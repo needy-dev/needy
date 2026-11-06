@@ -1,0 +1,33 @@
+[package]
+name = "needy"
+description = "Headless remote process runtime and cross-machine process bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+needy-exec-intercept = { path = "../exec-intercept", version = "0.1.0" }
+clap = { version = "4", features = ["derive", "env"] }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures-util = "0.3"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+tempfile = "3"
+tar = "0.4"
+signal-hook = "0.3"
+fs2 = "0.4"
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+
+[dev-dependencies]

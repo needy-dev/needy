@@ -1,0 +1,16 @@
+[package]
+name = "needy-exec-intercept"
+description = "Linux process-tree supervision and selective exec redirection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["linux", "ptrace", "seccomp", "exec"]
+categories = ["os::linux-apis"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

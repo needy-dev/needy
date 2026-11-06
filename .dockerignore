@@ -1,0 +1,10 @@
+.git
+.worktrees
+target
+bin
+.needy/**
+!.needy/image
+!.needy/image/needy
+**/__pycache__
+**/.env
+**/.env.*
