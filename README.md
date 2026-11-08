@@ -139,3 +139,5 @@ make docker-test
 ```
 
 Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
+
+See [docs/README.md](docs/README.md) for where new documents go.
