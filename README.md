@@ -22,6 +22,7 @@ work takes effect.
 - [How it works](#how-it-works)
 - [Documentation](#documentation)
 - [Development](#development)
+- [Acknowledgements](#acknowledgements)
 
 ## Use cases
 
@@ -92,3 +93,85 @@ make proto
 ```
 
 Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
+
+## Acknowledgements
+
+Needy borrows from, was compared against, or was tested with these projects.
+Thank you to their authors.
+
+**Built on**
+
+- [Firecracker](https://github.com/firecracker-microvm/firecracker): the actor
+  microVM; needy carries a patch for CPUID, SMBIOS and PCI identity.
+- [sshfs](https://github.com/libfuse/sshfs) and OpenSSH `sftp-server`: file
+  routing in passive mode, an idea taken from
+  [Lima](https://github.com/lima-vm/lima)'s reverse-sshfs mounts.
+- [tonic](https://github.com/hyperium/tonic), [prost](https://github.com/tokio-rs/prost),
+  [Buf](https://github.com/bufbuild/buf) with the
+  [neoeinstein](https://github.com/neoeinstein/protoc-gen-prost) plugins,
+  [tokio-vsock](https://github.com/rust-vsock/tokio-vsock),
+  [portable-pty](https://github.com/wezterm/wezterm/tree/main/pty),
+  [hyper](https://github.com/hyperium/hyper),
+  [rusqlite](https://github.com/rusqlite/rusqlite) and
+  [brush](https://github.com/reubeno/brush)'s shell parsing approach.
+
+**Design references**
+
+- [AUV](https://github.com/moeru-ai/auv): repository layout, documentation
+  structure, Buf workflow and agent skills.
+- [agentsh](https://github.com/canyonroad/agentsh): human and JSON output modes,
+  session reports, composite trace storage and its platform comparison.
+- [Reverie](https://github.com/facebookexperimental/reverie) and
+  [Hermit](https://github.com/facebookexperimental/hermit): syscall
+  interception, chaos scheduling and virtual time.
+- [kbox](https://github.com/sysprog21/kbox): seccomp user notification, FD
+  injection and shadow memfds.
+- [mirrord](https://github.com/metalbear-co/mirrord): running a local process
+  against remote resources.
+- [containerd shim v2](https://github.com/containerd/containerd/blob/main/api/runtime/task/v2/shim.proto):
+  the process lifecycle API.
+- [rclone](https://rclone.org/filtering/), [Mutagen](https://mutagen.io/) and
+  [Lima mounts](https://lima-vm.io/docs/config/mount/): file mapping and
+  filters.
+- [Codex](https://github.com/openai/codex/pull/7127) and
+  [Claude Code](https://code.claude.com/docs/en/permissions) permission rules:
+  matching shell commands.
+- [macstab chaos-testing-libraries](https://github.com/macstab/macstab-chaos-testing-libraries):
+  rule-based syscall fault injection.
+- [DeepSeek DSec](https://arxiv.org/html/2609.22978v1): sandbox infrastructure
+  for agent RL at scale, and the agent attacks it reports.
+
+**Compared or tried**
+
+- Isolation: [gVisor](https://github.com/google/gvisor),
+  [Kata Containers](https://github.com/kata-containers/kata-containers),
+  [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor),
+  [libkrun](https://github.com/containers/libkrun),
+  [apple/container](https://github.com/apple/container) and
+  [Containerization](https://github.com/apple/containerization),
+  [agentc](https://github.com/laosb/agentc),
+  [microvm.nix](https://github.com/astro/microvm.nix),
+  [Incus](https://github.com/lxc/incus) and [lxcfs](https://github.com/lxc/lxcfs).
+- OS identity: [Darling](https://github.com/darlinghq/darling) (tested),
+  [Wine](https://www.winehq.org/),
+  [tart-skills](https://github.com/jonnyzzz/tart-skills),
+  [faux-mac](https://github.com/stpettersens/faux-mac),
+  [fake-uname](https://github.com/brenkem/fake-uname) and
+  [fakehostname](https://github.com/dtcooper/fakehostname).
+- Agent sandboxes and policy:
+  [Anthropic sandbox-runtime](https://github.com/anthropics/sandbox-runtime),
+  [E2B](https://e2b.dev/), [Modal](https://modal.com/),
+  [AgentSentinel](https://github.com/abhinandanpandey-in/agentsentinel) and
+  [safe-agent](https://github.com/TurboRx/safe-agent).
+- Observation and faults: [Tetragon](https://github.com/cilium/tetragon),
+  [Falco](https://github.com/falcosecurity/falco),
+  [libfiu](https://github.com/albertito/libfiu), `strace --inject` and the
+  kernel fault-injection framework.
+- From the earlier research: [PRoot](https://github.com/proot-me/proot),
+  [LKL](https://github.com/lkl/linux), [LegoOS](https://github.com/Wuklab/LegoOS)
+  and [Telepresence](https://github.com/telepresenceio/telepresence).
+- Driving program and model used in tests: [opencode](https://github.com/sst/opencode),
+  [Ollama](https://github.com/ollama/ollama) with Qwen3.
+
+Thanks to [Makito](https://github.com/sumimakito) for CLI design ideas.
+

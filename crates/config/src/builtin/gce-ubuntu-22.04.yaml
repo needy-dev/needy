@@ -1,0 +1,35 @@
+# A Google Compute Engine VM running Ubuntu 22.04. Cloud VMs show a
+# hypervisor, so the hypervisor bit stays visible.
+cpu:
+  brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
+  signature: { family: 6, model: 85, stepping: 7 }
+  hypervisor: visible
+  topology: { cores: 2, threads_per_core: 1 }
+memory: 4GiB
+os:
+  image: ubuntu:22.04
+  kernel:
+    release: 6.5.0-1020-gcp
+    version: "#20~22.04.1-Ubuntu SMP Fri Mar  1 10:04:32 UTC 2024"
+    build: { user: buildd, host: lcy02-amd64-033 }
+  hostname: "instance-{hash}"
+firmware:
+  dmi:
+    sys_vendor: Google
+    product_name: Google Compute Engine
+    product_version: ""
+    bios: { vendor: Google, version: Google, date: 01/01/2011 }
+    board_vendor: Google
+    board_name: Google Compute Engine
+    chassis_type: other
+    serial: "GoogleCloud-{hash}"
+devices:
+  pci:
+    host_bridge: "8086:1237:02"
+    extra:
+      - { id: "8086:7110", class: isa-bridge, revision: "03" }
+  sensors: []
+network:
+  interface: ens4
+  mac: "42:01:0a:80:00:{seq}"
+  metadata: { provider: gce }

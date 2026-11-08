@@ -1,0 +1,40 @@
+# opencode runs in the actor; every shell it starts runs in a Docker executor.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  recipe: gce.recipe.yaml
+  command: [opencode, run, "Create hello.py that prints the operating system name and the Python version. Run it with python3 and tell me the output."]
+  env:
+    OPENCODE_DISABLE_AUTOUPDATE: "1"
+    OPENCODE_CONFIG_CONTENT: >-
+      {"$schema":"https://opencode.ai/config.json","autoupdate":false,"share":"disabled",
+       "model":"needy/qwen3:14b",
+       "provider":{"needy":{"npm":"@ai-sdk/openai-compatible","name":"needy",
+         "options":{"baseURL":"http://model.needy/v1"},
+         "models":{"qwen3:14b":{"name":"Qwen3 14B","tool_call":true}}}}}
+  network:
+    allow: [models.dev, "*.models.dev", registry.npmjs.org, "*.npmjs.org", opencode.ai, "*.opencode.ai"]
+    upstream:
+      model.needy: http://127.0.0.1:11434
+
+executors:
+  build:
+    runtime: docker
+    key: "{session}"
+    max_procs: 8
+
+commands:
+  - match: "{bash,sh,dash,zsh} **"
+    to: build
+  - match: "{python3,python,pip,pip3,node,npm,npx,make,gcc,cc,cargo} **"
+    to: build
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor
+
+files:
+  workspace:
+    mode: mount
+    from: executor:build:~/workspace/
+    to: actor:~/workspace/
+    writable: true
+session_files: [workspace]

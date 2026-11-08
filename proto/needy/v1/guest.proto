@@ -24,6 +24,8 @@ message GuestMount {
   // Path on the executor.
   string source = 3;
   bool writable = 4;
+  // Command that serves SFTP on stdin and stdout on the executor.
+  repeated string sftp_command = 5;
 }
 
 message GuestSensor {

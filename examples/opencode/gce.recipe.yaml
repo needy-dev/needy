@@ -1,0 +1,12 @@
+# A Google Compute Engine N1 VM (Broadwell Xeon), as far as the driving program
+# can tell. Broadwell has no AVX-512, so this recipe fits hosts without it; the
+# features hidden below are ones a Broadwell CPU does not have.
+extends: builtin:gce-ubuntu-22.04
+cpu:
+  brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
+  signature: { family: 6, model: 79, stepping: 0 }
+  features:
+    hide: [avx_vnni, serialize, gfni, vaes, vpclmulqdq, movdiri, movdir64b, waitpkg,
+           sha_ni, clflushopt, clwb, umip, pku, ospke, la57, hybrid_cpu]
+  topology: { cores: 2, threads_per_core: 1 }
+memory: 4GiB

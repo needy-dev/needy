@@ -1,0 +1,297 @@
+
+--- a/src/vmm/src/arch/x86_64/mod.rs	2026-09-04 18:36:26.000000000 +0800
++++ b/src/vmm/src/arch/x86_64/mod.rs	2026-11-09 07:16:28.327153378 +0800
+@@ -17,6 +17,7 @@
+ /// Layout for the x86_64 system.
+ pub mod layout;
+ mod mptable;
++mod smbios;
+ /// Logic for configuring x86_64 model specific registers (MSRs).
+ pub mod msr;
+ /// Logic for configuring x86_64 registers.
+@@ -299,6 +300,10 @@
+         &mut vm.resource_allocator(),
+         vcpus,
+     )?;
++
++    if let Err(err) = smbios::setup_smbios(vm.guest_memory()) {
++        logger::warn!("cannot write SMBIOS tables: {err}");
++    }
+     Ok(())
+ }
+ 
+
+--- a/src/vmm/src/arch/x86_64/smbios.rs	1970-01-01 08:00:00.000000000 +0800
++++ b/src/vmm/src/arch/x86_64/smbios.rs	2026-11-09 07:16:28.314107439 +0800
+@@ -0,0 +1,169 @@
++// Experiment: SMBIOS 3.0 tables at the legacy scan address so the guest
++// kernel and dmidecode see a configured machine identity.
++// Enabled by NEEDY_SMBIOS="key=value;key=value". Missing keys use GCE values.
++
++use std::collections::HashMap;
++
++use crate::vstate::memory::{Bytes, GuestAddress, GuestMemoryMmap};
++
++const ENTRY_ADDR: u64 = 0xf_0000;
++const TABLE_ADDR: u64 = 0xf_0100;
++
++const DEFAULTS: &[(&str, &str)] = &[
++    ("bios_vendor", "Google"),
++    ("bios_version", "Google"),
++    ("bios_date", "01/01/2011"),
++    ("sys_vendor", "Google"),
++    ("product_name", "Google Compute Engine"),
++    ("product_version", ""),
++    ("product_serial", "GoogleCloud-6B1F5C2E0D4A9E8B7C3D2A1F0E9D8C7B"),
++    ("product_uuid", "6b1f5c2e-0d4a-9e8b-7c3d-2a1f0e9d8c7b"),
++    ("product_family", ""),
++    ("product_sku", ""),
++    ("board_vendor", "Google"),
++    ("board_name", "Google Compute Engine"),
++    ("board_version", ""),
++    ("board_serial", "Board-GoogleCloud-6B1F5C2E0D4A9E8B"),
++    ("chassis_vendor", "Google"),
++    ("chassis_type", "1"),
++    ("chassis_serial", ""),
++];
++
++#[derive(Default)]
++struct Strings(Vec<String>);
++
++impl Strings {
++    fn add(&mut self, s: &str) -> u8 {
++        if s.is_empty() {
++            return 0;
++        }
++        self.0.push(s.to_string());
++        u8::try_from(self.0.len()).unwrap_or(0)
++    }
++}
++
++fn structure(out: &mut Vec<u8>, kind: u8, handle: u16, fields: &[u8], strings: Strings) {
++    out.push(kind);
++    out.push(u8::try_from(4 + fields.len()).unwrap());
++    out.extend_from_slice(&handle.to_le_bytes());
++    out.extend_from_slice(fields);
++    if strings.0.is_empty() {
++        out.push(0);
++    }
++    for s in strings.0 {
++        out.extend_from_slice(s.as_bytes());
++        out.push(0);
++    }
++    out.push(0);
++}
++
++fn uuid_bytes(text: &str) -> [u8; 16] {
++    let hex: String = text.chars().filter(char::is_ascii_hexdigit).collect();
++    let mut b = [0u8; 16];
++    for (i, byte) in b.iter_mut().enumerate() {
++        *byte = hex
++            .get(2 * i..2 * i + 2)
++            .and_then(|h| u8::from_str_radix(h, 16).ok())
++            .unwrap_or(0);
++    }
++    // SMBIOS 2.6+ stores the first three fields little-endian.
++    b[0..4].reverse();
++    b[4..6].reverse();
++    b[6..8].reverse();
++    b
++}
++
++fn values() -> Option<HashMap<String, String>> {
++    let raw = std::env::var("NEEDY_SMBIOS").ok()?;
++    let mut map: HashMap<String, String> = DEFAULTS
++        .iter()
++        .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
++        .collect();
++    for pair in raw.split(';').filter(|p| !p.is_empty()) {
++        if let Some((k, v)) = pair.split_once('=') {
++            map.insert(k.trim().to_string(), v.to_string());
++        }
++    }
++    Some(map)
++}
++
++/// Writes the tables when NEEDY_SMBIOS is set.
++pub fn setup_smbios(mem: &GuestMemoryMmap) -> Result<(), vm_memory::GuestMemoryError> {
++    let Some(v) = values() else { return Ok(()) };
++    let g = |k: &str| v.get(k).map(String::as_str).unwrap_or("");
++    let mut table = Vec::new();
++
++    // Type 0: BIOS information.
++    let mut s = Strings::default();
++    let vendor = s.add(g("bios_vendor"));
++    let version = s.add(g("bios_version"));
++    let date = s.add(g("bios_date"));
++    let mut f = vec![vendor, version];
++    f.extend_from_slice(&0xe800u16.to_le_bytes());
++    f.push(date);
++    f.push(0); // ROM size
++    f.extend_from_slice(&(1u64 << 3).to_le_bytes()); // characteristics not supported
++    f.extend_from_slice(&[0x00, 0x08, 0x00, 0x00, 0xff, 0xff]);
++    structure(&mut table, 0, 0, &f, s);
++
++    // Type 1: system information.
++    let mut s = Strings::default();
++    let mut f = vec![
++        s.add(g("sys_vendor")),
++        s.add(g("product_name")),
++        s.add(g("product_version")),
++        s.add(g("product_serial")),
++    ];
++    f.extend_from_slice(&uuid_bytes(g("product_uuid")));
++    f.push(0x06); // wake-up: power switch
++    f.push(s.add(g("product_sku")));
++    f.push(s.add(g("product_family")));
++    structure(&mut table, 1, 1, &f, s);
++
++    // Type 2: baseboard information.
++    let mut s = Strings::default();
++    let mut f = vec![
++        s.add(g("board_vendor")),
++        s.add(g("board_name")),
++        s.add(g("board_version")),
++        s.add(g("board_serial")),
++        0,    // asset tag
++        0x01, // hosting board
++        0,    // location in chassis
++    ];
++    f.extend_from_slice(&3u16.to_le_bytes()); // chassis handle
++    f.extend_from_slice(&[0x0a, 0]); // motherboard, no contained handles
++    structure(&mut table, 2, 2, &f, s);
++
++    // Type 3: chassis information.
++    let mut s = Strings::default();
++    let chassis_type = g("chassis_type").parse::<u8>().unwrap_or(1);
++    let mut f = vec![
++        s.add(g("chassis_vendor")),
++        chassis_type,
++        0,
++        s.add(g("chassis_serial")),
++        0,
++    ];
++    f.extend_from_slice(&[0x03, 0x03, 0x03, 0x02]);
++    f.extend_from_slice(&0u32.to_le_bytes());
++    f.extend_from_slice(&[0, 0, 0, 0x03]);
++    structure(&mut table, 3, 3, &f, s);
++
++    // Type 127: end of table.
++    structure(&mut table, 127, 0x7f, &[], Strings::default());
++
++    let mut ep = [0u8; 24];
++    ep[0..5].copy_from_slice(b"_SM3_");
++    ep[6] = 24;
++    ep[7] = 3; // SMBIOS 3.0.0
++    ep[10] = 1;
++    ep[12..16].copy_from_slice(&u32::try_from(table.len()).unwrap().to_le_bytes());
++    ep[16..24].copy_from_slice(&TABLE_ADDR.to_le_bytes());
++    let sum = ep.iter().fold(0u8, |a, b| a.wrapping_add(*b));
++    ep[5] = 0u8.wrapping_sub(sum);
++
++    mem.write_slice(&table, GuestAddress(TABLE_ADDR))?;
++    mem.write_slice(&ep, GuestAddress(ENTRY_ADDR))?;
++    Ok(())
++}
+
+--- a/src/vmm/src/cpu_config/x86_64/cpuid/intel/normalize.rs	2026-09-04 18:36:26.000000000 +0800
++++ b/src/vmm/src/cpu_config/x86_64/cpuid/intel/normalize.rs	2026-11-09 05:11:40.020965822 +0800
+@@ -282,6 +282,15 @@
+ 
+         let default_brand_string =
+             default_brand_string(host_brand_string).unwrap_or(*DEFAULT_BRAND_STRING);
++        let default_brand_string = match std::env::var("NEEDY_BRAND_STRING") {
++            Ok(v) => {
++                let mut out = [0u8; BRAND_STRING_LENGTH];
++                let n = v.len().min(BRAND_STRING_LENGTH - 1);
++                out[..n].copy_from_slice(&v.as_bytes()[..n]);
++                out
++            }
++            Err(_) => default_brand_string,
++        };
+ 
+         self.apply_brand_string(&default_brand_string)
+             .map_err(NormalizeCpuidError::ApplyBrandString)?;
+
+--- a/src/vmm/src/cpu_config/x86_64/cpuid/normalize.rs	2026-09-04 18:36:26.000000000 +0800
++++ b/src/vmm/src/cpu_config/x86_64/cpuid/normalize.rs	2026-11-09 05:11:40.017799065 +0800
+@@ -249,7 +249,7 @@
+         set_bit(&mut leaf_1.result.ecx, 24, true);
+ 
+         // CPUID.01H:ECX[31] (Mnemonic: Hypervisor)
+-        set_bit(&mut leaf_1.result.ecx, 31, true);
++        set_bit(&mut leaf_1.result.ecx, 31, std::env::var_os("NEEDY_HIDE_HYPERVISOR").is_none());
+ 
+         // CPUID.01H:EDX[28] (Mnemonic: HTT)
+         // Max APIC IDs reserved field is Valid. A value of 0 for HTT indicates there is only a
+
+--- a/src/vmm/src/devices/pci/pci_segment.rs	2026-09-04 18:36:26.000000000 +0800
++++ b/src/vmm/src/devices/pci/pci_segment.rs	2026-11-09 07:16:28.329648954 +0800
+@@ -66,7 +66,25 @@
+ impl PciSegment {
+     fn build(id: u16, vm: &Arc<KvmVm>, pci_irq_slots: &[u8; 32]) -> Result<PciSegment, BusError> {
+         let pci_root = PciRoot::new(None);
+-        let pci_bus = Arc::new(Mutex::new(PciBus::new(pci_root)));
++        let mut bus = PciBus::new(pci_root);
++        // Experiment: NEEDY_PCI_ISA_BRIDGE="vendor:device:revision" adds a
++        // config-space-only ISA bridge at 00:01.0.
++        if let Some((vendor, device, revision)) = std::env::var("NEEDY_PCI_ISA_BRIDGE")
++            .ok()
++            .and_then(|v| crate::pci::bus::parse_pci_id(&v))
++        {
++            let config = crate::pci::configuration::PciConfiguration::new_type0(
++                vendor,
++                device,
++                revision,
++                crate::pci::PciClassCode::Bridge,
++                crate::pci::PciBridgeSubclass::IsaBridge as u8,
++                0,
++                0,
++            );
++            let _ = bus.add_device(1, Arc::new(Mutex::new(PciRoot::new(Some(config)))));
++        }
++        let pci_bus = Arc::new(Mutex::new(bus));
+ 
+         let pci_config_mmio = Arc::new(Mutex::new(PciConfigMmio::new(Arc::clone(&pci_bus))));
+         let mmio_config_address = PCI_MMCONFIG_START + PCI_MMIO_CONFIG_SIZE_PER_SEGMENT * id as u64;
+
+--- a/src/vmm/src/pci/bus.rs	2026-09-04 18:36:26.000000000 +0800
++++ b/src/vmm/src/pci/bus.rs	2026-11-09 07:16:28.329507469 +0800
+@@ -41,11 +41,16 @@
+         if let Some(config) = config {
+             PciRoot { config }
+         } else {
++            // Experiment: NEEDY_PCI_HOST_BRIDGE="vendor:device:revision" (hex).
++            let (vendor, device, revision) = std::env::var("NEEDY_PCI_HOST_BRIDGE")
++                .ok()
++                .and_then(|v| parse_pci_id(&v))
++                .unwrap_or((VENDOR_ID_INTEL, DEVICE_ID_INTEL_VIRT_PCIE_HOST, 0));
+             PciRoot {
+                 config: PciConfiguration::new_type0(
+-                    VENDOR_ID_INTEL,
+-                    DEVICE_ID_INTEL_VIRT_PCIE_HOST,
+-                    0,
++                    vendor,
++                    device,
++                    revision,
+                     PciClassCode::Bridge,
+                     PciBridgeSubclass::HostBridge as u8,
+                     0,
+@@ -56,6 +61,17 @@
+     }
+ }
+ 
++/// Parses "vendor:device[:revision]" in hex.
++pub fn parse_pci_id(text: &str) -> Option<(u16, u16, u8)> {
++    let mut parts = text.split(':');
++    let vendor = u16::from_str_radix(parts.next()?, 16).ok()?;
++    let device = u16::from_str_radix(parts.next()?, 16).ok()?;
++    let revision = parts
++        .next()
++        .map_or(Some(0), |r| u8::from_str_radix(r, 16).ok())?;
++    Some((vendor, device, revision))
++}
++
+ impl BusDevice for PciRoot {}
+ 
+ impl PciDevice for PciRoot {

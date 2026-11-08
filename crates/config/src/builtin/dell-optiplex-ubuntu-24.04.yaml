@@ -1,0 +1,36 @@
+# A Dell OptiPlex desktop running Ubuntu 24.04 on bare metal: no hypervisor,
+# real sensors, an Alder Lake CPU.
+cpu:
+  brand: "12th Gen Intel(R) Core(TM) i7-12700"
+  signature: { family: 6, model: 151, stepping: 2 }
+  hypervisor: hidden
+  topology: { cores: 4, threads_per_core: 2 }
+memory: 16GiB
+os:
+  image: ubuntu:24.04
+  kernel:
+    release: 6.8.0-49-generic
+    version: "#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4 02:06:24 UTC 2024"
+    build: { user: buildd, host: lcy02-amd64-103 }
+  hostname: "optiplex-{hash}"
+  uptime: 2d7h
+firmware:
+  dmi:
+    sys_vendor: Dell Inc.
+    product_name: OptiPlex 7000
+    product_version: ""
+    bios: { vendor: Dell Inc., version: 1.21.0, date: 06/11/2024 }
+    board_vendor: Dell Inc.
+    board_name: 0C8MHW
+    chassis_type: tower
+    serial: "{hash}"
+devices:
+  pci:
+    host_bridge: "8086:4668:02"
+  sensors:
+    - { chip: coretemp, per_core: true, idle_c: 34, load_gain_c: 7, noise_c: 1.5 }
+    - { chip: nvme, idle_c: 33 }
+    - { chip: acpitz, idle_c: 27.8 }
+network:
+  interface: enp0s31f6
+  mac: "b0:7b:25:{seq}:12:34"

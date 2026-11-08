@@ -21,6 +21,9 @@ pub struct GuestMount {
     pub source: ::prost::alloc::string::String,
     #[prost(bool, tag="4")]
     pub writable: bool,
+    /// Command that serves SFTP on stdin and stdout on the executor.
+    #[prost(string, repeated, tag="5")]
+    pub sftp_command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GuestSensor {

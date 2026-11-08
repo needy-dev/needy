@@ -18,7 +18,8 @@ pub use needy_api_proto as proto;
 /// Methods that a client may call without a token by default.
 pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
 
-/// Checks a bearer token. The daemon owns token storage and revocation.
+/// Checks a bearer token. A request without one is checked as the empty
+/// token. The daemon owns token storage and revocation.
 pub trait Authenticator: Send + Sync + 'static {
     fn authenticate(&self, token: &str) -> bool;
 }
@@ -74,7 +75,10 @@ impl<S> AuthService<S> {
             .get(http::header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|token| self.auth.authenticate(token))
+            .map_or_else(
+                || self.auth.authenticate(""),
+                |token| self.auth.authenticate(token),
+            )
     }
 }
 
