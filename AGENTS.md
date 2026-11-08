@@ -1,11 +1,13 @@
 # Repository Guidelines
 
-Needy is a headless runtime for running commands on another machine. It has no
-agent-specific concepts: a workload is any command.
+Needy separates a driving program (the actor) from the environments where its
+work takes effect (executors). It has no agent-specific concepts.
 
 ## Project Structure
 
-- `crates/needy`: daemon, client, container runner and Linux proxy.
+- `crates/needy`: the `needy` binary: CLI, daemon, executor, actor guest
+  supervisor and proxy.
+- `crates/config`: `needy-config`, profiles, recipes and routing rules.
 - `crates/api-client`: `needy-api-client`, the Rust client for the daemon API.
 - `crates/api-server`: `needy-api-server`, protocol adapters such as bearer
   authentication for serving the daemon API.
@@ -13,8 +15,7 @@ agent-specific concepts: a workload is any command.
   Do not edit `src/gen`; change `proto/` and run `make proto`.
 - `proto/`: canonical API schemas, linted and generated with Buf.
 - `crates/exec-intercept`: Linux seccomp/ptrace supervision library.
-- `images/`: runtime image build.
-- `scripts/`: installer and integration test drivers.
+- `images/`: actor kernel, Firecracker patches and image builds.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
 
 ## Agent Skills
@@ -28,8 +29,6 @@ Use `use-buf` and `use-buf-plugins` when changing `proto/` or Buf configuration.
 make build
 make check
 make test
-make host-test
-make docker-test
 ```
 
 Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
@@ -46,9 +45,8 @@ Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
 - When an implementation is mostly complete, fold the result into durable
   reference material in the owning folder and update its `INDEX.md`.
 - Keep open questions and label provisional names in design docs.
-- Keep user-facing behavior in `README.md`, `docs/usage.md`, `docs/api.md` and
-  `docs/verification.md` current with the code. The README stays short; move
-  details into `docs/usage.md`.
+- Keep `README.md` and the design notes current with the code. The README
+  stays short; details live in `docs/ai/references/`.
 
 ### Documentation Placement
 

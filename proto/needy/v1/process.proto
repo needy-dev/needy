@@ -1,0 +1,109 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// ProcessService starts, attaches to and controls processes. The daemon owns a
+// process and its terminal, so a client may disconnect and attach again.
+service ProcessService {
+  // The first request carries `start` or `attach`; later requests carry input.
+  rpc Exec(stream ExecRequest) returns (stream ExecResponse);
+  rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+  rpc KillProcess(KillProcessRequest) returns (KillProcessResponse);
+}
+
+message WindowSize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+message ExecStart {
+  repeated string argv = 1;
+  string cwd = 2;
+  map<string, string> env = 3;
+  // Start from an empty environment instead of the executor's own.
+  bool clear_env = 4;
+  // Allocate a terminal of this size. Unset means pipes.
+  WindowSize tty = 5;
+  // Keep running after the client disconnects.
+  bool detach = 6;
+  // Session to route within. Empty means no session: run on `executor` directly.
+  string session_id = 7;
+  // Executor name. Empty lets the session's rules decide.
+  string executor = 8;
+  // Do not forward stdin; the process sees end of file at once.
+  bool no_stdin = 9;
+  // Free-form origin for the trace, for example "cli" or "actor-proxy".
+  string origin = 10;
+}
+
+message ExecAttach {
+  string process_id = 1;
+  // Replay buffered output before following.
+  bool replay = 2;
+}
+
+message ExecRequest {
+  oneof payload {
+    ExecStart start = 1;
+    ExecAttach attach = 2;
+    bytes stdin = 3;
+    bool stdin_eof = 4;
+    int32 signal = 5;
+    WindowSize resize = 6;
+  }
+}
+
+message ExecStarted {
+  string process_id = 1;
+  string executor = 2;
+  int64 pid = 3;
+  // Arguments, working directory and executor after routing rules applied.
+  repeated string argv = 4;
+  string cwd = 5;
+}
+
+message ExecExited {
+  // Present when the process exited normally.
+  optional int32 code = 1;
+  // Signal name, for example "SIGTERM", when a signal ended the process.
+  string signal = 2;
+}
+
+message ExecResponse {
+  oneof payload {
+    ExecStarted started = 1;
+    bytes stdout = 2;
+    bytes stderr = 3;
+    ExecExited exited = 4;
+    string error = 5;
+  }
+}
+
+message ListProcessesRequest {
+  string session_id = 1;
+}
+
+message ProcessInfo {
+  string process_id = 1;
+  repeated string argv = 2;
+  string executor = 3;
+  int64 pid = 4;
+  bool running = 5;
+  ExecExited exited = 6;
+  bool tty = 7;
+  int64 started_at_ms = 8;
+  string session_id = 9;
+}
+
+message ListProcessesResponse {
+  repeated ProcessInfo processes = 1;
+}
+
+message KillProcessRequest {
+  string process_id = 1;
+  // Signal number; 0 means SIGTERM.
+  int32 signal = 2;
+}
+
+message KillProcessResponse {}

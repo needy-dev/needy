@@ -1,11 +1,7 @@
 CARGO ?= cargo
-DOCKER ?= docker
 BUF ?= buf
-BINARY_STAGE ?= build
-IMAGE ?= needy-runtime:rust
-TEST_IMAGE ?= needy-rust-test:dev
 
-.PHONY: build release test check host-test docker-test image test-image proto
+.PHONY: build release test check proto
 
 build:
 	$(CARGO) build --locked --bin needy
@@ -23,18 +19,6 @@ test:
 check:
 	$(CARGO) fmt --all -- --check
 	$(CARGO) clippy --locked --workspace --all-targets -- -D warnings
-
-host-test: build
-	python3 scripts/test-rust-host.py bin/needy
-
-docker-test: build
-	python3 scripts/test-rust-docker.py bin/needy
-
-image:
-	$(DOCKER) build --build-arg BINARY_STAGE=$(BINARY_STAGE) -t $(IMAGE) -f images/Dockerfile .
-
-test-image:
-	$(DOCKER) build --build-arg BINARY_STAGE=$(BINARY_STAGE) -t $(TEST_IMAGE) -f images/Dockerfile .
 
 proto:
 	cd proto && $(BUF) lint && $(BUF) format -w && $(BUF) generate

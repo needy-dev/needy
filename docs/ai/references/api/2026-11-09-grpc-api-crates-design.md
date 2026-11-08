@@ -1,8 +1,7 @@
 # gRPC API crates
 
 **Status**: pending. The crates and schemas are initialized; the daemon does not
-serve them yet. The HTTP API in [`docs/api.md`](../../../api.md) is still the
-implemented contract.
+serve them yet. The previous HTTP API was removed on 2026-11-09.
 
 The `SessionService` and `RunService` schemas follow the pre-2026-11-09 model.
 The [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)

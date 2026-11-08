@@ -92,7 +92,7 @@ interception in the actor is an automatic `needy exec`.
 
 | Need | Mechanism | Notes |
 | --- | --- | --- |
-| Exec routing | In the actor's guest kernel, so the driving program sees no tracer; a proxy PID keeps parent and child semantics ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | Accepted direction; the kernel mechanism is being prototyped. The ptrace-based `exec-intercept` remains the fallback outside microVMs. |
+| Exec routing | A built-in binfmt handler in the actor's guest kernel swaps a routed exec for a proxy; the proxy keeps parent and child semantics ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | Prototype works without ptrace; see [Exec routing in the guest kernel](#exec-routing-in-the-guest-kernel). The ptrace-based `exec-intercept` remains the fallback outside microVMs. |
 | File routing | FUSE in the actor guest, served by the executor | Gives mmap, readdir and change semantics without rewriting each file syscall. |
 | Network routing | One network and gateway per side; bridge rules for exceptions | See [Network routing](#network-routing). |
 | Observation | eBPF in the guest kernel | The driving program cannot see a tracer. Block `bpf` and `perf_event_open` in the guest. |
@@ -244,6 +244,46 @@ Findings:
 - DMI is absent and still to do.
 - The whole proof of concept builds as one multi-stage Dockerfile in 2 min 25 s
   and runs with `docker run --device /dev/kvm`, without `--privileged`.
+
+### Exec routing in the guest kernel
+
+A built-in binfmt handler (`fs/binfmt_needy.c`, 77 lines) is registered ahead of
+binfmt_elf and binfmt_script. For an exec whose path, basename or file name is on
+the route list, it swaps in the proxy as binfmt_script swaps in an interpreter
+(`bprm_change_interp`, `open_exec`) and leaves argv unchanged. Otherwise it
+returns `-ENOEXEC` and the normal handlers run. The proxy reads the original
+path from `AT_EXECFN`. Artifacts are in `~/fc-exp/binfmt` on kvm-host.
+
+| Check inside the VM | Result |
+| --- | --- |
+| `TracerPid` | 0 |
+| `PTRACE_TRACEME` in a child | Succeeds |
+| Routed `uname -a` | Proxy runs; parent sees a normal PID and the proxy's exit status; `cmdline` is `uname -a`, `comm` is `uname` |
+| `/bin/uname` through a symlink | Routed |
+| Not routed (`sleep`) | Real binary runs |
+| Zero-byte stub at a routed path | Routed; the actor only needs placeholder files |
+| Shebang script | Routed by its own name, before binfmt_script |
+| `sh -c 'uname -a \| cat'` | Routed output flows through the pipe |
+
+Still visible or weak:
+
+- `/proc/<pid>/exe` and `maps` of a routed child point at the proxy; the
+  `/sys/module/binfmt_needy/` directory exists (its contents are root-only).
+- `execveat` with `AT_EMPTY_PATH` is routed, but the proxy cannot learn the
+  real path and `comm` becomes the proxy's name.
+- A memfd copy of a routed binary escapes routing. Set `vm.memfd_noexec=2`.
+- Name-based policy is escaped by a copy or hard link under another name; match
+  by file identity (inode, content hash or build ID) as well.
+- setuid bits come from the proxy file; untested.
+
+Alternatives rejected: BPF LSM can only deny; kprobe overrides only force
+errors; binfmt_misc matches by magic, catches every ELF including the proxy and
+is listed in `/proc/sys/fs/binfmt_misc`; patching `do_execveat_common` is more
+invasive.
+
+Next hardening: deliver the policy over the daemon channel instead of a module
+parameter, match by file identity, keep the original path in the kernel for the
+proxy, and hide the `exe` link.
 
 ### Timing
 

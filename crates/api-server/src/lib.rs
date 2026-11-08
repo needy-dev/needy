@@ -2,7 +2,7 @@
 //!
 //! The daemon implements the generated service traits re-exported from
 //! [`proto`]. This crate adds what every listener needs: bearer
-//! authentication in front of all methods except pairing.
+//! authentication in front of every method except health checks.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -15,8 +15,8 @@ use tower::{Layer, Service};
 
 pub use needy_api_proto as proto;
 
-/// Methods that a client may call before it is paired.
-pub const PUBLIC_METHODS: &[&str] = &["/needy.api.daemon.v1.PairingService/PairClient"];
+/// Methods that a client may call without a token by default.
+pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
 
 /// Checks a bearer token. The daemon owns token storage and revocation.
 pub trait Authenticator: Send + Sync + 'static {
@@ -27,13 +27,21 @@ pub trait Authenticator: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct AuthLayer {
     auth: Arc<dyn Authenticator>,
+    public: &'static [&'static str],
 }
 
 impl AuthLayer {
     pub fn new(auth: impl Authenticator) -> Self {
         Self {
             auth: Arc::new(auth),
+            public: PUBLIC_METHODS,
         }
+    }
+
+    /// Replaces the set of methods that need no token.
+    pub fn with_public(mut self, public: &'static [&'static str]) -> Self {
+        self.public = public;
+        self
     }
 }
 
@@ -44,6 +52,7 @@ impl<S> Layer<S> for AuthLayer {
         AuthService {
             inner,
             auth: self.auth.clone(),
+            public: self.public,
         }
     }
 }
@@ -52,11 +61,12 @@ impl<S> Layer<S> for AuthLayer {
 pub struct AuthService<S> {
     inner: S,
     auth: Arc<dyn Authenticator>,
+    public: &'static [&'static str],
 }
 
 impl<S> AuthService<S> {
     fn allows<B>(&self, request: &http::Request<B>) -> bool {
-        if PUBLIC_METHODS.contains(&request.uri().path()) {
+        if self.public.contains(&request.uri().path()) {
             return true;
         }
         request
@@ -97,12 +107,8 @@ where
 mod tests {
     use super::*;
     use needy_api_client::Client;
-    use proto::daemon::v1::health_service_server::{HealthService, HealthServiceServer};
-    use proto::daemon::v1::pairing_service_server::{PairingService, PairingServiceServer};
-    use proto::daemon::v1::{
-        CheckRequest, CheckResponse, HealthStatus, ListClientsRequest, ListClientsResponse,
-        PairClientRequest, PairClientResponse, RevokeClientRequest, RevokeClientResponse,
-    };
+    use proto::v1::health_service_server::{HealthService, HealthServiceServer};
+    use proto::v1::{CheckRequest, CheckResponse};
     use tokio::net::TcpListener;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::{Code, Request, Response};
@@ -121,70 +127,29 @@ mod tests {
     impl HealthService for Health {
         async fn check(&self, _: Request<CheckRequest>) -> Result<Response<CheckResponse>, Status> {
             Ok(Response::new(CheckResponse {
-                status: HealthStatus::Serving.into(),
+                role: "control".into(),
                 ..Default::default()
             }))
         }
     }
 
-    struct Pairing;
-
-    #[tonic::async_trait]
-    impl PairingService for Pairing {
-        async fn pair_client(
-            &self,
-            _: Request<PairClientRequest>,
-        ) -> Result<Response<PairClientResponse>, Status> {
-            Ok(Response::new(PairClientResponse {
-                client_id: "c1".into(),
-                token: "secret".into(),
-            }))
-        }
-
-        async fn list_clients(
-            &self,
-            _: Request<ListClientsRequest>,
-        ) -> Result<Response<ListClientsResponse>, Status> {
-            Ok(Response::new(ListClientsResponse::default()))
-        }
-
-        async fn revoke_client(
-            &self,
-            _: Request<RevokeClientRequest>,
-        ) -> Result<Response<RevokeClientResponse>, Status> {
-            Ok(Response::new(RevokeClientResponse {}))
-        }
-    }
-
     #[tokio::test]
-    async fn pairing_is_public_and_other_methods_need_a_token() {
+    async fn methods_need_a_token() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(
             tonic::transport::Server::builder()
-                .layer(AuthLayer::new(Token))
+                .layer(AuthLayer::new(Token).with_public(&[]))
                 .add_service(HealthServiceServer::new(Health))
-                .add_service(PairingServiceServer::new(Pairing))
                 .serve_with_incoming(TcpListenerStream::new(listener)),
         );
 
-        let client = Client::connect(url).await.unwrap();
+        let client = Client::connect(&url).await.unwrap();
         let err = client.health().check(CheckRequest {}).await.unwrap_err();
         assert_eq!(err.code(), Code::Unauthenticated);
 
-        let paired = client
-            .pairing()
-            .pair_client(PairClientRequest::default())
-            .await
-            .unwrap()
-            .into_inner();
-
-        let client = client.with_token(&paired.token).unwrap();
+        let client = client.with_token("secret").unwrap();
         let health = client.health().check(CheckRequest {}).await.unwrap();
-        assert_eq!(health.into_inner().status(), HealthStatus::Serving);
-
-        let client = client.with_token("wrong").unwrap();
-        let err = client.health().check(CheckRequest {}).await.unwrap_err();
-        assert_eq!(err.code(), Code::Unauthenticated);
+        assert_eq!(health.into_inner().role, "control");
     }
 }

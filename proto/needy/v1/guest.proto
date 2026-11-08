@@ -1,0 +1,71 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// GuestService is served to the supervisor inside an actor microVM over vsock.
+service GuestService {
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+  // Events observed inside the actor, such as identity probes.
+  rpc PushEvents(stream PushEventsRequest) returns (PushEventsResponse);
+  rpc ReportExit(ReportExitRequest) returns (ReportExitResponse);
+}
+
+message GuestUser {
+  string name = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+}
+
+message GuestMount {
+  // Path inside the actor.
+  string target = 1;
+  string executor = 2;
+  // Path on the executor.
+  string source = 3;
+  bool writable = 4;
+}
+
+message GuestSensor {
+  string chip = 1;
+  int32 idle_mc = 2;
+}
+
+message GetConfigRequest {}
+
+message GetConfigResponse {
+  string session_id = 1;
+  GuestUser user = 2;
+  // Executable names or paths the kernel hands to the proxy.
+  repeated string route_names = 3;
+  string hostname = 4;
+  int64 uptime_offset_secs = 5;
+  repeated GuestMount mounts = 6;
+  repeated string command = 7;
+  map<string, string> env = 8;
+  string cwd = 9;
+  // Port on the host (CID 2) that serves the actor gateway.
+  uint32 gateway_port = 10;
+  repeated GuestSensor sensors = 11;
+}
+
+message TraceEvent {
+  string session_id = 1;
+  int64 time_ms = 2;
+  // For example "exec.routed", "exec.local", "net.request", "fault.injected", "probe".
+  string kind = 3;
+  map<string, string> attrs = 4;
+}
+
+message PushEventsRequest {
+  TraceEvent event = 1;
+}
+
+message PushEventsResponse {}
+
+message ReportExitRequest {
+  optional int32 code = 1;
+  string signal = 2;
+}
+
+message ReportExitResponse {}

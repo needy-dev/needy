@@ -3,6 +3,7 @@ members = [
     "crates/api-client",
     "crates/api-proto",
     "crates/api-server",
+    "crates/config",
     "crates/exec-intercept",
     "crates/needy",
 ]

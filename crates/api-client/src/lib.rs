@@ -1,18 +1,17 @@
 //! Client for the Needy daemon API.
 //!
 //! [`Client`] owns one gRPC channel and hands out a typed client per service.
-//! Every call carries the paired bearer token when one is set.
+//! Endpoints are `http://`, `https://`, `unix:/path` and, inside a Linux guest,
+//! `vsock://CID:PORT`. Every call carries the bearer token when one is set.
 
-use needy_api_proto::daemon::v1::health_service_client::HealthServiceClient;
-use needy_api_proto::daemon::v1::host_service_client::HostServiceClient;
-use needy_api_proto::daemon::v1::pairing_service_client::PairingServiceClient;
-use needy_api_proto::runtime::v1::process_service_client::ProcessServiceClient;
-use needy_api_proto::runtime::v1::run_service_client::RunServiceClient;
-use needy_api_proto::runtime::v1::session_service_client::SessionServiceClient;
+use needy_api_proto::v1::guest_service_client::GuestServiceClient;
+use needy_api_proto::v1::health_service_client::HealthServiceClient;
+use needy_api_proto::v1::process_service_client::ProcessServiceClient;
+use needy_api_proto::v1::session_service_client::SessionServiceClient;
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Uri};
 use tonic::{Request, Status};
 
 pub use needy_api_proto as proto;
@@ -53,12 +52,21 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connects to `http://` or `https://` daemon endpoints. HTTPS uses the
-    /// platform's root certificates.
-    pub async fn connect(url: impl Into<String>) -> Result<Self> {
-        let url = url.into();
-        let mut endpoint =
-            Endpoint::from_shared(url.clone()).map_err(|_| Error::InvalidEndpoint(url.clone()))?;
+    /// Connects to a daemon endpoint. HTTPS uses the platform's root certificates.
+    pub async fn connect(url: &str) -> Result<Self> {
+        if let Some(path) = url.strip_prefix("unix:") {
+            return Ok(Self::from_channel(connect_unix(path.to_string()).await?));
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(rest) = url.strip_prefix("vsock://") {
+            let (cid, port) = rest
+                .split_once(':')
+                .and_then(|(c, p)| Some((c.parse().ok()?, p.parse().ok()?)))
+                .ok_or_else(|| Error::InvalidEndpoint(url.to_string()))?;
+            return Ok(Self::from_channel(connect_vsock(cid, port).await?));
+        }
+        let mut endpoint = Endpoint::from_shared(url.to_string())
+            .map_err(|_| Error::InvalidEndpoint(url.to_string()))?;
         if url.starts_with("https://") {
             endpoint = endpoint.tls_config(ClientTlsConfig::new().with_native_roots())?;
         }
@@ -88,78 +96,51 @@ impl Client {
         HealthServiceClient::new(self.service())
     }
 
-    pub fn host(&self) -> HostServiceClient<Service> {
-        HostServiceClient::new(self.service())
-    }
-
-    pub fn pairing(&self) -> PairingServiceClient<Service> {
-        PairingServiceClient::new(self.service())
+    pub fn processes(&self) -> ProcessServiceClient<Service> {
+        ProcessServiceClient::new(self.service())
+            .max_decoding_message_size(usize::MAX)
+            .max_encoding_message_size(usize::MAX)
     }
 
     pub fn sessions(&self) -> SessionServiceClient<Service> {
         SessionServiceClient::new(self.service())
     }
 
-    pub fn runs(&self) -> RunServiceClient<Service> {
-        RunServiceClient::new(self.service())
-    }
-
-    pub fn processes(&self) -> ProcessServiceClient<Service> {
-        ProcessServiceClient::new(self.service())
+    pub fn guest(&self) -> GuestServiceClient<Service> {
+        GuestServiceClient::new(self.service())
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use needy_api_proto::daemon::v1::health_service_server::{HealthService, HealthServiceServer};
-    use needy_api_proto::daemon::v1::{CheckRequest, CheckResponse, HealthStatus};
-    use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
-    use tonic::Response;
+fn placeholder() -> Endpoint {
+    // The URI is ignored by custom connectors but must parse.
+    Endpoint::from_static("http://needy.local")
+}
 
-    struct Health;
-
-    #[tonic::async_trait]
-    impl HealthService for Health {
-        async fn check(
-            &self,
-            request: Request<CheckRequest>,
-        ) -> Result<Response<CheckResponse>, Status> {
-            let auth = request.metadata().get("authorization");
-            if auth.and_then(|v| v.to_str().ok()) != Some("Bearer secret") {
-                return Err(Status::unauthenticated("missing token"));
+#[cfg(unix)]
+async fn connect_unix(path: String) -> Result<Channel> {
+    Ok(placeholder()
+        .connect_with_connector(tower::service_fn(move |_: Uri| {
+            let path = path.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(path).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
             }
-            Ok(Response::new(CheckResponse {
-                status: HealthStatus::Serving.into(),
-                instance_id: "test".into(),
-                version: String::new(),
-            }))
-        }
-    }
+        }))
+        .await?)
+}
 
-    #[tokio::test]
-    async fn sends_bearer_token() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(
-            tonic::transport::Server::builder()
-                .add_service(HealthServiceServer::new(Health))
-                .serve_with_incoming(TcpListenerStream::new(listener)),
-        );
+#[cfg(not(unix))]
+async fn connect_unix(path: String) -> Result<Channel> {
+    Err(Error::InvalidEndpoint(format!("unix:{path}")))
+}
 
-        let client = Client::connect(url).await.unwrap();
-        let status = client.health().check(CheckRequest {}).await.unwrap_err();
-        assert_eq!(status.code(), tonic::Code::Unauthenticated);
-
-        let response = client
-            .with_token("secret")
-            .unwrap()
-            .health()
-            .check(CheckRequest {})
-            .await
-            .unwrap()
-            .into_inner();
-        assert_eq!(response.status(), HealthStatus::Serving);
-    }
+#[cfg(target_os = "linux")]
+async fn connect_vsock(cid: u32, port: u32) -> Result<Channel> {
+    Ok(placeholder()
+        .connect_with_connector(tower::service_fn(move |_: Uri| async move {
+            let stream =
+                tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(cid, port)).await?;
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+        }))
+        .await?)
 }

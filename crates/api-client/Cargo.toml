@@ -9,9 +9,14 @@ publish = false
 
 [dependencies]
 needy-api-proto = { path = "../api-proto", version = "0.1.0" }
+hyper-util = { version = "0.1", features = ["tokio"] }
 thiserror = "2"
+tokio = { workspace = true }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-native-roots"] }
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tokio-vsock = "0.7"
 
 [dev-dependencies]
-tokio.workspace = true
 tokio-stream = { version = "0.1", features = ["net"] }
