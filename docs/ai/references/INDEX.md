@@ -32,6 +32,8 @@ folder names, filenames or navigation labels.
 | --- | --- | --- |
 | [`architecture/`](architecture/INDEX.md) | Active | Cross-cutting design decisions, vocabulary and scope |
 | [`api/`](api/INDEX.md) | Active | Daemon API schemas, generated types and the client |
+| [`cli/`](cli/INDEX.md) | Active | Command surface, exec streams, traces and reports |
+| [`config/`](config/INDEX.md) | Active | Profiles, presets, run-time rules and file mappings |
 
 Add a folder only when a note does not fit an existing one, for example
 `runtime/`, `exec-intercept/` or `pairing/`.

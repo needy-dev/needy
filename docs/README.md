@@ -15,7 +15,7 @@ docs/
 ├── ai/
 │   ├── references/           ← durable design / plan / evidence notes
 │   │   ├── INDEX.md          ← responsibility-folder index
-│   │   └── <responsibility>/ ← e.g. architecture/
+│   │   └── <responsibility>/ ← e.g. architecture/, cli/
 │   │       └── INDEX.md
 │   └── explanations/         ← tutorials, walkthroughs, interactive HTML
 └── notes/<owner>/            ← personal drafts (do not commit by default)

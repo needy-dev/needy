@@ -4,6 +4,12 @@
 serve them yet. The HTTP API in [`docs/api.md`](../../../api.md) is still the
 implemented contract.
 
+The `SessionService` and `RunService` schemas follow the pre-2026-11-09 model.
+The [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
+note redefines session, and the
+[CLI note](../cli/2026-11-09-cli-exec-and-report-design.md#grpc) lists the
+required `ProcessService` changes.
+
 The layout follows AUV: one canonical `proto/` tree, a crate of generated
 types, a client crate that other frontends reuse instead of wrapping the CLI,
 and a server crate with the protocol adapters every listener needs.

@@ -4,6 +4,11 @@ Reference for agents working in this repository. It records the decisions behind
 Needy's shape, including decisions that are accepted but not yet implemented. It
 is not a specification; read the code for current behavior.
 
+> [!NOTE]
+> The [actor and executor separation](2026-11-09-actor-executor-separation-design.md)
+> note (2026-11-09) changes D5, D6, D9 and R2 and promotes O2, O3, O5 and O7.
+> Read it before relying on those entries.
+
 Status values:
 
 - **accepted** — intended to be kept.

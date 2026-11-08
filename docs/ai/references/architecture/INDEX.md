@@ -5,3 +5,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | Date | Note | Type |
 | --- | --- | --- |
 | 2026-11-06 | [Needy design decisions](2026-11-06-needy-design-decisions-design.md) | design |
+| 2026-11-09 | [Actor and executor separation](2026-11-09-actor-executor-separation-design.md) | design |
