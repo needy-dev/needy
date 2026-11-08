@@ -1,0 +1,17 @@
+[package]
+name = "needy-api-client"
+description = "Rust client for the Needy daemon API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+needy-api-proto = { path = "../api-proto", version = "0.1.0" }
+thiserror = "2"
+tonic = { workspace = true, features = ["transport", "tls-ring", "tls-native-roots"] }
+
+[dev-dependencies]
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }

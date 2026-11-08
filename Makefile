@@ -1,10 +1,11 @@
 CARGO ?= cargo
 DOCKER ?= docker
+BUF ?= buf
 BINARY_STAGE ?= build
 IMAGE ?= needy-runtime:rust
 TEST_IMAGE ?= needy-rust-test:dev
 
-.PHONY: build release test check host-test docker-test image test-image
+.PHONY: build release test check host-test docker-test image test-image proto
 
 build:
 	$(CARGO) build --locked --bin needy
@@ -34,3 +35,6 @@ image:
 
 test-image:
 	$(DOCKER) build --build-arg BINARY_STAGE=$(BINARY_STAGE) -t $(TEST_IMAGE) -f images/Dockerfile .
+
+proto:
+	cd proto && $(BUF) lint && $(BUF) format -w && $(BUF) generate

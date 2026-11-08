@@ -1,0 +1,69 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.api.runtime.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// SessionService manages Docker sessions and their workspaces.
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc DeleteSession(DeleteSessionRequest) returns (DeleteSessionResponse);
+  // Upload a tar archive. The first message names the session.
+  rpc PushWorkspace(stream PushWorkspaceRequest) returns (PushWorkspaceResponse);
+  // Download the workspace as a tar archive.
+  rpc PullWorkspace(PullWorkspaceRequest) returns (stream PullWorkspaceResponse);
+}
+
+message Session {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+  // Empty when the session has no active run.
+  string active_run_id = 4;
+}
+
+message CreateSessionRequest {
+  string name = 1;
+}
+
+message CreateSessionResponse {
+  Session session = 1;
+}
+
+message GetSessionRequest {
+  string session_id = 1;
+}
+
+message GetSessionResponse {
+  Session session = 1;
+}
+
+message ListSessionsRequest {}
+
+message ListSessionsResponse {
+  repeated Session sessions = 1;
+}
+
+message DeleteSessionRequest {
+  string session_id = 1;
+}
+
+message DeleteSessionResponse {}
+
+message PushWorkspaceRequest {
+  string session_id = 1;
+  bytes chunk = 2;
+}
+
+message PushWorkspaceResponse {}
+
+message PullWorkspaceRequest {
+  string session_id = 1;
+}
+
+message PullWorkspaceResponse {
+  bytes chunk = 1;
+}

@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/exec-intercept", "crates/needy"]
+members = [
+    "crates/api-client",
+    "crates/api-proto",
+    "crates/api-server",
+    "crates/exec-intercept",
+    "crates/needy",
+]
 resolver = "3"
 
 [workspace.package]
@@ -14,6 +20,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "arbitrary_precision"] }
 anyhow = "1"
 tokio = { version = "1", features = ["full"] }
+prost = "0.14"
+prost-types = "0.14"
+tonic = { version = "0.14", default-features = false }
+tonic-prost = "0.14"
 
 [profile.release]
 lto = "thin"

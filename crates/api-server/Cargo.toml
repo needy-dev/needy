@@ -1,0 +1,19 @@
+[package]
+name = "needy-api-server"
+description = "Protocol adapters for serving the Needy daemon API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+needy-api-proto = { path = "../api-proto", version = "0.1.0" }
+http = "1"
+tonic = { workspace = true, features = ["router", "transport"] }
+tower = "0.5"
+
+[dev-dependencies]
+needy-api-client = { path = "../api-client", version = "0.1.0" }
+tokio.workspace = true
+tokio-stream = { version = "0.1", features = ["net"] }

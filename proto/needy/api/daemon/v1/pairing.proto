@@ -1,0 +1,44 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.api.daemon.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// PairingService exchanges one-time codes for client tokens and manages
+// paired clients. PairClient is the only unauthenticated RPC.
+service PairingService {
+  rpc PairClient(PairClientRequest) returns (PairClientResponse);
+  rpc ListClients(ListClientsRequest) returns (ListClientsResponse);
+  rpc RevokeClient(RevokeClientRequest) returns (RevokeClientResponse);
+}
+
+message PairClientRequest {
+  string code = 1;
+  string name = 2;
+}
+
+message PairClientResponse {
+  string client_id = 1;
+  // Bearer token for later calls. Treat it as a credential.
+  string token = 2;
+}
+
+message ListClientsRequest {}
+
+message ListClientsResponse {
+  repeated Client clients = 1;
+}
+
+message RevokeClientRequest {
+  string client_id = 1;
+}
+
+message RevokeClientResponse {}
+
+// Client is paired client metadata. It never carries the token.
+message Client {
+  string id = 1;
+  string name = 2;
+  google.protobuf.Timestamp created_at = 3;
+}

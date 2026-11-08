@@ -1,0 +1,11 @@
+version: v2
+inputs:
+  - directory: .
+plugins:
+  # Generated Rust is committed, so Cargo builds need neither protoc nor a
+  # build script. Run `buf generate` from `proto/` after editing a schema.
+  - remote: buf.build/community/neoeinstein-prost
+    out: ../crates/api-proto/src/gen
+  - remote: buf.build/community/neoeinstein-tonic
+    out: ../crates/api-proto/src/gen
+clean: true

@@ -6,10 +6,21 @@ agent-specific concepts: a workload is any command.
 ## Project Structure
 
 - `crates/needy`: daemon, client, container runner and Linux proxy.
+- `crates/api-client`: `needy-api-client`, the Rust client for the daemon API.
+- `crates/api-server`: `needy-api-server`, protocol adapters such as bearer
+  authentication for serving the daemon API.
+- `crates/api-proto`: `needy-api-proto`, generated Protobuf and gRPC types.
+  Do not edit `src/gen`; change `proto/` and run `make proto`.
+- `proto/`: canonical API schemas, linted and generated with Buf.
 - `crates/exec-intercept`: Linux seccomp/ptrace supervision library.
 - `images/`: runtime image build.
 - `scripts/`: installer and integration test drivers.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
+
+## Agent Skills
+
+Repository skills live in `.agents/skills/`; `.claude/skills` links to it.
+Use `use-buf` and `use-buf-plugins` when changing `proto/` or Buf configuration.
 
 ## Build and Test
 
