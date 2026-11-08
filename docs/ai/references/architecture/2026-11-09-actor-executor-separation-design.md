@@ -78,9 +78,8 @@ command) become one executor implementation. The `SessionService` and
   many small file operations. Commands run on the executor that holds the
   workspace. The actor reads and edits workspace files remotely; that volume is
   small.
-- **Every machine that can execute runs `needy daemon`.** The actor's daemon
-  connects to it, as the current Linux-to-Mac bridge already does. A dial-out
-  mode for executors behind NAT can be added later as a daemon option.
+- **Every machine that can execute runs `needy daemon`.** Executor daemons are
+  reached directly or dial out through a tunnel; see [Interconnect](#interconnect).
 
 - **Needy does not schedule.** Resource limits come from each runtime's own
   options; needy keeps a keyed pool of executor instances with a per-instance
@@ -93,7 +92,7 @@ interception in the actor is an automatic `needy exec`.
 
 | Need | Mechanism | Notes |
 | --- | --- | --- |
-| Exec routing | Existing exec interception and proxy PID ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | One hop is implemented. Executor PTYs, detach and attach, process groups and failure handling remain. |
+| Exec routing | In the actor's guest kernel, so the driving program sees no tracer; a proxy PID keeps parent and child semantics ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | Accepted direction; the kernel mechanism is being prototyped. The ptrace-based `exec-intercept` remains the fallback outside microVMs. |
 | File routing | FUSE in the actor guest, served by the executor | Gives mmap, readdir and change semantics without rewriting each file syscall. |
 | Network routing | One network and gateway per side; bridge rules for exceptions | See [Network routing](#network-routing). |
 | Observation | eBPF in the guest kernel | The driving program cannot see a tracer. Block `bpf` and `perf_event_open` in the guest. |
@@ -102,12 +101,50 @@ interception in the actor is an automatic `needy exec`.
 | Rules | Declarative only at run time | No scripts or LLM calls on the syscall path, so decisions depend only on profile, seed and event, and a session can be replayed. See [Profiles and rules](../config/2026-11-09-profile-and-rules-design.md). |
 | Single-process harness replacement | One allowed `execve`, then deny `fork`, `vfork`, `clone` without `CLONE_THREAD`, `clone3` and further exec | Threads stay allowed. Also deny io_uring, 32-bit compat syscalls, `personality`, `ptrace` and `process_vm_*`. |
 
-## Session state is split
+## State
 
-A session has state in two places: the actor VM and the executor workspace.
-Reset and fork must restore both to the same point. Firecracker snapshots cover
-the actor; the executor needs filesystem snapshots (btrfs, ZFS or an overlay
-layer). Needy needs one session snapshot that names both.
+Actors are stateless; executors hold state.
+
+- **Actor**: a read-only rootfs from a recipe plus a throwaway writable layer.
+  Files that a profile mirrors out, such as harness session directories, are
+  copied before the layer is discarded.
+- **Executor**: the workspace and its caches live in the executor's filesystem
+  layers and may outlive any one actor.
+- **Snapshots are out of scope.** There is no session snapshot or restore.
+
+### Shared executors and sub-agents
+
+Several actors may share one executor instance: a parent agent and its
+sub-agents, or several rounds of a recursive harness that read and process each
+other's results. Sessions join a **group**, and an executor whose key is
+`{group}` resolves to one instance for all of them.
+
+| Concern | Handling |
+| --- | --- |
+| Concurrent writes to the workspace | Per executor: `shared` (one tree), `overlay` (each actor writes to its own layer over a shared lower layer, merged on request) or `worktree` (one git worktree per actor). |
+| Processes | Visible to every actor by default (same user), so a dev server started by one sub-agent is reachable by another. A separate PID namespace per actor is optional. |
+| `max_procs` | Shared by every actor on the instance. |
+| Trace | Each executor event carries the session that caused it and goes to that session's trace, so a group can be analysed across actors: who wrote which file, who killed which process. |
+| Lifecycle | The instance outlives individual actors and is stopped by `idle_timeout` after the group's last session ends. |
+
+### Paths and users
+
+Both sides use one user, chosen by the profile, with the same name, UID and GID,
+and keep work under `/home/<user>/`. The workspace has the same path on the actor
+and the executor, for example `/home/agent/workspace`. FUSE then needs no path
+mapping, `cwd` passes through unchanged, and file ownership agrees on both sides.
+
+## Interconnect
+
+- **Actor and daemon**: a host-local channel into the microVM; vsock is the
+  candidate and is being measured.
+- **Daemon and executors**: executors may sit behind NAT or be reachable only
+  through tunnels such as Cloudflare Tunnel. The transport therefore must:
+  - work over a single outbound connection, so an executor can dial out;
+  - use HTTP/2 (gRPC) or WebSocket, which tunnels and TLS-terminating proxies
+    carry;
+  - not depend on direct IP reachability;
+  - survive proxy idle timeouts with keepalives and reconnect long streams.
 
 ## Recipes and identity
 
@@ -316,11 +353,11 @@ union of both logs.
 | D9 tar workspace transfer | Replaced by executor-owned workspaces and file routing (O2). |
 | R2 no syscall-virtualizing kernel | Narrowed: still no general syscall-virtualizing kernel, but selective result rewriting for recipes and chaos is in scope. |
 | O2, O3, O5, O7 | Become the main direction: executor-owned filesystem, actor/executor split, placement-relative network, executor capabilities as labels. |
+| Snapshots | Out of scope: actors are stateless and executors keep state in their filesystem layers. |
 | O9 long-lived interactive sessions | Becomes detach and attach for `needy exec`; see the [CLI note](../cli/2026-11-09-cli-exec-and-report-design.md). |
 
 ## Open questions
 
-- Atomic session snapshots across the actor VM and the executor workspace.
 - Process-group signals and executor failure semantics for routed exec.
 - DMI and a fuller PCI tree for richer recipes.
 - Firecracker on Arm inside apple/container: identity registers and timing.

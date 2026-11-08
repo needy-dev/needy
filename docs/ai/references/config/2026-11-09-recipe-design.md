@@ -30,7 +30,7 @@ cpu:
   brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
   signature: { family: 6, model: 85, stepping: 7 }
   hypervisor: hidden                   # visible | hidden
-  features: { hide: [avx_vnni, serialize] }   # hide only; never add
+  features: { hide: [avx_vnni, serialize] }   # Linux /proc/cpuinfo flag names; hide only, never add
   topology: { cores: 2, threads_per_core: 2 }
 
 memory: 16GiB
@@ -89,7 +89,7 @@ reusable rule blocks inside profiles.
 | `cpu.brand`, `cpu.hypervisor` | Patched Firecracker CPUID normalization | VM start | Verified in the proof of concept |
 | `cpu.signature` | CPUID leaf 1 EAX modifier | VM start | Verified |
 | KVM signature | Clear leaf `0x40000000` | VM start | Verified |
-| `cpu.features.hide` | Feature names mapped to CPUID leaf and bit, then cleared | VM start | Needs a feature table |
+| `cpu.features.hide` | Linux `/proc/cpuinfo` flag names (from `cpufeatures.h`) mapped to CPUID leaf and bit, then cleared | VM start | Needs the name-to-bit table |
 | `cpu.topology` | vCPU count and topology leaves | VM start | Partly built into Firecracker |
 | `memory` | `mem_size_mib`; real | VM start | Native |
 | `os.image` | OCI image to ext4 rootfs | Build | Verified |
@@ -135,10 +135,11 @@ reports:
 Built-in recipes are combinations that pass the check. Starting from one and
 overriding a few fields keeps a recipe consistent.
 
-## Open questions
+## Decisions and open questions
 
-- Feature table source for `cpu.features`: Linux's `cpufeatures.h` names or
-  CPUID bit names.
-- Whether recipes for Arm hosts use MIDR and ID register fields instead of
-  `cpu.brand` and `cpu.signature`.
-- Upstreaming the CPUID normalization switch to Firecracker or keeping a patch.
+Decided: feature names follow Linux's `/proc/cpuinfo` flags; Arm hosts use
+MIDR and ID register fields instead of `cpu.brand` and `cpu.signature`; the
+Firecracker patch is maintained in this project for now.
+
+- How hard DMI and extra PCI devices are; being implemented in the proof of
+  concept.

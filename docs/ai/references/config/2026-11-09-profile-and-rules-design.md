@@ -33,9 +33,9 @@ the recorded answer. It is off by default.
 
 ## Format
 
+- Profiles and recipes are **YAML** on disk (decided 2026-11-09).
 - The schema is defined in `proto/`, so Buf can also generate TypeScript types
-  for people who prefer to author profiles in code and emit JSON.
-- On disk a profile is YAML or JSON.
+  for tools that emit profiles.
 
 ## Profile structure
 
@@ -44,6 +44,8 @@ A profile describes one session. Machines are described by
 
 ```yaml
 extends: base-linux              # optional parent profile
+
+user: { name: agent, uid: 1000, gid: 1000 }   # same on the actor and every executor; ~ = /home/agent
 
 actor:
   recipe: gce-e2-standard-4
@@ -194,8 +196,7 @@ when:
 ```
 
 Launchers such as `bash -lc '…'`, `pnpm dlx`, `npx` and `node script.js` hide
-the command that really runs. Built-in launcher resolvers turn them into an
-effective command first, and `match` applies to that.
+the command that really runs; see [Launcher resolvers](#launcher-resolvers).
 
 ### Actions
 
@@ -217,9 +218,15 @@ effective command first, and `match` applies to that.
 
 ### Composition
 
-- **Rules are ordered; the first match wins**, like a firewall. Reading from the
-  top gives the result without reasoning about merges.
+Every rule that matches applies, in order:
+
+- **Single-valued fields take the first rule that sets them**: `to`, `deny`,
+  `timeout`, `cwd`. Reading from the top tells you where a command goes.
+- **Collections accumulate in rule order**: environment changes, `args.prepend`,
+  `args.append`, `wrap` (outermost first), `files` and `faults`.
+- **`final: true`** stops evaluation after that rule.
 - **Presets** are named blocks of actions reused with `use:`, like CSS classes.
+  A preset's fields count as if written in the rule that uses it.
 - **`extends`** inherits a parent profile; its rule list is appended after the
   child's rules.
 
@@ -229,55 +236,133 @@ presets:
   mac:       { to: mac }
 
 commands:
+  - match: "**"                   # accumulates for every command
+    env: { set: { CI: "1" } }
   - match: pnpm dlx pi **         # the harness itself stays on the actor
     to: actor
+    final: true
   - match: "{node,bun} {script} **"
     when: { script: "**/pi/dist/cli.js" }
     to: actor
+    final: true
   - match: "{uname,lscpu,sw_vers} **"   # identity commands stay on the actor's recipe
     to: actor
   - match: curl **
     when: { has: [-k, --insecure] }
     deny: insecure TLS is not allowed
   - match: git **
-    to: build
-    args: { prepend: [-c, color.ui=never] }
+    args: { prepend: [-c, color.ui=never] }   # also gets CI=1; placement comes from a later rule
   - match: "{xcodebuild,codesign} **"
     use: [mac, clean-env]
-  - match: "**"                   # everything else goes to the build executor
+  - match: "**"                   # everything not yet placed goes to the build executor
     to: build
     use: [clean-env]
 ```
 
+## Launcher resolvers
+
+Needy sees every real `execve` in the tree, so it can often decide late: a
+launcher's later exec reveals the real tool. Late decisions fail when the
+launcher's own placement must be chosen first; `pnpm dlx X` downloads into a
+cache, so `X` must run where the cache is. Resolve early from arguments where
+possible, and otherwise make the launcher's placement sticky for its subtree.
+
+| Launcher | Effective command | Known at the launcher's exec? |
+| --- | --- | --- |
+| `env [-i] [-u V] [V=x]… cmd`, `sudo`, `nice`, `timeout`, `nohup`, `stdbuf`, `time`, `ionice`, `setsid` | Arguments after the launcher's own options and assignments | Yes |
+| `xargs [opts] cmd` | `cmd`; its arguments come from stdin | Command yes, arguments no |
+| `sh -c S`, `bash -c S`, `bash -lc S` | Parse `S` | Only for word-only scripts |
+| `npx P`, `npm exec P`, `pnpm dlx P`, `yarn dlx P`, `bunx P`, `uvx P`, `pipx run P` | Package `P`; the binary appears at a later exec | Package yes, binary later |
+| `pnpm exec C`, `npm exec -- C`, `uv run C` | `C` from `node_modules/.bin` or `.venv/bin` | Yes |
+| `npm`, `pnpm`, `yarn`, `bun` `run S` | `scripts.S` in the nearest `package.json`, then a shell parse | From the project files |
+| `cargo run [--bin B]` | The built binary | At the later exec |
+| `python -m M` | Module `M` | Yes |
+| `node F`, `bun F` | Script path, nearest `package.json` name and version, content hash | Yes, by reading files |
+| `corepack pnpm …` | Strip `corepack` and resolve again | Yes |
+| `make T` | Recipes are shell; keep the subtree sticky | No |
+
+**Shell scripts.** Parse with [brush-parser](https://docs.rs/brush-parser), a
+maintained POSIX and bash parser. Like
+[Codex](https://github.com/openai/codex/pull/7127), accept only word-only
+scripts: plain commands joined by `&&`, `||`, `;` and `|`. If every
+subcommand resolves to the same placement, place the shell there. Redirects,
+substitutions, `eval`, functions, aliases and here-documents fall back to the
+`unknown` policy. `bash -l` loads a profile, so it is never fully static.
+
+Built-in resolvers cover the table. Users add more:
+
+```yaml
+resolvers:
+  - match: "mytool run {script} **"
+    effective: "{script} **"          # match again after rewriting
+  - match: "pnpm dlx {pkg} **"
+    identity: { package: "{pkg}" }    # early identity from arguments
+    sticky: true                      # children inherit the placement
+  - match: "make **"
+    sticky: true
+unknown: sticky                       # sticky | actor | <executor name>
+```
+
 ## File mappings
 
-| Kind | Direction | When | Example |
+The schema borrows rclone's ordered filters, Mutagen's directions and Lima's
+mount keys ([rclone filtering](https://rclone.org/filtering/),
+[Mutagen modes](https://mutagen.io/documentation/synchronization/),
+[Lima mounts](https://lima-vm.io/docs/config/mount/)).
+
+| Mode | Direction | When | Example |
 | --- | --- | --- | --- |
 | `copy-in` | Host → actor or executor | Session start | `.agents/`, `AGENTS.md`, Codex configuration |
-| `mount` | Live remote view | During the session | The workspace: commands run on the executor, the actor views it remotely. |
-| `mirror-out` | Actor or executor → host | Continuously or at the end | Session directories: `~/.codex/sessions`, `~/.claude/projects` |
-| `exclude` | Never transferred | — | Credential files |
+| `mount` | Live view; the executor holds the data | During the session | The workspace |
+| `mirror-out` | Actor or executor → host | Continuously or at the end | `~/.codex/sessions`, `~/.claude/projects` |
 
 ```yaml
 files:
-  - { copy-in: .agents/, to: actor:/home/agent/.agents/ }
-  - { copy-in: ~/.codex/, to: actor:/home/agent/.codex/, exclude: [auth.json] }
-  - { mount: executor:/workspace, at: actor:/workspace }
-  - { mirror-out: actor:/home/agent/.codex/sessions/, to: ./sessions/{session}/codex/ }
+  skills:
+    mode: copy-in
+    from: host:./.agents/
+    to: actor:~/.agents/
+  codex-home:
+    mode: copy-in
+    from: host:~/.codex/
+    to: actor:~/.codex/
+    filter: ["- /auth.json", "- /sessions/**", "+ **"]   # ordered; first match wins
+  workspace:
+    mode: mount
+    from: executor:build:~/workspace/
+    to: actor:~/workspace/              # same path on both sides
+    writable: true
+  codex-sessions:
+    mode: mirror-out
+    from: actor:~/.codex/sessions/
+    to: host:./sessions/{session}/codex/
+    when: continuous                    # continuous | end
+    delete: false                       # never propagate deletions to the host
+  ignore_file: .needyignore             # optional gitignore-style file, read as "-" rules
+
+session_files: [skills, codex-home, workspace, codex-sessions]
+
+commands:
+  - match: "{xcodebuild,codesign} **"
+    to: mac
+    files: [workspace-mac]              # added to session_files for this command
 ```
 
-Home directories of harnesses contain credentials, such as Codex's `auth.json`.
-Model keys are injected by the actor gateway, so credentials must never be
-copied into the actor; otherwise an agent that replaces its harness can read
-them. `copy-in` supports `exclude`, and harness presets exclude known credential
-files by default.
-
-Mirrored-out session directories are stored with the trace.
+- Mappings are **named**. A session lists its mappings; a command rule may add
+  more. They accumulate as a union.
+- Sides are written `host:`, `actor:` and `executor:<name>:`. `~` is
+  `/home/<user>` on every side, and every side uses the profile's UID and GID,
+  so no ownership mapping or `chown` is needed.
+- Filters follow rclone: ordered `+` and `-` rules, `**` for any depth, a
+  leading `/` anchored at the mapping root.
+- Harness home directories contain credentials, such as Codex's `auth.json`.
+  Model keys are injected by the actor gateway, so credentials must never be
+  copied into the actor; otherwise an agent that replaces its harness can read
+  them. Harness presets exclude known credential files by default.
+- Mirrored-out directories are stored with the trace.
 
 ## Open questions
 
-- YAML, TOML, or TypeScript that emits JSON as the primary authoring format.
-- Whether first-match-wins is enough, or some actions (environment, files)
-  should accumulate across matching rules.
-- Which launcher resolvers ship built in, and how users add one.
-- Whether `files` rules can also be attached to individual command rules.
+- The `unknown` default for launchers: `sticky` or an executor.
+- Workspace concurrency mode defaults for shared executors (`shared`,
+  `overlay`, `worktree`).

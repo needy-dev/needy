@@ -1,143 +1,94 @@
 <h1 align="center">Needy</h1>
 
-Needy is a headless runtime for running commands on another machine.
+Needy separates the program that drives work from the environments where that
+work takes effect.
 
-- Run batch jobs in Docker containers with persistent workspaces.
-- Keep a process tree on Linux, and run selected commands on macOS.
-- Submit jobs, follow events and download files from a paired CLI.
+- Run the driving program, such as an agent harness or a test suite, in a small
+  stateless microVM: the **actor**.
+- Route its commands, file access and network traffic by declarative rules to
+  **executors**: containers, microVMs, pods or real devices such as a Mac.
+- Record every operation, inject faults, and build each machine from a
+  **recipe** that fixes its identity: OS, kernel, CPU, firmware and devices.
 
-> Needy has no agent-specific concepts. A workload is any command, so any agent
-> or tool can run on top of it.
+> [!NOTE]
+> Needy is being redesigned around this model. The code in this repository is
+> the previous prototype and will be replaced. See the
+> [design notes](docs/ai/references/INDEX.md).
 
 ## Table of Contents
 
-- [Getting Started](#getting-started)
-- [Linux to Mac execution](#linux-to-mac-execution)
-- [Understand Needy](#understand-needy)
+- [Use cases](#use-cases)
+- [Concepts](#concepts)
+- [How it works](#how-it-works)
+- [Documentation](#documentation)
 - [Development](#development)
 
-## Getting Started
+## Use cases
 
-### Requirements
+- **Agent RL rollouts and evaluations.** Run many cheap, isolated harnesses
+  near the inference cluster, while their tools run where the workspace,
+  devices and services are. Let an agent replace its own harness, then ask what
+  machine it runs on.
+- **Integration tests.** A test suite drives services and devices on other
+  machines through one routing and recording layer.
+- **Acceptance environments.** Build a machine from a recipe, run the
+  acceptance script against it, and read the report.
 
-- Rust 1.97 or later.
-- Docker Engine (or a Docker-compatible backend on macOS) for container
-  workloads.
+## Concepts
 
-### Install
+| Term | Meaning |
+| --- | --- |
+| **actor** | Runs the driving program. Usually one stateless microVM. |
+| **executor** | Where routed operations take effect: a container, microVM, pod or device. Several actors may share one executor. |
+| **daemon** | The control plane: lifecycle, routing rules, network gateways and the trace. |
+| **recipe** | One machine: image, kernel, CPU, memory, firmware, devices and network identity. |
+| **profile** | One session: which recipes to use, routing rules, network policies, chaos and file mappings. |
+| **session** | One actor and the executors bound to it. |
+| **trace** | Every event recorded during a session. |
 
-```sh
-./scripts/install.sh --prefix "$HOME/.local"
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### Start the host
-
-```sh
-needy daemon \
-  --data-dir "$HOME/.local/share/needy" \
-  --listen 127.0.0.1:7331 \
-  --image needy-runtime:rust \
-  --max-concurrent 2
-```
-
-For a remote host, use an SSH tunnel (`ssh -N -L 7331:127.0.0.1:7331 user@host`)
-or configure HTTPS with `--tls-cert` and `--tls-key`.
-
-### Pair a client
-
-On the host, create a single-use code:
-
-```sh
-needy pairing-code --data-dir "$HOME/.local/share/needy" --out /tmp/needy-pairing-code
-```
-
-Copy the file to the client through a private channel, then pair:
-
-```sh
-needy pair --url http://127.0.0.1:7331 --code-file /tmp/needy-pairing-code --name laptop
-needy info
-```
-
-### Run a job
-
-```sh
-needy sessions create --name demo
-needy workspace push SESSION_ID ./project
-needy run SESSION_ID -- sh -c 'ls -la; echo hello > result.txt'
-needy events RUN_ID --follow
-needy workspace pull SESSION_ID ./downloaded-project
-```
-
-Clean up:
-
-```sh
-needy stop RUN_ID
-needy sessions delete SESSION_ID
-```
-
-## Linux to Mac execution
-
-On the Mac, allow the commands that may run there:
-
-```sh
-needy daemon --no-docker --data-dir .needy/mac-host \
-  --listen 127.0.0.1:7331 --host-root /Users/you/project \
-  --allow-host-exec uname,xcodebuild
-```
-
-Pair the Linux machine with it, then run:
-
-```sh
-needy intercept --remote-cwd /Users/you/project --select uname,xcodebuild \
-  -- /bin/sh -c 'cat /proc/sys/kernel/ostype; uname -s'
-```
-
-The shell prints `Linux`, and the selected `uname` prints `Darwin`. To run one
-command on the Mac directly, use `needy exec --cwd /Users/you/project -- uname -s`.
-
-> [!WARNING]
-> Host execution is trusted operator access. `--host-root` is not a filesystem
-> jail.
-
-## Understand Needy
+## How it works
 
 ```mermaid
 flowchart LR
-  A[needy CLI] -->|HTTP / HTTPS| B[needy daemon]
-  B --> C[Docker session<br>workspace + home]
-  B --> D[native host exec]
-  E[needy intercept on Linux] -->|selected execs| D
+  subgraph A[actor microVM]
+    P[driving program] --> S[needy supervisor]
+  end
+  S -->|commands, files, connections by rule| E1[executor: container]
+  S --> E2[executor: Mac]
+  S --> G1[actor gateway] --> M[model API]
+  E1 --> G2[executor gateway] --> I[internet]
+  D[needy daemon] -. lifecycle, rules, trace .- A
+  D -. lifecycle .- E1
 ```
 
-- One `needy` binary is the daemon, the client, the container runner and the
-  Linux proxy.
-- [`needy-exec-intercept`](crates/exec-intercept) is the Linux seccomp/ptrace
-  library behind `needy intercept`.
-- Needy does not install Docker, configure model providers, inject credentials
-  or provide a public relay.
+- **Route.** Exec, file and network operations go to the actor or an executor
+  by declarative rules. The program sees ordinary PIDs, pipes, terminals and
+  exit codes.
+- **Observe.** Every operation and decision is recorded. `needy report` writes a
+  human-readable summary; the trace exports to JSONL, SQLite and OpenTelemetry.
+- **Shape.** Inject faults such as `EIO`, delays or overheating sensors, and
+  build machines whose identity comes from a recipe.
 
-> [!IMPORTANT]
-> Pair only trusted users. A paired client can run any command on the host.
+The actor and the executors use separate networks. The actor's network sits
+near its main dependency, such as inference, and its gateway injects
+credentials so the actor never holds them. The executors' network sits near
+what the work operates on and carries most audit rules.
 
-More documentation:
+## Documentation
 
-- [Usage details](docs/usage.md): state, workspace rules, trust and limits.
-- [API](docs/api.md): the HTTP wire contract.
-- [Verification](docs/verification.md): test evidence and reproduction.
+- [Actor and executor separation](docs/ai/references/architecture/2026-11-09-actor-executor-separation-design.md):
+  model, terms, network and experiments.
+- [CLI, exec streams and reports](docs/ai/references/cli/2026-11-09-cli-exec-and-report-design.md)
+- [Profiles and rules](docs/ai/references/config/2026-11-09-profile-and-rules-design.md)
+- [Recipes](docs/ai/references/config/2026-11-09-recipe-design.md)
+- [Where documents go](docs/README.md)
 
 ## Development
 
 ```sh
-make build
-make image
 make check
 make test
-make host-test
-make test-image
-make docker-test
+make proto
 ```
 
 Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
-
-See [docs/README.md](docs/README.md) for where new documents go.

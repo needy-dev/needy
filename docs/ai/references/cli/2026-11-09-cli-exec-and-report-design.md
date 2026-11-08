@@ -10,10 +10,10 @@ note. Profiles are described in
 ```text
 needy daemon                                   # control plane; also runs on every executor machine
 needy build    --recipe NAME                   # build a machine image
-needy session  create|ls|stop|snapshot|restore # one actor plus its executors
+needy session  create|ls|stop [--group G]     # one actor plus its executors
 needy exec     [--session ID] -- CMD …         # run a command through placement
 needy ps | attach ID | kill ID                 # manage detached processes
-needy fs       cp|sync|snapshot …              # move and snapshot files between host, actor and executors
+needy fs       cp|sync …                       # move files between host, actor and executors
 needy report   SESSION|latest --level summary|detailed [--output FILE]
 ```
 
@@ -198,9 +198,8 @@ Firecracker executors use the same builds.
 
 ## `needy fs`
 
-Copies, syncs and snapshots files between the host, the actor and executors,
-like `kubectl cp` with sync. Executor workspace snapshots are the executor half
-of a session snapshot.
+Copies and syncs files between the host, the actor and executors, like
+`kubectl cp` with sync. Snapshots are out of scope.
 
 ## Open questions
 
