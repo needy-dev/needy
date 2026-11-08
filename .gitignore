@@ -3,3 +3,4 @@
 /.env.local
 *.test
 /target/
+/.claude/worktrees/
