@@ -187,7 +187,9 @@ Implemented on every executor platform: PTY or pipes, raw mode, resize, signal
 forwarding, stdin half-close, exit with a signal name, detach, attach with a
 256 KiB replay buffer, finished processes listed for 10 minutes, `json` and
 `ndjson` output with the placement events, and backpressure from a slow
-client to the process. `--events` is not
+starting client to the process. An attached client that falls behind is
+disconnected instead, so it never holds back the process or another client
+(see the [terminal note](2026-11-10-terminal-attach-design.md), G5). `--events` is not
 implemented yet, and `json` does not include events. On Windows a signal
 terminates the process tree; terminals use ConPTY through portable-pty but do
 not work yet in a daemon started in session 0 (see the closed-loop results).

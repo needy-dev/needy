@@ -440,6 +440,47 @@ every daemon's state in a scratch directory.
 | `examples/smoke` with a driving program that sleeps 25 s | Linux | Pass: `ps` hides the `actor-mount` `sftp-server`, `ps -a` shows it; attaching to it is refused and the workspace still works both ways afterwards; `session ls` shows `build=docker (released)` and `EXIT` `0` once finished; the report shows `25.2s`, `python3 on build`, and no `/run/needy/bin` anywhere in the detailed JSON |
 | `examples/cli` without an actor, `fs cp`, `exec` | Linux | Pass: `ps` hides the `fs` `mkdir` and `tar`, `ps -a` shows them; attaching to the `tar` is refused; the report shows `0.2s`; no container left |
 
+## Re-verified after the hardening and terminal fixes
+
+Owner-approved fixes, each with a regression test in `make test`: a TCP
+listener on a non-loopback address without a token is refused (loopback
+without a token warns); the daemon's state and runtime directories are 0700
+and its sockets 0600 under any umask, and a Docker executor's socket
+directory and default workspace are given to the profile's user (bug 1 of
+the cloud-host run below); `ps` without `--session` lists a process once, under the executor it
+was started through; a session that ends kills the processes it started on
+each executor before releasing it (`TODO(runner-ownership)`); the CLI sends
+the profile and its recipe resolved, so the control daemon reads no client
+path (`CreateSessionRequest.profile_dir` is gone, `recipe_yaml` is new);
+`exec` in an ended session says `session ID has ended: STATE`; and the
+terminal note's G2, G4, G5, G7, G8 and G9. Rerun on 2026-11-10 with every
+daemon's state in a scratch directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `make test`, `make check`, `make proto` without a diff | Mac | Pass |
+| `cargo test --workspace` | Linux | Pass |
+| `daemon --listen 0.0.0.0:…` without a token, both modes | Mac, Linux | Pass: exit 1, `will not listen on 0.0.0.0:0 without a token …; set a token with --token-env NAME` |
+| Control daemon under `umask 000`: modes of the state, sessions, a session's and the runtime directory, `daemon.sock`, `local.sock` | Mac | Pass: `drwx------` and `srw-------` |
+| Control daemon with umask 022 | Linux | Pass: 700, 700, 600, 600 |
+| `ps` without `--session` with a native session's detached `sleep` and a sessionless one | Mac, Linux | Pass: one row each, under `here` and `local` |
+| `exec -t` under `script`: `stty size` after `stty rows 33 cols 111` | Mac (native), Linux (Docker executor) | Pass: `33 111` |
+| `attach` from a 41x101 terminal to a detached `exec -t` started at 24x80 | Mac (native), Linux (Docker executor) | Pass: `41 101` |
+| A program that turns on the alternate screen, mouse, bracketed paste and hides the cursor; `top` quit with `q` | Mac (native), Linux (Docker executor, `top`) | Pass: after the program's last byte the client writes `CSI = 0 ; 1 u`, `CSI ? 1049 l` (only after the program entered the alternate screen), the mouse, paste and focus resets and `CSI ? 25 h` |
+| `exec -t -- sh -c 'setsid sleep 600 & exit 3'` (G8, literal) | Linux (local, Docker) | Pass before and after the fix: exit 3 in 23 ms; the descendant dies of the hangup before it leaves the session |
+| The same with the descendant in its own session before `exit 3` | Mac, Linux (local, Docker) | Before the fix: hangs on Linux (the regression test times out), passes on macOS. After: exit 3 in 0.12 s (Mac) and 0.62 s (Linux, the 500 ms drain) |
+| `TERM=xterm-ghostty COLORTERM=truecolor exec -t -- sh -c 'echo [$TERM] [$COLORTERM]'` on a Docker executor | Linux | Pass: `[xterm-256color] [truecolor]` |
+| `examples/smoke`, `examples/chaos` with an image from `needy build --recipe examples/opencode/gce.recipe.yaml --out DIR` | Linux | Pass: as before, the report counts 4 routed (1 failed) and 3 faults by kind |
+| `exec --session` of a finished, then stopped session | Linux, Mac (stopped) | Pass: `needy: session ID has ended: finished` (`stopped`), exit 1 |
+| A second `needy daemon --mode executor` on loopback with a token as a remote executor; an actor session with a workspace mount from it and `exec -d --executor far -- sleep 555`; `session stop` | Linux | Pass: before the stop the remote lists the `sftp-server` and the `sleep` running; after it both are `killed SIGKILL` and the remote executor has no children. A session whose actor finished ends its `sftp-server` the same way |
+| `session create` from a static `needy` in a container whose profile (relative `extends` and `actor.recipe`) exists only in the container, against the host's control daemon over TCP on loopback with a token | Linux | Pass: the session is created; the profile's directory does not exist on the daemon's host |
+| A profile whose user is 1001:1001 with a Docker executor, daemon as 1000 | Linux | Pass: fails in 14 ms with `cannot give …/executors/… to the container's user 1001:1001, so its executor cannot create its socket there; run the daemon as root or as that user: Operation not permitted` |
+| The control daemon as root (in a container with the Docker socket and the scratch directory at the same path), a Docker executor as 1000:1000 | Linux | Pass: the session is created and `id` in the executor prints `uid=1000(agent)`; the socket directory and the default workspace are `agent:agent 700`; the daemon's directories `root:root 700` and its socket 600 |
+
+The Docker executor rows mount this tree's static `needy` over the image's
+with `docker.args` (`-v …/needy:/usr/local/bin/needy:ro`); the
+`needy-executor:latest` image was not rebuilt.
+
 ## Re-verified on additional cloud hosts
 
 The tree at `830573e` (its last code change is `45f8065`) was run on
@@ -508,7 +549,8 @@ configures the VM in about 70 ms on B.
 ### Bugs found
 
 1. **A Docker executor cannot start when the control daemon's user is not
-   the profile's user.** The provider creates the executor's socket directory
+   the profile's user.** (Fixed by `a7c27dd`; see "Re-verified after the
+   hardening and terminal fixes".) The provider creates the executor's socket directory
    (and the default workspace) with the daemon's UID and umask, then starts
    the container with `--user <profile uid>:<gid>`
    (`crates/core-executor/src/provider/docker.rs`). As root with umask 022
