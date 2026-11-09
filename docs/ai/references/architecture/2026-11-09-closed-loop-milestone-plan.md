@@ -35,7 +35,7 @@ On one Linux host with KVM (a Linux KVM host for development):
 
 | # | Item | State |
 | --- | --- | --- |
-| 1 | Delete the previous daemon, Docker sessions, batch runs and their docs and tests | Done; `exec-intercept` kept |
+| 1 | Delete the previous daemon, Docker sessions, batch runs and their docs and tests | Done; the ptrace-based `exec-intercept` crate was later removed because nothing used it |
 | 2 | Redesign `proto/`: health, process (exec, attach, list, kill), session (with `Decide`), guest (config, events, exit, files) | Done |
 | 3 | Daemon core: session manager, keyed executor pool, Docker, native and remote providers | Done; `containerd`, `firecracker` and `k8s` executors remain |
 | 4 | Actor provider: Firecracker, `needy build --recipe` | Done |

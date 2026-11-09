@@ -14,7 +14,6 @@ work takes effect (executors). It has no agent-specific concepts.
 - `crates/api-proto`: `needy-api-proto`, generated Protobuf and gRPC types.
   Do not edit `src/gen`; change `proto/` and run `make proto`.
 - `proto/`: canonical API schemas, linted and generated with Buf.
-- `crates/exec-intercept`: Linux seccomp/ptrace supervision library.
 - `images/`: actor kernel, Firecracker patches and image builds.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
 
@@ -31,7 +30,6 @@ make check
 make test
 ```
 
-Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
 
 ## Documentation Workflow
 

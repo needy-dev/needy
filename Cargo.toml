@@ -4,7 +4,6 @@ members = [
     "crates/api-proto",
     "crates/api-server",
     "crates/config",
-    "crates/exec-intercept",
     "crates/needy",
 ]
 resolver = "3"

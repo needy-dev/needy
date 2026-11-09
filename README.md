@@ -145,7 +145,6 @@ make test
 make proto
 ```
 
-Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
 
 ## Acknowledgements
 

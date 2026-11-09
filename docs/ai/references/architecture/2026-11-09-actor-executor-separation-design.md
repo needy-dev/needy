@@ -92,7 +92,7 @@ interception in the actor is an automatic `needy exec`.
 
 | Need | Mechanism | Notes |
 | --- | --- | --- |
-| Exec routing | A built-in binfmt handler in the actor's guest kernel swaps a routed exec for a proxy; the proxy keeps parent and child semantics ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | Prototype works without ptrace; see [Exec routing in the guest kernel](#exec-routing-in-the-guest-kernel). The ptrace-based `exec-intercept` remains the fallback outside microVMs. |
+| Exec routing | A built-in binfmt handler in the actor's guest kernel swaps a routed exec for a proxy; the proxy keeps parent and child semantics ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | Prototype works without ptrace; see [Exec routing in the guest kernel](#exec-routing-in-the-guest-kernel). |
 | File routing | sshfs in passive mode in the actor; its SFTP stream travels over a needy exec stream to `sftp-server` on the executor | Every executor platform ships `sftp-server`, including macOS and Windows. Gives mmap, readdir and change semantics without rewriting each file syscall. |
 | Network routing | One network and gateway per side; bridge rules for exceptions | See [Network routing](#network-routing). |
 | Observation | eBPF in the guest kernel | The driving program cannot see a tracer. Block `bpf` and `perf_event_open` in the guest. |

@@ -36,4 +36,4 @@ folder names, filenames or navigation labels.
 | [`config/`](config/INDEX.md) | Active | Profiles, presets, run-time rules and file mappings |
 
 Add a folder only when a note does not fit an existing one, for example
-`runtime/`, `exec-intercept/` or `pairing/`.
+`runtime/`, `tunnel/` or `pairing/`.
