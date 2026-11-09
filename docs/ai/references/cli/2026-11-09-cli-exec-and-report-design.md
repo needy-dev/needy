@@ -78,7 +78,8 @@ Implemented on every executor platform: PTY or pipes, raw mode, resize, signal
 forwarding, stdin half-close, exit with a signal name, detach, attach with a
 256 KiB replay buffer, `json` and `ndjson` output, and backpressure from a slow
 client to the process. `--events` is not implemented yet. On Windows a signal
-terminates the process tree, and the terminal uses ConPTY through portable-pty.
+terminates the process tree; terminals use ConPTY through portable-pty but do
+not work yet in a daemon started in session 0 (see the closed-loop results).
 
 ## gRPC
 

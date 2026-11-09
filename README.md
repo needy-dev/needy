@@ -79,7 +79,7 @@ what the work operates on and carries most audit rules.
 ## Getting started
 
 An actor host needs Linux with KVM and Docker. Executors need only the `needy`
-binary: Linux, macOS and Windows are supported.
+binary: Linux and macOS are fully supported; Windows works without terminals.
 
 ```sh
 # On the actor host: build the actor image and the executor image.
@@ -120,6 +120,7 @@ Examples:
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor |
 | [`examples/local`](examples/local/profile.yaml) | No KVM needed: copy-in, mirror-out, chaos and recordings on this machine |
+| [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out on the actor, a file fault on the workspace, an exec fault and an overheating sensor |
 | [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec` |
 
 `needy profile check PROFILE --cmd "git status"` shows where commands would run

@@ -386,7 +386,10 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
             let _ = writer.flush();
         }
     });
-    let master = Arc::new(Mutex::new(master));
+    // The master is dropped after the child exits: ConPTY on Windows only ends
+    // the reader once its pseudo console closes.
+    let master = Arc::new(Mutex::new(Some(master)));
+    let wait_master = master.clone();
     tokio::spawn(async move {
         while let Some(input) = input_rx.recv().await {
             match input {
@@ -399,12 +402,14 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
                 }
                 Input::Signal(sig) => signal_group(pid, sig),
                 Input::Resize(rows, cols) => {
-                    let _ = master.lock().unwrap().resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    });
+                    if let Some(master) = master.lock().unwrap().as_ref() {
+                        let _ = master.resize(PtySize {
+                            rows,
+                            cols,
+                            pixel_width: 0,
+                            pixel_height: 0,
+                        });
+                    }
                 }
             }
         }
@@ -412,6 +417,15 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
     let wait_proc = proc.clone();
     tokio::task::spawn_blocking(move || {
         let status = child.wait();
+        // On Unix the reader ends when the child closes the terminal; give it
+        // a moment to drain before closing the master, which Windows needs.
+        for _ in 0..50 {
+            if reader_thread.is_finished() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        wait_master.lock().unwrap().take();
         let _ = reader_thread.join();
         let exit = match status {
             Ok(status) => {

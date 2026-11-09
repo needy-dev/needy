@@ -31,12 +31,13 @@ Tunnel: the executor listens locally and the tunnel carries the connection.
 | `needy exec` PTY, Ctrl-C, stdin, json and ndjson output, detach, attach with replay, kill | Pass on the Mac executor |
 | Bearer tokens on remote executors | Pass: a request without the token is rejected |
 | `max_procs` with `on_full: reject`; a detached process holds its slot until it exits | Pass |
-| Copy-in with rclone filters (`- /secret.txt`), mirror-out to `out/{session}/` | Pass on a native executor |
-| Chaos: `exec` errno (`curl **` → `ECONNREFUSED`), `exec` delay (+500 ms) | Pass |
-| Chaos: SFTP `open` replaced by an error reply for matching paths | Unit-tested framing and reply; not yet run in an actor |
+| Copy-in with rclone filters (`- /secret.txt`), mirror-out to `out/{session}/` | Pass on a native executor and in an actor ([`examples/chaos`](../../../../examples/chaos/profile.yaml)) |
+| Chaos: `exec` errno (`curl **` → `ECONNREFUSED`), `exec` delay (+500 ms) | Pass, on the CLI path and for a routed command in an actor (exit 126) |
+| Chaos: SFTP `open` of `**/*.json` on the actor's workspace mount | Pass: `cat broken.json` gets `Input/output error`, `ok.txt` reads normally |
+| Chaos: scheduled hwmon fault | Pass: `sensors` shows `+101.0°C ALARM (CRIT)` two seconds after start |
 | Terminal recordings in asciicast v2 under `sessions/<id>/casts/` | Pass |
 | `needy report` from SQLite traces | Pass |
-| Windows executor: `needy.exe` cross-compiled with mingw | Built; not yet deployed |
+| Windows executor: `needy.exe` cross-compiled with mingw, resident on Windows 11 | Pass with pipes; terminals do not work yet (see below) |
 
 Found on the way:
 
@@ -112,12 +113,39 @@ Keystroke to echo, 100 samples, driven through a pseudo-terminal:
 | 200 VMs at once | ready in 4.1 s, 58 MiB each |
 | Snapshot restore | 16 ms (snapshots are out of scope) |
 
+## Windows executor
+
+`needy.exe daemon --mode executor` runs on Windows 11 (10.0.26100), started
+through WMI so it outlives the SSH session, with a bearer token, reached over an
+SSH tunnel.
+
+| Works | Detail |
+| --- | --- |
+| `cmd`, PowerShell 5.1, exit codes, stdin, `json` output | `cmd /c "exit 7"` returns 7 |
+| Detach, `ps`, `kill` | `kill` ends the process tree with `taskkill /T /F` |
+| `needy fs cp` both ways | `tar.exe` ships with Windows |
+| Tools on PATH | git and scoop, `tar`, winget, python, node through proto, `wsl` |
+| Bearer token | Rejected without it |
+
+Not working yet:
+
+- **Terminals (`-t`).** portable-pty starts the child under ConPTY, but in the
+  executor's session 0 (started by WMI from SSH) the child produces no output
+  and its exit is never observed. Pipes work. A daemon started in the user's
+  interactive session should be tried next.
+- **Signals** other than termination have no Windows equivalent.
+- **File routing into an actor.** Windows ships `sftp-server.exe` in
+  `C:\Windows\System32\OpenSSH`, but a Windows workspace mount was not tried.
+
+| Measurement | Result |
+| --- | --- |
+| Mac → Windows `cmd /c exit 0` through the tunnel | p50 36 ms, p99 129 ms |
+| Mac → Windows 64 MiB from PowerShell | 35 MiB/s |
+| LAN ping Mac → Windows | 8.0 ms average |
+
 ## Not yet verified
 
-- Guest-side copy-in, mirror-out and scheduled hwmon faults; SFTP file faults in
-  a running actor. The code builds on macOS; the Linux guest build and the run
-  wait for SSH access to kvm-host.
-- The Windows executor: the binary is built; copying it needs SSH access.
+- Windows terminals, and a Windows workspace mounted into an actor.
 - Executor runtimes `containerd`, `firecracker` and `k8s`; pool settings
   `max_instances`, `idle_timeout` and `on_full: new`; `continuous` mirror-out.
 - Network policy for the executor network (only the actor gateway is enforced).
