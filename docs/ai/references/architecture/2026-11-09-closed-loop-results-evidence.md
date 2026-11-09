@@ -421,6 +421,25 @@ directory.
 | `examples/chaos` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` with exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out; the report counts 3 faults |
 | `examples/opencode` with a local Ollama model | Linux | Pass: opencode writes `hello.py` and runs it through a routed `bash`; 3 model calls through the actor gateway |
 
+## Re-verified after the CLI usability fixes
+
+`ps` shows `SESSION` and `ORIGIN`, hides needy's own processes unless `-a`,
+and splits `STATE` from `EXIT`; the daemon refuses to attach to needy's own
+processes; `session ls` keeps released executors and shows `EXIT`; `report`
+prints plain text by default with `-o markdown|json`, shows sub-second
+durations, and names a command routed through a route stub by its bare name.
+Each change has regression tests in `make test`. Rerun on 2026-11-10 with
+every daemon's state in a scratch directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `make test`, `make check`, `make proto` without a diff | Mac | Pass |
+| `examples/local` without an actor, `exec`, `exec -d`, `kill --signal SIGINT`, `fs cp` | Mac | Pass: `ps` lists only the `cli` commands, `ps -a` adds the `fs` `mkdir` and `tar`; `STATE` `exited`/`killed`, `EXIT` `2`/`SIGINT`; attaching to the `tar` is refused with exit 1; attaching to an exited command replays `hi` and exits 2; `session ls` shows `here=native (released)` and a failed session's reason; `report` in all three formats, colors only on a terminal and not with `NO_COLOR` |
+| `cargo test -p needy-core-actor` | Linux | Pass, with the stub-name regression test |
+| `needy build --out DIR` (actor only; the executor image is unchanged) | Linux | Pass |
+| `examples/smoke` with a driving program that sleeps 25 s | Linux | Pass: `ps` hides the `actor-mount` `sftp-server`, `ps -a` shows it; attaching to it is refused and the workspace still works both ways afterwards; `session ls` shows `build=docker (released)` and `EXIT` `0` once finished; the report shows `25.2s`, `python3 on build`, and no `/run/needy/bin` anywhere in the detailed JSON |
+| `examples/cli` without an actor, `fs cp`, `exec` | Linux | Pass: `ps` hides the `fs` `mkdir` and `tar`, `ps -a` shows them; attaching to the `tar` is refused; the report shows `0.2s`; no container left |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
