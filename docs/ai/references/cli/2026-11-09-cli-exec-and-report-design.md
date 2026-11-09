@@ -14,7 +14,7 @@ needy session  create|ls|stop|logs [--group G] # one actor plus its executors; l
 needy exec     [--session ID] -- CMD …         # run a command through placement
 needy ps [-a] [--session ID] | attach ID | kill ID   # manage detached processes
 needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
-needy report   SESSION|latest --level summary|detailed [--output FILE]
+needy report   SESSION|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
 ```
 
@@ -263,8 +263,68 @@ Together they show what the model saw and what actually happened.
 
 ## `needy report`
 
-A fixed-format markdown report for people, modelled on
-[agentsh's session report](https://github.com/canyonroad/agentsh/blob/main/docs/plans/2025-12-30-session-report-design.md).
+A fixed-format report, modelled on
+[agentsh's session report](https://github.com/canyonroad/agentsh/blob/main/docs/plans/2025-12-30-session-report-design.md),
+in three formats that `-o/--output` picks:
+
+- `human` (the default): plain text in sections of aligned `key  value`
+  lines, like `kubectl describe`, with no markdown syntax. Sections with
+  nothing to say are left out. Failures are red and faults yellow when
+  stdout is a terminal and `NO_COLOR` is unset or empty.
+- `markdown`: the markdown report the rest of this section describes.
+- `json`: a stable JSON summary of the same data (below).
+
+`--file FILE` writes the report to a file instead of stdout, without colors.
+`needy_core::report::render` renders every format from the session's events
+and does no IO; the CLI picks the format and whether to color.
+
+```text
+Session   b5eac210aee1  (profile smoke)
+State     finished, driving program exit 0
+Duration  0.8s
+
+Commands
+  routed to build  4  (1 failed)
+  kept on actor    0
+  denied           0
+  faults           0
+  (kept on actor counts only the names the actor routes: python3)
+
+Top commands
+  python3 on build  4  slowest 15 ms
+
+No findings.
+```
+
+`Commands` lists routed commands per executor with the failed ones, kept
+commands when an actor ran, commands from `needy exec` and model calls when
+there are any, denied commands and injected faults. The note on kept commands
+appears only when the actor routes a list of names rather than every exec.
+`--level detailed` adds an `Events` section: each event's offset, kind and
+JSON payload.
+
+The JSON summary has these fields:
+
+| Field | Meaning |
+| --- | --- |
+| `session`, `profile` | The session's ID and profile name (`null` before `session.create`). |
+| `state` | `running`, `stopped`, `finished` or `failed`, as in the markdown overview. |
+| `duration_ms` | From the create to the first end, or to the last event. |
+| `actor_exit` | `{code, signal}` of the driving program, or `null`. |
+| `failure` | Why the session failed, or `null`. |
+| `dropped_events` | Events the trace dropped; the counts may be low by as many. |
+| `route_names` | The names the actor routes (`["*"]` for every exec), or `null` without an actor. |
+| `commands` | `routed` (`[{executor, commands, failed}]`), `kept_on_actor`, `cli`, `denied`, `faults`, `failed`, `model_calls`. |
+| `top_commands` | `[{command, executor, count, slowest_ms}]`, most frequent first. |
+| `slowest_commands` | `[{command, ms}]`, the three slowest. |
+| `network` | `[{network, host, count}]` through the gateways, most frequent first. |
+| `findings` | `[{kind, message}]`; `kind` is `session_failed`, `probing`, `denied_command`, `denied_network` or `faults`. |
+| `events` | `--level detailed` only: `[{offset_ms, kind, payload}]`. |
+
+Command names in every format are what the actor or the user typed: a
+command the actor routed through a route stub (`/run/needy/bin`) carries
+the stub's bare name, `python3` rather than `/run/needy/bin/python3`, in the
+decision, the trace and the report.
 
 - `--level summary`: about one page.
 - `--level detailed`: adds per-decision tables, the event timeline and
@@ -319,7 +379,8 @@ Actor network: openrouter.ai (142)
 
 `needy report` reads the session's events from `trace.db` with the SQLite
 sink's reader, decodes each into a typed `needy_core::event` value, and
-renders them with `needy_core::report::render`, which does no IO. An event of
+renders them with `needy_core::report::render`, which does no IO. The
+markdown format is described here; an event of
 another schema version is an error that names the event instead of a partial
 report. Implemented today:
 
@@ -330,7 +391,8 @@ report. Implemented today:
   `.profile.yaml` (`mac.profile.yaml` is `mac`), or its directory's name for
   a file named `profile.yaml` (`examples/smoke/profile.yaml` is `smoke`).
 - **Overview**: duration (creation to the first of the actor's exit, the
-  stop and the failure), state (`failed` after `session.fail`), the driving
+  stop and the failure; tenths of a second under a minute, then minutes and
+  seconds, then hours and minutes), state (`failed` after `session.fail`), the driving
   program's exit, routed and kept commands, CLI
   commands, failed commands and model calls through the actor gateway.
   **Failed** counts commands that exited non-zero or by a signal and commands

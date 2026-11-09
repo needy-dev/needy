@@ -1,10 +1,15 @@
-//! `needy report`: a fixed-format markdown summary of one session, rendered
-//! from its typed events. No IO; the caller reads the events.
+//! `needy report`: a fixed-format summary of one session, rendered from its
+//! typed events in one of three formats: plain text for people (`human`),
+//! markdown, and a JSON [`Summary`] for tools. No IO; the caller reads the
+//! events and decides whether the text may carry colors.
+
+mod human;
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
 use needy_config::profile::FaultKind;
+use serde::Serialize;
 
 use crate::event::{ActorExit, Event, Recorded};
 use crate::pattern::basename;
@@ -17,6 +22,19 @@ pub enum Level {
   Summary,
   /// Adds the event timeline.
   Detailed,
+}
+
+/// How the report is written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+  /// Plain text in aligned sections, like `kubectl describe`; `color` marks
+  /// failures and faults with terminal colors.
+  Human {
+    color: bool,
+  },
+  Markdown,
+  /// A [`Summary`] as JSON.
+  Json,
 }
 
 /// Commands whose only purpose is to learn about the machine.
@@ -112,8 +130,16 @@ struct Tally {
   executor_cmds: BTreeMap<String, usize>,
   actor_net: BTreeMap<String, usize>,
   executor_net: BTreeMap<String, usize>,
-  denials: Vec<String>,
-  net_denials: Vec<String>,
+  /// Commands placed on each executor.
+  routed_by: BTreeMap<String, usize>,
+  /// Commands that failed on each executor.
+  failed_by: BTreeMap<String, usize>,
+  /// Per command name and executor: how many ran, and the slowest exit.
+  commands_by: BTreeMap<(String, String), (usize, Option<u64>)>,
+  /// Denied commands and the rules' messages.
+  denials: Vec<(String, String)>,
+  /// Denied hosts and their networks.
+  net_denials: Vec<(String, Network)>,
   slowest: Vec<(u64, String)>,
 }
 
@@ -145,10 +171,13 @@ impl Tally {
           // trace, so only commands the actor asked about count as kept.
           Outcome::Run(Placement::Actor) if decide.origin == Origin::ActorProxy => self.kept += 1,
           Outcome::Run(Placement::Actor) => {}
-          Outcome::Run(Placement::Executor(_)) => self.routed += 1,
+          Outcome::Run(Placement::Executor(executor)) => {
+            self.routed += 1;
+            *self.routed_by.entry(executor.clone()).or_default() += 1;
+          }
           Outcome::Deny(message) => {
             self.denied += 1;
-            self.denials.push(format!("`{}`: {message}", decide.argv.join(" ")));
+            self.denials.push((decide.argv.join(" "), message.clone()));
           }
           // Counted from its `fault.injected` event.
           Outcome::Fault(_) => {}
@@ -165,14 +194,21 @@ impl Tally {
         }
         if is_command(start.origin) {
           *self.executor_cmds.entry(format!("{} on {}", command_name(&start.argv), start.executor)).or_default() += 1;
+          self.commands_by.entry((command_name(&start.argv).to_string(), start.executor.clone())).or_default().0 += 1;
         }
       }
       Event::ExecExit(exit) => {
-        if exit.code.is_some_and(|code| code != 0) || exit.signal.is_some() {
+        let failed = exit.code.is_some_and(|code| code != 0) || exit.signal.is_some();
+        if failed {
           self.failed += 1;
         }
         if is_command(exit.origin) {
           self.slowest.push((exit.ms, exit.argv.join(" ")));
+          if failed {
+            *self.failed_by.entry(exit.executor.clone()).or_default() += 1;
+          }
+          let slowest = &mut self.commands_by.entry((command_name(&exit.argv).to_string(), exit.executor.clone())).or_default().1;
+          *slowest = Some(slowest.unwrap_or(0).max(exit.ms));
         }
       }
       Event::FaultInjected(fired) => {
@@ -191,7 +227,7 @@ impl Tally {
         self.count_host(request.network, &request.host);
       }
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
-      Event::NetDeny(deny) => self.net_denials.push(format!("{} ({} network)", deny.host, network_name(deny.network))),
+      Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::ActorStart(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
     }
   }
@@ -221,21 +257,235 @@ fn network_name(network: Network) -> &'static str {
 }
 
 /// Renders the report of session `id` from its events, in recorded order.
-pub fn render(id: &str, events: &[Recorded], level: Level) -> String {
+pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> String {
   let mut tally = Tally::default();
   for recorded in events {
     tally.add(recorded.time_ms, &recorded.event);
   }
-  let mut out = String::new();
-  // NOTICE: writing to a `String` cannot fail.
-  write_report(&mut out, id, events, &tally, level).expect("formatting into a String");
-  out
+  match format {
+    Format::Human { color } => human::render(&summarize(id, events, &tally, level), color),
+    Format::Markdown => {
+      let mut out = String::new();
+      // NOTICE: writing to a `String` cannot fail.
+      write_report(&mut out, id, events, &tally, level).expect("formatting into a String");
+      out
+    }
+    // NOTICE: a summary is strings, numbers, lists and maps with string
+    // keys, which always serialize to JSON.
+    Format::Json => serde_json::to_string_pretty(&summarize(id, events, &tally, level)).expect("a summary serializes to JSON") + "\n",
+  }
 }
 
-fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, level: Level) -> std::fmt::Result {
+/// What the human and JSON reports show: one session's outcome and counts.
+/// Its JSON form is `needy report -o json`; the CLI note lists its fields.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Summary {
+  pub session: String,
+  pub profile: Option<String>,
+  /// `None` for a trace without a `session.create`.
+  pub state: Option<SessionState>,
+  /// From the create to the first end, or to the last event.
+  pub duration_ms: i64,
+  /// How the driving program ended, when it reported its exit.
+  pub actor_exit: Option<ActorExit>,
+  /// Why the session failed.
+  pub failure: Option<String>,
+  /// Events the trace dropped; the counts are low by about as many.
+  pub dropped_events: u64,
+  /// The command names the actor routes, `["*"]` for every exec; `None`
+  /// when no actor ran.
+  pub route_names: Option<Vec<String>>,
+  pub commands: Commands,
+  /// Commands by name and executor, most frequent first.
+  pub top_commands: Vec<TopCommand>,
+  /// The slowest commands, slowest first.
+  pub slowest_commands: Vec<SlowCommand>,
+  /// Hosts reached through the gateways, most frequent first.
+  pub network: Vec<HostCount>,
+  pub findings: Vec<Finding>,
+  /// The event timeline, at the detailed level only.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub events: Option<Vec<TimelineEvent>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Commands {
+  /// Commands placed on each executor, by name.
+  pub routed: Vec<Routed>,
+  /// Commands the actor asked about and kept.
+  pub kept_on_actor: usize,
+  /// Commands `needy exec` ran.
+  pub cli: usize,
+  pub denied: usize,
+  /// Faults chaos injected.
+  pub faults: usize,
+  /// Commands that exited non-zero or by a signal, or that an injected
+  /// errno failed before they started.
+  pub failed: usize,
+  /// Requests to a model API through the actor gateway.
+  pub model_calls: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Routed {
+  pub executor: String,
+  pub commands: usize,
+  pub failed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TopCommand {
+  /// The program's name, without its directory.
+  pub command: String,
+  pub executor: String,
+  pub count: usize,
+  /// The slowest run's milliseconds, once one exited.
+  pub slowest_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SlowCommand {
+  pub command: String,
+  pub ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HostCount {
+  pub network: Network,
+  pub host: String,
+  pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Finding {
+  pub kind: FindingKind,
+  pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingKind {
+  SessionFailed,
+  /// Commands that only learn about the machine.
+  Probing,
+  DeniedCommand,
+  DeniedNetwork,
+  /// Faults chaos injected.
+  Faults,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TimelineEvent {
+  /// Milliseconds since the session was created.
+  pub offset_ms: i64,
+  pub kind: String,
+  pub payload: serde_json::Value,
+}
+
+/// The first end, or the last event, minus the create (or the first event).
+fn span(events: &[Recorded], t: &Tally) -> (i64, i64) {
   let first = events.first().map_or(0, |r| r.time_ms);
   let created = t.created.unwrap_or(first);
   let ended = t.ended.or(events.last().map(|r| r.time_ms)).unwrap_or(created);
+  (created, ended)
+}
+
+fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary {
+  let (created, ended) = span(events, t);
+  let mut findings = Vec::new();
+  let mut find = |kind, message: String| findings.push(Finding { kind, message });
+  if let Some(reason) = &t.failure {
+    find(FindingKind::SessionFailed, format!("session failed: {reason}"));
+  }
+  if !t.probes.is_empty() {
+    let count = t.probes.values().sum::<usize>();
+    let noun = if count == 1 { "command" } else { "commands" };
+    find(FindingKind::Probing, format!("environment probing: {count} identity {noun} ({})", top(&t.probes, TOP)));
+  }
+  for (argv, message) in &t.denials {
+    find(FindingKind::DeniedCommand, format!("denied command: {argv}: {message}"));
+  }
+  for (host, network) in &t.net_denials {
+    find(FindingKind::DeniedNetwork, format!("network denied: {host} ({} network)", network_name(*network)));
+  }
+  if t.faults > 0 {
+    find(FindingKind::Faults, format!("injected faults: {} ({})", t.faults, top(&t.fault_kinds, TOP)));
+  }
+  let mut top_commands: Vec<TopCommand> = t
+    .commands_by
+    .iter()
+    .map(|((command, executor), (count, slowest_ms))| TopCommand {
+      command: command.clone(),
+      executor: executor.clone(),
+      count: *count,
+      slowest_ms: *slowest_ms,
+    })
+    .collect();
+  top_commands.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| (&a.command, &a.executor).cmp(&(&b.command, &b.executor))));
+  top_commands.truncate(TOP);
+  let mut slowest = t.slowest.clone();
+  slowest.sort_by_key(|s| std::cmp::Reverse(s.0));
+  let mut network: Vec<HostCount> = [
+    (Network::Actor, &t.actor_net),
+    (Network::Executor, &t.executor_net),
+  ]
+  .into_iter()
+  .flat_map(|(network, hosts)| {
+    hosts.iter().map(move |(host, count)| HostCount {
+      network,
+      host: host.clone(),
+      count: *count,
+    })
+  })
+  .collect();
+  network.sort_by_key(|h| std::cmp::Reverse(h.count));
+  network.truncate(TOP);
+  Summary {
+    session: id.to_string(),
+    profile: t.profile.clone(),
+    state: t.state,
+    duration_ms: (ended - created).max(0),
+    actor_exit: t.actor_exit.clone(),
+    failure: t.failure.clone(),
+    dropped_events: t.dropped,
+    route_names: t.route_names.clone().map(|names| names.unwrap_or_else(|| vec!["*".to_string()])),
+    commands: Commands {
+      routed: t
+        .routed_by
+        .iter()
+        .map(|(executor, commands)| Routed {
+          executor: executor.clone(),
+          commands: *commands,
+          failed: t.failed_by.get(executor).copied().unwrap_or(0),
+        })
+        .collect(),
+      kept_on_actor: t.kept,
+      cli: t.cli,
+      denied: t.denied,
+      faults: t.faults,
+      failed: t.failed,
+      model_calls: t.model_calls,
+    },
+    top_commands,
+    slowest_commands: slowest.into_iter().take(3).map(|(ms, command)| SlowCommand { command, ms }).collect(),
+    network,
+    findings,
+    events: (level == Level::Detailed).then(|| {
+      events
+        .iter()
+        .map(|recorded| TimelineEvent {
+          offset_ms: recorded.time_ms - created,
+          kind: recorded.event.kind().to_string(),
+          // NOTICE: an event's payload is JSON by construction.
+          payload: serde_json::from_str(&recorded.event.payload()).unwrap_or_default(),
+        })
+        .collect()
+    }),
+  }
+}
+
+fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, level: Level) -> std::fmt::Result {
+  let (created, ended) = span(events, t);
   let driver = match &t.actor_exit {
     None => "-".to_string(),
     Some(ActorExit {
@@ -296,13 +546,13 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
     any = true;
     writeln!(out, "- ⚠️ Environment probing: {} identity commands ({})", t.probes.values().sum::<usize>(), top(&t.probes, TOP))?;
   }
-  for d in &t.denials {
+  for (argv, message) in &t.denials {
     any = true;
-    writeln!(out, "- 🚫 Denied command: {d}")?;
+    writeln!(out, "- 🚫 Denied command: `{argv}`: {message}")?;
   }
-  for d in &t.net_denials {
+  for (host, network) in &t.net_denials {
     any = true;
-    writeln!(out, "- 🚫 Network denied: {d}")?;
+    writeln!(out, "- 🚫 Network denied: {host} ({} network)", network_name(*network))?;
   }
   if t.faults > 0 {
     any = true;

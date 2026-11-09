@@ -259,7 +259,7 @@ fn exec_without_a_session_stays_out_of_a_running_session() {
   assert_eq!(stdout(&output), "sessionless\n");
   assert!(home.run(&["session", "stop", &session]).status.success());
 
-  let report = stdout(&home.run(&["report", &session, "--level", "detailed"]));
+  let report = stdout(&home.run(&["report", &session, "--level", "detailed", "-o", "markdown"]));
   assert!(report.contains("| session.stop |"), "{report}");
   assert!(!report.contains("sessionless"), "{report}");
 }
@@ -369,7 +369,7 @@ fn a_failed_session_create_records_session_fail_with_the_reason() {
   ]);
   assert_eq!(failed.status.code(), Some(1));
 
-  let output = home.run(&["report", "latest"]);
+  let output = home.run(&["report", "latest", "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
@@ -396,7 +396,7 @@ fn report_names_the_profile_after_its_file() {
   assert!(created.status.success(), "{}", stderr(&created));
   let session = stdout(&created).trim().to_string();
 
-  let output = home.run(&["report", &session]);
+  let output = home.run(&["report", &session, "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let title = stdout(&output).lines().next().unwrap().to_string();
@@ -410,7 +410,7 @@ fn session_stop_is_traced_without_attributes() {
   let session = create_session(&home, NATIVE_PROFILE);
   assert!(home.run(&["session", "stop", &session]).status.success());
 
-  let output = home.run(&["report", &session, "--level", "detailed"]);
+  let output = home.run(&["report", &session, "--level", "detailed", "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
@@ -1128,4 +1128,60 @@ fn attach_refuses_needys_own_processes() {
 
   assert_eq!(output.status.code(), Some(1));
   assert_eq!(stderr(&output), format!("needy: process {tar} is needy's own (origin fs); it cannot be attached\n"));
+}
+
+// The owner's 2026-11-10 trial: the default report was markdown, which
+// reads poorly in a terminal.
+#[test]
+fn report_defaults_to_plain_text() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
+  let created = home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--profile",
+    profile.to_str().unwrap(),
+  ]);
+  let session = stdout(&created).trim().to_string();
+  assert!(home.run(&["exec", "--session", &session, "--", "sh", "-c", "exit 2"]).status.code() == Some(2));
+  assert!(home.run(&["session", "stop", &session]).status.success());
+
+  let output = home.run(&["report", &session]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let report = stdout(&output);
+  let mut lines = report.lines();
+  assert_eq!(lines.next(), Some(format!("Session   {session}  (profile review)").as_str()));
+  assert_eq!(lines.next(), Some("State     stopped"));
+  assert!(lines.next().is_some_and(|l| l.starts_with("Duration  ") && l.ends_with('s')), "{report}");
+  assert!(report.contains("\nCommands\n  routed to here   1  (1 failed)\n"), "{report}");
+  assert!(report.contains("\nTop commands\n  sh on here  1  slowest "), "{report}");
+  assert!(!report.contains('\u{1b}'), "no colors when stdout is not a terminal: {report}");
+}
+
+#[test]
+fn report_json_is_a_summary_and_file_writes_it() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+  assert!(home.run(&["session", "stop", &session]).status.success());
+  let file = home.path().join("report.json");
+
+  let output = home.run(&[
+    "report",
+    &session,
+    "-o",
+    "json",
+    "--file",
+    file.to_str().unwrap(),
+  ]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert_eq!(stdout(&output), "");
+  let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+  assert_eq!((&json["session"], &json["state"]), (&serde_json::json!(session), &serde_json::json!("stopped")));
+  assert_eq!(json["route_names"], serde_json::Value::Null, "no actor ran");
+  assert_eq!(json["findings"], serde_json::json!([]));
 }

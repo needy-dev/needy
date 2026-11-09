@@ -8,6 +8,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+# Terminal colors for the human report, without IO of its own.
+anstyle.workspace = true
 glob-match.workspace = true
 needy-common.workspace = true
 needy-config.workspace = true

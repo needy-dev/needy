@@ -68,8 +68,8 @@ flowchart LR
   exit codes.
 - **Observe.** Routing decisions, routed execs, file transfers, gateway
   requests and faults are recorded as typed events; commands the actor's
-  kernel does not route are not. `needy report` writes a human-readable
-  summary; the trace is stored in SQLite and JSONL, as each profile's
+  kernel does not route are not. `needy report` writes a summary as plain
+  text, markdown or JSON; the trace is stored in SQLite and JSONL, as each profile's
   `trace:` selects. Terminal output is not recorded.
 - **Shape.** Inject faults such as `EIO`, delays or overheating sensors, and
   build machines whose identity comes from a recipe.

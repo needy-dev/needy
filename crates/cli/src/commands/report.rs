@@ -1,7 +1,9 @@
-//! `needy report`: a markdown report of a session from the trace. Events are
-//! read with the SQLite sink's reader, decoded into `needy_core::event` values
-//! and rendered by `needy_core::report`.
+//! `needy report`: a report of a session from the trace, as plain text for
+//! people, markdown or JSON. Events are read with the SQLite sink's reader,
+//! decoded into `needy_core::event` values and rendered by
+//! `needy_core::report`; this command picks the format and the colors.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -17,6 +19,15 @@ enum Level {
   Detailed,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum Format {
+  /// Plain text in aligned sections.
+  Human,
+  Markdown,
+  /// A stable JSON summary.
+  Json,
+}
+
 #[derive(clap::Args)]
 pub struct Args {
   /// Session ID prefix, or `latest`.
@@ -24,9 +35,17 @@ pub struct Args {
   session: String,
   #[arg(long, value_enum, default_value = "summary")]
   level: Level,
+  #[arg(short = 'o', long, value_enum, default_value = "human")]
+  output: Format,
   /// Write the report to this file instead of stdout.
   #[arg(long)]
-  output: Option<PathBuf>,
+  file: Option<PathBuf>,
+}
+
+/// Colors only for a terminal, and not when `NO_COLOR` is set
+/// (<https://no-color.org>).
+fn color(to_file: bool) -> bool {
+  !to_file && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -53,8 +72,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Level::Summary => report::Level::Summary,
     Level::Detailed => report::Level::Detailed,
   };
-  let text = report::render(&loaded.session, &events, level);
-  match args.output {
+  let format = match args.output {
+    Format::Human => report::Format::Human {
+      color: color(args.file.is_some()),
+    },
+    Format::Markdown => report::Format::Markdown,
+    Format::Json => report::Format::Json,
+  };
+  let text = report::render(&loaded.session, &events, level, format);
+  match args.file {
     Some(path) => std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?,
     None => print!("{text}"),
   }
