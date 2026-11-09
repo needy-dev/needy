@@ -12,7 +12,7 @@ fn spec(argv: &[&str]) -> Spec {
 
 /// Every output event of `proc`, replayed, until its exit.
 async fn collect(proc: &Proc) -> (Vec<u8>, Vec<u8>, Exit) {
-  let (past, mut live) = proc.subscribe(true).await;
+  let Subscription { past, mut live, .. } = proc.subscribe(true, Subscriber::Owner);
   let mut stdout = Vec::new();
   let mut stderr = Vec::new();
   let mut events = past.into_iter().collect::<VecDeque<_>>();
@@ -191,4 +191,42 @@ async fn shutdown_kills_running_processes_and_refuses_new_ones() {
 
   assert_eq!(proc.exit().map(|e| e.signal), Some("SIGKILL".into()));
   assert!(matches!(host.spawn(spec(&["true"])), Err(Error::ShuttingDown)));
+}
+
+// ROOT CAUSE:
+//
+// If one client attached to a process and stopped reading, the process and
+// every other client stalled, because output fan-out awaited each
+// subscriber in turn while it held the subscribers' lock.
+//
+// Before the fix, the client that started the process stopped receiving
+// output once the idle client's queue was full.
+// The fix lets only the starting client hold the process back and drops a
+// viewer that cannot keep up, saying so.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_viewer_that_stops_reading_holds_back_neither_the_process_nor_its_owner() {
+  let host = Host::default();
+  let proc = host
+    .spawn(spec(&[
+      "sh",
+      "-c",
+      "sleep 0.2; i=0; while [ $i -lt 3000 ]; do echo line $i; i=$((i+1)); done",
+    ]))
+    .unwrap();
+  let mut owner = proc.subscribe(true, Subscriber::Owner);
+  let idle = proc.subscribe(true, Subscriber::Viewer);
+
+  let drained = async {
+    while let Some(event) = owner.live.recv().await {
+      if let Output::Exit(exit) = event {
+        return exit;
+      }
+    }
+    panic!("the owner's subscription closed before the exit");
+  };
+  let exit = tokio::time::timeout(Duration::from_secs(10), drained).await.expect("a viewer that stopped reading held the process back");
+
+  assert_eq!(exit.code, Some(0));
+  assert!(idle.fell_behind());
 }

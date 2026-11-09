@@ -2,6 +2,7 @@
 //! and the exit.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -16,7 +17,8 @@ use super::{Input, Output, Spec, platform};
 // output than this sees only the most recent part.
 const REPLAY_BYTES: usize = 256 * 1024;
 
-/// Output events queued per subscriber before the process waits for it.
+/// Output events queued per subscriber: the owner's before the process
+/// waits for it, a viewer's before it is dropped.
 const SUBSCRIBER_QUEUE: usize = 64;
 
 pub struct Proc {
@@ -27,16 +29,58 @@ pub struct Proc {
   pub started_at_ms: i64,
   pub session_id: String,
   input: mpsc::UnboundedSender<Input>,
-  subscribers: tokio::sync::Mutex<Vec<mpsc::Sender<Output>>>,
-  replay: Mutex<Replay>,
+  /// The replay buffer and the subscribers, under one lock so a new
+  /// subscriber's snapshot and its first live event never overlap.
+  fanout: Mutex<Fanout>,
+  /// Orders each event's delivery to the owner; held across the owner's
+  /// send, never across a viewer's.
+  owner_order: tokio::sync::Mutex<()>,
   exited: watch::Receiver<Option<Exit>>,
   finished_at: OnceLock<Instant>,
 }
 
-struct Replay {
+struct Fanout {
   events: VecDeque<Output>,
   bytes: usize,
   finished: Option<Exit>,
+  /// The client that started the process; it alone may hold the process
+  /// back.
+  owner: Option<mpsc::Sender<Output>>,
+  viewers: Vec<Viewer>,
+}
+
+struct Viewer {
+  tx: mpsc::Sender<Output>,
+  behind: Arc<AtomicBool>,
+}
+
+/// Who subscribes to a process's output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subscriber {
+  /// The client that started the process. A slow owner slows the process
+  /// down instead of losing output (the CLI note documents this).
+  Owner,
+  /// Any other client, such as one that attached. A viewer that cannot keep
+  /// up is dropped, [`Subscription::fell_behind`], and never holds back the
+  /// process or another client.
+  // TODO(terminal-model): the terminal note's G1 turns this into skipping
+  // output and a fresh redraw from the terminal model.
+  Viewer,
+}
+
+/// A subscriber's output: what happened before it subscribed, then what
+/// happens after. The two never overlap.
+pub struct Subscription {
+  pub past: Vec<Output>,
+  pub live: mpsc::Receiver<Output>,
+  behind: Arc<AtomicBool>,
+}
+
+impl Subscription {
+  /// Whether `live` ended because this viewer could not keep up.
+  pub fn fell_behind(&self) -> bool {
+    self.behind.load(Ordering::SeqCst)
+  }
 }
 
 /// The parts of a new process its tasks own: the input queue and the exit.
@@ -57,12 +101,14 @@ impl Proc {
       started_at_ms: now_ms(),
       session_id: spec.session_id.clone(),
       input,
-      subscribers: tokio::sync::Mutex::new(Vec::new()),
-      replay: Mutex::new(Replay {
+      fanout: Mutex::new(Fanout {
         events: VecDeque::new(),
         bytes: 0,
         finished: None,
+        owner: None,
+        viewers: Vec::new(),
       }),
+      owner_order: tokio::sync::Mutex::new(()),
       exited,
       finished_at: OnceLock::new(),
     });
@@ -104,37 +150,61 @@ impl Proc {
     self.finished_at.get().map(Instant::elapsed)
   }
 
-  /// Subscribes to output. With `replay`, buffered output comes first. The
-  /// subscriber lock orders the snapshot before any live event. A slow
-  /// subscriber slows the process down instead of losing output.
-  pub async fn subscribe(&self, replay: bool) -> (Vec<Output>, mpsc::Receiver<Output>) {
-    let mut subscribers = self.subscribers.lock().await;
-    let (tx, rx) = mpsc::channel(SUBSCRIBER_QUEUE);
-    let state = self.replay.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+  /// Subscribes to output. With `replay`, buffered output comes first. A
+  /// process has one [`Subscriber::Owner`]; a later one replaces it.
+  pub fn subscribe(&self, replay: bool, subscriber: Subscriber) -> Subscription {
+    let (tx, live) = mpsc::channel(SUBSCRIBER_QUEUE);
+    let behind = Arc::new(AtomicBool::new(false));
+    let mut fanout = self.lock_fanout();
     let mut past: Vec<Output> = if replay {
-      state.events.iter().cloned().collect()
+      fanout.events.iter().cloned().collect()
     } else {
       Vec::new()
     };
-    if let Some(exit) = &state.finished {
+    if let Some(exit) = &fanout.finished {
       past.push(Output::Exit(exit.clone()));
     } else {
-      subscribers.push(tx);
-    }
-    (past, rx)
-  }
-
-  pub(super) async fn emit(&self, event: Output) {
-    let mut subscribers = self.subscribers.lock().await;
-    self.record(&event);
-    let mut alive = Vec::with_capacity(subscribers.len());
-    for tx in subscribers.drain(..) {
-      if tx.send(event.clone()).await.is_ok() {
-        alive.push(tx);
+      match subscriber {
+        Subscriber::Owner => fanout.owner = Some(tx),
+        Subscriber::Viewer => fanout.viewers.push(Viewer {
+          tx,
+          behind: behind.clone(),
+        }),
       }
     }
-    if !matches!(event, Output::Exit(_)) {
-      *subscribers = alive;
+    Subscription { past, live, behind }
+  }
+
+  /// Records `event` and fans it out: to each viewer without waiting, and to
+  /// the owner, whom the process waits for. No lock is held while it waits.
+  pub(super) async fn emit(&self, event: Output) {
+    let _order = self.owner_order.lock().await;
+    let owner = {
+      let mut fanout = self.lock_fanout();
+      fanout.record(&event);
+      let last = matches!(event, Output::Exit(_));
+      fanout.viewers.retain(|viewer| match viewer.tx.try_send(event.clone()) {
+        Ok(()) => !last,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+          viewer.behind.store(true, Ordering::SeqCst);
+          false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+      });
+      if last {
+        fanout.owner.take()
+      } else {
+        fanout.owner.clone()
+      }
+    };
+    if let Some(owner) = owner
+      && owner.send(event).await.is_err()
+    {
+      // The owner left; the process no longer waits for anyone.
+      let mut fanout = self.lock_fanout();
+      if fanout.owner.as_ref().is_some_and(|current| current.same_channel(&owner)) {
+        fanout.owner = None;
+      }
     }
   }
 
@@ -147,21 +217,28 @@ impl Proc {
     ends.send_replace(Some(exit));
   }
 
-  fn record(&self, event: &Output) {
-    let mut state = self.replay.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+  fn lock_fanout(&self) -> std::sync::MutexGuard<'_, Fanout> {
+    // NOTICE: every change under the lock is one push, pop or swap, so a
+    // panic elsewhere leaves the buffer whole.
+    self.fanout.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+}
+
+impl Fanout {
+  fn record(&mut self, event: &Output) {
     match event {
       Output::Stdout(b) | Output::Stderr(b) => {
-        state.bytes += b.len();
-        state.events.push_back(event.clone());
-        while state.bytes > REPLAY_BYTES {
-          match state.events.pop_front() {
-            Some(Output::Stdout(b) | Output::Stderr(b)) => state.bytes -= b.len(),
+        self.bytes += b.len();
+        self.events.push_back(event.clone());
+        while self.bytes > REPLAY_BYTES {
+          match self.events.pop_front() {
+            Some(Output::Stdout(b) | Output::Stderr(b)) => self.bytes -= b.len(),
             Some(_) => {}
             None => break,
           }
         }
       }
-      Output::Exit(exit) => state.finished = Some(exit.clone()),
+      Output::Exit(exit) => self.finished = Some(exit.clone()),
     }
   }
 }

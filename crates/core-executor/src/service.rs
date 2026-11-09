@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::process::{Error, Exit, Host, Input, Output, Proc, Spec};
+use crate::process::{Error, Exit, Host, Input, Output, Proc, Spec, Subscriber, Subscription};
 
 pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecResponse, Status>> + Send>>;
 
@@ -31,10 +31,6 @@ fn exited(exit: &Exit) -> ExecResponse {
     })),
   }
 }
-
-/// Output a client receives: what happened before it subscribed, then what
-/// happens after. The two never overlap.
-type Subscription = (Vec<Output>, mpsc::Receiver<Output>);
 
 /// Streams a process to one client, from `subscription`, until it exits or
 /// the client leaves. A client that leaves a process it did not detach takes
@@ -91,7 +87,7 @@ async fn relay_output(
   proc: std::sync::Arc<Proc>,
   tx: mpsc::Sender<Result<ExecResponse, Status>>,
   started: ExecStarted,
-  (past, mut live): Subscription,
+  mut subscription: Subscription,
   detach: bool,
 ) {
   let send = |event| {
@@ -102,7 +98,7 @@ async fn relay_output(
     payload: Some(exec_response::Payload::Started(started)),
   })
   .await;
-  for event in past {
+  for event in std::mem::take(&mut subscription.past) {
     if !alive {
       break;
     }
@@ -112,7 +108,14 @@ async fn relay_output(
     }
   }
   while alive {
-    let Some(event) = live.recv().await else {
+    let Some(event) = subscription.live.recv().await else {
+      if subscription.fell_behind() {
+        // The client is told why its stream ends without an exit.
+        let lagged = Status::resource_exhausted("the client fell behind the process's output; attach again");
+        if tx.send(Err(lagged)).await.is_err() {
+          tracing::debug!("process {}: the client left as it fell behind", proc.id);
+        }
+      }
       break;
     };
     let done = matches!(event, Output::Exit(_));
@@ -199,7 +202,7 @@ impl ProcessService for ExecutorService {
         // KiB) in that moment would lose its oldest output; subscribing
         // inside `Host::spawn`, before the output pumps start, would close
         // that gap if it is ever observed.
-        let subscription = proc.subscribe(true).await;
+        let subscription = proc.subscribe(true, Subscriber::Owner);
         let started = ExecStarted {
           process_id: proc.id.clone(),
           executor: self.name.clone(),
@@ -218,7 +221,7 @@ impl ProcessService for ExecutorService {
           argv: proc.argv.clone(),
           cwd: String::new(),
         };
-        let subscription = proc.subscribe(attach.replay).await;
+        let subscription = proc.subscribe(attach.replay, Subscriber::Viewer);
         // Resized after subscribing, so the redraw a full-screen program
         // makes for the new size reaches this client.
         if let Some(window) = attach.window
