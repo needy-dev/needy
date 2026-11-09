@@ -104,6 +104,14 @@ fn dispatch(cli: Cli) -> Result<i32> {
     Command::Daemon(_) => ctx.paths().ok().map(|p| p.state),
     _ => None,
   };
+  // The log file is the first thing in the state directory; the directory
+  // is the daemon's and private. Logging reports a directory it cannot use.
+  #[cfg(unix)]
+  if let Some(dir) = &log_dir
+    && let Err(e) = needy_api_server::create_private_dir(dir)
+  {
+    tracing::debug!("cannot create {}: {e}", dir.display());
+  }
   let _logs = crate::logging::init(cli.verbose, log_dir.as_deref())?;
   let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
   let code = runtime.block_on(async move {

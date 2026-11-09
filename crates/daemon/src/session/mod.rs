@@ -226,6 +226,12 @@ impl Daemon {
   async fn create_session(&self, request: NewSession) -> Result<Arc<Session>> {
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let created_ms = now_ms();
+    // The session's directory is private; the trace's JSONL sink would
+    // otherwise create it first.
+    let dir = self.session_dir(&id);
+    if let Err(e) = needy_api_server::create_private_dir(&dir) {
+      tracing::warn!("session {id}: cannot create {}: {e}", dir.display());
+    }
     let loaded = load_profile(&id, &request);
     let trace = self.session_trace(&id, loaded.as_ref().ok().map(|(profile, _)| &profile.trace));
     let prepared =
@@ -262,7 +268,7 @@ impl Daemon {
     trace: Dispatch,
   ) -> Result<Arc<Session>> {
     let dir = self.session_dir(id);
-    std::fs::create_dir_all(&dir)?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
     let or_id = |value: &str| {
       if value.is_empty() {

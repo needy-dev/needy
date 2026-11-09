@@ -21,4 +21,6 @@ mod testing;
 
 pub use needy_api_proto as proto;
 pub use protocol::grpc::v1::health::Health;
+#[cfg(unix)]
+pub use server::create_private_dir;
 pub use server::{Listen, Server};

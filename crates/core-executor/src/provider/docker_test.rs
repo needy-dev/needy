@@ -295,3 +295,63 @@ fn a_socket_path_over_sun_path_is_refused_with_the_path() {
   assert!(message.contains(&options.state_dir.display().to_string()), "{message}");
   assert!(message.contains("too long"), "{message}");
 }
+
+fn user(uid: u32) -> User {
+  User {
+    name: "agent".into(),
+    uid,
+    gid: uid,
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_directory_for_a_container_of_the_daemons_own_user_is_private() {
+  use std::os::unix::fs::PermissionsExt;
+  let dir = tempfile::tempdir().unwrap();
+  let shared = dir.path().join("executors").join("abc");
+  let me = nix::unistd::geteuid().as_raw();
+
+  share_with_container(&shared, &user(me)).unwrap();
+
+  assert_eq!(std::fs::metadata(&shared).unwrap().permissions().mode() & 0o777, 0o700);
+}
+
+// The 2026-11-10 run on additional cloud hosts: a daemon running as root made
+// the socket directory `root 0755` and started the container as 1000:1000,
+// whose executor could not create its socket; `session create` waited 10 s
+// and failed with a transport error that did not mention permissions.
+#[cfg(unix)]
+#[test]
+fn a_directory_for_a_container_of_another_user_is_theirs_or_the_error_says_why() {
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  let dir = tempfile::tempdir().unwrap();
+  let shared = dir.path().join("executors").join("abc");
+  let me = nix::unistd::geteuid().as_raw();
+  let other = if me == 4242 { 4243 } else { 4242 };
+
+  let shared_result = share_with_container(&shared, &user(other));
+
+  if me == 0 {
+    shared_result.unwrap();
+    let metadata = std::fs::metadata(&shared).unwrap();
+    assert_eq!((metadata.uid(), metadata.gid()), (other, other));
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+  } else {
+    let message = anyhow_like(shared_result.unwrap_err());
+    assert!(message.contains(&shared.display().to_string()), "{message}");
+    assert!(message.contains(&format!("{other}:{other}")), "{message}");
+    assert!(message.contains("cannot create its socket"), "{message}");
+  }
+}
+
+/// An error with its causes, as a client prints them.
+fn anyhow_like(error: Error) -> String {
+  let mut text = error.to_string();
+  let mut source = std::error::Error::source(&error);
+  while let Some(cause) = source {
+    text.push_str(&format!(": {cause}"));
+    source = cause.source();
+  }
+  text
+}

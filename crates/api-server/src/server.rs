@@ -2,7 +2,7 @@
 //! before any of them serves, so a listener that cannot bind fails at once
 //! with its address.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -144,6 +144,22 @@ impl Server {
   }
 }
 
+/// Creates `dir` and its missing parents with mode 0700, whatever the
+/// umask. Directories that exist already keep their mode: they may be shared
+/// ones such as `/tmp`.
+#[cfg(unix)]
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+  use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+  let missing: Vec<&Path> = dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && !d.exists()).collect();
+  std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+  // The umask may have narrowed `mode`; the mode is set again so it is
+  // exactly 0700.
+  for created in missing {
+    std::fs::set_permissions(created, std::fs::Permissions::from_mode(0o700))?;
+  }
+  Ok(())
+}
+
 enum Listener {
   #[cfg(unix)]
   Unix(tokio::net::UnixListener),
@@ -160,7 +176,7 @@ impl Listener {
       #[cfg(unix)]
       Listen::Unix(path) => {
         if let Some(parent) = path.parent() {
-          std::fs::create_dir_all(parent).map_err(failed)?;
+          create_private_dir(parent).map_err(failed)?;
         }
         if let Err(e) = std::fs::remove_file(path)
           && e.kind() != std::io::ErrorKind::NotFound
@@ -169,7 +185,13 @@ impl Listener {
         }
         // An over-long path is an `InvalidInput` error here, not a
         // truncated name.
-        Ok(Self::Unix(tokio::net::UnixListener::bind(path).map_err(failed)?))
+        let listener = tokio::net::UnixListener::bind(path).map_err(failed)?;
+        // NOTICE: `bind` creates the socket with the umask's mode; it is
+        // narrowed right after. A directory this server created is 0700, so
+        // nobody else can reach the socket in between.
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(failed)?;
+        Ok(Self::Unix(listener))
       }
       #[cfg(not(unix))]
       Listen::Unix(_) => Err(Error::Unsupported(listen.clone())),

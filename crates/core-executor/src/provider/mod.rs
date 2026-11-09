@@ -36,6 +36,17 @@ pub enum Error {
     path: PathBuf,
     source: std::io::Error,
   },
+  /// A directory shared with a container cannot be given to the
+  /// container's user.
+  #[error(
+    "cannot give {path} to the container's user {uid}:{gid}, so its executor cannot create its socket there; run the daemon as root or as that user"
+  )]
+  Ownership {
+    path: PathBuf,
+    uid: u32,
+    gid: u32,
+    source: std::io::Error,
+  },
   #[error(transparent)]
   Client(#[from] needy_api_client::Error),
   #[error("docker")]

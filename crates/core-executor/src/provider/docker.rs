@@ -329,6 +329,40 @@ fn check_mount(source: &str, target: &str, allowed: &dyn Fn(&str) -> bool) -> Re
   Ok(())
 }
 
+/// Creates a host directory the container's user writes through a bind
+/// mount: mode 0700, owned by that user. The directory's parents stay the
+/// daemon's and private; a bind mount does not need them to be searchable.
+// NOTICE: the container runs as the profile's `user`, which may differ from
+// the daemon's (a daemon run as root, as on the cloud hosts of 2026-11-10).
+// Only root can give a directory to another user; any other daemon fails at
+// once with the reason instead of the container's executor failing to bind.
+fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Result<(), Error> {
+  let failed = |source| Error::Directory {
+    path: path.to_path_buf(),
+    source,
+  };
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path).map_err(failed)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
+    if nix::unistd::geteuid().as_raw() != user.uid {
+      std::os::unix::fs::chown(path, Some(user.uid), Some(user.gid)).map_err(|source| Error::Ownership {
+        path: path.to_path_buf(),
+        uid: user.uid,
+        gid: user.gid,
+        source,
+      })?;
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = user;
+    std::fs::create_dir_all(path).map_err(failed)?;
+  }
+  Ok(())
+}
+
 /// The Docker runtime on this machine's Docker daemon.
 pub struct Docker {
   docker: bollard::Docker,
@@ -393,11 +427,16 @@ fn with_tag(image: &str) -> String {
 impl Provider for Docker {
   async fn create(&self, spec: &InstanceSpec) -> Result<InstanceHandle, Error> {
     let container = container(spec, &self.options)?;
-    for path in [&container.socket_dir, &container.workspace_dir] {
-      std::fs::create_dir_all(path).map_err(|source| Error::Directory {
-        path: path.clone(),
+    share_with_container(&container.socket_dir, &spec.user)?;
+    // A workspace the profile names is the user's; the default one is the
+    // daemon's, and the container writes it.
+    if spec.config.workspace.is_some() {
+      std::fs::create_dir_all(&container.workspace_dir).map_err(|source| Error::Directory {
+        path: container.workspace_dir.clone(),
         source,
       })?;
+    } else {
+      share_with_container(&container.workspace_dir, &spec.user)?;
     }
     // A container left by an earlier daemon would block the name.
     self.remove(&container.name).await?;

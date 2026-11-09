@@ -57,7 +57,7 @@ use anyhow::{Context, Result, bail};
 #[cfg(unix)]
 use needy_api_server::control::{Caller, ControlError};
 #[cfg(unix)]
-use needy_api_server::{Health, Listen, Server};
+use needy_api_server::{Health, Listen, Server, create_private_dir};
 #[cfg(unix)]
 use needy_core::types::SessionState;
 #[cfg(unix)]
@@ -124,8 +124,11 @@ pub struct Daemon {
 impl Daemon {
   /// Opens the trace store and starts the in-process local executor.
   pub async fn start(config: Config) -> Result<Self> {
+    for dir in [&config.state_dir, &config.runtime_dir] {
+      warn_if_shared(dir);
+    }
     let sessions_dir = config.state_dir.join("sessions");
-    std::fs::create_dir_all(&sessions_dir).with_context(|| format!("cannot create {}", sessions_dir.display()))?;
+    create_private_dir(&sessions_dir).with_context(|| format!("cannot create {}", sessions_dir.display()))?;
     let trace_db = config.state_dir.join("trace.db");
     let traces = Store::open(&trace_db).await.with_context(|| format!("cannot open {}", trace_db.display()))?;
     let tasks = TaskTracker::new();
@@ -258,6 +261,23 @@ impl Daemon {
     } else {
       "session stopped"
     }
+  }
+}
+
+#[cfg(unix)]
+/// Warns about a state or runtime directory that other users can enter. The
+/// daemon creates its directories 0700, but leaves the mode of one that
+/// exists, which may be shared.
+fn warn_if_shared(dir: &std::path::Path) {
+  use std::os::unix::fs::PermissionsExt;
+  if let Ok(metadata) = std::fs::metadata(dir)
+    && metadata.permissions().mode() & 0o077 != 0
+  {
+    tracing::warn!(
+      "{} is open to other users (mode {:o}); its sockets are not; consider chmod 700",
+      dir.display(),
+      metadata.permissions().mode() & 0o777
+    );
   }
 }
 

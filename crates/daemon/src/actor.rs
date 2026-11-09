@@ -116,6 +116,11 @@ fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
     tracing::warn!("cannot remove {}: {e}", path.display());
   }
   let listener = tokio::net::UnixListener::bind(&path).with_context(|| format!("cannot listen on {}", path.display()))?;
+  {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+      .with_context(|| format!("cannot restrict {}", path.display()))?;
+  }
   session.tasks.spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
   Ok(())
 }

@@ -1254,3 +1254,62 @@ fn a_daemon_refuses_a_token_variable_that_is_not_set() {
   assert_eq!(output.status.code(), Some(1));
   assert!(stderr(&output).contains("NEEDY_TEST_UNSET_TOKEN"), "{}", stderr(&output));
 }
+
+/// The permission bits of `path`.
+fn mode(path: &Path) -> u32 {
+  use std::os::unix::fs::PermissionsExt;
+  std::fs::metadata(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())).permissions().mode() & 0o7777
+}
+
+// ROOT CAUSE:
+//
+// If the daemon ran under a permissive umask, its directories and sockets
+// were open to every local user, because they were created with the
+// umask's default modes and the control socket accepts any client without
+// a token.
+//
+// Before the fix, under `umask 000` the runtime directory was 0777 and the
+// sockets 0777.
+// The fix creates the directories 0700 and the sockets 0600 whatever the
+// umask.
+#[test]
+fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
+  let home = Home::new();
+  let needy = home.needy();
+  let mut command = Command::new("sh");
+  command.args([
+    "-c",
+    "umask 000; exec \"$0\" daemon --mode control",
+    needy.get_program().to_str().unwrap(),
+  ]);
+  for (name, value) in needy.get_envs() {
+    match value {
+      Some(value) => command.env(name, value),
+      None => command.env_remove(name),
+    };
+  }
+  let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let socket = home.path().join("run").join("daemon.sock");
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !socket.exists() {
+    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  let _daemon = Daemon { child };
+  let session = create_session(&home, NATIVE_PROFILE);
+
+  let state = home.path().join("state");
+  let run = home.path().join("run");
+  let modes = [
+    (state.clone(), mode(&state)),
+    (state.join("sessions"), mode(&state.join("sessions"))),
+    (state.join("sessions").join(&session), mode(&state.join("sessions").join(&session))),
+    (run.clone(), mode(&run)),
+    (run.join("daemon.sock"), mode(&run.join("daemon.sock"))),
+    (run.join("local.sock"), mode(&run.join("local.sock"))),
+  ];
+  let expected = [0o700, 0o700, 0o700, 0o700, 0o600, 0o600];
+  for ((path, mode), expected) in modes.iter().zip(expected) {
+    assert_eq!(*mode, expected, "{} is {mode:o}", path.display());
+  }
+}
