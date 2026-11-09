@@ -45,6 +45,8 @@ libc = "0.2"
 nix = { version = "0.30", features = ["signal"] }
 parse-size = "1"
 portable-pty = "0.9"
+# Parsing only: the guest reads `/proc` itself and needs no `chrono`.
+procfs-core = { version = "0.18", default-features = false }
 prost = "0.14"
 prost-types = "0.14"
 sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "runtime-tokio", "sqlx-sqlite"] }

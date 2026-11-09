@@ -9,6 +9,8 @@ publish = false
 
 [dependencies]
 needy-api-proto.workspace = true
+needy-core.workspace = true
+thiserror.workspace = true
 http = "1"
 tonic = { workspace = true, features = ["router", "transport"] }
 tower = "0.5"

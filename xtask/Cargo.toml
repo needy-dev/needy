@@ -11,13 +11,14 @@ publish = false
 default = ["session"]
 # `bench run` talks to a control daemon. The probes alone build without it, so
 # the static binary shipped into an actor needs no TLS or gRPC stack.
-session = ["dep:needy-api-client", "dep:needy-api-proto", "dep:needy-trace", "dep:tokio"]
+session = ["dep:needy-api-client", "dep:needy-api-proto", "dep:needy-config", "dep:needy-trace", "dep:tokio"]
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
 needy-api-client = { workspace = true, optional = true }
 needy-api-proto = { workspace = true, optional = true }
+needy-config = { workspace = true, optional = true }
 needy-trace = { workspace = true, optional = true, features = ["sqlite"] }
 serde_json.workspace = true
 shell-words.workspace = true

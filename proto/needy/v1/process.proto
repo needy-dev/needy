@@ -36,8 +36,27 @@ message ExecStart {
   string executor = 8;
   // Do not forward stdin; the process sees end of file at once.
   bool no_stdin = 9;
-  // Free-form origin for the trace, for example "cli" or "actor-proxy".
-  string origin = 10;
+  // Who starts the process. Required.
+  Origin origin = 11;
+
+  reserved 10;
+}
+
+// Who started an exec. It decides whether the daemon runs the session's rules
+// and how the trace and the report count the process.
+enum Origin {
+  ORIGIN_UNSPECIFIED = 0;
+  // `needy exec`.
+  ORIGIN_CLI = 1;
+  // `needy fs`.
+  ORIGIN_FS = 2;
+  // The daemon's own copy-in and mirror-out.
+  ORIGIN_FILES = 3;
+  // A command the actor's kernel routed through the proxy, which decided
+  // its placement already.
+  ORIGIN_ACTOR_PROXY = 4;
+  // The SFTP server behind an actor's workspace mount.
+  ORIGIN_ACTOR_MOUNT = 5;
 }
 
 message ExecAttach {

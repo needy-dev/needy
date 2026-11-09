@@ -10,8 +10,7 @@ use std::ffi::{CStr, CString};
 use std::io::IsTerminal;
 
 use anyhow::Result;
-use needy_api_proto::v1::{DecideRequest, ExecRequest, ExecStart, exec_request};
-use needy_core::types::Origin;
+use needy_api_proto::v1::{Ancestor, DecideRequest, ExecRequest, ExecStart, Origin, exec_request};
 use needy_core_executor::{relay, signals};
 use nix::sys::signal::{SigHandler, Signal};
 
@@ -63,8 +62,7 @@ async fn proxy() -> Result<i32> {
   let env: HashMap<String, String> = std::env::vars().collect();
   let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
   let client = super::daemon().await?;
-  // TODO(7a, 8f): `Decide` carries no ancestry yet, so `when.under` cannot
-  // match a routed command; slice 7a adds it to the request and 8f fills it.
+  let ancestors = super::ancestry::ancestors(std::path::Path::new("/proc"), std::process::id() as i32);
   let decision = client
     .sessions()
     .decide(DecideRequest {
@@ -73,6 +71,7 @@ async fn proxy() -> Result<i32> {
       cwd: cwd.clone(),
       env: env.clone(),
       tty,
+      ancestors: ancestors.into_iter().map(|argv| Ancestor { argv }).collect(),
     })
     .await
     .map_err(|s| anyhow::anyhow!("{}", s.message()))?
@@ -104,7 +103,7 @@ async fn proxy() -> Result<i32> {
     session_id: String::new(),
     executor: decision.target,
     no_stdin: false,
-    origin: Origin::ActorProxy.as_str().into(),
+    origin: Origin::ActorProxy.into(),
   };
   let first = ExecRequest {
     payload: Some(exec_request::Payload::Start(start)),

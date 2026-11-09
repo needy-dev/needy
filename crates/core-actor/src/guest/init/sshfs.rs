@@ -8,8 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use backon::{ConstantBuilder, Retryable};
 use needy_api_client::Client;
-use needy_api_proto::v1::{ExecRequest, ExecStart, GuestMount, exec_request, exec_response};
-use needy_core::types::Origin;
+use needy_api_proto::v1::{ExecRequest, ExecStart, GuestMount, Origin, exec_request, exec_response};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -37,7 +36,7 @@ pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -
       executor: m.executor.clone(),
       // The mount root lets file faults match paths relative to it.
       cwd: m.source.clone(),
-      origin: Origin::ActorMount.as_str().into(),
+      origin: Origin::ActorMount.into(),
       ..Default::default()
     })),
   })

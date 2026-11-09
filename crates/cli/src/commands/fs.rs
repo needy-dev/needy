@@ -94,7 +94,7 @@ async fn run_tar(endpoint: &str, session: &str, executor: &str, argv: Vec<String
       executor: executor.to_string(),
       session_id: session.to_string(),
       no_stdin: input.is_none(),
-      origin: "fs".into(),
+      origin: needy_api_proto::v1::Origin::Fs.into(),
       // macOS tar would otherwise add AppleDouble `._` files.
       env: [("COPYFILE_DISABLE".to_string(), "1".to_string())].into(),
       ..Default::default()

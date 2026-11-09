@@ -351,9 +351,11 @@ and outcome:
 `profile check --cmd` runs the rules and lists the `exec` faults that match
 without firing them.
 
-The daemon does not yet send process ancestry, so `when.under` cannot match a
-routed command (fix slice 8f). A user decider after chaos (`ask`, above) is
-deferred.
+The actor's proxy reads the routed command's ancestors from `/proc` and sends
+them in `Decide`, and the daemon matches `when.under` against them. A
+closed-loop run confirms it; its regression test is fix slice 8f. Commands
+from `needy exec` have no ancestors. A user decider after chaos (`ask`,
+above) is deferred.
 
 ### Extends
 

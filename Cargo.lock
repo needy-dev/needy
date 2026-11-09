@@ -1983,6 +1983,8 @@ dependencies = [
  "http",
  "needy-api-client",
  "needy-api-proto",
+ "needy-core",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -2004,6 +2006,7 @@ dependencies = [
  "ignore",
  "needy-api-client",
  "needy-api-proto",
+ "needy-api-server",
  "needy-common",
  "needy-config",
  "needy-core",
@@ -2085,6 +2088,7 @@ dependencies = [
  "needy-core-executor",
  "needy-trace",
  "nix 0.30.1",
+ "procfs-core",
  "serde_json",
  "serde_yaml",
  "tempfile",
@@ -2526,6 +2530,16 @@ dependencies = [
  "syn 2.0.119",
  "version_check",
  "yansi",
+]
+
+[[package]]
+name = "procfs-core"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405"
+dependencies = [
+ "bitflags 2.13.2",
+ "hex",
 ]
 
 [[package]]
@@ -4381,6 +4395,7 @@ dependencies = [
  "clap",
  "needy-api-client",
  "needy-api-proto",
+ "needy-config",
  "needy-trace",
  "serde_json",
  "shell-words",

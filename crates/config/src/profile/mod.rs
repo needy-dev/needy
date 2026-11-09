@@ -10,7 +10,7 @@ mod rules;
 mod trace;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
@@ -100,6 +100,22 @@ pub fn load(source: &Source) -> Result<Profile, Error> {
     mapping.to = mapping.to.clone().expand_home(&user);
   }
   Ok(profile)
+}
+
+/// A profile's name from its file: the file name without `.yaml` or `.yml`
+/// and then without `.profile`. A file named only `profile.yaml` takes its
+/// directory's name, so `examples/smoke/profile.yaml` is `smoke` and
+/// `examples/bench/mac.profile.yaml` is `mac`.
+pub fn name(path: &Path) -> String {
+  let file = path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+  let stem = file.strip_suffix(".yaml").or_else(|| file.strip_suffix(".yml")).unwrap_or(&file);
+  let stem = stem.strip_suffix(".profile").unwrap_or(stem);
+  if (stem == "profile" || stem.is_empty())
+    && let Some(dir) = path.parent().and_then(Path::file_name)
+  {
+    return dir.to_string_lossy().into_owned();
+  }
+  stem.to_string()
 }
 
 #[cfg(test)]

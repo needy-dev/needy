@@ -42,7 +42,7 @@ mod run {
 
   use anyhow::{Context, Result, bail};
   use needy_api_client::Client;
-  use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, GetSessionRequest, StopSessionRequest};
+  use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, GetSessionRequest, SessionState, StopSessionRequest};
 
   /// The actor's architecture; actors run on x86_64 Linux KVM hosts.
   const PROBE_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -115,12 +115,14 @@ mod run {
       client = client.with_token(&token)?;
     }
     let yaml = std::fs::read_to_string(&args.profile).with_context(|| format!("cannot read profile {}", args.profile.display()))?;
-    let dir = std::fs::canonicalize(&args.profile)?.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let path = std::fs::canonicalize(&args.profile)?;
+    let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
     let created = client
       .sessions()
       .create_session(CreateSessionRequest {
         profile_yaml: yaml,
         profile_dir: dir,
+        profile_name: needy_config::profile::name(&path),
         start_actor: true,
         ..Default::default()
       })
@@ -142,10 +144,9 @@ mod run {
         .map_err(|s| anyhow::anyhow!("session {id}: {}", s.message()))?
         .into_inner()
         .session
-        .map(|s| s.state)
+        .map(|s| s.state())
         .unwrap_or_default();
-      // TODO(proto): session state becomes a proto enum in slice 7a.
-      if state != "running" {
+      if state != SessionState::Running {
         break;
       }
       if Instant::now() > deadline {

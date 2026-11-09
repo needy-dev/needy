@@ -268,8 +268,9 @@ report. Implemented today:
 - **Incomplete trace**: when the trace has `trace.gap` events, the report
   starts with a warning that names how many events were dropped.
 
-- **Title**: the session ID and the profile's name (its directory's name, for
-  example `smoke`).
+- **Title**: the session ID and the profile's name: its file name without
+  `.profile.yaml` (`mac.profile.yaml` is `mac`), or its directory's name for
+  a file named `profile.yaml` (`examples/smoke/profile.yaml` is `smoke`).
 - **Overview**: duration (creation to the first of the actor's exit, the
   stop and the failure), state (`failed` after `session.fail`), the driving
   program's exit, routed and kept commands, CLI

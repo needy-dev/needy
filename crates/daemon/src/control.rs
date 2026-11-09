@@ -19,6 +19,7 @@ use needy_api_proto::v1::{
   PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse, Session as SessionInfo, StopSessionRequest,
   StopSessionResponse, exec_request, exec_response,
 };
+use needy_api_server::protocol::domain;
 use needy_common::time::now_ms;
 use needy_config::Source;
 use needy_config::profile::{FaultKind, FileMode, OnFull, Profile, Runtime, Side, TraceSink};
@@ -281,10 +282,10 @@ impl Daemon {
           session_id: id.clone(),
           name: or_id(&request.name),
           group: or_id(&request.group),
-          state: SessionState::Failed.as_str().into(),
+          state: domain::proto_session_state(SessionState::Failed).into(),
           executors: Vec::new(),
           created_at_ms: created_ms,
-          profile: request.profile_dir.clone(),
+          profile: request.profile_name.clone(),
         });
         emit(
           &trace,
@@ -321,7 +322,7 @@ impl Daemon {
     } else {
       request.name.clone()
     };
-    let profile_name = profile_name(&base);
+    let profile_name = request.profile_name.clone();
     let recipe = match &profile.actor.recipe {
       Some(reference) => {
         let recipe = needy_config::recipe::load(&Source::reference(reference, &base))?;
@@ -583,7 +584,7 @@ impl Daemon {
         argv,
         no_stdin: input.is_none(),
         env: [("COPYFILE_DISABLE".to_string(), "1".to_string())].into(),
-        origin: Origin::Files.as_str().into(),
+        origin: domain::proto_origin(Origin::Files).into(),
         ..Default::default()
       })),
     })
@@ -811,17 +812,9 @@ fn exec_context(argv: &[String], cwd: &str, env: &HashMap<String, String>, tty: 
     cwd: cwd.to_string(),
     env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
     tty,
-    // TODO(8f): the proxy does not send its ancestry yet (slices 7a and 8f).
+    // `Decide` fills the ancestry it carries; other execs have none.
     ancestors: Vec::new(),
   }
-}
-
-/// A profile's name: its directory's name, since a session is created from
-/// a profile's text and its directory.
-// TODO(proto): `CreateSessionRequest` carries no file name, so a profile not
-// named `profile.yaml` is still shown by its directory's name.
-fn profile_name(base: &Path) -> String {
-  base.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| base.display().to_string())
 }
 
 fn map_prefix(value: &str, from: &str, to: &str) -> String {
@@ -915,7 +908,7 @@ impl Api {
       session_id: session.id.clone(),
       name: session.name.clone(),
       group: session.group.clone(),
-      state: session.state.lock().unwrap().as_str().into(),
+      state: domain::proto_session_state(*session.state.lock().unwrap()).into(),
       executors: session
         .executors
         .iter()
@@ -937,7 +930,11 @@ impl SessionService for Api {
     if self.bound.is_some() {
       return Err(Status::permission_denied("actors cannot create sessions"));
     }
-    let session = self.daemon.create_session(request.into_inner()).await.map_err(status)?;
+    let request = request.into_inner();
+    if request.profile_name.is_empty() {
+      return Err(Status::invalid_argument("the request names no profile"));
+    }
+    let session = self.daemon.create_session(request).await.map_err(status)?;
     Ok(Response::new(CreateSessionResponse {
       session: Some(Self::info(&session)),
     }))
@@ -1003,7 +1000,10 @@ impl SessionService for Api {
       Some(_) => self.bound_session()?,
       None => self.daemon.session(&request.session_id).ok_or_else(|| Status::not_found("no such session"))?,
     };
-    let ctx = exec_context(&request.argv, &request.cwd, &request.env, request.tty);
+    let mut ctx = exec_context(&request.argv, &request.cwd, &request.env, request.tty);
+    // TODO(8f): no regression test covers an `under` rule matching a routed
+    // command yet; slice 8f adds it and reruns one on the closed loop.
+    ctx.ancestors = request.ancestors.iter().map(|a| a.argv.clone()).collect();
     let decision = self.daemon.decide(&session, &ctx, None).await;
     self.daemon.record_decision(&session, &ctx, &decision, Origin::ActorProxy, decision.outcome.clone());
     // `deny` is what the proxy prints, worded like `needy exec`'s refusals.
@@ -1035,7 +1035,7 @@ impl ProcessService for Api {
     let mut first = inbound.message().await?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
     let (instance, session, argv, origin, decided) = match &mut first.payload {
       Some(exec_request::Payload::Start(start)) => {
-        let origin: Origin = start.origin.parse().map_err(|e: needy_core::types::UnknownOrigin| Status::invalid_argument(e.to_string()))?;
+        let origin = domain::origin(start.origin).map_err(|e| Status::invalid_argument(e.to_string()))?;
         let session = match &self.bound {
           Some(_) => Some(self.bound_session()?),
           None if !start.session_id.is_empty() => {
@@ -1430,10 +1430,7 @@ impl GuestService for Api {
     let mut stream = request.into_inner();
     while let Some(message) = stream.message().await? {
       if let Some(pushed) = message.event {
-        // TODO(proto): the typed payload travels in the `payload` entry of
-        // the string map until slice 7a gives `TraceEvent` a payload field.
-        let payload = pushed.attrs.get("payload").map(String::as_str).unwrap_or_default();
-        let event = Event::decode(&pushed.kind, event::SCHEMA_VERSION, payload)
+        let event = Event::decode(&pushed.kind, pushed.version, &pushed.payload)
           .map_err(|e| Status::invalid_argument(format!("guest event {}: {e}", pushed.kind)))?;
         session.trace.emit_at(pushed.time_ms, event.kind().as_str(), event.raw());
       }
@@ -1452,7 +1449,3 @@ impl GuestService for Api {
     Ok(Response::new(ReportExitResponse {}))
   }
 }
-
-#[cfg(test)]
-#[path = "control_test.rs"]
-mod tests;

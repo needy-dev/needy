@@ -106,19 +106,24 @@ pub struct GetConfigResponse {
     #[prost(message, repeated, tag="14")]
     pub hwmon_faults: ::prost::alloc::vec::Vec<GuestFault>,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+/// An event observed inside the actor. The listener the guest calls is bound to
+/// its session, so the event names none.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TraceEvent {
-    #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
     #[prost(int64, tag="2")]
     pub time_ms: i64,
-    /// For example "exec.routed", "exec.local", "net.request", "fault.injected", "probe".
+    /// The event kind, for example "fault.injected".
     #[prost(string, tag="3")]
     pub kind: ::prost::alloc::string::String,
-    #[prost(map="string, string", tag="4")]
-    pub attrs: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// The kind's payload: a JSON object whose schema is `needy_core::event`.
+    #[prost(string, tag="5")]
+    pub payload: ::prost::alloc::string::String,
+    /// The payload's schema version, `needy_core::event::SCHEMA_VERSION` of the
+    /// guest's build. The daemon refuses a version it does not read.
+    #[prost(uint32, tag="6")]
+    pub version: u32,
 }
-#[derive(Clone, PartialEq, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PushEventsRequest {
     #[prost(message, optional, tag="1")]
     pub event: ::core::option::Option<TraceEvent>,
@@ -185,9 +190,9 @@ pub struct ExecStart {
     /// Do not forward stdin; the process sees end of file at once.
     #[prost(bool, tag="9")]
     pub no_stdin: bool,
-    /// Free-form origin for the trace, for example "cli" or "actor-proxy".
-    #[prost(string, tag="10")]
-    pub origin: ::prost::alloc::string::String,
+    /// Who starts the process. Required.
+    #[prost(enumeration="Origin", tag="11")]
+    pub origin: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecAttach {
@@ -328,6 +333,52 @@ pub struct KillProcessRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KillProcessResponse {
 }
+/// Who started an exec. It decides whether the daemon runs the session's rules
+/// and how the trace and the report count the process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum Origin {
+    Unspecified = 0,
+    /// `needy exec`.
+    Cli = 1,
+    /// `needy fs`.
+    Fs = 2,
+    /// The daemon's own copy-in and mirror-out.
+    Files = 3,
+    /// A command the actor's kernel routed through the proxy, which decided
+    /// its placement already.
+    ActorProxy = 4,
+    /// The SFTP server behind an actor's workspace mount.
+    ActorMount = 5,
+}
+impl Origin {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ORIGIN_UNSPECIFIED",
+            Self::Cli => "ORIGIN_CLI",
+            Self::Fs => "ORIGIN_FS",
+            Self::Files => "ORIGIN_FILES",
+            Self::ActorProxy => "ORIGIN_ACTOR_PROXY",
+            Self::ActorMount => "ORIGIN_ACTOR_MOUNT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ORIGIN_UNSPECIFIED" => Some(Self::Unspecified),
+            "ORIGIN_CLI" => Some(Self::Cli),
+            "ORIGIN_FS" => Some(Self::Fs),
+            "ORIGIN_FILES" => Some(Self::Files),
+            "ORIGIN_ACTOR_PROXY" => Some(Self::ActorProxy),
+            "ORIGIN_ACTOR_MOUNT" => Some(Self::ActorMount),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateSessionRequest {
     /// Profile as YAML text; relative paths resolve against `profile_dir`.
@@ -345,6 +396,10 @@ pub struct CreateSessionRequest {
     /// Override the driving program of the actor.
     #[prost(string, repeated, tag="6")]
     pub actor_command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The profile's name in listings, traces and reports, for example its file
+    /// name without `.profile.yaml`. Required.
+    #[prost(string, tag="7")]
+    pub profile_name: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
@@ -363,13 +418,13 @@ pub struct Session {
     pub name: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub group: ::prost::alloc::string::String,
-    /// "running", "finished" (the actor exited), "stopped" or "failed".
-    #[prost(string, tag="4")]
-    pub state: ::prost::alloc::string::String,
+    #[prost(enumeration="SessionState", tag="8")]
+    pub state: i32,
     #[prost(message, repeated, tag="5")]
     pub executors: ::prost::alloc::vec::Vec<ExecutorRef>,
     #[prost(int64, tag="6")]
     pub created_at_ms: i64,
+    /// The profile's name, as `CreateSessionRequest.profile_name` gave it.
     #[prost(string, tag="7")]
     pub profile: ::prost::alloc::string::String,
 }
@@ -426,6 +481,17 @@ pub struct DecideRequest {
     pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
     #[prost(bool, tag="5")]
     pub tty: bool,
+    /// The processes the command runs under, nearest first: its parent, the
+    /// parent's parent and so on, up to but not including the actor's init.
+    /// Rules match `when.under` against them.
+    #[prost(message, repeated, tag="6")]
+    pub ancestors: ::prost::alloc::vec::Vec<Ancestor>,
+}
+/// A process a command runs under.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Ancestor {
+    #[prost(string, repeated, tag="1")]
+    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DecideResponse {
@@ -444,6 +510,50 @@ pub struct DecideResponse {
     /// "denied: <rule message>" or "fault injected: <errno>".
     #[prost(string, tag="6")]
     pub deny: ::prost::alloc::string::String,
+}
+/// A session's life cycle. The first terminal state (stopped, finished or
+/// failed) wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum SessionState {
+    Unspecified = 0,
+    Creating = 1,
+    Running = 2,
+    Stopping = 3,
+    Stopped = 4,
+    /// The actor's driving program exited.
+    Finished = 5,
+    Failed = 6,
+}
+impl SessionState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "SESSION_STATE_UNSPECIFIED",
+            Self::Creating => "SESSION_STATE_CREATING",
+            Self::Running => "SESSION_STATE_RUNNING",
+            Self::Stopping => "SESSION_STATE_STOPPING",
+            Self::Stopped => "SESSION_STATE_STOPPED",
+            Self::Finished => "SESSION_STATE_FINISHED",
+            Self::Failed => "SESSION_STATE_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "SESSION_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "SESSION_STATE_CREATING" => Some(Self::Creating),
+            "SESSION_STATE_RUNNING" => Some(Self::Running),
+            "SESSION_STATE_STOPPING" => Some(Self::Stopping),
+            "SESSION_STATE_STOPPED" => Some(Self::Stopped),
+            "SESSION_STATE_FINISHED" => Some(Self::Finished),
+            "SESSION_STATE_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
 }
 include!("needy.v1.tonic.rs");
 // @@protoc_insertion_point(module)

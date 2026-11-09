@@ -26,6 +26,9 @@ message CreateSessionRequest {
   bool start_actor = 5;
   // Override the driving program of the actor.
   repeated string actor_command = 6;
+  // The profile's name in listings, traces and reports, for example its file
+  // name without `.profile.yaml`. Required.
+  string profile_name = 7;
 }
 
 message ExecutorRef {
@@ -38,11 +41,26 @@ message Session {
   string session_id = 1;
   string name = 2;
   string group = 3;
-  // "running", "finished" (the actor exited), "stopped" or "failed".
-  string state = 4;
+  SessionState state = 8;
   repeated ExecutorRef executors = 5;
   int64 created_at_ms = 6;
+  // The profile's name, as `CreateSessionRequest.profile_name` gave it.
   string profile = 7;
+
+  reserved 4;
+}
+
+// A session's life cycle. The first terminal state (stopped, finished or
+// failed) wins.
+enum SessionState {
+  SESSION_STATE_UNSPECIFIED = 0;
+  SESSION_STATE_CREATING = 1;
+  SESSION_STATE_RUNNING = 2;
+  SESSION_STATE_STOPPING = 3;
+  SESSION_STATE_STOPPED = 4;
+  // The actor's driving program exited.
+  SESSION_STATE_FINISHED = 5;
+  SESSION_STATE_FAILED = 6;
 }
 
 message CreateSessionResponse {
@@ -83,6 +101,15 @@ message DecideRequest {
   string cwd = 3;
   map<string, string> env = 4;
   bool tty = 5;
+  // The processes the command runs under, nearest first: its parent, the
+  // parent's parent and so on, up to but not including the actor's init.
+  // Rules match `when.under` against them.
+  repeated Ancestor ancestors = 6;
+}
+
+// A process a command runs under.
+message Ancestor {
+  repeated string argv = 1;
 }
 
 message DecideResponse {

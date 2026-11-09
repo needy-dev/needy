@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow};
 use clap::Subcommand;
 use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, ListSessionsRequest, Session, StopSessionRequest};
+use needy_api_server::protocol::domain;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
@@ -72,15 +73,18 @@ impl Row for SessionRow {
   }
 }
 
-impl From<Session> for SessionRow {
-  fn from(s: Session) -> Self {
-    Self {
+impl TryFrom<Session> for SessionRow {
+  type Error = anyhow::Error;
+
+  fn try_from(s: Session) -> Result<Self> {
+    let state = domain::session_state(s.state).with_context(|| format!("session {}", s.session_id))?;
+    Ok(Self {
       executors: s.executors.iter().map(|e| format!("{}={}", e.name, e.runtime)).collect(),
       id: s.session_id,
       name: s.name,
-      state: s.state,
+      state: state.to_string(),
       group: s.group,
-    }
+    })
   }
 }
 
@@ -96,13 +100,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       command,
     } => {
       let yaml = std::fs::read_to_string(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
-      let dir = std::fs::canonicalize(&profile)?.parent().map(|p| p.display().to_string()).unwrap_or_default();
+      let path = std::fs::canonicalize(&profile)?;
+      let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
       let connection = crate::cli::connect(&endpoint).await?;
       let session = connection
         .sessions()
         .create_session(CreateSessionRequest {
           profile_yaml: yaml,
           profile_dir: dir,
+          profile_name: needy_config::profile::name(&path),
           group,
           name,
           start_actor: !no_actor,
@@ -118,7 +124,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Ls { output: format } => {
       let connection = crate::cli::connect(&endpoint).await?;
       let list = connection.sessions().list_sessions(ListSessionsRequest {}).await.map_err(fail)?.into_inner();
-      let rows: Vec<SessionRow> = list.sessions.into_iter().map(SessionRow::from).collect();
+      let rows = list.sessions.into_iter().map(SessionRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
     Command::Stop { session } => {

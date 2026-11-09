@@ -26,9 +26,8 @@ pub struct ExecContext {
   pub cwd: String,
   pub env: BTreeMap<String, String>,
   pub tty: bool,
-  /// Argument vectors of ancestor processes, nearest first.
-  // TODO(8f): the daemon does not fill this yet, so `when.under` cannot
-  // match a routed command; slices 7a and 8f carry the ancestry in `Decide`.
+  /// Argument vectors of ancestor processes, nearest first. The actor's
+  /// proxy sends them in `Decide`; other execs have none.
   pub ancestors: Vec<Vec<String>>,
 }
 

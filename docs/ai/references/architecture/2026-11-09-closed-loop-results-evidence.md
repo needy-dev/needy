@@ -181,6 +181,26 @@ Found on the way: an actor whose profile has no workspace mount and no
 directory `~/workspace` does not exist. This predates the slice; the console
 now names the failure.
 
+## Re-verified after the proto slice
+
+Slice 7a of the module layout redesign (`ExecStart.origin` and session state
+as proto enums mapped in `needy_api_server::protocol::domain`; `Decide`
+carries the process ancestry, which the proxy reads from `/proc`; guest
+events carry their payload and schema version in `TraceEvent`; the session
+request carries the profile's name) was rerun on 2026-11-10 with debug
+builds and every daemon's state, image and output in a scratch directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` in an actor; `session ls`; `report` | Linux | Pass: GCE identity, `systemd-detect-virt` prints `google`, the routed `python3` prints the actor's hostname, workspace both ways over the mount, `routed exit=7`; `session ls` shows `finished`; the report names profile `smoke` and counts 4 routed and 1 failed; no VM left |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out; the report names profile `chaos` and counts 3 faults by kind, the hwmon one pushed by the guest |
+| A scratch profile that denies `python3` under `bash **` and routes it to a Docker executor otherwise | Linux | Pass: `python3` started by the driving `sh` runs on the executor; started by `bash -c` it prints `needy: denied: under bash` and exits 126. The report names profile `under` from `under.profile.yaml` |
+| `examples/local` without an actor: `exec`, an injected `curl` fault, `session ls` before and after `session stop`, `report` | Mac | Pass: `running`, then `stopped` in the table and in `--output json`; exit 126 for `curl`; the report names profile `local` |
+
+The Docker executors of these sessions were left running after the actor
+exited, as before (fix slice 8h), and were removed by hand.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

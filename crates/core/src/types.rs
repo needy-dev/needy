@@ -4,7 +4,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::str::FromStr;
 use std::time::Duration;
 
 use needy_config::profile::{Fault, FaultKind};
@@ -96,9 +95,8 @@ impl fmt::Display for SessionState {
   }
 }
 
-/// Who started an exec.
-// TODO(proto): `ExecStart.origin` is still a string on the wire; slice 7a
-// makes it a proto enum and removes `as_str` and `FromStr`.
+/// Who started an exec. On the wire it is the `needy.v1.Origin` enum;
+/// `needy_api_server::protocol::domain` maps between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Origin {
@@ -112,39 +110,6 @@ pub enum Origin {
   ActorProxy,
   /// The SFTP server behind an actor's workspace mount.
   ActorMount,
-}
-
-impl Origin {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Cli => "cli",
-      Self::Fs => "fs",
-      Self::Files => "files",
-      Self::ActorProxy => "actor-proxy",
-      Self::ActorMount => "actor-mount",
-    }
-  }
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("unknown exec origin {0:?}")]
-pub struct UnknownOrigin(pub String);
-
-impl FromStr for Origin {
-  type Err = UnknownOrigin;
-
-  fn from_str(text: &str) -> Result<Self, Self::Err> {
-    [
-      Self::Cli,
-      Self::Fs,
-      Self::Files,
-      Self::ActorProxy,
-      Self::ActorMount,
-    ]
-    .into_iter()
-    .find(|origin| origin.as_str() == text)
-    .ok_or_else(|| UnknownOrigin(text.to_string()))
-  }
 }
 
 /// The network a request came from, at a gateway.

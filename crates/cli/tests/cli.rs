@@ -379,6 +379,30 @@ fn a_failed_session_create_records_session_fail_with_the_reason() {
   assert!(finding.contains("missing.recipe.yaml"), "{finding}");
 }
 
+// The QA pass on 2026-11-09 found that the report named a profile after its
+// directory, because the session request carried no file name.
+#[test]
+fn report_names_the_profile_after_its_file() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
+  let created = home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--profile",
+    profile.to_str().unwrap(),
+  ]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  let session = stdout(&created).trim().to_string();
+
+  let output = home.run(&["report", &session]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let title = stdout(&output).lines().next().unwrap().to_string();
+  assert_eq!(title, format!("# Session report: {session} (profile: review)"));
+}
+
 #[test]
 fn session_stop_is_traced_without_attributes() {
   let home = Home::new();

@@ -7,7 +7,7 @@ use std::time::Duration;
 use needy_api_client::Client;
 use needy_api_proto::v1::{GetConfigResponse, PushEventsRequest, TraceEvent};
 use needy_config::profile::FaultKind;
-use needy_core::event::Event;
+use needy_core::event::{self, Event};
 use needy_core::types::{Effect, Fired};
 use nix::sched::CloneFlags;
 
@@ -35,7 +35,6 @@ pub(super) fn apply(config: &GetConfigResponse) {
 pub(super) fn schedule_faults(client: &Client, config: &GetConfigResponse) {
   for fault in config.hwmon_faults.clone() {
     let client = client.clone();
-    let session = config.session_id.clone();
     tokio::spawn(async move {
       tokio::time::sleep(Duration::from_millis(fault.at_ms.max(0) as u64)).await;
       write_param(&format!("{CORETEMP}/override_mc"), &fault.temp_mc.to_string());
@@ -48,13 +47,10 @@ pub(super) fn schedule_faults(client: &Client, config: &GetConfigResponse) {
         },
       });
       let event = TraceEvent {
-        session_id: session,
         time_ms: needy_common::time::now_ms(),
         kind: fired.kind().as_str().into(),
-        // TODO(proto): `TraceEvent` still carries a string map; the typed
-        // payload travels as its `payload` entry until slice 7a gives the
-        // message a payload field.
-        attrs: [("payload".to_string(), fired.payload())].into(),
+        payload: fired.payload(),
+        version: event::SCHEMA_VERSION,
       };
       if let Err(status) = client.guest().push_events(tokio_stream::iter(vec![PushEventsRequest { event: Some(event) }])).await {
         tracing::warn!("cannot record the hwmon fault: {}", status.message());

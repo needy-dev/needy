@@ -15,6 +15,8 @@ use tower::{Layer, Service};
 
 pub use needy_api_proto as proto;
 
+pub mod protocol;
+
 /// Methods that a client may call without a token by default.
 pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
 

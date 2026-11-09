@@ -433,3 +433,15 @@ fn trace_selects_sinks_and_timing() {
   let err = load_text("trace: { sinks: [otel] }\n").unwrap_err().to_string();
   assert!(err.contains("trace.sinks[0]: unknown variant `otel`, expected `sqlite` or `jsonl`"), "{err}");
 }
+
+#[test]
+fn a_profile_is_named_after_its_file() {
+  assert_eq!(name(Path::new("/home/user/review.profile.yaml")), "review");
+  assert_eq!(name(Path::new("/home/user/review.yml")), "review");
+  assert_eq!(name(Path::new("/home/user/examples/bench/mac.profile.yaml")), "mac");
+}
+
+#[test]
+fn a_file_named_profile_takes_its_directory_name() {
+  assert_eq!(name(Path::new("/home/user/examples/smoke/profile.yaml")), "smoke");
+}

@@ -9,6 +9,7 @@
 //! The guest does not use `needy-trace`: it sends `needy_core::event`
 //! payloads to the daemon through `GuestService`.
 
+mod ancestry;
 mod init;
 mod proxy;
 

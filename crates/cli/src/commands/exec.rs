@@ -83,7 +83,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       session_id: args.session,
       executor: args.executor,
       no_stdin: !forward_stdin,
-      origin: "cli".into(),
+      origin: needy_api_proto::v1::Origin::Cli.into(),
     })),
   };
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;

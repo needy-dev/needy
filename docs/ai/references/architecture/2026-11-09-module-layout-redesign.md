@@ -561,7 +561,7 @@ Rules for every slice:
 | 8c | Fix: listener tasks and sockets are cleaned up | 8 | — | Regression test |
 | 8d | Fix: a failed create releases the instances it acquired | 8 | — | Regression test |
 | 8e | Fix: the pool lock is not held while an instance is created | 8 | — | Regression test |
-| 8f | Fix: `ancestors` reach the rules, so `when.under` matches | 7a, 8 | — | Regression test; closed loop: an `under` rule |
+| 8f | Fix: `ancestors` reach the rules, so `when.under` matches (7a wires the proxy and the daemon; 8f keeps it through the rebuild and adds the test) | 7a, 8 | — | Regression test; closed loop: an `under` rule |
 | 8g | Fix: copy-in and `fs cp` create the target directory instead of failing when it is missing | 8 | — | Regression test; `examples/local` on a fresh machine |
 | 8h | Fix: an actor that exits releases its executors and removes its sockets; the session stays listed as finished | 8 | — | Regression test; closed loop: smoke, no container left |
 | 8i | Fix: a listener that cannot bind (for example a socket path over `sun_path`) fails start-up at once with the path in the error | 7, 8 | — | Regression test |
@@ -575,7 +575,8 @@ The slice 1 and slice 4 items are closed; `crates/cli/tests/cli.rs` covers
 each one. The slice 5 item is closed; `process::Host`'s tests in
 `core-executor` cover it. The slice 6 item is closed: the actor image carries
 `systemd-detect-virt`, which reports `google` from the recipe's DMI, as on a
-Compute Engine VM.
+Compute Engine VM. The slice 3 profile name item is closed in slice 7a: the
+session request carries the profile's name, derived from its file name.
 
 | Slice | Item |
 | --- | --- |
@@ -622,5 +623,5 @@ Compute Engine VM.
   and its place after chaos in `exec.decide`. Deferred until the owner names it.
 - **bollard and Podman**: bollard speaks the Docker API, which Podman also
   serves on its socket; the provider would take a socket path.
-- **Ancestry in `Decide`**: the proxy can read its parent chain from `/proc`;
-  whether the kernel module should pass it instead is open.
+- **Ancestry in `Decide`**: the proxy reads its parent chain from `/proc`
+  (slice 7a); whether the kernel module should pass it instead is open.
