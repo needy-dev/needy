@@ -1,6 +1,6 @@
 # Recipes
 
-**Status**: draft. Terms follow the
+**Status**: draft; implemented as described unless the [closed-loop results](../architecture/2026-11-09-closed-loop-results-evidence.md#not-yet-verified) list it as missing. Terms follow the
 [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
 note. Recipes are referenced from
 [profiles](2026-11-09-profile-and-rules-design.md).

@@ -1,6 +1,6 @@
 # CLI, exec streams and reports
 
-**Status**: pending. Terms follow the
+**Status**: pending; implemented as described unless the [closed-loop results](../architecture/2026-11-09-closed-loop-results-evidence.md#not-yet-verified) list it as missing. Terms follow the
 [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
 note. Profiles are described in
 [Profiles and rules](../config/2026-11-09-profile-and-rules-design.md).
@@ -13,8 +13,10 @@ needy build    --recipe NAME                   # build a machine image
 needy session  create|ls|stop [--group G]     # one actor plus its executors
 needy exec     [--session ID] -- CMD …         # run a command through placement
 needy ps | attach ID | kill ID                 # manage detached processes
-needy fs       cp|sync …                       # move files between host, actor and executors
+needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
 needy report   SESSION|latest --level summary|detailed [--output FILE]
+needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions and recipe findings
+needy bench    spawn|pipe|fs|suite …            # hidden: latency and throughput probes
 ```
 
 Deliberately absent:
@@ -72,14 +74,11 @@ this, for both people and driving programs.
 
 ### Current state
 
-Implemented today, for native host execution only: PTY allocation, raw mode,
-resize, signal forwarding, separate stdout and stderr, stdin half-close, and
-exit with a signal name. Missing:
-
-- PTYs and interactive stdin on container and VM executors; the Docker path is
-  batch-only with line-based events.
-- Detach, attach and replay.
-- `json` and `ndjson` output.
+Implemented on every executor platform: PTY or pipes, raw mode, resize, signal
+forwarding, stdin half-close, exit with a signal name, detach, attach with a
+256 KiB replay buffer, `json` and `ndjson` output, and backpressure from a slow
+client to the process. `--events` is not implemented yet. On Windows a signal
+terminates the process tree, and the terminal uses ConPTY through portable-pty.
 
 ## gRPC
 
@@ -116,9 +115,9 @@ Writes are asynchronous; recording must not delay an intercepted syscall.
 auv's `auv-tracing` already exports runs through OpenTelemetry; a compatible
 event model lets both projects share one observability stack.
 
-**Terminal recording.** PTY streams already pass through needy. Record them in
-asciicast v2 format as trace attachments, so a report can link to a terminal
-replay of each interactive command.
+**Terminal recording.** Every terminal session that passes through the control
+daemon is recorded in asciicast v2 format under `sessions/<id>/casts/`, and the
+`exec.start` event names the file.
 
 **Mirrored files.** Session directories that a profile mirrors out of the actor,
 such as `~/.codex/sessions` or `~/.claude/projects`, are stored with the trace.

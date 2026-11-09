@@ -93,7 +93,7 @@ interception in the actor is an automatic `needy exec`.
 | Need | Mechanism | Notes |
 | --- | --- | --- |
 | Exec routing | A built-in binfmt handler in the actor's guest kernel swaps a routed exec for a proxy; the proxy keeps parent and child semantics ([D2, D3](2026-11-06-needy-design-decisions-design.md#accepted-decisions)) | Prototype works without ptrace; see [Exec routing in the guest kernel](#exec-routing-in-the-guest-kernel). The ptrace-based `exec-intercept` remains the fallback outside microVMs. |
-| File routing | FUSE in the actor guest, served by the executor | Gives mmap, readdir and change semantics without rewriting each file syscall. |
+| File routing | sshfs in passive mode in the actor; its SFTP stream travels over a needy exec stream to `sftp-server` on the executor | Every executor platform ships `sftp-server`, including macOS and Windows. Gives mmap, readdir and change semantics without rewriting each file syscall. |
 | Network routing | One network and gateway per side; bridge rules for exceptions | See [Network routing](#network-routing). |
 | Observation | eBPF in the guest kernel | The driving program cannot see a tracer. Block `bpf` and `perf_event_open` in the guest. |
 | Result rewriting and binary replacement | ptrace with a seccomp `RET_TRACE` subscription | Only where arguments or results must change. ptrace leaves visible traces (`TracerPid`, failed `PTRACE_TRACEME`). |
@@ -136,8 +136,10 @@ mapping, `cwd` passes through unchanged, and file ownership agrees on both sides
 
 ## Interconnect
 
-- **Actor and daemon**: a host-local channel into the microVM; vsock is the
-  candidate and is being measured.
+- **Actor and daemon**: gRPC over vsock. The guest connects to host CID 2;
+  Firecracker forwards to a per-session Unix socket. Firecracker's vsock does
+  not carry half-close, so every protocol on it needs its own framing; gRPC has
+  it.
 - **Daemon and executors**: executors may sit behind NAT or be reachable only
   through tunnels such as Cloudflare Tunnel. The transport therefore must:
   - work over a single outbound connection, so an executor can dial out;

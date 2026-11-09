@@ -17,3 +17,4 @@ pub use profile::{
 };
 pub use recipe::{CompiledRecipe, Finding, HostInfo, Recipe, Severity};
 pub use rules::{CommandContext, Decision, Target};
+pub use util::{glob_match, mix};

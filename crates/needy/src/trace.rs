@@ -116,6 +116,34 @@ impl Trace {
     }
 }
 
+/// Starts an asciicast v2 recording of a terminal session.
+pub fn open_cast(
+    dir: &Path,
+    process: &str,
+    cols: u32,
+    rows: u32,
+    argv: &[String],
+) -> Option<std::fs::File> {
+    std::fs::create_dir_all(dir).ok()?;
+    let mut file = std::fs::File::create(dir.join(format!("{process}.cast"))).ok()?;
+    let header = json!({
+        "version": 2,
+        "width": cols,
+        "height": rows,
+        "timestamp": now_ms() / 1000,
+        "command": argv.join(" "),
+    });
+    writeln!(file, "{header}").ok()?;
+    Some(file)
+}
+
+/// Appends terminal output to an asciicast recording.
+pub fn cast_output(file: &mut std::fs::File, started_ms: i64, bytes: &[u8]) {
+    let seconds = (now_ms() - started_ms) as f64 / 1000.0;
+    let event = json!([seconds, "o", String::from_utf8_lossy(bytes)]);
+    let _ = writeln!(file, "{event}");
+}
+
 pub struct Loaded {
     pub session: BTreeMap<String, Value>,
     pub events: Vec<(i64, String, BTreeMap<String, String>)>,

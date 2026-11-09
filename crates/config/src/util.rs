@@ -6,7 +6,7 @@ use serde::{Deserialize, Deserializer};
 /// Glob match: `**` matches any characters including `/`, `*` matches within
 /// one path segment, `?` matches one non-`/` character. `**/` also matches no
 /// directories at all.
-pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
+pub fn glob_match(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
     glob(&p, &t)
@@ -104,7 +104,7 @@ pub(crate) fn de_opt_duration<'de, D: Deserializer<'de>>(
 }
 
 /// splitmix64: a small, stable mixer for deriving values from a seed.
-pub(crate) fn mix(seed: u64, salt: u64) -> u64 {
+pub fn mix(seed: u64, salt: u64) -> u64 {
     let mut z = seed ^ salt.wrapping_mul(0x9E37_79B9_7F4A_7C15);
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);

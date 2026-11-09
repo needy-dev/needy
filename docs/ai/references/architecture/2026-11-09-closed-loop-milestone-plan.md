@@ -1,6 +1,7 @@
 # Closed-loop milestone
 
-**Status**: plan. The goal is one end-to-end loop that exercises every part of
+**Status**: mostly done; see
+[closed-loop results](2026-11-09-closed-loop-results-evidence.md). The goal is one end-to-end loop that exercises every part of
 the [actor and executor separation](2026-11-09-actor-executor-separation-design.md)
 at least once, before any part is deepened. Decided on 2026-11-09: snapshots
 are out of scope; the previous HTTP daemon, Docker sessions and batch runs are
@@ -32,20 +33,20 @@ On one Linux host with KVM (kvm-host for development):
 
 ## Work items
 
-| # | Item | Depends on | Notes |
-| --- | --- | --- | --- |
-| 1 | Delete the previous daemon, Docker sessions, batch runs and their docs and tests | — | Keep `exec-intercept` as the fallback outside microVMs. |
-| 2 | Redesign `proto/`: session, process (exec, attach, list, kill), file, trace and executor services | Transport findings | Must work over one outbound HTTP/2 connection for tunnels. |
-| 3 | Daemon core: session manager, keyed executor pool, Docker and remote providers | 2 | No scheduler; runtime options pass through with protected fields. |
-| 4 | Actor provider: Firecracker, `needy build --recipe` from the proof-of-concept Dockerfile | Recipe compiler | Includes CPUID, hwmon, DMI and PCI where ready. |
-| 5 | Actor ↔ daemon channel | vsock findings | Rules in, events out. |
-| 6 | Exec routing in the guest kernel, with a proxy that speaks the process service | Kernel prototype findings | ptrace fallback for comparison. |
-| 7 | Exec streams: PTY, pipes, signals, detach, attach, replay | 2, 3 | Executor side first, then routed exec. |
-| 8 | FUSE file routing, same path and UID | 2, 3 | Read and write; no change notifications yet. |
-| 9 | Two networks: actor gateway with key injection and allowlist; executor network allowlist | 3, 4 | Plain HTTP to the actor gateway, TLS upstream. |
-| 10 | Rules: YAML profiles, command matching, accumulation, built-in launcher resolvers | — | Declarative only. |
-| 11 | Trace (SQLite + JSONL) and `needy report` | 3 | OpenTelemetry export later. |
-| 12 | End-to-end test of the loop on kvm-host | all | The milestone is done when this passes. |
+| # | Item | State |
+| --- | --- | --- |
+| 1 | Delete the previous daemon, Docker sessions, batch runs and their docs and tests | Done; `exec-intercept` kept |
+| 2 | Redesign `proto/`: health, process (exec, attach, list, kill), session (with `Decide`), guest (config, events, exit, files) | Done |
+| 3 | Daemon core: session manager, keyed executor pool, Docker, native and remote providers | Done; `containerd`, `firecracker` and `k8s` executors remain |
+| 4 | Actor provider: Firecracker, `needy build --recipe` | Done |
+| 5 | Actor ↔ daemon channel | Done: gRPC over vsock |
+| 6 | Exec routing in the guest kernel | Done: `binfmt_needy`; execs by `/.needy` programs are never routed |
+| 7 | Exec streams: PTY, pipes, signals, detach, attach, replay | Done |
+| 8 | File routing, same path and UID | Done: sshfs passive mode over an exec stream to `sftp-server`; `path_map` for executors with other paths |
+| 9 | Two networks | Actor gateway done (allowlist, upstream mapping, key injection); executor network policy remains |
+| 10 | Rules: YAML profiles, matching, accumulation, launcher resolvers | Done in `needy-config` |
+| 11 | Trace (SQLite + JSONL) and `needy report` | Done, plus asciicast recordings |
+| 12 | End-to-end test on kvm-host | Done with opencode, a Mac executor and an sshd scenario |
 
 ## Out of the milestone
 

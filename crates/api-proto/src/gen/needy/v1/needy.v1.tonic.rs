@@ -162,6 +162,54 @@ pub mod guest_service_client {
                 .insert(GrpcMethod::new("needy.v1.GuestService", "ReportExit"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn fetch_files(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FetchFilesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::FetchFilesResponse>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.GuestService/FetchFiles",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.GuestService", "FetchFiles"));
+            self.inner.server_streaming(req, path, codec).await
+        }
+        pub async fn push_files(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<Message = super::PushFilesRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::PushFilesResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.GuestService/PushFiles",
+            );
+            let mut req = request.into_streaming_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.GuestService", "PushFiles"));
+            self.inner.client_streaming(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -196,6 +244,23 @@ pub mod guest_service_server {
             request: tonic::Request<super::ReportExitRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ReportExitResponse>,
+            tonic::Status,
+        >;
+        /// Server streaming response type for the FetchFiles method.
+        type FetchFilesStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::FetchFilesResponse, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        async fn fetch_files(
+            &self,
+            request: tonic::Request<super::FetchFilesRequest>,
+        ) -> std::result::Result<tonic::Response<Self::FetchFilesStream>, tonic::Status>;
+        async fn push_files(
+            &self,
+            request: tonic::Request<tonic::Streaming<super::PushFilesRequest>>,
+        ) -> std::result::Result<
+            tonic::Response<super::PushFilesResponse>,
             tonic::Status,
         >;
     }
@@ -408,6 +473,99 @@ pub mod guest_service_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.GuestService/FetchFiles" => {
+                    #[allow(non_camel_case_types)]
+                    struct FetchFilesSvc<T: GuestService>(pub Arc<T>);
+                    impl<
+                        T: GuestService,
+                    > tonic::server::ServerStreamingService<super::FetchFilesRequest>
+                    for FetchFilesSvc<T> {
+                        type Response = super::FetchFilesResponse;
+                        type ResponseStream = T::FetchFilesStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FetchFilesRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuestService>::fetch_files(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = FetchFilesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.GuestService/PushFiles" => {
+                    #[allow(non_camel_case_types)]
+                    struct PushFilesSvc<T: GuestService>(pub Arc<T>);
+                    impl<
+                        T: GuestService,
+                    > tonic::server::ClientStreamingService<super::PushFilesRequest>
+                    for PushFilesSvc<T> {
+                        type Response = super::PushFilesResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<
+                                tonic::Streaming<super::PushFilesRequest>,
+                            >,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as GuestService>::push_files(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = PushFilesSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.client_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

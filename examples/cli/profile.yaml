@@ -1,0 +1,6 @@
+# No actor: a Docker executor for `needy exec --session`.
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  build: { runtime: docker, key: "{session}" }
+commands:
+  - { match: "**", to: build }

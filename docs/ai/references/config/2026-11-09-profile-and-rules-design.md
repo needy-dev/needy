@@ -1,6 +1,6 @@
 # Profiles and rules
 
-**Status**: draft, under discussion. The matching syntax and composition rules
+**Status**: draft, under discussion; implemented as described unless the [closed-loop results](../architecture/2026-11-09-closed-loop-results-evidence.md#not-yet-verified) list it as missing. The matching syntax and composition rules
 below are proposals. Terms follow the
 [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
 note.
@@ -160,6 +160,20 @@ Runtime options pass through, except fields the daemon owns:
 
 containerd options are merged into the OCI spec as a JSON patch with the same
 fields protected.
+
+## Chaos
+
+Each fault fires from the profile's `seed`, its index and how many times it has
+matched (`nth`, `probability`), so a replayed session injects the same faults.
+
+| `on` | Subject matched by `match` | Effect |
+| --- | --- | --- |
+| `exec` | The command, word by word like command rules (`curl **`) | `errno` denies the command with `needy chaos: ERRNO`; `delay` sleeps first |
+| `net.connect` | The host, at the actor gateway | `errno` returns 502; `delay` sleeps first |
+| `file.open` | The path relative to an actor mount | The SFTP `open` gets an error reply; sshfs reports `ENOENT`, `EACCES`, `EPERM`, `EOPNOTSUPP` or, for anything else, `EIO` |
+| `hwmon` | — | At `at`, the fake coretemp reads `set.temp_c` |
+
+Every injected fault is a `fault.injected` trace event.
 
 ## Commands
 

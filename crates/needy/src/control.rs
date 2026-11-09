@@ -15,12 +15,12 @@ use needy_api_proto::v1::process_service_server::{ProcessService, ProcessService
 use needy_api_proto::v1::session_service_server::{SessionService, SessionServiceServer};
 use needy_api_proto::v1::{
     CreateSessionRequest, CreateSessionResponse, DecideRequest, DecideResponse, ExecRequest,
-    ExecResponse, ExecutorRef, GetConfigRequest, GetConfigResponse, GetSessionRequest,
-    GetSessionResponse, GuestMount, GuestSensor, GuestUser, KillProcessRequest,
-    KillProcessResponse, ListProcessesRequest, ListProcessesResponse, ListSessionsRequest,
-    ListSessionsResponse, PushEventsRequest, PushEventsResponse, ReportExitRequest,
-    ReportExitResponse, Session as SessionInfo, StopSessionRequest, StopSessionResponse,
-    exec_request, exec_response,
+    ExecResponse, ExecutorRef, FetchFilesRequest, FetchFilesResponse, GetConfigRequest,
+    GetConfigResponse, GetSessionRequest, GetSessionResponse, GuestCopy, GuestFault, GuestMount,
+    GuestSensor, GuestUser, KillProcessRequest, KillProcessResponse, ListProcessesRequest,
+    ListProcessesResponse, ListSessionsRequest, ListSessionsResponse, PushEventsRequest,
+    PushEventsResponse, PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse,
+    Session as SessionInfo, StopSessionRequest, StopSessionResponse, exec_request, exec_response,
 };
 use needy_config::profile::{FileMode, OnFull, Profile, Runtime, Side};
 use needy_config::recipe::{CompiledRecipe, HostInfo, Recipe};
@@ -73,6 +73,7 @@ pub struct Session {
     pub actor: Mutex<Option<tokio::process::Child>>,
     pub actor_command: Vec<String>,
     pub recipe: Option<CompiledRecipe>,
+    pub injector: Arc<crate::chaos::Injector>,
 }
 
 pub struct Daemon {
@@ -249,6 +250,7 @@ impl Daemon {
         } else {
             request.actor_command.clone()
         };
+        let injector = Arc::new(crate::chaos::Injector::new(&profile.chaos));
         let session = Arc::new(Session {
             id: id.clone(),
             name: name.clone(),
@@ -262,6 +264,7 @@ impl Daemon {
             actor: Mutex::new(None),
             actor_command,
             recipe,
+            injector,
         });
         self.sessions
             .lock()
@@ -285,6 +288,7 @@ impl Daemon {
                 ),
             ],
         );
+        self.copy_in_executors(&session).await?;
         if request.start_actor {
             self.start_actor(&session).await?;
         }
@@ -465,6 +469,9 @@ impl Daemon {
         if let Some(mut child) = session.actor.lock().unwrap().take() {
             let _ = child.start_kill();
         }
+        if let Err(e) = self.mirror_out_executors(session).await {
+            eprintln!("needy: mirror-out for {}: {e:#}", session.id);
+        }
         *session.state.lock().unwrap() = "stopped".into();
         for instance in session.executors.values() {
             self.release(instance).await;
@@ -524,6 +531,7 @@ impl Daemon {
             self.trace.clone(),
             session.id.clone(),
             "actor",
+            Some(session.injector.clone()),
         ));
         let _ = std::fs::remove_file(&gateway_path);
         let listener = tokio::net::UnixListener::bind(&gateway_path)?;
@@ -603,6 +611,195 @@ impl Daemon {
             }
         });
         Ok(())
+    }
+
+    // ---------------------------------------------------------------- files
+
+    fn host_path(session: &Session, path: &str) -> PathBuf {
+        let path = path.replace("{session}", &session.id);
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = path.replacen('~', &home, 1);
+        if Path::new(&path).is_absolute() {
+            PathBuf::from(path)
+        } else {
+            session.profile.base_dir.join(path)
+        }
+    }
+
+    /// Runs `argv` on an executor, feeding `input`, and returns stdout.
+    async fn run_on(
+        instance: &Instance,
+        argv: Vec<String>,
+        input: Option<Vec<u8>>,
+    ) -> Result<Vec<u8>> {
+        let (tx, rx) = mpsc::channel::<ExecRequest>(64);
+        tx.send(ExecRequest {
+            payload: Some(exec_request::Payload::Start(
+                needy_api_proto::v1::ExecStart {
+                    argv,
+                    no_stdin: input.is_none(),
+                    env: [("COPYFILE_DISABLE".to_string(), "1".to_string())].into(),
+                    origin: "files".into(),
+                    ..Default::default()
+                },
+            )),
+        })
+        .await?;
+        if let Some(bytes) = input {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                for chunk in bytes.chunks(1 << 20) {
+                    let _ = tx
+                        .send(ExecRequest {
+                            payload: Some(exec_request::Payload::Stdin(chunk.to_vec())),
+                        })
+                        .await;
+                }
+                let _ = tx
+                    .send(ExecRequest {
+                        payload: Some(exec_request::Payload::StdinEof(true)),
+                    })
+                    .await;
+            });
+        }
+        let mut stream = instance
+            .client
+            .processes()
+            .exec(ReceiverStream::new(rx))
+            .await?
+            .into_inner();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        while let Some(message) = stream.message().await? {
+            match message.payload {
+                Some(exec_response::Payload::Stdout(b)) => out.extend(b),
+                Some(exec_response::Payload::Stderr(b)) => err.extend(b),
+                Some(exec_response::Payload::Exited(exit)) => {
+                    if exit.code != Some(0) {
+                        bail!("{}", String::from_utf8_lossy(&err).trim());
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        drop(tx);
+        Ok(out)
+    }
+
+    async fn copy_in_executors(&self, session: &Arc<Session>) -> Result<()> {
+        for (name, mapping) in &session.profile.files {
+            if !session.profile.session_files.is_empty()
+                && !session.profile.session_files.contains(name)
+            {
+                continue;
+            }
+            let (FileMode::CopyIn, Side::Host(src), Side::Executor { name: exec, path }) =
+                (mapping.mode, &mapping.from, &mapping.to)
+            else {
+                continue;
+            };
+            let Some(instance) = session.executors.get(exec) else {
+                continue;
+            };
+            let root = Self::host_path(session, src);
+            let filter = mapping.filter.clone();
+            let archive =
+                tokio::task::spawn_blocking(move || crate::files::pack(&root, &filter)).await??;
+            let size = archive.len();
+            Self::run_on(
+                instance,
+                vec![
+                    "tar".into(),
+                    "-x".into(),
+                    "-f".into(),
+                    "-".into(),
+                    "-C".into(),
+                    path.clone(),
+                ],
+                Some(archive),
+            )
+            .await
+            .with_context(|| format!("copy-in {name}"))?;
+            self.trace.record(
+                &session.id,
+                "files.copy_in",
+                [
+                    ("name", name.clone()),
+                    ("to", format!("{exec}:{path}")),
+                    ("bytes", size.to_string()),
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    async fn mirror_out_executors(&self, session: &Arc<Session>) -> Result<()> {
+        for (name, mapping) in &session.profile.files {
+            let (FileMode::MirrorOut, Side::Executor { name: exec, path }, Side::Host(dst)) =
+                (mapping.mode, &mapping.from, &mapping.to)
+            else {
+                continue;
+            };
+            let Some(instance) = session.executors.get(exec) else {
+                continue;
+            };
+            let archive = Self::run_on(
+                instance,
+                vec![
+                    "tar".into(),
+                    "-c".into(),
+                    "-f".into(),
+                    "-".into(),
+                    "-C".into(),
+                    path.clone(),
+                    ".".into(),
+                ],
+                None,
+            )
+            .await
+            .with_context(|| format!("mirror-out {name}"))?;
+            let destination = Self::host_path(session, dst);
+            let size = archive.len();
+            tokio::task::spawn_blocking(move || crate::files::unpack(&archive, &destination))
+                .await??;
+            self.trace.record(
+                &session.id,
+                "files.mirror_out",
+                [
+                    ("name", name.clone()),
+                    ("from", format!("{exec}:{path}")),
+                    ("bytes", size.to_string()),
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------- chaos
+
+    /// Applies `exec` faults: delays sleep here; an errno denies the command.
+    async fn exec_fault(&self, session: &Session, command: &str) -> Option<String> {
+        let fired = session.injector.check("exec", command)?;
+        if let Some(delay) = fired.delay {
+            tokio::time::sleep(delay).await;
+        }
+        self.trace.record(
+            &session.id,
+            "fault.injected",
+            [
+                ("on", "exec".to_string()),
+                ("argv", command.to_string()),
+                ("errno", fired.errno.clone().unwrap_or_default()),
+                (
+                    "delay_ms",
+                    fired
+                        .delay
+                        .map(|d| d.as_millis().to_string())
+                        .unwrap_or_default(),
+                ),
+            ],
+        );
+        fired.errno
     }
 
     // -------------------------------------------------------------- routing
@@ -874,7 +1071,17 @@ impl SessionService for Api {
                 .session(&request.session_id)
                 .ok_or_else(|| Status::not_found("no such session"))?,
         };
-        Ok(Response::new(self.daemon.decide(&session, &request)))
+        let mut response = self.daemon.decide(&session, &request);
+        if response.deny.is_empty()
+            && let Some(errno) = self
+                .daemon
+                .exec_fault(&session, &request.argv.join(" "))
+                .await
+        {
+            response.target = String::new();
+            response.deny = format!("needy chaos: {errno}");
+        }
+        Ok(Response::new(response))
     }
 }
 
@@ -953,6 +1160,15 @@ impl ProcessService for Api {
                 }
                 let session_id = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
                 start.session_id = session_id.clone();
+                // Chaos and faults that act on commands fire before anything runs.
+                if let Some(session) = &session
+                    && start.origin != "actor-proxy"
+                    && start.origin != "actor-mount"
+                    && let Some(errno) =
+                        self.daemon.exec_fault(session, &start.argv.join(" ")).await
+                {
+                    return Err(Status::failed_precondition(format!("needy chaos: {errno}")));
+                }
                 (
                     instance,
                     session_id,
@@ -991,31 +1207,83 @@ impl ProcessService for Api {
             }),
             None => None,
         };
+        let (tty, mount_root, detach) = match &first.payload {
+            Some(exec_request::Payload::Start(start)) => (
+                start.tty.map(|t| (t.cols, t.rows)),
+                (start.origin == "actor-mount").then(|| start.cwd.clone()),
+                start.detach,
+            ),
+            _ => (None, None, false),
+        };
+        let session = self.daemon.session(&session_id);
+        let injector = session.as_ref().map(|s| s.injector.clone());
+        // SFTP for an actor mount is framed so file faults can answer `open`.
+        let tap = match (&mount_root, &injector) {
+            (Some(root), Some(injector)) if injector.has("file.open") => {
+                Some(Arc::new(crate::chaos::SftpTap::new(root)))
+            }
+            _ => None,
+        };
+        let (out_tx, out_rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
         let (tx, rx) = mpsc::channel::<ExecRequest>(64);
         tx.send(first)
             .await
             .map_err(|_| Status::internal("channel"))?;
-        tokio::spawn(async move {
-            while let Ok(Some(message)) = inbound.message().await {
-                if tx.send(message).await.is_err() {
-                    break;
+        {
+            let tap = tap.clone();
+            let injector = injector.clone();
+            let out_tx = out_tx.clone();
+            let trace = self.daemon.trace.clone();
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                while let Ok(Some(mut message)) = inbound.message().await {
+                    if let (Some(tap), Some(injector), Some(exec_request::Payload::Stdin(bytes))) =
+                        (&tap, &injector, &message.payload)
+                    {
+                        let tapped = tap.client_bytes(bytes, injector);
+                        for (path, errno) in &tapped.injected {
+                            trace.record(
+                                &session_id,
+                                "fault.injected",
+                                [("on", "file.open"), ("path", path), ("errno", errno)],
+                            );
+                        }
+                        for reply in tapped.replies {
+                            let _ = out_tx
+                                .send(Ok(ExecResponse {
+                                    payload: Some(exec_response::Payload::Stdout(reply)),
+                                }))
+                                .await;
+                        }
+                        if tapped.forward.is_empty() {
+                            continue;
+                        }
+                        message.payload = Some(exec_request::Payload::Stdin(tapped.forward));
+                    }
+                    if tx.send(message).await.is_err() {
+                        break;
+                    }
                 }
-            }
-        });
+            });
+        }
         let mut upstream = instance
             .client
             .processes()
             .exec(ReceiverStream::new(rx))
             .await?
             .into_inner();
-        let (out_tx, out_rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
         let daemon = self.daemon.clone();
         let started_ms = now_ms();
+        let cast_dir = session.as_ref().map(|s| s.dir.join("casts"));
         tokio::spawn(async move {
             let _permit = permit;
             let mut process_id = String::new();
+            let mut cast: Option<std::fs::File> = None;
+            // A detached process keeps its slot until it exits, so the stream
+            // is drained after the client leaves.
+            let mut client_gone = false;
             loop {
-                let message = match upstream.message().await {
+                let mut message = match upstream.message().await {
                     Ok(Some(m)) => m,
                     Ok(None) => break,
                     Err(e) => {
@@ -1024,7 +1292,7 @@ impl ProcessService for Api {
                     }
                 };
                 let mut done = false;
-                match &message.payload {
+                match &mut message.payload {
                     Some(exec_response::Payload::Started(started)) => {
                         process_id = started.process_id.clone();
                         daemon
@@ -1032,6 +1300,14 @@ impl ProcessService for Api {
                             .lock()
                             .unwrap()
                             .insert(started.process_id.clone(), instance.clone());
+                        let mut cast_path = String::new();
+                        if let (Some((cols, rows)), Some(dir)) = (tty, &cast_dir) {
+                            cast = crate::trace::open_cast(dir, &process_id, cols, rows, &argv);
+                            if cast.is_some() {
+                                cast_path =
+                                    dir.join(format!("{process_id}.cast")).display().to_string();
+                            }
+                        }
                         if !argv.is_empty() {
                             daemon.trace.record(
                                 &session_id,
@@ -1041,8 +1317,20 @@ impl ProcessService for Api {
                                     ("executor", instance.name.clone()),
                                     ("argv", argv.join(" ")),
                                     ("origin", origin.clone()),
+                                    ("cast", cast_path),
                                 ],
                             );
+                        }
+                    }
+                    Some(exec_response::Payload::Stdout(bytes)) => {
+                        if let Some(tap) = &tap {
+                            *bytes = tap.server_bytes(bytes);
+                            if bytes.is_empty() {
+                                continue;
+                            }
+                        }
+                        if let Some(file) = cast.as_mut() {
+                            crate::trace::cast_output(file, started_ms, bytes);
                         }
                     }
                     Some(exec_response::Payload::Exited(exit)) => {
@@ -1065,8 +1353,15 @@ impl ProcessService for Api {
                     }
                     _ => {}
                 }
-                if out_tx.send(Ok(message)).await.is_err() || done {
+                if done {
+                    let _ = out_tx.send(Ok(message)).await;
                     break;
+                }
+                if !client_gone && out_tx.send(Ok(message)).await.is_err() {
+                    if !detach {
+                        break;
+                    }
+                    client_gone = true;
                 }
             }
         });
@@ -1164,6 +1459,41 @@ impl GuestService for Api {
                 sftp_command: instance.sftp.clone(),
             });
         }
+        let mut copy_in = Vec::new();
+        let mut mirror_out = Vec::new();
+        for (name, mapping) in &profile.files {
+            if !profile.session_files.is_empty() && !profile.session_files.contains(name) {
+                continue;
+            }
+            match (mapping.mode, &mapping.from, &mapping.to) {
+                (FileMode::CopyIn, Side::Host(_), Side::Actor(path)) => copy_in.push(GuestCopy {
+                    name: name.clone(),
+                    path: path.clone(),
+                }),
+                (FileMode::MirrorOut, Side::Actor(path), Side::Host(_)) => {
+                    mirror_out.push(GuestCopy {
+                        name: name.clone(),
+                        path: path.clone(),
+                    })
+                }
+                _ => {}
+            }
+        }
+        let hwmon_faults = session
+            .injector
+            .faults()
+            .iter()
+            .filter(|f| f.on == "hwmon")
+            .map(|f| GuestFault {
+                at_ms: f.at.map(|d| d.as_millis() as i64).unwrap_or(0),
+                temp_mc: f
+                    .set
+                    .get("temp_c")
+                    .and_then(|v| v.as_f64())
+                    .map(|c| (c * 1000.0) as i32)
+                    .unwrap_or(100_000),
+            })
+            .collect();
         let recipe = session.recipe.as_ref();
         let route_names = profile.route_names().unwrap_or_else(|| vec!["*".into()]);
         self.daemon.trace.record(
@@ -1211,7 +1541,94 @@ impl GuestService for Api {
                         .collect()
                 })
                 .unwrap_or_default(),
+            copy_in,
+            mirror_out,
+            hwmon_faults,
         }))
+    }
+
+    type FetchFilesStream = std::pin::Pin<
+        Box<dyn futures_util::Stream<Item = Result<FetchFilesResponse, Status>> + Send>,
+    >;
+
+    async fn fetch_files(
+        &self,
+        request: Request<FetchFilesRequest>,
+    ) -> Result<Response<Self::FetchFilesStream>, Status> {
+        let session = self.bound_session()?;
+        let name = request.into_inner().name;
+        let mapping = session
+            .profile
+            .files
+            .get(&name)
+            .filter(|m| m.mode == FileMode::CopyIn)
+            .ok_or_else(|| Status::not_found("no such copy-in mapping"))?;
+        let Side::Host(src) = &mapping.from else {
+            return Err(Status::invalid_argument("copy-in must come from the host"));
+        };
+        let root = Daemon::host_path(&session, src);
+        let filter = mapping.filter.clone();
+        let archive = tokio::task::spawn_blocking(move || crate::files::pack(&root, &filter))
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?
+            .map_err(status)?;
+        self.daemon.trace.record(
+            &session.id,
+            "files.copy_in",
+            [
+                ("name", name),
+                ("to", "actor".into()),
+                ("bytes", archive.len().to_string()),
+            ],
+        );
+        let chunks: Vec<Result<FetchFilesResponse, Status>> = archive
+            .chunks(1 << 20)
+            .map(|c| Ok(FetchFilesResponse { data: c.to_vec() }))
+            .collect();
+        Ok(Response::new(Box::pin(tokio_stream::iter(chunks))))
+    }
+
+    async fn push_files(
+        &self,
+        request: Request<Streaming<PushFilesRequest>>,
+    ) -> Result<Response<PushFilesResponse>, Status> {
+        let session = self.bound_session()?;
+        let mut stream = request.into_inner();
+        let mut name = String::new();
+        let mut archive = Vec::new();
+        while let Some(message) = stream.message().await? {
+            if name.is_empty() {
+                name = message.name;
+            }
+            archive.extend(message.data);
+        }
+        let mapping = session
+            .profile
+            .files
+            .get(&name)
+            .filter(|m| m.mode == FileMode::MirrorOut)
+            .ok_or_else(|| Status::not_found("no such mirror-out mapping"))?;
+        let Side::Host(dst) = &mapping.to else {
+            return Err(Status::invalid_argument("mirror-out must go to the host"));
+        };
+        let destination = Daemon::host_path(&session, dst);
+        let size = archive.len();
+        let count =
+            tokio::task::spawn_blocking(move || crate::files::unpack(&archive, &destination))
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(status)?;
+        self.daemon.trace.record(
+            &session.id,
+            "files.mirror_out",
+            [
+                ("name", name),
+                ("from", "actor".into()),
+                ("bytes", size.to_string()),
+                ("entries", count.to_string()),
+            ],
+        );
+        Ok(Response::new(PushFilesResponse {}))
     }
 
     async fn push_events(

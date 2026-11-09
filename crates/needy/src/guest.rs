@@ -27,8 +27,9 @@ mod linux {
     use anyhow::{Context, Result, bail};
     use needy_api_client::Client;
     use needy_api_proto::v1::{
-        DecideRequest, ExecRequest, ExecStart, GetConfigRequest, GetConfigResponse, GuestMount,
-        ReportExitRequest, exec_request, exec_response,
+        DecideRequest, ExecRequest, ExecStart, FetchFilesRequest, GetConfigRequest,
+        GetConfigResponse, GuestMount, PushEventsRequest, PushFilesRequest, ReportExitRequest,
+        TraceEvent, exec_request, exec_response,
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::sync::mpsc;
@@ -300,6 +301,38 @@ mod linux {
         }
         tokio::spawn(gateway_forwarder(config.gateway_port));
         create_stubs(&config.route_names);
+        for copy in &config.copy_in {
+            if let Err(e) = copy_in(&client, &copy.name, &copy.path, user.uid, user.gid).await {
+                eprintln!("needy init: copy-in {}: {e:#}", copy.name);
+            }
+        }
+        for fault in config.hwmon_faults.clone() {
+            let client = client.clone();
+            let session = config.session_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_millis(fault.at_ms.max(0) as u64)).await;
+                write(
+                    "/sys/module/fake_coretemp/parameters/override_mc",
+                    &fault.temp_mc.to_string(),
+                );
+                let event = TraceEvent {
+                    session_id: session,
+                    time_ms: crate::trace::now_ms(),
+                    kind: "fault.injected".into(),
+                    attrs: [
+                        ("on".to_string(), "hwmon".to_string()),
+                        ("temp_mc".to_string(), fault.temp_mc.to_string()),
+                    ]
+                    .into(),
+                };
+                let _ = client
+                    .guest()
+                    .push_events(tokio_stream::iter(vec![PushEventsRequest {
+                        event: Some(event),
+                    }]))
+                    .await;
+            });
+        }
         // Route only after setup so init's own helpers stay local.
         write(
             "/sys/module/binfmt_needy/parameters/route_uid",
@@ -329,6 +362,11 @@ mod linux {
                 (Some(127), String::new())
             }
         };
+        for copy in &config.mirror_out {
+            if let Err(e) = mirror_out(&client, &copy.name, &copy.path).await {
+                eprintln!("needy init: mirror-out {}: {e:#}", copy.name);
+            }
+        }
         let _ = client
             .guest()
             .report_exit(ReportExitRequest { code, signal })
@@ -365,6 +403,8 @@ mod linux {
             payload: Some(exec_request::Payload::Start(ExecStart {
                 argv: m.sftp_command.clone(),
                 executor: m.executor.clone(),
+                // The mount root lets file faults match paths relative to it.
+                cwd: m.source.clone(),
                 origin: "actor-mount".into(),
                 ..Default::default()
             })),
@@ -422,6 +462,70 @@ mod linux {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         bail!("sshfs did not mount within 10 s")
+    }
+
+    /// Fetches a copy-in mapping from the host and unpacks it, owned by the user.
+    async fn copy_in(client: &Client, name: &str, path: &str, uid: u32, gid: u32) -> Result<()> {
+        let mut stream = client
+            .guest()
+            .fetch_files(FetchFilesRequest { name: name.into() })
+            .await
+            .map_err(|s| anyhow::anyhow!("{}", s.message()))?
+            .into_inner();
+        let mut archive = Vec::new();
+        while let Some(chunk) = stream
+            .message()
+            .await
+            .map_err(|s| anyhow::anyhow!("{}", s.message()))?
+        {
+            archive.extend(chunk.data);
+        }
+        let root = std::path::PathBuf::from(path);
+        crate::files::unpack(&archive, &root)?;
+        chown_tree(&root, uid, gid);
+        Ok(())
+    }
+
+    fn chown_tree(path: &std::path::Path, uid: u32, gid: u32) {
+        let _ = std::os::unix::fs::lchown(path, Some(uid), Some(gid));
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() && !p.is_symlink() {
+                    chown_tree(&p, uid, gid);
+                } else {
+                    let _ = std::os::unix::fs::lchown(&p, Some(uid), Some(gid));
+                }
+            }
+        }
+    }
+
+    /// Packs a directory and sends it to the host for a mirror-out mapping.
+    async fn mirror_out(client: &Client, name: &str, path: &str) -> Result<()> {
+        let root = std::path::PathBuf::from(path);
+        if !root.exists() {
+            return Ok(());
+        }
+        let archive = crate::files::pack(&root, &[])?;
+        let mut messages = Vec::new();
+        for (i, chunk) in archive.chunks(1 << 20).enumerate() {
+            messages.push(PushFilesRequest {
+                name: if i == 0 { name.into() } else { String::new() },
+                data: chunk.to_vec(),
+            });
+        }
+        if messages.is_empty() {
+            messages.push(PushFilesRequest {
+                name: name.into(),
+                data: Vec::new(),
+            });
+        }
+        client
+            .guest()
+            .push_files(tokio_stream::iter(messages))
+            .await
+            .map_err(|s| anyhow::anyhow!("{}", s.message()))?;
+        Ok(())
     }
 
     /// The kernel can only route a file that exists. Routed commands the actor

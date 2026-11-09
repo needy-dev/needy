@@ -11,15 +11,16 @@ work takes effect.
   **recipe** that fixes its identity: OS, kernel, CPU, firmware and devices.
 
 > [!NOTE]
-> Needy is being redesigned around this model. The code in this repository is
-> the previous prototype and will be replaced. See the
-> [design notes](docs/ai/references/INDEX.md).
+> Needy is experimental. The first closed loop works: opencode runs in an actor
+> while its commands run in Docker or on a Mac. See the
+> [results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md).
 
 ## Table of Contents
 
 - [Use cases](#use-cases)
 - [Concepts](#concepts)
 - [How it works](#how-it-works)
+- [Getting started](#getting-started)
 - [Documentation](#documentation)
 - [Development](#development)
 - [Acknowledgements](#acknowledgements)
@@ -75,6 +76,55 @@ near its main dependency, such as inference, and its gateway injects
 credentials so the actor never holds them. The executors' network sits near
 what the work operates on and carries most audit rules.
 
+## Getting started
+
+An actor host needs Linux with KVM and Docker. Executors need only the `needy`
+binary: Linux, macOS and Windows are supported.
+
+```sh
+# On the actor host: build the actor image and the executor image.
+needy build --executor        # writes ~/.needy/images/default
+needy daemon --mode control &
+
+# Run opencode in an actor; its shells run in a Docker executor.
+needy session create --profile examples/opencode/profile.yaml
+needy report latest
+```
+
+`needy exec` runs one command through the same rules, with a terminal when
+stdin and stdout are terminals:
+
+```sh
+needy session create --no-actor --profile examples/cli/profile.yaml
+needy exec --session SESSION -- uname -a
+needy exec -t --session SESSION -- ssh user@host     # interactive
+needy exec -d --session SESSION -- pnpm dev          # prints a process ID
+needy attach PROCESS                                 # replays recent output
+needy exec --output ndjson --session SESSION -- make test
+needy fs cp ./src build:/home/agent/workspace
+```
+
+A Mac or Windows machine becomes an executor by running the daemon and
+exposing it through a tunnel such as `ssh -R` or Cloudflare Tunnel:
+
+```sh
+NEEDY_TOKEN=... needy daemon --mode executor --listen 127.0.0.1:7401 --token-env NEEDY_TOKEN
+```
+
+Examples:
+
+| Profile | Shows |
+| --- | --- |
+| [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model through the gateway, shells in Docker |
+| [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on a Mac |
+| [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
+| [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor |
+| [`examples/local`](examples/local/profile.yaml) | No KVM needed: copy-in, mirror-out, chaos and recordings on this machine |
+| [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec` |
+
+`needy profile check PROFILE --cmd "git status"` shows where commands would run
+and the recipe's consistency findings.
+
 ## Documentation
 
 - [Actor and executor separation](docs/ai/references/architecture/2026-11-09-actor-executor-separation-design.md):
@@ -82,6 +132,8 @@ what the work operates on and carries most audit rules.
 - [CLI, exec streams and reports](docs/ai/references/cli/2026-11-09-cli-exec-and-report-design.md)
 - [Profiles and rules](docs/ai/references/config/2026-11-09-profile-and-rules-design.md)
 - [Recipes](docs/ai/references/config/2026-11-09-recipe-design.md)
+- [Closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md):
+  what runs, and latency and throughput numbers.
 - [Where documents go](docs/README.md)
 
 ## Development

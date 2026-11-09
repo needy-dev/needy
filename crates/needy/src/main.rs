@@ -2,10 +2,12 @@
 
 mod bench;
 mod build;
+mod chaos;
 #[cfg(unix)]
 mod control;
 mod exec_cli;
 mod executor;
+mod files;
 mod fs_cli;
 mod gateway;
 mod guest;

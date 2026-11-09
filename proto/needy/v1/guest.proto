@@ -9,7 +9,40 @@ service GuestService {
   // Events observed inside the actor, such as identity probes.
   rpc PushEvents(stream PushEventsRequest) returns (PushEventsResponse);
   rpc ReportExit(ReportExitRequest) returns (ReportExitResponse);
+  // A tar archive of a copy-in mapping's host files.
+  rpc FetchFiles(FetchFilesRequest) returns (stream FetchFilesResponse);
+  // A tar archive for a mirror-out mapping; the first message names it.
+  rpc PushFiles(stream PushFilesRequest) returns (PushFilesResponse);
 }
+
+message GuestCopy {
+  // Mapping name in the profile.
+  string name = 1;
+  // Path inside the actor.
+  string path = 2;
+}
+
+message GuestFault {
+  // Milliseconds after the driving program starts.
+  int64 at_ms = 1;
+  // Sensor reading to force, in millidegrees Celsius.
+  int32 temp_mc = 2;
+}
+
+message FetchFilesRequest {
+  string name = 1;
+}
+
+message FetchFilesResponse {
+  bytes data = 1;
+}
+
+message PushFilesRequest {
+  string name = 1;
+  bytes data = 2;
+}
+
+message PushFilesResponse {}
 
 message GuestUser {
   string name = 1;
@@ -49,6 +82,9 @@ message GetConfigResponse {
   // Port on the host (CID 2) that serves the actor gateway.
   uint32 gateway_port = 10;
   repeated GuestSensor sensors = 11;
+  repeated GuestCopy copy_in = 12;
+  repeated GuestCopy mirror_out = 13;
+  repeated GuestFault hwmon_faults = 14;
 }
 
 message TraceEvent {

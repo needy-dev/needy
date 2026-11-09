@@ -63,6 +63,7 @@ pub struct Gateway {
     pub trace: Trace,
     pub session: String,
     pub network: &'static str,
+    injector: Option<Arc<crate::chaos::Injector>>,
     client: hyper_util::client::legacy::Client<
         hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
         Incoming,
@@ -70,7 +71,13 @@ pub struct Gateway {
 }
 
 impl Gateway {
-    pub fn new(policy: Policy, trace: Trace, session: String, network: &'static str) -> Self {
+    pub fn new(
+        policy: Policy,
+        trace: Trace,
+        session: String,
+        network: &'static str,
+        injector: Option<Arc<crate::chaos::Injector>>,
+    ) -> Self {
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()
@@ -84,6 +91,7 @@ impl Gateway {
             trace,
             session,
             network,
+            injector,
             client,
         }
     }
@@ -105,6 +113,36 @@ impl Gateway {
             .await;
     }
 
+    /// Applies `net.connect` faults for `host`: delays sleep; an errno fails the request.
+    async fn fault(&self, host: &str) -> Option<Response<Body>> {
+        let fired = self.injector.as_ref()?.check("net.connect", host)?;
+        if let Some(delay) = fired.delay {
+            tokio::time::sleep(delay).await;
+        }
+        self.trace.record(
+            &self.session,
+            "fault.injected",
+            [
+                ("on", "net.connect".to_string()),
+                ("host", host.to_string()),
+                ("errno", fired.errno.clone().unwrap_or_default()),
+                (
+                    "delay_ms",
+                    fired
+                        .delay
+                        .map(|d| d.as_millis().to_string())
+                        .unwrap_or_default(),
+                ),
+            ],
+        );
+        fired.errno.map(|errno| {
+            text(
+                StatusCode::BAD_GATEWAY,
+                &format!("needy chaos: {errno} for {host}"),
+            )
+        })
+    }
+
     async fn handle(&self, request: Request<Incoming>) -> Response<Body> {
         if request.method() == Method::CONNECT {
             return self.connect(request).await;
@@ -118,6 +156,9 @@ impl Gateway {
                 StatusCode::FORBIDDEN,
                 &format!("needy: {host} is not allowed"),
             );
+        }
+        if let Some(response) = self.fault(&host).await {
+            return response;
         }
         let mut target = request.uri().to_string();
         if let Some(base) = self.policy.upstream.get(&host) {
@@ -178,6 +219,9 @@ impl Gateway {
                 StatusCode::FORBIDDEN,
                 &format!("needy: {host} is not allowed"),
             );
+        }
+        if let Some(response) = self.fault(&host).await {
+            return response;
         }
         let upstream = match tokio::net::TcpStream::connect(&authority).await {
             Ok(s) => s,
