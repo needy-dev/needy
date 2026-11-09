@@ -33,7 +33,8 @@ agent-written replacement.
 An environment where routed operations take effect: a container, a microVM, a
 pod or a real machine such as a Mac. Executors hold state (the workspace).
 
-*Avoid*: runner, worker, needy client, target.
+*Avoid*: worker, needy client, target. A *runner* is the machine an executor
+runs on, not the executor (see Runner).
 
 ### Executor instance
 
@@ -54,6 +55,15 @@ trace. In **executor** mode it only runs processes on its own machine.
 
 *Avoid*: server.
 
+### Runner (provisional)
+
+A machine running `needy daemon` that has joined a control plane, with the
+roles it can host (`actor` with its runtimes, `executor` with its providers)
+and labels. Runners are registered, listed, rotated and removed; actors and
+executors are instances that run on them. Designed in
+[Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md);
+not implemented yet.
+
 ## Sessions and configuration
 
 ### Session
@@ -67,7 +77,9 @@ starts its actor, then `running`. It ends `stopped` (after `stopping`, by
 `failed` (its create failed). The first of these end states stays: stopping a
 finished session releases its executors but keeps it `finished`.
 
-*Avoid*: run, rollout.
+*Avoid*: rollout. The [runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)
+design renames *session* to **run**; until that lands, *session* is the
+current term.
 
 ### Group
 
