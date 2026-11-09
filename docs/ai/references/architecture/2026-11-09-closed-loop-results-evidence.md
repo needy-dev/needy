@@ -272,6 +272,38 @@ Not rerun in this pass: `needy exec -t -- ssh` into an sshd container. The
 VMs of these sessions had exited before each stop; a VM still running at stop
 keeps running until fix slice 8b.
 
+## Re-verified after the fix slices
+
+Fix slices 8b–8i of the module layout redesign (the VM stops with its
+session; the guest listener runs under the session and the actor's sockets
+are removed; a failed create releases what it acquired; the pool lock is not
+held while an instance is created; an `under` rule test; a push creates its
+directory; an actor that exits releases its executors and sockets; short
+Docker executor socket paths and a clear error when one is too long) were
+rerun on 2026-11-10 with debug builds and every daemon's state, image and
+output in a scratch directory. Each fix has a regression test in `make test`.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `examples/local` without an actor, its native workspace a missing nested directory: copy-in, `exit 7`, `curl` fault (126), `fs cp --session` and `fs cp` without a session into missing directories, stop with mirror-out, `session ls`, `report` | Mac | Pass: copy-in creates the workspace (no manual `mkdir`); both copies land; the report names profile `local` |
+| A control daemon whose runtime directory makes `local.sock` longer than `sun_path` | Mac | Pass: exits 1 at once with `cannot listen on unix:<path>/local.sock: path must be shorter than SUN_LEN` |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor`; `images/Dockerfile`'s `windows` stage | Linux | Pass |
+| `examples/smoke` with `/bin/sleep 300` as the driving program, then `session stop` after 8 s | Linux | Pass: the stop returns in 0.27 s; no Firecracker process, no container and no socket left (`v.sock`, `v.sock_7000`, `v.sock_7001` and the executor's socket, 85–93 bytes long under the scratch state directory, were there before). The Docker executor's socket directory is `executors/<12 hex digits>` |
+| `examples/smoke` finishing on its own | Linux | Pass: GCE identity, routed `python3`, workspace both ways, `routed exit=7`; once the VM exits the container and sockets are gone without a stop and `session ls` says `finished`; a later `session stop` keeps it `finished` |
+| A profile whose second executor (a remote on a missing socket) cannot be created after a Docker one was | Linux | Pass: the create fails naming `executor b`; no container left; `session ls` says `failed` and the report shows the reason from `session.fail` |
+| Two sessions in one group whose Docker executor key is `{group}`, created concurrently | Linux | Pass: one container, both sessions run on it (same `hostname`); it is removed after the second stop |
+| A profile that routes `python3` to a Docker executor and denies it `under: "bash **"` | Linux | Pass: under `sh` it runs on the executor; under `bash -c` it prints `needy: denied: under bash` and exits 126 |
+| `examples/chaos` | Linux | Pass: copy-in, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; the report counts 3 faults by kind; no container or socket left |
+| Windows executor: `needy.exe` over TCP on the same host, `fs cp` of a file (backslash path) and a directory (forward-slash path) into missing nested directories, into an existing one, and onto a file | Windows | Pass: both copies land (the push falls back to `cmd`'s `mkdir`); an existing directory is fine; a path that is a file fails with `tar on local failed: … could not chdir` |
+
+Changed on purpose by these fixes:
+
+- A session whose actor exits releases its executors then; `session ls`
+  lists it as `finished` without executors.
+- A Docker executor's socket directory is named by 12 hex digits derived
+  from its container name instead of the key, and is removed with the
+  container.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

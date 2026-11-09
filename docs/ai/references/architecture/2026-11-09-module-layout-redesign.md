@@ -480,9 +480,9 @@ As built in slice 8:
   `Sessions` (`session/mod.rs`), `Processes` (`relay/mod.rs`) and `Guest`
   (`guest.rs`) itself. `testing.rs` holds the tests' in-process executor and
   daemon. The control plane's modules are Unix only, as before.
-- Tasks: the daemon's tracker holds the local executor, the guest listeners
-  and the relays of commands outside any session; a session's tracker holds
-  the relays of its commands and its actor's gateway and VM watch. The actor
+- Tasks: the daemon's tracker holds the local executor and the relays of
+  commands outside any session; a session's tracker holds the relays of its
+  commands and its actor's guest listener, gateway and VM watch. The actor
   has no tracker of its own: its tasks run under a child of the session's
   token, which the VM's exit also cancels, because an actor never outlives its
   session and the session's stop awaits them anyway. `Sessions::stop` cancels
@@ -491,13 +491,24 @@ As built in slice 8:
   sessions in creation order, cancels the daemon's token, calls
   `Host::shutdown` on the local executor and awaits the daemon's tracker. The
   executor role also calls `Host::shutdown` on a termination signal.
-- Until 8c the guest listener runs under the daemon's token, so it lives
-  until the daemon stops; until 8b a session's stop drops the VM's handle,
-  which leaves Firecracker running.
+- After the fix slices (8b–8i): a session's stop cancels the actor's token;
+  the VM watch stops Firecracker through `Vm::stop` (`SIGTERM`, then
+  `SIGKILL` after 3 s) and the stop removes the actor's sockets. A VM that
+  exits on its own finishes the session: mirror-out runs, its executors are
+  released and the actor's sockets removed, and the session stays listed as
+  `finished` until it is stopped. A failed create releases what it acquired
+  and removes the actor's sockets. `Pool::acquire` holds the lock only for
+  the map and the reference counts; each key has a `OnceCell`, so acquires of
+  one key share one creation and a failed creation leaves the key free.
+  `api_client::files::push` creates its directory first (`mkdir -p`, or
+  `cmd`'s `mkdir` where no `mkdir` program starts). A Docker executor's
+  socket directory is `executors/<12 hex digits>` derived from its container
+  name, removed when the instance is destroyed, and a socket path over
+  `sun_path` fails the create with the path.
 - `session::state` allows `Creating → Running | Failed | Finished`,
   `Running → Stopping | Finished` and `Stopping → Stopped`. A session is
   listed as `creating` while it is created. Stopping a finished session
-  releases its executors and keeps it `finished`.
+  keeps it `finished`; its executors were released when its actor exited.
 - Session lookups (`get`, `stop`, `logs`, `Decide`, the guest API) take an
   exact ID, a unique ID prefix or a name; an empty ID names no session, and a
   prefix or name that fits several is an `Invalid` error. A sessionless exec
@@ -594,14 +605,14 @@ Rules for every slice:
 | 7a | **proto**: `Origin` and session state as enums, ancestry in `Decide`, producers and consumers together | — | [gRPC API crates](../api/2026-11-09-grpc-api-crates-design.md): rewrite to the current schema | Unit; closed loop: routed exec |
 | 7 | **api-client**, **api-server**: `exec`, `files`, `ready`, errors; adapters, `control`, `Server`, `termination` | 3, 5, 7a | gRPC API crates: crate layout | Closed loop: `exec`, `fs cp`, Windows executor |
 | 8 | **daemon**: rebuilt on the above, with the closed-loop behavior | 1–7 | [Terms](../../../TERMS_AND_CONCEPTS.md) if a term changes | Closed loop: every row, Linux and Windows |
-| 8b | Fix: the VM stops with its session | 8 | Closed-loop results | Regression test; closed loop: session stop |
-| 8c | Fix: listener tasks and sockets are cleaned up | 8 | — | Regression test |
-| 8d | Fix: a failed create releases the instances it acquired | 8 | — | Regression test |
-| 8e | Fix: the pool lock is not held while an instance is created | 8 | — | Regression test |
-| 8f | Fix: `ancestors` reach the rules, so `when.under` matches (7a wires the proxy and the daemon; 8f keeps it through the rebuild and adds the test) | 7a, 8 | — | Regression test; closed loop: an `under` rule |
-| 8g | Fix: copy-in and `fs cp` create the target directory instead of failing when it is missing | 8 | — | Regression test; `examples/local` on a fresh machine |
-| 8h | Fix: an actor that exits releases its executors and removes its sockets; the session stays listed as finished | 8 | — | Regression test; closed loop: smoke, no container left |
-| 8i | Fix: a listener that cannot bind (for example a socket path over `sun_path`) fails start-up at once with the path in the error | 7, 8 | — | Regression test |
+| 8b | **Done.** Fix: the VM stops with its session | 8 | Closed-loop results | Regression test; closed loop: session stop |
+| 8c | **Done.** Fix: listener tasks and sockets are cleaned up | 8 | — | Regression test |
+| 8d | **Done.** Fix: a failed create releases the instances it acquired | 8 | — | Regression test |
+| 8e | **Done.** Fix: the pool lock is not held while an instance is created | 8 | — | Regression test |
+| 8f | **Done.** Fix: `ancestors` reach the rules, so `when.under` matches (7a wires the proxy and the daemon; 8f keeps it through the rebuild and adds the test) | 7a, 8 | — | Regression test; closed loop: an `under` rule |
+| 8g | **Done.** Fix: copy-in and `fs cp` create the target directory instead of failing when it is missing | 8 | — | Regression test; `examples/local` on a fresh machine |
+| 8h | **Done.** Fix: an actor that exits releases its executors and removes its sockets; the session stays listed as finished | 8 | — | Regression test; closed loop: smoke, no container left |
+| 8i | **Done.** Fix: a listener that cannot bind (for example a socket path over `sun_path`) fails start-up at once with the path in the error | 7, 8 | — | Regression test |
 | 9 | **persistence**: `state.db` for sessions, instances, processes; reconcile on start | 8 | Closed-loop results | Closed loop: daemon restart with a running session |
 
 ### QA checklist
