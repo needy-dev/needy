@@ -334,6 +334,11 @@ pub struct ProcessInfo {
     pub started_at_ms: i64,
     #[prost(string, tag="9")]
     pub session_id: ::prost::alloc::string::String,
+    /// Who started the process. The control daemon sets it from the start it
+    /// relayed; an executor, which does not keep it, and a daemon that did not
+    /// start the process leave it unspecified.
+    #[prost(enumeration="Origin", tag="10")]
+    pub origin: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ListProcessesResponse {

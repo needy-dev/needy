@@ -247,6 +247,8 @@ pub fn process_info(info: v1::ProcessInfo) -> ProcessInfo {
     tty: info.tty,
     started_ms: info.started_at_ms,
     session: info.session_id,
+    // An executor does not keep the origin; unspecified means unknown.
+    origin: origin(info.origin).ok(),
   }
 }
 
@@ -261,6 +263,7 @@ pub fn proto_process_info(info: ProcessInfo) -> v1::ProcessInfo {
     tty: info.tty,
     started_at_ms: info.started_ms,
     session_id: info.session,
+    origin: info.origin.map_or(v1::Origin::Unspecified, proto_origin).into(),
   }
 }
 

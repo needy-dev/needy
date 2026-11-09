@@ -149,6 +149,10 @@ message ProcessInfo {
   bool tty = 7;
   int64 started_at_ms = 8;
   string session_id = 9;
+  // Who started the process. The control daemon sets it from the start it
+  // relayed; an executor, which does not keep it, and a daemon that did not
+  // start the process leave it unspecified.
+  Origin origin = 10;
 }
 
 message ListProcessesResponse {

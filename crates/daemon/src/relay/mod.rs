@@ -48,6 +48,17 @@ fn relayed(e: needy_api_client::Error) -> ControlError {
   }
 }
 
+/// A process the daemon has seen: where it runs, and who started it.
+// NOTICE: executors do not keep a process's origin, so the daemon that
+// relayed the start is the only one that knows it. A process this daemon
+// only listed, such as one on a remote executor another daemon started,
+// has no origin.
+#[derive(Clone)]
+pub(crate) struct Known {
+  instance: Arc<Instance>,
+  origin: Option<Origin>,
+}
+
 /// What the relay asks the instance for.
 enum Upstream {
   Start(needy_api_server::control::ExecSpec),
@@ -78,14 +89,27 @@ impl Daemon {
     }
   }
 
-  fn process_instance(&self, process: &str) -> Result<Arc<Instance>, ControlError> {
+  fn process(&self, process: &str) -> Result<Known, ControlError> {
     let processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     processes.get(process).cloned().ok_or_else(|| ControlError::NotFound("no such process".into()))
   }
 
-  fn remember(&self, process: &str, instance: &Arc<Instance>) {
+  fn process_instance(&self, process: &str) -> Result<Arc<Instance>, ControlError> {
+    self.process(process).map(|known| known.instance)
+  }
+
+  /// Records the instance of `process` and, when this daemon started it, its
+  /// origin; a later sighting without an origin keeps the one recorded.
+  fn remember(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>) {
     let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    processes.insert(process.to_string(), instance.clone());
+    let origin = origin.or_else(|| processes.get(process).and_then(|known| known.origin));
+    processes.insert(
+      process.to_string(),
+      Known {
+        instance: instance.clone(),
+        origin,
+      },
+    );
   }
 }
 
@@ -198,7 +222,8 @@ impl Processes for Daemon {
           for p in list.into_inner().processes {
             let mut p = domain::process_info(p);
             p.executor = instance.name.clone();
-            self.remember(&p.process, &instance);
+            self.remember(&p.process, &instance, p.origin);
+            p.origin = self.process(&p.process).ok().and_then(|known| known.origin);
             processes.push(p);
           }
         }
@@ -294,7 +319,7 @@ impl Relay {
       let output = match output {
         client_exec::Event::Started(started) => {
           process_id = started.process_id.clone();
-          daemon.remember(&started.process_id, &self.instance);
+          daemon.remember(&started.process_id, &self.instance, self.origin);
           if let (Some(origin), Some(trace)) = (self.origin, &self.trace) {
             // From the request to the process running, placement and a
             // wait for the executor's slot included.

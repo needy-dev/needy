@@ -9,7 +9,7 @@ use needy_api_client::Client;
 use needy_common::process::Exit;
 use needy_core::event::{Event, SessionStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::SessionState;
+use needy_core::types::{Origin, SessionState};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -155,6 +155,7 @@ impl Processes for Fake {
       tty: false,
       started_ms: 7,
       session: session.into(),
+      origin: Some(Origin::Cli),
     }])
   }
 

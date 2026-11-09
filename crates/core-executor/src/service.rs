@@ -165,6 +165,10 @@ fn info(proc: &Proc, executor: &str) -> ProcessInfo {
     tty: proc.tty,
     started_at_ms: proc.started_at_ms,
     session_id: proc.session_id.clone(),
+    // TODO(process-origin): the executor does not keep who started a
+    // process; the control daemon, which relays every start, fills it in.
+    // Keeping it here waits for an executor that serves more than one daemon.
+    origin: needy_api_proto::v1::Origin::Unspecified.into(),
   }
 }
 

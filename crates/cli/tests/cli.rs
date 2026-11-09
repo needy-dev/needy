@@ -895,3 +895,85 @@ fn a_second_sigterm_makes_the_executor_exit_at_once() {
   assert_eq!(output.status.code(), Some(1));
   assert!(stderr(&output).contains("these processes were not killed"), "{}", stderr(&output));
 }
+
+/// The table rows `needy ps` prints, split into cells by two or more spaces.
+fn table(text: &str) -> Vec<Vec<String>> {
+  text.lines().map(|line| line.split("  ").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect()).collect()
+}
+
+/// A native session with one `needy exec` and one `needy fs cp`, whose
+/// `mkdir` and `tar` are needy's own processes.
+fn session_with_internal_processes(home: &Home) -> String {
+  let session = create_session(home, NATIVE_PROFILE);
+  let exec = home.run(&["exec", "--session", &session, "--", "echo", "mine"]);
+  assert!(exec.status.success(), "{}", stderr(&exec));
+  let file = home.write("copied.txt", "copied\n");
+  let dir = home.path().join("into");
+  let cp = home.run(&[
+    "fs",
+    "cp",
+    "--session",
+    &session,
+    file.to_str().unwrap(),
+    &format!("here:{}", dir.display()),
+  ]);
+  assert!(cp.status.success(), "{}", stderr(&cp));
+  session
+}
+
+// The owner's 2026-11-10 trial found that `needy ps` listed needy's own
+// helpers (the `mkdir` and `tar` of `fs cp`) next to the user's commands,
+// with no way to tell which session or caller started a process.
+#[test]
+fn ps_shows_session_and_origin_and_hides_needys_own_processes() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = session_with_internal_processes(&home);
+
+  let output = home.run(&["ps", "--session", &session]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let rows = table(&stdout(&output));
+  assert_eq!(rows[0][..3], ["ID", "SESSION", "ORIGIN"]);
+  assert_eq!(rows.len(), 2, "{rows:?}");
+  assert_eq!(rows[1][1..3], [session.as_str(), "cli"]);
+  assert_eq!(rows[1].last().unwrap(), "echo mine");
+}
+
+#[test]
+fn ps_all_shows_needys_own_processes_with_their_origin() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = session_with_internal_processes(&home);
+
+  let output = home.run(&["ps", "-a", "--session", &session]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let rows = table(&stdout(&output));
+  let commands: Vec<(&str, &str)> = rows[1..].iter().map(|r| (r[2].as_str(), r.last().unwrap().as_str())).collect();
+  assert_eq!(commands.len(), 3, "{rows:?}");
+  assert_eq!(commands[0], ("cli", "echo mine"));
+  assert!(commands[1].0 == "fs" && commands[1].1.starts_with("mkdir -p"), "{rows:?}");
+  assert!(commands[2].0 == "fs" && commands[2].1.starts_with("tar -x"), "{rows:?}");
+  assert!(rows[1..].iter().all(|r| r[1] == session), "{rows:?}");
+}
+
+#[test]
+fn ps_json_carries_session_and_origin_and_respects_all() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = session_with_internal_processes(&home);
+  let json = |args: &[&str]| -> Vec<serde_json::Value> {
+    let output = home.run(args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    serde_json::from_str(&stdout(&output)).unwrap()
+  };
+
+  let mine = json(&["ps", "-o", "json", "--session", &session]);
+  let all = json(&["ps", "-o", "json", "--all", "--session", &session]);
+
+  assert_eq!(mine.len(), 1, "{mine:?}");
+  assert_eq!((mine[0]["session"].as_str(), mine[0]["origin"].as_str()), (Some(session.as_str()), Some("cli")));
+  let origins: Vec<&str> = all.iter().map(|p| p["origin"].as_str().unwrap()).collect();
+  assert_eq!(origins, ["cli", "fs", "fs"]);
+}

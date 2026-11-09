@@ -216,6 +216,8 @@ pub struct ProcessInfo {
   pub tty: bool,
   pub started_ms: i64,
   pub session: String,
+  /// Who started the process; `None` for a process the daemon did not start.
+  pub origin: Option<Origin>,
 }
 
 #[async_trait::async_trait]

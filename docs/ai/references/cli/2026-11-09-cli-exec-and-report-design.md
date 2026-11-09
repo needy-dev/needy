@@ -12,7 +12,7 @@ needy daemon                                   # control plane; also runs on eve
 needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
 needy session  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
 needy exec     [--session ID] -- CMD …         # run a command through placement
-needy ps | attach ID | kill ID                 # manage detached processes
+needy ps [-a] [--session ID] | attach ID | kill ID   # manage detached processes
 needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
 needy report   SESSION|latest --level summary|detailed [--output FILE]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
@@ -24,7 +24,15 @@ everything. Logs are off by default; the daemon also writes
 `daemon.YYYY-MM-DD.log` in its state directory.
 
 `ps` and `session ls` print borderless tables, or a JSON array with
-`--output json`. `session ls` lists stopped and failed sessions with their
+`-o/--output json`. `ps` shows each process's `SESSION` (`-` outside any
+session) and `ORIGIN`, who started it: `cli` (`needy exec`), `actor-proxy`
+(a command the actor routed), `fs` (`needy fs cp`), `files` (the daemon's
+copy-in and mirror-out) or `actor-mount` (the SFTP server behind an actor's
+workspace mount). The last three are needy's own processes; `ps` hides them
+unless `-a/--all` asks for them, in the table and in JSON alike, whose
+objects carry `session` and `origin`. The control daemon records the origin
+from the start it relays; a process it did not start shows `-` (JSON
+`null`). `--session ID` lists one session's processes. `session ls` lists stopped and failed sessions with their
 state until the daemon exits. `session logs SESSION` prints the actor's
 serial console: the guest's boot messages and the driving program's terminal.
 

@@ -111,6 +111,31 @@ pub enum Origin {
   ActorMount,
 }
 
+impl Origin {
+  /// The origin's name in traces and listings.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Cli => "cli",
+      Self::Fs => "fs",
+      Self::Files => "files",
+      Self::ActorProxy => "actor-proxy",
+      Self::ActorMount => "actor-mount",
+    }
+  }
+
+  /// Whether needy started the process for its own work (file transfers and
+  /// workspace mounts) rather than to run a user's or the actor's command.
+  pub fn is_internal(self) -> bool {
+    matches!(self, Self::Fs | Self::Files | Self::ActorMount)
+  }
+}
+
+impl fmt::Display for Origin {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
 /// The network a request came from, at a gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -205,3 +230,7 @@ mod millis {
     Ok(Option::<u64>::deserialize(d)?.map(Duration::from_millis))
   }
 }
+
+#[cfg(test)]
+#[path = "types_test.rs"]
+mod tests;

@@ -106,10 +106,10 @@ pub struct Daemon {
   /// The local executor's processes.
   host: Host,
   /// The instance each process the daemon has seen runs on, for `attach`
-  /// and `kill`.
+  /// and `kill`, and who started it, for `ps`.
   // TODO(persistence): this map grows until the daemon exits; slice 9
   // keeps processes in `state.db`.
-  pub(crate) processes: Arc<Mutex<HashMap<String, Arc<Instance>>>>,
+  pub(crate) processes: Arc<Mutex<HashMap<String, relay::Known>>>,
   /// The daemon's own tasks: the local executor and the relays of commands
   /// outside any session.
   pub(crate) tasks: TaskTracker,

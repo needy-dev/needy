@@ -135,6 +135,7 @@ async fn an_actor_lists_only_its_own_session() {
 
   assert_eq!(served.fake.calls(), [r#"list "s-actor""#]);
   assert_eq!(listed[0].session_id, "s-actor");
+  assert_eq!(listed[0].origin, Origin::Cli as i32);
   assert!(!listed[0].running);
   assert_eq!(listed[0].exited.as_ref().map(|e| e.signal.as_str()), Some("SIGKILL"));
 }
