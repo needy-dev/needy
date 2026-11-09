@@ -51,7 +51,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 #[cfg(unix)]
 use needy_api_server::control::{Caller, ControlError};
 #[cfg(unix)]
@@ -169,10 +169,37 @@ impl Daemon {
     })
   }
 
-  /// Serves the control API on `listen` until a termination signal. Call
-  /// [`Daemon::shutdown`] afterwards.
+  /// Serves the control API on `listen` until a termination signal, then
+  /// shuts down with [`Daemon::shutdown`], also when serving failed. A
+  /// second termination signal ends the shutdown where it is and fails,
+  /// naming the sessions it did not clean up; the caller should then exit.
   pub async fn serve(&self, listen: &str, token: Option<String>) -> Result<()> {
-    let stop = needy_api_server::termination::token().context("cannot handle termination signals")?;
+    let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
+    let ended = termination
+      .unless_forced(async {
+        let served = self.serve_until(listen, token, termination.stop()).await;
+        self.shutdown().await;
+        served
+      })
+      .await;
+    match ended {
+      Some(served) => served,
+      None => {
+        let left: Vec<String> = self.sessions.live().iter().map(|s| s.id.clone()).collect();
+        // NOTICE: the sessions' executors, VMs and sockets stay behind; no
+        // daemon reconciles them until slice 9 keeps sessions in `state.db`.
+        let message = if left.is_empty() {
+          "exited at a second termination signal before the shutdown ended".to_string()
+        } else {
+          format!("exited at a second termination signal; these sessions were not cleaned up: {}", left.join(", "))
+        };
+        tracing::error!("{message}");
+        bail!(message)
+      }
+    }
+  }
+
+  async fn serve_until(&self, listen: &str, token: Option<String>, stop: CancellationToken) -> Result<()> {
     let api = Arc::new(self.clone());
     let health = Health {
       instance_id: uuid::Uuid::new_v4().to_string(),

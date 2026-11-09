@@ -59,10 +59,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         docker_image: args.docker_image,
       })
       .await?;
-      let served = daemon.serve(&listen, token).await;
       // Sessions are stopped even when serving failed.
-      daemon.shutdown().await;
-      served?;
+      daemon.serve(&listen, token).await?;
     }
   }
   Ok(0)

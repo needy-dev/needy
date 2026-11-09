@@ -616,3 +616,99 @@ fn socket_is_in_the_state_directory_without_a_runtime_directory() {
   let socket = home.path().join("state").join("daemon.sock");
   assert!(stderr(&output).contains(&format!("unix:{}", socket.display())), "{}", stderr(&output));
 }
+
+/// Sends signal `name` to process `pid`.
+fn kill(pid: u32, name: &str) {
+  let status = Command::new("kill").args([&format!("-{name}"), &pid.to_string()]).status().unwrap();
+  assert!(status.success(), "kill -{name} {pid}");
+}
+
+/// A daemon in `mode` on the home's socket whose stderr the test reads.
+fn spawn_daemon(home: &Home, mode: &str) -> Child {
+  let daemon = home.needy().args(["daemon", "--mode", mode]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+  let socket = home.path().join("run").join("daemon.sock");
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !socket.exists() {
+    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  daemon
+}
+
+/// A `sleep 300` run through `needy <exec>` and attached: an open stream,
+/// which a graceful shutdown waits for. Returns the attached `needy` and
+/// the sleep's process ID, once the sleep runs.
+fn attach_sleep(home: &Home, exec: &[&str]) -> (Child, u32) {
+  let pid_file = home.path().join("sleep.pid");
+  let script = format!("echo $$ > {}; exec sleep 300", pid_file.display());
+  let attached = home.needy().args(exec).args(["--", "sh", "-c", &script]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let deadline = Instant::now() + Duration::from_secs(20);
+  let read = || std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<u32>().ok();
+  while read().is_none() {
+    assert!(Instant::now() < deadline, "the attached sleep did not start");
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  (attached, read().unwrap())
+}
+
+/// Sends SIGTERM twice, half a second apart, and returns how long the
+/// daemon took to exit after the second and its output.
+fn terminate_twice(mut daemon: Child) -> (Duration, Output) {
+  kill(daemon.id(), "TERM");
+  std::thread::sleep(Duration::from_millis(500));
+  assert!(daemon.try_wait().unwrap().is_none(), "the first SIGTERM must start a graceful shutdown, not end it");
+  kill(daemon.id(), "TERM");
+  let second = Instant::now();
+  let deadline = second + Duration::from_secs(20);
+  while daemon.try_wait().unwrap().is_none() {
+    assert!(Instant::now() < deadline, "the daemon did not exit");
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  let elapsed = second.elapsed();
+  (elapsed, daemon.wait_with_output().unwrap())
+}
+
+// ROOT CAUSE:
+//
+// If a second SIGTERM came while the control daemon shut down, it was
+// ignored, because the signal handlers stayed installed after the first
+// signal and nothing listened for another.
+//
+// Before the fix, the daemon waited out its grace period for open streams
+// and the shutdown, then exited 0.
+// The fix keeps the first signal graceful and makes a second one exit at
+// once, non-zero, naming the sessions it did not clean up.
+#[test]
+fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
+  let home = Home::new();
+  let daemon = spawn_daemon(&home, "control");
+  let session = create_session(&home, NATIVE_PROFILE);
+  let (mut attached, sleep) = attach_sleep(&home, &["exec", "--session", &session]);
+
+  let (elapsed, output) = terminate_twice(daemon);
+  attached.kill().ok();
+  attached.wait().unwrap();
+  // A forced exit leaves the sleep behind.
+  kill(sleep, "KILL");
+
+  assert!(elapsed < Duration::from_secs(2), "the daemon took {elapsed:?} to exit after the second SIGTERM");
+  assert_eq!(output.status.code(), Some(1));
+  assert!(stderr(&output).contains(&session), "the exit names the session it left: {}", stderr(&output));
+}
+
+#[test]
+fn a_second_sigterm_makes_the_executor_exit_at_once() {
+  let home = Home::new();
+  let daemon = spawn_daemon(&home, "executor");
+  let (mut attached, sleep) = attach_sleep(&home, &["exec"]);
+
+  let (elapsed, output) = terminate_twice(daemon);
+  attached.kill().ok();
+  attached.wait().unwrap();
+  // A forced exit leaves the sleep behind.
+  kill(sleep, "KILL");
+
+  assert!(elapsed < Duration::from_secs(2), "the executor took {elapsed:?} to exit after the second SIGTERM");
+  assert_eq!(output.status.code(), Some(1));
+  assert!(stderr(&output).contains("these processes were not killed"), "{}", stderr(&output));
+}
