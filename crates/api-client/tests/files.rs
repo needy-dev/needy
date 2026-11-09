@@ -37,6 +37,42 @@ async fn a_pushed_directory_pulls_back_the_same() {
   assert_eq!(std::fs::read_to_string(back.join("sub/b.txt")).unwrap(), "beta");
 }
 
+// ROOT CAUSE:
+//
+// If the directory a push unpacks into did not exist on the executor, the
+// push failed, because `tar -C` changes into the directory and does not
+// create it.
+//
+// Before the fix, copy-in into a fresh native workspace and `needy fs cp`
+// into a new directory failed until the directory was made by hand.
+// The fix keeps a push creating its directory and the missing parents.
+#[tokio::test]
+async fn a_push_creates_its_missing_directory() {
+  let executor = support::executor().await;
+  let local = executor.dir.path().join("local");
+  std::fs::create_dir_all(&local).unwrap();
+  std::fs::write(local.join("a.txt"), "alpha").unwrap();
+  let remote = executor.dir.path().join("new/nested");
+  let archive = needy_common::archive::pack(&local, &[]).unwrap();
+
+  files::push(&executor.client, &target(), archive, remote.to_str().unwrap()).await.unwrap();
+
+  assert_eq!(std::fs::read_to_string(remote.join("a.txt")).unwrap(), "alpha");
+}
+
+#[tokio::test]
+async fn a_push_into_a_path_that_is_a_file_fails() {
+  let executor = support::executor().await;
+  let file = executor.dir.path().join("file");
+  std::fs::write(&file, "").unwrap();
+  let archive = needy_common::archive::pack(executor.dir.path(), &["- **".to_string()]).unwrap();
+
+  let error = files::push(&executor.client, &target(), archive, file.to_str().unwrap()).await.unwrap_err();
+
+  assert!(matches!(error, Error::Failed { .. }), "{error:?}");
+  assert!(error.to_string().contains("file"), "{error}");
+}
+
 #[tokio::test]
 async fn a_pull_names_one_entry_of_a_directory() {
   let executor = support::executor().await;
