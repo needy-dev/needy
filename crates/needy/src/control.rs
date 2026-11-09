@@ -50,6 +50,16 @@ pub struct Instance {
     container: Option<String>,
 }
 
+struct InstanceRequest<'a> {
+    key: &'a str,
+    name: &'a str,
+    config: &'a needy_config::profile::ExecutorConfig,
+    session: &'a str,
+    profile: &'a Profile,
+    base: &'a Path,
+    hostname: Option<&'a str>,
+}
+
 pub struct Session {
     pub id: String,
     pub name: String,
@@ -194,21 +204,6 @@ impl Daemon {
             request.name.clone()
         };
         let profile_name = base.display().to_string();
-        let mut executors = BTreeMap::new();
-        for (exec_name, config) in &profile.executors {
-            let key = config
-                .key
-                .replace("{session}", &id)
-                .replace("{group}", &group)
-                .replace("{profile}", &profile_name)
-                .replace("{rule}", exec_name);
-            let pool_key = format!("{exec_name}@{key}");
-            let instance = self
-                .instance(&pool_key, exec_name, config, &id, &profile, &base)
-                .await
-                .with_context(|| format!("executor {exec_name}"))?;
-            executors.insert(exec_name.clone(), instance);
-        }
         let recipe = match &profile.actor.recipe {
             Some(path) => {
                 let path = base.join(path);
@@ -224,6 +219,31 @@ impl Daemon {
             }
             None => None,
         };
+        // Executors present the actor's hostname, so `uname -n` agrees on both sides.
+        let hostname = recipe.as_ref().and_then(|r| r.hostname.clone());
+        let mut executors = BTreeMap::new();
+        for (exec_name, config) in &profile.executors {
+            let key = config
+                .key
+                .replace("{session}", &id)
+                .replace("{group}", &group)
+                .replace("{profile}", &profile_name)
+                .replace("{rule}", exec_name);
+            let pool_key = format!("{exec_name}@{key}");
+            let instance = self
+                .instance(InstanceRequest {
+                    key: &pool_key,
+                    name: exec_name,
+                    config,
+                    session: &id,
+                    profile: &profile,
+                    base: &base,
+                    hostname: hostname.as_deref(),
+                })
+                .await
+                .with_context(|| format!("executor {exec_name}"))?;
+            executors.insert(exec_name.clone(), instance);
+        }
         let actor_command = if request.actor_command.is_empty() {
             profile.actor.command.clone()
         } else {
@@ -272,15 +292,16 @@ impl Daemon {
     }
 
     /// Returns a pooled instance for `key`, creating it when needed.
-    async fn instance(
-        &self,
-        key: &str,
-        name: &str,
-        config: &needy_config::profile::ExecutorConfig,
-        session: &str,
-        profile: &Profile,
-        base: &Path,
-    ) -> Result<Arc<Instance>> {
+    async fn instance(&self, request: InstanceRequest<'_>) -> Result<Arc<Instance>> {
+        let InstanceRequest {
+            key,
+            name,
+            config,
+            session,
+            profile,
+            base,
+            hostname,
+        } = request;
         let mut pools = self.pools.lock().await;
         if let Some(existing) = pools.get(key) {
             existing.refs.fetch_add(1, Ordering::SeqCst);
@@ -375,6 +396,9 @@ impl Daemon {
                     "-v".into(),
                     format!("{}:/run/needy", sock_dir.display()),
                 ];
+                if let Some(hostname) = hostname {
+                    args.extend(["--hostname".into(), hostname.to_string()]);
+                }
                 args.extend(docker.args.iter().cloned());
                 args.extend([
                     image,
