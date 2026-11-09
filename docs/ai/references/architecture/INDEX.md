@@ -9,3 +9,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-09 | [Closed-loop milestone](2026-11-09-closed-loop-milestone-plan.md) | plan |
 | 2026-11-09 | [Closed-loop results](2026-11-09-closed-loop-results-evidence.md) | evidence |
 | 2026-11-09 | [Module layout redesign](2026-11-09-module-layout-redesign.md) | design |
+| 2026-11-10 | [Container actor runtime](2026-11-10-container-actor-runtime-design.md) | design |
