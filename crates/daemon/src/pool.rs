@@ -9,14 +9,14 @@
 //! free.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::ControlError;
 use needy_config::profile::{OnFull, Runtime};
 use needy_core_executor::provider::{Docker, InstanceHandle, InstanceSpec, Native, Provider, Remote};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 /// One executor instance and what the daemon knows about it.
 pub struct Instance {
@@ -70,10 +70,16 @@ impl Instance {
   }
 }
 
+/// One key's instance: created once by the first acquire, which the others
+/// of that key wait for.
+type KeyCell = Arc<OnceCell<Arc<Instance>>>;
+
 /// The instances of every session, by key, and the providers that create
 /// them.
 pub struct Pool {
-  instances: tokio::sync::Mutex<HashMap<String, Arc<Instance>>>,
+  /// The lock covers only the map and the reference counts; instances are
+  /// created outside it.
+  instances: Mutex<HashMap<String, KeyCell>>,
   native: Arc<Native>,
   remote: Arc<Remote>,
   /// `None` when the Docker client could not be set up (a bad `DOCKER_HOST`).
@@ -83,23 +89,48 @@ pub struct Pool {
 impl Pool {
   pub fn new(native: Arc<Native>, docker: Option<Docker>) -> Self {
     Self {
-      instances: tokio::sync::Mutex::new(HashMap::new()),
+      instances: Mutex::new(HashMap::new()),
       native,
       remote: Arc::new(Remote),
       docker: docker.map(Arc::new),
     }
   }
 
+  fn lock(&self) -> MutexGuard<'_, HashMap<String, KeyCell>> {
+    // NOTICE: every change under the lock is one map or counter update, so a
+    // panic elsewhere leaves the map whole.
+    self.instances.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  }
+
   /// The instance for the spec's key, created through the executor's
-  /// provider when no session holds one yet.
+  /// provider when no session holds one yet. Acquires of one key share one
+  /// creation; a failed creation leaves the key free for the next acquire.
   pub async fn acquire(&self, spec: InstanceSpec) -> Result<Arc<Instance>> {
-    // TODO(8e): the pool lock is held while the provider creates the
-    // instance; slice 8e fixes that with a regression test.
-    let mut instances = self.instances.lock().await;
-    if let Some(existing) = instances.get(&spec.key) {
-      existing.refs.fetch_add(1, Ordering::SeqCst);
-      return Ok(existing.clone());
+    loop {
+      let cell = self.lock().entry(spec.key.clone()).or_default().clone();
+      let created = cell.get_or_try_init(|| self.create(&spec)).await;
+      let mut instances = self.lock();
+      let current = instances.get(&spec.key).is_some_and(|c| Arc::ptr_eq(c, &cell));
+      match created {
+        Ok(instance) if current => {
+          instance.refs.fetch_add(1, Ordering::SeqCst);
+          return Ok(instance.clone());
+        }
+        // The last holder released the instance after it was created and
+        // before this acquire counted itself; create another.
+        Ok(_) => continue,
+        Err(e) => {
+          if current && !cell.initialized() {
+            instances.remove(&spec.key);
+          }
+          return Err(e);
+        }
+      }
     }
+  }
+
+  /// Creates the instance of `spec` through its runtime's provider.
+  async fn create(&self, spec: &InstanceSpec) -> Result<Arc<Instance>> {
     let provider: Arc<dyn Provider> = match spec.config.runtime {
       Runtime::Native => self.native.clone(),
       Runtime::Remote => self.remote.clone(),
@@ -108,8 +139,8 @@ impl Pool {
       // deferred; see `needy_core_executor::provider`.
       other => bail!("runtime {other:?} is not supported yet"),
     };
-    let handle = provider.create(&spec).await?;
-    let instance = Arc::new(Instance {
+    let handle = provider.create(spec).await?;
+    Ok(Arc::new(Instance {
       name: spec.name.clone(),
       key: spec.key.clone(),
       handle,
@@ -117,19 +148,20 @@ impl Pool {
       path_map: spec.config.path_map.clone(),
       slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
       on_full: spec.config.on_full,
-      refs: AtomicUsize::new(1),
-    });
-    instances.insert(spec.key, instance.clone());
-    Ok(instance)
+      // Each acquire counts itself under the pool's lock.
+      refs: AtomicUsize::new(0),
+    }))
   }
 
   /// Gives back one hold on `instance`; the last one destroys it.
   pub async fn release(&self, instance: &Arc<Instance>) {
-    if instance.refs.fetch_sub(1, Ordering::SeqCst) > 1 {
-      return;
+    {
+      let mut instances = self.lock();
+      if instance.refs.fetch_sub(1, Ordering::SeqCst) > 1 {
+        return;
+      }
+      instances.retain(|_, cell| !cell.get().is_some_and(|v| Arc::ptr_eq(v, instance)));
     }
-    let mut instances = self.instances.lock().await;
-    instances.retain(|_, v| !Arc::ptr_eq(v, instance));
     if let Err(e) = instance.provider.destroy(&instance.handle).await {
       tracing::warn!("executor {}: cannot destroy {}: {e}", instance.name, instance.handle.id);
     }
@@ -137,15 +169,15 @@ impl Pool {
 
   /// Every pooled instance.
   pub async fn instances(&self) -> Vec<Arc<Instance>> {
-    self.instances.lock().await.values().cloned().collect()
+    self.lock().values().filter_map(|cell| cell.get().cloned()).collect()
   }
 
   /// The one pooled instance of the executor `name`, for a command outside
   /// any session. Instances of the same executor under different keys make
   /// the name ambiguous.
   pub async fn named(&self, name: &str) -> Result<Arc<Instance>, ControlError> {
-    let instances = self.instances.lock().await;
-    let mut matches: Vec<_> = instances.values().filter(|i| i.name == name).collect();
+    let instances = self.lock();
+    let mut matches: Vec<_> = instances.values().filter_map(|cell| cell.get()).filter(|i| i.name == name).collect();
     match matches.len() {
       0 => Err(ControlError::NotFound("no such executor".into())),
       1 => Ok(matches[0].clone()),

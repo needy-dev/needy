@@ -21,14 +21,20 @@ pub struct Executor {
   pub native: Arc<Native>,
   /// `unix:` and the executor's socket.
   pub endpoint: String,
-  _dir: TempDir,
+  _dir: Option<TempDir>,
   _stop: DropGuard,
 }
 
 impl Executor {
   pub async fn start() -> Self {
     let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("executor.sock");
+    let mut executor = Self::start_at(&dir.path().join("executor.sock")).await;
+    executor._dir = Some(dir);
+    executor
+  }
+
+  /// An executor on `socket`, in a directory the caller keeps.
+  pub async fn start_at(socket: &Path) -> Self {
     let health = Health {
       instance_id: "test".into(),
       role: "executor",
@@ -37,7 +43,7 @@ impl Executor {
       host: Host::default(),
       name: "local".into(),
     };
-    let bound = Server::new(health, Caller::Cli).process_service(service).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
+    let bound = Server::new(health, Caller::Cli).process_service(service).bind(&[Listen::Unix(socket.to_path_buf())]).await.unwrap();
     let cancel = CancellationToken::new();
     tokio::spawn(bound.serve(cancel.clone()));
     let endpoint = format!("unix:{}", socket.display());
@@ -45,7 +51,7 @@ impl Executor {
     Self {
       native: Arc::new(Native::new(client)),
       endpoint,
-      _dir: dir,
+      _dir: None,
       _stop: cancel.drop_guard(),
     }
   }
