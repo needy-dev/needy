@@ -71,8 +71,14 @@ fn truncate(s: &str, n: usize) -> String {
 struct Tally {
   profile: Option<String>,
   created: Option<i64>,
-  /// The first end: an actor exit or a stop.
+  /// The first end: an actor exit, a stop or a failure.
   ended: Option<i64>,
+  /// `Running` once created, then the first terminal state, which stays as
+  /// it does in the daemon's session state machine, so the report agrees
+  /// with `session ls`.
+  // NOTICE: an actor exit that lands while a stop is under way is recorded
+  // before `session.stop`, so the report says `finished` where the daemon
+  // says `stopped`; the events cannot tell it from an exit before the stop.
   state: Option<SessionState>,
   actor_exit: Option<ActorExit>,
   /// Why the session failed to start.
@@ -104,23 +110,21 @@ impl Tally {
       Event::SessionCreate(create) => {
         self.profile = Some(create.profile.clone());
         self.created = Some(time_ms);
-        self.state = Some(SessionState::Running);
+        self.state.get_or_insert(SessionState::Running);
       }
-      Event::SessionStop(_) => {
-        self.ended.get_or_insert(time_ms);
-        self.state = Some(SessionState::Stopped);
-      }
+      Event::SessionStop(_) => self.end(time_ms, SessionState::Stopped),
       Event::SessionFail(fail) => {
-        self.ended.get_or_insert(time_ms);
-        self.state = Some(SessionState::Failed);
+        self.end(time_ms, SessionState::Failed);
         self.failure = Some(fail.reason.clone());
       }
       Event::TraceGap(gap) => self.dropped += gap.dropped,
       Event::ActorExit(exit) => {
-        self.ended.get_or_insert(time_ms);
-        self.state = Some(SessionState::Finished);
+        self.end(time_ms, SessionState::Finished);
         self.actor_exit = Some(exit.clone());
       }
+      // The daemon finishes a session whose VM exited, even when its driving
+      // program reported no exit.
+      Event::ActorVmExit(_) => self.end(time_ms, SessionState::Finished),
       Event::ActorConfig(config) => self.route_names = Some(config.route_names.clone()),
       Event::ExecDecide(decide) => {
         match &decide.outcome {
@@ -175,12 +179,15 @@ impl Tally {
       }
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push(format!("{} ({} network)", deny.host, network_name(deny.network))),
-      Event::ActorStart(_)
-      | Event::ActorVmExit(_)
-      | Event::FilesCopyIn(_)
-      | Event::FilesMirrorOut(_)
-      | Event::NetError(_)
-      | Event::TraceTiming(_) => {}
+      Event::ActorStart(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
+    }
+  }
+
+  /// Records an end at `time_ms`; only the first sets the state.
+  fn end(&mut self, time_ms: i64, state: SessionState) {
+    if self.ended.is_none() {
+      self.ended = Some(time_ms);
+      self.state = Some(state);
     }
   }
 

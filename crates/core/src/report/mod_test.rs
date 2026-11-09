@@ -122,7 +122,7 @@ fn the_title_names_the_profile_not_its_directory() {
 fn commands_a_fault_made_fail_count_as_failed() {
   let report = render("7f3a", &actor_session(), Level::Summary);
   // Duration | State | Driving program | Routed | Kept | CLI | Failed | Model calls
-  assert_eq!(line_after(&report, "| Duration"), "| 0m 05s | stopped | exit 0 | 1 | 1 | 1 | 2 | 1 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 0m 05s | finished | exit 0 | 1 | 1 | 1 | 2 | 1 |");
   // Routed | Kept | Denied | Fault injected
   assert_eq!(line_after(&report, "| ↪️"), "| 1 | 1 | 1 | 2 |");
 }
@@ -238,4 +238,80 @@ fn timing_summaries_are_not_activity() {
   ));
 
   assert_eq!(render("7f3a", &events, Level::Summary), render("7f3a", &actor_session(), Level::Summary));
+}
+
+fn create(time_ms: i64) -> Recorded {
+  at(
+    time_ms,
+    Event::SessionCreate(SessionCreate {
+      name: "demo".into(),
+      group: "demo".into(),
+      profile: "smoke".into(),
+      executors: vec![],
+    }),
+  )
+}
+
+// ROOT CAUSE:
+//
+// If a session finished and was then stopped, the report said `stopped`
+// while `session ls` said `finished`, because the report took the state of
+// the last terminal event and the daemon's state machine keeps the first.
+//
+// Before the fix, `session.stop` after `actor.exit` overwrote `finished`.
+// The fix keeps the first terminal state, as `session ls` does.
+#[test]
+fn a_session_stopped_after_it_finished_reports_finished() {
+  let events = vec![
+    create(1_000),
+    at(
+      4_000,
+      Event::ActorExit(ActorExit {
+        code: Some(0),
+        signal: None,
+      }),
+    ),
+    at(9_000, Event::SessionStop(SessionStop {})),
+  ];
+
+  let report = render("7f3a", &events, Level::Summary);
+
+  assert_eq!(line_after(&report, "| Duration"), "| 0m 03s | finished | exit 0 | 0 | 0 | 0 | 0 | 0 |");
+}
+
+// ROOT CAUSE:
+//
+// If the actor's VM exited without its driving program reporting an exit,
+// the daemon's state became `finished` but the report did not count the VM's
+// exit as an end, so a later stop made it say `stopped`.
+//
+// The fix counts `actor.vm_exit` as the end the daemon's state machine
+// counts it as.
+#[test]
+fn a_vm_exit_without_a_driver_exit_reports_finished() {
+  let events = vec![
+    create(1_000),
+    at(
+      2_000,
+      Event::ActorVmExit(ActorVmExit {
+        code: Some(0),
+        signal: None,
+        error: None,
+      }),
+    ),
+    at(9_000, Event::SessionStop(SessionStop {})),
+  ];
+
+  let report = render("7f3a", &events, Level::Summary);
+
+  assert_eq!(line_after(&report, "| Duration"), "| 0m 01s | finished | - | 0 | 0 | 0 | 0 | 0 |");
+}
+
+#[test]
+fn a_session_stopped_while_running_reports_stopped() {
+  let events = vec![create(1_000), at(3_000, Event::SessionStop(SessionStop {}))];
+
+  let report = render("7f3a", &events, Level::Summary);
+
+  assert_eq!(line_after(&report, "| Duration"), "| 0m 02s | stopped | - | 0 | 0 | 0 | 0 | 0 |");
 }
