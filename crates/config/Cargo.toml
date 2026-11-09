@@ -1,0 +1,20 @@
+[package]
+name = "needy-config"
+description = "Needy profile and recipe schemas: loading, extends, merging, validation and built-ins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+glob-match.workspace = true
+humantime.workspace = true
+serde.workspace = true
+serde_path_to_error.workspace = true
+serde_yaml.workspace = true
+shellexpand.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

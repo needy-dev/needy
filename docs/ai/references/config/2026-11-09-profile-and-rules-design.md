@@ -36,14 +36,27 @@ the recorded answer. It is off by default.
 - Profiles and recipes are **YAML** on disk (decided 2026-11-09).
 - The schema is defined in `proto/`, so Buf can also generate TypeScript types
   for tools that emit profiles.
+- `needy-config` loads profiles and recipes. Unknown keys are errors, except in
+  maps whose keys are names (executors, presets, file mappings, environment
+  variables). Values are checked when the document loads: durations
+  (`500ms`, `10m`, `3d4h`, or a number of seconds), sizes, sides and enum
+  values. An error names the key path, for example
+  ``commands[2].when.script: unknown field `script` ``.
+- After loading, `needy-config`'s `validate` checks the names a profile uses:
+  presets in `use:`, executors in `to:`, `executor:`, `default_executor`,
+  `unknown` and `executor:NAME:` sides, and file mappings in `session_files`
+  and a rule's `files:`. Each problem is an error finding. `needy profile
+  check` prints the findings and exits 1 on an error; session create refuses
+  the profile.
 
 ## Profile structure
 
 A profile describes one session. Machines are described by
-[recipes](2026-11-09-recipe-design.md) and referenced by name.
+[recipes](2026-11-09-recipe-design.md) and referenced as `builtin:NAME` or by a
+path relative to the profile.
 
 ```yaml
-extends: base-linux              # optional parent profile
+extends: base.yaml               # optional parent profile; see Extends
 
 user: { name: agent, uid: 1000, gid: 1000 }   # same on the actor and every executor; ~ = /home/agent
 
@@ -202,7 +215,8 @@ Conditions that are not positional go in `when`:
 ```yaml
 when:
   has: [--watch, -w]              # any of these flags anywhere in the arguments
-  script: "**/pi/dist/cli.js"     # glob on a captured argument
+  captures:
+    script: "**/pi/dist/cli.js"   # glob on the argument {script} captured
   cwd: /workspace/**
   env: { CI: "1" }
   under: "pnpm test **"           # an ancestor process matches
@@ -241,8 +255,8 @@ Every rule that matches applies, in order:
 - **`final: true`** stops evaluation after that rule.
 - **Presets** are named blocks of actions reused with `use:`, like CSS classes.
   A preset's fields count as if written in the rule that uses it.
-- **`extends`** inherits a parent profile; its rule list is appended after the
-  child's rules.
+- **`extends`** inherits a parent profile; the parent's rules come after the
+  child's (see [Extends](#extends)).
 
 ```yaml
 presets:
@@ -256,7 +270,7 @@ commands:
     to: actor
     final: true
   - match: "{node,bun} {script} **"
-    when: { script: "**/pi/dist/cli.js" }
+    when: { captures: { script: "**/pi/dist/cli.js" } }
     to: actor
     final: true
   - match: "{uname,lscpu,sw_vers} **"   # identity commands stay on the actor's recipe
@@ -272,6 +286,26 @@ commands:
     to: build
     use: [clean-env]
 ```
+
+### Extends
+
+`extends` names a parent: a path relative to the extending file, or
+`builtin:NAME` (there are no built-in profiles yet). A parent may extend
+another; a chain is at most 16 deep and may not cycle. Profiles and recipes
+share one merge model, applied to the documents before they are typed:
+
+- Maps merge key by key, recursively. A child that sets
+  `executors: { build: { max_procs: 8 } }` keeps the parent's other `build`
+  fields and its other executors.
+- A child's scalar or list replaces the parent's: `session_files`,
+  `actor.network.allow`, a rule's `args`.
+- A child's `null` (`~`) removes the parent's value, so the field takes its
+  default.
+- `commands` and `resolvers` are prepend lists: the child's entries come
+  first, then the parent's, so the child's rules are evaluated first.
+
+Relative paths resolve against the directory of the profile that was loaded,
+including paths a parent wrote.
 
 ## Launcher resolvers
 

@@ -63,10 +63,9 @@ mod tests {
 
   #[test]
   fn filters_and_round_trips() {
-    let src = std::env::temp_dir().join(format!("needy-pack-{}", std::process::id()));
-    let dst = src.with_extension("out");
-    let _ = std::fs::remove_dir_all(&src);
-    let _ = std::fs::remove_dir_all(&dst);
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("out");
     std::fs::create_dir_all(src.join("sessions")).unwrap();
     std::fs::write(src.join("config.toml"), "a").unwrap();
     std::fs::write(src.join("auth.json"), "secret").unwrap();
@@ -81,8 +80,6 @@ mod tests {
     assert!(dst.join("config.toml").exists());
     assert!(!dst.join("auth.json").exists());
     assert!(!dst.join("sessions/log.jsonl").exists());
-    let _ = std::fs::remove_dir_all(&src);
-    let _ = std::fs::remove_dir_all(&dst);
   }
 
   #[test]
@@ -99,11 +96,10 @@ mod tests {
     header.set_cksum();
     builder.append(&header, &b"x"[..]).unwrap();
     let archive = builder.into_inner().unwrap();
-    let dst = std::env::temp_dir().join(format!("needy-unpack-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dst);
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("out");
     assert_eq!(unpack(&archive, &dst).unwrap(), 1);
     assert!(dst.join("ok.txt").exists());
-    assert!(!dst.parent().unwrap().join("escape.txt").exists());
-    let _ = std::fs::remove_dir_all(&dst);
+    assert!(!dir.path().join("escape.txt").exists());
   }
 }

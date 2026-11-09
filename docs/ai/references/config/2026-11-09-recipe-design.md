@@ -79,8 +79,30 @@ devices:
 same values; different sessions get different serial numbers and MAC
 addresses.
 
-Built-in recipes are referenced as `builtin:NAME`. *Preset* stays reserved for
-reusable rule blocks inside profiles.
+Built-in recipes are referenced as `builtin:NAME`: `gce-ubuntu-22.04` and
+`dell-optiplex-ubuntu-24.04`, embedded in `needy-config`. *Preset* stays
+reserved for reusable rule blocks inside profiles.
+
+## Extends
+
+`extends` names a parent recipe: `builtin:NAME` or a path relative to the
+extending file. A profile's `actor.recipe` and `needy build --recipe` take the
+same references. A chain is at most 16 deep and may not cycle. Recipes use
+the profiles' merge model (see
+[Extends](2026-11-09-profile-and-rules-design.md#extends)):
+
+- Maps merge key by key: `os: { hostname: "x-{hash}" }` keeps the parent's
+  `os.image` and `os.kernel`.
+- A scalar or list replaces the parent's: `cpu.features.hide: [avx_vnni]`
+  replaces the parent's list, and `devices.pci.extra: []` removes its extra
+  devices.
+- `null` removes the parent's value. Recipes have no prepend lists.
+
+Unknown keys are errors. Values are checked when the recipe loads: `memory`
+(`512MiB`, `16GiB`, or a number of MiB), `os.uptime` (a duration) and
+`cpu.hypervisor` (`visible` or `hidden`). A relative path such as
+`network.metadata.file` resolves against the directory of the recipe that was
+loaded, including paths a parent wrote.
 
 ## How each field is applied
 
@@ -106,7 +128,9 @@ reusable rule blocks inside profiles.
 
 ## Raw overrides
 
-Each runtime accepts raw configuration, merged after the recipe is compiled:
+Not implemented: `needy-config` rejects a `firecracker:` key until the merge
+with the compiled recipe is decided. Each runtime would accept raw
+configuration, merged after the recipe is compiled:
 
 ```yaml
 firecracker:

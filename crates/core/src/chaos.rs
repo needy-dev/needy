@@ -9,8 +9,9 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::profile::{Chaos, Fault};
-use needy_common::util::{glob_match, mix};
+use glob_match::glob_match;
+use needy_common::seed::mix;
+use needy_config::profile::{Chaos, Fault, FaultKind};
 
 #[derive(Debug, Clone)]
 pub struct Fired {
@@ -33,7 +34,7 @@ impl Injector {
     }
   }
 
-  pub fn has(&self, on: &str) -> bool {
+  pub fn has(&self, on: FaultKind) -> bool {
     self.faults.iter().any(|f| f.on == on)
   }
 
@@ -43,12 +44,12 @@ impl Injector {
 
   /// The faults on `on` whose pattern matches `subject`, whether or not they
   /// would fire; nothing is counted.
-  pub fn matching(&self, on: &str, subject: &str) -> Vec<&Fault> {
+  pub fn matching(&self, on: FaultKind, subject: &str) -> Vec<&Fault> {
     self.faults.iter().filter(|fault| matches(fault, on, subject)).collect()
   }
 
   /// Counts a matching occurrence and reports the first fault that fires.
-  pub fn check(&self, on: &str, subject: &str) -> Option<Fired> {
+  pub fn check(&self, on: FaultKind, subject: &str) -> Option<Fired> {
     let mut counts = self.counts.lock().unwrap();
     for (index, fault) in self.faults.iter().enumerate() {
       if !matches(fault, on, subject) {
@@ -67,7 +68,7 @@ impl Injector {
       if fires {
         return Some(Fired {
           errno: fault.errno.clone(),
-          delay: fault.delay,
+          delay: fault.delay.map(Into::into),
         });
       }
     }
@@ -75,13 +76,13 @@ impl Injector {
   }
 }
 
-fn matches(fault: &Fault, on: &str, subject: &str) -> bool {
+fn matches(fault: &Fault, on: FaultKind, subject: &str) -> bool {
   if fault.on != on {
     return false;
   }
   match &fault.matcher {
     None => true,
-    Some(pattern) if on == "exec" => command_match(pattern, subject),
+    Some(pattern) if on == FaultKind::Exec => command_match(pattern, subject),
     Some(pattern) => glob_match(pattern, subject) || glob_match(pattern, subject.trim_start_matches('/')),
   }
 }
@@ -196,7 +197,7 @@ impl SftpTap {
       {
         let path = String::from_utf8_lossy(name).to_string();
         let relative = path.strip_prefix(&self.root).unwrap_or(&path).trim_start_matches('/').to_string();
-        if let Some(fired) = injector.check("file.open", &relative) {
+        if let Some(fired) = injector.check(FaultKind::FileOpen, &relative) {
           let errno = fired.errno.unwrap_or_else(|| "EIO".into());
           tapped.replies.push_back(status_reply(id, sftp_code(&errno), &format!("needy chaos: {errno}")));
           tapped.injected.push((relative, errno));
@@ -249,10 +250,10 @@ mod tests {
   #[test]
   fn nth_fires_once() {
     let i = Injector::new(&chaos("faults: [{on: exec, match: 'curl *', nth: 2}]"));
-    assert!(i.check("exec", "curl a").is_none());
-    assert!(i.check("exec", "curl b").is_some());
-    assert!(i.check("exec", "curl c").is_none());
-    assert!(i.check("exec", "wget a").is_none());
+    assert!(i.check(FaultKind::Exec, "curl a").is_none());
+    assert!(i.check(FaultKind::Exec, "curl b").is_some());
+    assert!(i.check(FaultKind::Exec, "curl c").is_none());
+    assert!(i.check(FaultKind::Exec, "wget a").is_none());
   }
 
   #[test]
@@ -260,7 +261,7 @@ mod tests {
     let yaml = "seed: 42\nfaults: [{on: net.connect, probability: 0.3}]";
     let run = || {
       let i = Injector::new(&chaos(yaml));
-      (0..200).map(|_| i.check("net.connect", "example.com").is_some()).collect::<Vec<_>>()
+      (0..200).map(|_| i.check(FaultKind::NetConnect, "example.com").is_some()).collect::<Vec<_>>()
     };
     let a = run();
     assert_eq!(a, run());

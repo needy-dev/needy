@@ -18,6 +18,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
+use needy_config::profile::FaultKind;
 use needy_core::trace::Trace;
 
 #[derive(Clone, Debug, Default)]
@@ -94,7 +95,7 @@ impl Gateway {
 
   /// Applies `net.connect` faults for `host`: delays sleep; an errno fails the request.
   async fn fault(&self, host: &str) -> Option<Response<Body>> {
-    let fired = self.injector.as_ref()?.check("net.connect", host)?;
+    let fired = self.injector.as_ref()?.check(FaultKind::NetConnect, host)?;
     if let Some(delay) = fired.delay {
       tokio::time::sleep(delay).await;
     }

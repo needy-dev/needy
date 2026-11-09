@@ -20,12 +20,19 @@ Dependencies point downward; a crate never depends on one above it.
 - `crates/core-executor` (`needy-core-executor`): where commands run. The
   process host (PTY, pipes, replay, detach), the process service, and the exec
   client used by the CLI and the proxy.
-- `crates/core` (`needy-core`): domain logic shared by everything: profiles,
-  rules, recipes, chaos, traces and reports, and the daemon's SQLite store
-  (SeaORM entities and migrations in `store`). No processes, listeners or VMs.
+- `crates/core` (`needy-core`): domain logic shared by everything: it
+  interprets loaded profiles and recipes (rules, recipe compilation, chaos),
+  and holds traces and reports and the daemon's SQLite store (SeaORM entities
+  and migrations in `store`). No processes, listeners or VMs.
+- `crates/config` (`needy-config`): what users write. Profile and recipe
+  schemas, loading from files, `builtin:NAME` and text with `extends` chains
+  (`source`), the one merge model (`merge`), cross-reference checks
+  (`validate`), user-written values such as durations and sizes (`value`), and
+  the embedded built-in recipes (`builtin`). Unknown keys are errors. No
+  processes, sockets or gRPC.
 - `crates/common` (`needy-common`): shared helpers that depend on neither the
-  platform nor an async runtime: globs, durations, filters, tar archives,
-  exit status and signal names.
+  platform nor an async runtime and know no needy concepts: filters, tar
+  archives, exit status and signal names, and seed mixing.
 - `crates/api-proto`, `crates/api-client`, `crates/api-server`: generated
   Protobuf and gRPC types, the Rust client, and server-side adapters such as
   bearer authentication. Do not edit `api-proto/src/gen`; change `proto/` and

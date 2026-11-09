@@ -17,6 +17,7 @@ hyper-util.workspace = true
 needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
+needy-config.workspace = true
 needy-core.workspace = true
 needy-core-executor.workspace = true
 tokio.workspace = true

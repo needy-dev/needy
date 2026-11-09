@@ -1,185 +1,15 @@
-//! Recipes: one machine's image, kernel, CPU, memory, firmware, devices and
-//! network identity, compiled into Firecracker and guest settings.
+//! Recipe compilation: one machine's identity, compiled for a host and a
+//! session seed into Firecracker and guest settings. Recipes themselves are
+//! loaded by `needy-config`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use anyhow::{Context, Result};
 use serde_json::json;
 
-use needy_common::util::{mix, parse_duration};
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Signature {
-  pub family: u32,
-  pub model: u32,
-  pub stepping: u32,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Features {
-  /// Linux `/proc/cpuinfo` flag names to clear.
-  pub hide: Vec<String>,
-  /// Flags the host must have.
-  pub require: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Topology {
-  pub cores: u32,
-  pub threads_per_core: u32,
-}
-
-impl Default for Topology {
-  fn default() -> Self {
-    Self {
-      cores: 1,
-      threads_per_core: 1,
-    }
-  }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct CpuSpec {
-  pub brand: Option<String>,
-  pub signature: Option<Signature>,
-  /// `visible` or `hidden`.
-  pub hypervisor: Option<String>,
-  pub features: Features,
-  pub topology: Option<Topology>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct KernelBuild {
-  pub user: Option<String>,
-  pub host: Option<String>,
-  pub timestamp: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct KernelSpec {
-  pub release: Option<String>,
-  pub version: Option<String>,
-  pub build: KernelBuild,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct OsSpec {
-  pub image: Option<String>,
-  pub kernel: KernelSpec,
-  pub hostname: Option<String>,
-  pub uptime: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Bios {
-  pub vendor: Option<String>,
-  pub version: Option<String>,
-  pub date: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Dmi {
-  pub sys_vendor: Option<String>,
-  pub product_name: Option<String>,
-  pub product_version: Option<String>,
-  pub bios: Bios,
-  pub board_vendor: Option<String>,
-  pub board_name: Option<String>,
-  pub chassis_type: Option<serde_yaml::Value>,
-  pub serial: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct FirmwareSpec {
-  pub dmi: Option<Dmi>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct PciDevice {
-  pub id: String,
-  pub class: String,
-  pub revision: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct PciSpec {
-  pub host_bridge: Option<String>,
-  pub extra: Vec<PciDevice>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Sensor {
-  pub chip: String,
-  pub per_core: bool,
-  pub idle_c: f64,
-  pub load_gain_c: f64,
-  pub noise_c: f64,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct DevicesSpec {
-  pub pci: PciSpec,
-  pub sensors: Vec<Sensor>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct MetadataSpec {
-  pub provider: Option<String>,
-  pub file: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct NetworkSpec {
-  pub interface: Option<String>,
-  pub mac: Option<String>,
-  pub metadata: Option<MetadataSpec>,
-}
-
-/// One machine.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default)]
-pub struct Recipe {
-  pub cpu: CpuSpec,
-  /// `16GiB`, `512MiB`, or a number of MiB.
-  pub memory: Option<serde_yaml::Value>,
-  pub vcpus: Option<u32>,
-  pub os: OsSpec,
-  pub firmware: FirmwareSpec,
-  pub devices: DevicesSpec,
-  pub network: NetworkSpec,
-  #[serde(skip)]
-  pub base_dir: PathBuf,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Severity {
-  Error,
-  Warning,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Finding {
-  pub severity: Severity,
-  pub message: String,
-}
+use needy_common::seed::mix;
+use needy_config::recipe::{ChassisType, Cpu, Dmi, Hypervisor, Recipe, Signature};
+use needy_config::validate::Finding;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SensorSpec {
@@ -251,225 +81,131 @@ impl HostInfo {
   }
 }
 
-const BUILTINS: &[(&str, &str)] = &[
-  ("gce-ubuntu-22.04", include_str!("builtin/gce-ubuntu-22.04.yaml")),
-  ("dell-optiplex-ubuntu-24.04", include_str!("builtin/dell-optiplex-ubuntu-24.04.yaml")),
-];
+/// Compiles a recipe for `host`; `seed` fills `{hash}` and `{seq}` and every
+/// other per-session value, so a replayed session gets the same machine.
+pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
+  let mut findings = Vec::new();
+  let fill = |text: &str| fill_placeholders(text, seed);
 
-const MAX_EXTENDS: usize = 16;
+  let topology = recipe.cpu.topology.clone();
+  let vcpus = recipe.vcpus.or_else(|| topology.map(|t| t.cores.max(1) * t.threads_per_core.max(1))).unwrap_or(2);
+  let mem_mib = match recipe.memory {
+    None => 1024,
+    Some(size) => u32::try_from(size.mib()).unwrap_or_else(|_| {
+      findings.push(warning(format!("memory of {} MiB is too large; using 1024 MiB", size.mib())));
+      1024
+    }),
+  };
 
-impl Recipe {
-  pub fn load(path: &Path) -> Result<Recipe> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read recipe {}", path.display()))?;
-    let base = path.parent().unwrap_or(Path::new("."));
-    Self::from_yaml(&text, base).with_context(|| format!("in recipe {}", path.display()))
+  let mut env = BTreeMap::new();
+  if let Some(brand) = &recipe.cpu.brand {
+    env.insert("NEEDY_BRAND_STRING".into(), fill(brand));
+  }
+  let hidden = recipe.cpu.hypervisor == Some(Hypervisor::Hidden);
+  if hidden {
+    env.insert("NEEDY_HIDE_HYPERVISOR".into(), "1".into());
+  }
+  if let Some(dmi) = &recipe.firmware.dmi {
+    env.insert("NEEDY_SMBIOS".into(), smbios(dmi, seed, &mut findings));
+  }
+  if let Some(bridge) = &recipe.devices.pci.host_bridge {
+    match pci_id(bridge, None) {
+      Ok(id) => {
+        env.insert("NEEDY_PCI_HOST_BRIDGE".into(), id);
+      }
+      Err(err) => findings.push(warning(err)),
+    }
+  }
+  if let Some(device) = recipe.devices.pci.extra.iter().find(|d| d.class == "isa-bridge") {
+    match pci_id(&device.id, device.revision.as_deref()) {
+      Ok(id) => {
+        env.insert("NEEDY_PCI_ISA_BRIDGE".into(), id);
+      }
+      Err(err) => findings.push(warning(err)),
+    }
+  }
+  for device in &recipe.devices.pci.extra {
+    if device.class != "isa-bridge" {
+      findings.push(warning(format!("PCI device class {:?} is not supported; only isa-bridge", device.class)));
+    }
   }
 
-  pub fn from_yaml(text: &str, base_dir: &Path) -> Result<Recipe> {
-    let value = resolve_value(text, base_dir, 0)?;
-    let mut recipe: Recipe = serde_yaml::from_value(value).context("invalid recipe")?;
-    recipe.base_dir = base_dir.to_path_buf();
-    Ok(recipe)
+  let cpu_template = cpu_template(&recipe.cpu, hidden, &mut findings);
+
+  let mut kernel_build_env = BTreeMap::new();
+  let kernel = &recipe.os.kernel;
+  for (key, value) in [
+    ("NEEDY_KERNEL_RELEASE", &kernel.release),
+    ("NEEDY_KERNEL_VERSION", &kernel.version),
+    ("KBUILD_BUILD_USER", &kernel.build.user),
+    ("KBUILD_BUILD_HOST", &kernel.build.host),
+    ("KBUILD_BUILD_TIMESTAMP", &kernel.build.timestamp),
+  ] {
+    if let Some(value) = value {
+      kernel_build_env.insert(key.to_string(), value.clone());
+    }
   }
 
-  pub fn compile(&self, host: &HostInfo, seed: u64) -> CompiledRecipe {
-    let mut findings = Vec::new();
-    let fill = |text: &str| fill_placeholders(text, seed);
+  let uptime_offset_secs = recipe.os.uptime.map_or(0, |d| d.as_secs() as i64);
 
-    let topology = self.cpu.topology.clone();
-    let vcpus = self.vcpus.or_else(|| topology.map(|t| t.cores.max(1) * t.threads_per_core.max(1))).unwrap_or(2);
-    let mem_mib = match &self.memory {
-      None => 1024,
-      Some(value) => parse_memory(value).unwrap_or_else(|err| {
-        findings.push(warning(format!("{err}; using 1024 MiB")));
-        1024
-      }),
-    };
+  let sensors = recipe
+    .devices
+    .sensors
+    .iter()
+    .map(|s| SensorSpec {
+      chip: s.chip.clone(),
+      idle_mc: (s.idle_c * 1000.0).round() as i32,
+      load_gain_mc: (s.load_gain_c * 1000.0).round() as i32,
+      noise_mc: (s.noise_c * 1000.0).round() as i32,
+      per_core: s.per_core,
+    })
+    .collect();
 
-    let mut env = BTreeMap::new();
-    if let Some(brand) = &self.cpu.brand {
-      env.insert("NEEDY_BRAND_STRING".into(), fill(brand));
-    }
-    let hidden = self.cpu.hypervisor.as_deref() == Some("hidden");
-    if hidden {
-      env.insert("NEEDY_HIDE_HYPERVISOR".into(), "1".into());
-    }
-    if let Some(dmi) = &self.firmware.dmi {
-      env.insert("NEEDY_SMBIOS".into(), smbios(dmi, seed, &mut findings));
-    }
-    if let Some(bridge) = &self.devices.pci.host_bridge {
-      match pci_id(bridge, None) {
-        Ok(id) => {
-          env.insert("NEEDY_PCI_HOST_BRIDGE".into(), id);
-        }
-        Err(err) => findings.push(warning(err)),
+  let metadata = recipe.network.metadata.as_ref().map(|m| {
+    let mut value = json!({});
+    if let Some(file) = &m.file {
+      let path = recipe.base_dir.join(file);
+      match std::fs::read_to_string(&path)
+        .map_err(anyhow::Error::from)
+        .and_then(|t| serde_yaml::from_str::<serde_json::Value>(&t).map_err(Into::into))
+      {
+        Ok(loaded) => value = loaded,
+        Err(err) => findings.push(warning(format!("cannot read metadata {}: {err}", path.display()))),
       }
     }
-    if let Some(device) = self.devices.pci.extra.iter().find(|d| d.class == "isa-bridge") {
-      match pci_id(&device.id, device.revision.as_deref()) {
-        Ok(id) => {
-          env.insert("NEEDY_PCI_ISA_BRIDGE".into(), id);
-        }
-        Err(err) => findings.push(warning(err)),
-      }
+    if let (Some(provider), Some(object)) = (&m.provider, value.as_object_mut()) {
+      object.entry("provider").or_insert_with(|| json!(provider));
     }
-    for device in &self.devices.pci.extra {
-      if device.class != "isa-bridge" {
-        findings.push(warning(format!("PCI device class {:?} is not supported; only isa-bridge", device.class)));
-      }
-    }
+    value
+  });
 
-    let cpu_template = cpu_template(&self.cpu, hidden, &mut findings);
-
-    let mut kernel_build_env = BTreeMap::new();
-    let kernel = &self.os.kernel;
-    for (key, value) in [
-      ("NEEDY_KERNEL_RELEASE", &kernel.release),
-      ("NEEDY_KERNEL_VERSION", &kernel.version),
-      ("KBUILD_BUILD_USER", &kernel.build.user),
-      ("KBUILD_BUILD_HOST", &kernel.build.host),
-      ("KBUILD_BUILD_TIMESTAMP", &kernel.build.timestamp),
-    ] {
-      if let Some(value) = value {
-        kernel_build_env.insert(key.to_string(), value.clone());
-      }
-    }
-
-    let uptime_offset_secs = match &self.os.uptime {
-      None => 0,
-      Some(text) => match parse_duration(text) {
-        Ok(d) => d.as_secs() as i64,
-        Err(err) => {
-          findings.push(warning(format!("os.uptime: {err}")));
-          0
-        }
-      },
-    };
-
-    let sensors = self
-      .devices
-      .sensors
-      .iter()
-      .map(|s| SensorSpec {
-        chip: s.chip.clone(),
-        idle_mc: (s.idle_c * 1000.0).round() as i32,
-        load_gain_mc: (s.load_gain_c * 1000.0).round() as i32,
-        noise_mc: (s.noise_c * 1000.0).round() as i32,
-        per_core: s.per_core,
-      })
-      .collect();
-
-    let metadata = self.network.metadata.as_ref().map(|m| {
-      let mut value = json!({});
-      if let Some(file) = &m.file {
-        let path = self.base_dir.join(file);
-        match std::fs::read_to_string(&path)
-          .map_err(anyhow::Error::from)
-          .and_then(|t| serde_yaml::from_str::<serde_json::Value>(&t).map_err(Into::into))
-        {
-          Ok(loaded) => value = loaded,
-          Err(err) => findings.push(warning(format!("cannot read metadata {}: {err}", path.display()))),
-        }
-      }
-      if let (Some(provider), Some(object)) = (&m.provider, value.as_object_mut()) {
-        object.entry("provider").or_insert_with(|| json!(provider));
-      }
-      value
-    });
-
-    let mut compiled = CompiledRecipe {
-      vcpus,
-      mem_mib,
-      firecracker_env: env,
-      cpu_template,
-      kernel_build_env,
-      hostname: self.os.hostname.as_deref().map(fill),
-      uptime_offset_secs,
-      sensors,
-      network_mac: self.network.mac.as_deref().map(fill),
-      interface: self.network.interface.clone(),
-      metadata,
-      os_image: self.os.image.clone(),
-      findings,
-    };
-    check_cpu(&self.cpu, host, &mut compiled.findings);
-    let vendor = check_vendor(self, &compiled);
-    compiled.findings.extend(vendor);
-    compiled
-  }
+  let mut compiled = CompiledRecipe {
+    vcpus,
+    mem_mib,
+    firecracker_env: env,
+    cpu_template,
+    kernel_build_env,
+    hostname: recipe.os.hostname.as_ref().map(|t| fill(t.as_str())),
+    uptime_offset_secs,
+    sensors,
+    network_mac: recipe.network.mac.as_ref().map(|t| fill(t.as_str())),
+    interface: recipe.network.interface.clone(),
+    metadata,
+    os_image: recipe.os.image.clone(),
+    findings,
+  };
+  check_cpu(&recipe.cpu, host, &mut compiled.findings);
+  let vendor = check_vendor(recipe, &compiled);
+  compiled.findings.extend(vendor);
+  compiled
 }
 
 fn warning(message: impl Into<String>) -> Finding {
-  Finding {
-    severity: Severity::Warning,
-    message: message.into(),
-  }
+  Finding::warning(message)
 }
 
 fn error(message: impl Into<String>) -> Finding {
-  Finding {
-    severity: Severity::Error,
-    message: message.into(),
-  }
-}
-
-fn resolve_value(text: &str, base_dir: &Path, depth: usize) -> Result<serde_yaml::Value> {
-  if depth > MAX_EXTENDS {
-    bail!("recipe extends nests more than {MAX_EXTENDS} levels");
-  }
-  let mut value: serde_yaml::Value = if text.trim().is_empty() {
-    serde_yaml::Value::Mapping(Default::default())
-  } else {
-    serde_yaml::from_str(text).context("invalid recipe YAML")?
-  };
-  let parent = value.as_mapping_mut().and_then(|m| m.remove("extends")).and_then(|v| v.as_str().map(str::to_string));
-  let Some(parent) = parent else {
-    return Ok(value);
-  };
-  let parent_value = if let Some(name) = parent.strip_prefix("builtin:") {
-    let (_, text) = BUILTINS.iter().find(|(n, _)| *n == name).with_context(|| format!("unknown built-in recipe {name:?}"))?;
-    resolve_value(text, base_dir, depth + 1)?
-  } else {
-    let path = base_dir.join(&parent);
-    let text = std::fs::read_to_string(&path).with_context(|| format!("cannot read parent recipe {}", path.display()))?;
-    let parent_base = path.parent().unwrap_or(base_dir).to_path_buf();
-    resolve_value(&text, &parent_base, depth + 1).with_context(|| format!("in parent recipe {}", path.display()))?
-  };
-  Ok(merge(parent_value, value))
-}
-
-/// Deep merge: mappings merge key by key, anything else is replaced.
-fn merge(base: serde_yaml::Value, over: serde_yaml::Value) -> serde_yaml::Value {
-  match (base, over) {
-    (serde_yaml::Value::Mapping(mut base), serde_yaml::Value::Mapping(over)) => {
-      for (key, value) in over {
-        let merged = match base.remove(&key) {
-          Some(old) => merge(old, value),
-          None => value,
-        };
-        base.insert(key, merged);
-      }
-      serde_yaml::Value::Mapping(base)
-    }
-    (_, over) => over,
-  }
-}
-
-fn parse_memory(value: &serde_yaml::Value) -> Result<u32> {
-  if let Some(n) = value.as_u64() {
-    return u32::try_from(n).context("memory too large");
-  }
-  let text = value.as_str().context("memory must be a size")?.trim();
-  let split = text.find(|c: char| !c.is_ascii_digit() && c != '.').unwrap_or(text.len());
-  let (number, unit) = text.split_at(split);
-  let number: f64 = number.parse().with_context(|| format!("invalid memory size {text:?}"))?;
-  let mib = match unit.trim() {
-    "" | "M" | "MiB" | "MB" => number,
-    "G" | "GiB" | "GB" => number * 1024.0,
-    "T" | "TiB" | "TB" => number * 1024.0 * 1024.0,
-    other => bail!("invalid memory unit {other:?}"),
-  };
-  Ok(mib.round() as u32)
+  Finding::error(message)
 }
 
 /// `{hash}` becomes 8 hex digits and `{seq}` 2 hex digits derived from the seed.
@@ -489,11 +225,12 @@ fn session_uuid(seed: u64) -> String {
   format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
-fn chassis_number(value: &serde_yaml::Value) -> Option<u32> {
-  if let Some(n) = value.as_u64() {
-    return u32::try_from(n).ok();
-  }
-  Some(match value.as_str()? {
+fn chassis_number(value: &ChassisType) -> Option<u32> {
+  let name = match value {
+    ChassisType::Code(n) => return Some(*n),
+    ChassisType::Name(name) => name,
+  };
+  Some(match name.as_str() {
     "other" => 1,
     "unknown" => 2,
     "desktop" => 3,
@@ -513,20 +250,20 @@ fn chassis_number(value: &serde_yaml::Value) -> Option<u32> {
 fn smbios(dmi: &Dmi, seed: u64, findings: &mut Vec<Finding>) -> String {
   let fill = |text: &str| fill_placeholders(text, seed).replace(';', ",");
   let mut fields = BTreeMap::new();
-  let mut put = |key: &str, value: Option<&String>| {
+  let mut put = |key: &str, value: Option<&str>| {
     if let Some(value) = value {
       fields.insert(key.to_string(), fill(value));
     }
   };
-  put("sys_vendor", dmi.sys_vendor.as_ref());
-  put("product_name", dmi.product_name.as_ref());
-  put("product_version", dmi.product_version.as_ref());
-  put("serial", dmi.serial.as_ref());
-  put("board_vendor", dmi.board_vendor.as_ref().or(dmi.sys_vendor.as_ref()));
-  put("board_name", dmi.board_name.as_ref().or(dmi.product_name.as_ref()));
-  put("bios_vendor", dmi.bios.vendor.as_ref());
-  put("bios_version", dmi.bios.version.as_ref());
-  put("bios_date", dmi.bios.date.as_ref());
+  put("sys_vendor", dmi.sys_vendor.as_deref());
+  put("product_name", dmi.product_name.as_deref());
+  put("product_version", dmi.product_version.as_deref());
+  put("serial", dmi.serial.as_ref().map(|t| t.as_str()));
+  put("board_vendor", dmi.board_vendor.as_deref().or(dmi.sys_vendor.as_deref()));
+  put("board_name", dmi.board_name.as_deref().or(dmi.product_name.as_deref()));
+  put("bios_vendor", dmi.bios.vendor.as_deref());
+  put("bios_version", dmi.bios.version.as_deref());
+  put("bios_date", dmi.bios.date.as_deref());
   fields.insert("uuid".into(), session_uuid(seed));
   if let Some(value) = &dmi.chassis_type {
     match chassis_number(value) {
@@ -642,7 +379,7 @@ pub(crate) fn feature_bit(name: &str) -> Option<(u32, u32, &'static str, u32)> {
   FEATURES.iter().find(|(n, ..)| *n == name).map(|&(_, leaf, subleaf, reg, bit)| (leaf, subleaf, reg, bit))
 }
 
-fn cpu_template(cpu: &CpuSpec, hidden: bool, findings: &mut Vec<Finding>) -> serde_json::Value {
+fn cpu_template(cpu: &Cpu, hidden: bool, findings: &mut Vec<Finding>) -> serde_json::Value {
   // (leaf, subleaf, register) → 32 bitmap characters, index 0 is bit 31.
   let mut registers: BTreeMap<(u32, u32, &str), [char; 32]> = BTreeMap::new();
   let mut set_bit = |leaf: u32, subleaf: u32, reg: &'static str, bit: u32, value: char| {
@@ -785,7 +522,7 @@ const MODELS: &[ModelProfile] = &[
   },
 ];
 
-fn check_cpu(cpu: &CpuSpec, host: &HostInfo, findings: &mut Vec<Finding>) {
+fn check_cpu(cpu: &Cpu, host: &HostInfo, findings: &mut Vec<Finding>) {
   if host.flags.is_empty() {
     return;
   }
@@ -884,7 +621,14 @@ fn check_vendor(recipe: &Recipe, compiled: &CompiledRecipe) -> Vec<Finding> {
 
 #[cfg(test)]
 mod tests {
+  use needy_config::Source;
+  use needy_config::validate::Severity;
+
   use super::*;
+
+  fn load(yaml: &str) -> Recipe {
+    needy_config::recipe::load(&Source::text(yaml, ".")).unwrap()
+  }
 
   const RAPTOR_LAKE_FLAGS: &str = "fpu vme sse sse2 ssse3 fma sse4_1 sse4_2 avx avx2 bmi1 bmi2 adx sha_ni gfni vaes vpclmulqdq avx_vnni serialize hybrid_cpu movdiri movdir64b waitpkg umip pku ospke rdseed clflushopt clwb";
 
@@ -922,8 +666,8 @@ os:
 
   #[test]
   fn compiles_gce_recipe() {
-    let recipe = Recipe::from_yaml(GCE, Path::new(".")).unwrap();
-    let c = recipe.compile(&HostInfo::default(), 7);
+    let recipe = load(GCE);
+    let c = compile(&recipe, &HostInfo::default(), 7);
     assert_eq!(c.vcpus, 4);
     assert_eq!(c.mem_mib, 16384);
     assert_eq!(c.firecracker_env["NEEDY_BRAND_STRING"], "Intel(R) Xeon(R) CPU @ 2.20GHz");
@@ -966,20 +710,18 @@ os:
     assert_eq!(reg(&kvm, "ebx"), format!("0b{}", "0".repeat(32)));
 
     // Same seed, same values; different seed, different values.
-    let again = recipe.compile(&HostInfo::default(), 7);
+    let again = compile(&recipe, &HostInfo::default(), 7);
     assert_eq!(again.hostname, c.hostname);
     assert_eq!(again.firecracker_env, c.firecracker_env);
-    let other = recipe.compile(&HostInfo::default(), 8);
+    let other = compile(&recipe, &HostInfo::default(), 8);
     assert_ne!(other.hostname, c.hostname);
     assert!(c.findings.is_empty(), "{:?}", c.findings);
   }
 
   #[test]
   fn cascade_lake_on_raptor_lake() {
-    let recipe =
-      Recipe::from_yaml("cpu: { signature: { family: 6, model: 85, stepping: 7 }, features: { hide: [serialize] } }", Path::new("."))
-        .unwrap();
-    let c = recipe.compile(&raptor_lake(), 1);
+    let recipe = load("cpu: { signature: { family: 6, model: 85, stepping: 7 }, features: { hide: [serialize] } }");
+    let c = compile(&recipe, &raptor_lake(), 1);
     let errors: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Error).collect();
     assert!(errors.iter().any(|f| f.message.contains("avx512f")), "{errors:?}");
     let warnings: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Warning).map(|f| f.message.clone()).collect();
@@ -990,45 +732,35 @@ os:
 
   #[test]
   fn raptor_lake_identity_on_raptor_lake_is_clean() {
-    let recipe =
-      Recipe::from_yaml("cpu: { signature: { family: 6, model: 183, stepping: 1 }, features: { require: [avx2] } }", Path::new("."))
-        .unwrap();
-    assert!(recipe.compile(&raptor_lake(), 1).findings.is_empty());
+    let recipe = load("cpu: { signature: { family: 6, model: 183, stepping: 1 }, features: { require: [avx2] } }");
+    assert!(compile(&recipe, &raptor_lake(), 1).findings.is_empty());
   }
 
   #[test]
   fn vendor_disagreement_warns() {
-    let recipe = Recipe::from_yaml(
-      "extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"0e:11:22:33:44:55\" }\nos: { kernel: { release: 6.8.0-1-aws } }",
-      Path::new("."),
-    )
-    .unwrap();
-    let c = recipe.compile(&HostInfo::default(), 1);
+    let recipe =
+      load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"0e:11:22:33:44:55\" }\nos: { kernel: { release: 6.8.0-1-aws } }");
+    let c = compile(&recipe, &HostInfo::default(), 1);
     assert!(c.findings.iter().any(|f| f.message.contains("machine identity disagrees")), "{:?}", c.findings);
   }
 
   #[test]
   fn builtins_compile() {
-    for (name, _) in BUILTINS {
-      let r = Recipe::from_yaml(&format!("extends: builtin:{name}"), Path::new(".")).unwrap();
-      let c = r.compile(&HostInfo::default(), 3);
+    for name in needy_config::builtin::recipes() {
+      let r = needy_config::recipe::load(&Source::builtin(name)).unwrap();
+      let c = compile(&r, &HostInfo::default(), 3);
       assert!(c.findings.is_empty(), "{name}: {:?}", c.findings);
     }
-    let dell = Recipe::from_yaml("extends: builtin:dell-optiplex-ubuntu-24.04", Path::new(".")).unwrap().compile(&HostInfo::default(), 3);
+    let dell = compile(&load("extends: builtin:dell-optiplex-ubuntu-24.04"), &HostInfo::default(), 3);
     assert_eq!(dell.sensors.len(), 3);
     assert_eq!(dell.sensors[0].idle_mc, 34000);
     assert!(dell.firecracker_env["NEEDY_SMBIOS"].contains("chassis_type=7"));
-    assert!(Recipe::from_yaml("extends: builtin:nope", Path::new(".")).is_err());
   }
 
   #[test]
-  fn memory_and_findings() {
-    assert_eq!(parse_memory(&serde_yaml::Value::from(512)).unwrap(), 512);
-    assert_eq!(parse_memory(&serde_yaml::Value::from("2G")).unwrap(), 2048);
-    assert_eq!(parse_memory(&serde_yaml::Value::from("512MiB")).unwrap(), 512);
-    assert!(parse_memory(&serde_yaml::Value::from("2Q")).is_err());
-    let r = Recipe::from_yaml("cpu: { features: { hide: [not_a_flag] } }\ndevices: { pci: { host_bridge: zz } }", Path::new(".")).unwrap();
-    let c = r.compile(&HostInfo::default(), 0);
+  fn unknown_features_and_bad_pci_ids_are_findings() {
+    let r = load("cpu: { features: { hide: [not_a_flag] } }\ndevices: { pci: { host_bridge: zz } }");
+    let c = compile(&r, &HostInfo::default(), 0);
     assert_eq!(c.findings.len(), 2, "{:?}", c.findings);
   }
 

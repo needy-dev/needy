@@ -80,6 +80,22 @@ Not rerun in this pass: opencode with a model, the Mac executor from an actor,
 and Windows `fs cp`. The Windows check ran the client on the Windows host
 because a local port forward was not available on the Mac.
 
+## Re-verified after the config slice
+
+Slice 2 of the module layout redesign (the `needy-config` crate: schemas,
+`extends` with one merge model, unknown keys rejected, `validate`, explicit
+`captures:`, built-in recipes moved out of `core`) was rerun on 2026-11-09,
+with every daemon's state, image and output in a scratch directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `needy profile check` on every profile under `examples/` | Mac, Linux | Pass: exit 0, no error findings |
+| `needy profile check` on a profile whose `actor.recipe` is `builtin:gce-ubuntu-22.04`, and `builtin:dell-optiplex-ubuntu-24.04` | Mac, Linux | Pass: both load and compile. On the Linux host the GCE built-in (Cascade Lake) reports errors for the missing AVX-512 features and exits 1, as in the first run; the Dell built-in has no findings |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` in an actor | Linux | Pass: GCE identity, routed `python3`, workspace both ways, `routed exit=7`; `report` |
+| `examples/chaos` in an actor | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; `report` counts 3 injected faults |
+| `examples/local` without an actor: copy-in filter, exec fault (126), delay fault (+500 ms), `--output json`, stop with mirror-out, `report` | Mac | Pass, once the native workspace directory exists (copy-in into a missing directory is fix slice 8g) |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

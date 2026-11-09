@@ -216,6 +216,25 @@ fn session_create_names_a_missing_profile() {
 }
 
 #[test]
+fn session_create_refuses_a_profile_with_errors() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("profile.yaml", "executors: { here: { runtime: native } }\ncommands: [{ match: \"**\", to: hier }]\n");
+
+  let output = home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--profile",
+    profile.to_str().unwrap(),
+  ]);
+
+  assert_eq!(output.status.code(), Some(1));
+  let message = stderr(&output);
+  assert!(message.contains("invalid profile: commands[0] (**) sends to unknown executor \"hier\""), "{message}");
+}
+
+#[test]
 fn session_ls_shows_stopped_and_failed_sessions() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
@@ -318,6 +337,82 @@ fn profile_check_splits_quoted_commands_and_shows_matching_faults() {
   assert!(curl.trim_end().ends_with("ECONNREFUSED"), "{curl}");
   let ls = text.lines().find(|l| l.starts_with("ls ")).unwrap();
   assert!(!ls.contains("ECONNREFUSED"), "{ls}");
+}
+
+/// Every example profile in the repository.
+fn example_profiles() -> Vec<PathBuf> {
+  let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+  let mut profiles = Vec::new();
+  for entry in std::fs::read_dir(&examples).unwrap() {
+    for file in std::fs::read_dir(entry.unwrap().path()).unwrap() {
+      let path = file.unwrap().path();
+      let name = path.file_name().unwrap().to_str().unwrap();
+      if name.ends_with("profile.yaml") {
+        profiles.push(path);
+      }
+    }
+  }
+  profiles.sort();
+  profiles
+}
+
+#[test]
+fn profile_check_accepts_every_example_profile() {
+  let home = Home::new();
+  let profiles = example_profiles();
+  assert!(profiles.len() >= 8, "{profiles:?}");
+
+  for profile in profiles {
+    let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+
+    assert!(output.status.success(), "{}: {}{}", profile.display(), stdout(&output), stderr(&output));
+    assert!(!stdout(&output).contains("error:"), "{}: {}", profile.display(), stdout(&output));
+  }
+}
+
+#[test]
+fn profile_check_reports_unknown_names_and_exits_1() {
+  let home = Home::new();
+  let profile = home.write(
+    "profile.yaml",
+    "executors: { build: {} }\ncommands:\n  - { match: \"git **\", to: biuld }\n  - { match: \"make **\", use: [fast] }\n",
+  );
+
+  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+
+  assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+  let text = stdout(&output);
+  assert!(text.contains("error: commands[0] (git **) sends to unknown executor \"biuld\"\n"), "{text}");
+  assert!(text.contains("error: commands[1] (make **) uses unknown preset \"fast\"\n"), "{text}");
+}
+
+// Captures used to sit directly under `when`, where a misspelt condition
+// became a capture that never matched. They now go under `captures:`.
+#[test]
+fn profile_check_rejects_flattened_captures() {
+  let home = Home::new();
+  let profile = home.write("profile.yaml", "commands: [{ match: \"node {script}\", when: { script: \"**/cli.js\" }, to: actor }]\n");
+
+  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+
+  assert_eq!(output.status.code(), Some(1));
+  let message = stderr(&output);
+  assert!(message.starts_with(&format!("needy: invalid profile {}: ", profile.display())), "{message}");
+  assert!(message.contains("commands[0].when.script: unknown field `script`, expected one of"), "{message}");
+}
+
+#[test]
+fn profile_check_compiles_a_built_in_recipe() {
+  let home = Home::new();
+  let profile = home.write("profile.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n");
+
+  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+
+  // The host CPU decides whether the recipe has findings, so only the
+  // compiled machine is checked here.
+  let text = stdout(&output);
+  assert!(text.contains("recipe: 2 vCPU, 4096 MiB"), "{text}{}", stderr(&output));
+  assert!(text.contains("NEEDY_SMBIOS="), "{text}");
 }
 
 #[test]

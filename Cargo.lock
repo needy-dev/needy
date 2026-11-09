@@ -1995,6 +1995,7 @@ dependencies = [
  "needy-api-client",
  "needy-api-proto",
  "needy-common",
+ "needy-config",
  "needy-core",
  "needy-core-actor",
  "needy-core-executor",
@@ -2019,12 +2020,23 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "glob-match",
+ "tar",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
+name = "needy-config"
+version = "0.1.0"
+dependencies = [
+ "glob-match",
  "humantime",
  "serde",
+ "serde_path_to_error",
  "serde_yaml",
  "shellexpand",
- "tar",
- "walkdir",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2032,13 +2044,16 @@ name = "needy-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "glob-match",
  "needy-common",
+ "needy-config",
  "sea-orm",
  "sea-orm-migration",
  "serde",
  "serde_json",
  "serde_yaml",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2055,6 +2070,7 @@ dependencies = [
  "needy-api-client",
  "needy-api-proto",
  "needy-common",
+ "needy-config",
  "needy-core",
  "needy-core-executor",
  "tokio",
@@ -2092,6 +2108,7 @@ dependencies = [
  "needy-api-proto",
  "needy-api-server",
  "needy-common",
+ "needy-config",
  "needy-core",
  "needy-core-actor",
  "needy-core-executor",
@@ -3012,6 +3029,17 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_path_to_error"
+version = "0.1.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10a9ff822e371bb5403e391ecd83e182e0e77ba7f6fe0160b795797109d1b457"
+dependencies = [
+ "itoa",
+ "serde",
+ "serde_core",
 ]
 
 [[package]]

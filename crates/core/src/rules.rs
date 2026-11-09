@@ -9,9 +9,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::Duration;
 
-use needy_common::util::{expand_home, glob_match};
-
-use crate::profile::{Actions, EnvOps, Fault, Profile, UnknownPolicy, When};
+use glob_match::glob_match;
+use needy_config::profile::{Actions, EnvOps, Fault, Profile, UnknownPolicy, When};
 
 /// What needy knows about a command when it decides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -143,7 +142,7 @@ fn when_holds(when: &When, m: &Match, ctx: &CommandContext, argv: &[String]) -> 
     return false;
   }
   if let Some(cwd) = &when.cwd
-    && !glob_match(cwd, &ctx.cwd)
+    && !cwd.matches(&ctx.cwd)
   {
     return false;
   }
@@ -160,7 +159,7 @@ fn when_holds(when: &When, m: &Match, ctx: &CommandContext, argv: &[String]) -> 
   {
     return false;
   }
-  when.captures.iter().all(|(name, glob)| m.captures.get(name).is_some_and(|value| glob_match(glob, value)))
+  when.captures.iter().all(|(name, glob)| m.captures.get(name).is_some_and(|value| glob.matches(value)))
 }
 
 /// Substitutes `{name}` captures and expands a `**` word into the rest.
@@ -262,7 +261,7 @@ impl State {
       self.placement = placement(a);
     }
     self.deny = self.deny.take().or_else(|| a.deny.clone());
-    self.timeout = self.timeout.or(a.timeout);
+    self.timeout = self.timeout.or(a.timeout.map(Into::into));
     self.cwd = self.cwd.take().or_else(|| a.cwd.clone());
     if self.exec.is_none() {
       self.exec = a.exec.as_ref().map(|words| expand_template(words, m));
@@ -334,7 +333,8 @@ fn unknown_target(profile: &Profile) -> Target {
   }
 }
 
-pub(crate) fn decide(profile: &Profile, ctx: &CommandContext) -> Decision {
+/// Decides where a command runs and how it is rewritten.
+pub fn decide(profile: &Profile, ctx: &CommandContext) -> Decision {
   decide_at(profile, ctx, 0).0
 }
 
@@ -402,7 +402,7 @@ fn decide_at(profile: &Profile, ctx: &CommandContext, depth: usize) -> (Decision
     argv,
     env,
     clear_env: state.clear_env,
-    cwd: state.cwd.map(|c| expand_home(&c, &profile.user.name)).unwrap_or_else(|| ctx.cwd.clone()),
+    cwd: state.cwd.map(|c| profile.user.expand_home(&c)).unwrap_or_else(|| ctx.cwd.clone()),
     files: state.files,
     faults: state.faults,
     timeout: state.timeout,
@@ -694,9 +694,10 @@ fn builtin_resolve(argv: &[String]) -> Option<Vec<String>> {
   }
 }
 
-/// Literal command names that some rule may place on an executor. `None` when
-/// a wildcard rule or a default executor means every exec must be asked about.
-pub(crate) fn route_names(profile: &Profile) -> Option<Vec<String>> {
+/// Executable names the actor's kernel should hand to the proxy: literal
+/// command names that some rule may place on an executor. `None` when a
+/// wildcard rule or a default executor means every exec must be asked about.
+pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
   if profile.default_executor.is_some() {
     return None;
   }
@@ -729,8 +730,6 @@ pub(crate) fn route_names(profile: &Profile) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-  use std::path::Path;
-
   use super::*;
 
   fn argv(s: &str) -> Vec<String> {
@@ -750,7 +749,7 @@ mod tests {
   }
 
   fn profile(yaml: &str) -> Profile {
-    Profile::from_yaml(yaml, Path::new(".")).unwrap()
+    needy_config::profile::load(&needy_config::Source::text(yaml, ".")).unwrap()
   }
 
   #[test]
@@ -785,7 +784,7 @@ commands:
     to: actor
     final: true
   - match: "{node,bun} {script} **"
-    when: { script: "**/pi/dist/cli.js" }
+    when: { captures: { script: "**/pi/dist/cli.js" } }
     to: actor
     final: true
   - match: "{uname,lscpu,sw_vers} **"
@@ -802,7 +801,7 @@ commands:
     use: [clean-env]
 "#,
     );
-    let d = p.decide(&ctx("git status"));
+    let d = decide(&p, &ctx("git status"));
     assert_eq!(d.target, Target::Executor("build".into()));
     assert_eq!(d.argv, argv("git -c color.ui=never status"));
     assert!(d.clear_env);
@@ -812,20 +811,20 @@ commands:
     assert_eq!(d.env.get("PATH").map(String::as_str), Some("/usr/bin"));
     assert_eq!(d.matched, vec![0, 5, 7]);
 
-    let d = p.decide(&ctx("pnpm dlx pi --help"));
+    let d = decide(&p, &ctx("pnpm dlx pi --help"));
     assert_eq!(d.target, Target::Actor);
     assert_eq!(d.matched, vec![0, 1]);
     assert_eq!(d.env.get("CI").map(String::as_str), Some("1"));
 
-    let d = p.decide(&ctx("node /opt/pi/dist/cli.js"));
+    let d = decide(&p, &ctx("node /opt/pi/dist/cli.js"));
     assert_eq!(d.target, Target::Actor);
-    let d = p.decide(&ctx("node server.js"));
+    let d = decide(&p, &ctx("node server.js"));
     assert_eq!(d.target, Target::Executor("build".into()));
 
-    assert_eq!(p.decide(&ctx("uname -a")).target, Target::Actor);
-    assert_eq!(p.decide(&ctx("curl -k https://x")).target, Target::Deny("insecure TLS is not allowed".into()));
-    assert_eq!(p.decide(&ctx("curl https://x")).target, Target::Executor("build".into()));
-    assert_eq!(p.decide(&ctx("xcodebuild -list")).target, Target::Executor("mac".into()));
+    assert_eq!(decide(&p, &ctx("uname -a")).target, Target::Actor);
+    assert_eq!(decide(&p, &ctx("curl -k https://x")).target, Target::Deny("insecure TLS is not allowed".into()));
+    assert_eq!(decide(&p, &ctx("curl https://x")).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &ctx("xcodebuild -list")).target, Target::Executor("mac".into()));
   }
 
   #[test]
@@ -850,7 +849,7 @@ commands:
     exec: audited-fetch --log {url}
 "#,
     );
-    let d = p.decide(&ctx("pytest -q"));
+    let d = decide(&p, &ctx("pytest -q"));
     assert_eq!(d.argv, argv("timeout 600 nice pytest -q -p no:cacheprovider"));
     assert_eq!(d.env["PATH"], "/opt/tools/bin:/usr/bin:/extra");
     assert_eq!(d.env["LANG"], "C.UTF-8");
@@ -859,7 +858,7 @@ commands:
     assert_eq!(d.timeout, Some(Duration::from_secs(600)));
     assert_eq!(d.target, Target::Actor);
 
-    let d = p.decide(&ctx("curl https://e.com"));
+    let d = decide(&p, &ctx("curl https://e.com"));
     assert_eq!(d.argv, argv("audited-fetch --log https://e.com"));
   }
 
@@ -878,20 +877,20 @@ commands:
     );
     let mut c = ctx("node x.js");
     c.cwd = "/tmp".into();
-    assert_eq!(p.decide(&c).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("build".into()));
     c.ancestors = vec![argv("pnpm test --watch")];
-    assert_eq!(p.decide(&c).target, Target::Executor("c".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("c".into()));
     c.cwd = "/home/agent/workspace/app".into();
-    assert_eq!(p.decide(&c).target, Target::Executor("a".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("a".into()));
     let mut c = ctx("make all");
-    assert_eq!(p.decide(&c).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("build".into()));
     c.env.insert("CI".into(), "1".into());
-    assert_eq!(p.decide(&c).target, Target::Executor("b".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("b".into()));
     let mut c = ctx("vim f");
     c.tty = true;
-    assert_eq!(p.decide(&c).target, Target::Executor("d".into()));
-    assert_eq!(p.decide(&ctx("git push --force=yes")).target, Target::Deny("no force".into()));
-    assert_eq!(p.decide(&ctx("git push")).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("d".into()));
+    assert_eq!(decide(&p, &ctx("git push --force=yes")).target, Target::Deny("no force".into()));
+    assert_eq!(decide(&p, &ctx("git push")).target, Target::Executor("build".into()));
   }
 
   #[test]
@@ -912,13 +911,13 @@ commands:
       "uv run --with x git status",
       "env nice -n 5 sudo git log",
     ] {
-      let d = p.decide(&ctx(cmd));
+      let d = decide(&p, &ctx(cmd));
       assert_eq!(d.target, Target::Executor("build".into()), "{cmd}");
       assert_eq!(d.effective[0], "git", "{cmd}");
       assert_eq!(d.argv, argv(cmd), "argv stays original for {cmd}");
     }
-    assert_eq!(p.decide(&ctx("npm exec git")).target, Target::Actor);
-    assert_eq!(p.decide(&ctx("python -m git")).target, Target::Actor);
+    assert_eq!(decide(&p, &ctx("npm exec git")).target, Target::Actor);
+    assert_eq!(decide(&p, &ctx("python -m git")).target, Target::Actor);
   }
 
   #[test]
@@ -933,10 +932,10 @@ commands:
   - { match: "make **", to: actor }
 "#,
     );
-    let d = p.decide(&ctx("mytool run deploy.sh --prod"));
+    let d = decide(&p, &ctx("mytool run deploy.sh --prod"));
     assert_eq!(d.effective, argv("deploy.sh --prod"));
     assert_eq!(d.target, Target::Executor("build".into()));
-    assert_eq!(p.decide(&ctx("make all")).target, Target::Actor);
+    assert_eq!(decide(&p, &ctx("make all")).target, Target::Actor);
   }
 
   #[test]
@@ -956,21 +955,21 @@ commands:
       "-lc".into(),
       "git status && make -j4 | tee log".into(),
     ];
-    assert_eq!(p.decide(&c).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("build".into()));
     c.argv = vec!["sh".into(), "-c".into(), "git status; ls".into()];
-    assert_eq!(p.decide(&c).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("build".into()));
     c.argv = vec!["sh".into(), "-c".into(), "git status; uname -a".into()];
-    assert_eq!(p.decide(&c).target, Target::Actor);
+    assert_eq!(decide(&p, &c).target, Target::Actor);
     c.argv = vec!["sh".into(), "-c".into(), "echo $HOME".into()];
-    assert_eq!(p.decide(&c).target, Target::Actor);
+    assert_eq!(decide(&p, &c).target, Target::Actor);
     c.argv = vec!["sh".into(), "-c".into(), "git pull && rm -rf /".into()];
-    assert_eq!(p.decide(&c).target, Target::Deny("no".into()));
+    assert_eq!(decide(&p, &c).target, Target::Deny("no".into()));
     c.argv = vec!["bash".into(), "-c".into(), "CI=1 'git' \"log\" -1".into()];
-    assert_eq!(p.decide(&c).target, Target::Executor("build".into()));
+    assert_eq!(decide(&p, &c).target, Target::Executor("build".into()));
 
     let sticky = profile("unknown: build\ncommands: [{ match: \"git **\", to: build }]");
     c.argv = vec!["sh".into(), "-c".into(), "git log > out".into()];
-    assert_eq!(sticky.decide(&c).target, Target::Executor("build".into()));
+    assert_eq!(decide(&sticky, &c).target, Target::Executor("build".into()));
   }
 
   #[test]
@@ -1000,14 +999,14 @@ commands:
     let p = profile(
       "commands:\n  - { match: \"{git,make} **\", to: build }\n  - { match: uname, to: actor }\n  - { match: \"cargo **\", executor: build }\n",
     );
-    let names = p.route_names().unwrap();
+    let names = route_names(&p).unwrap();
     assert!(names.contains(&"git".to_string()));
     assert!(names.contains(&"cargo".to_string()));
     assert!(names.contains(&"bash".to_string()));
     assert!(!names.contains(&"uname".to_string()));
-    assert_eq!(profile("commands: [{ match: \"**\", to: build }]").route_names(), None);
-    assert_eq!(profile("default_executor: build").route_names(), None);
-    assert_eq!(profile("commands: [{ match: uname, to: actor }]").route_names(), Some(vec![]));
+    assert_eq!(route_names(&profile("commands: [{ match: \"**\", to: build }]")), None);
+    assert_eq!(route_names(&profile("default_executor: build")), None);
+    assert_eq!(route_names(&profile("commands: [{ match: uname, to: actor }]")), Some(vec![]));
   }
 
   #[test]
@@ -1021,7 +1020,7 @@ commands:
     faults: [{ on: exec, errno: EIO }]
 "#,
     );
-    let d = p.decide(&ctx("xcodebuild"));
+    let d = decide(&p, &ctx("xcodebuild"));
     assert_eq!(d.files, vec!["a".to_string(), "b".to_string()]);
     assert_eq!(d.faults.len(), 1);
   }

@@ -1,0 +1,106 @@
+//! Profiles: one session's user, actor, executors, routing rules, networks,
+//! file mappings and chaos.
+
+mod actor;
+mod chaos;
+mod executor;
+mod files;
+mod network;
+mod rules;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+
+use serde::Deserialize;
+
+pub use actor::{Actor, Limits};
+pub use chaos::{Chaos, Fault, FaultKind, Readings};
+pub use executor::{Docker, DockerBuild, Executor, OnFull, Remote, Runtime};
+pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
+pub use network::{Injection, NetworkPolicy};
+pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
+
+use crate::{Error, Kind, Source, merge, source};
+
+/// One session: machines, routing rules, networks, files and chaos.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Profile {
+  pub user: User,
+  pub actor: Actor,
+  pub executors: BTreeMap<String, Executor>,
+  pub executor_network: NetworkPolicy,
+  /// Named blocks of actions that rules reuse with `use:`.
+  pub presets: BTreeMap<String, Actions>,
+  /// Every rule that matches applies, in order.
+  pub commands: Vec<Rule>,
+  pub files: Files,
+  /// The mappings this session uses; empty means all of them.
+  pub session_files: Vec<String>,
+  pub chaos: Chaos,
+  pub resolvers: Vec<Resolver>,
+  pub unknown: UnknownPolicy,
+  /// Where commands that no rule places run; the actor when absent.
+  pub default_executor: Option<String>,
+  // TODO(trace): `trace:` (sinks, timing) joins the schema with the trace
+  // crate in slice 4 of the module layout redesign.
+  /// The directory that relative paths in the profile resolve against.
+  #[serde(skip)]
+  pub base_dir: PathBuf,
+}
+
+/// The single user that the actor and every executor share.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct User {
+  pub name: String,
+  pub uid: u32,
+  pub gid: u32,
+}
+
+impl Default for User {
+  fn default() -> Self {
+    Self {
+      name: "agent".into(),
+      uid: 1000,
+      gid: 1000,
+    }
+  }
+}
+
+impl User {
+  /// `/home/<name>`, the same on the actor and every executor.
+  pub fn home(&self) -> String {
+    format!("/home/{}", self.name)
+  }
+
+  /// Expands a leading `~` to [`User::home`].
+  pub fn expand_home(&self, path: &str) -> String {
+    let home = self.home();
+    shellexpand::tilde_with_context(path, || Some(home.as_str())).into_owned()
+  }
+}
+
+/// A profile's rules are evaluated child first.
+const MERGE: merge::Rules = merge::Rules {
+  prepend: &["commands", "resolvers"],
+};
+
+/// Reads a profile and its `extends` chain.
+pub fn load(source: &Source) -> Result<Profile, Error> {
+  let document = source::read_chain(source, Kind::Profile, &MERGE)?;
+  let mut profile: Profile = source::deserialize(document, Kind::Profile, source)?;
+  profile.base_dir = source.base_dir();
+  // `~` means the profile user's home, known only after the whole chain
+  // merged.
+  let user = profile.user.clone();
+  for mapping in profile.files.mappings.values_mut() {
+    mapping.from = mapping.from.clone().expand_home(&user);
+    mapping.to = mapping.to.clone().expand_home(&user);
+  }
+  Ok(profile)
+}
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

@@ -14,6 +14,7 @@ needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-api-server.workspace = true
 needy-common.workspace = true
+needy-config.workspace = true
 needy-core.workspace = true
 needy-core-actor.workspace = true
 needy-core-executor.workspace = true

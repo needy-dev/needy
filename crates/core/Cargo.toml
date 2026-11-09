@@ -1,6 +1,6 @@
 [package]
 name = "needy-core"
-description = "Needy domain logic: profiles, rules, recipes, chaos, traces and reports"
+description = "Needy domain logic: rules, recipe compilation, chaos, traces and reports"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,13 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
+glob-match.workspace = true
 needy-common.workspace = true
+needy-config.workspace = true
 sea-orm.workspace = true
 sea-orm-migration.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 tokio.workspace = true
+tracing.workspace = true

@@ -1,6 +1,6 @@
 //! rclone-style ordered include and exclude filters.
 
-use crate::util::glob_match;
+use glob_match::glob_match;
 
 /// rclone-style filter: ordered `+ PATTERN` and `- PATTERN` rules, first match
 /// wins. A leading `/` anchors at the mapping root; otherwise a pattern may
@@ -29,4 +29,22 @@ pub fn filter_allows(filter: &[String], rel_path: &str) -> bool {
     }
   }
   true
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn filters_follow_rclone() {
+    let f: Vec<String> = ["- /auth.json", "- /sessions/**", "- *.log", "+ **"].iter().map(|s| s.to_string()).collect();
+    assert!(!filter_allows(&f, "auth.json"));
+    assert!(filter_allows(&f, "nested/auth.json"));
+    assert!(!filter_allows(&f, "sessions/2026/a.jsonl"));
+    assert!(!filter_allows(&f, "deep/dir/x.log"));
+    assert!(filter_allows(&f, "config.toml"));
+    let dir: Vec<String> = vec!["- node_modules/".into()];
+    assert!(!filter_allows(&dir, "pkg/node_modules/x/y.js"));
+    assert!(filter_allows(&[], "anything"));
+  }
 }

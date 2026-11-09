@@ -9,7 +9,9 @@ use bollard::Docker;
 use bollard::models::{BuildInfo, BuildInfoAux};
 use bollard::query_parameters::{BuildImageOptions, BuilderVersion, ImageBuildOutput};
 use futures_util::StreamExt;
-use needy_core::recipe::{HostInfo, Recipe, Severity};
+use needy_config::Source;
+use needy_config::validate::Severity;
+use needy_core::recipe::HostInfo;
 
 use crate::cli::Context;
 use crate::output;
@@ -19,9 +21,10 @@ const FAILED_STEP_LINES: usize = 30;
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Recipe whose kernel options the actor image is built with.
+  /// Recipe whose kernel options the actor image is built with: a path, or
+  /// `builtin:NAME`.
   #[arg(long)]
-  recipe: Option<PathBuf>,
+  recipe: Option<String>,
   /// Output directory for vmlinux, rootfs.ext4 and firecracker. Defaults to
   /// the image the daemon boots.
   #[arg(long)]
@@ -38,10 +41,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     None => ctx.paths()?.default_image(),
   };
   let mut build_args = HashMap::new();
-  if let Some(path) = &args.recipe {
-    let compiled = Recipe::load(path).with_context(|| format!("recipe {}", path.display()))?.compile(&HostInfo::detect()?, 0);
+  if let Some(reference) = &args.recipe {
+    let recipe = needy_config::recipe::load(&Source::reference(reference, Path::new("")))?;
+    let compiled = needy_core::recipe::compile(&recipe, &HostInfo::detect()?, 0);
     for finding in &compiled.findings {
-      output::message(format_args!("recipe {:?}: {}", finding.severity, finding.message));
+      output::message(format_args!("recipe {finding}"));
     }
     if compiled.findings.iter().any(|f| f.severity == Severity::Error) {
       bail!("the recipe has errors");

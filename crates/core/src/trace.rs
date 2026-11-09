@@ -40,8 +40,7 @@ impl Trace {
     tokio::spawn(async move {
       while let Some(event) = rx.recv().await {
         if let Err(err) = write(&db, &sessions_dir, &event).await {
-          // TODO(logging): move to structured logs with the tracing slice.
-          eprintln!("needy: trace {} for session {}: {err:#}", event.kind, event.session);
+          tracing::warn!("trace {} for session {}: {err:#}", event.kind, event.session);
         }
       }
     });
@@ -158,6 +157,8 @@ pub fn open_cast(dir: &Path, process: &str, cols: u32, rows: u32, argv: &[String
 pub fn cast_output(file: &mut std::fs::File, started_ms: i64, bytes: &[u8]) {
   let seconds = (now_ms() - started_ms) as f64 / 1000.0;
   let event = json!([seconds, "o", String::from_utf8_lossy(bytes)]);
+  // A failed write loses part of a recording, never the command's output.
+  // TODO(trace): terminal recordings are removed in slice 4.
   let _ = writeln!(file, "{event}");
 }
 
@@ -206,6 +207,7 @@ mod tests {
 
   fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("needy-trace-{}-{name}", std::process::id()));
+    // A directory left by an earlier run may or may not exist.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("sessions/s1")).unwrap();
     dir

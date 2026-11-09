@@ -21,9 +21,11 @@ use needy_api_proto::v1::{
   PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse, Session as SessionInfo, StopSessionRequest,
   StopSessionResponse, exec_request, exec_response,
 };
-use needy_core::profile::{FileMode, OnFull, Profile, Runtime, Side};
-use needy_core::recipe::{CompiledRecipe, HostInfo, Recipe};
-use needy_core::rules::{CommandContext, Target};
+use needy_config::Source;
+use needy_config::profile::{Executor, FaultKind, FileMode, OnFull, Profile, Runtime, Side};
+use needy_config::validate::{self, Severity};
+use needy_core::recipe::{CompiledRecipe, HostInfo};
+use needy_core::rules::{self, CommandContext, Target};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -52,7 +54,7 @@ pub struct Instance {
 struct InstanceRequest<'a> {
   key: &'a str,
   name: &'a str,
-  config: &'a needy_core::profile::ExecutorConfig,
+  config: &'a Executor,
   session: &'a str,
   profile: &'a Profile,
   base: &'a Path,
@@ -226,7 +228,15 @@ impl Daemon {
     } else {
       PathBuf::from(&request.profile_dir)
     };
-    let profile = Profile::from_yaml(&request.profile_yaml, &base)?;
+    let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), &base))?;
+    let findings = validate::profile(&profile);
+    for finding in findings.iter().filter(|f| f.severity == Severity::Warning) {
+      tracing::warn!("session {id}: profile {finding}");
+    }
+    let errors: Vec<&str> = findings.iter().filter(|f| f.severity == Severity::Error).map(|f| f.message.as_str()).collect();
+    if !errors.is_empty() {
+      bail!("invalid profile: {}", errors.join("; "));
+    }
     let dir = self.state_dir.join("sessions").join(&id);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
@@ -242,14 +252,13 @@ impl Daemon {
     };
     let profile_name = base.display().to_string();
     let recipe = match &profile.actor.recipe {
-      Some(path) => {
-        let path = base.join(path);
-        let recipe = Recipe::load(&path).with_context(|| format!("recipe {}", path.display()))?;
+      Some(reference) => {
+        let recipe = needy_config::recipe::load(&Source::reference(reference, &base))?;
         let host = HostInfo::detect().unwrap_or_else(|_| HostInfo::from_cpuinfo(""));
         let seed = u64::from_str_radix(&id[..8], 16).unwrap_or(0);
-        let compiled = recipe.compile(&host, seed);
+        let compiled = needy_core::recipe::compile(&recipe, &host, seed);
         for finding in &compiled.findings {
-          tracing::warn!("session {id}: recipe {:?}: {}", finding.severity, finding.message);
+          tracing::warn!("session {id}: recipe {finding}");
         }
         Some(compiled)
       }
@@ -259,8 +268,12 @@ impl Daemon {
     let hostname = recipe.as_ref().and_then(|r| r.hostname.clone());
     let mut executors = BTreeMap::new();
     for (exec_name, config) in &profile.executors {
-      let key =
-        config.key.replace("{session}", &id).replace("{group}", &group).replace("{profile}", &profile_name).replace("{rule}", exec_name);
+      let key = config.key.render(&[
+        ("session", &id),
+        ("group", &group),
+        ("profile", &profile_name),
+        ("rule", exec_name),
+      ]);
       let pool_key = format!("{exec_name}@{key}");
       let instance = self
         .instance(InstanceRequest {
@@ -277,7 +290,7 @@ impl Daemon {
       executors.insert(exec_name.clone(), instance);
     }
     let actor_command = if request.actor_command.is_empty() {
-      profile.actor.command.clone()
+      profile.actor.command.to_vec()
     } else {
       request.actor_command.clone()
     };
@@ -372,7 +385,7 @@ impl Daemon {
       }
       Runtime::Docker => {
         let docker = config.docker.clone().unwrap_or_default();
-        if let Err(e) = needy_core::profile::check_docker_args(&docker.args, &[]) {
+        if let Err(e) = needy_core::docker::check_docker_args(&docker.args, &[]) {
           bail!("{e}");
         }
         let image = docker.image.clone().unwrap_or_else(|| self.docker_image.clone());
@@ -516,7 +529,7 @@ impl Daemon {
     let gateway_path = format!("{}_{GATEWAY_PORT}", vsock.display());
     let network = &session.profile.actor.network;
     let policy = needy_core_actor::gateway::Policy {
-      allow: network.allow.clone(),
+      allow: network.allow.iter().map(|glob| glob.as_str().to_string()).collect(),
       upstream: network.upstream.clone(),
       inject: network.inject.iter().map(|(h, i)| (h.clone(), (i.header.clone(), i.secret.clone()))).collect(),
     };
@@ -667,7 +680,7 @@ impl Daemon {
   }
 
   async fn copy_in_executors(&self, session: &Arc<Session>) -> Result<()> {
-    for (name, mapping) in &session.profile.files {
+    for (name, mapping) in &session.profile.files.mappings {
       if !session.profile.session_files.is_empty() && !session.profile.session_files.contains(name) {
         continue;
       }
@@ -709,7 +722,7 @@ impl Daemon {
   }
 
   async fn mirror_out_executors(&self, session: &Arc<Session>) -> Result<()> {
-    for (name, mapping) in &session.profile.files {
+    for (name, mapping) in &session.profile.files.mappings {
       let (FileMode::MirrorOut, Side::Executor { name: exec, path }, Side::Host(dst)) = (mapping.mode, &mapping.from, &mapping.to) else {
         continue;
       };
@@ -751,7 +764,7 @@ impl Daemon {
 
   /// Applies `exec` faults: delays sleep here; an errno denies the command.
   async fn exec_fault(&self, session: &Session, command: &str) -> Option<String> {
-    let fired = session.injector.check("exec", command)?;
+    let fired = session.injector.check(FaultKind::Exec, command)?;
     if let Some(delay) = fired.delay {
       tokio::time::sleep(delay).await;
     }
@@ -778,7 +791,7 @@ impl Daemon {
       tty: request.tty,
       ancestors: Vec::new(),
     };
-    let decision = session.profile.decide(&ctx);
+    let decision = rules::decide(&session.profile, &ctx);
     let (target, deny) = match &decision.target {
       Target::Actor => ("actor".to_string(), String::new()),
       Target::Executor(name) => (name.clone(), String::new()),
@@ -1121,7 +1134,7 @@ impl ProcessService for Api {
     let injector = session.as_ref().map(|s| s.injector.clone());
     // SFTP for an actor mount is framed so file faults can answer `open`.
     let tap = match (&mount_root, &injector) {
-      (Some(root), Some(injector)) if injector.has("file.open") => Some(Arc::new(needy_core::chaos::SftpTap::new(root))),
+      (Some(root), Some(injector)) if injector.has(FaultKind::FileOpen) => Some(Arc::new(needy_core::chaos::SftpTap::new(root))),
       _ => None,
     };
     let (out_tx, out_rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
@@ -1300,7 +1313,7 @@ impl GuestService for Api {
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
     let mut mounts = Vec::new();
-    for (name, mapping) in &profile.files {
+    for (name, mapping) in &profile.files.mappings {
       if !profile.session_files.is_empty() && !profile.session_files.contains(name) {
         continue;
       }
@@ -1323,7 +1336,7 @@ impl GuestService for Api {
     }
     let mut copy_in = Vec::new();
     let mut mirror_out = Vec::new();
-    for (name, mapping) in &profile.files {
+    for (name, mapping) in &profile.files.mappings {
       if !profile.session_files.is_empty() && !profile.session_files.contains(name) {
         continue;
       }
@@ -1343,14 +1356,14 @@ impl GuestService for Api {
       .injector
       .faults()
       .iter()
-      .filter(|f| f.on == "hwmon")
+      .filter(|f| f.on == FaultKind::Hwmon)
       .map(|f| GuestFault {
         at_ms: f.at.map(|d| d.as_millis() as i64).unwrap_or(0),
-        temp_mc: f.set.get("temp_c").and_then(|v| v.as_f64()).map(|c| (c * 1000.0) as i32).unwrap_or(100_000),
+        temp_mc: f.set.temp_c.map(|c| (c * 1000.0) as i32).unwrap_or(100_000),
       })
       .collect();
     let recipe = session.recipe.as_ref();
-    let route_names = profile.route_names().unwrap_or_else(|| vec!["*".into()]);
+    let route_names = rules::route_names(profile).unwrap_or_else(|| vec!["*".into()]);
     self.daemon.trace.record(
       &session.id,
       "actor.config",
@@ -1396,8 +1409,13 @@ impl GuestService for Api {
   async fn fetch_files(&self, request: Request<FetchFilesRequest>) -> Result<Response<Self::FetchFilesStream>, Status> {
     let session = self.bound_session()?;
     let name = request.into_inner().name;
-    let mapping =
-      session.profile.files.get(&name).filter(|m| m.mode == FileMode::CopyIn).ok_or_else(|| Status::not_found("no such copy-in mapping"))?;
+    let mapping = session
+      .profile
+      .files
+      .mappings
+      .get(&name)
+      .filter(|m| m.mode == FileMode::CopyIn)
+      .ok_or_else(|| Status::not_found("no such copy-in mapping"))?;
     let Side::Host(src) = &mapping.from else {
       return Err(Status::invalid_argument("copy-in must come from the host"));
     };
@@ -1435,6 +1453,7 @@ impl GuestService for Api {
     let mapping = session
       .profile
       .files
+      .mappings
       .get(&name)
       .filter(|m| m.mode == FileMode::MirrorOut)
       .ok_or_else(|| Status::not_found("no such mirror-out mapping"))?;
