@@ -95,6 +95,43 @@ async fn a_signal_by_name_ends_the_process_with_that_signal() {
   );
 }
 
+// ROOT CAUSE:
+//
+// If the executor itself had SIGINT ignored (a daemon started with `&` from a
+// non-interactive shell), a piped child ignored SIGINT too because POSIX keeps
+// `SIG_IGN` across `exec`.
+//
+// Before the fix, `needy kill -s INT` left a piped `sleep` running.
+// The fix resets the signal dispositions and the mask of a piped child before
+// `exec`, as portable-pty does for a terminal's child.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_piped_child_dies_of_sigint_although_the_host_ignores_it() {
+  use nix::sys::signal::{SigHandler, Signal, signal};
+  // SAFETY: installs `SIG_IGN`, no handler code runs. It is process-wide, so
+  // the previous disposition is restored before the test asserts.
+  let previous = unsafe { signal(Signal::SIGINT, SigHandler::SigIgn) }.unwrap();
+  let host = Host::default();
+  let spawned = host.spawn(spec(&["sleep", "30"]));
+  // SAFETY: restores the disposition saved above.
+  unsafe { signal(Signal::SIGINT, previous) }.unwrap();
+  let proc = spawned.unwrap();
+
+  proc.send(Input::Signal("SIGINT".into()));
+  let exit = tokio::time::timeout(Duration::from_secs(5), proc.wait()).await;
+  if exit.is_err() {
+    proc.send(Input::Signal("SIGKILL".into()));
+  }
+
+  assert_eq!(
+    exit.expect("the child ends on SIGINT"),
+    Exit {
+      code: None,
+      signal: "SIGINT".into()
+    }
+  );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_terminal_process_sees_a_terminal_and_its_signal_death() {

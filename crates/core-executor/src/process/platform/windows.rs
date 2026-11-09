@@ -6,6 +6,9 @@ use needy_common::process::Exit;
 /// Windows has no process groups; `signal_group` ends the tree instead.
 pub fn own_group(_command: &mut tokio::process::Command) {}
 
+/// Windows has no inherited signal dispositions to reset.
+pub fn default_signals(_command: &mut tokio::process::Command) {}
+
 pub fn exit_from_std(status: std::process::ExitStatus) -> Exit {
   Exit {
     code: status.code(),

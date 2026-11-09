@@ -34,6 +34,7 @@ pub(super) fn spawn(spec: &Spec, tasks: &TaskTracker, cancel: &CancellationToken
   command.stdout(Stdio::piped());
   command.stderr(Stdio::piped());
   platform::own_group(&mut command);
+  platform::default_signals(&mut command);
   let mut child = command.spawn().map_err(|error| Error::Start {
     program: program.clone(),
     error,

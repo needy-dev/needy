@@ -3,7 +3,7 @@
 //! keeps its exact signal.
 
 use needy_common::process::Exit;
-use nix::sys::signal::{Signal, kill, killpg};
+use nix::sys::signal::{SigHandler, SigSet, SigmaskHow, Signal, kill, killpg, signal, sigprocmask};
 use nix::sys::wait::{WaitStatus, waitpid};
 use nix::unistd::Pid;
 
@@ -13,6 +13,45 @@ use crate::signals;
 /// commands it starts too. A terminal's child leads its own session already.
 pub fn own_group(command: &mut tokio::process::Command) {
   command.process_group(0);
+}
+
+/// Signals a piped child gets back at their default disposition before
+/// `exec`.
+// NOTICE: POSIX keeps `SIG_IGN` across `exec`, so a daemon started with `&`
+// from a non-interactive shell (SIGINT and SIGQUIT ignored) passed that on
+// to every child, and `needy kill -s INT` did nothing. portable-pty resets
+// SIGCHLD, SIGHUP, SIGINT, SIGQUIT, SIGTERM and SIGALRM and clears the mask
+// for a terminal's child (`portable-pty-0.9.0/src/unix.rs`, `pre_exec` in
+// `spawn_command`); the job-control signals and SIGPIPE are added here. std
+// clears the mask and resets SIGPIPE itself, but nothing else.
+const RESET_SIGNALS: [Signal; 10] = [
+  Signal::SIGINT,
+  Signal::SIGQUIT,
+  Signal::SIGTERM,
+  Signal::SIGHUP,
+  Signal::SIGALRM,
+  Signal::SIGCHLD,
+  Signal::SIGTSTP,
+  Signal::SIGTTIN,
+  Signal::SIGTTOU,
+  Signal::SIGPIPE,
+];
+
+/// Gives a piped child default signal dispositions and an empty signal mask,
+/// whatever the executor inherited.
+pub fn default_signals(command: &mut tokio::process::Command) {
+  // SAFETY: the closure runs in the forked child before `exec` and calls
+  // only `signal`, `sigemptyset` and `sigprocmask`, which are
+  // async-signal-safe. It allocates nothing and takes no lock.
+  unsafe {
+    command.pre_exec(|| {
+      for sig in RESET_SIGNALS {
+        signal(sig, SigHandler::SigDfl).map_err(std::io::Error::from)?;
+      }
+      sigprocmask(SigmaskHow::SIG_SETMASK, Some(&SigSet::empty()), None).map_err(std::io::Error::from)?;
+      Ok(())
+    });
+  }
 }
 
 pub fn exit_from_std(status: std::process::ExitStatus) -> Exit {
