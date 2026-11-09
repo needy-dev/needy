@@ -720,6 +720,120 @@ fn exec_whose_daemon_shuts_down_exits_255_and_says_why() {
   assert_eq!(stderr(&output), "needy: the connection ended before the command exited: daemon shutting down\n");
 }
 
+/// A daemon whose exec streams end before their command starts: with
+/// `reason`, the way a daemon says why; without one, by closing. It stops
+/// when dropped.
+struct EndingDaemon {
+  endpoint: String,
+  _runtime: tokio::runtime::Runtime,
+}
+
+impl EndingDaemon {
+  fn start(home: &Home, reason: Option<&str>) -> Self {
+    use needy_api_client::proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
+    use needy_api_client::proto::v1::{
+      ExecEnded, ExecRequest, ExecResponse, KillProcessRequest, KillProcessResponse, ListProcessesRequest, ListProcessesResponse,
+      exec_response,
+    };
+    use tonic::{Request, Response, Status, Streaming};
+
+    struct Ending(Option<String>);
+
+    #[tonic::async_trait]
+    impl ProcessService for Ending {
+      type ExecStream = tokio_stream::Iter<std::vec::IntoIter<Result<ExecResponse, Status>>>;
+
+      async fn exec(&self, _: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
+        let ended = self.0.iter().map(|reason| {
+          Ok(ExecResponse {
+            payload: Some(exec_response::Payload::Ended(ExecEnded {
+              reason: reason.clone(),
+            })),
+          })
+        });
+        Ok(Response::new(tokio_stream::iter(ended.collect::<Vec<_>>())))
+      }
+
+      async fn list_processes(&self, _: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
+        Err(Status::unimplemented("not part of the test"))
+      }
+
+      async fn kill_process(&self, _: Request<KillProcessRequest>) -> Result<Response<KillProcessResponse>, Status> {
+        Err(Status::unimplemented("not part of the test"))
+      }
+    }
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let socket = home.path().join("ending.sock");
+    let listener = {
+      let _context = runtime.enter();
+      tokio::net::UnixListener::bind(&socket).unwrap()
+    };
+    runtime.spawn(
+      tonic::transport::Server::builder()
+        .add_service(ProcessServiceServer::new(Ending(reason.map(str::to_string))))
+        .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener)),
+    );
+    Self {
+      endpoint: format!("unix:{}", socket.display()),
+      _runtime: runtime,
+    }
+  }
+}
+
+// ROOT CAUSE:
+//
+// If the exec stream of `needy exec -d` ended before the process started,
+// `needy` failed as if it had a bug of its own, because the detached path
+// read the end as an error instead of an unknown outcome.
+//
+// Before the fix, it exited 1, with "the stream ended before the process
+// started" or the daemon's reason worded for a command that had started.
+// The fix exits 255 and says why the stream ended, like an exec whose stream
+// ends before the command exits.
+#[test]
+fn detached_exec_whose_stream_ends_before_the_start_exits_255_and_says_why() {
+  let home = Home::new();
+  let daemon = EndingDaemon::start(&home, Some("session stopped"));
+
+  let output = home.run(&[
+    "--endpoint",
+    &daemon.endpoint,
+    "exec",
+    "-d",
+    "--",
+    "sleep",
+    "30",
+  ]);
+
+  assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+  assert_eq!(stdout(&output), "");
+  assert_eq!(stderr(&output), "needy: the connection ended before the command started: session stopped\n");
+}
+
+#[test]
+fn detached_exec_json_whose_stream_closes_before_the_start_reports_an_error() {
+  let home = Home::new();
+  let daemon = EndingDaemon::start(&home, None);
+
+  let output = home.run(&[
+    "--endpoint",
+    &daemon.endpoint,
+    "exec",
+    "-d",
+    "--output",
+    "json",
+    "--",
+    "sleep",
+    "30",
+  ]);
+
+  assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+  let summary: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+  assert_eq!(summary["error"], "the connection ended before the command started", "{summary}");
+  assert!(summary.get("process_id").is_none(), "{summary}");
+}
+
 /// Sends SIGTERM twice, half a second apart, and returns how long the
 /// daemon took to exit after the second and its output.
 fn terminate_twice(mut daemon: Child) -> (Duration, Output) {

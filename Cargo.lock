@@ -2030,6 +2030,8 @@ dependencies = [
  "tar",
  "tempfile",
  "tokio",
+ "tokio-stream",
+ "tonic",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",

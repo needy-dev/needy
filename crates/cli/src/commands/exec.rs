@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use base64::Engine;
 use clap::ValueEnum;
 use needy_api_client::exec::{Event, ExecStream};
@@ -149,9 +149,16 @@ fn refused(error: Error, format: Output) -> Result<i32> {
   Ok(code)
 }
 
-/// Waits until the detached process starts and prints its ID.
+/// Waits until the detached process starts and prints its ID. A stream that
+/// ends first leaves the process's fate unknown: 255 and why it ended.
 async fn detached(stream: &mut ExecStream, format: Output) -> Result<i32> {
-  while let Some(event) = stream.next().await? {
+  let reason = loop {
+    let event = match stream.next().await {
+      Ok(Some(event)) => event,
+      Ok(None) => break None,
+      Err(Error::Ended { reason }) => break reason,
+      Err(error) => return Err(error.into()),
+    };
     match event {
       Event::Started(started) => {
         match format {
@@ -164,8 +171,15 @@ async fn detached(stream: &mut ExecStream, format: Output) -> Result<i32> {
       Event::Trace(event) if format == Output::Ndjson => line(&event_line(&event)?)?,
       _ => {}
     }
+  };
+  let message = format!("the connection ended before the command started{}", reason.map(|r| format!(": {r}")).unwrap_or_default());
+  match format {
+    Output::Human => {}
+    Output::Json => line(&json!({"error": message}))?,
+    Output::Ndjson => line(&json!({"type": "error", "message": message}))?,
   }
-  bail!("the stream ended before the process started")
+  output::message(&message);
+  Ok(signals::ENDED)
 }
 
 /// Collects (`json`) or streams (`ndjson`) the process's events until it exits.
