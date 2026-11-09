@@ -221,3 +221,38 @@ async fn processes_on_an_executor_two_instances_share_are_listed_once() {
   Sessions::stop(daemon, &created.id).await.unwrap();
   daemon.shutdown().await;
 }
+
+/// The message of an exec in `session` the daemon refuses.
+async fn exec_refusal(daemon: &crate::Daemon, session: &str) -> String {
+  match daemon.exec(ExecOpen::Start(spec(&["true"], session, "")), attached()).await {
+    Ok(_) => panic!("an exec in session {session} was accepted"),
+    Err(e) => e.to_string(),
+  }
+}
+
+// ROOT CAUSE:
+//
+// If `needy exec` named a session whose actor had finished, it said "the
+// session has no executor", because finishing gives the executors back and
+// placement found none; a stopped session was "no such session".
+//
+// Before the fix, neither message said that the session had ended.
+// The fix says so, with the session's state.
+#[tokio::test]
+async fn an_exec_in_an_ended_session_says_it_ended_and_how() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  testing::fake_image(&started.dir.path().join("image"), r#"touch "$(dirname "$3")/v.sock"; sleep 0.2"#);
+  let finished = Sessions::create(daemon, testing::new_actor_session(PROFILE, started.dir.path())).await.unwrap();
+  let stopped = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  Sessions::stop(daemon, &stopped.id).await.unwrap();
+  let released = async {
+    while !daemon.pool.instances().await.is_empty() {
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+  };
+  tokio::time::timeout(Duration::from_secs(10), released).await.expect("the actor did not finish");
+
+  assert_eq!(exec_refusal(daemon, &finished.id).await, format!("session {} has ended: finished", finished.id));
+  assert_eq!(exec_refusal(daemon, &stopped.id).await, format!("session {} has ended: stopped", stopped.id));
+}

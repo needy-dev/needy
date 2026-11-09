@@ -137,7 +137,7 @@ impl Processes for Daemon {
         // an empty ID.
         let session: Option<Arc<Session>> = match spec.session.as_str() {
           "" => None,
-          id => Some(self.sessions.find(id)?),
+          id => Some(self.sessions.find_open(id)?),
         };
         let (instance, decided) = match &session {
           Some(session) => routing::place(session, &mut spec).await?,

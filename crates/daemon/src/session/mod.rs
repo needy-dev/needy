@@ -158,6 +158,21 @@ impl Registry {
     pick(id, &lock(&self.live), |s| (&s.id, &s.name))?.ok_or_else(no_such_session)
   }
 
+  /// The session `id` names, for a new command: one being created or
+  /// running. A session that finished, stopped or failed is an error that
+  /// says so, with its state.
+  pub fn find_open(&self, id: &str) -> Result<Arc<Session>, ControlError> {
+    let info = match self.find(id) {
+      Ok(session) => match session.state.get() {
+        SessionState::Creating | SessionState::Running => return Ok(session),
+        _ => session.info(),
+      },
+      Err(ControlError::NotFound(_)) => self.find_info(id)?,
+      Err(e) => return Err(e),
+    };
+    Err(ControlError::NotFound(format!("session {} has ended: {}", info.id, info.state)))
+  }
+
   /// The live or ended session `id` names; live sessions are looked at
   /// first.
   fn find_info(&self, id: &str) -> Result<SessionInfo, ControlError> {
