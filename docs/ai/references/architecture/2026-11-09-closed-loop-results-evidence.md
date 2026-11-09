@@ -355,7 +355,7 @@ scratch directory. Each fix has a regression test in `make test`.
 | `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
 | `examples/smoke` | Linux | Pass: `google`, both workspace files, `routed exit=7` |
 | `examples/chaos` | Linux | Pass: `Input/output error` on `broken.json`, `fault injected: ECONNREFUSED` with exit 126, hwmon `+101.0°C ALARM (CRIT)`, mirror-out of `result.txt`; the report counts 3 faults by kind; no container or process left |
-| `make check`, `make test` | Mac, Linux | `make check` passes on both, `make test` on the Mac. On Linux, `exec_without_a_session_stays_out_of_a_running_session` and `exec_returns_the_command_exit_code_and_output` fail in most full runs with empty stdout and the right exit status. The base commit fails the same way (4 of 8 runs), so the cause predates these fixes: a fresh start subscribes to its process without replay, so output written before the subscription is lost |
+| `make check`, `make test` | Mac, Linux | `make check` passes on both, `make test` on the Mac. On Linux, `exec_without_a_session_stays_out_of_a_running_session` and `exec_returns_the_command_exit_code_and_output` fail in most full runs with empty stdout and the right exit status. The base commit fails the same way (4 of 8 runs), so the cause predates these fixes: a fresh start subscribed to its process without replay, so output written before the subscription was lost. Fixed since; see the next section |
 
 Changed on purpose by these fixes:
 
@@ -366,6 +366,38 @@ Changed on purpose by these fixes:
   provides `~/workspace`.
 - `exec` and `attach` exit 255 when the stream ends before the command
   exited; `ExecResponse.ended` carries the daemon's reason.
+
+## Re-verified after the output race and exit-code fixes
+
+Three fixes (a started client subscribes with the replay buffer as soon as
+the process exists, so output written before the subscription reaches it;
+the proxy exits 127 when a routed program cannot start; `exec -d` exits 255
+when the stream ends before the process started) were rerun on 2026-11-10
+with debug builds and every daemon's state and output in a scratch
+directory. Each fix has a regression test in `make test`; the race test
+starts 32 short commands at once for 10 rounds and failed in round 0 on
+every run before the fix.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `make test` | Mac | Pass, 3 of 3 runs in a row |
+| `make test`, `make check` | Linux | Pass: `make test` 8 of 8 runs, including `exec_without_a_session_stays_out_of_a_running_session` and `exec_returns_the_command_exit_code_and_output`; `make check` passes |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| An actor whose driving `sh` runs `~/py/needy-missing` (a symlink to `/bin/true` in the actor) routed to a Docker executor, and `python3` started by `bash -c`, which a rule denies | Linux | Pass: `needy: cannot start /home/agent/py/needy-missing: No such file or directory (os error 2)` and exit 127 from the proxy; `needy: denied: under bash` and exit 126; a routed `python3` outside `bash` runs |
+| `examples/smoke` | Linux | Pass: `google`, `routed exit=7` |
+| `examples/chaos` | Linux | Pass: `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` with exit 126 for `curl`; the report counts 3 faults by kind (exec, file.open, hwmon); no container or process left |
+
+Changed on purpose by these fixes:
+
+- A routed program that cannot start on its executor exits 127 from the
+  proxy, as `needy exec` and a shell do; it exited 126 before.
+- `exec -d` exits 255 with `needy: the connection ended before the command
+  started` and the daemon's reason when the stream ends before the process
+  started; it exited 1 before. `--output json` prints `error`.
+- A program name that only a deny rule names is not routed by the actor's
+  kernel (`rules::route_names` lists names placed on executors), so the rule
+  applies to it only on the CLI path. This is unchanged; it is noted because
+  a deny-only rule in an actor profile looks like it should apply.
 
 ## Latency and throughput
 

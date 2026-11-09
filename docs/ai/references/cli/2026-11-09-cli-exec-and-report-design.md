@@ -57,9 +57,13 @@ rule denies it (`needy: denied: …`) or chaos injects an errno
 reason when the daemon gave one (`: session stopped`,
 `: daemon shutting down`); the command's own status is unknown. `--output
 json` then carries `error` instead of `exit_code` and `signal`, and
-`--output ndjson` ends with an `error` line instead of an `exit` line. A
-routed command in the actor gets 255 from the proxy in the same case. Any
-other error exits 1 with one `needy:` line.
+`--output ndjson` ends with an `error` line instead of an `exit` line.
+`exec -d` exits 255 the same way when the stream ends before the process
+started, with `needy: the connection ended before the command started` and
+the reason; `--output json` then prints only `error`. A routed command in the
+actor gets the same codes from the proxy: 126 when a rule or fault refuses
+it, 127 when its program cannot start on the executor, 255 when the stream
+ends early. Any other error exits 1 with one `needy:` line.
 
 | Exit | Meaning |
 | --- | --- |
@@ -67,7 +71,7 @@ other error exits 1 with one `needy:` line.
 | 126 | A rule denied the command or chaos injected an errno |
 | 127 | The command cannot start |
 | 128 + N | The command died of signal N |
-| 255 | The stream ended before the command exited |
+| 255 | The stream ended before the command exited (with `-d`, before it started) |
 | 1 | Any other error of `needy` itself |
 
 Deliberately absent:
