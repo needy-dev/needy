@@ -110,7 +110,7 @@ only through feature-gated sinks.
 | `common` | Domain-free: archive entries, filters, `Exit` |
 | `config` | Values users write: `Duration`, `ByteSize`, `Words`, `Glob`, `Template`, and the enums in the schema (`FaultKind`, `Runtime`, `OnFull`, `FileMode`, `Side`) |
 | `core` | Values the system produces: `Decision`, `Placement`, `SessionState`, `Origin`, `Fired` (a fault that chaos injected: kind, target, effect). Events: `EventKind` and one typed payload per kind, serialized with serde |
-| `trace` | The envelope only: `Event { session, seq, time, kind, payload }`, where `payload` is JSON |
+| `trace` | The envelope only: `Event { session, seq, time_ms, kind, version, payload }`, where `payload` is JSON and `version` is the producer's payload schema version (`core::event::SCHEMA_VERSION`), stamped by the session's `Dispatch` (slice 4) |
 
 Storage and dispatch do not need event types; producers and the report do.
 Producers build a `core::event` payload and hand its serialized form to
@@ -139,8 +139,8 @@ Producers build a `core::event` payload and hand its serialized form to
   [profile note](../config/2026-11-09-profile-and-rules-design.md), off by
   default and recorded for replay; it needs owner approval of its profile
   syntax.
-- **Observers** subscribe through `trace::Dispatch`. Dispatch never blocks the
-  flow. Events go through a bounded queue. A full queue drops the event and
+- **Observers** subscribe through `trace::Dispatch`, one per session (slice
+  4). Dispatch never blocks the flow. Events go through a bounded queue. A full queue drops the event and
   counts it; when space returns, Dispatch writes one `trace.gap { dropped }`
   event, and the report warns at the top that the trace is incomplete.
 - **No terminal recording.** Output bytes are not observed. The old asciicast
@@ -569,7 +569,8 @@ Rules for every slice:
 
 A QA pass on 2026-11-09 (a Mac without KVM, and the Linux KVM host) found
 these gaps in observable behavior. Each slice closes the items it owns.
-The slice 1 items are closed; `crates/cli/tests/cli.rs` covers each one.
+The slice 1 and slice 4 items are closed; `crates/cli/tests/cli.rs` covers
+each one.
 
 | Slice | Item |
 | --- | --- |

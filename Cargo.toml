@@ -10,6 +10,7 @@ members = [
     "crates/core-actor",
     "crates/core-executor",
     "crates/daemon",
+    "crates/trace",
     "xtask",
 ]
 resolver = "3"
@@ -22,6 +23,7 @@ repository = "https://github.com/needy-dev/needy"
 
 [workspace.dependencies]
 anyhow = "1"
+async-trait = "0.1"
 base64 = "0.22"
 comfy-table = "7"
 etcetera = "0.11"
@@ -74,6 +76,7 @@ needy-core = { path = "crates/core", version = "0.1.0" }
 needy-core-actor = { path = "crates/core-actor", version = "0.1.0" }
 needy-core-executor = { path = "crates/core-executor", version = "0.1.0" }
 needy-daemon = { path = "crates/daemon", version = "0.1.0" }
+needy-trace = { path = "crates/trace", version = "0.1.0", default-features = false }
 
 [profile.release]
 lto = "thin"

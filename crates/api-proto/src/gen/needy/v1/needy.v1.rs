@@ -244,9 +244,26 @@ pub struct ExecExited {
     #[prost(string, tag="2")]
     pub signal: ::prost::alloc::string::String,
 }
+/// One trace event of an exec, as the daemon records it for the session.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecEvent {
+    /// The event kind, for example "exec.decide" or "fault.injected".
+    #[prost(string, tag="1")]
+    pub kind: ::prost::alloc::string::String,
+    /// The kind's payload: a JSON object whose schema is `needy_core::event`.
+    #[prost(string, tag="2")]
+    pub payload: ::prost::alloc::string::String,
+}
+/// The details of the status of an exec the daemon refused: the events of
+/// the decision that refused it.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExecRefusal {
+    #[prost(message, repeated, tag="1")]
+    pub events: ::prost::alloc::vec::Vec<ExecEvent>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecResponse {
-    #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5")]
+    #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5, 6")]
     pub payload: ::core::option::Option<exec_response::Payload>,
 }
 /// Nested message and enum types in `ExecResponse`.
@@ -263,6 +280,10 @@ pub mod exec_response {
         Exited(super::ExecExited),
         #[prost(string, tag="5")]
         Error(::prost::alloc::string::String),
+        /// Sent before `started` for an exec placed within a session: its
+        /// faults and placement decision.
+        #[prost(message, tag="6")]
+        Event(super::ExecEvent),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

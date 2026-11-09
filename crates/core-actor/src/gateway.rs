@@ -20,8 +20,8 @@ use hyper_util::rt::TokioIo;
 
 use needy_core::chaos::{Injector, Subject};
 use needy_core::event::{Event, NetConnect, NetDeny, NetError, NetRequest};
-use needy_core::trace::Trace;
 use needy_core::types::Network;
+use needy_trace::Dispatch;
 
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
@@ -55,21 +55,20 @@ fn text(status: StatusCode, message: &str) -> Response<Body> {
 
 pub struct Gateway {
   pub policy: Policy,
-  pub trace: Trace,
-  pub session: String,
+  /// The session's trace.
+  pub trace: Dispatch,
   pub network: Network,
   injector: Option<Arc<Injector>>,
   client: hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Incoming>,
 }
 
 impl Gateway {
-  pub fn new(policy: Policy, trace: Trace, session: String, network: Network, injector: Option<Arc<Injector>>) -> Self {
+  pub fn new(policy: Policy, trace: Dispatch, network: Network, injector: Option<Arc<Injector>>) -> Self {
     let https = hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().build();
     let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build(https);
     Self {
       policy,
       trace,
-      session,
       network,
       injector,
       client,
@@ -87,7 +86,7 @@ impl Gateway {
       async move { Ok::<_, Infallible>(gateway.handle(request).await) }
     });
     if let Err(e) = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(stream), service).with_upgrades().await {
-      tracing::debug!("gateway connection for session {}: {e}", self.session);
+      tracing::debug!("gateway connection for session {}: {e}", self.trace.session());
     }
   }
 
@@ -98,7 +97,7 @@ impl Gateway {
       tokio::time::sleep(delay).await;
     }
     let errno = fired.effect.errno.clone();
-    self.trace.record(&self.session, Event::FaultInjected(fired));
+    self.record(Event::FaultInjected(fired));
     errno.map(|errno| text(StatusCode::BAD_GATEWAY, &format!("needy chaos: {errno} for {host}")))
   }
 
@@ -140,7 +139,9 @@ impl Gateway {
     }
     let path = parts.uri.path().to_string();
     let started = std::time::Instant::now();
-    match self.client.request(Request::from_parts(parts, body)).await {
+    let result = self.client.request(Request::from_parts(parts, body)).await;
+    self.trace.time("net.request", started.elapsed());
+    match result {
       Ok(response) => {
         self.record(Event::NetRequest(NetRequest {
           network: self.network,
@@ -180,7 +181,10 @@ impl Gateway {
     if let Some(response) = self.fault(&host).await {
       return response;
     }
-    let upstream = match tokio::net::TcpStream::connect(&authority).await {
+    let started = std::time::Instant::now();
+    let connected = tokio::net::TcpStream::connect(&authority).await;
+    self.trace.time("net.connect", started.elapsed());
+    let upstream = match connected {
       Ok(s) => s,
       Err(e) => {
         let message = format!("needy: {e}");
@@ -211,6 +215,6 @@ impl Gateway {
   }
 
   fn record(&self, event: Event) {
-    self.trace.record(&self.session, event);
+    self.trace.emit(event.kind().as_str(), event.raw());
   }
 }

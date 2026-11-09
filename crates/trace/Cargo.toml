@@ -1,0 +1,38 @@
+[package]
+name = "needy-trace"
+description = "Needy's event pipeline: the event envelope, observer dispatch, sinks and the SQLite reader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+# Sinks and observers are opt-in, so a crate that only reads or only
+# dispatches does not build SQLite or touch the filesystem.
+sqlite = ["dep:sea-orm", "dep:sea-orm-migration"]
+jsonl = []
+# An in-memory sink for tests.
+memory = []
+# Per-hook latency, written as `trace.timing` events.
+timing = []
+# TODO(trace): an `otel` sink is deferred (module layout redesign, Hooks);
+# it needs an owner decision on the exporter and the event-to-span mapping.
+
+[dependencies]
+async-trait.workspace = true
+needy-common.workspace = true
+sea-orm = { workspace = true, optional = true }
+sea-orm-migration = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+
+[dev-dependencies]
+# NOTICE: the crate's own tests need every sink; a dev-dependency on itself
+# turns the features on for `cargo test` only.
+needy-trace = { path = ".", features = ["sqlite", "jsonl", "memory", "timing"] }
+tempfile.workspace = true

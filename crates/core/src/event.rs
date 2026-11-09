@@ -1,6 +1,7 @@
 //! The events a session records: one [`EventKind`] and one serde payload per
-//! kind. Producers build an [`Event`] and store its kind and JSON
-//! [`Event::payload`]; readers rebuild it with [`Event::decode`].
+//! kind. Producers build an [`Event`] and hand its kind and JSON
+//! [`Event::raw`] payload to `needy-trace`; readers rebuild it with
+//! [`Event::decode`].
 //!
 //! Payloads are plain JSON objects with `deny_unknown_fields`, so a field
 //! that one side renames fails to decode instead of reading as empty.
@@ -55,6 +56,15 @@ macro_rules! events {
         json.expect("event payloads serialize to JSON")
       }
 
+      /// The payload as JSON for `needy-trace`.
+      pub fn raw(&self) -> Box<serde_json::value::RawValue> {
+        let json = match self {
+          $( Event::$variant(payload) => serde_json::value::to_raw_value(payload), )*
+        };
+        // NOTICE: as in `payload`, these types always serialize.
+        json.expect("event payloads serialize to JSON")
+      }
+
       /// Rebuilds an event from its stored kind, schema version and payload.
       pub fn decode(kind: &str, version: u32, payload: &str) -> Result<Event, DecodeError> {
         if version != SCHEMA_VERSION {
@@ -73,6 +83,8 @@ macro_rules! events {
 events! {
   SessionCreate(SessionCreate) = "session.create",
   SessionStop(SessionStop) = "session.stop",
+  /// Creating the session failed; whatever it had acquired is released.
+  SessionFail(SessionFail) = "session.fail",
   /// The actor's VM started.
   ActorStart(ActorStart) = "actor.start",
   /// The actor's VM process exited.
@@ -91,6 +103,12 @@ events! {
   NetConnect(NetConnect) = "net.connect",
   NetDeny(NetDeny) = "net.deny",
   NetError(NetError) = "net.error",
+  /// The trace dropped events because its queue was full. `needy-trace`
+  /// writes it.
+  TraceGap(TraceGap) = "trace.gap",
+  /// Per-hook latencies since the last summary. `needy-trace` writes it when
+  /// the profile turns on `trace.timing`.
+  TraceTiming(TraceTiming) = "trace.timing",
 }
 
 impl std::fmt::Display for EventKind {
@@ -150,6 +168,13 @@ pub struct ExecutorRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionStop {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionFail {
+  /// Why, with its causes.
+  pub reason: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -238,10 +263,6 @@ pub struct ExecStart {
   pub executor: String,
   pub argv: Vec<String>,
   pub origin: Origin,
-  /// The asciicast recording of a terminal session.
-  // TODO(trace): terminal recording is removed in slice 4, and this field
-  // with it.
-  pub cast: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -294,6 +315,32 @@ pub struct NetError {
   /// The request path; `None` for a `CONNECT` tunnel.
   pub path: Option<String>,
   pub error: String,
+}
+
+/// The payload `needy-trace` writes for `trace.gap`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceGap {
+  /// Events lost at this point of the trace.
+  pub dropped: u64,
+}
+
+/// The payload `needy-trace` writes for `trace.timing`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TraceTiming {
+  /// By hook point, for example `exec.decide`.
+  pub hooks: std::collections::BTreeMap<String, HookTiming>,
+}
+
+/// The latency samples of one hook point, in microseconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookTiming {
+  pub count: u64,
+  pub total_us: u64,
+  pub min_us: u64,
+  pub max_us: u64,
 }
 
 #[cfg(test)]

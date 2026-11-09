@@ -1,5 +1,5 @@
 //! Profiles: one session's user, actor, executors, routing rules, networks,
-//! file mappings and chaos.
+//! file mappings, chaos and the trace.
 
 mod actor;
 mod chaos;
@@ -7,6 +7,7 @@ mod executor;
 mod files;
 mod network;
 mod rules;
+mod trace;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ pub use executor::{Docker, DockerBuild, Executor, OnFull, Remote, Runtime};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
 pub use network::{Injection, NetworkPolicy};
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
+pub use trace::{Trace, TraceSink};
 
 use crate::{Error, Kind, Source, merge, source};
 
@@ -42,8 +44,7 @@ pub struct Profile {
   pub unknown: UnknownPolicy,
   /// Where commands that no rule places run; the actor when absent.
   pub default_executor: Option<String>,
-  // TODO(trace): `trace:` (sinks, timing) joins the schema with the trace
-  // crate in slice 4 of the module layout redesign.
+  pub trace: Trace,
   /// The directory that relative paths in the profile resolve against.
   #[serde(skip)]
   pub base_dir: PathBuf,

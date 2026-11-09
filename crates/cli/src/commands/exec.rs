@@ -1,14 +1,17 @@
 //! `needy exec`: run a command through placement. People get the command's
 //! own terminal output; tools get `json` after completion or `ndjson` while
-//! it runs. Those formats live here, not in the executor relay.
+//! it runs, which also carries the session's trace events for the command:
+//! the faults chaos injected and the placement decision. Those formats live
+//! here, not in the executor relay.
 
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use clap::ValueEnum;
-use needy_api_proto::v1::{ExecRequest, ExecResponse, ExecStart, exec_request, exec_response};
+use needy_api_proto::v1::{ExecEvent, ExecRefusal, ExecRequest, ExecResponse, ExecStart, exec_request, exec_response};
 use needy_core_executor::client;
+use prost::Message as _;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
@@ -119,6 +122,16 @@ fn refused(status: &tonic::Status, format: Output) -> Result<i32> {
     Output::Human => {}
     Output::Json => line(&json!({"exit_code": code, "signal": "", "error": status.message()}))?,
     Output::Ndjson => {
+      // The daemon sends the decision that refused the command in the
+      // status details.
+      match ExecRefusal::decode(status.details()) {
+        Ok(refusal) => {
+          for event in &refusal.events {
+            line(&event_line(event)?)?;
+          }
+        }
+        Err(e) => tracing::warn!("cannot read the refusal's events: {e}"),
+      }
       line(&json!({"type": "error", "message": status.message()}))?;
       line(&json!({"type": "exit", "code": code, "signal": ""}))?;
     }
@@ -139,6 +152,7 @@ async fn detached(responses: &mut tonic::Streaming<ExecResponse>, format: Output
         }
         return Ok(0);
       }
+      Some(exec_response::Payload::Event(event)) if format == Output::Ndjson => line(&event_line(&event)?)?,
       Some(exec_response::Payload::Error(error)) => bail!("{error}"),
       _ => {}
     }
@@ -181,6 +195,11 @@ async fn events(tx: mpsc::Sender<ExecRequest>, mut responses: tonic::Streaming<E
         });
         break;
       }
+      Some(exec_response::Payload::Event(event)) => {
+        if format == Output::Ndjson {
+          line(&event_line(&event)?)?;
+        }
+      }
       Some(exec_response::Payload::Error(error)) => bail!("{error}"),
       None => {}
     }
@@ -196,6 +215,15 @@ async fn events(tx: mpsc::Sender<ExecRequest>, mut responses: tonic::Streaming<E
 
 fn started_event(started: &needy_api_proto::v1::ExecStarted) -> Value {
   json!({"type": "started", "process_id": started.process_id, "executor": started.executor, "pid": started.pid, "argv": started.argv})
+}
+
+/// A trace event as an `ndjson` line: its payload's fields with the event
+/// kind as `type`.
+fn event_line(event: &ExecEvent) -> Result<Value> {
+  let mut payload: serde_json::Map<String, Value> =
+    serde_json::from_str(&event.payload).map_err(|e| anyhow!("{} event from the daemon is not a JSON object: {e}", event.kind))?;
+  payload.insert("type".into(), json!(event.kind));
+  Ok(Value::Object(payload))
 }
 
 fn chunk(kind: &str, bytes: &[u8]) -> Value {

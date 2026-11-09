@@ -58,6 +58,11 @@ mod run {
     /// Give up when the session has not finished after this many seconds.
     #[arg(long, default_value_t = 1800)]
     timeout_secs: u64,
+    /// The daemon's state directory, which holds `trace.db`. With it, and
+    /// `trace.timing` on in the profile, the per-hook latencies of the
+    /// session follow the probes' lines.
+    #[arg(long, env = "NEEDY_STATE_DIR")]
+    state_dir: Option<PathBuf>,
   }
 
   pub fn run(args: Args) -> Result<()> {
@@ -167,8 +172,7 @@ mod run {
         println!("{line}");
       }
     }
-    // TODO(trace): read per-hook latencies from the session's trace when the
-    // profile turns on `trace.timing`; that needs the trace slice (4).
+    // Stopping the session writes its timing summary to the trace.
     client
       .sessions()
       .stop_session(StopSessionRequest {
@@ -176,6 +180,24 @@ mod run {
       })
       .await
       .map_err(|s| anyhow::anyhow!("cannot stop session {id}: {}", s.message()))?;
+    match &args.state_dir {
+      Some(dir) => print_timing(&dir.join("trace.db"), &id).await?,
+      None => eprintln!("pass --state-dir or NEEDY_STATE_DIR to print per-hook latencies"),
+    }
+    Ok(())
+  }
+
+  /// Prints each `trace.timing` event of `session` as `{"timing": {...}}`.
+  async fn print_timing(db: &Path, session: &str) -> Result<()> {
+    let loaded = needy_trace::sink::sqlite::load(db, session).await.with_context(|| format!("cannot read the trace of {session}"))?;
+    let mut any = false;
+    for event in loaded.events.iter().filter(|e| e.kind == needy_trace::event::TIMING) {
+      any = true;
+      println!("{{\"timing\":{}}}", event.payload.get());
+    }
+    if !any {
+      eprintln!("session {session} has no per-hook latencies; set `trace: {{ timing: true }}` in the profile");
+    }
     Ok(())
   }
 }

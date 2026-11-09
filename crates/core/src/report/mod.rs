@@ -75,6 +75,10 @@ struct Tally {
   ended: Option<i64>,
   state: Option<SessionState>,
   actor_exit: Option<ActorExit>,
+  /// Why the session failed to start.
+  failure: Option<String>,
+  /// Events the trace dropped.
+  dropped: u64,
   /// The actor's route names; `Some(None)` routes every exec.
   route_names: Option<Option<Vec<String>>>,
   routed: usize,
@@ -106,6 +110,12 @@ impl Tally {
         self.ended.get_or_insert(time_ms);
         self.state = Some(SessionState::Stopped);
       }
+      Event::SessionFail(fail) => {
+        self.ended.get_or_insert(time_ms);
+        self.state = Some(SessionState::Failed);
+        self.failure = Some(fail.reason.clone());
+      }
+      Event::TraceGap(gap) => self.dropped += gap.dropped,
       Event::ActorExit(exit) => {
         self.ended.get_or_insert(time_ms);
         self.state = Some(SessionState::Finished);
@@ -165,7 +175,12 @@ impl Tally {
       }
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push(format!("{} ({} network)", deny.host, network_name(deny.network))),
-      Event::ActorStart(_) | Event::ActorVmExit(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) => {}
+      Event::ActorStart(_)
+      | Event::ActorVmExit(_)
+      | Event::FilesCopyIn(_)
+      | Event::FilesMirrorOut(_)
+      | Event::NetError(_)
+      | Event::TraceTiming(_) => {}
     }
   }
 
@@ -212,6 +227,13 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   };
 
   writeln!(out, "# Session report: {id} (profile: {})\n", t.profile.as_deref().unwrap_or("-"))?;
+  if t.dropped > 0 {
+    writeln!(
+      out,
+      "> ⚠️ The trace is incomplete: {} events were dropped when the trace queue was full, so the counts below may be low.\n",
+      t.dropped
+    )?;
+  }
   writeln!(out, "## Overview\n")?;
   writeln!(
     out,
@@ -248,6 +270,10 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
 
   writeln!(out, "## Findings\n")?;
   let mut any = false;
+  if let Some(reason) = &t.failure {
+    any = true;
+    writeln!(out, "- ❌ Session failed: {reason}")?;
+  }
   if !t.probes.is_empty() {
     any = true;
     writeln!(out, "- ⚠️ Environment probing: {} identity commands ({})", t.probes.values().sum::<usize>(), top(&t.probes, TOP))?;

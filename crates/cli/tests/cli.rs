@@ -102,6 +102,7 @@ commands:
 chaos:
   faults:
     - { on: exec, match: "curl **", errno: ECONNREFUSED }
+    - { on: exec, match: "sleep *", delay: 1ms }
 "#;
 
 fn create_session(home: &Home, profile: &str) -> String {
@@ -171,6 +172,96 @@ fn exec_fault_in_json_output_reports_the_exit_code() {
   let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
   assert_eq!(value["exit_code"], 126);
   assert_eq!(value["error"], "fault injected: ECONNREFUSED");
+}
+
+/// The lines of `ndjson` output, parsed.
+fn ndjson(output: &Output) -> Vec<serde_json::Value> {
+  stdout(output).lines().map(|line| serde_json::from_str(line).unwrap_or_else(|e| panic!("{e}: {line}"))).collect()
+}
+
+fn types(lines: &[serde_json::Value]) -> Vec<&str> {
+  lines.iter().map(|l| l["type"].as_str().unwrap()).collect()
+}
+
+// The QA pass on 2026-11-09 found that `--output ndjson` printed neither the
+// placement decision nor the faults chaos injected.
+#[test]
+fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+
+  let delayed = home.run(&[
+    "exec",
+    "--output",
+    "ndjson",
+    "--session",
+    &session,
+    "--",
+    "sleep",
+    "0",
+  ]);
+
+  assert_eq!(delayed.status.code(), Some(0), "{}", stderr(&delayed));
+  let lines = ndjson(&delayed);
+  assert_eq!(types(&lines), ["fault.injected", "exec.decide", "started", "exit"]);
+  assert_eq!(lines[0]["kind"], "exec");
+  assert_eq!(lines[0]["target"], "sleep 0");
+  assert_eq!(lines[0]["effect"]["delay"], 1);
+  assert_eq!(lines[1]["argv"], serde_json::json!(["sleep", "0"]));
+  assert_eq!(lines[1]["outcome"], serde_json::json!({"run": {"executor": "here"}}));
+  assert_eq!(lines[1]["origin"], "cli");
+
+  let refused = home.run(&[
+    "exec",
+    "--output",
+    "ndjson",
+    "--session",
+    &session,
+    "--",
+    "curl",
+    "http://example.com",
+  ]);
+
+  assert_eq!(refused.status.code(), Some(126));
+  let lines = ndjson(&refused);
+  assert_eq!(types(&lines), ["fault.injected", "exec.decide", "error", "exit"]);
+  assert_eq!(lines[0]["effect"]["errno"], "ECONNREFUSED");
+  assert_eq!(lines[1]["outcome"], serde_json::json!({"fault": "ECONNREFUSED"}));
+  assert_eq!(lines[3]["code"], 126);
+}
+
+#[test]
+fn exec_ndjson_without_a_session_has_no_decision() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+
+  let output = home.run(&["exec", "--output", "ndjson", "--", "true"]);
+
+  assert_eq!(types(&ndjson(&output)), ["started", "exit"]);
+}
+
+// ROOT CAUSE:
+//
+// If one session was running, an exec without `--session` was traced as that
+// session's, and could meet its chaos faults, because the relay looked the
+// session up by an empty ID prefix, which matches every session.
+//
+// Before the fix, the report of the running session listed the command.
+// The fix keeps an exec without a session out of every session.
+#[test]
+fn exec_without_a_session_stays_out_of_a_running_session() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+
+  let output = home.run(&["exec", "--", "sh", "-c", "echo sessionless"]);
+  assert_eq!(stdout(&output), "sessionless\n");
+  assert!(home.run(&["session", "stop", &session]).status.success());
+
+  let report = stdout(&home.run(&["report", &session, "--level", "detailed"]));
+  assert!(report.contains("| session.stop |"), "{report}");
+  assert!(!report.contains("sessionless"), "{report}");
 }
 
 #[test]
@@ -260,6 +351,48 @@ fn session_ls_shows_stopped_and_failed_sessions() {
     |key: &str, value: &str| sessions.as_array().unwrap().iter().find(|s| s[key] == value).map(|s| s["state"].as_str().unwrap().to_string());
   assert_eq!(state("id", &stopped).as_deref(), Some("stopped"));
   assert_eq!(state("name", "broken").as_deref(), Some("failed"));
+}
+
+// The QA pass on 2026-11-09 found that a failed create left nothing in the
+// trace, so `needy report` could not say why the session failed.
+#[test]
+fn a_failed_session_create_records_session_fail_with_the_reason() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  let failed = home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--profile",
+    broken.to_str().unwrap(),
+  ]);
+  assert_eq!(failed.status.code(), Some(1));
+
+  let output = home.run(&["report", "latest"]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let report = stdout(&output);
+  let overview = report.lines().skip_while(|l| !l.starts_with("| Duration")).nth(2).unwrap();
+  assert!(overview.contains("| failed |"), "{report}");
+  let finding = report.lines().find(|l| l.starts_with("- ❌ Session failed: ")).unwrap_or_else(|| panic!("{report}"));
+  assert!(finding.contains("missing.recipe.yaml"), "{finding}");
+}
+
+#[test]
+fn session_stop_is_traced_without_attributes() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+  assert!(home.run(&["session", "stop", &session]).status.success());
+
+  let output = home.run(&["report", &session, "--level", "detailed"]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let report = stdout(&output);
+  let stop = report.lines().find(|l| l.contains("| session.stop |")).unwrap_or_else(|| panic!("{report}"));
+  assert!(stop.ends_with("| session.stop | `{}` |"), "{stop}");
+  assert!(report.lines().nth(2).is_some_and(|l| !l.contains("incomplete")), "{report}");
 }
 
 #[test]

@@ -35,7 +35,7 @@ Tunnel: the executor listens locally and the tunnel carries the connection.
 | Chaos: `exec` errno (`curl **` → `ECONNREFUSED`), `exec` delay (+500 ms) | Pass, on the CLI path and for a routed command in an actor; both exit 126 with `needy: fault injected: ECONNREFUSED` |
 | Chaos: SFTP `open` of `**/*.json` on the actor's workspace mount | Pass: `cat broken.json` gets `Input/output error`, `ok.txt` reads normally |
 | Chaos: scheduled hwmon fault | Pass: `sensors` shows `+101.0°C ALARM (CRIT)` two seconds after start |
-| Terminal recordings in asciicast v2 under `sessions/<id>/casts/` | Pass |
+| Terminal recordings in asciicast v2 under `sessions/<id>/casts/` | Removed by design in the trace slice (owner, 2026-11-09): output bytes are not traced |
 | `needy report` from SQLite traces | Pass |
 | Windows executor: `needy.exe` cross-compiled with mingw, resident on Windows 11 | Pass with pipes; terminals do not work yet (see below) |
 
@@ -111,6 +111,26 @@ version; rows written before it are reported as unreadable.
 | `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
 | `examples/smoke` in an actor; `report` | Linux | Pass: GCE identity from the typed VM identity, routed `python3`, workspace both ways, `routed exit=7`; the report names profile `smoke`, counts 4 routed and 1 failed, and names the kernel's route list under Kept on actor |
 | `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)` (its event now sent by the guest as a typed payload), mirror-out to `out/{session}/`; the report counts 3 faults by kind (exec, file.open, hwmon) and the faulted `curl` as failed |
+
+## Re-verified after the trace slice
+
+Slice 4 of the module layout redesign (the `needy-trace` crate with a bounded
+per-session `Dispatch`, `trace.gap`, SQLite and JSONL sinks and the reader,
+per-hook timing, the profile's `trace:`, placement events in `ndjson`,
+`session.fail`, and no terminal recording) was rerun on 2026-11-09 with debug
+builds and every daemon's state, image and output in a scratch directory.
+`trace.db` has a new schema; a database from before the slice is refused, not
+migrated.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `examples/local` without an actor: `exec --output ndjson` for a command that exits 7, a faulted `curl` and a delayed `sleep`, `exec -t`, stop with mirror-out, `report` and `report --level detailed` | Mac | Pass: `ndjson` starts with `fault.injected` and `exec.decide` lines (outcome `run` on `here`, or `fault` `ECONNREFUSED` before the `error` and `exit` 126 lines); the report counts 4 routed, 4 failed and 2 faults; `session.stop` is `{}`; the session directory holds `profile.yaml` and `trace.jsonl`, no `casts/` |
+| A profile with `trace: { sinks: [sqlite], timing: true }`; a failed create with a missing recipe | Mac | Pass: one `trace.timing` event after `session.stop` with `exec.decide` and `exec.start`; no `trace.jsonl`; the failed session's report shows state `failed` and the reason under Findings |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` in an actor; `report` | Linux | Pass: GCE identity, routed `python3`, workspace both ways, `routed exit=7`; the report counts 4 routed and 1 failed; `trace.jsonl` has the same 18 events |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; the report counts 3 faults by kind |
+| `exec -t` in a session with a Docker executor and without a session | Linux | Pass: a terminal on both (`/dev/pts/N`, exit codes 4 and 5 returned); nothing recorded besides the events; the exec without a session is not in the session's trace (it was before the fix in this slice) |
+| `cargo xtask bench run --profile examples/bench/profile.yaml` with `NEEDY_STATE_DIR` | Linux | Pass: the probes' lines, then one `timing` line: `exec.decide` 601 samples (31–113 µs), `exec.start` 602 (0.5–1.2 ms), `net.request` 100 (0.15–0.6 ms); no container or VM left |
 
 ## Latency and throughput
 

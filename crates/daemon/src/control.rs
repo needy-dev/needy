@@ -21,29 +21,39 @@ use needy_api_proto::v1::{
   PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse, Session as SessionInfo, StopSessionRequest,
   StopSessionResponse, exec_request, exec_response,
 };
+use needy_common::time::now_ms;
 use needy_config::Source;
-use needy_config::profile::{Executor, FaultKind, FileMode, OnFull, Profile, Runtime, Side};
+use needy_config::profile::{Executor, FaultKind, FileMode, OnFull, Profile, Runtime, Side, TraceSink};
 use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
 use needy_core::chaos::sftp::SftpTap;
 use needy_core::event::{
   self, ActorConfig, ActorExit, ActorStart, ActorVmExit, Event, ExecDecide, ExecExit, ExecStart, FileEnd, FilesCopyIn, FilesMirrorOut,
-  SessionCreate, SessionStop,
+  SessionCreate, SessionFail, SessionStop,
 };
 use needy_core::intercept::{self, ExecContext};
 use needy_core::recipe::{CompiledRecipe, HostInfo, VmIdentity};
 use needy_core::rules::{self, Rules};
 use needy_core::types::{Decision, Network, Origin, Outcome, Placement, SessionState};
+use prost::Message as _;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use needy_core::trace::{Trace, now_ms};
 use needy_core_executor::service::ExecStream;
+use needy_trace::Dispatch;
+use needy_trace::sink::Sink;
+use needy_trace::sink::jsonl::Jsonl;
+use needy_trace::sink::sqlite::Store;
 
 /// Ports the actor reaches on the host over vsock.
 pub const GUEST_PORT: u32 = 7000;
 pub const GATEWAY_PORT: u32 = 7001;
+
+/// Events a session's trace queue holds before it drops them.
+// NOTICE: a burst larger than this while the sinks are slow is recorded as a
+// `trace.gap`; 4096 envelopes are a few MiB at most.
+const TRACE_QUEUE: usize = 4096;
 
 pub struct Instance {
   pub name: String,
@@ -83,12 +93,25 @@ pub struct Session {
   pub actor_command: Vec<String>,
   pub recipe: Option<CompiledRecipe>,
   pub injector: Arc<Injector>,
+  pub trace: Dispatch,
+}
+
+impl Session {
+  /// Records `event` in the session's trace.
+  fn emit(&self, event: &Event) {
+    emit(&self.trace, event);
+  }
+}
+
+fn emit(trace: &Dispatch, event: &Event) {
+  trace.emit(event.kind().as_str(), event.raw());
 }
 
 pub struct Daemon {
   pub state_dir: PathBuf,
   pub actor_image: PathBuf,
-  pub trace: Trace,
+  /// `trace.db`, shared by the sessions' SQLite sinks.
+  traces: Store,
   sessions: Mutex<HashMap<String, Arc<Session>>>,
   /// Sessions that were stopped or failed to create, kept so `session ls`
   /// and `session logs` still find them.
@@ -111,7 +134,8 @@ impl Daemon {
   pub async fn start(state_dir: PathBuf, runtime_dir: PathBuf, actor_image: PathBuf, docker_image: String) -> Result<Arc<Self>> {
     let sessions_dir = state_dir.join("sessions");
     std::fs::create_dir_all(&sessions_dir).with_context(|| format!("cannot create {}", sessions_dir.display()))?;
-    let trace = Trace::open(&state_dir.join("trace.db"), sessions_dir).await?;
+    let trace_db = state_dir.join("trace.db");
+    let traces = Store::open(&trace_db).await.with_context(|| format!("cannot open {}", trace_db.display()))?;
     // This machine is always available as the `local` executor.
     let local_sock = runtime_dir.join("local.sock");
     let local_listen = format!("unix:{}", local_sock.display());
@@ -148,7 +172,7 @@ impl Daemon {
     Ok(Arc::new(Self {
       state_dir,
       actor_image,
-      trace,
+      traces,
       sessions: Mutex::new(HashMap::new()),
       ended: Mutex::new(Vec::new()),
       pools: tokio::sync::Mutex::new(HashMap::new()),
@@ -197,11 +221,49 @@ impl Daemon {
     (matches.len() == 1).then(|| self.state_dir.join("sessions").join(&matches[0].session_id))
   }
 
-  /// Creates a session; a failure is kept as a failed session.
+  /// Starts the trace of session `id` with the sinks `config` selects; the
+  /// default sinks when the profile could not be read.
+  fn session_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
+    let default = needy_config::profile::Trace::default();
+    let config = config.unwrap_or(&default);
+    let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
+    // A sink listed twice is written once.
+    let selected: std::collections::BTreeSet<TraceSink> = config.sinks.iter().copied().collect();
+    for sink in selected {
+      match sink {
+        TraceSink::Sqlite => sinks.push(Box::new(self.traces.sink())),
+        TraceSink::Jsonl => {
+          let path = self.state_dir.join("sessions").join(id).join("trace.jsonl");
+          match Jsonl::create(&path) {
+            Ok(jsonl) => sinks.push(Box::new(jsonl)),
+            Err(e) => tracing::warn!("session {id}: the trace goes without JSONL: {e}"),
+          }
+        }
+      }
+    }
+    Dispatch::new(
+      id,
+      sinks,
+      needy_trace::Options {
+        capacity: TRACE_QUEUE,
+        version: event::SCHEMA_VERSION,
+        timing: config.timing,
+      },
+    )
+  }
+
+  /// Creates a session; a failure is kept as a failed session and recorded
+  /// as `session.fail`.
   async fn create_session(self: &Arc<Self>, request: CreateSessionRequest) -> Result<Arc<Session>> {
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let created_ms = now_ms();
-    match self.try_create_session(&id, &request).await {
+    let loaded = load_profile(&id, &request);
+    let trace = self.session_trace(&id, loaded.as_ref().ok().map(|(profile, _)| &profile.trace));
+    let created = match loaded {
+      Ok((profile, base)) => self.try_create_session(&id, &request, profile, base, trace.clone()).await,
+      Err(error) => Err(error),
+    };
+    match created {
       Ok(session) => Ok(session),
       Err(error) => {
         // TODO(8d): instances acquired before the failure are not released;
@@ -224,27 +286,28 @@ impl Daemon {
           created_at_ms: created_ms,
           profile: request.profile_dir.clone(),
         });
+        emit(
+          &trace,
+          &Event::SessionFail(SessionFail {
+            reason: format!("{error:#}"),
+          }),
+        );
+        // `needy report` right after the failed create must find the reason.
+        trace.flush().await;
         Err(error)
       }
     }
   }
 
-  async fn try_create_session(self: &Arc<Self>, id: &str, request: &CreateSessionRequest) -> Result<Arc<Session>> {
+  async fn try_create_session(
+    self: &Arc<Self>,
+    id: &str,
+    request: &CreateSessionRequest,
+    profile: Profile,
+    base: PathBuf,
+    trace: Dispatch,
+  ) -> Result<Arc<Session>> {
     let id = id.to_string();
-    let base = if request.profile_dir.is_empty() {
-      std::env::current_dir()?
-    } else {
-      PathBuf::from(&request.profile_dir)
-    };
-    let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), &base))?;
-    let findings = validate::profile(&profile);
-    for finding in findings.iter().filter(|f| f.severity == Severity::Warning) {
-      tracing::warn!("session {id}: profile {finding}");
-    }
-    let errors: Vec<&str> = findings.iter().filter(|f| f.severity == Severity::Error).map(|f| f.message.as_str()).collect();
-    if !errors.is_empty() {
-      bail!("invalid profile: {}", errors.join("; "));
-    }
     let dir = self.state_dir.join("sessions").join(&id);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
@@ -317,25 +380,23 @@ impl Daemon {
       actor_command,
       recipe,
       injector,
+      trace,
     });
     self.sessions.lock().unwrap().insert(id.clone(), session.clone());
-    self.trace.record(
-      &id,
-      Event::SessionCreate(SessionCreate {
-        name,
-        group,
-        profile: profile_name,
-        executors: session
-          .executors
-          .iter()
-          .map(|(n, i)| event::ExecutorRef {
-            name: n.clone(),
-            runtime: i.runtime.clone(),
-            instance: i.id.clone(),
-          })
-          .collect(),
-      }),
-    );
+    session.emit(&Event::SessionCreate(SessionCreate {
+      name,
+      group,
+      profile: profile_name,
+      executors: session
+        .executors
+        .iter()
+        .map(|(n, i)| event::ExecutorRef {
+          name: n.clone(),
+          runtime: i.runtime.clone(),
+          instance: i.id.clone(),
+        })
+        .collect(),
+    }));
     self.copy_in_executors(&session).await?;
     if request.start_actor {
       self.start_actor(&session).await?;
@@ -507,7 +568,10 @@ impl Daemon {
     for instance in session.executors.values() {
       self.release(instance).await;
     }
-    self.trace.record(&session.id, Event::SessionStop(SessionStop {}));
+    session.emit(&Event::SessionStop(SessionStop {}));
+    // `needy report` right after the stop must see it, and the timing
+    // summary is written now.
+    session.trace.flush().await;
     self.sessions.lock().unwrap().remove(&session.id);
     self.ended.lock().unwrap().push(Api::info(session));
   }
@@ -548,13 +612,8 @@ impl Daemon {
       upstream: network.upstream.clone(),
       inject: network.inject.iter().map(|(h, i)| (h.clone(), (i.header.clone(), i.secret.clone()))).collect(),
     };
-    let gateway = Arc::new(needy_core_actor::gateway::Gateway::new(
-      policy,
-      self.trace.clone(),
-      session.id.clone(),
-      Network::Actor,
-      Some(session.injector.clone()),
-    ));
+    let gateway =
+      Arc::new(needy_core_actor::gateway::Gateway::new(policy, session.trace.clone(), Network::Actor, Some(session.injector.clone())));
     // A socket left by an earlier daemon would make bind fail.
     if let Err(e) = std::fs::remove_file(&gateway_path)
       && e.kind() != std::io::ErrorKind::NotFound
@@ -604,17 +663,12 @@ impl Daemon {
     }
     let mut child = command.spawn().context("cannot start firecracker")?;
     let pid = child.id().unwrap_or(0);
-    self.trace.record(
-      &session.id,
-      Event::ActorStart(ActorStart {
-        pid,
-        vcpus,
-        mem_mib: mem,
-      }),
-    );
+    session.emit(&Event::ActorStart(ActorStart {
+      pid,
+      vcpus,
+      mem_mib: mem,
+    }));
     // Firecracker exits when the guest reboots after the driving program.
-    let daemon = self.clone();
-    let id = session.id.clone();
     let watch = session.clone();
     tokio::spawn(async move {
       let exit = match child.wait().await {
@@ -632,7 +686,7 @@ impl Daemon {
           error: Some(e.to_string()),
         },
       };
-      daemon.trace.record(&id, Event::ActorVmExit(exit));
+      watch.emit(&Event::ActorVmExit(exit));
       let mut state = watch.state.lock().unwrap();
       if *state == SessionState::Running {
         *state = SessionState::Finished;
@@ -736,17 +790,14 @@ impl Daemon {
       )
       .await
       .with_context(|| format!("copy-in {name}"))?;
-      self.trace.record(
-        &session.id,
-        Event::FilesCopyIn(FilesCopyIn {
-          name: name.clone(),
-          to: FileEnd::Executor {
-            name: exec.clone(),
-            path: path.clone(),
-          },
-          bytes: size as u64,
-        }),
-      );
+      session.emit(&Event::FilesCopyIn(FilesCopyIn {
+        name: name.clone(),
+        to: FileEnd::Executor {
+          name: exec.clone(),
+          path: path.clone(),
+        },
+        bytes: size as u64,
+      }));
     }
     Ok(())
   }
@@ -777,18 +828,15 @@ impl Daemon {
       let destination = Self::host_path(session, dst);
       let size = archive.len();
       tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination)).await??;
-      self.trace.record(
-        &session.id,
-        Event::FilesMirrorOut(FilesMirrorOut {
-          name: name.clone(),
-          from: FileEnd::Executor {
-            name: exec.clone(),
-            path: path.clone(),
-          },
-          bytes: size as u64,
-          entries: None,
-        }),
-      );
+      session.emit(&Event::FilesMirrorOut(FilesMirrorOut {
+        name: name.clone(),
+        from: FileEnd::Executor {
+          name: exec.clone(),
+          path: path.clone(),
+        },
+        bytes: size as u64,
+        entries: None,
+      }));
     }
     Ok(())
   }
@@ -798,36 +846,70 @@ impl Daemon {
   /// Runs the `exec.decide` chain for one command of `session`: rules, then
   /// chaos. A command placed on `executor` explicitly skips the rules. The
   /// delays of injected faults are applied here, and each fault is recorded.
+  /// The chain's latency, without the delays, is the `exec.decide` timing.
   async fn decide(&self, session: &Session, ctx: &ExecContext, executor: Option<&str>) -> Decision {
+    let started = std::time::Instant::now();
     let rules = Rules::new(&session.profile);
     let injector = session.injector.as_ref();
     let decision = match executor {
       None => intercept::decide(&[&rules, injector], ctx, Decision::unchanged(ctx, Placement::Actor)),
       Some(name) => intercept::decide(&[injector], ctx, Decision::unchanged(ctx, Placement::Executor(name.into()))),
     };
+    session.trace.time("exec.decide", started.elapsed());
     for fired in &decision.fired {
       if let Some(delay) = fired.effect.delay {
         tokio::time::sleep(delay).await;
       }
-      self.trace.record(&session.id, Event::FaultInjected(fired.clone()));
+      session.emit(&Event::FaultInjected(fired.clone()));
     }
     decision
   }
 
-  /// Records an `exec.decide` event; `outcome` is where the command really
-  /// runs, which for a command from the CLI may differ from the rules'.
-  fn record_decision(&self, session: &Session, ctx: &ExecContext, decision: &Decision, origin: Origin, outcome: Outcome) {
-    self.trace.record(
-      &session.id,
-      Event::ExecDecide(ExecDecide {
-        argv: ctx.argv.clone(),
-        effective: decision.effective.clone(),
-        origin,
-        outcome,
-        rules: decision.matched.clone(),
-      }),
-    );
+  /// Records an `exec.decide` event and returns it; `outcome` is where the
+  /// command really runs, which for a command from the CLI may differ from
+  /// the rules'.
+  fn record_decision(&self, session: &Session, ctx: &ExecContext, decision: &Decision, origin: Origin, outcome: Outcome) -> Event {
+    let event = Event::ExecDecide(ExecDecide {
+      argv: ctx.argv.clone(),
+      effective: decision.effective.clone(),
+      origin,
+      outcome,
+      rules: decision.matched.clone(),
+    });
+    session.emit(&event);
+    event
   }
+}
+
+/// Reads and checks the profile of a session about to be created, and the
+/// directory its relative paths resolve against.
+fn load_profile(id: &str, request: &CreateSessionRequest) -> Result<(Profile, PathBuf)> {
+  let base = if request.profile_dir.is_empty() {
+    std::env::current_dir()?
+  } else {
+    PathBuf::from(&request.profile_dir)
+  };
+  let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), &base))?;
+  let findings = validate::profile(&profile);
+  for finding in findings.iter().filter(|f| f.severity == Severity::Warning) {
+    tracing::warn!("session {id}: profile {finding}");
+  }
+  let errors: Vec<&str> = findings.iter().filter(|f| f.severity == Severity::Error).map(|f| f.message.as_str()).collect();
+  if !errors.is_empty() {
+    bail!("invalid profile: {}", errors.join("; "));
+  }
+  Ok((profile, base))
+}
+
+/// Events in the form the exec stream carries them.
+fn exec_events(events: &[Event]) -> Vec<needy_api_proto::v1::ExecEvent> {
+  events
+    .iter()
+    .map(|event| needy_api_proto::v1::ExecEvent {
+      kind: event.kind().as_str().into(),
+      payload: event.payload(),
+    })
+    .collect()
 }
 
 /// The command a decision runs on `instance`: its arguments and working
@@ -992,13 +1074,15 @@ struct Api {
 impl Api {
   /// Places an exec of `session`: runs the `exec.decide` chain unless the
   /// command comes from the actor (the proxy decided already; a mount is not
-  /// a command), rewrites `start` and returns the instance it runs on.
+  /// a command), rewrites `start` and returns the instance it runs on with
+  /// the events of the decision. A refusal's status carries those events as
+  /// an `ExecRefusal` in its details.
   async fn place(
     &self,
     session: &Arc<Session>,
     start: &mut needy_api_proto::v1::ExecStart,
     origin: Origin,
-  ) -> Result<Arc<Instance>, Status> {
+  ) -> Result<(Arc<Instance>, Vec<Event>), Status> {
     let explicit = (!start.executor.is_empty()).then(|| start.executor.clone());
     let decision = match origin {
       Origin::ActorProxy | Origin::ActorMount => None,
@@ -1007,6 +1091,7 @@ impl Api {
         Some((self.daemon.decide(session, &ctx, explicit.as_deref()).await, ctx))
       }
     };
+    let mut events: Vec<Event> = decision.iter().flat_map(|(d, _)| d.fired.iter().cloned().map(Event::FaultInjected)).collect();
     if let Some((decision, ctx)) = &decision {
       let refusal = match &decision.outcome {
         Outcome::Deny(message) => Some(format!("denied: {message}")),
@@ -1015,9 +1100,12 @@ impl Api {
       };
       if let Some(refusal) = refusal {
         if explicit.is_none() {
-          self.daemon.record_decision(session, ctx, decision, origin, decision.outcome.clone());
+          events.push(self.daemon.record_decision(session, ctx, decision, origin, decision.outcome.clone()));
         }
-        return Err(Status::permission_denied(refusal));
+        let details = needy_api_proto::v1::ExecRefusal {
+          events: exec_events(&events),
+        };
+        return Err(Status::with_details(tonic::Code::PermissionDenied, refusal, details.encode_to_vec().into()));
       }
     }
     if explicit.is_none() {
@@ -1040,9 +1128,9 @@ impl Api {
       start.cwd = cwd;
       start.env.extend(changed_env(decision, &start.env));
       // The decision records where the command really runs.
-      self.daemon.record_decision(session, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone())));
+      events.push(self.daemon.record_decision(session, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone()))));
     }
-    Ok(instance)
+    Ok((instance, events))
   }
 
   fn bound_session(&self) -> Result<Arc<Session>, Status> {
@@ -1170,9 +1258,10 @@ impl ProcessService for Api {
   type ExecStream = ExecStream;
 
   async fn exec(&self, request: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
+    let requested = std::time::Instant::now();
     let mut inbound = request.into_inner();
     let mut first = inbound.message().await?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
-    let (instance, session_id, argv, origin) = match &mut first.payload {
+    let (instance, session, argv, origin, decided) = match &mut first.payload {
       Some(exec_request::Payload::Start(start)) => {
         let origin: Origin = start.origin.parse().map_err(|e: needy_core::types::UnknownOrigin| Status::invalid_argument(e.to_string()))?;
         let session = match &self.bound {
@@ -1182,10 +1271,10 @@ impl ProcessService for Api {
           }
           None => None,
         };
-        let instance = match &session {
+        let (instance, decided) = match &session {
           Some(session) => self.place(session, start, origin).await?,
           None => match start.executor.as_str() {
-            "" | "local" => self.daemon.local.clone(),
+            "" | "local" => (self.daemon.local.clone(), Vec::new()),
             name => self
               .daemon
               .pools
@@ -1194,20 +1283,20 @@ impl ProcessService for Api {
               .values()
               .find(|i| i.name == name)
               .cloned()
+              .map(|instance| (instance, Vec::new()))
               .ok_or_else(|| Status::not_found("no such executor"))?,
           },
         };
         if start.cwd.is_empty() && !instance.workspace.is_empty() {
           start.cwd = instance.workspace.clone();
         }
-        let session_id = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
-        start.session_id = session_id.clone();
-        (instance, session_id, start.argv.clone(), Some(origin))
+        start.session_id = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+        (instance, session, start.argv.clone(), Some(origin), decided)
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let instance =
           self.daemon.procs.lock().unwrap().get(&attach.process_id).cloned().ok_or_else(|| Status::not_found("no such process"))?;
-        (instance, String::new(), Vec::new(), None)
+        (instance, None, Vec::new(), None, Vec::new())
       }
       _ => {
         return Err(Status::invalid_argument("the first request must start or attach"));
@@ -1220,35 +1309,45 @@ impl ProcessService for Api {
       }),
       None => None,
     };
-    let (tty, mount_root, detach) = match &first.payload {
+    let (mount_root, detach) = match &first.payload {
       Some(exec_request::Payload::Start(start)) => {
         let mount = origin == Some(Origin::ActorMount);
-        (start.tty.map(|t| (t.cols, t.rows)), mount.then(|| start.cwd.clone()), start.detach)
+        (mount.then(|| start.cwd.clone()), start.detach)
       }
-      _ => (None, None, false),
+      _ => (None, false),
     };
-    let session = self.daemon.session(&session_id);
+    // The session comes from the start request, never from a lookup by an
+    // empty ID, which as a prefix matches every session. An exec without a
+    // session has no profile, so no chaos and no trace.
     let injector = session.as_ref().map(|s| s.injector.clone());
+    let trace = session.as_ref().map(|s| s.trace.clone());
     // SFTP for an actor mount is framed so file faults can answer `open`.
     let tap = match (&mount_root, &injector) {
       (Some(root), Some(injector)) if injector.has(FaultKind::FileOpen) => Some(Arc::new(SftpTap::new(root))),
       _ => None,
     };
     let (out_tx, out_rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
+    for event in exec_events(&decided) {
+      let event = Ok(ExecResponse {
+        payload: Some(exec_response::Payload::Event(event)),
+      });
+      out_tx.send(event).await.map_err(|_| Status::internal("channel"))?;
+    }
     let (tx, rx) = mpsc::channel::<ExecRequest>(64);
     tx.send(first).await.map_err(|_| Status::internal("channel"))?;
     {
       let tap = tap.clone();
       let injector = injector.clone();
       let out_tx = out_tx.clone();
-      let trace = self.daemon.trace.clone();
-      let session_id = session_id.clone();
+      let trace = trace.clone();
       tokio::spawn(async move {
         while let Ok(Some(mut message)) = inbound.message().await {
           if let (Some(tap), Some(injector), Some(exec_request::Payload::Stdin(bytes))) = (&tap, &injector, &message.payload) {
             let tapped = tap.client_bytes(bytes, injector);
-            for fired in tapped.injected {
-              trace.record(&session_id, Event::FaultInjected(fired));
+            if let Some(trace) = &trace {
+              for fired in tapped.injected {
+                emit(trace, &Event::FaultInjected(fired));
+              }
             }
             for reply in tapped.replies {
               let reply = Ok(ExecResponse {
@@ -1273,11 +1372,9 @@ impl ProcessService for Api {
     let mut upstream = instance.client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
     let daemon = self.daemon.clone();
     let started_ms = now_ms();
-    let cast_dir = session.as_ref().map(|s| s.dir.join("casts"));
     tokio::spawn(async move {
       let _permit = permit;
       let mut process_id = String::new();
-      let mut cast: Option<std::fs::File> = None;
       // A detached process keeps its slot until it exits, so the stream
       // is drained after the client leaves.
       let mut client_gone = false;
@@ -1297,22 +1394,17 @@ impl ProcessService for Api {
           Some(exec_response::Payload::Started(started)) => {
             process_id = started.process_id.clone();
             daemon.procs.lock().unwrap().insert(started.process_id.clone(), instance.clone());
-            let mut cast_path = None;
-            if let (Some((cols, rows)), Some(dir)) = (tty, &cast_dir) {
-              cast = needy_core::trace::open_cast(dir, &process_id, cols, rows, &argv);
-              if cast.is_some() {
-                cast_path = Some(dir.join(format!("{process_id}.cast")).display().to_string());
-              }
-            }
-            if let Some(origin) = origin {
-              daemon.trace.record(
-                &session_id,
-                Event::ExecStart(ExecStart {
+            if let (Some(origin), Some(trace)) = (origin, &trace) {
+              // From the request to the process running, placement and a
+              // wait for the executor's slot included.
+              trace.time("exec.start", requested.elapsed());
+              emit(
+                trace,
+                &Event::ExecStart(ExecStart {
                   process: process_id.clone(),
                   executor: instance.name.clone(),
                   argv: argv.clone(),
                   origin,
-                  cast: cast_path,
                 }),
               );
             }
@@ -1324,15 +1416,12 @@ impl ProcessService for Api {
                 continue;
               }
             }
-            if let Some(file) = cast.as_mut() {
-              needy_core::trace::cast_output(file, started_ms, bytes);
-            }
           }
           Some(exec_response::Payload::Exited(exit)) => {
-            if let Some(origin) = origin {
-              daemon.trace.record(
-                &session_id,
-                Event::ExecExit(ExecExit {
+            if let (Some(origin), Some(trace)) = (origin, &trace) {
+              emit(
+                trace,
+                &Event::ExecExit(ExecExit {
                   process: process_id.clone(),
                   executor: instance.name.clone(),
                   argv: argv.clone(),
@@ -1459,13 +1548,10 @@ impl GuestService for Api {
       .collect();
     let recipe = session.recipe.as_ref();
     let routed = rules::route_names(profile);
-    self.daemon.trace.record(
-      &session.id,
-      Event::ActorConfig(ActorConfig {
-        route_names: routed.clone(),
-        mounts: mounts.iter().map(|m| m.target.clone()).collect(),
-      }),
-    );
+    session.emit(&Event::ActorConfig(ActorConfig {
+      route_names: routed.clone(),
+      mounts: mounts.iter().map(|m| m.target.clone()).collect(),
+    }));
     // `*` asks the kernel to route every exec.
     let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
     Ok(Response::new(GetConfigResponse {
@@ -1521,14 +1607,11 @@ impl GuestService for Api {
       .await
       .map_err(|e| Status::internal(e.to_string()))?
       .map_err(status)?;
-    self.daemon.trace.record(
-      &session.id,
-      Event::FilesCopyIn(FilesCopyIn {
-        name,
-        to: FileEnd::Actor,
-        bytes: archive.len() as u64,
-      }),
-    );
+    session.emit(&Event::FilesCopyIn(FilesCopyIn {
+      name,
+      to: FileEnd::Actor,
+      bytes: archive.len() as u64,
+    }));
     let chunks: Vec<Result<FetchFilesResponse, Status>> =
       archive.chunks(1 << 20).map(|c| Ok(FetchFilesResponse { data: c.to_vec() })).collect();
     Ok(Response::new(Box::pin(tokio_stream::iter(chunks))))
@@ -1561,15 +1644,12 @@ impl GuestService for Api {
       .await
       .map_err(|e| Status::internal(e.to_string()))?
       .map_err(status)?;
-    self.daemon.trace.record(
-      &session.id,
-      Event::FilesMirrorOut(FilesMirrorOut {
-        name,
-        from: FileEnd::Actor,
-        bytes: size as u64,
-        entries: Some(count as u64),
-      }),
-    );
+    session.emit(&Event::FilesMirrorOut(FilesMirrorOut {
+      name,
+      from: FileEnd::Actor,
+      bytes: size as u64,
+      entries: Some(count as u64),
+    }));
     Ok(Response::new(PushFilesResponse {}))
   }
 
@@ -1583,7 +1663,7 @@ impl GuestService for Api {
         let payload = pushed.attrs.get("payload").map(String::as_str).unwrap_or_default();
         let event = Event::decode(&pushed.kind, event::SCHEMA_VERSION, payload)
           .map_err(|e| Status::invalid_argument(format!("guest event {}: {e}", pushed.kind)))?;
-        self.daemon.trace.record_at(&session.id, pushed.time_ms, event);
+        session.trace.emit_at(pushed.time_ms, event.kind().as_str(), event.raw());
       }
     }
     Ok(Response::new(PushEventsResponse {}))
@@ -1592,13 +1672,10 @@ impl GuestService for Api {
   async fn report_exit(&self, request: Request<ReportExitRequest>) -> Result<Response<ReportExitResponse>, Status> {
     let session = self.bound_session()?;
     let exit = request.into_inner();
-    self.daemon.trace.record(
-      &session.id,
-      Event::ActorExit(ActorExit {
-        code: exit.code,
-        signal: (!exit.signal.is_empty()).then_some(exit.signal),
-      }),
-    );
+    session.emit(&Event::ActorExit(ActorExit {
+      code: exit.code,
+      signal: (!exit.signal.is_empty()).then_some(exit.signal),
+    }));
     *session.state.lock().unwrap() = SessionState::Finished;
     Ok(Response::new(ReportExitResponse {}))
   }

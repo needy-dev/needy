@@ -69,7 +69,8 @@ flowchart LR
 - **Observe.** Routing decisions, routed execs, file transfers, gateway
   requests and faults are recorded as typed events; commands the actor's
   kernel does not route are not. `needy report` writes a human-readable
-  summary; the trace is stored in SQLite and JSONL.
+  summary; the trace is stored in SQLite and JSONL, as each profile's
+  `trace:` selects. Terminal output is not recorded.
 - **Shape.** Inject faults such as `EIO`, delays or overheating sensors, and
   build machines whose identity comes from a recipe.
 
@@ -127,7 +128,7 @@ Examples:
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on a Mac |
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
-| [`examples/local`](examples/local/profile.yaml) | No KVM needed: copy-in, mirror-out, chaos and recordings on this machine |
+| [`examples/local`](examples/local/profile.yaml) | No KVM needed: copy-in, mirror-out, chaos and the trace on this machine |
 | [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out on the actor, a file fault on the workspace, an exec fault and an overheating sensor |
 | [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec` |
 

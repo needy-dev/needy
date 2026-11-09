@@ -23,6 +23,9 @@ fn every_kind() -> Vec<Event> {
       }],
     }),
     Event::SessionStop(SessionStop {}),
+    Event::SessionFail(SessionFail {
+      reason: "executor build: no such image".into(),
+    }),
     Event::ActorStart(ActorStart {
       pid: 42,
       vcpus: 4,
@@ -67,7 +70,6 @@ fn every_kind() -> Vec<Event> {
       executor: "build".into(),
       argv: argv("git status"),
       origin: Origin::Cli,
-      cast: None,
     }),
     Event::ExecExit(ExecExit {
       process: "p1".into(),
@@ -109,6 +111,19 @@ fn every_kind() -> Vec<Event> {
       host: "example.net".into(),
       path: Some("/".into()),
       error: "connection refused".into(),
+    }),
+    Event::TraceGap(TraceGap { dropped: 4 }),
+    Event::TraceTiming(TraceTiming {
+      hooks: [(
+        "exec.decide".to_string(),
+        HookTiming {
+          count: 2,
+          total_us: 50,
+          min_us: 20,
+          max_us: 30,
+        },
+      )]
+      .into(),
     }),
   ]
 }
@@ -155,4 +170,18 @@ fn decode_rejects_unknown_kinds_versions_and_fields() {
   let old = r#"{"code":"0","signal":""}"#;
   assert!(matches!(Event::decode("actor.exit", SCHEMA_VERSION, old), Err(DecodeError::Payload { .. })));
   assert!(matches!(Event::decode("session.stop", SCHEMA_VERSION, r#"{"":""}"#), Err(DecodeError::Payload { .. })));
+}
+
+// `needy-trace` writes these two kinds itself, without knowing core's types;
+// the literals are the payloads its tests pin (`dispatch_test.rs`).
+#[test]
+fn the_trace_crate_s_own_events_decode() {
+  let gap = Event::decode("trace.gap", SCHEMA_VERSION, r#"{"dropped":6}"#).unwrap();
+  assert_eq!(gap, Event::TraceGap(TraceGap { dropped: 6 }));
+  let timing =
+    Event::decode("trace.timing", SCHEMA_VERSION, r#"{"hooks":{"exec.decide":{"count":2,"total_us":40,"min_us":10,"max_us":30}}}"#).unwrap();
+  let Event::TraceTiming(timing) = timing else {
+    panic!("{timing:?}")
+  };
+  assert_eq!(timing.hooks["exec.decide"].total_us, 40);
 }

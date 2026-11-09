@@ -40,7 +40,6 @@ fn start(origin: Origin, command: &str) -> Event {
     executor: "build".into(),
     argv: argv(command),
     origin,
-    cast: None,
   })
 }
 
@@ -173,4 +172,70 @@ fn detailed_adds_the_timeline() {
   assert!(report.contains("| +ms | Event | Details |"), "{report}");
   assert!(report.contains("| 200 | exec.decide |"), "{report}");
   assert!(!render("7f3a", &actor_session(), Level::Summary).contains("Event timeline"));
+}
+
+#[test]
+fn a_trace_with_gaps_is_reported_incomplete_at_the_top() {
+  let mut events = actor_session();
+  events.insert(3, at(1_220, Event::TraceGap(TraceGap { dropped: 5 })));
+  events.insert(6, at(1_350, Event::TraceGap(TraceGap { dropped: 2 })));
+
+  let report = render("7f3a", &events, Level::Summary);
+
+  let mut lines = report.lines();
+  assert_eq!(lines.next(), Some("# Session report: 7f3a (profile: smoke)"));
+  assert_eq!(lines.next(), Some(""));
+  assert_eq!(
+    lines.next(),
+    Some("> ⚠️ The trace is incomplete: 7 events were dropped when the trace queue was full, so the counts below may be low.")
+  );
+  assert!(!render("7f3a", &actor_session(), Level::Summary).contains("incomplete"));
+}
+
+#[test]
+fn a_failed_session_shows_its_state_and_reason() {
+  let events = vec![
+    at(
+      1_000,
+      Event::SessionCreate(SessionCreate {
+        name: "demo".into(),
+        group: "demo".into(),
+        profile: "smoke".into(),
+        executors: vec![],
+      }),
+    ),
+    at(
+      3_000,
+      Event::SessionFail(SessionFail {
+        reason: "executor build: no such image".into(),
+      }),
+    ),
+  ];
+
+  let report = render("7f3a", &events, Level::Summary);
+
+  assert_eq!(line_after(&report, "| Duration"), "| 0m 02s | failed | - | 0 | 0 | 0 | 0 | 0 |");
+  assert!(report.contains("- ❌ Session failed: executor build: no such image\n"), "{report}");
+}
+
+#[test]
+fn timing_summaries_are_not_activity() {
+  let mut events = actor_session();
+  let hooks = [(
+    "exec.decide".to_string(),
+    HookTiming {
+      count: 3,
+      total_us: 90,
+      min_us: 20,
+      max_us: 40,
+    },
+  )];
+  events.push(at(
+    7_100,
+    Event::TraceTiming(TraceTiming {
+      hooks: hooks.into(),
+    }),
+  ));
+
+  assert_eq!(render("7f3a", &events, Level::Summary), render("7f3a", &actor_session(), Level::Summary));
 }

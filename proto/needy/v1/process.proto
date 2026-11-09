@@ -74,6 +74,20 @@ message ExecExited {
   string signal = 2;
 }
 
+// One trace event of an exec, as the daemon records it for the session.
+message ExecEvent {
+  // The event kind, for example "exec.decide" or "fault.injected".
+  string kind = 1;
+  // The kind's payload: a JSON object whose schema is `needy_core::event`.
+  string payload = 2;
+}
+
+// The details of the status of an exec the daemon refused: the events of
+// the decision that refused it.
+message ExecRefusal {
+  repeated ExecEvent events = 1;
+}
+
 message ExecResponse {
   oneof payload {
     ExecStarted started = 1;
@@ -81,6 +95,9 @@ message ExecResponse {
     bytes stderr = 3;
     ExecExited exited = 4;
     string error = 5;
+    // Sent before `started` for an exec placed within a session: its
+    // faults and placement decision.
+    ExecEvent event = 6;
   }
 }
 

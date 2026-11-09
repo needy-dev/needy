@@ -25,9 +25,15 @@ Dependencies point downward; a crate never depends on one above it.
   typed VM identity, `chaos`), and owns command patterns (`pattern`), the
   interceptor traits of each hook point (`intercept`), the values producers
   and consumers share (`types`), the typed event schema (`event`) and report
-  rendering (`report`, no IO). Until the `trace` crate lands it also holds the
-  trace writer and the daemon's SQLite store (`trace`, `store`). No
-  processes, listeners or VMs.
+  rendering (`report`, no IO). No processes, listeners, VMs or storage.
+- `crates/trace` (`needy-trace`): the event pipeline. It carries an envelope
+  (`event`: session, sequence number, time, kind and a JSON payload) and does
+  not know event types. `Dispatch` is one session's bounded queue: it never
+  blocks a producer, counts what a full queue drops and records it as
+  `trace.gap`. Sinks sit behind features: `sqlite` (`trace.db`, SeaORM
+  entities and migrations, and the reader `needy report` uses), `jsonl`,
+  `memory` for tests, and `timing` for per-hook latency. Depends only on
+  `common`.
 - `crates/config` (`needy-config`): what users write. Profile and recipe
   schemas, loading from files, `builtin:NAME` and text with `extends` chains
   (`source`), the one merge model (`merge`), cross-reference checks
@@ -36,7 +42,7 @@ Dependencies point downward; a crate never depends on one above it.
   processes, sockets or gRPC.
 - `crates/common` (`needy-common`): shared helpers that depend on neither the
   platform nor an async runtime and know no needy concepts: filters, tar
-  archives, exit status and signal names, and seed mixing.
+  archives, exit status and signal names, seed mixing and wall-clock time.
 - `crates/api-proto`, `crates/api-client`, `crates/api-server`: generated
   Protobuf and gRPC types, the Rust client, and server-side adapters such as
   bearer authentication. Do not edit `api-proto/src/gen`; change `proto/` and

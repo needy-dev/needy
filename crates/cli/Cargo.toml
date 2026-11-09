@@ -29,6 +29,8 @@ needy-core.workspace = true
 needy-core-actor.workspace = true
 needy-core-executor.workspace = true
 needy-daemon.workspace = true
+needy-trace = { workspace = true, features = ["sqlite"] }
+prost.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 shell-words.workspace = true

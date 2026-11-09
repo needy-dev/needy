@@ -28,3 +28,5 @@ files:
   workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
   probe: { mode: copy-in, from: "host:../../target/bench-probe/", to: "actor:~/probe/" }
 session_files: [workspace, probe]
+# Per-hook latencies; `cargo xtask bench run --state-dir DIR` prints them.
+trace: { timing: true }

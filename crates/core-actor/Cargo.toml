@@ -20,6 +20,7 @@ needy-common.workspace = true
 needy-config.workspace = true
 needy-core.workspace = true
 needy-core-executor.workspace = true
+needy-trace = { workspace = true, features = ["timing"] }
 tokio.workspace = true
 tokio-stream.workspace = true
 tracing.workspace = true

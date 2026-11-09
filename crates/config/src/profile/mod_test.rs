@@ -414,3 +414,22 @@ fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
   assert_eq!(p.user.expand_home("~/w"), "/home/dev/w");
   assert_eq!(p.user.expand_home("./w"), "./w");
 }
+
+#[test]
+fn trace_defaults_to_sqlite_and_jsonl_without_timing() {
+  let p = load_text("# nothing yet\n").unwrap();
+
+  assert_eq!(p.trace.sinks, [TraceSink::Sqlite, TraceSink::Jsonl]);
+  assert!(!p.trace.timing);
+}
+
+#[test]
+fn trace_selects_sinks_and_timing() {
+  let p = load_text("trace: { sinks: [jsonl], timing: true }\n").unwrap();
+
+  assert_eq!(p.trace.sinks, [TraceSink::Jsonl]);
+  assert!(p.trace.timing);
+  assert!(load_text("trace: { sinks: [] }\n").unwrap().trace.sinks.is_empty());
+  let err = load_text("trace: { sinks: [otel] }\n").unwrap_err().to_string();
+  assert!(err.contains("trace.sinks[0]: unknown variant `otel`, expected `sqlite` or `jsonl`"), "{err}");
+}

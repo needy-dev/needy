@@ -160,22 +160,23 @@ One chaos rule, by kind: `exec`, `net.connect`, `file.open` or `hwmon`.
 What a program can learn about the machine it runs on: OS, kernel, CPU,
 firmware, devices, network identity. A recipe defines it.
 
-## Recording
+## Observation
 
 ### Trace
 
-Every event recorded during a session, stored in SQLite and as JSONL under the
-session directory.
+Every event recorded during a session, in order: each carries the session, a
+sequence number, a time, a kind such as `exec.decide` and a payload. The
+profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under the
+session directory. Terminal output is not part of the trace.
+
+### Trace gap
+
+A `trace.gap` event: the trace dropped this many events at this point because
+its queue was full. A report of a trace with gaps says it is incomplete.
 
 ### Report
 
 A fixed-format markdown summary of one session, written by `needy report`.
-
-### Recording
-
-An asciicast v2 file of one terminal session, stored with the trace.
-
-*Avoid*: cast, when talking to people.
 
 ## Processes
 

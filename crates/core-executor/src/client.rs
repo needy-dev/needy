@@ -71,7 +71,9 @@ pub async fn relay(tx: mpsc::Sender<ExecRequest>, mut responses: tonic::Streamin
         break;
       }
       Some(exec_response::Payload::Error(error)) => bail!("{error}"),
-      Some(exec_response::Payload::Started(_)) | None => {}
+      // A person at a terminal sees the command's output, not the trace
+      // events of its placement.
+      Some(exec_response::Payload::Started(_)) | Some(exec_response::Payload::Event(_)) | None => {}
     }
   }
   drop(terminal);

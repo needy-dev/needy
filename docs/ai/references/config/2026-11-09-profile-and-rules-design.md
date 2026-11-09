@@ -84,6 +84,8 @@ chaos:
     - { on: file.open, match: "/workspace/**/*.json", errno: EIO, probability: 0.01 }
     - { on: net.connect, match: registry.npmjs.org, delay: 2s, nth: 3 }
     - { on: hwmon, set: { temp_c: 101 }, at: 5m }
+
+trace: { sinks: [sqlite, jsonl], timing: false }   # see Trace
 ```
 
 ## Executors
@@ -189,6 +191,20 @@ matched (`nth`, `probability`), so a replayed session injects the same faults.
 Every injected fault is a `fault.injected` trace event that names its kind,
 its target (the command, host, path or sensor) and its effect. `exec` faults
 are the second step of [rule evaluation](#evaluation).
+
+## Trace
+
+`trace:` selects where the session's events go and whether hook latencies are
+recorded. Both keys are optional.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `sinks` | `[sqlite, jsonl]` | `sqlite` writes the daemon's `trace.db`, which `needy report` reads; `jsonl` appends to `sessions/<id>/trace.jsonl`. An empty list records nothing. |
+| `timing` | `false` | Records the latency of `exec.decide`, `exec.start`, `net.request` and `net.connect` as one `trace.timing` event when the session stops |
+
+A session whose profile cannot be read uses the defaults, so its `session.fail`
+event is still recorded. An OpenTelemetry sink is deferred. Terminal output
+is not recorded.
 
 ## Commands
 

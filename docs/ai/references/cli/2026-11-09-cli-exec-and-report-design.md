@@ -31,13 +31,15 @@ serial console: the guest's boot messages and the driving program's terminal.
 Benchmarks are a developer task, not a product command: `cargo xtask bench`
 runs the latency and throughput probes, and `cargo xtask bench run --profile
 examples/bench/profile.yaml` builds them for the actor and runs them in a
-session.
+session. With `--state-dir` (or `NEEDY_STATE_DIR`) pointing at the daemon's
+state directory, it also prints the session's per-hook latencies, which the
+bench profile records with `trace: { timing: true }`.
 
 ### Paths
 
 | Directory | Default | Override | Holds |
 | --- | --- | --- | --- |
-| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `trace.db`, `sessions/`, executor sockets and workspaces, the daemon log |
+| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `trace.db`, `sessions/` (each with its `trace.jsonl`), executor sockets and workspaces, the daemon log |
 | Data | `$XDG_DATA_HOME/needy` | `NEEDY_DATA_DIR` | `images/default`, which `needy build` writes and the daemon boots |
 | Runtime | `$XDG_RUNTIME_DIR/needy`, else the state directory (macOS) | `NEEDY_RUNTIME_DIR` | `daemon.sock`, the default endpoint, and `local.sock` |
 
@@ -106,12 +108,24 @@ this, for both people and driving programs.
 When the daemon refuses the command, `json` prints `exit_code` and `error`, and
 `ndjson` prints an `error` and an `exit` line.
 
+Within a session, `ndjson` starts with the trace events of the command's
+placement, before `started`: one `fault.injected` line per fault chaos
+injected, then the `exec.decide` line with the arguments, the outcome (for
+example `{"run": {"executor": "build"}}` or `{"fault": "ECONNREFUSED"}`) and
+the rules that matched. Each line is the event's payload with its kind as
+`type`. The daemon sends them on the exec stream as `ExecEvent` messages, and
+for a refused command in the status details as an `ExecRefusal`, so a refused
+command's lines come before its `error` line. A command run with `--executor`
+skips the rules, so it has fault lines but no `exec.decide` line; a command
+without a session has neither.
+
 ### Current state
 
 Implemented on every executor platform: PTY or pipes, raw mode, resize, signal
 forwarding, stdin half-close, exit with a signal name, detach, attach with a
-256 KiB replay buffer, `json` and `ndjson` output, and backpressure from a slow
-client to the process. `--events` is not implemented yet. On Windows a signal
+256 KiB replay buffer, `json` and `ndjson` output with the placement events,
+and backpressure from a slow client to the process. `--events` is not
+implemented yet, and `json` does not include events. On Windows a signal
 terminates the process tree; terminals use ConPTY through portable-pty but do
 not work yet in a daemon started in session 0 (see the closed-loop results).
 
@@ -135,10 +149,11 @@ custom multiplexer.
 
 ## Trace
 
-Every event is defined in `proto/` and carries the session ID, a sequence
-number, a timestamp and the process identity. Event kinds include exec
-(arguments, side, executor, PID, exit), file operations, network connections per
-network, injected faults, recipe answers and each routing decision.
+Every event carries the session ID, a sequence number, a timestamp, a kind
+and a payload. Event kinds include session creation, stop and failure, the
+actor's start, configuration and exit, file copies, each routing decision,
+exec start and exit (arguments, executor, origin, exit), network requests per
+network, injected faults, and the trace's own `trace.gap` and `trace.timing`.
 
 Storage follows agentsh's composite store:
 
@@ -150,9 +165,34 @@ Writes are asynchronous; recording must not delay an intercepted syscall.
 auv's `auv-tracing` already exports runs through OpenTelemetry; a compatible
 event model lets both projects share one observability stack.
 
-**Terminal recording.** Every terminal session that passes through the control
-daemon is recorded in asciicast v2 format under `sessions/<id>/casts/`, and the
-`exec.start` event names the file.
+**No terminal recording.** Output bytes are not part of the trace. The
+asciicast recordings under `sessions/<id>/casts/` were removed (owner,
+2026-11-09).
+
+### Current state
+
+The `needy-trace` crate carries the envelope; the payload schema is
+`needy_core::event`, versioned, and payloads are JSON objects. Each session
+has one `Dispatch`: producers in the daemon and the actor gateway hand it
+events and never wait. A bounded queue of 4096 events feeds a worker that
+writes the profile's sinks in order. When the queue is full, events are
+dropped and counted, and once it has room again one `trace.gap { dropped }`
+event marks the place, so a gap is never silent. `needy report` then starts
+with a warning that the trace is incomplete.
+
+The profile's `trace:` selects the sinks (`sqlite` and `jsonl` by default) and
+`timing`, which records per-hook latencies (`exec.decide`, `exec.start`,
+`net.request`, `net.connect`) as one `trace.timing` event with count, total,
+minimum and maximum when the session stops. A failed `session create`
+records `session.fail` with the reason, using the default sinks when the
+profile itself could not be read. An exec without a session is not traced.
+Events the guest sends keep the time the guest gave them.
+
+`trace.db` has one schema and no migration from the database written before
+the trace crate (principle 7 of the
+[module layout redesign](../architecture/2026-11-09-module-layout-redesign.md));
+the daemon refuses such a database and says to move it away. The
+OpenTelemetry sink is not implemented.
 
 **Mirrored files.** Session directories that a profile mirrors out of the actor,
 such as `~/.codex/sessions` or `~/.claude/projects`, are stored with the trace.
@@ -164,8 +204,8 @@ A fixed-format markdown report for people, modelled on
 [agentsh's session report](https://github.com/canyonroad/agentsh/blob/main/docs/plans/2025-12-30-session-report-design.md).
 
 - `--level summary`: about one page.
-- `--level detailed`: adds per-decision tables, the event timeline, per-category
-  lists and links to terminal recordings.
+- `--level detailed`: adds per-decision tables, the event timeline and
+  per-category lists.
 
 Needy's decision vocabulary differs from agentsh's:
 
@@ -214,16 +254,20 @@ Actor network: openrouter.ai (142)
 
 ### Current state
 
-`needy report` reads the session's rows from `trace.db`, decodes each into a
-typed `needy_core::event` value, and renders them with
-`needy_core::report::render`, which does no IO. A row of another schema
-version, such as one written before the typed events, is an error that names
-the row instead of a partial report. Implemented today:
+`needy report` reads the session's events from `trace.db` with the SQLite
+sink's reader, decodes each into a typed `needy_core::event` value, and
+renders them with `needy_core::report::render`, which does no IO. An event of
+another schema version is an error that names the event instead of a partial
+report. Implemented today:
+
+- **Incomplete trace**: when the trace has `trace.gap` events, the report
+  starts with a warning that names how many events were dropped.
 
 - **Title**: the session ID and the profile's name (its directory's name, for
   example `smoke`).
-- **Overview**: duration (creation to the first of the actor's exit and the
-  stop), state, the driving program's exit, routed and kept commands, CLI
+- **Overview**: duration (creation to the first of the actor's exit, the
+  stop and the failure), state (`failed` after `session.fail`), the driving
+  program's exit, routed and kept commands, CLI
   commands, failed commands and model calls through the actor gateway.
   **Failed** counts commands that exited non-zero or by a signal and commands
   an `exec` fault failed before they started.
@@ -233,15 +277,15 @@ the row instead of a partial report. Implemented today:
   on the actor without a trace event. A line under the table says so and
   names the route list, or says that the kernel routed every exec, or that the
   session ran no actor.
-- **Findings**: environment probing by identity commands, denied commands,
+- **Findings**: why the session failed to start, environment probing by
+  identity commands, denied commands,
   denied network requests, and injected faults by kind. Timing probes,
   harness replacement and reactions to faults are not implemented.
 - **Top activity**: executor commands (from the CLI and the actor, not
   needy's own copy-in, `fs` and mounts), executor and actor network hosts,
   and the slowest commands. Empty lines are omitted.
 - **`--level detailed`** adds the event timeline with each event's JSON
-  payload. Per-decision tables and links to terminal recordings are not
-  implemented.
+  payload. Per-decision tables are not implemented.
 
 ## `needy build`
 

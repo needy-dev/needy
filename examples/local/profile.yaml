@@ -1,5 +1,5 @@
 # Runs on any machine without KVM: no actor, this machine as a native executor.
-# Shows copy-in, mirror-out, chaos on commands and terminal recordings.
+# Shows copy-in, mirror-out, chaos on commands and the session's trace.
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here:

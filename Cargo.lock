@@ -2000,6 +2000,8 @@ dependencies = [
  "needy-core-actor",
  "needy-core-executor",
  "needy-daemon",
+ "needy-trace",
+ "prost",
  "serde",
  "serde_json",
  "shell-words",
@@ -2043,17 +2045,13 @@ dependencies = [
 name = "needy-core"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "glob-match",
  "needy-common",
  "needy-config",
- "sea-orm",
- "sea-orm-migration",
  "serde",
  "serde_json",
  "serde_yaml",
  "thiserror 2.0.21",
- "tokio",
  "tracing",
 ]
 
@@ -2074,6 +2072,7 @@ dependencies = [
  "needy-config",
  "needy-core",
  "needy-core-executor",
+ "needy-trace",
  "tokio",
  "tokio-stream",
  "tokio-vsock",
@@ -2114,12 +2113,31 @@ dependencies = [
  "needy-core",
  "needy-core-actor",
  "needy-core-executor",
+ "needy-trace",
+ "prost",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "needy-trace"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "needy-common",
+ "needy-trace",
+ "sea-orm",
+ "sea-orm-migration",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4328,6 +4346,7 @@ dependencies = [
  "clap",
  "needy-api-client",
  "needy-api-proto",
+ "needy-trace",
  "serde_json",
  "shell-words",
  "tokio",

@@ -9,7 +9,8 @@
 //! - [`chaos`]: deterministic fault injection.
 //! - [`intercept`]: the interceptor traits of each hook point.
 //! - [`types`] and [`event`]: the values producers and consumers share, and
-//!   the typed events a session records.
+//!   the typed events a session records. `needy-trace` carries and stores
+//!   them as JSON payloads.
 //! - [`report`]: a session's events rendered as markdown.
 
 pub mod chaos;
@@ -20,6 +21,4 @@ pub mod pattern;
 pub mod recipe;
 pub mod report;
 pub mod rules;
-pub mod store;
-pub mod trace;
 pub mod types;

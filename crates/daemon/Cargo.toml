@@ -18,6 +18,8 @@ needy-config.workspace = true
 needy-core.workspace = true
 needy-core-actor.workspace = true
 needy-core-executor.workspace = true
+needy-trace = { workspace = true, features = ["sqlite", "jsonl", "timing"] }
+prost.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true

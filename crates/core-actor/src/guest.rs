@@ -272,7 +272,7 @@ mod linux {
         });
         let event = TraceEvent {
           session_id: session,
-          time_ms: needy_core::trace::now_ms(),
+          time_ms: needy_common::time::now_ms(),
           kind: fired.kind().as_str().into(),
           // TODO(proto): `TraceEvent` still carries a string map; the typed
           // payload travels as its `payload` entry until slice 7a gives the
