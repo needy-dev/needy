@@ -30,6 +30,11 @@ fn options() -> Options {
   }
 }
 
+/// The socket directory's name for container `name`.
+fn socket_id(name: &str) -> String {
+  uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).simple().to_string()[..12].to_string()
+}
+
 fn refusal(args: &[&str], options: &Options) -> String {
   match container(&spec(args), options) {
     Ok(container) => panic!("{args:?} was accepted: {container:?}"),
@@ -42,7 +47,7 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
   let container = container(&spec(&[]), &options()).unwrap();
 
   assert_eq!(container.name, "needy-build-s1");
-  assert_eq!(container.socket_dir, Path::new("/home/user/state/executors/build-s1"));
+  assert_eq!(container.socket_dir, Path::new("/home/user/state/executors").join(socket_id("needy-build-s1")));
   assert_eq!(container.workspace_dir, Path::new("/home/user/state/workspaces/build-s1"));
   assert_eq!(container.workspace, "/home/agent/workspace");
   let body = &container.body;
@@ -70,7 +75,7 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
     host.binds.as_deref().unwrap(),
     [
       "/home/user/state/workspaces/build-s1:/home/agent/workspace",
-      "/home/user/state/executors/build-s1:/run/needy"
+      &format!("/home/user/state/executors/{}:/run/needy", socket_id("needy-build-s1"))
     ]
   );
 }
@@ -250,4 +255,43 @@ async fn create_and_destroy_an_executor_container() {
     ) || gone.is_ok_and(|c| c.state.and_then(|s| s.running) == Some(false)),
     "the container is removed"
   );
+}
+
+// ROOT CAUSE:
+//
+// If a Docker executor's key was long (a group or profile in its template)
+// or the state directory was deep, the instance's socket path went over the
+// Unix socket limit (`sun_path`, 108 bytes on Linux), because the socket
+// directory was named after the whole key.
+//
+// Before the fix, `executors/<key>/executor.sock` under a project's scratch
+// state directory left about 13 bytes to spare, and a longer path made the
+// create time out waiting for a socket the container could not bind.
+// The fix keeps the directory's name to twelve characters derived from the
+// key, and refuses a path that still does not fit, naming it.
+#[test]
+fn the_socket_directory_is_short_whatever_the_key() {
+  let mut long = spec(&[]);
+  long.key = format!("build@{}", "group-".repeat(20));
+
+  let container = container(&long, &options()).unwrap();
+
+  let name = container.socket_dir.strip_prefix("/home/user/state/executors").unwrap();
+  assert_eq!(name.as_os_str().len(), 12, "{}", container.socket_dir.display());
+  assert_eq!(container.socket_dir, super::container(&long, &options()).unwrap().socket_dir, "one key, one directory");
+  assert_ne!(container.socket_dir, super::container(&spec(&[]), &options()).unwrap().socket_dir);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_socket_path_over_sun_path_is_refused_with_the_path() {
+  let options = Options {
+    state_dir: PathBuf::from("/home/user").join("s".repeat(100)),
+    ..options()
+  };
+
+  let message = refusal(&[], &options);
+
+  assert!(message.contains(&options.state_dir.display().to_string()), "{message}");
+  assert!(message.contains("too long"), "{message}");
 }

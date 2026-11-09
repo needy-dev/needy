@@ -25,10 +25,11 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
-uuid.workspace = true
+# `v5`: short, stable names for Docker executors' socket directories.
+uuid = { workspace = true, features = ["v5"] }
 
 [target.'cfg(unix)'.dependencies]
-nix.workspace = true
+nix = { workspace = true, features = ["socket"] }
 
 [dev-dependencies]
 tempfile.workspace = true

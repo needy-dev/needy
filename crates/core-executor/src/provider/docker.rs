@@ -11,7 +11,7 @@
 //! runs containers in a VM, where the host cannot connect to it.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use bollard::errors::Error as DockerError;
 use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, Mount, MountType, ResourcesUlimits};
@@ -55,8 +55,34 @@ pub struct Container {
 
 impl Container {
   fn socket(&self) -> PathBuf {
-    self.socket_dir.join("executor.sock")
+    self.socket_dir.join(SOCKET)
   }
+}
+
+/// The executor's socket in its socket directory.
+const SOCKET: &str = "executor.sock";
+
+/// The host directory with the socket of the container `name`: twelve hex
+/// digits derived from the name, so a long key cannot make the socket's
+/// path too long.
+fn socket_dir(options: &Options, name: &str) -> PathBuf {
+  let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).simple().to_string();
+  options.state_dir.join("executors").join(&id[..12])
+}
+
+/// Refuses a socket path that does not fit a Unix socket address
+/// (`sun_path`), which the container's executor could not bind.
+fn check_socket(path: &Path) -> Result<(), Error> {
+  #[cfg(unix)]
+  if nix::sys::socket::UnixAddr::new(path).is_err() {
+    return Err(Error::Config(format!(
+      "the executor's socket path {} is too long for a Unix socket; use a shorter state directory",
+      path.display()
+    )));
+  }
+  #[cfg(not(unix))]
+  let _ = path;
+  Ok(())
 }
 
 /// The container for one instance of a profile's executor: the daemon's
@@ -65,7 +91,8 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
   let docker = spec.config.docker.clone().unwrap_or_default();
   let key = sanitize(&spec.key);
   let name = format!("needy-{key}");
-  let socket_dir = options.state_dir.join("executors").join(&key);
+  let socket_dir = socket_dir(options, &name);
+  check_socket(&socket_dir.join(SOCKET))?;
   let workspace_dir = match &spec.config.workspace {
     Some(path) => host_path(path, &spec.base),
     None => options.state_dir.join("workspaces").join(&key),
@@ -81,7 +108,7 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
         "--mode",
         "executor",
         "--listen",
-        &format!("unix:{SOCKET_DIR}/executor.sock"),
+        &format!("unix:{SOCKET_DIR}/{SOCKET}"),
         "--name",
         &spec.name,
       ]
@@ -398,7 +425,15 @@ impl Provider for Docker {
   }
 
   async fn destroy(&self, handle: &InstanceHandle) -> Result<(), Error> {
-    self.remove(&handle.id).await
+    self.remove(&handle.id).await?;
+    // The socket stays behind its container; the workspace is the user's.
+    let dir = socket_dir(&self.options, &handle.id);
+    if let Err(e) = std::fs::remove_dir_all(&dir)
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!("cannot remove {}: {e}", dir.display());
+    }
+    Ok(())
   }
 }
 

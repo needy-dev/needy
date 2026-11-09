@@ -55,3 +55,26 @@ async fn shutdown_stops_sessions_and_the_local_executors_processes() {
   );
   assert!(!running(pid), "the local executor's processes are killed");
 }
+
+// A socket path longer than `sun_path` used to make the control daemon wait
+// 10 s for its local executor before it failed without naming the path.
+// This keeps start-up failing at once with the path in the error.
+#[tokio::test]
+async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
+  let dir = tempfile::tempdir().unwrap();
+  let runtime_dir = dir.path().join("r".repeat(120));
+  let config = crate::Config {
+    state_dir: dir.path().join("state"),
+    runtime_dir: runtime_dir.clone(),
+    actor_image: dir.path().join("image"),
+    docker_image: "needy-executor:latest".into(),
+  };
+
+  let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");
+
+  let Err(error) = started else {
+    panic!("a daemon started on a socket path over sun_path");
+  };
+  let socket = runtime_dir.join("local.sock");
+  assert!(format!("{error:#}").contains(&socket.display().to_string()), "{error:#}");
+}

@@ -134,9 +134,8 @@ impl Daemon {
       instance_id: uuid::Uuid::new_v4().to_string(),
       role: "executor",
     };
-    // TODO(8i): a socket that cannot bind (a path over `sun_path`) now
-    // fails start-up here with its path; slice 8i adds the daemon's
-    // regression test.
+    // A socket that cannot bind, such as a path over `sun_path`, fails
+    // start-up here with its path.
     let local_server = Server::new(health, Caller::Cli).process_service(service).bind(&[Listen::Unix(local_sock.clone())]).await?;
     let stop = cancel.clone();
     tasks.spawn(async move {
