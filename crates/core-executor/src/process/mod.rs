@@ -144,8 +144,8 @@ impl Host {
   }
 
   /// Kills every running process and waits for the host's tasks to end.
-  // TODO(daemon): nothing calls this yet. `api-server::termination` (slice 7)
-  // and `Daemon::shutdown` (slice 8) stop the executor through it.
+  /// The executor role calls it on a termination signal, and
+  /// `Daemon::shutdown` for the control daemon's local executor.
   pub async fn shutdown(&self) {
     self.inner.cancel.cancel();
     for proc in self.list() {

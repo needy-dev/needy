@@ -61,6 +61,12 @@ trace. In **executor** mode it only runs processes on its own machine.
 One actor and the executor instances bound to it, started from a profile. One
 RL rollout is one session. A session can also have no actor, for `needy exec`.
 
+A session is `creating` while it acquires its executors, copies files in and
+starts its actor, then `running`. It ends `stopped` (after `stopping`, by
+`needy session stop`), `finished` (its actor's driving program exited) or
+`failed` (its create failed). The first of these end states stays: stopping a
+finished session releases its executors but keeps it `finished`.
+
 *Avoid*: run, rollout.
 
 ### Group

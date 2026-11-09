@@ -61,9 +61,8 @@ pub struct Decision {
   pub fired: Vec<Fired>,
 }
 
-/// A session's life cycle. The first terminal state wins.
-// TODO(daemon): `Creating` and `Stopping` are not entered yet; slice 8 moves
-// the transitions into `daemon::session::state`.
+/// A session's life cycle. The first terminal state wins. The daemon's
+/// `session::state` holds the transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {

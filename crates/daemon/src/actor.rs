@@ -1,0 +1,148 @@
+//! Wires a session to its actor: the guest listener the actor's init and
+//! proxy call, the gateway its network goes through, and the Firecracker VM.
+//!
+//! The actor's tasks belong to its session and run under a child of the
+//! session's token, which the VM's exit also cancels: the gateway stops when
+//! the actor exits or its session stops.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use needy_api_server::control::Caller;
+use needy_api_server::{Health, Listen, Server};
+use needy_core::event::{ActorStart, ActorVmExit, Event};
+use needy_core::types::{Network, SessionState};
+use needy_core_actor::host::{gateway, vm};
+use tokio_util::sync::CancellationToken;
+
+use crate::Daemon;
+use crate::session::Session;
+
+/// Ports the actor reaches on the host over vsock.
+pub const GUEST_PORT: u32 = 7000;
+pub const GATEWAY_PORT: u32 = 7001;
+
+/// Starts the actor of `session`: its guest listener, its gateway, then its
+/// VM.
+pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
+  let image = vm::Image::new(&daemon.config.actor_image);
+  image.check()?;
+  let launch = vm::Launch::new(&image, &session.dir, session.recipe.as_ref());
+  serve_guest(daemon, session).await?;
+  let actor = session.cancel.child_token();
+  serve_gateway(session, &actor)?;
+  let vm = match vm::Vm::start(&launch) {
+    Ok(vm) => vm,
+    Err(e) => {
+      actor.cancel();
+      return Err(e.into());
+    }
+  };
+  session.emit(&Event::ActorStart(ActorStart {
+    pid: vm.pid(),
+    vcpus: launch.vcpus,
+    mem_mib: launch.mem_mib,
+  }));
+  session.tasks.spawn(watch(session.clone(), vm, actor));
+  Ok(())
+}
+
+/// Serves the session's API to the actor on its vsock port, as
+/// `Caller::Actor` bound to the session.
+async fn serve_guest(daemon: &Daemon, session: &Session) -> Result<()> {
+  let api = Arc::new(daemon.clone());
+  let health = Health {
+    instance_id: uuid::Uuid::new_v4().to_string(),
+    role: "control",
+  };
+  let caller = Caller::Actor {
+    session: session.id.clone(),
+  };
+  let listener = Server::new(health, caller)
+    .sessions(api.clone())
+    .processes(api.clone())
+    .guest(api)
+    .bind(&[Listen::Unix(vm::host_port(&session.dir, GUEST_PORT))])
+    .await?;
+  let id = session.id.clone();
+  // TODO(8c): the guest listener serves under the daemon's token, so it
+  // outlives its actor and session until the daemon stops; slice 8c moves it
+  // under the session's token and removes its socket.
+  let stop = daemon.cancel.clone();
+  daemon.tasks.spawn(async move {
+    if let Err(e) = listener.serve(stop).await {
+      tracing::error!("session {id}: guest listener: {e:#}");
+    }
+  });
+  Ok(())
+}
+
+/// Serves the actor's gateway on its vsock port until `actor` is cancelled.
+fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
+  let path = vm::host_port(&session.dir, GATEWAY_PORT);
+  let network = &session.profile.actor.network;
+  let mut inject = BTreeMap::new();
+  for (host, injection) in &network.inject {
+    // The daemon holds the credential; the actor never sees it.
+    match std::env::var(&injection.secret) {
+      Ok(value) => {
+        inject.insert(host.clone(), (injection.header.clone(), value));
+      }
+      Err(e) => tracing::warn!("session {}: no {} header for {host}: {}: {e}", session.id, injection.header, injection.secret),
+    }
+  }
+  let policy = gateway::Policy {
+    allow: network.allow.iter().map(|glob| glob.as_str().to_string()).collect(),
+    upstream: network.upstream.clone(),
+    inject,
+  };
+  let gateway =
+    Arc::new(gateway::Gateway::new(policy, session.trace.clone(), Network::Actor, Some(session.injector.clone()), actor.clone()));
+  // A socket left by an earlier daemon would make bind fail.
+  if let Err(e) = std::fs::remove_file(&path)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    tracing::warn!("cannot remove {}: {e}", path.display());
+  }
+  let listener = tokio::net::UnixListener::bind(&path).with_context(|| format!("cannot listen on {}", path.display()))?;
+  session.tasks.spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
+  Ok(())
+}
+
+/// Waits for the VM to exit, which it does when the guest reboots after the
+/// driving program, then finishes the session and stops the actor's tasks.
+async fn watch(session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) {
+  let waited = tokio::select! {
+    waited = vm.wait() => waited,
+    () = actor.cancelled() => {
+      // TODO(8b): the session stopped, but dropping the handle leaves
+      // Firecracker running (see `vm::Vm`); slice 8b stops it here through
+      // `Vm::stop`, with a regression test.
+      return;
+    }
+  };
+  let exit = match waited {
+    Ok(status) => {
+      use std::os::unix::process::ExitStatusExt;
+      ActorVmExit {
+        code: status.code(),
+        signal: status.signal().map(needy_core_executor::signals::name),
+        error: None,
+      }
+    }
+    Err(e) => ActorVmExit {
+      code: None,
+      signal: None,
+      error: Some(e.to_string()),
+    },
+  };
+  actor.cancel();
+  session.emit(&Event::ActorVmExit(exit));
+  if let Err(refused) = session.state.advance(SessionState::Finished) {
+    tracing::debug!("session {}: {refused}", session.id);
+  }
+  // TODO(8h): the session keeps its executors and the actor's sockets until
+  // `session stop`; slice 8h releases them here and keeps the session listed
+  // as finished.
+}

@@ -474,6 +474,38 @@ src/
 The daemon implements `api-server::control`. It keeps its own state in
 `state.db`, separate from `trace.db`.
 
+As built in slice 8:
+
+- `Daemon` is a handle whose clones share the daemon; it implements
+  `Sessions` (`session/mod.rs`), `Processes` (`relay/mod.rs`) and `Guest`
+  (`guest.rs`) itself. `testing.rs` holds the tests' in-process executor and
+  daemon. The control plane's modules are Unix only, as before.
+- Tasks: the daemon's tracker holds the local executor, the guest listeners
+  and the relays of commands outside any session; a session's tracker holds
+  the relays of its commands and its actor's gateway and VM watch. The actor
+  has no tracker of its own: its tasks run under a child of the session's
+  token, which the VM's exit also cancels, because an actor never outlives its
+  session and the session's stop awaits them anyway. `Sessions::stop` cancels
+  the session's token and awaits its tracker before mirror-out; a stop
+  therefore ends the session's open exec streams. `Daemon::shutdown` stops the
+  sessions in creation order, cancels the daemon's token, calls
+  `Host::shutdown` on the local executor and awaits the daemon's tracker. The
+  executor role also calls `Host::shutdown` on a termination signal.
+- Until 8c the guest listener runs under the daemon's token, so it lives
+  until the daemon stops; until 8b a session's stop drops the VM's handle,
+  which leaves Firecracker running.
+- `session::state` allows `Creating → Running | Failed | Finished`,
+  `Running → Stopping | Finished` and `Stopping → Stopped`. A session is
+  listed as `creating` while it is created. Stopping a finished session
+  releases its executors and keeps it `finished`.
+- Session lookups (`get`, `stop`, `logs`, `Decide`, the guest API) take an
+  exact ID, a unique ID prefix or a name; an empty ID names no session, and a
+  prefix or name that fits several is an `Invalid` error. A sessionless exec
+  on an executor name that more than one pooled instance has is an `Invalid`
+  error that lists their keys.
+- The `exec.output` interceptor is `core::intercept::StreamFilter`;
+  `relay::filter` installs the SFTP fault tap through it.
+
 ### common
 
 ```

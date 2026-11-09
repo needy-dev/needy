@@ -226,6 +226,52 @@ directory.
 The Docker executors of the actor sessions were left running after the actor
 exited, as before (fix slice 8h), and were removed by hand.
 
+## Re-verified after the daemon slice
+
+Slice 8 of the module layout redesign (`daemon` split into `session` with
+its state transitions, `pool`, `routing`, `relay` with stream filters,
+`files`, `actor` and `guest`; every long-lived task in the daemon's or a
+session's `TaskTracker`; `Daemon::shutdown`; session lookups by exact ID,
+unique prefix or name; an ambiguous sessionless executor name refused) was
+rerun on 2026-11-10 with debug builds and every daemon's state, image and
+output in a scratch directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| Native executor without a session: exit 7 with stdout and stderr apart, stdin, `SIGTERM` death exits 143, a missing program exits 127, `--output json` and `ndjson`, `-t` under `script`, detach, `ps`, `attach` (137 after `kill -s SIGKILL`, and again with replay), `kill` of an unknown process, `fs cp` of a directory and a file both ways, a failed `tar` named, an unknown executor | Mac | Pass |
+| `examples/local` without an actor, its workspace created by hand (8g): copy-in filter, `exit 7`, `curl` fault (126) with and without `--executor`, delay fault (+500 ms), `ndjson` with `fault.injected` and `exec.decide`, `--output json`, `fs cp --session`, `ps --session`, stop with mirror-out, `session ls`, `session logs` (no actor console), `report` | Mac | Pass: the report names profile `local` and counts 4 routed and 5 faults |
+| `profile check` with `--cmd`; a failed create (missing recipe) listed as `failed` with its reason in the report | Mac | Pass |
+| `SIGTERM` to a control daemon with a running session | Mac, Linux | Pass: the daemon stops the session (mirror-out runs, `session.stop` is recorded, the Docker executor is removed) and exits within half a second |
+| An executor daemon with `--token-env`: no token, a wrong token, the right token; `SIGTERM` with a detached process | Mac | Pass: both refused with `missing or invalid bearer token`; on `SIGTERM` the executor kills its processes and exits |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/cli` through a Docker executor: exit 7, stdin, `SIGTERM` (143), 127, `--output json`, `-t` (`/dev/pts/0`, exit 3), detach, `ps`, `attach` (137 after `kill`), `fs cp` of a directory both ways; `session stop` leaves no container | Linux | Pass |
+| `max_procs: 1` with `on_full: reject` on a Docker executor; `needy exec --executor build` without a session | Linux | Pass: `executor is full` while a detached process holds the slot, accepted after it exits. With one session the name runs on its instance; with two it is refused as ambiguous, naming both keys |
+| `examples/smoke` in an actor; `session logs`; `report` | Linux | Pass: GCE identity, `systemd-detect-virt` prints `google`, the routed `python3` prints the actor's hostname, workspace both ways, `routed exit=7`; the report counts 4 routed and 1 failed; no container or VM left after stop |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; the report counts 3 faults by kind |
+| A scratch profile that denies `python3` under `bash **` and routes it to a Docker executor otherwise | Linux | Pass: under `sh` it runs on the executor; under `bash -c` it prints `needy: denied: under bash` and exits 126 |
+| `examples/opencode` with Qwen3 14B on the host's Ollama through the actor gateway | Linux | Pass: the Write tool writes over sshfs, the bash tool is routed to the Docker executor and prints the actor's hostname; the report shows 3 model calls and 1 routed command |
+| `cargo xtask bench run --profile examples/bench/profile.yaml` | Linux | Pass: actor-routed Docker `true` p50 2.95 ms, p99 3.98 ms with a debug daemon on a loaded host; the previous commit's debug daemon, run alternately with this one twice on the same image, measures p50 2.96–3.01 ms against 2.93–2.98 ms. 256 MiB pipe 709 MiB/s; timing `exec.decide` 32–107 µs, `exec.start` 0.5–1.4 ms, as after the trace slice; no container or VM left |
+| Mac executor from a Linux actor through an SSH reverse tunnel, with a bearer token: `examples/macos` | Mac, Linux | Pass: `sw_vers`, `xcodebuild -version`, `simctl list`, `swiftc` compile and run, `xcrun swift build` and run, cwd mapped to the Mac path, the Mac workspace mounted in the actor; the same executor without the token is refused with `missing or invalid bearer token` |
+| Windows executor: `needy.exe` from `images/Dockerfile`'s `windows` stage, started through WMI with a token, driven by `needy.exe` on the same host over TCP | Windows | Pass: no token and a wrong token are refused; `cmd /c` exit 7 with stdout and stderr apart, stdin, `--output json`, a missing program exits 127, detach, `ps`, `attach` live and with replay after `kill` (exit 1, as `taskkill` ends it), `fs cp` of a directory and a file both ways, a failed `tar` names the executor |
+
+Changed on purpose in this slice:
+
+- A session is listed as `creating` while it is created, and `stopping`
+  while it stops.
+- The first end state stays: stopping a session whose actor finished keeps it
+  `finished` in `session ls`, where it used to become `stopped`. The report
+  still says `stopped`, since it takes the last of `actor.exit` and
+  `session.stop`.
+- `session stop` ends the session's open exec streams; a detached process on
+  a native executor keeps running, as before.
+- `session get`, `session stop`, `session logs` and `Decide` no longer take an
+  empty ID as a prefix of every session; a prefix or name that fits several
+  sessions is refused as ambiguous.
+
+Not rerun in this pass: `needy exec -t -- ssh` into an sshd container. The
+VMs of these sessions had exited before each stop; a VM still running at stop
+keeps running until fix slice 8b.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

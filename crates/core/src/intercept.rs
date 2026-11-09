@@ -6,18 +6,16 @@
 //! | --- | --- |
 //! | `exec.decide` | [`crate::rules::Rules`], then [`crate::chaos::Injector`] |
 //! | `net.request`, `net.connect` | the gateway's allowlist, then [`crate::chaos::Injector`], then the gateway's header injection |
+//! | `exec.output` | the stream filters the daemon's relay installs per stream: the SFTP fault tap ([`crate::chaos::sftp::SftpTap`]) |
 //!
 //! NOTICE: interceptors are synchronous and return decisions only. Effects
 //! such as a fault's delay are carried in the decision and applied by the
 //! flow, so a chain is deterministic for a profile, a seed and a context, and
 //! `core` needs no async runtime.
-//
-// TODO(daemon): the `exec.output` stream filter (the SFTP fault tap) gets its
-// trait when the relay is rebuilt in slice 8.
 
 use std::collections::BTreeMap;
 
-use crate::types::{Decision, NetDecision, Network, Outcome, Placement};
+use crate::types::{Decision, Fired, NetDecision, Network, Outcome, Placement};
 
 /// What needy knows about a command when it decides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -85,4 +83,25 @@ pub trait NetDecide {
 /// Runs a `net.request` or `net.connect` chain from `start`.
 pub fn decide_net(chain: &[&dyn NetDecide], ctx: &NetContext, start: NetDecision) -> NetDecision {
   chain.iter().fold(start, |decision, interceptor| interceptor.decide(ctx, decision))
+}
+
+/// An `exec.output` interceptor: a filter on one exec stream's bytes, in
+/// both directions. It may pass bytes on, hold them until a whole message
+/// has arrived, or answer the caller itself.
+pub trait StreamFilter: Send + Sync {
+  /// Bytes the caller sends the process.
+  fn inbound(&self, bytes: &[u8]) -> Filtered;
+  /// Bytes the process sends the caller; what it returns goes on.
+  fn outbound(&self, bytes: &[u8]) -> Vec<u8>;
+}
+
+/// What a [`StreamFilter`] makes of the caller's bytes.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Filtered {
+  /// Bytes for the process.
+  pub forward: Vec<u8>,
+  /// Answers for the caller, in order, which the process never sees.
+  pub replies: Vec<Vec<u8>>,
+  /// Faults the filter injected.
+  pub fired: Vec<Fired>,
 }

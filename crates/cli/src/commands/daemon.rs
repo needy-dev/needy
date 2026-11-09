@@ -52,8 +52,17 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Mode::Control => {
       let paths = ctx.paths()?;
       let image = args.actor_image.unwrap_or_else(|| paths.default_image());
-      let daemon = needy_daemon::control::Daemon::start(paths.state, paths.runtime, image, args.docker_image).await?;
-      daemon.serve(&listen, token).await?;
+      let daemon = needy_daemon::Daemon::start(needy_daemon::Config {
+        state_dir: paths.state,
+        runtime_dir: paths.runtime,
+        actor_image: image,
+        docker_image: args.docker_image,
+      })
+      .await?;
+      let served = daemon.serve(&listen, token).await;
+      // Sessions are stopped even when serving failed.
+      daemon.shutdown().await;
+      served?;
     }
   }
   Ok(0)

@@ -12,11 +12,15 @@ Dependencies point downward; a crate never depends on one above it.
   (`output/`, tables and JSON), XDG paths (`paths`) and process logs
   (`logging`, `tracing`). It composes the crates below and, inside an actor,
   dispatches to the guest init and proxy by `argv[0]`.
-- `crates/daemon` (`needy-daemon`): the control plane (sessions, the executor
-  instance pool, routing, the exec relay, copy-in and mirror-out) and the
-  executor role. It implements `needy-api-server`'s domain traits and serves
-  them through its `Server`; it never builds a gRPC status. Composition only;
-  logic lives below.
+- `crates/daemon` (`needy-daemon`): the control plane's policy and the
+  executor role: `session` (create, get, list, stop, and the session state
+  transitions), `pool` (instances by key, refcounts, slots), `routing` (the
+  `exec.decide` chain, path maps), `relay` (exec streams and their stream
+  filters), `files` (copy-in, mirror-out), `actor` and `guest` (a session's
+  VM, gateway and guest API), and `executor`. It implements
+  `needy-api-server`'s domain traits and serves them through its `Server`; it
+  never builds a gRPC status. Every long-lived task belongs to the daemon's
+  or a session's `TaskTracker`. Mechanisms live below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
   is the in-guest init and exec-routing proxy, on `nix`, logging to the
   console. `host` runs next to the VM: `detect` reads this machine's CPU,
@@ -234,8 +238,10 @@ the decision survives the next read of the code.
 
 - Focused unit tests live next to the code they cover with `#[cfg(test)]`.
 - The repository has Rust unit coverage for profiles, rules, recipes, chaos,
-  archives, signals and bearer authentication. Daemon, guest and exec-stream
-  behavior is so far verified end to end on hosts (see the closed-loop results).
+  archives, signals and bearer authentication. The daemon is tested in
+  process through `needy-api-server`'s traits with a native executor
+  (sessions, pool, routing, relay, shutdown); actors and Docker executors are
+  verified end to end on hosts (see the closed-loop results).
 - Add regression tests for behavior changes and keep them narrow.
 - Use `cargo test` for the full suite and include regression tests for bug
   fixes.
