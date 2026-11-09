@@ -19,6 +19,8 @@ use crate::{Config, Daemon};
 /// provider over it. It stops when dropped.
 pub struct Executor {
   pub native: Arc<Native>,
+  /// `unix:` and the executor's socket.
+  pub endpoint: String,
   _dir: TempDir,
   _stop: DropGuard,
 }
@@ -38,9 +40,11 @@ impl Executor {
     let bound = Server::new(health, Caller::Cli).process_service(service).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
     let cancel = CancellationToken::new();
     tokio::spawn(bound.serve(cancel.clone()));
-    let client = provider::connect(&format!("unix:{}", socket.display())).await.unwrap();
+    let endpoint = format!("unix:{}", socket.display());
+    let client = provider::connect(&endpoint).await.unwrap();
     Self {
       native: Arc::new(Native::new(client)),
+      endpoint,
       _dir: dir,
       _stop: cancel.drop_guard(),
     }

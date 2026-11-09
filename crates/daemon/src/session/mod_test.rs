@@ -4,7 +4,7 @@ use needy_api_server::control::{ControlError, Sessions};
 use needy_core::intercept::ExecContext;
 use needy_core::types::SessionState;
 
-use crate::testing::{self, new_session};
+use crate::testing::{self, fake_image, new_actor_session, new_session};
 
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -103,4 +103,66 @@ async fn a_prefix_of_several_sessions_is_ambiguous() {
   for id in ids {
     assert_eq!(Sessions::get(daemon, id).await.unwrap().state, SessionState::Running);
   }
+}
+
+// ROOT CAUSE:
+//
+// If a session's create failed after it had acquired some of its executors,
+// those instances stayed in the pool, because the rollback stopped the
+// session's tasks and recorded the failure but released nothing.
+//
+// Before the fix, a profile whose second executor could not be created left
+// the first one's instance pooled (for Docker, a running container).
+// The fix keeps a failed create holding nothing: the rollback releases
+// every instance the create acquired.
+#[tokio::test]
+async fn a_failed_create_releases_the_executors_it_acquired() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let remote = testing::Executor::start().await;
+  // `b` is acquired after `a` and fails: its token's variable is not set.
+  let profile = format!(
+    r#"
+user: {{ name: agent, uid: 1000, gid: 1000 }}
+executors:
+  a: {{ runtime: native }}
+  b: {{ runtime: remote, remote: {{ url: "{}", token_env: NEEDY_TEST_UNSET_TOKEN }} }}
+commands:
+  - {{ match: "**", to: a }}
+"#,
+    remote.endpoint
+  );
+  let Err(ControlError::Failed(message)) = Sessions::create(daemon, new_session(&profile, started.dir.path())).await else {
+    panic!("a create whose executor fails must fail");
+  };
+  assert!(message.contains("executor b"), "{message}");
+
+  assert!(daemon.pool.instances().await.is_empty(), "the failed create still holds an executor");
+  let listed = Sessions::list(daemon).await.unwrap();
+  assert_eq!(listed.len(), 1);
+  assert_eq!(listed[0].state, SessionState::Failed);
+}
+
+#[tokio::test]
+async fn a_create_whose_actor_cannot_start_releases_its_executors_and_sockets() {
+  use std::os::unix::fs::PermissionsExt;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let image = started.dir.path().join("image");
+  fake_image(&image, "exit 0");
+  // Firecracker cannot be started once the guest listener and the gateway
+  // listen.
+  std::fs::set_permissions(image.join("firecracker"), std::fs::Permissions::from_mode(0o644)).unwrap();
+
+  let Err(ControlError::Failed(message)) = Sessions::create(daemon, new_actor_session(PROFILE, started.dir.path())).await else {
+    panic!("a create whose actor cannot start must fail");
+  };
+  assert!(message.contains("firecracker"), "{message}");
+
+  assert!(daemon.pool.instances().await.is_empty(), "the failed create still holds an executor");
+  let id = &Sessions::list(daemon).await.unwrap()[0].id;
+  let dir = started.dir.path().join("state/sessions").join(id);
+  let sockets: Vec<_> =
+    std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().starts_with("v.sock")).collect();
+  assert!(sockets.is_empty(), "{sockets:?}");
 }

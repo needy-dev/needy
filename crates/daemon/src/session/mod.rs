@@ -329,12 +329,14 @@ impl Daemon {
     if let Err(refused) = session.state.advance(SessionState::Failed) {
       tracing::debug!("session {}: {refused}", session.id);
     }
+    // The actor's tasks and VM, if it started, stop.
     session.cancel.cancel();
     session.tasks.close();
     session.tasks.wait().await;
-    // TODO(8d): the instances in `session.executors()` that were acquired
-    // before the failure are not released; slice 8d releases them here with
-    // a regression test.
+    for instance in session.executors().values() {
+      self.pool.release(instance).await;
+    }
+    actor::remove_sockets(&session.dir);
     self.record_failure(&session.id, request, session.created_ms, &session.trace, error).await;
   }
 
