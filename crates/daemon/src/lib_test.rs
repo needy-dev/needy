@@ -5,7 +5,7 @@ use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes, Sessi
 use needy_core::types::{Origin, SessionState};
 use tokio_stream::StreamExt as _;
 
-use crate::testing::{self, new_session};
+use crate::testing::{self, new_session, running};
 
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -14,11 +14,6 @@ executors:
 commands:
   - { match: "**", to: here }
 "#;
-
-fn running(pid: i64) -> bool {
-  // Signal 0 checks that the process exists without signalling it.
-  unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
 
 #[tokio::test]
 async fn shutdown_stops_sessions_and_the_local_executors_processes() {

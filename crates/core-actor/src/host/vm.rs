@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 
 use needy_core::recipe::{CompiledRecipe, VmIdentity};
 use serde_json::json;
@@ -177,7 +178,8 @@ fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
 }
 
 /// A running VM. The handle owns the Firecracker process; Firecracker exits
-/// when the guest reboots after its driving program.
+/// when the guest reboots after its driving program, or when the handle
+/// stops it.
 // NOTICE: the process is not killed when the handle is dropped. Whether a VM
 // outlives a daemon restart is decided with persistence (slice 9 of the
 // module layout redesign); until then a dropped handle leaves it running, as
@@ -228,14 +230,32 @@ impl Vm {
     self.child.wait().await
   }
 
-  /// Kills Firecracker and waits until it is gone.
-  // TODO(8b): the daemon does not call this when a session stops yet; fix
-  // slice 8b stops the VM with its session, with a regression test.
-  pub async fn stop(&mut self) -> std::io::Result<ExitStatus> {
-    // Killing a process that was already waited for is an error.
+  /// Stops Firecracker and waits until it is gone: `SIGTERM` first, then
+  /// `SIGKILL` if it is still running after `grace`.
+  pub async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
+    // Signalling a process that was already waited for could reach another
+    // process that took its ID.
     if let Some(status) = self.child.try_wait()? {
       return Ok(status);
     }
+    #[cfg(unix)]
+    {
+      use nix::sys::signal::{Signal, kill};
+      use nix::unistd::Pid;
+      match kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
+        Ok(()) => {
+          if let Ok(waited) = tokio::time::timeout(grace, self.child.wait()).await {
+            return waited;
+          }
+          tracing::warn!("firecracker {} did not stop within {grace:?} of SIGTERM; killing it", self.pid);
+        }
+        // It exited between `try_wait` and the signal; `wait` below reaps it.
+        Err(nix::errno::Errno::ESRCH) => {}
+        Err(e) => return Err(e.into()),
+      }
+    }
+    #[cfg(not(unix))]
+    let _ = grace;
     self.child.start_kill()?;
     self.child.wait().await
   }

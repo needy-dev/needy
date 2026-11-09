@@ -22,6 +22,10 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
+# Stopping the VM sends Firecracker `SIGTERM`.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, features = ["signal"] }
+
 # The guest runs only inside a Linux actor.
 [target.'cfg(target_os = "linux")'.dependencies]
 anyhow.workspace = true

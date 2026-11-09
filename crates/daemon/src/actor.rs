@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use needy_api_server::control::Caller;
@@ -22,6 +23,11 @@ use crate::session::Session;
 /// Ports the actor reaches on the host over vsock.
 pub const GUEST_PORT: u32 = 7000;
 pub const GATEWAY_PORT: u32 = 7001;
+
+// NOTICE: the guest's state is not kept, so Firecracker gets a short time to
+// exit on `SIGTERM` before it is killed; a session's stop waits this long at
+// most for its VM.
+const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// Starts the actor of `session`: its guest listener, its gateway, then its
 /// VM.
@@ -116,9 +122,10 @@ async fn watch(session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) 
   let waited = tokio::select! {
     waited = vm.wait() => waited,
     () = actor.cancelled() => {
-      // TODO(8b): the session stopped, but dropping the handle leaves
-      // Firecracker running (see `vm::Vm`); slice 8b stops it here through
-      // `Vm::stop`, with a regression test.
+      // The session stopped: its VM stops with it.
+      if let Err(e) = vm.stop(VM_STOP_GRACE).await {
+        tracing::warn!("session {}: cannot stop firecracker {}: {e}", session.id, vm.pid());
+      }
       return;
     }
   };
@@ -146,3 +153,7 @@ async fn watch(session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) 
   // `session stop`; slice 8h releases them here and keeps the session listed
   // as finished.
 }
+
+#[cfg(test)]
+#[path = "actor_test.rs"]
+mod tests;

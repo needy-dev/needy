@@ -66,6 +66,34 @@ pub async fn daemon() -> Started {
   Started { daemon, dir }
 }
 
+/// Writes a stand-in actor image into `dir`: empty kernel and root file
+/// system, and a `firecracker` that runs `script` with `sh`. `$3` is the
+/// VM's `vm.json`, so `$(dirname "$3")` is the session's directory.
+pub fn fake_image(dir: &Path, script: &str) {
+  use std::os::unix::fs::PermissionsExt;
+  std::fs::create_dir_all(dir).unwrap();
+  std::fs::write(dir.join("vmlinux"), "").unwrap();
+  std::fs::write(dir.join("rootfs.ext4"), "").unwrap();
+  let firecracker = dir.join("firecracker");
+  std::fs::write(&firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
+  std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Whether process `pid` exists.
+pub fn running(pid: i64) -> bool {
+  // Signal 0 checks that the process exists without signalling it.
+  unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+/// A session request for `profile_yaml` with an actor, which starts from
+/// the image `fake_image` wrote into the daemon's `image` directory.
+pub fn new_actor_session(profile_yaml: &str, dir: &Path) -> NewSession {
+  NewSession {
+    start_actor: true,
+    ..new_session(profile_yaml, dir)
+  }
+}
+
 /// A session request for `profile_yaml` without an actor, whose relative
 /// paths resolve against `dir`.
 pub fn new_session(profile_yaml: &str, dir: &Path) -> NewSession {

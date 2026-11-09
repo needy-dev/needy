@@ -2,6 +2,7 @@ use std::path::Path;
 
 use needy_config::Source;
 use needy_core::recipe::{CompiledRecipe, HostInfo, Smbios, VmIdentity};
+use nix::sys::signal::Signal;
 use serde_json::json;
 
 use super::*;
@@ -128,4 +129,45 @@ fn a_missing_image_file_is_named_in_the_error() {
   };
 
   assert_eq!(error.to_string(), format!("actor image is missing {}; run `needy build`", dir.path().join("vmlinux").display()));
+}
+
+/// An image whose `firecracker` runs `script` with `sh`.
+fn fake_image(dir: &Path, script: &str) -> Image {
+  use std::os::unix::fs::PermissionsExt;
+  let image = Image::new(dir);
+  std::fs::write(&image.kernel, "").unwrap();
+  std::fs::write(&image.rootfs, "").unwrap();
+  std::fs::write(&image.firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
+  std::fs::set_permissions(&image.firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+  image
+}
+
+#[tokio::test]
+async fn stop_terminates_firecracker() {
+  use std::os::unix::process::ExitStatusExt;
+  let dir = tempfile::tempdir().unwrap();
+  let image = fake_image(dir.path(), "exec sleep 300");
+  let mut vm = Vm::start(&Launch::new(&image, dir.path(), None)).unwrap();
+
+  let status = vm.stop(std::time::Duration::from_secs(10)).await.unwrap();
+
+  assert_eq!(status.signal(), Some(Signal::SIGTERM as i32));
+}
+
+// A Firecracker stuck in a device's emulation may not handle the signal.
+#[tokio::test]
+async fn stop_kills_a_firecracker_that_ignores_sigterm() {
+  use std::os::unix::process::ExitStatusExt;
+  let dir = tempfile::tempdir().unwrap();
+  let ready = dir.path().join("ready");
+  let image = fake_image(dir.path(), &format!("trap '' TERM; touch {}; while :; do sleep 0.1; done", ready.display()));
+  let mut vm = Vm::start(&Launch::new(&image, dir.path(), None)).unwrap();
+  // The trap must be in place before the signal.
+  while !ready.exists() {
+    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+  }
+
+  let status = vm.stop(std::time::Duration::from_millis(200)).await.unwrap();
+
+  assert_eq!(status.signal(), Some(Signal::SIGKILL as i32));
 }
