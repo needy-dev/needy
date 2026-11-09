@@ -11,7 +11,7 @@ use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
 use super::Streamed;
-use crate::control::{Caller, ControlError, ExecOpen, Inputs, Processes};
+use crate::control::{Caller, ControlError, ExecOpen, Inputs, Processes, WindowSize};
 use crate::protocol::{domain, status};
 
 pub struct Adapter<P> {
@@ -61,6 +61,10 @@ impl<P: Processes> ProcessService for Adapter<P> {
       Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
         process: attach.process_id,
         replay: attach.replay,
+        window: attach.window.map(|w| WindowSize {
+          rows: w.rows,
+          cols: w.cols,
+        }),
       },
       _ => return Err(ControlError::Invalid("the first request must start or attach".into()).into()),
     };

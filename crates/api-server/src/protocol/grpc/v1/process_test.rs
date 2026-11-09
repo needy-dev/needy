@@ -109,7 +109,7 @@ async fn a_stream_must_start_or_attach_first() {
 async fn an_attach_names_the_process_and_replay() {
   let served = serve(Caller::Cli).await;
 
-  let stream = ExecStream::attach(&served.client, "p9", true).await.unwrap();
+  let stream = ExecStream::attach(&served.client, "p9", true, None).await.unwrap();
   drop(stream);
 
   assert_eq!(served.fake.calls(), ["attach p9 replay=true"]);

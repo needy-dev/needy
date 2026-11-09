@@ -124,7 +124,9 @@ impl Processes for Fake {
         }
         ("p1".to_string(), spec.session)
       }
-      ExecOpen::Attach { process, replay } => {
+      ExecOpen::Attach {
+        process, replay, ..
+      } => {
         self.call(format!("attach {process} replay={replay}"));
         (process, String::new())
       }

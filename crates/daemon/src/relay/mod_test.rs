@@ -140,6 +140,7 @@ async fn attaching_to_a_workspace_mount_is_refused() {
       ExecOpen::Attach {
         process: process.clone(),
         replay: true,
+        window: None,
       },
       attached(),
     )
@@ -166,6 +167,7 @@ async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
       ExecOpen::Attach {
         process,
         replay: true,
+        window: None,
       },
       attached(),
     )
@@ -255,4 +257,44 @@ async fn an_exec_in_an_ended_session_says_it_ended_and_how() {
 
   assert_eq!(exec_refusal(daemon, &finished.id).await, format!("session {} has ended: finished", finished.id));
   assert_eq!(exec_refusal(daemon, &stopped.id).await, format!("session {} has ended: stopped", stopped.id));
+}
+
+// G2 of the terminal note: the daemon passes the attaching client's window
+// size on to the executor.
+#[tokio::test]
+async fn attaching_through_the_daemon_resizes_the_terminal() {
+  use needy_api_server::control::{ExecInput, WindowSize};
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let on_a_terminal = ExecSpec {
+    tty: Some(WindowSize { rows: 24, cols: 80 }),
+    ..spec(&["sh", "-c", "read line; stty size"], &created.id, "")
+  };
+  let process = {
+    let detached = ExecSpec {
+      detach: true,
+      ..on_a_terminal
+    };
+    let mut outputs = daemon.exec(ExecOpen::Start(detached), attached()).await.unwrap();
+    loop {
+      if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+        break started.process;
+      }
+    }
+  };
+
+  let input: Inputs = Box::pin(tokio_stream::iter([ExecInput::Stdin(b"\n".to_vec())]).chain(tokio_stream::pending()));
+  let open = ExecOpen::Attach {
+    process,
+    replay: false,
+    window: Some(WindowSize {
+      rows: 40,
+      cols: 100,
+    }),
+  };
+  let (stdout, _) = tokio::time::timeout(Duration::from_secs(10), finish(daemon.exec(open, input).await.unwrap())).await.unwrap();
+
+  assert!(stdout.contains("40 100"), "{stdout:?}");
+  Sessions::stop(daemon, &created.id).await.unwrap();
 }

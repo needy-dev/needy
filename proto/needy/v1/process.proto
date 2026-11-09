@@ -68,6 +68,10 @@ message ExecAttach {
   string process_id = 1;
   // Replay buffered output before following.
   bool replay = 2;
+  // The attaching client's terminal size. A process on a terminal is resized
+  // to it, so a full-screen program redraws for the client. Unset keeps the
+  // size.
+  WindowSize window = 3;
 }
 
 message ExecRequest {

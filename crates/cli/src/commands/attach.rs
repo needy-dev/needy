@@ -16,7 +16,9 @@ pub struct Args {
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
-  let stream = ExecStream::attach(&connection, &args.process_id, !args.no_replay).await?;
   let tty = relay::interactive();
+  // The process's terminal takes this client's size, so a full-screen
+  // program redraws for it.
+  let stream = ExecStream::attach(&connection, &args.process_id, !args.no_replay, tty.then(relay::window)).await?;
   super::exec::status(relay::run(stream, tty, true).await)
 }

@@ -58,11 +58,13 @@ impl ExecStream {
   }
 
   /// Attaches to a running or finished process; with `replay`, its buffered
-  /// output comes first.
-  pub async fn attach(client: &Client, process_id: &str, replay: bool) -> Result<Self> {
+  /// output comes first. With `window`, a process on a terminal is resized
+  /// to the attaching client's.
+  pub async fn attach(client: &Client, process_id: &str, replay: bool, window: Option<WindowSize>) -> Result<Self> {
     let attach = ExecAttach {
       process_id: process_id.to_string(),
       replay,
+      window,
     };
     Self::open(client, exec_request::Payload::Attach(attach)).await
   }

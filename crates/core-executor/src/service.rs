@@ -219,6 +219,13 @@ impl ProcessService for ExecutorService {
           cwd: String::new(),
         };
         let subscription = proc.subscribe(attach.replay).await;
+        // Resized after subscribing, so the redraw a full-screen program
+        // makes for the new size reaches this client.
+        if let Some(window) = attach.window
+          && proc.tty
+        {
+          proc.send(Input::Resize(window.rows.max(1) as u16, window.cols.max(1) as u16));
+        }
         // An attached client never owns the process.
         Ok(Response::new(stream_process(&self.host, proc, inbound, started, subscription, true)))
       }

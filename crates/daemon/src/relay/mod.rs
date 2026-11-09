@@ -62,7 +62,11 @@ pub(crate) struct Known {
 /// What the relay asks the instance for.
 enum Upstream {
   Start(needy_api_server::control::ExecSpec),
-  Attach { process: String, replay: bool },
+  Attach {
+    process: String,
+    replay: bool,
+    window: Option<needy_api_server::control::WindowSize>,
+  },
 }
 
 /// One relayed stream's output side.
@@ -158,7 +162,11 @@ impl Processes for Daemon {
         };
         (session, relay, decided, Upstream::Start(spec))
       }
-      ExecOpen::Attach { process, replay } => {
+      ExecOpen::Attach {
+        process,
+        replay,
+        window,
+      } => {
         let known = self.process(&process)?;
         // An attach forwards the caller's input: keystrokes in an SFTP or tar
         // stream corrupt it, and its output is binary.
@@ -174,7 +182,16 @@ impl Processes for Daemon {
           filter: None,
           requested,
         };
-        (None, relay, Vec::new(), Upstream::Attach { process, replay })
+        (
+          None,
+          relay,
+          Vec::new(),
+          Upstream::Attach {
+            process,
+            replay,
+            window,
+          },
+        )
       }
     };
     let slot = relay.instance.slot().await?;
@@ -185,7 +202,11 @@ impl Processes for Daemon {
     let client = &relay.instance.handle.client;
     let upstream = match upstream {
       Upstream::Start(spec) => ExecStream::start(client, domain::proto_exec_start(spec)).await,
-      Upstream::Attach { process, replay } => ExecStream::attach(client, &process, replay).await,
+      Upstream::Attach {
+        process,
+        replay,
+        window,
+      } => ExecStream::attach(client, &process, replay, window.map(domain::proto_window)).await,
     }
     .map_err(relayed)?;
     // A session's relays stop with the session; the others with the daemon.

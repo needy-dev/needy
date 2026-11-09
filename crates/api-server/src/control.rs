@@ -154,7 +154,12 @@ pub trait Sessions: Send + Sync + 'static {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecOpen {
   Start(ExecSpec),
-  Attach { process: String, replay: bool },
+  /// `window` is the attaching client's terminal size, if it has one.
+  Attach {
+    process: String,
+    replay: bool,
+    window: Option<WindowSize>,
+  },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

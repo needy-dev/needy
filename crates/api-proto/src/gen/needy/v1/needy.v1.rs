@@ -207,6 +207,11 @@ pub struct ExecAttach {
     /// Replay buffered output before following.
     #[prost(bool, tag="2")]
     pub replay: bool,
+    /// The attaching client's terminal size. A process on a terminal is resized
+    /// to it, so a full-screen program redraws for the client. Unset keeps the
+    /// size.
+    #[prost(message, optional, tag="3")]
+    pub window: ::core::option::Option<WindowSize>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecRequest {

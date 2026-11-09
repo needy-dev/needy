@@ -3,8 +3,8 @@ use std::path::Path;
 
 use needy_api_client::exec::ExecStream;
 use needy_api_client::{Client, Kind};
-use needy_api_proto::v1::ExecStart;
 use needy_api_proto::v1::process_service_server::ProcessServiceServer;
+use needy_api_proto::v1::{ExecStart, WindowSize};
 use tokio_stream::wrappers::UnixListenerStream;
 
 use super::*;
@@ -135,4 +135,47 @@ async fn a_started_client_receives_output_written_before_it_subscribed() {
       assert_eq!(String::from_utf8_lossy(&output.stdout), "early\n", "round {round}");
     }
   }
+}
+
+// ROOT CAUSE:
+//
+// If a client attached to a process on a terminal, the terminal kept the
+// size of whoever sized it last, because an attach carried no window size
+// and the client sent one only when its window changed.
+//
+// Before the fix, `stty size` in the attached process printed the size the
+// process started with.
+// The fix sends the attaching client's size with the attach, and the
+// executor resizes the terminal to it.
+#[tokio::test]
+async fn attaching_resizes_the_terminal_to_the_attaching_client() {
+  let executor = executor().await;
+  let start = ExecStart {
+    argv: vec!["sh".into(), "-c".into(), "read line; stty size".into()],
+    tty: Some(WindowSize { rows: 24, cols: 80 }),
+    detach: true,
+    ..Default::default()
+  };
+  let mut started = ExecStream::start(&executor.client, start).await.unwrap();
+  let process = loop {
+    if let Some(needy_api_client::exec::Event::Started(started)) = started.next().await.unwrap() {
+      break started.process_id;
+    }
+  };
+  drop(started);
+
+  let attached = ExecStream::attach(
+    &executor.client,
+    &process,
+    false,
+    Some(WindowSize {
+      rows: 40,
+      cols: 100,
+    }),
+  )
+  .await
+  .unwrap();
+  let output = attached.run(Some(b"\n".to_vec())).await.unwrap();
+
+  assert!(String::from_utf8_lossy(&output.stdout).contains("40 100"), "{:?}", String::from_utf8_lossy(&output.stdout));
 }

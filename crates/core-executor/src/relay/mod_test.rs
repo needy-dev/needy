@@ -108,7 +108,7 @@ async fn a_detached_process_can_be_listed_attached_with_replay_and_killed() {
 
   // An attached client sees the output, live or replayed, and leaves the
   // process running when it goes.
-  let mut attached = ExecStream::attach(&executor.client, &id, true).await.unwrap();
+  let mut attached = ExecStream::attach(&executor.client, &id, true, None).await.unwrap();
   started(&mut attached).await;
   let first = attached.next().await.unwrap();
   assert_eq!(first, Some(Event::Stdout(b"ready\n".to_vec())));
@@ -125,7 +125,7 @@ async fn a_detached_process_can_be_listed_attached_with_replay_and_killed() {
     })
     .await
     .unwrap();
-  let attached = ExecStream::attach(&executor.client, &id, true).await.unwrap();
+  let attached = ExecStream::attach(&executor.client, &id, true, None).await.unwrap();
   let (replayed, exit) = read(attached).await;
 
   assert_eq!(replayed, "ready\n");
