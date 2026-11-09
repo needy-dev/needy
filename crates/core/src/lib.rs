@@ -14,8 +14,7 @@ pub mod rules;
 pub mod trace;
 
 pub use profile::{
-    ActorConfig, Chaos, ExecutorConfig, Fault, FileMapping, NetworkPolicy, Profile, Runtime, User,
-    check_docker_args, filter_allows,
+  ActorConfig, Chaos, ExecutorConfig, Fault, FileMapping, NetworkPolicy, Profile, Runtime, User, check_docker_args, filter_allows,
 };
 pub use recipe::{CompiledRecipe, Finding, HostInfo, Recipe, Severity};
 pub use rules::{CommandContext, Decision, Target};

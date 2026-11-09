@@ -32,6 +32,9 @@ target environment.
 
 ## Terms
 
+The maintained glossary is [`docs/TERMS_AND_CONCEPTS.md`](../../../TERMS_AND_CONCEPTS.md);
+this table records the terms as agreed on 2026-11-09.
+
 | Term | Meaning | Avoid |
 | --- | --- | --- |
 | **actor** | The side that runs the driving program: an agent harness, a test suite or an acceptance script. Usually one microVM. The program's view of the world, including its recipe identity, lives here. | harness layer, caller, shallow layer |

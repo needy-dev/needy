@@ -9,6 +9,7 @@ for contributors and agents is [`AGENTS.md`](../AGENTS.md).
 ```text
 docs/
 ├── README.md                 ← you are here
+├── TERMS_AND_CONCEPTS.md     ← shared vocabulary
 ├── ai/
 │   ├── references/           ← durable design / plan / evidence notes
 │   │   ├── INDEX.md          ← responsibility-folder index
