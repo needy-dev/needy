@@ -234,6 +234,46 @@ the decision survives the next read of the code.
   source, generated output, or a command, include the relevant file, command,
   issue, or URL in code-formatted text.
 
+## Provenance of Hard-coded and Copied Data
+
+needy fakes machines, so it carries many values that come from somewhere
+else: CPUID leaves and feature bits, `/proc/cpuinfo` and `dmidecode` samples,
+SMBIOS/DMI strings, PCI vendor and device IDs, kernel config fragments, the
+Firecracker patch, terminal escape sequences, errno and signal tables, protocol
+constants, and test fixtures. A reader must be able to tell where each one came
+from and check it again.
+
+Every such value, table, file or patch hunk carries, at the place it is
+defined (a comment above it, a header comment in a data file, or a
+`SOURCES.md` next to a directory of fixtures):
+
+- **Permalink**: a URL pinned to an immutable revision, with line anchors where
+  the format allows: `https://github.com/<org>/<repo>/blob/<commit>/<path>#L10-L24`,
+  a tagged release, a versioned specification section (e.g. a DMTF SMBIOS
+  version, an Intel SDM order number and revision), or a dated archive snapshot
+  when the page has no versions. Never link a moving branch (`main`, `master`).
+- **Reference link**: the human-readable page that explains the value (the
+  specification section, the man page, the upstream documentation).
+- **For data captured from a machine**: the exact command, the machine by role
+  and hardware only (see [Private Data](#private-data)), and the capture date,
+  plus what was removed or changed (serial numbers, UUIDs, MAC addresses).
+- **For derived values**: how they were derived from the source (e.g. "bits
+  from SDM Vol. 2A Table 3-8, CPUID.07H.0:EBX"), so a reviewer can redo it.
+
+Format in code:
+
+```rust
+// Source: https://github.com/firecracker-microvm/firecracker/blob/<commit>/src/vmm/src/cpu_config/x86_64/cpuid/common.rs#L40-L58
+// Reference: Intel SDM Vol. 2A (order 325462-0xxUS), CPUID leaf 07H
+// NOTICE: avx_vnni is CPUID.(EAX=07H,ECX=1):EAX[4]; hiding it needs subleaf 1,
+// which hosts without that subleaf reject.
+```
+
+In YAML and other data files use the file's comment syntax at the top of the
+file or the entry. If a source has no stable permalink, say so and give the
+retrieval date. A value without provenance is a review finding; when you touch
+one, add its provenance or a `TODO(provenance):` naming what is missing.
+
 ## Testing Practices
 
 - Focused unit tests live next to the code they cover with `#[cfg(test)]`.
