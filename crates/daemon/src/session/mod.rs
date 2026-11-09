@@ -220,7 +220,8 @@ impl Daemon {
       }
     };
     self.sessions.insert(session.clone());
-    if let Err(error) = self.provision(&session, &request, &base).await {
+    let provisioned = self.provision(&session, &request, &base).await.and_then(|()| unwinding(&session));
+    if let Err(error) = provisioned {
       self.rollback(&session, &request, &error).await;
       return Err(error);
     }
@@ -294,6 +295,14 @@ impl Daemon {
   }
 
   /// Acquires the session's executors, copies files in and starts its actor.
+  /// A cancelled session token ends it before its next step.
+  // NOTICE: a step in progress, such as a provider creating a container or
+  // pulling its image, runs to its end: the providers are not safe to drop
+  // midway (a container created before the drop would be left behind).
+  // TODO(shutdown): pass the session's token into `Provider::create` once
+  // the providers can unwind a create themselves, so shutdown need not wait
+  // for the step; not needed while each step is bounded (`connect` waits
+  // 10 s at most) and a second termination signal forces exit.
   async fn provision(&self, session: &Arc<Session>, request: &NewSession, base: &Path) -> Result<()> {
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
     let hostname = session.recipe.as_ref().and_then(|r| r.hostname.clone());
@@ -313,6 +322,7 @@ impl Daemon {
         user: session.profile.user.clone(),
         hostname: hostname.clone(),
       };
+      unwinding(session)?;
       let instance = self.pool.acquire(spec).await.with_context(|| format!("executor {exec_name}"))?;
       session.lock_executors().insert(exec_name.clone(), instance);
     }
@@ -322,8 +332,10 @@ impl Daemon {
       profile: session.profile_name.clone(),
       executors: executor_refs(&session.executors()),
     }));
+    unwinding(session)?;
     files::copy_in(session).await?;
     if request.start_actor {
+      unwinding(session)?;
       actor::start(self, session).await?;
     }
     Ok(())
@@ -459,6 +471,15 @@ impl Daemon {
   }
 }
 
+/// Fails a create whose session's token was cancelled, which only the
+/// daemon's shutdown does while a session is created.
+fn unwinding(session: &Session) -> Result<()> {
+  if session.cancel.is_cancelled() {
+    bail!("the daemon shut down while the session was being created");
+  }
+  Ok(())
+}
+
 /// Reads and checks the profile of a session about to be created, and the
 /// directory its relative paths resolve against.
 fn load_profile(id: &str, request: &NewSession) -> Result<(Profile, PathBuf)> {
@@ -484,7 +505,8 @@ fn load_profile(id: &str, request: &NewSession) -> Result<(Profile, PathBuf)> {
 #[async_trait::async_trait]
 impl Sessions for Daemon {
   async fn create(&self, request: NewSession) -> Result<SessionInfo, ControlError> {
-    let session = self.create_session(request).await.map_err(failed)?;
+    // Shutdown waits for creates in progress to end or unwind.
+    let session = self.creates.track_future(self.create_session(request)).await.map_err(failed)?;
     Ok(session.info())
   }
 

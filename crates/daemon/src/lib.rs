@@ -57,6 +57,8 @@ use needy_api_server::control::{Caller, ControlError};
 #[cfg(unix)]
 use needy_api_server::{Health, Listen, Server};
 #[cfg(unix)]
+use needy_core::types::SessionState;
+#[cfg(unix)]
 use needy_core_executor::process::Host;
 #[cfg(unix)]
 use needy_core_executor::provider::{self, Docker, Native};
@@ -109,6 +111,8 @@ pub struct Daemon {
   /// The daemon's own tasks: the local executor and the relays of commands
   /// outside any session.
   pub(crate) tasks: TaskTracker,
+  /// Session creates in progress, which shutdown waits for.
+  pub(crate) creates: TaskTracker,
   pub(crate) cancel: CancellationToken,
 }
 
@@ -165,6 +169,7 @@ impl Daemon {
       host,
       processes: Arc::default(),
       tasks,
+      creates: TaskTracker::new(),
       cancel,
     })
   }
@@ -211,10 +216,20 @@ impl Daemon {
     Ok(())
   }
 
-  /// Stops every session in the order they were created, then the
-  /// daemon's own tasks and the local executor's processes, and waits for
-  /// them.
+  /// Unwinds the sessions being created, stops every other session in the
+  /// order they were created, then the daemon's own tasks and the local
+  /// executor's processes, and waits for them.
   pub async fn shutdown(&self) {
+    // A create sees its cancelled token before its next step and unwinds
+    // through its rollback. A create that finished meanwhile is running
+    // and is stopped below.
+    for session in self.sessions.live() {
+      if session.state.get() == SessionState::Creating {
+        session.cancel.cancel();
+      }
+    }
+    self.creates.close();
+    self.creates.wait().await;
     for session in self.sessions.live() {
       if let Err(e) = self.stop_session(&session).await {
         tracing::warn!("session {}: {e}", session.id);
