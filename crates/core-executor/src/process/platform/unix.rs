@@ -112,3 +112,26 @@ pub fn signal_group(pid: i64, name: &str) {
     tracing::debug!("process {pid}: {name}: {e}");
   }
 }
+
+/// The bytes that end input on the terminal behind `master`: its end-of-file
+/// character (VEOF, usually `0x04`) when it reads by lines (ICANON), and
+/// nothing in raw mode, where that byte would be a keystroke. A terminal
+/// whose settings cannot be read gets `0x04`, as before.
+pub fn end_of_input(master: &dyn portable_pty::MasterPty) -> Vec<u8> {
+  use nix::sys::termios::{LocalFlags, SpecialCharacterIndices, tcgetattr};
+  use std::os::fd::BorrowedFd;
+  let Some(fd) = master.as_raw_fd() else {
+    return vec![4];
+  };
+  // SAFETY: the master is borrowed for the call and stays open meanwhile.
+  match tcgetattr(unsafe { BorrowedFd::borrow_raw(fd) }) {
+    Ok(termios) if termios.local_flags.contains(LocalFlags::ICANON) => {
+      vec![termios.control_chars[SpecialCharacterIndices::VEOF as usize]]
+    }
+    Ok(_) => Vec::new(),
+    Err(e) => {
+      tracing::debug!("terminal settings: {e}");
+      vec![4]
+    }
+  }
+}

@@ -230,3 +230,73 @@ async fn a_viewer_that_stops_reading_holds_back_neither_the_process_nor_its_owne
   assert_eq!(exit.code, Some(0));
   assert!(idle.fell_behind());
 }
+
+/// Reads `live` until its text contains `marker`, and returns all of it.
+async fn read_until(live: &mut tokio::sync::mpsc::Receiver<Output>, marker: &str) -> String {
+  let mut text = String::new();
+  while !text.contains(marker) {
+    match live.recv().await {
+      Some(Output::Stdout(bytes)) => text.push_str(&String::from_utf8_lossy(&bytes)),
+      Some(_) => {}
+      None => break,
+    }
+  }
+  text
+}
+
+// ROOT CAUSE:
+//
+// If the client's input ended while a program had its terminal in raw
+// mode, the program read a Ctrl-D keystroke, because end of input on a
+// terminal was always written as `0x04`.
+//
+// Before the fix, the raw-mode reader below printed `04`.
+// The fix writes the end-of-file character only when the terminal reads by
+// lines (ICANON); otherwise input just stops.
+#[cfg(unix)]
+#[tokio::test]
+async fn end_of_input_reaches_a_raw_mode_program_as_nothing() {
+  let host = Host::default();
+  let mut raw = spec(&[
+    "sh",
+    "-c",
+    "stty raw -echo; echo ready; dd bs=1 count=1 2>/dev/null | od -An -tx1; echo read",
+  ]);
+  raw.tty = Some((24, 80));
+  let proc = host.spawn(raw).unwrap();
+  let mut owner = proc.subscribe(true, Subscriber::Owner);
+  let mut text: String = owner
+    .past
+    .iter()
+    .filter_map(|o| {
+      if let Output::Stdout(b) = o {
+        Some(String::from_utf8_lossy(b).into_owned())
+      } else {
+        None
+      }
+    })
+    .collect();
+  if !text.contains("ready") {
+    text.push_str(&read_until(&mut owner.live, "ready").await);
+  }
+
+  proc.send(Input::Eof);
+  let after = tokio::time::timeout(Duration::from_millis(700), read_until(&mut owner.live, "read")).await.unwrap_or_default();
+  proc.send(Input::Signal("SIGKILL".into()));
+
+  assert!(!after.contains("04"), "the program read a Ctrl-D: {after:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn end_of_input_ends_a_line_reading_program_on_a_terminal() {
+  let host = Host::default();
+  let mut cat = spec(&["cat"]);
+  cat.tty = Some((24, 80));
+  let proc = host.spawn(cat).unwrap();
+
+  proc.send(Input::Eof);
+  let exit = tokio::time::timeout(Duration::from_secs(10), proc.wait()).await.expect("cat did not see the end of input");
+
+  assert_eq!(exit.code, Some(0));
+}

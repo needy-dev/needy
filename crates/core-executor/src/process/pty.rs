@@ -1,5 +1,5 @@
 //! A process on a pseudo-terminal: one output stream, window size changes,
-//! and end of input as the EOF character.
+//! and end of input as the EOF character when the terminal reads by lines.
 
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
@@ -99,6 +99,8 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   let cancel = cancel.clone();
   let input_proc = proc.clone();
   tasks.spawn(async move {
+    // After end of input in raw mode, input is not forwarded any more.
+    let mut ended = false;
     loop {
       // Input ends with the process or the host; dropping `in_tx` ends the
       // writer thread.
@@ -108,9 +110,21 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
         () = cancel.cancelled() => None,
       };
       let bytes = match next {
+        Some(Input::Stdin(_)) if ended => continue,
         Some(Input::Stdin(bytes)) => bytes,
-        // A terminal has no half-close; send the EOF character.
-        Some(Input::Eof) => vec![4],
+        // A terminal has no half-close: a line-reading program gets the EOF
+        // character; a raw one, which would read it as Ctrl-D, nothing.
+        Some(Input::Eof) => {
+          let bytes = match master.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref() {
+            Some(master) => platform::end_of_input(master.as_ref()),
+            None => Vec::new(),
+          };
+          if bytes.is_empty() {
+            ended = true;
+            continue;
+          }
+          bytes
+        }
         Some(Input::Resize(rows, cols)) => {
           if let Some(master) = master.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref()
             && let Err(e) = master.resize(size(rows, cols))

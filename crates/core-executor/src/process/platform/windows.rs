@@ -45,3 +45,11 @@ pub fn signal_group(pid: i64, name: &str) {
     Err(e) => tracing::warn!("process {pid}: {name}: cannot run taskkill: {e}"),
   }
 }
+
+/// The bytes that end input on a pseudo console.
+// TODO(windows): ConPTY has no termios to tell a line-reading program from a
+// raw one; `0x04` stays until the Windows executor gets terminals (see the
+// closed-loop results).
+pub fn end_of_input(_master: &dyn portable_pty::MasterPty) -> Vec<u8> {
+  vec![4]
+}
