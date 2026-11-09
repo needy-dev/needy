@@ -53,8 +53,6 @@ fn record(session: &Session, ctx: &ExecContext, decision: &Decision, origin: Ori
 
 /// Routes a command the actor's proxy asks about.
 pub async fn route(session: &Session, ctx: ExecContext) -> Route {
-  // TODO(8f): no regression test covers an `under` rule matching a routed
-  // command yet; slice 8f adds it and reruns one on the closed loop.
   let decision = decide(session, &ctx, None).await;
   record(session, &ctx, &decision, Origin::ActorProxy, decision.outcome.clone());
   // A refusal is what the proxy prints, worded like `needy exec`'s.
