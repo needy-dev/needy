@@ -11,7 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-pub use needy_common::process::{Exit, signal_name, signal_number};
+pub use needy_common::process::Exit;
+
+use crate::signals;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, watch};
 
@@ -29,7 +31,8 @@ pub enum Output {
 pub enum Input {
     Stdin(Vec<u8>),
     Eof,
-    Signal(i32),
+    /// Signal name, for example `SIGINT`.
+    Signal(String),
     Resize(u16, u16),
 }
 
@@ -285,7 +288,7 @@ fn spawn_pipes(spec: &Spec) -> Result<Arc<Proc>> {
                     }
                 }
                 Input::Eof => stdin = None,
-                Input::Signal(sig) => signal_group(pid, sig),
+                Input::Signal(sig) => signal_group(pid, &sig),
                 Input::Resize(..) => {}
             }
         }
@@ -385,7 +388,7 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
                 Input::Eof => {
                     let _ = in_tx.send(vec![4]);
                 }
-                Input::Signal(sig) => signal_group(pid, sig),
+                Input::Signal(sig) => signal_group(pid, &sig),
                 Input::Resize(rows, cols) => {
                     if let Some(master) = master.lock().unwrap().as_ref() {
                         let _ = master.resize(PtySize {
@@ -401,7 +404,7 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
     });
     let wait_proc = proc.clone();
     tokio::task::spawn_blocking(move || {
-        let status = child.wait();
+        let exit = wait_pty_child(&mut child, pid);
         // On Unix the reader ends when the child closes the terminal; give it
         // a moment to drain before closing the master, which Windows needs.
         for _ in 0..50 {
@@ -412,23 +415,6 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
         }
         wait_master.lock().unwrap().take();
         let _ = reader_thread.join();
-        let exit = match status {
-            Ok(status) => {
-                let signal = status.signal().map(normalize_signal).unwrap_or_default();
-                Exit {
-                    code: if signal.is_empty() {
-                        Some(status.exit_code() as i32)
-                    } else {
-                        None
-                    },
-                    signal,
-                }
-            }
-            Err(_) => Exit {
-                code: None,
-                signal: "SIGKILL".into(),
-            },
-        };
         tokio::runtime::Handle::current().block_on(async move {
             let _ = pump.await;
             finish(&wait_proc, &exit_tx, exit).await;
@@ -437,26 +423,48 @@ fn spawn_pty(spec: &Spec, (rows, cols): (u16, u16)) -> Result<Arc<Proc>> {
     Ok(proc)
 }
 
-/// portable-pty reports signals by their description on some platforms.
-fn normalize_signal(signal: &str) -> String {
-    if signal.starts_with("SIG") {
-        return signal.to_string();
+/// Waits for a terminal's child. On Unix this reaps it directly, so a signal
+/// death keeps its exact signal instead of a description.
+#[cfg(unix)]
+fn wait_pty_child(_child: &mut Box<dyn portable_pty::Child + Send + Sync>, pid: i64) -> Exit {
+    use nix::sys::wait::{WaitStatus, waitpid};
+    loop {
+        match waitpid(nix::unistd::Pid::from_raw(pid as i32), None) {
+            Ok(WaitStatus::Exited(_, code)) => {
+                return Exit {
+                    code: Some(code),
+                    signal: String::new(),
+                };
+            }
+            Ok(WaitStatus::Signaled(_, sig, _)) => {
+                return Exit {
+                    code: None,
+                    signal: sig.as_str().to_string(),
+                };
+            }
+            Ok(_) | Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => {
+                return Exit {
+                    code: None,
+                    signal: "SIGKILL".into(),
+                };
+            }
+        }
     }
-    let known = [
-        ("Hangup", "SIGHUP"),
-        ("Interrupt", "SIGINT"),
-        ("Quit", "SIGQUIT"),
-        ("Killed", "SIGKILL"),
-        ("Terminated", "SIGTERM"),
-        ("Broken pipe", "SIGPIPE"),
-        ("Aborted", "SIGABRT"),
-        ("Segmentation fault", "SIGSEGV"),
-    ];
-    known
-        .iter()
-        .find(|(name, _)| signal.starts_with(name))
-        .map(|(_, sig)| sig.to_string())
-        .unwrap_or_else(|| signal.to_string())
+}
+
+#[cfg(not(unix))]
+fn wait_pty_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>, _pid: i64) -> Exit {
+    match child.wait() {
+        Ok(status) => Exit {
+            code: Some(status.exit_code() as i32),
+            signal: String::new(),
+        },
+        Err(_) => Exit {
+            code: None,
+            signal: "SIGKILL".into(),
+        },
+    }
 }
 
 #[cfg(unix)]
@@ -465,7 +473,7 @@ fn exit_from_std(status: std::process::ExitStatus) -> Exit {
     match status.signal() {
         Some(sig) => Exit {
             code: None,
-            signal: signal_name(sig),
+            signal: signals::name(sig),
         },
         None => Exit {
             code: status.code(),
@@ -483,19 +491,23 @@ fn exit_from_std(status: std::process::ExitStatus) -> Exit {
 }
 
 #[cfg(unix)]
-fn signal_group(pid: i64, sig: i32) {
+fn signal_group(pid: i64, name: &str) {
+    use nix::sys::signal::{Signal, kill, killpg};
+    use nix::unistd::Pid;
+    let Ok(sig) = name.parse::<Signal>() else {
+        return;
+    };
     if pid > 0 {
-        unsafe {
-            // The child leads its own process group (pipes) or session (PTY).
-            if libc::kill(-(pid as i32), sig) != 0 {
-                libc::kill(pid as i32, sig);
-            }
+        // The child leads its own process group (pipes) or session (PTY).
+        let pid = Pid::from_raw(pid as i32);
+        if killpg(pid, sig).is_err() {
+            let _ = kill(pid, sig);
         }
     }
 }
 
 #[cfg(not(unix))]
-fn signal_group(pid: i64, _sig: i32) {
+fn signal_group(pid: i64, _name: &str) {
     // Windows has no POSIX signals; any signal terminates the process.
     if pid > 0 {
         let _ = std::process::Command::new("taskkill")

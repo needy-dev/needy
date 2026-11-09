@@ -85,8 +85,8 @@ pub fn stream_process(
             }
         }
         if !alive && !detach && proc.exit().is_none() {
-            let sig = if proc.tty { 1 } else { 15 };
-            proc.send(Input::Signal(sig));
+            let sig = if proc.tty { "SIGHUP" } else { "SIGTERM" };
+            proc.send(Input::Signal(sig.into()));
         }
     });
     Box::pin(ReceiverStream::new(rx))
@@ -219,8 +219,8 @@ impl ProcessService for ExecutorService {
             .host
             .get(&request.process_id)
             .ok_or_else(|| Status::not_found("no such process"))?;
-        proc.send(Input::Signal(if request.signal == 0 {
-            15
+        proc.send(Input::Signal(if request.signal.is_empty() {
+            "SIGTERM".into()
         } else {
             request.signal
         }));

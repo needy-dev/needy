@@ -79,7 +79,7 @@ pub async fn exec(endpoint: &str, options: ExecOptions) -> Result<i32> {
         options.output,
     )
     .await?;
-    Ok(exit.shell_code())
+    Ok(crate::signals::shell_code(&exit))
 }
 
 pub async fn attach(endpoint: &str, process_id: String, replay: bool) -> Result<i32> {
@@ -92,7 +92,7 @@ pub async fn attach(endpoint: &str, process_id: String, replay: bool) -> Result<
     };
     let tty = stdin_is_tty() && stdout_is_tty();
     let exit = run_stream(client, first, tty, true, false, OutputMode::Human).await?;
-    Ok(exit.shell_code())
+    Ok(crate::signals::shell_code(&exit))
 }
 
 /// Bridges the local terminal or pipes to a remote process until it exits.
@@ -254,10 +254,10 @@ fn forward_signals(tx: mpsc::Sender<ExecRequest>, tty: bool) {
         };
         loop {
             let request = tokio::select! {
-                _ = int.recv() => exec_request::Payload::Signal(2),
-                _ = term.recv() => exec_request::Payload::Signal(15),
-                _ = hup.recv() => exec_request::Payload::Signal(1),
-                _ = quit.recv() => exec_request::Payload::Signal(3),
+                _ = int.recv() => exec_request::Payload::Signal("SIGINT".into()),
+                _ = term.recv() => exec_request::Payload::Signal("SIGTERM".into()),
+                _ = hup.recv() => exec_request::Payload::Signal("SIGHUP".into()),
+                _ = quit.recv() => exec_request::Payload::Signal("SIGQUIT".into()),
                 _ = winch.recv() => {
                     if !tty { continue; }
                     exec_request::Payload::Resize(window())

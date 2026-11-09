@@ -6,10 +6,12 @@
 //! accumulate, until a rule with `final: true`.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 
+use needy_common::util::{expand_home, glob_match};
+
 use crate::profile::{Actions, EnvOps, Fault, Profile, UnknownPolicy, When};
-use needy_common::util::{basename, expand_home, glob_match};
 
 /// What needy knows about a command when it decides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -84,6 +86,14 @@ struct Match {
     captures: BTreeMap<String, String>,
     /// Arguments matched by the last `**`.
     rest: Vec<String>,
+}
+
+/// The program name of a command word: the last path component.
+fn basename(arg: &str) -> &str {
+    Path::new(arg)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(arg)
 }
 
 fn word_matches(pattern: &str, arg: &str, first: bool) -> bool {

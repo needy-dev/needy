@@ -214,8 +214,9 @@ pub mod exec_request {
         Stdin(::prost::alloc::vec::Vec<u8>),
         #[prost(bool, tag="4")]
         StdinEof(bool),
-        #[prost(int32, tag="5")]
-        Signal(i32),
+        /// Signal name, for example "SIGINT". Numbers differ between platforms.
+        #[prost(string, tag="5")]
+        Signal(::prost::alloc::string::String),
         #[prost(message, tag="6")]
         Resize(super::WindowSize),
     }
@@ -299,9 +300,9 @@ pub struct ListProcessesResponse {
 pub struct KillProcessRequest {
     #[prost(string, tag="1")]
     pub process_id: ::prost::alloc::string::String,
-    /// Signal number; 0 means SIGTERM.
-    #[prost(int32, tag="2")]
-    pub signal: i32,
+    /// Signal name, for example "SIGKILL". Empty means SIGTERM.
+    #[prost(string, tag="2")]
+    pub signal: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KillProcessResponse {

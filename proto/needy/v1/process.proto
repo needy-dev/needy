@@ -49,7 +49,8 @@ message ExecRequest {
     ExecAttach attach = 2;
     bytes stdin = 3;
     bool stdin_eof = 4;
-    int32 signal = 5;
+    // Signal name, for example "SIGINT". Numbers differ between platforms.
+    string signal = 5;
     WindowSize resize = 6;
   }
 }
@@ -102,8 +103,8 @@ message ListProcessesResponse {
 
 message KillProcessRequest {
   string process_id = 1;
-  // Signal number; 0 means SIGTERM.
-  int32 signal = 2;
+  // Signal name, for example "SIGKILL". Empty means SIGTERM.
+  string signal = 2;
 }
 
 message KillProcessResponse {}

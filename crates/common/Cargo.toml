@@ -12,3 +12,7 @@ anyhow.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 tar.workspace = true
+glob-match.workspace = true
+humantime.workspace = true
+shellexpand.workspace = true
+walkdir.workspace = true

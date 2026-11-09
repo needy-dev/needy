@@ -1,68 +1,65 @@
-//! Tar archives for copy-in and mirror-out mappings.
+//! Tar archives for file mappings: pack a file or directory with filter rules,
+//! and unpack into a directory.
 
-use std::path::{Component, Path};
+use std::path::Path;
+
+use anyhow::Result;
 
 use crate::filter::filter_allows;
-use anyhow::{Result, bail};
 
-/// Packs `root` (a file or directory) with rclone-style `filter` rules
-/// applied to paths relative to `root`.
+/// Packs `root` (a file or directory). `filter` rules apply to paths relative
+/// to `root`; a directory that a rule excludes is skipped with its contents.
 pub fn pack(root: &Path, filter: &[String]) -> Result<Vec<u8>> {
     let mut builder = tar::Builder::new(Vec::new());
     builder.follow_symlinks(false);
     if root.is_file() {
-        let name = root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let name = root.file_name().unwrap_or_default();
         builder.append_path_with_name(root, name)?;
         return Ok(builder.into_inner()?);
     }
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let mut entries: Vec<_> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok()).collect();
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let path = entry.path();
-            let relative = path
-                .strip_prefix(root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            let kind = entry.file_type()?;
-            let probe = if kind.is_dir() {
+    let walker = walkdir::WalkDir::new(root)
+        .min_depth(1)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            let relative = relative(root, entry.path());
+            let probe = if entry.file_type().is_dir() {
                 format!("{relative}/")
             } else {
-                relative.clone()
+                relative
             };
-            if !filter_allows(filter, &probe) {
-                continue;
-            }
-            if kind.is_dir() {
-                builder.append_dir(&relative, &path)?;
-                stack.push(path);
-            } else if kind.is_file() || kind.is_symlink() {
-                builder.append_path_with_name(&path, &relative)?;
-            }
+            filter_allows(filter, &probe)
+        });
+    for entry in walker {
+        let entry = entry?;
+        let relative = relative(root, entry.path());
+        if entry.file_type().is_dir() {
+            builder.append_dir(&relative, entry.path())?;
+        } else {
+            builder.append_path_with_name(entry.path(), &relative)?;
         }
     }
     Ok(builder.into_inner()?)
 }
 
-/// Unpacks into `destination`, refusing paths that would escape it.
+fn relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// Unpacks into `destination` and returns the number of entries. Entries with
+/// absolute paths or `..` components are skipped by `tar` itself.
 pub fn unpack(archive: &[u8], destination: &Path) -> Result<usize> {
     std::fs::create_dir_all(destination)?;
     let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
     tar.set_preserve_permissions(true);
     let mut count = 0;
     for entry in tar.entries()? {
-        let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        if path.is_absolute() || path.components().any(|c| matches!(c, Component::ParentDir)) {
-            bail!("unsafe path in archive: {}", path.display());
+        if entry?.unpack_in(destination)? {
+            count += 1;
         }
-        entry.unpack_in(destination)?;
-        count += 1;
     }
     Ok(count)
 }
@@ -92,6 +89,30 @@ mod tests {
         assert!(!dst.join("auth.json").exists());
         assert!(!dst.join("sessions/log.jsonl").exists());
         let _ = std::fs::remove_dir_all(&src);
+        let _ = std::fs::remove_dir_all(&dst);
+    }
+
+    #[test]
+    fn unpack_skips_escaping_paths() {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header.clone(), "ok.txt", &b"x"[..])
+            .unwrap();
+        // `append_data` refuses `..`, so write the name into the header directly.
+        let name = b"../escape.txt";
+        header.as_old_mut().name[..name.len()].copy_from_slice(name);
+        header.set_cksum();
+        builder.append(&header, &b"x"[..]).unwrap();
+        let archive = builder.into_inner().unwrap();
+        let dst = std::env::temp_dir().join(format!("needy-unpack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dst);
+        assert_eq!(unpack(&archive, &dst).unwrap(), 1);
+        assert!(dst.join("ok.txt").exists());
+        assert!(!dst.parent().unwrap().join("escape.txt").exists());
         let _ = std::fs::remove_dir_all(&dst);
     }
 }

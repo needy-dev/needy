@@ -93,16 +93,13 @@ fn command_match(pattern: &str, command: &str) -> bool {
             Some((part, rest)) => match words.split_first() {
                 None => false,
                 Some((word, tail)) => {
-                    let base = word.rsplit('/').next().unwrap_or(word);
-                    let alternatives: Vec<&str> =
-                        match part.strip_prefix('{').and_then(|p| p.strip_suffix('}')) {
-                            Some(inner) => inner.split(',').collect(),
-                            None => vec![part],
-                        };
-                    let hit = *part == "*"
-                        || alternatives
-                            .iter()
-                            .any(|alt| glob_match(alt, word) || (first && glob_match(alt, base)));
+                    // `glob_match` handles `{a,b}` alternatives itself.
+                    let base = std::path::Path::new(word)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(word);
+                    let hit =
+                        *part == "*" || glob_match(part, word) || (first && glob_match(part, base));
                     hit && go(rest, tail, false)
                 }
             },

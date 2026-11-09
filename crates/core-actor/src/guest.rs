@@ -158,13 +158,13 @@ mod linux {
             return Ok(code);
         }
         // Die of the same signal so the parent's wait sees signal death.
-        if let Some(sig) = needy_common::process::signal_number(&exit.signal) {
+        if let Some(sig) = needy_core_executor::signals::number(&exit.signal) {
             unsafe {
                 libc::signal(sig, libc::SIG_DFL);
                 libc::kill(libc::getpid(), sig);
             }
         }
-        Ok(exit.shell_code())
+        Ok(needy_core_executor::signals::shell_code(&exit))
     }
 
     /// Runs the real binary here. The kernel does not route execs made by the proxy.
@@ -353,7 +353,7 @@ mod linux {
                     status.code(),
                     status
                         .signal()
-                        .map(needy_common::process::signal_name)
+                        .map(needy_core_executor::signals::name)
                         .unwrap_or_default(),
                 )
             }

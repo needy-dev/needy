@@ -5,7 +5,6 @@ mod build;
 mod fs_cli;
 mod process_cli;
 
-use needy_common::process as prochost;
 use needy_core::report;
 use needy_core_actor::guest;
 use needy_core_executor::{client as exec_cli, service as executor};
@@ -326,10 +325,9 @@ fn main() -> Result<()> {
                 no_replay,
             } => exec_cli::attach(&endpoint, process_id, !no_replay).await,
             Command::Kill { process_id, signal } => {
-                let number = prochost::signal_number(&signal)
-                    .or_else(|| signal.parse().ok())
-                    .unwrap_or(15);
-                process_cli::kill(&endpoint, process_id, number)
+                let signal = needy_core_executor::signals::parse(&signal)
+                    .ok_or_else(|| anyhow::anyhow!("unknown signal {signal}"))?;
+                process_cli::kill(&endpoint, process_id, signal)
                     .await
                     .map(|_| 0)
             }

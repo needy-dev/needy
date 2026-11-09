@@ -5,3 +5,4 @@
 pub mod client;
 pub mod prochost;
 pub mod service;
+pub mod signals;

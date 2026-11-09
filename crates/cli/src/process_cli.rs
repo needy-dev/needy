@@ -43,7 +43,7 @@ pub async fn ps(endpoint: &str, session: String) -> Result<()> {
     Ok(())
 }
 
-pub async fn kill(endpoint: &str, process_id: String, signal: i32) -> Result<()> {
+pub async fn kill(endpoint: &str, process_id: String, signal: String) -> Result<()> {
     let client = connect(endpoint).await?;
     client
         .processes()
