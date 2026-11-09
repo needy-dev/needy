@@ -131,6 +131,7 @@ pub fn proto_route(route: Route) -> v1::DecideResponse {
     env: route.env,
     clear_env: route.clear_env,
     cwd: route.cwd,
+    search_path_if_missing: route.search_path_if_missing,
     deny,
   }
 }
@@ -152,6 +153,7 @@ pub fn exec_spec(start: v1::ExecStart) -> Result<ExecSpec, Error> {
     session: start.session_id,
     executor: start.executor,
     no_stdin: start.no_stdin,
+    search_path_if_missing: start.search_path_if_missing,
   })
 }
 
@@ -167,6 +169,7 @@ pub fn proto_exec_start(spec: ExecSpec) -> v1::ExecStart {
     executor: spec.executor,
     no_stdin: spec.no_stdin,
     origin: proto_origin(spec.origin).into(),
+    search_path_if_missing: spec.search_path_if_missing,
   }
 }
 

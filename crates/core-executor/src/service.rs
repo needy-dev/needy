@@ -183,6 +183,7 @@ impl ProcessService for ExecutorService {
           tty,
           no_stdin: start.no_stdin,
           session_id: start.session_id,
+          search_path_if_missing: start.search_path_if_missing,
         };
         let proc = self.host.spawn(spec).map_err(spawn_status)?;
         let started = ExecStarted {
@@ -227,3 +228,7 @@ impl ProcessService for ExecutorService {
     Ok(Response::new(KillProcessResponse {}))
   }
 }
+
+#[cfg(all(test, unix))]
+#[path = "service_test.rs"]
+mod tests;

@@ -32,6 +32,7 @@ async fn shutdown_stops_sessions_and_the_local_executors_processes() {
     executor: String::new(),
     no_stdin: true,
     origin: Origin::Cli,
+    search_path_if_missing: false,
   };
   let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
   let pid = loop {

@@ -122,4 +122,6 @@ message DecideResponse {
   // Set when the command must not run: the message to show, either
   // "denied: <rule message>" or "fault injected: <errno>".
   string deny = 6;
+  // The value of `ExecStart.search_path_if_missing` for the routed exec.
+  bool search_path_if_missing = 7;
 }

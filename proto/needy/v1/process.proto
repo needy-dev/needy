@@ -38,6 +38,11 @@ message ExecStart {
   bool no_stdin = 9;
   // Who starts the process. Required.
   Origin origin = 11;
+  // When `argv[0]` is an absolute path that does not exist on the executor,
+  // run the program of the same name on the executor's PATH instead. Routing
+  // sets it for a command the actor resolved on its own path; a start that
+  // names a path itself leaves it unset and fails when the path is missing.
+  bool search_path_if_missing = 12;
 
   reserved 10;
 }

@@ -28,6 +28,7 @@ fn spec(argv: &[&str], session: &str, executor: &str) -> ExecSpec {
     executor: executor.into(),
     no_stdin: true,
     origin: Origin::Cli,
+    search_path_if_missing: false,
   }
 }
 

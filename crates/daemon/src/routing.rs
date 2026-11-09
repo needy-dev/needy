@@ -62,13 +62,14 @@ pub async fn route(session: &Session, ctx: ExecContext) -> Route {
     Outcome::Deny(message) => (Target::Refused(format!("denied: {message}")), None),
     Outcome::Fault(errno) => (Target::Refused(format!("fault injected: {errno}")), None),
   };
-  let (argv, cwd) = executor_command(instance.as_deref(), &decision);
+  let command = executor_command(instance.as_deref(), &decision);
   Route {
     target,
-    argv,
+    argv: command.argv,
     env: changed_env(&decision, &ctx.env),
     clear_env: decision.clear_env,
-    cwd,
+    cwd: command.cwd,
+    search_path_if_missing: command.search_path_if_missing,
   }
 }
 
@@ -115,9 +116,10 @@ pub async fn place(session: &Session, spec: &mut ExecSpec) -> Result<(Arc<Instan
     .cloned()
     .ok_or_else(|| ControlError::NotFound("the session has no executor".into()))?;
   if let (None, Some((decision, ctx))) = (&explicit, &decision) {
-    let (argv, cwd) = executor_command(Some(&instance), decision);
-    spec.argv = argv;
-    spec.cwd = cwd;
+    let command = executor_command(Some(&instance), decision);
+    spec.argv = command.argv;
+    spec.cwd = command.cwd;
+    spec.search_path_if_missing = command.search_path_if_missing;
     spec.env.extend(changed_env(decision, &ctx.env));
     // The decision records where the command really runs.
     events.push(record(session, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone()))));
@@ -136,24 +138,39 @@ fn context(spec: &ExecSpec) -> ExecContext {
   }
 }
 
+/// A decision's command as it runs on an executor.
+struct ExecutorCommand {
+  argv: Vec<String>,
+  cwd: String,
+  /// The executor may run the program of the same name from its PATH when
+  /// the actor's absolute path does not exist there.
+  search_path_if_missing: bool,
+}
+
 /// The command a decision runs on `instance`: its arguments and working
-/// directory through the executor's path map, with the executable resolved
-/// by the executor instead of the actor's path.
-fn executor_command(instance: Option<&Instance>, decision: &Decision) -> (Vec<String>, String) {
+/// directory through the executor's path map. A program the path map maps
+/// runs from the mapped path; any other absolute program keeps the actor's
+/// path, and the executor falls back to its own PATH when that path is
+/// missing there (the actor's `/usr/bin/python3` may live elsewhere).
+fn executor_command(instance: Option<&Instance>, decision: &Decision) -> ExecutorCommand {
   let mut argv = decision.argv.clone();
   let mut cwd = decision.cwd.clone();
+  let mut search_path_if_missing = false;
   if let Some(instance) = instance {
     for (from, to) in &instance.path_map {
       cwd = map_prefix(&cwd, from, to);
       argv = argv.iter().map(|a| map_prefix(a, from, to)).collect();
     }
-    if let Some(first) = argv.first_mut()
-      && first.starts_with('/')
-    {
-      *first = needy_core::pattern::basename(first).to_string();
-    }
+    search_path_if_missing = match (argv.first(), decision.argv.first()) {
+      (Some(program), Some(asked)) => program == asked && program.starts_with('/'),
+      _ => false,
+    };
   }
-  (argv, cwd)
+  ExecutorCommand {
+    argv,
+    cwd,
+    search_path_if_missing,
+  }
 }
 
 /// The variables a decision sets or changes relative to `asked`; all of them

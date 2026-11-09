@@ -105,6 +105,7 @@ async fn proxy() -> Result<i32> {
     executor: decision.target,
     no_stdin: false,
     origin: Origin::ActorProxy.into(),
+    search_path_if_missing: decision.search_path_if_missing,
   };
   let stream = ExecStream::start(&client, start).await?;
   let exit = relay::run(stream, tty, true).await?;

@@ -108,6 +108,9 @@ pub struct Route {
   pub env: HashMap<String, String>,
   pub clear_env: bool,
   pub cwd: String,
+  /// Run the program of the same name on the executor's PATH when `argv[0]`
+  /// is an absolute path the executor does not have.
+  pub search_path_if_missing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +160,9 @@ pub struct ExecSpec {
   pub executor: String,
   pub no_stdin: bool,
   pub origin: Origin,
+  /// Run the program of the same name on the executor's PATH when `argv[0]`
+  /// is an absolute path the executor does not have. Set by routing only.
+  pub search_path_if_missing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

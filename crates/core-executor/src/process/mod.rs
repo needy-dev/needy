@@ -54,6 +54,29 @@ pub enum Error {
   ShuttingDown,
 }
 
+impl Error {
+  /// The error with `program` as the program that could not start.
+  fn naming(self, program: String) -> Self {
+    match self {
+      Self::Start { error, .. } => Self::Start { program, error },
+      Self::StartTerminal { message, .. } => Self::StartTerminal { program, message },
+      other => other,
+    }
+  }
+}
+
+/// The basename to search `PATH` for when `program` is an absolute path that
+/// does not exist here; `None` when the path exists or is not absolute.
+// NOTICE: `has_root`, not `is_absolute`: a Unix path such as
+// `/usr/bin/python3` routed to a Windows executor has a root but no drive.
+fn path_fallback(program: &str) -> Option<String> {
+  let path = std::path::Path::new(program);
+  if !path.has_root() || path.exists() {
+    return None;
+  }
+  path.file_name().map(|name| name.to_string_lossy().into_owned())
+}
+
 #[derive(Debug, Clone)]
 pub enum Output {
   Stdout(Bytes),
@@ -80,6 +103,9 @@ pub struct Spec {
   pub tty: Option<(u16, u16)>,
   pub no_stdin: bool,
   pub session_id: String,
+  /// When `argv[0]` is an absolute path that does not exist here, run the
+  /// program of the same name on `PATH` instead.
+  pub search_path_if_missing: bool,
 }
 
 /// The process table of one machine. Clones share the table.
@@ -128,17 +154,25 @@ impl Host {
   }
 
   /// Starts a process. Its tasks belong to the host, not to the caller.
-  pub fn spawn(&self, spec: Spec) -> Result<Arc<Proc>, Error> {
-    if spec.argv.first().is_none_or(|program| program.is_empty()) {
+  pub fn spawn(&self, mut spec: Spec) -> Result<Arc<Proc>, Error> {
+    let Some(asked) = spec.argv.first().filter(|program| !program.is_empty()).cloned() else {
       return Err(Error::EmptyCommand);
-    }
+    };
     if self.inner.cancel.is_cancelled() {
       return Err(Error::ShuttingDown);
     }
-    let proc = match spec.tty {
-      Some(size) => pty::spawn(&spec, size, &self.inner.tasks, &self.inner.cancel)?,
-      None => pipes::spawn(&spec, &self.inner.tasks, &self.inner.cancel)?,
+    if spec.search_path_if_missing
+      && let Some(name) = path_fallback(&asked)
+    {
+      spec.argv[0] = name;
+    }
+    let spawned = match spec.tty {
+      Some(size) => pty::spawn(&spec, size, &self.inner.tasks, &self.inner.cancel),
+      None => pipes::spawn(&spec, &self.inner.tasks, &self.inner.cancel),
     };
+    // A program found on neither its path nor `PATH` is reported by the
+    // path the caller asked for.
+    let proc = spawned.map_err(|error| error.naming(asked))?;
     self.table().insert(proc.id.clone(), proc.clone());
     Ok(proc)
   }

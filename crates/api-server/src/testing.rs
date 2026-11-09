@@ -97,6 +97,7 @@ impl Sessions for Fake {
       env: HashMap::from([("SET".into(), "1".into())]),
       clear_env: false,
       cwd: ctx.cwd,
+      search_path_if_missing: false,
     })
   }
 }

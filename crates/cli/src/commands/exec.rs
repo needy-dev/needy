@@ -83,6 +83,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     executor: args.executor,
     no_stdin: !forward_stdin,
     origin: Origin::Cli.into(),
+    // A path named on the command line must exist where it runs.
+    search_path_if_missing: false,
   };
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
   let mut stream = match ExecStream::start(&connection, start).await {

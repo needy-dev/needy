@@ -12,6 +12,7 @@ executors:
 commands:
   - { match: "rm **", deny: no deleting here }
   - { match: "python3 **", to: here, env: { set: { ROUTED: "1" } } }
+  - { match: "tool.sh **", to: here }
 "#;
 
 fn ctx(argv: &[&str], cwd: &str) -> ExecContext {
@@ -32,10 +33,34 @@ async fn route(argv: &[&str], cwd: &str) -> Route {
 async fn a_routed_command_goes_through_the_executors_path_map() {
   let route = route(&["/usr/bin/python3", "/home/agent/workspace/a.py"], "/home/agent/workspace/sub").await;
   assert_eq!(route.target, Target::Executor("here".into()));
-  // The executor resolves the program on its own path.
-  assert_eq!(route.argv, ["python3", "/srv/ws/a.py"]);
+  assert_eq!(route.argv, ["/usr/bin/python3", "/srv/ws/a.py"]);
   assert_eq!(route.cwd, "/srv/ws/sub");
   assert_eq!(route.env.get("ROUTED").map(String::as_str), Some("1"));
+}
+
+// ROOT CAUSE:
+//
+// If a routed command named its program by an absolute path, routing cut it
+// to its basename so the executor would find the program on its own PATH.
+//
+// Before the fix, `/opt/tool/bin/x` could run another `x` from the
+// executor's PATH, and a missing program was reported without its path.
+// The fix keeps the path and lets the executor search its PATH only when
+// the path does not exist there.
+#[tokio::test]
+async fn a_routed_absolute_program_keeps_its_path_and_may_fall_back_to_the_executors_path() {
+  let route = route(&["/usr/bin/python3", "-V"], "/").await;
+  assert_eq!(route.target, Target::Executor("here".into()));
+  assert_eq!(route.argv, ["/usr/bin/python3", "-V"]);
+  assert!(route.search_path_if_missing);
+}
+
+#[tokio::test]
+async fn a_routed_program_the_path_map_maps_runs_from_the_mapped_path_only() {
+  let route = route(&["/home/agent/workspace/tool.sh", "x"], "/").await;
+  assert_eq!(route.target, Target::Executor("here".into()));
+  assert_eq!(route.argv, ["/srv/ws/tool.sh", "x"]);
+  assert!(!route.search_path_if_missing);
 }
 
 #[tokio::test]
@@ -50,6 +75,7 @@ async fn a_command_no_rule_routes_stays_on_the_actor_unchanged() {
   let route = route(&["/bin/ls", "/home/agent/workspace"], "/home/agent/workspace").await;
   assert_eq!(route.target, Target::Actor);
   assert_eq!(route.argv, ["/bin/ls", "/home/agent/workspace"]);
+  assert!(!route.search_path_if_missing);
   assert_eq!(route.cwd, "/home/agent/workspace");
 }
 

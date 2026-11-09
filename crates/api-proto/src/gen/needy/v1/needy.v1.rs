@@ -193,6 +193,12 @@ pub struct ExecStart {
     /// Who starts the process. Required.
     #[prost(enumeration="Origin", tag="11")]
     pub origin: i32,
+    /// When `argv\[0\]` is an absolute path that does not exist on the executor,
+    /// run the program of the same name on the executor's PATH instead. Routing
+    /// sets it for a command the actor resolved on its own path; a start that
+    /// names a path itself leaves it unset and fails when the path is missing.
+    #[prost(bool, tag="12")]
+    pub search_path_if_missing: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecAttach {
@@ -510,6 +516,9 @@ pub struct DecideResponse {
     /// "denied: <rule message>" or "fault injected: <errno>".
     #[prost(string, tag="6")]
     pub deny: ::prost::alloc::string::String,
+    /// The value of `ExecStart.search_path_if_missing` for the routed exec.
+    #[prost(bool, tag="7")]
+    pub search_path_if_missing: bool,
 }
 /// A session's life cycle. The first terminal state (stopped, finished or
 /// failed) wins.
