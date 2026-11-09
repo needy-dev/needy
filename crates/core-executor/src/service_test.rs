@@ -103,3 +103,36 @@ async fn a_program_missing_from_its_path_and_from_path_fails_naming_its_path() {
   assert_eq!(error.kind(), Kind::Failed, "{error}");
   assert!(error.to_string().starts_with(&format!("cannot start {}", program.display())), "{error}");
 }
+
+// ROOT CAUSE:
+//
+// If a started process wrote its output before the stream that started it
+// subscribed, that output was lost, because a new start subscribed without
+// the replay buffer. The client saw the exit status with empty output.
+//
+// Before the fix, the stream subscribed after it sent `started`, from a task
+// that could run after the process had written and exited.
+// The fix subscribes the starting client with the replay buffer as soon as
+// the process exists, so it receives the output from its first byte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_started_client_receives_output_written_before_it_subscribed() {
+  let executor = executor().await;
+
+  // NOTICE: the loss needs the process to write before the stream
+  // subscribes. Many concurrent starts keep the runtime busy between the two,
+  // which made the loss show up in every run of this test before the fix.
+  for round in 0..10 {
+    let runs = (0..32).map(|_| {
+      let start = ExecStart {
+        argv: vec!["echo".into(), "early".into()],
+        no_stdin: true,
+        ..Default::default()
+      };
+      async { ExecStream::start(&executor.client, start).await.unwrap().run(None).await.unwrap() }
+    });
+    for output in futures_util::future::join_all(runs).await {
+      assert_eq!(output.exit.code, Some(0), "round {round}");
+      assert_eq!(String::from_utf8_lossy(&output.stdout), "early\n", "round {round}");
+    }
+  }
+}

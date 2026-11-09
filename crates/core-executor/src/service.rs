@@ -32,15 +32,19 @@ fn exited(exit: &Exit) -> ExecResponse {
   }
 }
 
-/// Streams a process to one client until it exits or the client leaves. A
-/// client that leaves a process it did not detach takes the process down.
-/// The stream's tasks belong to `host`.
+/// Output a client receives: what happened before it subscribed, then what
+/// happens after. The two never overlap.
+type Subscription = (Vec<Output>, mpsc::Receiver<Output>);
+
+/// Streams a process to one client, from `subscription`, until it exits or
+/// the client leaves. A client that leaves a process it did not detach takes
+/// the process down. The stream's tasks belong to `host`.
 fn stream_process(
   host: &Host,
   proc: std::sync::Arc<Proc>,
   mut inbound: Streaming<ExecRequest>,
   started: ExecStarted,
-  replay: bool,
+  subscription: Subscription,
   detach: bool,
 ) -> ExecStream {
   let (tasks, cancel) = host.tasks();
@@ -74,7 +78,7 @@ fn stream_process(
   let cancel = cancel.clone();
   tasks.spawn(async move {
     tokio::select! {
-      () = relay_output(proc, tx, started, replay, detach) => {}
+      () = relay_output(proc, tx, started, subscription, detach) => {}
       // The host kills its processes when it stops; the client sees the
       // stream end.
       () = cancel.cancelled() => {}
@@ -87,7 +91,7 @@ async fn relay_output(
   proc: std::sync::Arc<Proc>,
   tx: mpsc::Sender<Result<ExecResponse, Status>>,
   started: ExecStarted,
-  replay: bool,
+  (past, mut live): Subscription,
   detach: bool,
 ) {
   let send = |event| {
@@ -98,7 +102,6 @@ async fn relay_output(
     payload: Some(exec_response::Payload::Started(started)),
   })
   .await;
-  let (past, mut live) = proc.subscribe(replay).await;
   for event in past {
     if !alive {
       break;
@@ -186,6 +189,13 @@ impl ProcessService for ExecutorService {
           search_path_if_missing: start.search_path_if_missing,
         };
         let proc = self.host.spawn(spec).map_err(spawn_status)?;
+        // The starting client subscribes before anything else runs, with the
+        // replay buffer, so output written since the spawn reaches it too.
+        // NOTICE: a process that writes more than the replay buffer (256
+        // KiB) in that moment would lose its oldest output; subscribing
+        // inside `Host::spawn`, before the output pumps start, would close
+        // that gap if it is ever observed.
+        let subscription = proc.subscribe(true).await;
         let started = ExecStarted {
           process_id: proc.id.clone(),
           executor: self.name.clone(),
@@ -193,7 +203,7 @@ impl ProcessService for ExecutorService {
           argv: proc.argv.clone(),
           cwd: String::new(),
         };
-        Ok(Response::new(stream_process(&self.host, proc, inbound, started, false, start.detach)))
+        Ok(Response::new(stream_process(&self.host, proc, inbound, started, subscription, start.detach)))
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let proc = self.host.get(&attach.process_id).ok_or_else(|| Status::not_found("no such process"))?;
@@ -204,8 +214,9 @@ impl ProcessService for ExecutorService {
           argv: proc.argv.clone(),
           cwd: String::new(),
         };
+        let subscription = proc.subscribe(attach.replay).await;
         // An attached client never owns the process.
-        Ok(Response::new(stream_process(&self.host, proc, inbound, started, attach.replay, true)))
+        Ok(Response::new(stream_process(&self.host, proc, inbound, started, subscription, true)))
       }
       _ => Err(Status::invalid_argument("the first request must start or attach")),
     }
