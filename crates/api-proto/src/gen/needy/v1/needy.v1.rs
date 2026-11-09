@@ -250,6 +250,20 @@ pub struct ExecStarted {
     pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag="5")]
     pub cwd: ::prost::alloc::string::String,
+    /// Set when the executor has no terminfo entry for the requested `TERM`
+    /// and gave the process another one.
+    #[prost(message, optional, tag="6")]
+    pub term_fallback: ::core::option::Option<TermFallback>,
+}
+/// A terminal type an executor replaced.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TermFallback {
+    /// The `TERM` the client asked for.
+    #[prost(string, tag="1")]
+    pub requested: ::prost::alloc::string::String,
+    /// The `TERM` the process got.
+    #[prost(string, tag="2")]
+    pub used: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecExited {

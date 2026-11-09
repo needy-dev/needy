@@ -12,7 +12,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use super::proc::{Ends, Proc, lost};
-use super::{Error, Input, Output, Spec, platform};
+use super::{Error, FALLBACK_TERM, Input, Output, Spec, TermFallback, platform};
 
 /// Bytes read from the terminal at once.
 const READ_CHUNK: usize = 256 * 1024;
@@ -47,6 +47,16 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   for (k, v) in &spec.env {
     command.env(k, v);
   }
+  // A program cannot draw for a terminal type this machine does not know.
+  let term_fallback = spec.env.iter().rev().find(|(k, _)| k == "TERM").and_then(|(_, term)| {
+    (!platform::has_terminfo(term)).then(|| TermFallback {
+      requested: term.clone(),
+      used: FALLBACK_TERM.into(),
+    })
+  });
+  if let Some(fallback) = &term_fallback {
+    command.env("TERM", &fallback.used);
+  }
   let mut child = pair.slave.spawn_command(command).map_err(|e| Error::StartTerminal {
     program: program.clone(),
     message: format!("{e:#}"),
@@ -56,7 +66,7 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   let master = pair.master;
   let mut reader = master.try_clone_reader().map_err(|e| Error::Terminal(format!("{e:#}")))?;
   let mut writer = master.take_writer().map_err(|e| Error::Terminal(format!("{e:#}")))?;
-  let (proc, ends) = Proc::new(spec, pid, true);
+  let (proc, ends) = Proc::new(spec, pid, true, term_fallback);
   let Ends {
     mut input,
     exit: exit_tx,

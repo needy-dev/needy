@@ -69,8 +69,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let window = tty.then(relay::window);
   let mut env: HashMap<String, String> =
     args.env.iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
-  if tty && let Ok(term) = std::env::var("TERM") {
-    env.entry("TERM".into()).or_insert(term);
+  // The terminal's type and color support go with it; the executor replaces
+  // a `TERM` it has no terminfo entry for.
+  if tty {
+    for name in ["TERM", "COLORTERM"] {
+      if let Ok(value) = std::env::var(name) {
+        env.entry(name.into()).or_insert(value);
+      }
+    }
   }
   let forward_stdin = !(args.no_stdin || args.detach);
   let start = ExecStart {

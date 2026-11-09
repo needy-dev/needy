@@ -40,6 +40,7 @@ fn start(origin: Origin, command: &str) -> Event {
     executor: "build".into(),
     argv: argv(command),
     origin,
+    term_fallback: None,
   })
 }
 

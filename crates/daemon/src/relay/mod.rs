@@ -14,7 +14,7 @@ use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
 use needy_api_server::control::{ControlError, ExecInput, ExecOpen, ExecOutput, Inputs, Outputs, ProcessInfo, Processes};
 use needy_api_server::protocol::domain;
 use needy_common::time::now_ms;
-use needy_core::event::{Event, ExecExit, ExecStart};
+use needy_core::event::{Event, ExecExit, ExecStart, TermFallback};
 use needy_core::intercept::StreamFilter;
 use needy_core::types::Origin;
 use needy_trace::Dispatch;
@@ -381,6 +381,10 @@ impl Relay {
                 executor: self.instance.name.clone(),
                 argv: self.argv.clone(),
                 origin,
+                term_fallback: started.term_fallback.as_ref().map(|f| TermFallback {
+                  requested: f.requested.clone(),
+                  used: f.used.clone(),
+                }),
               }),
             );
           }

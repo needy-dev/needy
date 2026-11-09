@@ -300,3 +300,48 @@ async fn end_of_input_ends_a_line_reading_program_on_a_terminal() {
 
   assert_eq!(exit.code, Some(0));
 }
+
+/// The `TERM` a terminal process with `term` in its environment sees, and
+/// what the process records about it.
+#[cfg(unix)]
+async fn term_seen(term: &str) -> (String, Option<TermFallback>) {
+  let host = Host::default();
+  let mut probe = spec(&["sh", "-c", "echo \"[$TERM]\""]);
+  probe.tty = Some((24, 80));
+  probe.env = vec![("TERM".into(), term.into())];
+  let proc = host.spawn(probe).unwrap();
+  let (stdout, _, _) = collect(&proc).await;
+  (String::from_utf8_lossy(&stdout).trim().to_string(), proc.term_fallback.clone())
+}
+
+// ROOT CAUSE:
+//
+// If the client's terminal type had no terminfo entry on the executor, a
+// program there could not draw (`tput: unknown terminal`), because the
+// client's `TERM` was passed on as it was.
+//
+// Before the fix, the process saw the unknown `TERM`.
+// The fix falls back to `xterm-256color` and records the fallback.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_unknown_terminal_type_falls_back_to_xterm_256color() {
+  let (seen, fallback) = term_seen("needy-no-such-terminal").await;
+
+  assert_eq!(seen, "[xterm-256color]");
+  assert_eq!(
+    fallback,
+    Some(TermFallback {
+      requested: "needy-no-such-terminal".into(),
+      used: "xterm-256color".into()
+    })
+  );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_known_terminal_type_is_kept() {
+  let (seen, fallback) = term_seen("vt100").await;
+
+  assert_eq!(seen, "[vt100]");
+  assert_eq!(fallback, None);
+}

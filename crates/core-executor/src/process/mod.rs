@@ -77,6 +77,17 @@ fn path_fallback(program: &str) -> Option<String> {
   path.file_name().map(|name| name.to_string_lossy().into_owned())
 }
 
+/// A terminal type the executor replaced: it has no terminfo entry for the
+/// one the client asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TermFallback {
+  pub requested: String,
+  pub used: String,
+}
+
+/// The terminal type used when the client's has no terminfo entry here.
+pub const FALLBACK_TERM: &str = "xterm-256color";
+
 #[derive(Debug, Clone)]
 pub enum Output {
   Stdout(Bytes),

@@ -10,7 +10,7 @@ use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use tokio::sync::{mpsc, watch};
 
-use super::{Input, Output, Spec, platform};
+use super::{Input, Output, Spec, TermFallback, platform};
 
 /// Output kept per process for clients that attach later.
 // NOTICE: the CLI note documents 256 KiB; a client attaching after more
@@ -28,6 +28,8 @@ pub struct Proc {
   pub tty: bool,
   pub started_at_ms: i64,
   pub session_id: String,
+  /// The terminal type the executor set instead of the client's.
+  pub term_fallback: Option<TermFallback>,
   input: mpsc::UnboundedSender<Input>,
   /// The replay buffer and the subscribers, under one lock so a new
   /// subscriber's snapshot and its first live event never overlap.
@@ -90,7 +92,7 @@ pub(super) struct Ends {
 }
 
 impl Proc {
-  pub(super) fn new(spec: &Spec, pid: i64, tty: bool) -> (Arc<Self>, Ends) {
+  pub(super) fn new(spec: &Spec, pid: i64, tty: bool, term_fallback: Option<TermFallback>) -> (Arc<Self>, Ends) {
     let (input, input_rx) = mpsc::unbounded_channel();
     let (exit_tx, exited) = watch::channel(None);
     let proc = Arc::new(Self {
@@ -100,6 +102,7 @@ impl Proc {
       tty,
       started_at_ms: now_ms(),
       session_id: spec.session_id.clone(),
+      term_fallback,
       input,
       fanout: Mutex::new(Fanout {
         events: VecDeque::new(),

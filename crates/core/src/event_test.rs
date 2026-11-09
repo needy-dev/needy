@@ -70,6 +70,10 @@ fn every_kind() -> Vec<Event> {
       executor: "build".into(),
       argv: argv("git status"),
       origin: Origin::Cli,
+      term_fallback: Some(TermFallback {
+        requested: "xterm-ghostty".into(),
+        used: "xterm-256color".into(),
+      }),
     }),
     Event::ExecExit(ExecExit {
       process: "p1".into(),
@@ -184,4 +188,22 @@ fn the_trace_crate_s_own_events_decode() {
     panic!("{timing:?}")
   };
   assert_eq!(timing.hooks["exec.decide"].total_us, 40);
+}
+
+// An exec start whose terminal type was kept carries no `term_fallback`,
+// so traces written before the field existed read the same.
+#[test]
+fn an_exec_start_without_a_term_fallback_has_no_such_key() {
+  let start = Event::ExecStart(ExecStart {
+    process: "p1".into(),
+    executor: "build".into(),
+    argv: argv("ls"),
+    origin: Origin::Cli,
+    term_fallback: None,
+  });
+
+  let payload = start.payload();
+
+  assert!(!payload.contains("term_fallback"), "{payload}");
+  assert_eq!(Event::decode("exec.start", SCHEMA_VERSION, &payload).unwrap(), start);
 }

@@ -135,3 +135,43 @@ pub fn end_of_input(master: &dyn portable_pty::MasterPty) -> Vec<u8> {
     }
   }
 }
+
+/// Whether this machine has a terminfo entry for the terminal type `name`,
+/// looked up where ncurses looks (terminfo(5)): `$TERMINFO`,
+/// `~/.terminfo`, `$TERMINFO_DIRS`, then the system directories, each with
+/// entries under their first letter or its hexadecimal code (macOS).
+// NOTICE: written here rather than with a terminfo crate: only the entry's
+// existence matters, and the crates parse the compiled database as well.
+// The system directories are the ones ncurses builds and distributions use.
+pub fn has_terminfo(name: &str) -> bool {
+  use std::path::PathBuf;
+  let Some(first) = name.chars().next() else {
+    return false;
+  };
+  if name.contains('/') {
+    return false;
+  }
+  let mut dirs: Vec<PathBuf> = Vec::new();
+  if let Some(dir) = std::env::var_os("TERMINFO") {
+    dirs.push(dir.into());
+  }
+  if let Some(home) = std::env::var_os("HOME") {
+    dirs.push(PathBuf::from(home).join(".terminfo"));
+  }
+  if let Some(list) = std::env::var_os("TERMINFO_DIRS") {
+    dirs.extend(std::env::split_paths(&list).filter(|d| !d.as_os_str().is_empty()));
+  }
+  dirs.extend(
+    [
+      "/etc/terminfo",
+      "/lib/terminfo",
+      "/usr/share/terminfo",
+      "/usr/lib/terminfo",
+      "/usr/local/share/terminfo",
+    ]
+    .map(PathBuf::from),
+  );
+  let letter = first.to_string();
+  let hex = format!("{:x}", u32::from(first));
+  dirs.iter().any(|dir| dir.join(&letter).join(name).exists() || dir.join(&hex).join(name).exists())
+}

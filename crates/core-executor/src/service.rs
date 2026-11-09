@@ -7,7 +7,7 @@ use futures_util::Stream;
 use needy_api_proto::v1::process_service_server::ProcessService;
 use needy_api_proto::v1::{
   ExecExited, ExecRequest, ExecResponse, ExecStarted, KillProcessRequest, KillProcessResponse, ListProcessesRequest, ListProcessesResponse,
-  ProcessInfo, exec_request, exec_response,
+  ProcessInfo, TermFallback, exec_request, exec_response,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -209,6 +209,10 @@ impl ProcessService for ExecutorService {
           pid: proc.pid,
           argv: proc.argv.clone(),
           cwd: String::new(),
+          term_fallback: proc.term_fallback.as_ref().map(|f| TermFallback {
+            requested: f.requested.clone(),
+            used: f.used.clone(),
+          }),
         };
         Ok(Response::new(stream_process(&self.host, proc, inbound, started, subscription, start.detach)))
       }
@@ -220,6 +224,10 @@ impl ProcessService for ExecutorService {
           pid: proc.pid,
           argv: proc.argv.clone(),
           cwd: String::new(),
+          term_fallback: proc.term_fallback.as_ref().map(|f| TermFallback {
+            requested: f.requested.clone(),
+            used: f.used.clone(),
+          }),
         };
         let subscription = proc.subscribe(attach.replay, Subscriber::Viewer);
         // Resized after subscribing, so the redraw a full-screen program

@@ -1478,3 +1478,29 @@ fn exec_on_a_terminal_restores_it_when_a_second_sigterm_makes_it_leave() {
   assert!(contains_after(&written, after, b"\x1b[?1049l"), "{:?}", String::from_utf8_lossy(&written[after..]));
   assert!(contains_after(&written, after, b"\x1b[?2004l"), "{:?}", String::from_utf8_lossy(&written[after..]));
 }
+
+// The terminal note's G9: `COLORTERM` was not forwarded, and a `TERM` the
+// executor has no terminfo entry for was passed on as it was.
+#[test]
+fn exec_on_a_terminal_forwards_colorterm_and_replaces_an_unknown_term() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+
+  let output = home
+    .needy()
+    .env("TERM", "needy-no-such-terminal")
+    .env("COLORTERM", "needy-test-colors")
+    .args([
+      "exec",
+      "-t",
+      "--",
+      "sh",
+      "-c",
+      "echo \"[$TERM] [$COLORTERM]\"",
+    ])
+    .output()
+    .unwrap();
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert!(stdout(&output).contains("[xterm-256color] [needy-test-colors]"), "{:?}", stdout(&output));
+}

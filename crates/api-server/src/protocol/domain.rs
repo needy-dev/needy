@@ -211,6 +211,10 @@ pub fn proto_exec_output(output: ExecOutput) -> v1::ExecResponse {
       pid: started.pid,
       argv: started.argv,
       cwd: started.cwd,
+      // TODO(term-fallback): the control daemon records a terminal type
+      // fallback in the trace's `exec.start`; its callers do not get it yet,
+      // as no client shows it. Add it to `Started` when one does.
+      term_fallback: None,
     }),
     ExecOutput::Stdout(bytes) => Payload::Stdout(bytes),
     ExecOutput::Stderr(bytes) => Payload::Stderr(bytes),

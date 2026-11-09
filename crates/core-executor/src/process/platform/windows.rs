@@ -53,3 +53,8 @@ pub fn signal_group(pid: i64, name: &str) {
 pub fn end_of_input(_master: &dyn portable_pty::MasterPty) -> Vec<u8> {
   vec![4]
 }
+
+/// Windows has no terminfo; a terminal type is kept as the client sent it.
+pub fn has_terminfo(_name: &str) -> bool {
+  true
+}

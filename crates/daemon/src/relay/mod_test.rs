@@ -298,3 +298,24 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
   assert!(stdout.contains("40 100"), "{stdout:?}");
   Sessions::stop(daemon, &created.id).await.unwrap();
 }
+
+// The terminal note's G9: the executor's fallback for an unknown `TERM` is
+// recorded in the command's `exec.start` event.
+#[tokio::test]
+async fn a_terminal_type_the_executor_replaced_is_recorded_in_exec_start() {
+  use needy_api_server::control::WindowSize;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let on_a_terminal = ExecSpec {
+    tty: Some(WindowSize { rows: 24, cols: 80 }),
+    env: [("TERM".to_string(), "needy-no-such-terminal".to_string())].into(),
+    ..spec(&["true"], &created.id, "")
+  };
+  finish(daemon.exec(ExecOpen::Start(on_a_terminal), attached()).await.unwrap()).await;
+  Sessions::stop(daemon, &created.id).await.unwrap();
+
+  let trace = std::fs::read_to_string(started.dir.path().join("state/sessions").join(&created.id).join("trace.jsonl")).unwrap();
+  let start = trace.lines().find(|l| l.contains("\"exec.start\"")).unwrap_or_else(|| panic!("{trace}"));
+  assert!(start.contains(r#""term_fallback":{"requested":"needy-no-such-terminal","used":"xterm-256color"}"#), "{start}");
+}

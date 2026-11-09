@@ -263,6 +263,17 @@ pub struct ExecStart {
   pub executor: String,
   pub argv: Vec<String>,
   pub origin: Origin,
+  /// The terminal type the executor used instead of the client's, which it
+  /// has no terminfo entry for. Absent when kept.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub term_fallback: Option<TermFallback>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TermFallback {
+  pub requested: String,
+  pub used: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

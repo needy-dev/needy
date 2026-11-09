@@ -93,6 +93,17 @@ message ExecStarted {
   // Arguments, working directory and executor after routing rules applied.
   repeated string argv = 4;
   string cwd = 5;
+  // Set when the executor has no terminfo entry for the requested `TERM`
+  // and gave the process another one.
+  TermFallback term_fallback = 6;
+}
+
+// A terminal type an executor replaced.
+message TermFallback {
+  // The `TERM` the client asked for.
+  string requested = 1;
+  // The `TERM` the process got.
+  string used = 2;
 }
 
 message ExecExited {

@@ -40,7 +40,7 @@ pub(super) fn spawn(spec: &Spec, tasks: &TaskTracker, cancel: &CancellationToken
     error,
   })?;
   let pid = child.id().map(i64::from).unwrap_or(-1);
-  let (proc, ends) = Proc::new(spec, pid, false);
+  let (proc, ends) = Proc::new(spec, pid, false, None);
   let Ends {
     mut input,
     exit: exit_tx,
