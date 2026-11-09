@@ -1056,3 +1056,17 @@ fn ps_json_has_separate_state_exit_code_and_signal() {
   assert_eq!(fields(&exited), (serde_json::json!("exited"), serde_json::json!(3), serde_json::Value::Null));
   assert_eq!(fields(&killed), (serde_json::json!("killed"), serde_json::Value::Null, serde_json::json!("SIGINT")));
 }
+
+#[test]
+fn attach_refuses_needys_own_processes() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = session_with_internal_processes(&home);
+  let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-a", "-o", "json", "--session", &session]))).unwrap();
+  let tar = listed.iter().find(|p| p["argv"][0] == "tar").unwrap()["id"].as_str().unwrap().to_string();
+
+  let output = home.run(&["attach", &tar]);
+
+  assert_eq!(output.status.code(), Some(1));
+  assert_eq!(stderr(&output), format!("needy: process {tar} is needy's own (origin fs); it cannot be attached\n"));
+}

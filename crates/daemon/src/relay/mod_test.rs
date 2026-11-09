@@ -114,3 +114,65 @@ async fn a_stream_its_session_stop_ends_says_session_stopped() {
 
   assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "session stopped"), "{rest:?}");
 }
+
+// The owner's 2026-11-10 trial: `needy attach` forwards stdin, so attaching
+// to the `sftp-server` behind an actor's workspace mount would write the
+// user's keystrokes into the SFTP stream and could corrupt the mount.
+#[tokio::test]
+async fn attaching_to_a_workspace_mount_is_refused() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let mount = ExecSpec {
+    origin: Origin::ActorMount,
+    detach: true,
+    ..spec(&["sleep", "30"], &created.id, "here")
+  };
+  let mut outputs = daemon.exec(ExecOpen::Start(mount), attached()).await.unwrap();
+  let process = loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break started.process;
+    }
+  };
+
+  let refused = daemon
+    .exec(
+      ExecOpen::Attach {
+        process: process.clone(),
+        replay: true,
+      },
+      attached(),
+    )
+    .await;
+
+  let Err(ControlError::Denied { message, .. }) = refused else {
+    panic!("attaching to a workspace mount must be refused");
+  };
+  assert_eq!(message, format!("process {process} is needy's own (origin actor-mount); it cannot be attached"));
+  Sessions::stop(daemon, &created.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let outputs = daemon.exec(ExecOpen::Start(spec(&["sh", "-c", "echo done; exit 4"], &created.id, "here")), attached()).await.unwrap();
+  let process = Processes::list(daemon, &created.id).await.unwrap()[0].process.clone();
+  finish(outputs).await;
+
+  let attached = daemon
+    .exec(
+      ExecOpen::Attach {
+        process,
+        replay: true,
+      },
+      attached(),
+    )
+    .await
+    .unwrap();
+
+  let (stdout, exit) = tokio::time::timeout(Duration::from_secs(10), finish(attached)).await.unwrap();
+  assert_eq!(stdout, "done\n");
+  assert_eq!(exit.unwrap().code, Some(4));
+}

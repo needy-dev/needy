@@ -130,7 +130,15 @@ this, for both people and driving programs.
 
 A finished process stays in `needy ps`, with its exit, and can be attached
 for its replay for 10 minutes after it exits; then the executor forgets it.
-Running processes never expire.
+Running processes never expire. Attaching to a finished process replays its
+buffered output, then exits with its exit like the original `exec`.
+
+The control daemon refuses to attach to needy's own processes (origin `fs`,
+`files` or `actor-mount`) with `PERMISSION_DENIED`, whatever the client:
+an attach forwards stdin, and keystrokes written into the SFTP stream of a
+workspace mount or a `tar` archive would corrupt it. `needy attach` then
+exits 1 with `needy: process ID is needy's own (origin actor-mount); it
+cannot be attached`.
 
 ### Output modes
 

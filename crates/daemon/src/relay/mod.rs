@@ -146,8 +146,14 @@ impl Processes for Daemon {
         (session, relay, decided, Upstream::Start(spec))
       }
       ExecOpen::Attach { process, replay } => {
+        let known = self.process(&process)?;
+        // An attach forwards the caller's input: keystrokes in an SFTP or tar
+        // stream corrupt it, and its output is binary.
+        if let Some(origin) = known.origin.filter(|o| o.is_internal()) {
+          return Err(ControlError::denied(format!("process {process} is needy's own (origin {origin}); it cannot be attached")));
+        }
         let relay = Relay {
-          instance: self.process_instance(&process)?,
+          instance: known.instance,
           trace: None,
           origin: None,
           argv: Vec::new(),
