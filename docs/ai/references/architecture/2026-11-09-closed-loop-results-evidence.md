@@ -8,13 +8,13 @@
 
 Hosts:
 
-- **kvm-host**: Intel Core i5-13600KF, 20 threads, 94 GB, RTX 4080 SUPER,
+- **Linux host**: Intel Core i5-13600KF, 20 threads, 94 GB, RTX 4080 SUPER,
   Debian 13, kernel 7.1, KVM, Docker; actor host and Docker executors.
 - **Mac**: Apple M5 Max, macOS 27.2, Xcode 27.2; native and remote executor.
-- **windows-host**: Windows 11 (10.0.26100), OpenSSH, no Docker.
+- **Windows host**: Windows 11 (10.0.26100), OpenSSH, no Docker.
 
-The Mac reaches kvm-host over a LAN with a 4.8 ms average ping. The Mac
-executor is exposed to kvm-host with `ssh -R`, the same model as a Cloudflare
+The Mac reaches the Linux host over a LAN with a 4.8 ms average ping. The Mac
+executor is exposed to the Linux host with `ssh -R`, the same model as a Cloudflare
 Tunnel: the executor listens locally and the tunnel carries the connection.
 
 ## What runs end to end
@@ -71,7 +71,7 @@ Release builds. `p50 / p99` in milliseconds unless stated.
 | Actor, routed to the proxy and kept local (`sh -c true`) | 1.61 | 2.35 |
 | **Actor, routed to a Docker executor (`true`)** | **1.45** | **1.97** |
 | Actor, routed to the Mac through the tunnel (`true`) | 12.3 | 83.6 |
-| kvm-host host CLI → Mac executor through the tunnel | 18.4 | 90.2 |
+| Linux host CLI → Mac executor through the tunnel | 18.4 | 90.2 |
 
 ### Streams
 

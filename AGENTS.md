@@ -58,6 +58,27 @@ Linux kernel tests must run on Linux; macOS cannot exercise ptrace.
 - `docs/notes/<owner>/`: personal or exploratory material. Do not commit it
   unless the user asks for that exact material.
 
+## Private Data
+
+- Do not put private data in the repository or on GitHub. This rule applies to
+  code, tests, fixtures, docs, comments, commit messages, PR and issue text, and
+  review replies.
+- Private data is data about a real person, device, or network: names, email
+  addresses, usernames, SSH host aliases, host names, domains, IP addresses,
+  local paths, device names, tokens, and recorded content.
+- If a value looks private, treat it as private. A host alias from
+  `~/.ssh/config` or a path from the user's machine is private.
+- Do not copy values from the user's configuration, logs, traces, or command
+  output into a commit.
+- In examples, tests and evidence notes, use reserved values: `example.com`,
+  `user@example.com`, `192.0.2.0/24`, `198.51.100.0/24`, `/home/user` and
+  `/Users/user`. Describe machines by role and hardware, for example "a Linux
+  KVM host", not by name.
+- Before you commit or push, search the diff and the commit message for private
+  data.
+- If private data is already on GitHub, stop and tell the user. Do not rewrite
+  pushed history without approval.
+
 ## Commits
 
 - Use `<type>(<scope>): <message>`, for example `feat(needy): ...`.

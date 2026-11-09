@@ -9,7 +9,7 @@ deleted, not migrated; `proto/` is redesigned from scratch.
 
 ## The loop
 
-On one Linux host with KVM (kvm-host for development):
+On one Linux host with KVM (a Linux KVM host for development):
 
 1. `needy build --recipe gce-e2-standard-4` builds an actor image and a
    Firecracker executor image from one recipe.
@@ -46,7 +46,7 @@ On one Linux host with KVM (kvm-host for development):
 | 9 | Two networks | Actor gateway done (allowlist, upstream mapping, key injection); executor network policy remains |
 | 10 | Rules: YAML profiles, matching, accumulation, launcher resolvers | Done in `needy-config` |
 | 11 | Trace (SQLite + JSONL) and `needy report` | Done, plus asciicast recordings |
-| 12 | End-to-end test on kvm-host | Done with opencode, a Mac executor and an sshd scenario |
+| 12 | End-to-end test on a Linux KVM host | Done with opencode, a Mac executor and an sshd scenario |
 
 ## Out of the milestone
 

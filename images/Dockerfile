@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && r
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release --ignore-rust-version --target x86_64-unknown-linux-musl -p needy \
+    cargo build --release --target x86_64-unknown-linux-musl -p needy \
  && cp target/x86_64-unknown-linux-musl/release/needy /needy
 
 # needy.exe for Windows executors.
@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc-mingw-w64-x
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release --ignore-rust-version --target x86_64-pc-windows-gnu -p needy \
+    cargo build --release --target x86_64-pc-windows-gnu -p needy \
  && cp target/x86_64-pc-windows-gnu/release/needy.exe /needy.exe
 
 FROM scratch AS windows

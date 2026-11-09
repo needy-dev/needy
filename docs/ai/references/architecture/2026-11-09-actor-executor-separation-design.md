@@ -189,8 +189,8 @@ every probe the agent makes; the probes are useful data.
 
 ## Experiments
 
-All runs on kvm-host: Intel Core i5-13600KF, 20 threads, 94 GB RAM, Debian 13,
-kernel 7.1. Artifacts are in `~/fc-exp` on that host.
+All runs on one Linux KVM host: Intel Core i5-13600KF, 20 threads, 94 GB RAM, Debian 13,
+kernel 7.1. The experiment artifacts are not in the repository.
 
 ### macOS identity with Darling
 
@@ -254,7 +254,7 @@ binfmt_elf and binfmt_script. For an exec whose path, basename or file name is o
 the route list, it swaps in the proxy as binfmt_script swaps in an interpreter
 (`bprm_change_interp`, `open_exec`) and leaves argv unchanged. Otherwise it
 returns `-ENOEXEC` and the normal handlers run. The proxy reads the original
-path from `AT_EXECFN`. Artifacts are in `~/fc-exp/binfmt` on kvm-host.
+path from `AT_EXECFN`. The prototype artifacts are not in the repository.
 
 | Check inside the VM | Result |
 | --- | --- |
