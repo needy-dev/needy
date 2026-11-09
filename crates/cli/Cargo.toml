@@ -22,6 +22,7 @@ futures-util.workspace = true
 humantime.workspace = true
 ignore.workspace = true
 needy-api-client.workspace = true
+needy-api-server.workspace = true
 needy-common.workspace = true
 needy-config.workspace = true
 needy-core.workspace = true

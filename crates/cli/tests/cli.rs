@@ -1185,3 +1185,72 @@ fn report_json_is_a_summary_and_file_writes_it() {
   assert_eq!(json["route_names"], serde_json::Value::Null, "no actor ran");
   assert_eq!(json["findings"], serde_json::json!([]));
 }
+
+/// `needy daemon` with `args`, given `timeout` to exit by itself: its
+/// output, and whether it exited (a daemon still running is killed).
+fn daemon_within(home: &Home, args: &[&str], timeout: Duration) -> (bool, Output) {
+  let mut daemon = home.needy().arg("daemon").args(args).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+  let deadline = Instant::now() + timeout;
+  while daemon.try_wait().unwrap().is_none() {
+    if Instant::now() >= deadline {
+      daemon.kill().unwrap();
+      return (false, daemon.wait_with_output().unwrap());
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  (true, daemon.wait_with_output().unwrap())
+}
+
+// ROOT CAUSE:
+//
+// If `needy daemon --listen HOST:PORT` named a non-loopback address and no
+// token, it served every method to anyone who could reach the port, because
+// the server accepted any token when it had none.
+//
+// Before the fix, both modes listened on `0.0.0.0` without a token.
+// The fix refuses such a listener at once, naming the address and
+// `--token-env`.
+#[test]
+fn a_daemon_refuses_a_network_listener_without_a_token() {
+  let home = Home::new();
+  for mode in ["executor", "control"] {
+    let (exited, output) = daemon_within(&home, &["--mode", mode, "--listen", "0.0.0.0:0"], Duration::from_secs(10));
+
+    assert!(exited, "the {mode} daemon listened on 0.0.0.0 without a token");
+    assert_eq!(output.status.code(), Some(1), "{mode}: {}", stderr(&output));
+    assert!(stderr(&output).contains("0.0.0.0:0"), "{mode}: {}", stderr(&output));
+    assert!(stderr(&output).contains("--token-env"), "{mode}: {}", stderr(&output));
+  }
+}
+
+#[test]
+fn a_daemon_on_a_loopback_address_without_a_token_starts_with_a_warning() {
+  let home = Home::new();
+
+  let (exited, output) = daemon_within(&home, &["-v", "--mode", "executor", "--listen", "127.0.0.1:0"], Duration::from_secs(2));
+
+  assert!(!exited, "the executor did not keep running: {}", stderr(&output));
+  assert!(stderr(&output).contains("WARN") && stderr(&output).contains("without a token"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_daemon_refuses_a_token_variable_that_is_not_set() {
+  let home = Home::new();
+
+  let (exited, output) = daemon_within(
+    &home,
+    &[
+      "--mode",
+      "executor",
+      "--listen",
+      "127.0.0.1:0",
+      "--token-env",
+      "NEEDY_TEST_UNSET_TOKEN",
+    ],
+    Duration::from_secs(10),
+  );
+
+  assert!(exited, "the executor listened without the token it was told to use");
+  assert_eq!(output.status.code(), Some(1));
+  assert!(stderr(&output).contains("NEEDY_TEST_UNSET_TOKEN"), "{}", stderr(&output));
+}

@@ -2017,6 +2017,7 @@ dependencies = [
  "humantime",
  "ignore",
  "needy-api-client",
+ "needy-api-server",
  "needy-common",
  "needy-config",
  "needy-core",

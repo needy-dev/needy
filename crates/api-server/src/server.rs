@@ -57,6 +57,10 @@ pub enum Error {
     #[source]
     source: std::io::Error,
   },
+  /// A TCP listener reachable from other machines would serve every method
+  /// to anyone; one without a token does not start.
+  #[error("will not listen on {0} without a token: the address is not a loopback address")]
+  Unauthenticated(Listen),
   #[error("unix sockets are not supported here: {0}")]
   Unsupported(Listen),
   #[error("serving {listen}")]
@@ -120,11 +124,17 @@ impl Server {
 
   /// Binds every listener, or none: the first that cannot bind is the
   /// error. A Unix socket's directory is created, and a socket left by an
-  /// earlier server is replaced.
+  /// earlier server is replaced. Without a token, a TCP listener on a
+  /// non-loopback address is refused ([`Error::Unauthenticated`]); one on a
+  /// loopback address, where tunnels end, starts with a warning.
   pub async fn bind(self, listen: &[Listen]) -> Result<Bound, Error> {
     let mut listeners = Vec::with_capacity(listen.len());
     for listen in listen {
-      listeners.push((listen.clone(), Listener::bind(listen).await?));
+      let listener = Listener::bind(listen).await?;
+      if self.token.is_none() {
+        listener.check_unauthenticated(listen)?;
+      }
+      listeners.push((listen.clone(), listener));
     }
     Ok(Bound {
       routes: self.routes,
@@ -165,6 +175,24 @@ impl Listener {
       Listen::Unix(_) => Err(Error::Unsupported(listen.clone())),
       Listen::Tcp(address) => Ok(Self::Tcp(tokio::net::TcpListener::bind(address).await.map_err(failed)?)),
     }
+  }
+}
+
+impl Listener {
+  /// Refuses a TCP listener without a token unless only this machine can
+  /// reach it. The bound address decides, so a host name is judged by what
+  /// it resolved to.
+  fn check_unauthenticated(&self, listen: &Listen) -> Result<(), Error> {
+    let Self::Tcp(listener) = self else {
+      // A Unix socket is guarded by its file permissions.
+      return Ok(());
+    };
+    let loopback = listener.local_addr().is_ok_and(|address| address.ip().to_canonical().is_loopback());
+    if !loopback {
+      return Err(Error::Unauthenticated(listen.clone()));
+    }
+    tracing::warn!("listening on {listen} without a token: every local user, and every tunnel that ends here, can use it");
+    Ok(())
   }
 }
 

@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use clap::ValueEnum;
 
 use crate::cli::Context;
@@ -27,6 +27,7 @@ pub struct Args {
   #[arg(long, default_value = "local")]
   name: String,
   /// Environment variable holding the bearer token clients must present.
+  /// Required to listen on a TCP address other than loopback.
   #[arg(long)]
   token_env: Option<String>,
   /// Directory with the actor's vmlinux, rootfs.ext4 and firecracker.
@@ -39,11 +40,25 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  serve(args, ctx).await.map_err(|error| match error.downcast_ref::<needy_api_server::server::Error>() {
+    Some(needy_api_server::server::Error::Unauthenticated(_)) => anyhow!("{error}; set a token with --token-env NAME"),
+    _ => error,
+  })
+}
+
+async fn serve(args: Args, ctx: &Context) -> Result<i32> {
   let listen = match args.listen {
     Some(listen) => listen,
     None => ctx.endpoint()?,
   };
-  let token = args.token_env.as_ref().and_then(|name| std::env::var(name).ok());
+  // A token variable that is not set must not leave the daemon open.
+  let token = match &args.token_env {
+    Some(name) => match std::env::var(name) {
+      Ok(token) if !token.is_empty() => Some(token),
+      _ => bail!("--token-env {name}: {name} is not set"),
+    },
+    None => None,
+  };
   match args.mode {
     Mode::Executor => needy_daemon::executor::serve(&listen, args.name, token).await?,
     #[cfg(not(unix))]

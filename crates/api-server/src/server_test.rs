@@ -64,6 +64,17 @@ async fn serving_ends_when_cancelled() {
   assert!(served.unwrap().is_ok());
 }
 
+#[tokio::test]
+async fn a_tcp_listener_off_loopback_needs_a_token() {
+  let open = Server::new(health(), Caller::Cli).bind(&[Listen::Tcp("0.0.0.0:0".into())]).await;
+  let loopback = Server::new(health(), Caller::Cli).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await;
+  let with_token = Server::new(health(), Caller::Cli).token(Some("secret".into())).bind(&[Listen::Tcp("0.0.0.0:0".into())]).await;
+
+  assert!(matches!(open, Err(Error::Unauthenticated(Listen::Tcp(ref address))) if address == "0.0.0.0:0"), "{:?}", open.err());
+  assert!(loopback.is_ok(), "{:?}", loopback.err());
+  assert!(with_token.is_ok(), "{:?}", with_token.err());
+}
+
 #[test]
 fn listen_addresses_are_unix_paths_or_host_and_port() {
   assert_eq!(Listen::parse("unix:/run/needy.sock"), Listen::Unix("/run/needy.sock".into()));
