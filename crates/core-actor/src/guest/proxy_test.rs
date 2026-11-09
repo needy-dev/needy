@@ -23,3 +23,31 @@ fn a_routed_command_a_rule_or_fault_refuses_exits_126() {
 fn other_start_errors_are_the_proxys_own() {
   assert_eq!(refused(Kind::Unavailable), None);
 }
+
+fn strings(words: &[&str]) -> Vec<String> {
+  words.iter().map(|w| w.to_string()).collect()
+}
+
+// ROOT CAUSE:
+//
+// If the actor ran a routed command it does not have, such as `python3`,
+// the kernel handed the proxy the route stub's path, `/run/needy/bin/python3`,
+// and the proxy put that path in argv[0], because it reports the path the
+// original `execve` named.
+//
+// Before the fix, the decision, the trace and the report showed
+// `/run/needy/bin/python3 -c …`, a path the user never typed.
+// The fix names a stub's command by its bare name, as the user invoked it.
+#[test]
+fn a_command_routed_through_a_stub_keeps_its_bare_name() {
+  let argv = command("/run/needy/bin/python3", &strings(&["python3", "-c", "print(1)"]));
+
+  assert_eq!(argv, strings(&["python3", "-c", "print(1)"]));
+}
+
+#[test]
+fn a_command_the_actor_has_keeps_the_path_it_ran() {
+  let argv = command("/usr/bin/git", &strings(&["git", "status"]));
+
+  assert_eq!(argv, strings(&["/usr/bin/git", "status"]));
+}

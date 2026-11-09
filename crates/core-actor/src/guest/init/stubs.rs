@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// The stubs' directory, last on the driving program's `PATH`.
-pub(super) const STUB_DIR: &str = "/run/needy/bin";
+pub(in crate::guest) const STUB_DIR: &str = "/run/needy/bin";
 /// The actor's own programs, searched before the stubs.
 pub(super) const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 

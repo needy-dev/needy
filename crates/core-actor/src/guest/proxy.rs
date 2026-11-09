@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::ffi::{CStr, CString};
 use std::io::IsTerminal;
+use std::path::Path;
 
 use anyhow::Result;
 use needy_api_client::Kind;
@@ -15,6 +16,8 @@ use needy_api_client::exec::ExecStream;
 use needy_api_proto::v1::{Ancestor, DecideRequest, ExecStart, Origin};
 use needy_core_executor::{relay, signals};
 use nix::sys::signal::{SigHandler, Signal};
+
+use super::init::STUB_DIR;
 
 /// Environment the actor passes to routed commands when rules do not.
 const PASS_ENV: &[&str] = &[
@@ -56,10 +59,7 @@ fn exec_path() -> String {
 async fn proxy() -> Result<i32> {
   let path = exec_path();
   let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
-  let mut argv = args.clone();
-  if let Some(first) = argv.first_mut() {
-    *first = path.clone();
-  }
+  let argv = command(&path, &args);
   let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
   let env: HashMap<String, String> = std::env::vars().collect();
   let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -139,6 +139,23 @@ async fn proxy() -> Result<i32> {
     let _ = nix::sys::signal::raise(signal);
   }
   Ok(signals::shell_code(&exit))
+}
+
+/// The command the actor asked for: `args` with argv[0] replaced by the path
+/// the original `execve` named, so the executor can run the same program.
+/// A route stub stands for a program the actor does not have; its path means
+/// nothing elsewhere, so the command keeps the stub's bare name, as the user
+/// typed it, and the executor finds the program on its own PATH.
+fn command(path: &str, args: &[String]) -> Vec<String> {
+  let program = match Path::new(path).strip_prefix(STUB_DIR) {
+    Ok(name) if name.components().count() == 1 => name.to_string_lossy().into_owned(),
+    _ => path.to_string(),
+  };
+  let mut argv = args.to_vec();
+  if let Some(first) = argv.first_mut() {
+    *first = program;
+  }
+  argv
 }
 
 /// The exit code for a start the daemon refused, like `needy exec`'s and a

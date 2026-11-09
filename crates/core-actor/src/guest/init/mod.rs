@@ -18,6 +18,8 @@ mod network;
 mod sshfs;
 mod stubs;
 
+pub(super) use stubs::STUB_DIR;
+
 use std::time::Duration;
 
 use anyhow::Result;
