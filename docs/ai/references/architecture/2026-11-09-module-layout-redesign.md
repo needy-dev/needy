@@ -556,7 +556,32 @@ Rules for every slice:
 | 8d | Fix: a failed create releases the instances it acquired | 8 | — | Regression test |
 | 8e | Fix: the pool lock is not held while an instance is created | 8 | — | Regression test |
 | 8f | Fix: `ancestors` reach the rules, so `when.under` matches | 7a, 8 | — | Regression test; closed loop: an `under` rule |
+| 8g | Fix: copy-in and `fs cp` create the target directory instead of failing when it is missing | 8 | — | Regression test; `examples/local` on a fresh machine |
+| 8h | Fix: an actor that exits releases its executors and removes its sockets; the session stays listed as finished | 8 | — | Regression test; closed loop: smoke, no container left |
+| 8i | Fix: a listener that cannot bind (for example a socket path over `sun_path`) fails start-up at once with the path in the error | 7, 8 | — | Regression test |
 | 9 | **persistence**: `state.db` for sessions, instances, processes; reconcile on start | 8 | Closed-loop results | Closed loop: daemon restart with a running session |
+
+### QA checklist
+
+A QA pass on 2026-11-09 (a Mac without KVM, and the Linux KVM host) found
+these gaps in observable behavior. Each slice closes the items it owns.
+
+| Slice | Item |
+| --- | --- |
+| 1 | An injected exec errno on the CLI path exits 126, like the actor path, not 1; the message says "fault injected", not "denied", and has one `needy:` prefix |
+| 1 | A missing profile file names the path in the error |
+| 1 | A command that cannot start exits 127 |
+| 1 | `profile check` shows which chaos faults match each `--cmd` |
+| 1 | `session ls` shows stopped and failed sessions with their state |
+| 1 | `needy session logs SESSION` prints the actor's console output (today only `console.log` in the state directory has it) |
+| 1 | `--profile` and `--group` have help text |
+| 3 | The report shows the profile name, not its directory |
+| 3 | The report counts commands that a fault made fail as failed |
+| 3 | "Kept on actor" counts only what the trace can see, and the report says so; empty "network" lines are omitted |
+| 4 | `ndjson` output includes the placement decision and injected faults |
+| 4 | A failed session create records `session.fail` with the reason; `session.stop` carries no placeholder attributes |
+| 5 | Finished processes expire from `ps` after a retention period |
+| 6 | The smoke example's `systemd-detect-virt` probe is present in the actor image or removed from the example |
 
 ## Decisions
 
