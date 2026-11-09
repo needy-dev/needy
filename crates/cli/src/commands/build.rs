@@ -155,13 +155,105 @@ fn pack_context(root: &Path) -> Result<Vec<u8>> {
   Ok(tar.into_inner()?)
 }
 
-/// Unpacks the actor image's tar into `out`, keeping file modes.
+/// Unpacks the actor image's tar into `out`, keeping file modes and leaving
+/// runs of zeros in regular files as holes.
 fn unpack(archive: &Path, out: &Path) -> Result<()> {
   let file = std::fs::File::open(archive).with_context(|| format!("cannot open {}", archive.display()))?;
   let mut tar = tar::Archive::new(std::io::BufReader::new(file));
   tar.set_preserve_permissions(true);
   tar.set_overwrite(true);
-  tar.unpack(out).with_context(|| format!("cannot unpack the image into {}", out.display()))
+  let unpacking = || format!("cannot unpack the image into {}", out.display());
+  for entry in tar.entries().with_context(unpacking)? {
+    let mut entry = entry.with_context(unpacking)?;
+    if entry.header().entry_type().is_file() {
+      unpack_file(&mut entry, out).with_context(unpacking)?;
+    } else {
+      entry.unpack_in(out).with_context(unpacking)?;
+    }
+  }
+  Ok(())
+}
+
+/// Writes one regular file of the image into `out`.
+///
+/// NOTICE: `tar::Entry::unpack_in` writes every byte, so the actor's
+/// `rootfs.ext4` (an ext4 image whose free blocks are zeros) took its full
+/// length on disk. BuildKit's tar exporter has no sparse entries to keep the
+/// holes, so they are made here while writing. Regular files are written by
+/// hand for that; everything else still goes through `unpack_in`.
+fn unpack_file(entry: &mut tar::Entry<impl std::io::Read>, out: &Path) -> Result<()> {
+  let entry_path = entry.path()?.into_owned();
+  let mut path = out.to_path_buf();
+  for component in entry_path.components() {
+    match component {
+      std::path::Component::Normal(part) => path.push(part),
+      std::path::Component::CurDir => {}
+      _ => bail!("the image holds a file outside its root: {}", entry_path.display()),
+    }
+  }
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent)?;
+  }
+  // As `set_overwrite` does: replace the file instead of writing through it,
+  // which could follow a link left by an earlier build.
+  match std::fs::remove_file(&path) {
+    Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+    _ => {}
+  }
+  let mut file = std::fs::File::create_new(&path).with_context(|| format!("cannot create {}", path.display()))?;
+  write_sparse(entry, &mut file).with_context(|| format!("cannot write {}", path.display()))?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    file.set_permissions(std::fs::Permissions::from_mode(entry.header().mode()? & 0o7777))?;
+  }
+  Ok(())
+}
+
+/// Copies `reader` into `file`, seeking over blocks that hold only zeros so
+/// the file system leaves them unallocated, and returns the length written.
+///
+/// NOTICE: this is how `cp --sparse=always` and GNU tar's `--sparse` make
+/// holes. No maintained crate writes a stream sparsely; hole punching after
+/// the write (`fallocate(FALLOC_FL_PUNCH_HOLE)` on Linux, `F_PUNCHHOLE` on
+/// macOS) needs a code path per platform and writes the zeros first. 4 KiB is
+/// the block size of ext4, APFS and most file systems; a smaller block would
+/// still be stored in a whole one. The file system decides what a skipped
+/// range becomes: APFS stores short ones (up to about 16 MiB) as zeros, and
+/// NTFS, without `FSCTL_SET_SPARSE`, all of them; the content is the same.
+fn write_sparse(reader: &mut impl std::io::Read, file: &mut std::fs::File) -> std::io::Result<u64> {
+  use std::io::{Seek as _, SeekFrom, Write as _};
+
+  const BLOCK: usize = 4096;
+  let mut buffer = vec![0u8; 256 * BLOCK];
+  let mut written = 0u64;
+  loop {
+    // Fill the buffer so blocks stay aligned to the file's offsets across
+    // short reads.
+    let mut filled = 0;
+    while filled < buffer.len() {
+      match reader.read(&mut buffer[filled..]) {
+        Ok(0) => break,
+        Ok(read) => filled += read,
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+        Err(error) => return Err(error),
+      }
+    }
+    if filled == 0 {
+      break;
+    }
+    for block in buffer[..filled].chunks(BLOCK) {
+      if block.iter().all(|&byte| byte == 0) {
+        file.seek(SeekFrom::Current(block.len() as i64))?;
+      } else {
+        file.write_all(block)?;
+      }
+    }
+    written += filled as u64;
+  }
+  // A file that ends in a hole would otherwise end at its last data block.
+  file.set_len(written)?;
+  Ok(written)
 }
 
 /// Runs one build and prints each step as it starts; a failed step also
@@ -204,3 +296,7 @@ async fn build(docker: &Docker, context: &[u8], options: BuildImageOptions) -> R
   }
   Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "build_test.rs"]
+mod tests;

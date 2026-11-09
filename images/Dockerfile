@@ -83,7 +83,21 @@ RUN ln /.needy/needy /.needy/init && ln /.needy/needy /.needy/proxy
 FROM ubuntu:24.04 AS actor-image
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*
 COPY --from=actor-root / /r
-RUN mke2fs -q -t ext4 -d /r /rootfs.ext4 3G
+# NOTICE: the image is sized to its content: the blocks `du` counts plus 10%
+# and 64 MiB for ext4's journal, inode tables, bitmaps, directories and extent
+# trees, and the inodes in use plus 10%. There is no room to grow on purpose:
+# Firecracker attaches the rootfs read-only (`is_read_only` in
+# `crates/core-actor/src/host/vm.rs`) and the guest's writable places are
+# tmpfs. If the rootfs ever becomes writable, give it headroom here. A margin
+# too small fails the build in `mke2fs -d` ("Could not allocate block");
+# `e2fsck -fn` checks the result.
+# TODO(rootfs): an EROFS image with compression, and the driving program
+# (opencode, about 200 MB) outside the base rootfs, would shrink it further;
+# neither is approved yet.
+RUN set -eu; \
+    kib=$(du -sk /r | cut -f1); inodes=$(find /r | wc -l); \
+    mke2fs -q -t ext4 -N $((inodes + inodes / 10)) -d /r /rootfs.ext4 "$((kib + kib / 10 + 64 * 1024))k"; \
+    e2fsck -fn /rootfs.ext4
 
 FROM scratch AS actor
 COPY --from=kernel /linux/vmlinux /vmlinux
