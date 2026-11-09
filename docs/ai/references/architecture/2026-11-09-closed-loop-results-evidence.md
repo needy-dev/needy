@@ -335,6 +335,38 @@ Changed on purpose by these fixes:
   progress (a provider create or a copy-in), then rolls back and records
   `session.fail`.
 
+## Re-verified after fixes b, d, f, g
+
+Four fixes (piped children get default signal dispositions; a routed
+program keeps its absolute path and falls back to the executor's `PATH`; an
+actor without a workspace mount starts in `~`; an exec whose stream ends
+before the command exited fails with 255 and the reason) were rerun on
+2026-11-10 with debug builds and every daemon's state, image and output in a
+scratch directory. Each fix has a regression test in `make test`.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| Control daemon started with SIGINT ignored (`sh -c 'trap "" INT; exec needy daemon …'` in the background): `exec -d -- sleep 300`, then `kill -s INT` | Mac, Linux | Pass: the sleep ends with `SIGINT` in `ps`. On Linux the daemon's `SigIgn` has the SIGINT bit set |
+| `exec -- /nonexistent/x`, without a session and in a session | Mac, Linux | Pass: exit 127, `needy: cannot start /nonexistent/x: No such file or directory` |
+| A no-actor session whose rule routes `**` to a Docker executor: `exec -- /opt/actor-only/bin/python3`, and the same with `--executor build` | Linux | Pass: routed by the rule, it runs the container's `/usr/bin/python3` from `PATH`; placed with `--executor`, it is not rewritten and exits 127 naming `/opt/actor-only/bin/python3` |
+| An actor with no workspace mount and no `actor.cwd`; its driving program runs `~/py/python3` (a symlink in the actor) and `~/py/needy-missing`, both routed to a Docker executor | Linux | Pass: the driving program starts in `/home/agent` (`~/workspace` does not exist); `python3` runs from the executor's `PATH` and does not see `~/py`; `needy-missing` fails with `needy: cannot start /home/agent/py/needy-missing: No such file or directory`, exit 126 from the proxy |
+| `exec --session <id> -- sleep 60` attached, then `session stop` | Mac | Pass: exit 255, `needy: the connection ended before the command exited: session stopped` |
+| `exec --session <id> -- sleep 60` routed to a Docker executor, then SIGTERM to the daemon | Linux | Pass: exit 255, `needy: the connection ended before the command exited: daemon shutting down`; the daemon exits |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` | Linux | Pass: `google`, both workspace files, `routed exit=7` |
+| `examples/chaos` | Linux | Pass: `Input/output error` on `broken.json`, `fault injected: ECONNREFUSED` with exit 126, hwmon `+101.0°C ALARM (CRIT)`, mirror-out of `result.txt`; the report counts 3 faults by kind; no container or process left |
+| `make check`, `make test` | Mac, Linux | `make check` passes on both, `make test` on the Mac. On Linux, `exec_without_a_session_stays_out_of_a_running_session` and `exec_returns_the_command_exit_code_and_output` fail in most full runs with empty stdout and the right exit status. The base commit fails the same way (4 of 8 runs), so the cause predates these fixes: a fresh start subscribes to its process without replay, so output written before the subscription is lost |
+
+Changed on purpose by these fixes:
+
+- A routed command's absolute `argv[0]` is no longer cut to its basename.
+  `ExecStart.search_path_if_missing` (set by routing only) lets the executor
+  run the program of the same name from its `PATH` when the path is missing.
+- Without `actor.cwd`, the driving program starts in `~` unless a mount
+  provides `~/workspace`.
+- `exec` and `attach` exit 255 when the stream ends before the command
+  exited; `ExecResponse.ended` carries the daemon's reason.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

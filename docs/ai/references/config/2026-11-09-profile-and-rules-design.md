@@ -274,6 +274,14 @@ the command that really runs; see [Launcher resolvers](#launcher-resolvers).
 | Files | Mappings, as below | — |
 | Other | `network`, `faults`, `timeout`, `deny: MESSAGE` | — |
 
+A routed command's program keeps its path. When an executor's `path_map`
+maps `argv[0]`, the command runs from the mapped path. Any other absolute
+`argv[0]`, such as the actor's `/usr/bin/python3`, is sent as it is, and the
+executor runs it from that path when the path exists there; otherwise it runs
+the program of the same name from its own `PATH`. When neither exists, the
+error names the original path. A command placed with `--executor`, or run
+without a session, is never rewritten and gets no `PATH` fallback.
+
 ### Composition
 
 Every rule that matches applies, in order:
@@ -478,6 +486,10 @@ commands:
   copied into the actor; otherwise an agent that replaces its harness can read
   them. Harness presets exclude known credential files by default.
 - Mirrored-out directories are stored with the trace.
+- The driving program starts in `actor.cwd`. Without one it starts in
+  `~/workspace` when a `mount` mapping provides that directory, and in `~`
+  otherwise: the actor's home is a fresh tmpfs, so `~/workspace` exists only
+  when a mount creates it.
 
 ## Open questions
 

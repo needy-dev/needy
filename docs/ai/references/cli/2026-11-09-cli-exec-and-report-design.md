@@ -51,7 +51,24 @@ Windows uses its known folders through `etcetera`. `~/.needy` is not read.
 death. When the command does not run, `exec` exits like a shell: 126 when a
 rule denies it (`needy: denied: …`) or chaos injects an errno
 (`needy: fault injected: ECONNREFUSED`), 127 when it cannot start
-(`needy: cannot start …`). Any other error exits 1 with one `needy:` line.
+(`needy: cannot start …`). When the stream ends before the command exited,
+`exec` and `attach` exit 255 with
+`needy: the connection ended before the command exited`, followed by the
+reason when the daemon gave one (`: session stopped`,
+`: daemon shutting down`); the command's own status is unknown. `--output
+json` then carries `error` instead of `exit_code` and `signal`, and
+`--output ndjson` ends with an `error` line instead of an `exit` line. A
+routed command in the actor gets 255 from the proxy in the same case. Any
+other error exits 1 with one `needy:` line.
+
+| Exit | Meaning |
+| --- | --- |
+| 0–125 | The command's own exit code |
+| 126 | A rule denied the command or chaos injected an errno |
+| 127 | The command cannot start |
+| 128 + N | The command died of signal N |
+| 255 | The stream ended before the command exited |
+| 1 | Any other error of `needy` itself |
 
 Deliberately absent:
 
