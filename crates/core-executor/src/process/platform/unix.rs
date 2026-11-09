@@ -175,3 +175,39 @@ pub fn has_terminfo(name: &str) -> bool {
   let hex = format!("{:x}", u32::from(first));
   dirs.iter().any(|dir| dir.join(&letter).join(name).exists() || dir.join(&hex).join(name).exists())
 }
+
+/// Waits for output on a terminal, so its reader can stop without the
+/// terminal's end: a descendant in its own session may keep it open after
+/// the child exits.
+pub struct Readable(std::os::fd::OwnedFd);
+
+impl Readable {
+  /// Watches the terminal behind `master` through a duplicate of its file
+  /// descriptor, which stays valid after the master is dropped.
+  pub fn new(master: &dyn portable_pty::MasterPty) -> std::io::Result<Self> {
+    use std::os::fd::BorrowedFd;
+    let fd = master.as_raw_fd().ok_or_else(|| std::io::Error::other("the terminal has no file descriptor"))?;
+    // SAFETY: the master is open for the length of this call.
+    let duplicate = unsafe { BorrowedFd::borrow_raw(fd) }.try_clone_to_owned()?;
+    Ok(Self(duplicate))
+  }
+
+  /// Returns once the terminal has output or has ended (a read then says
+  /// which), or `false` once `stop` is set.
+  pub fn wait(&self, stop: &std::sync::atomic::AtomicBool) -> bool {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    use std::os::fd::AsFd;
+    loop {
+      if stop.load(std::sync::atomic::Ordering::SeqCst) {
+        return false;
+      }
+      // NOTICE: 100 ms bounds how long a stop waits; it is no output delay,
+      // since output ends the wait at once.
+      let mut fds = [PollFd::new(self.0.as_fd(), PollFlags::POLLIN)];
+      match poll(&mut fds, PollTimeout::from(100u16)) {
+        Ok(0) | Err(nix::errno::Errno::EINTR) => continue,
+        Ok(_) | Err(_) => return true,
+      }
+    }
+  }
+}

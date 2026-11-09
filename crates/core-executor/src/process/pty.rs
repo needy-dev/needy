@@ -2,6 +2,7 @@
 //! and end of input as the EOF character when the terminal reads by lines.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -19,9 +20,10 @@ const READ_CHUNK: usize = 256 * 1024;
 
 /// How long output may keep draining after the child exits before the
 /// terminal is closed.
-// NOTICE: on Unix the reader ends by itself once the child closes the
-// terminal; ConPTY on Windows ends it only when the pseudo console closes, so
-// the master is dropped after this grace period.
+// NOTICE: on Unix the reader ends by itself once every process closes the
+// terminal, which a descendant in its own session may never do, so the
+// reader is stopped after this grace period; ConPTY on Windows ends it only
+// when the pseudo console closes, so the master is dropped then too.
 const DRAIN: Duration = Duration::from_millis(500);
 
 fn size(rows: u16, cols: u16) -> PtySize {
@@ -65,6 +67,10 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   let pid = child.process_id().map(i64::from).unwrap_or(-1);
   let master = pair.master;
   let mut reader = master.try_clone_reader().map_err(|e| Error::Terminal(format!("{e:#}")))?;
+  let readable = platform::Readable::new(master.as_ref()).map_err(|e| Error::Terminal(format!("{e:#}")))?;
+  // Set when the child exited and the output had its grace period.
+  let stop_reading = Arc::new(AtomicBool::new(false));
+  let reader_stop = stop_reading.clone();
   let mut writer = master.take_writer().map_err(|e| Error::Terminal(format!("{e:#}")))?;
   let (proc, ends) = Proc::new(spec, pid, true, term_fallback);
   let Ends {
@@ -76,7 +82,9 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   let (out_tx, mut out_rx) = mpsc::channel::<Bytes>(64);
   let mut read_thread = tasks.spawn_blocking(move || {
     let mut buf = vec![0u8; READ_CHUNK];
-    loop {
+    // A read blocks until there is output; the reader waits for output
+    // first, so it can stop while a descendant keeps the terminal open.
+    while readable.wait(&reader_stop) {
       match reader.read(&mut buf) {
         Ok(0) | Err(_) => break,
         Ok(n) => {
@@ -164,6 +172,9 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
       }
     };
     let drained = tokio::time::timeout(DRAIN, &mut read_thread).await.is_ok();
+    // A descendant that left the session, such as `setsid sleep 600 &`,
+    // keeps the terminal open, and the reader would never see its end.
+    stop_reading.store(true, Ordering::SeqCst);
     wait_master.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
     if !drained && let Err(e) = read_thread.await {
       tracing::warn!("process {pid}: terminal reader failed: {e}");

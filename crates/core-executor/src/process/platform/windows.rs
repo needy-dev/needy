@@ -58,3 +58,19 @@ pub fn end_of_input(_master: &dyn portable_pty::MasterPty) -> Vec<u8> {
 pub fn has_terminfo(_name: &str) -> bool {
   true
 }
+
+/// A pseudo console's reader ends when the pseudo console closes; it never
+/// needs to stop earlier.
+// TODO(windows): revisit with terminals on the Windows executor (see the
+// closed-loop results).
+pub struct Readable;
+
+impl Readable {
+  pub fn new(_master: &dyn portable_pty::MasterPty) -> std::io::Result<Self> {
+    Ok(Self)
+  }
+
+  pub fn wait(&self, _stop: &std::sync::atomic::AtomicBool) -> bool {
+    true
+  }
+}

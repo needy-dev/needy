@@ -345,3 +345,39 @@ async fn a_known_terminal_type_is_kept() {
   assert_eq!(seen, "[vt100]");
   assert_eq!(fallback, None);
 }
+
+// ROOT CAUSE:
+//
+// If a process on a terminal left a descendant in its own session, such as
+// `setsid sleep 600 &`, its exit was not reported until the descendant
+// ended, because the descendant kept the terminal open and the output
+// reader, which the exit waits for, blocked in `read` on Linux.
+//
+// Before the fix, `exec -t -- sh -c 'setsid sleep 600 & exit 3'` hung on
+// Linux (the terminal note's G8); macOS ended the read at the exit.
+// The fix stops the reader after the drain period that follows the exit.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_process_exits_while_a_descendant_in_its_own_session_keeps_the_terminal() {
+  let dir = tempfile::tempdir().unwrap();
+  let pid_file = dir.path().join("descendant.pid");
+  let script = dir.path().join("leave-a-descendant.sh");
+  // `setsid(1)` is missing on macOS; perl's POSIX module has setsid(2).
+  std::fs::write(
+    &script,
+    format!("perl -MPOSIX -e 'setsid(); open(my $f, \">\", \"{}\"); print $f $$; close $f; exec \"sleep\", \"600\"' &\nwhile [ ! -s {} ]; do sleep 0.05; done\nexit 3\n", pid_file.display(), pid_file.display()),
+  )
+  .unwrap();
+  let host = Host::default();
+  let mut leaves = spec(&["sh", script.to_str().unwrap()]);
+  leaves.tty = Some((24, 80));
+  let proc = host.spawn(leaves).unwrap();
+
+  let exit = tokio::time::timeout(Duration::from_secs(5), collect(&proc)).await;
+  let descendant: i32 = std::fs::read_to_string(&pid_file).unwrap().trim().parse().unwrap();
+  // The descendant is this test's to end; one that is gone already is fine.
+  let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(descendant), nix::sys::signal::Signal::SIGKILL);
+
+  let (_, _, exit) = exit.expect("the exit was not reported while the descendant held the terminal");
+  assert_eq!(exit.code, Some(3));
+}

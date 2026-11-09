@@ -29,7 +29,7 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["socket", "term", "user"] }
+nix = { workspace = true, features = ["poll", "socket", "term", "user"] }
 
 [dev-dependencies]
 tempfile.workspace = true
