@@ -234,10 +234,9 @@ impl Daemon {
       tracing::warn!("session {id}: cannot create {}: {e}", dir.display());
     }
     let loaded = load_profile(&id, &request);
-    let trace = self.session_trace(&id, loaded.as_ref().ok().map(|(profile, _)| &profile.trace));
-    let prepared =
-      loaded.and_then(|(profile, base)| self.prepare(&id, &request, profile, &base, created_ms, trace.clone()).map(|s| (s, base)));
-    let (session, base) = match prepared {
+    let trace = self.session_trace(&id, loaded.as_ref().ok().map(|profile| &profile.trace));
+    let prepared = loaded.and_then(|profile| self.prepare(&id, &request, profile, created_ms, trace.clone()));
+    let session = match prepared {
       Ok(prepared) => prepared,
       Err(error) => {
         self.record_failure(&id, &request, created_ms, &trace, &error, Vec::new()).await;
@@ -245,7 +244,7 @@ impl Daemon {
       }
     };
     self.sessions.insert(session.clone());
-    let provisioned = self.provision(&session, &request, &base).await.and_then(|()| unwinding(&session));
+    let provisioned = self.provision(&session, &request).await.and_then(|()| unwinding(&session));
     if let Err(error) = provisioned {
       self.rollback(&session, &request, &error).await;
       return Err(error);
@@ -259,15 +258,7 @@ impl Daemon {
 
   /// The session before it acquires anything: its directory, profile and
   /// recipe.
-  fn prepare(
-    &self,
-    id: &str,
-    request: &NewSession,
-    profile: Profile,
-    base: &Path,
-    created_ms: i64,
-    trace: Dispatch,
-  ) -> Result<Arc<Session>> {
+  fn prepare(&self, id: &str, request: &NewSession, profile: Profile, created_ms: i64, trace: Dispatch) -> Result<Arc<Session>> {
     let dir = self.session_dir(id);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
@@ -280,7 +271,14 @@ impl Daemon {
     };
     let recipe = match &profile.actor.recipe {
       Some(reference) => {
-        let recipe = needy_config::recipe::load(&Source::reference(reference, base))?;
+        // The client sends a recipe file's content; the daemon reads only
+        // its built-in recipes.
+        let source = match Source::reference(reference, Path::new("")) {
+          builtin @ Source::Builtin(_) => builtin,
+          _ if request.recipe_yaml.is_empty() => bail!("recipe {reference} was not sent with the profile"),
+          _ => Source::text(request.recipe_yaml.clone(), PathBuf::new()),
+        };
+        let recipe = needy_config::recipe::load(&source)?;
         let host = needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
           tracing::warn!("session {id}: cannot read this machine's CPU; the recipe skips host checks: {e}");
           Default::default()
@@ -330,7 +328,7 @@ impl Daemon {
   // the providers can unwind a create themselves, so shutdown need not wait
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
-  async fn provision(&self, session: &Arc<Session>, request: &NewSession, base: &Path) -> Result<()> {
+  async fn provision(&self, session: &Arc<Session>, request: &NewSession) -> Result<()> {
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
     let hostname = session.recipe.as_ref().and_then(|r| r.hostname.clone());
     for (exec_name, config) in &session.profile.executors {
@@ -345,7 +343,7 @@ impl Daemon {
         key: format!("{exec_name}@{key}"),
         session: session.id.clone(),
         config: config.clone(),
-        base: base.to_path_buf(),
+        base: session.profile.base_dir.clone(),
         user: session.profile.user.clone(),
         hostname: hostname.clone(),
       };
@@ -565,15 +563,13 @@ fn unwinding(session: &Session) -> Result<()> {
   Ok(())
 }
 
-/// Reads and checks the profile of a session about to be created, and the
-/// directory its relative paths resolve against.
-fn load_profile(id: &str, request: &NewSession) -> Result<(Profile, PathBuf)> {
-  let base = if request.profile_dir.is_empty() {
-    std::env::current_dir()?
-  } else {
-    PathBuf::from(&request.profile_dir)
-  };
-  let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), &base))?;
+/// Reads and checks the profile of a session about to be created. The
+/// client resolved it, so it names no file to read.
+// NOTICE: a profile with relative paths, which a client did not resolve,
+// would have them resolve against the daemon's working directory; no base
+// directory is set, so they stay relative and fail visibly.
+fn load_profile(id: &str, request: &NewSession) -> Result<Profile> {
+  let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), PathBuf::new()))?;
   let findings = validate::profile(&profile);
   for finding in findings.iter().filter(|f| f.severity == Severity::Warning) {
     tracing::warn!("session {id}: profile {finding}");
@@ -582,7 +578,7 @@ fn load_profile(id: &str, request: &NewSession) -> Result<(Profile, PathBuf)> {
   if !errors.is_empty() {
     bail!("invalid profile: {}", errors.join("; "));
   }
-  Ok((profile, base))
+  Ok(profile)
 }
 
 // ------------------------------------------------------------------ API

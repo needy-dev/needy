@@ -102,6 +102,73 @@ pub fn load(source: &Source) -> Result<Profile, Error> {
   Ok(profile)
 }
 
+/// A profile as a client sends it to a control daemon: self-contained, so
+/// the daemon reads no path on the client's machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+  /// The profile with its `extends` chain merged and its relative host
+  /// paths made absolute.
+  pub yaml: String,
+  /// The actor's recipe with its `extends` chain merged, when `actor.recipe`
+  /// names a file; a built-in recipe is the daemon's own.
+  pub recipe_yaml: Option<String>,
+}
+
+/// Reads a profile, its `extends` chain and the recipe file it names into a
+/// [`Resolved`] profile.
+///
+/// A host path (`host:` in a file mapping, an executor's `workspace`) is a
+/// path on the control daemon's machine; a relative one is made absolute
+/// against the profile's directory here.
+// TODO(runner-files): relative host paths still resolve against the
+// client's directory, which names the right files only when the client
+// runs on the control daemon's machine. Moving files between a client and
+// the control plane belongs to the runners and runs design
+// (`docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`).
+pub fn resolve(source: &Source) -> Result<Resolved, Error> {
+  let mut document = source::read_chain(source, Kind::Profile, &MERGE)?;
+  let base = source.base_dir();
+  absolute_host_paths(&mut document, &base);
+  let profile: Profile = source::deserialize(document.clone(), Kind::Profile, source)?;
+  let recipe_yaml = match &profile.actor.recipe {
+    Some(reference) => match Source::reference(reference, &base) {
+      Source::Builtin(_) => None,
+      file => Some(crate::recipe::resolve(&file)?),
+    },
+    None => None,
+  };
+  Ok(Resolved {
+    yaml: source::serialize(&document, Kind::Profile, source)?,
+    recipe_yaml,
+  })
+}
+
+/// Makes the relative host paths of a merged profile absolute against
+/// `base`: `host:` sides of file mappings and executors' workspaces.
+// NOTICE: `executors.*.docker.build.context` is a host path too, but no
+// provider builds images yet; it is left as written.
+fn absolute_host_paths(document: &mut serde_yaml::Value, base: &Path) {
+  use serde_yaml::Value;
+  if let Some(Value::Mapping(executors)) = document.get_mut("executors") {
+    for executor in executors.values_mut() {
+      if let Some(Value::String(workspace)) = executor.get_mut("workspace") {
+        *workspace = source::absolute(workspace, base);
+      }
+    }
+  }
+  if let Some(Value::Mapping(files)) = document.get_mut("files") {
+    for mapping in files.values_mut() {
+      for side in ["from", "to"] {
+        if let Some(Value::String(text)) = mapping.get_mut(side)
+          && let Some(path) = text.strip_prefix("host:")
+        {
+          *text = format!("host:{}", source::absolute(path, base));
+        }
+      }
+    }
+  }
+}
+
 /// A profile's name from its file: the file name without `.yaml` or `.yml`
 /// and then without `.profile`. A file named only `profile.yaml` takes its
 /// directory's name, so `examples/smoke/profile.yaml` is `smoke` and

@@ -105,6 +105,10 @@ chaos:
     - { on: exec, match: "sleep *", delay: 1ms }
 "#;
 
+/// A profile the daemon refuses when it creates the session: its default
+/// executor does not exist.
+const BROKEN_PROFILE: &str = "user: { name: agent, uid: 1000, gid: 1000 }\ndefault_executor: missing-executor\n";
+
 fn create_session(home: &Home, profile: &str) -> String {
   let profile = home.write("profile.yaml", profile);
   let output = home.run(&[
@@ -331,7 +335,7 @@ fn session_ls_shows_stopped_and_failed_sessions() {
   let _daemon = Daemon::start(&home);
   let stopped = create_session(&home, NATIVE_PROFILE);
   assert!(home.run(&["session", "stop", &stopped]).status.success());
-  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  let broken = home.write("broken.yaml", BROKEN_PROFILE);
   let failed = home.run(&[
     "session",
     "create",
@@ -359,7 +363,7 @@ fn session_ls_shows_stopped_and_failed_sessions() {
 fn a_failed_session_create_records_session_fail_with_the_reason() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  let broken = home.write("broken.yaml", BROKEN_PROFILE);
   let failed = home.run(&[
     "session",
     "create",
@@ -376,7 +380,7 @@ fn a_failed_session_create_records_session_fail_with_the_reason() {
   let overview = report.lines().skip_while(|l| !l.starts_with("| Duration")).nth(2).unwrap();
   assert!(overview.contains("| failed |"), "{report}");
   let finding = report.lines().find(|l| l.starts_with("- ❌ Session failed: ")).unwrap_or_else(|| panic!("{report}"));
-  assert!(finding.contains("missing.recipe.yaml"), "{finding}");
+  assert!(finding.contains("missing-executor"), "{finding}");
 }
 
 // The QA pass on 2026-11-09 found that the report named a profile after its
@@ -446,7 +450,7 @@ fn session_ls_shows_released_executors_and_why_a_session_failed() {
   let _daemon = Daemon::start(&home);
   let stopped = create_session(&home, NATIVE_PROFILE);
   assert!(home.run(&["session", "stop", &stopped]).status.success());
-  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  let broken = home.write("broken.yaml", BROKEN_PROFILE);
   let failed = home.run(&[
     "session",
     "create",
@@ -473,7 +477,7 @@ fn session_ls_shows_released_executors_and_why_a_session_failed() {
   );
   assert_eq!(rows[2][1..3], ["broken", "failed"]);
   let exit = rows[2].last().unwrap();
-  assert!(exit.starts_with("cannot read ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
+  assert!(exit.starts_with("invalid profile: ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
 }
 
 #[test]
@@ -482,7 +486,7 @@ fn session_ls_json_keeps_names_and_carries_released_executors_and_the_failure() 
   let _daemon = Daemon::start(&home);
   let stopped = create_session(&home, NATIVE_PROFILE);
   assert!(home.run(&["session", "stop", &stopped]).status.success());
-  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  let broken = home.write("broken.yaml", BROKEN_PROFILE);
   home.run(&[
     "session",
     "create",
@@ -500,7 +504,7 @@ fn session_ls_json_keeps_names_and_carries_released_executors_and_the_failure() 
     (&sessions[0]["exit_code"], &sessions[0]["signal"], &sessions[0]["failure"]),
     (&serde_json::Value::Null, &serde_json::Value::Null, &serde_json::Value::Null)
   );
-  assert!(sessions[1]["failure"].as_str().unwrap().contains("missing.recipe.yaml"), "{:?}", sessions[1]);
+  assert!(sessions[1]["failure"].as_str().unwrap().contains("missing-executor"), "{:?}", sessions[1]);
 }
 
 #[test]
@@ -1312,4 +1316,37 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
   for ((path, mode), expected) in modes.iter().zip(expected) {
     assert_eq!(*mode, expected, "{} is {mode:o}", path.display());
   }
+}
+
+// A control daemon on another machine cannot read the client's profile
+// directory; the client sends the profile and its recipe resolved. Here the
+// daemon runs in another working directory than the profile's.
+#[test]
+fn session_create_sends_a_profile_with_a_relative_parent_and_recipe() {
+  let home = Home::new();
+  let elsewhere = home.path().join("elsewhere");
+  std::fs::create_dir_all(&elsewhere).unwrap();
+  let child =
+    home.needy().args(["daemon", "--mode", "control"]).current_dir(&elsewhere).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let socket = home.path().join("run").join("daemon.sock");
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !socket.exists() {
+    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  let _daemon = Daemon { child };
+  std::fs::create_dir_all(home.path().join("p")).unwrap();
+  home.write("p/base.yaml", NATIVE_PROFILE);
+  home.write("p/gce.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\n");
+  let profile = home.write("p/profile.yaml", "extends: base.yaml\nactor: { recipe: gce.recipe.yaml }\n");
+
+  let output = home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--profile",
+    profile.to_str().unwrap(),
+  ]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
 }

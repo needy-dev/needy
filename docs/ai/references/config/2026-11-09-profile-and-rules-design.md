@@ -385,6 +385,10 @@ share one merge model, applied to the documents before they are typed:
 Relative paths resolve against the directory of the profile that was loaded,
 including paths a parent wrote.
 
+The client resolves the chain: `needy session create` sends the merged
+profile and the merged recipe file it names as text, so a control daemon on
+another machine reads no path on the client's.
+
 ## Launcher resolvers
 
 Needy sees every real `execve` in the tree, so it can often decide late: a
@@ -479,6 +483,12 @@ commands:
 - Sides are written `host:`, `actor:` and `executor:<name>:`. `~` is
   `/home/<user>` on every side, and every side uses the profile's UID and GID,
   so no ownership mapping or `chown` is needed.
+- A `host:` path is a path on the control daemon's machine, and `~` there is
+  that machine's home. The client makes a relative `host:` path absolute
+  against the profile's directory, so it names the intended files only when
+  the client runs on the control daemon's machine (`TODO(runner-files)`:
+  moving files between a client and the control plane belongs to
+  [runners and runs](../architecture/2026-11-10-runner-and-run-design.md)).
 - Filters follow rclone: ordered `+` and `-` rules, `**` for any depth, a
   leading `/` anchored at the mapping root.
 - Harness home directories contain credentials, such as Codex's `auth.json`.

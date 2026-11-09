@@ -52,6 +52,21 @@ pub fn load(source: &Source) -> Result<Recipe, Error> {
   Ok(recipe)
 }
 
+/// Reads a recipe and its `extends` chain into one YAML document a client
+/// sends, with `network.metadata.file` made absolute.
+// TODO(runner-files): the metadata file stays a path on the client's
+// machine; see `profile::resolve`.
+pub fn resolve(source: &Source) -> Result<String, Error> {
+  let mut document = source::read_chain(source, Kind::Recipe, &MERGE)?;
+  if let Some(serde_yaml::Value::String(file)) =
+    document.get_mut("network").and_then(|n| n.get_mut("metadata")).and_then(|m| m.get_mut("file"))
+  {
+    *file = source::absolute(file, &source.base_dir());
+  }
+  let _: Recipe = source::deserialize(document.clone(), Kind::Recipe, source)?;
+  source::serialize(&document, Kind::Recipe, source)
+}
+
 #[cfg(test)]
 #[path = "mod_test.rs"]
 mod tests;

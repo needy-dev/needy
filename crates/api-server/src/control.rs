@@ -74,9 +74,12 @@ pub type Outputs = Pin<Box<dyn Stream<Item = Result<ExecOutput>> + Send>>;
 /// A session to create from a profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewSession {
+  /// The profile, self-contained: no `extends` to read, host paths
+  /// absolute.
   pub profile_yaml: String,
-  /// The directory relative paths in the profile resolve against.
-  pub profile_dir: String,
+  /// The actor's recipe when the profile names a recipe file; empty for a
+  /// built-in recipe or none.
+  pub recipe_yaml: String,
   /// The profile's name, derived by the client from its file name.
   pub profile_name: String,
   /// Empty for the session's ID.

@@ -104,12 +104,13 @@ pub fn new_actor_session(profile_yaml: &str, dir: &Path) -> NewSession {
   }
 }
 
-/// A session request for `profile_yaml` without an actor, whose relative
-/// paths resolve against `dir`.
+/// A session request for `profile_yaml` without an actor, resolved as the
+/// CLI does: relative paths against `dir`.
 pub fn new_session(profile_yaml: &str, dir: &Path) -> NewSession {
+  let resolved = needy_config::profile::resolve(&needy_config::Source::text(profile_yaml, dir)).unwrap();
   NewSession {
-    profile_yaml: profile_yaml.into(),
-    profile_dir: dir.display().to_string(),
+    profile_yaml: resolved.yaml,
+    recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
     profile_name: "test".into(),
     start_actor: false,
     ..NewSession::default()

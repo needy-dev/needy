@@ -19,9 +19,9 @@ service SessionService {
 }
 
 message CreateSessionRequest {
-  // Profile as YAML text; relative paths resolve against `profile_dir`.
+  // Profile as YAML text, self-contained: its `extends` chain merged and its
+  // host paths absolute. The daemon reads no path on the client's machine.
   string profile_yaml = 1;
-  string profile_dir = 2;
   string group = 3;
   string name = 4;
   // Start the actor; false creates executors only, for `needy exec`.
@@ -31,6 +31,14 @@ message CreateSessionRequest {
   // The profile's name in listings, traces and reports, for example its file
   // name without `.profile.yaml`. Required.
   string profile_name = 7;
+  // The actor's recipe as YAML with its `extends` chain merged, when
+  // `actor.recipe` names a file. Empty for a built-in recipe or none.
+  string recipe_yaml = 8;
+
+  // The client's profile directory, which the daemon cannot read when it
+  // runs on another machine.
+  reserved 2;
+  reserved "profile_dir";
 }
 
 message ExecutorRef {

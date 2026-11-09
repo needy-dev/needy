@@ -144,6 +144,26 @@ fn read(source: &Source, kind: Kind, rules: &merge::Rules, chain: &mut Vec<Sourc
   Ok(merge::merge(parent, document, rules))
 }
 
+/// A merged document as YAML text, for a client to send.
+pub(crate) fn serialize(value: &Value, kind: Kind, source: &Source) -> Result<String, Error> {
+  serde_yaml::to_string(value).map_err(|source_error| Error::Yaml {
+    kind,
+    origin: source.to_string(),
+    source: source_error,
+  })
+}
+
+/// `path` resolved against `base` when it is relative; `~` stays for the
+/// reader's home, and the text after the base keeps its form, such as a
+/// trailing `/`.
+pub(crate) fn absolute(path: &str, base: &Path) -> String {
+  if path.is_empty() || path.starts_with('~') || Path::new(path).is_absolute() {
+    return path.to_string();
+  }
+  let base = std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf());
+  format!("{}/{}", base.display().to_string().trim_end_matches('/'), path.trim_start_matches("./"))
+}
+
 /// Types a merged document. Errors name the key path, such as
 /// `commands[2].when`, in the merged document.
 pub(crate) fn deserialize<T: DeserializeOwned>(value: Value, kind: Kind, source: &Source) -> Result<T, Error> {

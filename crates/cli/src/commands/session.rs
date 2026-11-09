@@ -178,15 +178,16 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       no_actor,
       command,
     } => {
-      let yaml = std::fs::read_to_string(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
-      let path = std::fs::canonicalize(&profile)?;
-      let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+      let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
+      // The daemon may run on another machine: it gets the profile and its
+      // recipe as text, not paths to read.
+      let resolved = needy_config::profile::resolve(&needy_config::Source::file(&path))?;
       let connection = crate::cli::connect(&endpoint).await?;
       let session = connection
         .sessions()
         .create_session(CreateSessionRequest {
-          profile_yaml: yaml,
-          profile_dir: dir,
+          profile_yaml: resolved.yaml,
+          recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
           profile_name: needy_config::profile::name(&path),
           group,
           name,

@@ -445,3 +445,41 @@ fn a_profile_is_named_after_its_file() {
 fn a_file_named_profile_takes_its_directory_name() {
   assert_eq!(name(Path::new("/home/user/examples/smoke/profile.yaml")), "smoke");
 }
+
+#[test]
+fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
+  let dir = files(&[
+    ("base.yaml", "executors:\n  here: { runtime: native }\n"),
+    (
+      "p/profile.yaml",
+      "extends: ../base.yaml\nexecutors:\n  here: { workspace: ws/ }\nfiles:\n  seed: { mode: copy-in, from: \"host:./seed/\", to: \"actor:~/seed/\" }\n  out: { mode: mirror-out, from: \"actor:~/out/\", to: \"host:~/out/\" }\n",
+    ),
+  ]);
+
+  let resolved = resolve(&Source::file(dir.path().join("p/profile.yaml"))).unwrap();
+  let profile = load(&Source::text(resolved.yaml.clone(), "")).unwrap();
+
+  assert!(!resolved.yaml.contains("extends"), "{}", resolved.yaml);
+  assert_eq!(profile.executors["here"].workspace.as_deref(), Some(format!("{}/p/ws/", dir.path().display()).as_str()));
+  assert_eq!(profile.files.mappings["seed"].from, Side::Host(format!("{}/p/seed/", dir.path().display())));
+  // `~` is the home of the machine that reads the path.
+  assert_eq!(profile.files.mappings["out"].to, Side::Host("~/out/".into()));
+  assert_eq!(resolved.recipe_yaml, None);
+}
+
+#[test]
+fn a_resolved_profile_carries_its_recipe_file_but_not_a_built_in_one() {
+  let dir = files(&[
+    ("r.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\nos: { hostname: h1 }\nnetwork: { metadata: { file: meta.yaml } }\n"),
+    ("file.yaml", "actor: { recipe: r.recipe.yaml }\n"),
+    ("builtin.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n"),
+  ]);
+
+  let from_file = resolve(&Source::file(dir.path().join("file.yaml"))).unwrap();
+  let built_in = resolve(&Source::file(dir.path().join("builtin.yaml"))).unwrap();
+
+  let recipe = crate::recipe::load(&Source::text(from_file.recipe_yaml.unwrap(), "")).unwrap();
+  assert_eq!(recipe.os.hostname.map(|h| h.as_str().to_string()), Some("h1".into()));
+  assert_eq!(recipe.network.metadata.and_then(|m| m.file), Some(format!("{}/meta.yaml", dir.path().display())));
+  assert_eq!(built_in.recipe_yaml, None);
+}

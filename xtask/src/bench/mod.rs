@@ -114,14 +114,14 @@ mod run {
     {
       client = client.with_token(&token)?;
     }
-    let yaml = std::fs::read_to_string(&args.profile).with_context(|| format!("cannot read profile {}", args.profile.display()))?;
-    let path = std::fs::canonicalize(&args.profile)?;
-    let dir = path.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let path = std::fs::canonicalize(&args.profile).with_context(|| format!("cannot read profile {}", args.profile.display()))?;
+    // As `needy session create` does: the daemon reads no client path.
+    let resolved = needy_config::profile::resolve(&needy_config::Source::file(&path))?;
     let created = client
       .sessions()
       .create_session(CreateSessionRequest {
-        profile_yaml: yaml,
-        profile_dir: dir,
+        profile_yaml: resolved.yaml,
+        recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
         profile_name: needy_config::profile::name(&path),
         start_actor: true,
         ..Default::default()

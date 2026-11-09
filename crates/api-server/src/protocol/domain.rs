@@ -79,7 +79,7 @@ pub fn new_session(request: v1::CreateSessionRequest) -> Result<NewSession, Erro
   }
   Ok(NewSession {
     profile_yaml: request.profile_yaml,
-    profile_dir: request.profile_dir,
+    recipe_yaml: request.recipe_yaml,
     profile_name: request.profile_name,
     group: request.group,
     name: request.name,

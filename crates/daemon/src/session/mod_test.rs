@@ -295,3 +295,31 @@ async fn a_finished_session_ends_its_processes_on_a_remote_executor() {
   assert_eq!(Sessions::get(daemon, &created.id).await.unwrap().state, SessionState::Finished);
   Sessions::stop(daemon, &created.id).await.unwrap();
 }
+
+// ROOT CAUSE:
+//
+// If the control daemon ran on another machine than the client, a profile
+// with a relative `extends` or `actor.recipe` failed with `cannot read
+// recipe /Users/...`, because the client sent its profile directory and the
+// daemon read the files there on its own machine.
+//
+// Before the fix, the daemon read the client's directory.
+// The fix sends the profile and its recipe resolved, as text; the client's
+// directory is gone here before the session is created.
+#[tokio::test]
+async fn a_session_is_created_from_a_profile_whose_directory_the_daemon_cannot_read() {
+  let client = tempfile::tempdir().unwrap();
+  std::fs::write(client.path().join("base.yaml"), "user: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { runtime: native }\n")
+    .unwrap();
+  std::fs::write(client.path().join("r.recipe.yaml"), "extends: builtin:gce-ubuntu-22.04\nos: { hostname: from-the-client }\n").unwrap();
+  let yaml = "extends: base.yaml\nactor: { recipe: r.recipe.yaml }\ncommands:\n  - { match: \"**\", to: here }\n";
+  let request = new_session(yaml, client.path());
+  drop(client);
+  let started = testing::daemon().await;
+
+  let created = Sessions::create(&started.daemon, request).await.unwrap();
+
+  let session = started.daemon.sessions.find(&created.id).unwrap();
+  assert_eq!(session.recipe.as_ref().and_then(|r| r.hostname.as_deref()), Some("from-the-client"));
+  assert_eq!(created.executors.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["here"]);
+}

@@ -404,11 +404,10 @@ impl Origin {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateSessionRequest {
-    /// Profile as YAML text; relative paths resolve against `profile_dir`.
+    /// Profile as YAML text, self-contained: its `extends` chain merged and its
+    /// host paths absolute. The daemon reads no path on the client's machine.
     #[prost(string, tag="1")]
     pub profile_yaml: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub profile_dir: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub group: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
@@ -423,6 +422,10 @@ pub struct CreateSessionRequest {
     /// name without `.profile.yaml`. Required.
     #[prost(string, tag="7")]
     pub profile_name: ::prost::alloc::string::String,
+    /// The actor's recipe as YAML with its `extends` chain merged, when
+    /// `actor.recipe` names a file. Empty for a built-in recipe or none.
+    #[prost(string, tag="8")]
+    pub recipe_yaml: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
