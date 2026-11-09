@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
+use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
 use needy_api_server::control::{ControlError, NewSession, Route, SessionInfo, Sessions};
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
@@ -376,9 +377,7 @@ impl Daemon {
     session.cancel.cancel();
     session.tasks.close();
     session.tasks.wait().await;
-    for instance in session.take_executors().values() {
-      self.pool.release(instance).await;
-    }
+    self.release_executors(session).await;
     actor::remove_sockets(&session.dir);
     let released = lock(&session.released).clone();
     self.record_failure(&session.id, request, session.created_ms, &session.trace, error, released).await;
@@ -433,9 +432,7 @@ impl Daemon {
     if let Err(e) = files::mirror_out(session).await {
       tracing::warn!("mirror-out for {}: {e:#}", session.id);
     }
-    for instance in session.take_executors().values() {
-      self.pool.release(instance).await;
-    }
+    self.release_executors(session).await;
     actor::remove_sockets(&session.dir);
   }
 
@@ -462,9 +459,7 @@ impl Daemon {
     if stopping && let Err(refused) = session.state.advance(SessionState::Stopped) {
       tracing::warn!("session {}: {refused}", session.id);
     }
-    for instance in session.take_executors().values() {
-      self.pool.release(instance).await;
-    }
+    self.release_executors(session).await;
     session.emit(&Event::SessionStop(SessionStop {}));
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
@@ -472,6 +467,57 @@ impl Daemon {
     actor::remove_sockets(&session.dir);
     self.sessions.end(session.info());
     Ok(())
+  }
+
+  /// Ends the processes the session started on its executors, such as
+  /// detached commands and a workspace mount's `sftp-server`, then gives
+  /// the executors back.
+  // TODO(runner-ownership): the control daemon asks each executor here, so a
+  // daemon that exits first leaves the processes behind; the runner owns a
+  // run's processes and ends them in the design of
+  // `docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`
+  // ("Ownership and cleanup").
+  async fn release_executors(&self, session: &Session) {
+    let instances = session.take_executors();
+    let request = ListProcessesRequest {
+      session_id: session.id.clone(),
+    };
+    // Instances that share an executor list the same processes.
+    let mut asked: Vec<(&'static str, &str)> = Vec::new();
+    for instance in instances.values() {
+      let executor = (instance.handle.runtime, instance.handle.id.as_str());
+      if asked.contains(&executor) {
+        continue;
+      }
+      asked.push(executor);
+      let processes = match instance.handle.client.processes().list_processes(request.clone()).await {
+        Ok(list) => list.into_inner().processes,
+        Err(status) => {
+          tracing::warn!("session {}: cannot list its processes on executor {}: {}", session.id, instance.name, status.message());
+          continue;
+        }
+      };
+      for process in processes.into_iter().filter(|p| p.running) {
+        // NOTICE: SIGKILL, as the executors' own shutdown uses: the session
+        // is over, and a process that ignores SIGTERM would stay.
+        let kill = KillProcessRequest {
+          process_id: process.process_id.clone(),
+          signal: "SIGKILL".into(),
+        };
+        if let Err(status) = instance.handle.client.processes().kill_process(kill).await {
+          tracing::warn!(
+            "session {}: cannot end process {} on executor {}: {}",
+            session.id,
+            process.process_id,
+            instance.name,
+            status.message()
+          );
+        }
+      }
+    }
+    for instance in instances.values() {
+      self.pool.release(instance).await;
+    }
   }
 
   fn session_dir(&self, id: &str) -> PathBuf {

@@ -207,3 +207,91 @@ async fn a_finished_session_keeps_its_driving_programs_exit() {
   assert_eq!(finished.actor_exit, Some(exit));
   assert_eq!(finished.failure, None);
 }
+
+/// A profile whose every command runs on executor `far`, the remote
+/// executor at `endpoint`.
+fn remote_profile(endpoint: &str) -> String {
+  format!(
+    r#"
+user: {{ name: agent, uid: 1000, gid: 1000 }}
+executors:
+  far: {{ runtime: remote, remote: {{ url: "{endpoint}" }} }}
+commands:
+  - {{ match: "**", to: far }}
+"#
+  )
+}
+
+/// Starts a detached `sleep 300` in `session` and returns its process ID on
+/// the executor.
+async fn detached_sleep(daemon: &crate::Daemon, session: &str) -> i64 {
+  use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes};
+  use tokio_stream::StreamExt as _;
+  let spec = ExecSpec {
+    argv: vec!["sleep".into(), "300".into()],
+    cwd: String::new(),
+    env: Default::default(),
+    clear_env: false,
+    tty: None,
+    detach: true,
+    session: session.into(),
+    executor: String::new(),
+    no_stdin: true,
+    origin: needy_core::types::Origin::Cli,
+    search_path_if_missing: false,
+  };
+  let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
+  loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break started.pid;
+    }
+  }
+}
+
+/// Waits up to ten seconds for process `pid` to end.
+async fn ended(pid: i64) -> bool {
+  for _ in 0..200 {
+    if !testing::running(pid) {
+      return true;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+  false
+}
+
+// ROOT CAUSE:
+//
+// If a session with a remote executor stopped, its detached processes and
+// its workspace mount's `sftp-server` kept running on the remote machine,
+// because the `remote` provider's `destroy` does nothing and nothing else
+// ended them.
+//
+// Before the fix, the sleep below outlived its session.
+// The fix kills the processes a session started on each of its executors
+// before it releases them.
+#[tokio::test]
+async fn stopping_a_session_ends_its_processes_on_a_remote_executor() {
+  let remote = testing::Executor::start().await;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(&remote_profile(&remote.endpoint), started.dir.path())).await.unwrap();
+  let pid = detached_sleep(daemon, &created.id).await;
+
+  Sessions::stop(daemon, &created.id).await.unwrap();
+
+  assert!(ended(pid).await, "process {pid} outlived its session");
+}
+
+#[tokio::test]
+async fn a_finished_session_ends_its_processes_on_a_remote_executor() {
+  let remote = testing::Executor::start().await;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), r#"touch "$(dirname "$3")/v.sock"; sleep 1"#);
+  let created = Sessions::create(daemon, new_actor_session(&remote_profile(&remote.endpoint), started.dir.path())).await.unwrap();
+  let pid = detached_sleep(daemon, &created.id).await;
+
+  assert!(ended(pid).await, "process {pid} outlived its finished session");
+  assert_eq!(Sessions::get(daemon, &created.id).await.unwrap().state, SessionState::Finished);
+  Sessions::stop(daemon, &created.id).await.unwrap();
+}

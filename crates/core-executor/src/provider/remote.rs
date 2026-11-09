@@ -35,7 +35,8 @@ impl Provider for Remote {
     })
   }
 
-  /// The remote machine outlives its sessions.
+  /// The remote machine outlives its sessions. The control daemon ends a
+  /// session's processes there before it releases the instance.
   async fn destroy(&self, _handle: &InstanceHandle) -> Result<(), Error> {
     Ok(())
   }
