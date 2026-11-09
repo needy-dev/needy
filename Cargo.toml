@@ -36,7 +36,8 @@ nix = { version = "0.30", features = ["signal"] }
 portable-pty = "0.9"
 prost = "0.14"
 prost-types = "0.14"
-rusqlite = { version = "0.37", features = ["bundled"] }
+sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "runtime-tokio", "sqlx-sqlite"] }
+sea-orm-migration = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-sqlite"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value", "arbitrary_precision"] }
 serde_yaml = "0.9"

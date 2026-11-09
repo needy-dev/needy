@@ -10,7 +10,8 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 needy-common.workspace = true
-rusqlite.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

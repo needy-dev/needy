@@ -20,7 +20,8 @@ Dependencies point downward; a crate never depends on one above it.
   process host (PTY, pipes, replay, detach), the process service, and the exec
   client used by the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: profiles,
-  rules, recipes, chaos, traces and reports. No processes, listeners or VMs.
+  rules, recipes, chaos, traces and reports, and the daemon's SQLite store
+  (SeaORM entities and migrations in `store`). No processes, listeners or VMs.
 - `crates/common` (`needy-common`): shared helpers that depend on neither the
   platform nor an async runtime: globs, durations, filters, tar archives,
   exit status and signal names.

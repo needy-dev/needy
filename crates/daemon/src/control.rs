@@ -92,7 +92,7 @@ fn status(e: anyhow::Error) -> Status {
 impl Daemon {
   pub async fn start(state_dir: PathBuf, actor_image: PathBuf, docker_image: String) -> Result<Arc<Self>> {
     std::fs::create_dir_all(state_dir.join("sessions"))?;
-    let trace = Trace::open(&state_dir.join("trace.db"), state_dir.join("sessions"))?;
+    let trace = Trace::open(&state_dir.join("trace.db"), state_dir.join("sessions")).await?;
     // This machine is always available as the `local` executor.
     let local_sock = state_dir.join("local.sock");
     let local_listen = format!("unix:{}", local_sock.display());

@@ -11,6 +11,7 @@ pub mod profile;
 pub mod recipe;
 pub mod report;
 pub mod rules;
+pub mod store;
 pub mod trace;
 
 pub use profile::{

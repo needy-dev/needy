@@ -342,7 +342,7 @@ fn main() -> Result<()> {
         level,
         output,
       } => {
-        let text = report::render(&needy_home().join("trace.db"), &session, matches!(level, ReportLevel::Detailed))?;
+        let text = report::render(&needy_home().join("trace.db"), &session, matches!(level, ReportLevel::Detailed)).await?;
         match output {
           Some(path) => std::fs::write(path, text)?,
           None => print!("{text}"),

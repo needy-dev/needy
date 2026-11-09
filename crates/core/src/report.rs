@@ -38,8 +38,8 @@ fn top(counts: &BTreeMap<String, usize>, n: usize) -> String {
   v.iter().take(n).map(|(k, c)| format!("{k} ({c})")).collect::<Vec<_>>().join(", ")
 }
 
-pub fn render(db: &Path, session: &str, detailed: bool) -> Result<String> {
-  let loaded = trace::load(db, session)?;
+pub async fn render(db: &Path, session: &str, detailed: bool) -> Result<String> {
+  let loaded = trace::load(db, session).await?;
   let info = &loaded.session;
   let id = info["id"].as_str().unwrap_or_default().to_string();
   let created = info["created_ms"].as_i64().unwrap_or(0);
