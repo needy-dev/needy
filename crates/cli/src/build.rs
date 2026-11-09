@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use needy_config::recipe::{HostInfo, Recipe};
+use needy_core::recipe::{HostInfo, Recipe};
 
 fn repo_root() -> Result<PathBuf> {
     if let Ok(root) = std::env::var("NEEDY_REPO") {

@@ -9,7 +9,7 @@ use needy_api_proto::v1::{ExecRequest, ExecStart, exec_request, exec_response};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::exec_cli::connect;
+use needy_core_executor::client::connect;
 
 /// `EXECUTOR:path`, or a local path.
 enum Location {

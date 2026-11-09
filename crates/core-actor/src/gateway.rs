@@ -18,7 +18,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
-use crate::trace::Trace;
+use needy_core::trace::Trace;
 
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
@@ -63,7 +63,7 @@ pub struct Gateway {
     pub trace: Trace,
     pub session: String,
     pub network: &'static str,
-    injector: Option<Arc<crate::chaos::Injector>>,
+    injector: Option<Arc<needy_core::chaos::Injector>>,
     client: hyper_util::client::legacy::Client<
         hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
         Incoming,
@@ -76,7 +76,7 @@ impl Gateway {
         trace: Trace,
         session: String,
         network: &'static str,
-        injector: Option<Arc<crate::chaos::Injector>>,
+        injector: Option<Arc<needy_core::chaos::Injector>>,
     ) -> Self {
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_webpki_roots()

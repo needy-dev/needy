@@ -1,0 +1,32 @@
+[package]
+name = "needy-cli"
+description = "The needy command: CLI, daemon, executor, and the actor's init and proxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "needy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+needy-api-client.workspace = true
+needy-api-proto.workspace = true
+needy-common.workspace = true
+needy-core.workspace = true
+needy-core-actor.workspace = true
+needy-core-executor.workspace = true
+needy-daemon.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -724,39 +724,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "needy"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "bytes",
- "clap",
- "futures-util",
- "http",
- "http-body-util",
- "hyper",
- "hyper-rustls",
- "hyper-util",
- "libc",
- "needy-api-client",
- "needy-api-proto",
- "needy-api-server",
- "needy-config",
- "portable-pty",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "tar",
- "tokio",
- "tokio-stream",
- "tokio-vsock",
- "tonic",
- "tower",
- "uuid",
-]
-
-[[package]]
 name = "needy-api-client"
 version = "0.1.0"
 dependencies = [
@@ -794,13 +761,110 @@ dependencies = [
 ]
 
 [[package]]
-name = "needy-config"
+name = "needy-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "libc",
+ "needy-api-client",
+ "needy-api-proto",
+ "needy-common",
+ "needy-core",
+ "needy-core-actor",
+ "needy-core-executor",
+ "needy-daemon",
+ "serde_json",
+ "tar",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
+]
+
+[[package]]
+name = "needy-common"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_yaml",
+ "tar",
+]
+
+[[package]]
+name = "needy-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "needy-common",
+ "rusqlite",
+ "serde",
  "serde_json",
  "serde_yaml",
+ "tokio",
+]
+
+[[package]]
+name = "needy-core-actor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "libc",
+ "needy-api-client",
+ "needy-api-proto",
+ "needy-common",
+ "needy-core",
+ "needy-core-executor",
+ "tokio",
+ "tokio-stream",
+ "tokio-vsock",
+]
+
+[[package]]
+name = "needy-core-executor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "futures-util",
+ "libc",
+ "needy-api-client",
+ "needy-api-proto",
+ "needy-common",
+ "portable-pty",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
+]
+
+[[package]]
+name = "needy-daemon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-util",
+ "libc",
+ "needy-api-client",
+ "needy-api-proto",
+ "needy-api-server",
+ "needy-common",
+ "needy-core",
+ "needy-core-actor",
+ "needy-core-executor",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "uuid",
 ]
 
 [[package]]

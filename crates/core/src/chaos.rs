@@ -9,8 +9,8 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use needy_config::profile::{Chaos, Fault};
-use needy_config::{glob_match, mix};
+use crate::profile::{Chaos, Fault};
+use needy_common::util::{glob_match, mix};
 
 #[derive(Debug, Clone)]
 pub struct Fired {

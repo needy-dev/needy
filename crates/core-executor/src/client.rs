@@ -1,4 +1,5 @@
-//! `needy exec`, `needy attach`, `needy ps` and `needy kill`.
+//! Client side of running a process through a daemon: terminal handling,
+//! stdin and signal forwarding, and the human, JSON and NDJSON output modes.
 
 use std::collections::BTreeMap;
 
@@ -6,17 +7,16 @@ use anyhow::{Context, Result, bail};
 use base64::Engine;
 use needy_api_client::Client;
 use needy_api_proto::v1::{
-    ExecAttach, ExecRequest, ExecStart, KillProcessRequest, ListProcessesRequest, WindowSize,
-    exec_request, exec_response,
+    ExecAttach, ExecRequest, ExecStart, WindowSize, exec_request, exec_response,
 };
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::prochost::Exit;
+use needy_common::process::Exit;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OutputMode {
     Human,
     Json,
@@ -236,55 +236,6 @@ fn chunk(kind: &str, bytes: &[u8]) -> Value {
 
 fn line(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string(value)?);
-    Ok(())
-}
-
-pub async fn ps(endpoint: &str, session: String) -> Result<()> {
-    let client = connect(endpoint).await?;
-    let list = client
-        .processes()
-        .list_processes(ListProcessesRequest {
-            session_id: session,
-        })
-        .await
-        .map_err(|s| anyhow::anyhow!("{}", s.message()))?
-        .into_inner();
-    println!(
-        "{:<13} {:<10} {:>7} {:<10} {:<4} COMMAND",
-        "ID", "EXECUTOR", "PID", "STATE", "TTY"
-    );
-    for p in list.processes {
-        let state = if p.running {
-            "running".to_string()
-        } else {
-            match p.exited {
-                Some(e) => match e.code {
-                    Some(c) => format!("exit {c}"),
-                    None => e.signal,
-                },
-                None => "exited".into(),
-            }
-        };
-        println!(
-            "{:<13} {:<10} {:>7} {:<10} {:<4} {}",
-            p.process_id,
-            p.executor,
-            p.pid,
-            state,
-            if p.tty { "yes" } else { "no" },
-            p.argv.join(" ")
-        );
-    }
-    Ok(())
-}
-
-pub async fn kill(endpoint: &str, process_id: String, signal: i32) -> Result<()> {
-    let client = connect(endpoint).await?;
-    client
-        .processes()
-        .kill_process(KillProcessRequest { process_id, signal })
-        .await
-        .map_err(|s| anyhow::anyhow!("{}", s.message()))?;
     Ok(())
 }
 

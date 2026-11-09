@@ -2,8 +2,8 @@
 
 use std::path::{Component, Path};
 
+use crate::filter::filter_allows;
 use anyhow::{Result, bail};
-use needy_config::filter_allows;
 
 /// Packs `root` (a file or directory) with rclone-style `filter` rules
 /// applied to paths relative to `root`.

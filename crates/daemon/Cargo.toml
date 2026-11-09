@@ -1,0 +1,27 @@
+[package]
+name = "needy-daemon"
+description = "Needy daemon: listeners for every role and the control plane"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+needy-api-client.workspace = true
+needy-api-proto.workspace = true
+needy-api-server.workspace = true
+needy-common.workspace = true
+needy-core.workspace = true
+needy-core-actor.workspace = true
+needy-core-executor.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true

@@ -2,19 +2,16 @@
 
 mod bench;
 mod build;
-mod chaos;
-#[cfg(unix)]
-mod control;
-mod exec_cli;
-mod executor;
-mod files;
 mod fs_cli;
-mod gateway;
-mod guest;
-mod prochost;
-mod report;
-mod server;
-mod trace;
+mod process_cli;
+
+use needy_common::process as prochost;
+use needy_core::report;
+use needy_core_actor::guest;
+use needy_core_executor::{client as exec_cli, service as executor};
+#[cfg(unix)]
+use needy_daemon::control;
+use needy_daemon::server;
 
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -152,6 +149,23 @@ enum ProfileCommand {
 }
 
 #[derive(Clone, Copy, ValueEnum)]
+enum OutputArg {
+    Human,
+    Json,
+    Ndjson,
+}
+
+impl From<OutputArg> for exec_cli::OutputMode {
+    fn from(arg: OutputArg) -> Self {
+        match arg {
+            OutputArg::Human => Self::Human,
+            OutputArg::Json => Self::Json,
+            OutputArg::Ndjson => Self::Ndjson,
+        }
+    }
+}
+
+#[derive(Clone, Copy, ValueEnum)]
 enum ReportLevel {
     Summary,
     Detailed,
@@ -239,7 +253,7 @@ struct ExecArgs {
     #[arg(long, default_value = "")]
     executor: String,
     #[arg(long, value_enum, default_value = "human")]
-    output: exec_cli::OutputMode,
+    output: OutputArg,
     #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
 }
@@ -301,12 +315,12 @@ fn main() -> Result<()> {
                         detach: args.detach,
                         session: args.session,
                         executor: args.executor,
-                        output: args.output,
+                        output: args.output.into(),
                     },
                 )
                 .await
             }
-            Command::Ps { session } => exec_cli::ps(&endpoint, session).await.map(|_| 0),
+            Command::Ps { session } => process_cli::ps(&endpoint, session).await.map(|_| 0),
             Command::Attach {
                 process_id,
                 no_replay,
@@ -315,7 +329,7 @@ fn main() -> Result<()> {
                 let number = prochost::signal_number(&signal)
                     .or_else(|| signal.parse().ok())
                     .unwrap_or(15);
-                exec_cli::kill(&endpoint, process_id, number)
+                process_cli::kill(&endpoint, process_id, number)
                     .await
                     .map(|_| 0)
             }
@@ -375,7 +389,7 @@ async fn daemon(args: DaemonArgs, endpoint: &str) -> Result<()> {
     match args.mode {
         Mode::Executor => {
             let service = executor::ExecutorService {
-                host: prochost::Host::default(),
+                host: needy_core_executor::prochost::Host::default(),
                 name: args.name,
             };
             let mut routes = tonic::service::Routes::default();
@@ -444,9 +458,9 @@ fn run_bench(command: BenchCommand) -> Result<()> {
 }
 
 fn profile_check(path: &std::path::Path, commands: &[String]) -> Result<()> {
-    use needy_config::profile::Profile;
-    use needy_config::recipe::{HostInfo, Recipe};
-    use needy_config::rules::{CommandContext, Target};
+    use needy_core::profile::Profile;
+    use needy_core::recipe::{HostInfo, Recipe};
+    use needy_core::rules::{CommandContext, Target};
     let profile = Profile::load(path)?;
     let base = path.parent().unwrap_or(std::path::Path::new("."));
     println!(

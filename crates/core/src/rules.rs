@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use crate::profile::{Actions, EnvOps, Fault, Profile, UnknownPolicy, When};
-use crate::util::{basename, expand_home, glob_match};
+use needy_common::util::{basename, expand_home, glob_match};
 
 /// What needy knows about a command when it decides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

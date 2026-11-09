@@ -5,16 +5,31 @@ work takes effect (executors). It has no agent-specific concepts.
 
 ## Project Structure
 
-- `crates/needy`: the `needy` binary: CLI, daemon, executor, actor guest
-  supervisor and proxy.
-- `crates/config`: `needy-config`, profiles, recipes and routing rules.
-- `crates/api-client`: `needy-api-client`, the Rust client for the daemon API.
-- `crates/api-server`: `needy-api-server`, protocol adapters such as bearer
-  authentication for serving the daemon API.
-- `crates/api-proto`: `needy-api-proto`, generated Protobuf and gRPC types.
-  Do not edit `src/gen`; change `proto/` and run `make proto`.
+Dependencies point downward; a crate never depends on one above it.
+
+- `crates/cli` (`needy-cli`, binary `needy`): argument parsing, terminal and
+  output formats, `build`, `profile check`, `bench`, `report` printing. It
+  composes the crates below and, inside an actor, dispatches to the guest init
+  and proxy by `argv[0]`.
+- `crates/daemon` (`needy-daemon`): listeners and authentication for every
+  role, and the control plane (sessions, the executor instance pool, the
+  session, process and guest APIs). Composition only; logic lives below.
+- `crates/core-actor` (`needy-core-actor`): the actor. `guest` is the in-guest
+  init and exec-routing proxy (Linux only); `gateway` is the actor gateway.
+- `crates/core-executor` (`needy-core-executor`): where commands run. The
+  process host (PTY, pipes, replay, detach), the process service, and the exec
+  client used by the CLI and the proxy.
+- `crates/core` (`needy-core`): domain logic shared by everything: profiles,
+  rules, recipes, chaos, traces and reports. No processes, listeners or VMs.
+- `crates/common` (`needy-common`): shared helpers that depend on neither the
+  platform nor an async runtime: globs, durations, filters, tar archives,
+  exit status and signal names.
+- `crates/api-proto`, `crates/api-client`, `crates/api-server`: generated
+  Protobuf and gRPC types, the Rust client, and server-side adapters such as
+  bearer authentication. Do not edit `api-proto/src/gen`; change `proto/` and
+  run `make proto`.
 - `proto/`: canonical API schemas, linted and generated with Buf.
-- `images/`: actor kernel, Firecracker patches and image builds.
+- `images/`: actor kernel sources, the Firecracker patch and image builds.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
 
 ## Agent Skills

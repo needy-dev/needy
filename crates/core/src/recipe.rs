@@ -8,7 +8,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::util::{mix, parse_duration};
+use needy_common::util::{mix, parse_duration};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]

@@ -8,7 +8,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
 
 use crate::rules::{self, CommandContext, Decision};
-use crate::util::{de_opt_duration, expand_home, glob_match};
+pub use needy_common::filter::filter_allows;
+use needy_common::util::{de_opt_duration, expand_home, glob_match};
 
 /// The single user that the actor and every executor share.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -532,38 +533,6 @@ fn load_raw(text: &str, base_dir: &Path, depth: usize) -> Result<RawProfile> {
     let parent = load_raw(&parent_text, &parent_base, depth + 1)
         .with_context(|| format!("in parent profile {}", path.display()))?;
     Ok(raw.merge(parent))
-}
-
-/// rclone-style filter: ordered `+ PATTERN` and `- PATTERN` rules, first match
-/// wins. A leading `/` anchors at the mapping root; otherwise a pattern may
-/// match at any directory level. A trailing `/` matches a directory and its
-/// contents. Paths that match no rule are included.
-pub fn filter_allows(filter: &[String], rel_path: &str) -> bool {
-    let rel = rel_path.trim_start_matches('/');
-    for rule in filter {
-        let rule = rule.trim();
-        let (include, pattern) = match rule.split_at_checked(1) {
-            Some(("+", rest)) => (true, rest.trim()),
-            Some(("-", rest)) => (false, rest.trim()),
-            _ => continue,
-        };
-        let mut pattern = pattern.to_string();
-        if pattern.ends_with('/') {
-            pattern.push_str("**");
-        }
-        let matched = if let Some(anchored) = pattern.strip_prefix('/') {
-            glob_match(anchored, rel)
-        } else {
-            glob_match(&pattern, rel)
-                || rel
-                    .match_indices('/')
-                    .any(|(i, _)| glob_match(&pattern, &rel[i + 1..]))
-        };
-        if matched {
-            return include;
-        }
-    }
-    true
 }
 
 const DAEMON_OWNED: &[&str] = &["--network", "--net", "--name", "--label", "-l"];

@@ -41,7 +41,7 @@ fn glob(p: &[char], t: &[char]) -> bool {
 }
 
 /// Parses `500ms`, `2s`, `10m`, `3d4h`; a bare number means seconds.
-pub(crate) fn parse_duration(text: &str) -> anyhow::Result<Duration> {
+pub fn parse_duration(text: &str) -> anyhow::Result<Duration> {
     let text = text.trim();
     if let Ok(secs) = text.parse::<f64>() {
         return Ok(Duration::from_secs_f64(secs));
@@ -86,9 +86,7 @@ pub(crate) fn parse_duration(text: &str) -> anyhow::Result<Duration> {
     Ok(total)
 }
 
-pub(crate) fn de_opt_duration<'de, D: Deserializer<'de>>(
-    d: D,
-) -> Result<Option<Duration>, D::Error> {
+pub fn de_opt_duration<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Duration>, D::Error> {
     let value = Option::<serde_yaml::Value>::deserialize(d)?;
     match value {
         None | Some(serde_yaml::Value::Null) => Ok(None),
@@ -113,7 +111,7 @@ pub fn mix(seed: u64, salt: u64) -> u64 {
 }
 
 /// Expands a leading `~` to `/home/<user>`.
-pub(crate) fn expand_home(path: &str, user: &str) -> String {
+pub fn expand_home(path: &str, user: &str) -> String {
     if path == "~" {
         format!("/home/{user}")
     } else if let Some(rest) = path.strip_prefix("~/") {
@@ -123,7 +121,7 @@ pub(crate) fn expand_home(path: &str, user: &str) -> String {
     }
 }
 
-pub(crate) fn basename(path: &str) -> &str {
+pub fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 

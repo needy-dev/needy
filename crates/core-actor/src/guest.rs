@@ -35,7 +35,7 @@ mod linux {
     use tokio::sync::mpsc;
     use tokio_stream::wrappers::ReceiverStream;
 
-    use crate::exec_cli;
+    use needy_core_executor::client as exec_cli;
 
     const DAEMON: &str = "vsock://2:7000";
     const STUB_DIR: &str = "/run/needy/bin";
@@ -158,7 +158,7 @@ mod linux {
             return Ok(code);
         }
         // Die of the same signal so the parent's wait sees signal death.
-        if let Some(sig) = crate::prochost::signal_number(&exit.signal) {
+        if let Some(sig) = needy_common::process::signal_number(&exit.signal) {
             unsafe {
                 libc::signal(sig, libc::SIG_DFL);
                 libc::kill(libc::getpid(), sig);
@@ -317,7 +317,7 @@ mod linux {
                 );
                 let event = TraceEvent {
                     session_id: session,
-                    time_ms: crate::trace::now_ms(),
+                    time_ms: needy_core::trace::now_ms(),
                     kind: "fault.injected".into(),
                     attrs: [
                         ("on".to_string(), "hwmon".to_string()),
@@ -353,7 +353,7 @@ mod linux {
                     status.code(),
                     status
                         .signal()
-                        .map(crate::prochost::signal_name)
+                        .map(needy_common::process::signal_name)
                         .unwrap_or_default(),
                 )
             }
@@ -481,7 +481,7 @@ mod linux {
             archive.extend(chunk.data);
         }
         let root = std::path::PathBuf::from(path);
-        crate::files::unpack(&archive, &root)?;
+        needy_common::archive::unpack(&archive, &root)?;
         chown_tree(&root, uid, gid);
         Ok(())
     }
@@ -506,7 +506,7 @@ mod linux {
         if !root.exists() {
             return Ok(());
         }
-        let archive = crate::files::pack(&root, &[])?;
+        let archive = needy_common::archive::pack(&root, &[])?;
         let mut messages = Vec::new();
         for (i, chunk) in archive.chunks(1 << 20).enumerate() {
             messages.push(PushFilesRequest {

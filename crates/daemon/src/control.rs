@@ -22,15 +22,15 @@ use needy_api_proto::v1::{
     PushEventsResponse, PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse,
     Session as SessionInfo, StopSessionRequest, StopSessionResponse, exec_request, exec_response,
 };
-use needy_config::profile::{FileMode, OnFull, Profile, Runtime, Side};
-use needy_config::recipe::{CompiledRecipe, HostInfo, Recipe};
-use needy_config::rules::{CommandContext, Target};
+use needy_core::profile::{FileMode, OnFull, Profile, Runtime, Side};
+use needy_core::recipe::{CompiledRecipe, HostInfo, Recipe};
+use needy_core::rules::{CommandContext, Target};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::executor::ExecStream;
-use crate::trace::{Trace, now_ms};
+use needy_core::trace::{Trace, now_ms};
+use needy_core_executor::service::ExecStream;
 
 /// Ports the actor reaches on the host over vsock.
 pub const GUEST_PORT: u32 = 7000;
@@ -53,7 +53,7 @@ pub struct Instance {
 struct InstanceRequest<'a> {
     key: &'a str,
     name: &'a str,
-    config: &'a needy_config::profile::ExecutorConfig,
+    config: &'a needy_core::profile::ExecutorConfig,
     session: &'a str,
     profile: &'a Profile,
     base: &'a Path,
@@ -73,7 +73,7 @@ pub struct Session {
     pub actor: Mutex<Option<tokio::process::Child>>,
     pub actor_command: Vec<String>,
     pub recipe: Option<CompiledRecipe>,
-    pub injector: Arc<crate::chaos::Injector>,
+    pub injector: Arc<needy_core::chaos::Injector>,
 }
 
 pub struct Daemon {
@@ -102,8 +102,8 @@ impl Daemon {
         // This machine is always available as the `local` executor.
         let local_sock = state_dir.join("local.sock");
         let local_listen = format!("unix:{}", local_sock.display());
-        let host = crate::prochost::Host::default();
-        let service = crate::executor::ExecutorService {
+        let host = needy_core_executor::prochost::Host::default();
+        let service = needy_core_executor::service::ExecutorService {
             host,
             name: "local".into(),
         };
@@ -250,7 +250,7 @@ impl Daemon {
         } else {
             request.actor_command.clone()
         };
-        let injector = Arc::new(crate::chaos::Injector::new(&profile.chaos));
+        let injector = Arc::new(needy_core::chaos::Injector::new(&profile.chaos));
         let session = Arc::new(Session {
             id: id.clone(),
             name: name.clone(),
@@ -365,7 +365,7 @@ impl Daemon {
             }
             Runtime::Docker => {
                 let docker = config.docker.clone().unwrap_or_default();
-                if let Err(e) = needy_config::profile::check_docker_args(&docker.args, &[]) {
+                if let Err(e) = needy_core::profile::check_docker_args(&docker.args, &[]) {
                     bail!("{e}");
                 }
                 let image = docker
@@ -517,7 +517,7 @@ impl Daemon {
         });
         let gateway_path = format!("{}_{GATEWAY_PORT}", vsock.display());
         let network = &session.profile.actor.network;
-        let policy = crate::gateway::Policy {
+        let policy = needy_core_actor::gateway::Policy {
             allow: network.allow.clone(),
             upstream: network.upstream.clone(),
             inject: network
@@ -526,7 +526,7 @@ impl Daemon {
                 .map(|(h, i)| (h.clone(), (i.header.clone(), i.secret.clone())))
                 .collect(),
         };
-        let gateway = Arc::new(crate::gateway::Gateway::new(
+        let gateway = Arc::new(needy_core_actor::gateway::Gateway::new(
             policy,
             self.trace.clone(),
             session.id.clone(),
@@ -704,7 +704,8 @@ impl Daemon {
             let root = Self::host_path(session, src);
             let filter = mapping.filter.clone();
             let archive =
-                tokio::task::spawn_blocking(move || crate::files::pack(&root, &filter)).await??;
+                tokio::task::spawn_blocking(move || needy_common::archive::pack(&root, &filter))
+                    .await??;
             let size = archive.len();
             Self::run_on(
                 instance,
@@ -760,8 +761,10 @@ impl Daemon {
             .with_context(|| format!("mirror-out {name}"))?;
             let destination = Self::host_path(session, dst);
             let size = archive.len();
-            tokio::task::spawn_blocking(move || crate::files::unpack(&archive, &destination))
-                .await??;
+            tokio::task::spawn_blocking(move || {
+                needy_common::archive::unpack(&archive, &destination)
+            })
+            .await??;
             self.trace.record(
                 &session.id,
                 "files.mirror_out",
@@ -1220,7 +1223,7 @@ impl ProcessService for Api {
         // SFTP for an actor mount is framed so file faults can answer `open`.
         let tap = match (&mount_root, &injector) {
             (Some(root), Some(injector)) if injector.has("file.open") => {
-                Some(Arc::new(crate::chaos::SftpTap::new(root)))
+                Some(Arc::new(needy_core::chaos::SftpTap::new(root)))
             }
             _ => None,
         };
@@ -1302,7 +1305,8 @@ impl ProcessService for Api {
                             .insert(started.process_id.clone(), instance.clone());
                         let mut cast_path = String::new();
                         if let (Some((cols, rows)), Some(dir)) = (tty, &cast_dir) {
-                            cast = crate::trace::open_cast(dir, &process_id, cols, rows, &argv);
+                            cast =
+                                needy_core::trace::open_cast(dir, &process_id, cols, rows, &argv);
                             if cast.is_some() {
                                 cast_path =
                                     dir.join(format!("{process_id}.cast")).display().to_string();
@@ -1330,7 +1334,7 @@ impl ProcessService for Api {
                             }
                         }
                         if let Some(file) = cast.as_mut() {
-                            crate::trace::cast_output(file, started_ms, bytes);
+                            needy_core::trace::cast_output(file, started_ms, bytes);
                         }
                     }
                     Some(exec_response::Payload::Exited(exit)) => {
@@ -1568,10 +1572,11 @@ impl GuestService for Api {
         };
         let root = Daemon::host_path(&session, src);
         let filter = mapping.filter.clone();
-        let archive = tokio::task::spawn_blocking(move || crate::files::pack(&root, &filter))
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?
-            .map_err(status)?;
+        let archive =
+            tokio::task::spawn_blocking(move || needy_common::archive::pack(&root, &filter))
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?
+                .map_err(status)?;
         self.daemon.trace.record(
             &session.id,
             "files.copy_in",
@@ -1613,11 +1618,12 @@ impl GuestService for Api {
         };
         let destination = Daemon::host_path(&session, dst);
         let size = archive.len();
-        let count =
-            tokio::task::spawn_blocking(move || crate::files::unpack(&archive, &destination))
-                .await
-                .map_err(|e| Status::internal(e.to_string()))?
-                .map_err(status)?;
+        let count = tokio::task::spawn_blocking(move || {
+            needy_common::archive::unpack(&archive, &destination)
+        })
+        .await
+        .map_err(|e| Status::internal(e.to_string()))?
+        .map_err(status)?;
         self.daemon.trace.record(
             &session.id,
             "files.mirror_out",
@@ -1639,7 +1645,7 @@ impl GuestService for Api {
         let mut stream = request.into_inner();
         while let Some(message) = stream.message().await? {
             if let Some(event) = message.event {
-                self.daemon.trace.record_event(crate::trace::Event {
+                self.daemon.trace.record_event(needy_core::trace::Event {
                     session: session.id.clone(),
                     time_ms: event.time_ms,
                     kind: event.kind,
