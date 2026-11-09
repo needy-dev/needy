@@ -212,6 +212,37 @@ Executor network: registry.npmjs.org (9)
 Actor network: openrouter.ai (142)
 ```
 
+### Current state
+
+`needy report` reads the session's rows from `trace.db`, decodes each into a
+typed `needy_core::event` value, and renders them with
+`needy_core::report::render`, which does no IO. A row of another schema
+version, such as one written before the typed events, is an error that names
+the row instead of a partial report. Implemented today:
+
+- **Title**: the session ID and the profile's name (its directory's name, for
+  example `smoke`).
+- **Overview**: duration (creation to the first of the actor's exit and the
+  stop), state, the driving program's exit, routed and kept commands, CLI
+  commands, failed commands and model calls through the actor gateway.
+  **Failed** counts commands that exited non-zero or by a signal and commands
+  an `exec` fault failed before they started.
+- **Decisions**: routed, kept, denied and injected faults; 🎭 Recipe answered
+  is not implemented. **Kept on actor** counts only commands the actor's
+  kernel routed to needy and the rules kept on the actor; other commands run
+  on the actor without a trace event. A line under the table says so and
+  names the route list, or says that the kernel routed every exec, or that the
+  session ran no actor.
+- **Findings**: environment probing by identity commands, denied commands,
+  denied network requests, and injected faults by kind. Timing probes,
+  harness replacement and reactions to faults are not implemented.
+- **Top activity**: executor commands (from the CLI and the actor, not
+  needy's own copy-in, `fs` and mounts), executor and actor network hosts,
+  and the slowest commands. Empty lines are omitted.
+- **`--level detailed`** adds the event timeline with each event's JSON
+  payload. Per-decision tables and links to terminal recordings are not
+  implemented.
+
 ## `needy build`
 
 Builds a machine image from a [recipe](../config/2026-11-09-recipe-design.md):

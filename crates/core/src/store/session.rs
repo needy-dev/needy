@@ -13,7 +13,7 @@ pub struct Model {
   pub profile: Option<String>,
   pub created_ms: Option<i64>,
   pub ended_ms: Option<i64>,
-  /// `running`, `stopped` or `finished`.
+  /// A `core::types::SessionState`: `running`, `stopped` or `finished`.
   pub state: Option<String>,
 }
 

@@ -412,7 +412,7 @@ fn profile_check_compiles_a_built_in_recipe() {
   // compiled machine is checked here.
   let text = stdout(&output);
   assert!(text.contains("recipe: 2 vCPU, 4096 MiB"), "{text}{}", stderr(&output));
-  assert!(text.contains("NEEDY_SMBIOS="), "{text}");
+  assert!(text.contains("  smbios: sys_vendor=Google, product_name=Google Compute Engine,"), "{text}");
 }
 
 #[test]

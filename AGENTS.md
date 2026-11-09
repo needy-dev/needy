@@ -21,9 +21,13 @@ Dependencies point downward; a crate never depends on one above it.
   process host (PTY, pipes, replay, detach), the process service, and the exec
   client used by the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
-  interprets loaded profiles and recipes (rules, recipe compilation, chaos),
-  and holds traces and reports and the daemon's SQLite store (SeaORM entities
-  and migrations in `store`). No processes, listeners or VMs.
+  interprets loaded profiles and recipes (`rules`, `recipe` compilation to a
+  typed VM identity, `chaos`), and owns command patterns (`pattern`), the
+  interceptor traits of each hook point (`intercept`), the values producers
+  and consumers share (`types`), the typed event schema (`event`) and report
+  rendering (`report`, no IO). Until the `trace` crate lands it also holds the
+  trace writer and the daemon's SQLite store (`trace`, `store`). No
+  processes, listeners or VMs.
 - `crates/config` (`needy-config`): what users write. Profile and recipe
   schemas, loading from files, `builtin:NAME` and text with `extends` chains
   (`source`), the one merge model (`merge`), cross-reference checks

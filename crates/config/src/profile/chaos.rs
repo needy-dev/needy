@@ -1,7 +1,7 @@
 //! Chaos: deterministic faults, fired from the seed, the fault's index and how
 //! often it has matched.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::value::Duration;
 
@@ -34,7 +34,7 @@ pub struct Fault {
 }
 
 /// Where a fault applies.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 pub enum FaultKind {
   #[serde(rename = "exec")]
   Exec,

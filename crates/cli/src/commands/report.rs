@@ -1,9 +1,13 @@
-//! `needy report`: a markdown report of a session from the trace.
+//! `needy report`: a markdown report of a session from the trace. Rows are
+//! read from the trace database, decoded into `needy_core::event` values and
+//! rendered by `needy_core::report`.
 
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::ValueEnum;
+use needy_core::event::{Event, Recorded};
+use needy_core::report;
 
 use crate::cli::Context;
 
@@ -32,7 +36,25 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   if !db.exists() {
     anyhow::bail!("no trace database at {}; is NEEDY_STATE_DIR the daemon's?", db.display());
   }
-  let text = needy_core::report::render(&db, &args.session, matches!(args.level, Level::Detailed)).await?;
+  let loaded = needy_core::trace::load(&db, &args.session).await?;
+  let events = loaded
+    .rows
+    .iter()
+    .enumerate()
+    .map(|(index, row)| {
+      let event = Event::decode(&row.kind, row.version, &row.payload)
+        .with_context(|| format!("session {}: event {index} ({}) cannot be read", loaded.session, row.kind))?;
+      Ok(Recorded {
+        time_ms: row.time_ms,
+        event,
+      })
+    })
+    .collect::<Result<Vec<_>>>()?;
+  let level = match args.level {
+    Level::Summary => report::Level::Summary,
+    Level::Detailed => report::Level::Detailed,
+  };
+  let text = report::render(&loaded.session, &events, level);
   match args.output {
     Some(path) => std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?,
     None => print!("{text}"),

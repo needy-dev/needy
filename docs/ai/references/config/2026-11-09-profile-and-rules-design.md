@@ -181,12 +181,14 @@ matched (`nth`, `probability`), so a replayed session injects the same faults.
 
 | `on` | Subject matched by `match` | Effect |
 | --- | --- | --- |
-| `exec` | The command, word by word like command rules (`curl **`) | `errno` denies the command with `needy chaos: ERRNO`; `delay` sleeps first |
+| `exec` | The command as typed, word by word like command rules (`curl **`) | `errno` fails the command before it starts: `needy: fault injected: ERRNO`, exit 126; `delay` holds it first |
 | `net.connect` | The host, at the actor gateway | `errno` returns 502; `delay` sleeps first |
 | `file.open` | The path relative to an actor mount | The SFTP `open` gets an error reply; sshfs reports `ENOENT`, `EACCES`, `EPERM`, `EOPNOTSUPP` or, for anything else, `EIO` |
 | `hwmon` | — | At `at`, the fake coretemp reads `set.temp_c` |
 
-Every injected fault is a `fault.injected` trace event.
+Every injected fault is a `fault.injected` trace event that names its kind,
+its target (the command, host, path or sensor) and its effect. `exec` faults
+are the second step of [rule evaluation](#evaluation).
 
 ## Commands
 
@@ -286,6 +288,44 @@ commands:
     to: build
     use: [clean-env]
 ```
+
+### Evaluation
+
+Deciding a command is the `exec.decide` hook point: an ordered chain of
+interceptors (`needy_core::intercept`), each of which sees the decision so
+far and returns it. Interceptors only decide; the daemon applies their effects.
+
+1. **Rules** (`needy_core::rules`). Launcher resolvers rewrite the command
+   into its effective form. Every rule whose `match` and `when` hold applies
+   in order, as in [Composition](#composition). Patterns are compiled once per
+   decision and shared with resolvers, `when.under` and `exec` faults
+   (`needy_core::pattern`). The outcome is the first `deny`, else the first
+   placement, else a shell script's common placement (see
+   [Launcher resolvers](#launcher-resolvers)), else `default_executor`, else
+   the actor.
+2. **Chaos** (`needy_core::chaos`). Unless the command is already denied,
+   `exec` faults are checked against the command as typed. An `errno` turns
+   the outcome into a fault; a `delay` keeps the placement and the daemon
+   waits before answering. Each fired fault becomes a `fault.injected` event.
+
+The daemon records each decision as an `exec.decide` event with its origin
+and outcome:
+
+- A command the actor's kernel routes is decided once, when the proxy asks;
+  its later exec on the executor is not decided again.
+- A `needy exec` in a session without `--executor` runs the whole chain. A
+  command the rules keep on the actor runs on `default_executor` (or the
+  session's first executor), and the event records that executor, since a CLI
+  command has no actor to run on.
+- A `needy exec --executor NAME` skips the rules; only chaos runs, and no
+  `exec.decide` event is recorded.
+
+`profile check --cmd` runs the rules and lists the `exec` faults that match
+without firing them.
+
+The daemon does not yet send process ancestry, so `when.under` cannot match a
+routed command (fix slice 8f). A user decider after chaos (`ask`, above) is
+deferred.
 
 ### Extends
 

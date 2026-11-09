@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
 use needy_config::Source;
-use needy_config::profile::{Fault, FaultKind};
+use needy_config::profile::Fault;
 use needy_config::validate::{self, Finding, Severity};
-use needy_core::chaos::Injector;
-use needy_core::recipe::HostInfo;
-use needy_core::rules::{self, CommandContext, Target};
+use needy_core::chaos::{Injector, Subject};
+use needy_core::intercept::ExecContext;
+use needy_core::recipe::{HostInfo, VmIdentity};
+use needy_core::rules;
+use needy_core::types::Outcome;
 use serde::Serialize;
 
 use crate::cli::Context;
@@ -77,9 +79,7 @@ fn check(path: &Path, commands: &[String]) -> Result<i32> {
       "recipe: {} vCPU, {} MiB, hostname {:?}, uptime offset {} s",
       compiled.vcpus, compiled.mem_mib, compiled.hostname, compiled.uptime_offset_secs
     );
-    for (k, v) in &compiled.firecracker_env {
-      println!("  {k}={v}");
-    }
+    print_identity(&compiled.identity);
     findings.extend(compiled.findings.into_iter().map(|f| Finding {
       message: format!("recipe: {}", f.message),
       ..f
@@ -102,7 +102,7 @@ fn check(path: &Path, commands: &[String]) -> Result<i32> {
     let argv = shell_words::split(command).with_context(|| format!("cannot split {command:?}"))?;
     let decision = rules::decide(
       &profile,
-      &CommandContext {
+      &ExecContext {
         argv: argv.clone(),
         cwd: format!("/home/{}/workspace", profile.user.name),
         env: Default::default(),
@@ -110,13 +110,14 @@ fn check(path: &Path, commands: &[String]) -> Result<i32> {
         ancestors: Vec::new(),
       },
     );
-    let target = match &decision.target {
-      Target::Actor => "actor".to_string(),
-      Target::Executor(name) => format!("executor {name}"),
-      Target::Deny(message) => format!("deny ({message})"),
+    let target = match &decision.outcome {
+      Outcome::Run(placement) => placement.to_string(),
+      Outcome::Deny(message) => format!("deny ({message})"),
+      Outcome::Fault(errno) => format!("fault ({errno})"),
     };
-    // The daemon checks exec faults against the command as typed.
-    let faults = injector.matching(FaultKind::Exec, &argv.join(" ")).into_iter().map(describe).collect();
+    // The daemon checks exec faults against the command as typed. Nothing
+    // fires here, so a fault that would fire later is still listed.
+    let faults = injector.matching(Subject::Exec(&argv)).into_iter().map(describe).collect();
     rows.push(Decision {
       command: command.clone(),
       target,
@@ -128,6 +129,40 @@ fn check(path: &Path, commands: &[String]) -> Result<i32> {
   println!();
   output::print_table(&rows);
   Ok(code)
+}
+
+/// The machine a recipe presents through the hypervisor, one line per part.
+fn print_identity(identity: &VmIdentity) {
+  if let Some(brand) = &identity.cpu_brand {
+    println!("  cpu brand: {brand}");
+  }
+  if identity.hide_hypervisor {
+    println!("  hypervisor: hidden");
+  }
+  if let Some(smbios) = &identity.smbios {
+    let chassis = smbios.chassis_type.map(|n| n.to_string());
+    let fields = [
+      ("sys_vendor", smbios.sys_vendor.as_deref()),
+      ("product_name", smbios.product_name.as_deref()),
+      ("product_version", smbios.product_version.as_deref()),
+      ("serial", smbios.serial.as_deref()),
+      ("board_vendor", smbios.board_vendor.as_deref()),
+      ("board_name", smbios.board_name.as_deref()),
+      ("bios_vendor", smbios.bios_vendor.as_deref()),
+      ("bios_version", smbios.bios_version.as_deref()),
+      ("bios_date", smbios.bios_date.as_deref()),
+      ("chassis_type", chassis.as_deref()),
+      ("uuid", Some(smbios.uuid.as_str())),
+    ];
+    let text = fields.iter().filter_map(|(k, v)| v.map(|v| format!("{k}={v}"))).collect::<Vec<_>>().join(", ");
+    println!("  smbios: {text}");
+  }
+  if let Some(id) = identity.pci_host_bridge {
+    println!("  pci host bridge: {id}");
+  }
+  if let Some(id) = identity.pci_isa_bridge {
+    println!("  pci isa bridge: {id}");
+  }
 }
 
 /// A fault's effect and when it fires, for example `ECONNREFUSED` or

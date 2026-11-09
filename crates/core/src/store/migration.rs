@@ -7,7 +7,7 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
   fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![Box::new(CreateTrace)]
+    vec![Box::new(CreateTrace), Box::new(TypedPayload)]
   }
 }
 
@@ -34,6 +34,8 @@ enum Events {
   TimeMs,
   Kind,
   Attrs,
+  Version,
+  Payload,
 }
 
 #[derive(DeriveIden)]
@@ -89,5 +91,36 @@ impl MigrationTrait for CreateTrace {
   async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
     manager.drop_table(Table::drop().table(Sessions::Table).to_owned()).await?;
     manager.drop_table(Table::drop().table(Events::Table).to_owned()).await
+  }
+}
+
+/// Typed event payloads: `attrs` becomes `payload`, and `version` records the
+/// payload schema. Existing rows keep their string attributes as version 0,
+/// which readers reject.
+// TODO(trace): slice 4 replaces this schema with the `trace` crate's
+// envelope.
+struct TypedPayload;
+
+impl MigrationName for TypedPayload {
+  fn name(&self) -> &str {
+    "m20261109_000002_typed_payload"
+  }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for TypedPayload {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    // NOTICE: SQLite applies one change per `ALTER TABLE`.
+    manager.alter_table(Table::alter().table(Events::Table).rename_column(Events::Attrs, Events::Payload).to_owned()).await?;
+    manager
+      .alter_table(
+        Table::alter().table(Events::Table).add_column(ColumnDef::new(Events::Version).integer().not_null().default(0)).to_owned(),
+      )
+      .await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.alter_table(Table::alter().table(Events::Table).drop_column(Events::Version).to_owned()).await?;
+    manager.alter_table(Table::alter().table(Events::Table).rename_column(Events::Payload, Events::Attrs).to_owned()).await
   }
 }

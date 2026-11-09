@@ -139,6 +139,7 @@ mod run {
         .session
         .map(|s| s.state)
         .unwrap_or_default();
+      // TODO(proto): session state becomes a proto enum in slice 7a.
       if state != "running" {
         break;
       }

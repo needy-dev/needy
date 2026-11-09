@@ -66,8 +66,10 @@ flowchart LR
 - **Route.** Exec, file and network operations go to the actor or an executor
   by declarative rules. The program sees ordinary PIDs, pipes, terminals and
   exit codes.
-- **Observe.** Every operation and decision is recorded. `needy report` writes a
-  human-readable summary; the trace is stored in SQLite and JSONL.
+- **Observe.** Routing decisions, routed execs, file transfers, gateway
+  requests and faults are recorded as typed events; commands the actor's
+  kernel does not route are not. `needy report` writes a human-readable
+  summary; the trace is stored in SQLite and JSONL.
 - **Shape.** Inject faults such as `EIO`, delays or overheating sensors, and
   build machines whose identity comes from a recipe.
 

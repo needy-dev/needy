@@ -129,7 +129,11 @@ Producers build a `core::event` payload and hand its serialized form to
 | `actor.*` (config, exit, guest events) | — | trace |
 
 - **Interceptors** are traits in `core::intercept`, one per point, for example
-  `async fn decide(&self, ctx: &ExecContext) -> Decision`.
+  `ExecDecide::decide(&self, ctx: &ExecContext, decision: Decision) -> Decision`:
+  each interceptor sees the decision so far and returns it. They are
+  synchronous and only decide; effects such as a fault's delay travel in the
+  decision and the flow applies them, so a chain is deterministic for a
+  profile, a seed and a context (slice 3).
   `TODO(intercept):` a user decider after chaos is deferred. It is the `ask`
   escape hatch in the
   [profile note](../config/2026-11-09-profile-and-rules-design.md), off by

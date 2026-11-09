@@ -24,8 +24,16 @@ use needy_api_proto::v1::{
 use needy_config::Source;
 use needy_config::profile::{Executor, FaultKind, FileMode, OnFull, Profile, Runtime, Side};
 use needy_config::validate::{self, Severity};
-use needy_core::recipe::{CompiledRecipe, HostInfo};
-use needy_core::rules::{self, CommandContext, Target};
+use needy_core::chaos::Injector;
+use needy_core::chaos::sftp::SftpTap;
+use needy_core::event::{
+  self, ActorConfig, ActorExit, ActorStart, ActorVmExit, Event, ExecDecide, ExecExit, ExecStart, FileEnd, FilesCopyIn, FilesMirrorOut,
+  SessionCreate, SessionStop,
+};
+use needy_core::intercept::{self, ExecContext};
+use needy_core::recipe::{CompiledRecipe, HostInfo, VmIdentity};
+use needy_core::rules::{self, Rules};
+use needy_core::types::{Decision, Network, Origin, Outcome, Placement, SessionState};
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
@@ -70,11 +78,11 @@ pub struct Session {
   pub created_ms: i64,
   pub dir: PathBuf,
   pub executors: BTreeMap<String, Arc<Instance>>,
-  pub state: Mutex<String>,
+  pub state: Mutex<SessionState>,
   pub actor: Mutex<Option<tokio::process::Child>>,
   pub actor_command: Vec<String>,
   pub recipe: Option<CompiledRecipe>,
-  pub injector: Arc<needy_core::chaos::Injector>,
+  pub injector: Arc<Injector>,
 }
 
 pub struct Daemon {
@@ -211,7 +219,7 @@ impl Daemon {
           session_id: id.clone(),
           name: or_id(&request.name),
           group: or_id(&request.group),
-          state: "failed".into(),
+          state: SessionState::Failed.as_str().into(),
           executors: Vec::new(),
           created_at_ms: created_ms,
           profile: request.profile_dir.clone(),
@@ -250,7 +258,7 @@ impl Daemon {
     } else {
       request.name.clone()
     };
-    let profile_name = base.display().to_string();
+    let profile_name = profile_name(&base);
     let recipe = match &profile.actor.recipe {
       Some(reference) => {
         let recipe = needy_config::recipe::load(&Source::reference(reference, &base))?;
@@ -294,7 +302,7 @@ impl Daemon {
     } else {
       request.actor_command.clone()
     };
-    let injector = Arc::new(needy_core::chaos::Injector::new(&profile.chaos));
+    let injector = Arc::new(Injector::new(&profile.chaos));
     let session = Arc::new(Session {
       id: id.clone(),
       name: name.clone(),
@@ -304,7 +312,7 @@ impl Daemon {
       created_ms: now_ms(),
       dir: dir.clone(),
       executors,
-      state: Mutex::new("running".into()),
+      state: Mutex::new(SessionState::Running),
       actor: Mutex::new(None),
       actor_command,
       recipe,
@@ -313,13 +321,20 @@ impl Daemon {
     self.sessions.lock().unwrap().insert(id.clone(), session.clone());
     self.trace.record(
       &id,
-      "session.create",
-      [
-        ("name", name),
-        ("group", group),
-        ("profile", profile_name),
-        ("executors", session.executors.iter().map(|(n, i)| format!("{n}={}:{}", i.runtime, i.id)).collect::<Vec<_>>().join(",")),
-      ],
+      Event::SessionCreate(SessionCreate {
+        name,
+        group,
+        profile: profile_name,
+        executors: session
+          .executors
+          .iter()
+          .map(|(n, i)| event::ExecutorRef {
+            name: n.clone(),
+            runtime: i.runtime.clone(),
+            instance: i.id.clone(),
+          })
+          .collect(),
+      }),
     );
     self.copy_in_executors(&session).await?;
     if request.start_actor {
@@ -488,11 +503,11 @@ impl Daemon {
     if let Err(e) = self.mirror_out_executors(session).await {
       tracing::warn!("mirror-out for {}: {e:#}", session.id);
     }
-    *session.state.lock().unwrap() = "stopped".into();
+    *session.state.lock().unwrap() = SessionState::Stopped;
     for instance in session.executors.values() {
       self.release(instance).await;
     }
-    self.trace.record(&session.id, "session.stop", [("", "")]);
+    self.trace.record(&session.id, Event::SessionStop(SessionStop {}));
     self.sessions.lock().unwrap().remove(&session.id);
     self.ended.lock().unwrap().push(Api::info(session));
   }
@@ -537,7 +552,7 @@ impl Daemon {
       policy,
       self.trace.clone(),
       session.id.clone(),
-      "actor",
+      Network::Actor,
       Some(session.injector.clone()),
     ));
     // A socket left by an earlier daemon would make bind fail.
@@ -555,7 +570,7 @@ impl Daemon {
 
     let recipe = session.recipe.clone();
     let (vcpus, mem) = recipe.as_ref().map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048));
-    let pci = recipe.as_ref().is_some_and(|r| r.firecracker_env.keys().any(|k| k.starts_with("NEEDY_PCI")));
+    let pci = recipe.as_ref().is_some_and(|r| r.identity.has_pci());
     let mut boot_args = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4".to_string();
     if !pci {
       boot_args.push_str(" pci=off");
@@ -585,29 +600,42 @@ impl Daemon {
       command.arg("--enable-pci");
     }
     if let Some(r) = &recipe {
-      command.envs(&r.firecracker_env);
+      command.envs(firecracker_env(&r.identity));
     }
     let mut child = command.spawn().context("cannot start firecracker")?;
     let pid = child.id().unwrap_or(0);
     self.trace.record(
       &session.id,
-      "actor.start",
-      [
-        ("pid", pid.to_string()),
-        ("vcpus", vcpus.to_string()),
-        ("mem_mib", mem.to_string()),
-      ],
+      Event::ActorStart(ActorStart {
+        pid,
+        vcpus,
+        mem_mib: mem,
+      }),
     );
     // Firecracker exits when the guest reboots after the driving program.
     let daemon = self.clone();
     let id = session.id.clone();
     let watch = session.clone();
     tokio::spawn(async move {
-      let status = child.wait().await;
-      daemon.trace.record(&id, "actor.vm.exit", [("status", format!("{status:?}"))]);
+      let exit = match child.wait().await {
+        Ok(status) => {
+          use std::os::unix::process::ExitStatusExt;
+          ActorVmExit {
+            code: status.code(),
+            signal: status.signal().map(needy_core_executor::signals::name),
+            error: None,
+          }
+        }
+        Err(e) => ActorVmExit {
+          code: None,
+          signal: None,
+          error: Some(e.to_string()),
+        },
+      };
+      daemon.trace.record(&id, Event::ActorVmExit(exit));
       let mut state = watch.state.lock().unwrap();
-      if *state == "running" {
-        *state = "finished".into();
+      if *state == SessionState::Running {
+        *state = SessionState::Finished;
       }
     });
     Ok(())
@@ -634,7 +662,7 @@ impl Daemon {
         argv,
         no_stdin: input.is_none(),
         env: [("COPYFILE_DISABLE".to_string(), "1".to_string())].into(),
-        origin: "files".into(),
+        origin: Origin::Files.as_str().into(),
         ..Default::default()
       })),
     })
@@ -710,12 +738,14 @@ impl Daemon {
       .with_context(|| format!("copy-in {name}"))?;
       self.trace.record(
         &session.id,
-        "files.copy_in",
-        [
-          ("name", name.clone()),
-          ("to", format!("{exec}:{path}")),
-          ("bytes", size.to_string()),
-        ],
+        Event::FilesCopyIn(FilesCopyIn {
+          name: name.clone(),
+          to: FileEnd::Executor {
+            name: exec.clone(),
+            path: path.clone(),
+          },
+          bytes: size as u64,
+        }),
       );
     }
     Ok(())
@@ -749,101 +779,140 @@ impl Daemon {
       tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination)).await??;
       self.trace.record(
         &session.id,
-        "files.mirror_out",
-        [
-          ("name", name.clone()),
-          ("from", format!("{exec}:{path}")),
-          ("bytes", size.to_string()),
-        ],
+        Event::FilesMirrorOut(FilesMirrorOut {
+          name: name.clone(),
+          from: FileEnd::Executor {
+            name: exec.clone(),
+            path: path.clone(),
+          },
+          bytes: size as u64,
+          entries: None,
+        }),
       );
     }
     Ok(())
   }
 
-  // ---------------------------------------------------------------- chaos
-
-  /// Applies `exec` faults: delays sleep here; an errno denies the command.
-  async fn exec_fault(&self, session: &Session, command: &str) -> Option<String> {
-    let fired = session.injector.check(FaultKind::Exec, command)?;
-    if let Some(delay) = fired.delay {
-      tokio::time::sleep(delay).await;
-    }
-    self.trace.record(
-      &session.id,
-      "fault.injected",
-      [
-        ("on", "exec".to_string()),
-        ("argv", command.to_string()),
-        ("errno", fired.errno.clone().unwrap_or_default()),
-        ("delay_ms", fired.delay.map(|d| d.as_millis().to_string()).unwrap_or_default()),
-      ],
-    );
-    fired.errno
-  }
-
   // -------------------------------------------------------------- routing
 
-  fn decide(&self, session: &Session, request: &DecideRequest) -> DecideResponse {
-    let ctx = CommandContext {
-      argv: request.argv.clone(),
-      cwd: request.cwd.clone(),
-      env: request.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-      tty: request.tty,
-      ancestors: Vec::new(),
+  /// Runs the `exec.decide` chain for one command of `session`: rules, then
+  /// chaos. A command placed on `executor` explicitly skips the rules. The
+  /// delays of injected faults are applied here, and each fault is recorded.
+  async fn decide(&self, session: &Session, ctx: &ExecContext, executor: Option<&str>) -> Decision {
+    let rules = Rules::new(&session.profile);
+    let injector = session.injector.as_ref();
+    let decision = match executor {
+      None => intercept::decide(&[&rules, injector], ctx, Decision::unchanged(ctx, Placement::Actor)),
+      Some(name) => intercept::decide(&[injector], ctx, Decision::unchanged(ctx, Placement::Executor(name.into()))),
     };
-    let decision = rules::decide(&session.profile, &ctx);
-    let (target, deny) = match &decision.target {
-      Target::Actor => ("actor".to_string(), String::new()),
-      Target::Executor(name) => (name.clone(), String::new()),
-      Target::Deny(message) => (String::new(), message.clone()),
-    };
-    let mut argv = decision.argv.clone();
-    let mut cwd = decision.cwd.clone();
-    if let Some(instance) = session.executors.get(&target) {
-      for (from, to) in &instance.path_map {
-        cwd = map_prefix(&cwd, from, to);
-        argv = argv.iter().map(|a| map_prefix(a, from, to)).collect();
+    for fired in &decision.fired {
+      if let Some(delay) = fired.effect.delay {
+        tokio::time::sleep(delay).await;
       }
-      // Run the executable the executor resolves, not the actor's path.
-      if let Some(first) = argv.first_mut()
-        && first.starts_with('/')
-      {
-        *first = Path::new(first.as_str()).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| first.clone());
-      }
+      self.trace.record(&session.id, Event::FaultInjected(fired.clone()));
     }
-    let env: HashMap<String, String> = decision
-      .env
-      .iter()
-      .filter(|(k, v)| request.env.get(*k) != Some(*v) || decision.clear_env)
-      .map(|(k, v)| (k.clone(), v.clone()))
-      .collect();
+    decision
+  }
+
+  /// Records an `exec.decide` event; `outcome` is where the command really
+  /// runs, which for a command from the CLI may differ from the rules'.
+  fn record_decision(&self, session: &Session, ctx: &ExecContext, decision: &Decision, origin: Origin, outcome: Outcome) {
     self.trace.record(
       &session.id,
-      "exec.decide",
-      [
-        ("argv", request.argv.join(" ")),
-        ("effective", decision.effective.join(" ")),
-        (
-          "target",
-          if deny.is_empty() {
-            target.clone()
-          } else {
-            "deny".into()
-          },
-        ),
-        ("deny", deny.clone()),
-        ("rules", decision.matched.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(",")),
-      ],
+      Event::ExecDecide(ExecDecide {
+        argv: ctx.argv.clone(),
+        effective: decision.effective.clone(),
+        origin,
+        outcome,
+        rules: decision.matched.clone(),
+      }),
     );
-    DecideResponse {
-      target,
-      argv,
-      env,
-      clear_env: decision.clear_env,
-      cwd,
-      deny,
+  }
+}
+
+/// The command a decision runs on `instance`: its arguments and working
+/// directory through the executor's path map, with the executable resolved
+/// by the executor instead of the actor's path.
+fn executor_command(instance: Option<&Instance>, decision: &Decision) -> (Vec<String>, String) {
+  let mut argv = decision.argv.clone();
+  let mut cwd = decision.cwd.clone();
+  if let Some(instance) = instance {
+    for (from, to) in &instance.path_map {
+      cwd = map_prefix(&cwd, from, to);
+      argv = argv.iter().map(|a| map_prefix(a, from, to)).collect();
+    }
+    if let Some(first) = argv.first_mut()
+      && first.starts_with('/')
+    {
+      *first = needy_core::pattern::basename(first).to_string();
     }
   }
+  (argv, cwd)
+}
+
+/// The variables a decision sets or changes relative to `asked`; all of them
+/// when the decision clears the environment.
+fn changed_env(decision: &Decision, asked: &HashMap<String, String>) -> HashMap<String, String> {
+  decision.env.iter().filter(|(k, v)| asked.get(*k) != Some(*v) || decision.clear_env).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
+fn exec_context(argv: &[String], cwd: &str, env: &HashMap<String, String>, tty: bool) -> ExecContext {
+  ExecContext {
+    argv: argv.to_vec(),
+    cwd: cwd.to_string(),
+    env: env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+    tty,
+    // TODO(8f): the proxy does not send its ancestry yet (slices 7a and 8f).
+    ancestors: Vec::new(),
+  }
+}
+
+/// A profile's name: its directory's name, since a session is created from
+/// a profile's text and its directory.
+// TODO(proto): `CreateSessionRequest` carries no file name, so a profile not
+// named `profile.yaml` is still shown by its directory's name.
+fn profile_name(base: &Path) -> String {
+  base.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| base.display().to_string())
+}
+
+/// The patched Firecracker's environment for a VM identity.
+// TODO(core-actor): this mapping moves to `core-actor::host::vm` with the VM
+// start-up in slice 6 of the module layout redesign.
+fn firecracker_env(identity: &VmIdentity) -> BTreeMap<String, String> {
+  let mut env = BTreeMap::new();
+  if let Some(brand) = &identity.cpu_brand {
+    env.insert("NEEDY_BRAND_STRING".into(), brand.clone());
+  }
+  if identity.hide_hypervisor {
+    env.insert("NEEDY_HIDE_HYPERVISOR".into(), "1".into());
+  }
+  if let Some(smbios) = &identity.smbios {
+    // `key=value;…`; a `;` inside a value would end it early.
+    let chassis_type = smbios.chassis_type.map(|n| n.to_string());
+    let fields = [
+      ("bios_date", smbios.bios_date.as_deref()),
+      ("bios_vendor", smbios.bios_vendor.as_deref()),
+      ("bios_version", smbios.bios_version.as_deref()),
+      ("board_name", smbios.board_name.as_deref()),
+      ("board_vendor", smbios.board_vendor.as_deref()),
+      ("chassis_type", chassis_type.as_deref()),
+      ("product_name", smbios.product_name.as_deref()),
+      ("product_version", smbios.product_version.as_deref()),
+      ("serial", smbios.serial.as_deref()),
+      ("sys_vendor", smbios.sys_vendor.as_deref()),
+      ("uuid", Some(smbios.uuid.as_str())),
+    ];
+    let value =
+      fields.iter().filter_map(|(key, value)| value.map(|v| format!("{key}={}", v.replace(';', ",")))).collect::<Vec<_>>().join(";");
+    env.insert("NEEDY_SMBIOS".into(), value);
+  }
+  if let Some(id) = identity.pci_host_bridge {
+    env.insert("NEEDY_PCI_HOST_BRIDGE".into(), id.to_string());
+  }
+  if let Some(id) = identity.pci_isa_bridge {
+    env.insert("NEEDY_PCI_ISA_BRIDGE".into(), id.to_string());
+  }
+  env
 }
 
 fn map_prefix(value: &str, from: &str, to: &str) -> String {
@@ -921,6 +990,61 @@ struct Api {
 }
 
 impl Api {
+  /// Places an exec of `session`: runs the `exec.decide` chain unless the
+  /// command comes from the actor (the proxy decided already; a mount is not
+  /// a command), rewrites `start` and returns the instance it runs on.
+  async fn place(
+    &self,
+    session: &Arc<Session>,
+    start: &mut needy_api_proto::v1::ExecStart,
+    origin: Origin,
+  ) -> Result<Arc<Instance>, Status> {
+    let explicit = (!start.executor.is_empty()).then(|| start.executor.clone());
+    let decision = match origin {
+      Origin::ActorProxy | Origin::ActorMount => None,
+      Origin::Cli | Origin::Fs | Origin::Files => {
+        let ctx = exec_context(&start.argv, &start.cwd, &start.env, start.tty.is_some());
+        Some((self.daemon.decide(session, &ctx, explicit.as_deref()).await, ctx))
+      }
+    };
+    if let Some((decision, ctx)) = &decision {
+      let refusal = match &decision.outcome {
+        Outcome::Deny(message) => Some(format!("denied: {message}")),
+        Outcome::Fault(errno) => Some(format!("fault injected: {errno}")),
+        Outcome::Run(_) => None,
+      };
+      if let Some(refusal) = refusal {
+        if explicit.is_none() {
+          self.daemon.record_decision(session, ctx, decision, origin, decision.outcome.clone());
+        }
+        return Err(Status::permission_denied(refusal));
+      }
+    }
+    if explicit.is_none() {
+      // A command the rules keep on the actor runs on the default executor:
+      // a CLI command has no actor to run on.
+      start.executor = match decision.as_ref().map(|(d, _)| &d.outcome) {
+        Some(Outcome::Run(Placement::Executor(name))) => name.clone(),
+        _ => session.profile.default_executor.clone().unwrap_or_default(),
+      };
+    }
+    let instance = session
+      .executors
+      .get(&start.executor)
+      .or_else(|| session.executors.values().next())
+      .cloned()
+      .ok_or_else(|| Status::not_found("the session has no executor"))?;
+    if let (None, Some((decision, ctx))) = (&explicit, &decision) {
+      let (argv, cwd) = executor_command(Some(&instance), decision);
+      start.argv = argv;
+      start.cwd = cwd;
+      start.env.extend(changed_env(decision, &start.env));
+      // The decision records where the command really runs.
+      self.daemon.record_decision(session, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone())));
+    }
+    Ok(instance)
+  }
+
   fn bound_session(&self) -> Result<Arc<Session>, Status> {
     let id = self.bound.as_ref().ok_or_else(|| Status::permission_denied("not an actor listener"))?;
     self.daemon.session(id).ok_or_else(|| Status::not_found("session ended"))
@@ -931,7 +1055,7 @@ impl Api {
       session_id: session.id.clone(),
       name: session.name.clone(),
       group: session.group.clone(),
-      state: session.state.lock().unwrap().clone(),
+      state: session.state.lock().unwrap().as_str().into(),
       executors: session
         .executors
         .iter()
@@ -1019,15 +1143,25 @@ impl SessionService for Api {
       Some(_) => self.bound_session()?,
       None => self.daemon.session(&request.session_id).ok_or_else(|| Status::not_found("no such session"))?,
     };
-    let mut response = self.daemon.decide(&session, &request);
+    let ctx = exec_context(&request.argv, &request.cwd, &request.env, request.tty);
+    let decision = self.daemon.decide(&session, &ctx, None).await;
+    self.daemon.record_decision(&session, &ctx, &decision, Origin::ActorProxy, decision.outcome.clone());
     // `deny` is what the proxy prints, worded like `needy exec`'s refusals.
-    if !response.deny.is_empty() {
-      response.deny = format!("denied: {}", response.deny);
-    } else if let Some(errno) = self.daemon.exec_fault(&session, &request.argv.join(" ")).await {
-      response.target = String::new();
-      response.deny = format!("fault injected: {errno}");
-    }
-    Ok(Response::new(response))
+    let (target, instance, deny) = match &decision.outcome {
+      Outcome::Run(Placement::Actor) => ("actor".to_string(), None, String::new()),
+      Outcome::Run(Placement::Executor(name)) => (name.clone(), session.executors.get(name), String::new()),
+      Outcome::Deny(message) => (String::new(), None, format!("denied: {message}")),
+      Outcome::Fault(errno) => (String::new(), None, format!("fault injected: {errno}")),
+    };
+    let (argv, cwd) = executor_command(instance.map(Arc::as_ref), &decision);
+    Ok(Response::new(DecideResponse {
+      target,
+      argv,
+      env: changed_env(&decision, &request.env),
+      clear_env: decision.clear_env,
+      cwd,
+      deny,
+    }))
   }
 }
 
@@ -1040,6 +1174,7 @@ impl ProcessService for Api {
     let mut first = inbound.message().await?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
     let (instance, session_id, argv, origin) = match &mut first.payload {
       Some(exec_request::Payload::Start(start)) => {
+        let origin: Origin = start.origin.parse().map_err(|e: needy_core::types::UnknownOrigin| Status::invalid_argument(e.to_string()))?;
         let session = match &self.bound {
           Some(_) => Some(self.bound_session()?),
           None if !start.session_id.is_empty() => {
@@ -1048,38 +1183,7 @@ impl ProcessService for Api {
           None => None,
         };
         let instance = match &session {
-          Some(session) => {
-            if start.executor.is_empty() {
-              let decision = self.daemon.decide(
-                session,
-                &DecideRequest {
-                  session_id: session.id.clone(),
-                  argv: start.argv.clone(),
-                  cwd: start.cwd.clone(),
-                  env: start.env.clone(),
-                  tty: start.tty.is_some(),
-                },
-              );
-              if !decision.deny.is_empty() {
-                return Err(Status::permission_denied(format!("denied: {}", decision.deny)));
-              }
-              let target = if decision.target == "actor" {
-                session.profile.default_executor.clone().unwrap_or_default()
-              } else {
-                decision.target
-              };
-              start.executor = target;
-              start.argv = decision.argv;
-              start.cwd = decision.cwd;
-              start.env.extend(decision.env);
-            }
-            session
-              .executors
-              .get(&start.executor)
-              .or_else(|| session.executors.values().next())
-              .cloned()
-              .ok_or_else(|| Status::not_found("the session has no executor"))?
-          }
+          Some(session) => self.place(session, start, origin).await?,
           None => match start.executor.as_str() {
             "" | "local" => self.daemon.local.clone(),
             name => self
@@ -1098,20 +1202,12 @@ impl ProcessService for Api {
         }
         let session_id = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         start.session_id = session_id.clone();
-        // Chaos and faults that act on commands fire before anything runs.
-        if let Some(session) = &session
-          && start.origin != "actor-proxy"
-          && start.origin != "actor-mount"
-          && let Some(errno) = self.daemon.exec_fault(session, &start.argv.join(" ")).await
-        {
-          return Err(Status::permission_denied(format!("fault injected: {errno}")));
-        }
-        (instance, session_id, start.argv.clone(), start.origin.clone())
+        (instance, session_id, start.argv.clone(), Some(origin))
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let instance =
           self.daemon.procs.lock().unwrap().get(&attach.process_id).cloned().ok_or_else(|| Status::not_found("no such process"))?;
-        (instance, String::new(), Vec::new(), "attach".into())
+        (instance, String::new(), Vec::new(), None)
       }
       _ => {
         return Err(Status::invalid_argument("the first request must start or attach"));
@@ -1126,7 +1222,8 @@ impl ProcessService for Api {
     };
     let (tty, mount_root, detach) = match &first.payload {
       Some(exec_request::Payload::Start(start)) => {
-        (start.tty.map(|t| (t.cols, t.rows)), (start.origin == "actor-mount").then(|| start.cwd.clone()), start.detach)
+        let mount = origin == Some(Origin::ActorMount);
+        (start.tty.map(|t| (t.cols, t.rows)), mount.then(|| start.cwd.clone()), start.detach)
       }
       _ => (None, None, false),
     };
@@ -1134,7 +1231,7 @@ impl ProcessService for Api {
     let injector = session.as_ref().map(|s| s.injector.clone());
     // SFTP for an actor mount is framed so file faults can answer `open`.
     let tap = match (&mount_root, &injector) {
-      (Some(root), Some(injector)) if injector.has(FaultKind::FileOpen) => Some(Arc::new(needy_core::chaos::SftpTap::new(root))),
+      (Some(root), Some(injector)) if injector.has(FaultKind::FileOpen) => Some(Arc::new(SftpTap::new(root))),
       _ => None,
     };
     let (out_tx, out_rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
@@ -1150,8 +1247,8 @@ impl ProcessService for Api {
         while let Ok(Some(mut message)) = inbound.message().await {
           if let (Some(tap), Some(injector), Some(exec_request::Payload::Stdin(bytes))) = (&tap, &injector, &message.payload) {
             let tapped = tap.client_bytes(bytes, injector);
-            for (path, errno) in &tapped.injected {
-              trace.record(&session_id, "fault.injected", [("on", "file.open"), ("path", path), ("errno", errno)]);
+            for fired in tapped.injected {
+              trace.record(&session_id, Event::FaultInjected(fired));
             }
             for reply in tapped.replies {
               let reply = Ok(ExecResponse {
@@ -1200,24 +1297,23 @@ impl ProcessService for Api {
           Some(exec_response::Payload::Started(started)) => {
             process_id = started.process_id.clone();
             daemon.procs.lock().unwrap().insert(started.process_id.clone(), instance.clone());
-            let mut cast_path = String::new();
+            let mut cast_path = None;
             if let (Some((cols, rows)), Some(dir)) = (tty, &cast_dir) {
               cast = needy_core::trace::open_cast(dir, &process_id, cols, rows, &argv);
               if cast.is_some() {
-                cast_path = dir.join(format!("{process_id}.cast")).display().to_string();
+                cast_path = Some(dir.join(format!("{process_id}.cast")).display().to_string());
               }
             }
-            if !argv.is_empty() {
+            if let Some(origin) = origin {
               daemon.trace.record(
                 &session_id,
-                "exec.start",
-                [
-                  ("process", process_id.clone()),
-                  ("executor", instance.name.clone()),
-                  ("argv", argv.join(" ")),
-                  ("origin", origin.clone()),
-                  ("cast", cast_path),
-                ],
+                Event::ExecStart(ExecStart {
+                  process: process_id.clone(),
+                  executor: instance.name.clone(),
+                  argv: argv.clone(),
+                  origin,
+                  cast: cast_path,
+                }),
               );
             }
           }
@@ -1233,19 +1329,18 @@ impl ProcessService for Api {
             }
           }
           Some(exec_response::Payload::Exited(exit)) => {
-            if !argv.is_empty() {
+            if let Some(origin) = origin {
               daemon.trace.record(
                 &session_id,
-                "exec.exit",
-                [
-                  ("process", process_id.clone()),
-                  ("executor", instance.name.clone()),
-                  ("argv", argv.join(" ")),
-                  ("origin", origin.clone()),
-                  ("code", exit.code.map(|c| c.to_string()).unwrap_or_default()),
-                  ("signal", exit.signal.clone()),
-                  ("ms", (now_ms() - started_ms).to_string()),
-                ],
+                Event::ExecExit(ExecExit {
+                  process: process_id.clone(),
+                  executor: instance.name.clone(),
+                  argv: argv.clone(),
+                  origin,
+                  code: exit.code,
+                  signal: (!exit.signal.is_empty()).then(|| exit.signal.clone()),
+                  ms: (now_ms() - started_ms).max(0) as u64,
+                }),
               );
             }
             done = true;
@@ -1363,15 +1458,16 @@ impl GuestService for Api {
       })
       .collect();
     let recipe = session.recipe.as_ref();
-    let route_names = rules::route_names(profile).unwrap_or_else(|| vec!["*".into()]);
+    let routed = rules::route_names(profile);
     self.daemon.trace.record(
       &session.id,
-      "actor.config",
-      [
-        ("route", route_names.join(",")),
-        ("mounts", mounts.iter().map(|m| m.target.clone()).collect::<Vec<_>>().join(",")),
-      ],
+      Event::ActorConfig(ActorConfig {
+        route_names: routed.clone(),
+        mounts: mounts.iter().map(|m| m.target.clone()).collect(),
+      }),
     );
+    // `*` asks the kernel to route every exec.
+    let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
     Ok(Response::new(GetConfigResponse {
       session_id: session.id.clone(),
       user: Some(GuestUser {
@@ -1427,12 +1523,11 @@ impl GuestService for Api {
       .map_err(status)?;
     self.daemon.trace.record(
       &session.id,
-      "files.copy_in",
-      [
-        ("name", name),
-        ("to", "actor".into()),
-        ("bytes", archive.len().to_string()),
-      ],
+      Event::FilesCopyIn(FilesCopyIn {
+        name,
+        to: FileEnd::Actor,
+        bytes: archive.len() as u64,
+      }),
     );
     let chunks: Vec<Result<FetchFilesResponse, Status>> =
       archive.chunks(1 << 20).map(|c| Ok(FetchFilesResponse { data: c.to_vec() })).collect();
@@ -1468,13 +1563,12 @@ impl GuestService for Api {
       .map_err(status)?;
     self.daemon.trace.record(
       &session.id,
-      "files.mirror_out",
-      [
-        ("name", name),
-        ("from", "actor".into()),
-        ("bytes", size.to_string()),
-        ("entries", count.to_string()),
-      ],
+      Event::FilesMirrorOut(FilesMirrorOut {
+        name,
+        from: FileEnd::Actor,
+        bytes: size as u64,
+        entries: Some(count as u64),
+      }),
     );
     Ok(Response::new(PushFilesResponse {}))
   }
@@ -1483,13 +1577,13 @@ impl GuestService for Api {
     let session = self.bound_session()?;
     let mut stream = request.into_inner();
     while let Some(message) = stream.message().await? {
-      if let Some(event) = message.event {
-        self.daemon.trace.record_event(needy_core::trace::Event {
-          session: session.id.clone(),
-          time_ms: event.time_ms,
-          kind: event.kind,
-          attrs: event.attrs.into_iter().collect(),
-        });
+      if let Some(pushed) = message.event {
+        // TODO(proto): the typed payload travels in the `payload` entry of
+        // the string map until slice 7a gives `TraceEvent` a payload field.
+        let payload = pushed.attrs.get("payload").map(String::as_str).unwrap_or_default();
+        let event = Event::decode(&pushed.kind, event::SCHEMA_VERSION, payload)
+          .map_err(|e| Status::invalid_argument(format!("guest event {}: {e}", pushed.kind)))?;
+        self.daemon.trace.record_at(&session.id, pushed.time_ms, event);
       }
     }
     Ok(Response::new(PushEventsResponse {}))
@@ -1500,13 +1594,16 @@ impl GuestService for Api {
     let exit = request.into_inner();
     self.daemon.trace.record(
       &session.id,
-      "actor.exit",
-      [
-        ("code", exit.code.map(|c| c.to_string()).unwrap_or_default()),
-        ("signal", exit.signal),
-      ],
+      Event::ActorExit(ActorExit {
+        code: exit.code,
+        signal: (!exit.signal.is_empty()).then_some(exit.signal),
+      }),
     );
-    *session.state.lock().unwrap() = "finished".into();
+    *session.state.lock().unwrap() = SessionState::Finished;
     Ok(Response::new(ReportExitResponse {}))
   }
 }
+
+#[cfg(test)]
+#[path = "control_test.rs"]
+mod tests;

@@ -34,6 +34,9 @@ mod linux {
   use tokio::sync::mpsc;
   use tokio_stream::wrappers::ReceiverStream;
 
+  use needy_config::profile::FaultKind;
+  use needy_core::event::Event;
+  use needy_core::types::{Effect, Fired, Origin};
   use needy_core_executor::client as exec_cli;
 
   const DAEMON: &str = "vsock://2:7000";
@@ -136,7 +139,7 @@ mod linux {
       session_id: String::new(),
       executor: decision.target,
       no_stdin: false,
-      origin: "actor-proxy".into(),
+      origin: Origin::ActorProxy.as_str().into(),
     };
     let first = ExecRequest {
       payload: Some(exec_request::Payload::Start(start)),
@@ -259,17 +262,26 @@ mod linux {
       tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(fault.at_ms.max(0) as u64)).await;
         write("/sys/module/fake_coretemp/parameters/override_mc", &fault.temp_mc.to_string());
+        let fired = Event::FaultInjected(Fired {
+          kind: FaultKind::Hwmon,
+          target: "coretemp".into(),
+          effect: Effect {
+            temp_mc: Some(fault.temp_mc),
+            ..Effect::default()
+          },
+        });
         let event = TraceEvent {
           session_id: session,
           time_ms: needy_core::trace::now_ms(),
-          kind: "fault.injected".into(),
-          attrs: [
-            ("on".to_string(), "hwmon".to_string()),
-            ("temp_mc".to_string(), fault.temp_mc.to_string()),
-          ]
-          .into(),
+          kind: fired.kind().as_str().into(),
+          // TODO(proto): `TraceEvent` still carries a string map; the typed
+          // payload travels as its `payload` entry until slice 7a gives the
+          // message a payload field.
+          attrs: [("payload".to_string(), fired.payload())].into(),
         };
-        let _ = client.guest().push_events(tokio_stream::iter(vec![PushEventsRequest { event: Some(event) }])).await;
+        if let Err(status) = client.guest().push_events(tokio_stream::iter(vec![PushEventsRequest { event: Some(event) }])).await {
+          eprintln!("needy init: cannot record the hwmon fault: {}", status.message());
+        }
       });
     }
     // Route only after setup so init's own helpers stay local.
@@ -330,7 +342,7 @@ mod linux {
         executor: m.executor.clone(),
         // The mount root lets file faults match paths relative to it.
         cwd: m.source.clone(),
-        origin: "actor-mount".into(),
+        origin: Origin::ActorMount.as_str().into(),
         ..Default::default()
       })),
     })

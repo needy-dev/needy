@@ -4,14 +4,22 @@
 //!
 //! - [`rules`] and [`recipe`]: a run-time decision depends only on the
 //!   profile and the command context, so a session can be replayed; a recipe
-//!   compiles to one machine's settings for a host and seed.
+//!   compiles to one machine's identity for a host and seed.
+//! - [`pattern`]: command patterns, shared by rules, resolvers and chaos.
 //! - [`chaos`]: deterministic fault injection.
-//! - [`trace`] and [`report`]: recording sessions and summarising them.
+//! - [`intercept`]: the interceptor traits of each hook point.
+//! - [`types`] and [`event`]: the values producers and consumers share, and
+//!   the typed events a session records.
+//! - [`report`]: a session's events rendered as markdown.
 
 pub mod chaos;
 pub mod docker;
+pub mod event;
+pub mod intercept;
+pub mod pattern;
 pub mod recipe;
 pub mod report;
 pub mod rules;
 pub mod store;
 pub mod trace;
+pub mod types;

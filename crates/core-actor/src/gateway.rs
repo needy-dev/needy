@@ -18,8 +18,10 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 
-use needy_config::profile::FaultKind;
+use needy_core::chaos::{Injector, Subject};
+use needy_core::event::{Event, NetConnect, NetDeny, NetError, NetRequest};
 use needy_core::trace::Trace;
+use needy_core::types::Network;
 
 #[derive(Clone, Debug, Default)]
 pub struct Policy {
@@ -55,19 +57,13 @@ pub struct Gateway {
   pub policy: Policy,
   pub trace: Trace,
   pub session: String,
-  pub network: &'static str,
-  injector: Option<Arc<needy_core::chaos::Injector>>,
+  pub network: Network,
+  injector: Option<Arc<Injector>>,
   client: hyper_util::client::legacy::Client<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, Incoming>,
 }
 
 impl Gateway {
-  pub fn new(
-    policy: Policy,
-    trace: Trace,
-    session: String,
-    network: &'static str,
-    injector: Option<Arc<needy_core::chaos::Injector>>,
-  ) -> Self {
+  pub fn new(policy: Policy, trace: Trace, session: String, network: Network, injector: Option<Arc<Injector>>) -> Self {
     let https = hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().build();
     let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build(https);
     Self {
@@ -90,26 +86,20 @@ impl Gateway {
       let gateway = gateway.clone();
       async move { Ok::<_, Infallible>(gateway.handle(request).await) }
     });
-    let _ = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(stream), service).with_upgrades().await;
+    if let Err(e) = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(stream), service).with_upgrades().await {
+      tracing::debug!("gateway connection for session {}: {e}", self.session);
+    }
   }
 
   /// Applies `net.connect` faults for `host`: delays sleep; an errno fails the request.
   async fn fault(&self, host: &str) -> Option<Response<Body>> {
-    let fired = self.injector.as_ref()?.check(FaultKind::NetConnect, host)?;
-    if let Some(delay) = fired.delay {
+    let fired = self.injector.as_ref()?.check(Subject::NetConnect(host))?;
+    if let Some(delay) = fired.effect.delay {
       tokio::time::sleep(delay).await;
     }
-    self.trace.record(
-      &self.session,
-      "fault.injected",
-      [
-        ("on", "net.connect".to_string()),
-        ("host", host.to_string()),
-        ("errno", fired.errno.clone().unwrap_or_default()),
-        ("delay_ms", fired.delay.map(|d| d.as_millis().to_string()).unwrap_or_default()),
-      ],
-    );
-    fired.errno.map(|errno| text(StatusCode::BAD_GATEWAY, &format!("needy chaos: {errno} for {host}")))
+    let errno = fired.effect.errno.clone();
+    self.trace.record(&self.session, Event::FaultInjected(fired));
+    errno.map(|errno| text(StatusCode::BAD_GATEWAY, &format!("needy chaos: {errno} for {host}")))
   }
 
   async fn handle(&self, request: Request<Incoming>) -> Response<Body> {
@@ -120,7 +110,11 @@ impl Gateway {
       return text(StatusCode::BAD_REQUEST, "absolute URI required");
     };
     if !self.policy.allows(&host) {
-      self.record("net.deny", &host, request.uri().path(), "");
+      self.record(Event::NetDeny(NetDeny {
+        network: self.network,
+        host: host.clone(),
+        path: Some(request.uri().path().to_string()),
+      }));
       return text(StatusCode::FORBIDDEN, &format!("needy: {host} is not allowed"));
     }
     if let Some(response) = self.fault(&host).await {
@@ -148,12 +142,24 @@ impl Gateway {
     let started = std::time::Instant::now();
     match self.client.request(Request::from_parts(parts, body)).await {
       Ok(response) => {
-        self.record("net.request", &host, &path, &format!("{} {}ms", response.status().as_u16(), started.elapsed().as_millis()));
+        self.record(Event::NetRequest(NetRequest {
+          network: self.network,
+          host,
+          path,
+          status: response.status().as_u16(),
+          ms: started.elapsed().as_millis() as u64,
+        }));
         response.map(|b| b.boxed())
       }
       Err(e) => {
-        self.record("net.error", &host, &path, &e.to_string());
-        text(StatusCode::BAD_GATEWAY, &format!("needy: upstream: {e}"))
+        let message = format!("needy: upstream: {e}");
+        self.record(Event::NetError(NetError {
+          network: self.network,
+          host,
+          path: Some(path),
+          error: e.to_string(),
+        }));
+        text(StatusCode::BAD_GATEWAY, &message)
       }
     }
   }
@@ -164,7 +170,11 @@ impl Gateway {
     };
     let host = authority.split(':').next().unwrap_or_default().to_string();
     if !self.policy.allows(&host) {
-      self.record("net.deny", &host, "", "CONNECT");
+      self.record(Event::NetDeny(NetDeny {
+        network: self.network,
+        host: host.clone(),
+        path: None,
+      }));
       return text(StatusCode::FORBIDDEN, &format!("needy: {host} is not allowed"));
     }
     if let Some(response) = self.fault(&host).await {
@@ -173,31 +183,34 @@ impl Gateway {
     let upstream = match tokio::net::TcpStream::connect(&authority).await {
       Ok(s) => s,
       Err(e) => {
-        self.record("net.error", &host, "", &e.to_string());
-        return text(StatusCode::BAD_GATEWAY, &format!("needy: {e}"));
+        let message = format!("needy: {e}");
+        self.record(Event::NetError(NetError {
+          network: self.network,
+          host,
+          path: None,
+          error: e.to_string(),
+        }));
+        return text(StatusCode::BAD_GATEWAY, &message);
       }
     };
-    self.record("net.connect", &host, "", &authority);
+    self.record(Event::NetConnect(NetConnect {
+      network: self.network,
+      host,
+      authority: authority.clone(),
+    }));
     tokio::spawn(async move {
       if let Ok(upgraded) = hyper::upgrade::on(request).await {
         let mut client = TokioIo::new(upgraded);
         let mut upstream = upstream;
-        let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        if let Err(e) = tokio::io::copy_bidirectional(&mut client, &mut upstream).await {
+          tracing::debug!("tunnel to {authority}: {e}");
+        }
       }
     });
     Response::new(Full::new(Bytes::new()).map_err(|never| match never {}).boxed())
   }
 
-  fn record(&self, kind: &str, host: &str, path: &str, detail: &str) {
-    self.trace.record(
-      &self.session,
-      kind,
-      [
-        ("network", self.network.to_string()),
-        ("host", host.to_string()),
-        ("path", path.to_string()),
-        ("detail", detail.to_string()),
-      ],
-    );
+  fn record(&self, event: Event) {
+    self.trace.record(&self.session, event);
   }
 }

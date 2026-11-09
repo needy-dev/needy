@@ -96,6 +96,22 @@ with every daemon's state, image and output in a scratch directory.
 | `examples/chaos` in an actor | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; `report` counts 3 injected faults |
 | `examples/local` without an actor: copy-in filter, exec fault (126), delay fault (+500 ms), `--output json`, stop with mirror-out, `report` | Mac | Pass, once the native workspace directory exists (copy-in into a missing directory is fix slice 8g) |
 
+## Re-verified after the core slice
+
+Slice 3 of the module layout redesign (`core` split into `rules`, `recipe`
+and `chaos` modules, one `pattern` matcher, domain types, the `exec.decide`
+interceptor chain, typed `core::event` payloads in the trace, and the report
+rendered from them) was rerun on 2026-11-09, with every daemon's state, image
+and output in a scratch directory. The trace database gains a payload schema
+version; rows written before it are reported as unreadable.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `examples/local` without an actor: copy-in filter, `exit 7` returned, exec fault (126, `needy: fault injected: ECONNREFUSED`) with and without `--executor`, delay fault (+500 ms), `--output json`, stop with mirror-out, `report` and `report --level detailed` | Mac | Pass: the report names profile `local`, counts 3 failed (one exit 7, two faulted `curl`), says no actor ran, and omits the empty network lines |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` in an actor; `report` | Linux | Pass: GCE identity from the typed VM identity, routed `python3`, workspace both ways, `routed exit=7`; the report names profile `smoke`, counts 4 routed and 1 failed, and names the kernel's route list under Kept on actor |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)` (its event now sent by the guest as a typed payload), mirror-out to `out/{session}/`; the report counts 3 faults by kind (exec, file.open, hwmon) and the faulted `curl` as failed |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
