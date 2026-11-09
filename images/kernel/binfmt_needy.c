@@ -7,9 +7,10 @@
  * binfmt_script swaps a script for its interpreter, but argv is left
  * untouched. The proxy finds the original path in AT_EXECFN.
  *
- * Only execs by `route_uid` are routed, so the guest's own init stays local,
- * and execs made by the proxy itself are never routed, so the proxy can run
- * the real binary when a rule keeps the command on the actor.
+ * Only execs by `route_uid` are routed. Execs made by needy's own programs in
+ * /.needy (init and the proxy) are never routed: init starts the driving
+ * program locally, and the proxy can run the real binary when a rule keeps a
+ * command on the actor.
  */
 #include <linux/binfmts.h>
 #include <linux/dcache.h>
@@ -31,22 +32,19 @@ static int route_uid = -1;
 module_param_string(proxy, proxy, sizeof(proxy), 0600);
 module_param(route_uid, int, 0600);
 
-static bool caller_is_proxy(void)
+static bool caller_is_needy(void)
 {
 	struct file *exe = get_mm_exe_file(current->mm);
-	bool same = false;
+	bool needy = false;
 
 	if (exe) {
-		struct name_snapshot name;
+		struct dentry *parent = dget_parent(exe->f_path.dentry);
 
-		take_dentry_name_snapshot(&name, exe->f_path.dentry);
-		same = !strcmp(name.name.name, kbasename(proxy)) &&
-		       exe->f_path.dentry->d_parent &&
-		       !strcmp(exe->f_path.dentry->d_parent->d_name.name, ".needy");
-		release_dentry_name_snapshot(&name);
+		needy = !strcmp(parent->d_name.name, ".needy");
+		dput(parent);
 		fput(exe);
 	}
-	return same;
+	return needy;
 }
 
 static bool listed(const char *name)
@@ -79,7 +77,7 @@ static int load_needy(struct linux_binprm *bprm)
 	if (route_uid >= 0 &&
 	    !uid_eq(current_uid(), make_kuid(&init_user_ns, route_uid)))
 		return -ENOEXEC;
-	if (caller_is_proxy())
+	if (caller_is_needy())
 		return -ENOEXEC;
 
 	/* Match the exec path, its basename, or the file name for fd and memfd execs. */
