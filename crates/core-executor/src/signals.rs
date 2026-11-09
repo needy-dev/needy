@@ -42,6 +42,11 @@ pub fn shell_code(exit: &Exit) -> i32 {
   }
 }
 
+/// The status a client reports when an exec stream ended before the command
+/// exited, so the command's own status is unknown. A shell reserves 255 for
+/// an exit status out of range, which no exit or signal maps to here.
+pub const ENDED: i32 = 255;
+
 /// Accepts `SIGTERM`, `TERM` or a number, and returns the signal name.
 pub fn parse(text: &str) -> Option<String> {
   if let Ok(n) = text.parse::<i32>() {

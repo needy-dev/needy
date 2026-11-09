@@ -21,9 +21,10 @@ pub enum Error {
   /// The executor reported an error instead of an exit.
   #[error("{0}")]
   Remote(String),
-  /// The exec stream ended before the process exited.
-  #[error("the stream ended before the process exited")]
-  Ended,
+  /// The exec stream ended before the process exited, so the command's
+  /// outcome is unknown. `reason` is why, when the daemon said so.
+  #[error("the connection ended before the command exited{}", .reason.as_deref().map(|r| format!(": {r}")).unwrap_or_default())]
+  Ended { reason: Option<String> },
   /// The exec stream's input is closed: the stream has ended.
   #[error("the exec stream is closed")]
   Closed,
@@ -65,6 +66,9 @@ pub enum Kind {
   Exhausted,
   /// The server is not reachable or is going away.
   Unavailable,
+  /// An exec stream ended before its command exited: the daemon ended it,
+  /// for example because its session stopped, or the connection closed.
+  Ended,
   /// Anything else: a bug, or a status this build does not map.
   Other,
 }
@@ -76,7 +80,8 @@ impl Error {
       Self::Transport(_) | Self::Unreachable { .. } => Kind::Unavailable,
       Self::InvalidEndpoint(_) | Self::InvalidToken => Kind::Invalid,
       Self::Failed { .. } => Kind::Failed,
-      Self::Remote(_) | Self::Ended | Self::Closed => Kind::Other,
+      Self::Ended { .. } => Kind::Ended,
+      Self::Remote(_) | Self::Closed => Kind::Other,
     }
   }
 

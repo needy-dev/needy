@@ -106,6 +106,12 @@ message ExecEvent {
   string payload = 2;
 }
 
+// Why the daemon ended an exec stream before the process exited.
+message ExecEnded {
+  // For example "session stopped" or "daemon shutting down".
+  string reason = 1;
+}
+
 // The details of the status of an exec the daemon refused: the events of
 // the decision that refused it.
 message ExecRefusal {
@@ -122,6 +128,10 @@ message ExecResponse {
     // Sent before `started` for an exec placed within a session: its
     // faults and placement decision.
     ExecEvent event = 6;
+    // Sent last when the daemon ends the stream before the process exited;
+    // no `exited` follows. A stream that closes without `exited` or
+    // `ended` also ended before the process exited, for a reason unknown.
+    ExecEnded ended = 7;
   }
 }
 

@@ -108,7 +108,15 @@ async fn proxy() -> Result<i32> {
     search_path_if_missing: decision.search_path_if_missing,
   };
   let stream = ExecStream::start(&client, start).await?;
-  let exit = relay::run(stream, tty, true).await?;
+  let exit = match relay::run(stream, tty, true).await {
+    Ok(exit) => exit,
+    // The command's status is unknown; the parent sees 255, not success.
+    Err(error) if error.ended() => {
+      message(&error);
+      return Ok(signals::ENDED);
+    }
+    Err(error) => return Err(error.into()),
+  };
   if let Some(code) = exit.code {
     return Ok(code);
   }

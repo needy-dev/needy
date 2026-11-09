@@ -73,3 +73,27 @@ async fn a_command_that_cannot_start_fails_to_start() {
   assert!(error.to_string().starts_with("cannot start /nonexistent/needy-test-command"), "{error}");
   assert!(matches!(error, Error::Status(_)));
 }
+
+// ROOT CAUSE:
+//
+// If an exec stream ended before the process exited, a caller could take
+// the missing exit for success, because nothing told the two apart.
+//
+// Before the fix, the CLI reported exit 0 for such a stream.
+// The fix makes a run to completion fail with `Kind::Ended`, which clients
+// report as exit 255.
+#[tokio::test]
+async fn a_run_whose_stream_closes_without_an_exit_fails_as_ended() {
+  let executor = support::executor().await;
+  let mut stream = ExecStream::start(&executor.client, start(&["sleep", "30"])).await.unwrap();
+  // The process runs once the stream has started.
+  while !matches!(stream.next().await.unwrap(), Some(needy_api_client::exec::Event::Started(_))) {}
+  let run = tokio::spawn(stream.run(None));
+
+  // A host that shuts down closes its streams without an exit.
+  executor.host.shutdown().await;
+  let error = run.await.unwrap().expect_err("the stream closed before the process exited");
+
+  assert_eq!(error.kind(), Kind::Ended);
+  assert_eq!(error.to_string(), "the connection ended before the command exited");
+}

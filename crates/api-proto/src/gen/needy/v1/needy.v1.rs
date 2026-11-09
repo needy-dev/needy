@@ -265,6 +265,13 @@ pub struct ExecEvent {
     #[prost(string, tag="2")]
     pub payload: ::prost::alloc::string::String,
 }
+/// Why the daemon ended an exec stream before the process exited.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecEnded {
+    /// For example "session stopped" or "daemon shutting down".
+    #[prost(string, tag="1")]
+    pub reason: ::prost::alloc::string::String,
+}
 /// The details of the status of an exec the daemon refused: the events of
 /// the decision that refused it.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -274,7 +281,7 @@ pub struct ExecRefusal {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecResponse {
-    #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5, 6")]
+    #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
     pub payload: ::core::option::Option<exec_response::Payload>,
 }
 /// Nested message and enum types in `ExecResponse`.
@@ -295,6 +302,11 @@ pub mod exec_response {
         /// faults and placement decision.
         #[prost(message, tag="6")]
         Event(super::ExecEvent),
+        /// Sent last when the daemon ends the stream before the process exited;
+        /// no `exited` follows. A stream that closes without `exited` or
+        /// `ended` also ended before the process exited, for a reason unknown.
+        #[prost(message, tag="7")]
+        Ended(super::ExecEnded),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

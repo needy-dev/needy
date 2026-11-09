@@ -12,7 +12,8 @@ use clap::ValueEnum;
 use needy_api_client::exec::{Event, ExecStream};
 use needy_api_client::proto::v1::{ExecEvent, ExecStart, ExecStarted, Origin};
 use needy_api_client::{Error, Kind};
-use needy_core_executor::relay;
+use needy_common::process::Exit;
+use needy_core_executor::{relay, signals};
 use serde_json::{Value, json};
 
 use crate::cli::Context;
@@ -95,14 +96,24 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     return detached(&mut stream, args.output).await;
   }
   match args.output {
-    Output::Human => {
-      let exit = relay::run(stream, tty, forward_stdin).await?;
-      Ok(needy_core_executor::signals::shell_code(&exit))
-    }
+    Output::Human => status(relay::run(stream, tty, forward_stdin).await),
     Output::Json | Output::Ndjson => {
       let _forward = relay::Forward::start(stream.input(), forward_stdin, false);
       events(stream, args.output).await
     }
+  }
+}
+
+/// The exit code of a relayed command: its own, or 255 with a message when
+/// the stream ended before it exited.
+pub(crate) fn status(relayed: Result<Exit, relay::Error>) -> Result<i32> {
+  match relayed {
+    Ok(exit) => Ok(signals::shell_code(&exit)),
+    Err(error) if error.ended() => {
+      output::message(&error);
+      Ok(signals::ENDED)
+    }
+    Err(error) => Err(error.into()),
   }
 }
 
@@ -163,7 +174,14 @@ async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
   let mut stdout = Vec::new();
   let mut stderr = Vec::new();
   let mut code = 0;
-  while let Some(event) = stream.next().await? {
+  // A stream that ends before the process exited has no exit to report.
+  let ended = loop {
+    let event = match stream.next().await {
+      Ok(Some(event)) => event,
+      Ok(None) => break Some(Error::Ended { reason: None }),
+      Err(error) if error.kind() == Kind::Ended => break Some(error),
+      Err(error) => return Err(error.into()),
+    };
     match event {
       Event::Started(started) => {
         if format == Output::Ndjson {
@@ -186,8 +204,8 @@ async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
         }
         summary.insert("exit_code", json!(exit.code));
         summary.insert("signal", json!(exit.signal));
-        code = needy_core_executor::signals::shell_code(&exit);
-        break;
+        code = signals::shell_code(&exit);
+        break None;
       }
       Event::Trace(event) => {
         if format == Output::Ndjson {
@@ -195,8 +213,17 @@ async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
         }
       }
     }
-  }
+  };
   drop(stream);
+  if let Some(error) = ended {
+    let message = error.to_string();
+    if format == Output::Ndjson {
+      line(&json!({"type": "error", "message": message}))?;
+    }
+    summary.insert("error", json!(message));
+    output::message(&message);
+    code = signals::ENDED;
+  }
   if format == Output::Json {
     summary.insert("stdout", json!(String::from_utf8_lossy(&stdout)));
     summary.insert("stderr", json!(String::from_utf8_lossy(&stderr)));

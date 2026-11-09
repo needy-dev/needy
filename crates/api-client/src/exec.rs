@@ -80,8 +80,9 @@ impl ExecStream {
     self.input.clone()
   }
 
-  /// The next event; `None` when the stream ends. An error the executor
-  /// reports instead of an exit is [`Error::Remote`].
+  /// The next event; `None` when the stream closes. An error the executor
+  /// reports instead of an exit is [`Error::Remote`]; a stream the daemon
+  /// ends before the process exited is [`Error::Ended`] with its reason.
   pub async fn next(&mut self) -> Result<Option<Event>> {
     loop {
       let Some(message) = self.responses.message().await? else {
@@ -94,6 +95,11 @@ impl ExecStream {
         Some(exec_response::Payload::Stderr(bytes)) => Event::Stderr(bytes),
         Some(exec_response::Payload::Exited(exited)) => Event::Exited(exit(exited)),
         Some(exec_response::Payload::Error(message)) => return Err(Error::Remote(message)),
+        Some(exec_response::Payload::Ended(ended)) => {
+          return Err(Error::Ended {
+            reason: (!ended.reason.is_empty()).then_some(ended.reason),
+          });
+        }
         // A message from a newer server with a payload this build does not
         // know carries nothing for it.
         None => continue,
@@ -121,7 +127,7 @@ impl ExecStream {
         Some(Event::Stderr(bytes)) => stderr.extend(bytes),
         Some(Event::Exited(exit)) => break exit,
         Some(Event::Trace(_) | Event::Started(_)) => {}
-        None => return Err(Error::Ended),
+        None => return Err(Error::Ended { reason: None }),
       }
     };
     // A closed input means the process exited before reading all of it;

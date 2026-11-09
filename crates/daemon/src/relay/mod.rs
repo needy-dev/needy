@@ -42,7 +42,8 @@ fn relayed(e: needy_api_client::Error) -> ControlError {
     Kind::Invalid => ControlError::Invalid(message),
     Kind::Failed => ControlError::Failed(message),
     Kind::Exhausted => ControlError::Exhausted(message),
-    Kind::Unavailable => ControlError::Unavailable(message),
+    // The executor's stream ended before the process exited.
+    Kind::Unavailable | Kind::Ended => ControlError::Unavailable(message),
     Kind::Other => ControlError::Internal(message),
   }
 }
@@ -156,7 +157,21 @@ impl Processes for Daemon {
       relay.trace.clone(),
       out_tx.clone(),
     )));
-    tasks.spawn(cancel.clone().run_until_cancelled_owned(relay.run(self.clone(), upstream, slot, out_tx)));
+    let daemon = self.clone();
+    let cancel = cancel.clone();
+    tasks.spawn(async move {
+      let ended = out_tx.clone();
+      if cancel.run_until_cancelled(relay.run(daemon.clone(), upstream, slot, out_tx)).await.is_none() {
+        // The session stopped or the daemon is shutting down before the
+        // process exited; the caller learns why before the stream closes.
+        // NOTICE: `try_send`, so a caller that reads nothing cannot hold up
+        // the stop, which waits for this task; it then sees the stream
+        // close without the reason.
+        if let Err(e) = ended.try_send(Ok(ExecOutput::Ended(daemon.end_reason().into()))) {
+          tracing::debug!("exec relay: cannot say why the stream ends: {e}");
+        }
+      }
+    });
     Ok(Box::pin(ReceiverStream::new(out_rx)))
   }
 

@@ -191,6 +191,9 @@ pub enum ExecOutput {
   Exited(Exit),
   /// The executor reported an error instead of an exit.
   Error(String),
+  /// The daemon ends the stream before the process exited, for this
+  /// reason; nothing follows.
+  Ended(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

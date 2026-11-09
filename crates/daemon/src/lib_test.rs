@@ -57,6 +57,40 @@ async fn shutdown_stops_sessions_and_the_local_executors_processes() {
   assert!(!running(pid), "the local executor's processes are killed");
 }
 
+#[tokio::test]
+async fn shutdown_ends_open_streams_saying_the_daemon_is_shutting_down() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let session = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let mut streams = Vec::new();
+  for session in [String::new(), session.id] {
+    let spec = ExecSpec {
+      argv: vec!["sleep".into(), "30".into()],
+      cwd: String::new(),
+      env: HashMap::new(),
+      clear_env: false,
+      tty: None,
+      detach: false,
+      session,
+      executor: String::new(),
+      no_stdin: true,
+      origin: Origin::Cli,
+      search_path_if_missing: false,
+    };
+    let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
+    while !matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)) {}
+    streams.push(outputs);
+  }
+
+  tokio::time::timeout(Duration::from_secs(20), daemon.shutdown()).await.expect("shutdown waits for every task");
+
+  // A session's stream and one outside any session say the same.
+  for outputs in streams {
+    let rest: Vec<_> = outputs.collect().await;
+    assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "daemon shutting down"), "{rest:?}");
+  }
+}
+
 // A socket path longer than `sun_path` used to make the control daemon wait
 // 10 s for its local executor before it failed without naming the path.
 // This keeps start-up failing at once with the path in the error.

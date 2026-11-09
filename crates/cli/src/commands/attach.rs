@@ -18,6 +18,5 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
   let stream = ExecStream::attach(&connection, &args.process_id, !args.no_replay).await?;
   let tty = relay::interactive();
-  let exit = relay::run(stream, tty, true).await?;
-  Ok(needy_core_executor::signals::shell_code(&exit))
+  super::exec::status(relay::run(stream, tty, true).await)
 }

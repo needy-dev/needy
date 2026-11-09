@@ -211,6 +211,7 @@ pub fn proto_exec_output(output: ExecOutput) -> v1::ExecResponse {
     ExecOutput::Stderr(bytes) => Payload::Stderr(bytes),
     ExecOutput::Exited(exit) => Payload::Exited(proto_exit(exit)),
     ExecOutput::Error(message) => Payload::Error(message),
+    ExecOutput::Ended(reason) => Payload::Ended(v1::ExecEnded { reason }),
   };
   v1::ExecResponse {
     payload: Some(payload),

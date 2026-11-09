@@ -92,3 +92,25 @@ async fn stopping_a_session_ends_its_commands_streams() {
   let (_, exit) = tokio::time::timeout(Duration::from_secs(10), finish(outputs)).await.unwrap();
   assert_eq!(exit, None, "the relay ended with the session, before the command exited");
 }
+
+// ROOT CAUSE:
+//
+// If a session stopped while one of its commands' streams was open, the
+// relay just closed the stream, because cancelling it dropped the sender;
+// the caller could not tell why no exit came.
+//
+// Before the fix, `needy exec` took the closed stream for exit 0.
+// The fix sends an explicit end with the reason before the stream closes.
+#[tokio::test]
+async fn a_stream_its_session_stop_ends_says_session_stopped() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let mut outputs = daemon.exec(ExecOpen::Start(spec(&["sleep", "30"], &created.id, "")), attached()).await.unwrap();
+  while !matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)) {}
+
+  Sessions::stop(daemon, &created.id).await.unwrap();
+  let rest: Vec<_> = tokio::time::timeout(Duration::from_secs(10), outputs.collect::<Vec<_>>()).await.unwrap();
+
+  assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "session stopped"), "{rest:?}");
+}

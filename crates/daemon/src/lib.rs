@@ -48,6 +48,8 @@ use std::collections::HashMap;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
@@ -114,6 +116,8 @@ pub struct Daemon {
   /// Session creates in progress, which shutdown waits for.
   pub(crate) creates: TaskTracker,
   pub(crate) cancel: CancellationToken,
+  /// Set when [`Daemon::shutdown`] begins, so a stream it ends says why.
+  shutting_down: Arc<AtomicBool>,
 }
 
 #[cfg(unix)]
@@ -171,6 +175,7 @@ impl Daemon {
       tasks,
       creates: TaskTracker::new(),
       cancel,
+      shutting_down: Arc::default(),
     })
   }
 
@@ -220,6 +225,7 @@ impl Daemon {
   /// order they were created, then the daemon's own tasks and the local
   /// executor's processes, and waits for them.
   pub async fn shutdown(&self) {
+    self.shutting_down.store(true, Ordering::SeqCst);
     // A create sees its cancelled token before its next step and unwinds
     // through its rollback. A create that finished meanwhile is running
     // and is stopped below.
@@ -239,6 +245,19 @@ impl Daemon {
     self.host.shutdown().await;
     self.tasks.close();
     self.tasks.wait().await;
+  }
+}
+
+#[cfg(unix)]
+impl Daemon {
+  /// Why the daemon ends an open exec stream: its session stopped, or the
+  /// daemon, which stops every session first, is shutting down.
+  pub(crate) fn end_reason(&self) -> &'static str {
+    if self.shutting_down.load(Ordering::SeqCst) {
+      "daemon shutting down"
+    } else {
+      "session stopped"
+    }
   }
 }
 

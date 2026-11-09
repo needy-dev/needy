@@ -27,21 +27,26 @@ pub enum Error {
   Output(#[from] std::io::Error),
 }
 
+impl Error {
+  /// Whether the stream ended before the command exited, which a client
+  /// reports as [`ENDED`](crate::signals::ENDED).
+  pub fn ended(&self) -> bool {
+    matches!(self, Self::Client(e) if e.kind() == needy_api_client::Kind::Ended)
+  }
+}
+
 /// Bridges the local terminal or pipes to a remote process until it exits.
-/// With `tty`, the local terminal is raw for the duration.
+/// With `tty`, the local terminal is raw for the duration. A stream that
+/// ends before the process exited fails, [`Error::ended`].
 pub async fn run(mut stream: ExecStream, tty: bool, stdin: bool) -> Result<Exit, Error> {
   let raw = if tty { RawMode::enable() } else { None };
   let _forward = Forward::start(stream.input(), stdin, tty);
   let mut stdout = tokio::io::stdout();
   let mut stderr = tokio::io::stderr();
-  // TODO(fix): a stream that ends without an exit reports exit 0, as it
-  // always has; it should be an error. Needs its own fix commit with a
-  // regression test.
-  let mut exit = Exit {
-    code: Some(0),
-    signal: String::new(),
-  };
-  while let Some(event) = stream.next().await? {
+  let exit = loop {
+    let Some(event) = stream.next().await? else {
+      return Err(needy_api_client::Error::Ended { reason: None }.into());
+    };
     match event {
       Event::Stdout(bytes) => {
         stdout.write_all(&bytes).await?;
@@ -51,15 +56,12 @@ pub async fn run(mut stream: ExecStream, tty: bool, stdin: bool) -> Result<Exit,
         stderr.write_all(&bytes).await?;
         stderr.flush().await?;
       }
-      Event::Exited(exited) => {
-        exit = exited;
-        break;
-      }
+      Event::Exited(exit) => break exit,
       // A person at a terminal sees the command's output, not the trace
       // events of its placement.
       Event::Started(_) | Event::Trace(_) => {}
     }
-  }
+  };
   drop(raw);
   Ok(exit)
 }

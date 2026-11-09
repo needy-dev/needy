@@ -12,6 +12,9 @@ pub struct Executor {
   // file uses the directory.
   #[allow(dead_code)]
   pub dir: tempfile::TempDir,
+  /// The executor's processes; shutting it down ends every stream.
+  #[allow(dead_code)]
+  pub host: Host,
   pub client: Client,
 }
 
@@ -19,8 +22,9 @@ pub async fn executor() -> Executor {
   let dir = tempfile::tempdir().unwrap();
   let socket = dir.path().join("executor.sock");
   let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+  let host = Host::default();
   let service = ExecutorService {
-    host: Host::default(),
+    host: host.clone(),
     name: "test".into(),
   };
   tokio::spawn(
@@ -29,5 +33,5 @@ pub async fn executor() -> Executor {
       .serve_with_incoming(UnixListenerStream::new(listener)),
   );
   let client = Client::connect(&format!("unix:{}", socket.display())).await.unwrap();
-  Executor { dir, client }
+  Executor { dir, host, client }
 }

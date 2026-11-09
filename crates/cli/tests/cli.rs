@@ -641,7 +641,7 @@ fn spawn_daemon(home: &Home, mode: &str) -> Child {
 fn attach_sleep(home: &Home, exec: &[&str]) -> (Child, u32) {
   let pid_file = home.path().join("sleep.pid");
   let script = format!("echo $$ > {}; exec sleep 300", pid_file.display());
-  let attached = home.needy().args(exec).args(["--", "sh", "-c", &script]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let attached = home.needy().args(exec).args(["--", "sh", "-c", &script]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
   let deadline = Instant::now() + Duration::from_secs(20);
   let read = || std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<u32>().ok();
   while read().is_none() {
@@ -649,6 +649,75 @@ fn attach_sleep(home: &Home, exec: &[&str]) -> (Child, u32) {
     std::thread::sleep(Duration::from_millis(50));
   }
   (attached, read().unwrap())
+}
+
+/// The output of an attached `needy` once it exits by itself.
+fn exited(mut attached: Child) -> Output {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while attached.try_wait().unwrap().is_none() {
+    if Instant::now() >= deadline {
+      attached.kill().ok();
+      panic!("the attached needy did not exit: {:?}", attached.wait_with_output().unwrap());
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  attached.wait_with_output().unwrap()
+}
+
+// ROOT CAUSE:
+//
+// If an exec stream ended before the command exited, `needy exec` reported
+// exit 0, because the relay started from a successful exit and kept it
+// when no exit came.
+//
+// Before the fix, stopping the session of an attached `needy exec` made it
+// exit 0 without a word.
+// The fix fails such an exec with 255, saying why the stream ended.
+#[test]
+fn exec_whose_session_stops_exits_255_and_says_why() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+  let (attached, sleep) = attach_sleep(&home, &["exec", "--session", &session]);
+
+  assert!(home.run(&["session", "stop", &session]).status.success());
+  let output = exited(attached);
+  // Leaving the stream ends the sleep; this is for a failed assertion only.
+  let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).status();
+
+  assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+  assert_eq!(stderr(&output), "needy: the connection ended before the command exited: session stopped\n");
+}
+
+#[test]
+fn exec_json_whose_session_stops_reports_an_error_instead_of_an_exit() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+  let (attached, _) = attach_sleep(&home, &["exec", "--output", "json", "--session", &session]);
+
+  assert!(home.run(&["session", "stop", &session]).status.success());
+  let output = exited(attached);
+
+  assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+  let summary: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+  assert_eq!(summary["error"], "the connection ended before the command exited: session stopped", "{summary}");
+  assert!(summary.get("exit_code").is_none(), "{summary}");
+}
+
+#[test]
+fn exec_whose_daemon_shuts_down_exits_255_and_says_why() {
+  let home = Home::new();
+  let mut daemon = spawn_daemon(&home, "control");
+  let (attached, sleep) = attach_sleep(&home, &["exec"]);
+
+  kill(daemon.id(), "TERM");
+  let output = exited(attached);
+  daemon.wait().unwrap();
+  let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).status();
+
+  assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
+  assert_eq!(stderr(&output), "needy: the connection ended before the command exited: daemon shutting down\n");
 }
 
 /// Sends SIGTERM twice, half a second apart, and returns how long the
