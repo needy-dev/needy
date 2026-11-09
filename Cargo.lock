@@ -2025,6 +2025,7 @@ dependencies = [
  "needy-core-executor",
  "needy-daemon",
  "needy-trace",
+ "portable-pty",
  "serde",
  "serde_json",
  "shell-words",

@@ -1350,3 +1350,131 @@ fn session_create_sends_a_profile_with_a_relative_parent_and_recipe() {
 
   assert!(output.status.success(), "{}", stderr(&output));
 }
+
+/// Runs `needy` with `args` on a new terminal of `rows` x `cols` and
+/// returns everything it wrote there, once it exits.
+fn on_terminal(home: &Home, args: &[&str], size: (u16, u16)) -> (Option<i32>, Vec<u8>) {
+  on_terminal_with(home, args, size, |_, _| {})
+}
+
+/// [`on_terminal`], calling `meanwhile` with `needy`'s process ID and what
+/// it wrote so far once it runs.
+fn on_terminal_with(
+  home: &Home,
+  args: &[&str],
+  (rows, cols): (u16, u16),
+  meanwhile: impl FnOnce(u32, &std::sync::Mutex<Vec<u8>>),
+) -> (Option<i32>, Vec<u8>) {
+  use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+  use std::io::Read;
+  let pair = native_pty_system()
+    .openpty(PtySize {
+      rows,
+      cols,
+      pixel_width: 0,
+      pixel_height: 0,
+    })
+    .unwrap();
+  let template = home.needy();
+  let mut command = CommandBuilder::new(template.get_program());
+  command.args(args);
+  for (name, value) in template.get_envs() {
+    match value {
+      Some(value) => command.env(name, value),
+      None => command.env_remove(name),
+    }
+  }
+  let mut child = pair.slave.spawn_command(command).unwrap();
+  drop(pair.slave);
+  let mut reader = pair.master.try_clone_reader().unwrap();
+  let written = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+  let sink = written.clone();
+  std::thread::spawn(move || {
+    let mut buf = [0u8; 4096];
+    while let Ok(n) = reader.read(&mut buf) {
+      if n == 0 {
+        break;
+      }
+      sink.lock().unwrap().extend_from_slice(&buf[..n]);
+    }
+  });
+  meanwhile(child.process_id().unwrap(), &written);
+  let deadline = Instant::now() + Duration::from_secs(20);
+  let status = loop {
+    if let Some(status) = child.try_wait().unwrap() {
+      break status;
+    }
+    if Instant::now() >= deadline {
+      child.kill().ok();
+      panic!("needy {args:?} did not exit: {:?}", String::from_utf8_lossy(&written.lock().unwrap()));
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  };
+  // What the client wrote last is still in the terminal's buffer.
+  std::thread::sleep(Duration::from_millis(300));
+  let code = i32::try_from(status.exit_code()).ok();
+  let bytes = written.lock().unwrap().clone();
+  (code, bytes)
+}
+
+/// Whether `haystack` contains `needle` after position `from`.
+fn contains_after(haystack: &[u8], from: usize, needle: &[u8]) -> bool {
+  haystack[from..].windows(needle.len()).any(|w| w == needle)
+}
+
+// ROOT CAUSE:
+//
+// If a program run with `needy exec -t` turned on terminal modes and ended
+// without turning them off, they stayed on in the user's shell, because the
+// client restored only raw mode.
+//
+// Before the fix, the alternate screen, mouse reporting, bracketed paste,
+// focus events, the kitty keyboard protocol and a hidden cursor leaked.
+// The fix turns them all off when the client leaves the terminal.
+#[test]
+fn exec_on_a_terminal_turns_off_the_programs_terminal_modes_when_it_ends() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let modes = r"printf '\033[?1049h\033[?1000h\033[?1006h\033[?2004h\033[?1004h\033[>1u\033[?25lMODES-ON'";
+
+  let (code, written) = on_terminal(&home, &["exec", "-t", "--", "sh", "-c", modes], (24, 80));
+
+  assert_eq!(code, Some(0), "{:?}", String::from_utf8_lossy(&written));
+  let after = written.windows(8).position(|w| w == b"MODES-ON").expect("the program's output") + 8;
+  for (mode, off) in [
+    ("alternate screen", &b"\x1b[?1049l"[..]),
+    ("mouse reporting", b"\x1b[?1000l"),
+    ("SGR mouse", b"\x1b[?1006l"),
+    ("bracketed paste", b"\x1b[?2004l"),
+    ("focus events", b"\x1b[?1004l"),
+    ("kitty keyboard", b"\x1b[=0;1u"),
+    ("hidden cursor", b"\x1b[?25h"),
+  ] {
+    assert!(contains_after(&written, after, off), "{mode} is not turned off: {:?}", String::from_utf8_lossy(&written[after..]));
+  }
+}
+
+// The terminal note's G4: a client whose process ignores the forwarded
+// SIGTERM leaves at a second one, and the terminal is restored then too.
+#[test]
+fn exec_on_a_terminal_restores_it_when_a_second_sigterm_makes_it_leave() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let ignores_term = r"trap '' TERM; printf '\033[?1049h\033[?2004hMODES-ON'; sleep 30";
+
+  let (code, written) = on_terminal_with(&home, &["exec", "-t", "--", "sh", "-c", ignores_term], (24, 80), |pid, written| {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !written.lock().unwrap().windows(8).any(|w| w == b"MODES-ON") {
+      assert!(Instant::now() < deadline, "the program did not start");
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    kill(pid, "TERM");
+    std::thread::sleep(Duration::from_millis(300));
+    kill(pid, "TERM");
+  });
+
+  assert_eq!(code, Some(143), "{:?}", String::from_utf8_lossy(&written));
+  let after = written.windows(8).position(|w| w == b"MODES-ON").unwrap() + 8;
+  assert!(contains_after(&written, after, b"\x1b[?1049l"), "{:?}", String::from_utf8_lossy(&written[after..]));
+  assert!(contains_after(&written, after, b"\x1b[?2004l"), "{:?}", String::from_utf8_lossy(&written[after..]));
+}

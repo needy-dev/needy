@@ -113,6 +113,8 @@ pub(crate) fn status(relayed: Result<Exit, relay::Error>) -> Result<i32> {
       output::message(&error);
       Ok(signals::ENDED)
     }
+    // A second SIGTERM or SIGHUP: the client leaves like a shell's child.
+    Err(relay::Error::Terminated(signal)) => Ok(128 + signals::number(signal).unwrap_or(1)),
     Err(error) => Err(error.into()),
   }
 }

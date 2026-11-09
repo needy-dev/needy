@@ -125,6 +125,8 @@ async fn proxy() -> Result<i32> {
       message(&error);
       return Ok(signals::ENDED);
     }
+    // A second SIGTERM or SIGHUP: the proxy leaves like a shell's child.
+    Err(relay::Error::Terminated(signal)) => return Ok(128 + signals::number(signal).unwrap_or(1)),
     Err(error) => return Err(error.into()),
   };
   if let Some(code) = exit.code {

@@ -12,10 +12,11 @@ mod terminal;
 use needy_api_client::exec::{Event, ExecStream, Input};
 use needy_common::process::Exit;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
 use terminal::RawMode;
-pub use terminal::{interactive, window};
+pub use terminal::{interactive, restore, window};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,6 +26,10 @@ pub enum Error {
   Client(#[from] needy_api_client::Error),
   #[error("cannot write the process's output")]
   Output(#[from] std::io::Error),
+  /// The client got a second termination signal while the process kept
+  /// running; the first was forwarded to it.
+  #[error("left the process at a second {0}")]
+  Terminated(&'static str),
 }
 
 impl Error {
@@ -38,17 +43,27 @@ impl Error {
 /// Bridges the local terminal or pipes to a remote process until it exits.
 /// With `tty`, the local terminal is raw for the duration. A stream that
 /// ends before the process exited fails, [`Error::ended`].
+/// A second termination signal ends the relay with [`Error::Terminated`];
+/// the terminal is restored on every way out.
 pub async fn run(mut stream: ExecStream, tty: bool, stdin: bool) -> Result<Exit, Error> {
   let raw = if tty { RawMode::enable() } else { None };
-  let _forward = Forward::start(stream.input(), stdin, tty);
+  let mut forward = Forward::start(stream.input(), stdin, tty);
+  let mut modes = terminal::Modes::default();
   let mut stdout = tokio::io::stdout();
   let mut stderr = tokio::io::stderr();
   let exit = loop {
-    let Some(event) = stream.next().await? else {
+    let next = tokio::select! {
+      next = stream.next() => next?,
+      Some(signal) = forward.terminated.recv() => return Err(Error::Terminated(signal)),
+    };
+    let Some(event) = next else {
       return Err(needy_api_client::Error::Ended { reason: None }.into());
     };
     match event {
       Event::Stdout(bytes) => {
+        if raw.is_some() {
+          modes.observe(&bytes);
+        }
         stdout.write_all(&bytes).await?;
         stdout.flush().await?;
       }
@@ -73,6 +88,9 @@ pub struct Forward {
   // runs on a blocking thread that cannot be interrupted; the task ends at
   // once, and the thread at the next input or when the process exits.
   _stop: DropGuard,
+  /// The name of a second termination signal, after which the client
+  /// leaves.
+  pub terminated: mpsc::Receiver<&'static str>,
 }
 
 impl Forward {
@@ -81,9 +99,11 @@ impl Forward {
     if stdin {
       tokio::spawn(forward_stdin(input.clone(), cancel.clone()));
     }
-    tokio::spawn(signals::forward(input, tty, cancel.clone()));
+    let (terminated_tx, terminated) = mpsc::channel(1);
+    tokio::spawn(signals::forward(input, tty, terminated_tx, cancel.clone()));
     Self {
       _stop: cancel.drop_guard(),
+      terminated,
     }
   }
 }
