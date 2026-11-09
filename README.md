@@ -83,13 +83,19 @@ binary: Linux and macOS are fully supported; Windows works without terminals.
 
 ```sh
 # On the actor host: build the actor image and the executor image.
-needy build --executor        # writes ~/.needy/images/default
+needy build --executor        # writes $XDG_DATA_HOME/needy/images/default
 needy daemon --mode control &
 
 # Run opencode in an actor; its shells run in a Docker executor.
 needy session create --profile examples/opencode/profile.yaml
+needy session logs SESSION    # the actor's console
 needy report latest
 ```
+
+Needy keeps the trace and sessions in `$XDG_STATE_HOME/needy`, images in
+`$XDG_DATA_HOME/needy` and the daemon's socket in `$XDG_RUNTIME_DIR/needy`
+(the state directory on macOS). `NEEDY_STATE_DIR`, `NEEDY_DATA_DIR` and
+`NEEDY_RUNTIME_DIR` override them; `-v` turns on logs.
 
 `needy exec` runs one command through the same rules, with a terminal when
 stdin and stdout are terminals:
@@ -118,13 +124,13 @@ Examples:
 | [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model through the gateway, shells in Docker |
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on a Mac |
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
-| [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor |
+| [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
 | [`examples/local`](examples/local/profile.yaml) | No KVM needed: copy-in, mirror-out, chaos and recordings on this machine |
 | [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out on the actor, a file fault on the workspace, an exec fault and an overheating sensor |
 | [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec` |
 
-`needy profile check PROFILE --cmd "git status"` shows where commands would run
-and the recipe's consistency findings.
+`needy profile check PROFILE --cmd "git status"` shows where commands would run,
+the chaos faults that match them and the recipe's consistency findings.
 
 ## Documentation
 
@@ -143,6 +149,7 @@ and the recipe's consistency findings.
 make check
 make test
 make proto
+cargo xtask bench --help      # latency and throughput probes
 ```
 
 

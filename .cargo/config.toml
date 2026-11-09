@@ -1,0 +1,3 @@
+[alias]
+# Developer tasks such as benchmarks: `cargo xtask bench --help`.
+xtask = "run --package xtask --"

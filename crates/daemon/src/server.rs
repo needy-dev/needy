@@ -45,9 +45,14 @@ pub async fn serve(listen: &str, routes: Routes, token: Option<String>) -> Resul
   if let Some(path) = listen.strip_prefix("unix:") {
     #[cfg(unix)]
     {
-      let _ = std::fs::remove_file(path);
+      // A socket left by an earlier daemon would make bind fail.
+      if let Err(e) = std::fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+      {
+        tracing::warn!("cannot remove {path}: {e}");
+      }
       if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent).ok();
+        std::fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
       }
       let listener = tokio::net::UnixListener::bind(path).with_context(|| format!("cannot listen on {path}"))?;
       router.serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener)).await?;

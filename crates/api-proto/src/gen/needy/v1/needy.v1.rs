@@ -342,6 +342,7 @@ pub struct Session {
     pub name: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub group: ::prost::alloc::string::String,
+    /// "running", "finished" (the actor exited), "stopped" or "failed".
     #[prost(string, tag="4")]
     pub state: ::prost::alloc::string::String,
     #[prost(message, repeated, tag="5")]
@@ -382,6 +383,16 @@ pub struct StopSessionRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StopSessionResponse {
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSessionLogsRequest {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetSessionLogsResponse {
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DecideRequest {
     #[prost(string, tag="1")]
@@ -408,7 +419,8 @@ pub struct DecideResponse {
     pub clear_env: bool,
     #[prost(string, tag="5")]
     pub cwd: ::prost::alloc::string::String,
-    /// Set when a rule denies the command.
+    /// Set when the command must not run: the message to show, either
+    /// "denied: <rule message>" or "fault injected: <errno>".
     #[prost(string, tag="6")]
     pub deny: ::prost::alloc::string::String,
 }

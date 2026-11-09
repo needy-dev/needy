@@ -1,15 +1,90 @@
-//! `needy bench`: small latency and throughput probes. They run anywhere,
-//! including as an actor's driving program, and print one JSON line.
+//! Latency and throughput probes. They run anywhere, including as an actor's
+//! driving program, and each prints one JSON line.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use clap::{Parser, Subcommand};
 use serde_json::json;
 
+#[derive(Subcommand)]
+pub enum Probe {
+  /// Spawn a command repeatedly and measure spawn-to-exit time.
+  Spawn {
+    #[arg(short = 'n', default_value_t = 100)]
+    count: usize,
+    #[arg(long, default_value = "")]
+    label: String,
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+  },
+  /// Read a command's stdout and measure throughput.
+  Pipe {
+    #[arg(long, default_value = "")]
+    label: String,
+    #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+    command: Vec<String>,
+  },
+  /// Measure file throughput and small-file operations in a directory.
+  Fs {
+    dir: PathBuf,
+    #[arg(long, default_value_t = 256)]
+    mib: usize,
+    #[arg(long, default_value_t = 1000)]
+    files: usize,
+    #[arg(long, default_value = "")]
+    label: String,
+  },
+  /// Run several probes in sequence; each argument is one shell-quoted probe.
+  Suite {
+    #[arg(required = true)]
+    probes: Vec<String>,
+  },
+}
+
+/// Parses one probe of a suite as if it followed `probe` on the command line.
+#[derive(Parser)]
+#[command(no_binary_name = true)]
+struct SuiteEntry {
+  #[command(subcommand)]
+  probe: Probe,
+}
+
+pub fn run(probe: Probe) -> Result<()> {
+  match probe {
+    Probe::Spawn {
+      count,
+      label,
+      command,
+    } => spawn(&label, count, &command),
+    Probe::Pipe { label, command } => pipe(&label, &command),
+    Probe::Fs {
+      dir,
+      mib,
+      files,
+      label,
+    } => fs(&label, &dir, mib, files),
+    Probe::Suite { probes } => {
+      // A failing probe prints an error line and the suite goes on, so one
+      // broken measurement does not hide the others.
+      for text in probes {
+        let result = shell_words::split(&text)
+          .with_context(|| format!("cannot split {text:?}"))
+          .and_then(|words| SuiteEntry::try_parse_from(words).with_context(|| format!("cannot parse {text:?}")))
+          .and_then(|entry| run(entry.probe));
+        if let Err(error) = result {
+          println!("{}", json!({"error": format!("{text}: {error:#}")}));
+        }
+      }
+      Ok(())
+    }
+  }
+}
+
 fn stats(mut samples: Vec<f64>) -> serde_json::Value {
-  samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+  samples.sort_by(f64::total_cmp);
   let pick = |q: f64| {
     let i = ((samples.len() as f64 - 1.0) * q).round() as usize;
     (samples[i] * 1000.0).round() / 1000.0
@@ -26,9 +101,9 @@ fn stats(mut samples: Vec<f64>) -> serde_json::Value {
 }
 
 /// Spawns `argv` `count` times and reports wall time from spawn to exit.
-pub fn spawn(label: &str, count: usize, argv: &[String]) -> Result<()> {
-  if argv.is_empty() {
-    bail!("no command");
+fn spawn(label: &str, count: usize, argv: &[String]) -> Result<()> {
+  if argv.is_empty() || count == 0 {
+    bail!("no command or no runs");
   }
   let mut samples = Vec::with_capacity(count);
   let mut failures = 0;
@@ -55,11 +130,14 @@ pub fn spawn(label: &str, count: usize, argv: &[String]) -> Result<()> {
 }
 
 /// Reads `argv`'s stdout to the end and reports bytes per second.
-pub fn pipe(label: &str, argv: &[String]) -> Result<()> {
+fn pipe(label: &str, argv: &[String]) -> Result<()> {
+  if argv.is_empty() {
+    bail!("no command");
+  }
   let start = Instant::now();
   let mut child =
     std::process::Command::new(&argv[0]).args(&argv[1..]).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).spawn()?;
-  let mut stdout = child.stdout.take().unwrap();
+  let mut stdout = child.stdout.take().context("the child has no stdout")?;
   let mut buf = vec![0u8; 1 << 20];
   let mut total = 0u64;
   loop {
@@ -81,7 +159,7 @@ pub fn pipe(label: &str, argv: &[String]) -> Result<()> {
 }
 
 /// Sequential write and read of one file, then small-file create, stat and read.
-pub fn fs(label: &str, dir: &Path, mib: usize, files: usize) -> Result<()> {
+fn fs(label: &str, dir: &Path, mib: usize, files: usize) -> Result<()> {
   std::fs::create_dir_all(dir)?;
   let big = dir.join("needy-bench.bin");
   let chunk = vec![7u8; 1 << 20];

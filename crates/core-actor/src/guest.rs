@@ -109,7 +109,8 @@ mod linux {
       .map_err(|s| anyhow::anyhow!("{}", s.message()))?
       .into_inner();
     if !decision.deny.is_empty() {
-      eprintln!("needy: denied: {}", decision.deny);
+      // The refused command's own error output, worded like `needy exec`'s.
+      eprintln!("needy: {}", decision.deny);
       return Ok(126);
     }
     if decision.target == "actor" || decision.target.is_empty() {
@@ -140,7 +141,7 @@ mod linux {
     let first = ExecRequest {
       payload: Some(exec_request::Payload::Start(start)),
     };
-    let exit = exec_cli::run_stream(client, first, tty, true, false, exec_cli::OutputMode::Human).await?;
+    let exit = exec_cli::run_stream(client, first, tty, true).await?;
     if let Some(code) = exit.code {
       return Ok(code);
     }

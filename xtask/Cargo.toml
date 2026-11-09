@@ -1,0 +1,23 @@
+[package]
+name = "xtask"
+description = "Developer tasks for the needy workspace: `cargo xtask <task>`"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = ["session"]
+# `bench run` talks to a control daemon. The probes alone build without it, so
+# the static binary shipped into an actor needs no TLS or gRPC stack.
+session = ["dep:needy-api-client", "dep:needy-api-proto", "dep:tokio"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+needy-api-client = { workspace = true, optional = true }
+needy-api-proto = { workspace = true, optional = true }
+serde_json.workspace = true
+shell-words.workspace = true
+tokio = { workspace = true, optional = true }

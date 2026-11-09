@@ -9,6 +9,9 @@ service SessionService {
   rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
   rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
   rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+  // Stream the actor's console output: the guest's boot messages and the
+  // driving program's terminal. NOT_FOUND when the session has no actor.
+  rpc GetSessionLogs(GetSessionLogsRequest) returns (stream GetSessionLogsResponse);
   // Decide where a command runs and how it is rewritten.
   rpc Decide(DecideRequest) returns (DecideResponse);
 }
@@ -35,6 +38,7 @@ message Session {
   string session_id = 1;
   string name = 2;
   string group = 3;
+  // "running", "finished" (the actor exited), "stopped" or "failed".
   string state = 4;
   repeated ExecutorRef executors = 5;
   int64 created_at_ms = 6;
@@ -65,6 +69,14 @@ message StopSessionRequest {
 
 message StopSessionResponse {}
 
+message GetSessionLogsRequest {
+  string session_id = 1;
+}
+
+message GetSessionLogsResponse {
+  bytes data = 1;
+}
+
 message DecideRequest {
   string session_id = 1;
   repeated string argv = 2;
@@ -80,6 +92,7 @@ message DecideResponse {
   map<string, string> env = 3;
   bool clear_env = 4;
   string cwd = 5;
-  // Set when a rule denies the command.
+  // Set when the command must not run: the message to show, either
+  // "denied: <rule message>" or "fault injected: <errno>".
   string deny = 6;
 }

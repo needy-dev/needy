@@ -7,10 +7,11 @@ work takes effect (executors). It has no agent-specific concepts.
 
 Dependencies point downward; a crate never depends on one above it.
 
-- `crates/cli` (`needy-cli`, binary `needy`): argument parsing, terminal and
-  output formats, `build`, `profile check`, `bench`, `report` printing. It
-  composes the crates below and, inside an actor, dispatches to the guest init
-  and proxy by `argv[0]`.
+- `crates/cli` (`needy-cli`, binary `needy`): argument parsing, one module per
+  command in `commands/` (each owns its `Args` and `run`), output formats
+  (`output/`, tables and JSON), XDG paths (`paths`) and process logs
+  (`logging`, `tracing`). It composes the crates below and, inside an actor,
+  dispatches to the guest init and proxy by `argv[0]`.
 - `crates/daemon` (`needy-daemon`): listeners and authentication for every
   role, and the control plane (sessions, the executor instance pool, the
   session, process and guest APIs). Composition only; logic lives below.
@@ -29,6 +30,8 @@ Dependencies point downward; a crate never depends on one above it.
   Protobuf and gRPC types, the Rust client, and server-side adapters such as
   bearer authentication. Do not edit `api-proto/src/gen`; change `proto/` and
   run `make proto`.
+- `xtask` (`cargo xtask`): developer tasks that are not product commands,
+  today the `bench` latency and throughput probes.
 - `proto/`: canonical API schemas, linted and generated with Buf.
 - `images/`: actor kernel sources, the Firecracker patch and image builds.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
@@ -241,6 +244,7 @@ Use `use-buf` and `use-buf-plugins` when changing `proto/` or Buf configuration.
 make build
 make check
 make test
+cargo xtask bench --help
 ```
 
 

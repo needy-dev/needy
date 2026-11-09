@@ -565,6 +565,7 @@ Rules for every slice:
 
 A QA pass on 2026-11-09 (a Mac without KVM, and the Linux KVM host) found
 these gaps in observable behavior. Each slice closes the items it owns.
+The slice 1 items are closed; `crates/cli/tests/cli.rs` covers each one.
 
 | Slice | Item |
 | --- | --- |

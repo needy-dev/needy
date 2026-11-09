@@ -7,6 +7,9 @@ package needy.v1;
 // process and its terminal, so a client may disconnect and attach again.
 service ProcessService {
   // The first request carries `start` or `attach`; later requests carry input.
+  // A start that does not run fails with PERMISSION_DENIED when a rule or an
+  // injected fault refuses the command, and with FAILED_PRECONDITION when the
+  // command cannot start, for example because it does not exist.
   rpc Exec(stream ExecRequest) returns (stream ExecResponse);
   rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
   rpc KillProcess(KillProcessRequest) returns (KillProcessResponse);

@@ -15,10 +15,11 @@ use needy_api_proto::v1::process_service_server::{ProcessService, ProcessService
 use needy_api_proto::v1::session_service_server::{SessionService, SessionServiceServer};
 use needy_api_proto::v1::{
   CreateSessionRequest, CreateSessionResponse, DecideRequest, DecideResponse, ExecRequest, ExecResponse, ExecutorRef, FetchFilesRequest,
-  FetchFilesResponse, GetConfigRequest, GetConfigResponse, GetSessionRequest, GetSessionResponse, GuestCopy, GuestFault, GuestMount,
-  GuestSensor, GuestUser, KillProcessRequest, KillProcessResponse, ListProcessesRequest, ListProcessesResponse, ListSessionsRequest,
-  ListSessionsResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse,
-  Session as SessionInfo, StopSessionRequest, StopSessionResponse, exec_request, exec_response,
+  FetchFilesResponse, GetConfigRequest, GetConfigResponse, GetSessionLogsRequest, GetSessionLogsResponse, GetSessionRequest,
+  GetSessionResponse, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser, KillProcessRequest, KillProcessResponse,
+  ListProcessesRequest, ListProcessesResponse, ListSessionsRequest, ListSessionsResponse, PushEventsRequest, PushEventsResponse,
+  PushFilesRequest, PushFilesResponse, ReportExitRequest, ReportExitResponse, Session as SessionInfo, StopSessionRequest,
+  StopSessionResponse, exec_request, exec_response,
 };
 use needy_core::profile::{FileMode, OnFull, Profile, Runtime, Side};
 use needy_core::recipe::{CompiledRecipe, HostInfo, Recipe};
@@ -79,6 +80,11 @@ pub struct Daemon {
   pub actor_image: PathBuf,
   pub trace: Trace,
   sessions: Mutex<HashMap<String, Arc<Session>>>,
+  /// Sessions that were stopped or failed to create, kept so `session ls`
+  /// and `session logs` still find them.
+  // TODO(persistence): this list lives in memory and grows until the daemon
+  // exits; slice 9 keeps sessions in `state.db`.
+  ended: Mutex<Vec<SessionInfo>>,
   pools: tokio::sync::Mutex<HashMap<String, Arc<Instance>>>,
   procs: Mutex<HashMap<String, Arc<Instance>>>,
   local: Arc<Instance>,
@@ -90,11 +96,14 @@ fn status(e: anyhow::Error) -> Status {
 }
 
 impl Daemon {
-  pub async fn start(state_dir: PathBuf, actor_image: PathBuf, docker_image: String) -> Result<Arc<Self>> {
-    std::fs::create_dir_all(state_dir.join("sessions"))?;
-    let trace = Trace::open(&state_dir.join("trace.db"), state_dir.join("sessions")).await?;
+  /// Starts the control plane. `state_dir` holds the trace and sessions;
+  /// `runtime_dir` holds the local executor's socket.
+  pub async fn start(state_dir: PathBuf, runtime_dir: PathBuf, actor_image: PathBuf, docker_image: String) -> Result<Arc<Self>> {
+    let sessions_dir = state_dir.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).with_context(|| format!("cannot create {}", sessions_dir.display()))?;
+    let trace = Trace::open(&state_dir.join("trace.db"), sessions_dir).await?;
     // This machine is always available as the `local` executor.
-    let local_sock = state_dir.join("local.sock");
+    let local_sock = runtime_dir.join("local.sock");
     let local_listen = format!("unix:{}", local_sock.display());
     let host = needy_core_executor::prochost::Host::default();
     let service = needy_core_executor::service::ExecutorService {
@@ -109,7 +118,7 @@ impl Daemon {
       .add_service(ProcessServiceServer::new(service).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX));
     tokio::spawn(async move {
       if let Err(e) = crate::server::serve(&local_listen, routes, None).await {
-        eprintln!("needy: local executor: {e:#}");
+        tracing::error!("local executor: {e:#}");
       }
     });
     let local_client = wait_connect(&format!("unix:{}", local_sock.display())).await?;
@@ -131,6 +140,7 @@ impl Daemon {
       actor_image,
       trace,
       sessions: Mutex::new(HashMap::new()),
+      ended: Mutex::new(Vec::new()),
       pools: tokio::sync::Mutex::new(HashMap::new()),
       procs: Mutex::new(HashMap::new()),
       local,
@@ -166,14 +176,57 @@ impl Daemon {
     })
   }
 
+  /// The directory of a running, finished, stopped or failed session, by ID,
+  /// ID prefix or name.
+  fn session_dir(&self, id: &str) -> Option<PathBuf> {
+    if let Some(session) = self.session(id) {
+      return Some(session.dir.clone());
+    }
+    let ended = self.ended.lock().unwrap();
+    let matches: Vec<_> = ended.iter().filter(|s| s.session_id.starts_with(id) || s.name == id).collect();
+    (matches.len() == 1).then(|| self.state_dir.join("sessions").join(&matches[0].session_id))
+  }
+
+  /// Creates a session; a failure is kept as a failed session.
   async fn create_session(self: &Arc<Self>, request: CreateSessionRequest) -> Result<Arc<Session>> {
+    let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let created_ms = now_ms();
+    match self.try_create_session(&id, &request).await {
+      Ok(session) => Ok(session),
+      Err(error) => {
+        // TODO(8d): instances acquired before the failure are not released;
+        // slice 8d fixes that with a regression test.
+        self.sessions.lock().unwrap().remove(&id);
+        tracing::warn!("session {id} failed: {error:#}");
+        let or_id = |value: &str| {
+          if value.is_empty() {
+            id.clone()
+          } else {
+            value.to_string()
+          }
+        };
+        self.ended.lock().unwrap().push(SessionInfo {
+          session_id: id.clone(),
+          name: or_id(&request.name),
+          group: or_id(&request.group),
+          state: "failed".into(),
+          executors: Vec::new(),
+          created_at_ms: created_ms,
+          profile: request.profile_dir.clone(),
+        });
+        Err(error)
+      }
+    }
+  }
+
+  async fn try_create_session(self: &Arc<Self>, id: &str, request: &CreateSessionRequest) -> Result<Arc<Session>> {
+    let id = id.to_string();
     let base = if request.profile_dir.is_empty() {
       std::env::current_dir()?
     } else {
       PathBuf::from(&request.profile_dir)
     };
     let profile = Profile::from_yaml(&request.profile_yaml, &base)?;
-    let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let dir = self.state_dir.join("sessions").join(&id);
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
@@ -196,7 +249,7 @@ impl Daemon {
         let seed = u64::from_str_radix(&id[..8], 16).unwrap_or(0);
         let compiled = recipe.compile(&host, seed);
         for finding in &compiled.findings {
-          eprintln!("needy: recipe {:?}: {}", finding.severity, finding.message);
+          tracing::warn!("session {id}: recipe {:?}: {}", finding.severity, finding.message);
         }
         Some(compiled)
       }
@@ -332,7 +385,12 @@ impl Daemon {
         };
         std::fs::create_dir_all(&host_ws)?;
         let home = format!("/home/{}", user.name);
-        let _ = tokio::process::Command::new("docker").args(["rm", "-f", &container]).output().await;
+        // A container left from an earlier daemon would block the name. When
+        // there is none, `docker rm` exits non-zero, which is the expected
+        // case; only failing to run docker at all is worth a log line.
+        if let Err(e) = tokio::process::Command::new("docker").args(["rm", "-f", &container]).output().await {
+          tracing::debug!("docker rm {container}: {e}");
+        }
         let mut args: Vec<String> = vec![
           "run".into(),
           "-d".into(),
@@ -396,16 +454,26 @@ impl Daemon {
     let mut pools = self.pools.lock().await;
     pools.retain(|_, v| !Arc::ptr_eq(v, instance));
     if let Some(container) = &instance.container {
-      let _ = tokio::process::Command::new("docker").args(["rm", "-f", container]).output().await;
+      match tokio::process::Command::new("docker").args(["rm", "-f", container]).output().await {
+        Ok(output) if !output.status.success() => {
+          tracing::warn!("docker rm {container}: {}", String::from_utf8_lossy(&output.stderr).trim());
+        }
+        Err(e) => tracing::warn!("docker rm {container}: {e}"),
+        Ok(_) => {}
+      }
     }
   }
 
   async fn stop_session(&self, session: &Arc<Session>) {
-    if let Some(mut child) = session.actor.lock().unwrap().take() {
-      let _ = child.start_kill();
+    // TODO(8b): `actor` is never set, so this does not stop the VM; slice 8b
+    // fixes that with a regression test.
+    if let Some(mut child) = session.actor.lock().unwrap().take()
+      && let Err(e) = child.start_kill()
+    {
+      tracing::warn!("session {}: cannot kill the actor: {e}", session.id);
     }
     if let Err(e) = self.mirror_out_executors(session).await {
-      eprintln!("needy: mirror-out for {}: {e:#}", session.id);
+      tracing::warn!("mirror-out for {}: {e:#}", session.id);
     }
     *session.state.lock().unwrap() = "stopped".into();
     for instance in session.executors.values() {
@@ -413,6 +481,7 @@ impl Daemon {
     }
     self.trace.record(&session.id, "session.stop", [("", "")]);
     self.sessions.lock().unwrap().remove(&session.id);
+    self.ended.lock().unwrap().push(Api::info(session));
   }
 
   // --------------------------------------------------------------- actor
@@ -434,13 +503,14 @@ impl Daemon {
       daemon: self.clone(),
       bound: Some(session.id.clone()),
     };
+    let api_session = session.id.clone();
     let routes = tonic::service::Routes::default()
       .add_service(GuestServiceServer::new(api.clone()))
       .add_service(SessionServiceServer::new(api.clone()))
       .add_service(ProcessServiceServer::new(api).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX));
     tokio::spawn(async move {
       if let Err(e) = crate::server::serve(&guest_listen, routes, None).await {
-        eprintln!("needy: guest listener: {e:#}");
+        tracing::error!("session {}: guest listener: {e:#}", api_session);
       }
     });
     let gateway_path = format!("{}_{GATEWAY_PORT}", vsock.display());
@@ -457,7 +527,12 @@ impl Daemon {
       "actor",
       Some(session.injector.clone()),
     ));
-    let _ = std::fs::remove_file(&gateway_path);
+    // A socket left by an earlier daemon would make bind fail.
+    if let Err(e) = std::fs::remove_file(&gateway_path)
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!("cannot remove {gateway_path}: {e}");
+    }
     let listener = tokio::net::UnixListener::bind(&gateway_path)?;
     tokio::spawn(async move {
       while let Ok((stream, _)) = listener.accept().await {
@@ -554,18 +629,22 @@ impl Daemon {
     if let Some(bytes) = input {
       let tx = tx.clone();
       tokio::spawn(async move {
+        // A closed channel means the command already exited; its exit
+        // status, read below, reports why.
         for chunk in bytes.chunks(1 << 20) {
-          let _ = tx
-            .send(ExecRequest {
-              payload: Some(exec_request::Payload::Stdin(chunk.to_vec())),
-            })
-            .await;
+          let stdin = ExecRequest {
+            payload: Some(exec_request::Payload::Stdin(chunk.to_vec())),
+          };
+          if tx.send(stdin).await.is_err() {
+            return;
+          }
         }
-        let _ = tx
-          .send(ExecRequest {
-            payload: Some(exec_request::Payload::StdinEof(true)),
-          })
-          .await;
+        let eof = ExecRequest {
+          payload: Some(exec_request::Payload::StdinEof(true)),
+        };
+        if tx.send(eof).await.is_err() {
+          tracing::debug!("the command exited before end of input");
+        }
       });
     }
     let mut stream = instance.client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
@@ -869,16 +948,47 @@ impl SessionService for Api {
 
   async fn get_session(&self, request: Request<GetSessionRequest>) -> Result<Response<GetSessionResponse>, Status> {
     let id = request.into_inner().session_id;
-    let session = self.daemon.session(&id).ok_or_else(|| Status::not_found("no such session"))?;
+    if let Some(session) = self.daemon.session(&id) {
+      return Ok(Response::new(GetSessionResponse {
+        session: Some(Self::info(&session)),
+      }));
+    }
+    let ended = self.daemon.ended.lock().unwrap();
+    let session = ended.iter().find(|s| s.session_id == id).cloned().ok_or_else(|| Status::not_found("no such session"))?;
     Ok(Response::new(GetSessionResponse {
-      session: Some(Self::info(&session)),
+      session: Some(session),
     }))
   }
 
   async fn list_sessions(&self, _: Request<ListSessionsRequest>) -> Result<Response<ListSessionsResponse>, Status> {
     let mut sessions: Vec<_> = self.daemon.sessions.lock().unwrap().values().map(|s| Self::info(s)).collect();
+    sessions.extend(self.daemon.ended.lock().unwrap().iter().cloned());
     sessions.sort_by_key(|s| s.created_at_ms);
     Ok(Response::new(ListSessionsResponse { sessions }))
+  }
+
+  type GetSessionLogsStream = std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<GetSessionLogsResponse, Status>> + Send>>;
+
+  async fn get_session_logs(&self, request: Request<GetSessionLogsRequest>) -> Result<Response<Self::GetSessionLogsStream>, Status> {
+    if self.bound.is_some() {
+      return Err(Status::permission_denied("actors cannot read session logs"));
+    }
+    let id = request.into_inner().session_id;
+    let dir = self.daemon.session_dir(&id).ok_or_else(|| Status::not_found("no such session"))?;
+    // Firecracker writes the guest's serial console here.
+    let path = dir.join("console.log");
+    let console = match tokio::fs::read(&path).await {
+      Ok(bytes) => bytes,
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        return Err(Status::not_found(format!("session {id} has no actor console")));
+      }
+      Err(e) => return Err(Status::internal(format!("cannot read {}: {e}", path.display()))),
+    };
+    // TODO(session-logs): follow a running actor's console (`--follow`); not
+    // needed by the QA item, which asks for the output so far.
+    let chunks: Vec<Result<GetSessionLogsResponse, Status>> =
+      console.chunks(1 << 20).map(|c| Ok(GetSessionLogsResponse { data: c.to_vec() })).collect();
+    Ok(Response::new(Box::pin(tokio_stream::iter(chunks))))
   }
 
   async fn stop_session(&self, request: Request<StopSessionRequest>) -> Result<Response<StopSessionResponse>, Status> {
@@ -897,11 +1007,12 @@ impl SessionService for Api {
       None => self.daemon.session(&request.session_id).ok_or_else(|| Status::not_found("no such session"))?,
     };
     let mut response = self.daemon.decide(&session, &request);
-    if response.deny.is_empty()
-      && let Some(errno) = self.daemon.exec_fault(&session, &request.argv.join(" ")).await
-    {
+    // `deny` is what the proxy prints, worded like `needy exec`'s refusals.
+    if !response.deny.is_empty() {
+      response.deny = format!("denied: {}", response.deny);
+    } else if let Some(errno) = self.daemon.exec_fault(&session, &request.argv.join(" ")).await {
       response.target = String::new();
-      response.deny = format!("needy chaos: {errno}");
+      response.deny = format!("fault injected: {errno}");
     }
     Ok(Response::new(response))
   }
@@ -937,7 +1048,7 @@ impl ProcessService for Api {
                 },
               );
               if !decision.deny.is_empty() {
-                return Err(Status::permission_denied(decision.deny));
+                return Err(Status::permission_denied(format!("denied: {}", decision.deny)));
               }
               let target = if decision.target == "actor" {
                 session.profile.default_executor.clone().unwrap_or_default()
@@ -980,7 +1091,7 @@ impl ProcessService for Api {
           && start.origin != "actor-mount"
           && let Some(errno) = self.daemon.exec_fault(session, &start.argv.join(" ")).await
         {
-          return Err(Status::failed_precondition(format!("needy chaos: {errno}")));
+          return Err(Status::permission_denied(format!("fault injected: {errno}")));
         }
         (instance, session_id, start.argv.clone(), start.origin.clone())
       }
@@ -1030,11 +1141,13 @@ impl ProcessService for Api {
               trace.record(&session_id, "fault.injected", [("on", "file.open"), ("path", path), ("errno", errno)]);
             }
             for reply in tapped.replies {
-              let _ = out_tx
-                .send(Ok(ExecResponse {
-                  payload: Some(exec_response::Payload::Stdout(reply)),
-                }))
-                .await;
+              let reply = Ok(ExecResponse {
+                payload: Some(exec_response::Payload::Stdout(reply)),
+              });
+              // The client is gone; the inbound loop ends on its next read.
+              if out_tx.send(reply).await.is_err() {
+                break;
+              }
             }
             if tapped.forward.is_empty() {
               continue;
@@ -1063,7 +1176,9 @@ impl ProcessService for Api {
           Ok(Some(m)) => m,
           Ok(None) => break,
           Err(e) => {
-            let _ = out_tx.send(Err(e)).await;
+            if out_tx.send(Err(e)).await.is_err() {
+              tracing::debug!("exec relay: the client left before the upstream error");
+            }
             break;
           }
         };
@@ -1125,7 +1240,9 @@ impl ProcessService for Api {
           _ => {}
         }
         if done {
-          let _ = out_tx.send(Ok(message)).await;
+          if out_tx.send(Ok(message)).await.is_err() {
+            tracing::debug!("exec relay: the client left before the exit");
+          }
           break;
         }
         if !client_gone && out_tx.send(Ok(message)).await.is_err() {

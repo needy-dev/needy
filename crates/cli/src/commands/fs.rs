@@ -4,12 +4,44 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context as _, Result, bail};
+use clap::Subcommand;
 use needy_api_proto::v1::{ExecRequest, ExecStart, exec_request, exec_response};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use needy_core_executor::client::connect;
+
+use crate::cli::Context;
+
+#[derive(clap::Args)]
+pub struct Args {
+  #[command(subcommand)]
+  command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+  /// Copy a file or directory into a directory: `SRC EXECUTOR:DIR` or `EXECUTOR:PATH DIR`.
+  Cp {
+    source: String,
+    destination: String,
+    /// Look the executor up in this session.
+    #[arg(long, default_value = "", hide_default_value = true)]
+    session: String,
+  },
+}
+
+pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  match args.command {
+    Command::Cp {
+      source,
+      destination,
+      session,
+    } => cp(&ctx.endpoint()?, &session, &source, &destination).await?,
+  }
+  Ok(0)
+}
 
 /// `EXECUTOR:path`, or a local path.
 enum Location {
@@ -44,7 +76,7 @@ fn split(path: &str) -> (String, String) {
 }
 
 /// Copies `source` into the directory `destination`, keeping its name.
-pub async fn cp(endpoint: &str, session: &str, source: &str, destination: &str) -> Result<()> {
+async fn cp(endpoint: &str, session: &str, source: &str, destination: &str) -> Result<()> {
   match (parse(source), parse(destination)) {
     (Location::Local(local), Location::Remote { executor, path }) => upload(endpoint, session, &executor, &local, &path).await,
     (Location::Remote { executor, path }, Location::Local(local)) => download(endpoint, session, &executor, &path, &local).await,
@@ -52,7 +84,8 @@ pub async fn cp(endpoint: &str, session: &str, source: &str, destination: &str) 
   }
 }
 
-async fn run(endpoint: &str, session: &str, executor: &str, argv: Vec<String>, input: Option<Vec<u8>>) -> Result<Vec<u8>> {
+/// Runs `tar` on the executor, feeding `input` to its stdin, and returns its stdout.
+async fn run_tar(endpoint: &str, session: &str, executor: &str, argv: Vec<String>, input: Option<Vec<u8>>) -> Result<Vec<u8>> {
   let client = connect(endpoint).await?;
   let (tx, rx) = mpsc::channel::<ExecRequest>(64);
   tx.send(ExecRequest {
@@ -82,11 +115,16 @@ async fn run(endpoint: &str, session: &str, executor: &str, argv: Vec<String>, i
           return;
         }
       }
-      let _ = tx
+      // A closed channel means tar already exited; its status reports why.
+      if tx
         .send(ExecRequest {
           payload: Some(exec_request::Payload::StdinEof(true)),
         })
-        .await;
+        .await
+        .is_err()
+      {
+        tracing::debug!("tar on the executor exited before end of input");
+      }
     });
   }
   let mut responses = client.processes().exec(ReceiverStream::new(rx)).await.map_err(|s| anyhow::anyhow!("{}", s.message()))?.into_inner();
@@ -125,7 +163,7 @@ async fn upload(endpoint: &str, session: &str, executor: &str, local: &Path, rem
   })
   .await??;
   let size = archive.len();
-  run(
+  run_tar(
     endpoint,
     session,
     executor,
@@ -140,13 +178,13 @@ async fn upload(endpoint: &str, session: &str, executor: &str, local: &Path, rem
     Some(archive),
   )
   .await?;
-  eprintln!("needy: copied {size} bytes to {executor}:{remote_dir}");
+  tracing::info!("copied {size} bytes to {executor}:{remote_dir}");
   Ok(())
 }
 
 async fn download(endpoint: &str, session: &str, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
   let (parent, name) = split(remote);
-  let archive = run(
+  let archive = run_tar(
     endpoint,
     session,
     executor,
@@ -179,6 +217,6 @@ async fn download(endpoint: &str, session: &str, executor: &str, remote: &str, l
     Ok(())
   })
   .await??;
-  eprintln!("needy: copied {size} bytes from {executor}:{remote}");
+  tracing::info!("copied {size} bytes from {executor}:{remote}");
   Ok(())
 }

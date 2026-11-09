@@ -1,0 +1,180 @@
+//! `cargo xtask bench`: latency and throughput probes, run here or inside an
+//! actor.
+//!
+//! The probes run inside an actor, whose image only carries the needy binary,
+//! so `bench run` builds this crate statically for the actor and ships it in
+//! with the profile's copy-in. The bench profile copies it from
+//! `target/bench-probe/`.
+
+mod probe;
+
+use anyhow::Result;
+use clap::Subcommand;
+
+#[derive(clap::Args)]
+pub struct Args {
+  #[command(subcommand)]
+  command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+  #[command(flatten)]
+  Probe(probe::Probe),
+  /// Build the probes for the actor, run a bench profile's session and print
+  /// the probes' JSON lines.
+  #[cfg(feature = "session")]
+  Run(run::Args),
+}
+
+pub fn main(args: Args) -> Result<()> {
+  match args.command {
+    Command::Probe(probe) => probe::run(probe),
+    #[cfg(feature = "session")]
+    Command::Run(args) => run::run(args),
+  }
+}
+
+#[cfg(feature = "session")]
+mod run {
+  use std::path::{Path, PathBuf};
+  use std::time::{Duration, Instant};
+
+  use anyhow::{Context, Result, bail};
+  use needy_api_client::Client;
+  use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, GetSessionRequest, StopSessionRequest};
+
+  /// The actor's architecture; actors run on x86_64 Linux KVM hosts.
+  const PROBE_TARGET: &str = "x86_64-unknown-linux-musl";
+
+  #[derive(clap::Args)]
+  pub struct Args {
+    /// Bench profile, for example `examples/bench/profile.yaml`.
+    #[arg(long)]
+    profile: PathBuf,
+    /// Control daemon endpoint, as `needy` prints it on start.
+    #[arg(long, env = "NEEDY_ENDPOINT")]
+    endpoint: String,
+    /// Give up when the session has not finished after this many seconds.
+    #[arg(long, default_value_t = 1800)]
+    timeout_secs: u64,
+  }
+
+  pub fn run(args: Args) -> Result<()> {
+    build_probe()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(session(args))
+  }
+
+  fn workspace_root() -> PathBuf {
+    // NOTICE: xtask always runs through `cargo xtask` from this checkout, so
+    // its manifest directory locates the workspace.
+    Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).unwrap_or_default()
+  }
+
+  /// Builds the probes without the session feature, so the static binary
+  /// needs no TLS or gRPC stack, and stages it for the profile's copy-in.
+  fn build_probe() -> Result<()> {
+    let root = workspace_root();
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let status = std::process::Command::new(cargo)
+      .current_dir(&root)
+      .args([
+        "build",
+        "--locked",
+        "--release",
+        "--package",
+        "xtask",
+        "--no-default-features",
+        "--target",
+        PROBE_TARGET,
+      ])
+      .status()
+      .context("cannot run cargo")?;
+    if !status.success() {
+      bail!("cannot build the probes for {PROBE_TARGET}");
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(PathBuf::from).unwrap_or_else(|| root.join("target"));
+    let stage = target.join("bench-probe");
+    std::fs::create_dir_all(&stage).with_context(|| format!("cannot create {}", stage.display()))?;
+    let built = target.join(PROBE_TARGET).join("release").join("xtask");
+    std::fs::copy(&built, stage.join("xtask")).with_context(|| format!("cannot stage {}", built.display()))?;
+    Ok(())
+  }
+
+  async fn session(args: Args) -> Result<()> {
+    let mut client = Client::connect(&args.endpoint).await.with_context(|| format!("cannot reach the daemon at {}", args.endpoint))?;
+    if let Ok(token) = std::env::var("NEEDY_TOKEN")
+      && !token.is_empty()
+    {
+      client = client.with_token(&token)?;
+    }
+    let yaml = std::fs::read_to_string(&args.profile).with_context(|| format!("cannot read profile {}", args.profile.display()))?;
+    let dir = std::fs::canonicalize(&args.profile)?.parent().map(|p| p.display().to_string()).unwrap_or_default();
+    let created = client
+      .sessions()
+      .create_session(CreateSessionRequest {
+        profile_yaml: yaml,
+        profile_dir: dir,
+        start_actor: true,
+        ..Default::default()
+      })
+      .await
+      .map_err(|s| anyhow::anyhow!("cannot create the session: {}", s.message()))?
+      .into_inner()
+      .session
+      .unwrap_or_default();
+    let id = created.session_id;
+    println!("{}", serde_json::json!({"session": id}));
+    let deadline = Instant::now() + Duration::from_secs(args.timeout_secs);
+    loop {
+      let state = client
+        .sessions()
+        .get_session(GetSessionRequest {
+          session_id: id.clone(),
+        })
+        .await
+        .map_err(|s| anyhow::anyhow!("session {id}: {}", s.message()))?
+        .into_inner()
+        .session
+        .map(|s| s.state)
+        .unwrap_or_default();
+      if state != "running" {
+        break;
+      }
+      if Instant::now() > deadline {
+        bail!("session {id} did not finish in {} s", args.timeout_secs);
+      }
+      tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let mut logs = client
+      .sessions()
+      .get_session_logs(GetSessionLogsRequest {
+        session_id: id.clone(),
+      })
+      .await
+      .map_err(|s| anyhow::anyhow!("session {id} logs: {}", s.message()))?
+      .into_inner();
+    let mut console = Vec::new();
+    while let Some(chunk) = logs.message().await.map_err(|s| anyhow::anyhow!("session {id} logs: {}", s.message()))? {
+      console.extend_from_slice(&chunk.data);
+    }
+    // The console also carries the guest's boot output; the probes' results
+    // are the lines that are JSON objects.
+    for line in String::from_utf8_lossy(&console).lines().map(str::trim) {
+      if line.starts_with('{') && serde_json::from_str::<serde_json::Value>(line).is_ok() {
+        println!("{line}");
+      }
+    }
+    // TODO(trace): read per-hook latencies from the session's trace when the
+    // profile turns on `trace.timing`; that needs the trace slice (4).
+    client
+      .sessions()
+      .stop_session(StopSessionRequest {
+        session_id: id.clone(),
+      })
+      .await
+      .map_err(|s| anyhow::anyhow!("cannot stop session {id}: {}", s.message()))?;
+    Ok(())
+  }
+}

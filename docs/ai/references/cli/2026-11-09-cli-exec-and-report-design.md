@@ -9,15 +9,47 @@ note. Profiles are described in
 
 ```text
 needy daemon                                   # control plane; also runs on every executor machine
-needy build    --recipe NAME                   # build a machine image
-needy session  create|ls|stop [--group G]     # one actor plus its executors
+needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
+needy session  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
 needy exec     [--session ID] -- CMD …         # run a command through placement
 needy ps | attach ID | kill ID                 # manage detached processes
 needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
 needy report   SESSION|latest --level summary|detailed [--output FILE]
-needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions and recipe findings
-needy bench    spawn|pipe|fs|suite …            # hidden: latency and throughput probes
+needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
 ```
+
+Every command takes `--endpoint` (or `NEEDY_ENDPOINT`) and `-v`, which turns
+on logs on stderr: `-v` info, `-vv` debug for needy's crates, `-vvv`
+everything. Logs are off by default; the daemon also writes
+`daemon.YYYY-MM-DD.log` in its state directory.
+
+`ps` and `session ls` print borderless tables, or a JSON array with
+`--output json`. `session ls` lists stopped and failed sessions with their
+state until the daemon exits. `session logs SESSION` prints the actor's
+serial console: the guest's boot messages and the driving program's terminal.
+
+Benchmarks are a developer task, not a product command: `cargo xtask bench`
+runs the latency and throughput probes, and `cargo xtask bench run --profile
+examples/bench/profile.yaml` builds them for the actor and runs them in a
+session.
+
+### Paths
+
+| Directory | Default | Override | Holds |
+| --- | --- | --- | --- |
+| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `trace.db`, `sessions/`, executor sockets and workspaces, the daemon log |
+| Data | `$XDG_DATA_HOME/needy` | `NEEDY_DATA_DIR` | `images/default`, which `needy build` writes and the daemon boots |
+| Runtime | `$XDG_RUNTIME_DIR/needy`, else the state directory (macOS) | `NEEDY_RUNTIME_DIR` | `daemon.sock`, the default endpoint, and `local.sock` |
+
+Windows uses its known folders through `etcetera`. `~/.needy` is not read.
+
+### Exit codes
+
+`exec` and `attach` exit with the process's code, or `128 + N` for signal
+death. When the command does not run, `exec` exits like a shell: 126 when a
+rule denies it (`needy: denied: …`) or chaos injects an errno
+(`needy: fault injected: ECONNREFUSED`), 127 when it cannot start
+(`needy: cannot start …`). Any other error exits 1 with one `needy:` line.
 
 Deliberately absent:
 
@@ -71,6 +103,8 @@ this, for both people and driving programs.
 | `ndjson` | Tools, while running | One JSON object per line: placement decision, output chunk, injected fault, exit. |
 
 `--events summary|all` controls how many events `json` and `ndjson` include.
+When the daemon refuses the command, `json` prints `exit_code` and `error`, and
+`ndjson` prints an `error` and an `exit` line.
 
 ### Current state
 
@@ -182,7 +216,9 @@ Actor network: openrouter.ai (142)
 
 Builds a machine image from a [recipe](../config/2026-11-09-recipe-design.md):
 kernel, rootfs, Firecracker configuration and identity overlay. Actors and
-Firecracker executors use the same builds.
+Firecracker executors use the same builds. The CLI runs `images/Dockerfile`
+through the Docker API with BuildKit (`bollard`), sending the checkout without
+what `.dockerignore` and `.gitignore` exclude.
 
 - **Input is an OCI image by default.** This is the path the Firecracker proof
   of concept used: OCI image, identity overlay, ext4 through `mke2fs -d`, plus a

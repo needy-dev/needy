@@ -1,0 +1,78 @@
+//! `needy daemon`: a control daemon, or an executor daemon on any machine
+//! that runs commands.
+
+use std::path::PathBuf;
+
+use anyhow::Result;
+use clap::ValueEnum;
+use needy_api_proto::v1::health_service_server::HealthServiceServer;
+use needy_api_proto::v1::process_service_server::ProcessServiceServer;
+use needy_core_executor::service::ExecutorService;
+use needy_daemon::server;
+
+use crate::cli::Context;
+
+#[derive(Clone, Copy, ValueEnum)]
+enum Mode {
+  /// Run processes on this machine only.
+  Executor,
+  /// Manage sessions, actors and executors.
+  Control,
+}
+
+#[derive(clap::Args)]
+pub struct Args {
+  #[arg(long, value_enum, default_value = "executor")]
+  mode: Mode,
+  /// Where to listen: unix:/path or HOST:PORT. Defaults to the endpoint.
+  #[arg(long)]
+  listen: Option<String>,
+  /// Executor name reported to clients.
+  #[arg(long, default_value = "local")]
+  name: String,
+  /// Environment variable holding the bearer token clients must present.
+  #[arg(long)]
+  token_env: Option<String>,
+  /// Directory with the actor's vmlinux, rootfs.ext4 and firecracker.
+  /// Defaults to the image `needy build` writes.
+  #[arg(long)]
+  actor_image: Option<PathBuf>,
+  /// Docker image for docker executors without their own image.
+  #[arg(long, default_value = "needy-executor:latest")]
+  docker_image: String,
+}
+
+pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let listen = match args.listen {
+    Some(listen) => listen,
+    None => ctx.endpoint()?,
+  };
+  let token = args.token_env.as_ref().and_then(|name| std::env::var(name).ok());
+  match args.mode {
+    Mode::Executor => {
+      let service = ExecutorService {
+        host: needy_core_executor::prochost::Host::default(),
+        name: args.name,
+      };
+      let routes = tonic::service::Routes::default()
+        .add_service(HealthServiceServer::new(server::Health {
+          instance_id: uuid::Uuid::new_v4().to_string(),
+          role: "executor",
+        }))
+        .add_service(ProcessServiceServer::new(service).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX));
+      tracing::info!("executor listening on {listen}");
+      server::serve(&listen, routes, token).await?;
+    }
+    #[cfg(not(unix))]
+    Mode::Control => anyhow::bail!("the control daemon needs a Unix host"),
+    #[cfg(unix)]
+    Mode::Control => {
+      let paths = ctx.paths()?;
+      let image = args.actor_image.unwrap_or_else(|| paths.default_image());
+      let daemon = needy_daemon::control::Daemon::start(paths.state, paths.runtime, image, args.docker_image).await?;
+      tracing::info!("control daemon listening on {listen}");
+      server::serve(&listen, daemon.routes(), token).await?;
+    }
+  }
+  Ok(0)
+}

@@ -32,7 +32,7 @@ Tunnel: the executor listens locally and the tunnel carries the connection.
 | Bearer tokens on remote executors | Pass: a request without the token is rejected |
 | `max_procs` with `on_full: reject`; a detached process holds its slot until it exits | Pass |
 | Copy-in with rclone filters (`- /secret.txt`), mirror-out to `out/{session}/` | Pass on a native executor and in an actor ([`examples/chaos`](../../../../examples/chaos/profile.yaml)) |
-| Chaos: `exec` errno (`curl **` → `ECONNREFUSED`), `exec` delay (+500 ms) | Pass, on the CLI path and for a routed command in an actor (exit 126) |
+| Chaos: `exec` errno (`curl **` → `ECONNREFUSED`), `exec` delay (+500 ms) | Pass, on the CLI path and for a routed command in an actor; both exit 126 with `needy: fault injected: ECONNREFUSED` |
 | Chaos: SFTP `open` of `**/*.json` on the actor's workspace mount | Pass: `cat broken.json` gets `Input/output error`, `ok.txt` reads normally |
 | Chaos: scheduled hwmon fault | Pass: `sensors` shows `+101.0°C ALARM (CRIT)` two seconds after start |
 | Terminal recordings in asciicast v2 under `sessions/<id>/casts/` | Pass |
@@ -56,6 +56,29 @@ Found on the way:
   gives an absolute path and disables opencode's task tool.
 - **The user's swiftly toolchain crashes `swift build`** on the Mac by itself;
   Xcode's toolchain through `xcrun` works.
+
+## Re-verified after the CLI slice
+
+The [module layout redesign](2026-11-09-module-layout-redesign.md)'s slice 1
+(the CLI's `commands/`, XDG paths, `tracing` logs, `comfy-table` output,
+`needy build` through `bollard`, `bench` moved to `cargo xtask`) was rerun on
+2026-11-09, with every daemon's state in a scratch directory through
+`NEEDY_STATE_DIR`, `NEEDY_RUNTIME_DIR` and `NEEDY_DATA_DIR`.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` through the Docker API with BuildKit | Linux | Pass: kernel, rootfs, Firecracker and needy exported with their file modes; `needy-executor:latest` built |
+| `examples/smoke` in an actor; `needy session logs` prints its console | Linux | Pass: GCE identity, routed `python3`, workspace both ways, `routed exit=7` |
+| `examples/chaos` in an actor | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/` |
+| `needy exec` through a Docker executor: exit 7, `-t` (exit 3 on a PTY), `--output json`, a missing command exits 127, detach, `ps`, `attach` with replay, `kill`, `fs cp` | Linux | Pass |
+| `examples/local` without an actor: copy-in filter, exec fault (126), delay fault (+500 ms), json and ndjson, detach, `ps`, `attach`, `kill`, `fs cp`, stop with mirror-out, `report` | Mac | Pass |
+| `session ls` lists a failed create and a stopped session with their states | Mac, Linux | Pass |
+| `cargo xtask bench run --profile examples/bench/profile.yaml`: probes built for musl and copied into the actor | Linux | Pass: actor-routed Docker `true` p50 1.44 ms, p99 2.10 ms; 256 MiB pipe 689 MiB/s; in line with the numbers below |
+| Windows executor: `needy.exe` from `images/Dockerfile`'s `windows` stage, started through WMI, driven by `needy.exe` on the same host over TCP with a bearer token | Windows | Pass: `cmd /c exit 7` returns 7, stdin to PowerShell, `--output json`, a missing program exits 127, detach, `ps`, `kill`, a wrong token is rejected |
+
+Not rerun in this pass: opencode with a model, the Mac executor from an actor,
+and Windows `fs cp`. The Windows check ran the client on the Windows host
+because a local port forward was not available on the Mac.
 
 ## Latency and throughput
 

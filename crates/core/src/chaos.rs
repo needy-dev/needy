@@ -41,22 +41,18 @@ impl Injector {
     &self.faults
   }
 
+  /// The faults on `on` whose pattern matches `subject`, whether or not they
+  /// would fire; nothing is counted.
+  pub fn matching(&self, on: &str, subject: &str) -> Vec<&Fault> {
+    self.faults.iter().filter(|fault| matches(fault, on, subject)).collect()
+  }
+
   /// Counts a matching occurrence and reports the first fault that fires.
   pub fn check(&self, on: &str, subject: &str) -> Option<Fired> {
     let mut counts = self.counts.lock().unwrap();
     for (index, fault) in self.faults.iter().enumerate() {
-      if fault.on != on {
+      if !matches(fault, on, subject) {
         continue;
-      }
-      if let Some(pattern) = &fault.matcher {
-        let matched = if on == "exec" {
-          command_match(pattern, subject)
-        } else {
-          glob_match(pattern, subject) || glob_match(pattern, subject.trim_start_matches('/'))
-        };
-        if !matched {
-          continue;
-        }
       }
       counts[index] += 1;
       let n = counts[index];
@@ -76,6 +72,17 @@ impl Injector {
       }
     }
     None
+  }
+}
+
+fn matches(fault: &Fault, on: &str, subject: &str) -> bool {
+  if fault.on != on {
+    return false;
+  }
+  match &fault.matcher {
+    None => true,
+    Some(pattern) if on == "exec" => command_match(pattern, subject),
+    Some(pattern) => glob_match(pattern, subject) || glob_match(pattern, subject.trim_start_matches('/')),
   }
 }
 

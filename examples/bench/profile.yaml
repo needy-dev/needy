@@ -1,5 +1,8 @@
-# Latency and throughput probes run inside the actor. The probe binary is copied
-# out of /.needy, because execs made by programs in /.needy are never routed.
+# Latency and throughput probes run inside the actor. Run it with
+# `cargo xtask bench run --profile examples/bench/profile.yaml`, which builds
+# the probes into target/bench-probe/ for the copy-in below. The probes run
+# from the home directory, not /.needy, because execs made by programs in
+# /.needy are never routed.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   recipe: ../opencode/gce.recipe.yaml
@@ -7,8 +10,7 @@ actor:
     - /bin/sh
     - -c
     - |
-      cp /.needy/needy /tmp/probe
-      /tmp/probe bench suite \
+      ~/probe/xtask bench suite \
         "spawn -n 300 --label actor-local -- /usr/bin/test 1" \
         "spawn -n 300 --label actor-proxy-decide-local -- /bin/sh -c true" \
         "spawn -n 300 --label actor-routed-docker -- true" \
@@ -24,4 +26,5 @@ commands:
   - { match: "{true,head} **", to: build }
 files:
   workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
-session_files: [workspace]
+  probe: { mode: copy-in, from: "host:../../target/bench-probe/", to: "actor:~/probe/" }
+session_files: [workspace, probe]

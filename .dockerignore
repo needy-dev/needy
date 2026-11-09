@@ -3,3 +3,4 @@ bin
 .git
 .claude
 .agents
+.tmp
