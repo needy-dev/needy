@@ -977,3 +977,82 @@ fn ps_json_carries_session_and_origin_and_respects_all() {
   let origins: Vec<&str> = all.iter().map(|p| p["origin"].as_str().unwrap()).collect();
   assert_eq!(origins, ["cli", "fs", "fs"]);
 }
+
+/// Starts `command` detached in `session` and returns its process ID.
+fn detach(home: &Home, session: &str, command: &[&str]) -> String {
+  let output = home.needy().args(["exec", "-d", "--session", session, "--"]).args(command).output().unwrap();
+  assert!(output.status.success(), "{}", stderr(&output));
+  stdout(&output).trim().to_string()
+}
+
+/// Waits until `needy ps` no longer lists process `id` as running.
+fn wait_until_ended(home: &Home, session: &str, id: &str) {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  loop {
+    let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-o", "json", "--session", session]))).unwrap();
+    if listed.iter().any(|p| p["id"] == id && p["state"] != "running") {
+      return;
+    }
+    assert!(Instant::now() < deadline, "process {id} did not end: {listed:?}");
+    std::thread::sleep(Duration::from_millis(50));
+  }
+}
+
+// The owner's 2026-11-10 trial: `ps` folded the exit into STATE (`exit 0`,
+// `SIGINT`), so neither column could be filtered or sorted on its own.
+#[test]
+fn ps_shows_state_and_exit_in_separate_columns() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+  let running = detach(&home, &session, &["sleep", "30"]);
+  let exited = detach(&home, &session, &["sh", "-c", "exit 3"]);
+  let killed = detach(&home, &session, &["sleep", "31"]);
+  assert!(home.run(&["kill", &killed, "--signal", "SIGINT"]).status.success());
+  wait_until_ended(&home, &session, &exited);
+  wait_until_ended(&home, &session, &killed);
+
+  let output = home.run(&["ps", "--session", &session]);
+
+  let text = stdout(&output);
+  let header: Vec<&str> = text.lines().next().unwrap().split_whitespace().collect();
+  assert_eq!(
+    header,
+    [
+      "ID", "SESSION", "ORIGIN", "EXECUTOR", "PID", "STATE", "EXIT", "TTY", "COMMAND"
+    ]
+  );
+  let row = |id: &str| -> (String, String) {
+    let line = text.lines().find(|l| l.starts_with(id)).unwrap_or_else(|| panic!("{text}"));
+    let state_at = text.lines().next().unwrap().find("STATE").unwrap();
+    let exit_at = text.lines().next().unwrap().find("EXIT").unwrap();
+    let tty_at = text.lines().next().unwrap().find("TTY").unwrap();
+    (line[state_at..exit_at].trim().to_string(), line[exit_at..tty_at].trim().to_string())
+  };
+  assert_eq!(row(&running), ("running".into(), "".into()));
+  assert_eq!(row(&exited), ("exited".into(), "3".into()));
+  assert_eq!(row(&killed), ("killed".into(), "SIGINT".into()));
+  assert!(home.run(&["kill", &running, "--signal", "SIGKILL"]).status.success());
+}
+
+#[test]
+fn ps_json_has_separate_state_exit_code_and_signal() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let session = create_session(&home, NATIVE_PROFILE);
+  let exited = detach(&home, &session, &["sh", "-c", "exit 3"]);
+  let killed = detach(&home, &session, &["sleep", "31"]);
+  assert!(home.run(&["kill", &killed, "--signal", "SIGINT"]).status.success());
+  wait_until_ended(&home, &session, &exited);
+  wait_until_ended(&home, &session, &killed);
+
+  let output = home.run(&["ps", "-o", "json", "--session", &session]);
+
+  let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
+  let fields = |id: &str| {
+    let p = listed.iter().find(|p| p["id"] == id).unwrap();
+    (p["state"].clone(), p["exit_code"].clone(), p["signal"].clone())
+  };
+  assert_eq!(fields(&exited), (serde_json::json!("exited"), serde_json::json!(3), serde_json::Value::Null));
+  assert_eq!(fields(&killed), (serde_json::json!("killed"), serde_json::Value::Null, serde_json::json!("SIGINT")));
+}

@@ -22,6 +22,27 @@ pub struct Args {
   output: OutputFormat,
 }
 
+/// Where a process is in its life, as a small fixed set; how it ended is
+/// in `exit_code` or `signal`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum State {
+  Running,
+  Exited,
+  /// A signal ended it.
+  Killed,
+}
+
+impl State {
+  fn as_str(self) -> &'static str {
+    match self {
+      Self::Running => "running",
+      Self::Exited => "exited",
+      Self::Killed => "killed",
+    }
+  }
+}
+
 #[derive(Serialize)]
 struct Process {
   id: String,
@@ -31,14 +52,18 @@ struct Process {
   origin: Option<Origin>,
   executor: String,
   pid: i64,
-  state: String,
+  state: State,
+  /// Present when the process exited normally.
+  exit_code: Option<i32>,
+  /// The signal that ended the process.
+  signal: Option<String>,
   tty: bool,
   argv: Vec<String>,
 }
 
 impl Row for Process {
   const HEADER: &'static [&'static str] = &[
-    "ID", "SESSION", "ORIGIN", "EXECUTOR", "PID", "STATE", "TTY", "COMMAND",
+    "ID", "SESSION", "ORIGIN", "EXECUTOR", "PID", "STATE", "EXIT", "TTY", "COMMAND",
   ];
 
   fn cells(&self) -> Vec<String> {
@@ -48,7 +73,9 @@ impl Row for Process {
       self.origin.map_or("-", Origin::as_str).into(),
       self.executor.clone(),
       self.pid.to_string(),
-      self.state.clone(),
+      self.state.as_str().into(),
+      // Empty while the process runs.
+      self.exit_code.map(|code| code.to_string()).or_else(|| self.signal.clone()).unwrap_or_default(),
       if self.tty { "yes" } else { "no" }.into(),
       self.argv.join(" "),
     ]
@@ -78,13 +105,12 @@ fn origin(value: i32) -> Option<Origin> {
 
 impl From<ProcessInfo> for Process {
   fn from(p: ProcessInfo) -> Self {
-    let state = match (p.running, p.exited) {
-      (true, _) => "running".to_string(),
-      (false, Some(exit)) => match exit.code {
-        Some(code) => format!("exit {code}"),
-        None => exit.signal,
-      },
-      (false, None) => "exited".into(),
+    let (state, exit_code, signal) = match (p.running, p.exited) {
+      (true, _) => (State::Running, None, None),
+      (false, Some(exit)) if exit.code.is_none() && !exit.signal.is_empty() => (State::Killed, None, Some(exit.signal)),
+      (false, Some(exit)) => (State::Exited, exit.code, None),
+      // An executor that reported no exit for a process that is not running.
+      (false, None) => (State::Exited, None, None),
     };
     Self {
       id: p.process_id,
@@ -93,6 +119,8 @@ impl From<ProcessInfo> for Process {
       executor: p.executor,
       pid: p.pid,
       state,
+      exit_code,
+      signal,
       tty: p.tty,
       argv: p.argv,
     }

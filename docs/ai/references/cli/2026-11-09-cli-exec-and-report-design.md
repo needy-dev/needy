@@ -32,7 +32,10 @@ workspace mount). The last three are needy's own processes; `ps` hides them
 unless `-a/--all` asks for them, in the table and in JSON alike, whose
 objects carry `session` and `origin`. The control daemon records the origin
 from the start it relays; a process it did not start shows `-` (JSON
-`null`). `--session ID` lists one session's processes. `session ls` lists stopped and failed sessions with their
+`null`). `--session ID` lists one session's processes. `STATE` is `running`,
+`exited` or `killed` (a signal ended it); `EXIT` is the exit code or the
+signal name, empty while the process runs. JSON carries `state`,
+`exit_code` and `signal` as separate fields. `session ls` lists stopped and failed sessions with their
 state until the daemon exits. `session logs SESSION` prints the actor's
 serial console: the guest's boot messages and the driving program's terminal.
 
