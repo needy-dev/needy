@@ -39,6 +39,23 @@ fn mounts(session: &Session) -> Vec<GuestMount> {
   mounts
 }
 
+/// The driving program's working directory when the profile sets no
+/// `actor.cwd`: `~/workspace` when a workspace mount provides it, else the
+/// home directory. Init mounts a fresh home, so `~/workspace` exists only
+/// when a mount at or below it creates it.
+fn default_cwd(home: &str, mounts: &[GuestMount]) -> String {
+  let workspace = format!("{home}/workspace");
+  let provided = mounts.iter().any(|m| {
+    let target = m.target.trim_end_matches('/');
+    target == workspace || target.starts_with(&format!("{workspace}/"))
+  });
+  if provided {
+    workspace
+  } else {
+    home.to_string()
+  }
+}
+
 #[async_trait::async_trait]
 impl Guest for Daemon {
   async fn config(&self, session: &str) -> Result<GuestConfig, ControlError> {
@@ -47,6 +64,7 @@ impl Guest for Daemon {
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
     let mounts = mounts(&session);
+    let cwd = profile.actor.cwd.clone().unwrap_or_else(|| default_cwd(&home, &mounts));
     let mut copy_in = Vec::new();
     let mut mirror_out = Vec::new();
     for (name, mapping) in &profile.files.mappings {
@@ -96,7 +114,7 @@ impl Guest for Daemon {
       mounts,
       command: session.actor_command.clone(),
       env: profile.actor.env.clone().into_iter().collect(),
-      cwd: profile.actor.cwd.clone().unwrap_or_else(|| format!("{home}/workspace")),
+      cwd,
       gateway_port: GATEWAY_PORT,
       sensors: recipe
         .map(|r| {
@@ -143,3 +161,7 @@ impl Guest for Daemon {
     files::push(&session, name, archive).await
   }
 }
+
+#[cfg(test)]
+#[path = "guest_test.rs"]
+mod tests;

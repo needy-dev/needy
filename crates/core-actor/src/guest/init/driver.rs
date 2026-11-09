@@ -36,8 +36,10 @@ pub(super) async fn run(config: &GetConfigResponse, home: &str) -> Result<ExitSt
     .env("NO_PROXY", "localhost,127.0.0.1")
     .env("no_proxy", "localhost,127.0.0.1")
     .envs(&config.env)
+    // The daemon sends the default working directory; the home directory
+    // is the one that always exists.
     .current_dir(if config.cwd.is_empty() {
-      format!("{home}/workspace")
+      home.to_string()
     } else {
       config.cwd.clone()
     })
