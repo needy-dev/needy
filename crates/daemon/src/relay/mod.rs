@@ -98,6 +98,19 @@ impl Daemon {
     self.process(process).map(|known| known.instance)
   }
 
+  /// What the daemon knows of `process`, which `instance` listed: what it
+  /// recorded, or else `instance` and `origin`, which are then recorded.
+  fn sighted(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>) -> Known {
+    let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    processes
+      .entry(process.to_string())
+      .or_insert_with(|| Known {
+        instance: instance.clone(),
+        origin,
+      })
+      .clone()
+  }
+
   /// Records the instance of `process` and, when this daemon started it, its
   /// origin; a later sighting without an origin keeps the one recorded.
   fn remember(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>) {
@@ -208,28 +221,38 @@ impl Processes for Daemon {
   async fn list(&self, session: &str) -> Result<Vec<ProcessInfo>, ControlError> {
     // An empty or unknown session lists every executor; the executors keep
     // only the session's processes.
-    let mut instances: Vec<Arc<Instance>> = match self.sessions.find(session) {
+    let instances: Vec<Arc<Instance>> = match self.sessions.find(session) {
       Ok(session) => session.executors().into_values().collect(),
       Err(_) => {
-        let mut all = self.pool.instances().await;
-        all.push(self.local.clone());
+        let mut all = vec![self.local.clone()];
+        all.extend(self.pool.instances().await);
         all
       }
     };
-    instances.dedup_by(|a, b| Arc::ptr_eq(a, b));
     let request = ListProcessesRequest {
       session_id: session.to_string(),
     };
     let mut processes = Vec::new();
+    // Instances that share one executor, such as this machine's `local` and
+    // every native executor, list the same processes; each executor is
+    // asked once.
+    let mut asked: Vec<(&'static str, String)> = Vec::new();
     for instance in instances {
+      let executor = (instance.handle.runtime, instance.handle.id.clone());
+      if asked.contains(&executor) {
+        continue;
+      }
+      asked.push(executor);
       // An executor that does not answer has nothing to list.
       match instance.handle.client.processes().list_processes(request.clone()).await {
         Ok(list) => {
           for p in list.into_inner().processes {
             let mut p = domain::process_info(p);
-            p.executor = instance.name.clone();
-            self.remember(&p.process, &instance, p.origin);
-            p.origin = self.process(&p.process).ok().and_then(|known| known.origin);
+            // A process is named by the instance it was started through;
+            // one this daemon did not start, by the first that listed it.
+            let known = self.sighted(&p.process, &instance, p.origin);
+            p.executor = known.instance.name.clone();
+            p.origin = known.origin;
             processes.push(p);
           }
         }

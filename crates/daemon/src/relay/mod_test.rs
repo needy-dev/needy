@@ -176,3 +176,48 @@ async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
   assert_eq!(stdout, "done\n");
   assert_eq!(exit.unwrap().code, Some(4));
 }
+
+/// Starts `argv` detached and returns its process ID once it runs.
+async fn start_detached(daemon: &crate::Daemon, argv: &[&str], session: &str, executor: &str) -> String {
+  let detached = ExecSpec {
+    detach: true,
+    ..spec(argv, session, executor)
+  };
+  let mut outputs = daemon.exec(ExecOpen::Start(detached), attached()).await.unwrap();
+  loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break started.process;
+    }
+  }
+}
+
+// ROOT CAUSE:
+//
+// If a session had a native executor, `needy ps` without `--session` listed
+// each of its processes twice, under `here` and under `local`, because both
+// instances share this machine's executor and each was asked for every
+// process on it.
+//
+// Before the fix, the list had one row per instance that shares the executor.
+// The fix asks each executor once and names a process by the instance it
+// was started through.
+#[tokio::test]
+async fn processes_on_an_executor_two_instances_share_are_listed_once() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let in_session = start_detached(daemon, &["sleep", "30"], &created.id, "").await;
+  let outside = start_detached(daemon, &["sleep", "30"], "", "").await;
+
+  let listed: Vec<(String, String)> = Processes::list(daemon, "").await.unwrap().into_iter().map(|p| (p.process, p.executor)).collect();
+
+  assert_eq!(
+    listed,
+    [
+      (in_session, "here".to_string()),
+      (outside, "local".to_string())
+    ]
+  );
+  Sessions::stop(daemon, &created.id).await.unwrap();
+  daemon.shutdown().await;
+}
