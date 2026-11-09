@@ -57,6 +57,19 @@ fn top(counts: &BTreeMap<String, usize>, n: usize) -> String {
   v.iter().take(n).map(|(k, c)| format!("{k} ({c})")).collect::<Vec<_>>().join(", ")
 }
 
+/// A session's length in units that fit it: tenths of a second under a
+/// minute, then minutes and seconds, then hours and minutes. Each unit is
+/// cut, not rounded, so a length never reads longer than it was.
+fn duration(ms: i64) -> String {
+  let ms = ms.max(0);
+  let secs = ms / 1000;
+  match secs {
+    0..60 => format!("{}.{}s", secs, (ms % 1000) / 100),
+    60..3600 => format!("{}m {:02}s", secs / 60, secs % 60),
+    _ => format!("{}h {:02}m", secs / 3600, secs % 3600 / 60),
+  }
+}
+
 fn truncate(s: &str, n: usize) -> String {
   if s.chars().count() <= n {
     return s.to_string();
@@ -223,7 +236,6 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   let first = events.first().map_or(0, |r| r.time_ms);
   let created = t.created.unwrap_or(first);
   let ended = t.ended.or(events.last().map(|r| r.time_ms)).unwrap_or(created);
-  let secs = (ended - created).max(0) / 1000;
   let driver = match &t.actor_exit {
     None => "-".to_string(),
     Some(ActorExit {
@@ -249,9 +261,8 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   writeln!(out, "| --- | --- | --- | --- | --- | --- | --- | --- |")?;
   writeln!(
     out,
-    "| {}m {:02}s | {} | {driver} | {} | {} | {} | {} | {} |\n",
-    secs / 60,
-    secs % 60,
+    "| {} | {} | {driver} | {} | {} | {} | {} | {} |\n",
+    duration(ended - created),
     t.state.map_or("-", SessionState::as_str),
     t.routed,
     t.kept,

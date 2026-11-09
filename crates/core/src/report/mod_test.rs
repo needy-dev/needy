@@ -122,7 +122,7 @@ fn the_title_names_the_profile_not_its_directory() {
 fn commands_a_fault_made_fail_count_as_failed() {
   let report = render("7f3a", &actor_session(), Level::Summary);
   // Duration | State | Driving program | Routed | Kept | CLI | Failed | Model calls
-  assert_eq!(line_after(&report, "| Duration"), "| 0m 05s | finished | exit 0 | 1 | 1 | 1 | 2 | 1 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 5.0s | finished | exit 0 | 1 | 1 | 1 | 2 | 1 |");
   // Routed | Kept | Denied | Fault injected
   assert_eq!(line_after(&report, "| ↪️"), "| 1 | 1 | 1 | 2 |");
 }
@@ -214,7 +214,7 @@ fn a_failed_session_shows_its_state_and_reason() {
 
   let report = render("7f3a", &events, Level::Summary);
 
-  assert_eq!(line_after(&report, "| Duration"), "| 0m 02s | failed | - | 0 | 0 | 0 | 0 | 0 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 2.0s | failed | - | 0 | 0 | 0 | 0 | 0 |");
   assert!(report.contains("- ❌ Session failed: executor build: no such image\n"), "{report}");
 }
 
@@ -276,7 +276,7 @@ fn a_session_stopped_after_it_finished_reports_finished() {
 
   let report = render("7f3a", &events, Level::Summary);
 
-  assert_eq!(line_after(&report, "| Duration"), "| 0m 03s | finished | exit 0 | 0 | 0 | 0 | 0 | 0 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 3.0s | finished | exit 0 | 0 | 0 | 0 | 0 | 0 |");
 }
 
 // ROOT CAUSE:
@@ -304,7 +304,7 @@ fn a_vm_exit_without_a_driver_exit_reports_finished() {
 
   let report = render("7f3a", &events, Level::Summary);
 
-  assert_eq!(line_after(&report, "| Duration"), "| 0m 01s | finished | - | 0 | 0 | 0 | 0 | 0 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 1.0s | finished | - | 0 | 0 | 0 | 0 | 0 |");
 }
 
 #[test]
@@ -313,5 +313,31 @@ fn a_session_stopped_while_running_reports_stopped() {
 
   let report = render("7f3a", &events, Level::Summary);
 
-  assert_eq!(line_after(&report, "| Duration"), "| 0m 02s | stopped | - | 0 | 0 | 0 | 0 | 0 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 2.0s | stopped | - | 0 | 0 | 0 | 0 | 0 |");
+}
+
+// ROOT CAUSE:
+//
+// If a session lasted less than a second, the report said `0m 00s`, because
+// it showed whole minutes and seconds only.
+//
+// Before the fix, the owner's 0.8 s smoke session read as no time at all.
+// The fix shows tenths of a second under a minute, and coarser units above.
+#[test]
+fn a_sub_second_session_shows_its_duration() {
+  let events = vec![create(1_000), at(1_800, Event::SessionStop(SessionStop {}))];
+
+  let report = render("7f3a", &events, Level::Summary);
+
+  assert_eq!(line_after(&report, "| Duration"), "| 0.8s | stopped | - | 0 | 0 | 0 | 0 | 0 |");
+}
+
+#[test]
+fn durations_use_units_that_fit_them() {
+  assert_eq!(duration(0), "0.0s");
+  assert_eq!(duration(840), "0.8s");
+  assert_eq!(duration(59_940), "59.9s");
+  assert_eq!(duration(60_000), "1m 00s");
+  assert_eq!(duration(245_000), "4m 05s");
+  assert_eq!(duration(3_725_000), "1h 02m");
 }
