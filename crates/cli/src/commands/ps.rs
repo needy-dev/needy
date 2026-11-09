@@ -1,7 +1,7 @@
 //! `needy ps`: list processes of a session, or of every executor.
 
-use anyhow::{Result, anyhow};
-use needy_api_proto::v1::{ListProcessesRequest, ProcessInfo};
+use anyhow::Result;
+use needy_api_client::proto::v1::{ListProcessesRequest, ProcessInfo};
 use serde::Serialize;
 
 use crate::cli::Context;
@@ -70,7 +70,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       session_id: args.session,
     })
     .await
-    .map_err(|s| anyhow!("{}", s.message()))?
+    .map_err(needy_api_client::Error::from)?
     .into_inner();
   let rows: Vec<Process> = list.processes.into_iter().map(Process::from).collect();
   output::print(args.output, &rows)?;

@@ -71,7 +71,7 @@ async fn boot() -> Result<()> {
   write_param("/proc/sys/vm/memfd_noexec", "2");
 
   let client = super::daemon().await?;
-  let config = client.guest().get_config(GetConfigRequest {}).await.map_err(|s| anyhow::anyhow!("{}", s.message()))?.into_inner();
+  let config = client.guest().get_config(GetConfigRequest {}).await.map_err(needy_api_client::Error::from)?.into_inner();
   let user = config.user.clone().unwrap_or_default();
   let home = format!("/home/{}", user.name);
   mounts::home(&home, user.uid, user.gid);

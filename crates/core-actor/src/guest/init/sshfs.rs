@@ -8,10 +8,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use backon::{ConstantBuilder, Retryable};
 use needy_api_client::Client;
-use needy_api_proto::v1::{ExecRequest, ExecStart, GuestMount, Origin, exec_request, exec_response};
+use needy_api_client::exec::{Event, ExecStream};
+use needy_api_proto::v1::{ExecStart, GuestMount, Origin};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
 
 /// Mounts an executor directory at `m.target`, owned by the user.
 pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -> Result<()> {
@@ -29,19 +28,16 @@ pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -
     .context("cannot start sshfs")?;
   let mut sshfs_in = sshfs.stdin.take().context("sshfs stdin")?;
   let mut sshfs_out = sshfs.stdout.take().context("sshfs stdout")?;
-  let (tx, rx) = mpsc::channel::<ExecRequest>(64);
-  tx.send(ExecRequest {
-    payload: Some(exec_request::Payload::Start(ExecStart {
-      argv: m.sftp_command.clone(),
-      executor: m.executor.clone(),
-      // The mount root lets file faults match paths relative to it.
-      cwd: m.source.clone(),
-      origin: Origin::ActorMount.into(),
-      ..Default::default()
-    })),
-  })
-  .await?;
-  let mut responses = client.processes().exec(ReceiverStream::new(rx)).await.map_err(|s| anyhow::anyhow!("{}", s.message()))?.into_inner();
+  let start = ExecStart {
+    argv: m.sftp_command.clone(),
+    executor: m.executor.clone(),
+    // The mount root lets file faults match paths relative to it.
+    cwd: m.source.clone(),
+    origin: Origin::ActorMount.into(),
+    ..Default::default()
+  };
+  let mut stream = ExecStream::start(client, start).await?;
+  let input = stream.input();
   let target = m.target.clone();
   // sshfs's requests go to the executor's stdin.
   tokio::spawn(async move {
@@ -57,10 +53,7 @@ pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -
           break;
         }
       };
-      let request = ExecRequest {
-        payload: Some(exec_request::Payload::Stdin(buf[..n].to_vec())),
-      };
-      if tx.send(request).await.is_err() {
+      if input.stdin(buf[..n].to_vec()).await.is_err() {
         break;
       }
     }
@@ -69,16 +62,16 @@ pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -
   let target = m.target.clone();
   tokio::spawn(async move {
     loop {
-      let message = match responses.message().await {
-        Ok(Some(message)) => message,
+      let event = match stream.next().await {
+        Ok(Some(event)) => event,
         Ok(None) => break,
-        Err(status) => {
-          tracing::warn!("mount {target}: the SFTP stream failed: {}", status.message());
+        Err(e) => {
+          tracing::warn!("mount {target}: the SFTP stream failed: {e}");
           break;
         }
       };
-      match message.payload {
-        Some(exec_response::Payload::Stdout(bytes)) => {
+      match event {
+        Event::Stdout(bytes) => {
           if let Err(e) = async {
             sshfs_in.write_all(&bytes).await?;
             sshfs_in.flush().await
@@ -89,8 +82,8 @@ pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -
             break;
           }
         }
-        Some(exec_response::Payload::Exited(_)) | Some(exec_response::Payload::Error(_)) => break,
-        _ => {}
+        Event::Exited(_) => break,
+        Event::Started(_) | Event::Stderr(_) | Event::Trace(_) => {}
       }
     }
   });

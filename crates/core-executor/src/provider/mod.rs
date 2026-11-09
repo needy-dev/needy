@@ -17,9 +17,7 @@ pub mod remote;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use backon::{ConstantBuilder, Retryable};
 use needy_api_client::Client;
-use needy_api_proto::v1::CheckRequest;
 use needy_config::profile::{Executor, User};
 
 pub use docker::Docker;
@@ -38,8 +36,6 @@ pub enum Error {
     path: PathBuf,
     source: std::io::Error,
   },
-  #[error("cannot reach {endpoint}: {message}")]
-  Unreachable { endpoint: String, message: String },
   #[error(transparent)]
   Client(#[from] needy_api_client::Error),
   #[error("docker")]
@@ -91,23 +87,9 @@ pub trait Provider: Send + Sync {
 
 /// Connects to an executor and waits until it answers its health check.
 pub async fn connect(endpoint: &str) -> Result<Client, Error> {
-  // NOTICE: a container's executor needs a moment to bind its socket; 100
-  // tries 100 ms apart cover a cold container start on the Linux host.
-  // TODO(api-client): this moves to `api-client::ready` in slice 7.
-  let attempt = || async {
-    let client = Client::connect(endpoint).await.map_err(|e| e.to_string())?;
-    // Any answer, even an error status, means the server is up.
-    match client.health().check(CheckRequest {}).await {
-      Err(status) if status.code() == tonic::Code::Unavailable => Err(status.message().to_string()),
-      _ => Ok(client),
-    }
-  };
-  attempt.retry(ConstantBuilder::default().with_delay(Duration::from_millis(100)).with_max_times(100)).await.map_err(|message| {
-    Error::Unreachable {
-      endpoint: endpoint.to_string(),
-      message,
-    }
-  })
+  // NOTICE: a container's executor needs a moment to bind its socket; 10 s
+  // covers a cold container start on the Linux host.
+  Ok(needy_api_client::ready::wait(endpoint, Duration::from_secs(10)).await?)
 }
 
 /// A profile path on this machine: `~` is the user's home directory, and a

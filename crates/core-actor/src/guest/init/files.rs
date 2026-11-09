@@ -11,9 +11,9 @@ use needy_api_proto::v1::{FetchFilesRequest, PushFilesRequest};
 /// by the user.
 pub(super) async fn copy_in(client: &Client, name: &str, path: &str, uid: u32, gid: u32) -> Result<()> {
   let mut stream =
-    client.guest().fetch_files(FetchFilesRequest { name: name.into() }).await.map_err(|s| anyhow::anyhow!("{}", s.message()))?.into_inner();
+    client.guest().fetch_files(FetchFilesRequest { name: name.into() }).await.map_err(needy_api_client::Error::from)?.into_inner();
   let mut archive = Vec::new();
-  while let Some(chunk) = stream.message().await.map_err(|s| anyhow::anyhow!("{}", s.message()))? {
+  while let Some(chunk) = stream.message().await.map_err(needy_api_client::Error::from)? {
     archive.extend(chunk.data);
   }
   let root = PathBuf::from(path);
@@ -67,6 +67,6 @@ pub(super) async fn mirror_out(client: &Client, name: &str, path: &str) -> Resul
       data: Vec::new(),
     });
   }
-  client.guest().push_files(tokio_stream::iter(messages)).await.map_err(|s| anyhow::anyhow!("{}", s.message()))?;
+  client.guest().push_files(tokio_stream::iter(messages)).await.map_err(needy_api_client::Error::from)?;
   Ok(())
 }

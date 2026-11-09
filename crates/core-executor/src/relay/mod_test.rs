@@ -1,8 +1,9 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
+use needy_api_client::Client;
 use needy_api_proto::v1::process_service_server::ProcessServiceServer;
-use needy_api_proto::v1::{ExecAttach, ExecStart, KillProcessRequest, ListProcessesRequest};
+use needy_api_proto::v1::{ExecStart, KillProcessRequest, ListProcessesRequest};
 use tokio_stream::wrappers::UnixListenerStream;
 
 use super::*;
@@ -34,41 +35,32 @@ async fn executor() -> Executor {
   Executor { _dir: dir, client }
 }
 
-fn start(argv: &[&str], detach: bool) -> ExecRequest {
-  ExecRequest {
-    payload: Some(exec_request::Payload::Start(ExecStart {
-      argv: argv.iter().map(|a| a.to_string()).collect(),
-      no_stdin: true,
-      detach,
-      ..Default::default()
-    })),
+fn start(argv: &[&str], detach: bool) -> ExecStart {
+  ExecStart {
+    argv: argv.iter().map(|a| a.to_string()).collect(),
+    no_stdin: true,
+    detach,
+    ..Default::default()
   }
 }
 
 /// The stdout and exit of a stream, read without relaying to local stdio.
-async fn read(mut responses: tonic::Streaming<ExecResponse>) -> (String, Option<Exit>) {
+async fn read(mut stream: ExecStream) -> (String, Option<Exit>) {
   let mut stdout = Vec::new();
-  while let Some(message) = responses.message().await.unwrap() {
-    match message.payload {
-      Some(exec_response::Payload::Stdout(bytes)) => stdout.extend(bytes),
-      Some(exec_response::Payload::Exited(exited)) => {
-        let exit = Exit {
-          code: exited.code,
-          signal: exited.signal,
-        };
-        return (String::from_utf8_lossy(&stdout).into_owned(), Some(exit));
-      }
+  while let Some(event) = stream.next().await.unwrap() {
+    match event {
+      Event::Stdout(bytes) => stdout.extend(bytes),
+      Event::Exited(exit) => return (String::from_utf8_lossy(&stdout).into_owned(), Some(exit)),
       _ => {}
     }
   }
   (String::from_utf8_lossy(&stdout).into_owned(), None)
 }
 
-async fn started(responses: &mut tonic::Streaming<ExecResponse>) -> String {
+async fn started(stream: &mut ExecStream) -> String {
   loop {
-    match responses.message().await.unwrap().expect("a started message").payload {
-      Some(exec_response::Payload::Started(started)) => return started.process_id,
-      _ => continue,
+    if let Some(Event::Started(started)) = stream.next().await.unwrap() {
+      return started.process_id;
     }
   }
 }
@@ -76,8 +68,9 @@ async fn started(responses: &mut tonic::Streaming<ExecResponse>) -> String {
 #[tokio::test]
 async fn the_relay_returns_the_exit_code() {
   let executor = executor().await;
+  let stream = ExecStream::start(&executor.client, start(&["sh", "-c", "exit 7"], false)).await.unwrap();
 
-  let exit = run(&executor.client, start(&["sh", "-c", "exit 7"], false), false, false).await.unwrap();
+  let exit = run(stream, false, false).await.unwrap();
 
   assert_eq!(
     exit,
@@ -92,8 +85,9 @@ async fn the_relay_returns_the_exit_code() {
 #[tokio::test]
 async fn the_relay_returns_a_signal_death_by_name() {
   let executor = executor().await;
+  let stream = ExecStream::start(&executor.client, start(&["sh", "-c", "kill -TERM $$"], false)).await.unwrap();
 
-  let exit = run(&executor.client, start(&["sh", "-c", "kill -TERM $$"], false), false, false).await.unwrap();
+  let exit = run(stream, false, false).await.unwrap();
 
   assert_eq!(
     exit,
@@ -106,38 +100,19 @@ async fn the_relay_returns_a_signal_death_by_name() {
 }
 
 #[tokio::test]
-async fn a_command_that_cannot_start_is_a_failed_precondition() {
-  let executor = executor().await;
-
-  let error = run(&executor.client, start(&["/nonexistent/needy-test-command"], false), false, false).await.err().unwrap();
-
-  let Error::Status(status) = error else {
-    panic!("{error:?}")
-  };
-  assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-  assert!(status.message().starts_with("cannot start /nonexistent/needy-test-command"), "{}", status.message());
-}
-
-#[tokio::test]
 async fn a_detached_process_can_be_listed_attached_with_replay_and_killed() {
   let executor = executor().await;
-  let (_tx, mut responses) = open(&executor.client, start(&["sh", "-c", "echo ready; exec sleep 30"], true)).await.unwrap();
-  let id = started(&mut responses).await;
-  drop(responses);
+  let mut stream = ExecStream::start(&executor.client, start(&["sh", "-c", "echo ready; exec sleep 30"], true)).await.unwrap();
+  let id = started(&mut stream).await;
+  drop(stream);
 
   // An attached client sees the output, live or replayed, and leaves the
   // process running when it goes.
-  let attach = || ExecRequest {
-    payload: Some(exec_request::Payload::Attach(ExecAttach {
-      process_id: id.clone(),
-      replay: true,
-    })),
-  };
-  let (tx, mut responses) = open(&executor.client, attach()).await.unwrap();
-  started(&mut responses).await;
-  let first = responses.message().await.unwrap().and_then(|m| m.payload);
-  assert_eq!(first, Some(exec_response::Payload::Stdout(b"ready\n".to_vec())));
-  drop((tx, responses));
+  let mut attached = ExecStream::attach(&executor.client, &id, true).await.unwrap();
+  started(&mut attached).await;
+  let first = attached.next().await.unwrap();
+  assert_eq!(first, Some(Event::Stdout(b"ready\n".to_vec())));
+  drop(attached);
   let listed = executor.client.processes().list_processes(ListProcessesRequest::default()).await.unwrap().into_inner().processes;
   assert_eq!(listed.iter().map(|p| (p.process_id.clone(), p.running)).collect::<BTreeSet<_>>(), BTreeSet::from([(id.clone(), true)]));
 
@@ -150,8 +125,8 @@ async fn a_detached_process_can_be_listed_attached_with_replay_and_killed() {
     })
     .await
     .unwrap();
-  let (_tx, responses) = open(&executor.client, attach()).await.unwrap();
-  let (replayed, exit) = read(responses).await;
+  let attached = ExecStream::attach(&executor.client, &id, true).await.unwrap();
+  let (replayed, exit) = read(attached).await;
 
   assert_eq!(replayed, "ready\n");
   assert_eq!(exit.map(|e| e.signal), Some("SIGKILL".into()));

@@ -9,11 +9,11 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use clap::ValueEnum;
-use needy_api_proto::v1::{ExecEvent, ExecRefusal, ExecRequest, ExecResponse, ExecStart, exec_request, exec_response};
+use needy_api_client::exec::{Event, ExecStream};
+use needy_api_client::proto::v1::{ExecEvent, ExecStart, ExecStarted, Origin};
+use needy_api_client::{Error, Kind};
 use needy_core_executor::relay;
-use prost::Message as _;
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
 
 use crate::cli::Context;
 use crate::output;
@@ -72,76 +72,75 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     env.entry("TERM".into()).or_insert(term);
   }
   let forward_stdin = !(args.no_stdin || args.detach);
-  let first = ExecRequest {
-    payload: Some(exec_request::Payload::Start(ExecStart {
-      argv: args.command,
-      cwd: args.cwd.unwrap_or_default(),
-      env,
-      clear_env: args.clear_env,
-      tty: window,
-      detach: args.detach,
-      session_id: args.session,
-      executor: args.executor,
-      no_stdin: !forward_stdin,
-      origin: needy_api_proto::v1::Origin::Cli.into(),
-    })),
+  let start = ExecStart {
+    argv: args.command,
+    cwd: args.cwd.unwrap_or_default(),
+    env,
+    clear_env: args.clear_env,
+    tty: window,
+    detach: args.detach,
+    session_id: args.session,
+    executor: args.executor,
+    no_stdin: !forward_stdin,
+    origin: Origin::Cli.into(),
   };
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
-  let (tx, mut responses) = match relay::open(&connection, first).await {
+  let mut stream = match ExecStream::start(&connection, start).await {
     Ok(stream) => stream,
-    Err(status) => return refused(&status, args.output),
+    Err(error) => return refused(error, args.output),
   };
   if args.detach {
-    return detached(&mut responses, args.output).await;
+    return detached(&mut stream, args.output).await;
   }
   match args.output {
     Output::Human => {
-      let exit = relay::stdio(tx, responses, tty, forward_stdin).await?;
+      let exit = relay::run(stream, tty, forward_stdin).await?;
       Ok(needy_core_executor::signals::shell_code(&exit))
     }
     Output::Json | Output::Ndjson => {
-      let _forward = relay::Forward::start(tx.clone(), forward_stdin, false);
-      events(tx, responses, args.output).await
+      let _forward = relay::Forward::start(stream.input(), forward_stdin, false);
+      events(stream, args.output).await
     }
   }
 }
 
 /// Exit code and output for a start the daemon refused, like a shell's: 126
 /// when a rule or an injected fault refuses the command, 127 when it cannot
-/// start. Other statuses are errors.
-fn refused(status: &tonic::Status, format: Output) -> Result<i32> {
-  let code = match status.code() {
-    tonic::Code::PermissionDenied => 126,
-    tonic::Code::FailedPrecondition => 127,
-    _ => bail!("{}", status.message()),
+/// start. Other errors are errors.
+fn refused(error: Error, format: Output) -> Result<i32> {
+  let code = match error.kind() {
+    Kind::Denied => 126,
+    Kind::Failed => 127,
+    _ => return Err(error.into()),
   };
+  let message = error.to_string();
   match format {
     Output::Human => {}
-    Output::Json => line(&json!({"exit_code": code, "signal": "", "error": status.message()}))?,
+    Output::Json => line(&json!({"exit_code": code, "signal": "", "error": message}))?,
     Output::Ndjson => {
-      // The daemon sends the decision that refused the command in the
-      // status details.
-      match ExecRefusal::decode(status.details()) {
-        Ok(refusal) => {
-          for event in &refusal.events {
+      // The daemon sends the decision that refused the command with the
+      // refusal.
+      match error.refusal() {
+        Ok(events) => {
+          for event in &events {
             line(&event_line(event)?)?;
           }
         }
         Err(e) => tracing::warn!("cannot read the refusal's events: {e}"),
       }
-      line(&json!({"type": "error", "message": status.message()}))?;
+      line(&json!({"type": "error", "message": message}))?;
       line(&json!({"type": "exit", "code": code, "signal": ""}))?;
     }
   }
-  output::message(status.message());
+  output::message(&message);
   Ok(code)
 }
 
 /// Waits until the detached process starts and prints its ID.
-async fn detached(responses: &mut tonic::Streaming<ExecResponse>, format: Output) -> Result<i32> {
-  while let Some(message) = responses.message().await.map_err(|s| anyhow!("{}", s.message()))? {
-    match message.payload {
-      Some(exec_response::Payload::Started(started)) => {
+async fn detached(stream: &mut ExecStream, format: Output) -> Result<i32> {
+  while let Some(event) = stream.next().await? {
+    match event {
+      Event::Started(started) => {
         match format {
           Output::Human => println!("{}", started.process_id),
           Output::Json => line(&json!({"process_id": started.process_id, "executor": started.executor}))?,
@@ -149,8 +148,7 @@ async fn detached(responses: &mut tonic::Streaming<ExecResponse>, format: Output
         }
         return Ok(0);
       }
-      Some(exec_response::Payload::Event(event)) if format == Output::Ndjson => line(&event_line(&event)?)?,
-      Some(exec_response::Payload::Error(error)) => bail!("{error}"),
+      Event::Trace(event) if format == Output::Ndjson => line(&event_line(&event)?)?,
       _ => {}
     }
   }
@@ -158,50 +156,45 @@ async fn detached(responses: &mut tonic::Streaming<ExecResponse>, format: Output
 }
 
 /// Collects (`json`) or streams (`ndjson`) the process's events until it exits.
-async fn events(tx: mpsc::Sender<ExecRequest>, mut responses: tonic::Streaming<ExecResponse>, format: Output) -> Result<i32> {
+async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
   let mut summary: BTreeMap<&str, Value> = BTreeMap::new();
   let mut stdout = Vec::new();
   let mut stderr = Vec::new();
   let mut code = 0;
-  while let Some(message) = responses.message().await.map_err(|s| anyhow!("{}", s.message()))? {
-    match message.payload {
-      Some(exec_response::Payload::Started(started)) => {
+  while let Some(event) = stream.next().await? {
+    match event {
+      Event::Started(started) => {
         if format == Output::Ndjson {
           line(&started_event(&started))?;
         }
         summary.insert("process_id", json!(started.process_id));
         summary.insert("executor", json!(started.executor));
       }
-      Some(exec_response::Payload::Stdout(bytes)) => match format {
+      Event::Stdout(bytes) => match format {
         Output::Ndjson => line(&chunk("stdout", &bytes))?,
         _ => stdout.extend_from_slice(&bytes),
       },
-      Some(exec_response::Payload::Stderr(bytes)) => match format {
+      Event::Stderr(bytes) => match format {
         Output::Ndjson => line(&chunk("stderr", &bytes))?,
         _ => stderr.extend_from_slice(&bytes),
       },
-      Some(exec_response::Payload::Exited(exited)) => {
+      Event::Exited(exit) => {
         if format == Output::Ndjson {
-          line(&json!({"type": "exit", "code": exited.code, "signal": exited.signal}))?;
+          line(&json!({"type": "exit", "code": exit.code, "signal": exit.signal}))?;
         }
-        summary.insert("exit_code", json!(exited.code));
-        summary.insert("signal", json!(exited.signal));
-        code = needy_core_executor::signals::shell_code(&needy_common::process::Exit {
-          code: exited.code,
-          signal: exited.signal,
-        });
+        summary.insert("exit_code", json!(exit.code));
+        summary.insert("signal", json!(exit.signal));
+        code = needy_core_executor::signals::shell_code(&exit);
         break;
       }
-      Some(exec_response::Payload::Event(event)) => {
+      Event::Trace(event) => {
         if format == Output::Ndjson {
           line(&event_line(&event)?)?;
         }
       }
-      Some(exec_response::Payload::Error(error)) => bail!("{error}"),
-      None => {}
     }
   }
-  drop(tx);
+  drop(stream);
   if format == Output::Json {
     summary.insert("stdout", json!(String::from_utf8_lossy(&stdout)));
     summary.insert("stderr", json!(String::from_utf8_lossy(&stderr)));
@@ -210,7 +203,7 @@ async fn events(tx: mpsc::Sender<ExecRequest>, mut responses: tonic::Streaming<E
   Ok(code)
 }
 
-fn started_event(started: &needy_api_proto::v1::ExecStarted) -> Value {
+fn started_event(started: &ExecStarted) -> Value {
   json!({"type": "started", "process_id": started.process_id, "executor": started.executor, "pid": started.pid, "argv": started.argv})
 }
 

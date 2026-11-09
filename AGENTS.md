@@ -12,9 +12,11 @@ Dependencies point downward; a crate never depends on one above it.
   (`output/`, tables and JSON), XDG paths (`paths`) and process logs
   (`logging`, `tracing`). It composes the crates below and, inside an actor,
   dispatches to the guest init and proxy by `argv[0]`.
-- `crates/daemon` (`needy-daemon`): listeners and authentication for every
-  role, and the control plane (sessions, the executor instance pool, the
-  session, process and guest APIs). Composition only; logic lives below.
+- `crates/daemon` (`needy-daemon`): the control plane (sessions, the executor
+  instance pool, routing, the exec relay, copy-in and mirror-out) and the
+  executor role. It implements `needy-api-server`'s domain traits and serves
+  them through its `Server`; it never builds a gRPC status. Composition only;
+  logic lives below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
   is the in-guest init and exec-routing proxy, on `nix`, logging to the
   console. `host` runs next to the VM: `detect` reads this machine's CPU,
@@ -51,10 +53,20 @@ Dependencies point downward; a crate never depends on one above it.
 - `crates/common` (`needy-common`): shared helpers that depend on neither the
   platform nor an async runtime and know no needy concepts: filters, tar
   archives, exit status and signal names, seed mixing and wall-clock time.
-- `crates/api-proto`, `crates/api-client`, `crates/api-server`: generated
-  Protobuf and gRPC types, the Rust client, and server-side adapters such as
-  bearer authentication. Do not edit `api-proto/src/gen`; change `proto/` and
-  run `make proto`.
+- `crates/api-proto` (`needy-api-proto`): generated Protobuf and gRPC types.
+  Do not edit `api-proto/src/gen`; change `proto/` and run `make proto`.
+- `crates/api-client` (`needy-api-client`): the outbound side. `Client`
+  connects over Unix sockets, HTTP(S) and vsock with a token the caller
+  gives; `ready` waits until a server answers; `exec` is an exec stream (start,
+  attach, input, events, run to completion); `files` moves tar archives over
+  exec; `Error` maps a status to a `Kind`. The CLI, the proxy, the providers,
+  the daemon's relay and xtask use it instead of raw streams.
+- `crates/api-server` (`needy-api-server`): the inbound side. `control` holds
+  the domain traits (`Sessions`, `Processes`, `Guest`), `Caller` (the CLI, or
+  an actor bound to its session) and `ControlError`; `server` binds every
+  listener before serving; `protocol` has the gRPC adapters, the proto <->
+  domain conversions and the one status table; `middleware` is bearer
+  authentication; `termination` turns signals into cancellation.
 - `xtask` (`cargo xtask`): developer tasks that are not product commands,
   today the `bench` latency and throughput probes.
 - `proto/`: canonical API schemas, linted and generated with Buf.

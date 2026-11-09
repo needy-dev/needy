@@ -2,10 +2,10 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
-use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, ListSessionsRequest, Session, StopSessionRequest};
-use needy_api_server::protocol::domain;
+use needy_api_client::proto::v1::{self, CreateSessionRequest, GetSessionLogsRequest, ListSessionsRequest, Session, StopSessionRequest};
+use needy_core::types::SessionState;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
@@ -77,7 +77,7 @@ impl TryFrom<Session> for SessionRow {
   type Error = anyhow::Error;
 
   fn try_from(s: Session) -> Result<Self> {
-    let state = domain::session_state(s.state).with_context(|| format!("session {}", s.session_id))?;
+    let state = state(s.state).with_context(|| format!("session {}", s.session_id))?;
     Ok(Self {
       executors: s.executors.iter().map(|e| format!("{}={}", e.name, e.runtime)).collect(),
       id: s.session_id,
@@ -88,9 +88,25 @@ impl TryFrom<Session> for SessionRow {
   }
 }
 
+/// The state a `Session` names. Its zero value means the daemon left it
+/// unset, and a value this build does not know comes from a newer daemon;
+/// both are errors instead of a default.
+fn state(value: i32) -> Result<SessionState> {
+  match v1::SessionState::try_from(value) {
+    Ok(v1::SessionState::Unspecified) => bail!("the session state is unspecified"),
+    Ok(v1::SessionState::Creating) => Ok(SessionState::Creating),
+    Ok(v1::SessionState::Running) => Ok(SessionState::Running),
+    Ok(v1::SessionState::Stopping) => Ok(SessionState::Stopping),
+    Ok(v1::SessionState::Stopped) => Ok(SessionState::Stopped),
+    Ok(v1::SessionState::Finished) => Ok(SessionState::Finished),
+    Ok(v1::SessionState::Failed) => Ok(SessionState::Failed),
+    Err(_) => bail!("unknown session state {value}"),
+  }
+}
+
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let endpoint = ctx.endpoint()?;
-  let fail = |s: tonic::Status| anyhow!("{}", s.message());
+  let fail = needy_api_client::Error::from;
   match args.command {
     Command::Create {
       profile,
@@ -156,3 +172,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   }
   Ok(0)
 }
+
+#[cfg(test)]
+#[path = "session_test.rs"]
+mod tests;

@@ -16,7 +16,6 @@ mod proxy;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use backon::{ConstantBuilder, Retryable};
 use needy_api_client::Client;
 
 /// The daemon's guest listener, as the actor reaches it.
@@ -42,8 +41,6 @@ fn runtime() -> tokio::runtime::Runtime {
 /// Connects to the daemon, which may still be binding the vsock listener
 /// while the VM boots.
 async fn daemon() -> Result<Client> {
-  // NOTICE: 50 retries 100 ms apart give the daemon 5 s, well past a VM's
-  // boot time (about 200 ms).
-  let retry = ConstantBuilder::default().with_delay(Duration::from_millis(100)).with_max_times(50);
-  (|| Client::connect(DAEMON)).retry(retry).await.context("cannot reach the daemon over vsock")
+  // NOTICE: 5 s is well past a VM's boot time (about 200 ms).
+  needy_api_client::ready::wait(DAEMON, Duration::from_secs(5)).await.context("cannot reach the daemon over vsock")
 }

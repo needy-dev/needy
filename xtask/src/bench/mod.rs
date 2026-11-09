@@ -42,7 +42,7 @@ mod run {
 
   use anyhow::{Context, Result, bail};
   use needy_api_client::Client;
-  use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, GetSessionRequest, SessionState, StopSessionRequest};
+  use needy_api_client::proto::v1::{CreateSessionRequest, GetSessionLogsRequest, GetSessionRequest, SessionState, StopSessionRequest};
 
   /// The actor's architecture; actors run on x86_64 Linux KVM hosts.
   const PROBE_TARGET: &str = "x86_64-unknown-linux-musl";

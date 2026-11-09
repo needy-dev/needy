@@ -201,6 +201,31 @@ builds and every daemon's state, image and output in a scratch directory.
 The Docker executors of these sessions were left running after the actor
 exited, as before (fix slice 8h), and were removed by hand.
 
+## Re-verified after the API crates slice
+
+Slice 7 of the module layout redesign (`needy-api-client` with `ready`,
+`exec`, `files` and an error `Kind`; `needy-api-server` with the domain
+traits, `Caller`, `Server::bind`, `termination` and one status table; the
+daemon implementing the traits instead of three gRPC services; `fs cp`,
+copy-in and mirror-out over `api_client::files`) was rerun on 2026-11-10 with
+debug builds and every daemon's state, image and output in a scratch
+directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| Native executor without a session: exit 7 with stdout and stderr apart, stdin, `SIGTERM` death exits 143, a missing program exits 127, `--output json` and `ndjson`, `-t` under `script`, detach, `ps`, `attach` (137 after `kill -s SIGKILL`, and again with replay after the exit), `kill` of an unknown process, `fs cp` of a directory and a file both ways, a failed `tar` and an unknown executor named in the error | Mac | Pass |
+| `examples/local` without an actor: copy-in filter, `exit 7`, `curl` fault (126) with and without `--executor`, delay fault (+500 ms), `ndjson` with `fault.injected` and `exec.decide` before `error` and `exit` 126, `--output json`, `fs cp --session`, stop with mirror-out, `session ls`, `report` | Mac | Pass: the report names profile `local` and counts 4 faults |
+| An executor daemon with `--token-env`: no token, a wrong token, the right token; `SIGTERM` | Mac | Pass: both refused with `missing or invalid bearer token`, the right one runs; the daemon exits on `SIGTERM` (it now handles SIGINT, SIGTERM and SIGHUP) |
+| A socket path over `sun_path`: `daemon --mode executor --listen`, and a control daemon whose runtime directory is too long | Mac | Pass: both exit 1 at once with `cannot listen on unix:<path>: path must be shorter than SUN_LEN`; the control daemon used to wait 10 s for its local executor |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/cli` through a Docker executor: exit 7, stdin, `SIGTERM` (143), 127, `--output json`, `-t` (`/dev/pts/0`, exit 3), detach, `ps`, `attach` (137 after `kill`), `fs cp` of a directory both ways; `session stop` leaves no container | Linux | Pass |
+| `examples/smoke` in an actor; `session logs`; `report` | Linux | Pass: GCE identity, `systemd-detect-virt` prints `google`, the routed `python3` prints the actor's hostname, workspace both ways, `routed exit=7`; the report counts 4 routed and 1 failed; no VM left |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; the report counts 3 faults by kind |
+| Windows executor: `needy.exe` from `images/Dockerfile`'s `windows` stage, started through WMI with a token, driven by `needy.exe` on the same host over TCP | Windows | Pass: no token and a wrong token are refused; `cmd /c` exit 7 with stdout and stderr apart, stdin to PowerShell, `--output json`, a missing program exits 127, detach, `ps`, `attach` live and with replay after `kill` (exit 1, as `taskkill` ends it), `fs cp` of a directory and a file both ways, a failed `tar` names the executor |
+
+The Docker executors of the actor sessions were left running after the actor
+exited, as before (fix slice 8h), and were removed by hand.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

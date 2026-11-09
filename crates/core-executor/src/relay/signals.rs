@@ -2,12 +2,11 @@
 //! SIGQUIT, and window changes (SIGWINCH) as resize requests on a terminal.
 //! In raw mode Ctrl-C and Ctrl-Z travel as bytes instead.
 
-use needy_api_proto::v1::{ExecRequest, exec_request};
-use tokio::sync::mpsc;
+use needy_api_client::exec::Input;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(unix)]
-pub async fn forward(tx: mpsc::Sender<ExecRequest>, tty: bool, cancel: CancellationToken) {
+pub async fn forward(input: Input, tty: bool, cancel: CancellationToken) {
   use tokio::signal::unix::{SignalKind, signal};
   let handlers = (
     signal(SignalKind::interrupt()),
@@ -21,26 +20,21 @@ pub async fn forward(tx: mpsc::Sender<ExecRequest>, tty: bool, cancel: Cancellat
     return;
   };
   loop {
-    let payload = tokio::select! {
-      _ = int.recv() => exec_request::Payload::Signal("SIGINT".into()),
-      _ = term.recv() => exec_request::Payload::Signal("SIGTERM".into()),
-      _ = hup.recv() => exec_request::Payload::Signal("SIGHUP".into()),
-      _ = quit.recv() => exec_request::Payload::Signal("SIGQUIT".into()),
+    let sent = tokio::select! {
+      _ = int.recv() => input.signal("SIGINT").await,
+      _ = term.recv() => input.signal("SIGTERM").await,
+      _ = hup.recv() => input.signal("SIGHUP").await,
+      _ = quit.recv() => input.signal("SIGQUIT").await,
       _ = winch.recv() => {
         if !tty {
           continue;
         }
-        exec_request::Payload::Resize(super::window())
+        input.resize(super::window()).await
       }
       () = cancel.cancelled() => return,
     };
-    if tx
-      .send(ExecRequest {
-        payload: Some(payload),
-      })
-      .await
-      .is_err()
-    {
+    // A closed stream has ended; there is nothing left to signal.
+    if sent.is_err() {
       return;
     }
   }
@@ -49,4 +43,4 @@ pub async fn forward(tx: mpsc::Sender<ExecRequest>, tty: bool, cancel: Cancellat
 // TODO(windows): Ctrl-C and Ctrl-Break (`tokio::signal::windows`) are not
 // forwarded from a Windows client; terminals on Windows are a known gap.
 #[cfg(not(unix))]
-pub async fn forward(_tx: mpsc::Sender<ExecRequest>, _tty: bool, _cancel: CancellationToken) {}
+pub async fn forward(_input: Input, _tty: bool, _cancel: CancellationToken) {}

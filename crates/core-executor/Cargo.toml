@@ -9,7 +9,6 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
-backon.workspace = true
 bollard.workspace = true
 bytes.workspace = true
 crossterm.workspace = true

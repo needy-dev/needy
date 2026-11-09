@@ -10,7 +10,8 @@ use std::ffi::{CStr, CString};
 use std::io::IsTerminal;
 
 use anyhow::Result;
-use needy_api_proto::v1::{Ancestor, DecideRequest, ExecRequest, ExecStart, Origin, exec_request};
+use needy_api_client::exec::ExecStream;
+use needy_api_proto::v1::{Ancestor, DecideRequest, ExecStart, Origin};
 use needy_core_executor::{relay, signals};
 use nix::sys::signal::{SigHandler, Signal};
 
@@ -74,7 +75,7 @@ async fn proxy() -> Result<i32> {
       ancestors: ancestors.into_iter().map(|argv| Ancestor { argv }).collect(),
     })
     .await
-    .map_err(|s| anyhow::anyhow!("{}", s.message()))?
+    .map_err(needy_api_client::Error::from)?
     .into_inner();
   if !decision.deny.is_empty() {
     message(&decision.deny);
@@ -105,10 +106,8 @@ async fn proxy() -> Result<i32> {
     no_stdin: false,
     origin: Origin::ActorProxy.into(),
   };
-  let first = ExecRequest {
-    payload: Some(exec_request::Payload::Start(start)),
-  };
-  let exit = relay::run(&client, first, tty, true).await?;
+  let stream = ExecStream::start(&client, start).await?;
+  let exit = relay::run(stream, tty, true).await?;
   if let Some(code) = exit.code {
     return Ok(code);
   }

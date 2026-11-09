@@ -2,7 +2,19 @@
 //!
 //! [`Client`] owns one gRPC channel and hands out a typed client per service.
 //! Endpoints are `http://`, `https://`, `unix:/path` and, inside a Linux guest,
-//! `vsock://CID:PORT`. Every call carries the bearer token when one is set.
+//! `vsock://CID:PORT`. Every call carries the bearer token when the caller
+//! sets one; the library never reads a token from the environment.
+//!
+//! - [`ready`]: connect and wait until the server answers its health check.
+//! - [`exec`]: exec streams: start or attach, input, events, run to
+//!   completion.
+//! - [`files`]: tar archives over exec streams, to and from an executor.
+//! - [`error`]: errors, with the server's status mapped to a [`Kind`].
+
+pub mod error;
+pub mod exec;
+pub mod files;
+pub mod ready;
 
 use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
@@ -14,19 +26,8 @@ use tonic::service::interceptor::InterceptedService;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Uri};
 use tonic::{Request, Status};
 
+pub use error::{Error, Kind, Result};
 pub use needy_api_proto as proto;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-  #[error("invalid endpoint: {0}")]
-  InvalidEndpoint(String),
-  #[error("token is not a valid header value")]
-  InvalidToken,
-  #[error(transparent)]
-  Transport(#[from] tonic::transport::Error),
-}
-
-pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Adds `authorization: Bearer <token>` to every request when a token is set.
 #[derive(Debug, Clone, Default)]
@@ -50,18 +51,22 @@ pub struct Client {
 }
 
 impl Client {
-  /// Connects to a daemon endpoint. HTTPS uses the platform's root certificates.
+  /// Connects to a daemon endpoint. HTTPS uses the platform's root
+  /// certificates. A malformed endpoint, or one this platform cannot reach
+  /// (vsock outside Linux), is [`Error::InvalidEndpoint`].
   pub async fn connect(url: &str) -> Result<Self> {
     if let Some(path) = url.strip_prefix("unix:") {
       return Ok(Self::from_channel(connect_unix(path.to_string()).await?));
     }
-    #[cfg(target_os = "linux")]
     if let Some(rest) = url.strip_prefix("vsock://") {
       let (cid, port) = rest
         .split_once(':')
-        .and_then(|(c, p)| Some((c.parse().ok()?, p.parse().ok()?)))
+        .and_then(|(c, p)| Some((c.parse::<u32>().ok()?, p.parse::<u32>().ok()?)))
         .ok_or_else(|| Error::InvalidEndpoint(url.to_string()))?;
       return Ok(Self::from_channel(connect_vsock(cid, port).await?));
+    }
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+      return Err(Error::InvalidEndpoint(url.to_string()));
     }
     let mut endpoint = Endpoint::from_shared(url.to_string()).map_err(|_| Error::InvalidEndpoint(url.to_string()))?;
     if url.starts_with("https://") {
@@ -140,4 +145,9 @@ async fn connect_vsock(cid: u32, port: u32) -> Result<Channel> {
       }))
       .await?,
   )
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn connect_vsock(cid: u32, port: u32) -> Result<Channel> {
+  Err(Error::InvalidEndpoint(format!("vsock://{cid}:{port} needs Linux")))
 }

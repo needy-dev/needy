@@ -1,6 +1,6 @@
 [package]
 name = "needy-api-server"
-description = "Protocol adapters for serving the Needy daemon API"
+description = "Serving the Needy daemon API: listeners, authentication, gRPC adapters and status mapping"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,20 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
+http.workspace = true
 needy-api-proto.workspace = true
+needy-common.workspace = true
 needy-core.workspace = true
+prost.workspace = true
 thiserror.workspace = true
-http = "1"
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 tonic = { workspace = true, features = ["router", "transport"] }
-tower = "0.5"
+tower.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 needy-api-client.workspace = true
-tokio.workspace = true
-tokio-stream = { version = "0.1", features = ["net"] }
+tempfile.workspace = true

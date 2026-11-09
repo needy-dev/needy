@@ -1,18 +1,14 @@
-//! `needy fs cp`: copies files between this machine and an executor by
-//! streaming a tar archive through an exec stream. Every executor platform has
-//! `tar`, including Windows.
+//! `needy fs cp`: copies files between this machine and an executor as tar
+//! archives over exec streams (`needy_api_client::files`).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
-use needy_api_proto::v1::{ExecRequest, ExecStart, exec_request, exec_response};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use needy_api_client::files::{self, Target};
+use needy_api_client::proto::v1::Origin;
 
-use crate::cli::connect;
-
-use crate::cli::Context;
+use crate::cli::{Context, connect};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -84,68 +80,21 @@ async fn cp(endpoint: &str, session: &str, source: &str, destination: &str) -> R
   }
 }
 
-/// Runs `tar` on the executor, feeding `input` to its stdin, and returns its stdout.
-async fn run_tar(endpoint: &str, session: &str, executor: &str, argv: Vec<String>, input: Option<Vec<u8>>) -> Result<Vec<u8>> {
-  let client = connect(endpoint).await?;
-  let (tx, rx) = mpsc::channel::<ExecRequest>(64);
-  tx.send(ExecRequest {
-    payload: Some(exec_request::Payload::Start(ExecStart {
-      argv,
-      executor: executor.to_string(),
-      session_id: session.to_string(),
-      no_stdin: input.is_none(),
-      origin: needy_api_proto::v1::Origin::Fs.into(),
-      // macOS tar would otherwise add AppleDouble `._` files.
-      env: [("COPYFILE_DISABLE".to_string(), "1".to_string())].into(),
-      ..Default::default()
-    })),
-  })
-  .await?;
-  if let Some(bytes) = input {
-    let tx = tx.clone();
-    tokio::spawn(async move {
-      for chunk in bytes.chunks(1 << 20) {
-        if tx
-          .send(ExecRequest {
-            payload: Some(exec_request::Payload::Stdin(chunk.to_vec())),
-          })
-          .await
-          .is_err()
-        {
-          return;
-        }
-      }
-      // A closed channel means tar already exited; its status reports why.
-      if tx
-        .send(ExecRequest {
-          payload: Some(exec_request::Payload::StdinEof(true)),
-        })
-        .await
-        .is_err()
-      {
-        tracing::debug!("tar on the executor exited before end of input");
-      }
-    });
+/// A failed `tar` names the executor; the daemon's refusals speak for
+/// themselves.
+fn tar_failed(executor: &str, error: needy_api_client::Error) -> anyhow::Error {
+  match error {
+    needy_api_client::Error::Failed { .. } => anyhow::anyhow!("tar on {executor} failed: {error}"),
+    error => error.into(),
   }
-  let mut responses = client.processes().exec(ReceiverStream::new(rx)).await.map_err(|s| anyhow::anyhow!("{}", s.message()))?.into_inner();
-  let mut out = Vec::new();
-  let mut err = Vec::new();
-  while let Some(message) = responses.message().await.map_err(|s| anyhow::anyhow!("{}", s.message()))? {
-    match message.payload {
-      Some(exec_response::Payload::Stdout(b)) => out.extend_from_slice(&b),
-      Some(exec_response::Payload::Stderr(b)) => err.extend_from_slice(&b),
-      Some(exec_response::Payload::Exited(exit)) => {
-        if exit.code != Some(0) {
-          bail!("tar on {executor} failed: {}", String::from_utf8_lossy(&err).trim());
-        }
-        break;
-      }
-      Some(exec_response::Payload::Error(e)) => bail!("{e}"),
-      _ => {}
-    }
+}
+
+fn target(session: &str, executor: &str) -> Target {
+  Target {
+    executor: executor.to_string(),
+    session: session.to_string(),
+    origin: Origin::Fs,
   }
-  drop(tx);
-  Ok(out)
 }
 
 async fn upload(endpoint: &str, session: &str, executor: &str, local: &Path, remote_dir: &str) -> Result<()> {
@@ -163,43 +112,16 @@ async fn upload(endpoint: &str, session: &str, executor: &str, local: &Path, rem
   })
   .await??;
   let size = archive.len();
-  run_tar(
-    endpoint,
-    session,
-    executor,
-    vec![
-      "tar".into(),
-      "-x".into(),
-      "-f".into(),
-      "-".into(),
-      "-C".into(),
-      remote_dir.into(),
-    ],
-    Some(archive),
-  )
-  .await?;
+  let client = connect(endpoint).await?;
+  files::push(&client, &target(session, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, e))?;
   tracing::info!("copied {size} bytes to {executor}:{remote_dir}");
   Ok(())
 }
 
 async fn download(endpoint: &str, session: &str, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
   let (parent, name) = split(remote);
-  let archive = run_tar(
-    endpoint,
-    session,
-    executor,
-    vec![
-      "tar".into(),
-      "-c".into(),
-      "-f".into(),
-      "-".into(),
-      "-C".into(),
-      parent,
-      name,
-    ],
-    None,
-  )
-  .await?;
+  let client = connect(endpoint).await?;
+  let archive = files::pull(&client, &target(session, executor), &parent, &name).await.map_err(|e| tar_failed(executor, e))?;
   let size = archive.len();
   let local_dir = local_dir.to_path_buf();
   tokio::task::spawn_blocking(move || -> Result<()> {

@@ -1956,14 +1956,20 @@ dependencies = [
 name = "needy-api-client"
 version = "0.1.0"
 dependencies = [
+ "backon",
  "hyper-util",
  "needy-api-proto",
+ "needy-common",
+ "needy-core-executor",
+ "prost",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
  "tokio-vsock",
  "tonic",
  "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -1980,15 +1986,21 @@ dependencies = [
 name = "needy-api-server"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "http",
  "needy-api-client",
  "needy-api-proto",
+ "needy-common",
  "needy-core",
+ "prost",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
  "tower",
+ "tracing",
 ]
 
 [[package]]
@@ -2005,8 +2017,6 @@ dependencies = [
  "humantime",
  "ignore",
  "needy-api-client",
- "needy-api-proto",
- "needy-api-server",
  "needy-common",
  "needy-config",
  "needy-core",
@@ -2014,15 +2024,12 @@ dependencies = [
  "needy-core-executor",
  "needy-daemon",
  "needy-trace",
- "prost",
  "serde",
  "serde_json",
  "shell-words",
  "tar",
  "tempfile",
  "tokio",
- "tokio-stream",
- "tonic",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -2106,7 +2113,6 @@ name = "needy-core-executor"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "backon",
  "bollard",
  "bytes",
  "crossterm",
@@ -2133,10 +2139,9 @@ name = "needy-daemon"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "futures-util",
+ "async-trait",
  "libc",
  "needy-api-client",
- "needy-api-proto",
  "needy-api-server",
  "needy-common",
  "needy-config",
@@ -2144,12 +2149,10 @@ dependencies = [
  "needy-core-actor",
  "needy-core-executor",
  "needy-trace",
- "prost",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tonic",
  "tracing",
  "uuid",
 ]
@@ -4394,7 +4397,6 @@ dependencies = [
  "anyhow",
  "clap",
  "needy-api-client",
- "needy-api-proto",
  "needy-config",
  "needy-trace",
  "serde_json",

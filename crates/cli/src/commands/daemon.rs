@@ -5,10 +5,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::ValueEnum;
-use needy_api_proto::v1::health_service_server::HealthServiceServer;
-use needy_api_proto::v1::process_service_server::ProcessServiceServer;
-use needy_core_executor::service::ExecutorService;
-use needy_daemon::server;
 
 use crate::cli::Context;
 
@@ -49,20 +45,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   };
   let token = args.token_env.as_ref().and_then(|name| std::env::var(name).ok());
   match args.mode {
-    Mode::Executor => {
-      let service = ExecutorService {
-        host: needy_core_executor::process::Host::default(),
-        name: args.name,
-      };
-      let routes = tonic::service::Routes::default()
-        .add_service(HealthServiceServer::new(server::Health {
-          instance_id: uuid::Uuid::new_v4().to_string(),
-          role: "executor",
-        }))
-        .add_service(ProcessServiceServer::new(service).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX));
-      tracing::info!("executor listening on {listen}");
-      server::serve(&listen, routes, token).await?;
-    }
+    Mode::Executor => needy_daemon::executor::serve(&listen, args.name, token).await?,
     #[cfg(not(unix))]
     Mode::Control => anyhow::bail!("the control daemon needs a Unix host"),
     #[cfg(unix)]
@@ -70,8 +53,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let paths = ctx.paths()?;
       let image = args.actor_image.unwrap_or_else(|| paths.default_image());
       let daemon = needy_daemon::control::Daemon::start(paths.state, paths.runtime, image, args.docker_image).await?;
-      tracing::info!("control daemon listening on {listen}");
-      server::serve(&listen, daemon.routes(), token).await?;
+      daemon.serve(&listen, token).await?;
     }
   }
   Ok(0)

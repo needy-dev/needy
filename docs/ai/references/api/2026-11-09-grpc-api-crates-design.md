@@ -1,10 +1,8 @@
 # gRPC API crates
 
-**Status**: current, 2026-11-09. Describes the schema and generation as they
-are after slice 7a of the
+**Status**: current, 2026-11-10. Describes the schema, the generation and the
+client and server crates as they are after slice 7 of the
 [module layout redesign](../architecture/2026-11-09-module-layout-redesign.md).
-Slice 7 restructures `needy-api-client` and `needy-api-server`; the crate
-layout below changes with it.
 
 The daemon speaks gRPC only. The previous HTTP API was removed on 2026-11-09.
 The layout follows AUV: one canonical `proto/` tree, a crate of generated
@@ -24,9 +22,15 @@ proto/
     └── guest.proto    GuestService
 crates/
 ├── api-proto/        needy-api-proto: generated prost and tonic code (src/gen, committed)
-├── api-client/       needy-api-client: Client with one channel and bearer auth
-└── api-server/       needy-api-server: AuthLayer and Authenticator; protocol::domain
+├── api-client/       needy-api-client: connect, readiness, exec streams, files over exec
+└── api-server/       needy-api-server: domain traits, Server, adapters, status table
 ```
+
+Generated types stop at the two API crates. The daemon implements the domain
+traits of `needy_api_server::control` and never builds a `tonic::Status`;
+callers of `needy_api_client` build requests from the generated types it
+re-exports as `needy_api_client::proto`, and read errors as an `Error` with a
+`Kind`.
 
 Every schema file is marked `EXPERIMENTAL / UNSTABLE`. There are no users yet,
 so a schema change removes old fields instead of keeping them beside the new
@@ -55,10 +59,12 @@ Who serves what:
   `ProcessService`.
 - An executor daemon, and the control daemon's in-process local executor,
   serve `HealthService` and `ProcessService`.
-- Each actor gets a listener bound to its session (a vsock Unix socket). It
-  serves `GuestService`, `SessionService` and `ProcessService`; `Decide`,
-  `Exec` and the guest calls act on that session, and `CreateSession`,
-  `StopSession` and `GetSessionLogs` are refused.
+- Each actor gets a listener bound to its session (a vsock Unix socket), with
+  the caller `Caller::Actor { session }`. It serves `HealthService`,
+  `GuestService`, `SessionService` and `ProcessService`; `Decide`, `Exec`,
+  `ListProcesses` and the guest calls act on that session whatever the request
+  names, and `CreateSession`, `StopSession` and `GetSessionLogs` are refused.
+  The control socket's caller is `Caller::Cli`, which `GuestService` refuses.
 
 ### Exec
 
@@ -100,11 +106,12 @@ listener is bound to a session, so the event names none.
 | `SessionState` (`session.proto`) | `CREATING`, `RUNNING`, `STOPPING`, `STOPPED`, `FINISHED`, `FAILED` | `needy_core::types::SessionState` |
 
 Each enum has an `_UNSPECIFIED` zero value, as Buf's STANDARD lint requires.
-`needy_api_server::protocol::domain` maps each enum to its domain type and
-back, one function per direction. A zero value or a value this build does not
-know is refused with an error that names the field, never read as a default.
-Producers on the client side (the CLI, the proxy, the mount) set the proto
-enum directly.
+Each direction has one function. `needy_api_server::protocol::domain` reads
+`Origin` and writes `SessionState`; the CLI's `session` command reads
+`SessionState`, since it is the only reader of session states on the wire. A
+zero value or a value this build does not know is refused with an error that
+names the field, never read as a default. Producers on the client side (the
+CLI, the proxy, the mount) set the proto enum directly.
 
 Other values are still strings: `CheckResponse.role`, `ExecutorRef.runtime`,
 `DecideResponse.target`, event kinds and signal names.
@@ -116,6 +123,90 @@ Other values are still strings: `CheckResponse.role`, `ExecutorRef.runtime`,
 then without `.profile`, or the directory's name for a file named only
 `profile.yaml`. The daemon uses it in executor keys (`{profile}`), the
 `session.create` event, listings and reports.
+
+## Crate layout
+
+### `needy-api-client`
+
+```text
+src/
+  lib.rs     Client: connect to unix:/path, http(s)://, vsock://CID:PORT (Linux); with_token
+  ready.rs   wait(endpoint, within): connect and retry until the health check answers
+  error.rs   Error and Kind
+  exec.rs    ExecStream: start, attach, input (stdin, eof, signal, resize), next event, run to completion
+  files.rs   push an archive into a directory, pull a path as an archive: tar over exec
+tests/       exec and files against an in-process ExecutorService
+```
+
+- **Tokens** come from the caller (`Client::with_token`); the library reads
+  no environment variable. The CLI reads `NEEDY_TOKEN`, a remote executor its
+  `token_env`.
+- **`ready::wait`** retries every 100 ms with `backon` while the error is
+  transient (the server is not up: a transport error or `UNAVAILABLE`); a
+  malformed endpoint, or vsock outside Linux, fails at once. Providers wait
+  10 s for an executor, the guest 5 s for the daemon's vsock listener.
+- **`Kind`** is the inverse of the server's status table: `Unauthenticated`,
+  `Denied`, `NotFound`, `Invalid`, `Failed`, `Exhausted`, `Unavailable`,
+  `Other`. `Error::refusal` decodes a refused exec's `ExecRefusal` events.
+- **`ExecStream`** yields `Event::{Trace, Started, Stdout, Stderr, Exited}`;
+  an executor's `error` payload is `Error::Remote`. `run` feeds stdin beside
+  the reader and fails with `Error::Ended` when the stream ends before the
+  exit. The terminal relay (`needy_core_executor::relay`), the CLI, the
+  proxy and the workspace mount use it.
+- **`files`** runs `tar` on the executor with `COPYFILE_DISABLE=1`; a non-zero
+  exit is `Error::Failed` with tar's stderr. Packing and unpacking on this side
+  stay with the caller (`needy_common::archive`, or the CLI's archive of one
+  named file or directory), since copy-in filters and `fs cp` name entries
+  differently. The daemon's copy-in and mirror-out and `needy fs cp` use it.
+
+### `needy-api-server`
+
+```text
+src/
+  control.rs          Sessions, Processes, Guest; Caller; ControlError; domain types
+  server.rs           Server: services for one Caller; bind every listener, then serve
+  termination.rs      SIGINT, SIGTERM, SIGHUP (Ctrl-C on Windows) as a CancellationToken
+  middleware/
+    authentication.rs AuthLayer, Authenticator, Token
+  protocol/
+    domain.rs         generated <-> domain conversions, one function per direction
+    status.rs         ControlError -> tonic::Status, one table
+    grpc/v1/          health, session, process, guest adapters
+```
+
+- **Domain traits.** `Sessions` (`create`, `get`, `list`, `stop`, `logs`,
+  `decide`), `Processes` (`exec`, `list`, `kill`) and `Guest` (`config`,
+  `event`, `exit`, `fetch_files`, `push_files`) take and return
+  `needy_core` and `control` types. `Processes::exec` takes an `ExecOpen`
+  (start or attach) and the rest of the caller's stream as `ExecInput`s, and
+  returns a stream of `ExecOutput`s. The executor's `ExecutorService` still
+  implements the generated `ProcessService`, which `Server::process_service`
+  serves as is, since `core-executor` sits below `api-server`.
+- **`Caller`** is fixed per server: `Cli` on the control socket and on an
+  executor daemon, `Actor { session }` on an actor's listener. The adapters
+  apply it: an actor's calls act on its own session, and the session
+  operations an actor may not call are refused before the daemon sees them.
+- **`Server::bind`** binds every listener before any serves, so a socket
+  path over `sun_path` or a taken port fails start-up at once with the
+  address; a Unix socket's directory is created and a stale socket replaced.
+  `serve` stops accepting when its token is cancelled and gives open calls
+  5 s, since an attached exec may never end.
+- **Status table** (`protocol::status`):
+
+  | `ControlError` | Status | Example |
+  | --- | --- | --- |
+  | `Denied { message, events }` | `PERMISSION_DENIED`, details `ExecRefusal` | a rule or fault refused an exec; an actor stopping a session |
+  | `NotFound` | `NOT_FOUND` | no such session, process or mapping |
+  | `Invalid` | `INVALID_ARGUMENT` | an unspecified origin; a guest event of another schema version |
+  | `Failed` | `FAILED_PRECONDITION` | an invalid profile; a command that cannot start |
+  | `Exhausted` | `RESOURCE_EXHAUSTED` | a full executor with `on_full: reject` |
+  | `Unavailable` | `UNAVAILABLE` | a closing executor |
+  | `Internal` | `INTERNAL` | a console that cannot be read |
+
+  The daemon maps an executor's relayed error back to the same row by its
+  `Kind`. Authentication failures are `UNAUTHENTICATED` from the middleware.
+- **Tests** run the adapters through a real `Server` and `needy-api-client`
+  against a fake implementation of the traits (`src/testing.rs`).
 
 ## Generation
 

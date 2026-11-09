@@ -1,7 +1,7 @@
 //! `needy kill`: send a signal to a process.
 
 use anyhow::{Result, anyhow};
-use needy_api_proto::v1::KillProcessRequest;
+use needy_api_client::proto::v1::KillProcessRequest;
 
 use crate::cli::Context;
 
@@ -23,6 +23,6 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       signal,
     })
     .await
-    .map_err(|s| anyhow!("{}", s.message()))?;
+    .map_err(needy_api_client::Error::from)?;
   Ok(0)
 }

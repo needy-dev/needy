@@ -90,13 +90,17 @@ cli ──► daemon, api-client, core, trace, config
 xtask ► api-client, trace
 
 daemon ─────────► api-server, api-client, core-actor, core-executor, core, trace
-api-server ─────► api-proto, core
-api-client ─────► api-proto
+api-server ─────► api-proto, core, common
+api-client ─────► api-proto, common
 core-actor ─────► api-client, core, trace
 core-executor ──► api-client, core, trace
 core ───────────► config ──► common
 trace ──────────► common
 ```
+
+`api-client` and `api-server` use `common` only for `Exit`. The CLI reaches `api-server`
+through the daemon only: `daemon::executor::serve` and `Daemon::serve` bind
+and serve for the `daemon` command (slice 7).
 
 `config`, `core` and `common` never see gRPC, processes or sockets. `trace`
 does not know event types: it carries an envelope whose payload is JSON, so it
@@ -420,7 +424,7 @@ src/
   ready.rs           wait until healthy, with backoff
   error.rs           Error, including Status mapped to a kind
   exec.rs            ExecStream: start, stdin, resize, signal, events, run to completion
-  files.rs           tar over exec: push a directory, pull a directory
+  files.rs           tar over exec: push an archive into a directory, pull a path
 ```
 
 `files.rs` replaces the three copies in `control.rs`, `cli::fs_cli` and their
@@ -463,6 +467,7 @@ src/
   files.rs           copy-in and mirror-out (session side)
   actor.rs           wires a session to core-actor (VM, guest API, gateway)
   guest.rs           GuestService domain: config, events, exit, file streams
+  executor.rs        the executor role: ExecutorService behind api-server's Server
   store/             state.db: sessions, instances, processes (slice 9)
 ```
 
