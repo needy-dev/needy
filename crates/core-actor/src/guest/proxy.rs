@@ -10,6 +10,7 @@ use std::ffi::{CStr, CString};
 use std::io::IsTerminal;
 
 use anyhow::Result;
+use needy_api_client::Kind;
 use needy_api_client::exec::ExecStream;
 use needy_api_proto::v1::{Ancestor, DecideRequest, ExecStart, Origin};
 use needy_core_executor::{relay, signals};
@@ -107,7 +108,16 @@ async fn proxy() -> Result<i32> {
     origin: Origin::ActorProxy.into(),
     search_path_if_missing: decision.search_path_if_missing,
   };
-  let stream = ExecStream::start(&client, start).await?;
+  let stream = match ExecStream::start(&client, start).await {
+    Ok(stream) => stream,
+    Err(error) => match refused(error.kind()) {
+      Some(code) => {
+        message(&error);
+        return Ok(code);
+      }
+      None => return Err(error.into()),
+    },
+  };
   let exit = match relay::run(stream, tty, true).await {
     Ok(exit) => exit,
     // The command's status is unknown; the parent sees 255, not success.
@@ -131,6 +141,17 @@ async fn proxy() -> Result<i32> {
   Ok(signals::shell_code(&exit))
 }
 
+/// The exit code for a start the daemon refused, like `needy exec`'s and a
+/// shell's: 126 when a rule or an injected fault refuses the command, 127
+/// when it cannot start. Other errors are the proxy's own.
+fn refused(kind: Kind) -> Option<i32> {
+  match kind {
+    Kind::Denied => Some(126),
+    Kind::Failed => Some(127),
+    _ => None,
+  }
+}
+
 /// Runs the real program here. The kernel does not route execs made by the
 /// proxy.
 fn exec_local(path: &str, args: &[String]) -> ! {
@@ -141,3 +162,7 @@ fn exec_local(path: &str, args: &[String]) -> ! {
   message(format_args!("cannot run {path}: {}", std::io::Error::from(errno)));
   std::process::exit(127)
 }
+
+#[cfg(test)]
+#[path = "proxy_test.rs"]
+mod tests;
