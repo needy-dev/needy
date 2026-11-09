@@ -399,6 +399,28 @@ Changed on purpose by these fixes:
   applies to it only on the CLI path. This is unchanged; it is noted because
   a deny-only rule in an actor profile looks like it should apply.
 
+## Re-verified after sizing the actor rootfs
+
+The actor's `rootfs.ext4` was a fixed 3 GiB ext4 image (786432 blocks,
+643021 free) and took 3.1 GB on disk, because `needy build` unpacked the
+exported tar by writing every zero. `images/Dockerfile` now sizes the image
+to its content (the blocks `du` counts plus 10% and 64 MiB, inodes in use
+plus 10%; the rootfs is attached read-only, so it has no room to grow), and
+`needy build` writes blocks of zeros as holes. The regression test
+`unpack_leaves_runs_of_zeros_as_holes` failed before the fix. Rerun on
+2026-11-10 on a Linux KVM host with every daemon's state in a scratch
+directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `make test`, `make check` | Mac | Pass |
+| `build::tests` on ext4 | Linux | Pass |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --out DIR` (actor only) | Linux | Pass: `rootfs.ext4` is 550 MB long and takes 442 MB on disk; 140662 blocks of 4 KiB with 23452 free, 8400 inodes with 764 free; `e2fsck -fn` is clean; `firecracker`, `needy` and `vmlinux` keep their modes |
+| `images/Dockerfile` `windows` stage | Linux | Pass: `needy.exe` builds |
+| `examples/smoke` | Linux | Pass: `google`, routed `python3`, workspace both ways, `routed exit=7` |
+| `examples/chaos` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` with exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out; the report counts 3 faults |
+| `examples/opencode` with a local Ollama model | Linux | Pass: opencode writes `hello.py` and runs it through a routed `bash`; 3 model calls through the actor gateway |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
