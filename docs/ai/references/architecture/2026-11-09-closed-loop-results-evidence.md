@@ -440,6 +440,132 @@ every daemon's state in a scratch directory.
 | `examples/smoke` with a driving program that sleeps 25 s | Linux | Pass: `ps` hides the `actor-mount` `sftp-server`, `ps -a` shows it; attaching to it is refused and the workspace still works both ways afterwards; `session ls` shows `build=docker (released)` and `EXIT` `0` once finished; the report shows `25.2s`, `python3 on build`, and no `/run/needy/bin` anywhere in the detailed JSON |
 | `examples/cli` without an actor, `fs cp`, `exec` | Linux | Pass: `ps` hides the `fs` `mkdir` and `tar`, `ps -a` shows them; attaching to the `tar` is refused; the report shows `0.2s`; no container left |
 
+## Re-verified on additional cloud hosts
+
+The tree at `830573e` (its last code change is `45f8065`) was run on
+2026-11-10 on three small cloud VMs. That tree predates the rootfs sizing and
+the CLI usability fixes above. Nothing was compiled on them: the static
+musl `needy`, the actor image (`vmlinux`, `rootfs.ext4`, patched
+`firecracker`) and `needy-executor:latest` were built on the Linux host from
+the same tree with `needy build --recipe examples/opencode/gce.recipe.yaml
+--executor` and copied over. Each control daemon ran as root, started in the
+background, with its state, sockets and output in a scratch directory through
+`NEEDY_STATE_DIR`, `NEEDY_RUNTIME_DIR` and `NEEDY_DATA_DIR`. `examples/local`
+ran on a copy whose native workspace is a missing nested directory in that
+scratch directory.
+
+- **A**: a 2-vCPU AMD EPYC cloud VM without hardware virtualization, Debian 13
+  (kernel 6.12), Docker 29.
+- **B**: a 3-vCPU Intel Xeon (Cascade Lake) cloud VM with nested
+  virtualization, Debian 13 (kernel 6.12), Docker 29.
+- **C**: a 2-vCPU Intel Cascade Lake cloud VM without hardware virtualization,
+  Debian 12 (kernel 6.1, glibc 2.36), Docker 29.
+
+The Docker rows marked "umask 000" ran with the control daemon started under
+`umask 000`. This works around bug 1 below in the test harness only.
+
+| Loop | A | B | C |
+| --- | --- | --- | --- |
+| The static `needy` (static-pie) runs | Pass | Pass | Pass |
+| `needy exec` without a session on the local executor: exit 7 with stdout and stderr apart, stdin, `SIGTERM` death exits 143, a missing program exits 127 (by name and by absolute path), `--output json` and `ndjson`, `-t` under `script` (`/dev/pts/1`, `stty size`, exit 4), detach, `ps`, `attach` (143 after `kill`, and again with replay after the exit), `kill` of an unknown process exits 1 | Pass | Pass | Pass |
+| `fs cp` of a directory into a missing nested directory and back | Pass | Pass | Pass |
+| `examples/local` without an actor: copy-in creates the workspace and skips `secret.txt`, `exit 7`, `curl` fault (126, `needy: fault injected: ECONNREFUSED`) with and without `--executor`, delay fault (`sleep 0.1` takes 609–610 ms against 6–9 ms for `true`), `ndjson` with `fault.injected` and `exec.decide` before `error` and `exit` 126, `fs cp --session` into a missing directory, `session logs` (`has no actor console`, exit 1), `session ls`, stop with mirror-out to `out/{session}/`, `report` (profile `local`, 4 faults) | Pass | Pass | Pass |
+| `examples/cli` through a Docker executor, the daemon as root with umask 022 | Fail: bug 1 | Fail: bug 1 (reproduced with `docker run`) | Fail: bug 1 |
+| `examples/cli` through a Docker executor, umask 000: create in 0.29–0.52 s, exit 7 with stdout and stderr apart, stdin, `SIGTERM` (143), 127, `--output json`, `-t` (`/dev/pts/0`, exit 3), detach, `ps --session`, `attach` (137 after `kill -s SIGKILL`), `fs cp` of a directory into a missing directory and back; `session stop` leaves no container | Pass | Pass | Pass |
+| `max_procs: 1` with `on_full: reject` on a Docker executor, umask 000 | Pass: `needy: executor is full` (exit 1) while a detached `sleep` holds the slot; accepted after `kill` | Pass, same | Pass, same |
+| `SIGTERM` to a control daemon with a Docker session, a detached `sleep 300` and an attached `exec -- sleep 60`, umask 000 | Pass: the attached exec exits 255 with `the connection ended before the command exited: daemon shutting down`; the daemon exits after 5.2 s (the 5 s grace for open calls); no container left | Pass, after 5.3 s | Pass, after 5.2 s |
+| An actor profile on a host without `/dev/kvm`: `examples/smoke`, and a profile with only an actor running `/bin/true` | Unclear: bug 3. `examples/smoke` with umask 022 fails at its Docker executor first (bug 1, exit 1 after 10 s) | Not applicable | Unclear: bug 3, and bug 4 before KVM is reached |
+| `examples/smoke` in an actor with `examples/opencode/gce.recipe.yaml` | Not applicable | Fail: bug 2 | Not applicable |
+| `examples/smoke` in an actor with a copy of that recipe without `avx_vnni` in `cpu.features.hide`, umask 000; `session logs`; `report` | Not applicable | Pass: `instance-…`, `Intel(R) Xeon(R) CPU @ 2.20GHz`, `Google Compute Engine`, `systemd-detect-virt` prints `google`, the routed `python3` prints the actor's hostname, workspace both ways, `routed exit=7`; the report counts 4 routed and 1 failed; 3.3 s from create to `finished` | Not applicable |
+| `examples/chaos` with the same recipe copy, umask 000; `report` | Not applicable | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out of `result.txt` to `out/{session}/`; the report counts 3 faults by kind | Not applicable |
+| An actor whose driving `sh` runs `~/py/needy-missing` (a symlink to `/bin/true` in the actor) routed to a Docker executor | Not applicable | Pass: `needy: cannot start /home/agent/py/needy-missing: No such file or directory (os error 2)`, exit 127; a routed `python3` runs | Not applicable |
+| `examples/smoke` with `/bin/sleep 300` as the driving program, `session stop` after 8 s | Not applicable | Pass: the stop returns in 0.44 s; `stopped`; no Firecracker process, container or socket left | Not applicable |
+| An actor's Docker executor removed after the actor finishes | Not applicable | Pass, with a delay: the container was still up when `session ls` first said `finished`, and gone 1 s later | Not applicable |
+| The Docker API through `bollard` on Debian 12 | Not applicable | Not applicable | Pass, umask 000 |
+| B's actor routing to A as a remote executor over TCP with a bearer token | Not run | Not run | Not run |
+
+The remote-executor row was not run because the three VMs share no private
+network: A and B have only public addresses on unrelated networks, and C
+sits alone on a private /24 behind NAT.
+
+### Actor boot under nested virtualization
+
+A profile with only an actor whose driving program is `/bin/true`, three runs
+each. "Create" is the time until `session create` returns. "To finished" is
+the time from the create call until `session ls` says `finished`, polled every
+0.1 s. "Guest kernel" is the last kernel timestamp on the console, and "init"
+is init's own timestamp on `the driving program exited`.
+
+| Host | Recipe | Create | To finished | Guest kernel | init |
+| --- | --- | --- | --- | --- | --- |
+| The Linux host (KVM, Raptor Lake) | `examples/opencode/gce.recipe.yaml` | 6–7 ms | 0.262–0.264 s | 0.144–0.161 s | 0.015–0.016 s |
+| B (nested KVM, Cascade Lake) | the same without `avx_vnni` hidden | 21–26 ms | 1.34–1.65 s | 1.09–1.30 s | 0.076–0.101 s |
+
+Under nested virtualization the guest boots about six times slower, and most
+of the time is spent in the guest kernel. The Firecracker process starts and
+configures the VM in about 70 ms on B.
+
+### Bugs found
+
+1. **A Docker executor cannot start when the control daemon's user is not
+   the profile's user.** The provider creates the executor's socket directory
+   (and the default workspace) with the daemon's UID and umask, then starts
+   the container with `--user <profile uid>:<gid>`
+   (`crates/core-executor/src/provider/docker.rs`). As root with umask 022
+   the directory is `root:root 0755`, so the executor in the container cannot
+   create its socket. The profile design note says every side uses the
+   profile's UID; the daemon's own host directories do not. The Linux host
+   runs its daemon as UID 1000, the profile's UID, which hid this. The
+   reproduction on A, B and C, as root:
+
+   ```sh
+   mkdir d                                  # root:root 0755
+   docker run --rm --user 1000:1000 -v "$PWD/d:/run/needy" needy-executor:latest \
+     needy daemon --mode executor --listen unix:/run/needy/executor.sock --name x
+   # needy: cannot listen on unix:/run/needy/executor.sock: Permission denied (os error 13), exit 1
+   chmod 0777 d                             # the same command now listens
+   ```
+
+   Through needy, `needy daemon --mode control` as root, then
+   `needy session create --no-actor --profile examples/cli/profile.yaml`,
+   exits 1 after 10 s with `needy: executor build: cannot reach
+   unix:<state>/executors/<12 hex digits>/executor.sock: transport error`.
+   The session is `failed` and no container is left. The message does not
+   name the permission error, because the container's stderr goes away with
+   the container (`auto_remove`).
+
+2. **The example recipe cannot boot on a host CPU without CPUID leaf 7,
+   subleaf 1.** `examples/opencode/gce.recipe.yaml` hides `avx_vnni`, which
+   `crates/core/src/recipe/cpu.rs` maps to leaf 7, subleaf 1, EAX bit 4. On
+   B, Firecracker refuses the template:
+   `Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1`,
+   exit 1. `needy profile check` reports only a warning about `avx512f`.
+   With `avx_vnni` removed from the hide list, the actor boots and every
+   actor row above passes. Cascade Lake CPUs have no leaf 7, subleaf 1, so
+   the same refusal is expected on such a host without nesting, but this was
+   not verified.
+
+3. **An actor that never starts is reported as `finished` with no
+   findings.** This happens when Firecracker exits at once: no `/dev/kvm`
+   (A, C), the CPUID refusal (B), or the glibc mismatch (C). Then
+   `session create` exits 0 and prints the ID, `session ls` says `finished`,
+   and `report` says `finished` with driving program `-`, "No findings" and
+   "No actor ran in this session". The daemon log has no warning. The reason
+   is only in `session logs`. On A it is
+   `Kvm error: Error creating KVM object: No such file or directory (os error 2)`.
+   No VM, container or socket is left. To reproduce on a host without
+   `/dev/kvm`, create a session from a profile with only `actor.recipe` and
+   `actor.command: [/bin/true]`.
+
+4. **The patched Firecracker does not run on Debian 12.** `images/Dockerfile`
+   builds it for `x86_64-unknown-linux-gnu` in the `rust:1` stage, so it
+   needs glibc 2.38. On C:
+   `firecracker: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.38' not found`.
+   This is reported only through `session logs` (bug 3). The static `needy`
+   is unaffected.
+
+No product code was changed in this pass.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
