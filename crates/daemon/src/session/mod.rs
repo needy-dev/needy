@@ -77,6 +77,11 @@ impl Session {
     self.lock_executors().clone()
   }
 
+  /// Takes the session's executors out of it, to release them.
+  fn take_executors(&self) -> BTreeMap<String, Arc<Instance>> {
+    std::mem::take(&mut *self.lock_executors())
+  }
+
   pub fn info(&self) -> SessionInfo {
     SessionInfo {
       id: self.id.clone(),
@@ -369,13 +374,27 @@ impl Daemon {
     trace.flush().await;
   }
 
+  /// Gives back what a session whose actor exited holds: it mirrors out,
+  /// releases its executors and removes the actor's sockets. The session
+  /// stays listed as finished until it is stopped, which then has nothing
+  /// left to release.
+  pub(crate) async fn finish_session(&self, session: &Session) {
+    if let Err(e) = files::mirror_out(session).await {
+      tracing::warn!("mirror-out for {}: {e:#}", session.id);
+    }
+    for instance in session.take_executors().values() {
+      self.pool.release(instance).await;
+    }
+    actor::remove_sockets(&session.dir);
+  }
+
   /// Stops a running or finished session: its tasks, mirror-out, its
   /// executors, its trace.
   pub(crate) async fn stop_session(&self, session: &Arc<Session>) -> Result<(), ControlError> {
     let stopping = match session.state.advance(SessionState::Stopping) {
       Ok(_) => true,
-      // The actor finished first and that state stays; the session still
-      // holds its executors until it is stopped.
+      // The actor finished first and that state stays; finishing released
+      // its executors already.
       Err(Refused {
         from: SessionState::Finished,
         ..

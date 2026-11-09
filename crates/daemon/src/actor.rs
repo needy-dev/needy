@@ -57,7 +57,7 @@ pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
     vcpus: launch.vcpus,
     mem_mib: launch.mem_mib,
   }));
-  session.tasks.spawn(watch(session.clone(), vm, actor));
+  session.tasks.spawn(watch(daemon.clone(), session.clone(), vm, actor));
   Ok(())
 }
 
@@ -137,8 +137,8 @@ pub fn remove_sockets(dir: &Path) {
 }
 
 /// Waits for the VM to exit, which it does when the guest reboots after the
-/// driving program, then finishes the session and stops the actor's tasks.
-async fn watch(session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) {
+/// driving program, then stops the actor's tasks and finishes the session.
+async fn watch(daemon: Daemon, session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) {
   let waited = tokio::select! {
     waited = vm.wait() => waited,
     () = actor.cancelled() => {
@@ -169,9 +169,7 @@ async fn watch(session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) 
   if let Err(refused) = session.state.advance(SessionState::Finished) {
     tracing::debug!("session {}: {refused}", session.id);
   }
-  // TODO(8h): the session keeps its executors and the actor's sockets until
-  // `session stop`; slice 8h releases them here and keeps the session listed
-  // as finished.
+  daemon.finish_session(&session).await;
 }
 
 #[cfg(test)]

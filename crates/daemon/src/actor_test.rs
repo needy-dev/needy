@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use needy_api_server::control::Sessions;
+use needy_core::types::SessionState;
 
 use crate::testing::{self, fake_image, new_actor_session, running};
 
@@ -94,4 +95,36 @@ async fn stopping_a_session_stops_its_guest_listener_and_removes_its_sockets() {
 
   assert_eq!(sockets(&dir), Vec::<String>::new());
   assert_eq!(started.daemon.tasks.len(), daemon_tasks, "the session's tasks are not the daemon's");
+}
+
+// ROOT CAUSE:
+//
+// If a session's actor exited on its own, the session kept its executors
+// and the actor's sockets until someone ran `session stop`, because the VM
+// watch only recorded the exit and marked the session finished.
+//
+// Before the fix, `examples/smoke` left its Docker executor running after
+// the driving program finished.
+// The fix keeps a finished session holding nothing: when the VM exits, the
+// session mirrors out, releases its executors and removes the actor's
+// sockets, and it stays listed as finished until it is stopped.
+#[tokio::test]
+async fn an_actor_that_exits_releases_its_executors_and_sockets() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), r#"touch "$(dirname "$3")/v.sock"; sleep 0.2"#);
+  let created = Sessions::create(daemon, new_actor_session(PROFILE, started.dir.path())).await.unwrap();
+  let dir = session_dir(&started, &created.id);
+
+  let released = async {
+    while !(daemon.pool.instances().await.is_empty() && sockets(&dir).is_empty()) {
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+  };
+  tokio::time::timeout(Duration::from_secs(10), released).await.expect("the finished session still holds its executors or sockets");
+
+  let listed = Sessions::list(daemon).await.unwrap();
+  assert_eq!(listed[0].state, SessionState::Finished);
+  Sessions::stop(daemon, &created.id).await.unwrap();
+  assert_eq!(Sessions::get(daemon, &created.id).await.unwrap().state, SessionState::Finished);
 }
