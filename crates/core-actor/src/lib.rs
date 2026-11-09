@@ -1,5 +1,10 @@
-//! The actor: the in-guest init and exec-routing proxy (Linux only), and the
-//! actor gateway that the host runs for each actor.
+//! The actor: the guest that runs inside its microVM, and the host side that
+//! runs next to it.
+//!
+//! - [`guest`] (Linux only): the in-guest init and the exec-routing proxy.
+//! - [`host`]: what this machine offers, the Firecracker VM, and the actor
+//!   gateway.
 
-pub mod gateway;
+#[cfg(target_os = "linux")]
 pub mod guest;
+pub mod host;

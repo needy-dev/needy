@@ -129,7 +129,9 @@ Producers build a `core::event` payload and hand its serialized form to
 | `actor.*` (config, exit, guest events) | — | trace |
 
 - **Interceptors** are traits in `core::intercept`, one per point, for example
-  `ExecDecide::decide(&self, ctx: &ExecContext, decision: Decision) -> Decision`:
+  `ExecDecide::decide(&self, ctx: &ExecContext, decision: Decision) -> Decision`
+  (`net.request` and `net.connect` share `NetDecide`, since they share their
+  interceptors; the context's path tells them apart):
   each interceptor sees the decision so far and returns it. They are
   synchronous and only decide; effects such as a fault's delay travel in the
   decision and the flow applies them, so a chain is deterministic for a
@@ -571,7 +573,9 @@ A QA pass on 2026-11-09 (a Mac without KVM, and the Linux KVM host) found
 these gaps in observable behavior. Each slice closes the items it owns.
 The slice 1 and slice 4 items are closed; `crates/cli/tests/cli.rs` covers
 each one. The slice 5 item is closed; `process::Host`'s tests in
-`core-executor` cover it.
+`core-executor` cover it. The slice 6 item is closed: the actor image carries
+`systemd-detect-virt`, which reports `google` from the recipe's DMI, as on a
+Compute Engine VM.
 
 | Slice | Item |
 | --- | --- |

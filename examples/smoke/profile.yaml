@@ -1,4 +1,6 @@
 # Smoke test: the driving program is `sh` in the actor; only python3 is routed.
+# `systemd-detect-virt` reads the recipe's DMI and prints `google`, as on a
+# Compute Engine VM.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   recipe: ../opencode/gce.recipe.yaml

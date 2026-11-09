@@ -1,0 +1,17 @@
+processor	: 0
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 79
+model name	: Intel(R) Xeon(R) CPU @ 2.20GHz
+stepping	: 0
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sse sse2 ssse3 avx avx2 hypervisor
+bogomips	: 4400.00
+
+processor	: 1
+vendor_id	: GenuineIntel
+cpu family	: 6
+model		: 79
+model name	: Intel(R) Xeon(R) CPU @ 2.20GHz
+stepping	: 0
+flags		: fpu vme de pse tsc msr pae mce cx8 apic sse sse2 ssse3 avx avx2 hypervisor avx512f
+bogomips	: 4400.00

@@ -11,18 +11,8 @@ pub struct HostInfo {
 }
 
 impl HostInfo {
-  /// Reads `/proc/cpuinfo`; other systems report no flags, which skips
-  /// host checks.
-  // TODO(core-actor): reading the host moves to `core-actor::host::detect` in
-  // slice 6 of the module layout redesign; only the parsing stays here.
-  pub fn detect() -> std::io::Result<HostInfo> {
-    if cfg!(target_os = "linux") {
-      Ok(Self::from_cpuinfo(&std::fs::read_to_string("/proc/cpuinfo")?))
-    } else {
-      Ok(HostInfo::default())
-    }
-  }
-
+  /// Parses `/proc/cpuinfo` text; the first processor's values count.
+  /// `needy_core_actor::host::detect` reads the machine.
   pub fn from_cpuinfo(text: &str) -> HostInfo {
     let mut info = HostInfo::default();
     for line in text.lines() {

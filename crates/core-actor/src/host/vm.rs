@@ -1,0 +1,246 @@
+//! The actor's Firecracker VM: its configuration from a compiled recipe, and
+//! a handle that owns the Firecracker process.
+//!
+//! A VM keeps its files in one directory: `vm.json` (the configuration),
+//! `console.log` (the guest's serial console) and `v.sock` (the vsock device,
+//! where guest-initiated connections to host port `P` land on `v.sock_P`).
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
+
+use needy_core::recipe::{CompiledRecipe, VmIdentity};
+use serde_json::json;
+
+/// The guest's vsock context ID; the host is always 2.
+const GUEST_CID: u32 = 3;
+
+/// The guest kernel's command line. `init=` starts needy's guest init.
+const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4";
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error("actor image is missing {}; run `needy build`", .0.display())]
+  Missing(PathBuf),
+  #[error("cannot write {}", path.display())]
+  Write {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+  },
+  #[error("cannot start firecracker")]
+  Spawn(#[source] std::io::Error),
+}
+
+/// The files `needy build` writes for actors.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+  pub kernel: PathBuf,
+  pub rootfs: PathBuf,
+  /// The patched Firecracker that applies a recipe's identity.
+  pub firecracker: PathBuf,
+}
+
+impl Image {
+  /// The image in directory `dir`.
+  pub fn new(dir: &Path) -> Self {
+    Self {
+      kernel: dir.join("vmlinux"),
+      rootfs: dir.join("rootfs.ext4"),
+      firecracker: dir.join("firecracker"),
+    }
+  }
+
+  /// Fails with the first file the image lacks.
+  pub fn check(&self) -> Result<(), Error> {
+    match [&self.kernel, &self.rootfs, &self.firecracker].into_iter().find(|path| !path.exists()) {
+      Some(missing) => Err(Error::Missing(missing.clone())),
+      None => Ok(()),
+    }
+  }
+}
+
+/// The vsock device's socket in a VM's directory.
+pub fn vsock(dir: &Path) -> PathBuf {
+  dir.join("v.sock")
+}
+
+/// Where the guest's vsock connections to host `port` arrive.
+pub fn host_port(dir: &Path, port: u32) -> PathBuf {
+  let mut name = vsock(dir).into_os_string();
+  name.push(format!("_{port}"));
+  PathBuf::from(name)
+}
+
+/// The guest's serial console, as Firecracker writes it.
+pub fn console(dir: &Path) -> PathBuf {
+  dir.join("console.log")
+}
+
+/// How one VM starts: Firecracker's configuration, arguments and
+/// environment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Launch {
+  pub image: Image,
+  /// The VM's directory.
+  pub dir: PathBuf,
+  pub vcpus: u32,
+  pub mem_mib: u32,
+  /// The contents of `vm.json`.
+  pub config: serde_json::Value,
+  pub args: Vec<String>,
+  /// What the patched Firecracker reads to present the recipe's identity.
+  pub env: BTreeMap<String, String>,
+}
+
+impl Launch {
+  /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one.
+  pub fn new(image: &Image, dir: &Path, recipe: Option<&CompiledRecipe>) -> Self {
+    let (vcpus, mem_mib) = recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048));
+    let pci = recipe.is_some_and(|r| r.identity.has_pci());
+    let mut boot_args = BOOT_ARGS.to_string();
+    if !pci {
+      boot_args.push_str(" pci=off");
+    }
+    // NOTICE: JSON strings are Unicode, so a path that is not UTF-8 cannot
+    // reach Firecracker's configuration at all; it is passed lossily and
+    // Firecracker reports the file it cannot open.
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    let mut config = json!({
+      "boot-source": {"kernel_image_path": path(&image.kernel), "boot_args": boot_args},
+      "drives": [{"drive_id": "rootfs", "path_on_host": path(&image.rootfs), "is_root_device": true, "is_read_only": true}],
+      "machine-config": {"vcpu_count": vcpus, "mem_size_mib": mem_mib},
+      "vsock": {"guest_cid": GUEST_CID, "uds_path": path(&vsock(dir))},
+    });
+    if let Some(r) = recipe
+      && r.cpu_template.get("cpuid_modifiers").and_then(|m| m.as_array()).is_some_and(|m| !m.is_empty())
+    {
+      config["cpu-config"] = r.cpu_template.clone();
+    }
+    let mut args = vec![
+      "--no-api".to_string(),
+      "--config-file".to_string(),
+      path(&dir.join("vm.json")),
+    ];
+    if pci {
+      args.push("--enable-pci".into());
+    }
+    Self {
+      image: image.clone(),
+      dir: dir.to_path_buf(),
+      vcpus,
+      mem_mib,
+      config,
+      args,
+      env: recipe.map(|r| identity_env(&r.identity)).unwrap_or_default(),
+    }
+  }
+}
+
+/// The patched Firecracker's environment for a VM identity; see
+/// `images/firecracker/needy.patch`.
+fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
+  let mut env = BTreeMap::new();
+  if let Some(brand) = &identity.cpu_brand {
+    env.insert("NEEDY_BRAND_STRING".into(), brand.clone());
+  }
+  if identity.hide_hypervisor {
+    env.insert("NEEDY_HIDE_HYPERVISOR".into(), "1".into());
+  }
+  if let Some(smbios) = &identity.smbios {
+    // `key=value;…`; a `;` inside a value would end it early.
+    let chassis_type = smbios.chassis_type.map(|n| n.to_string());
+    let fields = [
+      ("bios_date", smbios.bios_date.as_deref()),
+      ("bios_vendor", smbios.bios_vendor.as_deref()),
+      ("bios_version", smbios.bios_version.as_deref()),
+      ("board_name", smbios.board_name.as_deref()),
+      ("board_vendor", smbios.board_vendor.as_deref()),
+      ("chassis_type", chassis_type.as_deref()),
+      ("product_name", smbios.product_name.as_deref()),
+      ("product_version", smbios.product_version.as_deref()),
+      ("serial", smbios.serial.as_deref()),
+      ("sys_vendor", smbios.sys_vendor.as_deref()),
+      ("uuid", Some(smbios.uuid.as_str())),
+    ];
+    let value =
+      fields.iter().filter_map(|(key, value)| value.map(|v| format!("{key}={}", v.replace(';', ",")))).collect::<Vec<_>>().join(";");
+    env.insert("NEEDY_SMBIOS".into(), value);
+  }
+  if let Some(id) = identity.pci_host_bridge {
+    env.insert("NEEDY_PCI_HOST_BRIDGE".into(), id.to_string());
+  }
+  if let Some(id) = identity.pci_isa_bridge {
+    env.insert("NEEDY_PCI_ISA_BRIDGE".into(), id.to_string());
+  }
+  env
+}
+
+/// A running VM. The handle owns the Firecracker process; Firecracker exits
+/// when the guest reboots after its driving program.
+// NOTICE: the process is not killed when the handle is dropped. Whether a VM
+// outlives a daemon restart is decided with persistence (slice 9 of the
+// module layout redesign); until then a dropped handle leaves it running, as
+// before this handle existed.
+#[derive(Debug)]
+pub struct Vm {
+  child: tokio::process::Child,
+  pid: u32,
+}
+
+impl Vm {
+  /// Writes `vm.json` and starts Firecracker with the guest's console in
+  /// `console.log`.
+  pub fn start(launch: &Launch) -> Result<Vm, Error> {
+    let image = &launch.image;
+    image.check()?;
+    let config_path = launch.dir.join("vm.json");
+    let write_error = |path: &Path| {
+      let path = path.to_path_buf();
+      move |source| Error::Write { path, source }
+    };
+    // NOTICE: a `Value` always serializes.
+    let config = serde_json::to_vec_pretty(&launch.config).expect("a JSON value serializes");
+    std::fs::write(&config_path, config).map_err(write_error(&config_path))?;
+    let console_path = console(&launch.dir);
+    let console = std::fs::File::create(&console_path).map_err(write_error(&console_path))?;
+    let stderr = console.try_clone().map_err(write_error(&console_path))?;
+    let child = tokio::process::Command::new(&image.firecracker)
+      .args(&launch.args)
+      .envs(&launch.env)
+      .stdin(Stdio::null())
+      .stdout(console)
+      .stderr(stderr)
+      .spawn()
+      .map_err(Error::Spawn)?;
+    // NOTICE: `id` is `None` only after the child was waited for.
+    let pid = child.id().unwrap_or(0);
+    Ok(Vm { child, pid })
+  }
+
+  /// The Firecracker process's ID.
+  pub fn pid(&self) -> u32 {
+    self.pid
+  }
+
+  /// Waits until Firecracker exits.
+  pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+    self.child.wait().await
+  }
+
+  /// Kills Firecracker and waits until it is gone.
+  // TODO(8b): the daemon does not call this when a session stops yet; fix
+  // slice 8b stops the VM with its session, with a regression test.
+  pub async fn stop(&mut self) -> std::io::Result<ExitStatus> {
+    // Killing a process that was already waited for is an error.
+    if let Some(status) = self.child.try_wait()? {
+      return Ok(status);
+    }
+    self.child.start_kill()?;
+    self.child.wait().await
+  }
+}
+
+#[cfg(all(test, unix))]
+#[path = "vm_test.rs"]
+mod tests;

@@ -157,6 +157,30 @@ Found on the way: a daemon started in the background of a non-interactive
 shell inherits `SIGINT` as ignored and passes that on to every process it
 starts, so `needy kill -s INT` has no effect there. This predates the slice.
 
+## Re-verified after the core-actor slice
+
+Slice 6 of the module layout redesign (`core-actor` split into `guest` and
+`host`; the guest on `nix` with `tracing` to the console; `host::detect`;
+`host::vm` building Firecracker's configuration and owning its process; the
+gateway on the `net.*` interceptors with its connections and tunnels owned
+under the actor's cancellation token) was rerun on 2026-11-09 with debug
+builds and every daemon's state, image and output in a scratch directory. The
+actor image now carries `systemd` for `systemd-detect-virt`; needy's init is
+still PID 1.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` in an actor; `session logs`; `report` | Linux | Pass: GCE identity (`instance-…`, `Intel(R) Xeon(R) CPU @ 2.20GHz`, `Google Compute Engine`), `systemd-detect-virt` prints `google` as on a Compute Engine VM, the routed `python3` prints the actor's hostname, workspace both ways, `routed exit=7`; init's log line `the driving program exited: exit status: 0` on the console; the report counts 4 routed and 1 failed; no container or VM left |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, `needy: fault injected: ECONNREFUSED` and exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; the report counts 3 faults by kind |
+| `examples/opencode` with Qwen3 14B on the host's Ollama through the actor gateway | Linux | Pass on the second run: the Write tool writes over sshfs, the bash tool is routed to the Docker executor and prints the actor's hostname; the report shows 3 model calls and 1 routed command. In the first run the model sent malformed bash tool arguments, so nothing was routed; the gateway carried its 3 model calls |
+| A gateway check profile: an `upstream` host with an injected header, a `net.connect` fault on its second request, a denied host over plain HTTP and over `CONNECT`, an allowed host over `CONNECT` | Linux | Pass: the upstream receives the header's value from the daemon's environment; the second request gets `502 needy chaos: ECONNRESET`; the denied hosts get 403 (`curl` exits 56 for the tunnel); `models.dev` answers 200 through the tunnel. The trace has `net.request`, `fault.injected`, `net.deny` (with path, and without for the tunnel) and `net.connect`; the report lists both denials and the fault |
+
+Found on the way: an actor whose profile has no workspace mount and no
+`actor.cwd` cannot start its driving program, because the default working
+directory `~/workspace` does not exist. This predates the slice; the console
+now names the failure.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

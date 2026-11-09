@@ -11,7 +11,6 @@ use bollard::query_parameters::{BuildImageOptions, BuilderVersion, ImageBuildOut
 use futures_util::StreamExt;
 use needy_config::Source;
 use needy_config::validate::Severity;
-use needy_core::recipe::HostInfo;
 
 use crate::cli::Context;
 use crate::output;
@@ -43,7 +42,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let mut build_args = HashMap::new();
   if let Some(reference) = &args.recipe {
     let recipe = needy_config::recipe::load(&Source::reference(reference, Path::new("")))?;
-    let compiled = needy_core::recipe::compile(&recipe, &HostInfo::detect()?, 0);
+    let compiled = needy_core::recipe::compile(&recipe, &needy_core_actor::host::detect::detect()?, 0);
     for finding in &compiled.findings {
       output::message(format_args!("recipe {finding}"));
     }

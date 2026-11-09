@@ -3,9 +3,9 @@ use std::time::Duration;
 use needy_config::profile::{Chaos, FaultKind, Profile};
 
 use super::*;
-use crate::intercept::{self, ExecContext};
+use crate::intercept::{self, ExecContext, NetContext, NetDecide};
 use crate::rules::Rules;
-use crate::types::{Decision, Effect, Outcome, Placement};
+use crate::types::{Decision, Effect, NetDecision, NetOutcome, Network, Outcome, Placement};
 
 fn chaos(yaml: &str) -> Chaos {
   serde_yaml::from_str(yaml).unwrap()
@@ -128,4 +128,76 @@ fn chaos_alone_faults_an_explicitly_placed_command() {
   let d = intercept::decide(&[&injector], &ctx, Decision::unchanged(&ctx, Placement::Executor("mac".into())));
   assert_eq!(d.outcome, Outcome::Fault("EIO".into()));
   assert_eq!(d.argv, argv("curl https://x"));
+}
+
+/// Denies one host, as an allowlist would.
+struct DenyHost(&'static str);
+
+impl NetDecide for DenyHost {
+  fn decide(&self, ctx: &NetContext, mut decision: NetDecision) -> NetDecision {
+    if ctx.host == self.0 {
+      decision.outcome = NetOutcome::Deny;
+    }
+    decision
+  }
+}
+
+/// Adds a header to what is still allowed, as header injection would.
+struct AddHeader;
+
+impl NetDecide for AddHeader {
+  fn decide(&self, _: &NetContext, mut decision: NetDecision) -> NetDecision {
+    if decision.outcome == NetOutcome::Allow {
+      decision.headers.push(("x-key".into(), "value".into()));
+    }
+    decision
+  }
+}
+
+fn net(host: &str) -> NetContext {
+  NetContext {
+    network: Network::Actor,
+    host: host.into(),
+    path: Some("/v1".into()),
+  }
+}
+
+#[test]
+fn net_chain_runs_in_order_and_chaos_skips_a_denied_host() {
+  let injector = Injector::new(&chaos("faults: [{on: net.connect, nth: 1, errno: ECONNRESET}]"));
+  let chain: [&dyn NetDecide; 3] = [&DenyHost("blocked.example.com"), &injector, &AddHeader];
+  let decide = |host: &str| intercept::decide_net(&chain, &net(host), NetDecision::allowed());
+
+  // A denied host is not counted by chaos and gets no header.
+  let d = decide("blocked.example.com");
+  assert_eq!(
+    d,
+    NetDecision {
+      outcome: NetOutcome::Deny,
+      ..NetDecision::allowed()
+    }
+  );
+
+  // So the first allowed request is the fault's first occurrence, and the
+  // interceptor after chaos sees the fault.
+  let d = decide("api.example.com");
+  assert_eq!(d.outcome, NetOutcome::Fault("ECONNRESET".into()));
+  assert_eq!(d.fired.len(), 1);
+  assert_eq!(d.fired[0].kind, FaultKind::NetConnect);
+  assert_eq!(d.fired[0].target, "api.example.com");
+  assert!(d.headers.is_empty());
+
+  let d = decide("api.example.com");
+  assert_eq!(d.outcome, NetOutcome::Allow);
+  assert_eq!(d.headers, [("x-key".to_string(), "value".to_string())]);
+}
+
+#[test]
+fn a_net_delay_keeps_the_request_allowed() {
+  let injector = Injector::new(&chaos("faults: [{on: net.connect, match: 'api.example.com', delay: 500ms}]"));
+
+  let d = intercept::decide_net(&[&injector], &net("api.example.com"), NetDecision::allowed());
+
+  assert_eq!(d.outcome, NetOutcome::Allow);
+  assert_eq!(d.fired[0].effect.delay, Some(Duration::from_millis(500)));
 }

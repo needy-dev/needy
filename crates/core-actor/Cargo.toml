@@ -1,6 +1,6 @@
 [package]
 name = "needy-core-actor"
-description = "Needy actors: the in-guest init and proxy, and the actor gateway"
+description = "Needy actors: the in-guest init and proxy, and the host side: VM start-up, host detection and the actor gateway"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,25 +8,36 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-anyhow.workspace = true
 bytes.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+needy-core.workspace = true
+needy-trace = { workspace = true, features = ["timing"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+
+# The guest runs only inside a Linux actor.
+[target.'cfg(target_os = "linux")'.dependencies]
+anyhow.workspace = true
+backon.workspace = true
+libc.workspace = true
 needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
 needy-config.workspace = true
-needy-core.workspace = true
 needy-core-executor.workspace = true
-needy-trace = { workspace = true, features = ["timing"] }
-tokio.workspace = true
-tokio-stream.workspace = true
-tracing.workspace = true
-
-[target.'cfg(unix)'.dependencies]
-libc.workspace = true
-
-[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true, features = ["fs", "hostname", "ioctl", "mount", "net", "process", "reboot", "sched", "signal", "socket"] }
 tokio-vsock.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+needy-config.workspace = true
+needy-trace = { workspace = true, features = ["memory", "timing"] }
+serde_yaml.workspace = true
+tempfile.workspace = true

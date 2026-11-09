@@ -15,8 +15,12 @@ Dependencies point downward; a crate never depends on one above it.
 - `crates/daemon` (`needy-daemon`): listeners and authentication for every
   role, and the control plane (sessions, the executor instance pool, the
   session, process and guest APIs). Composition only; logic lives below.
-- `crates/core-actor` (`needy-core-actor`): the actor. `guest` is the in-guest
-  init and exec-routing proxy (Linux only); `gateway` is the actor gateway.
+- `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
+  is the in-guest init and exec-routing proxy, on `nix`, logging to the
+  console. `host` runs next to the VM: `detect` reads this machine's CPU,
+  `vm` builds the Firecracker configuration from a compiled recipe and owns
+  the Firecracker process, and `gateway` is the actor gateway on the `net.*`
+  interceptors.
 - `crates/core-executor` (`needy-core-executor`): where commands run.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is

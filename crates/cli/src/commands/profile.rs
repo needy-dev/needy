@@ -10,7 +10,7 @@ use needy_config::profile::Fault;
 use needy_config::validate::{self, Finding, Severity};
 use needy_core::chaos::{Injector, Subject};
 use needy_core::intercept::ExecContext;
-use needy_core::recipe::{HostInfo, VmIdentity};
+use needy_core::recipe::VmIdentity;
 use needy_core::rules;
 use needy_core::types::Outcome;
 use serde::Serialize;
@@ -74,7 +74,7 @@ fn check(path: &Path, commands: &[String]) -> Result<i32> {
   println!("kernel route names: {}", rules::route_names(&profile).map(|n| n.join(",")).unwrap_or_else(|| "* (every exec)".into()));
   if let Some(reference) = &profile.actor.recipe {
     let recipe = needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
-    let compiled = needy_core::recipe::compile(&recipe, &HostInfo::detect()?, 1);
+    let compiled = needy_core::recipe::compile(&recipe, &needy_core_actor::host::detect::detect()?, 1);
     println!(
       "recipe: {} vCPU, {} MiB, hostname {:?}, uptime offset {} s",
       compiled.vcpus, compiled.mem_mib, compiled.hostname, compiled.uptime_offset_secs

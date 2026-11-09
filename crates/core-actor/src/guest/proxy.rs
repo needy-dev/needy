@@ -1,0 +1,136 @@
+//! The proxy for a routed exec. It asks the daemon where the command runs,
+//! then either `execve`s the real program here or relays it to an executor,
+//! keeping the parent's view of a child: its exit status or signal death.
+//!
+//! What the proxy writes to stderr is the routed command's own error output,
+//! so the proxy installs no log subscriber.
+
+use std::collections::HashMap;
+use std::ffi::{CStr, CString};
+use std::io::IsTerminal;
+
+use anyhow::Result;
+use needy_api_proto::v1::{DecideRequest, ExecRequest, ExecStart, exec_request};
+use needy_core::types::Origin;
+use needy_core_executor::{relay, signals};
+use nix::sys::signal::{SigHandler, Signal};
+
+/// Environment the actor passes to routed commands when rules do not.
+const PASS_ENV: &[&str] = &[
+  "TERM",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "COLORTERM",
+  "NO_COLOR",
+];
+
+pub(super) fn main() -> ! {
+  let code = super::runtime().block_on(proxy()).unwrap_or_else(|e| {
+    message(format_args!("{e:#}"));
+    126
+  });
+  std::process::exit(code)
+}
+
+/// Prints a message as the routed command's error output, worded like
+/// `needy exec`'s.
+fn message(message: impl std::fmt::Display) {
+  eprintln!("needy: {message}");
+}
+
+/// The path the original `execve` named. argv[0] is the command's own and
+/// `/proc/self/exe` is the proxy, so only the auxiliary vector has it.
+fn exec_path() -> String {
+  // NOTICE: neither std nor nix reads the auxiliary vector; `getauxval` is
+  // the libc call for it. `AT_EXECFN` points into this process's stack and
+  // lives as long as the process.
+  let p = unsafe { libc::getauxval(libc::AT_EXECFN) } as *const libc::c_char;
+  if p.is_null() {
+    return std::env::args().next().unwrap_or_default();
+  }
+  unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+}
+
+async fn proxy() -> Result<i32> {
+  let path = exec_path();
+  let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+  let mut argv = args.clone();
+  if let Some(first) = argv.first_mut() {
+    *first = path.clone();
+  }
+  let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
+  let env: HashMap<String, String> = std::env::vars().collect();
+  let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+  let client = super::daemon().await?;
+  // TODO(7a, 8f): `Decide` carries no ancestry yet, so `when.under` cannot
+  // match a routed command; slice 7a adds it to the request and 8f fills it.
+  let decision = client
+    .sessions()
+    .decide(DecideRequest {
+      session_id: String::new(),
+      argv: argv.clone(),
+      cwd: cwd.clone(),
+      env: env.clone(),
+      tty,
+    })
+    .await
+    .map_err(|s| anyhow::anyhow!("{}", s.message()))?
+    .into_inner();
+  if !decision.deny.is_empty() {
+    message(&decision.deny);
+    return Ok(126);
+  }
+  if decision.target == "actor" || decision.target.is_empty() {
+    exec_local(&path, &args);
+  }
+  let mut pass: HashMap<String, String> = PASS_ENV.iter().filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
+  pass.extend(decision.env);
+  let start = ExecStart {
+    argv: if decision.argv.is_empty() {
+      args
+    } else {
+      decision.argv
+    },
+    cwd: if decision.cwd.is_empty() {
+      cwd
+    } else {
+      decision.cwd
+    },
+    env: pass,
+    clear_env: decision.clear_env,
+    tty: tty.then(relay::window),
+    detach: false,
+    session_id: String::new(),
+    executor: decision.target,
+    no_stdin: false,
+    origin: Origin::ActorProxy.as_str().into(),
+  };
+  let first = ExecRequest {
+    payload: Some(exec_request::Payload::Start(start)),
+  };
+  let exit = relay::run(&client, first, tty, true).await?;
+  if let Some(code) = exit.code {
+    return Ok(code);
+  }
+  // Die of the same signal so the parent's wait sees signal death.
+  if let Some(signal) = signals::number(&exit.signal).and_then(|n| Signal::try_from(n).ok()) {
+    // When either call fails the process lives on, and the shell's exit
+    // code for the signal below stands in for the death.
+    // SAFETY: the default disposition installs no handler.
+    let _ = unsafe { nix::sys::signal::signal(signal, SigHandler::SigDfl) };
+    let _ = nix::sys::signal::raise(signal);
+  }
+  Ok(signals::shell_code(&exit))
+}
+
+/// Runs the real program here. The kernel does not route execs made by the
+/// proxy.
+fn exec_local(path: &str, args: &[String]) -> ! {
+  // NOTICE: a path or argument from `execve` cannot hold a NUL byte.
+  let program = CString::new(path).unwrap_or_default();
+  let argv: Vec<CString> = args.iter().map(|a| CString::new(a.as_str()).unwrap_or_default()).collect();
+  let Err(errno) = nix::unistd::execv(&program, &argv);
+  message(format_args!("cannot run {path}: {}", std::io::Error::from(errno)));
+  std::process::exit(127)
+}

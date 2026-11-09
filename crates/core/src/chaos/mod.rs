@@ -1,8 +1,9 @@
 //! Fault injection. A fault fires from the profile's seed, its index and how
 //! many times it has matched, so a replayed session injects the same faults.
 //!
-//! [`Injector`] is the second `exec.decide` interceptor; the gateway and the
-//! SFTP tap ([`sftp`]) ask it directly for `net.connect` and `file.open`.
+//! [`Injector`] is the second `exec.decide` interceptor and the second
+//! `net.request` and `net.connect` interceptor; the SFTP tap ([`sftp`]) asks
+//! it directly for `file.open`.
 
 pub mod sftp;
 
@@ -12,9 +13,9 @@ use glob_match::glob_match;
 use needy_common::seed::mix;
 use needy_config::profile::{Chaos, Fault, FaultKind};
 
-use crate::intercept::{ExecContext, ExecDecide};
+use crate::intercept::{ExecContext, ExecDecide, NetContext, NetDecide};
 use crate::pattern::Pattern;
-use crate::types::{Decision, Effect, Fired, Outcome};
+use crate::types::{Decision, Effect, Fired, NetDecision, NetOutcome, Outcome};
 
 /// What a fault is checked against.
 #[derive(Debug, Clone, Copy)]
@@ -146,6 +147,25 @@ impl ExecDecide for Injector {
     if let Some(fired) = self.check(Subject::Exec(&ctx.argv)) {
       if let Some(errno) = &fired.effect.errno {
         decision.outcome = Outcome::Fault(errno.clone());
+      }
+      decision.fired.push(fired);
+    }
+    decision
+  }
+}
+
+/// Chaos follows the allowlist at a gateway. It checks the host unless the
+/// request is already refused, so a denied host is not counted; an errno
+/// fails the request, and a delay is left in [`NetDecision::fired`] for the
+/// gateway to apply.
+impl NetDecide for Injector {
+  fn decide(&self, ctx: &NetContext, mut decision: NetDecision) -> NetDecision {
+    if decision.outcome != NetOutcome::Allow {
+      return decision;
+    }
+    if let Some(fired) = self.check(Subject::NetConnect(&ctx.host)) {
+      if let Some(errno) = &fired.effect.errno {
+        decision.outcome = NetOutcome::Fault(errno.clone());
       }
       decision.fired.push(fired);
     }

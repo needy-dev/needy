@@ -152,9 +152,52 @@ impl FromStr for Origin {
 #[serde(rename_all = "snake_case")]
 pub enum Network {
   Actor,
-  // TODO(core-actor): executors have no gateway yet; the variant is reserved
-  // for the executor network the CLI note describes.
+  // TODO(executor-network): executors have no gateway yet; the variant is
+  // reserved for the executor network the CLI note describes and waits for
+  // the owner to name that slice. Only the actor gateway exists.
   Executor,
+}
+
+/// The `net.request` or `net.connect` result: whether a gateway lets a
+/// request or tunnel through, and what it adds.
+// NOTICE: `headers` may hold an injected credential; do not log a decision.
+#[derive(Clone, PartialEq, Eq)]
+pub struct NetDecision {
+  pub outcome: NetOutcome,
+  /// Headers set on the upstream request, as name and value. A `net.connect`
+  /// tunnel is opaque, so nothing adds headers to it.
+  pub headers: Vec<(String, String)>,
+  /// Faults that chaos injected. The flow applies their delays; an errno is
+  /// already in `outcome`.
+  pub fired: Vec<Fired>,
+}
+
+impl NetDecision {
+  /// Allowed and unchanged, before any interceptor.
+  pub fn allowed() -> NetDecision {
+    NetDecision {
+      outcome: NetOutcome::Allow,
+      headers: Vec::new(),
+      fired: Vec::new(),
+    }
+  }
+}
+
+impl fmt::Debug for NetDecision {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
+    f.debug_struct("NetDecision").field("outcome", &self.outcome).field("headers", &names).field("fired", &self.fired).finish()
+  }
+}
+
+/// What happens to a request or tunnel at a gateway.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NetOutcome {
+  Allow,
+  /// The network policy does not allow the host.
+  Deny,
+  /// An injected fault failed it with this errno.
+  Fault(String),
 }
 
 /// A fault that chaos injected.

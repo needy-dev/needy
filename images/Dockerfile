@@ -64,12 +64,14 @@ RUN patch -p1 < /tmp/needy.patch \
  && cargo build --release -p firecracker --target x86_64-unknown-linux-gnu \
  && cp build/cargo_target/x86_64-unknown-linux-gnu/release/firecracker /firecracker
 
-# Actor userland: the driving program's world.
+# Actor userland: the driving program's world. `systemd` is not run (needy's
+# init is PID 1); it brings `systemd-detect-virt`, which a cloud VM has and
+# which reads the recipe's DMI identity.
 FROM ubuntu:24.04 AS actor-root
 ARG OPENCODE_VERSION
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       bash git ripgrep ca-certificates curl sshfs fuse3 iproute2 procps less file xz-utils \
-      pciutils dmidecode lm-sensors util-linux \
+      pciutils dmidecode lm-sensors util-linux systemd \
  && rm -rf /var/lib/apt/lists/* /run/systemd/container \
  && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent \
  && curl -fsSL https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz \

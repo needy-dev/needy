@@ -30,14 +30,16 @@ use needy_core::event::{
   SessionCreate, SessionFail, SessionStop,
 };
 use needy_core::intercept::{self, ExecContext};
-use needy_core::recipe::{CompiledRecipe, HostInfo, VmIdentity};
+use needy_core::recipe::CompiledRecipe;
 use needy_core::rules::{self, Rules};
 use needy_core::types::{Decision, Network, Origin, Outcome, Placement, SessionState};
 use prost::Message as _;
 use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 
+use needy_core_actor::host::{gateway, vm};
 use needy_core_executor::provider::{self, Docker, InstanceHandle, InstanceSpec, Native, Provider, Remote};
 use needy_core_executor::service::ExecStream;
 use needy_trace::Dispatch;
@@ -75,7 +77,6 @@ pub struct Session {
   pub dir: PathBuf,
   pub executors: BTreeMap<String, Arc<Instance>>,
   pub state: Mutex<SessionState>,
-  pub actor: Mutex<Option<tokio::process::Child>>,
   pub actor_command: Vec<String>,
   pub recipe: Option<CompiledRecipe>,
   pub injector: Arc<Injector>,
@@ -324,7 +325,10 @@ impl Daemon {
     let recipe = match &profile.actor.recipe {
       Some(reference) => {
         let recipe = needy_config::recipe::load(&Source::reference(reference, &base))?;
-        let host = HostInfo::detect().unwrap_or_else(|_| HostInfo::from_cpuinfo(""));
+        let host = needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
+          tracing::warn!("session {id}: cannot read this machine's CPU; the recipe skips host checks: {e}");
+          Default::default()
+        });
         let seed = u64::from_str_radix(&id[..8], 16).unwrap_or(0);
         let compiled = needy_core::recipe::compile(&recipe, &host, seed);
         for finding in &compiled.findings {
@@ -373,7 +377,6 @@ impl Daemon {
       dir: dir.clone(),
       executors,
       state: Mutex::new(SessionState::Running),
-      actor: Mutex::new(None),
       actor_command,
       recipe,
       injector,
@@ -445,13 +448,10 @@ impl Daemon {
   }
 
   async fn stop_session(&self, session: &Arc<Session>) {
-    // TODO(8b): `actor` is never set, so this does not stop the VM; slice 8b
-    // fixes that with a regression test.
-    if let Some(mut child) = session.actor.lock().unwrap().take()
-      && let Err(e) = child.start_kill()
-    {
-      tracing::warn!("session {}: cannot kill the actor: {e}", session.id);
-    }
+    // TODO(8b): this does not stop the VM: its handle
+    // (`needy_core_actor::host::vm::Vm`) is owned by the task that waits for
+    // it in `start_actor`; slice 8b stops it here through `Vm::stop`, with a
+    // regression test.
     if let Err(e) = self.mirror_out_executors(session).await {
       tracing::warn!("mirror-out for {}: {e:#}", session.id);
     }
@@ -470,18 +470,10 @@ impl Daemon {
   // --------------------------------------------------------------- actor
 
   async fn start_actor(self: &Arc<Self>, session: &Arc<Session>) -> Result<()> {
-    let image = &self.actor_image;
-    let vmlinux = image.join("vmlinux");
-    let rootfs = image.join("rootfs.ext4");
-    let firecracker = image.join("firecracker");
-    for path in [&vmlinux, &rootfs, &firecracker] {
-      if !path.exists() {
-        bail!("actor image is missing {}; run `needy build`", path.display());
-      }
-    }
-    let vsock = session.dir.join("v.sock");
-    // Guest-initiated vsock connections land on `<uds>_<port>`.
-    let guest_listen = format!("unix:{}_{GUEST_PORT}", vsock.display());
+    let image = vm::Image::new(&self.actor_image);
+    image.check()?;
+    let launch = vm::Launch::new(&image, &session.dir, session.recipe.as_ref());
+    let guest_listen = format!("unix:{}", vm::host_port(&session.dir, GUEST_PORT).display());
     let api = Api {
       daemon: self.clone(),
       bound: Some(session.id.clone()),
@@ -491,78 +483,61 @@ impl Daemon {
       .add_service(GuestServiceServer::new(api.clone()))
       .add_service(SessionServiceServer::new(api.clone()))
       .add_service(ProcessServiceServer::new(api).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX));
+    // TODO(8c): the guest listener is not stopped with its actor; slice 8c
+    // cleans up listener tasks and sockets.
     tokio::spawn(async move {
       if let Err(e) = crate::server::serve(&guest_listen, routes, None).await {
         tracing::error!("session {}: guest listener: {e:#}", api_session);
       }
     });
-    let gateway_path = format!("{}_{GATEWAY_PORT}", vsock.display());
+    // The actor owns its gateway: the gateway stops when the VM exits.
+    let actor = CancellationToken::new();
+    let gateway_path = vm::host_port(&session.dir, GATEWAY_PORT);
     let network = &session.profile.actor.network;
-    let policy = needy_core_actor::gateway::Policy {
+    let mut inject = BTreeMap::new();
+    for (host, injection) in &network.inject {
+      // The daemon holds the credential; the actor never sees it.
+      match std::env::var(&injection.secret) {
+        Ok(value) => {
+          inject.insert(host.clone(), (injection.header.clone(), value));
+        }
+        Err(e) => tracing::warn!("session {}: no {} header for {host}: {}: {e}", session.id, injection.header, injection.secret),
+      }
+    }
+    let policy = gateway::Policy {
       allow: network.allow.iter().map(|glob| glob.as_str().to_string()).collect(),
       upstream: network.upstream.clone(),
-      inject: network.inject.iter().map(|(h, i)| (h.clone(), (i.header.clone(), i.secret.clone()))).collect(),
+      inject,
     };
     let gateway =
-      Arc::new(needy_core_actor::gateway::Gateway::new(policy, session.trace.clone(), Network::Actor, Some(session.injector.clone())));
+      Arc::new(gateway::Gateway::new(policy, session.trace.clone(), Network::Actor, Some(session.injector.clone()), actor.clone()));
     // A socket left by an earlier daemon would make bind fail.
     if let Err(e) = std::fs::remove_file(&gateway_path)
       && e.kind() != std::io::ErrorKind::NotFound
     {
-      tracing::warn!("cannot remove {gateway_path}: {e}");
+      tracing::warn!("cannot remove {}: {e}", gateway_path.display());
     }
-    let listener = tokio::net::UnixListener::bind(&gateway_path)?;
-    tokio::spawn(async move {
-      while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(gateway.clone().serve(stream));
-      }
-    });
+    let listener = tokio::net::UnixListener::bind(&gateway_path).with_context(|| format!("cannot listen on {}", gateway_path.display()))?;
+    // TODO(daemon): the gateway's own task joins the session's task tracker
+    // when slice 8 gives sessions one.
+    tokio::spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
 
-    let recipe = session.recipe.clone();
-    let (vcpus, mem) = recipe.as_ref().map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048));
-    let pci = recipe.as_ref().is_some_and(|r| r.identity.has_pci());
-    let mut boot_args = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4".to_string();
-    if !pci {
-      boot_args.push_str(" pci=off");
-    }
-    let mut config = serde_json::json!({
-        "boot-source": {"kernel_image_path": vmlinux, "boot_args": boot_args},
-        "drives": [{"drive_id": "rootfs", "path_on_host": rootfs, "is_root_device": true, "is_read_only": true}],
-        "machine-config": {"vcpu_count": vcpus, "mem_size_mib": mem},
-        "vsock": {"guest_cid": 3, "uds_path": vsock},
-    });
-    if let Some(r) = &recipe
-      && r.cpu_template.get("cpuid_modifiers").and_then(|m| m.as_array()).is_some_and(|m| !m.is_empty())
-    {
-      config["cpu-config"] = r.cpu_template.clone();
-    }
-    let config_path = session.dir.join("vm.json");
-    std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
-    let console = std::fs::File::create(session.dir.join("console.log"))?;
-    let mut command = tokio::process::Command::new(&firecracker);
-    command
-      .args(["--no-api", "--config-file"])
-      .arg(&config_path)
-      .stdin(std::process::Stdio::null())
-      .stdout(console.try_clone()?)
-      .stderr(console);
-    if pci {
-      command.arg("--enable-pci");
-    }
-    if let Some(r) = &recipe {
-      command.envs(firecracker_env(&r.identity));
-    }
-    let mut child = command.spawn().context("cannot start firecracker")?;
-    let pid = child.id().unwrap_or(0);
+    let mut vm = match vm::Vm::start(&launch) {
+      Ok(vm) => vm,
+      Err(e) => {
+        actor.cancel();
+        return Err(e.into());
+      }
+    };
     session.emit(&Event::ActorStart(ActorStart {
-      pid,
-      vcpus,
-      mem_mib: mem,
+      pid: vm.pid(),
+      vcpus: launch.vcpus,
+      mem_mib: launch.mem_mib,
     }));
     // Firecracker exits when the guest reboots after the driving program.
     let watch = session.clone();
     tokio::spawn(async move {
-      let exit = match child.wait().await {
+      let exit = match vm.wait().await {
         Ok(status) => {
           use std::os::unix::process::ExitStatusExt;
           ActorVmExit {
@@ -577,6 +552,7 @@ impl Daemon {
           error: Some(e.to_string()),
         },
       };
+      actor.cancel();
       watch.emit(&Event::ActorVmExit(exit));
       let mut state = watch.state.lock().unwrap();
       if *state == SessionState::Running {
@@ -848,46 +824,6 @@ fn profile_name(base: &Path) -> String {
   base.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| base.display().to_string())
 }
 
-/// The patched Firecracker's environment for a VM identity.
-// TODO(core-actor): this mapping moves to `core-actor::host::vm` with the VM
-// start-up in slice 6 of the module layout redesign.
-fn firecracker_env(identity: &VmIdentity) -> BTreeMap<String, String> {
-  let mut env = BTreeMap::new();
-  if let Some(brand) = &identity.cpu_brand {
-    env.insert("NEEDY_BRAND_STRING".into(), brand.clone());
-  }
-  if identity.hide_hypervisor {
-    env.insert("NEEDY_HIDE_HYPERVISOR".into(), "1".into());
-  }
-  if let Some(smbios) = &identity.smbios {
-    // `key=value;…`; a `;` inside a value would end it early.
-    let chassis_type = smbios.chassis_type.map(|n| n.to_string());
-    let fields = [
-      ("bios_date", smbios.bios_date.as_deref()),
-      ("bios_vendor", smbios.bios_vendor.as_deref()),
-      ("bios_version", smbios.bios_version.as_deref()),
-      ("board_name", smbios.board_name.as_deref()),
-      ("board_vendor", smbios.board_vendor.as_deref()),
-      ("chassis_type", chassis_type.as_deref()),
-      ("product_name", smbios.product_name.as_deref()),
-      ("product_version", smbios.product_version.as_deref()),
-      ("serial", smbios.serial.as_deref()),
-      ("sys_vendor", smbios.sys_vendor.as_deref()),
-      ("uuid", Some(smbios.uuid.as_str())),
-    ];
-    let value =
-      fields.iter().filter_map(|(key, value)| value.map(|v| format!("{key}={}", v.replace(';', ",")))).collect::<Vec<_>>().join(";");
-    env.insert("NEEDY_SMBIOS".into(), value);
-  }
-  if let Some(id) = identity.pci_host_bridge {
-    env.insert("NEEDY_PCI_HOST_BRIDGE".into(), id.to_string());
-  }
-  if let Some(id) = identity.pci_isa_bridge {
-    env.insert("NEEDY_PCI_ISA_BRIDGE".into(), id.to_string());
-  }
-  env
-}
-
 fn map_prefix(value: &str, from: &str, to: &str) -> String {
   if value == from {
     return to.to_string();
@@ -1037,7 +973,7 @@ impl SessionService for Api {
     let id = request.into_inner().session_id;
     let dir = self.daemon.session_dir(&id).ok_or_else(|| Status::not_found("no such session"))?;
     // Firecracker writes the guest's serial console here.
-    let path = dir.join("console.log");
+    let path = vm::console(&dir);
     let console = match tokio::fs::read(&path).await {
       Ok(bytes) => bytes,
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
