@@ -3,6 +3,8 @@ syntax = "proto3";
 
 package needy.v1;
 
+import "needy/v1/process.proto";
+
 // SessionService manages sessions: one actor and the executors bound to it.
 service SessionService {
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
@@ -35,6 +37,8 @@ message ExecutorRef {
   string name = 1;
   string runtime = 2;
   string instance = 3;
+  // The session gave the executor back: it stopped, finished or failed.
+  bool released = 4;
 }
 
 message Session {
@@ -46,6 +50,12 @@ message Session {
   int64 created_at_ms = 6;
   // The profile's name, as `CreateSessionRequest.profile_name` gave it.
   string profile = 7;
+  // How the actor's driving program ended. Unset while it runs, for a
+  // session without an actor, and for an actor whose VM ended before the
+  // program reported its exit.
+  ExecExited actor_exit = 9;
+  // Why the session failed, with its causes. Empty unless it failed.
+  string failure = 10;
 
   reserved 4;
 }

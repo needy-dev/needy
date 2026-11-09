@@ -49,8 +49,11 @@ fn info(id: &str, name: &str) -> SessionInfo {
     group: id.into(),
     state: SessionState::Running,
     executors: Vec::new(),
+    released: Vec::new(),
     created_ms: 1,
     profile: "fake".into(),
+    actor_exit: None,
+    failure: None,
   }
 }
 

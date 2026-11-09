@@ -35,8 +35,26 @@ from the start it relays; a process it did not start shows `-` (JSON
 `null`). `--session ID` lists one session's processes. `STATE` is `running`,
 `exited` or `killed` (a signal ended it); `EXIT` is the exit code or the
 signal name, empty while the process runs. JSON carries `state`,
-`exit_code` and `signal` as separate fields. `session ls` lists stopped and failed sessions with their
-state until the daemon exits. `session logs SESSION` prints the actor's
+`exit_code` and `signal` as separate fields.
+
+`session ls` lists stopped, finished and failed sessions with their state
+until the daemon exits. Its columns are `ID`, `NAME`, `STATE`, `GROUP`,
+`EXECUTORS` and `EXIT`. `NAME` and `GROUP` show `-` when they were not
+given and default to the ID; JSON keeps the real values. `EXECUTORS` keeps
+the executors a session had after it gives them back, marked
+`build=docker (released)`. `EXIT` is the driving program's exit code or
+signal, or the first 48 characters of why a failed session failed; it is
+empty while the session runs and for a session without an actor. JSON
+carries `executors` as objects with `name`, `runtime` and `released`, and
+`exit_code`, `signal` and `failure` (the whole reason) as separate fields.
+
+```text
+ID            NAME  STATE     GROUP  EXECUTORS                 EXIT
+b5eac210aee1  -     finished  -      build=docker (released)   0
+4c0f3e9d1a27  -     running   -      here=native
+```
+
+`session logs SESSION` prints the actor's
 serial console: the guest's boot messages and the driving program's terminal.
 
 Benchmarks are a developer task, not a product command: `cargo xtask bench`

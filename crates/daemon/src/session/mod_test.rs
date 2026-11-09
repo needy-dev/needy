@@ -141,6 +141,9 @@ commands:
   let listed = Sessions::list(daemon).await.unwrap();
   assert_eq!(listed.len(), 1);
   assert_eq!(listed[0].state, SessionState::Failed);
+  let released: Vec<&str> = listed[0].released.iter().map(|e| e.name.as_str()).collect();
+  assert_eq!(released, ["a"], "a failed session lists the executors it gave back");
+  assert!(listed[0].failure.as_deref().is_some_and(|f| f.contains("executor b")), "{:?}", listed[0].failure);
 }
 
 #[tokio::test]
@@ -165,4 +168,42 @@ async fn a_create_whose_actor_cannot_start_releases_its_executors_and_sockets() 
   let sockets: Vec<_> =
     std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name()).filter(|n| n.to_string_lossy().starts_with("v.sock")).collect();
   assert!(sockets.is_empty(), "{sockets:?}");
+}
+
+// The owner's 2026-11-10 trial: a finished or stopped session gives its
+// executors back, and `session ls` then showed none at all.
+#[tokio::test]
+async fn a_stopped_session_lists_the_executors_it_released() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  assert!(created.released.is_empty());
+
+  Sessions::stop(daemon, &created.id).await.unwrap();
+
+  let stopped = Sessions::get(daemon, &created.id).await.unwrap();
+  assert!(stopped.executors.is_empty(), "{:?}", stopped.executors);
+  let released: Vec<_> = stopped.released.iter().map(|e| (e.name.as_str(), e.runtime.as_str())).collect();
+  assert_eq!(released, [("here", "native")]);
+}
+
+#[tokio::test]
+async fn a_finished_session_keeps_its_driving_programs_exit() {
+  use needy_api_server::control::Guest;
+  use needy_common::process::Exit;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  assert_eq!(created.actor_exit, None);
+
+  let exit = Exit {
+    code: Some(3),
+    signal: String::new(),
+  };
+  Guest::exit(daemon, &created.id, exit.clone()).await.unwrap();
+
+  let finished = Sessions::get(daemon, &created.id).await.unwrap();
+  assert_eq!(finished.state, SessionState::Finished);
+  assert_eq!(finished.actor_exit, Some(exit));
+  assert_eq!(finished.failure, None);
 }

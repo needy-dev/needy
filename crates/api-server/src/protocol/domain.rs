@@ -97,14 +97,19 @@ pub fn proto_session(session: SessionInfo) -> v1::Session {
     executors: session
       .executors
       .into_iter()
-      .map(|e| v1::ExecutorRef {
+      .map(|e| (e, false))
+      .chain(session.released.into_iter().map(|e| (e, true)))
+      .map(|(e, released)| v1::ExecutorRef {
         name: e.name,
         runtime: e.runtime,
         instance: e.instance,
+        released,
       })
       .collect(),
     created_at_ms: session.created_ms,
     profile: session.profile,
+    actor_exit: session.actor_exit.map(proto_exit),
+    failure: session.failure.unwrap_or_default(),
   }
 }
 

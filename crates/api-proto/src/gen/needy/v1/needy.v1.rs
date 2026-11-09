@@ -432,6 +432,9 @@ pub struct ExecutorRef {
     pub runtime: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub instance: ::prost::alloc::string::String,
+    /// The session gave the executor back: it stopped, finished or failed.
+    #[prost(bool, tag="4")]
+    pub released: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Session {
@@ -450,6 +453,14 @@ pub struct Session {
     /// The profile's name, as `CreateSessionRequest.profile_name` gave it.
     #[prost(string, tag="7")]
     pub profile: ::prost::alloc::string::String,
+    /// How the actor's driving program ended. Unset while it runs, for a
+    /// session without an actor, and for an actor whose VM ended before the
+    /// program reported its exit.
+    #[prost(message, optional, tag="9")]
+    pub actor_exit: ::core::option::Option<ExecExited>,
+    /// Why the session failed, with its causes. Empty unless it failed.
+    #[prost(string, tag="10")]
+    pub failure: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateSessionResponse {

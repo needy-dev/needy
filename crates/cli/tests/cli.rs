@@ -430,18 +430,77 @@ fn session_ls_prints_a_table() {
   let text = stdout(&output);
   let mut lines = text.lines();
   let header: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
-  assert_eq!(header, ["ID", "NAME", "STATE", "GROUP", "EXECUTORS"]);
+  assert_eq!(header, ["ID", "NAME", "STATE", "GROUP", "EXECUTORS", "EXIT"]);
+  // A name and group that default to the ID show as `-`; a running
+  // session has no exit yet.
   let row: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
+  assert_eq!(row, [session.as_str(), "-", "running", "-", "here=native"]);
+}
+
+// The owner's 2026-11-10 trial: a session that ended gave its executors
+// back and `session ls` showed an empty EXECUTORS cell, and nothing said
+// how the session ended.
+#[test]
+fn session_ls_shows_released_executors_and_why_a_session_failed() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let stopped = create_session(&home, NATIVE_PROFILE);
+  assert!(home.run(&["session", "stop", &stopped]).status.success());
+  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  let failed = home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--name",
+    "broken",
+    "--profile",
+    broken.to_str().unwrap(),
+  ]);
+  assert_eq!(failed.status.code(), Some(1));
+
+  let output = home.run(&["session", "ls"]);
+
+  let rows = table(&stdout(&output));
   assert_eq!(
-    row,
+    rows[1][..],
     [
-      session.as_str(),
-      &session,
-      "running",
-      &session,
-      "here=native"
+      stopped.as_str(),
+      "-",
+      "stopped",
+      "-",
+      "here=native (released)"
     ]
   );
+  assert_eq!(rows[2][1..3], ["broken", "failed"]);
+  let exit = rows[2].last().unwrap();
+  assert!(exit.starts_with("cannot read ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
+}
+
+#[test]
+fn session_ls_json_keeps_names_and_carries_released_executors_and_the_failure() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let stopped = create_session(&home, NATIVE_PROFILE);
+  assert!(home.run(&["session", "stop", &stopped]).status.success());
+  let broken = home.write("broken.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { recipe: missing.recipe.yaml }\n");
+  home.run(&[
+    "session",
+    "create",
+    "--no-actor",
+    "--profile",
+    broken.to_str().unwrap(),
+  ]);
+
+  let output = home.run(&["session", "ls", "-o", "json"]);
+
+  let sessions: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
+  assert_eq!((&sessions[0]["name"], &sessions[0]["group"]), (&serde_json::json!(stopped), &serde_json::json!(stopped)));
+  assert_eq!(sessions[0]["executors"], serde_json::json!([{ "name": "here", "runtime": "native", "released": true }]));
+  assert_eq!(
+    (&sessions[0]["exit_code"], &sessions[0]["signal"], &sessions[0]["failure"]),
+    (&serde_json::Value::Null, &serde_json::Value::Null, &serde_json::Value::Null)
+  );
+  assert!(sessions[1]["failure"].as_str().unwrap().contains("missing.recipe.yaml"), "{:?}", sessions[1]);
 }
 
 #[test]

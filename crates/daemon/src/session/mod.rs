@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{ControlError, NewSession, Route, SessionInfo, Sessions};
+use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::Source;
 use needy_config::profile::{Profile, TraceSink};
@@ -57,6 +58,10 @@ pub struct Session {
   pub trace: Dispatch,
   /// The session's executors by name, added as they are acquired.
   executors: Mutex<BTreeMap<String, Arc<Instance>>>,
+  /// The executors it gave back, for `session ls`.
+  released: Mutex<Vec<ExecutorRef>>,
+  /// How the actor's driving program ended, as its init reported it.
+  actor_exit: Mutex<Option<Exit>>,
   /// The session's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -77,9 +82,17 @@ impl Session {
     self.lock_executors().clone()
   }
 
-  /// Takes the session's executors out of it, to release them.
+  /// Takes the session's executors out of it, to release them, and keeps
+  /// them listed as released.
   fn take_executors(&self) -> BTreeMap<String, Arc<Instance>> {
-    std::mem::take(&mut *self.lock_executors())
+    let taken = std::mem::take(&mut *self.lock_executors());
+    lock(&self.released).extend(executor_refs(&taken));
+    taken
+  }
+
+  /// Records how the actor's driving program ended.
+  pub fn set_actor_exit(&self, exit: Exit) {
+    *lock(&self.actor_exit) = Some(exit);
   }
 
   pub fn info(&self) -> SessionInfo {
@@ -89,8 +102,13 @@ impl Session {
       group: self.group.clone(),
       state: self.state.get(),
       executors: executor_refs(&self.executors()),
+      released: lock(&self.released).clone(),
       created_ms: self.created_ms,
       profile: self.profile_name.clone(),
+      // NOTICE: an actor whose VM ended before init reported the driving
+      // program's exit has none; `actor.vm.exit` in the trace has the VM's.
+      actor_exit: lock(&self.actor_exit).clone(),
+      failure: None,
     }
   }
 
@@ -215,7 +233,7 @@ impl Daemon {
     let (session, base) = match prepared {
       Ok(prepared) => prepared,
       Err(error) => {
-        self.record_failure(&id, &request, created_ms, &trace, &error).await;
+        self.record_failure(&id, &request, created_ms, &trace, &error, Vec::new()).await;
         return Err(error);
       }
     };
@@ -289,6 +307,8 @@ impl Daemon {
       recipe,
       trace,
       executors: Mutex::new(BTreeMap::new()),
+      released: Mutex::new(Vec::new()),
+      actor_exit: Mutex::new(None),
       tasks: TaskTracker::new(),
       cancel,
     }))
@@ -350,15 +370,25 @@ impl Daemon {
     session.cancel.cancel();
     session.tasks.close();
     session.tasks.wait().await;
-    for instance in session.executors().values() {
+    for instance in session.take_executors().values() {
       self.pool.release(instance).await;
     }
     actor::remove_sockets(&session.dir);
-    self.record_failure(&session.id, request, session.created_ms, &session.trace, error).await;
+    let released = lock(&session.released).clone();
+    self.record_failure(&session.id, request, session.created_ms, &session.trace, error, released).await;
   }
 
-  /// Keeps a failed create as a failed session and records why.
-  async fn record_failure(&self, id: &str, request: &NewSession, created_ms: i64, trace: &Dispatch, error: &anyhow::Error) {
+  /// Keeps a failed create as a failed session, with the executors it
+  /// `released`, and records why.
+  async fn record_failure(
+    &self,
+    id: &str,
+    request: &NewSession,
+    created_ms: i64,
+    trace: &Dispatch,
+    error: &anyhow::Error,
+    released: Vec<ExecutorRef>,
+  ) {
     tracing::warn!("session {id} failed: {error:#}");
     let or_id = |value: &str| {
       if value.is_empty() {
@@ -373,8 +403,11 @@ impl Daemon {
       group: or_id(&request.group),
       state: SessionState::Failed,
       executors: Vec::new(),
+      released,
       created_ms,
       profile: request.profile_name.clone(),
+      actor_exit: None,
+      failure: Some(format!("{error:#}")),
     });
     emit(
       trace,
@@ -423,7 +456,7 @@ impl Daemon {
     if stopping && let Err(refused) = session.state.advance(SessionState::Stopped) {
       tracing::warn!("session {}: {refused}", session.id);
     }
-    for instance in session.executors().values() {
+    for instance in session.take_executors().values() {
       self.pool.release(instance).await;
     }
     session.emit(&Event::SessionStop(SessionStop {}));

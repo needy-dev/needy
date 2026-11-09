@@ -94,9 +94,18 @@ pub struct SessionInfo {
   pub name: String,
   pub group: String,
   pub state: SessionState,
+  /// The executors the session holds.
   pub executors: Vec<ExecutorRef>,
+  /// The executors the session held and gave back when it stopped,
+  /// finished or failed.
+  pub released: Vec<ExecutorRef>,
   pub created_ms: i64,
   pub profile: String,
+  /// How the actor's driving program ended; `None` while it runs, without
+  /// an actor, or when the VM ended before the program reported its exit.
+  pub actor_exit: Option<Exit>,
+  /// Why the session failed, with its causes.
+  pub failure: Option<String>,
 }
 
 /// Where a routed command runs and how it is rewritten.

@@ -141,6 +141,7 @@ impl Guest for Daemon {
 
   async fn exit(&self, session: &str, exit: Exit) -> Result<(), ControlError> {
     let session = self.sessions.find(session)?;
+    session.set_actor_exit(exit.clone());
     session.emit(&Event::ActorExit(ActorExit {
       code: exit.code,
       signal: (!exit.signal.is_empty()).then_some(exit.signal),
