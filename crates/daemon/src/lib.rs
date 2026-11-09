@@ -106,8 +106,8 @@ pub struct Daemon {
   // TODO(persistence): this map grows until the daemon exits; slice 9
   // keeps processes in `state.db`.
   pub(crate) processes: Arc<Mutex<HashMap<String, Arc<Instance>>>>,
-  /// The daemon's own tasks: the local executor, the guest listeners and
-  /// the relays of commands outside any session.
+  /// The daemon's own tasks: the local executor and the relays of commands
+  /// outside any session.
   pub(crate) tasks: TaskTracker,
   pub(crate) cancel: CancellationToken,
 }

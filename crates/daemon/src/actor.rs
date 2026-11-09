@@ -2,10 +2,11 @@
 //! proxy call, the gateway its network goes through, and the Firecracker VM.
 //!
 //! The actor's tasks belong to its session and run under a child of the
-//! session's token, which the VM's exit also cancels: the gateway stops when
-//! the actor exits or its session stops.
+//! session's token, which the VM's exit also cancels: the guest listener and
+//! the gateway stop when the actor exits or its session stops.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -35,9 +36,15 @@ pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
   let image = vm::Image::new(&daemon.config.actor_image);
   image.check()?;
   let launch = vm::Launch::new(&image, &session.dir, session.recipe.as_ref());
-  serve_guest(daemon, session).await?;
   let actor = session.cancel.child_token();
-  serve_gateway(session, &actor)?;
+  if let Err(e) = serve_guest(daemon, session, &actor).await {
+    actor.cancel();
+    return Err(e);
+  }
+  if let Err(e) = serve_gateway(session, &actor) {
+    actor.cancel();
+    return Err(e);
+  }
   let vm = match vm::Vm::start(&launch) {
     Ok(vm) => vm,
     Err(e) => {
@@ -55,8 +62,8 @@ pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
 }
 
 /// Serves the session's API to the actor on its vsock port, as
-/// `Caller::Actor` bound to the session.
-async fn serve_guest(daemon: &Daemon, session: &Session) -> Result<()> {
+/// `Caller::Actor` bound to the session, until `actor` is cancelled.
+async fn serve_guest(daemon: &Daemon, session: &Session, actor: &CancellationToken) -> Result<()> {
   let api = Arc::new(daemon.clone());
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
@@ -72,11 +79,8 @@ async fn serve_guest(daemon: &Daemon, session: &Session) -> Result<()> {
     .bind(&[Listen::Unix(vm::host_port(&session.dir, GUEST_PORT))])
     .await?;
   let id = session.id.clone();
-  // TODO(8c): the guest listener serves under the daemon's token, so it
-  // outlives its actor and session until the daemon stops; slice 8c moves it
-  // under the session's token and removes its socket.
-  let stop = daemon.cancel.clone();
-  daemon.tasks.spawn(async move {
+  let stop = actor.clone();
+  session.tasks.spawn(async move {
     if let Err(e) = listener.serve(stop).await {
       tracing::error!("session {id}: guest listener: {e:#}");
     }
@@ -114,6 +118,22 @@ fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
   let listener = tokio::net::UnixListener::bind(&path).with_context(|| format!("cannot listen on {}", path.display()))?;
   session.tasks.spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
   Ok(())
+}
+
+/// Removes the actor's sockets from the session's directory `dir`: the vsock
+/// device's and the host ports' the guest connects to.
+pub fn remove_sockets(dir: &Path) {
+  for path in [
+    vm::vsock(dir),
+    vm::host_port(dir, GUEST_PORT),
+    vm::host_port(dir, GATEWAY_PORT),
+  ] {
+    if let Err(e) = std::fs::remove_file(&path)
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!("cannot remove {}: {e}", path.display());
+    }
+  }
 }
 
 /// Waits for the VM to exit, which it does when the guest reboots after the

@@ -58,7 +58,7 @@ pub struct Session {
   /// The session's executors by name, added as they are acquired.
   executors: Mutex<BTreeMap<String, Arc<Instance>>>,
   /// The session's tasks: the relays of its commands, and its actor's
-  /// gateway and VM watch, which run under a child token.
+  /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
   pub cancel: CancellationToken,
 }
@@ -397,8 +397,7 @@ impl Daemon {
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
     session.trace.flush().await;
-    // TODO(8c): the actor's sockets (`vsock` and its guest and gateway
-    // ports) stay in the session's directory; slice 8c removes them here.
+    actor::remove_sockets(&session.dir);
     self.sessions.end(session.info());
     Ok(())
   }
