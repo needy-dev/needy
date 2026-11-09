@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use base64::Engine;
 use clap::ValueEnum;
 use needy_api_proto::v1::{ExecEvent, ExecRefusal, ExecRequest, ExecResponse, ExecStart, exec_request, exec_response};
-use needy_core_executor::client;
+use needy_core_executor::relay;
 use prost::Message as _;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -63,9 +63,9 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let interactive = client::stdin_is_tty() && client::stdout_is_tty();
+  let interactive = relay::interactive();
   let tty = (args.tty || (interactive && !args.no_tty)) && args.output == Output::Human;
-  let window = tty.then(client::window);
+  let window = tty.then(relay::window);
   let mut env: HashMap<String, String> =
     args.env.iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
   if tty && let Ok(term) = std::env::var("TERM") {
@@ -86,8 +86,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       origin: "cli".into(),
     })),
   };
-  let connection = client::connect(&ctx.endpoint()?).await?;
-  let (tx, mut responses) = match client::open(&connection, first).await {
+  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  let (tx, mut responses) = match relay::open(&connection, first).await {
     Ok(stream) => stream,
     Err(status) => return refused(&status, args.output),
   };
@@ -96,14 +96,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   }
   match args.output {
     Output::Human => {
-      let exit = client::relay(tx, responses, tty, forward_stdin).await?;
+      let exit = relay::stdio(tx, responses, tty, forward_stdin).await?;
       Ok(needy_core_executor::signals::shell_code(&exit))
     }
     Output::Json | Output::Ndjson => {
-      if forward_stdin {
-        client::forward_stdin(tx.clone());
-      }
-      client::forward_signals(tx.clone(), false);
+      let _forward = relay::Forward::start(tx.clone(), forward_stdin, false);
       events(tx, responses, args.output).await
     }
   }

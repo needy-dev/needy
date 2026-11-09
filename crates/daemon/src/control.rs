@@ -5,10 +5,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use needy_api_client::Client;
 use needy_api_proto::v1::guest_service_server::{GuestService, GuestServiceServer};
 use needy_api_proto::v1::health_service_server::HealthServiceServer;
 use needy_api_proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
@@ -23,7 +21,7 @@ use needy_api_proto::v1::{
 };
 use needy_common::time::now_ms;
 use needy_config::Source;
-use needy_config::profile::{Executor, FaultKind, FileMode, OnFull, Profile, Runtime, Side, TraceSink};
+use needy_config::profile::{FaultKind, FileMode, OnFull, Profile, Runtime, Side, TraceSink};
 use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
 use needy_core::chaos::sftp::SftpTap;
@@ -40,6 +38,7 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
+use needy_core_executor::provider::{self, Docker, InstanceHandle, InstanceSpec, Native, Provider, Remote};
 use needy_core_executor::service::ExecStream;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
@@ -57,26 +56,13 @@ const TRACE_QUEUE: usize = 4096;
 
 pub struct Instance {
   pub name: String,
-  pub runtime: String,
-  pub id: String,
-  pub client: Client,
-  pub sftp: Vec<String>,
-  pub workspace: String,
+  pub handle: InstanceHandle,
+  /// The provider that created the instance and destroys it.
+  provider: Arc<dyn Provider>,
   pub path_map: BTreeMap<String, String>,
   slots: Option<Arc<Semaphore>>,
   on_full: OnFull,
   refs: AtomicUsize,
-  container: Option<String>,
-}
-
-struct InstanceRequest<'a> {
-  key: &'a str,
-  name: &'a str,
-  config: &'a Executor,
-  session: &'a str,
-  profile: &'a Profile,
-  base: &'a Path,
-  hostname: Option<&'a str>,
 }
 
 pub struct Session {
@@ -121,7 +107,10 @@ pub struct Daemon {
   pools: tokio::sync::Mutex<HashMap<String, Arc<Instance>>>,
   procs: Mutex<HashMap<String, Arc<Instance>>>,
   local: Arc<Instance>,
-  docker_image: String,
+  native: Arc<Native>,
+  remote: Arc<Remote>,
+  /// `None` when the Docker client could not be set up (a bad `DOCKER_HOST`).
+  docker: Option<Arc<Docker>>,
 }
 
 fn status(e: anyhow::Error) -> Status {
@@ -139,7 +128,7 @@ impl Daemon {
     // This machine is always available as the `local` executor.
     let local_sock = runtime_dir.join("local.sock");
     let local_listen = format!("unix:{}", local_sock.display());
-    let host = needy_core_executor::prochost::Host::default();
+    let host = needy_core_executor::process::Host::default();
     let service = needy_core_executor::service::ExecutorService {
       host,
       name: "local".into(),
@@ -155,20 +144,28 @@ impl Daemon {
         tracing::error!("local executor: {e:#}");
       }
     });
-    let local_client = wait_connect(&format!("unix:{}", local_sock.display())).await?;
+    let local_client = provider::connect(&format!("unix:{}", local_sock.display())).await?;
+    let native = Arc::new(Native::new(local_client));
     let local = Arc::new(Instance {
       name: "local".into(),
-      runtime: "native".into(),
-      id: "local".into(),
-      client: local_client,
-      sftp: sftp_command_native(),
-      workspace: String::new(),
+      handle: native.machine(),
+      provider: native.clone(),
       path_map: BTreeMap::new(),
       slots: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
-      container: None,
     });
+    let docker = match Docker::new(provider::docker::Options {
+      image: docker_image,
+      state_dir: state_dir.clone(),
+      allow: Vec::new(),
+    }) {
+      Ok(docker) => Some(Arc::new(docker)),
+      Err(e) => {
+        tracing::warn!("docker executors are unavailable: {e}");
+        None
+      }
+    };
     Ok(Arc::new(Self {
       state_dir,
       actor_image,
@@ -178,7 +175,9 @@ impl Daemon {
       pools: tokio::sync::Mutex::new(HashMap::new()),
       procs: Mutex::new(HashMap::new()),
       local,
-      docker_image,
+      native,
+      remote: Arc::new(Remote),
+      docker,
     }))
   }
 
@@ -346,18 +345,16 @@ impl Daemon {
         ("rule", exec_name),
       ]);
       let pool_key = format!("{exec_name}@{key}");
-      let instance = self
-        .instance(InstanceRequest {
-          key: &pool_key,
-          name: exec_name,
-          config,
-          session: &id,
-          profile: &profile,
-          base: &base,
-          hostname: hostname.as_deref(),
-        })
-        .await
-        .with_context(|| format!("executor {exec_name}"))?;
+      let spec = InstanceSpec {
+        name: exec_name.clone(),
+        key: pool_key,
+        session: id.clone(),
+        config: config.clone(),
+        base: base.clone(),
+        user: profile.user.clone(),
+        hostname: hostname.clone(),
+      };
+      let instance = self.instance(spec).await.with_context(|| format!("executor {exec_name}"))?;
       executors.insert(exec_name.clone(), instance);
     }
     let actor_command = if request.actor_command.is_empty() {
@@ -392,8 +389,8 @@ impl Daemon {
         .iter()
         .map(|(n, i)| event::ExecutorRef {
           name: n.clone(),
-          runtime: i.runtime.clone(),
-          instance: i.id.clone(),
+          runtime: i.handle.runtime.into(),
+          instance: i.handle.id.clone(),
         })
         .collect(),
     }));
@@ -404,135 +401,35 @@ impl Daemon {
     Ok(session)
   }
 
-  /// Returns a pooled instance for `key`, creating it when needed.
-  async fn instance(&self, request: InstanceRequest<'_>) -> Result<Arc<Instance>> {
-    let InstanceRequest {
-      key,
-      name,
-      config,
-      session,
-      profile,
-      base,
-      hostname,
-    } = request;
+  /// Returns a pooled instance for the spec's key, creating it through the
+  /// executor's provider when needed.
+  async fn instance(&self, spec: InstanceSpec) -> Result<Arc<Instance>> {
+    // TODO(8e): the pool lock is held while the provider creates the
+    // instance; slice 8e fixes that with a regression test.
     let mut pools = self.pools.lock().await;
-    if let Some(existing) = pools.get(key) {
+    if let Some(existing) = pools.get(&spec.key) {
       existing.refs.fetch_add(1, Ordering::SeqCst);
       return Ok(existing.clone());
     }
-    let slots = config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize)));
-    let user = &profile.user;
-    let instance = match config.runtime {
-      Runtime::Native => Instance {
-        name: name.into(),
-        runtime: "native".into(),
-        id: "local".into(),
-        client: self.local.client.clone(),
-        sftp: sftp_command_native(),
-        workspace: config.workspace.clone().map(|w| expand(&w, base)).unwrap_or_default(),
-        path_map: config.path_map.clone(),
-        slots,
-        on_full: config.on_full,
-        refs: AtomicUsize::new(1),
-        container: None,
-      },
-      Runtime::Remote => {
-        let remote = config.remote.clone().context("remote executor needs `remote`")?;
-        let mut client = wait_connect(&remote.url).await?;
-        if let Some(env) = &remote.token_env {
-          let token = std::env::var(env).with_context(|| format!("{env} is not set"))?;
-          client = client.with_token(&token)?;
-        }
-        let platform =
-          client.health().check(needy_api_proto::v1::CheckRequest {}).await.map(|r| r.into_inner().platform).unwrap_or_default();
-        Instance {
-          name: name.into(),
-          runtime: "remote".into(),
-          id: remote.url.clone(),
-          client,
-          sftp: sftp_command_for(&platform),
-          workspace: config.workspace.clone().unwrap_or_default(),
-          path_map: config.path_map.clone(),
-          slots,
-          on_full: config.on_full,
-          refs: AtomicUsize::new(1),
-          container: None,
-        }
-      }
-      Runtime::Docker => {
-        let docker = config.docker.clone().unwrap_or_default();
-        if let Err(e) = needy_core::docker::check_docker_args(&docker.args, &[]) {
-          bail!("{e}");
-        }
-        let image = docker.image.clone().unwrap_or_else(|| self.docker_image.clone());
-        let container = format!("needy-{}", sanitize(key));
-        let sock_dir = self.state_dir.join("executors").join(sanitize(key));
-        std::fs::create_dir_all(&sock_dir)?;
-        let host_ws = match &config.workspace {
-          Some(w) => PathBuf::from(expand(w, base)),
-          None => self.state_dir.join("workspaces").join(sanitize(key)),
-        };
-        std::fs::create_dir_all(&host_ws)?;
-        let home = format!("/home/{}", user.name);
-        // A container left from an earlier daemon would block the name. When
-        // there is none, `docker rm` exits non-zero, which is the expected
-        // case; only failing to run docker at all is worth a log line.
-        if let Err(e) = tokio::process::Command::new("docker").args(["rm", "-f", &container]).output().await {
-          tracing::debug!("docker rm {container}: {e}");
-        }
-        let mut args: Vec<String> = vec![
-          "run".into(),
-          "-d".into(),
-          "--rm".into(),
-          "--name".into(),
-          container.clone(),
-          "--label".into(),
-          format!("needy.session={session}"),
-          "--user".into(),
-          format!("{}:{}", user.uid, user.gid),
-          "-v".into(),
-          format!("{}:{home}/workspace", host_ws.display()),
-          "-v".into(),
-          format!("{}:/run/needy", sock_dir.display()),
-        ];
-        if let Some(hostname) = hostname {
-          args.extend(["--hostname".into(), hostname.to_string()]);
-        }
-        args.extend(docker.args.iter().cloned());
-        args.extend([
-          image,
-          "needy".into(),
-          "daemon".into(),
-          "--mode".into(),
-          "executor".into(),
-          "--listen".into(),
-          "unix:/run/needy/executor.sock".into(),
-          "--name".into(),
-          name.into(),
-        ]);
-        let output = tokio::process::Command::new("docker").args(&args).output().await?;
-        if !output.status.success() {
-          bail!("docker run failed: {}", String::from_utf8_lossy(&output.stderr));
-        }
-        let client = wait_connect(&format!("unix:{}", sock_dir.join("executor.sock").display())).await?;
-        Instance {
-          name: name.into(),
-          runtime: "docker".into(),
-          id: container.clone(),
-          client,
-          sftp: vec!["/usr/lib/openssh/sftp-server".into()],
-          workspace: format!("{home}/workspace"),
-          path_map: config.path_map.clone(),
-          slots,
-          on_full: config.on_full,
-          refs: AtomicUsize::new(1),
-          container: Some(container),
-        }
-      }
-      ref other => bail!("runtime {other:?} is not supported yet"),
+    let provider: Arc<dyn Provider> = match spec.config.runtime {
+      Runtime::Native => self.native.clone(),
+      Runtime::Remote => self.remote.clone(),
+      Runtime::Docker => self.docker.clone().context("Docker is not available on this machine")?,
+      // TODO(provider): containerd, firecracker and k8s providers are
+      // deferred; see `needy_core_executor::provider`.
+      other => bail!("runtime {other:?} is not supported yet"),
     };
-    let instance = Arc::new(instance);
-    pools.insert(key.to_string(), instance.clone());
+    let handle = provider.create(&spec).await?;
+    let instance = Arc::new(Instance {
+      name: spec.name.clone(),
+      handle,
+      provider,
+      path_map: spec.config.path_map.clone(),
+      slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
+      on_full: spec.config.on_full,
+      refs: AtomicUsize::new(1),
+    });
+    pools.insert(spec.key, instance.clone());
     Ok(instance)
   }
 
@@ -542,14 +439,8 @@ impl Daemon {
     }
     let mut pools = self.pools.lock().await;
     pools.retain(|_, v| !Arc::ptr_eq(v, instance));
-    if let Some(container) = &instance.container {
-      match tokio::process::Command::new("docker").args(["rm", "-f", container]).output().await {
-        Ok(output) if !output.status.success() => {
-          tracing::warn!("docker rm {container}: {}", String::from_utf8_lossy(&output.stderr).trim());
-        }
-        Err(e) => tracing::warn!("docker rm {container}: {e}"),
-        Ok(_) => {}
-      }
+    if let Err(e) = instance.provider.destroy(&instance.handle).await {
+      tracing::warn!("executor {}: cannot destroy {}: {e}", instance.name, instance.handle.id);
     }
   }
 
@@ -742,7 +633,7 @@ impl Daemon {
         }
       });
     }
-    let mut stream = instance.client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
+    let mut stream = instance.handle.client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
     let (mut out, mut err) = (Vec::new(), Vec::new());
     while let Some(message) = stream.message().await? {
       match message.payload {
@@ -1007,61 +898,6 @@ fn map_prefix(value: &str, from: &str, to: &str) -> String {
   }
 }
 
-fn expand(path: &str, base: &Path) -> String {
-  let home = std::env::var("HOME").unwrap_or_default();
-  let path = path.replacen('~', &home, 1);
-  if Path::new(&path).is_absolute() {
-    path
-  } else {
-    base.join(path).display().to_string()
-  }
-}
-
-fn sanitize(key: &str) -> String {
-  key
-    .chars()
-    .map(|c| {
-      if c.is_ascii_alphanumeric() || c == '-' {
-        c
-      } else {
-        '-'
-      }
-    })
-    .collect()
-}
-
-fn sftp_command_native() -> Vec<String> {
-  sftp_command_for(&format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH))
-}
-
-fn sftp_command_for(platform: &str) -> Vec<String> {
-  if platform.starts_with("macos") {
-    vec!["/usr/libexec/sftp-server".into()]
-  } else if platform.starts_with("windows") {
-    vec![r"C:\Windows\System32\OpenSSH\sftp-server.exe".into()]
-  } else {
-    vec!["/usr/lib/openssh/sftp-server".into()]
-  }
-}
-
-async fn wait_connect(endpoint: &str) -> Result<Client> {
-  let mut last = None;
-  for _ in 0..100 {
-    match Client::connect(endpoint).await {
-      Ok(client) => {
-        // Any answer, even an error status, means the server is up.
-        match client.health().check(needy_api_proto::v1::CheckRequest {}).await {
-          Err(status) if status.code() == tonic::Code::Unavailable => {}
-          _ => return Ok(client),
-        }
-      }
-      Err(e) => last = Some(e),
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-  }
-  bail!("cannot reach {endpoint}: {last:?}")
-}
-
 // ------------------------------------------------------------------ API
 
 #[derive(Clone)]
@@ -1149,8 +985,8 @@ impl Api {
         .iter()
         .map(|(n, i)| ExecutorRef {
           name: n.clone(),
-          runtime: i.runtime.clone(),
-          instance: i.id.clone(),
+          runtime: i.handle.runtime.into(),
+          instance: i.handle.id.clone(),
         })
         .collect(),
       created_at_ms: session.created_ms,
@@ -1287,8 +1123,8 @@ impl ProcessService for Api {
               .ok_or_else(|| Status::not_found("no such executor"))?,
           },
         };
-        if start.cwd.is_empty() && !instance.workspace.is_empty() {
-          start.cwd = instance.workspace.clone();
+        if start.cwd.is_empty() && !instance.handle.workspace.is_empty() {
+          start.cwd = instance.handle.workspace.clone();
         }
         start.session_id = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         (instance, session, start.argv.clone(), Some(origin), decided)
@@ -1369,7 +1205,7 @@ impl ProcessService for Api {
         }
       });
     }
-    let mut upstream = instance.client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
+    let mut upstream = instance.handle.client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
     let daemon = self.daemon.clone();
     let started_ms = now_ms();
     tokio::spawn(async move {
@@ -1469,7 +1305,7 @@ impl ProcessService for Api {
     instances.dedup_by(|a, b| Arc::ptr_eq(a, b));
     let mut processes = Vec::new();
     for instance in instances {
-      if let Ok(list) = instance.client.processes().list_processes(request.clone()).await {
+      if let Ok(list) = instance.handle.client.processes().list_processes(request.clone()).await {
         for mut p in list.into_inner().processes {
           p.executor = instance.name.clone();
           self.daemon.procs.lock().unwrap().insert(p.process_id.clone(), instance.clone());
@@ -1485,7 +1321,7 @@ impl ProcessService for Api {
     let request = request.into_inner();
     let instance =
       self.daemon.procs.lock().unwrap().get(&request.process_id).cloned().ok_or_else(|| Status::not_found("no such process"))?;
-    instance.client.processes().kill_process(request).await
+    instance.handle.client.processes().kill_process(request).await
   }
 }
 
@@ -1515,7 +1351,7 @@ impl GuestService for Api {
         executor: exec.clone(),
         source: path.clone(),
         writable: mapping.writable,
-        sftp_command: instance.sftp.clone(),
+        sftp_command: instance.handle.sftp.clone(),
       });
     }
     let mut copy_in = Vec::new();

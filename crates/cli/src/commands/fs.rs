@@ -10,7 +10,7 @@ use needy_api_proto::v1::{ExecRequest, ExecStart, exec_request, exec_response};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use needy_core_executor::client::connect;
+use crate::cli::connect;
 
 use crate::cli::Context;
 

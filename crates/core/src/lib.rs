@@ -14,7 +14,6 @@
 //! - [`report`]: a session's events rendered as markdown.
 
 pub mod chaos;
-pub mod docker;
 pub mod event;
 pub mod intercept;
 pub mod pattern;

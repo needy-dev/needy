@@ -1,4 +1,5 @@
-//! The process service of an executor: runs processes on this machine.
+//! `ExecutorService`: the process service of one machine, over its
+//! [`process::Host`](crate::process::Host).
 
 use std::pin::Pin;
 
@@ -12,7 +13,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::prochost::{Exit, Host, Input, Output, Proc, Spec};
+use crate::process::{Error, Exit, Host, Input, Output, Proc, Spec};
 
 pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecResponse, Status>> + Send>>;
 
@@ -22,7 +23,7 @@ pub struct ExecutorService {
   pub name: String,
 }
 
-pub fn exited(exit: &Exit) -> ExecResponse {
+fn exited(exit: &Exit) -> ExecResponse {
   ExecResponse {
     payload: Some(exec_response::Payload::Exited(ExecExited {
       code: exit.code,
@@ -33,61 +34,105 @@ pub fn exited(exit: &Exit) -> ExecResponse {
 
 /// Streams a process to one client until it exits or the client leaves. A
 /// client that leaves a process it did not detach takes the process down.
-pub fn stream_process(
+/// The stream's tasks belong to `host`.
+fn stream_process(
+  host: &Host,
   proc: std::sync::Arc<Proc>,
   mut inbound: Streaming<ExecRequest>,
   started: ExecStarted,
   replay: bool,
   detach: bool,
 ) -> ExecStream {
+  let (tasks, cancel) = host.tasks();
   let (tx, rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
   let input_proc = proc.clone();
-  tokio::spawn(async move {
-    while let Ok(Some(message)) = inbound.message().await {
-      match message.payload {
+  let input_cancel = cancel.clone();
+  tasks.spawn(async move {
+    loop {
+      let message = tokio::select! {
+        message = inbound.message() => message,
+        () = input_cancel.cancelled() => break,
+      };
+      let payload = match message {
+        Ok(Some(message)) => message.payload,
+        Ok(None) => break,
+        Err(status) => {
+          tracing::debug!("process {}: client stream: {status}", input_proc.id);
+          break;
+        }
+      };
+      match payload {
         Some(exec_request::Payload::Stdin(bytes)) => input_proc.send(Input::Stdin(bytes)),
         Some(exec_request::Payload::StdinEof(_)) => input_proc.send(Input::Eof),
         Some(exec_request::Payload::Signal(sig)) => input_proc.send(Input::Signal(sig)),
         Some(exec_request::Payload::Resize(size)) => input_proc.send(Input::Resize(size.rows as u16, size.cols as u16)),
-        _ => {}
+        // A second start or attach on one stream has no meaning.
+        Some(exec_request::Payload::Start(_) | exec_request::Payload::Attach(_)) | None => {}
       }
     }
   });
-  tokio::spawn(async move {
-    let send = |event| {
-      let tx = tx.clone();
-      async move { tx.send(Ok(event)).await.is_ok() }
-    };
-    let mut alive = send(ExecResponse {
-      payload: Some(exec_response::Payload::Started(started)),
-    })
-    .await;
-    let (past, mut live) = proc.subscribe(replay).await;
-    for event in past {
-      if !alive {
-        break;
-      }
-      alive = send(to_response(&event)).await;
-      if matches!(event, Output::Exit(_)) {
-        return;
-      }
-    }
-    while alive {
-      let Some(event) = live.recv().await else {
-        break;
-      };
-      let done = matches!(event, Output::Exit(_));
-      alive = send(to_response(&event)).await;
-      if done {
-        return;
-      }
-    }
-    if !alive && !detach && proc.exit().is_none() {
-      let sig = if proc.tty { "SIGHUP" } else { "SIGTERM" };
-      proc.send(Input::Signal(sig.into()));
+  let cancel = cancel.clone();
+  tasks.spawn(async move {
+    tokio::select! {
+      () = relay_output(proc, tx, started, replay, detach) => {}
+      // The host kills its processes when it stops; the client sees the
+      // stream end.
+      () = cancel.cancelled() => {}
     }
   });
   Box::pin(ReceiverStream::new(rx))
+}
+
+async fn relay_output(
+  proc: std::sync::Arc<Proc>,
+  tx: mpsc::Sender<Result<ExecResponse, Status>>,
+  started: ExecStarted,
+  replay: bool,
+  detach: bool,
+) {
+  let send = |event| {
+    let tx = tx.clone();
+    async move { tx.send(Ok(event)).await.is_ok() }
+  };
+  let mut alive = send(ExecResponse {
+    payload: Some(exec_response::Payload::Started(started)),
+  })
+  .await;
+  let (past, mut live) = proc.subscribe(replay).await;
+  for event in past {
+    if !alive {
+      break;
+    }
+    alive = send(to_response(&event)).await;
+    if matches!(event, Output::Exit(_)) {
+      return;
+    }
+  }
+  while alive {
+    let Some(event) = live.recv().await else {
+      break;
+    };
+    let done = matches!(event, Output::Exit(_));
+    alive = send(to_response(&event)).await;
+    if done {
+      return;
+    }
+  }
+  if !alive && !detach && proc.exit().is_none() {
+    let sig = if proc.tty { "SIGHUP" } else { "SIGTERM" };
+    proc.send(Input::Signal(sig.into()));
+  }
+}
+
+/// A command that cannot start is a failed precondition, which clients
+/// report like a shell does (127).
+fn spawn_status(error: Error) -> Status {
+  match error {
+    Error::ShuttingDown => Status::unavailable(error.to_string()),
+    Error::EmptyCommand | Error::Start { .. } | Error::StartTerminal { .. } | Error::Terminal(_) => {
+      Status::failed_precondition(error.to_string())
+    }
+  }
 }
 
 fn to_response(event: &Output) -> ExecResponse {
@@ -102,7 +147,7 @@ fn to_response(event: &Output) -> ExecResponse {
   }
 }
 
-pub fn info(proc: &Proc, executor: &str) -> ProcessInfo {
+fn info(proc: &Proc, executor: &str) -> ProcessInfo {
   let exit = proc.exit();
   ProcessInfo {
     process_id: proc.id.clone(),
@@ -139,7 +184,7 @@ impl ProcessService for ExecutorService {
           no_stdin: start.no_stdin,
           session_id: start.session_id,
         };
-        let proc = self.host.spawn(spec).map_err(|e| Status::failed_precondition(format!("{e:#}")))?;
+        let proc = self.host.spawn(spec).map_err(spawn_status)?;
         let started = ExecStarted {
           process_id: proc.id.clone(),
           executor: self.name.clone(),
@@ -147,7 +192,7 @@ impl ProcessService for ExecutorService {
           argv: proc.argv.clone(),
           cwd: String::new(),
         };
-        Ok(Response::new(stream_process(proc, inbound, started, false, start.detach)))
+        Ok(Response::new(stream_process(&self.host, proc, inbound, started, false, start.detach)))
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let proc = self.host.get(&attach.process_id).ok_or_else(|| Status::not_found("no such process"))?;
@@ -159,7 +204,7 @@ impl ProcessService for ExecutorService {
           cwd: String::new(),
         };
         // An attached client never owns the process.
-        Ok(Response::new(stream_process(proc, inbound, started, attach.replay, true)))
+        Ok(Response::new(stream_process(&self.host, proc, inbound, started, attach.replay, true)))
       }
       _ => Err(Status::invalid_argument("the first request must start or attach")),
     }

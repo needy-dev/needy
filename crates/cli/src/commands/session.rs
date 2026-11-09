@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, anyhow};
 use clap::Subcommand;
 use needy_api_proto::v1::{CreateSessionRequest, GetSessionLogsRequest, ListSessionsRequest, Session, StopSessionRequest};
-use needy_core_executor::client;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
@@ -98,7 +97,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     } => {
       let yaml = std::fs::read_to_string(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
       let dir = std::fs::canonicalize(&profile)?.parent().map(|p| p.display().to_string()).unwrap_or_default();
-      let connection = client::connect(&endpoint).await?;
+      let connection = crate::cli::connect(&endpoint).await?;
       let session = connection
         .sessions()
         .create_session(CreateSessionRequest {
@@ -117,13 +116,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       println!("{}", session.session_id);
     }
     Command::Ls { output: format } => {
-      let connection = client::connect(&endpoint).await?;
+      let connection = crate::cli::connect(&endpoint).await?;
       let list = connection.sessions().list_sessions(ListSessionsRequest {}).await.map_err(fail)?.into_inner();
       let rows: Vec<SessionRow> = list.sessions.into_iter().map(SessionRow::from).collect();
       output::print(format, &rows)?;
     }
     Command::Stop { session } => {
-      let connection = client::connect(&endpoint).await?;
+      let connection = crate::cli::connect(&endpoint).await?;
       connection
         .sessions()
         .stop_session(StopSessionRequest {
@@ -133,7 +132,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .map_err(fail)?;
     }
     Command::Logs { session } => {
-      let connection = client::connect(&endpoint).await?;
+      let connection = crate::cli::connect(&endpoint).await?;
       let mut stream = connection
         .sessions()
         .get_session_logs(GetSessionLogsRequest {

@@ -96,6 +96,10 @@ owns task IO. A client may disconnect without stopping the process.
 buffer. Long-running commands such as `pnpm dev` or watch-mode tests depend on
 this, for both people and driving programs.
 
+A finished process stays in `needy ps`, with its exit, and can be attached
+for its replay for 10 minutes after it exits; then the executor forgets it.
+Running processes never expire.
+
 ### Output modes
 
 | `--output` | For | Content |
@@ -123,8 +127,9 @@ without a session has neither.
 
 Implemented on every executor platform: PTY or pipes, raw mode, resize, signal
 forwarding, stdin half-close, exit with a signal name, detach, attach with a
-256 KiB replay buffer, `json` and `ndjson` output with the placement events,
-and backpressure from a slow client to the process. `--events` is not
+256 KiB replay buffer, finished processes listed for 10 minutes, `json` and
+`ndjson` output with the placement events, and backpressure from a slow
+client to the process. `--events` is not
 implemented yet, and `json` does not include events. On Windows a signal
 terminates the process tree; terminals use ConPTY through portable-pty but do
 not work yet in a daemon started in session 0 (see the closed-loop results).
@@ -314,6 +319,7 @@ Copies and syncs files between the host, the actor and executors, like
 
 ## Open questions
 
-- Replay buffer size and retention for detached processes.
+- Replay buffer size, and whether the 10-minute retention of finished
+  processes should be configurable per executor.
 - Whether `ndjson` output chunks are text or base64.
 - Trace retention and size limits per session.

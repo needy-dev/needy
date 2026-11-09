@@ -17,9 +17,13 @@ Dependencies point downward; a crate never depends on one above it.
   session, process and guest APIs). Composition only; logic lives below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` is the in-guest
   init and exec-routing proxy (Linux only); `gateway` is the actor gateway.
-- `crates/core-executor` (`needy-core-executor`): where commands run. The
-  process host (PTY, pipes, replay, detach), the process service, and the exec
-  client used by the CLI and the proxy.
+- `crates/core-executor` (`needy-core-executor`): where commands run.
+  `process` is the process host (PTY, pipes, replay, detach, expiry of
+  finished processes) with platform code in `process/platform`; `service` is
+  the process service one machine serves; `provider` creates and destroys
+  executor instances (`native`, `remote`, `docker` through `bollard`) and owns
+  the Docker run-option policy; `relay` connects an exec stream to the local
+  terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a
   typed VM identity, `chaos`), and owns command patterns (`pattern`), the

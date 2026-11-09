@@ -1,6 +1,6 @@
 [package]
 name = "needy-core-executor"
-description = "Needy executors: the process host, the process service and the exec client"
+description = "Needy executors: processes, executor providers and the terminal relay"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,18 +8,29 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-anyhow.workspace = true
+async-trait.workspace = true
+backon.workspace = true
+bollard.workspace = true
 bytes.workspace = true
+crossterm.workspace = true
 futures-util.workspace = true
 needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
+needy-config.workspace = true
+parse-size.workspace = true
 portable-pty.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-util.workspace = true
 tonic.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc.workspace = true
 nix.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tonic = { workspace = true, features = ["router", "transport"] }

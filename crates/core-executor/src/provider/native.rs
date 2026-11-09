@@ -1,0 +1,44 @@
+//! The `native` runtime: this machine, through the daemon's own executor.
+//! There is nothing to create; every instance shares the machine.
+
+use needy_api_client::Client;
+
+use super::{Error, InstanceHandle, InstanceSpec, Provider, host_path, sftp_command};
+
+pub struct Native {
+  /// The in-process executor of this machine.
+  client: Client,
+}
+
+impl Native {
+  pub fn new(client: Client) -> Self {
+    Self { client }
+  }
+
+  /// This machine with the executor's default working directory.
+  pub fn machine(&self) -> InstanceHandle {
+    InstanceHandle {
+      runtime: "native",
+      id: "local".into(),
+      client: self.client.clone(),
+      sftp: sftp_command(&format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)),
+      workspace: String::new(),
+    }
+  }
+}
+
+#[async_trait::async_trait]
+impl Provider for Native {
+  async fn create(&self, spec: &InstanceSpec) -> Result<InstanceHandle, Error> {
+    let mut handle = self.machine();
+    if let Some(workspace) = &spec.config.workspace {
+      handle.workspace = host_path(workspace, &spec.base).display().to_string();
+    }
+    Ok(handle)
+  }
+
+  /// This machine outlives its sessions.
+  async fn destroy(&self, _handle: &InstanceHandle) -> Result<(), Error> {
+    Ok(())
+  }
+}

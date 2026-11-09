@@ -169,9 +169,21 @@ session can be reproduced after `latest` moves.
 Runtime options pass through, except fields the daemon owns:
 
 - **Set by the daemon, never overridden**: `--network` (the executor network and
-  gateway), the workspace mount, `--name`, `--label`.
+  gateway), the workspace mount, `--name`, `--label`, `--hostname` (the
+  recipe's), `--user` (the profile's `user`), `--entrypoint`, `--rm` and
+  `--detach`.
 - **Denied unless the daemon's operator configuration allows them**:
   `--privileged`, `--cap-add`, `--device`, `--pid host`, mounting the host root.
+
+The daemon creates containers through the Docker API, so `docker.args` are
+translated rather than passed to `docker run`. Translated today: `--cpus`,
+`--memory`, `--memory-swap`, `--shm-size`, `--pids-limit`, `--cpuset-cpus`,
+`--env`, `--volume`, `--mount` (bind, volume, tmpfs), `--tmpfs`, `--cap-add`,
+`--cap-drop`, `--device`, `--pid`, `--ipc`, `--userns`, `--uts`,
+`--security-opt`, `--ulimit`, `--privileged`, `--read-only` and `--init`.
+Any other option is an error when the executor is created, not silently
+dropped. There is no operator configuration yet, so the privileged options
+are always refused.
 
 containerd options are merged into the OCI spec as a JSON patch with the same
 fields protected.

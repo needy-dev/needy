@@ -132,6 +132,31 @@ migrated.
 | `exec -t` in a session with a Docker executor and without a session | Linux | Pass: a terminal on both (`/dev/pts/N`, exit codes 4 and 5 returned); nothing recorded besides the events; the exec without a session is not in the session's trace (it was before the fix in this slice) |
 | `cargo xtask bench run --profile examples/bench/profile.yaml` with `NEEDY_STATE_DIR` | Linux | Pass: the probes' lines, then one `timing` line: `exec.decide` 601 samples (31–113 µs), `exec.start` 602 (0.5–1.2 ms), `net.request` 100 (0.15–0.6 ms); no container or VM left |
 
+## Re-verified after the core-executor slice
+
+Slice 5 of the module layout redesign (`core-executor` split into `process`,
+`service`, `provider` and `relay`; Docker executors created through the
+Docker API with `bollard`; the terminal relay on `crossterm`; finished
+processes expire from `ps` after 10 minutes) was rerun on 2026-11-09 with
+debug builds and every daemon's state, image and output in a scratch
+directory.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| Native executor: exit 7 with stdout and stderr apart, stdin, `SIGTERM` death exits 143, a missing program exits 127, `--output json`, `-t` under `script` (a terminal, its window size, the local terminal restored), detach, `ps`, `attach` with replay, `kill`, `fs cp` both ways | Mac | Pass |
+| Finished processes in `ps` | Mac | Pass: listed with their exit right after they finish; gone from `ps` once 10 minutes have passed, while a running process stays |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| The Docker provider's create and destroy round trip (`cargo test`): an executor container from `needy-executor:latest` answers, has the recipe's hostname, and is gone after destroy | Linux | Pass |
+| `examples/cli` through a Docker executor: exit 7, stdin, `SIGTERM` (143), 127, `--output json`, `-t` (`/dev/pts/0`, exit 3), detach, `ps`, `attach` with replay, `kill`, `fs cp` both ways; `session stop` leaves no container | Linux | Pass |
+| A profile with an untranslated `docker.args` option (`--gpus all`) | Linux | Pass: `session create` fails with `executor build: --gpus is not a supported docker run option` |
+| `examples/smoke` in an actor; `report` | Linux | Pass: GCE identity, the routed `python3` prints the actor's hostname, workspace both ways, `routed exit=7`; the report counts 4 routed and 1 failed; no container left after stop |
+| `examples/chaos` in an actor; `report` | Linux | Pass: copy-in filter, `Input/output error` on `broken.json`, exit 126 for `curl`, hwmon `+101.0°C ALARM (CRIT)`, mirror-out to `out/{session}/`; the report counts 3 faults by kind; no container left |
+| Windows executor: `needy.exe` from `images/Dockerfile`'s `windows` stage, started through WMI, driven by `needy.exe` on the same host over TCP with a bearer token | Windows | Pass: `cmd /c` exit 7, stdin to PowerShell, `--output json`, a missing program exits 127, detach, `ps`, `kill`, `fs cp` both ways, a wrong or missing token is rejected. `attach` was tried only after the process had expired and correctly answered `no such process` |
+
+Found on the way: a daemon started in the background of a non-interactive
+shell inherits `SIGINT` as ignored and passes that on to every process it
+starts, so `needy kill -s INT` has no effect there. This predates the slice.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

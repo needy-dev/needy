@@ -37,7 +37,7 @@ mod linux {
   use needy_config::profile::FaultKind;
   use needy_core::event::Event;
   use needy_core::types::{Effect, Fired, Origin};
-  use needy_core_executor::client as exec_cli;
+  use needy_core_executor::relay;
 
   const DAEMON: &str = "vsock://2:7000";
   const STUB_DIR: &str = "/run/needy/bin";
@@ -134,7 +134,7 @@ mod linux {
       },
       env: pass,
       clear_env: decision.clear_env,
-      tty: tty.then(exec_cli::window),
+      tty: tty.then(relay::window),
       detach: false,
       session_id: String::new(),
       executor: decision.target,
@@ -144,7 +144,7 @@ mod linux {
     let first = ExecRequest {
       payload: Some(exec_request::Payload::Start(start)),
     };
-    let exit = exec_cli::run_stream(client, first, tty, true).await?;
+    let exit = relay::run(&client, first, tty, true).await?;
     if let Some(code) = exit.code {
       return Ok(code);
     }

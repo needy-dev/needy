@@ -51,7 +51,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   match args.mode {
     Mode::Executor => {
       let service = ExecutorService {
-        host: needy_core_executor::prochost::Host::default(),
+        host: needy_core_executor::process::Host::default(),
         name: args.name,
       };
       let routes = tonic::service::Routes::default()

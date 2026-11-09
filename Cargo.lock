@@ -387,6 +387,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+ "tokio",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2083,18 +2093,26 @@ dependencies = [
 name = "needy-core-executor"
 version = "0.1.0"
 dependencies = [
- "anyhow",
+ "async-trait",
+ "backon",
+ "bollard",
  "bytes",
+ "crossterm",
  "futures-util",
- "libc",
  "needy-api-client",
  "needy-api-proto",
  "needy-common",
+ "needy-config",
  "nix 0.30.1",
+ "parse-size",
  "portable-pty",
+ "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tonic",
+ "tracing",
  "uuid",
 ]
 
@@ -2360,6 +2378,12 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
+
+[[package]]
+name = "parse-size"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
 
 [[package]]
 name = "percent-encoding"
@@ -3683,6 +3707,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

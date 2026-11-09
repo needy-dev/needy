@@ -4,8 +4,9 @@
 //! 126 when a rule or an injected fault refuses it and 127 when it cannot
 //! start); 1 for any other error, printed once with a `needy:` prefix.
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
+use needy_api_client::Client;
 
 use crate::commands::{attach, build, daemon, exec, fs, kill, profile, ps, report, session};
 use crate::paths::Paths;
@@ -70,6 +71,15 @@ impl Context {
       None => Ok(format!("unix:{}", self.paths()?.socket().display())),
     }
   }
+}
+
+/// Connects to a daemon, presenting the token in `NEEDY_TOKEN` when it is set.
+pub async fn connect(endpoint: &str) -> Result<Client> {
+  let client = Client::connect(endpoint).await.with_context(|| format!("cannot reach the daemon at {endpoint}"))?;
+  Ok(match std::env::var("NEEDY_TOKEN") {
+    Ok(token) if !token.is_empty() => client.with_token(&token)?,
+    _ => client,
+  })
 }
 
 /// Parses the command line, runs the command and returns the exit code.

@@ -2,7 +2,6 @@
 
 use anyhow::{Result, anyhow};
 use needy_api_proto::v1::{ListProcessesRequest, ProcessInfo};
-use needy_core_executor::client;
 use serde::Serialize;
 
 use crate::cli::Context;
@@ -64,7 +63,7 @@ impl From<ProcessInfo> for Process {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let connection = client::connect(&ctx.endpoint()?).await?;
+  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
   let list = connection
     .processes()
     .list_processes(ListProcessesRequest {
