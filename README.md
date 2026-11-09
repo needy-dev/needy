@@ -67,7 +67,7 @@ flowchart LR
   by declarative rules. The program sees ordinary PIDs, pipes, terminals and
   exit codes.
 - **Observe.** Every operation and decision is recorded. `needy report` writes a
-  human-readable summary; the trace exports to JSONL, SQLite and OpenTelemetry.
+  human-readable summary; the trace is stored in SQLite and JSONL.
 - **Shape.** Inject faults such as `EIO`, delays or overheating sensors, and
   build machines whose identity comes from a recipe.
 
@@ -164,7 +164,7 @@ Thank you to their authors.
   [tokio-vsock](https://github.com/rust-vsock/tokio-vsock),
   [portable-pty](https://github.com/wezterm/wezterm/tree/main/pty),
   [hyper](https://github.com/hyperium/hyper),
-  [rusqlite](https://github.com/rusqlite/rusqlite) and
+  [SeaORM](https://github.com/SeaQL/sea-orm) and
   [brush](https://github.com/reubeno/brush)'s shell parsing approach.
 
 **Design references**
