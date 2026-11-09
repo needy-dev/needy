@@ -304,6 +304,37 @@ Changed on purpose by these fixes:
   from its container name instead of the key, and is removed with the
   container.
 
+## Re-verified after the follow-up fixes
+
+Three follow-up fixes (the report keeps the first terminal state, as
+`session ls` does; a second termination signal makes a daemon exit at once;
+shutdown unwinds a session create in progress) were rerun on 2026-11-10 with
+debug builds and every daemon's state, image and output in a scratch
+directory. Each fix has a regression test in `make test`.
+
+| Loop | Host | Result |
+| --- | --- | --- |
+| `examples/local` without an actor: `exec` (exit 0), `curl` fault (126), `session stop`, `session ls`, `report` | Mac | Pass: `stopped` in both |
+| Control daemon with a session and an attached `exec -- sleep 300`: SIGTERM, then SIGTERM again 0.5 s later | Mac | Pass: still shutting down after the first; exits 1 0.08 s after the second with `exited at a second termination signal; these sessions were not cleaned up: <id>`, also in the daemon log. One SIGTERM with nothing open exits 0 in 0.04 s |
+| A no-actor session whose copy-in takes 67 s, SIGTERM 1.5 s into the create | Mac | Pass: the daemon waits for the copy-in step, then the create fails with `the daemon shut down while the session was being created`; `report` shows `failed` and that reason; the daemon exits 0 |
+| `needy build --recipe examples/opencode/gce.recipe.yaml --executor` | Linux | Pass |
+| `examples/smoke` with a second, remote executor whose socket listens 8 s later: SIGTERM once the Docker executor is up | Linux | Pass: the daemon outlives the 5 s grace and waits for the create; once the remote executor answers, the create unwinds: `session create` exits 1 with the shutdown reason, the daemon exits 0 7.3 s after the signal, no container, Firecracker or session socket is left, and `report` shows `failed` with the reason |
+| `examples/smoke` (and a variant with a 1 GiB copy-in) signalled while `creating` | Linux | Pass: the create ended within the server's 5 s grace for open calls, so the session ran and was stopped; nothing left behind |
+| `examples/smoke` finishing on its own, then `session stop` | Linux | Pass: `finished` in `session ls` before and after the stop, and `finished`, `exit 0` in `report`; `routed exit=7` in `session logs` |
+| `examples/smoke` with `/bin/sleep 300` and an attached routed `python3` sleep: SIGTERM, then SIGTERM again | Linux | Pass: exits 1 0.02 s after the second, naming the session; its container, Firecracker and sockets are left behind, as the message says, and were removed by hand |
+
+Changed on purpose by these fixes:
+
+- `report` shows the first of `actor.exit`, `actor.vm_exit`, `session.stop`
+  and `session.fail` as the session's state; a session stopped after it
+  finished reports `finished`.
+- A second SIGINT, SIGTERM or SIGHUP (a second Ctrl-C on Windows) makes the
+  control daemon or an executor exit 1 at once, naming the sessions or
+  processes it did not clean up. Nothing reconciles them yet (slice 9).
+- Shutdown cancels the sessions being created; each finishes the step in
+  progress (a provider create or a copy-in), then rolls back and records
+  `session.fail`.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
