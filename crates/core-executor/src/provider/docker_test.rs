@@ -182,6 +182,54 @@ fn privileged_options_need_the_operator() {
   assert_eq!((host.privileged, host.pid_mode.as_deref()), (Some(true), Some("host")));
 }
 
+/// The device mappings `--device` values become, as (host, container, permissions).
+fn devices(values: &[&str]) -> Vec<(String, String, String)> {
+  let operator = Options {
+    allow: vec!["--device".into()],
+    ..options()
+  };
+  let args: Vec<&str> = values.iter().flat_map(|v| ["--device", v]).collect();
+  let host = container(&spec(&args), &operator).unwrap().body.host_config.unwrap();
+  host.devices.unwrap().into_iter().map(|d| (d.path_on_host.unwrap(), d.path_in_container.unwrap(), d.cgroup_permissions.unwrap())).collect()
+}
+
+// ROOT CAUSE:
+//
+// If a profile passed `--device /dev/x:rw`, the container got a device at
+// the path `rw` with permissions `rwm`, because the second field always
+// became the container path; Docker reads a second field that is a valid
+// mode as the permissions and keeps the host path in the container.
+//
+// Before the fix, `/dev/fuse:rw` mapped to `("/dev/fuse", "rw", "rwm")`.
+// The fix parses `--device` as docker/cli v28.5.1 does.
+#[test]
+fn a_device_parses_as_docker_does() {
+  let own = |h: &str, c: &str, p: &str| (h.to_string(), c.to_string(), p.to_string());
+  assert_eq!(
+    devices(&[
+      "/dev/fuse",
+      "/dev/fuse:rw",
+      "/dev/kvm:/dev/vm",
+      "/dev/kvm:/dev/vm:r"
+    ]),
+    [
+      own("/dev/fuse", "/dev/fuse", "rwm"),
+      own("/dev/fuse", "/dev/fuse", "rw"),
+      own("/dev/kvm", "/dev/vm", "rwm"),
+      own("/dev/kvm", "/dev/vm", "r"),
+    ]
+  );
+  let operator = Options {
+    allow: vec!["--device".into()],
+    ..options()
+  };
+  assert_eq!(refusal(&["--device", "/dev/kvm:/dev/vm:rx"], &operator), "--device /dev/kvm:/dev/vm:rx: bad mode specified: rx");
+  assert_eq!(refusal(&["--device", "/dev/a:/b:rw:m"], &operator), "--device /dev/a:/b:rw:m: bad format for path");
+  assert_eq!(refusal(&["--device", "/dev/kvm:vm"], &operator), "--device /dev/kvm:vm: vm is not an absolute path");
+  assert_eq!(refusal(&["--device", "/dev/x:r:w"], &operator), "--device /dev/x:r:w: r is not an absolute path");
+  assert_eq!(refusal(&["--device", ":/dev/x"], &operator), "--device :/dev/x: bad format for path");
+}
+
 #[test]
 fn an_unknown_option_is_an_error_not_dropped() {
   assert_eq!(refusal(&["--gpus", "all"], &options()), "--gpus is not a supported docker run option");

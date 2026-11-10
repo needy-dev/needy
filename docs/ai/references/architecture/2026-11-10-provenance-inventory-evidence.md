@@ -57,7 +57,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | 21 | fake coretemp max 80 C, crit 100 C | `images/kernel/fake_coretemp.c:48` | TODO(provenance) | the real driver reads TjMax: `K/drivers/hwmon/coretemp.c#L268-L328` |
 | 22 | fake coretemp file numbering | `images/kernel/fake_coretemp.c:59` | fixed | real Core N is `temp(N+2)`: `K/drivers/hwmon/coretemp.c#L427-L436`; the fake now puts Core N in channel N+1 (`temp(N+2)`) and hides the channels between; checked in an actor with `ls /sys/class/hwmon/*/` and `sensors` |
 | 23 | fake coretemp core IDs step by 4 | `images/kernel/fake_coretemp.c:62` | TODO(provenance) | none found |
-| 24 | `--device host:mode` | `crates/core-executor/src/provider/docker.rs:248` | REVIEW | <https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1005-L1016> |
+| 24 | `--device host:mode` | `crates/core-executor/src/provider/docker.rs:248` | fixed | <https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1005-L1016>; `device` follows `validateLinuxPath` (`#L1092-L1130`) and `parseLinuxDevice` (`#L999-L1033`); test `a_device_parses_as_docker_does` |
 | 25 | `ENDED = 255` reserved status | `crates/core-executor/src/signals.rs:53` | TODO(provenance) | only the non-normative Advanced Bash-Scripting Guide |
 | 26 | "no exit maps to 255" | `crates/core-executor/src/signals.rs:57` | REVIEW | `shell_code` passes `exit 255` through |
 

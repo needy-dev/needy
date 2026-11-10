@@ -10,7 +10,7 @@
 //! container and the daemon share a kernel (Linux). Docker Desktop on macOS
 //! runs containers in a VM, where the host cannot connect to it.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use bollard::errors::Error as DockerError;
@@ -245,19 +245,8 @@ fn apply_run_options(args: &[String], allow: &[String], body: &mut ContainerCrea
       "--cap-add" | "--device" if !allowed(flag) => return refuse(format!("{flag} is not allowed by the operator")),
       "--cap-add" => host.cap_add.get_or_insert_with(Vec::new).push(value),
       "--cap-drop" => host.cap_drop.get_or_insert_with(Vec::new).push(value),
-      // REVIEW: Docker reads a second field that is a valid mode (`/dev/x:rw`)
-      // as the permissions, with the container path equal to the host's
-      // (https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1005-L1016);
-      // here it always becomes the container path.
       "--device" => {
-        let mut parts = value.splitn(3, ':');
-        let on_host = parts.next().unwrap_or_default().to_string();
-        let in_container = parts.next().map(String::from).unwrap_or_else(|| on_host.clone());
-        host.devices.get_or_insert_with(Vec::new).push(DeviceMapping {
-          path_on_host: Some(on_host),
-          path_in_container: Some(in_container),
-          cgroup_permissions: Some(parts.next().unwrap_or("rwm").to_string()),
-        });
+        host.devices.get_or_insert_with(Vec::new).push(device(&value).map_err(|e| Error::Config(format!("{flag} {value}: {e}")))?)
       }
       "--pid" | "--ipc" | "--userns" | "--uts" if value == "host" && !allowed(flag) => {
         return refuse(format!("{flag} host is not allowed by the operator"));
@@ -278,6 +267,37 @@ fn apply_run_options(args: &[String], allow: &[String], body: &mut ContainerCrea
     body.env.get_or_insert_with(Vec::new).extend(env);
   }
   Ok(())
+}
+
+/// A `--device` value, `host[:container][:mode]`, as `docker run` reads it: a
+/// second field made only of `r`, `w` and `m` is the mode, and the container
+/// path defaults to the host's.
+// Source: https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1092-L1130
+// (`validateLinuxPath`, run first with `validDeviceMode`, #L1053-L1071) and
+// #L999-L1033 (`parseLinuxDevice`).
+// Reference: https://github.com/docker/cli/blob/v28.5.1/docs/reference/commandline/container_run.md#L871-L905
+// NOTICE: docker/cli also runs `path.Clean` on the container path; this keeps
+// it as written, and the daemon receives it unchanged.
+fn device(value: &str) -> Result<DeviceMapping, String> {
+  let mode = |m: &str| !m.is_empty() && m.chars().all(|c| "rwm".contains(c)) && m.chars().collect::<BTreeSet<_>>().len() == m.len();
+  let fields: Vec<&str> = value.split(':').collect();
+  let (on_host, in_container, permissions) = match fields.as_slice() {
+    [""] | ["", ..] => return Err("bad format for path".into()),
+    [on_host] => (*on_host, *on_host, "rwm"),
+    [on_host, permissions] if mode(permissions) => (*on_host, *on_host, *permissions),
+    [on_host, in_container] => (*on_host, *in_container, "rwm"),
+    [on_host, in_container, permissions] if mode(permissions) => (*on_host, *in_container, *permissions),
+    [_, _, permissions] => return Err(format!("bad mode specified: {permissions}")),
+    _ => return Err("bad format for path".into()),
+  };
+  if !in_container.starts_with('/') {
+    return Err(format!("{in_container} is not an absolute path"));
+  }
+  Ok(DeviceMapping {
+    path_on_host: Some(on_host.to_string()),
+    path_in_container: Some(in_container.to_string()),
+    cgroup_permissions: Some(permissions.to_string()),
+  })
 }
 
 /// A size as `docker run` takes it: binary units, `8g` is 8 GiB.
