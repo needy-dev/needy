@@ -692,9 +692,38 @@ Not changed by these fixes, seen on the way:
 - `uname -a` shows the guest kernel's own release and date (`6.18.62 #1 SMP
   PREEMPT_DYNAMIC …`), not the recipe's `os.kernel.release` and `version`:
   `images/Dockerfile` reads only the `KBUILD_BUILD_*` build arguments, and
-  nothing consumes `NEEDY_KERNEL_RELEASE` or `NEEDY_KERNEL_VERSION`.
+  nothing consumes `NEEDY_KERNEL_RELEASE` or `NEEDY_KERNEL_VERSION`. Fixed
+  below.
 - The probe actor has no network interface, and `network.mac` is compiled
   but not applied anywhere, so the MAC fixes are checked by unit tests only.
+  Recorded as `TODO(actor-network)` in `crates/core-actor/src/host/vm.rs`:
+  the actor reaches the network through the gateway forwarder; a NIC with
+  the recipe's MAC waits for an owner decision.
+
+### The recipe's `uname` in the actor
+
+`needy build --recipe` now passes the kernel's own make variables
+(`crates/core/src/recipe/kernel.rs`): `KERNELRELEASE` on the make command
+line for `UTS_RELEASE`, and the recipe's version split into
+`KBUILD_BUILD_VERSION` (build number and the recipe's `SMP`/`PREEMPT_DYNAMIC`
+flags, with the configuration's flags emptied) and `KBUILD_BUILD_TIMESTAMP` for
+`UTS_VERSION`. Every needy kernel module is built in, so vermagic is not
+involved. Run on 2026-11-10 on the Linux KVM host from `b5402d8`, with images
+built into a scratch directory and a daemon with its own state there:
+
+| Check | Result |
+| --- | --- |
+| `strings vmlinux`, GCE image (`examples/opencode/gce.recipe.yaml`) | `Linux version 6.5.0-1020-gcp (buildd@lcy02-amd64-115) (gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, …) #20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024` |
+| `strings vmlinux`, Dell image (`builtin:dell-optiplex-ubuntu-24.04`) | `Linux version 6.8.0-49-generic (buildd@lcy02-amd64-028) (…) #49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4 02:06:24 UTC 2024` |
+| GCE actor: `uname -a` | `Linux instance-… 6.5.0-1020-gcp #20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024 x86_64 x86_64 x86_64 GNU/Linux` |
+| GCE actor: `uname -r`, `uname -v`, `/proc/version`, `/proc/sys/kernel/osrelease`, `/proc/sys/kernel/version` | All the same release and version |
+| Built-in modules | `/proc/modules` empty; `/sys/module` lists `binfmt_needy` and `fake_coretemp`; `sensors` prints `Package id 0` |
+| Routing | `python3` routed to the Docker executor, `routed exit=7`; `examples/smoke` `finished` with 4 routed and 1 failed |
+| Network in the actor | `ls /sys/class/net` prints only `lo` |
+| Nothing left | Pass: no daemon or Firecracker |
+
+Still not the recipe's: the compiler in `/proc/version` is the image's
+(`gcc 13.3.0`, binutils 2.42), since recipes have no compiler field.
 
 ## Latency and throughput
 
