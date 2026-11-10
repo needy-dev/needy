@@ -1271,14 +1271,61 @@ fn a_daemon_refuses_a_network_listener_without_a_token() {
   }
 }
 
+// ROOT CAUSE:
+//
+// If the machine was busy, the test failed although the daemon warned,
+// because it gave the daemon a fixed 2 s to log the warning.
+//
+// Before the fix, a slow start read the daemon's output before the warning.
+// The fix waits for the warning's line itself, within a generous bound.
 #[test]
 fn a_daemon_on_a_loopback_address_without_a_token_starts_with_a_warning() {
+  use std::io::BufRead as _;
   let home = Home::new();
+  let mut daemon = home
+    .needy()
+    .args([
+      "daemon",
+      "-v",
+      "--mode",
+      "executor",
+      "--listen",
+      "127.0.0.1:0",
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  // The daemon's log is read on another thread, so the bound below holds
+  // even if the daemon logs nothing.
+  let log = std::io::BufReader::new(daemon.stderr.take().unwrap());
+  let (lines, read) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    for line in log.lines().map_while(Result::ok) {
+      if lines.send(line).is_err() {
+        break;
+      }
+    }
+  });
+  let deadline = Instant::now() + Duration::from_secs(60);
+  let mut seen = Vec::new();
+  let warning = loop {
+    let left = deadline.saturating_duration_since(Instant::now());
+    match read.recv_timeout(left) {
+      Ok(line) if line.contains("without a token") => break Some(line),
+      Ok(line) => seen.push(line),
+      // The daemon exited, or the bound passed.
+      Err(_) => break None,
+    }
+  };
+  let running = daemon.try_wait().unwrap().is_none();
+  if daemon.kill().is_ok() {
+    daemon.wait().unwrap();
+  }
 
-  let (exited, output) = daemon_within(&home, &["-v", "--mode", "executor", "--listen", "127.0.0.1:0"], Duration::from_secs(2));
-
-  assert!(!exited, "the executor did not keep running: {}", stderr(&output));
-  assert!(stderr(&output).contains("WARN") && stderr(&output).contains("without a token"), "{}", stderr(&output));
+  let warning = warning.unwrap_or_else(|| panic!("no warning; the daemon logged: {}", seen.join("\n")));
+  assert!(warning.contains("WARN"), "{warning}");
+  assert!(running, "the executor did not keep running after the warning: {}", seen.join("\n"));
 }
 
 #[test]
