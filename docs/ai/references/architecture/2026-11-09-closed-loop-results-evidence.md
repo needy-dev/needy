@@ -933,6 +933,37 @@ failed twice in about fifteen full `make test` runs with the restarted
 runner never heartbeating within 20 s; it passed 25 times alone and in
 six runs of the CLI tests alone. Not reproduced with logs.
 
+## Clients
+
+Slice 7 of the
+[runners-and-runs design](2026-11-10-runner-and-run-design.md#as-built-slice-7),
+from `1423753`. On the Mac: a control daemon on a loopback TCP port with a
+control token and a stand-in actor (the CLI tests' fake Firecracker), its
+state in a scratch directory; a second client configuration (its own config
+and state directories) reached it by the endpoint only.
+
+| Check | Result |
+| --- | --- |
+| The second client without a token | `missing or invalid bearer token`, exit 1 |
+| `client pair create --name mac-second` with the control token, then `client pair CODE` on the second client | Paired; `credentials.json` is `-rw-------`; the same code again: `pairing code … was used already`, exit 1 |
+| `run create`, `exec --run` (exit 3), `run logs`, `run stop`, `report` from the second client, whose state directory holds no `trace.db` | `boot`, `hello from the actor`; the report: `Started by client:mac-second`, `Stopped by client:mac-second`, `routed to here 1 (1 failed)`; JSON `started_by` and `stopped_by` the same |
+| `client revoke ID`, then the second client | `client ls`: `revoked`; the client: `missing or invalid bearer token`, exit 1 |
+
+Across machines: a control daemon on the Linux KVM host on a loopback TCP
+listener with only the control token as the bootstrap credential, built from
+a scratch copy of the committed tree, with the slice 4 actor image (whose
+guest pushes version 1 events) and the existing executor image. The Mac
+reached it through `ssh -L` only, with only the client token it paired.
+
+| Check | Result |
+| --- | --- |
+| The Mac without a token; the Mac pairing with a code the host's operator created | Refused; then paired as `mac` |
+| `run create` of `examples/smoke` from the Mac, `run logs -f` | The console streamed to the end: `google`, `hello-from-actor`, `hi-from-executor`, `routed exit=7`, `Firecracker exiting successfully`; `logs -f` ended when the run finished |
+| A driving program printing `tick N` every 2 s, followed from the Mac | `+0s tick 1`, `+2s tick 2`, `+4s tick 3`: each line as it was written |
+| `report` (human and `-o json`) from the Mac after `run stop` | `finished, driving program exit 0`, `routed to build 4 (1 failed)`, `Started by client:mac`, `Stopped by client:mac`; the detailed timeline names `run.create client:mac`, `exec.start actor:RUN`, `run.stop client:mac`; `report --local` on the Mac: `no trace database`, exit 1 |
+| `client revoke` on the host, then the Mac | `missing or invalid bearer token`, exit 1; the host's log: `pairing code … created`, `client mac (…) paired`, `client … revoked` |
+| Nothing left | Pass: no daemon, Firecracker or container on the host; the tunnel stopped |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
