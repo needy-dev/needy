@@ -752,6 +752,38 @@ numbers.
 | `run ls`, `run stop`, `report` | The Docker run `stopped` with `build=docker (released)`; its report counts 4 commands from `needy exec`; `report -o json` has a `run` key |
 | Nothing left | Pass: no daemon, Firecracker or container |
 
+## Runner registry and enrollment
+
+Slice 3 of [runners and runs](2026-11-10-runner-and-run-design.md#as-built-slice-3)
+(`fbe8ca4`, `6c06f02`, `ae284ef`): `state.db`, `RunnerService`, the `runner`
+commands and `needy daemon --mode runner`. Run on 2026-11-10.
+
+On one Mac (Apple silicon, macOS), a control daemon and a runner daemon with
+separate state, data and runtime directories, heartbeats every 2 s:
+
+| Check | Result |
+| --- | --- |
+| `runner token create --ttl 10m --roles executor --labels os=darwin`, then a runner joins with `--join-token-env` | `runner ls`: `online`, `executor`, `arch=arm64,os=darwin`; `runner.json` is `-rw-------`; the join token is not in the runner's arguments (`ps`) |
+| Restart without the join token | `online`, last seen 1 s ago |
+| `runner rotate` | `online (rotating)`, then `online` once the runner used the new credential |
+| `runner rm` | The runner exits 1: "the control plane refused this runner's credential …"; `runner ls` shows `removed` |
+| A token with `--ttl 1s` after 2 s; the spent single-use token again | Both exit 1: `join token … expired`, `join token … has no uses left`; `runner token ls` shows `expired` and `used-up` |
+
+Across machines: a control daemon on the Linux KVM host on a loopback TCP
+listener with a control token, built from a scratch copy of the committed tree
+(`make check` passes on Linux). The host also runs a local runner (`actor`,
+`executor`); the Mac joins through `ssh -L` to the control port, so it makes
+only outbound connections:
+
+| Check | Result |
+| --- | --- |
+| `runner ls` without the control token | `missing or invalid bearer token`, exit 1 |
+| Local runner `kvm` with `--join-token-file` | `online`, `actor,executor`, `kvm=true` |
+| The Mac joins through the tunnel, then restarts without the token or `--join` | Running; `runner ls` on the host lists `kvm` and `mac` both `online`, `mac` with `executor` and `os=darwin` |
+| `examples/smoke` through the same control daemon over TCP with the token | `finished`, `google`, `hello-from-actor`, `hi-from-executor`, `routed exit=7`; `report`: 4 routed, 1 failed |
+| `examples/cli` through `run create --no-actor` | `exec --run` of `uname -s` (rc 0) and `exit 4` (rc 4); `fs cp --run` and `cat` of the copy; `run stop` |
+| Nothing left | Pass: both daemons and the Mac runner stopped, no Firecracker |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
