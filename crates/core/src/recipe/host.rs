@@ -1,4 +1,5 @@
-//! What the host CPU offers, parsed from `/proc/cpuinfo` text.
+//! What the host CPU offers, parsed from `/proc/cpuinfo` text, and the
+//! CPUID entries its KVM supports.
 
 use std::collections::BTreeSet;
 
@@ -8,6 +9,11 @@ pub struct HostInfo {
   pub flags: BTreeSet<String>,
   pub vendor: String,
   pub model_name: String,
+  /// The CPUID entries, as `(leaf, subleaf)`, that this host's KVM supports
+  /// (`KVM_GET_SUPPORTED_CPUID`); `None` when they are unknown, such as on a
+  /// host without KVM. Firecracker builds the guest's CPUID from exactly
+  /// these entries.
+  pub kvm_cpuid: Option<BTreeSet<(u32, u32)>>,
 }
 
 impl HostInfo {

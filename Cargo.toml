@@ -41,6 +41,10 @@ hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "webpki-tokio", "tls12"] }
 hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
 humantime = "2"
+# The versions Firecracker v1.17.0 uses (`src/vmm/Cargo.toml`), so needy reads
+# KVM's supported CPUID as Firecracker does.
+kvm-bindings = { version = "0.14", features = ["fam-wrappers"] }
+kvm-ioctls = "0.25"
 ignore = "0.4"
 libc = "0.2"
 nix = { version = "0.30", features = ["signal"] }

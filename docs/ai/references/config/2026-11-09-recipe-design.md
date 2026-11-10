@@ -111,7 +111,7 @@ loaded, including paths a parent wrote.
 | `cpu.brand`, `cpu.hypervisor` | Patched Firecracker CPUID normalization | VM start | Verified in the proof of concept |
 | `cpu.signature` | CPUID leaf 1 EAX modifier | VM start | Verified |
 | KVM signature | Clear leaf `0x40000000` | VM start | Verified |
-| `cpu.features.hide` | Linux `/proc/cpuinfo` flag names (from `cpufeatures.h`) mapped to CPUID leaf and bit, then cleared | VM start | Needs the name-to-bit table |
+| `cpu.features.hide` | Linux `/proc/cpuinfo` flag names (from `cpufeatures.h`) mapped to CPUID leaf and bit, then cleared; a feature in a CPUID entry the host's KVM does not support is left out with a warning, since the guest cannot see it | VM start | Needs the name-to-bit table |
 | `cpu.topology` | vCPU count and topology leaves | VM start | Partly built into Firecracker |
 | `memory` | `mem_size_mib`; real | VM start | Native |
 | `os.image` | OCI image to ext4 rootfs | Build | Verified |

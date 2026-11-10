@@ -88,6 +88,15 @@ const FEATURES: &[(&str, u32, u32, &str, u32)] = &[
   ("avx512_fp16", 7, 0, "edx", 23),
   ("amx_tile", 7, 0, "edx", 24),
   ("amx_int8", 7, 0, "edx", 25),
+  // Source: Intel SDM Vol. 2A, order 253666-088US (June 2025), Table 3-17,
+  // "Structured Extended Feature Enumeration Sub-leaf (Initial EAX Value = 07H,
+  // ECX = 1)": EAX bit 04 AVX-VNNI, bit 05 AVX512-BF16,
+  // https://cdrdv2-public.intel.com/858446/253666-088-sdm-vol-2a.pdf
+  // Reference: https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html
+  // NOTICE: the same table says a subleaf above the one leaf 07H, subleaf 0
+  // reports in EAX returns zeros. CPUs without subleaf 1, such as Cascade
+  // Lake, have no such entry in KVM's supported CPUID, so `cpu_template`
+  // leaves these two out there.
   ("avx_vnni", 7, 1, "eax", 4),
   ("avx512_bf16", 7, 1, "eax", 5),
 ];
@@ -96,7 +105,20 @@ pub(super) fn feature_bit(name: &str) -> Option<(u32, u32, &'static str, u32)> {
   FEATURES.iter().find(|(n, ..)| *n == name).map(|&(_, leaf, subleaf, reg, bit)| (leaf, subleaf, reg, bit))
 }
 
-pub(super) fn cpu_template(cpu: &Cpu, hidden: bool, findings: &mut Vec<Finding>) -> serde_json::Value {
+/// The Firecracker custom CPU template for `cpu`. Hiding a feature only
+/// clears bits in CPUID entries `host`'s KVM supports: Firecracker refuses a
+/// template that changes any other entry, and the guest cannot see a feature
+/// in an entry it does not have.
+// Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/cpu_config/x86_64/mod.rs#L43-L75
+// (v1.17.0: `apply_template_to_cpuid` looks each modifier's leaf and subleaf
+// up in the CPUID built from `KVM_GET_SUPPORTED_CPUID`,
+// https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/arch/x86_64/mod.rs#L205-L207,
+// and fails with "Template changes a CPUID entry not supported by KVM").
+// Reference: https://www.kernel.org/doc/html/v6.12/virt/kvm/api.html#kvm-get-supported-cpuid
+pub(super) fn cpu_template(cpu: &Cpu, hidden: bool, host: &HostInfo, findings: &mut Vec<Finding>) -> serde_json::Value {
+  // NOTICE: with no KVM to ask (`kvm_cpuid` is `None`), every hide is kept;
+  // a host without KVM cannot start the actor anyway.
+  let supported = |leaf: u32, subleaf: u32| host.kvm_cpuid.as_ref().is_none_or(|entries| entries.contains(&(leaf, subleaf)));
   // (leaf, subleaf, register) → 32 bitmap characters, index 0 is bit 31.
   let mut registers: BTreeMap<(u32, u32, &str), [char; 32]> = BTreeMap::new();
   let mut set_bit = |leaf: u32, subleaf: u32, reg: &'static str, bit: u32, value: char| {
@@ -111,15 +133,20 @@ pub(super) fn cpu_template(cpu: &Cpu, hidden: bool, findings: &mut Vec<Finding>)
   }
   if hidden {
     set_bit(1, 0, "ecx", 31, '0');
-    for reg in ["ebx", "ecx", "edx"] {
-      for bit in 0..32 {
-        set_bit(0x4000_0000, 0, reg, bit, '0');
+    if supported(0x4000_0000, 0) {
+      for reg in ["ebx", "ecx", "edx"] {
+        for bit in 0..32 {
+          set_bit(0x4000_0000, 0, reg, bit, '0');
+        }
       }
     }
   }
   for name in &cpu.features.hide {
     match feature_bit(name) {
-      Some((leaf, subleaf, reg, bit)) => set_bit(leaf, subleaf, reg, bit, '0'),
+      Some((leaf, subleaf, reg, bit)) if supported(leaf, subleaf) => set_bit(leaf, subleaf, reg, bit, '0'),
+      Some((leaf, subleaf, ..)) => findings.push(Finding::warning(format!(
+        "cpu.features.hide: {name} has no effect: this host's KVM has no CPUID leaf {leaf:#x}, subleaf {subleaf:#x}, so the guest cannot see it"
+      ))),
       None => findings.push(Finding::warning(format!("cpu.features.hide: unknown feature {name:?}"))),
     }
   }

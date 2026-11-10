@@ -152,3 +152,76 @@ fn host_info_parsing() {
   assert!(feature_bit("avx512f").is_some());
   assert!(feature_bit("bogus").is_none());
 }
+
+/// The CPUID entries a host's KVM supports, from a fixture in `testdata`
+/// (see `testdata/SOURCES.md`).
+fn kvm_cpuid(fixture: &str) -> std::collections::BTreeSet<(u32, u32)> {
+  let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/recipe/testdata").join(fixture);
+  let hex = |s: &str| u32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap();
+  std::fs::read_to_string(&path)
+    .unwrap()
+    .lines()
+    .map(|line| {
+      let (leaf, subleaf) = line.split_once(' ').unwrap();
+      (hex(leaf), hex(subleaf))
+    })
+    .collect()
+}
+
+/// The modifiers of `template` as `(leaf, subleaf)` strings.
+fn modified_entries(template: &serde_json::Value) -> Vec<(String, String)> {
+  template["cpuid_modifiers"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|m| (m["leaf"].as_str().unwrap().to_string(), m["subleaf"].as_str().unwrap().to_string()))
+    .collect()
+}
+
+// ROOT CAUSE:
+//
+// If a recipe hid a feature in a CPUID entry the host's KVM does not
+// support, such as `avx_vnni` (leaf 7, subleaf 1) on Cascade Lake, the actor
+// never booted, because the template still modified that entry and
+// Firecracker refuses a template that changes an entry KVM did not report.
+//
+// Before the fix, `examples/opencode/gce.recipe.yaml` failed on a Cascade
+// Lake host with "Template changes a CPUID entry not supported by KVM: Leaf: 7,
+// Subleaf: 1".
+// The fix keeps hiding a feature the host does not provide a no-op: the
+// template modifies only entries the host's KVM supports, and the recipe
+// says which hides it left out.
+#[test]
+fn hiding_a_feature_in_a_cpuid_entry_the_hosts_kvm_lacks_emits_no_modifier() {
+  let recipe = load(GCE);
+  let host = HostInfo {
+    kvm_cpuid: Some(kvm_cpuid("kvm-cpuid-cascade-lake.txt")),
+    ..HostInfo::default()
+  };
+
+  let c = compile(&recipe, &host, 7);
+
+  let entries = modified_entries(&c.cpu_template);
+  assert!(!entries.contains(&("0x7".into(), "0x1".into())), "{entries:?}");
+  assert!(entries.contains(&("0x7".into(), "0x0".into())), "serialize is still hidden: {entries:?}");
+  assert!(entries.contains(&("0x40000000".into(), "0x0".into())), "{entries:?}");
+  let messages: Vec<_> = c.findings.iter().map(|f| f.to_string()).collect();
+  assert_eq!(
+    messages,
+    ["warning: cpu.features.hide: avx_vnni has no effect: this host's KVM has no CPUID leaf 0x7, subleaf 0x1, so the guest cannot see it"]
+  );
+}
+
+#[test]
+fn hiding_a_feature_in_a_cpuid_entry_the_hosts_kvm_supports_modifies_it() {
+  let recipe = load(GCE);
+  let host = HostInfo {
+    kvm_cpuid: Some(kvm_cpuid("kvm-cpuid-raptor-lake.txt")),
+    ..HostInfo::default()
+  };
+
+  let c = compile(&recipe, &host, 7);
+
+  assert!(modified_entries(&c.cpu_template).contains(&("0x7".into(), "0x1".into())));
+  assert!(c.findings.is_empty(), "{:?}", c.findings);
+}

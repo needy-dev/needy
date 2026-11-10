@@ -26,8 +26,10 @@ tracing.workspace = true
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal"] }
 
-# The guest runs only inside a Linux actor.
+# The guest runs only inside a Linux actor, and KVM is Linux's.
 [target.'cfg(target_os = "linux")'.dependencies]
+kvm-bindings.workspace = true
+kvm-ioctls.workspace = true
 anyhow.workspace = true
 backon.workspace = true
 libc.workspace = true

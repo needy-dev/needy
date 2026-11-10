@@ -104,7 +104,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
     }
   }
 
-  let cpu_template = cpu::cpu_template(&recipe.cpu, hidden, &mut findings);
+  let cpu_template = cpu::cpu_template(&recipe.cpu, hidden, host, &mut findings);
 
   let mut kernel_build_env = BTreeMap::new();
   let kernel = &recipe.os.kernel;
