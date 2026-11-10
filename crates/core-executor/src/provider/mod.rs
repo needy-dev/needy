@@ -60,7 +60,7 @@ pub struct InstanceSpec {
   pub name: String,
   /// The pool key the instance serves; names its container and directories.
   pub key: String,
-  pub session: String,
+  pub run: String,
   pub config: Executor,
   /// The profile's directory; relative paths in `config` resolve against it.
   pub base: PathBuf,

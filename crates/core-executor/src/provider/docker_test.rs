@@ -8,7 +8,7 @@ fn spec(args: &[&str]) -> InstanceSpec {
   InstanceSpec {
     name: "build".into(),
     key: "build@s1".into(),
-    session: "s1".into(),
+    run: "s1".into(),
     config: Executor {
       docker: Some(DockerConfig {
         args: args.iter().map(|a| a.to_string()).collect(),
@@ -55,7 +55,7 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
   assert_eq!(body.user.as_deref(), Some("1000:1000"));
   // The recipe's hostname, so the actor and its executors agree on it.
   assert_eq!(body.hostname.as_deref(), Some("instance-1"));
-  assert_eq!(body.labels.as_ref().unwrap()["needy.session"], "s1");
+  assert_eq!(body.labels.as_ref().unwrap()["needy.run"], "s1");
   assert_eq!(
     body.cmd.as_deref().unwrap(),
     [
@@ -367,7 +367,7 @@ fn a_directory_for_a_container_of_the_daemons_own_user_is_private() {
 
 // The 2026-11-10 run on additional cloud hosts: a daemon running as root made
 // the socket directory `root 0755` and started the container as 1000:1000,
-// whose executor could not create its socket; `session create` waited 10 s
+// whose executor could not create its socket; `run create` waited 10 s
 // and failed with a transport error that did not mention permissions.
 #[cfg(unix)]
 #[test]

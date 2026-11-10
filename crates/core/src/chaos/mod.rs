@@ -1,5 +1,5 @@
 //! Fault injection. A fault fires from the profile's seed, its index and how
-//! many times it has matched, so a replayed session injects the same faults.
+//! many times it has matched, so a replayed run injects the same faults.
 //!
 //! [`Injector`] is the second `exec.decide` interceptor and the second
 //! `net.request` and `net.connect` interceptor; the SFTP tap ([`sftp`]) asks

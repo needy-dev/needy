@@ -44,9 +44,9 @@ work takes effect.
 | **executor** | Where routed operations take effect: a container, microVM, pod or device. Several actors may share one executor. |
 | **daemon** | The control plane: lifecycle, routing rules, network gateways and the trace. |
 | **recipe** | One machine: image, kernel, CPU, memory, firmware, devices and network identity. |
-| **profile** | One session: which recipes to use, routing rules, network policies, chaos and file mappings. |
-| **session** | One actor and the executors bound to it. |
-| **trace** | Every event recorded during a session. |
+| **profile** | One run: which recipes to use, routing rules, network policies, chaos and file mappings. |
+| **run** | One actor and the executors bound to it. |
+| **trace** | Every event recorded during a run. |
 
 ## How it works
 
@@ -90,12 +90,12 @@ needy build --executor        # writes $XDG_DATA_HOME/needy/images/default
 needy daemon --mode control &
 
 # Run opencode in an actor; its shells run in a Docker executor.
-needy session create --profile examples/opencode/profile.yaml
-needy session logs SESSION    # the actor's console
+needy run create --profile examples/opencode/profile.yaml
+needy run logs RUN    # the actor's console
 needy report latest
 ```
 
-Needy keeps the trace and sessions in `$XDG_STATE_HOME/needy`, images in
+Needy keeps the trace and run directories in `$XDG_STATE_HOME/needy`, images in
 `$XDG_DATA_HOME/needy` and the daemon's socket in `$XDG_RUNTIME_DIR/needy`
 (the state directory on macOS). `NEEDY_STATE_DIR`, `NEEDY_DATA_DIR` and
 `NEEDY_RUNTIME_DIR` override them; `-v` turns on logs.
@@ -104,12 +104,12 @@ Needy keeps the trace and sessions in `$XDG_STATE_HOME/needy`, images in
 stdin and stdout are terminals:
 
 ```sh
-needy session create --no-actor --profile examples/cli/profile.yaml
-needy exec --session SESSION -- uname -a
-needy exec -t --session SESSION -- ssh user@host     # interactive
-needy exec -d --session SESSION -- pnpm dev          # prints a process ID
+needy run create --no-actor --profile examples/cli/profile.yaml
+needy exec --run RUN -- uname -a
+needy exec -t --run RUN -- ssh user@host     # interactive
+needy exec -d --run RUN -- pnpm dev          # prints a process ID
 needy attach PROCESS                                 # replays recent output
-needy exec --output ndjson --session SESSION -- make test
+needy exec --output ndjson --run RUN -- make test
 needy fs cp ./src build:/home/agent/workspace
 ```
 

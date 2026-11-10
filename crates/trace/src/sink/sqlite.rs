@@ -1,5 +1,5 @@
 //! The SQLite sink and its reader, through SeaORM. `needy report` reads a
-//! session's events back with [`load`].
+//! run's events back with [`load`].
 //!
 //! Schema changes go through [`migration`]; do not issue DDL anywhere else.
 
@@ -39,7 +39,7 @@ impl Store {
     Ok(Self { db })
   }
 
-  /// A sink that writes one session's events.
+  /// A sink that writes one run's events.
   pub fn sink(&self) -> Sqlite {
     Sqlite {
       db: self.db.clone(),
@@ -60,10 +60,10 @@ async fn has_other_schema(db: &DatabaseConnection) -> Result<bool, Error> {
   Ok(applied.iter().any(|m| !known.contains(&m.version)))
 }
 
-/// Writes the events of one session.
+/// Writes the events of one run.
 pub struct Sqlite {
   db: DatabaseConnection,
-  /// Whether this sink has added its session to `sessions`.
+  /// Whether this sink has added its run to `runs`.
   registered: bool,
 }
 
@@ -71,15 +71,15 @@ pub struct Sqlite {
 impl Sink for Sqlite {
   async fn write(&mut self, event: &Event) -> Result<(), Error> {
     if !self.registered {
-      let row = entity::session::ActiveModel {
-        id: Set(event.session.clone()),
+      let row = entity::run::ActiveModel {
+        id: Set(event.run.clone()),
         first_ms: Set(event.time_ms),
       };
-      entity::session::Entity::insert(row).on_conflict_do_nothing_on([entity::session::Column::Id]).exec(&self.db).await?;
+      entity::run::Entity::insert(row).on_conflict_do_nothing_on([entity::run::Column::Id]).exec(&self.db).await?;
       self.registered = true;
     }
     entity::event::Entity::insert(entity::event::ActiveModel {
-      session: Set(event.session.clone()),
+      run: Set(event.run.clone()),
       seq: Set(i64::try_from(event.seq).unwrap_or(i64::MAX)),
       time_ms: Set(event.time_ms),
       kind: Set(event.kind.clone()),
@@ -93,32 +93,32 @@ impl Sink for Sqlite {
   }
 }
 
-/// One session's events, read back.
+/// One run's events, read back.
 pub struct Loaded {
-  /// The full session ID.
-  pub session: String,
+  /// The full run ID.
+  pub run: String,
   /// In the order of their `seq`.
   pub events: Vec<Event>,
 }
 
-/// Reads the events of `session`, an ID prefix or `latest`. A prefix that
-/// matches several sessions picks the one that started last.
-pub async fn load(path: &Path, session: &str) -> Result<Loaded, Error> {
+/// Reads the events of `run`, an ID prefix or `latest`. A prefix that
+/// matches several runs picks the one that started last.
+pub async fn load(path: &Path, run: &str) -> Result<Loaded, Error> {
   if !path.exists() {
     return Err(Error::NoDatabase(PathBuf::from(path)));
   }
   let store = Store::open(path).await?;
-  let mut query = entity::session::Entity::find()
-    .order_by_desc(entity::session::Column::FirstMs)
-    // NOTICE: sessions that started in the same millisecond keep the order
+  let mut query = entity::run::Entity::find()
+    .order_by_desc(entity::run::Column::FirstMs)
+    // NOTICE: runs that started in the same millisecond keep the order
     // they were added in through SQLite's implicit `rowid`.
     .order_by(Expr::cust("rowid"), Order::Desc);
-  if session != "latest" {
-    query = query.filter(entity::session::Column::Id.starts_with(session));
+  if run != "latest" {
+    query = query.filter(entity::run::Column::Id.starts_with(run));
   }
-  let found = query.one(&store.db).await?.ok_or_else(|| Error::NoSession(session.to_string()))?;
+  let found = query.one(&store.db).await?.ok_or_else(|| Error::NoRun(run.to_string()))?;
   let rows = entity::event::Entity::find()
-    .filter(entity::event::Column::Session.eq(&found.id))
+    .filter(entity::event::Column::Run.eq(&found.id))
     .order_by_asc(entity::event::Column::Seq)
     .order_by_asc(entity::event::Column::Id)
     .all(&store.db)
@@ -127,7 +127,7 @@ pub async fn load(path: &Path, session: &str) -> Result<Loaded, Error> {
     .into_iter()
     .map(|row| {
       Ok(Event {
-        session: row.session,
+        run: row.run,
         seq: u64::try_from(row.seq).unwrap_or(0),
         time_ms: row.time_ms,
         kind: row.kind,
@@ -137,7 +137,7 @@ pub async fn load(path: &Path, session: &str) -> Result<Loaded, Error> {
     })
     .collect::<Result<_, Error>>()?;
   Ok(Loaded {
-    session: found.id,
+    run: found.id,
     events,
   })
 }
@@ -153,7 +153,7 @@ mod entity {
     pub struct Model {
       #[sea_orm(primary_key)]
       pub id: i64,
-      pub session: String,
+      pub run: String,
       pub seq: i64,
       pub time_ms: i64,
       pub kind: String,
@@ -168,14 +168,14 @@ mod entity {
     impl ActiveModelBehavior for ActiveModel {}
   }
 
-  pub mod session {
-    //! A session with events, and the time of its first one; readers use it
+  pub mod run {
+    //! A run with events, and the time of its first one; readers use it
     //! to resolve ID prefixes and `latest`.
 
     use sea_orm::entity::prelude::*;
 
     #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
-    #[sea_orm(table_name = "sessions")]
+    #[sea_orm(table_name = "runs")]
     pub struct Model {
       #[sea_orm(primary_key, auto_increment = false)]
       pub id: String,
@@ -203,16 +203,18 @@ pub mod migration {
     }
   }
 
-  /// The `events` and `sessions` tables of the event envelope.
+  /// The `events` and `runs` tables of the event envelope.
   struct CreateTrace;
 
   // NOTICE: `DeriveMigrationName` names a migration after its module, which
   // would give every migration in this module the same name. The name differs
-  // from the migrations `needy-core` applied before the trace crate, so their
-  // databases are recognized and refused (principle 7: no migration path).
+  // from the migrations `needy-core` applied before the trace crate and from
+  // `m20261109_000010_trace_envelope`, the same tables with `session` for
+  // `run`, so their databases are recognized and refused (principle 7: no
+  // migration path).
   impl MigrationName for CreateTrace {
     fn name(&self) -> &str {
-      "m20261109_000010_trace_envelope"
+      "m20261110_000020_trace_runs"
     }
   }
 
@@ -220,7 +222,7 @@ pub mod migration {
   enum Events {
     Table,
     Id,
-    Session,
+    Run,
     Seq,
     TimeMs,
     Kind,
@@ -229,7 +231,7 @@ pub mod migration {
   }
 
   #[derive(DeriveIden)]
-  enum Sessions {
+  enum Runs {
     Table,
     Id,
     FirstMs,
@@ -243,7 +245,7 @@ pub mod migration {
           Table::create()
             .table(Events::Table)
             .col(ColumnDef::new(Events::Id).integer().not_null().auto_increment().primary_key())
-            .col(ColumnDef::new(Events::Session).text().not_null())
+            .col(ColumnDef::new(Events::Run).text().not_null())
             .col(ColumnDef::new(Events::Seq).big_integer().not_null())
             .col(ColumnDef::new(Events::TimeMs).big_integer().not_null())
             .col(ColumnDef::new(Events::Kind).text().not_null())
@@ -252,22 +254,20 @@ pub mod migration {
             .to_owned(),
         )
         .await?;
-      manager
-        .create_index(Index::create().name("events_session_seq").table(Events::Table).col(Events::Session).col(Events::Seq).to_owned())
-        .await?;
+      manager.create_index(Index::create().name("events_run_seq").table(Events::Table).col(Events::Run).col(Events::Seq).to_owned()).await?;
       manager
         .create_table(
           Table::create()
-            .table(Sessions::Table)
-            .col(ColumnDef::new(Sessions::Id).text().not_null().primary_key())
-            .col(ColumnDef::new(Sessions::FirstMs).big_integer().not_null())
+            .table(Runs::Table)
+            .col(ColumnDef::new(Runs::Id).text().not_null().primary_key())
+            .col(ColumnDef::new(Runs::FirstMs).big_integer().not_null())
             .to_owned(),
         )
         .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-      manager.drop_table(Table::drop().table(Sessions::Table).to_owned()).await?;
+      manager.drop_table(Table::drop().table(Runs::Table).to_owned()).await?;
       manager.drop_table(Table::drop().table(Events::Table).to_owned()).await
     }
   }

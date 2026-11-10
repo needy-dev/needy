@@ -41,6 +41,6 @@ fn globs() {
 
 #[test]
 fn templates() {
-  let key = Template::new("{session}:{cwd}");
-  assert_eq!(key.render(&[("session", "abc")]), "abc:{cwd}");
+  let key = Template::new("{run}:{cwd}");
+  assert_eq!(key.render(&[("run", "abc")]), "abc:{cwd}");
 }

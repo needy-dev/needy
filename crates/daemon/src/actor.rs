@@ -1,9 +1,9 @@
-//! Wires a session to its actor: the guest listener the actor's init and
+//! Wires a run to its actor: the guest listener the actor's init and
 //! proxy call, the gateway its network goes through, and the Firecracker VM.
 //!
-//! The actor's tasks belong to its session and run under a child of the
-//! session's token, which the VM's exit also cancels: the guest listener and
-//! the gateway stop when the actor exits or its session stops.
+//! The actor's tasks belong to its run and run under a child of the
+//! run's token, which the VM's exit also cancels: the guest listener and
+//! the gateway stop when the actor exits or its run stops.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -14,19 +14,19 @@ use anyhow::{Context, Result};
 use needy_api_server::control::Caller;
 use needy_api_server::{Health, Listen, Server};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
-use needy_core::types::{Network, SessionState};
+use needy_core::types::{Network, RunState};
 use needy_core_actor::host::{gateway, vm};
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
-use crate::session::Session;
+use crate::run::Run;
 
 /// Ports the actor reaches on the host over vsock.
 pub const GUEST_PORT: u32 = 7000;
 pub const GATEWAY_PORT: u32 = 7001;
 
 // NOTICE: the guest's state is not kept, so Firecracker gets a short time to
-// exit on `SIGTERM` before it is killed; a session's stop waits this long at
+// exit on `SIGTERM` before it is killed; a run's stop waits this long at
 // most for its VM.
 const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
@@ -37,18 +37,18 @@ pub fn check_host(daemon: &Daemon) -> Result<()> {
   Ok(())
 }
 
-/// Starts the actor of `session`: its guest listener, its gateway, then its
+/// Starts the actor of `run`: its guest listener, its gateway, then its
 /// VM.
-pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
+pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   let image = vm::Image::new(&daemon.config.actor_image);
   image.check()?;
-  let launch = vm::Launch::new(&image, &session.dir, session.recipe.as_ref());
-  let actor = session.cancel.child_token();
-  if let Err(e) = serve_guest(daemon, session, &actor).await {
+  let launch = vm::Launch::new(&image, &run.dir, run.recipe.as_ref());
+  let actor = run.cancel.child_token();
+  if let Err(e) = serve_guest(daemon, run, &actor).await {
     actor.cancel();
     return Err(e);
   }
-  if let Err(e) = serve_gateway(session, &actor) {
+  if let Err(e) = serve_gateway(run, &actor) {
     actor.cancel();
     return Err(e);
   }
@@ -59,46 +59,46 @@ pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
       return Err(e.into());
     }
   };
-  session.emit(&Event::ActorStart(ActorStart {
+  run.emit(&Event::ActorStart(ActorStart {
     pid: vm.pid(),
     vcpus: launch.vcpus,
     mem_mib: launch.mem_mib,
   }));
-  session.tasks.spawn(watch(daemon.clone(), session.clone(), vm, actor));
+  run.tasks.spawn(watch(daemon.clone(), run.clone(), vm, actor));
   Ok(())
 }
 
-/// Serves the session's API to the actor on its vsock port, as
-/// `Caller::Actor` bound to the session, until `actor` is cancelled.
-async fn serve_guest(daemon: &Daemon, session: &Session, actor: &CancellationToken) -> Result<()> {
+/// Serves the run's API to the actor on its vsock port, as
+/// `Caller::Actor` bound to the run, until `actor` is cancelled.
+async fn serve_guest(daemon: &Daemon, run: &Run, actor: &CancellationToken) -> Result<()> {
   let api = Arc::new(daemon.clone());
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
     role: "control",
   };
   let caller = Caller::Actor {
-    session: session.id.clone(),
+    run: run.id.clone(),
   };
   let listener = Server::new(health, caller)
-    .sessions(api.clone())
+    .runs(api.clone())
     .processes(api.clone())
     .guest(api)
-    .bind(&[Listen::Unix(vm::host_port(&session.dir, GUEST_PORT))])
+    .bind(&[Listen::Unix(vm::host_port(&run.dir, GUEST_PORT))])
     .await?;
-  let id = session.id.clone();
+  let id = run.id.clone();
   let stop = actor.clone();
-  session.tasks.spawn(async move {
+  run.tasks.spawn(async move {
     if let Err(e) = listener.serve(stop).await {
-      tracing::error!("session {id}: guest listener: {e:#}");
+      tracing::error!("run {id}: guest listener: {e:#}");
     }
   });
   Ok(())
 }
 
 /// Serves the actor's gateway on its vsock port until `actor` is cancelled.
-fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
-  let path = vm::host_port(&session.dir, GATEWAY_PORT);
-  let network = &session.profile.actor.network;
+fn serve_gateway(run: &Run, actor: &CancellationToken) -> Result<()> {
+  let path = vm::host_port(&run.dir, GATEWAY_PORT);
+  let network = &run.profile.actor.network;
   let mut inject = BTreeMap::new();
   for (host, injection) in &network.inject {
     // The daemon holds the credential; the actor never sees it.
@@ -106,7 +106,7 @@ fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
       Ok(value) => {
         inject.insert(host.clone(), (injection.header.clone(), value));
       }
-      Err(e) => tracing::warn!("session {}: no {} header for {host}: {}: {e}", session.id, injection.header, injection.secret),
+      Err(e) => tracing::warn!("run {}: no {} header for {host}: {}: {e}", run.id, injection.header, injection.secret),
     }
   }
   let policy = gateway::Policy {
@@ -114,8 +114,7 @@ fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
     upstream: network.upstream.clone(),
     inject,
   };
-  let gateway =
-    Arc::new(gateway::Gateway::new(policy, session.trace.clone(), Network::Actor, Some(session.injector.clone()), actor.clone()));
+  let gateway = Arc::new(gateway::Gateway::new(policy, run.trace.clone(), Network::Actor, Some(run.injector.clone()), actor.clone()));
   // A socket left by an earlier daemon would make bind fail.
   if let Err(e) = std::fs::remove_file(&path)
     && e.kind() != std::io::ErrorKind::NotFound
@@ -128,11 +127,11 @@ fn serve_gateway(session: &Session, actor: &CancellationToken) -> Result<()> {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
       .with_context(|| format!("cannot restrict {}", path.display()))?;
   }
-  session.tasks.spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
+  run.tasks.spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
   Ok(())
 }
 
-/// Removes the actor's sockets from the session's directory `dir`: the vsock
+/// Removes the actor's sockets from the run's directory `dir`: the vsock
 /// device's and the host ports' the guest connects to.
 pub fn remove_sockets(dir: &Path) {
   for path in [
@@ -149,16 +148,16 @@ pub fn remove_sockets(dir: &Path) {
 }
 
 /// Waits for the VM to exit, which it does when the guest reboots after the
-/// driving program, then stops the actor's tasks and finishes the session.
+/// driving program, then stops the actor's tasks and finishes the run.
 /// A VM that exits before the driving program reported its exit fails the
-/// session instead, with the VM's exit and the end of its log as the reason.
-async fn watch(daemon: Daemon, session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) {
+/// run instead, with the VM's exit and the end of its log as the reason.
+async fn watch(daemon: Daemon, run: Arc<Run>, mut vm: vm::Vm, actor: CancellationToken) {
   let waited = tokio::select! {
     waited = vm.wait() => waited,
     () = actor.cancelled() => {
-      // The session stopped: its VM stops with it.
+      // The run stopped: its VM stops with it.
       if let Err(e) = vm.stop(VM_STOP_GRACE).await {
-        tracing::warn!("session {}: cannot stop firecracker {}: {e}", session.id, vm.pid());
+        tracing::warn!("run {}: cannot stop firecracker {}: {e}", run.id, vm.pid());
       }
       return;
     }
@@ -179,25 +178,25 @@ async fn watch(daemon: Daemon, session: Arc<Session>, mut vm: vm::Vm, actor: Can
     },
   };
   actor.cancel();
-  session.emit(&Event::ActorVmExit(exit.clone()));
-  if session.actor_exit().is_some() {
-    if let Err(refused) = session.state.advance(SessionState::Finished) {
-      tracing::debug!("session {}: {refused}", session.id);
+  run.emit(&Event::ActorVmExit(exit.clone()));
+  if run.actor_exit().is_some() {
+    if let Err(refused) = run.state.advance(RunState::Finished) {
+      tracing::debug!("run {}: {refused}", run.id);
     }
   } else {
-    let reason = vm_failure(&exit, &vm::console(&session.dir));
-    tracing::warn!("session {} failed: {reason}", session.id);
-    session.fail(reason);
+    let reason = vm_failure(&exit, &vm::console(&run.dir));
+    tracing::warn!("run {} failed: {reason}", run.id);
+    run.fail(reason);
   }
-  daemon.finish_session(&session).await;
+  daemon.finish_run(&run).await;
   // `needy report` right after the end must see it.
-  session.trace.flush().await;
+  run.trace.flush().await;
 }
 
 /// How many of the last lines of the VM's log a failure quotes.
 const FAILURE_LOG_LINES: usize = 5;
 
-/// Why a session whose VM exited before its driving program did failed: the
+/// Why a run whose VM exited before its driving program did failed: the
 /// VM's exit and the last lines of the log Firecracker and the guest's
 /// console share, on one line.
 fn vm_failure(exit: &ActorVmExit, log: &Path) -> String {

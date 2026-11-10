@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use needy_api_proto::v1::{CheckRequest, ListSessionsRequest};
+use needy_api_proto::v1::{CheckRequest, ListRunsRequest};
 use tonic::Code;
 
 use super::*;
@@ -41,9 +41,9 @@ async fn health_needs_no_token_and_everything_else_does() {
   let served = serve_with(Caller::Cli, Some("secret")).await;
 
   let health = served.client.health().check(CheckRequest {}).await.unwrap().into_inner();
-  let refused = served.client.sessions().list_sessions(ListSessionsRequest {}).await.unwrap_err();
+  let refused = served.client.runs().list_runs(ListRunsRequest {}).await.unwrap_err();
   let with_token = served.client.clone().with_token("secret").unwrap();
-  let listed = with_token.sessions().list_sessions(ListSessionsRequest {}).await;
+  let listed = with_token.runs().list_runs(ListRunsRequest {}).await;
 
   assert_eq!(health.role, "control");
   assert_eq!(refused.code(), Code::Unauthenticated);

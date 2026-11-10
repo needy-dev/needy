@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, build, daemon, exec, fs, kill, profile, ps, report, session};
+use crate::commands::{attach, build, daemon, exec, fs, kill, profile, ps, report, run};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -43,13 +43,13 @@ enum Command {
   Kill(kill::Args),
   /// Copy files between this machine and executors.
   Fs(fs::Args),
-  /// Manage sessions: one actor and its executors.
-  Session(session::Args),
+  /// Manage runs: one actor and its executors.
+  Run(run::Args),
   /// Build an actor image from a recipe, and the executor image.
   Build(build::Args),
   /// Check a profile: show routing decisions, matching faults and the recipe's findings.
   Profile(profile::Args),
-  /// Write a markdown report of a session.
+  /// Write a markdown report of a run.
   Report(report::Args),
 }
 
@@ -122,7 +122,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Attach(args) => attach::run(args, &ctx).await,
       Command::Kill(args) => kill::run(args, &ctx).await,
       Command::Fs(args) => fs::run(args, &ctx).await,
-      Command::Session(args) => session::run(args, &ctx).await,
+      Command::Run(args) => run::run(args, &ctx).await,
       Command::Build(args) => build::run(args, &ctx).await,
       Command::Profile(args) => profile::run(args, &ctx).await,
       Command::Report(args) => report::run(args, &ctx).await,

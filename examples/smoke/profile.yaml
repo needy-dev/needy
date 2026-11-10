@@ -18,9 +18,9 @@ actor:
       cat ~/workspace/from-executor.txt; echo; ls -la ~/workspace
       python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
 executors:
-  build: { runtime: docker, key: "{session}", max_procs: 4 }
+  build: { runtime: docker, key: "{run}", max_procs: 4 }
 commands:
   - { match: "python3 **", to: build }
 files:
   workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
-session_files: [workspace]
+run_files: [workspace]

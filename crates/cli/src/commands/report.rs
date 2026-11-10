@@ -1,4 +1,4 @@
-//! `needy report`: a report of a session from the trace, as plain text for
+//! `needy report`: a report of a run from the trace, as plain text for
 //! people, markdown or JSON. Events are read with the SQLite sink's reader,
 //! decoded into `needy_core::event` values and rendered by
 //! `needy_core::report`; this command picks the format and the colors.
@@ -30,9 +30,9 @@ enum Format {
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Session ID prefix, or `latest`.
+  /// Run ID prefix, or `latest`.
   #[arg(default_value = "latest")]
-  session: String,
+  run: String,
   #[arg(long, value_enum, default_value = "summary")]
   level: Level,
   #[arg(short = 'o', long, value_enum, default_value = "human")]
@@ -55,13 +55,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   if !db.exists() {
     anyhow::bail!("no trace database at {}; is NEEDY_STATE_DIR the daemon's?", db.display());
   }
-  let loaded = needy_trace::sink::sqlite::load(&db, &args.session).await?;
+  let loaded = needy_trace::sink::sqlite::load(&db, &args.run).await?;
   let events = loaded
     .events
     .iter()
     .map(|stored| {
       let event = Event::decode(&stored.kind, stored.version, stored.payload.get())
-        .with_context(|| format!("session {}: event {} ({}) cannot be read", loaded.session, stored.seq, stored.kind))?;
+        .with_context(|| format!("run {}: event {} ({}) cannot be read", loaded.run, stored.seq, stored.kind))?;
       Ok(Recorded {
         time_ms: stored.time_ms,
         event,
@@ -79,7 +79,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Format::Markdown => report::Format::Markdown,
     Format::Json => report::Format::Json,
   };
-  let text = report::render(&loaded.session, &events, level, format);
+  let text = report::render(&loaded.run, &events, level, format);
   match args.file {
     Some(path) => std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?,
     None => print!("{text}"),

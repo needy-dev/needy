@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use needy_api_server::control::{Caller, NewSession};
+use needy_api_server::control::{Caller, NewRun};
 use needy_api_server::{Health, Listen, Server};
 use needy_core_executor::process::Host;
 use needy_core_executor::provider::{self, Native};
@@ -83,7 +83,7 @@ pub async fn daemon() -> Started {
 
 /// Writes a stand-in actor image into `dir`: empty kernel and root file
 /// system, and a `firecracker` that runs `script` with `sh`. `$3` is the
-/// VM's `vm.json`, so `$(dirname "$3")` is the session's directory.
+/// VM's `vm.json`, so `$(dirname "$3")` is the run's directory.
 pub fn fake_image(dir: &Path, script: &str) {
   use std::os::unix::fs::PermissionsExt;
   std::fs::create_dir_all(dir).unwrap();
@@ -94,12 +94,12 @@ pub fn fake_image(dir: &Path, script: &str) {
   std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A stand-in Firecracker that runs until its session's actor exits through
+/// A stand-in Firecracker that runs until its run's actor exits through
 /// [`exit_actor`], as a guest reboots after its init reported the driving
 /// program's exit.
 pub const REBOOTS_AFTER_EXIT: &str = r#"dir=$(dirname "$3"); touch "$dir/v.sock"; while [ ! -e "$dir/rebooted" ]; do sleep 0.02; done"#;
 
-/// Reports that the driving program of session `id` exited with 0, as the
+/// Reports that the driving program of run `id` exited with 0, as the
 /// guest's init does, then lets its [`REBOOTS_AFTER_EXIT`] VM exit.
 pub async fn exit_actor(started: &Started, id: &str) {
   use needy_api_server::control::Guest;
@@ -108,7 +108,7 @@ pub async fn exit_actor(started: &Started, id: &str) {
     signal: String::new(),
   };
   Guest::exit(&started.daemon, id, exit).await.unwrap();
-  std::fs::write(started.dir.path().join("state/sessions").join(id).join("rebooted"), "").unwrap();
+  std::fs::write(started.dir.path().join("state/runs").join(id).join("rebooted"), "").unwrap();
 }
 
 /// Whether process `pid` exists.
@@ -117,24 +117,24 @@ pub fn running(pid: i64) -> bool {
   unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-/// A session request for `profile_yaml` with an actor, which starts from
+/// A run request for `profile_yaml` with an actor, which starts from
 /// the image `fake_image` wrote into the daemon's `image` directory.
-pub fn new_actor_session(profile_yaml: &str, dir: &Path) -> NewSession {
-  NewSession {
+pub fn new_actor_run(profile_yaml: &str, dir: &Path) -> NewRun {
+  NewRun {
     start_actor: true,
-    ..new_session(profile_yaml, dir)
+    ..new_run(profile_yaml, dir)
   }
 }
 
-/// A session request for `profile_yaml` without an actor, resolved as the
+/// A run request for `profile_yaml` without an actor, resolved as the
 /// CLI does: relative paths against `dir`.
-pub fn new_session(profile_yaml: &str, dir: &Path) -> NewSession {
+pub fn new_run(profile_yaml: &str, dir: &Path) -> NewRun {
   let resolved = needy_config::profile::resolve(&needy_config::Source::text(profile_yaml, dir)).unwrap();
-  NewSession {
+  NewRun {
     profile_yaml: resolved.yaml,
     recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
     profile_name: "test".into(),
     start_actor: false,
-    ..NewSession::default()
+    ..NewRun::default()
   }
 }

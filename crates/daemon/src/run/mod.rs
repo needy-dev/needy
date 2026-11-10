@@ -1,10 +1,10 @@
-//! Sessions: create, get, list and stop, through `api-server`'s `Sessions`
-//! trait, and the registry of live and ended sessions.
+//! Runs: create, get, list and stop, through `api-server`'s `Runs`
+//! trait, and the registry of live and ended runs.
 //!
-//! A session is registered while it is created, so it is listed as
+//! A run is registered while it is created, so it is listed as
 //! `creating`. A create that fails unwinds what it did and is kept as a
-//! failed session; a stopped session is kept as stopped, so `session ls`,
-//! `session logs` and `report` still find it.
+//! failed run; a stopped run is kept as stopped, so `run ls`,
+//! `run logs` and `report` still find it.
 
 pub mod state;
 
@@ -14,17 +14,17 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
-use needy_api_server::control::{ControlError, NewSession, Route, SessionInfo, Sessions};
+use needy_api_server::control::{ControlError, NewRun, Route, RunInfo, Runs};
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::Source;
 use needy_config::profile::{Profile, TraceSink};
 use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
-use needy_core::event::{self, Event, ExecutorRef, SessionCreate, SessionFail, SessionStop};
+use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::CompiledRecipe;
-use needy_core::types::SessionState;
+use needy_core::types::RunState;
 use needy_core_actor::host::vm;
 use needy_core_executor::provider::InstanceSpec;
 use needy_trace::Dispatch;
@@ -37,13 +37,13 @@ use crate::pool::Instance;
 use crate::{Daemon, actor, failed, files, routing};
 use state::{Refused, State};
 
-/// Events a session's trace queue holds before it drops them.
+/// Events a run's trace queue holds before it drops them.
 // NOTICE: a burst larger than this while the sinks are slow is recorded as a
 // `trace.gap`; 4096 envelopes are a few MiB at most.
 const TRACE_QUEUE: usize = 4096;
 
-/// A live session: being created, running, finished or stopping.
-pub struct Session {
+/// A live run: being created, running, finished or stopping.
+pub struct Run {
   pub id: String,
   pub name: String,
   pub group: String,
@@ -57,23 +57,23 @@ pub struct Session {
   pub recipe: Option<CompiledRecipe>,
   pub injector: Arc<Injector>,
   pub trace: Dispatch,
-  /// The session's executors by name, added as they are acquired.
+  /// The run's executors by name, added as they are acquired.
   executors: Mutex<BTreeMap<String, Arc<Instance>>>,
-  /// The executors it gave back, for `session ls`.
+  /// The executors it gave back, for `run ls`.
   released: Mutex<Vec<ExecutorRef>>,
   /// How the actor's driving program ended, as its init reported it.
   actor_exit: Mutex<Option<Exit>>,
-  /// Why the session failed after it was created, such as an actor whose VM
+  /// Why the run failed after it was created, such as an actor whose VM
   /// exited before its driving program did.
   failure: Mutex<Option<String>>,
-  /// The session's tasks: the relays of its commands, and its actor's
+  /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
   pub cancel: CancellationToken,
 }
 
-impl Session {
-  /// Records `event` in the session's trace.
+impl Run {
+  /// Records `event` in the run's trace.
   pub fn emit(&self, event: &Event) {
     emit(&self.trace, event);
   }
@@ -86,7 +86,7 @@ impl Session {
     self.lock_executors().clone()
   }
 
-  /// Takes the session's executors out of it, to release them, and keeps
+  /// Takes the run's executors out of it, to release them, and keeps
   /// them listed as released.
   fn take_executors(&self) -> BTreeMap<String, Arc<Instance>> {
     let taken = std::mem::take(&mut *self.lock_executors());
@@ -104,22 +104,22 @@ impl Session {
     lock(&self.actor_exit).clone()
   }
 
-  /// Fails the session for `reason`, unless it already ended, and records
-  /// the reason as `session.fail`.
+  /// Fails the run for `reason`, unless it already ended, and records
+  /// the reason as `run.fail`.
   pub fn fail(&self, reason: String) {
     // The reason is in place before the state says `failed`.
     *lock(&self.failure) = Some(reason.clone());
-    match self.state.advance(SessionState::Failed) {
-      Ok(_) => self.emit(&Event::SessionFail(SessionFail { reason })),
+    match self.state.advance(RunState::Failed) {
+      Ok(_) => self.emit(&Event::RunFail(RunFail { reason })),
       Err(refused) => {
-        tracing::debug!("session {}: {refused}", self.id);
+        tracing::debug!("run {}: {refused}", self.id);
         *lock(&self.failure) = None;
       }
     }
   }
 
-  pub fn info(&self) -> SessionInfo {
-    SessionInfo {
+  pub fn info(&self) -> RunInfo {
+    RunInfo {
       id: self.id.clone(),
       name: self.name.clone(),
       group: self.group.clone(),
@@ -159,64 +159,64 @@ fn executor_refs(executors: &BTreeMap<String, Arc<Instance>>) -> Vec<ExecutorRef
 
 // ------------------------------------------------------------- registry
 
-/// Live sessions in the order they were created, and ended ones.
+/// Live runs in the order they were created, and ended ones.
 #[derive(Default)]
 pub struct Registry {
-  live: Mutex<Vec<Arc<Session>>>,
-  /// Sessions that were stopped or failed to create, kept so `session ls`
-  /// and `session logs` still find them.
+  live: Mutex<Vec<Arc<Run>>>,
+  /// Runs that were stopped or failed to create, kept so `run ls`
+  /// and `run logs` still find them.
   // TODO(persistence): this list lives in memory and grows until the daemon
-  // exits; slice 9 keeps sessions in `state.db`.
-  ended: Mutex<Vec<SessionInfo>>,
+  // exits; slice 9 keeps runs in `state.db`.
+  ended: Mutex<Vec<RunInfo>>,
 }
 
 impl Registry {
-  pub fn live(&self) -> Vec<Arc<Session>> {
+  pub fn live(&self) -> Vec<Arc<Run>> {
     lock(&self.live).clone()
   }
 
-  /// The live session `id` names.
-  pub fn find(&self, id: &str) -> Result<Arc<Session>, ControlError> {
-    pick(id, &lock(&self.live), |s| (&s.id, &s.name))?.ok_or_else(no_such_session)
+  /// The live run `id` names.
+  pub fn find(&self, id: &str) -> Result<Arc<Run>, ControlError> {
+    pick(id, &lock(&self.live), |s| (&s.id, &s.name))?.ok_or_else(no_such_run)
   }
 
-  /// The session `id` names, for a new command: one being created or
-  /// running. A session that finished, stopped or failed is an error that
+  /// The run `id` names, for a new command: one being created or
+  /// running. A run that finished, stopped or failed is an error that
   /// says so, with its state.
-  pub fn find_open(&self, id: &str) -> Result<Arc<Session>, ControlError> {
+  pub fn find_open(&self, id: &str) -> Result<Arc<Run>, ControlError> {
     let info = match self.find(id) {
-      Ok(session) => match session.state.get() {
-        SessionState::Creating | SessionState::Running => return Ok(session),
-        _ => session.info(),
+      Ok(run) => match run.state.get() {
+        RunState::Creating | RunState::Running => return Ok(run),
+        _ => run.info(),
       },
       Err(ControlError::NotFound(_)) => self.find_info(id)?,
       Err(e) => return Err(e),
     };
-    Err(ControlError::NotFound(format!("session {} has ended: {}", info.id, info.state)))
+    Err(ControlError::NotFound(format!("run {} has ended: {}", info.id, info.state)))
   }
 
-  /// The live or ended session `id` names; live sessions are looked at
+  /// The live or ended run `id` names; live runs are looked at
   /// first.
-  fn find_info(&self, id: &str) -> Result<SessionInfo, ControlError> {
-    if let Some(session) = pick(id, &lock(&self.live), |s| (&s.id, &s.name))? {
-      return Ok(session.info());
+  fn find_info(&self, id: &str) -> Result<RunInfo, ControlError> {
+    if let Some(run) = pick(id, &lock(&self.live), |s| (&s.id, &s.name))? {
+      return Ok(run.info());
     }
-    pick(id, &lock(&self.ended), |s| (&s.id, &s.name))?.ok_or_else(no_such_session)
+    pick(id, &lock(&self.ended), |s| (&s.id, &s.name))?.ok_or_else(no_such_run)
   }
 
-  fn list(&self) -> Vec<SessionInfo> {
-    let mut sessions: Vec<_> = lock(&self.live).iter().map(|s| s.info()).collect();
-    sessions.extend(lock(&self.ended).iter().cloned());
-    sessions.sort_by_key(|s| s.created_ms);
-    sessions
+  fn list(&self) -> Vec<RunInfo> {
+    let mut runs: Vec<_> = lock(&self.live).iter().map(|s| s.info()).collect();
+    runs.extend(lock(&self.ended).iter().cloned());
+    runs.sort_by_key(|s| s.created_ms);
+    runs
   }
 
-  fn insert(&self, session: Arc<Session>) {
-    lock(&self.live).push(session);
+  fn insert(&self, run: Arc<Run>) {
+    lock(&self.live).push(run);
   }
 
-  /// Moves session `info.id` from the live sessions to the ended ones.
-  fn end(&self, info: SessionInfo) {
+  /// Moves run `info.id` from the live runs to the ended ones.
+  fn end(&self, info: RunInfo) {
     lock(&self.live).retain(|s| s.id != info.id);
     lock(&self.ended).push(info);
   }
@@ -228,8 +228,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn no_such_session() -> ControlError {
-  ControlError::NotFound("no such session".into())
+fn no_such_run() -> ControlError {
+  ControlError::NotFound("no such run".into())
 }
 
 /// The one item `id` names: the one whose ID is `id`, else the only one whose
@@ -252,54 +252,54 @@ fn pick<T: Clone>(id: &str, items: &[T], names: impl Fn(&T) -> (&str, &str)) -> 
   match matches.as_slice() {
     [] => Ok(None),
     [one] => Ok(Some((*one).clone())),
-    _ => Err(ControlError::Invalid(format!("session {id} is ambiguous: {} sessions match", matches.len()))),
+    _ => Err(ControlError::Invalid(format!("run {id} is ambiguous: {} runs match", matches.len()))),
   }
 }
 
 // ------------------------------------------------------------ lifecycle
 
 impl Daemon {
-  /// Creates a session; a failure is kept as a failed session and recorded
-  /// as `session.fail`.
-  async fn create_session(&self, request: NewSession) -> Result<Arc<Session>> {
+  /// Creates a run; a failure is kept as a failed run and recorded
+  /// as `run.fail`.
+  async fn create_run(&self, request: NewRun) -> Result<Arc<Run>> {
     let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
     let created_ms = now_ms();
-    // The session's directory is private; the trace's JSONL sink would
+    // The run's directory is private; the trace's JSONL sink would
     // otherwise create it first.
-    let dir = self.session_dir(&id);
+    let dir = self.run_dir(&id);
     if let Err(e) = needy_api_server::create_private_dir(&dir) {
-      tracing::warn!("session {id}: cannot create {}: {e}", dir.display());
+      tracing::warn!("run {id}: cannot create {}: {e}", dir.display());
     }
     let loaded = load_profile(&id, &request);
-    let trace = self.session_trace(&id, loaded.as_ref().ok().map(|profile| &profile.trace));
+    let trace = self.run_trace(&id, loaded.as_ref().ok().map(|profile| &profile.trace));
     let prepared = loaded.and_then(|profile| self.prepare(&id, &request, profile, created_ms, trace.clone()));
-    let session = match prepared {
+    let run = match prepared {
       Ok(prepared) => prepared,
       Err(error) => {
         self.record_failure(&id, &request, created_ms, &trace, &error, Vec::new()).await;
         return Err(error);
       }
     };
-    self.sessions.insert(session.clone());
-    let provisioned = self.provision(&session, &request).await.and_then(|()| unwinding(&session));
+    self.runs.insert(run.clone());
+    let provisioned = self.provision(&run, &request).await.and_then(|()| unwinding(&run));
     if let Err(error) = provisioned {
-      self.rollback(&session, &request, &error).await;
+      self.rollback(&run, &request, &error).await;
       return Err(error);
     }
-    // An actor that exited already has finished its session.
-    if let Err(refused) = session.state.advance(SessionState::Running) {
-      tracing::debug!("session {id}: {refused}");
+    // An actor that exited already has finished its run.
+    if let Err(refused) = run.state.advance(RunState::Running) {
+      tracing::debug!("run {id}: {refused}");
     }
-    // `needy report` right after the create must find the session and its
-    // `session.create`.
-    session.trace.flush().await;
-    Ok(session)
+    // `needy report` right after the create must find the run and its
+    // `run.create`.
+    run.trace.flush().await;
+    Ok(run)
   }
 
-  /// The session before it acquires anything: its directory, profile and
+  /// The run before it acquires anything: its directory, profile and
   /// recipe.
-  fn prepare(&self, id: &str, request: &NewSession, profile: Profile, created_ms: i64, trace: Dispatch) -> Result<Arc<Session>> {
-    let dir = self.session_dir(id);
+  fn prepare(&self, id: &str, request: &NewRun, profile: Profile, created_ms: i64, trace: Dispatch) -> Result<Arc<Run>> {
+    let dir = self.run_dir(id);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
     let or_id = |value: &str| {
@@ -320,13 +320,13 @@ impl Daemon {
         };
         let recipe = needy_config::recipe::load(&source)?;
         let host = needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
-          tracing::warn!("session {id}: cannot read this machine's CPU; the recipe skips host checks: {e}");
+          tracing::warn!("run {id}: cannot read this machine's CPU; the recipe skips host checks: {e}");
           Default::default()
         });
         let seed = u64::from_str_radix(&id[..8], 16).unwrap_or(0);
         let compiled = needy_core::recipe::compile(&recipe, &host, seed);
         for finding in &compiled.findings {
-          tracing::warn!("session {id}: recipe {finding}");
+          tracing::warn!("run {id}: recipe {finding}");
         }
         Some(compiled)
       }
@@ -338,7 +338,7 @@ impl Daemon {
       request.actor_command.clone()
     };
     let cancel = self.cancel.child_token();
-    Ok(Arc::new(Session {
+    Ok(Arc::new(Run {
       id: id.to_string(),
       name: or_id(&request.name),
       group: or_id(&request.group),
@@ -360,83 +360,83 @@ impl Daemon {
     }))
   }
 
-  /// Acquires the session's executors, copies files in and starts its actor.
-  /// A cancelled session token ends it before its next step.
+  /// Acquires the run's executors, copies files in and starts its actor.
+  /// A cancelled run token ends it before its next step.
   // NOTICE: a step in progress, such as a provider creating a container or
   // pulling its image, runs to its end: the providers are not safe to drop
   // midway (a container created before the drop would be left behind).
-  // TODO(shutdown): pass the session's token into `Provider::create` once
+  // TODO(shutdown): pass the run's token into `Provider::create` once
   // the providers can unwind a create themselves, so shutdown need not wait
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
-  async fn provision(&self, session: &Arc<Session>, request: &NewSession) -> Result<()> {
+  async fn provision(&self, run: &Arc<Run>, request: &NewRun) -> Result<()> {
     if request.start_actor {
       actor::check_host(self)?;
     }
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
-    let hostname = session.recipe.as_ref().and_then(|r| r.hostname.clone());
-    for (exec_name, config) in &session.profile.executors {
+    let hostname = run.recipe.as_ref().and_then(|r| r.hostname.clone());
+    for (exec_name, config) in &run.profile.executors {
       let key = config.key.render(&[
-        ("session", &session.id),
-        ("group", &session.group),
-        ("profile", &session.profile_name),
+        ("run", &run.id),
+        ("group", &run.group),
+        ("profile", &run.profile_name),
         ("rule", exec_name),
       ]);
       let spec = InstanceSpec {
         name: exec_name.clone(),
         key: format!("{exec_name}@{key}"),
-        session: session.id.clone(),
+        run: run.id.clone(),
         config: config.clone(),
-        base: session.profile.base_dir.clone(),
-        user: session.profile.user.clone(),
+        base: run.profile.base_dir.clone(),
+        user: run.profile.user.clone(),
         hostname: hostname.clone(),
       };
-      unwinding(session)?;
+      unwinding(run)?;
       let instance = self.pool.acquire(spec).await.with_context(|| format!("executor {exec_name}"))?;
-      session.lock_executors().insert(exec_name.clone(), instance);
+      run.lock_executors().insert(exec_name.clone(), instance);
     }
-    session.emit(&Event::SessionCreate(SessionCreate {
-      name: session.name.clone(),
-      group: session.group.clone(),
-      profile: session.profile_name.clone(),
-      executors: executor_refs(&session.executors()),
+    run.emit(&Event::RunCreate(RunCreate {
+      name: run.name.clone(),
+      group: run.group.clone(),
+      profile: run.profile_name.clone(),
+      executors: executor_refs(&run.executors()),
     }));
-    unwinding(session)?;
-    files::copy_in(session).await?;
+    unwinding(run)?;
+    files::copy_in(run).await?;
     if request.start_actor {
-      unwinding(session)?;
-      actor::start(self, session).await?;
+      unwinding(run)?;
+      actor::start(self, run).await?;
     }
     Ok(())
   }
 
-  /// Unwinds a create that failed after the session was registered.
-  async fn rollback(&self, session: &Arc<Session>, request: &NewSession, error: &anyhow::Error) {
-    if let Err(refused) = session.state.advance(SessionState::Failed) {
-      tracing::debug!("session {}: {refused}", session.id);
+  /// Unwinds a create that failed after the run was registered.
+  async fn rollback(&self, run: &Arc<Run>, request: &NewRun, error: &anyhow::Error) {
+    if let Err(refused) = run.state.advance(RunState::Failed) {
+      tracing::debug!("run {}: {refused}", run.id);
     }
     // The actor's tasks and VM, if it started, stop.
-    session.cancel.cancel();
-    session.tasks.close();
-    session.tasks.wait().await;
-    self.release_executors(session).await;
-    actor::remove_sockets(&session.dir);
-    let released = lock(&session.released).clone();
-    self.record_failure(&session.id, request, session.created_ms, &session.trace, error, released).await;
+    run.cancel.cancel();
+    run.tasks.close();
+    run.tasks.wait().await;
+    self.release_executors(run).await;
+    actor::remove_sockets(&run.dir);
+    let released = lock(&run.released).clone();
+    self.record_failure(&run.id, request, run.created_ms, &run.trace, error, released).await;
   }
 
-  /// Keeps a failed create as a failed session, with the executors it
+  /// Keeps a failed create as a failed run, with the executors it
   /// `released`, and records why.
   async fn record_failure(
     &self,
     id: &str,
-    request: &NewSession,
+    request: &NewRun,
     created_ms: i64,
     trace: &Dispatch,
     error: &anyhow::Error,
     released: Vec<ExecutorRef>,
   ) {
-    tracing::warn!("session {id} failed: {error:#}");
+    tracing::warn!("run {id} failed: {error:#}");
     let or_id = |value: &str| {
       if value.is_empty() {
         id.to_string()
@@ -444,11 +444,11 @@ impl Daemon {
         value.to_string()
       }
     };
-    self.sessions.end(SessionInfo {
+    self.runs.end(RunInfo {
       id: id.to_string(),
       name: or_id(&request.name),
       group: or_id(&request.group),
-      state: SessionState::Failed,
+      state: RunState::Failed,
       executors: Vec::new(),
       released,
       created_ms,
@@ -458,7 +458,7 @@ impl Daemon {
     });
     emit(
       trace,
-      &Event::SessionFail(SessionFail {
+      &Event::RunFail(RunFail {
         reason: format!("{error:#}"),
       }),
     );
@@ -466,52 +466,52 @@ impl Daemon {
     trace.flush().await;
   }
 
-  /// Gives back what a session whose actor exited holds: it mirrors out,
-  /// releases its executors and removes the actor's sockets. The session
+  /// Gives back what a run whose actor exited holds: it mirrors out,
+  /// releases its executors and removes the actor's sockets. The run
   /// stays listed as finished or failed until it is stopped, which then has
   /// nothing left to release.
-  pub(crate) async fn finish_session(&self, session: &Session) {
-    if let Err(e) = files::mirror_out(session).await {
-      tracing::warn!("mirror-out for {}: {e:#}", session.id);
+  pub(crate) async fn finish_run(&self, run: &Run) {
+    if let Err(e) = files::mirror_out(run).await {
+      tracing::warn!("mirror-out for {}: {e:#}", run.id);
     }
-    self.release_executors(session).await;
-    actor::remove_sockets(&session.dir);
+    self.release_executors(run).await;
+    actor::remove_sockets(&run.dir);
   }
 
-  /// Stops a running or finished session: its tasks, mirror-out, its
+  /// Stops a running or finished run: its tasks, mirror-out, its
   /// executors, its trace.
-  pub(crate) async fn stop_session(&self, session: &Arc<Session>) -> Result<(), ControlError> {
-    let stopping = match session.state.advance(SessionState::Stopping) {
+  pub(crate) async fn stop_run(&self, run: &Arc<Run>) -> Result<(), ControlError> {
+    let stopping = match run.state.advance(RunState::Stopping) {
       Ok(_) => true,
       // The actor finished or failed first and that state stays; ending
       // released its executors already.
       Err(Refused {
-        from: SessionState::Finished | SessionState::Failed,
+        from: RunState::Finished | RunState::Failed,
         ..
       }) => false,
-      Err(refused) => return Err(ControlError::Failed(format!("session {}: {refused}", session.id))),
+      Err(refused) => return Err(ControlError::Failed(format!("run {}: {refused}", run.id))),
     };
-    // The relays of the session's commands and its actor's tasks stop.
-    session.cancel.cancel();
-    session.tasks.close();
-    session.tasks.wait().await;
-    if let Err(e) = files::mirror_out(session).await {
-      tracing::warn!("mirror-out for {}: {e:#}", session.id);
+    // The relays of the run's commands and its actor's tasks stop.
+    run.cancel.cancel();
+    run.tasks.close();
+    run.tasks.wait().await;
+    if let Err(e) = files::mirror_out(run).await {
+      tracing::warn!("mirror-out for {}: {e:#}", run.id);
     }
-    if stopping && let Err(refused) = session.state.advance(SessionState::Stopped) {
-      tracing::warn!("session {}: {refused}", session.id);
+    if stopping && let Err(refused) = run.state.advance(RunState::Stopped) {
+      tracing::warn!("run {}: {refused}", run.id);
     }
-    self.release_executors(session).await;
-    session.emit(&Event::SessionStop(SessionStop {}));
+    self.release_executors(run).await;
+    run.emit(&Event::RunStop(RunStop {}));
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
-    session.trace.flush().await;
-    actor::remove_sockets(&session.dir);
-    self.sessions.end(session.info());
+    run.trace.flush().await;
+    actor::remove_sockets(&run.dir);
+    self.runs.end(run.info());
     Ok(())
   }
 
-  /// Ends the processes the session started on its executors, such as
+  /// Ends the processes the run started on its executors, such as
   /// detached commands and a workspace mount's `sftp-server`, then gives
   /// the executors back.
   // TODO(runner-ownership): the control daemon asks each executor here, so a
@@ -519,10 +519,10 @@ impl Daemon {
   // run's processes and ends them in the design of
   // `docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`
   // ("Ownership and cleanup").
-  async fn release_executors(&self, session: &Session) {
-    let instances = session.take_executors();
+  async fn release_executors(&self, run: &Run) {
+    let instances = run.take_executors();
     let request = ListProcessesRequest {
-      session_id: session.id.clone(),
+      run_id: run.id.clone(),
     };
     // Instances that share an executor list the same processes.
     let mut asked: Vec<(&'static str, &str)> = Vec::new();
@@ -535,25 +535,19 @@ impl Daemon {
       let processes = match instance.handle.client.processes().list_processes(request.clone()).await {
         Ok(list) => list.into_inner().processes,
         Err(status) => {
-          tracing::warn!("session {}: cannot list its processes on executor {}: {}", session.id, instance.name, status.message());
+          tracing::warn!("run {}: cannot list its processes on executor {}: {}", run.id, instance.name, status.message());
           continue;
         }
       };
       for process in processes.into_iter().filter(|p| p.running) {
-        // NOTICE: SIGKILL, as the executors' own shutdown uses: the session
+        // NOTICE: SIGKILL, as the executors' own shutdown uses: the run
         // is over, and a process that ignores SIGTERM would stay.
         let kill = KillProcessRequest {
           process_id: process.process_id.clone(),
           signal: "SIGKILL".into(),
         };
         if let Err(status) = instance.handle.client.processes().kill_process(kill).await {
-          tracing::warn!(
-            "session {}: cannot end process {} on executor {}: {}",
-            session.id,
-            process.process_id,
-            instance.name,
-            status.message()
-          );
+          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run.id, process.process_id, instance.name, status.message());
         }
       }
     }
@@ -562,13 +556,13 @@ impl Daemon {
     }
   }
 
-  fn session_dir(&self, id: &str) -> PathBuf {
-    self.config.state_dir.join("sessions").join(id)
+  fn run_dir(&self, id: &str) -> PathBuf {
+    self.config.state_dir.join("runs").join(id)
   }
 
-  /// Starts the trace of session `id` with the sinks `config` selects; the
+  /// Starts the trace of run `id` with the sinks `config` selects; the
   /// default sinks when the profile could not be read.
-  fn session_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
+  fn run_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
     let default = needy_config::profile::Trace::default();
     let config = config.unwrap_or(&default);
     let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
@@ -578,10 +572,10 @@ impl Daemon {
       match sink {
         TraceSink::Sqlite => sinks.push(Box::new(self.traces.sink())),
         TraceSink::Jsonl => {
-          let path = self.session_dir(id).join("trace.jsonl");
+          let path = self.run_dir(id).join("trace.jsonl");
           match Jsonl::create(&path) {
             Ok(jsonl) => sinks.push(Box::new(jsonl)),
-            Err(e) => tracing::warn!("session {id}: the trace goes without JSONL: {e}"),
+            Err(e) => tracing::warn!("run {id}: the trace goes without JSONL: {e}"),
           }
         }
       }
@@ -598,25 +592,25 @@ impl Daemon {
   }
 }
 
-/// Fails a create whose session's token was cancelled, which only the
-/// daemon's shutdown does while a session is created.
-fn unwinding(session: &Session) -> Result<()> {
-  if session.cancel.is_cancelled() {
-    bail!("the daemon shut down while the session was being created");
+/// Fails a create whose run's token was cancelled, which only the
+/// daemon's shutdown does while a run is created.
+fn unwinding(run: &Run) -> Result<()> {
+  if run.cancel.is_cancelled() {
+    bail!("the daemon shut down while the run was being created");
   }
   Ok(())
 }
 
-/// Reads and checks the profile of a session about to be created. The
+/// Reads and checks the profile of a run about to be created. The
 /// client resolved it, so it names no file to read.
 // NOTICE: a profile with relative paths, which a client did not resolve,
 // would have them resolve against the daemon's working directory; no base
 // directory is set, so they stay relative and fail visibly.
-fn load_profile(id: &str, request: &NewSession) -> Result<Profile> {
+fn load_profile(id: &str, request: &NewRun) -> Result<Profile> {
   let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), PathBuf::new()))?;
   let findings = validate::profile(&profile);
   for finding in findings.iter().filter(|f| f.severity == Severity::Warning) {
-    tracing::warn!("session {id}: profile {finding}");
+    tracing::warn!("run {id}: profile {finding}");
   }
   let errors: Vec<&str> = findings.iter().filter(|f| f.severity == Severity::Error).map(|f| f.message.as_str()).collect();
   if !errors.is_empty() {
@@ -628,42 +622,42 @@ fn load_profile(id: &str, request: &NewSession) -> Result<Profile> {
 // ------------------------------------------------------------------ API
 
 #[async_trait::async_trait]
-impl Sessions for Daemon {
-  async fn create(&self, request: NewSession) -> Result<SessionInfo, ControlError> {
+impl Runs for Daemon {
+  async fn create(&self, request: NewRun) -> Result<RunInfo, ControlError> {
     // Shutdown waits for creates in progress to end or unwind.
-    let session = self.creates.track_future(self.create_session(request)).await.map_err(failed)?;
-    Ok(session.info())
+    let run = self.creates.track_future(self.create_run(request)).await.map_err(failed)?;
+    Ok(run.info())
   }
 
-  async fn get(&self, id: &str) -> Result<SessionInfo, ControlError> {
-    self.sessions.find_info(id)
+  async fn get(&self, id: &str) -> Result<RunInfo, ControlError> {
+    self.runs.find_info(id)
   }
 
-  async fn list(&self) -> Result<Vec<SessionInfo>, ControlError> {
-    Ok(self.sessions.list())
+  async fn list(&self) -> Result<Vec<RunInfo>, ControlError> {
+    Ok(self.runs.list())
   }
 
   async fn stop(&self, id: &str) -> Result<(), ControlError> {
-    let session = self.sessions.find(id)?;
-    self.stop_session(&session).await
+    let run = self.runs.find(id)?;
+    self.stop_run(&run).await
   }
 
   async fn logs(&self, id: &str) -> Result<Vec<u8>, ControlError> {
-    let info = self.sessions.find_info(id)?;
+    let info = self.runs.find_info(id)?;
     // Firecracker writes the guest's serial console here.
-    let path = vm::console(&self.session_dir(&info.id));
-    // TODO(session-logs): follow a running actor's console (`--follow`); not
+    let path = vm::console(&self.run_dir(&info.id));
+    // TODO(run-logs): follow a running actor's console (`--follow`); not
     // needed by the QA item, which asks for the output so far.
     match tokio::fs::read(&path).await {
       Ok(bytes) => Ok(bytes),
-      Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ControlError::NotFound(format!("session {id} has no actor console"))),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ControlError::NotFound(format!("run {id} has no actor console"))),
       Err(e) => Err(ControlError::Internal(format!("cannot read {}: {e}", path.display()))),
     }
   }
 
-  async fn decide(&self, session: &str, ctx: ExecContext) -> Result<Route, ControlError> {
-    let session = self.sessions.find(session)?;
-    Ok(routing::route(&session, ctx).await)
+  async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route, ControlError> {
+    let run = self.runs.find(run)?;
+    Ok(routing::route(&run, ctx).await)
   }
 }
 

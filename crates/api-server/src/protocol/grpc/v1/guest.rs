@@ -1,5 +1,5 @@
 //! `GuestService` over [`Guest`]: served only on an actor's listener, for
-//! the session it is bound to.
+//! the run it is bound to.
 
 use std::sync::Arc;
 
@@ -22,9 +22,9 @@ pub struct Adapter<G> {
 }
 
 impl<G> Adapter<G> {
-  fn session(&self) -> Result<&str, Status> {
+  fn run(&self) -> Result<&str, Status> {
     match &self.caller {
-      Caller::Actor { session } => Ok(session),
+      Caller::Actor { run } => Ok(run),
       Caller::Cli => Err(ControlError::denied("not an actor listener").into()),
     }
   }
@@ -33,12 +33,12 @@ impl<G> Adapter<G> {
 #[tonic::async_trait]
 impl<G: Guest> GuestService for Adapter<G> {
   async fn get_config(&self, _: Request<GetConfigRequest>) -> Result<Response<GetConfigResponse>, Status> {
-    let config = self.guest.config(self.session()?).await?;
+    let config = self.guest.config(self.run()?).await?;
     Ok(Response::new(domain::proto_guest_config(config)))
   }
 
   async fn push_events(&self, request: Request<Streaming<PushEventsRequest>>) -> Result<Response<PushEventsResponse>, Status> {
-    let session = self.session()?;
+    let run = self.run()?;
     let mut stream = request.into_inner();
     while let Some(message) = stream.message().await? {
       let Some(pushed) = message.event else {
@@ -47,32 +47,32 @@ impl<G: Guest> GuestService for Adapter<G> {
       // The guest build's schema version must be this daemon's.
       let event = Event::decode(&pushed.kind, pushed.version, &pushed.payload)
         .map_err(|e| ControlError::Invalid(format!("guest event {}: {e}", pushed.kind)))?;
-      self.guest.event(session, pushed.time_ms, event).await?;
+      self.guest.event(run, pushed.time_ms, event).await?;
     }
     Ok(Response::new(PushEventsResponse {}))
   }
 
   async fn report_exit(&self, request: Request<ReportExitRequest>) -> Result<Response<ReportExitResponse>, Status> {
-    let session = self.session()?;
+    let run = self.run()?;
     let exit = request.into_inner();
     let exit = Exit {
       code: exit.code,
       signal: exit.signal,
     };
-    self.guest.exit(session, exit).await?;
+    self.guest.exit(run, exit).await?;
     Ok(Response::new(ReportExitResponse {}))
   }
 
   type FetchFilesStream = Streamed<FetchFilesResponse>;
 
   async fn fetch_files(&self, request: Request<FetchFilesRequest>) -> Result<Response<Self::FetchFilesStream>, Status> {
-    let session = self.session()?;
-    let archive = self.guest.fetch_files(session, &request.into_inner().name).await?;
+    let run = self.run()?;
+    let archive = self.guest.fetch_files(run, &request.into_inner().name).await?;
     Ok(Response::new(chunked(archive, |data| FetchFilesResponse { data })))
   }
 
   async fn push_files(&self, request: Request<Streaming<PushFilesRequest>>) -> Result<Response<PushFilesResponse>, Status> {
-    let session = self.session()?;
+    let run = self.run()?;
     let mut stream = request.into_inner();
     // The first message names the mapping; the rest carry only data.
     let mut name = String::new();
@@ -83,7 +83,7 @@ impl<G: Guest> GuestService for Adapter<G> {
       }
       archive.extend(message.data);
     }
-    self.guest.push_files(session, &name, archive).await?;
+    self.guest.push_files(run, &name, archive).await?;
     Ok(Response::new(PushFilesResponse {}))
   }
 }

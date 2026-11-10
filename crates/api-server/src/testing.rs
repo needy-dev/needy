@@ -7,9 +7,9 @@ use std::sync::Mutex;
 
 use needy_api_client::Client;
 use needy_common::process::Exit;
-use needy_core::event::{Event, SessionStop};
+use needy_core::event::{Event, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, SessionState};
+use needy_core::types::{Origin, RunState};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -39,15 +39,15 @@ impl Fake {
 
 /// The event a refused exec carries.
 pub fn refusal_event() -> Event {
-  Event::SessionStop(SessionStop {})
+  Event::RunStop(RunStop {})
 }
 
-fn info(id: &str, name: &str) -> SessionInfo {
-  SessionInfo {
+fn info(id: &str, name: &str) -> RunInfo {
+  RunInfo {
     id: id.into(),
     name: name.into(),
     group: id.into(),
-    state: SessionState::Running,
+    state: RunState::Running,
     executors: Vec::new(),
     released: Vec::new(),
     created_ms: 1,
@@ -58,20 +58,20 @@ fn info(id: &str, name: &str) -> SessionInfo {
 }
 
 #[async_trait::async_trait]
-impl Sessions for Fake {
-  async fn create(&self, request: NewSession) -> Result<SessionInfo> {
+impl Runs for Fake {
+  async fn create(&self, request: NewRun) -> Result<RunInfo> {
     self.call(format!("create {}", request.profile_name));
     Ok(info("s1", &request.name))
   }
 
-  async fn get(&self, id: &str) -> Result<SessionInfo> {
+  async fn get(&self, id: &str) -> Result<RunInfo> {
     match id {
       "s1" => Ok(info("s1", "one")),
-      _ => Err(ControlError::NotFound("no such session".into())),
+      _ => Err(ControlError::NotFound("no such run".into())),
     }
   }
 
-  async fn list(&self) -> Result<Vec<SessionInfo>> {
+  async fn list(&self) -> Result<Vec<RunInfo>> {
     Ok(vec![info("s1", "one"), info("s2", "two")])
   }
 
@@ -86,13 +86,13 @@ impl Sessions for Fake {
     Ok(vec![b'c'; 3 << 20])
   }
 
-  async fn decide(&self, session: &str, ctx: ExecContext) -> Result<Route> {
-    self.call(format!("decide {session}"));
+  async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route> {
+    self.call(format!("decide {run}"));
     self.contexts.lock().unwrap().push(ctx.clone());
     let target = match ctx.argv.first().map(String::as_str) {
       Some("rm") => Target::Refused("denied: no deleting".into()),
       Some("ls") => Target::Actor,
-      _ => Target::Executor(format!("on-{session}")),
+      _ => Target::Executor(format!("on-{run}")),
     };
     Ok(Route {
       target,
@@ -108,11 +108,11 @@ impl Sessions for Fake {
 #[async_trait::async_trait]
 impl Processes for Fake {
   /// Echoes the stdin of a start until end of input, then exits 3. The
-  /// started process's executor names the session it was placed in.
+  /// started process's executor names the run it was placed in.
   async fn exec(&self, open: ExecOpen, mut input: Inputs) -> Result<Outputs> {
     let (process, executor) = match open {
       ExecOpen::Start(spec) => {
-        self.call(format!("exec {} in {:?} from {:?}", spec.argv.join(" "), spec.session, spec.origin));
+        self.call(format!("exec {} in {:?} from {:?}", spec.argv.join(" "), spec.run, spec.origin));
         if spec.argv.first().map(String::as_str) == Some("refuse") {
           return Err(ControlError::Denied {
             message: "denied: refused".into(),
@@ -122,7 +122,7 @@ impl Processes for Fake {
         if spec.argv.first().map(String::as_str) == Some("full") {
           return Err(ControlError::Exhausted("executor is full".into()));
         }
-        ("p1".to_string(), spec.session)
+        ("p1".to_string(), spec.run)
       }
       ExecOpen::Attach {
         process, replay, ..
@@ -145,8 +145,8 @@ impl Processes for Fake {
     Ok(stream)
   }
 
-  async fn list(&self, session: &str) -> Result<Vec<ProcessInfo>> {
-    self.call(format!("list {session:?}"));
+  async fn list(&self, run: &str) -> Result<Vec<ProcessInfo>> {
+    self.call(format!("list {run:?}"));
     Ok(vec![ProcessInfo {
       process: "p1".into(),
       argv: vec!["sleep".into()],
@@ -159,7 +159,7 @@ impl Processes for Fake {
       }),
       tty: false,
       started_ms: 7,
-      session: session.into(),
+      run: run.into(),
       origin: Some(Origin::Cli),
     }])
   }
@@ -199,9 +199,9 @@ fn async_stream(process: String, executor: String, echo: impl Future<Output = Ve
 
 #[async_trait::async_trait]
 impl Guest for Fake {
-  async fn config(&self, session: &str) -> Result<GuestConfig> {
+  async fn config(&self, run: &str) -> Result<GuestConfig> {
     Ok(GuestConfig {
-      session: session.into(),
+      run: run.into(),
       user: GuestUser {
         name: "agent".into(),
         uid: 1000,
@@ -220,25 +220,25 @@ impl Guest for Fake {
     })
   }
 
-  async fn event(&self, session: &str, time_ms: i64, event: Event) -> Result<()> {
-    self.events.lock().unwrap().push((session.into(), time_ms, event));
+  async fn event(&self, run: &str, time_ms: i64, event: Event) -> Result<()> {
+    self.events.lock().unwrap().push((run.into(), time_ms, event));
     Ok(())
   }
 
-  async fn exit(&self, session: &str, exit: Exit) -> Result<()> {
-    self.exits.lock().unwrap().push((session.into(), exit));
+  async fn exit(&self, run: &str, exit: Exit) -> Result<()> {
+    self.exits.lock().unwrap().push((run.into(), exit));
     Ok(())
   }
 
-  async fn fetch_files(&self, _session: &str, name: &str) -> Result<Vec<u8>> {
+  async fn fetch_files(&self, _run: &str, name: &str) -> Result<Vec<u8>> {
     match name {
       "big" => Ok(vec![b'f'; 3 << 20]),
       _ => Err(ControlError::NotFound("no such copy-in mapping".into())),
     }
   }
 
-  async fn push_files(&self, session: &str, name: &str, archive: Vec<u8>) -> Result<()> {
-    self.pushed.lock().unwrap().push((session.into(), name.into(), archive));
+  async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()> {
+    self.pushed.lock().unwrap().push((run.into(), name.into(), archive));
     Ok(())
   }
 }
@@ -267,7 +267,7 @@ pub async fn serve_with(caller: Caller, token: Option<&str>) -> Served {
   };
   let bound = Server::new(health, caller)
     .token(token.map(str::to_string))
-    .sessions(fake.clone())
+    .runs(fake.clone())
     .processes(fake.clone())
     .guest(fake.clone())
     .bind(&[Listen::Unix(socket.clone())])

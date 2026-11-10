@@ -1,4 +1,4 @@
-//! The actor's side of its session, through `api-server`'s `Guest` trait:
+//! The actor's side of its run, through `api-server`'s `Guest` trait:
 //! the configuration its init asks for at boot, the events it observes, the
 //! driving program's exit, and the archives of its copy-in and mirror-out
 //! mappings.
@@ -8,24 +8,24 @@ use needy_common::process::Exit;
 use needy_config::profile::{FaultKind, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
-use needy_core::types::SessionState;
+use needy_core::types::RunState;
 
 use crate::actor::GATEWAY_PORT;
-use crate::session::Session;
+use crate::run::Run;
 use crate::{Daemon, files};
 
-/// The workspace mounts of `session`: executor directories mounted into the
+/// The workspace mounts of `run`: executor directories mounted into the
 /// actor over SFTP.
-fn mounts(session: &Session) -> Vec<GuestMount> {
+fn mounts(run: &Run) -> Vec<GuestMount> {
   let mut mounts = Vec::new();
-  for (name, mapping) in &session.profile.files.mappings {
-    if !files::selected(session, name) || mapping.mode != FileMode::Mount {
+  for (name, mapping) in &run.profile.files.mappings {
+    if !files::selected(run, name) || mapping.mode != FileMode::Mount {
       continue;
     }
     let (Side::Executor { name: exec, path }, Side::Actor(target)) = (&mapping.from, &mapping.to) else {
       continue;
     };
-    let Some(instance) = session.executor(exec) else {
+    let Some(instance) = run.executor(exec) else {
       continue;
     };
     mounts.push(GuestMount {
@@ -58,17 +58,17 @@ fn default_cwd(home: &str, mounts: &[GuestMount]) -> String {
 
 #[async_trait::async_trait]
 impl Guest for Daemon {
-  async fn config(&self, session: &str) -> Result<GuestConfig, ControlError> {
-    let session = self.sessions.find(session)?;
-    let profile = &session.profile;
+  async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
+    let run = self.runs.find(run)?;
+    let profile = &run.profile;
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
-    let mounts = mounts(&session);
+    let mounts = mounts(&run);
     let cwd = profile.actor.cwd.clone().unwrap_or_else(|| default_cwd(&home, &mounts));
     let mut copy_in = Vec::new();
     let mut mirror_out = Vec::new();
     for (name, mapping) in &profile.files.mappings {
-      if !files::selected(&session, name) {
+      if !files::selected(&run, name) {
         continue;
       }
       match (mapping.mode, &mapping.from, &mapping.to) {
@@ -83,7 +83,7 @@ impl Guest for Daemon {
         _ => {}
       }
     }
-    let hwmon_faults = session
+    let hwmon_faults = run
       .injector
       .faults()
       .iter()
@@ -93,16 +93,16 @@ impl Guest for Daemon {
         temp_mc: f.set.temp_c.map(|c| (c * 1000.0) as i32).unwrap_or(100_000),
       })
       .collect();
-    let recipe = session.recipe.as_ref();
+    let recipe = run.recipe.as_ref();
     let routed = rules::route_names(profile);
-    session.emit(&Event::ActorConfig(ActorConfig {
+    run.emit(&Event::ActorConfig(ActorConfig {
       route_names: routed.clone(),
       mounts: mounts.iter().map(|m| m.target.clone()).collect(),
     }));
     // `*` asks the kernel to route every exec.
     let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
     Ok(GuestConfig {
-      session: session.id.clone(),
+      run: run.id.clone(),
       user: GuestUser {
         name: user.name.clone(),
         uid: user.uid,
@@ -112,7 +112,7 @@ impl Guest for Daemon {
       hostname: recipe.and_then(|r| r.hostname.clone()).unwrap_or_default(),
       uptime_offset_secs: recipe.map(|r| r.uptime_offset_secs).unwrap_or(0),
       mounts,
-      command: session.actor_command.clone(),
+      command: run.actor_command.clone(),
       env: profile.actor.env.clone().into_iter().collect(),
       cwd,
       gateway_port: GATEWAY_PORT,
@@ -133,33 +133,33 @@ impl Guest for Daemon {
     })
   }
 
-  async fn event(&self, session: &str, time_ms: i64, event: Event) -> Result<(), ControlError> {
-    let session = self.sessions.find(session)?;
-    session.trace.emit_at(time_ms, event.kind().as_str(), event.raw());
+  async fn event(&self, run: &str, time_ms: i64, event: Event) -> Result<(), ControlError> {
+    let run = self.runs.find(run)?;
+    run.trace.emit_at(time_ms, event.kind().as_str(), event.raw());
     Ok(())
   }
 
-  async fn exit(&self, session: &str, exit: Exit) -> Result<(), ControlError> {
-    let session = self.sessions.find(session)?;
-    session.set_actor_exit(exit.clone());
-    session.emit(&Event::ActorExit(ActorExit {
+  async fn exit(&self, run: &str, exit: Exit) -> Result<(), ControlError> {
+    let run = self.runs.find(run)?;
+    run.set_actor_exit(exit.clone());
+    run.emit(&Event::ActorExit(ActorExit {
       code: exit.code,
       signal: (!exit.signal.is_empty()).then_some(exit.signal),
     }));
-    if let Err(refused) = session.state.advance(SessionState::Finished) {
-      tracing::debug!("session {}: {refused}", session.id);
+    if let Err(refused) = run.state.advance(RunState::Finished) {
+      tracing::debug!("run {}: {refused}", run.id);
     }
     Ok(())
   }
 
-  async fn fetch_files(&self, session: &str, name: &str) -> Result<Vec<u8>, ControlError> {
-    let session = self.sessions.find(session)?;
-    files::fetch(&session, name).await
+  async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>, ControlError> {
+    let run = self.runs.find(run)?;
+    files::fetch(&run, name).await
   }
 
-  async fn push_files(&self, session: &str, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
-    let session = self.sessions.find(session)?;
-    files::push(&session, name, archive).await
+  async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
+    let run = self.runs.find(run)?;
+    files::push(&run, name, archive).await
   }
 }
 

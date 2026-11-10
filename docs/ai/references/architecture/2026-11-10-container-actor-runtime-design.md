@@ -36,7 +36,7 @@ recorded in the research notes; none is planned.
 ## Runtime abstraction
 
 `core-actor::host` gets an `ActorRuntime` trait with `start`, `stop` and `wait`,
-owned by the session like the `Vm` handle today. Implementations:
+owned by the run like the `Vm` handle today. Implementations:
 
 | Runtime | Backend | Needs |
 | --- | --- | --- |
@@ -81,7 +81,7 @@ image, so the programs in it are known when the image is built.
   `python3` both reach the shim, so absolute paths are covered without runtime
   bind mounts.
 - The proxy finds the program it stands for from `argv[0]`. For a name on the
-  session's route list (or for every name when the list is `*`) it asks the
+  run's route list (or for every name when the list is `*`) it asks the
   daemon with the process ancestry, as it does today, and runs the command
   through an exec stream or executes the real program. For any other name it
   executes `/.needy/real/<path>` directly, without asking.
@@ -119,11 +119,11 @@ the runtime cannot provide is an error.
 ### Isolation
 
 - `runc`: shares the host kernel. Suitable for trusted driving programs or
-  hosts dedicated to one session.
+  hosts dedicated to one run.
 - `runsc`: a user-space kernel between the program and the host. Weaker than a
   microVM and with syscall overhead, but no KVM.
 
-The report shows the runtime of each session so a reader knows which
+The report shows the runtime of each run so a reader knows which
 isolation a trace came from.
 
 ## Slices (proposed)

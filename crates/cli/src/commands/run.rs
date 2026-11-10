@@ -1,17 +1,22 @@
-//! `needy session`: create, list, stop sessions and read an actor's console.
+//! `needy run`: create, list, stop runs and read an actor's console.
 
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
-use needy_api_client::proto::v1::{self, CreateSessionRequest, GetSessionLogsRequest, ListSessionsRequest, Session, StopSessionRequest};
-use needy_core::types::SessionState;
+use needy_api_client::proto::v1::{self, CreateRunRequest, GetRunLogsRequest, ListRunsRequest, Run, StopRunRequest};
+use needy_core::types::RunState;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::cli::Context;
 use crate::output::{self, OutputFormat, Row};
 
+// TODO(run-ux): a bare `needy run --profile X [-- cmd]` as `run create` is
+// left out: with the driving program as an optional trailing argument, a
+// program named `ls`, `stop`, `logs` or `create` would parse as a
+// subcommand. Revisit with `run -it` and `run attach` (slice 8 of the
+// runners-and-runs design) or on an owner decision.
 #[derive(clap::Args)]
 pub struct Args {
   #[command(subcommand)]
@@ -20,38 +25,42 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Create a session from a profile and start its actor.
+  /// Create a run from a profile and start its actor.
   Create {
     /// Profile YAML; relative paths in it resolve against its directory.
     #[arg(long)]
     profile: PathBuf,
-    /// Sessions in one group share executors whose key uses `{group}`.
-    /// Defaults to the session ID.
+    /// Runs in one group share executors whose key uses `{group}`.
+    /// Defaults to the run ID.
     #[arg(long, default_value = "", hide_default_value = true)]
     group: String,
-    /// A name to address the session by instead of its ID.
+    /// A name to address the run by instead of its ID.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
     /// Create executors only; do not start the actor.
+    // TODO(runner): replaced by exec --runner in slice 4 of the runners-and-runs
+    // design (`docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`);
+    // kept until runners exist, since the Docker executor workflow
+    // (`examples/cli`) depends on it.
     #[arg(long)]
     no_actor: bool,
     /// Override the actor's driving program.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
   },
-  /// List sessions, including stopped and failed ones.
+  /// List runs, including stopped and failed ones.
   Ls {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Stop a session and release its executors.
-  Stop { session: String },
+  /// Stop a run and release its executors.
+  Stop { run: String },
   /// Print the actor's console output: boot messages and the driving program's terminal.
-  Logs { session: String },
+  Logs { run: String },
 }
 
 #[derive(Serialize)]
-struct SessionRow {
+struct RunRow {
   id: String,
   name: String,
   state: String,
@@ -61,7 +70,7 @@ struct SessionRow {
   exit_code: Option<i32>,
   /// The signal that ended the driving program.
   signal: Option<String>,
-  /// Why the session failed, with its causes.
+  /// Why the run failed, with its causes.
   failure: Option<String>,
 }
 
@@ -69,14 +78,14 @@ struct SessionRow {
 struct ExecutorCell {
   name: String,
   runtime: String,
-  /// The session gave it back when it stopped, finished or failed.
+  /// The run gave it back when it stopped, finished or failed.
   released: bool,
 }
 
 /// How many characters of a failure the EXIT column shows; JSON has all of it.
 const FAILURE_WIDTH: usize = 48;
 
-impl Row for SessionRow {
+impl Row for RunRow {
   const HEADER: &'static [&'static str] = &["ID", "NAME", "STATE", "GROUP", "EXECUTORS", "EXIT"];
 
   fn cells(&self) -> Vec<String> {
@@ -93,7 +102,7 @@ impl Row for SessionRow {
       let suffix = if e.released { " (released)" } else { "" };
       format!("{}={}{suffix}", e.name, e.runtime)
     });
-    // Empty while the session runs, and for a session without an actor.
+    // Empty while the driving program runs, and for a run without an actor.
     let exit = match (&self.exit_code, &self.signal, &self.failure) {
       (Some(code), _, _) => code.to_string(),
       (None, Some(signal), _) => signal.clone(),
@@ -121,11 +130,11 @@ fn truncate(text: &str, width: usize) -> String {
   cut
 }
 
-impl TryFrom<Session> for SessionRow {
+impl TryFrom<Run> for RunRow {
   type Error = anyhow::Error;
 
-  fn try_from(s: Session) -> Result<Self> {
-    let state = state(s.state).with_context(|| format!("session {}", s.session_id))?;
+  fn try_from(s: Run) -> Result<Self> {
+    let state = state(s.state).with_context(|| format!("run {}", s.run_id))?;
     let (exit_code, signal) = match s.actor_exit {
       Some(exit) => (exit.code, (!exit.signal.is_empty()).then_some(exit.signal)),
       None => (None, None),
@@ -140,7 +149,7 @@ impl TryFrom<Session> for SessionRow {
           released: e.released,
         })
         .collect(),
-      id: s.session_id,
+      id: s.run_id,
       name: s.name,
       state: state.to_string(),
       group: s.group,
@@ -151,19 +160,19 @@ impl TryFrom<Session> for SessionRow {
   }
 }
 
-/// The state a `Session` names. Its zero value means the daemon left it
+/// The state a `Run` names. Its zero value means the daemon left it
 /// unset, and a value this build does not know comes from a newer daemon;
 /// both are errors instead of a default.
-fn state(value: i32) -> Result<SessionState> {
-  match v1::SessionState::try_from(value) {
-    Ok(v1::SessionState::Unspecified) => bail!("the session state is unspecified"),
-    Ok(v1::SessionState::Creating) => Ok(SessionState::Creating),
-    Ok(v1::SessionState::Running) => Ok(SessionState::Running),
-    Ok(v1::SessionState::Stopping) => Ok(SessionState::Stopping),
-    Ok(v1::SessionState::Stopped) => Ok(SessionState::Stopped),
-    Ok(v1::SessionState::Finished) => Ok(SessionState::Finished),
-    Ok(v1::SessionState::Failed) => Ok(SessionState::Failed),
-    Err(_) => bail!("unknown session state {value}"),
+fn state(value: i32) -> Result<RunState> {
+  match v1::RunState::try_from(value) {
+    Ok(v1::RunState::Unspecified) => bail!("the run state is unspecified"),
+    Ok(v1::RunState::Creating) => Ok(RunState::Creating),
+    Ok(v1::RunState::Running) => Ok(RunState::Running),
+    Ok(v1::RunState::Stopping) => Ok(RunState::Stopping),
+    Ok(v1::RunState::Stopped) => Ok(RunState::Stopped),
+    Ok(v1::RunState::Finished) => Ok(RunState::Finished),
+    Ok(v1::RunState::Failed) => Ok(RunState::Failed),
+    Err(_) => bail!("unknown run state {value}"),
   }
 }
 
@@ -183,9 +192,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       // recipe as text, not paths to read.
       let resolved = needy_config::profile::resolve(&needy_config::Source::file(&path))?;
       let connection = crate::cli::connect(&endpoint).await?;
-      let session = connection
-        .sessions()
-        .create_session(CreateSessionRequest {
+      let run = connection
+        .runs()
+        .create_run(CreateRunRequest {
           profile_yaml: resolved.yaml,
           recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
           profile_name: needy_config::profile::name(&path),
@@ -197,36 +206,23 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .await
         .map_err(fail)?
         .into_inner()
-        .session
+        .run
         .unwrap_or_default();
-      println!("{}", session.session_id);
+      println!("{}", run.run_id);
     }
     Command::Ls { output: format } => {
       let connection = crate::cli::connect(&endpoint).await?;
-      let list = connection.sessions().list_sessions(ListSessionsRequest {}).await.map_err(fail)?.into_inner();
-      let rows = list.sessions.into_iter().map(SessionRow::try_from).collect::<Result<Vec<_>>>()?;
+      let list = connection.runs().list_runs(ListRunsRequest {}).await.map_err(fail)?.into_inner();
+      let rows = list.runs.into_iter().map(RunRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
-    Command::Stop { session } => {
+    Command::Stop { run } => {
       let connection = crate::cli::connect(&endpoint).await?;
-      connection
-        .sessions()
-        .stop_session(StopSessionRequest {
-          session_id: session,
-        })
-        .await
-        .map_err(fail)?;
+      connection.runs().stop_run(StopRunRequest { run_id: run }).await.map_err(fail)?;
     }
-    Command::Logs { session } => {
+    Command::Logs { run } => {
       let connection = crate::cli::connect(&endpoint).await?;
-      let mut stream = connection
-        .sessions()
-        .get_session_logs(GetSessionLogsRequest {
-          session_id: session,
-        })
-        .await
-        .map_err(fail)?
-        .into_inner();
+      let mut stream = connection.runs().get_run_logs(GetRunLogsRequest { run_id: run }).await.map_err(fail)?.into_inner();
       let mut stdout = tokio::io::stdout();
       while let Some(chunk) = stream.message().await.map_err(fail)? {
         stdout.write_all(&chunk.data).await?;
@@ -238,5 +234,5 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 }
 
 #[cfg(test)]
-#[path = "session_test.rs"]
+#[path = "run_test.rs"]
 mod tests;

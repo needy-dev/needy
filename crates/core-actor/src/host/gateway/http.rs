@@ -67,7 +67,7 @@ impl Gateway {
           parts.headers.insert(name, value);
         }
         // The value is a credential; only the header's name is logged.
-        _ => tracing::warn!("gateway for session {}: cannot inject header {name:?} for {host}", self.trace.session()),
+        _ => tracing::warn!("gateway for run {}: cannot inject header {name:?} for {host}", self.trace.run()),
       }
     }
     let path = parts.uri.path().to_string();

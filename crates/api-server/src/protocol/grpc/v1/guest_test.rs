@@ -1,5 +1,5 @@
 use needy_api_proto::v1::{FetchFilesRequest, GetConfigRequest, PushEventsRequest, PushFilesRequest, ReportExitRequest, TraceEvent};
-use needy_core::event::{Event, SCHEMA_VERSION, SessionStop};
+use needy_core::event::{Event, RunStop, SCHEMA_VERSION};
 use tonic::Code;
 
 use crate::control::Caller;
@@ -7,7 +7,7 @@ use crate::testing::serve;
 
 fn actor() -> Caller {
   Caller::Actor {
-    session: "s-actor".into(),
+    run: "s-actor".into(),
   }
 }
 
@@ -22,19 +22,19 @@ async fn the_control_socket_serves_no_guest() {
 }
 
 #[tokio::test]
-async fn the_actor_gets_its_session_s_configuration() {
+async fn the_actor_gets_its_run_s_configuration() {
   let served = serve(actor()).await;
 
   let config = served.client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
 
-  assert_eq!(config.session_id, "s-actor");
+  assert_eq!(config.run_id, "s-actor");
   assert_eq!(config.user.map(|u| (u.name, u.uid)), Some(("agent".into(), 1000)));
   assert_eq!(config.mounts[0].target, "/home/agent/workspace");
   assert_eq!(config.gateway_port, 7001);
 }
 
 fn pushed(version: u32) -> PushEventsRequest {
-  let event = Event::SessionStop(SessionStop {});
+  let event = Event::RunStop(RunStop {});
   PushEventsRequest {
     event: Some(TraceEvent {
       time_ms: 99,
@@ -46,13 +46,13 @@ fn pushed(version: u32) -> PushEventsRequest {
 }
 
 #[tokio::test]
-async fn guest_events_are_decoded_into_the_session() {
+async fn guest_events_are_decoded_into_the_run() {
   let served = serve(actor()).await;
 
   served.client.guest().push_events(tokio_stream::iter([pushed(SCHEMA_VERSION)])).await.unwrap();
 
   let events = served.fake.events.lock().unwrap();
-  assert_eq!(*events, [("s-actor".to_string(), 99, Event::SessionStop(SessionStop {}))]);
+  assert_eq!(*events, [("s-actor".to_string(), 99, Event::RunStop(RunStop {}))]);
 }
 
 #[tokio::test]
@@ -62,7 +62,7 @@ async fn a_guest_event_of_another_schema_version_is_invalid() {
   let status = served.client.guest().push_events(tokio_stream::iter([pushed(SCHEMA_VERSION + 1)])).await.unwrap_err();
 
   assert_eq!(status.code(), Code::InvalidArgument);
-  assert!(status.message().starts_with("guest event session.stop: "), "{}", status.message());
+  assert!(status.message().starts_with("guest event run.stop: "), "{}", status.message());
   assert!(served.fake.events.lock().unwrap().is_empty());
 }
 

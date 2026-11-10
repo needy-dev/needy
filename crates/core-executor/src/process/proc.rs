@@ -27,7 +27,7 @@ pub struct Proc {
   pub pid: i64,
   pub tty: bool,
   pub started_at_ms: i64,
-  pub session_id: String,
+  pub run_id: String,
   /// The terminal type the executor set instead of the client's.
   pub term_fallback: Option<TermFallback>,
   input: mpsc::UnboundedSender<Input>,
@@ -101,7 +101,7 @@ impl Proc {
       pid,
       tty,
       started_at_ms: now_ms(),
-      session_id: spec.session_id.clone(),
+      run_id: spec.run_id.clone(),
       term_fallback,
       input,
       fanout: Mutex::new(Fanout {

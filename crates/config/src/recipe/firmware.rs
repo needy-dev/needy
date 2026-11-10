@@ -20,7 +20,7 @@ pub struct Dmi {
   pub board_vendor: Option<String>,
   pub board_name: Option<String>,
   pub chassis_type: Option<ChassisType>,
-  /// The system serial. `{hash}` derives from the session seed, and
+  /// The system serial. `{hash}` derives from the run seed, and
   /// `{uuid_hex}` is the system UUID's 32 upper-case hex digits.
   pub serial: Option<Template>,
   /// The baseboard serial, with the same placeholders as `serial`.

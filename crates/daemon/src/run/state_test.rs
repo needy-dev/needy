@@ -1,9 +1,9 @@
-use needy_core::types::SessionState::*;
+use needy_core::types::RunState::*;
 
 use super::*;
 
 #[test]
-fn a_session_starts_creating_and_runs() {
+fn a_run_starts_creating_and_runs() {
   let state = State::new();
   assert_eq!(state.get(), Creating);
   assert_eq!(state.advance(Running), Ok(Creating));
@@ -46,7 +46,7 @@ fn an_actor_exit_during_a_stop_is_refused() {
 }
 
 #[test]
-fn a_creating_session_cannot_stop_but_can_fail() {
+fn a_creating_run_cannot_stop_but_can_fail() {
   let state = State::new();
   assert_eq!(state.advance(Stopping).unwrap_err().from, Creating);
   assert_eq!(state.advance(Failed), Ok(Creating));
@@ -54,14 +54,14 @@ fn a_creating_session_cannot_stop_but_can_fail() {
 }
 
 #[test]
-fn an_actor_that_exits_while_its_session_is_created_finishes_it() {
+fn an_actor_that_exits_while_its_run_is_created_finishes_it() {
   let state = State::new();
   assert_eq!(state.advance(Finished), Ok(Creating));
   assert_eq!(state.advance(Running).unwrap_err().from, Finished);
 }
 
 #[test]
-fn a_running_session_whose_actor_never_reported_an_exit_can_fail() {
+fn a_running_run_whose_actor_never_reported_an_exit_can_fail() {
   let state = State::new();
   state.advance(Running).unwrap();
   assert_eq!(state.advance(Failed), Ok(Running));

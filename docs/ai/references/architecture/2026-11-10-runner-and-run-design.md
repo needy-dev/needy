@@ -1,6 +1,8 @@
 # Runners and runs
 
-**Status**: design, 2026-11-10. Nothing here is implemented. The owner chose
+**Status**: design, 2026-11-10. Slice 2 is partly implemented: *session* is
+renamed *run* everywhere, while `--no-actor` stays as `needy run create
+--no-actor` until `exec --runner` exists. Nothing else is implemented. The owner chose
 the model (runners as registered machines; actors and executors as what runs on
 them; runs instead of sessions); open questions are at the end. This note
 absorbs slice 9 (persistence) of the

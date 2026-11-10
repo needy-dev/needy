@@ -167,7 +167,7 @@ fn info(proc: &Proc, executor: &str) -> ProcessInfo {
     }),
     tty: proc.tty,
     started_at_ms: proc.started_at_ms,
-    session_id: proc.session_id.clone(),
+    run_id: proc.run_id.clone(),
     // TODO(process-origin): the executor does not keep who started a
     // process; the control daemon, which relays every start, fills it in.
     // Keeping it here waits for an executor that serves more than one daemon.
@@ -192,7 +192,7 @@ impl ProcessService for ExecutorService {
           clear_env: start.clear_env,
           tty,
           no_stdin: start.no_stdin,
-          session_id: start.session_id,
+          run_id: start.run_id,
           search_path_if_missing: start.search_path_if_missing,
         };
         let proc = self.host.spawn(spec).map_err(spawn_status)?;
@@ -245,8 +245,8 @@ impl ProcessService for ExecutorService {
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
-    let session = request.into_inner().session_id;
-    let processes = self.host.list().iter().filter(|p| session.is_empty() || p.session_id == session).map(|p| info(p, &self.name)).collect();
+    let run = request.into_inner().run_id;
+    let processes = self.host.list().iter().filter(|p| run.is_empty() || p.run_id == run).map(|p| info(p, &self.name)).collect();
     Ok(Response::new(ListProcessesResponse { processes }))
   }
 

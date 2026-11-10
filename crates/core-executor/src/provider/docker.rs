@@ -117,7 +117,7 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
     ),
     user: Some(format!("{}:{}", spec.user.uid, spec.user.gid)),
     hostname: spec.hostname.clone(),
-    labels: Some(HashMap::from([("needy.session".to_string(), spec.session.clone())])),
+    labels: Some(HashMap::from([("needy.run".to_string(), spec.run.clone())])),
     host_config: Some(HostConfig {
       auto_remove: Some(true),
       binds: Some(vec![

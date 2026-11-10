@@ -35,7 +35,7 @@ async fn events_keep_their_order_and_number_from_zero() {
   let events = memory.events();
   assert_eq!(kinds(&events), ["a.one", "a.two"]);
   assert_eq!(events.iter().map(|e| e.seq).collect::<Vec<_>>(), [0, 1]);
-  assert!(events.iter().all(|e| e.session == "s1" && e.version == 3));
+  assert!(events.iter().all(|e| e.run == "s1" && e.version == 3));
   assert_eq!(events[1].time_ms, 42);
   assert_eq!(events[1].payload.get(), r#"{"n":2}"#);
 }

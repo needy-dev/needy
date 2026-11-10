@@ -1358,7 +1358,7 @@ pub mod process_service_server {
     }
 }
 /// Generated client implementations.
-pub mod session_service_client {
+pub mod run_service_client {
     #![allow(
         unused_variables,
         dead_code,
@@ -1369,10 +1369,10 @@ pub mod session_service_client {
     use tonic::codegen::*;
     use tonic::codegen::http::Uri;
     #[derive(Debug, Clone)]
-    pub struct SessionServiceClient<T> {
+    pub struct RunServiceClient<T> {
         inner: tonic::client::Grpc<T>,
     }
-    impl SessionServiceClient<tonic::transport::Channel> {
+    impl RunServiceClient<tonic::transport::Channel> {
         /// Attempt to create a new client by connecting to a given endpoint.
         pub async fn connect<D>(dst: D) -> Result<Self, tonic::transport::Error>
         where
@@ -1383,7 +1383,7 @@ pub mod session_service_client {
             Ok(Self::new(conn))
         }
     }
-    impl<T> SessionServiceClient<T>
+    impl<T> RunServiceClient<T>
     where
         T: tonic::client::GrpcService<tonic::body::Body>,
         T::Error: Into<StdError>,
@@ -1401,7 +1401,7 @@ pub mod session_service_client {
         pub fn with_interceptor<F>(
             inner: T,
             interceptor: F,
-        ) -> SessionServiceClient<InterceptedService<T, F>>
+        ) -> RunServiceClient<InterceptedService<T, F>>
         where
             F: tonic::service::Interceptor,
             T::ResponseBody: Default,
@@ -1415,7 +1415,7 @@ pub mod session_service_client {
                 http::Request<tonic::body::Body>,
             >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
         {
-            SessionServiceClient::new(InterceptedService::new(inner, interceptor))
+            RunServiceClient::new(InterceptedService::new(inner, interceptor))
         }
         /// Compress requests with the given encoding.
         ///
@@ -1448,11 +1448,11 @@ pub mod session_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
-        pub async fn create_session(
+        pub async fn create_run(
             &mut self,
-            request: impl tonic::IntoRequest<super::CreateSessionRequest>,
+            request: impl tonic::IntoRequest<super::CreateRunRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::CreateSessionResponse>,
+            tonic::Response<super::CreateRunResponse>,
             tonic::Status,
         > {
             self.inner
@@ -1465,20 +1465,17 @@ pub mod session_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.SessionService/CreateSession",
+                "/needy.v1.RunService/CreateRun",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.SessionService", "CreateSession"));
+                .insert(GrpcMethod::new("needy.v1.RunService", "CreateRun"));
             self.inner.unary(req, path, codec).await
         }
-        pub async fn get_session(
+        pub async fn get_run(
             &mut self,
-            request: impl tonic::IntoRequest<super::GetSessionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetSessionResponse>,
-            tonic::Status,
-        > {
+            request: impl tonic::IntoRequest<super::GetRunRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetRunResponse>, tonic::Status> {
             self.inner
                 .ready()
                 .await
@@ -1489,18 +1486,18 @@ pub mod session_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.SessionService/GetSession",
+                "/needy.v1.RunService/GetRun",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.SessionService", "GetSession"));
+                .insert(GrpcMethod::new("needy.v1.RunService", "GetRun"));
             self.inner.unary(req, path, codec).await
         }
-        pub async fn list_sessions(
+        pub async fn list_runs(
             &mut self,
-            request: impl tonic::IntoRequest<super::ListSessionsRequest>,
+            request: impl tonic::IntoRequest<super::ListRunsRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::ListSessionsResponse>,
+            tonic::Response<super::ListRunsResponse>,
             tonic::Status,
         > {
             self.inner
@@ -1513,18 +1510,18 @@ pub mod session_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.SessionService/ListSessions",
+                "/needy.v1.RunService/ListRuns",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.SessionService", "ListSessions"));
+                .insert(GrpcMethod::new("needy.v1.RunService", "ListRuns"));
             self.inner.unary(req, path, codec).await
         }
-        pub async fn stop_session(
+        pub async fn stop_run(
             &mut self,
-            request: impl tonic::IntoRequest<super::StopSessionRequest>,
+            request: impl tonic::IntoRequest<super::StopRunRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::StopSessionResponse>,
+            tonic::Response<super::StopRunResponse>,
             tonic::Status,
         > {
             self.inner
@@ -1537,18 +1534,18 @@ pub mod session_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.SessionService/StopSession",
+                "/needy.v1.RunService/StopRun",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.SessionService", "StopSession"));
+                .insert(GrpcMethod::new("needy.v1.RunService", "StopRun"));
             self.inner.unary(req, path, codec).await
         }
-        pub async fn get_session_logs(
+        pub async fn get_run_logs(
             &mut self,
-            request: impl tonic::IntoRequest<super::GetSessionLogsRequest>,
+            request: impl tonic::IntoRequest<super::GetRunLogsRequest>,
         ) -> std::result::Result<
-            tonic::Response<tonic::codec::Streaming<super::GetSessionLogsResponse>>,
+            tonic::Response<tonic::codec::Streaming<super::GetRunLogsResponse>>,
             tonic::Status,
         > {
             self.inner
@@ -1561,11 +1558,11 @@ pub mod session_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.SessionService/GetSessionLogs",
+                "/needy.v1.RunService/GetRunLogs",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.SessionService", "GetSessionLogs"));
+                .insert(GrpcMethod::new("needy.v1.RunService", "GetRunLogs"));
             self.inner.server_streaming(req, path, codec).await
         }
         pub async fn decide(
@@ -1582,17 +1579,17 @@ pub mod session_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.SessionService/Decide",
+                "/needy.v1.RunService/Decide",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.SessionService", "Decide"));
+                .insert(GrpcMethod::new("needy.v1.RunService", "Decide"));
             self.inner.unary(req, path, codec).await
         }
     }
 }
 /// Generated server implementations.
-pub mod session_service_server {
+pub mod run_service_server {
     #![allow(
         unused_variables,
         dead_code,
@@ -1601,64 +1598,55 @@ pub mod session_service_server {
         clippy::let_unit_value,
     )]
     use tonic::codegen::*;
-    /// Generated trait containing gRPC methods that should be implemented for use with SessionServiceServer.
+    /// Generated trait containing gRPC methods that should be implemented for use with RunServiceServer.
     #[async_trait]
-    pub trait SessionService: std::marker::Send + std::marker::Sync + 'static {
-        async fn create_session(
+    pub trait RunService: std::marker::Send + std::marker::Sync + 'static {
+        async fn create_run(
             &self,
-            request: tonic::Request<super::CreateSessionRequest>,
+            request: tonic::Request<super::CreateRunRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::CreateSessionResponse>,
+            tonic::Response<super::CreateRunResponse>,
             tonic::Status,
         >;
-        async fn get_session(
+        async fn get_run(
             &self,
-            request: tonic::Request<super::GetSessionRequest>,
+            request: tonic::Request<super::GetRunRequest>,
+        ) -> std::result::Result<tonic::Response<super::GetRunResponse>, tonic::Status>;
+        async fn list_runs(
+            &self,
+            request: tonic::Request<super::ListRunsRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::GetSessionResponse>,
+            tonic::Response<super::ListRunsResponse>,
             tonic::Status,
         >;
-        async fn list_sessions(
+        async fn stop_run(
             &self,
-            request: tonic::Request<super::ListSessionsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ListSessionsResponse>,
-            tonic::Status,
-        >;
-        async fn stop_session(
-            &self,
-            request: tonic::Request<super::StopSessionRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::StopSessionResponse>,
-            tonic::Status,
-        >;
-        /// Server streaming response type for the GetSessionLogs method.
-        type GetSessionLogsStream: tonic::codegen::tokio_stream::Stream<
-                Item = std::result::Result<super::GetSessionLogsResponse, tonic::Status>,
+            request: tonic::Request<super::StopRunRequest>,
+        ) -> std::result::Result<tonic::Response<super::StopRunResponse>, tonic::Status>;
+        /// Server streaming response type for the GetRunLogs method.
+        type GetRunLogsStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::GetRunLogsResponse, tonic::Status>,
             >
             + std::marker::Send
             + 'static;
-        async fn get_session_logs(
+        async fn get_run_logs(
             &self,
-            request: tonic::Request<super::GetSessionLogsRequest>,
-        ) -> std::result::Result<
-            tonic::Response<Self::GetSessionLogsStream>,
-            tonic::Status,
-        >;
+            request: tonic::Request<super::GetRunLogsRequest>,
+        ) -> std::result::Result<tonic::Response<Self::GetRunLogsStream>, tonic::Status>;
         async fn decide(
             &self,
             request: tonic::Request<super::DecideRequest>,
         ) -> std::result::Result<tonic::Response<super::DecideResponse>, tonic::Status>;
     }
     #[derive(Debug)]
-    pub struct SessionServiceServer<T> {
+    pub struct RunServiceServer<T> {
         inner: Arc<T>,
         accept_compression_encodings: EnabledCompressionEncodings,
         send_compression_encodings: EnabledCompressionEncodings,
         max_decoding_message_size: Option<usize>,
         max_encoding_message_size: Option<usize>,
     }
-    impl<T> SessionServiceServer<T> {
+    impl<T> RunServiceServer<T> {
         pub fn new(inner: T) -> Self {
             Self::from_arc(Arc::new(inner))
         }
@@ -1709,9 +1697,9 @@ pub mod session_service_server {
             self
         }
     }
-    impl<T, B> tonic::codegen::Service<http::Request<B>> for SessionServiceServer<T>
+    impl<T, B> tonic::codegen::Service<http::Request<B>> for RunServiceServer<T>
     where
-        T: SessionService,
+        T: RunService,
         B: Body + std::marker::Send + 'static,
         B::Error: Into<StdError> + std::marker::Send + 'static,
     {
@@ -1726,25 +1714,25 @@ pub mod session_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
-                "/needy.v1.SessionService/CreateSession" => {
+                "/needy.v1.RunService/CreateRun" => {
                     #[allow(non_camel_case_types)]
-                    struct CreateSessionSvc<T: SessionService>(pub Arc<T>);
+                    struct CreateRunSvc<T: RunService>(pub Arc<T>);
                     impl<
-                        T: SessionService,
-                    > tonic::server::UnaryService<super::CreateSessionRequest>
-                    for CreateSessionSvc<T> {
-                        type Response = super::CreateSessionResponse;
+                        T: RunService,
+                    > tonic::server::UnaryService<super::CreateRunRequest>
+                    for CreateRunSvc<T> {
+                        type Response = super::CreateRunResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::CreateSessionRequest>,
+                            request: tonic::Request<super::CreateRunRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as SessionService>::create_session(&inner, request).await
+                                <T as RunService>::create_run(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -1755,7 +1743,7 @@ pub mod session_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = CreateSessionSvc(inner);
+                        let method = CreateRunSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1771,25 +1759,23 @@ pub mod session_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/needy.v1.SessionService/GetSession" => {
+                "/needy.v1.RunService/GetRun" => {
                     #[allow(non_camel_case_types)]
-                    struct GetSessionSvc<T: SessionService>(pub Arc<T>);
-                    impl<
-                        T: SessionService,
-                    > tonic::server::UnaryService<super::GetSessionRequest>
-                    for GetSessionSvc<T> {
-                        type Response = super::GetSessionResponse;
+                    struct GetRunSvc<T: RunService>(pub Arc<T>);
+                    impl<T: RunService> tonic::server::UnaryService<super::GetRunRequest>
+                    for GetRunSvc<T> {
+                        type Response = super::GetRunResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::GetSessionRequest>,
+                            request: tonic::Request<super::GetRunRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as SessionService>::get_session(&inner, request).await
+                                <T as RunService>::get_run(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -1800,7 +1786,7 @@ pub mod session_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = GetSessionSvc(inner);
+                        let method = GetRunSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1816,25 +1802,25 @@ pub mod session_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/needy.v1.SessionService/ListSessions" => {
+                "/needy.v1.RunService/ListRuns" => {
                     #[allow(non_camel_case_types)]
-                    struct ListSessionsSvc<T: SessionService>(pub Arc<T>);
+                    struct ListRunsSvc<T: RunService>(pub Arc<T>);
                     impl<
-                        T: SessionService,
-                    > tonic::server::UnaryService<super::ListSessionsRequest>
-                    for ListSessionsSvc<T> {
-                        type Response = super::ListSessionsResponse;
+                        T: RunService,
+                    > tonic::server::UnaryService<super::ListRunsRequest>
+                    for ListRunsSvc<T> {
+                        type Response = super::ListRunsResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::ListSessionsRequest>,
+                            request: tonic::Request<super::ListRunsRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as SessionService>::list_sessions(&inner, request).await
+                                <T as RunService>::list_runs(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -1845,7 +1831,7 @@ pub mod session_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = ListSessionsSvc(inner);
+                        let method = ListRunsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1861,25 +1847,25 @@ pub mod session_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/needy.v1.SessionService/StopSession" => {
+                "/needy.v1.RunService/StopRun" => {
                     #[allow(non_camel_case_types)]
-                    struct StopSessionSvc<T: SessionService>(pub Arc<T>);
+                    struct StopRunSvc<T: RunService>(pub Arc<T>);
                     impl<
-                        T: SessionService,
-                    > tonic::server::UnaryService<super::StopSessionRequest>
-                    for StopSessionSvc<T> {
-                        type Response = super::StopSessionResponse;
+                        T: RunService,
+                    > tonic::server::UnaryService<super::StopRunRequest>
+                    for StopRunSvc<T> {
+                        type Response = super::StopRunResponse;
                         type Future = BoxFuture<
                             tonic::Response<Self::Response>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::StopSessionRequest>,
+                            request: tonic::Request<super::StopRunRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as SessionService>::stop_session(&inner, request).await
+                                <T as RunService>::stop_run(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -1890,7 +1876,7 @@ pub mod session_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = StopSessionSvc(inner);
+                        let method = StopRunSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1906,27 +1892,26 @@ pub mod session_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/needy.v1.SessionService/GetSessionLogs" => {
+                "/needy.v1.RunService/GetRunLogs" => {
                     #[allow(non_camel_case_types)]
-                    struct GetSessionLogsSvc<T: SessionService>(pub Arc<T>);
+                    struct GetRunLogsSvc<T: RunService>(pub Arc<T>);
                     impl<
-                        T: SessionService,
-                    > tonic::server::ServerStreamingService<super::GetSessionLogsRequest>
-                    for GetSessionLogsSvc<T> {
-                        type Response = super::GetSessionLogsResponse;
-                        type ResponseStream = T::GetSessionLogsStream;
+                        T: RunService,
+                    > tonic::server::ServerStreamingService<super::GetRunLogsRequest>
+                    for GetRunLogsSvc<T> {
+                        type Response = super::GetRunLogsResponse;
+                        type ResponseStream = T::GetRunLogsStream;
                         type Future = BoxFuture<
                             tonic::Response<Self::ResponseStream>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::GetSessionLogsRequest>,
+                            request: tonic::Request<super::GetRunLogsRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as SessionService>::get_session_logs(&inner, request)
-                                    .await
+                                <T as RunService>::get_run_logs(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -1937,7 +1922,7 @@ pub mod session_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = GetSessionLogsSvc(inner);
+                        let method = GetRunLogsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1953,12 +1938,10 @@ pub mod session_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/needy.v1.SessionService/Decide" => {
+                "/needy.v1.RunService/Decide" => {
                     #[allow(non_camel_case_types)]
-                    struct DecideSvc<T: SessionService>(pub Arc<T>);
-                    impl<
-                        T: SessionService,
-                    > tonic::server::UnaryService<super::DecideRequest>
+                    struct DecideSvc<T: RunService>(pub Arc<T>);
+                    impl<T: RunService> tonic::server::UnaryService<super::DecideRequest>
                     for DecideSvc<T> {
                         type Response = super::DecideResponse;
                         type Future = BoxFuture<
@@ -1971,7 +1954,7 @@ pub mod session_service_server {
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as SessionService>::decide(&inner, request).await
+                                <T as RunService>::decide(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -2020,7 +2003,7 @@ pub mod session_service_server {
             }
         }
     }
-    impl<T> Clone for SessionServiceServer<T> {
+    impl<T> Clone for RunServiceServer<T> {
         fn clone(&self) -> Self {
             let inner = self.inner.clone();
             Self {
@@ -2033,8 +2016,8 @@ pub mod session_service_server {
         }
     }
     /// Generated gRPC service name
-    pub const SERVICE_NAME: &str = "needy.v1.SessionService";
-    impl<T> tonic::server::NamedService for SessionServiceServer<T> {
+    pub const SERVICE_NAME: &str = "needy.v1.RunService";
+    impl<T> tonic::server::NamedService for RunServiceServer<T> {
         const NAME: &'static str = SERVICE_NAME;
     }
 }

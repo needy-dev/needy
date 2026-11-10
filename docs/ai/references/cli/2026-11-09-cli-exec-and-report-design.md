@@ -10,11 +10,11 @@ note. Profiles are described in
 ```text
 needy daemon                                   # control plane; also runs on every executor machine
 needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
-needy session  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
-needy exec     [--session ID] -- CMD …         # run a command through placement
-needy ps [-a] [--session ID] | attach ID | kill ID   # manage detached processes
+needy run  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
+needy exec     [--run ID] -- CMD …         # run a command through placement
+needy ps [-a] [--run ID] | attach ID | kill ID   # manage detached processes
 needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
-needy report   SESSION|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE]
+needy report   RUN|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
 ```
 
@@ -23,28 +23,28 @@ on logs on stderr: `-v` info, `-vv` debug for needy's crates, `-vvv`
 everything. Logs are off by default; the daemon also writes
 `daemon.YYYY-MM-DD.log` in its state directory.
 
-`ps` and `session ls` print borderless tables, or a JSON array with
-`-o/--output json`. `ps` shows each process's `SESSION` (`-` outside any
-session) and `ORIGIN`, who started it: `cli` (`needy exec`), `actor-proxy`
+`ps` and `run ls` print borderless tables, or a JSON array with
+`-o/--output json`. `ps` shows each process's `RUN` (`-` outside any
+run) and `ORIGIN`, who started it: `cli` (`needy exec`), `actor-proxy`
 (a command the actor routed), `fs` (`needy fs cp`), `files` (the daemon's
 copy-in and mirror-out) or `actor-mount` (the SFTP server behind an actor's
 workspace mount). The last three are needy's own processes; `ps` hides them
 unless `-a/--all` asks for them, in the table and in JSON alike, whose
-objects carry `session` and `origin`. The control daemon records the origin
+objects carry `run` and `origin`. The control daemon records the origin
 from the start it relays; a process it did not start shows `-` (JSON
-`null`). `--session ID` lists one session's processes. `STATE` is `running`,
+`null`). `--run ID` lists one run's processes. `STATE` is `running`,
 `exited` or `killed` (a signal ended it); `EXIT` is the exit code or the
 signal name, empty while the process runs. JSON carries `state`,
 `exit_code` and `signal` as separate fields.
 
-`session ls` lists stopped, finished and failed sessions with their state
+`run ls` lists stopped, finished and failed runs with their state
 until the daemon exits. Its columns are `ID`, `NAME`, `STATE`, `GROUP`,
 `EXECUTORS` and `EXIT`. `NAME` and `GROUP` show `-` when they were not
 given and default to the ID; JSON keeps the real values. `EXECUTORS` keeps
-the executors a session had after it gives them back, marked
+the executors a run had after it gives them back, marked
 `build=docker (released)`. `EXIT` is the driving program's exit code or
-signal, or the first 48 characters of why a failed session failed; it is
-empty while the session runs and for a session without an actor. JSON
+signal, or the first 48 characters of why a failed run failed; it is
+empty while the driving program runs and for a run without an actor. JSON
 carries `executors` as objects with `name`, `runtime` and `released`, and
 `exit_code`, `signal` and `failure` (the whole reason) as separate fields.
 
@@ -54,21 +54,21 @@ b5eac210aee1  -     finished  -      build=docker (released)   0
 4c0f3e9d1a27  -     running   -      here=native
 ```
 
-`session logs SESSION` prints the actor's
+`run logs RUN` prints the actor's
 serial console: the guest's boot messages and the driving program's terminal.
 
 Benchmarks are a developer task, not a product command: `cargo xtask bench`
 runs the latency and throughput probes, and `cargo xtask bench run --profile
 examples/bench/profile.yaml` builds them for the actor and runs them in a
-session. With `--state-dir` (or `NEEDY_STATE_DIR`) pointing at the daemon's
-state directory, it also prints the session's per-hook latencies, which the
+run. With `--state-dir` (or `NEEDY_STATE_DIR`) pointing at the daemon's
+state directory, it also prints the run's per-hook latencies, which the
 bench profile records with `trace: { timing: true }`.
 
 ### Paths
 
 | Directory | Default | Override | Holds |
 | --- | --- | --- | --- |
-| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `trace.db`, `sessions/` (each with its `trace.jsonl`), executor sockets and workspaces, the daemon log |
+| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `trace.db`, `runs/` (each with its `trace.jsonl`), executor sockets and workspaces, the daemon log |
 | Data | `$XDG_DATA_HOME/needy` | `NEEDY_DATA_DIR` | `images/default`, which `needy build` writes and the daemon boots |
 | Runtime | `$XDG_RUNTIME_DIR/needy`, else the state directory (macOS) | `NEEDY_RUNTIME_DIR` | `daemon.sock`, the default endpoint, and `local.sock` |
 
@@ -83,7 +83,7 @@ rule denies it (`needy: denied: …`) or chaos injects an errno
 (`needy: cannot start …`). When the stream ends before the command exited,
 `exec` and `attach` exit 255 with
 `needy: the connection ended before the command exited`, followed by the
-reason when the daemon gave one (`: session stopped`,
+reason when the daemon gave one (`: run stopped`,
 `: daemon shutting down`); the command's own status is unknown. `--output
 json` then carries `error` instead of `exit_code` and `signal`, and
 `--output ndjson` ends with an `error` line instead of an `exit` line.
@@ -170,7 +170,7 @@ cannot be attached`.
 When the daemon refuses the command, `json` prints `exit_code` and `error`, and
 `ndjson` prints an `error` and an `exit` line.
 
-Within a session, `ndjson` starts with the trace events of the command's
+Within a run, `ndjson` starts with the trace events of the command's
 placement, before `started`: one `fault.injected` line per fault chaos
 injected, then the `exec.decide` line with the arguments, the outcome (for
 example `{"run": {"executor": "build"}}` or `{"fault": "ECONNREFUSED"}`) and
@@ -179,7 +179,7 @@ the rules that matched. Each line is the event's payload with its kind as
 for a refused command in the status details as an `ExecRefusal`, so a refused
 command's lines come before its `error` line. A command run with `--executor`
 skips the rules, so it has fault lines but no `exec.decide` line; a command
-without a session has neither.
+without a run has neither.
 
 ### Current state
 
@@ -214,8 +214,8 @@ custom multiplexer.
 
 ## Trace
 
-Every event carries the session ID, a sequence number, a timestamp, a kind
-and a payload. Event kinds include session creation, stop and failure, the
+Every event carries the run ID, a sequence number, a timestamp, a kind
+and a payload. Event kinds include run creation, stop and failure, the
 actor's start, configuration and exit, file copies, each routing decision,
 exec start and exit (arguments, executor, origin, exit), network requests per
 network, injected faults, and the trace's own `trace.gap` and `trace.timing`.
@@ -231,13 +231,13 @@ auv's `auv-tracing` already exports runs through OpenTelemetry; a compatible
 event model lets both projects share one observability stack.
 
 **No terminal recording.** Output bytes are not part of the trace. The
-asciicast recordings under `sessions/<id>/casts/` were removed (owner,
+asciicast recordings under `runs/<id>/casts/` were removed (owner,
 2026-11-09).
 
 ### Current state
 
 The `needy-trace` crate carries the envelope; the payload schema is
-`needy_core::event`, versioned, and payloads are JSON objects. Each session
+`needy_core::event`, versioned, and payloads are JSON objects. Each run
 has one `Dispatch`: producers in the daemon and the actor gateway hand it
 events and never wait. A bounded queue of 4096 events feeds a worker that
 writes the profile's sinks in order. When the queue is full, events are
@@ -248,9 +248,9 @@ with a warning that the trace is incomplete.
 The profile's `trace:` selects the sinks (`sqlite` and `jsonl` by default) and
 `timing`, which records per-hook latencies (`exec.decide`, `exec.start`,
 `net.request`, `net.connect`) as one `trace.timing` event with count, total,
-minimum and maximum when the session stops. A failed `session create`
-records `session.fail` with the reason, using the default sinks when the
-profile itself could not be read. An exec without a session is not traced.
+minimum and maximum when the run stops. A failed `run create`
+records `run.fail` with the reason, using the default sinks when the
+profile itself could not be read. An exec without a run is not traced.
 Events the guest sends keep the time the guest gave them.
 
 `trace.db` has one schema and no migration from the database written before
@@ -277,11 +277,11 @@ in three formats that `-o/--output` picks:
 - `json`: a stable JSON summary of the same data (below).
 
 `--file FILE` writes the report to a file instead of stdout, without colors.
-`needy_core::report::render` renders every format from the session's events
+`needy_core::report::render` renders every format from the run's events
 and does no IO; the CLI picks the format and whether to color.
 
 ```text
-Session   b5eac210aee1  (profile smoke)
+Run       b5eac210aee1  (profile smoke)
 State     finished, driving program exit 0
 Duration  0.8s
 
@@ -309,18 +309,18 @@ The JSON summary has these fields:
 
 | Field | Meaning |
 | --- | --- |
-| `session`, `profile` | The session's ID and profile name (`null` before `session.create`). |
+| `run`, `profile` | The run's ID and profile name (`null` before `run.create`). |
 | `state` | `running`, `stopped`, `finished` or `failed`, as in the markdown overview. |
 | `duration_ms` | From the create to the first end, or to the last event. |
 | `actor_exit` | `{code, signal}` of the driving program, or `null`. |
-| `failure` | Why the session failed, or `null`. |
+| `failure` | Why the run failed, or `null`. |
 | `dropped_events` | Events the trace dropped; the counts may be low by as many. |
 | `route_names` | The names the actor routes (`["*"]` for every exec), or `null` without an actor. |
 | `commands` | `routed` (`[{executor, commands, failed}]`), `kept_on_actor`, `cli`, `denied`, `faults`, `failed`, `model_calls`. |
 | `top_commands` | `[{command, executor, count, slowest_ms}]`, most frequent first. |
 | `slowest_commands` | `[{command, ms}]`, the three slowest. |
 | `network` | `[{network, host, count}]` through the gateways, most frequent first. |
-| `findings` | `[{kind, message}]`; `kind` is `session_failed`, `probing`, `denied_command`, `denied_network` or `faults`. |
+| `findings` | `[{kind, message}]`; `kind` is `run_failed`, `probing`, `denied_command`, `denied_network` or `faults`. |
 | `events` | `--level detailed` only: `[{offset_ms, kind, payload}]`. |
 
 Command names in every format are what the actor or the user typed: a
@@ -354,7 +354,7 @@ Findings specific to needy:
 Example summary:
 
 ```markdown
-# Session report: 7f3a… (profile: rl-default, recipe: gce-e2-standard-4)
+# Run report: 7f3a… (profile: rl-default, recipe: gce-e2-standard-4)
 
 ## Overview
 | Duration | Actor commands | Routed to executor | Failed | Model calls (actor gateway) |
@@ -379,7 +379,7 @@ Actor network: openrouter.ai (142)
 
 ### Current state
 
-`needy report` reads the session's events from `trace.db` with the SQLite
+`needy report` reads the run's events from `trace.db` with the SQLite
 sink's reader, decodes each into a typed `needy_core::event` value, and
 renders them with `needy_core::report::render`, which does no IO. The
 markdown format is described here; an event of
@@ -389,12 +389,12 @@ report. Implemented today:
 - **Incomplete trace**: when the trace has `trace.gap` events, the report
   starts with a warning that names how many events were dropped.
 
-- **Title**: the session ID and the profile's name: its file name without
+- **Title**: the run ID and the profile's name: its file name without
   `.profile.yaml` (`mac.profile.yaml` is `mac`), or its directory's name for
   a file named `profile.yaml` (`examples/smoke/profile.yaml` is `smoke`).
 - **Overview**: duration (creation to the first of the actor's exit, the
   stop and the failure; tenths of a second under a minute, then minutes and
-  seconds, then hours and minutes), state (`failed` after `session.fail`), the driving
+  seconds, then hours and minutes), state (`failed` after `run.fail`), the driving
   program's exit, routed and kept commands, CLI
   commands, failed commands and model calls through the actor gateway.
   **Failed** counts commands that exited non-zero or by a signal and commands
@@ -404,8 +404,8 @@ report. Implemented today:
   kernel routed to needy and the rules kept on the actor; other commands run
   on the actor without a trace event. A line under the table says so and
   names the route list, or says that the kernel routed every exec, or that the
-  session ran no actor.
-- **Findings**: why the session failed to start, environment probing by
+  run had no actor.
+- **Findings**: why the run failed to start, environment probing by
   identity commands, denied commands,
   denied network requests, and injected faults by kind. Timing probes,
   harness replacement and reactions to faults are not implemented.
@@ -445,4 +445,4 @@ Copies and syncs files between the host, the actor and executors, like
 - Replay buffer size, and whether the 10-minute retention of finished
   processes should be configurable per executor.
 - Whether `ndjson` output chunks are text or base64.
-- Trace retention and size limits per session.
+- Trace retention and size limits per run.

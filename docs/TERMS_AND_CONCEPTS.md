@@ -43,9 +43,9 @@ instance key is equal share one instance.
 
 ### Instance key
 
-A template such as `{session}`, `{group}`, `{profile}` or `{rule}` that decides
+A template such as `{run}`, `{group}`, `{profile}` or `{rule}` that decides
 which commands share an executor instance. Built only from deterministic
-inputs, so a session can be replayed.
+inputs, so a run can be replayed.
 
 ### Daemon
 
@@ -64,32 +64,33 @@ executors are instances that run on them. Designed in
 [Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md);
 not implemented yet.
 
-## Sessions and configuration
+## Runs and configuration
 
-### Session
+### Run
 
-One actor and the executor instances bound to it, started from a profile. One
-RL rollout is one session. A session can also have no actor, for `needy exec`.
+One execution of a driving program in an actor, with the executor instances
+bound to it, started from a profile, and its trace and report. One RL rollout
+is one run. A run can also have no actor, for `needy exec`
+(`needy run create --no-actor`, until `exec --runner` replaces it; see
+[Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)).
 
-A session is `creating` while it acquires its executors, copies files in and
+A run is `creating` while it acquires its executors, copies files in and
 starts its actor, then `running`. It ends `stopped` (after `stopping`, by
-`needy session stop`), `finished` (its actor's driving program exited) or
+`needy run stop`), `finished` (its actor's driving program exited) or
 `failed` (its create failed, or its actor's VM exited before the driving
 program did, with the reason). The first of these end states stays: stopping a
-finished or failed session releases its executors but keeps its state.
+finished or failed run releases its executors but keeps its state.
 
-*Avoid*: rollout. The [runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)
-design renames *session* to **run**; until that lands, *session* is the
-current term.
+*Avoid*: session (the earlier name), rollout.
 
 ### Group
 
-A name shared by several sessions so that executors keyed by `{group}` serve
+A name shared by several runs so that executors keyed by `{group}` serve
 all of them, for example a parent agent and its sub-agents. **Provisional.**
 
 ### Profile
 
-A declarative YAML description of one session: which recipes to use, executors,
+A declarative YAML description of one run: which recipes to use, executors,
 command rules, file mappings, both networks and chaos.
 
 *Avoid*: config.
@@ -152,7 +153,7 @@ actor at the same path, `/home/<user>/workspace` by default.
 
 ### File mapping
 
-A named profile entry that moves files: **copy-in** at session start,
+A named profile entry that moves files: **copy-in** at run start,
 **mount** for a live view, **mirror-out** back to the host.
 
 ### Actor network and executor network
@@ -167,7 +168,7 @@ what the work operates on.
 ### Chaos
 
 Deterministic fault injection: a fault fires from the profile's seed, its index
-and how many times it has matched, so a replayed session injects the same
+and how many times it has matched, so a replayed run injects the same
 faults.
 
 ### Fault
@@ -183,10 +184,10 @@ firmware, devices, network identity. A recipe defines it.
 
 ### Trace
 
-Every event recorded during a session, in order: each carries the session, a
+Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide` and a payload. The
 profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under the
-session directory. Terminal output is not part of the trace.
+run directory. Terminal output is not part of the trace.
 
 ### Trace gap
 
@@ -195,7 +196,7 @@ its queue was full. A report of a trace with gaps says it is incomplete.
 
 ### Report
 
-A fixed-format markdown summary of one session, written by `needy report`.
+A fixed-format markdown summary of one run, written by `needy report`.
 
 ## Processes
 

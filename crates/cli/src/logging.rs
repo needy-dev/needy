@@ -2,7 +2,7 @@
 //! daemon also writes a daily file, `daemon.YYYY-MM-DD.log`, in its state
 //! directory.
 //!
-//! Process logs are not the product trace (sessions' events); those go
+//! Process logs are not the product trace (runs' events); those go
 //! through the daemon's trace store.
 
 use std::path::Path;

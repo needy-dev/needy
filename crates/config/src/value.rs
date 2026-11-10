@@ -1,6 +1,6 @@
 //! Values users write in profiles and recipes: durations, sizes, word lists,
 //! globs and templates. Each one checks its form when the document loads, so
-//! a typo fails at load time instead of when a session uses it.
+//! a typo fails at load time instead of when a run uses it.
 
 use std::fmt;
 use std::ops::Deref;
@@ -274,7 +274,7 @@ impl fmt::Display for Glob {
 }
 
 /// Text with `{name}` placeholders that are filled in later, such as an
-/// executor key `"{session}"` or a hostname `"instance-{hash}"`.
+/// executor key `"{run}"` or a hostname `"instance-{hash}"`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
 #[serde(transparent)]
 pub struct Template(String);

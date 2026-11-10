@@ -34,7 +34,7 @@ pub(super) fn apply(config: &GetConfigResponse) {
 }
 
 /// Schedules the profile's hwmon faults, each at its time after boot, and
-/// records each in the session's trace when it fires.
+/// records each in the run's trace when it fires.
 pub(super) fn schedule_faults(client: &Client, config: &GetConfigResponse) {
   for fault in config.hwmon_faults.clone() {
     let client = client.clone();

@@ -8,7 +8,7 @@ use crate::value::Template;
 #[serde(default, deny_unknown_fields)]
 pub struct Network {
   pub interface: Option<String>,
-  /// `{seq}` derives from the session seed.
+  /// `{seq}` derives from the run seed.
   pub mac: Option<Template>,
   pub metadata: Option<Metadata>,
 }

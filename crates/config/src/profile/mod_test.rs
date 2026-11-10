@@ -38,7 +38,7 @@ executors:
     docker:
       build: { context: ./env, dockerfile: Dockerfile.build, target: toolchain, args: { RUST_VERSION: "1.97" } }
       args: [--cpus=4, --memory=8g]
-    key: "{session}"
+    key: "{run}"
     max_procs: 4
     on_full: wait
     max_instances: 16
@@ -77,7 +77,7 @@ files:
   workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
   sessions: { mode: mirror-out, from: "actor:~/.codex/sessions/", to: "host:./sessions/", when: continuous }
   ignore_file: .needyignore
-session_files: [skills, workspace]
+run_files: [skills, workspace]
 chaos:
   seed: 42
   faults:
@@ -139,7 +139,7 @@ fn loads_every_section() {
   assert_eq!(files.mappings["codex-home"].from, Side::Host("~/.codex/".into()));
   assert_eq!(files.mappings["sessions"].when, MirrorWhen::Continuous);
   assert_eq!(files.ignore_file.as_deref(), Some(".needyignore"));
-  assert_eq!(p.session_files, ["skills", "workspace"]);
+  assert_eq!(p.run_files, ["skills", "workspace"]);
 
   assert_eq!(p.chaos.seed, 42);
   let faults = &p.chaos.faults;
@@ -169,7 +169,7 @@ fn executor_defaults() {
 
   let build = &p.executors["build"];
   assert_eq!(build.runtime, Runtime::Docker);
-  assert_eq!(build.key.as_str(), "{session}");
+  assert_eq!(build.key.as_str(), "{run}");
   assert_eq!(build.on_full, OnFull::Wait);
 }
 
@@ -211,7 +211,7 @@ commands:
   - { match: "**", env: { set: { BASE: "1" } } }
 resolvers:
   - { match: "make **", sticky: true }
-session_files: [workspace]
+run_files: [workspace]
 files:
   workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
 "#,
@@ -228,7 +228,7 @@ commands:
   - { match: "git **", to: actor }
 resolvers:
   - { match: "mytool **", sticky: true }
-session_files: []
+run_files: []
 files:
   workspace: { writable: false }
 "#,
@@ -250,7 +250,7 @@ files:
   // Scalars and lists replace.
   assert_eq!(p.default_executor.as_deref(), Some("build"));
   assert_eq!(p.actor.network.allow, [Glob::new("b.example.com")]);
-  assert!(p.session_files.is_empty());
+  assert!(p.run_files.is_empty());
   // Prepend lists: the child's entries first.
   let matchers: Vec<&str> = p.commands.iter().map(|r| r.matcher.as_str()).collect();
   assert_eq!(matchers, ["git **", "**"]);

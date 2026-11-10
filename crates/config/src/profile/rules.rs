@@ -100,7 +100,7 @@ pub struct Actions {
   /// Replaces the command; may use captures.
   pub exec: Option<Words>,
   pub env: EnvOps,
-  /// File mappings added to the session's for this command.
+  /// File mappings added to the run's for this command.
   pub files: Vec<String>,
   pub faults: Vec<Fault>,
   /// Presets whose actions apply as if written here.

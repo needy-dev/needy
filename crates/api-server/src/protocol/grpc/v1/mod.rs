@@ -1,12 +1,12 @@
 //! `needy.v1` adapters. Each converts requests to domain types, calls the
 //! daemon's trait, and converts the result or error back. None of them
-//! decides anything about the session; [`Caller`](crate::control::Caller)
+//! decides anything about the run; [`Caller`](crate::control::Caller)
 //! only scopes what an actor may name.
 
 pub mod guest;
 pub mod health;
 pub mod process;
-pub mod session;
+pub mod run;
 
 use std::pin::Pin;
 

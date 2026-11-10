@@ -69,7 +69,7 @@ message GuestSensor {
 message GetConfigRequest {}
 
 message GetConfigResponse {
-  string session_id = 1;
+  string run_id = 1;
   GuestUser user = 2;
   // Executable names or paths the kernel hands to the proxy.
   repeated string route_names = 3;
@@ -88,7 +88,7 @@ message GetConfigResponse {
 }
 
 // An event observed inside the actor. The listener the guest calls is bound to
-// its session, so the event names none.
+// its run, so the event names none.
 message TraceEvent {
   int64 time_ms = 2;
   // The event kind, for example "fault.injected".

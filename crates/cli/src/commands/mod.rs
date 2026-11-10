@@ -11,4 +11,4 @@ pub mod kill;
 pub mod profile;
 pub mod ps;
 pub mod report;
-pub mod session;
+pub mod run;

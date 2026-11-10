@@ -11,7 +11,7 @@ use std::pin::Pin;
 use needy_common::process::Exit;
 use needy_core::event::{Event, ExecutorRef};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, SessionState};
+use needy_core::types::{Origin, RunState};
 use tokio_stream::Stream;
 
 /// Who is calling, fixed by the listener the call arrived on.
@@ -20,9 +20,9 @@ pub enum Caller {
   /// A client of the control socket: the CLI, or another tool holding the
   /// daemon's token.
   Cli,
-  /// An actor, on the listener bound to its session. Its calls act on that
-  /// session; it may not create, stop or read the logs of sessions.
-  Actor { session: String },
+  /// An actor, on the listener bound to its run. Its calls act on that
+  /// run; it may not create, stop or read the logs of runs.
+  Actor { run: String },
 }
 
 /// Why the daemon refused or failed a call. Each variant is one row of the
@@ -39,7 +39,7 @@ pub enum ControlError {
   /// The request is malformed.
   #[error("{0}")]
   Invalid(String),
-  /// The request cannot be carried out, such as a session whose profile is
+  /// The request cannot be carried out, such as a run whose profile is
   /// invalid or a command that cannot start.
   #[error("{0}")]
   Failed(String),
@@ -69,11 +69,11 @@ pub type Result<T, E = ControlError> = std::result::Result<T, E>;
 pub type Inputs = Pin<Box<dyn Stream<Item = ExecInput> + Send>>;
 pub type Outputs = Pin<Box<dyn Stream<Item = Result<ExecOutput>> + Send>>;
 
-// ------------------------------------------------------------- sessions
+// ------------------------------------------------------------- runs
 
-/// A session to create from a profile.
+/// A run to create from a profile.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct NewSession {
+pub struct NewRun {
   /// The profile, self-contained: no `extends` to read, host paths
   /// absolute.
   pub profile_yaml: String,
@@ -82,9 +82,9 @@ pub struct NewSession {
   pub recipe_yaml: String,
   /// The profile's name, derived by the client from its file name.
   pub profile_name: String,
-  /// Empty for the session's ID.
+  /// Empty for the run's ID.
   pub group: String,
-  /// Empty for the session's ID.
+  /// Empty for the run's ID.
   pub name: String,
   pub start_actor: bool,
   /// Overrides the profile's driving program when not empty.
@@ -92,14 +92,14 @@ pub struct NewSession {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionInfo {
+pub struct RunInfo {
   pub id: String,
   pub name: String,
   pub group: String,
-  pub state: SessionState,
-  /// The executors the session holds.
+  pub state: RunState,
+  /// The executors the run holds.
   pub executors: Vec<ExecutorRef>,
-  /// The executors the session held and gave back when it stopped,
+  /// The executors the run held and gave back when it stopped,
   /// finished or failed.
   pub released: Vec<ExecutorRef>,
   pub created_ms: i64,
@@ -107,7 +107,7 @@ pub struct SessionInfo {
   /// How the actor's driving program ended; `None` while it runs, without
   /// an actor, or when the VM ended before the program reported its exit.
   pub actor_exit: Option<Exit>,
-  /// Why the session failed, with its causes.
+  /// Why the run failed, with its causes.
   pub failure: Option<String>,
 }
 
@@ -136,16 +136,16 @@ pub enum Target {
 }
 
 #[async_trait::async_trait]
-pub trait Sessions: Send + Sync + 'static {
-  async fn create(&self, request: NewSession) -> Result<SessionInfo>;
-  /// A running, finished, stopped or failed session by ID.
-  async fn get(&self, id: &str) -> Result<SessionInfo>;
-  async fn list(&self) -> Result<Vec<SessionInfo>>;
+pub trait Runs: Send + Sync + 'static {
+  async fn create(&self, request: NewRun) -> Result<RunInfo>;
+  /// A running, finished, stopped or failed run by ID.
+  async fn get(&self, id: &str) -> Result<RunInfo>;
+  async fn list(&self) -> Result<Vec<RunInfo>>;
   async fn stop(&self, id: &str) -> Result<()>;
   /// The actor's console output so far.
   async fn logs(&self, id: &str) -> Result<Vec<u8>>;
   /// Places a command the actor's proxy routed.
-  async fn decide(&self, session: &str, ctx: ExecContext) -> Result<Route>;
+  async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route>;
 }
 
 // ------------------------------------------------------------ processes
@@ -171,9 +171,9 @@ pub struct ExecSpec {
   /// A terminal of this size; pipes when `None`.
   pub tty: Option<WindowSize>,
   pub detach: bool,
-  /// Empty outside a session.
-  pub session: String,
-  /// Empty to let the session's rules decide.
+  /// Empty outside a run.
+  pub run: String,
+  /// Empty to let the run's rules decide.
   pub executor: String,
   pub no_stdin: bool,
   pub origin: Origin,
@@ -232,7 +232,7 @@ pub struct ProcessInfo {
   pub exit: Option<Exit>,
   pub tty: bool,
   pub started_ms: i64,
-  pub session: String,
+  pub run: String,
   /// Who started the process; `None` for a process the daemon did not start.
   pub origin: Option<Origin>,
 }
@@ -242,8 +242,8 @@ pub trait Processes: Send + Sync + 'static {
   /// Starts or attaches to a process; `input` is the rest of the caller's
   /// stream.
   async fn exec(&self, open: ExecOpen, input: Inputs) -> Result<Outputs>;
-  /// The processes of `session`, or of every executor when it is empty.
-  async fn list(&self, session: &str) -> Result<Vec<ProcessInfo>>;
+  /// The processes of `run`, or of every executor when it is empty.
+  async fn list(&self, run: &str) -> Result<Vec<ProcessInfo>>;
   async fn kill(&self, process: &str, signal: &str) -> Result<()>;
 }
 
@@ -252,7 +252,7 @@ pub trait Processes: Send + Sync + 'static {
 /// The actor's configuration, which its init asks for at boot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestConfig {
-  pub session: String,
+  pub run: String,
   pub user: GuestUser,
   /// Command names the kernel routes; `*` routes every exec.
   pub route_names: Vec<String>,
@@ -304,17 +304,17 @@ pub struct GuestFault {
   pub temp_mc: i32,
 }
 
-/// The actor's side of its session. Every call names the session the
+/// The actor's side of its run. Every call names the run the
 /// actor's listener is bound to.
 #[async_trait::async_trait]
 pub trait Guest: Send + Sync + 'static {
-  async fn config(&self, session: &str) -> Result<GuestConfig>;
+  async fn config(&self, run: &str) -> Result<GuestConfig>;
   /// An event observed inside the actor, at `time_ms`.
-  async fn event(&self, session: &str, time_ms: i64, event: Event) -> Result<()>;
+  async fn event(&self, run: &str, time_ms: i64, event: Event) -> Result<()>;
   /// The driving program's exit.
-  async fn exit(&self, session: &str, exit: Exit) -> Result<()>;
+  async fn exit(&self, run: &str, exit: Exit) -> Result<()>;
   /// A copy-in mapping's archive.
-  async fn fetch_files(&self, session: &str, name: &str) -> Result<Vec<u8>>;
+  async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>>;
   /// A mirror-out mapping's archive.
-  async fn push_files(&self, session: &str, name: &str, archive: Vec<u8>) -> Result<()>;
+  async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()>;
 }

@@ -1,5 +1,10 @@
 # Module layout redesign
 
+> **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
+> API, the CLI and the trace (slice 2 of
+> [Runners and runs](2026-11-10-runner-and-run-design.md)). This note keeps
+> the word it was written with: read *session* as *run*.
+
 **Status**: accepted, 2026-11-09. Slices are implemented in order; see
 [Slices](#slices).
 

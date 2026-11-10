@@ -37,7 +37,7 @@ impl Provider for Native {
     Ok(handle)
   }
 
-  /// This machine outlives its sessions.
+  /// This machine outlives its runs.
   async fn destroy(&self, _handle: &InstanceHandle) -> Result<(), Error> {
     Ok(())
   }

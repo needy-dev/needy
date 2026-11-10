@@ -1,5 +1,10 @@
 # Closed-loop milestone
 
+> **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
+> API, the CLI and the trace (slice 2 of
+> [Runners and runs](2026-11-10-runner-and-run-design.md)). This note keeps
+> the word it was written with: read *session* as *run*.
+
 **Status**: mostly done; see
 [closed-loop results](2026-11-09-closed-loop-results-evidence.md). The goal is one end-to-end loop that exercises every part of
 the [actor and executor separation](2026-11-09-actor-executor-separation-design.md)

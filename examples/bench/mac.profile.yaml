@@ -31,4 +31,4 @@ commands:
 files:
   workspace: { mode: mount, from: "executor:mac:/Users/user/needy-ws/demo/", to: "actor:~/workspace/", writable: true }
   probe: { mode: copy-in, from: "host:../../target/bench-probe/", to: "actor:~/probe/" }
-session_files: [workspace, probe]
+run_files: [workspace, probe]

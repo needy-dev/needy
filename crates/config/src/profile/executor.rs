@@ -17,7 +17,7 @@ pub struct Executor {
   pub workspace: Option<String>,
   /// Actor path prefix to executor path prefix.
   pub path_map: BTreeMap<String, String>,
-  /// Commands whose key renders equal share one instance: `{session}`,
+  /// Commands whose key renders equal share one instance: `{run}`,
   /// `{profile}`, `{group}`, `{rule}`.
   pub key: Template,
   /// Matched commands running at once per instance.
@@ -36,7 +36,7 @@ impl Default for Executor {
       remote: None,
       workspace: None,
       path_map: BTreeMap::new(),
-      key: Template::new("{session}"),
+      key: Template::new("{run}"),
       max_procs: None,
       on_full: OnFull::Wait,
       max_instances: None,

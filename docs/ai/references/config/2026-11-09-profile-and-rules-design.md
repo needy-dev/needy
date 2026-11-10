@@ -15,15 +15,15 @@ without it:
 | Routing: actor or which executor | Yes | The syscall waits for it. |
 | Network allowlists, denials | Yes | Afterwards is too late. |
 | Chaos: fail this `open` with `EIO` | Yes | It applies to this call. |
-| Recipe identity | Yes, but static | Fixed when the session starts. |
+| Recipe identity | Yes, but static | Fixed when the run starts. |
 | Did the program probe its environment? | No | The whole trace answers better. |
 | Reward hacking, reading answers | No | Needs context before and after. |
 | Did the final answer get each dimension right? | No | Naturally after the fact. |
-| Model A vs. model B, regressions | No | Spans sessions. |
+| Model A vs. model B, regressions | No | Spans runs. |
 
 Run-time rules are therefore declarative only: no scripts and no LLM calls on
 the syscall path. Each decision is a function of the profile, the seed and the
-event, so a session can be replayed exactly. After-the-fact analysis runs
+event, so a run can be replayed exactly. After-the-fact analysis runs
 outside needy on the trace (see the
 [CLI note](../cli/2026-11-09-cli-exec-and-report-design.md#trace)).
 
@@ -44,14 +44,14 @@ the recorded answer. It is off by default.
   ``commands[2].when.script: unknown field `script` ``.
 - After loading, `needy-config`'s `validate` checks the names a profile uses:
   presets in `use:`, executors in `to:`, `executor:`, `default_executor`,
-  `unknown` and `executor:NAME:` sides, and file mappings in `session_files`
+  `unknown` and `executor:NAME:` sides, and file mappings in `run_files`
   and a rule's `files:`. Each problem is an error finding. `needy profile
-  check` prints the findings and exits 1 on an error; session create refuses
+  check` prints the findings and exits 1 on an error; run create refuses
   the profile.
 
 ## Profile structure
 
-A profile describes one session. Machines are described by
+A profile describes one run. Machines are described by
 [recipes](2026-11-09-recipe-design.md) and referenced as `builtin:NAME` or by a
 path relative to the profile.
 
@@ -105,7 +105,7 @@ executors:
         target: toolchain
         args: { RUST_VERSION: "1.97" }
       args: [--cpus=4, --memory=8g, --pids-limit=512]   # run options: docker run
-    key: "{session}"
+    key: "{run}"
     max_procs: 4          # matched commands running at once per instance
     on_full: wait         # wait | new | reject
     max_instances: 16
@@ -114,7 +114,7 @@ executors:
   vm:
     runtime: firecracker
     recipe: gce-e2-standard-4             # same machine as the actor
-    key: "{session}"
+    key: "{run}"
     max_procs: 2
 
   mac:
@@ -136,14 +136,14 @@ instances.
 
 | Key | Effect | Use |
 | --- | --- | --- |
-| `{session}` (default) | One instance per session | RL: sessions are isolated |
-| `{profile}` | Shared by every session of a profile | Shared build caches during development |
-| `{workspace}` | Shared per workspace | Several sessions on one repository |
+| `{run}` (default) | One instance per run | RL: runs are isolated |
+| `{profile}` | Shared by every run of a profile | Shared build caches during development |
+| `{workspace}` | Shared per workspace | Several runs on one repository |
 | `{rule}` | Shared per matching command rule | One Mac VM for every `xcodebuild` |
-| Combinations, such as `{session}:{cwd}` | Finer split | — |
+| Combinations, such as `{run}:{cwd}` | Finer split | — |
 
 Commands that operate on one workspace must land on one instance, or at least on
-one volume. A key may use only deterministic inputs, so that a session can be
+one volume. A key may use only deterministic inputs, so that a run can be
 replayed.
 
 ### Full instances and limits
@@ -162,7 +162,7 @@ replayed.
 `build` options and run options are separate: `docker.build.args` are build
 arguments, `docker.args` are `docker run` arguments. Builds are cached by the
 hash of their inputs. The resolved image digest is written to the trace, so a
-session can be reproduced after `latest` moves.
+run can be reproduced after `latest` moves.
 
 ### Pass-through limits
 
@@ -191,7 +191,7 @@ fields protected.
 ## Chaos
 
 Each fault fires from the profile's `seed`, its index and how many times it has
-matched (`nth`, `probability`), so a replayed session injects the same faults.
+matched (`nth`, `probability`), so a replayed run injects the same faults.
 
 | `on` | Subject matched by `match` | Effect |
 | --- | --- | --- |
@@ -206,15 +206,15 @@ are the second step of [rule evaluation](#evaluation).
 
 ## Trace
 
-`trace:` selects where the session's events go and whether hook latencies are
+`trace:` selects where the run's events go and whether hook latencies are
 recorded. Both keys are optional.
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `sinks` | `[sqlite, jsonl]` | `sqlite` writes the daemon's `trace.db`, which `needy report` reads; `jsonl` appends to `sessions/<id>/trace.jsonl`. An empty list records nothing. |
-| `timing` | `false` | Records the latency of `exec.decide`, `exec.start`, `net.request` and `net.connect` as one `trace.timing` event when the session stops |
+| `sinks` | `[sqlite, jsonl]` | `sqlite` writes the daemon's `trace.db`, which `needy report` reads; `jsonl` appends to `runs/<id>/trace.jsonl`. An empty list records nothing. |
+| `timing` | `false` | Records the latency of `exec.decide`, `exec.start`, `net.request` and `net.connect` as one `trace.timing` event when the run stops |
 
-A session whose profile cannot be read uses the defaults, so its `session.fail`
+A run whose profile cannot be read uses the defaults, so its `run.fail`
 event is still recorded. An OpenTelemetry sink is deferred. Terminal output
 is not recorded.
 
@@ -280,7 +280,7 @@ maps `argv[0]`, the command runs from the mapped path. Any other absolute
 executor runs it from that path when the path exists there; otherwise it runs
 the program of the same name from its own `PATH`. When neither exists, the
 error names the original path. A command placed with `--executor`, or run
-without a session, is never rewritten and gets no `PATH` fallback.
+without a run, is never rewritten and gets no `PATH` fallback.
 
 ### Composition
 
@@ -349,9 +349,9 @@ and outcome:
 
 - A command the actor's kernel routes is decided once, when the proxy asks;
   its later exec on the executor is not decided again.
-- A `needy exec` in a session without `--executor` runs the whole chain. A
+- A `needy exec` in a run without `--executor` runs the whole chain. A
   command the rules keep on the actor runs on `default_executor` (or the
-  session's first executor), and the event records that executor, since a CLI
+  run's first executor), and the event records that executor, since a CLI
   command has no actor to run on.
 - A `needy exec --executor NAME` skips the rules; only chaos runs, and no
   `exec.decide` event is recorded.
@@ -375,7 +375,7 @@ share one merge model, applied to the documents before they are typed:
 - Maps merge key by key, recursively. A child that sets
   `executors: { build: { max_procs: 8 } }` keeps the parent's other `build`
   fields and its other executors.
-- A child's scalar or list replaces the parent's: `session_files`,
+- A child's scalar or list replaces the parent's: `run_files`,
   `actor.network.allow`, a rule's `args`.
 - A child's `null` (`~`) removes the parent's value, so the field takes its
   default.
@@ -385,7 +385,7 @@ share one merge model, applied to the documents before they are typed:
 Relative paths resolve against the directory of the profile that was loaded,
 including paths a parent wrote.
 
-The client resolves the chain: `needy session create` sends the merged
+The client resolves the chain: `needy run create` sends the merged
 profile and the merged recipe file it names as text, so a control daemon on
 another machine reads no path on the client's.
 
@@ -442,8 +442,8 @@ mount keys ([rclone filtering](https://rclone.org/filtering/),
 
 | Mode | Direction | When | Example |
 | --- | --- | --- | --- |
-| `copy-in` | Host → actor or executor | Session start | `.agents/`, `AGENTS.md`, Codex configuration |
-| `mount` | Live view; the executor holds the data | During the session | The workspace |
+| `copy-in` | Host → actor or executor | Run start | `.agents/`, `AGENTS.md`, Codex configuration |
+| `mount` | Live view; the executor holds the data | During the run | The workspace |
 | `mirror-out` | Actor or executor → host | Continuously or at the end | `~/.codex/sessions`, `~/.claude/projects` |
 
 ```yaml
@@ -465,20 +465,20 @@ files:
   codex-sessions:
     mode: mirror-out
     from: actor:~/.codex/sessions/
-    to: host:./sessions/{session}/codex/
+    to: host:./runs/{run}/codex/
     when: continuous                    # continuous | end
     delete: false                       # never propagate deletions to the host
   ignore_file: .needyignore             # optional gitignore-style file, read as "-" rules
 
-session_files: [skills, codex-home, workspace, codex-sessions]
+run_files: [skills, codex-home, workspace, codex-sessions]
 
 commands:
   - match: "{xcodebuild,codesign} **"
     to: mac
-    files: [workspace-mac]              # added to session_files for this command
+    files: [workspace-mac]              # added to run_files for this command
 ```
 
-- Mappings are **named**. A session lists its mappings; a command rule may add
+- Mappings are **named**. A run lists its mappings; a command rule may add
   more. They accumulate as a union.
 - Sides are written `host:`, `actor:` and `executor:<name>:`. `~` is
   `/home/<user>` on every side, and every side uses the profile's UID and GID,

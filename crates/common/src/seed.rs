@@ -1,4 +1,4 @@
-//! Values derived from a session seed.
+//! Values derived from a run seed.
 
 /// splitmix64: a small mixer for deriving values from a seed. It is kept here
 /// rather than taken from `rand` because its output must never change between

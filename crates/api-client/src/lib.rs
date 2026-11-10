@@ -19,7 +19,7 @@ pub mod ready;
 use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
 use needy_api_proto::v1::process_service_client::ProcessServiceClient;
-use needy_api_proto::v1::session_service_client::SessionServiceClient;
+use needy_api_proto::v1::run_service_client::RunServiceClient;
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -101,8 +101,8 @@ impl Client {
     ProcessServiceClient::new(self.service()).max_decoding_message_size(usize::MAX).max_encoding_message_size(usize::MAX)
   }
 
-  pub fn sessions(&self) -> SessionServiceClient<Service> {
-    SessionServiceClient::new(self.service())
+  pub fn runs(&self) -> RunServiceClient<Service> {
+    RunServiceClient::new(self.service())
   }
 
   pub fn guest(&self) -> GuestServiceClient<Service> {

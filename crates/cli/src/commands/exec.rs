@@ -1,6 +1,6 @@
 //! `needy exec`: run a command through placement. People get the command's
 //! own terminal output; tools get `json` after completion or `ndjson` while
-//! it runs, which also carries the session's trace events for the command:
+//! it runs, which also carries the run's trace events for the command:
 //! the faults chaos injected and the placement decision. Those formats live
 //! here, not in the executor relay.
 
@@ -51,9 +51,9 @@ pub struct Args {
   /// Start from an empty environment.
   #[arg(long)]
   clear_env: bool,
-  /// Route within this session's rules and executors.
+  /// Route within this run's rules and executors.
   #[arg(long, default_value = "", hide_default_value = true)]
-  session: String,
+  run: String,
   /// Run on this executor instead of letting rules decide.
   #[arg(long, default_value = "", hide_default_value = true)]
   executor: String,
@@ -86,7 +86,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     clear_env: args.clear_env,
     tty: window,
     detach: args.detach,
-    session_id: args.session,
+    run_id: args.run,
     executor: args.executor,
     no_stdin: !forward_stdin,
     origin: Origin::Cli.into(),

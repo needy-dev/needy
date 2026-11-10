@@ -1,5 +1,10 @@
 # Actor and executor separation
 
+> **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
+> API, the CLI and the trace (slice 2 of
+> [Runners and runs](2026-11-10-runner-and-run-design.md)). This note keeps
+> the word it was written with: read *session* as *run*.
+
 **Status**: pending. This note records the direction agreed on 2026-11-09 and
 the experiments behind it. Nothing in it is implemented in this repository yet.
 It changes several entries in the

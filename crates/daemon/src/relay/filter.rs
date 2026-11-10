@@ -1,5 +1,5 @@
 //! The stream filters (`exec.output` interceptors) the relay installs on a
-//! session's exec streams.
+//! run's exec streams.
 
 use std::sync::Arc;
 
@@ -9,18 +9,18 @@ use needy_core::chaos::sftp::SftpTap;
 use needy_core::intercept::{Filtered, StreamFilter};
 use needy_core::types::Origin;
 
-use crate::session::Session;
+use crate::run::Run;
 
-/// The filter for a stream of `session` that runs at `cwd`: the SFTP fault
+/// The filter for a stream of `run` that runs at `cwd`: the SFTP fault
 /// tap on an actor's workspace mount when the profile has `file.open`
 /// faults, so a fault can answer `open` itself.
-pub fn install(session: &Session, origin: Origin, cwd: &str) -> Option<Arc<dyn StreamFilter>> {
-  if origin != Origin::ActorMount || !session.injector.has(FaultKind::FileOpen) {
+pub fn install(run: &Run, origin: Origin, cwd: &str) -> Option<Arc<dyn StreamFilter>> {
+  if origin != Origin::ActorMount || !run.injector.has(FaultKind::FileOpen) {
     return None;
   }
   Some(Arc::new(FileFaults {
     tap: SftpTap::new(cwd),
-    injector: session.injector.clone(),
+    injector: run.injector.clone(),
   }))
 }
 

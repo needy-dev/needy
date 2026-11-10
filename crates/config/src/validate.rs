@@ -65,9 +65,9 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
   {
     findings.push(Finding::error(format!("unknown names unknown executor {name:?}")));
   }
-  for name in &profile.session_files {
+  for name in &profile.run_files {
     if !profile.files.mappings.contains_key(name) {
-      findings.push(Finding::error(format!("session_files names unknown file mapping {name:?}")));
+      findings.push(Finding::error(format!("run_files names unknown file mapping {name:?}")));
     }
   }
   for (name, preset) in &profile.presets {

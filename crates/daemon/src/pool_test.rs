@@ -12,7 +12,7 @@ fn spec(name: &str, key: &str, max_procs: Option<u32>, on_full: OnFull) -> Insta
   InstanceSpec {
     name: name.into(),
     key: format!("{name}@{key}"),
-    session: key.into(),
+    run: key.into(),
     config: Executor {
       runtime: Runtime::Native,
       max_procs,
@@ -26,7 +26,7 @@ fn spec(name: &str, key: &str, max_procs: Option<u32>, on_full: OnFull) -> Insta
 }
 
 #[tokio::test]
-async fn sessions_with_one_key_share_an_instance_until_the_last_release() {
+async fn runs_with_one_key_share_an_instance_until_the_last_release() {
   let executor = testing::Executor::start().await;
   let pool = Pool::new(executor.native.clone(), None);
   let first = pool.acquire(spec("here", "g", None, OnFull::Wait)).await.unwrap();
@@ -35,7 +35,7 @@ async fn sessions_with_one_key_share_an_instance_until_the_last_release() {
   assert_eq!(pool.instances().await.len(), 1);
 
   pool.release(&first).await;
-  assert_eq!(pool.instances().await.len(), 1, "one session still holds it");
+  assert_eq!(pool.instances().await.len(), 1, "one run still holds it");
   pool.release(&second).await;
   assert!(pool.instances().await.is_empty());
 }
@@ -109,7 +109,7 @@ fn remote(name: &str, key: &str, endpoint: &str, token_env: Option<&str>) -> Ins
 // ROOT CAUSE:
 //
 // If an instance took long to create (a container starting, a remote
-// executor not answering yet), every other session's acquire waited for it,
+// executor not answering yet), every other run's acquire waited for it,
 // because `Pool::acquire` held the pool's lock while the provider created the
 // instance.
 //
@@ -124,7 +124,7 @@ async fn an_instance_being_created_does_not_hold_up_other_keys() {
   let dir = tempfile::tempdir().unwrap();
   let late = dir.path().join("late.sock");
   let endpoint = format!("unix:{}", late.display());
-  // Two sessions acquire the remote executor while it is not up yet.
+  // Two runs acquire the remote executor while it is not up yet.
   let slow = |pool: Arc<Pool>| {
     let spec = remote("far", "g", &endpoint, None);
     tokio::spawn(async move { pool.acquire(spec).await })
@@ -142,7 +142,7 @@ async fn an_instance_being_created_does_not_hold_up_other_keys() {
   assert!(Arc::ptr_eq(&first, &second), "one key, one instance");
   assert_eq!(pool.instances().await.len(), 2);
   pool.release(&first).await;
-  assert_eq!(pool.instances().await.len(), 2, "one session still holds it");
+  assert_eq!(pool.instances().await.len(), 2, "one run still holds it");
   pool.release(&second).await;
   assert_eq!(pool.instances().await.len(), 1);
 }

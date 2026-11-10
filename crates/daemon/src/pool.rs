@@ -1,7 +1,7 @@
 //! The executor instance pool: instances by key, their reference counts, and
 //! their slots.
 //!
-//! Sessions whose executor key renders equal share one instance. The pool
+//! Runs whose executor key renders equal share one instance. The pool
 //! creates an instance through its runtime's provider on the first
 //! [`Pool::acquire`] and destroys it when the last holder releases it. An
 //! instance with `max_procs` has that many slots; a command takes one for as
@@ -74,7 +74,7 @@ impl Instance {
 /// of that key wait for.
 type KeyCell = Arc<OnceCell<Arc<Instance>>>;
 
-/// The instances of every session, by key, and the providers that create
+/// The instances of every run, by key, and the providers that create
 /// them.
 pub struct Pool {
   /// The lock covers only the map and the reference counts; instances are
@@ -103,7 +103,7 @@ impl Pool {
   }
 
   /// The instance for the spec's key, created through the executor's
-  /// provider when no session holds one yet. Acquires of one key share one
+  /// provider when no run holds one yet. Acquires of one key share one
   /// creation; a failed creation leaves the key free for the next acquire.
   pub async fn acquire(&self, spec: InstanceSpec) -> Result<Arc<Instance>> {
     loop {
@@ -173,7 +173,7 @@ impl Pool {
   }
 
   /// The one pooled instance of the executor `name`, for a command outside
-  /// any session. Instances of the same executor under different keys make
+  /// any run. Instances of the same executor under different keys make
   /// the name ambiguous.
   pub async fn named(&self, name: &str) -> Result<Arc<Instance>, ControlError> {
     let instances = self.lock();
@@ -184,7 +184,7 @@ impl Pool {
       n => {
         matches.sort_by(|a, b| a.key.cmp(&b.key));
         let keys: Vec<&str> = matches.iter().map(|i| i.key.as_str()).collect();
-        Err(ControlError::Invalid(format!("executor {name} is ambiguous: {n} instances ({}); name the session instead", keys.join(", "))))
+        Err(ControlError::Invalid(format!("executor {name} is ambiguous: {n} instances ({}); name the run instead", keys.join(", "))))
       }
     }
   }

@@ -11,11 +11,11 @@ pub const GAP: &str = "trace.gap";
 /// `{"hooks": {HOOK: {"count", "total_us", "min_us", "max_us"}}}`.
 pub const TIMING: &str = "trace.timing";
 
-/// One event of one session.
+/// One event of one run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
-  pub session: String,
-  /// The event's place in its session, from 0, in the order Dispatch
+  pub run: String,
+  /// The event's place in its run, from 0, in the order Dispatch
   /// accepted it. Dropped events take no number; a `trace.gap` marks them.
   pub seq: u64,
   /// Milliseconds since the Unix epoch.

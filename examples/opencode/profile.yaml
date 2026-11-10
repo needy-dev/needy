@@ -28,7 +28,7 @@ actor:
 executors:
   build:
     runtime: docker
-    key: "{session}"
+    key: "{run}"
     max_procs: 8
 
 commands:
@@ -45,4 +45,4 @@ files:
     from: executor:build:~/workspace/
     to: actor:~/workspace/
     writable: true
-session_files: [workspace]
+run_files: [workspace]

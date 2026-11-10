@@ -20,11 +20,11 @@ pub struct Adapter<P> {
 }
 
 impl<P> Adapter<P> {
-  /// The session a call acts on: an actor's own, or the one the request
+  /// The run a call acts on: an actor's own, or the one the request
   /// names.
-  fn session(&self, named: String) -> String {
+  fn run(&self, named: String) -> String {
     match &self.caller {
-      Caller::Actor { session } => session.clone(),
+      Caller::Actor { run } => run.clone(),
       Caller::Cli => named,
     }
   }
@@ -55,7 +55,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
     let open = match first.payload {
       Some(exec_request::Payload::Start(start)) => {
         let mut spec = domain::exec_spec(start).map_err(ControlError::from)?;
-        spec.session = self.session(spec.session);
+        spec.run = self.run(spec.run);
         ExecOpen::Start(spec)
       }
       Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
@@ -74,8 +74,8 @@ impl<P: Processes> ProcessService for Adapter<P> {
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
-    let session = self.session(request.into_inner().session_id);
-    let processes = self.processes.list(&session).await?.into_iter().map(domain::proto_process_info).collect();
+    let run = self.run(request.into_inner().run_id);
+    let processes = self.processes.list(&run).await?.into_iter().map(domain::proto_process_info).collect();
     Ok(Response::new(ListProcessesResponse { processes }))
   }
 

@@ -57,7 +57,7 @@ pub(super) fn fill_placeholders(text: &str, seed: u64) -> String {
 
 // Version 4 bits in octet 6 and variant 10 in octet 8: RFC 9562 sections 4.1,
 // 4.2 and 5.4, https://www.rfc-editor.org/rfc/rfc9562.html#section-5.4
-fn session_uuid(seed: u64) -> String {
+fn run_uuid(seed: u64) -> String {
   let a = mix(seed, 10);
   let b = mix(seed, 11);
   let mut bytes = [0u8; 16];
@@ -97,7 +97,7 @@ fn chassis_number(value: &ChassisType) -> Option<u32> {
 /// The SMBIOS tables for a recipe's DMI; board fields fall back to the
 /// system's, and the chassis vendor is the system's.
 pub(super) fn smbios(dmi: &Dmi, seed: u64, findings: &mut Vec<Finding>) -> Smbios {
-  let uuid = session_uuid(seed);
+  let uuid = run_uuid(seed);
   let uuid_hex = uuid.replace('-', "").to_ascii_uppercase();
   let fill = |value: Option<&str>| value.map(|text| fill_placeholders(text, seed).replace("{uuid_hex}", &uuid_hex));
   let chassis_type = dmi.chassis_type.as_ref().and_then(|value| {

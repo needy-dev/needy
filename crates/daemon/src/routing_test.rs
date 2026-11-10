@@ -1,7 +1,7 @@
-use needy_api_server::control::{Route, Sessions, Target};
+use needy_api_server::control::{Route, Runs, Target};
 use needy_core::intercept::ExecContext;
 
-use crate::testing::{self, new_session};
+use crate::testing::{self, new_run};
 
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -25,8 +25,8 @@ fn ctx(argv: &[&str], cwd: &str) -> ExecContext {
 
 async fn route(argv: &[&str], cwd: &str) -> Route {
   let started = testing::daemon().await;
-  let created = Sessions::create(&started.daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
-  Sessions::decide(&started.daemon, &created.id, ctx(argv, cwd)).await.unwrap()
+  let created = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  Runs::decide(&started.daemon, &created.id, ctx(argv, cwd)).await.unwrap()
 }
 
 #[tokio::test]
@@ -104,13 +104,13 @@ commands:
   - { match: "python3 **", when: { under: "bash **" }, deny: under bash }
 "#;
   let started = testing::daemon().await;
-  let created = Sessions::create(&started.daemon, new_session(UNDER, started.dir.path())).await.unwrap();
+  let created = Runs::create(&started.daemon, new_run(UNDER, started.dir.path())).await.unwrap();
   let mut asked = ctx(&["python3", "-c", "1"], "/");
   asked.ancestors = vec![vec!["sh".into(), "-c".into(), "python3 -c 1".into()]];
-  let routed = Sessions::decide(&started.daemon, &created.id, asked.clone()).await.unwrap();
+  let routed = Runs::decide(&started.daemon, &created.id, asked.clone()).await.unwrap();
   assert_eq!(routed.target, Target::Executor("here".into()));
 
   asked.ancestors.insert(0, vec!["bash".into(), "-c".into(), "python3 -c 1".into()]);
-  let refused = Sessions::decide(&started.daemon, &created.id, asked).await.unwrap();
+  let refused = Runs::decide(&started.daemon, &created.id, asked).await.unwrap();
   assert_eq!(refused.target, Target::Refused("denied: under bash".into()));
 }

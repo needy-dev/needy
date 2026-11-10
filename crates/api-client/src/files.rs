@@ -10,10 +10,10 @@ use crate::{Client, Error, Kind, Result};
 
 /// Where the executor's `tar` runs, and who asks.
 pub struct Target {
-  /// The executor's name within the session; empty on an executor daemon.
+  /// The executor's name within the run; empty on an executor daemon.
   pub executor: String,
-  /// Empty outside a session.
-  pub session: String,
+  /// Empty outside a run.
+  pub run: String,
   pub origin: Origin,
 }
 
@@ -31,7 +31,7 @@ pub async fn push(client: &Client, target: &Target, archive: Vec<u8>, dir: &str)
 ///
 /// NOTICE: `tar -C` does not create its directory, and neither GNU tar nor
 /// bsdtar has a portable option that does. The executor's platform is not
-/// known here (through a session the client talks to the control daemon), so
+/// known here (through a run the client talks to the control daemon), so
 /// `mkdir -p` runs first, and where no `mkdir` program can start, as on
 /// Windows, `cmd`'s built-in `mkdir`, which creates parents too.
 async fn make_dir(client: &Client, target: &Target, dir: &str) -> Result<()> {
@@ -60,7 +60,7 @@ async fn run(client: &Client, target: &Target, argv: &[&str], stdin: Option<Vec<
   let start = ExecStart {
     argv: argv.iter().map(|a| a.to_string()).collect(),
     executor: target.executor.clone(),
-    session_id: target.session.clone(),
+    run_id: target.run.clone(),
     no_stdin: stdin.is_none(),
     origin: target.origin.into(),
     // macOS tar would otherwise add AppleDouble `._` files.

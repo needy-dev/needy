@@ -12,7 +12,7 @@ fn argv(s: &str) -> Vec<String> {
 /// One event of every kind.
 fn every_kind() -> Vec<Event> {
   vec![
-    Event::SessionCreate(SessionCreate {
+    Event::RunCreate(RunCreate {
       name: "demo".into(),
       group: "g".into(),
       profile: "smoke".into(),
@@ -22,8 +22,8 @@ fn every_kind() -> Vec<Event> {
         instance: "needy-build".into(),
       }],
     }),
-    Event::SessionStop(SessionStop {}),
-    Event::SessionFail(SessionFail {
+    Event::RunStop(RunStop {}),
+    Event::RunFail(RunFail {
       reason: "executor build: no such image".into(),
     }),
     Event::ActorStart(ActorStart {
@@ -162,18 +162,18 @@ fn payloads_are_plain_json_objects() {
 }
 
 #[test]
-fn a_session_stop_carries_no_attributes() {
-  assert_eq!(Event::SessionStop(SessionStop {}).payload(), "{}");
+fn a_run_stop_carries_no_attributes() {
+  assert_eq!(Event::RunStop(RunStop {}).payload(), "{}");
 }
 
 #[test]
 fn decode_rejects_unknown_kinds_versions_and_fields() {
   assert!(matches!(Event::decode("exec.bogus", SCHEMA_VERSION, "{}"), Err(DecodeError::Kind(_))));
-  assert!(matches!(Event::decode("session.stop", 0, "{}"), Err(DecodeError::Version { found: 0, .. })));
+  assert!(matches!(Event::decode("run.stop", 0, "{}"), Err(DecodeError::Version { found: 0, .. })));
   // Rows written before the typed schema stored flat string attributes.
   let old = r#"{"code":"0","signal":""}"#;
   assert!(matches!(Event::decode("actor.exit", SCHEMA_VERSION, old), Err(DecodeError::Payload { .. })));
-  assert!(matches!(Event::decode("session.stop", SCHEMA_VERSION, r#"{"":""}"#), Err(DecodeError::Payload { .. })));
+  assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION, r#"{"":""}"#), Err(DecodeError::Payload { .. })));
 }
 
 // `needy-trace` writes these two kinds itself, without knowing core's types;

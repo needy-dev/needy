@@ -4,7 +4,7 @@ use super::*;
 
 fn event(seq: u64, kind: &str, payload: serde_json::Value) -> Event {
   Event {
-    session: "s1".into(),
+    run: "s1".into(),
     seq,
     time_ms: 1_000 + seq as i64,
     kind: kind.into(),
@@ -16,10 +16,10 @@ fn event(seq: u64, kind: &str, payload: serde_json::Value) -> Event {
 #[tokio::test]
 async fn writes_one_envelope_per_line_and_appends() {
   let dir = tempfile::tempdir().unwrap();
-  let path = dir.path().join("sessions/s1/trace.jsonl");
+  let path = dir.path().join("runs/s1/trace.jsonl");
 
   let mut sink = Jsonl::create(&path).unwrap();
-  sink.write(&event(0, "session.create", serde_json::json!({"name": "demo"}))).await.unwrap();
+  sink.write(&event(0, "run.create", serde_json::json!({"name": "demo"}))).await.unwrap();
   drop(sink);
   let mut sink = Jsonl::create(&path).unwrap();
   sink.write(&event(1, "trace.gap", serde_json::json!({"dropped": 2}))).await.unwrap();
@@ -29,8 +29,8 @@ async fn writes_one_envelope_per_line_and_appends() {
   assert_eq!(
     lines,
     [
-      r#"{"session":"s1","seq":0,"time_ms":1000,"kind":"session.create","version":1,"payload":{"name":"demo"}}"#,
-      r#"{"session":"s1","seq":1,"time_ms":1001,"kind":"trace.gap","version":1,"payload":{"dropped":2}}"#,
+      r#"{"run":"s1","seq":0,"time_ms":1000,"kind":"run.create","version":1,"payload":{"name":"demo"}}"#,
+      r#"{"run":"s1","seq":1,"time_ms":1001,"kind":"trace.gap","version":1,"payload":{"dropped":2}}"#,
     ]
   );
 }

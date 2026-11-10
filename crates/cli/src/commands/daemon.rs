@@ -12,7 +12,7 @@ use crate::cli::Context;
 enum Mode {
   /// Run processes on this machine only.
   Executor,
-  /// Manage sessions, actors and executors.
+  /// Manage runs, actors and executors.
   Control,
 }
 
@@ -75,7 +75,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         docker_image: args.docker_image,
       })
       .await?;
-      // Sessions are stopped even when serving failed.
+      // Runs are stopped even when serving failed.
       daemon.serve(&listen, token).await?;
     }
   }

@@ -6,6 +6,11 @@
 [profile](../config/2026-11-09-profile-and-rules-design.md) and
 [recipe](../config/2026-11-09-recipe-design.md) notes.
 
+> **Migration notice (2026-11-10)**: *session* is now *run* (`needy run
+> create|ls|logs|stop`, `exec --run`, `{run}`, `run_files`, `run.*` events;
+> see [Runners and runs](2026-11-10-runner-and-run-design.md)). The dated
+> sections below keep the commands and names they were run with.
+
 Hosts:
 
 - **Linux host**: Intel Core i5-13600KF, 20 threads, 94 GB, RTX 4080 SUPER,
@@ -31,7 +36,7 @@ Tunnel: the executor listens locally and the tunnel carries the connection.
 | `needy exec` PTY, Ctrl-C, stdin, json and ndjson output, detach, attach with replay, kill | Pass on the Mac executor |
 | Bearer tokens on remote executors | Pass: a request without the token is rejected |
 | `max_procs` with `on_full: reject`; a detached process holds its slot until it exits | Pass |
-| Copy-in with rclone filters (`- /secret.txt`), mirror-out to `out/{session}/` | Pass on a native executor and in an actor ([`examples/chaos`](../../../../examples/chaos/profile.yaml)) |
+| Copy-in with rclone filters (`- /secret.txt`), mirror-out to `out/{run}/` | Pass on a native executor and in an actor ([`examples/chaos`](../../../../examples/chaos/profile.yaml)) |
 | Chaos: `exec` errno (`curl **` → `ECONNREFUSED`), `exec` delay (+500 ms) | Pass, on the CLI path and for a routed command in an actor; both exit 126 with `needy: fault injected: ECONNREFUSED` |
 | Chaos: SFTP `open` of `**/*.json` on the actor's workspace mount | Pass: `cat broken.json` gets `Input/output error`, `ok.txt` reads normally |
 | Chaos: scheduled hwmon fault | Pass: `sensors` shows `+101.0°C ALARM (CRIT)` two seconds after start |

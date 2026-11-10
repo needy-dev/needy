@@ -5,20 +5,20 @@ package needy.v1;
 
 import "needy/v1/process.proto";
 
-// SessionService manages sessions: one actor and the executors bound to it.
-service SessionService {
-  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
-  rpc GetSession(GetSessionRequest) returns (GetSessionResponse);
-  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
-  rpc StopSession(StopSessionRequest) returns (StopSessionResponse);
+// RunService manages runs: one actor and the executors bound to it.
+service RunService {
+  rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
+  rpc GetRun(GetRunRequest) returns (GetRunResponse);
+  rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  rpc StopRun(StopRunRequest) returns (StopRunResponse);
   // Stream the actor's console output: the guest's boot messages and the
-  // driving program's terminal. NOT_FOUND when the session has no actor.
-  rpc GetSessionLogs(GetSessionLogsRequest) returns (stream GetSessionLogsResponse);
+  // driving program's terminal. NOT_FOUND when the run has no actor.
+  rpc GetRunLogs(GetRunLogsRequest) returns (stream GetRunLogsResponse);
   // Decide where a command runs and how it is rewritten.
   rpc Decide(DecideRequest) returns (DecideResponse);
 }
 
-message CreateSessionRequest {
+message CreateRunRequest {
   // Profile as YAML text, self-contained: its `extends` chain merged and its
   // host paths absolute. The daemon reads no path on the client's machine.
   string profile_yaml = 1;
@@ -45,76 +45,76 @@ message ExecutorRef {
   string name = 1;
   string runtime = 2;
   string instance = 3;
-  // The session gave the executor back: it stopped, finished or failed.
+  // The run gave the executor back: it stopped, finished or failed.
   bool released = 4;
 }
 
-message Session {
-  string session_id = 1;
+message Run {
+  string run_id = 1;
   string name = 2;
   string group = 3;
-  SessionState state = 8;
+  RunState state = 8;
   repeated ExecutorRef executors = 5;
   int64 created_at_ms = 6;
-  // The profile's name, as `CreateSessionRequest.profile_name` gave it.
+  // The profile's name, as `CreateRunRequest.profile_name` gave it.
   string profile = 7;
   // How the actor's driving program ended. Unset while it runs, for a
-  // session without an actor, and for an actor whose VM ended before the
+  // run without an actor, and for an actor whose VM ended before the
   // program reported its exit.
   ExecExited actor_exit = 9;
-  // Why the session failed, with its causes. Empty unless it failed.
+  // Why the run failed, with its causes. Empty unless it failed.
   string failure = 10;
 
   reserved 4;
 }
 
-// A session's life cycle. The first terminal state (stopped, finished or
+// A run's life cycle. The first terminal state (stopped, finished or
 // failed) wins.
-enum SessionState {
-  SESSION_STATE_UNSPECIFIED = 0;
-  SESSION_STATE_CREATING = 1;
-  SESSION_STATE_RUNNING = 2;
-  SESSION_STATE_STOPPING = 3;
-  SESSION_STATE_STOPPED = 4;
+enum RunState {
+  RUN_STATE_UNSPECIFIED = 0;
+  RUN_STATE_CREATING = 1;
+  RUN_STATE_RUNNING = 2;
+  RUN_STATE_STOPPING = 3;
+  RUN_STATE_STOPPED = 4;
   // The actor's driving program exited.
-  SESSION_STATE_FINISHED = 5;
-  SESSION_STATE_FAILED = 6;
+  RUN_STATE_FINISHED = 5;
+  RUN_STATE_FAILED = 6;
 }
 
-message CreateSessionResponse {
-  Session session = 1;
+message CreateRunResponse {
+  Run run = 1;
 }
 
-message GetSessionRequest {
-  string session_id = 1;
+message GetRunRequest {
+  string run_id = 1;
 }
 
-message GetSessionResponse {
-  Session session = 1;
+message GetRunResponse {
+  Run run = 1;
 }
 
-message ListSessionsRequest {}
+message ListRunsRequest {}
 
-message ListSessionsResponse {
-  repeated Session sessions = 1;
+message ListRunsResponse {
+  repeated Run runs = 1;
 }
 
-message StopSessionRequest {
-  string session_id = 1;
+message StopRunRequest {
+  string run_id = 1;
 }
 
-message StopSessionResponse {}
+message StopRunResponse {}
 
-message GetSessionLogsRequest {
-  string session_id = 1;
+message GetRunLogsRequest {
+  string run_id = 1;
 }
 
-message GetSessionLogsResponse {
+message GetRunLogsResponse {
   bytes data = 1;
 }
 
 message DecideRequest {
-  string session_id = 1;
+  string run_id = 1;
   repeated string argv = 2;
   string cwd = 3;
   map<string, string> env = 4;

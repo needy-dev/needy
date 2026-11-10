@@ -55,14 +55,14 @@ fn exec_fault(command: &str, errno: Option<&str>) -> Event {
   })
 }
 
-/// An actor session: one routed command that exits 7, one kept on the actor,
+/// An actor run: one routed command that exits 7, one kept on the actor,
 /// one denied, one failed by an exec fault, one delayed, one CLI command and
 /// one model call.
-fn actor_session() -> Vec<Recorded> {
+fn actor_run() -> Vec<Recorded> {
   vec![
     at(
       1_000,
-      Event::SessionCreate(SessionCreate {
+      Event::RunCreate(RunCreate {
         name: "demo".into(),
         group: "demo".into(),
         profile: "smoke".into(),
@@ -104,7 +104,7 @@ fn actor_session() -> Vec<Recorded> {
         signal: None,
       }),
     ),
-    at(7_000, Event::SessionStop(SessionStop {})),
+    at(7_000, Event::RunStop(RunStop {})),
   ]
 }
 
@@ -115,13 +115,13 @@ fn line_after<'a>(report: &'a str, header: &str) -> &'a str {
 
 #[test]
 fn the_title_names_the_profile_not_its_directory() {
-  let report = render("7f3a", &actor_session(), Level::Summary, Format::Markdown);
-  assert_eq!(report.lines().next(), Some("# Session report: 7f3a (profile: smoke)"));
+  let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
+  assert_eq!(report.lines().next(), Some("# Run report: 7f3a (profile: smoke)"));
 }
 
 #[test]
 fn commands_a_fault_made_fail_count_as_failed() {
-  let report = render("7f3a", &actor_session(), Level::Summary, Format::Markdown);
+  let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
   // Duration | State | Driving program | Routed | Kept | CLI | Failed | Model calls
   assert_eq!(line_after(&report, "| Duration"), "| 5.0s | finished | exit 0 | 1 | 1 | 1 | 2 | 1 |");
   // Routed | Kept | Denied | Fault injected
@@ -130,7 +130,7 @@ fn commands_a_fault_made_fail_count_as_failed() {
 
 #[test]
 fn kept_on_actor_says_it_counts_only_routed_names() {
-  let report = render("7f3a", &actor_session(), Level::Summary, Format::Markdown);
+  let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
   assert!(
     report.contains(
       "🏠 Kept on actor counts only commands the actor's kernel routed to needy (`bash`, `git`); other commands ran on the actor without a trace event."
@@ -138,7 +138,7 @@ fn kept_on_actor_says_it_counts_only_routed_names() {
     "{report}"
   );
 
-  let mut every = actor_session();
+  let mut every = actor_run();
   every[1].event = Event::ActorConfig(ActorConfig {
     route_names: None,
     mounts: vec![],
@@ -146,14 +146,14 @@ fn kept_on_actor_says_it_counts_only_routed_names() {
   let report = render("7f3a", &every, Level::Summary, Format::Markdown);
   assert!(report.contains("🏠 Kept on actor counts every command the actor ran, except needy's own init and proxy."), "{report}");
 
-  let no_actor: Vec<_> = actor_session().into_iter().filter(|r| !matches!(r.event, Event::ActorConfig(_))).collect();
+  let no_actor: Vec<_> = actor_run().into_iter().filter(|r| !matches!(r.event, Event::ActorConfig(_))).collect();
   let report = render("7f3a", &no_actor, Level::Summary, Format::Markdown);
-  assert!(report.contains("🏠 No actor ran in this session."), "{report}");
+  assert!(report.contains("🏠 No actor ran in this run."), "{report}");
 }
 
 #[test]
 fn empty_activity_lines_are_omitted() {
-  let report = render("7f3a", &actor_session(), Level::Summary, Format::Markdown);
+  let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
   assert!(report.contains("- Actor network: api.example.com (1)\n"), "{report}");
   assert!(!report.contains("Executor network"), "{report}");
   // The daemon's own copy-in is not an executor command.
@@ -162,43 +162,43 @@ fn empty_activity_lines_are_omitted() {
 
 #[test]
 fn findings_list_denials_and_faults() {
-  let report = render("7f3a", &actor_session(), Level::Summary, Format::Markdown);
+  let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
   assert!(report.contains("- 🚫 Denied command: `git push --force`: no force\n"), "{report}");
   assert!(report.contains("- ℹ️ Injected faults: 2 (exec (2))\n"), "{report}");
 }
 
 #[test]
 fn detailed_adds_the_timeline() {
-  let report = render("7f3a", &actor_session(), Level::Detailed, Format::Markdown);
+  let report = render("7f3a", &actor_run(), Level::Detailed, Format::Markdown);
   assert!(report.contains("| +ms | Event | Details |"), "{report}");
   assert!(report.contains("| 200 | exec.decide |"), "{report}");
-  assert!(!render("7f3a", &actor_session(), Level::Summary, Format::Markdown).contains("Event timeline"));
+  assert!(!render("7f3a", &actor_run(), Level::Summary, Format::Markdown).contains("Event timeline"));
 }
 
 #[test]
 fn a_trace_with_gaps_is_reported_incomplete_at_the_top() {
-  let mut events = actor_session();
+  let mut events = actor_run();
   events.insert(3, at(1_220, Event::TraceGap(TraceGap { dropped: 5 })));
   events.insert(6, at(1_350, Event::TraceGap(TraceGap { dropped: 2 })));
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
   let mut lines = report.lines();
-  assert_eq!(lines.next(), Some("# Session report: 7f3a (profile: smoke)"));
+  assert_eq!(lines.next(), Some("# Run report: 7f3a (profile: smoke)"));
   assert_eq!(lines.next(), Some(""));
   assert_eq!(
     lines.next(),
     Some("> ⚠️ The trace is incomplete: 7 events were dropped when the trace queue was full, so the counts below may be low.")
   );
-  assert!(!render("7f3a", &actor_session(), Level::Summary, Format::Markdown).contains("incomplete"));
+  assert!(!render("7f3a", &actor_run(), Level::Summary, Format::Markdown).contains("incomplete"));
 }
 
 #[test]
-fn a_failed_session_shows_its_state_and_reason() {
+fn a_failed_run_shows_its_state_and_reason() {
   let events = vec![
     at(
       1_000,
-      Event::SessionCreate(SessionCreate {
+      Event::RunCreate(RunCreate {
         name: "demo".into(),
         group: "demo".into(),
         profile: "smoke".into(),
@@ -207,7 +207,7 @@ fn a_failed_session_shows_its_state_and_reason() {
     ),
     at(
       3_000,
-      Event::SessionFail(SessionFail {
+      Event::RunFail(RunFail {
         reason: "executor build: no such image".into(),
       }),
     ),
@@ -216,12 +216,12 @@ fn a_failed_session_shows_its_state_and_reason() {
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
   assert_eq!(line_after(&report, "| Duration"), "| 2.0s | failed | - | 0 | 0 | 0 | 0 | 0 |");
-  assert!(report.contains("- ❌ Session failed: executor build: no such image\n"), "{report}");
+  assert!(report.contains("- ❌ Run failed: executor build: no such image\n"), "{report}");
 }
 
 #[test]
 fn timing_summaries_are_not_activity() {
-  let mut events = actor_session();
+  let mut events = actor_run();
   let hooks = [(
     "exec.decide".to_string(),
     HookTiming {
@@ -238,13 +238,13 @@ fn timing_summaries_are_not_activity() {
     }),
   ));
 
-  assert_eq!(render("7f3a", &events, Level::Summary, Format::Markdown), render("7f3a", &actor_session(), Level::Summary, Format::Markdown));
+  assert_eq!(render("7f3a", &events, Level::Summary, Format::Markdown), render("7f3a", &actor_run(), Level::Summary, Format::Markdown));
 }
 
 fn create(time_ms: i64) -> Recorded {
   at(
     time_ms,
-    Event::SessionCreate(SessionCreate {
+    Event::RunCreate(RunCreate {
       name: "demo".into(),
       group: "demo".into(),
       profile: "smoke".into(),
@@ -255,14 +255,14 @@ fn create(time_ms: i64) -> Recorded {
 
 // ROOT CAUSE:
 //
-// If a session finished and was then stopped, the report said `stopped`
-// while `session ls` said `finished`, because the report took the state of
+// If a run finished and was then stopped, the report said `stopped`
+// while `run ls` said `finished`, because the report took the state of
 // the last terminal event and the daemon's state machine keeps the first.
 //
-// Before the fix, `session.stop` after `actor.exit` overwrote `finished`.
-// The fix keeps the first terminal state, as `session ls` does.
+// Before the fix, `run.stop` after `actor.exit` overwrote `finished`.
+// The fix keeps the first terminal state, as `run ls` does.
 #[test]
-fn a_session_stopped_after_it_finished_reports_finished() {
+fn a_run_stopped_after_it_finished_reports_finished() {
   let events = vec![
     create(1_000),
     at(
@@ -272,7 +272,7 @@ fn a_session_stopped_after_it_finished_reports_finished() {
         signal: None,
       }),
     ),
-    at(9_000, Event::SessionStop(SessionStop {})),
+    at(9_000, Event::RunStop(RunStop {})),
   ];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
@@ -287,9 +287,9 @@ fn a_session_stopped_after_it_finished_reports_finished() {
 // report said `finished` with no findings, because it counted the VM's exit
 // as a finish.
 //
-// Before the fix, an actor that never started read as a clean session.
+// Before the fix, an actor that never started read as a clean run.
 // The fix counts a VM exit before any `actor.exit` as a failure, which the
-// daemon records as `session.fail` with the reason; a later stop keeps it.
+// daemon records as `run.fail` with the reason; a later stop keeps it.
 #[test]
 fn a_vm_exit_without_a_driver_exit_reports_failed_with_the_reason() {
   let events = vec![
@@ -304,18 +304,18 @@ fn a_vm_exit_without_a_driver_exit_reports_failed_with_the_reason() {
     ),
     at(
       2_000,
-      Event::SessionFail(SessionFail {
+      Event::RunFail(RunFail {
         reason: "the actor's VM exited before its driving program did: firecracker exited with code 1".into(),
       }),
     ),
-    at(9_000, Event::SessionStop(SessionStop {})),
+    at(9_000, Event::RunStop(RunStop {})),
   ];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
   assert_eq!(line_after(&report, "| Duration"), "| 1.0s | failed | - | 0 | 0 | 0 | 0 | 0 |");
   assert!(
-    report.contains("- ❌ Session failed: the actor's VM exited before its driving program did: firecracker exited with code 1\n"),
+    report.contains("- ❌ Run failed: the actor's VM exited before its driving program did: firecracker exited with code 1\n"),
     "{report}"
   );
 }
@@ -347,8 +347,8 @@ fn a_vm_exit_after_the_driver_exit_reports_finished() {
 }
 
 #[test]
-fn a_session_stopped_while_running_reports_stopped() {
-  let events = vec![create(1_000), at(3_000, Event::SessionStop(SessionStop {}))];
+fn a_run_stopped_while_running_reports_stopped() {
+  let events = vec![create(1_000), at(3_000, Event::RunStop(RunStop {}))];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
@@ -357,14 +357,14 @@ fn a_session_stopped_while_running_reports_stopped() {
 
 // ROOT CAUSE:
 //
-// If a session lasted less than a second, the report said `0m 00s`, because
+// If a run lasted less than a second, the report said `0m 00s`, because
 // it showed whole minutes and seconds only.
 //
-// Before the fix, the owner's 0.8 s smoke session read as no time at all.
+// Before the fix, the owner's 0.8 s smoke run read as no time at all.
 // The fix shows tenths of a second under a minute, and coarser units above.
 #[test]
-fn a_sub_second_session_shows_its_duration() {
-  let events = vec![create(1_000), at(1_800, Event::SessionStop(SessionStop {}))];
+fn a_sub_second_run_shows_its_duration() {
+  let events = vec![create(1_000), at(1_800, Event::RunStop(RunStop {}))];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
@@ -386,14 +386,14 @@ fn human(events: &[Recorded]) -> String {
 }
 
 #[test]
-fn the_human_report_leads_with_the_session_state_and_duration() {
-  let report = human(&actor_session());
+fn the_human_report_leads_with_the_run_state_and_duration() {
+  let report = human(&actor_run());
 
   let head: Vec<&str> = report.lines().take(4).collect();
   assert_eq!(
     head,
     [
-      "Session   7f3a  (profile smoke)",
+      "Run       7f3a  (profile smoke)",
       "State     finished, driving program exit 0",
       "Duration  5.0s",
       "",
@@ -403,7 +403,7 @@ fn the_human_report_leads_with_the_session_state_and_duration() {
 
 #[test]
 fn the_human_report_counts_commands_per_executor_in_aligned_lines() {
-  let report = human(&actor_session());
+  let report = human(&actor_run());
 
   let commands: Vec<&str> = report.lines().skip_while(|l| *l != "Commands").take_while(|l| !l.is_empty()).collect();
   assert_eq!(
@@ -427,36 +427,36 @@ fn the_human_report_counts_commands_per_executor_in_aligned_lines() {
 
 #[test]
 fn the_human_report_has_no_markdown() {
-  let report = human(&actor_session());
+  let report = human(&actor_run());
 
   assert!(!report.contains('|') && !report.contains('#') && !report.contains('`'), "{report}");
 }
 
 #[test]
 fn the_human_report_omits_empty_sections() {
-  let events = vec![create(1_000), at(1_800, Event::SessionStop(SessionStop {}))];
+  let events = vec![create(1_000), at(1_800, Event::RunStop(RunStop {}))];
 
   let report = human(&events);
 
-  assert_eq!(report, "Session   7f3a  (profile smoke)\nState     stopped\nDuration  0.8s\n\nNo findings.\n");
+  assert_eq!(report, "Run       7f3a  (profile smoke)\nState     stopped\nDuration  0.8s\n\nNo findings.\n");
 }
 
 #[test]
 fn the_human_report_colors_failures_and_faults_only_when_asked() {
-  let colored = render("7f3a", &actor_session(), Level::Summary, Format::Human { color: true });
+  let colored = render("7f3a", &actor_run(), Level::Summary, Format::Human { color: true });
 
   assert!(colored.contains("\u{1b}[31m(1 failed)\u{1b}[0m"), "{colored}");
   assert!(colored.contains("\u{1b}[33minjected faults: 2 (exec (2))\u{1b}[0m"), "{colored}");
-  assert!(!human(&actor_session()).contains('\u{1b}'));
+  assert!(!human(&actor_run()).contains('\u{1b}'));
 }
 
 #[test]
-fn the_human_report_of_a_failed_session_says_why() {
+fn the_human_report_of_a_failed_run_says_why() {
   let events = vec![
     create(1_000),
     at(
       3_000,
-      Event::SessionFail(SessionFail {
+      Event::RunFail(RunFail {
         reason: "executor build: no such image".into(),
       }),
     ),
@@ -465,15 +465,15 @@ fn the_human_report_of_a_failed_session_says_why() {
   let report = human(&events);
 
   assert!(report.contains("\nState     failed\n"), "{report}");
-  assert!(report.ends_with("\nFindings\n  session failed: executor build: no such image\n"), "{report}");
+  assert!(report.ends_with("\nFindings\n  run failed: executor build: no such image\n"), "{report}");
 }
 
 #[test]
 fn the_json_report_summarizes_the_same_counts() {
-  let report = render("7f3a", &actor_session(), Level::Summary, Format::Json);
+  let report = render("7f3a", &actor_run(), Level::Summary, Format::Json);
 
   let json: serde_json::Value = serde_json::from_str(&report).unwrap();
-  assert_eq!(json["session"], "7f3a");
+  assert_eq!(json["run"], "7f3a");
   assert_eq!(json["profile"], "smoke");
   assert_eq!(json["state"], "finished");
   assert_eq!(json["duration_ms"], 5_000);
@@ -500,10 +500,10 @@ fn the_json_report_summarizes_the_same_counts() {
 
 #[test]
 fn the_detailed_json_report_adds_the_timeline() {
-  let report = render("7f3a", &actor_session(), Level::Detailed, Format::Json);
+  let report = render("7f3a", &actor_run(), Level::Detailed, Format::Json);
 
   let json: serde_json::Value = serde_json::from_str(&report).unwrap();
   let first = &json["events"][0];
-  assert_eq!((&first["offset_ms"], &first["kind"]), (&serde_json::json!(0), &serde_json::json!("session.create")));
+  assert_eq!((&first["offset_ms"], &first["kind"]), (&serde_json::json!(0), &serde_json::json!("run.create")));
   assert_eq!(first["payload"]["profile"], "smoke");
 }

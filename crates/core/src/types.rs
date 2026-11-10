@@ -1,5 +1,5 @@
 //! Values the system produces and that producers and consumers share:
-//! decisions, placements, session states, exec origins and injected faults.
+//! decisions, placements, run states, exec origins and injected faults.
 //! Values users write live in `needy-config`.
 
 use std::collections::BTreeMap;
@@ -61,11 +61,11 @@ pub struct Decision {
   pub fired: Vec<Fired>,
 }
 
-/// A session's life cycle. The first terminal state wins. The daemon's
-/// `session::state` holds the transitions.
+/// A run's life cycle. The first terminal state wins. The daemon's
+/// `run::state` holds the transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionState {
+pub enum RunState {
   Creating,
   Running,
   Stopping,
@@ -75,7 +75,7 @@ pub enum SessionState {
   Failed,
 }
 
-impl SessionState {
+impl RunState {
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Creating => "creating",
@@ -88,7 +88,7 @@ impl SessionState {
   }
 }
 
-impl fmt::Display for SessionState {
+impl fmt::Display for RunState {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
   }

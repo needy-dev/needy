@@ -17,7 +17,7 @@ actor:
       echo "== hwmon"; sensors | grep -m1 Package; sleep 3; sensors | grep -m1 Package
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
-  build: { runtime: docker, key: "{session}" }
+  build: { runtime: docker, key: "{run}" }
 commands:
   - { match: "{python3,curl} **", to: build }
 files:
@@ -34,8 +34,8 @@ files:
   results:
     mode: mirror-out
     from: "actor:~/out/"
-    to: "host:./out/{session}/"
-session_files: [seed, workspace, results]
+    to: "host:./out/{run}/"
+run_files: [seed, workspace, results]
 chaos:
   seed: 1
   faults:

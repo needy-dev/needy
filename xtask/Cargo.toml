@@ -8,10 +8,10 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["session"]
+default = ["run"]
 # `bench run` talks to a control daemon. The probes alone build without it, so
 # the static binary shipped into an actor needs no TLS or gRPC stack.
-session = ["dep:needy-api-client", "dep:needy-config", "dep:needy-trace", "dep:tokio"]
+run = ["dep:needy-api-client", "dep:needy-config", "dep:needy-trace", "dep:tokio"]
 
 [dependencies]
 anyhow.workspace = true

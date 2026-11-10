@@ -2,7 +2,7 @@
 //! [`Decision`].
 //!
 //! A decision depends only on the profile and the command context, so a
-//! session can be replayed. Every matching rule applies in order;
+//! run can be replayed. Every matching rule applies in order;
 //! single-valued fields take the first rule that sets them and collections
 //! accumulate, until a rule with `final: true`.
 

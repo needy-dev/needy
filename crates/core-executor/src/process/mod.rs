@@ -115,7 +115,7 @@ pub struct Spec {
   /// Rows and columns of a terminal; pipes when `None`.
   pub tty: Option<(u16, u16)>,
   pub no_stdin: bool,
-  pub session_id: String,
+  pub run_id: String,
   /// When `argv[0]` is an absolute path that does not exist here, run the
   /// program of the same name on `PATH` instead.
   pub search_path_if_missing: bool,

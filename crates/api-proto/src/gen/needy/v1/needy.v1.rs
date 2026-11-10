@@ -76,7 +76,7 @@ pub struct GetConfigRequest {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct GetConfigResponse {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
     #[prost(message, optional, tag="2")]
     pub user: ::core::option::Option<GuestUser>,
     /// Executable names or paths the kernel hands to the proxy.
@@ -107,7 +107,7 @@ pub struct GetConfigResponse {
     pub hwmon_faults: ::prost::alloc::vec::Vec<GuestFault>,
 }
 /// An event observed inside the actor. The listener the guest calls is bound to
-/// its session, so the event names none.
+/// its run, so the event names none.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct TraceEvent {
     #[prost(int64, tag="2")]
@@ -150,7 +150,7 @@ pub struct CheckResponse {
     pub instance_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub version: ::prost::alloc::string::String,
-    /// "control" for a daemon that manages sessions, "executor" for one that only runs processes.
+    /// "control" for a daemon that manages runs, "executor" for one that only runs processes.
     #[prost(string, tag="3")]
     pub role: ::prost::alloc::string::String,
     /// Operating system and architecture of the machine, for example "linux/x86_64".
@@ -181,10 +181,10 @@ pub struct ExecStart {
     /// Keep running after the client disconnects.
     #[prost(bool, tag="6")]
     pub detach: bool,
-    /// Session to route within. Empty means no session: run on `executor` directly.
+    /// Run to route within. Empty means no run: run on `executor` directly.
     #[prost(string, tag="7")]
-    pub session_id: ::prost::alloc::string::String,
-    /// Executor name. Empty lets the session's rules decide.
+    pub run_id: ::prost::alloc::string::String,
+    /// Executor name. Empty lets the run's rules decide.
     #[prost(string, tag="8")]
     pub executor: ::prost::alloc::string::String,
     /// Do not forward stdin; the process sees end of file at once.
@@ -274,7 +274,7 @@ pub struct ExecExited {
     #[prost(string, tag="2")]
     pub signal: ::prost::alloc::string::String,
 }
-/// One trace event of an exec, as the daemon records it for the session.
+/// One trace event of an exec, as the daemon records it for the run.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecEvent {
     /// The event kind, for example "exec.decide" or "fault.injected".
@@ -287,7 +287,7 @@ pub struct ExecEvent {
 /// Why the daemon ended an exec stream before the process exited.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecEnded {
-    /// For example "session stopped" or "daemon shutting down".
+    /// For example "run stopped" or "daemon shutting down".
     #[prost(string, tag="1")]
     pub reason: ::prost::alloc::string::String,
 }
@@ -317,7 +317,7 @@ pub mod exec_response {
         Exited(super::ExecExited),
         #[prost(string, tag="5")]
         Error(::prost::alloc::string::String),
-        /// Sent before `started` for an exec placed within a session: its
+        /// Sent before `started` for an exec placed within a run: its
         /// faults and placement decision.
         #[prost(message, tag="6")]
         Event(super::ExecEvent),
@@ -331,7 +331,7 @@ pub mod exec_response {
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListProcessesRequest {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProcessInfo {
@@ -352,7 +352,7 @@ pub struct ProcessInfo {
     #[prost(int64, tag="8")]
     pub started_at_ms: i64,
     #[prost(string, tag="9")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
     /// Who started the process. The control daemon sets it from the start it
     /// relayed; an executor, which does not keep it, and a daemon that did not
     /// start the process leave it unspecified.
@@ -375,7 +375,7 @@ pub struct KillProcessRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KillProcessResponse {
 }
-/// Who started an exec. It decides whether the daemon runs the session's rules
+/// Who started an exec. It decides whether the daemon applies the run's rules
 /// and how the trace and the report count the process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -422,7 +422,7 @@ impl Origin {
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CreateSessionRequest {
+pub struct CreateRunRequest {
     /// Profile as YAML text, self-contained: its `extends` chain merged and its
     /// host paths absolute. The daemon reads no path on the client's machine.
     #[prost(string, tag="1")]
@@ -454,81 +454,81 @@ pub struct ExecutorRef {
     pub runtime: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub instance: ::prost::alloc::string::String,
-    /// The session gave the executor back: it stopped, finished or failed.
+    /// The run gave the executor back: it stopped, finished or failed.
     #[prost(bool, tag="4")]
     pub released: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Session {
+pub struct Run {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub group: ::prost::alloc::string::String,
-    #[prost(enumeration="SessionState", tag="8")]
+    #[prost(enumeration="RunState", tag="8")]
     pub state: i32,
     #[prost(message, repeated, tag="5")]
     pub executors: ::prost::alloc::vec::Vec<ExecutorRef>,
     #[prost(int64, tag="6")]
     pub created_at_ms: i64,
-    /// The profile's name, as `CreateSessionRequest.profile_name` gave it.
+    /// The profile's name, as `CreateRunRequest.profile_name` gave it.
     #[prost(string, tag="7")]
     pub profile: ::prost::alloc::string::String,
     /// How the actor's driving program ended. Unset while it runs, for a
-    /// session without an actor, and for an actor whose VM ended before the
+    /// run without an actor, and for an actor whose VM ended before the
     /// program reported its exit.
     #[prost(message, optional, tag="9")]
     pub actor_exit: ::core::option::Option<ExecExited>,
-    /// Why the session failed, with its causes. Empty unless it failed.
+    /// Why the run failed, with its causes. Empty unless it failed.
     #[prost(string, tag="10")]
     pub failure: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CreateSessionResponse {
+pub struct CreateRunResponse {
     #[prost(message, optional, tag="1")]
-    pub session: ::core::option::Option<Session>,
+    pub run: ::core::option::Option<Run>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetSessionRequest {
+pub struct GetRunRequest {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetSessionResponse {
+pub struct GetRunResponse {
     #[prost(message, optional, tag="1")]
-    pub session: ::core::option::Option<Session>,
+    pub run: ::core::option::Option<Run>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListSessionsRequest {
+pub struct ListRunsRequest {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListSessionsResponse {
+pub struct ListRunsResponse {
     #[prost(message, repeated, tag="1")]
-    pub sessions: ::prost::alloc::vec::Vec<Session>,
+    pub runs: ::prost::alloc::vec::Vec<Run>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct StopSessionRequest {
+pub struct StopRunRequest {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct StopSessionResponse {
+pub struct StopRunResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetSessionLogsRequest {
+pub struct GetRunLogsRequest {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetSessionLogsResponse {
+pub struct GetRunLogsResponse {
     #[prost(bytes="vec", tag="1")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DecideRequest {
     #[prost(string, tag="1")]
-    pub session_id: ::prost::alloc::string::String,
+    pub run_id: ::prost::alloc::string::String,
     #[prost(string, repeated, tag="2")]
     pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(string, tag="3")]
@@ -570,11 +570,11 @@ pub struct DecideResponse {
     #[prost(bool, tag="7")]
     pub search_path_if_missing: bool,
 }
-/// A session's life cycle. The first terminal state (stopped, finished or
+/// A run's life cycle. The first terminal state (stopped, finished or
 /// failed) wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum SessionState {
+pub enum RunState {
     Unspecified = 0,
     Creating = 1,
     Running = 2,
@@ -584,32 +584,32 @@ pub enum SessionState {
     Finished = 5,
     Failed = 6,
 }
-impl SessionState {
+impl RunState {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "SESSION_STATE_UNSPECIFIED",
-            Self::Creating => "SESSION_STATE_CREATING",
-            Self::Running => "SESSION_STATE_RUNNING",
-            Self::Stopping => "SESSION_STATE_STOPPING",
-            Self::Stopped => "SESSION_STATE_STOPPED",
-            Self::Finished => "SESSION_STATE_FINISHED",
-            Self::Failed => "SESSION_STATE_FAILED",
+            Self::Unspecified => "RUN_STATE_UNSPECIFIED",
+            Self::Creating => "RUN_STATE_CREATING",
+            Self::Running => "RUN_STATE_RUNNING",
+            Self::Stopping => "RUN_STATE_STOPPING",
+            Self::Stopped => "RUN_STATE_STOPPED",
+            Self::Finished => "RUN_STATE_FINISHED",
+            Self::Failed => "RUN_STATE_FAILED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "SESSION_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "SESSION_STATE_CREATING" => Some(Self::Creating),
-            "SESSION_STATE_RUNNING" => Some(Self::Running),
-            "SESSION_STATE_STOPPING" => Some(Self::Stopping),
-            "SESSION_STATE_STOPPED" => Some(Self::Stopped),
-            "SESSION_STATE_FINISHED" => Some(Self::Finished),
-            "SESSION_STATE_FAILED" => Some(Self::Failed),
+            "RUN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUN_STATE_CREATING" => Some(Self::Creating),
+            "RUN_STATE_RUNNING" => Some(Self::Running),
+            "RUN_STATE_STOPPING" => Some(Self::Stopping),
+            "RUN_STATE_STOPPED" => Some(Self::Stopped),
+            "RUN_STATE_FINISHED" => Some(Self::Finished),
+            "RUN_STATE_FAILED" => Some(Self::Failed),
             _ => None,
         }
     }

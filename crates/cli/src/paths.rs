@@ -13,7 +13,7 @@ use etcetera::BaseStrategy;
 // slice (2) reads user configuration or `needy build` keeps a cache.
 #[derive(Debug, Clone)]
 pub struct Paths {
-  /// `trace.db`, sessions and the daemon log: `$XDG_STATE_HOME/needy`, or
+  /// `trace.db`, runs and the daemon log: `$XDG_STATE_HOME/needy`, or
   /// `NEEDY_STATE_DIR`.
   pub state: PathBuf,
   /// Images: `$XDG_DATA_HOME/needy`, or `NEEDY_DATA_DIR`.

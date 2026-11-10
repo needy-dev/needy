@@ -1,4 +1,4 @@
-//! Profiles: one session's user, actor, executors, routing rules, networks,
+//! Profiles: one run's user, actor, executors, routing rules, networks,
 //! file mappings, chaos and the trace.
 
 mod actor;
@@ -24,7 +24,7 @@ pub use trace::{Trace, TraceSink};
 
 use crate::{Error, Kind, Source, merge, source};
 
-/// One session: machines, routing rules, networks, files and chaos.
+/// One run: machines, routing rules, networks, files and chaos.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Profile {
@@ -37,8 +37,8 @@ pub struct Profile {
   /// Every rule that matches applies, in order.
   pub commands: Vec<Rule>,
   pub files: Files,
-  /// The mappings this session uses; empty means all of them.
-  pub session_files: Vec<String>,
+  /// The mappings this run uses; empty means all of them.
+  pub run_files: Vec<String>,
   pub chaos: Chaos,
   pub resolvers: Vec<Resolver>,
   pub unknown: UnknownPolicy,

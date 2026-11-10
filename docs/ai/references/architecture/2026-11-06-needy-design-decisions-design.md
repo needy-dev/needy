@@ -1,5 +1,10 @@
 # Needy design decisions
 
+> **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
+> API, the CLI and the trace (slice 2 of
+> [Runners and runs](2026-11-10-runner-and-run-design.md)). This note keeps
+> the word it was written with: read *session* as *run*.
+
 Reference for agents working in this repository. It records the decisions behind
 Needy's shape, including decisions that are accepted but not yet implemented. It
 is not a specification; read the code for current behavior.

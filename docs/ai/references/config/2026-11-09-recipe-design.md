@@ -12,8 +12,8 @@ that presents a chosen identity, as an evaluation may want.
 
 | | Recipe | Profile |
 | --- | --- | --- |
-| Describes | One machine | One session: which recipe the actor and each executor use, routing rules, both networks, chaos, file mappings |
-| Used by | `needy build --recipe NAME`; outputs are cached by the hash of their inputs | `needy session create --profile NAME` |
+| Describes | One machine | One run: which recipe the actor and each executor use, routing rules, both networks, chaos, file mappings |
+| Used by | `needy build --recipe NAME`; outputs are cached by the hash of their inputs | `needy run create --profile NAME` |
 | Reuse | One recipe can serve the actor and several executors | References recipes |
 
 When the actor and an executor use the same recipe, an in-process `uname()` in
@@ -77,9 +77,9 @@ devices:
 
 `{hash}` (8 hex digits) and `{seq}` (2 hex digits, 02 to ff, so a MAC that
 encodes an address never names a subnet's network or gateway) derive from the
-session seed. In `firmware.dmi.serial` and `board_serial`, `{uuid_hex}` is the
+run seed. In `firmware.dmi.serial` and `board_serial`, `{uuid_hex}` is the
 system UUID's 32 upper-case hex digits, as GCE serials carry it. A replayed
-session gets the same values; different sessions get different serial
+run gets the same values; different runs get different serial
 numbers and MAC addresses.
 
 Built-in recipes are referenced as `builtin:NAME`: `gce-ubuntu-22.04` and

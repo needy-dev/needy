@@ -1,4 +1,4 @@
-//! The events a session records: one [`EventKind`] and one serde payload per
+//! The events a run records: one [`EventKind`] and one serde payload per
 //! kind. Producers build an [`Event`] and hand its kind and JSON
 //! [`Event::raw`] payload to `needy-trace`; readers rebuild it with
 //! [`Event::decode`].
@@ -81,10 +81,10 @@ macro_rules! events {
 }
 
 events! {
-  SessionCreate(SessionCreate) = "session.create",
-  SessionStop(SessionStop) = "session.stop",
-  /// Creating the session failed; whatever it had acquired is released.
-  SessionFail(SessionFail) = "session.fail",
+  RunCreate(RunCreate) = "run.create",
+  RunStop(RunStop) = "run.stop",
+  /// Creating the run failed; whatever it had acquired is released.
+  RunFail(RunFail) = "run.fail",
   /// The actor's VM started.
   ActorStart(ActorStart) = "actor.start",
   /// The actor's VM process exited.
@@ -148,7 +148,7 @@ pub struct Recorded {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SessionCreate {
+pub struct RunCreate {
   pub name: String,
   pub group: String,
   /// The profile's name.
@@ -156,7 +156,7 @@ pub struct SessionCreate {
   pub executors: Vec<ExecutorRef>,
 }
 
-/// An executor instance a session uses.
+/// An executor instance a run uses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutorRef {
@@ -167,11 +167,11 @@ pub struct ExecutorRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SessionStop {}
+pub struct RunStop {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SessionFail {
+pub struct RunFail {
   /// Why, with its causes.
   pub reason: String,
 }

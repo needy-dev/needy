@@ -105,20 +105,20 @@ chaos:
     - { on: exec, match: "sleep *", delay: 1ms }
 "#;
 
-/// A profile the daemon refuses when it creates the session: its default
+/// A profile the daemon refuses when it creates the run: its default
 /// executor does not exist.
 const BROKEN_PROFILE: &str = "user: { name: agent, uid: 1000, gid: 1000 }\ndefault_executor: missing-executor\n";
 
-fn create_session(home: &Home, profile: &str) -> String {
+fn create_run(home: &Home, profile: &str) -> String {
   let profile = home.write("profile.yaml", profile);
   let output = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
     profile.to_str().unwrap(),
   ]);
-  assert!(output.status.success(), "session create: {}", stderr(&output));
+  assert!(output.status.success(), "run create: {}", stderr(&output));
   stdout(&output).trim().to_string()
 }
 
@@ -128,16 +128,9 @@ fn create_session(home: &Home, profile: &str) -> String {
 fn exec_fault_exits_126_and_says_fault_injected() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&[
-    "exec",
-    "--session",
-    &session,
-    "--",
-    "curl",
-    "http://example.com",
-  ]);
+  let output = home.run(&["exec", "--run", &run, "--", "curl", "http://example.com"]);
 
   assert_eq!(output.status.code(), Some(126));
   assert_eq!(stderr(&output), "needy: fault injected: ECONNREFUSED\n");
@@ -147,9 +140,9 @@ fn exec_fault_exits_126_and_says_fault_injected() {
 fn exec_denied_by_a_rule_exits_126() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["exec", "--session", &session, "--", "rm", "-rf", "/"]);
+  let output = home.run(&["exec", "--run", &run, "--", "rm", "-rf", "/"]);
 
   assert_eq!(output.status.code(), Some(126));
   assert_eq!(stderr(&output), "needy: denied: no deleting here\n");
@@ -159,14 +152,14 @@ fn exec_denied_by_a_rule_exits_126() {
 fn exec_fault_in_json_output_reports_the_exit_code() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
   let output = home.run(&[
     "exec",
     "--output",
     "json",
-    "--session",
-    &session,
+    "--run",
+    &run,
     "--",
     "curl",
     "http://example.com",
@@ -193,17 +186,10 @@ fn types(lines: &[serde_json::Value]) -> Vec<&str> {
 fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
   let delayed = home.run(&[
-    "exec",
-    "--output",
-    "ndjson",
-    "--session",
-    &session,
-    "--",
-    "sleep",
-    "0",
+    "exec", "--output", "ndjson", "--run", &run, "--", "sleep", "0",
   ]);
 
   assert_eq!(delayed.status.code(), Some(0), "{}", stderr(&delayed));
@@ -220,8 +206,8 @@ fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
     "exec",
     "--output",
     "ndjson",
-    "--session",
-    &session,
+    "--run",
+    &run,
     "--",
     "curl",
     "http://example.com",
@@ -236,7 +222,7 @@ fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
 }
 
 #[test]
-fn exec_ndjson_without_a_session_has_no_decision() {
+fn exec_ndjson_without_a_run_has_no_decision() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
 
@@ -247,25 +233,25 @@ fn exec_ndjson_without_a_session_has_no_decision() {
 
 // ROOT CAUSE:
 //
-// If one session was running, an exec without `--session` was traced as that
-// session's, and could meet its chaos faults, because the relay looked the
-// session up by an empty ID prefix, which matches every session.
+// If one run was running, an exec without `--run` was traced as that
+// run's, and could meet its chaos faults, because the relay looked the
+// run up by an empty ID prefix, which matches every run.
 //
-// Before the fix, the report of the running session listed the command.
-// The fix keeps an exec without a session out of every session.
+// Before the fix, the report of the running run listed the command.
+// The fix keeps an exec without a run out of every run.
 #[test]
-fn exec_without_a_session_stays_out_of_a_running_session() {
+fn exec_without_a_run_stays_out_of_a_running_run() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["exec", "--", "sh", "-c", "echo sessionless"]);
-  assert_eq!(stdout(&output), "sessionless\n");
-  assert!(home.run(&["session", "stop", &session]).status.success());
+  let output = home.run(&["exec", "--", "sh", "-c", "echo outside-a-run"]);
+  assert_eq!(stdout(&output), "outside-a-run\n");
+  assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let report = stdout(&home.run(&["report", &session, "--level", "detailed", "-o", "markdown"]));
-  assert!(report.contains("| session.stop |"), "{report}");
-  assert!(!report.contains("sessionless"), "{report}");
+  let report = stdout(&home.run(&["report", &run, "--level", "detailed", "-o", "markdown"]));
+  assert!(report.contains("| run.stop |"), "{report}");
+  assert!(!report.contains("outside-a-run"), "{report}");
 }
 
 #[test]
@@ -294,12 +280,12 @@ fn exec_returns_the_command_exit_code_and_output() {
 }
 
 #[test]
-fn session_create_names_a_missing_profile() {
+fn run_create_names_a_missing_profile() {
   let home = Home::new();
   let missing = home.path().join("missing.yaml");
 
   let output = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
@@ -311,13 +297,13 @@ fn session_create_names_a_missing_profile() {
 }
 
 #[test]
-fn session_create_refuses_a_profile_with_errors() {
+fn run_create_refuses_a_profile_with_errors() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let profile = home.write("profile.yaml", "executors: { here: { runtime: native } }\ncommands: [{ match: \"**\", to: hier }]\n");
 
   let output = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
@@ -330,14 +316,14 @@ fn session_create_refuses_a_profile_with_errors() {
 }
 
 #[test]
-fn session_ls_shows_stopped_and_failed_sessions() {
+fn run_ls_shows_stopped_and_failed_runs() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let stopped = create_session(&home, NATIVE_PROFILE);
-  assert!(home.run(&["session", "stop", &stopped]).status.success());
+  let stopped = create_run(&home, NATIVE_PROFILE);
+  assert!(home.run(&["run", "stop", &stopped]).status.success());
   let broken = home.write("broken.yaml", BROKEN_PROFILE);
   let failed = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--name",
@@ -347,25 +333,25 @@ fn session_ls_shows_stopped_and_failed_sessions() {
   ]);
   assert_eq!(failed.status.code(), Some(1));
 
-  let output = home.run(&["session", "ls", "--output", "json"]);
+  let output = home.run(&["run", "ls", "--output", "json"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
-  let sessions: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+  let runs: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
   let state =
-    |key: &str, value: &str| sessions.as_array().unwrap().iter().find(|s| s[key] == value).map(|s| s["state"].as_str().unwrap().to_string());
+    |key: &str, value: &str| runs.as_array().unwrap().iter().find(|s| s[key] == value).map(|s| s["state"].as_str().unwrap().to_string());
   assert_eq!(state("id", &stopped).as_deref(), Some("stopped"));
   assert_eq!(state("name", "broken").as_deref(), Some("failed"));
 }
 
 // The QA pass on 2026-11-09 found that a failed create left nothing in the
-// trace, so `needy report` could not say why the session failed.
+// trace, so `needy report` could not say why the run failed.
 #[test]
-fn a_failed_session_create_records_session_fail_with_the_reason() {
+fn a_failed_run_create_records_run_fail_with_the_reason() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let broken = home.write("broken.yaml", BROKEN_PROFILE);
   let failed = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
@@ -379,80 +365,80 @@ fn a_failed_session_create_records_session_fail_with_the_reason() {
   let report = stdout(&output);
   let overview = report.lines().skip_while(|l| !l.starts_with("| Duration")).nth(2).unwrap();
   assert!(overview.contains("| failed |"), "{report}");
-  let finding = report.lines().find(|l| l.starts_with("- ❌ Session failed: ")).unwrap_or_else(|| panic!("{report}"));
+  let finding = report.lines().find(|l| l.starts_with("- ❌ Run failed: ")).unwrap_or_else(|| panic!("{report}"));
   assert!(finding.contains("missing-executor"), "{finding}");
 }
 
 // The QA pass on 2026-11-09 found that the report named a profile after its
-// directory, because the session request carried no file name.
+// directory, because the run request carried no file name.
 #[test]
 fn report_names_the_profile_after_its_file() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
   let created = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
     profile.to_str().unwrap(),
   ]);
   assert!(created.status.success(), "{}", stderr(&created));
-  let session = stdout(&created).trim().to_string();
+  let run = stdout(&created).trim().to_string();
 
-  let output = home.run(&["report", &session, "-o", "markdown"]);
+  let output = home.run(&["report", &run, "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let title = stdout(&output).lines().next().unwrap().to_string();
-  assert_eq!(title, format!("# Session report: {session} (profile: review)"));
+  assert_eq!(title, format!("# Run report: {run} (profile: review)"));
 }
 
 #[test]
-fn session_stop_is_traced_without_attributes() {
+fn run_stop_is_traced_without_attributes() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  assert!(home.run(&["session", "stop", &session]).status.success());
+  let run = create_run(&home, NATIVE_PROFILE);
+  assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let output = home.run(&["report", &session, "--level", "detailed", "-o", "markdown"]);
+  let output = home.run(&["report", &run, "--level", "detailed", "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
-  let stop = report.lines().find(|l| l.contains("| session.stop |")).unwrap_or_else(|| panic!("{report}"));
-  assert!(stop.ends_with("| session.stop | `{}` |"), "{stop}");
+  let stop = report.lines().find(|l| l.contains("| run.stop |")).unwrap_or_else(|| panic!("{report}"));
+  assert!(stop.ends_with("| run.stop | `{}` |"), "{stop}");
   assert!(report.lines().nth(2).is_some_and(|l| !l.contains("incomplete")), "{report}");
 }
 
 #[test]
-fn session_ls_prints_a_table() {
+fn run_ls_prints_a_table() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["session", "ls"]);
+  let output = home.run(&["run", "ls"]);
 
   let text = stdout(&output);
   let mut lines = text.lines();
   let header: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
   assert_eq!(header, ["ID", "NAME", "STATE", "GROUP", "EXECUTORS", "EXIT"]);
   // A name and group that default to the ID show as `-`; a running
-  // session has no exit yet.
+  // run has no exit yet.
   let row: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
-  assert_eq!(row, [session.as_str(), "-", "running", "-", "here=native"]);
+  assert_eq!(row, [run.as_str(), "-", "running", "-", "here=native"]);
 }
 
-// The owner's 2026-11-10 trial: a session that ended gave its executors
-// back and `session ls` showed an empty EXECUTORS cell, and nothing said
-// how the session ended.
+// The owner's 2026-11-10 trial: a run that ended gave its executors
+// back and `run ls` showed an empty EXECUTORS cell, and nothing said
+// how the run ended.
 #[test]
-fn session_ls_shows_released_executors_and_why_a_session_failed() {
+fn run_ls_shows_released_executors_and_why_a_run_failed() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let stopped = create_session(&home, NATIVE_PROFILE);
-  assert!(home.run(&["session", "stop", &stopped]).status.success());
+  let stopped = create_run(&home, NATIVE_PROFILE);
+  assert!(home.run(&["run", "stop", &stopped]).status.success());
   let broken = home.write("broken.yaml", BROKEN_PROFILE);
   let failed = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--name",
@@ -462,7 +448,7 @@ fn session_ls_shows_released_executors_and_why_a_session_failed() {
   ]);
   assert_eq!(failed.status.code(), Some(1));
 
-  let output = home.run(&["session", "ls"]);
+  let output = home.run(&["run", "ls"]);
 
   let rows = table(&stdout(&output));
   assert_eq!(
@@ -481,57 +467,57 @@ fn session_ls_shows_released_executors_and_why_a_session_failed() {
 }
 
 #[test]
-fn session_ls_json_keeps_names_and_carries_released_executors_and_the_failure() {
+fn run_ls_json_keeps_names_and_carries_released_executors_and_the_failure() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let stopped = create_session(&home, NATIVE_PROFILE);
-  assert!(home.run(&["session", "stop", &stopped]).status.success());
+  let stopped = create_run(&home, NATIVE_PROFILE);
+  assert!(home.run(&["run", "stop", &stopped]).status.success());
   let broken = home.write("broken.yaml", BROKEN_PROFILE);
   home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
     broken.to_str().unwrap(),
   ]);
 
-  let output = home.run(&["session", "ls", "-o", "json"]);
+  let output = home.run(&["run", "ls", "-o", "json"]);
 
-  let sessions: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
-  assert_eq!((&sessions[0]["name"], &sessions[0]["group"]), (&serde_json::json!(stopped), &serde_json::json!(stopped)));
-  assert_eq!(sessions[0]["executors"], serde_json::json!([{ "name": "here", "runtime": "native", "released": true }]));
+  let runs: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
+  assert_eq!((&runs[0]["name"], &runs[0]["group"]), (&serde_json::json!(stopped), &serde_json::json!(stopped)));
+  assert_eq!(runs[0]["executors"], serde_json::json!([{ "name": "here", "runtime": "native", "released": true }]));
   assert_eq!(
-    (&sessions[0]["exit_code"], &sessions[0]["signal"], &sessions[0]["failure"]),
+    (&runs[0]["exit_code"], &runs[0]["signal"], &runs[0]["failure"]),
     (&serde_json::Value::Null, &serde_json::Value::Null, &serde_json::Value::Null)
   );
-  assert!(sessions[1]["failure"].as_str().unwrap().contains("missing-executor"), "{:?}", sessions[1]);
+  assert!(runs[1]["failure"].as_str().unwrap().contains("missing-executor"), "{:?}", runs[1]);
 }
 
 #[test]
-fn session_logs_prints_the_actor_console() {
+fn run_logs_prints_the_actor_console() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  // Firecracker writes the console here; this session has no actor, so the
+  let run = create_run(&home, NATIVE_PROFILE);
+  // Firecracker writes the console here; this run has no actor, so the
   // test writes it.
-  std::fs::write(home.path().join("state/sessions").join(&session).join("console.log"), "boot\nhello from the actor\n").unwrap();
+  std::fs::write(home.path().join("state/runs").join(&run).join("console.log"), "boot\nhello from the actor\n").unwrap();
 
-  let output = home.run(&["session", "logs", &session]);
+  let output = home.run(&["run", "logs", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   assert_eq!(stdout(&output), "boot\nhello from the actor\n");
 }
 
 #[test]
-fn session_logs_without_an_actor_says_so() {
+fn run_logs_without_an_actor_says_so() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["session", "logs", &session]);
+  let output = home.run(&["run", "logs", &run]);
 
   assert_eq!(output.status.code(), Some(1));
-  assert_eq!(stderr(&output), format!("needy: session {session} has no actor console\n"));
+  assert_eq!(stderr(&output), format!("needy: run {run} has no actor console\n"));
 }
 
 #[test]
@@ -636,16 +622,28 @@ fn profile_check_compiles_a_built_in_recipe() {
 }
 
 #[test]
-fn session_create_explains_profile_and_group() {
+fn run_create_explains_profile_and_group() {
   let home = Home::new();
 
-  let output = home.run(&["session", "create", "--help"]);
+  let output = home.run(&["run", "create", "--help"]);
 
   let text = stdout(&output);
   let help = |flag: &str| text.lines().find(|l| l.trim_start().starts_with(flag)).unwrap().split_once(flag).unwrap().1.trim().to_string();
   assert!(help("--profile <PROFILE>").starts_with("Profile YAML"), "{text}");
-  assert!(help("--group <GROUP>").starts_with("Sessions in one group share executors"), "{text}");
+  assert!(help("--group <GROUP>").starts_with("Runs in one group share executors"), "{text}");
   assert!(!help("--group <GROUP>").contains("[default"), "{text}");
+}
+
+// The runners-and-runs design renamed *session* to *run* without a
+// compatibility alias (principle 7 of the module layout redesign).
+#[test]
+fn the_session_command_is_gone() {
+  let home = Home::new();
+
+  let output = home.run(&["session", "ls"]);
+
+  assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+  assert!(stderr(&output).contains("unrecognized subcommand 'session'"), "{}", stderr(&output));
 }
 
 #[test]
@@ -733,38 +731,38 @@ fn exited(mut attached: Child) -> Output {
 // exit 0, because the relay started from a successful exit and kept it
 // when no exit came.
 //
-// Before the fix, stopping the session of an attached `needy exec` made it
+// Before the fix, stopping the run of an attached `needy exec` made it
 // exit 0 without a word.
 // The fix fails such an exec with 255, saying why the stream ended.
 #[test]
-fn exec_whose_session_stops_exits_255_and_says_why() {
+fn exec_whose_run_stops_exits_255_and_says_why() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  let (attached, sleep) = attach_sleep(&home, &["exec", "--session", &session]);
+  let run = create_run(&home, NATIVE_PROFILE);
+  let (attached, sleep) = attach_sleep(&home, &["exec", "--run", &run]);
 
-  assert!(home.run(&["session", "stop", &session]).status.success());
+  assert!(home.run(&["run", "stop", &run]).status.success());
   let output = exited(attached);
   // Leaving the stream ends the sleep; this is for a failed assertion only.
   let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).status();
 
   assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
-  assert_eq!(stderr(&output), "needy: the connection ended before the command exited: session stopped\n");
+  assert_eq!(stderr(&output), "needy: the connection ended before the command exited: run stopped\n");
 }
 
 #[test]
-fn exec_json_whose_session_stops_reports_an_error_instead_of_an_exit() {
+fn exec_json_whose_run_stops_reports_an_error_instead_of_an_exit() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  let (attached, _) = attach_sleep(&home, &["exec", "--output", "json", "--session", &session]);
+  let run = create_run(&home, NATIVE_PROFILE);
+  let (attached, _) = attach_sleep(&home, &["exec", "--output", "json", "--run", &run]);
 
-  assert!(home.run(&["session", "stop", &session]).status.success());
+  assert!(home.run(&["run", "stop", &run]).status.success());
   let output = exited(attached);
 
   assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
   let summary: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
-  assert_eq!(summary["error"], "the connection ended before the command exited: session stopped", "{summary}");
+  assert_eq!(summary["error"], "the connection ended before the command exited: run stopped", "{summary}");
   assert!(summary.get("exit_code").is_none(), "{summary}");
 }
 
@@ -857,7 +855,7 @@ impl EndingDaemon {
 #[test]
 fn detached_exec_whose_stream_ends_before_the_start_exits_255_and_says_why() {
   let home = Home::new();
-  let daemon = EndingDaemon::start(&home, Some("session stopped"));
+  let daemon = EndingDaemon::start(&home, Some("run stopped"));
 
   let output = home.run(&[
     "--endpoint",
@@ -871,7 +869,7 @@ fn detached_exec_whose_stream_ends_before_the_start_exits_255_and_says_why() {
 
   assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
   assert_eq!(stdout(&output), "");
-  assert_eq!(stderr(&output), "needy: the connection ended before the command started: session stopped\n");
+  assert_eq!(stderr(&output), "needy: the connection ended before the command started: run stopped\n");
 }
 
 #[test]
@@ -923,13 +921,13 @@ fn terminate_twice(mut daemon: Child) -> (Duration, Output) {
 // Before the fix, the daemon waited out its grace period for open streams
 // and the shutdown, then exited 0.
 // The fix keeps the first signal graceful and makes a second one exit at
-// once, non-zero, naming the sessions it did not clean up.
+// once, non-zero, naming the runs it did not clean up.
 #[test]
 fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
   let home = Home::new();
   let daemon = spawn_daemon(&home, "control");
-  let session = create_session(&home, NATIVE_PROFILE);
-  let (mut attached, sleep) = attach_sleep(&home, &["exec", "--session", &session]);
+  let run = create_run(&home, NATIVE_PROFILE);
+  let (mut attached, sleep) = attach_sleep(&home, &["exec", "--run", &run]);
 
   let (elapsed, output) = terminate_twice(daemon);
   attached.kill().ok();
@@ -939,7 +937,7 @@ fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
 
   assert!(elapsed < Duration::from_secs(2), "the daemon took {elapsed:?} to exit after the second SIGTERM");
   assert_eq!(output.status.code(), Some(1));
-  assert!(stderr(&output).contains(&session), "the exit names the session it left: {}", stderr(&output));
+  assert!(stderr(&output).contains(&run), "the exit names the run it left: {}", stderr(&output));
 }
 
 #[test]
@@ -964,42 +962,42 @@ fn table(text: &str) -> Vec<Vec<String>> {
   text.lines().map(|line| line.split("  ").map(str::trim).filter(|c| !c.is_empty()).map(str::to_string).collect()).collect()
 }
 
-/// A native session with one `needy exec` and one `needy fs cp`, whose
+/// A native run with one `needy exec` and one `needy fs cp`, whose
 /// `mkdir` and `tar` are needy's own processes.
-fn session_with_internal_processes(home: &Home) -> String {
-  let session = create_session(home, NATIVE_PROFILE);
-  let exec = home.run(&["exec", "--session", &session, "--", "echo", "mine"]);
+fn run_with_internal_processes(home: &Home) -> String {
+  let run = create_run(home, NATIVE_PROFILE);
+  let exec = home.run(&["exec", "--run", &run, "--", "echo", "mine"]);
   assert!(exec.status.success(), "{}", stderr(&exec));
   let file = home.write("copied.txt", "copied\n");
   let dir = home.path().join("into");
   let cp = home.run(&[
     "fs",
     "cp",
-    "--session",
-    &session,
+    "--run",
+    &run,
     file.to_str().unwrap(),
     &format!("here:{}", dir.display()),
   ]);
   assert!(cp.status.success(), "{}", stderr(&cp));
-  session
+  run
 }
 
 // The owner's 2026-11-10 trial found that `needy ps` listed needy's own
 // helpers (the `mkdir` and `tar` of `fs cp`) next to the user's commands,
-// with no way to tell which session or caller started a process.
+// with no way to tell which run or caller started a process.
 #[test]
-fn ps_shows_session_and_origin_and_hides_needys_own_processes() {
+fn ps_shows_run_and_origin_and_hides_needys_own_processes() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = session_with_internal_processes(&home);
+  let run = run_with_internal_processes(&home);
 
-  let output = home.run(&["ps", "--session", &session]);
+  let output = home.run(&["ps", "--run", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let rows = table(&stdout(&output));
-  assert_eq!(rows[0][..3], ["ID", "SESSION", "ORIGIN"]);
+  assert_eq!(rows[0][..3], ["ID", "RUN", "ORIGIN"]);
   assert_eq!(rows.len(), 2, "{rows:?}");
-  assert_eq!(rows[1][1..3], [session.as_str(), "cli"]);
+  assert_eq!(rows[1][1..3], [run.as_str(), "cli"]);
   assert_eq!(rows[1].last().unwrap(), "echo mine");
 }
 
@@ -1007,9 +1005,9 @@ fn ps_shows_session_and_origin_and_hides_needys_own_processes() {
 fn ps_all_shows_needys_own_processes_with_their_origin() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = session_with_internal_processes(&home);
+  let run = run_with_internal_processes(&home);
 
-  let output = home.run(&["ps", "-a", "--session", &session]);
+  let output = home.run(&["ps", "-a", "--run", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let rows = table(&stdout(&output));
@@ -1018,41 +1016,41 @@ fn ps_all_shows_needys_own_processes_with_their_origin() {
   assert_eq!(commands[0], ("cli", "echo mine"));
   assert!(commands[1].0 == "fs" && commands[1].1.starts_with("mkdir -p"), "{rows:?}");
   assert!(commands[2].0 == "fs" && commands[2].1.starts_with("tar -x"), "{rows:?}");
-  assert!(rows[1..].iter().all(|r| r[1] == session), "{rows:?}");
+  assert!(rows[1..].iter().all(|r| r[1] == run), "{rows:?}");
 }
 
 #[test]
-fn ps_json_carries_session_and_origin_and_respects_all() {
+fn ps_json_carries_run_and_origin_and_respects_all() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = session_with_internal_processes(&home);
+  let run = run_with_internal_processes(&home);
   let json = |args: &[&str]| -> Vec<serde_json::Value> {
     let output = home.run(args);
     assert!(output.status.success(), "{}", stderr(&output));
     serde_json::from_str(&stdout(&output)).unwrap()
   };
 
-  let mine = json(&["ps", "-o", "json", "--session", &session]);
-  let all = json(&["ps", "-o", "json", "--all", "--session", &session]);
+  let mine = json(&["ps", "-o", "json", "--run", &run]);
+  let all = json(&["ps", "-o", "json", "--all", "--run", &run]);
 
   assert_eq!(mine.len(), 1, "{mine:?}");
-  assert_eq!((mine[0]["session"].as_str(), mine[0]["origin"].as_str()), (Some(session.as_str()), Some("cli")));
+  assert_eq!((mine[0]["run"].as_str(), mine[0]["origin"].as_str()), (Some(run.as_str()), Some("cli")));
   let origins: Vec<&str> = all.iter().map(|p| p["origin"].as_str().unwrap()).collect();
   assert_eq!(origins, ["cli", "fs", "fs"]);
 }
 
-/// Starts `command` detached in `session` and returns its process ID.
-fn detach(home: &Home, session: &str, command: &[&str]) -> String {
-  let output = home.needy().args(["exec", "-d", "--session", session, "--"]).args(command).output().unwrap();
+/// Starts `command` detached in `run` and returns its process ID.
+fn detach(home: &Home, run: &str, command: &[&str]) -> String {
+  let output = home.needy().args(["exec", "-d", "--run", run, "--"]).args(command).output().unwrap();
   assert!(output.status.success(), "{}", stderr(&output));
   stdout(&output).trim().to_string()
 }
 
 /// Waits until `needy ps` no longer lists process `id` as running.
-fn wait_until_ended(home: &Home, session: &str, id: &str) {
+fn wait_until_ended(home: &Home, run: &str, id: &str) {
   let deadline = Instant::now() + Duration::from_secs(20);
   loop {
-    let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-o", "json", "--session", session]))).unwrap();
+    let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-o", "json", "--run", run]))).unwrap();
     if listed.iter().any(|p| p["id"] == id && p["state"] != "running") {
       return;
     }
@@ -1067,22 +1065,22 @@ fn wait_until_ended(home: &Home, session: &str, id: &str) {
 fn ps_shows_state_and_exit_in_separate_columns() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  let running = detach(&home, &session, &["sleep", "30"]);
-  let exited = detach(&home, &session, &["sh", "-c", "exit 3"]);
-  let killed = detach(&home, &session, &["sleep", "31"]);
+  let run = create_run(&home, NATIVE_PROFILE);
+  let running = detach(&home, &run, &["sleep", "30"]);
+  let exited = detach(&home, &run, &["sh", "-c", "exit 3"]);
+  let killed = detach(&home, &run, &["sleep", "31"]);
   assert!(home.run(&["kill", &killed, "--signal", "SIGINT"]).status.success());
-  wait_until_ended(&home, &session, &exited);
-  wait_until_ended(&home, &session, &killed);
+  wait_until_ended(&home, &run, &exited);
+  wait_until_ended(&home, &run, &killed);
 
-  let output = home.run(&["ps", "--session", &session]);
+  let output = home.run(&["ps", "--run", &run]);
 
   let text = stdout(&output);
   let header: Vec<&str> = text.lines().next().unwrap().split_whitespace().collect();
   assert_eq!(
     header,
     [
-      "ID", "SESSION", "ORIGIN", "EXECUTOR", "PID", "STATE", "EXIT", "TTY", "COMMAND"
+      "ID", "RUN", "ORIGIN", "EXECUTOR", "PID", "STATE", "EXIT", "TTY", "COMMAND"
     ]
   );
   let row = |id: &str| -> (String, String) {
@@ -1102,14 +1100,14 @@ fn ps_shows_state_and_exit_in_separate_columns() {
 fn ps_json_has_separate_state_exit_code_and_signal() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  let exited = detach(&home, &session, &["sh", "-c", "exit 3"]);
-  let killed = detach(&home, &session, &["sleep", "31"]);
+  let run = create_run(&home, NATIVE_PROFILE);
+  let exited = detach(&home, &run, &["sh", "-c", "exit 3"]);
+  let killed = detach(&home, &run, &["sleep", "31"]);
   assert!(home.run(&["kill", &killed, "--signal", "SIGINT"]).status.success());
-  wait_until_ended(&home, &session, &exited);
-  wait_until_ended(&home, &session, &killed);
+  wait_until_ended(&home, &run, &exited);
+  wait_until_ended(&home, &run, &killed);
 
-  let output = home.run(&["ps", "-o", "json", "--session", &session]);
+  let output = home.run(&["ps", "-o", "json", "--run", &run]);
 
   let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
   let fields = |id: &str| {
@@ -1124,8 +1122,8 @@ fn ps_json_has_separate_state_exit_code_and_signal() {
 fn attach_refuses_needys_own_processes() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = session_with_internal_processes(&home);
-  let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-a", "-o", "json", "--session", &session]))).unwrap();
+  let run = run_with_internal_processes(&home);
+  let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-a", "-o", "json", "--run", &run]))).unwrap();
   let tar = listed.iter().find(|p| p["argv"][0] == "tar").unwrap()["id"].as_str().unwrap().to_string();
 
   let output = home.run(&["attach", &tar]);
@@ -1142,22 +1140,22 @@ fn report_defaults_to_plain_text() {
   let _daemon = Daemon::start(&home);
   let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
   let created = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",
     profile.to_str().unwrap(),
   ]);
-  let session = stdout(&created).trim().to_string();
-  assert!(home.run(&["exec", "--session", &session, "--", "sh", "-c", "exit 2"]).status.code() == Some(2));
-  assert!(home.run(&["session", "stop", &session]).status.success());
+  let run = stdout(&created).trim().to_string();
+  assert!(home.run(&["exec", "--run", &run, "--", "sh", "-c", "exit 2"]).status.code() == Some(2));
+  assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let output = home.run(&["report", &session]);
+  let output = home.run(&["report", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
   let mut lines = report.lines();
-  assert_eq!(lines.next(), Some(format!("Session   {session}  (profile review)").as_str()));
+  assert_eq!(lines.next(), Some(format!("Run       {run}  (profile review)").as_str()));
   assert_eq!(lines.next(), Some("State     stopped"));
   assert!(lines.next().is_some_and(|l| l.starts_with("Duration  ") && l.ends_with('s')), "{report}");
   assert!(report.contains("\nCommands\n  routed to here   1  (1 failed)\n"), "{report}");
@@ -1169,13 +1167,13 @@ fn report_defaults_to_plain_text() {
 fn report_json_is_a_summary_and_file_writes_it() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let session = create_session(&home, NATIVE_PROFILE);
-  assert!(home.run(&["session", "stop", &session]).status.success());
+  let run = create_run(&home, NATIVE_PROFILE);
+  assert!(home.run(&["run", "stop", &run]).status.success());
   let file = home.path().join("report.json");
 
   let output = home.run(&[
     "report",
-    &session,
+    &run,
     "-o",
     "json",
     "--file",
@@ -1185,7 +1183,7 @@ fn report_json_is_a_summary_and_file_writes_it() {
   assert!(output.status.success(), "{}", stderr(&output));
   assert_eq!(stdout(&output), "");
   let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-  assert_eq!((&json["session"], &json["state"]), (&serde_json::json!(session), &serde_json::json!("stopped")));
+  assert_eq!((&json["run"], &json["state"]), (&serde_json::json!(run), &serde_json::json!("stopped")));
   assert_eq!(json["route_names"], serde_json::Value::Null, "no actor ran");
   assert_eq!(json["findings"], serde_json::json!([]));
 }
@@ -1300,17 +1298,17 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
     std::thread::sleep(Duration::from_millis(50));
   }
   let _daemon = Daemon { child };
-  let session = create_session(&home, NATIVE_PROFILE);
+  let run = create_run(&home, NATIVE_PROFILE);
 
   let state = home.path().join("state");
-  let run = home.path().join("run");
+  let runtime = home.path().join("run");
   let modes = [
     (state.clone(), mode(&state)),
-    (state.join("sessions"), mode(&state.join("sessions"))),
-    (state.join("sessions").join(&session), mode(&state.join("sessions").join(&session))),
-    (run.clone(), mode(&run)),
-    (run.join("daemon.sock"), mode(&run.join("daemon.sock"))),
-    (run.join("local.sock"), mode(&run.join("local.sock"))),
+    (state.join("runs"), mode(&state.join("runs"))),
+    (state.join("runs").join(&run), mode(&state.join("runs").join(&run))),
+    (runtime.clone(), mode(&runtime)),
+    (runtime.join("daemon.sock"), mode(&runtime.join("daemon.sock"))),
+    (runtime.join("local.sock"), mode(&runtime.join("local.sock"))),
   ];
   let expected = [0o700, 0o700, 0o700, 0o700, 0o600, 0o600];
   for ((path, mode), expected) in modes.iter().zip(expected) {
@@ -1322,7 +1320,7 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
 // directory; the client sends the profile and its recipe resolved. Here the
 // daemon runs in another working directory than the profile's.
 #[test]
-fn session_create_sends_a_profile_with_a_relative_parent_and_recipe() {
+fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   let home = Home::new();
   let elsewhere = home.path().join("elsewhere");
   std::fs::create_dir_all(&elsewhere).unwrap();
@@ -1341,7 +1339,7 @@ fn session_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   let profile = home.write("p/profile.yaml", "extends: base.yaml\nactor: { recipe: gce.recipe.yaml }\n");
 
   let output = home.run(&[
-    "session",
+    "run",
     "create",
     "--no-actor",
     "--profile",

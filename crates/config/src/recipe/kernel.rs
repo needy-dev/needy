@@ -11,7 +11,7 @@ pub struct Os {
   /// The OCI image the rootfs is built from.
   pub image: Option<String>,
   pub kernel: Kernel,
-  /// `{hash}` derives from the session seed.
+  /// `{hash}` derives from the run seed.
   pub hostname: Option<Template>,
   pub uptime: Option<Duration>,
 }

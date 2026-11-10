@@ -11,7 +11,7 @@ use needy_api_proto::v1::Origin;
 fn target() -> Target {
   Target {
     executor: String::new(),
-    session: String::new(),
+    run: String::new(),
     origin: Origin::Files,
   }
 }

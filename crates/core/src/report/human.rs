@@ -8,7 +8,7 @@ use anstyle::{AnsiColor, Style};
 
 use super::{FindingKind, Summary, duration, network_name, truncate};
 use crate::event::ActorExit;
-use crate::types::SessionState;
+use crate::types::RunState;
 
 const FAILURE: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)));
 const FAULT: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Yellow)));
@@ -49,12 +49,12 @@ pub(super) fn render(s: &Summary, color: bool) -> String {
 }
 
 fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
-  let session = match &s.profile {
-    Some(profile) => format!("{}  (profile {profile})", s.session),
-    None => s.session.clone(),
+  let run = match &s.profile {
+    Some(profile) => format!("{}  (profile {profile})", s.run),
+    None => s.run.clone(),
   };
   let mut state = match s.state {
-    Some(SessionState::Failed) => paint("failed", FAILURE, color),
+    Some(RunState::Failed) => paint("failed", FAILURE, color),
     Some(state) => state.to_string(),
     None => "unknown".into(),
   };
@@ -71,7 +71,7 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     );
   }
   let mut head = vec![
-    ("Session".to_string(), session),
+    ("Run".to_string(), run),
     ("State".into(), state),
     ("Duration".into(), duration(s.duration_ms)),
   ];
@@ -145,7 +145,7 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     writeln!(out, "\nFindings")?;
     for finding in &s.findings {
       let message = match finding.kind {
-        FindingKind::SessionFailed => paint(&finding.message, FAILURE, color),
+        FindingKind::RunFailed => paint(&finding.message, FAILURE, color),
         FindingKind::Faults => paint(&finding.message, FAULT, color),
         FindingKind::Probing | FindingKind::DeniedCommand | FindingKind::DeniedNetwork => finding.message.clone(),
       };

@@ -1,4 +1,4 @@
-//! A session's state: the one place where its `core::SessionState` changes.
+//! A run's state: the one place where its `core::RunState` changes.
 //!
 //! ```text
 //! Creating ──► Running ──► Stopping ──► Stopped
@@ -13,37 +13,37 @@
 
 use std::sync::Mutex;
 
-use needy_core::types::SessionState;
+use needy_core::types::RunState;
 
-/// A session's current state.
+/// A run's current state.
 #[derive(Debug)]
-pub struct State(Mutex<SessionState>);
+pub struct State(Mutex<RunState>);
 
 /// A transition the current state does not allow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Refused {
-  pub from: SessionState,
-  pub to: SessionState,
+  pub from: RunState,
+  pub to: RunState,
 }
 
 impl std::fmt::Display for Refused {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(f, "a {} session cannot become {}", self.from.as_str(), self.to.as_str())
+    write!(f, "a {} run cannot become {}", self.from.as_str(), self.to.as_str())
   }
 }
 
 impl State {
-  /// A session being created.
+  /// A run being created.
   pub fn new() -> Self {
-    Self(Mutex::new(SessionState::Creating))
+    Self(Mutex::new(RunState::Creating))
   }
 
-  pub fn get(&self) -> SessionState {
+  pub fn get(&self) -> RunState {
     *self.lock()
   }
 
   /// Moves to `to` and returns the state before, or refuses.
-  pub fn advance(&self, to: SessionState) -> Result<SessionState, Refused> {
+  pub fn advance(&self, to: RunState) -> Result<RunState, Refused> {
     let mut state = self.lock();
     let from = *state;
     if !allowed(from, to) {
@@ -53,14 +53,14 @@ impl State {
     Ok(from)
   }
 
-  fn lock(&self) -> std::sync::MutexGuard<'_, SessionState> {
+  fn lock(&self) -> std::sync::MutexGuard<'_, RunState> {
     // A panic elsewhere cannot leave the state half-written; it is one value.
     self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
   }
 }
 
-fn allowed(from: SessionState, to: SessionState) -> bool {
-  use SessionState::*;
+fn allowed(from: RunState, to: RunState) -> bool {
+  use RunState::*;
   matches!((from, to), (Creating, Running | Failed | Finished) | (Running, Stopping | Finished | Failed) | (Stopping, Stopped))
 }
 

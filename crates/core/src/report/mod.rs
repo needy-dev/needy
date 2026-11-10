@@ -1,4 +1,4 @@
-//! `needy report`: a fixed-format summary of one session, rendered from its
+//! `needy report`: a fixed-format summary of one run, rendered from its
 //! typed events in one of three formats: plain text for people (`human`),
 //! markdown, and a JSON [`Summary`] for tools. No IO; the caller reads the
 //! events and decides whether the text may carry colors.
@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::event::{ActorExit, Event, Recorded};
 use crate::pattern::basename;
-use crate::types::{Network, Origin, Outcome, Placement, SessionState};
+use crate::types::{Network, Origin, Outcome, Placement, RunState};
 
 /// How much the report shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +75,7 @@ fn top(counts: &BTreeMap<String, usize>, n: usize) -> String {
   v.iter().take(n).map(|(k, c)| format!("{k} ({c})")).collect::<Vec<_>>().join(", ")
 }
 
-/// A session's length in units that fit it: tenths of a second under a
+/// A run's length in units that fit it: tenths of a second under a
 /// minute, then minutes and seconds, then hours and minutes. Each unit is
 /// cut, not rounded, so a length never reads longer than it was.
 fn duration(ms: i64) -> String {
@@ -105,14 +105,14 @@ struct Tally {
   /// The first end: an actor exit, a stop or a failure.
   ended: Option<i64>,
   /// `Running` once created, then the first terminal state, which stays as
-  /// it does in the daemon's session state machine, so the report agrees
-  /// with `session ls`.
+  /// it does in the daemon's run state machine, so the report agrees
+  /// with `run ls`.
   // NOTICE: an actor exit that lands while a stop is under way is recorded
-  // before `session.stop`, so the report says `finished` where the daemon
+  // before `run.stop`, so the report says `finished` where the daemon
   // says `stopped`; the events cannot tell it from an exit before the stop.
-  state: Option<SessionState>,
+  state: Option<RunState>,
   actor_exit: Option<ActorExit>,
-  /// Why the session failed.
+  /// Why the run failed.
   failure: Option<String>,
   /// Events the trace dropped.
   dropped: u64,
@@ -146,25 +146,25 @@ struct Tally {
 impl Tally {
   fn add(&mut self, time_ms: i64, event: &Event) {
     match event {
-      Event::SessionCreate(create) => {
+      Event::RunCreate(create) => {
         self.profile = Some(create.profile.clone());
         self.created = Some(time_ms);
-        self.state.get_or_insert(SessionState::Running);
+        self.state.get_or_insert(RunState::Running);
       }
-      Event::SessionStop(_) => self.end(time_ms, SessionState::Stopped),
-      Event::SessionFail(fail) => {
-        self.end(time_ms, SessionState::Failed);
+      Event::RunStop(_) => self.end(time_ms, RunState::Stopped),
+      Event::RunFail(fail) => {
+        self.end(time_ms, RunState::Failed);
         self.failure = Some(fail.reason.clone());
       }
       Event::TraceGap(gap) => self.dropped += gap.dropped,
       Event::ActorExit(exit) => {
-        self.end(time_ms, SessionState::Finished);
+        self.end(time_ms, RunState::Finished);
         self.actor_exit = Some(exit.clone());
       }
       // A VM exit after the driving program's `actor.exit` ended nothing
       // new; one before it is the failure the daemon records next as
-      // `session.fail`, with the reason.
-      Event::ActorVmExit(_) => self.end(time_ms, SessionState::Failed),
+      // `run.fail`, with the reason.
+      Event::ActorVmExit(_) => self.end(time_ms, RunState::Failed),
       Event::ActorConfig(config) => self.route_names = Some(config.route_names.clone()),
       Event::ExecDecide(decide) => {
         match &decide.outcome {
@@ -234,7 +234,7 @@ impl Tally {
   }
 
   /// Records an end at `time_ms`; only the first sets the state.
-  fn end(&mut self, time_ms: i64, state: SessionState) {
+  fn end(&mut self, time_ms: i64, state: RunState) {
     if self.ended.is_none() {
       self.ended = Some(time_ms);
       self.state = Some(state);
@@ -257,7 +257,7 @@ fn network_name(network: Network) -> &'static str {
   }
 }
 
-/// Renders the report of session `id` from its events, in recorded order.
+/// Renders the report of run `id` from its events, in recorded order.
 pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> String {
   let mut tally = Tally::default();
   for recorded in events {
@@ -277,19 +277,19 @@ pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> St
   }
 }
 
-/// What the human and JSON reports show: one session's outcome and counts.
+/// What the human and JSON reports show: one run's outcome and counts.
 /// Its JSON form is `needy report -o json`; the CLI note lists its fields.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Summary {
-  pub session: String,
+  pub run: String,
   pub profile: Option<String>,
-  /// `None` for a trace without a `session.create`.
-  pub state: Option<SessionState>,
+  /// `None` for a trace without a `run.create`.
+  pub state: Option<RunState>,
   /// From the create to the first end, or to the last event.
   pub duration_ms: i64,
   /// How the driving program ended, when it reported its exit.
   pub actor_exit: Option<ActorExit>,
-  /// Why the session failed.
+  /// Why the run failed.
   pub failure: Option<String>,
   /// Events the trace dropped; the counts are low by about as many.
   pub dropped_events: u64,
@@ -366,7 +366,7 @@ pub struct Finding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
-  SessionFailed,
+  RunFailed,
   /// Commands that only learn about the machine.
   Probing,
   DeniedCommand,
@@ -377,7 +377,7 @@ pub enum FindingKind {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TimelineEvent {
-  /// Milliseconds since the session was created.
+  /// Milliseconds since the run was created.
   pub offset_ms: i64,
   pub kind: String,
   pub payload: serde_json::Value,
@@ -396,7 +396,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
   let mut findings = Vec::new();
   let mut find = |kind, message: String| findings.push(Finding { kind, message });
   if let Some(reason) = &t.failure {
-    find(FindingKind::SessionFailed, format!("session failed: {reason}"));
+    find(FindingKind::RunFailed, format!("run failed: {reason}"));
   }
   if !t.probes.is_empty() {
     let count = t.probes.values().sum::<usize>();
@@ -442,7 +442,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
   network.sort_by_key(|h| std::cmp::Reverse(h.count));
   network.truncate(TOP);
   Summary {
-    session: id.to_string(),
+    run: id.to_string(),
     profile: t.profile.clone(),
     state: t.state,
     duration_ms: (ended - created).max(0),
@@ -496,7 +496,7 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
     Some(ActorExit { code, .. }) => format!("exit {}", code.map_or("-".to_string(), |c| c.to_string())),
   };
 
-  writeln!(out, "# Session report: {id} (profile: {})\n", t.profile.as_deref().unwrap_or("-"))?;
+  writeln!(out, "# Run report: {id} (profile: {})\n", t.profile.as_deref().unwrap_or("-"))?;
   if t.dropped > 0 {
     writeln!(
       out,
@@ -514,7 +514,7 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
     out,
     "| {} | {} | {driver} | {} | {} | {} | {} | {} |\n",
     duration(ended - created),
-    t.state.map_or("-", SessionState::as_str),
+    t.state.map_or("-", RunState::as_str),
     t.routed,
     t.kept,
     t.cli,
@@ -526,7 +526,7 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   writeln!(out, "| --- | --- | --- | --- |")?;
   writeln!(out, "| {} | {} | {} | {} |\n", t.routed, t.kept, t.denied, t.faults)?;
   match &t.route_names {
-    None => writeln!(out, "🏠 No actor ran in this session.\n")?,
+    None => writeln!(out, "🏠 No actor ran in this run.\n")?,
     Some(None) => writeln!(out, "🏠 Kept on actor counts every command the actor ran, except needy's own init and proxy.\n")?,
     Some(Some(names)) => {
       let names = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
@@ -541,7 +541,7 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   let mut any = false;
   if let Some(reason) = &t.failure {
     any = true;
-    writeln!(out, "- ❌ Session failed: {reason}")?;
+    writeln!(out, "- ❌ Run failed: {reason}")?;
   }
   if !t.probes.is_empty() {
     any = true;

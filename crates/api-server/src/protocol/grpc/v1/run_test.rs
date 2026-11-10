@@ -1,6 +1,4 @@
-use needy_api_proto::v1::{
-  Ancestor, CreateSessionRequest, DecideRequest, GetSessionLogsRequest, GetSessionRequest, ListSessionsRequest, StopSessionRequest,
-};
+use needy_api_proto::v1::{Ancestor, CreateRunRequest, DecideRequest, GetRunLogsRequest, GetRunRequest, ListRunsRequest, StopRunRequest};
 use tonic::Code;
 
 use crate::control::Caller;
@@ -8,12 +6,12 @@ use crate::testing::serve;
 
 fn actor() -> Caller {
   Caller::Actor {
-    session: "s-actor".into(),
+    run: "s-actor".into(),
   }
 }
 
-fn create() -> CreateSessionRequest {
-  CreateSessionRequest {
+fn create() -> CreateRunRequest {
+  CreateRunRequest {
     profile_yaml: "{}".into(),
     profile_name: "local".into(),
     name: "mine".into(),
@@ -22,26 +20,26 @@ fn create() -> CreateSessionRequest {
 }
 
 #[tokio::test]
-async fn the_cli_creates_a_session_and_reads_its_state_as_an_enum() {
+async fn the_cli_creates_a_run_and_reads_its_state_as_an_enum() {
   let served = serve(Caller::Cli).await;
 
-  let session = served.client.sessions().create_session(create()).await.unwrap().into_inner().session.unwrap();
+  let run = served.client.runs().create_run(create()).await.unwrap().into_inner().run.unwrap();
 
-  assert_eq!(session.session_id, "s1");
-  assert_eq!(session.name, "mine");
-  assert_eq!(session.state(), needy_api_proto::v1::SessionState::Running);
+  assert_eq!(run.run_id, "s1");
+  assert_eq!(run.name, "mine");
+  assert_eq!(run.state(), needy_api_proto::v1::RunState::Running);
   assert_eq!(served.fake.calls(), ["create local"]);
 }
 
 #[tokio::test]
 async fn a_create_that_names_no_profile_is_invalid() {
   let served = serve(Caller::Cli).await;
-  let request = CreateSessionRequest {
+  let request = CreateRunRequest {
     profile_name: String::new(),
     ..create()
   };
 
-  let status = served.client.sessions().create_session(request).await.unwrap_err();
+  let status = served.client.runs().create_run(request).await.unwrap_err();
 
   assert_eq!(status.code(), Code::InvalidArgument);
   assert_eq!(status.message(), "the request names no profile");
@@ -49,22 +47,22 @@ async fn a_create_that_names_no_profile_is_invalid() {
 }
 
 #[tokio::test]
-async fn an_actor_cannot_create_stop_or_read_the_logs_of_sessions() {
+async fn an_actor_cannot_create_stop_or_read_the_logs_of_runs() {
   let served = serve(actor()).await;
-  let sessions = served.client.sessions();
+  let runs = served.client.runs();
 
-  let create = sessions.clone().create_session(create()).await.unwrap_err();
-  let stop = sessions
+  let create = runs.clone().create_run(create()).await.unwrap_err();
+  let stop = runs
     .clone()
-    .stop_session(StopSessionRequest {
-      session_id: "s-actor".into(),
+    .stop_run(StopRunRequest {
+      run_id: "s-actor".into(),
     })
     .await
     .unwrap_err();
-  let logs = sessions
+  let logs = runs
     .clone()
-    .get_session_logs(GetSessionLogsRequest {
-      session_id: "s-actor".into(),
+    .get_run_logs(GetRunLogsRequest {
+      run_id: "s-actor".into(),
     })
     .await
     .unwrap_err();
@@ -77,42 +75,42 @@ async fn an_actor_cannot_create_stop_or_read_the_logs_of_sessions() {
       Code::PermissionDenied
     ]
   );
-  assert_eq!(create.message(), "actors cannot create sessions");
+  assert_eq!(create.message(), "actors cannot create runs");
   assert!(served.fake.calls().is_empty(), "{:?}", served.fake.calls());
 }
 
 #[tokio::test]
-async fn a_missing_session_is_not_found() {
+async fn a_missing_run_is_not_found() {
   let served = serve(Caller::Cli).await;
 
   let status = served
     .client
-    .sessions()
-    .get_session(GetSessionRequest {
-      session_id: "nope".into(),
+    .runs()
+    .get_run(GetRunRequest {
+      run_id: "nope".into(),
     })
     .await
     .unwrap_err();
 
   assert_eq!(status.code(), Code::NotFound);
-  assert_eq!(status.message(), "no such session");
+  assert_eq!(status.message(), "no such run");
 }
 
 #[tokio::test]
-async fn sessions_are_listed_and_stopped() {
+async fn runs_are_listed_and_stopped() {
   let served = serve(Caller::Cli).await;
 
-  let list = served.client.sessions().list_sessions(ListSessionsRequest {}).await.unwrap().into_inner().sessions;
+  let list = served.client.runs().list_runs(ListRunsRequest {}).await.unwrap().into_inner().runs;
   served
     .client
-    .sessions()
-    .stop_session(StopSessionRequest {
-      session_id: "s2".into(),
+    .runs()
+    .stop_run(StopRunRequest {
+      run_id: "s2".into(),
     })
     .await
     .unwrap();
 
-  assert_eq!(list.iter().map(|s| s.session_id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
+  assert_eq!(list.iter().map(|s| s.run_id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
   assert_eq!(served.fake.calls(), ["stop s2"]);
 }
 
@@ -122,9 +120,9 @@ async fn logs_arrive_in_chunks_that_add_up() {
 
   let mut stream = served
     .client
-    .sessions()
-    .get_session_logs(GetSessionLogsRequest {
-      session_id: "s1".into(),
+    .runs()
+    .get_run_logs(GetRunLogsRequest {
+      run_id: "s1".into(),
     })
     .await
     .unwrap()
@@ -137,9 +135,9 @@ async fn logs_arrive_in_chunks_that_add_up() {
   assert_eq!(chunks, [1 << 20, 1 << 20, 1 << 20]);
 }
 
-fn decide(session: &str, argv: &[&str]) -> DecideRequest {
+fn decide(run: &str, argv: &[&str]) -> DecideRequest {
   DecideRequest {
-    session_id: session.into(),
+    run_id: run.into(),
     argv: argv.iter().map(|a| a.to_string()).collect(),
     cwd: "/home/agent".into(),
     ancestors: vec![Ancestor {
@@ -150,10 +148,10 @@ fn decide(session: &str, argv: &[&str]) -> DecideRequest {
 }
 
 #[tokio::test]
-async fn an_actor_decides_within_its_own_session_whatever_the_request_names() {
+async fn an_actor_decides_within_its_own_run_whatever_the_request_names() {
   let served = serve(actor()).await;
 
-  let response = served.client.sessions().decide(decide("someone-else", &["python3"])).await.unwrap().into_inner();
+  let response = served.client.runs().decide(decide("someone-else", &["python3"])).await.unwrap().into_inner();
 
   assert_eq!(response.target, "on-s-actor");
   assert_eq!(response.cwd, "/home/agent");
@@ -163,10 +161,10 @@ async fn an_actor_decides_within_its_own_session_whatever_the_request_names() {
 }
 
 #[tokio::test]
-async fn the_cli_decides_within_the_session_it_names() {
+async fn the_cli_decides_within_the_run_it_names() {
   let served = serve(Caller::Cli).await;
 
-  let response = served.client.sessions().decide(decide("s1", &["python3"])).await.unwrap().into_inner();
+  let response = served.client.runs().decide(decide("s1", &["python3"])).await.unwrap().into_inner();
 
   assert_eq!(response.target, "on-s1");
 }
@@ -175,8 +173,8 @@ async fn the_cli_decides_within_the_session_it_names() {
 async fn a_refused_or_local_route_maps_to_the_wire_shape() {
   let served = serve(actor()).await;
 
-  let refused = served.client.sessions().decide(decide("", &["rm", "-rf", "/"])).await.unwrap().into_inner();
-  let local = served.client.sessions().decide(decide("", &["ls"])).await.unwrap().into_inner();
+  let refused = served.client.runs().decide(decide("", &["rm", "-rf", "/"])).await.unwrap().into_inner();
+  let local = served.client.runs().decide(decide("", &["ls"])).await.unwrap().into_inner();
 
   assert_eq!((refused.target.as_str(), refused.deny.as_str()), ("", "denied: no deleting"));
   assert_eq!((local.target.as_str(), local.deny.as_str()), ("actor", ""));

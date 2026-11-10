@@ -1,10 +1,10 @@
 //! The actor's init: the boot sequence, in order. It mounts the system, asks
-//! the daemon for the session's configuration, sets up the identity, the
+//! the daemon for the run's configuration, sets up the identity, the
 //! workspace mounts, the gateway forwarder, route stubs and copy-in, turns
 //! routing on, runs the driving program, mirrors out, reports its exit and
 //! reboots, which ends the VM.
 //!
-//! Init logs to the console (the VM's serial port), which `needy session
+//! Init logs to the console (the VM's serial port), which `needy run
 //! logs` prints.
 //!
 //! NOTICE: the tasks init spawns (the forwarder, sshfs bridges, scheduled

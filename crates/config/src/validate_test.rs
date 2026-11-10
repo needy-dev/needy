@@ -23,7 +23,7 @@ commands:
   - { match: "xcodebuild **", use: [mac], files: [workspace] }
 files:
   workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/" }
-session_files: [workspace]
+run_files: [workspace]
 "#,
   );
 
@@ -81,12 +81,12 @@ fn to_executor_without_a_default_is_an_error() {
 
 #[test]
 fn unknown_file_mappings_are_errors() {
-  let found = findings("session_files: [workspace]\ncommands: [{ match: \"git **\", files: [cache] }]");
+  let found = findings("run_files: [workspace]\ncommands: [{ match: \"git **\", files: [cache] }]");
 
   assert_eq!(
     found,
     [
-      "error: session_files names unknown file mapping \"workspace\"",
+      "error: run_files names unknown file mapping \"workspace\"",
       "error: commands[0] (git **) adds unknown file mapping \"cache\"",
     ]
   );

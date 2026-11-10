@@ -9,13 +9,13 @@ use std::time::Duration;
 use needy_api_proto::v1::guest_service_server::GuestServiceServer;
 use needy_api_proto::v1::health_service_server::HealthServiceServer;
 use needy_api_proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
-use needy_api_proto::v1::session_service_server::SessionServiceServer;
+use needy_api_proto::v1::run_service_server::RunServiceServer;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
-use crate::control::{Caller, Guest, Processes, Sessions};
+use crate::control::{Caller, Guest, Processes, Runs};
 use crate::middleware::authentication::{AuthLayer, Token};
-use crate::protocol::grpc::v1::{guest, health::Health, process, session};
+use crate::protocol::grpc::v1::{guest, health::Health, process, run};
 
 // NOTICE: once cancelled, a server stops accepting and lets open calls
 // finish; an attached exec stream may never finish, so it gets 5 s.
@@ -95,9 +95,9 @@ impl Server {
     self
   }
 
-  pub fn sessions<S: Sessions>(mut self, sessions: Arc<S>) -> Self {
+  pub fn runs<S: Runs>(mut self, runs: Arc<S>) -> Self {
     let caller = self.caller.clone();
-    self.routes = self.routes.add_service(SessionServiceServer::new(session::Adapter { sessions, caller }));
+    self.routes = self.routes.add_service(RunServiceServer::new(run::Adapter { runs, caller }));
     self
   }
 

@@ -1,5 +1,10 @@
 # Provenance inventory
 
+> **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
+> API, the CLI and the trace (slice 2 of
+> [Runners and runs](2026-11-10-runner-and-run-design.md)). This note keeps
+> the word it was written with: read *session* as *run*.
+
 **Status**: evidence, 2026-11-10. The audit that applied the "Provenance of
 Hard-coded and Copied Data" rules in [`AGENTS.md`](../../../../AGENTS.md) to
 the existing code. Every item below now carries its source at its definition;

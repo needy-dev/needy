@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use needy_api_server::control::{ControlError, ExecOpen, ExecOutput, ExecSpec, Inputs, Outputs, Processes, Sessions};
+use needy_api_server::control::{ControlError, ExecOpen, ExecOutput, ExecSpec, Inputs, Outputs, Processes, Runs};
 use needy_common::process::Exit;
 use needy_core::types::Origin;
 use tokio_stream::StreamExt as _;
 
-use crate::testing::{self, new_session};
+use crate::testing::{self, new_run};
 
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -16,7 +16,7 @@ commands:
   - { match: "**", to: here }
 "#;
 
-fn spec(argv: &[&str], session: &str, executor: &str) -> ExecSpec {
+fn spec(argv: &[&str], run: &str, executor: &str) -> ExecSpec {
   ExecSpec {
     argv: argv.iter().map(|a| a.to_string()).collect(),
     cwd: String::new(),
@@ -24,7 +24,7 @@ fn spec(argv: &[&str], session: &str, executor: &str) -> ExecSpec {
     clear_env: false,
     tty: None,
     detach: false,
-    session: session.into(),
+    run: run.into(),
     executor: executor.into(),
     no_stdin: true,
     origin: Origin::Cli,
@@ -51,25 +51,25 @@ async fn finish(mut outputs: Outputs) -> (String, Option<Exit>) {
 }
 
 #[tokio::test]
-async fn an_exec_outside_any_session_runs_on_the_named_executor() {
+async fn an_exec_outside_any_run_runs_on_the_named_executor() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let outputs = daemon.exec(ExecOpen::Start(spec(&["echo", "hi"], "", "here")), attached()).await.unwrap();
   let (stdout, exit) = finish(outputs).await;
   assert_eq!(stdout, "hi\n");
   assert_eq!(exit.unwrap().code, Some(0));
 }
 
-// The module layout redesign's sessionless exec flow: an ambiguous name is
+// The module layout redesign's exec flow outside a run: an ambiguous name is
 // an error instead of the first match.
 #[tokio::test]
-async fn an_exec_outside_any_session_refuses_an_ambiguous_executor_name() {
+async fn an_exec_outside_any_run_refuses_an_ambiguous_executor_name() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  // Each session keys its own `here` instance by its ID.
-  Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
-  Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  // Each run keys its own `here` instance by its ID.
+  Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let Err(ControlError::Invalid(message)) = daemon.exec(ExecOpen::Start(spec(&["true"], "", "here")), attached()).await else {
     panic!("an ambiguous executor name must be refused");
   };
@@ -77,10 +77,10 @@ async fn an_exec_outside_any_session_refuses_an_ambiguous_executor_name() {
 }
 
 #[tokio::test]
-async fn stopping_a_session_ends_its_commands_streams() {
+async fn stopping_a_run_ends_its_commands_streams() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let mut outputs = daemon.exec(ExecOpen::Start(spec(&["sleep", "30"], &created.id, "")), attached()).await.unwrap();
   // The process runs once the relay passes on its start.
   loop {
@@ -88,31 +88,31 @@ async fn stopping_a_session_ends_its_commands_streams() {
       break;
     }
   }
-  tokio::time::timeout(Duration::from_secs(10), Sessions::stop(daemon, &created.id)).await.expect("the stop waits for no command").unwrap();
+  tokio::time::timeout(Duration::from_secs(10), Runs::stop(daemon, &created.id)).await.expect("the stop waits for no command").unwrap();
   let (_, exit) = tokio::time::timeout(Duration::from_secs(10), finish(outputs)).await.unwrap();
-  assert_eq!(exit, None, "the relay ended with the session, before the command exited");
+  assert_eq!(exit, None, "the relay ended with the run, before the command exited");
 }
 
 // ROOT CAUSE:
 //
-// If a session stopped while one of its commands' streams was open, the
+// If a run stopped while one of its commands' streams was open, the
 // relay just closed the stream, because cancelling it dropped the sender;
 // the caller could not tell why no exit came.
 //
 // Before the fix, `needy exec` took the closed stream for exit 0.
 // The fix sends an explicit end with the reason before the stream closes.
 #[tokio::test]
-async fn a_stream_its_session_stop_ends_says_session_stopped() {
+async fn a_stream_its_run_stop_ends_says_run_stopped() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let mut outputs = daemon.exec(ExecOpen::Start(spec(&["sleep", "30"], &created.id, "")), attached()).await.unwrap();
   while !matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)) {}
 
-  Sessions::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id).await.unwrap();
   let rest: Vec<_> = tokio::time::timeout(Duration::from_secs(10), outputs.collect::<Vec<_>>()).await.unwrap();
 
-  assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "session stopped"), "{rest:?}");
+  assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "run stopped"), "{rest:?}");
 }
 
 // The owner's 2026-11-10 trial: `needy attach` forwards stdin, so attaching
@@ -122,7 +122,7 @@ async fn a_stream_its_session_stop_ends_says_session_stopped() {
 async fn attaching_to_a_workspace_mount_is_refused() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let mount = ExecSpec {
     origin: Origin::ActorMount,
     detach: true,
@@ -150,14 +150,14 @@ async fn attaching_to_a_workspace_mount_is_refused() {
     panic!("attaching to a workspace mount must be refused");
   };
   assert_eq!(message, format!("process {process} is needy's own (origin actor-mount); it cannot be attached"));
-  Sessions::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id).await.unwrap();
 }
 
 #[tokio::test]
 async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let outputs = daemon.exec(ExecOpen::Start(spec(&["sh", "-c", "echo done; exit 4"], &created.id, "here")), attached()).await.unwrap();
   let process = Processes::list(daemon, &created.id).await.unwrap()[0].process.clone();
   finish(outputs).await;
@@ -180,10 +180,10 @@ async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
 }
 
 /// Starts `argv` detached and returns its process ID once it runs.
-async fn start_detached(daemon: &crate::Daemon, argv: &[&str], session: &str, executor: &str) -> String {
+async fn start_detached(daemon: &crate::Daemon, argv: &[&str], run: &str, executor: &str) -> String {
   let detached = ExecSpec {
     detach: true,
-    ..spec(argv, session, executor)
+    ..spec(argv, run, executor)
   };
   let mut outputs = daemon.exec(ExecOpen::Start(detached), attached()).await.unwrap();
   loop {
@@ -195,7 +195,7 @@ async fn start_detached(daemon: &crate::Daemon, argv: &[&str], session: &str, ex
 
 // ROOT CAUSE:
 //
-// If a session had a native executor, `needy ps` without `--session` listed
+// If a run had a native executor, `needy ps` without `--run` listed
 // each of its processes twice, under `here` and under `local`, because both
 // instances share this machine's executor and each was asked for every
 // process on it.
@@ -207,48 +207,42 @@ async fn start_detached(daemon: &crate::Daemon, argv: &[&str], session: &str, ex
 async fn processes_on_an_executor_two_instances_share_are_listed_once() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
-  let in_session = start_detached(daemon, &["sleep", "30"], &created.id, "").await;
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let in_run = start_detached(daemon, &["sleep", "30"], &created.id, "").await;
   let outside = start_detached(daemon, &["sleep", "30"], "", "").await;
 
   let listed: Vec<(String, String)> = Processes::list(daemon, "").await.unwrap().into_iter().map(|p| (p.process, p.executor)).collect();
 
-  assert_eq!(
-    listed,
-    [
-      (in_session, "here".to_string()),
-      (outside, "local".to_string())
-    ]
-  );
-  Sessions::stop(daemon, &created.id).await.unwrap();
+  assert_eq!(listed, [(in_run, "here".to_string()), (outside, "local".to_string())]);
+  Runs::stop(daemon, &created.id).await.unwrap();
   daemon.shutdown().await;
 }
 
-/// The message of an exec in `session` the daemon refuses.
-async fn exec_refusal(daemon: &crate::Daemon, session: &str) -> String {
-  match daemon.exec(ExecOpen::Start(spec(&["true"], session, "")), attached()).await {
-    Ok(_) => panic!("an exec in session {session} was accepted"),
+/// The message of an exec in `run` the daemon refuses.
+async fn exec_refusal(daemon: &crate::Daemon, run: &str) -> String {
+  match daemon.exec(ExecOpen::Start(spec(&["true"], run, "")), attached()).await {
+    Ok(_) => panic!("an exec in run {run} was accepted"),
     Err(e) => e.to_string(),
   }
 }
 
 // ROOT CAUSE:
 //
-// If `needy exec` named a session whose actor had finished, it said "the
-// session has no executor", because finishing gives the executors back and
-// placement found none; a stopped session was "no such session".
+// If `needy exec` named a run whose actor had finished, it said "the
+// run has no executor", because finishing gives the executors back and
+// placement found none; a stopped run was "no such run".
 //
-// Before the fix, neither message said that the session had ended.
-// The fix says so, with the session's state.
+// Before the fix, neither message said that the run had ended.
+// The fix says so, with the run's state.
 #[tokio::test]
-async fn an_exec_in_an_ended_session_says_it_ended_and_how() {
+async fn an_exec_in_an_ended_run_says_it_ended_and_how() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
   testing::fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
-  let finished = Sessions::create(daemon, testing::new_actor_session(PROFILE, started.dir.path())).await.unwrap();
+  let finished = Runs::create(daemon, testing::new_actor_run(PROFILE, started.dir.path())).await.unwrap();
   testing::exit_actor(&started, &finished.id).await;
-  let stopped = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
-  Sessions::stop(daemon, &stopped.id).await.unwrap();
+  let stopped = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  Runs::stop(daemon, &stopped.id).await.unwrap();
   let released = async {
     while !daemon.pool.instances().await.is_empty() {
       tokio::time::sleep(Duration::from_millis(20)).await;
@@ -256,8 +250,8 @@ async fn an_exec_in_an_ended_session_says_it_ended_and_how() {
   };
   tokio::time::timeout(Duration::from_secs(10), released).await.expect("the actor did not finish");
 
-  assert_eq!(exec_refusal(daemon, &finished.id).await, format!("session {} has ended: finished", finished.id));
-  assert_eq!(exec_refusal(daemon, &stopped.id).await, format!("session {} has ended: stopped", stopped.id));
+  assert_eq!(exec_refusal(daemon, &finished.id).await, format!("run {} has ended: finished", finished.id));
+  assert_eq!(exec_refusal(daemon, &stopped.id).await, format!("run {} has ended: stopped", stopped.id));
 }
 
 // G2 of the terminal note: the daemon passes the attaching client's window
@@ -267,7 +261,7 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
   use needy_api_server::control::{ExecInput, WindowSize};
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let on_a_terminal = ExecSpec {
     tty: Some(WindowSize { rows: 24, cols: 80 }),
     ..spec(&["sh", "-c", "read line; stty size"], &created.id, "")
@@ -297,7 +291,7 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
   let (stdout, _) = tokio::time::timeout(Duration::from_secs(10), finish(daemon.exec(open, input).await.unwrap())).await.unwrap();
 
   assert!(stdout.contains("40 100"), "{stdout:?}");
-  Sessions::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id).await.unwrap();
 }
 
 // The terminal note's G9: the executor's fallback for an unknown `TERM` is
@@ -307,16 +301,16 @@ async fn a_terminal_type_the_executor_replaced_is_recorded_in_exec_start() {
   use needy_api_server::control::WindowSize;
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let on_a_terminal = ExecSpec {
     tty: Some(WindowSize { rows: 24, cols: 80 }),
     env: [("TERM".to_string(), "needy-no-such-terminal".to_string())].into(),
     ..spec(&["true"], &created.id, "")
   };
   finish(daemon.exec(ExecOpen::Start(on_a_terminal), attached()).await.unwrap()).await;
-  Sessions::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id).await.unwrap();
 
-  let trace = std::fs::read_to_string(started.dir.path().join("state/sessions").join(&created.id).join("trace.jsonl")).unwrap();
+  let trace = std::fs::read_to_string(started.dir.path().join("state/runs").join(&created.id).join("trace.jsonl")).unwrap();
   let start = trace.lines().find(|l| l.contains("\"exec.start\"")).unwrap_or_else(|| panic!("{trace}"));
   assert!(start.contains(r#""term_fallback":{"requested":"needy-no-such-terminal","used":"xterm-256color"}"#), "{start}");
 }

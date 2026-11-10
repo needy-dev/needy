@@ -1,4 +1,4 @@
-//! What a session's trace records and where it goes.
+//! What a run's trace records and where it goes.
 
 use serde::Deserialize;
 
@@ -25,7 +25,7 @@ impl Default for Trace {
 pub enum TraceSink {
   /// The daemon's `trace.db`, which `needy report` reads.
   Sqlite,
-  /// `trace.jsonl` in the session's directory, for export.
+  /// `trace.jsonl` in the run's directory, for export.
   Jsonl,
   // TODO(trace): `otel` is deferred (module layout redesign, Hooks) until
   // the owner approves an exporter.

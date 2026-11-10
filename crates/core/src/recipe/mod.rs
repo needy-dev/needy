@@ -1,5 +1,5 @@
 //! Recipe compilation: one machine's identity, compiled for a host and a
-//! session seed. Recipes themselves are loaded by `needy-config`.
+//! run seed. Recipes themselves are loaded by `needy-config`.
 
 mod cpu;
 mod host;
@@ -44,7 +44,7 @@ impl VmIdentity {
   }
 }
 
-/// A recipe compiled for one host and session seed.
+/// A recipe compiled for one host and run seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledRecipe {
   pub vcpus: u32,
@@ -68,7 +68,7 @@ pub struct CompiledRecipe {
 }
 
 /// Compiles a recipe for `host`; `seed` fills `{hash}` and `{seq}` and every
-/// other per-session value, so a replayed session gets the same machine.
+/// other per-run value, so a replayed run gets the same machine.
 pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
   let mut findings = Vec::new();
   let fill = |text: &str| fill_placeholders(text, seed);

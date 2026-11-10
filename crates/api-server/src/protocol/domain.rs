@@ -14,11 +14,9 @@ use needy_api_proto::v1;
 use needy_common::process::Exit;
 use needy_core::event::Event;
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, SessionState};
+use needy_core::types::{Origin, RunState};
 
-use crate::control::{
-  ExecInput, ExecOutput, ExecSpec, GuestConfig, NewSession, ProcessInfo, Route, SessionInfo, Started, Target, WindowSize,
-};
+use crate::control::{ExecInput, ExecOutput, ExecSpec, GuestConfig, NewRun, ProcessInfo, Route, RunInfo, Started, Target, WindowSize};
 
 /// A request field with no domain meaning.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -58,26 +56,26 @@ pub fn proto_origin(origin: Origin) -> v1::Origin {
   }
 }
 
-// NOTICE: proto -> `SessionState` lives on the client side
-// (`needy-cli`), the only reader of session states on the wire.
-pub fn proto_session_state(state: SessionState) -> v1::SessionState {
+// NOTICE: proto -> `RunState` lives on the client side
+// (`needy-cli`), the only reader of run states on the wire.
+pub fn proto_run_state(state: RunState) -> v1::RunState {
   match state {
-    SessionState::Creating => v1::SessionState::Creating,
-    SessionState::Running => v1::SessionState::Running,
-    SessionState::Stopping => v1::SessionState::Stopping,
-    SessionState::Stopped => v1::SessionState::Stopped,
-    SessionState::Finished => v1::SessionState::Finished,
-    SessionState::Failed => v1::SessionState::Failed,
+    RunState::Creating => v1::RunState::Creating,
+    RunState::Running => v1::RunState::Running,
+    RunState::Stopping => v1::RunState::Stopping,
+    RunState::Stopped => v1::RunState::Stopped,
+    RunState::Finished => v1::RunState::Finished,
+    RunState::Failed => v1::RunState::Failed,
   }
 }
 
-// ------------------------------------------------------------- sessions
+// ------------------------------------------------------------- runs
 
-pub fn new_session(request: v1::CreateSessionRequest) -> Result<NewSession, Error> {
+pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
   if request.profile_name.is_empty() {
     return Err(Error::Missing("profile"));
   }
-  Ok(NewSession {
+  Ok(NewRun {
     profile_yaml: request.profile_yaml,
     recipe_yaml: request.recipe_yaml,
     profile_name: request.profile_name,
@@ -88,17 +86,17 @@ pub fn new_session(request: v1::CreateSessionRequest) -> Result<NewSession, Erro
   })
 }
 
-pub fn proto_session(session: SessionInfo) -> v1::Session {
-  v1::Session {
-    session_id: session.id,
-    name: session.name,
-    group: session.group,
-    state: proto_session_state(session.state).into(),
-    executors: session
+pub fn proto_run(run: RunInfo) -> v1::Run {
+  v1::Run {
+    run_id: run.id,
+    name: run.name,
+    group: run.group,
+    state: proto_run_state(run.state).into(),
+    executors: run
       .executors
       .into_iter()
       .map(|e| (e, false))
-      .chain(session.released.into_iter().map(|e| (e, true)))
+      .chain(run.released.into_iter().map(|e| (e, true)))
       .map(|(e, released)| v1::ExecutorRef {
         name: e.name,
         runtime: e.runtime,
@@ -106,10 +104,10 @@ pub fn proto_session(session: SessionInfo) -> v1::Session {
         released,
       })
       .collect(),
-    created_at_ms: session.created_ms,
-    profile: session.profile,
-    actor_exit: session.actor_exit.map(proto_exit),
-    failure: session.failure.unwrap_or_default(),
+    created_at_ms: run.created_ms,
+    profile: run.profile,
+    actor_exit: run.actor_exit.map(proto_exit),
+    failure: run.failure.unwrap_or_default(),
   }
 }
 
@@ -155,7 +153,7 @@ pub fn exec_spec(start: v1::ExecStart) -> Result<ExecSpec, Error> {
       cols: t.cols,
     }),
     detach: start.detach,
-    session: start.session_id,
+    run: start.run_id,
     executor: start.executor,
     no_stdin: start.no_stdin,
     search_path_if_missing: start.search_path_if_missing,
@@ -170,7 +168,7 @@ pub fn proto_exec_start(spec: ExecSpec) -> v1::ExecStart {
     clear_env: spec.clear_env,
     tty: spec.tty.map(proto_window),
     detach: spec.detach,
-    session_id: spec.session,
+    run_id: spec.run,
     executor: spec.executor,
     no_stdin: spec.no_stdin,
     origin: proto_origin(spec.origin).into(),
@@ -255,7 +253,7 @@ pub fn process_info(info: v1::ProcessInfo) -> ProcessInfo {
     exit: info.exited.map(exit),
     tty: info.tty,
     started_ms: info.started_at_ms,
-    session: info.session_id,
+    run: info.run_id,
     // An executor does not keep the origin; unspecified means unknown.
     origin: origin(info.origin).ok(),
   }
@@ -271,7 +269,7 @@ pub fn proto_process_info(info: ProcessInfo) -> v1::ProcessInfo {
     exited: info.exit.map(proto_exit),
     tty: info.tty,
     started_at_ms: info.started_ms,
-    session_id: info.session,
+    run_id: info.run,
     origin: info.origin.map_or(v1::Origin::Unspecified, proto_origin).into(),
   }
 }
@@ -294,7 +292,7 @@ pub fn proto_exit(exit: Exit) -> v1::ExecExited {
 
 pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
   v1::GetConfigResponse {
-    session_id: config.session,
+    run_id: config.run,
     user: Some(v1::GuestUser {
       name: config.user.name,
       uid: config.user.uid,

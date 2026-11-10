@@ -67,7 +67,7 @@ pub enum Kind {
   /// The server is not reachable or is going away.
   Unavailable,
   /// An exec stream ended before its command exited: the daemon ended it,
-  /// for example because its session stopped, or the connection closed.
+  /// for example because its run stopped, or the connection closed.
   Ended,
   /// Anything else: a bug, or a status this build does not map.
   Other,

@@ -1,6 +1,6 @@
-use needy_api_server::control::{Guest, Sessions};
+use needy_api_server::control::{Guest, Runs};
 
-use crate::testing::{self, new_session};
+use crate::testing::{self, new_run};
 
 const NO_MOUNT: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -14,12 +14,12 @@ executors:
   here: { runtime: native }
 files:
   workspace: { mode: mount, from: "executor:here:/srv/ws/", to: "actor:~/workspace/", writable: true }
-session_files: [workspace]
+run_files: [workspace]
 "#;
 
 async fn cwd(profile: &str) -> String {
   let started = testing::daemon().await;
-  let created = Sessions::create(&started.daemon, new_session(profile, started.dir.path())).await.unwrap();
+  let created = Runs::create(&started.daemon, new_run(profile, started.dir.path())).await.unwrap();
   Guest::config(&started.daemon, &created.id).await.unwrap().cwd
 }
 

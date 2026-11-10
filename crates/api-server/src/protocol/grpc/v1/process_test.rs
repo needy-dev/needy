@@ -11,7 +11,7 @@ use crate::testing::{refusal_event, serve};
 fn start(argv: &[&str]) -> ExecStart {
   ExecStart {
     argv: argv.iter().map(|a| a.to_string()).collect(),
-    session_id: "s1".into(),
+    run_id: "s1".into(),
     origin: Origin::Cli.into(),
     ..Default::default()
   }
@@ -29,15 +29,15 @@ async fn an_exec_carries_input_to_the_daemon_and_output_back() {
 }
 
 #[tokio::test]
-async fn an_actor_execs_within_its_own_session() {
+async fn an_actor_execs_within_its_own_run() {
   let served = serve(Caller::Actor {
-    session: "s-actor".into(),
+    run: "s-actor".into(),
   })
   .await;
   let mut stream = ExecStream::start(
     &served.client,
     ExecStart {
-      session_id: "someone-else".into(),
+      run_id: "someone-else".into(),
       origin: Origin::ActorProxy.into(),
       ..start(&["python3"])
     },
@@ -116,9 +116,9 @@ async fn an_attach_names_the_process_and_replay() {
 }
 
 #[tokio::test]
-async fn an_actor_lists_only_its_own_session() {
+async fn an_actor_lists_only_its_own_run() {
   let served = serve(Caller::Actor {
-    session: "s-actor".into(),
+    run: "s-actor".into(),
   })
   .await;
 
@@ -126,7 +126,7 @@ async fn an_actor_lists_only_its_own_session() {
     .client
     .processes()
     .list_processes(ListProcessesRequest {
-      session_id: String::new(),
+      run_id: String::new(),
     })
     .await
     .unwrap()
@@ -134,7 +134,7 @@ async fn an_actor_lists_only_its_own_session() {
     .processes;
 
   assert_eq!(served.fake.calls(), [r#"list "s-actor""#]);
-  assert_eq!(listed[0].session_id, "s-actor");
+  assert_eq!(listed[0].run_id, "s-actor");
   assert_eq!(listed[0].origin, Origin::Cli as i32);
   assert!(!listed[0].running);
   assert_eq!(listed[0].exited.as_ref().map(|e| e.signal.as_str()), Some("SIGKILL"));

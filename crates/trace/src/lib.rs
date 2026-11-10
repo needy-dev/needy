@@ -1,6 +1,6 @@
 //! Needy's event pipeline. Producers hand [`Dispatch`] an event kind and its
 //! JSON payload; Dispatch stamps the [`Event`] envelope and passes it to the
-//! session's sinks without ever blocking the producer.
+//! run's sinks without ever blocking the producer.
 //!
 //! The crate does not know event types: payloads are JSON built by
 //! `needy_core::event`, which also reads them back. It reaches the filesystem
@@ -31,10 +31,10 @@ pub enum Error {
   #[error("trace database: {0}")]
   Database(#[from] sea_orm::DbErr),
   #[cfg(feature = "sqlite")]
-  #[error("trace database {0} has another schema; needy does not migrate trace databases from before the trace crate, so move it away")]
+  #[error("trace database {0} has another schema; needy does not migrate trace databases from an earlier schema, so move it away")]
   Schema(std::path::PathBuf),
   #[error("no trace database at {0}")]
   NoDatabase(std::path::PathBuf),
-  #[error("no session matches {0}")]
-  NoSession(String),
+  #[error("no run matches {0}")]
+  NoRun(String),
 }

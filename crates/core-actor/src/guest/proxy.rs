@@ -66,9 +66,9 @@ async fn proxy() -> Result<i32> {
   let client = super::daemon().await?;
   let ancestors = super::ancestry::ancestors(std::path::Path::new("/proc"), std::process::id() as i32);
   let decision = client
-    .sessions()
+    .runs()
     .decide(DecideRequest {
-      session_id: String::new(),
+      run_id: String::new(),
       argv: argv.clone(),
       cwd: cwd.clone(),
       env: env.clone(),
@@ -102,7 +102,7 @@ async fn proxy() -> Result<i32> {
     clear_env: decision.clear_env,
     tty: tty.then(relay::window),
     detach: false,
-    session_id: String::new(),
+    run_id: String::new(),
     executor: decision.target,
     no_stdin: false,
     origin: Origin::ActorProxy.into(),

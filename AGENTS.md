@@ -13,14 +13,14 @@ Dependencies point downward; a crate never depends on one above it.
   (`logging`, `tracing`). It composes the crates below and, inside an actor,
   dispatches to the guest init and proxy by `argv[0]`.
 - `crates/daemon` (`needy-daemon`): the control plane's policy and the
-  executor role: `session` (create, get, list, stop, and the session state
+  executor role: `run` (create, get, list, stop, and the run state
   transitions), `pool` (instances by key, refcounts, slots), `routing` (the
   `exec.decide` chain, path maps), `relay` (exec streams and their stream
-  filters), `files` (copy-in, mirror-out), `actor` and `guest` (a session's
+  filters), `files` (copy-in, mirror-out), `actor` and `guest` (a run's
   VM, gateway and guest API), and `executor`. It implements
   `needy-api-server`'s domain traits and serves them through its `Server`; it
   never builds a gRPC status. Every long-lived task belongs to the daemon's
-  or a session's `TaskTracker`. Mechanisms live below.
+  or a run's `TaskTracker`. Mechanisms live below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
   is the in-guest init and exec-routing proxy, on `nix`, logging to the
   console. `host` runs next to the VM: `detect` reads this machine's CPU,
@@ -41,8 +41,8 @@ Dependencies point downward; a crate never depends on one above it.
   and consumers share (`types`), the typed event schema (`event`) and report
   rendering (`report`, no IO). No processes, listeners, VMs or storage.
 - `crates/trace` (`needy-trace`): the event pipeline. It carries an envelope
-  (`event`: session, sequence number, time, kind and a JSON payload) and does
-  not know event types. `Dispatch` is one session's bounded queue: it never
+  (`event`: run, sequence number, time, kind and a JSON payload) and does
+  not know event types. `Dispatch` is one run's bounded queue: it never
   blocks a producer, counts what a full queue drops and records it as
   `trace.gap`. Sinks sit behind features: `sqlite` (`trace.db`, SeaORM
   entities and migrations, and the reader `needy report` uses), `jsonl`,
@@ -66,8 +66,8 @@ Dependencies point downward; a crate never depends on one above it.
   exec; `Error` maps a status to a `Kind`. The CLI, the proxy, the providers,
   the daemon's relay and xtask use it instead of raw streams.
 - `crates/api-server` (`needy-api-server`): the inbound side. `control` holds
-  the domain traits (`Sessions`, `Processes`, `Guest`), `Caller` (the CLI, or
-  an actor bound to its session) and `ControlError`; `server` binds every
+  the domain traits (`Runs`, `Processes`, `Guest`), `Caller` (the CLI, or
+  an actor bound to its run) and `ControlError`; `server` binds every
   listener before serving; `protocol` has the gRPC adapters, the proto <->
   domain conversions and the one status table; `middleware` is bearer
   authentication; `termination` turns signals into cancellation.
@@ -80,7 +80,7 @@ Dependencies point downward; a crate never depends on one above it.
 ## Shared Vocabulary
 
 - Use [`docs/TERMS_AND_CONCEPTS.md`](docs/TERMS_AND_CONCEPTS.md) as the shared
-  vocabulary for actors, executors, sessions, profiles, recipes, routing,
+  vocabulary for actors, executors, runs, profiles, recipes, routing,
   traces and reports.
 - When a design introduces or changes a core term, update
   `docs/TERMS_AND_CONCEPTS.md` instead of defining the term only inside a
@@ -280,7 +280,7 @@ one, add its provenance or a `TODO(provenance):` naming what is missing.
 - The repository has Rust unit coverage for profiles, rules, recipes, chaos,
   archives, signals and bearer authentication. The daemon is tested in
   process through `needy-api-server`'s traits with a native executor
-  (sessions, pool, routing, relay, shutdown); actors and Docker executors are
+  (runs, pool, routing, relay, shutdown); actors and Docker executors are
   verified end to end on hosts (see the closed-loop results).
 - Add regression tests for behavior changes and keep them narrow.
 - Use `cargo test` for the full suite and include regression tests for bug

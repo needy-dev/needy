@@ -1,4 +1,4 @@
-//! Routing: the `exec.decide` chain for a session's commands (rules, then
+//! Routing: the `exec.decide` chain for a run's commands (rules, then
 //! chaos), where a command runs, and how the executor's path map rewrites
 //! it.
 
@@ -12,26 +12,26 @@ use needy_core::rules::Rules;
 use needy_core::types::{Decision, Origin, Outcome, Placement};
 
 use crate::pool::Instance;
-use crate::session::Session;
+use crate::run::Run;
 
-/// Runs the `exec.decide` chain for one command of `session`: rules, then
+/// Runs the `exec.decide` chain for one command of `run`: rules, then
 /// chaos. A command placed on `executor` explicitly skips the rules. The
 /// delays of injected faults are applied here, and each fault is recorded.
 /// The chain's latency, without the delays, is the `exec.decide` timing.
-async fn decide(session: &Session, ctx: &ExecContext, executor: Option<&str>) -> Decision {
+async fn decide(run: &Run, ctx: &ExecContext, executor: Option<&str>) -> Decision {
   let started = std::time::Instant::now();
-  let rules = Rules::new(&session.profile);
-  let injector = session.injector.as_ref();
+  let rules = Rules::new(&run.profile);
+  let injector = run.injector.as_ref();
   let decision = match executor {
     None => intercept::decide(&[&rules, injector], ctx, Decision::unchanged(ctx, Placement::Actor)),
     Some(name) => intercept::decide(&[injector], ctx, Decision::unchanged(ctx, Placement::Executor(name.into()))),
   };
-  session.trace.time("exec.decide", started.elapsed());
+  run.trace.time("exec.decide", started.elapsed());
   for fired in &decision.fired {
     if let Some(delay) = fired.effect.delay {
       tokio::time::sleep(delay).await;
     }
-    session.emit(&Event::FaultInjected(fired.clone()));
+    run.emit(&Event::FaultInjected(fired.clone()));
   }
   decision
 }
@@ -39,7 +39,7 @@ async fn decide(session: &Session, ctx: &ExecContext, executor: Option<&str>) ->
 /// Records an `exec.decide` event and returns it; `outcome` is where the
 /// command really runs, which for a command from the CLI may differ from
 /// the rules'.
-fn record(session: &Session, ctx: &ExecContext, decision: &Decision, origin: Origin, outcome: Outcome) -> Event {
+fn record(run: &Run, ctx: &ExecContext, decision: &Decision, origin: Origin, outcome: Outcome) -> Event {
   let event = Event::ExecDecide(ExecDecide {
     argv: ctx.argv.clone(),
     effective: decision.effective.clone(),
@@ -47,18 +47,18 @@ fn record(session: &Session, ctx: &ExecContext, decision: &Decision, origin: Ori
     outcome,
     rules: decision.matched.clone(),
   });
-  session.emit(&event);
+  run.emit(&event);
   event
 }
 
 /// Routes a command the actor's proxy asks about.
-pub async fn route(session: &Session, ctx: ExecContext) -> Route {
-  let decision = decide(session, &ctx, None).await;
-  record(session, &ctx, &decision, Origin::ActorProxy, decision.outcome.clone());
+pub async fn route(run: &Run, ctx: ExecContext) -> Route {
+  let decision = decide(run, &ctx, None).await;
+  record(run, &ctx, &decision, Origin::ActorProxy, decision.outcome.clone());
   // A refusal is what the proxy prints, worded like `needy exec`'s.
   let (target, instance) = match &decision.outcome {
     Outcome::Run(Placement::Actor) => (Target::Actor, None),
-    Outcome::Run(Placement::Executor(name)) => (Target::Executor(name.clone()), session.executor(name)),
+    Outcome::Run(Placement::Executor(name)) => (Target::Executor(name.clone()), run.executor(name)),
     Outcome::Deny(message) => (Target::Refused(format!("denied: {message}")), None),
     Outcome::Fault(errno) => (Target::Refused(format!("fault injected: {errno}")), None),
   };
@@ -73,18 +73,18 @@ pub async fn route(session: &Session, ctx: ExecContext) -> Route {
   }
 }
 
-/// Places an exec of `session`: runs the `exec.decide` chain unless the
+/// Places an exec of `run`: runs the `exec.decide` chain unless the
 /// command comes from the actor (the proxy decided already; a mount is not
 /// a command), rewrites `spec` and returns the instance it runs on with
 /// the events of the decision. A refusal carries those events.
-pub async fn place(session: &Session, spec: &mut ExecSpec) -> Result<(Arc<Instance>, Vec<Event>), ControlError> {
+pub async fn place(run: &Run, spec: &mut ExecSpec) -> Result<(Arc<Instance>, Vec<Event>), ControlError> {
   let origin = spec.origin;
   let explicit = (!spec.executor.is_empty()).then(|| spec.executor.clone());
   let decision = match origin {
     Origin::ActorProxy | Origin::ActorMount => None,
     Origin::Cli | Origin::Fs | Origin::Files => {
       let ctx = context(spec);
-      Some((decide(session, &ctx, explicit.as_deref()).await, ctx))
+      Some((decide(run, &ctx, explicit.as_deref()).await, ctx))
     }
   };
   let mut events: Vec<Event> = decision.iter().flat_map(|(d, _)| d.fired.iter().cloned().map(Event::FaultInjected)).collect();
@@ -96,7 +96,7 @@ pub async fn place(session: &Session, spec: &mut ExecSpec) -> Result<(Arc<Instan
     };
     if let Some(message) = refusal {
       if explicit.is_none() {
-        events.push(record(session, ctx, decision, origin, decision.outcome.clone()));
+        events.push(record(run, ctx, decision, origin, decision.outcome.clone()));
       }
       return Err(ControlError::Denied { message, events });
     }
@@ -106,15 +106,15 @@ pub async fn place(session: &Session, spec: &mut ExecSpec) -> Result<(Arc<Instan
     // a CLI command has no actor to run on.
     spec.executor = match decision.as_ref().map(|(d, _)| &d.outcome) {
       Some(Outcome::Run(Placement::Executor(name))) => name.clone(),
-      _ => session.profile.default_executor.clone().unwrap_or_default(),
+      _ => run.profile.default_executor.clone().unwrap_or_default(),
     };
   }
-  let executors = session.executors();
+  let executors = run.executors();
   let instance = executors
     .get(&spec.executor)
     .or_else(|| executors.values().next())
     .cloned()
-    .ok_or_else(|| ControlError::NotFound("the session has no executor".into()))?;
+    .ok_or_else(|| ControlError::NotFound("the run has no executor".into()))?;
   if let (None, Some((decision, ctx))) = (&explicit, &decision) {
     let command = executor_command(Some(&instance), decision);
     spec.argv = command.argv;
@@ -122,7 +122,7 @@ pub async fn place(session: &Session, spec: &mut ExecSpec) -> Result<(Arc<Instan
     spec.search_path_if_missing = command.search_path_if_missing;
     spec.env.extend(changed_env(decision, &ctx.env));
     // The decision records where the command really runs.
-    events.push(record(session, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone()))));
+    events.push(record(run, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone()))));
   }
   Ok((instance, events))
 }

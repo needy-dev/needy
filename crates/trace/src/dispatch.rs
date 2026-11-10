@@ -1,5 +1,5 @@
-//! Dispatch: one session's bounded event queue and the worker that drains it
-//! into the session's sinks.
+//! Dispatch: one run's bounded event queue and the worker that drains it
+//! into the run's sinks.
 //!
 //! Producers never wait. [`Dispatch::emit`] puts the event on the queue or,
 //! when the queue is full, drops it and counts it. When the queue has room
@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{Event, Sink, event};
 
-/// How a session's Dispatch behaves.
+/// How a run's Dispatch behaves.
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
   /// Events the queue holds before it drops.
@@ -25,7 +25,7 @@ pub struct Options {
   pub timing: bool,
 }
 
-/// A session's event pipeline. Clones share one queue; the worker ends when
+/// A run's event pipeline. Clones share one queue; the worker ends when
 /// the last clone is dropped and the queue is drained.
 #[derive(Clone)]
 pub struct Dispatch {
@@ -33,7 +33,7 @@ pub struct Dispatch {
 }
 
 struct Inner {
-  session: String,
+  run: String,
   version: u32,
   tx: mpsc::Sender<Message>,
   shared: Arc<Shared>,
@@ -67,9 +67,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Dispatch {
-  /// Starts the worker of `session` on the current Tokio runtime.
-  pub fn new(session: impl Into<String>, sinks: Vec<Box<dyn Sink>>, options: Options) -> Self {
-    let session = session.into();
+  /// Starts the worker of `run` on the current Tokio runtime.
+  pub fn new(run: impl Into<String>, sinks: Vec<Box<dyn Sink>>, options: Options) -> Self {
+    let run = run.into();
     let (tx, rx) = mpsc::channel(options.capacity.max(1));
     let shared = Arc::new(Shared {
       counters: Mutex::new(Counters::default()),
@@ -78,10 +78,10 @@ impl Dispatch {
     });
     #[cfg(not(feature = "timing"))]
     if options.timing {
-      tracing::warn!("session {session}: trace timing is on, but this build has no `timing` feature");
+      tracing::warn!("run {run}: trace timing is on, but this build has no `timing` feature");
     }
     let worker = Worker {
-      session: session.clone(),
+      run: run.clone(),
       version: options.version,
       rx,
       sinks,
@@ -90,7 +90,7 @@ impl Dispatch {
     tokio::spawn(worker.run());
     Self {
       inner: Arc::new(Inner {
-        session,
+        run,
         version: options.version,
         tx,
         shared,
@@ -98,8 +98,8 @@ impl Dispatch {
     }
   }
 
-  pub fn session(&self) -> &str {
-    &self.inner.session
+  pub fn run(&self) -> &str {
+    &self.inner.run
   }
 
   /// Records an event of `kind` now.
@@ -114,14 +114,14 @@ impl Dispatch {
     if counters.dropped > 0 {
       // The queue may have room again: the gap goes first. When it has
       // not, this event is dropped too.
-      let gap = gap(&inner.session, inner.version, &counters, time_ms);
+      let gap = gap(&inner.run, inner.version, &counters, time_ms);
       if !self.enqueue(&mut counters, gap) {
         return;
       }
       counters.dropped = 0;
     }
     let event = Event {
-      session: inner.session.clone(),
+      run: inner.run.clone(),
       seq: counters.seq,
       time_ms,
       kind: kind.to_string(),
@@ -146,7 +146,7 @@ impl Dispatch {
       Err(mpsc::error::TrySendError::Closed(message)) => {
         // NOTICE: the worker only ends early when the runtime shuts down.
         if let Message::Event(event) = message {
-          tracing::warn!("session {}: trace {} after the trace closed", event.session, event.kind);
+          tracing::warn!("run {}: trace {} after the trace closed", event.run, event.kind);
         }
         false
       }
@@ -175,12 +175,12 @@ impl Dispatch {
 }
 
 /// The gap event for the events dropped so far, numbered `counters.seq`.
-fn gap(session: &str, version: u32, counters: &Counters, time_ms: i64) -> Event {
+fn gap(run: &str, version: u32, counters: &Counters, time_ms: i64) -> Event {
   let payload = serde_json::value::to_raw_value(&serde_json::json!({ "dropped": counters.dropped }))
     // NOTICE: an object with one integer always serializes.
     .expect("gap payloads serialize to JSON");
   Event {
-    session: session.to_string(),
+    run: run.to_string(),
     seq: counters.seq,
     time_ms,
     kind: event::GAP.to_string(),
@@ -190,7 +190,7 @@ fn gap(session: &str, version: u32, counters: &Counters, time_ms: i64) -> Event 
 }
 
 struct Worker {
-  session: String,
+  run: String,
   version: u32,
   rx: mpsc::Receiver<Message>,
   sinks: Vec<Box<dyn Sink>>,
@@ -223,7 +223,7 @@ impl Worker {
     let gap = {
       let mut counters = lock(&self.shared.counters);
       (counters.dropped > 0 && self.rx.is_empty()).then(|| {
-        let event = gap(&self.session, self.version, &counters, now_ms());
+        let event = gap(&self.run, self.version, &counters, now_ms());
         counters.seq += 1;
         counters.dropped = 0;
         event
@@ -245,7 +245,7 @@ impl Worker {
           let seq = counters.seq;
           counters.seq += 1;
           Event {
-            session: self.session.clone(),
+            run: self.run.clone(),
             seq,
             time_ms: now_ms(),
             kind: event::TIMING.to_string(),
@@ -258,7 +258,7 @@ impl Worker {
     }
     for sink in &mut self.sinks {
       if let Err(e) = sink.flush().await {
-        tracing::warn!("session {}: trace flush: {e}", self.session);
+        tracing::warn!("run {}: trace flush: {e}", self.run);
       }
     }
   }
@@ -266,7 +266,7 @@ impl Worker {
   async fn write(&mut self, event: &Event) {
     for sink in &mut self.sinks {
       if let Err(e) = sink.write(event).await {
-        tracing::warn!("session {}: trace {} #{}: {e}", self.session, event.kind, event.seq);
+        tracing::warn!("run {}: trace {} #{}: {e}", self.run, event.kind, event.seq);
       }
     }
   }

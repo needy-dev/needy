@@ -1,4 +1,4 @@
-//! `needy ps`: list processes of a session, or of every executor. Needy's
+//! `needy ps`: list processes of a run, or of every executor. Needy's
 //! own processes (file transfers and workspace mounts) are hidden unless
 //! `--all` asks for them.
 
@@ -12,9 +12,9 @@ use crate::output::{self, OutputFormat, Row};
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Only this session's processes.
+  /// Only this run's processes.
   #[arg(long, default_value = "", hide_default_value = true)]
-  session: String,
+  run: String,
   /// Also list needy's own processes: file transfers and workspace mounts.
   #[arg(short = 'a', long)]
   all: bool,
@@ -46,8 +46,8 @@ impl State {
 #[derive(Serialize)]
 struct Process {
   id: String,
-  /// Empty for a process outside any session.
-  session: String,
+  /// Empty for a process outside any run.
+  run: String,
   /// `None` when the daemon did not start the process.
   origin: Option<Origin>,
   executor: String,
@@ -63,13 +63,13 @@ struct Process {
 
 impl Row for Process {
   const HEADER: &'static [&'static str] = &[
-    "ID", "SESSION", "ORIGIN", "EXECUTOR", "PID", "STATE", "EXIT", "TTY", "COMMAND",
+    "ID", "RUN", "ORIGIN", "EXECUTOR", "PID", "STATE", "EXIT", "TTY", "COMMAND",
   ];
 
   fn cells(&self) -> Vec<String> {
     vec![
       self.id.clone(),
-      or_dash(&self.session),
+      or_dash(&self.run),
       self.origin.map_or("-", Origin::as_str).into(),
       self.executor.clone(),
       self.pid.to_string(),
@@ -114,7 +114,7 @@ impl From<ProcessInfo> for Process {
     };
     Self {
       id: p.process_id,
-      session: p.session_id,
+      run: p.run_id,
       origin: origin(p.origin),
       executor: p.executor,
       pid: p.pid,
@@ -131,9 +131,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
   let list = connection
     .processes()
-    .list_processes(ListProcessesRequest {
-      session_id: args.session,
-    })
+    .list_processes(ListProcessesRequest { run_id: args.run })
     .await
     .map_err(needy_api_client::Error::from)?
     .into_inner();

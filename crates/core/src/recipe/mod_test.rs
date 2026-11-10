@@ -262,7 +262,7 @@ fn the_gce_builtin_serials_carry_the_system_uuid() {
 
 // ROOT CAUSE:
 //
-// If a session's seed gave `{seq}` the value 00 or 01, the GCE built-in's
+// If a run's seed gave `{seq}` the value 00 or 01, the GCE built-in's
 // MAC encoded 10.128.0.0 or 10.128.0.1, the subnet's network and gateway
 // addresses, which no VM gets, because `{seq}` covered all 256 values.
 //

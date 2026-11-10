@@ -6,7 +6,7 @@
 //! or `net.connect` interceptors in order: the [`Allowlist`], chaos
 //! ([`needy_core::chaos::Injector`]) and header injection ([`http::Inject`]).
 //! The gateway applies the decision and records typed `net.*` and
-//! `fault.injected` events in the session's trace.
+//! `fault.injected` events in the run's trace.
 
 mod connect;
 mod http;
@@ -95,7 +95,7 @@ fn text(status: StatusCode, message: &str) -> Response<Body> {
 /// One network's gateway. Its connections and tunnels are tasks it owns,
 /// under its owner's cancellation token.
 pub struct Gateway {
-  /// The session's trace.
+  /// The run's trace.
   trace: Dispatch,
   network: Network,
   upstream: BTreeMap<String, String>,
@@ -144,7 +144,7 @@ impl Gateway {
             self.tasks.spawn(self.clone().serve(stream));
           }
           Some(Err(e)) => {
-            tracing::warn!("gateway for session {}: cannot accept: {e}", self.trace.session());
+            tracing::warn!("gateway for run {}: cannot accept: {e}", self.trace.run());
             break;
           }
           None => break,
@@ -171,7 +171,7 @@ impl Gateway {
     tokio::select! {
       result = connection => {
         if let Err(e) = result {
-          tracing::debug!("gateway connection for session {}: {e}", self.trace.session());
+          tracing::debug!("gateway connection for run {}: {e}", self.trace.run());
         }
       }
       // The connection is dropped: its actor is gone.

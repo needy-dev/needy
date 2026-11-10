@@ -43,4 +43,4 @@ files:
     from: "executor:mac:/Users/user/needy-ws/demo/"
     to: "actor:~/workspace/"
     writable: true
-session_files: [workspace]
+run_files: [workspace]

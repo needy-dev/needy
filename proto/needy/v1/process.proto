@@ -30,9 +30,9 @@ message ExecStart {
   WindowSize tty = 5;
   // Keep running after the client disconnects.
   bool detach = 6;
-  // Session to route within. Empty means no session: run on `executor` directly.
-  string session_id = 7;
-  // Executor name. Empty lets the session's rules decide.
+  // Run to route within. Empty means no run: run on `executor` directly.
+  string run_id = 7;
+  // Executor name. Empty lets the run's rules decide.
   string executor = 8;
   // Do not forward stdin; the process sees end of file at once.
   bool no_stdin = 9;
@@ -47,7 +47,7 @@ message ExecStart {
   reserved 10;
 }
 
-// Who started an exec. It decides whether the daemon runs the session's rules
+// Who started an exec. It decides whether the daemon applies the run's rules
 // and how the trace and the report count the process.
 enum Origin {
   ORIGIN_UNSPECIFIED = 0;
@@ -113,7 +113,7 @@ message ExecExited {
   string signal = 2;
 }
 
-// One trace event of an exec, as the daemon records it for the session.
+// One trace event of an exec, as the daemon records it for the run.
 message ExecEvent {
   // The event kind, for example "exec.decide" or "fault.injected".
   string kind = 1;
@@ -123,7 +123,7 @@ message ExecEvent {
 
 // Why the daemon ended an exec stream before the process exited.
 message ExecEnded {
-  // For example "session stopped" or "daemon shutting down".
+  // For example "run stopped" or "daemon shutting down".
   string reason = 1;
 }
 
@@ -140,7 +140,7 @@ message ExecResponse {
     bytes stderr = 3;
     ExecExited exited = 4;
     string error = 5;
-    // Sent before `started` for an exec placed within a session: its
+    // Sent before `started` for an exec placed within a run: its
     // faults and placement decision.
     ExecEvent event = 6;
     // Sent last when the daemon ends the stream before the process exited;
@@ -151,7 +151,7 @@ message ExecResponse {
 }
 
 message ListProcessesRequest {
-  string session_id = 1;
+  string run_id = 1;
 }
 
 message ProcessInfo {
@@ -163,7 +163,7 @@ message ProcessInfo {
   ExecExited exited = 6;
   bool tty = 7;
   int64 started_at_ms = 8;
-  string session_id = 9;
+  string run_id = 9;
   // Who started the process. The control daemon sets it from the start it
   // relayed; an executor, which does not keep it, and a daemon that did not
   // start the process leave it unspecified.

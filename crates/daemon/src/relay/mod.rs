@@ -1,8 +1,8 @@
 //! The exec relay, through `api-server`'s `Processes` trait: places a
 //! command, takes a slot on its instance, opens the upstream exec stream
 //! there, and relays both ways through the stream filters installed for the
-//! session. A session's relays are its tasks and stop with it; a relay
-//! outside any session is the daemon's.
+//! run. A run's relays are its tasks and stop with it; a relay
+//! outside any run is the daemon's.
 
 mod filter;
 
@@ -25,7 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::Daemon;
 use crate::pool::{Instance, Slot};
 use crate::routing;
-use crate::session::{self, Session};
+use crate::run::{self, Run};
 
 type Sender = mpsc::Sender<Result<ExecOutput, ControlError>>;
 
@@ -72,7 +72,7 @@ enum Upstream {
 /// One relayed stream's output side.
 struct Relay {
   instance: Arc<Instance>,
-  /// The session's trace; an exec without a session has no profile, so no
+  /// The run's trace; an exec without a run has no profile, so no
   /// chaos and no trace.
   trace: Option<Dispatch>,
   /// `None` for an attach, which records nothing.
@@ -84,9 +84,9 @@ struct Relay {
 }
 
 impl Daemon {
-  /// The instance a command outside any session runs on: this machine, or
+  /// The instance where a command outside any run executes: this machine, or
   /// the one pooled instance of executor `name`.
-  async fn sessionless(&self, name: &str) -> Result<Arc<Instance>, ControlError> {
+  async fn outside_run(&self, name: &str) -> Result<Arc<Instance>, ControlError> {
     match name {
       "" | "local" => Ok(self.local.clone()),
       name => self.pool.named(name).await,
@@ -134,33 +134,33 @@ impl Daemon {
 impl Processes for Daemon {
   async fn exec(&self, open: ExecOpen, input: Inputs) -> Result<Outputs, ControlError> {
     let requested = Instant::now();
-    let (session, relay, decided, upstream) = match open {
+    let (run, relay, decided, upstream) = match open {
       ExecOpen::Start(mut spec) => {
         let origin = spec.origin;
-        // The session comes from the start request, never from a lookup by
+        // The run comes from the start request, never from a lookup by
         // an empty ID.
-        let session: Option<Arc<Session>> = match spec.session.as_str() {
+        let run: Option<Arc<Run>> = match spec.run.as_str() {
           "" => None,
-          id => Some(self.sessions.find_open(id)?),
+          id => Some(self.runs.find_open(id)?),
         };
-        let (instance, decided) = match &session {
-          Some(session) => routing::place(session, &mut spec).await?,
-          None => (self.sessionless(&spec.executor).await?, Vec::new()),
+        let (instance, decided) = match &run {
+          Some(run) => routing::place(run, &mut spec).await?,
+          None => (self.outside_run(&spec.executor).await?, Vec::new()),
         };
         if spec.cwd.is_empty() && !instance.handle.workspace.is_empty() {
           spec.cwd = instance.handle.workspace.clone();
         }
-        spec.session = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+        spec.run = run.as_ref().map(|s| s.id.clone()).unwrap_or_default();
         let relay = Relay {
           instance,
-          trace: session.as_ref().map(|s| s.trace.clone()),
+          trace: run.as_ref().map(|s| s.trace.clone()),
           origin: Some(origin),
           argv: spec.argv.clone(),
           detach: spec.detach,
-          filter: session.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
+          filter: run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
           requested,
         };
-        (session, relay, decided, Upstream::Start(spec))
+        (run, relay, decided, Upstream::Start(spec))
       }
       ExecOpen::Attach {
         process,
@@ -209,9 +209,9 @@ impl Processes for Daemon {
       } => ExecStream::attach(client, &process, replay, window.map(domain::proto_window)).await,
     }
     .map_err(relayed)?;
-    // A session's relays stop with the session; the others with the daemon.
-    let (tasks, cancel) = match &session {
-      Some(session) => (&session.tasks, &session.cancel),
+    // A run's relays stop with the run; the others with the daemon.
+    let (tasks, cancel) = match &run {
+      Some(run) => (&run.tasks, &run.cancel),
       None => (&self.tasks, &self.cancel),
     };
     tasks.spawn(cancel.clone().run_until_cancelled_owned(forward_input(
@@ -226,7 +226,7 @@ impl Processes for Daemon {
     tasks.spawn(async move {
       let ended = out_tx.clone();
       if cancel.run_until_cancelled(relay.run(daemon.clone(), upstream, slot, out_tx)).await.is_none() {
-        // The session stopped or the daemon is shutting down before the
+        // The run stopped or the daemon is shutting down before the
         // process exited; the caller learns why before the stream closes.
         // NOTICE: `try_send`, so a caller that reads nothing cannot hold up
         // the stop, which waits for this task; it then sees the stream
@@ -239,11 +239,11 @@ impl Processes for Daemon {
     Ok(Box::pin(ReceiverStream::new(out_rx)))
   }
 
-  async fn list(&self, session: &str) -> Result<Vec<ProcessInfo>, ControlError> {
-    // An empty or unknown session lists every executor; the executors keep
-    // only the session's processes.
-    let instances: Vec<Arc<Instance>> = match self.sessions.find(session) {
-      Ok(session) => session.executors().into_values().collect(),
+  async fn list(&self, run: &str) -> Result<Vec<ProcessInfo>, ControlError> {
+    // An empty or unknown run lists every executor; the executors keep
+    // only the run's processes.
+    let instances: Vec<Arc<Instance>> = match self.runs.find(run) {
+      Ok(run) => run.executors().into_values().collect(),
       Err(_) => {
         let mut all = vec![self.local.clone()];
         all.extend(self.pool.instances().await);
@@ -251,7 +251,7 @@ impl Processes for Daemon {
       }
     };
     let request = ListProcessesRequest {
-      session_id: session.to_string(),
+      run_id: run.to_string(),
     };
     let mut processes = Vec::new();
     // Instances that share one executor, such as this machine's `local` and
@@ -308,7 +308,7 @@ async fn forward_input(
       let filtered = filter.inbound(bytes);
       if let Some(trace) = &trace {
         for fired in filtered.fired {
-          session::emit(trace, &Event::FaultInjected(fired));
+          run::emit(trace, &Event::FaultInjected(fired));
         }
       }
       for reply in filtered.replies {
@@ -374,7 +374,7 @@ impl Relay {
             // From the request to the process running, placement and a
             // wait for the executor's slot included.
             trace.time("exec.start", self.requested.elapsed());
-            session::emit(
+            run::emit(
               trace,
               &Event::ExecStart(ExecStart {
                 process: process_id.clone(),
@@ -402,7 +402,7 @@ impl Relay {
         client_exec::Event::Stderr(bytes) => ExecOutput::Stderr(bytes),
         client_exec::Event::Exited(exit) => {
           if let (Some(origin), Some(trace)) = (self.origin, &self.trace) {
-            session::emit(
+            run::emit(
               trace,
               &Event::ExecExit(ExecExit {
                 process: process_id.clone(),

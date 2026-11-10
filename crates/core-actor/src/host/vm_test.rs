@@ -8,7 +8,7 @@ use serde_json::json;
 use super::*;
 
 const IMAGE: &str = "/home/user/.local/share/needy/actor";
-const DIR: &str = "/home/user/.local/state/needy/sessions/0123456789ab";
+const DIR: &str = "/home/user/.local/state/needy/runs/0123456789ab";
 
 fn gce(extra: &str) -> CompiledRecipe {
   let text = format!("extends: builtin:gce-ubuntu-22.04\n{extra}");
@@ -35,7 +35,7 @@ fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
         "is_read_only": true,
       }],
       "machine-config": {"vcpu_count": 2, "mem_size_mib": 2048},
-      "vsock": {"guest_cid": 3, "uds_path": "/home/user/.local/state/needy/sessions/0123456789ab/v.sock"},
+      "vsock": {"guest_cid": 3, "uds_path": "/home/user/.local/state/needy/runs/0123456789ab/v.sock"},
     })
   );
   assert_eq!(
@@ -43,7 +43,7 @@ fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
     [
       "--no-api",
       "--config-file",
-      "/home/user/.local/state/needy/sessions/0123456789ab/vm.json"
+      "/home/user/.local/state/needy/runs/0123456789ab/vm.json"
     ]
   );
   assert!(launch.env.is_empty(), "{:?}", launch.env);
@@ -67,7 +67,7 @@ fn a_recipe_with_pci_bridges_sizes_the_vm_and_enables_pci() {
     [
       "--no-api",
       "--config-file",
-      "/home/user/.local/state/needy/sessions/0123456789ab/vm.json",
+      "/home/user/.local/state/needy/runs/0123456789ab/vm.json",
       "--enable-pci"
     ]
   );

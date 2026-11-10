@@ -22,9 +22,9 @@ enum Command {
   Cp {
     source: String,
     destination: String,
-    /// Look the executor up in this session.
+    /// Look the executor up in this run.
     #[arg(long, default_value = "", hide_default_value = true)]
-    session: String,
+    run: String,
   },
 }
 
@@ -33,8 +33,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Cp {
       source,
       destination,
-      session,
-    } => cp(&ctx.endpoint()?, &session, &source, &destination).await?,
+      run,
+    } => cp(&ctx.endpoint()?, &run, &source, &destination).await?,
   }
   Ok(0)
 }
@@ -72,10 +72,10 @@ fn split(path: &str) -> (String, String) {
 }
 
 /// Copies `source` into the directory `destination`, keeping its name.
-async fn cp(endpoint: &str, session: &str, source: &str, destination: &str) -> Result<()> {
+async fn cp(endpoint: &str, run: &str, source: &str, destination: &str) -> Result<()> {
   match (parse(source), parse(destination)) {
-    (Location::Local(local), Location::Remote { executor, path }) => upload(endpoint, session, &executor, &local, &path).await,
-    (Location::Remote { executor, path }, Location::Local(local)) => download(endpoint, session, &executor, &path, &local).await,
+    (Location::Local(local), Location::Remote { executor, path }) => upload(endpoint, run, &executor, &local, &path).await,
+    (Location::Remote { executor, path }, Location::Local(local)) => download(endpoint, run, &executor, &path, &local).await,
     _ => bail!("one side must be EXECUTOR:path and the other a local path"),
   }
 }
@@ -89,15 +89,15 @@ fn tar_failed(executor: &str, error: needy_api_client::Error) -> anyhow::Error {
   }
 }
 
-fn target(session: &str, executor: &str) -> Target {
+fn target(run: &str, executor: &str) -> Target {
   Target {
     executor: executor.to_string(),
-    session: session.to_string(),
+    run: run.to_string(),
     origin: Origin::Fs,
   }
 }
 
-async fn upload(endpoint: &str, session: &str, executor: &str, local: &Path, remote_dir: &str) -> Result<()> {
+async fn upload(endpoint: &str, run: &str, executor: &str, local: &Path, remote_dir: &str) -> Result<()> {
   let name = local.file_name().context("source has no file name")?.to_os_string();
   let local = local.to_path_buf();
   let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
@@ -113,15 +113,15 @@ async fn upload(endpoint: &str, session: &str, executor: &str, local: &Path, rem
   .await??;
   let size = archive.len();
   let client = connect(endpoint).await?;
-  files::push(&client, &target(session, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, e))?;
+  files::push(&client, &target(run, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, e))?;
   tracing::info!("copied {size} bytes to {executor}:{remote_dir}");
   Ok(())
 }
 
-async fn download(endpoint: &str, session: &str, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
+async fn download(endpoint: &str, run: &str, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
   let (parent, name) = split(remote);
   let client = connect(endpoint).await?;
-  let archive = files::pull(&client, &target(session, executor), &parent, &name).await.map_err(|e| tar_failed(executor, e))?;
+  let archive = files::pull(&client, &target(run, executor), &parent, &name).await.map_err(|e| tar_failed(executor, e))?;
   let size = archive.len();
   let local_dir = local_dir.to_path_buf();
   tokio::task::spawn_blocking(move || -> Result<()> {

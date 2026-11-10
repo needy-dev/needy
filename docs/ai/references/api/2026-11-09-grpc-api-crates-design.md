@@ -17,7 +17,7 @@ proto/
 ├── buf.gen.yaml      neoeinstein-prost and neoeinstein-tonic remote plugins
 └── needy/v1/
     ├── health.proto   HealthService
-    ├── session.proto  SessionService
+    ├── run.proto  RunService
     ├── process.proto  ProcessService
     └── guest.proto    GuestService
 crates/
@@ -41,10 +41,10 @@ ones; removed field numbers are `reserved`.
 | Service | RPC | Shape | What it does |
 | --- | --- | --- | --- |
 | `HealthService` | `Check` | unary | Instance ID, version, role (`control` or `executor`) and platform. The only RPC that needs no token |
-| `SessionService` | `CreateSession` | unary | Creates a session from a profile's YAML, its directory and its name; optionally starts the actor |
-| | `GetSession`, `ListSessions` | unary | Running, stopped, finished and failed sessions |
-| | `StopSession` | unary | Stops a session and releases its executors |
-| | `GetSessionLogs` | server stream | The actor's console output so far; `NOT_FOUND` when the session has no actor |
+| `RunService` | `CreateRun` | unary | Creates a run from a profile's YAML, its directory and its name; optionally starts the actor |
+| | `GetRun`, `ListRuns` | unary | Running, stopped, finished and failed runs |
+| | `StopRun` | unary | Stops a run and releases its executors |
+| | `GetRunLogs` | server stream | The actor's console output so far; `NOT_FOUND` when the run has no actor |
 | | `Decide` | unary | Where a command runs and how it is rewritten. The actor's proxy calls it with the command's ancestry |
 | `ProcessService` | `Exec` | bidirectional stream | Start (`ExecStart`) or attach (`ExecAttach`), then stdin, signals and resizes; responses carry `event`, `started`, output, `exited` or `error` |
 | | `ListProcesses`, `KillProcess` | unary | The process table; a signal by name |
@@ -55,25 +55,25 @@ ones; removed field numbers are `reserved`.
 
 Who serves what:
 
-- The control daemon's socket serves `HealthService`, `SessionService` and
+- The control daemon's socket serves `HealthService`, `RunService` and
   `ProcessService`.
 - An executor daemon, and the control daemon's in-process local executor,
   serve `HealthService` and `ProcessService`.
-- Each actor gets a listener bound to its session (a vsock Unix socket), with
-  the caller `Caller::Actor { session }`. It serves `HealthService`,
-  `GuestService`, `SessionService` and `ProcessService`; `Decide`, `Exec`,
-  `ListProcesses` and the guest calls act on that session whatever the request
-  names, and `CreateSession`, `StopSession` and `GetSessionLogs` are refused.
+- Each actor gets a listener bound to its run (a vsock Unix socket), with
+  the caller `Caller::Actor { run }`. It serves `HealthService`,
+  `GuestService`, `RunService` and `ProcessService`; `Decide`, `Exec`,
+  `ListProcesses` and the guest calls act on that run whatever the request
+  names, and `CreateRun`, `StopRun` and `GetRunLogs` are refused.
   The control socket's caller is `Caller::Cli`, which `GuestService` refuses.
 
 ### Exec
 
 `ExecStart.origin` says who starts the process and is required. It decides
-whether the daemon runs the session's rules: `ORIGIN_ACTOR_PROXY` was placed by
+whether the daemon applies the run's rules: `ORIGIN_ACTOR_PROXY` was placed by
 `Decide` already, and `ORIGIN_ACTOR_MOUNT` is a mount's SFTP server, not a
 command. The trace and the report use it to count commands.
 
-For an exec within a session, the daemon sends `ExecResponse.event` messages
+For an exec within a run, the daemon sends `ExecResponse.event` messages
 before `started`: the faults chaos injected and the placement decision, as
 `ExecEvent { kind, payload }` where `payload` is the JSON of a
 `needy_core::event` kind. A refused start fails with `PERMISSION_DENIED`, and
@@ -96,19 +96,19 @@ to the message the proxy prints.
 `needy_core::event` payload as JSON with the guest build's schema version. The
 daemon decodes it and refuses a version it does not read, so an actor image
 built from other sources fails loudly instead of recording a wrong event. The
-listener is bound to a session, so the event names none.
+listener is bound to a run, so the event names none.
 
 ## Enums
 
 | Enum | Values | Domain type |
 | --- | --- | --- |
 | `Origin` (`process.proto`) | `CLI`, `FS`, `FILES`, `ACTOR_PROXY`, `ACTOR_MOUNT` | `needy_core::types::Origin` |
-| `SessionState` (`session.proto`) | `CREATING`, `RUNNING`, `STOPPING`, `STOPPED`, `FINISHED`, `FAILED` | `needy_core::types::SessionState` |
+| `RunState` (`run.proto`) | `CREATING`, `RUNNING`, `STOPPING`, `STOPPED`, `FINISHED`, `FAILED` | `needy_core::types::RunState` |
 
 Each enum has an `_UNSPECIFIED` zero value, as Buf's STANDARD lint requires.
 Each direction has one function. `needy_api_server::protocol::domain` reads
-`Origin` and writes `SessionState`; the CLI's `session` command reads
-`SessionState`, since it is the only reader of session states on the wire. A
+`Origin` and writes `RunState`; the CLI's `run` command reads
+`RunState`, since it is the only reader of run states on the wire. A
 zero value or a value this build does not know is refused with an error that
 names the field, never read as a default. Producers on the client side (the
 CLI, the proxy, the mount) set the proto enum directly.
@@ -118,11 +118,11 @@ Other values are still strings: `CheckResponse.role`, `ExecutorRef.runtime`,
 
 ## Profile names
 
-`CreateSessionRequest.profile_name` is required. The client derives it with
+`CreateRunRequest.profile_name` is required. The client derives it with
 `needy_config::profile::name`: the file name without `.yaml` or `.yml` and
 then without `.profile`, or the directory's name for a file named only
 `profile.yaml`. The daemon uses it in executor keys (`{profile}`), the
-`session.create` event, listings and reports.
+`run.create` event, listings and reports.
 
 ## Crate layout
 
@@ -163,7 +163,7 @@ tests/       exec and files against an in-process ExecutorService
 
 ```text
 src/
-  control.rs          Sessions, Processes, Guest; Caller; ControlError; domain types
+  control.rs          Runs, Processes, Guest; Caller; ControlError; domain types
   server.rs           Server: services for one Caller; bind every listener, then serve
   termination.rs      SIGINT, SIGTERM, SIGHUP (Ctrl-C on Windows) as a CancellationToken
   middleware/
@@ -171,10 +171,10 @@ src/
   protocol/
     domain.rs         generated <-> domain conversions, one function per direction
     status.rs         ControlError -> tonic::Status, one table
-    grpc/v1/          health, session, process, guest adapters
+    grpc/v1/          health, run, process, guest adapters
 ```
 
-- **Domain traits.** `Sessions` (`create`, `get`, `list`, `stop`, `logs`,
+- **Domain traits.** `Runs` (`create`, `get`, `list`, `stop`, `logs`,
   `decide`), `Processes` (`exec`, `list`, `kill`) and `Guest` (`config`,
   `event`, `exit`, `fetch_files`, `push_files`) take and return
   `needy_core` and `control` types. `Processes::exec` takes an `ExecOpen`
@@ -183,8 +183,8 @@ src/
   implements the generated `ProcessService`, which `Server::process_service`
   serves as is, since `core-executor` sits below `api-server`.
 - **`Caller`** is fixed per server: `Cli` on the control socket and on an
-  executor daemon, `Actor { session }` on an actor's listener. The adapters
-  apply it: an actor's calls act on its own session, and the session
+  executor daemon, `Actor { run }` on an actor's listener. The adapters
+  apply it: an actor's calls act on its own run, and the run
   operations an actor may not call are refused before the daemon sees them.
 - **`Server::bind`** binds every listener before any serves, so a socket
   path over `sun_path` or a taken port fails start-up at once with the
@@ -195,8 +195,8 @@ src/
 
   | `ControlError` | Status | Example |
   | --- | --- | --- |
-  | `Denied { message, events }` | `PERMISSION_DENIED`, details `ExecRefusal` | a rule or fault refused an exec; an actor stopping a session |
-  | `NotFound` | `NOT_FOUND` | no such session, process or mapping |
+  | `Denied { message, events }` | `PERMISSION_DENIED`, details `ExecRefusal` | a rule or fault refused an exec; an actor stopping a run |
+  | `NotFound` | `NOT_FOUND` | no such run, process or mapping |
   | `Invalid` | `INVALID_ARGUMENT` | an unspecified origin; a guest event of another schema version |
   | `Failed` | `FAILED_PRECONDITION` | an invalid profile; a command that cannot start |
   | `Exhausted` | `RESOURCE_EXHAUSTED` | a full executor with `on_full: reject` |
