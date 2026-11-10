@@ -91,8 +91,9 @@ impl Modes {
     // screen (`h`) or the normal one (`l`), per xterm's control sequences
     // (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html). This is not
     // a terminal model: the last switch seen wins.
-    // TODO(terminal-model): the terminal-state model of the terminal note
-    // (G1) tracks every mode; this scanner goes when it lands.
+    // The terminal-state model (G1) lives with the process on the executor;
+    // the client keeps this scanner, since a redraw also enters the
+    // alternate screen with the sequence it looks for.
     let mut text = std::mem::take(&mut self.tail);
     text.extend_from_slice(bytes);
     let mut last = None;

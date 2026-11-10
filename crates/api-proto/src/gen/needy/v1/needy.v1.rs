@@ -279,7 +279,9 @@ pub struct ExecStart {
 pub struct ExecAttach {
     #[prost(string, tag="1")]
     pub process_id: ::prost::alloc::string::String,
-    /// Replay buffered output before following.
+    /// Show what came before following: for a process on a terminal, its
+    /// current screen drawn from the executor's terminal model; for pipes, the
+    /// buffered output.
     #[prost(bool, tag="2")]
     pub replay: bool,
     /// The attaching client's terminal size. A process on a terminal is resized

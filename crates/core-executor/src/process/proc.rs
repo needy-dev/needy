@@ -1,5 +1,5 @@
-//! One process: input, output fan-out to attached clients, the replay buffer
-//! and the exit.
+//! One process: input, output fan-out to attached clients, the replay buffer,
+//! the terminal-state model of a process on a terminal, and the exit.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +10,9 @@ use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use tokio::sync::{mpsc, watch};
 
+use bytes::Bytes;
+
+use super::screen::Screen;
 use super::{Input, Output, Spec, TermFallback, platform};
 
 /// Output kept per process for clients that attach later.
@@ -18,7 +21,8 @@ use super::{Input, Output, Spec, TermFallback, platform};
 const REPLAY_BYTES: usize = 256 * 1024;
 
 /// Output events queued per subscriber: the owner's before the process
-/// waits for it, a viewer's before it is dropped.
+/// waits for it, a viewer's before it skips output (a terminal) or is
+/// dropped (pipes).
 const SUBSCRIBER_QUEUE: usize = 64;
 
 pub struct Proc {
@@ -31,8 +35,9 @@ pub struct Proc {
   /// The terminal type the executor set instead of the client's.
   pub term_fallback: Option<TermFallback>,
   input: mpsc::UnboundedSender<Input>,
-  /// The replay buffer and the subscribers, under one lock so a new
-  /// subscriber's snapshot and its first live event never overlap.
+  /// The replay buffer, the terminal model and the subscribers, under one
+  /// lock so a new subscriber's snapshot and its first live event never
+  /// overlap.
   fanout: Mutex<Fanout>,
   /// Orders each event's delivery to the owner; held across the owner's
   /// send, never across a viewer's.
@@ -44,6 +49,9 @@ pub struct Proc {
 struct Fanout {
   events: VecDeque<Output>,
   bytes: usize,
+  /// What a process on a terminal shows, fed with the replay buffer's
+  /// bytes; `None` for pipes.
+  screen: Option<Screen>,
   finished: Option<Exit>,
   /// The client that started the process; it alone may hold the process
   /// back.
@@ -54,6 +62,9 @@ struct Fanout {
 struct Viewer {
   tx: mpsc::Sender<Output>,
   behind: Arc<AtomicBool>,
+  /// A terminal viewer whose queue filled: it skips output until its queue
+  /// has room, then gets the screen drawn again.
+  stale: bool,
 }
 
 /// Who subscribes to a process's output.
@@ -62,11 +73,10 @@ pub enum Subscriber {
   /// The client that started the process. A slow owner slows the process
   /// down instead of losing output (the CLI note documents this).
   Owner,
-  /// Any other client, such as one that attached. A viewer that cannot keep
-  /// up is dropped, [`Subscription::fell_behind`], and never holds back the
-  /// process or another client.
-  // TODO(terminal-model): the terminal note's G1 turns this into skipping
-  // output and a fresh redraw from the terminal model.
+  /// Any other client, such as one that attached. A viewer never holds back
+  /// the process or another client. On a terminal, a viewer that cannot
+  /// keep up skips output and gets the screen drawn again from the model
+  /// once it reads; on pipes it is dropped, [`Subscription::fell_behind`].
   Viewer,
 }
 
@@ -93,6 +103,7 @@ pub(super) struct Ends {
 
 impl Proc {
   pub(super) fn new(spec: &Spec, pid: i64, tty: bool, term_fallback: Option<TermFallback>) -> (Arc<Self>, Ends) {
+    let screen = spec.tty.filter(|_| tty).map(Screen::new);
     let (input, input_rx) = mpsc::unbounded_channel();
     let (exit_tx, exited) = watch::channel(None);
     let proc = Arc::new(Self {
@@ -107,6 +118,7 @@ impl Proc {
       fanout: Mutex::new(Fanout {
         events: VecDeque::new(),
         bytes: 0,
+        screen,
         finished: None,
         owner: None,
         viewers: Vec::new(),
@@ -153,16 +165,19 @@ impl Proc {
     self.finished_at.get().map(Instant::elapsed)
   }
 
-  /// Subscribes to output. With `replay`, buffered output comes first. A
-  /// process has one [`Subscriber::Owner`]; a later one replaces it.
+  /// Subscribes to output. With `replay`, what came before comes first: for
+  /// a viewer of a terminal, the screen drawn from the model; otherwise the
+  /// buffered output, which the owner, subscribing as the process starts,
+  /// gets whole. A process has one [`Subscriber::Owner`]; a later one
+  /// replaces it.
   pub fn subscribe(&self, replay: bool, subscriber: Subscriber) -> Subscription {
     let (tx, live) = mpsc::channel(SUBSCRIBER_QUEUE);
     let behind = Arc::new(AtomicBool::new(false));
     let mut fanout = self.lock_fanout();
-    let mut past: Vec<Output> = if replay {
-      fanout.events.iter().cloned().collect()
-    } else {
-      Vec::new()
+    let mut past: Vec<Output> = match (&fanout.screen, replay, subscriber) {
+      (_, false, _) => Vec::new(),
+      (Some(screen), true, Subscriber::Viewer) => vec![Output::Stdout(Bytes::from(screen.redraw()))],
+      (_, true, _) => fanout.events.iter().cloned().collect(),
     };
     if let Some(exit) = &fanout.finished {
       past.push(Output::Exit(exit.clone()));
@@ -172,6 +187,7 @@ impl Proc {
         Subscriber::Viewer => fanout.viewers.push(Viewer {
           tx,
           behind: behind.clone(),
+          stale: false,
         }),
       }
     }
@@ -186,13 +202,48 @@ impl Proc {
       let mut fanout = self.lock_fanout();
       fanout.record(&event);
       let last = matches!(event, Output::Exit(_));
-      fanout.viewers.retain(|viewer| match viewer.tx.try_send(event.clone()) {
-        Ok(()) => !last,
-        Err(mpsc::error::TrySendError::Full(_)) => {
-          viewer.behind.store(true, Ordering::SeqCst);
-          false
+      let Fanout {
+        screen, viewers, ..
+      } = &mut *fanout;
+      // Drawn once per event, for every stale viewer that has room again.
+      let mut redraw: Option<Bytes> = None;
+      viewers.retain_mut(|viewer| {
+        if viewer.stale {
+          // NOTICE: a stale viewer is drawn again at the next output after
+          // its queue has room; a program that stays quiet leaves it on the
+          // last screen it received until then. The exit needs room for the
+          // redraw and itself.
+          let room = viewer.tx.capacity();
+          if room < if last { 2 } else { 1 } {
+            if last {
+              viewer.behind.store(true, Ordering::SeqCst);
+            }
+            return !last;
+          }
+          if let Some(screen) = screen.as_ref() {
+            let bytes = redraw.get_or_insert_with(|| Bytes::from(screen.redraw()));
+            if viewer.tx.try_send(Output::Stdout(bytes.clone())).is_err() {
+              return false;
+            }
+          }
+          viewer.stale = false;
+          // The redraw already shows this output.
+          if !last {
+            return true;
+          }
         }
-        Err(mpsc::error::TrySendError::Closed(_)) => false,
+        match viewer.tx.try_send(event.clone()) {
+          Ok(()) => !last,
+          Err(mpsc::error::TrySendError::Full(_)) if screen.is_some() && !last => {
+            viewer.stale = true;
+            true
+          }
+          Err(mpsc::error::TrySendError::Full(_)) => {
+            viewer.behind.store(true, Ordering::SeqCst);
+            false
+          }
+          Err(mpsc::error::TrySendError::Closed(_)) => false,
+        }
       });
       if last {
         fanout.owner.take()
@@ -220,6 +271,13 @@ impl Proc {
     ends.send_replace(Some(exit));
   }
 
+  /// Follows a window size change in the terminal model.
+  pub(super) fn resize_screen(&self, rows: u16, cols: u16) {
+    if let Some(screen) = self.lock_fanout().screen.as_mut() {
+      screen.resize(rows, cols);
+    }
+  }
+
   fn lock_fanout(&self) -> std::sync::MutexGuard<'_, Fanout> {
     // NOTICE: every change under the lock is one push, pop or swap, so a
     // panic elsewhere leaves the buffer whole.
@@ -231,6 +289,9 @@ impl Fanout {
   fn record(&mut self, event: &Output) {
     match event {
       Output::Stdout(b) | Output::Stderr(b) => {
+        if let Some(screen) = self.screen.as_mut() {
+          screen.process(b);
+        }
         self.bytes += b.len();
         self.events.push_back(event.clone());
         while self.bytes > REPLAY_BYTES {

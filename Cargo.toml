@@ -51,6 +51,7 @@ libc = "0.2"
 nix = { version = "0.30", features = ["signal"] }
 parse-size = "1"
 portable-pty = "0.9"
+vt100 = "0.18"
 # Parsing only: the guest reads `/proc` itself and needs no `chrono`.
 procfs-core = { version = "0.18", default-features = false }
 prost = "0.14"

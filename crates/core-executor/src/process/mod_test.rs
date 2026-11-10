@@ -381,3 +381,94 @@ async fn a_terminal_process_exits_while_a_descendant_in_its_own_session_keeps_th
   let (_, _, exit) = exit.expect("the exit was not reported while the descendant held the terminal");
   assert_eq!(exit.code, Some(3));
 }
+
+/// A terminal of `rows` by `cols` that shows what a client receives.
+fn terminal(rows: u16, cols: u16) -> vt100::Parser {
+  vt100::Parser::new(std::num::NonZeroU16::new(rows).unwrap(), std::num::NonZeroU16::new(cols).unwrap(), 0)
+}
+
+/// Feeds `live` into `screen` until its contents include `marker`.
+async fn render_until(live: &mut tokio::sync::mpsc::Receiver<Output>, screen: &mut vt100::Parser, marker: &str) {
+  while !screen.screen().contents().contains(marker) {
+    match live.recv().await {
+      Some(Output::Stdout(bytes)) => screen.process(&bytes),
+      Some(_) => {}
+      None => panic!("the subscription ended before {marker:?} was drawn"),
+    }
+  }
+}
+
+/// A program that enters the alternate screen, then draws more than the
+/// replay buffer holds with cursor moves, and waits.
+const FULL_SCREEN: &str = r#"printf '\033[?1049h\033[2J\033[1;1HTITLE\033[?2004h'
+yes "$(printf '\033[5;1Hfiller')" | head -c 400000
+printf '\033[5;1Hframe drawn\033[3;7H'
+sleep 30"#;
+
+// ROOT CAUSE:
+//
+// If a client attached to a full-screen program after more output than the
+// replay buffer holds, it got the buffer's raw bytes, which started after
+// the program entered the alternate screen.
+//
+// Before the fix, the client drew the frame on its normal screen, without
+// the program's modes.
+// The fix draws the screen from a terminal-state model instead.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_client_attaching_to_a_full_screen_program_sees_the_programs_screen() {
+  let host = Host::default();
+  let mut tty = spec(&["sh", "-c", FULL_SCREEN]);
+  tty.tty = Some((12, 50));
+  let proc = host.spawn(tty).unwrap();
+  let mut owner = proc.subscribe(true, Subscriber::Owner);
+  let mut program = terminal(12, 50);
+  for event in std::mem::take(&mut owner.past) {
+    if let Output::Stdout(bytes) = event {
+      program.process(&bytes);
+    }
+  }
+  tokio::time::timeout(Duration::from_secs(20), render_until(&mut owner.live, &mut program, "frame drawn")).await.unwrap();
+
+  let attached = proc.subscribe(true, Subscriber::Viewer);
+  let mut client = terminal(12, 50);
+  client.process(b"the client's own prompt$ ");
+  for event in attached.past {
+    if let Output::Stdout(bytes) = event {
+      client.process(&bytes);
+    }
+  }
+
+  assert_eq!(client.screen().contents(), program.screen().contents());
+  assert!(client.screen().alternate_screen());
+  assert!(client.screen().bracketed_paste());
+  assert_eq!(client.screen().cursor_position(), program.screen().cursor_position());
+  proc.send(Input::Signal("SIGKILL".into()));
+}
+
+// A terminal viewer that falls behind skips output and is drawn the screen
+// again once it reads, instead of being dropped (G5, then G1).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_terminal_viewer_that_falls_behind_is_redrawn_not_dropped() {
+  let host = Host::default();
+  let mut tty = spec(&[
+    "sh",
+    "-c",
+    r#"sleep 0.3; yes "$(printf '\033[2;1Hburst')" | head -c 400000; printf '\033[3;1Hburst done'; sleep 1; printf '\033[4;1Hfinal'; sleep 30"#,
+  ]);
+  tty.tty = Some((6, 30));
+  let proc = host.spawn(tty).unwrap();
+  let mut owner = proc.subscribe(true, Subscriber::Owner);
+  let mut viewer = proc.subscribe(true, Subscriber::Viewer);
+  let mut program = terminal(6, 30);
+  tokio::time::timeout(Duration::from_secs(20), render_until(&mut owner.live, &mut program, "burst done")).await.unwrap();
+
+  let mut client = terminal(6, 30);
+  tokio::time::timeout(Duration::from_secs(20), render_until(&mut viewer.live, &mut client, "final")).await.unwrap();
+  tokio::time::timeout(Duration::from_secs(20), render_until(&mut owner.live, &mut program, "final")).await.unwrap();
+
+  assert!(!viewer.fell_behind());
+  assert_eq!(client.screen().contents(), program.screen().contents());
+  proc.send(Input::Signal("SIGKILL".into()));
+}

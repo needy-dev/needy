@@ -144,6 +144,7 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
           bytes
         }
         Some(Input::Resize(rows, cols)) => {
+          input_proc.resize_screen(rows, cols);
           if let Some(master) = master.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_ref()
             && let Err(e) = master.resize(size(rows, cols))
           {

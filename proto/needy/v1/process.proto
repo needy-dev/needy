@@ -70,7 +70,9 @@ enum Origin {
 
 message ExecAttach {
   string process_id = 1;
-  // Replay buffered output before following.
+  // Show what came before following: for a process on a terminal, its
+  // current screen drawn from the executor's terminal model; for pipes, the
+  // buffered output.
   bool replay = 2;
   // The attaching client's terminal size. A process on a terminal is resized
   // to it, so a full-screen program redraws for the client. Unset keeps the

@@ -9,6 +9,7 @@
 mod pipes;
 mod proc;
 mod pty;
+mod screen;
 
 #[cfg(unix)]
 #[path = "platform/unix.rs"]
