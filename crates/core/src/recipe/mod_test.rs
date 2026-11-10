@@ -172,6 +172,65 @@ fn vendor_disagreement_warns() {
   assert!(c.findings.iter().any(|f| f.message.contains("machine identity disagrees")), "{:?}", c.findings);
 }
 
+fn builtin(name: &str, seed: u64) -> CompiledRecipe {
+  compile(&needy_config::recipe::load(&Source::builtin(name)).unwrap(), &HostInfo::default(), seed)
+}
+
+// ROOT CAUSE:
+//
+// If the GCE built-in was compiled, its kernel version string and build host
+// were not the ones the cited Ubuntu build carries, because they were typed
+// in rather than read from that build's `vmlinuz`.
+//
+// Before the fix, the version said `Fri Mar  1 10:04:32 UTC 2024` and the
+// host `lcy02-amd64-033`.
+// The fix keeps both as `linux-image-unsigned-6.5.0-1020-gcp` reports them.
+#[test]
+fn the_gce_builtin_kernel_is_the_cited_ubuntu_build() {
+  let c = builtin("gce-ubuntu-22.04", 1);
+
+  assert_eq!(c.kernel_build_env["NEEDY_KERNEL_VERSION"], "#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024");
+  assert_eq!(c.kernel_build_env["KBUILD_BUILD_HOST"], "lcy02-amd64-115");
+}
+
+// ROOT CAUSE:
+//
+// If the GCE built-in was compiled, its system serial was `GoogleCloud-`
+// and 8 hex digits unrelated to the system UUID, and it had no board
+// serial, because `{hash}` was the only placeholder; real GCE serials are
+// `GoogleCloud-` and `Board-GoogleCloud-` followed by the system UUID's 32
+// upper-case hex digits.
+//
+// Before the fix, the serial was `GoogleCloud-93f88501`.
+// The fix derives both serials from the UUID through `{uuid_hex}`.
+#[test]
+fn the_gce_builtin_serials_carry_the_system_uuid() {
+  let c = builtin("gce-ubuntu-22.04", 7);
+  let smbios = c.identity.smbios.unwrap();
+
+  let hex = smbios.uuid.replace('-', "").to_ascii_uppercase();
+  assert_eq!(hex.len(), 32);
+  assert_eq!(smbios.serial.unwrap(), format!("GoogleCloud-{hex}"));
+  assert_eq!(smbios.board_serial.unwrap(), format!("Board-GoogleCloud-{hex}"));
+}
+
+// ROOT CAUSE:
+//
+// If a session's seed gave `{seq}` the value 00 or 01, the GCE built-in's
+// MAC encoded 10.128.0.0 or 10.128.0.1, the subnet's network and gateway
+// addresses, which no VM gets, because `{seq}` covered all 256 values.
+//
+// Before the fix, seed 7 gave `42:01:0a:80:00:01`.
+// The fix keeps `{seq}` from 02 to ff.
+#[test]
+fn the_gce_builtin_mac_is_never_the_subnets_network_or_gateway() {
+  for seed in 0..4096 {
+    let mac = builtin("gce-ubuntu-22.04", seed).network_mac.unwrap();
+    assert!(mac.starts_with("42:01:0a:80:00:"), "{mac}");
+    assert!(!mac.ends_with(":00") && !mac.ends_with(":01"), "seed {seed}: {mac}");
+  }
+}
+
 #[test]
 fn builtins_compile() {
   for name in needy_config::builtin::recipes() {

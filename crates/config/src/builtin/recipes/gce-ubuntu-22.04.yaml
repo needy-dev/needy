@@ -26,13 +26,13 @@ os:
   kernel:
     # Source: https://launchpad.net/ubuntu/+source/linux-gcp-6.5/6.5.0-1020.20~22.04.1
     # and its amd64 build, https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/28152459
-    # REVIEW: that build's `vmlinuz` (linux-image-unsigned-6.5.0-1020-gcp
-    # 6.5.0-1020.20~22.04.1, decompressed on 2026-11-10) says
-    # `#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024` and
-    # `buildd@lcy02-amd64-115`; the date and host below match neither.
+    # The version string and build host are that build's `vmlinuz`
+    # (linux-image-unsigned-6.5.0-1020-gcp 6.5.0-1020.20~22.04.1, decompressed
+    # on 2026-11-10): `#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024`
+    # and `buildd@lcy02-amd64-115`.
     release: 6.5.0-1020-gcp
-    version: "#20~22.04.1-Ubuntu SMP Fri Mar  1 10:04:32 UTC 2024"
-    build: { user: buildd, host: lcy02-amd64-033 }
+    version: "#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024"
+    build: { user: buildd, host: lcy02-amd64-115 }
   # TODO(provenance): the `instance-` prefix (the Cloud Console's default VM
   # name) has no cited source.
   hostname: "instance-{hash}"
@@ -47,10 +47,12 @@ firmware:
     # TODO(provenance): no public GCE SMBIOS type 3 dump was found for
     # "Other" (1).
     chassis_type: other
-    # REVIEW: real GCE serials are `GoogleCloud-` and the 32 upper-case hex
-    # digits of the system UUID (the sos issue above; cloud-init only checks
-    # the prefix); `{hash}` is 8 lower-case digits unrelated to the UUID.
-    serial: "GoogleCloud-{hash}"
+    # Real GCE serials are `GoogleCloud-` and `Board-GoogleCloud-` followed by
+    # the 32 upper-case hex digits of the system UUID (the sos issue above:
+    # `GoogleCloud-98E621D0...` for UUID `98e621d0-...`; cloud-init only
+    # checks the prefix).
+    serial: "GoogleCloud-{uuid_hex}"
+    board_serial: "Board-GoogleCloud-{uuid_hex}"
 devices:
   pci:
     # Source: https://github.com/pciutils/pciids/blob/2393ed647fe52d620f2840e24af5222889dca5ac/pci.ids#L33582
@@ -68,8 +70,9 @@ network:
   # internal IPv4 address in hex. 0a:80:00 is 10.128.0, us-central1's default
   # subnet 10.128.0.0/20,
   # https://web.archive.org/web/20240105143455/https://cloud.google.com/vpc/docs/subnets
-  # REVIEW: `{seq}` can be 00 or 01, the subnet's network and gateway
-  # addresses, which no VM gets.
+  # `{seq}` is 02 to ff, so the address is never the subnet's network (.0) or
+  # gateway (.1), which no VM gets,
+  # https://web.archive.org/web/20240105143455/https://cloud.google.com/vpc/docs/subnets#reserved_ip_addresses_in_every_subnet
   interface: ens4
   mac: "42:01:0a:80:00:{seq}"
   metadata: { provider: gce }

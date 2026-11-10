@@ -50,7 +50,7 @@ firmware:
     product_name: Google Compute Engine
     bios: { vendor: Google, version: Google, date: 01/01/2011 }
     chassis_type: other
-    serial: "GoogleCloud-{hash}"
+    serial: "GoogleCloud-{uuid_hex}"
 
 devices:
   pci:
@@ -75,9 +75,12 @@ devices:
     - { chip: acpitz, idle_c: 27 }
 ```
 
-`{hash}` and `{seq}` derive from the session seed. A replayed session gets the
-same values; different sessions get different serial numbers and MAC
-addresses.
+`{hash}` (8 hex digits) and `{seq}` (2 hex digits, 02 to ff, so a MAC that
+encodes an address never names a subnet's network or gateway) derive from the
+session seed. In `firmware.dmi.serial` and `board_serial`, `{uuid_hex}` is the
+system UUID's 32 upper-case hex digits, as GCE serials carry it. A replayed
+session gets the same values; different sessions get different serial
+numbers and MAC addresses.
 
 Built-in recipes are referenced as `builtin:NAME`: `gce-ubuntu-22.04` and
 `dell-optiplex-ubuntu-24.04`, embedded in `needy-config`. *Preset* stays

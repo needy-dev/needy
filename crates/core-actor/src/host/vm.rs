@@ -193,16 +193,13 @@ fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
     // https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L59
     // Every key whose patch default is a GCE value is sent, empty when the
     // recipe has none, so no default leaks into another machine's identity.
-    // TODO(smbios-board-serial): the recipe has no board serial yet, so it is
-    // sent empty ("Not Specified"); a recipe field opens when a machine's
-    // board serial has a cited format.
     let chassis_type = smbios.chassis_type.map(|n| n.to_string());
     let fields = [
       ("bios_date", smbios.bios_date.as_deref()),
       ("bios_vendor", smbios.bios_vendor.as_deref()),
       ("bios_version", smbios.bios_version.as_deref()),
       ("board_name", smbios.board_name.as_deref()),
-      ("board_serial", None),
+      ("board_serial", smbios.board_serial.as_deref()),
       ("board_vendor", smbios.board_vendor.as_deref()),
       ("chassis_type", chassis_type.as_deref()),
       ("chassis_vendor", smbios.chassis_vendor.as_deref()),
