@@ -24,6 +24,12 @@ pub fn own_group(command: &mut tokio::process::Command) {
 // for a terminal's child (`portable-pty-0.9.0/src/unix.rs`, `pre_exec` in
 // `spawn_command`); the job-control signals and SIGPIPE are added here. std
 // clears the mask and resets SIGPIPE itself, but nothing else.
+// Source: https://github.com/wezterm/wezterm/blob/f8921727a11b9f8b073e8c24821d72fd41283500/pty/src/unix.rs#L228-L255
+// (portable-pty 0.9.0's commit, from its `.cargo_vcs_info.json`).
+// Reference: https://pubs.opengroup.org/onlinepubs/9799919799/functions/exec.html#tag_17_129_03
+// (SIG_IGN survives `exec`) and
+// https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_12
+// (an asynchronous list without job control ignores SIGINT and SIGQUIT).
 const RESET_SIGNALS: [Signal; 10] = [
   Signal::SIGINT,
   Signal::SIGQUIT,

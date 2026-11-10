@@ -164,6 +164,11 @@ const SWITCHES: &[&str] = &["--privileged", "--read-only", "--init"];
 /// API's body (the Docker CLI does it in Go, in `cli/command/container/opts.go`),
 /// so the options profiles use are translated here. An option outside this
 /// list is an error rather than silently dropped.
+// Source: https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L600-L712
+// (flags to `HostConfig`), sizes with go-units' binary `RAMInBytes`,
+// https://github.com/docker/go-units/blob/v0.5.0/size.go#L86-L88.
+// Reference: https://github.com/moby/moby/blob/v28.5.1/api/swagger.yaml#L917-L1195
+// (Engine API 1.51 `HostConfig`).
 // TODO(docker): `--gpus`, `--add-host`, `--dns`, `--workdir`, `--cpu-shares`
 // and `--sysctl` are not translated yet; add them when a profile needs them.
 fn apply_run_options(args: &[String], allow: &[String], body: &mut ContainerCreateBody) -> Result<(), Error> {
@@ -240,6 +245,10 @@ fn apply_run_options(args: &[String], allow: &[String], body: &mut ContainerCrea
       "--cap-add" | "--device" if !allowed(flag) => return refuse(format!("{flag} is not allowed by the operator")),
       "--cap-add" => host.cap_add.get_or_insert_with(Vec::new).push(value),
       "--cap-drop" => host.cap_drop.get_or_insert_with(Vec::new).push(value),
+      // REVIEW: Docker reads a second field that is a valid mode (`/dev/x:rw`)
+      // as the permissions, with the container path equal to the host's
+      // (https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1005-L1016);
+      // here it always becomes the container path.
       "--device" => {
         let mut parts = value.splitn(3, ':');
         let on_host = parts.next().unwrap_or_default().to_string();

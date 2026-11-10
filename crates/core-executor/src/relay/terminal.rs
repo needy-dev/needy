@@ -111,6 +111,10 @@ impl Modes {
   }
 }
 
+// Source: https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1022-L1026 and
+// #L1163-L1168 (DEC private modes 1047 and 1049, set and reset), #L958 and
+// #L1105 (47), xterm patch 412.
+// Reference: https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
 const SWITCHES: &[(&[u8], bool)] = &[
   (b"\x1b[?1049h", true),
   (b"\x1b[?1049l", false),
@@ -153,6 +157,14 @@ fn write_restore(out: &mut impl Write, alternate: bool) -> std::io::Result<()> {
   // keyboard protocol's flags to none on the current screen
   // (https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement);
   // it is sent on both screens, and terminals without the protocol ignore it.
+  // Source: https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1068-L1185
+  // (reset `CSI ? Pm l`: 1000 #L1118, 1002 #L1121, 1003 #L1123, 1004 #L1125,
+  // 1005 #L1126, 1006 #L1127, 1015 #L1135, 2004 #L1185), xterm patch 412;
+  // https://github.com/kovidgoyal/kitty/blob/v0.50.0/docs/keyboard-protocol.rst?plain=1#L279-L300
+  // (`CSI = flags ; mode u`, mode 1 replaces all flags) and #L326-L328 (one
+  // stack per screen). crossterm 0.29 writes `CSI ? 1049 l` and `CSI ? 25 h`:
+  // https://github.com/crossterm-rs/crossterm/blob/36d95b26a26e64b0f8c12edfe11f410a6d56a812/src/terminal.rs#L256-L261,
+  // https://github.com/crossterm-rs/crossterm/blob/36d95b26a26e64b0f8c12edfe11f410a6d56a812/src/cursor.rs#L316-L321.
   const KEYBOARD: &str = "\x1b[=0;1u";
   out.write_all(KEYBOARD.as_bytes())?;
   if alternate {

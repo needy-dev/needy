@@ -9,10 +9,22 @@ use std::sync::Mutex;
 use super::{Injector, Subject};
 use crate::types::Fired;
 
+// Source: https://github.com/openssh/openssh-portable/blob/V_10_6_P2/sftp.h#L36
+// (`SSH2_FXP_OPEN 3`) and #L58 (`SSH2_FXP_STATUS 101`), protocol version 3
+// (#L32), which `sftp-server` speaks.
+// Reference: https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02#section-3
+// (packet `uint32 length, byte type`, then `uint32 id`, section 6.3) and
+// #section-7 (SSH_FXP_STATUS: id, code, message, language tag).
 const SSH_FXP_OPEN: u8 = 3;
 const SSH_FXP_STATUS: u8 = 101;
 
 /// SFTP status code for an errno. sshfs maps unknown codes to EIO.
+// Source: https://github.com/libfuse/sshfs/blob/sshfs-3.7.6/sshfs.c#L1766-L1779
+// (`sftp_error_to_errno`: 2 ENOENT, 3 EACCES, 4 EPERM, 8 EOPNOTSUPP, any
+// other EIO), the inverse of this table; codes from
+// https://github.com/openssh/openssh-portable/blob/V_10_6_P2/sftp.h#L89-L95.
+// NOTICE: sshfs turns SSH_FX_FAILURE on a `rmdir` into ENOTEMPTY
+// (sshfs.c#L2027-L2031); only `open` is faulted here.
 fn sftp_code(errno: &str) -> u32 {
   match errno {
     "ENOENT" => 2,

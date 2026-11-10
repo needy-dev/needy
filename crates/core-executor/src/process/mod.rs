@@ -86,6 +86,8 @@ pub struct TermFallback {
 }
 
 /// The terminal type used when the client's has no terminfo entry here.
+// Source: https://github.com/ThomasDickey/ncurses-snapshots/blob/v6_5_20251227/misc/terminfo.src#L5486-L5487
+// Reference: https://man7.org/linux/man-pages/man5/terminfo.5.html
 pub const FALLBACK_TERM: &str = "xterm-256color";
 
 #[derive(Debug, Clone)]
