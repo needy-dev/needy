@@ -11,6 +11,17 @@
  * /.needy (init and the proxy) are never routed: init starts the driving
  * program locally, and the proxy can run the real binary when a rule keeps a
  * command on the actor.
+ *
+ * Source: the interpreter swap copies `load_script`'s `bprm_change_interp`,
+ * `open_exec` and `bprm->interpreter` steps,
+ * https://github.com/torvalds/linux/blob/v6.18/fs/binfmt_script.c#L121-L138 (Linux v6.18).
+ * `insert_binfmt` puts this format at the head of the list
+ * (https://github.com/torvalds/linux/blob/v6.18/fs/exec.c#L91-L99, https://github.com/torvalds/linux/blob/v6.18/include/linux/binfmts.h#L112-L120),
+ * which `search_binary_handler` walks from the head (https://github.com/torvalds/linux/blob/v6.18/fs/exec.c#L1651-L1665),
+ * so it runs before binfmt_script and binfmt_elf, which `register_binfmt` at
+ * the tail (https://github.com/torvalds/linux/blob/v6.18/fs/binfmt_script.c#L145-L156, https://github.com/torvalds/linux/blob/v6.18/fs/binfmt_elf.c#L2132-L2144).
+ * AT_EXECFN is `bprm->exec`: https://github.com/torvalds/linux/blob/v6.18/fs/binfmt_elf.c#L275.
+ * Reference: https://docs.kernel.org/6.18/admin-guide/binfmt-misc.html
  */
 #include <linux/binfmts.h>
 #include <linux/dcache.h>

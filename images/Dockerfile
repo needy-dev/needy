@@ -30,6 +30,10 @@ FROM scratch AS windows
 COPY --from=needy-windows /needy.exe /needy.exe
 
 # Guest kernel: Firecracker CI config, needy fragment, exec routing and fake sensors.
+# Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
+# (v1.17.0; `images/kernel/firecracker-6.18.config` is an unchanged copy).
+# Reference: https://www.kernel.org/ (stable 6.18.y; the tarball URL below is
+# pinned by KERNEL_VERSION).
 FROM ubuntu:24.04 AS kernel
 ARG KERNEL_VERSION
 ARG KBUILD_BUILD_USER=builder
