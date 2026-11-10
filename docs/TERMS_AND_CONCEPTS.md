@@ -157,6 +157,45 @@ only its hash. `needy runner rotate` hands the runner a new one at its next
 heartbeat, and the old one stops working once the runner uses the new one;
 `needy runner rm` revokes it.
 
+### Control token
+
+The bearer token a control daemon reads from `--token-env`: the bootstrap and
+admin credential, held by the **operator**. It is required for a TCP listener
+on a non-loopback address; the control socket on the control host needs none
+(its file permissions guard it). An operator uses it to pair the first clients
+and runners; day-to-day clients use their own **client tokens**.
+
+### Client
+
+A program that calls the control plane on behalf of a person or a tool: the
+CLI on another machine, a script. A **paired** client holds its own **client
+token**, which has an operator's rights, is listed (`needy client ls`) and can
+be revoked (`needy client revoke ID`); the trace names it `client:NAME`. The
+CLI keeps one token per control plane endpoint in `credentials.json` in its
+config directory (`$XDG_CONFIG_HOME/needy`, mode 0600) and presents it to that
+endpoint; `NEEDY_TOKEN` overrides it. The control plane stores only the
+token's hash. A client's name is a DNS label that no other client that is not
+revoked holds.
+
+*Avoid*: user, account. Needy has no users; a client is a credential with a
+name.
+
+### Pairing code
+
+A short-lived (10 minutes by default), single-use secret an operator creates
+(`needy client pair create [--name NAME]`) and hands to a new client, which
+exchanges it for its client token (`needy client pair --endpoint URL CODE`).
+Shown once; stored hashed.
+
+### Principal
+
+Who caused a trace event: `operator` (the control token or the control
+socket), `client:NAME` (a paired client's token), `runner:NAME` (a runner's
+credential) or `actor:RUN` (an actor, through its own guest channel).
+`run.create`, `run.stop`, `exec.start` and `exec.kill` record it as `by`;
+what the control plane does on its own, such as stopping runs at shutdown,
+records none. `needy report` shows who started and stopped a run.
+
 ## Runs and configuration
 
 ### Run
@@ -282,9 +321,10 @@ firmware, devices, network identity. A recipe defines it.
 ### Trace
 
 Every event recorded during a run, in order: each carries the run, a
-sequence number, a time, a kind such as `exec.decide` and a payload. The
-profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under the
-run directory. Terminal output is not part of the trace.
+sequence number, a time, a kind such as `exec.decide`, a payload and the
+payload's schema version (2 since principals; version 1 rows still read).
+The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
+the run directory. Terminal output is not part of the trace.
 
 ### Trace gap
 
@@ -293,7 +333,9 @@ its queue was full. A report of a trace with gaps says it is incomplete.
 
 ### Report
 
-A fixed-format markdown summary of one run, written by `needy report`.
+A fixed-format summary of one run, written by `needy report` as plain text,
+markdown or JSON from the run's events, which the control plane sends to any
+client it reaches (`--local` reads this machine's `trace.db` instead).
 
 ## Processes
 

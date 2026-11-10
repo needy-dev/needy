@@ -92,14 +92,27 @@ needy daemon --mode control &
 
 # Run opencode in an actor; its shells run in a Docker executor.
 needy run create --profile examples/opencode/profile.yaml
-needy run logs RUN    # the actor's console
+needy run logs -f RUN    # the actor's console, followed
 needy report latest
 ```
 
 Needy keeps the trace and run directories in `$XDG_STATE_HOME/needy`, images in
-`$XDG_DATA_HOME/needy` and the daemon's socket in `$XDG_RUNTIME_DIR/needy`
-(the state directory on macOS). `NEEDY_STATE_DIR`, `NEEDY_DATA_DIR` and
+`$XDG_DATA_HOME/needy`, client tokens in `$XDG_CONFIG_HOME/needy` and the
+daemon's socket in `$XDG_RUNTIME_DIR/needy` (the state directory on macOS).
+`NEEDY_STATE_DIR`, `NEEDY_DATA_DIR`, `NEEDY_CONFIG_DIR` and
 `NEEDY_RUNTIME_DIR` override them; `-v` turns on logs.
+
+On another machine, the CLI pairs once with a code an operator creates with
+the control daemon's token (`--token-env`, the bootstrap credential), then
+uses its own token, which can be revoked; the trace and `needy report` name it
+as `client:NAME`. `run logs` and `report` come from the control plane:
+
+```sh
+NEEDY_TOKEN=... needy client pair create --name laptop     # where the control token is
+needy --endpoint http://127.0.0.1:7400 client pair CODE    # on the laptop, once
+needy --endpoint http://127.0.0.1:7400 report latest
+needy client ls; needy client revoke ID
+```
 
 `needy exec` runs one command through the same rules, with a terminal when
 stdin and stdout are terminals:

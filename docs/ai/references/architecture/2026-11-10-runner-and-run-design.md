@@ -1,13 +1,13 @@
 # Runners and runs
 
-**Status**: design, 2026-11-10. Slices 1 to 6 are implemented: *session* is
+**Status**: design, 2026-11-10. Slices 1 to 7 are implemented: *session* is
 renamed *run* and `needy run create --no-actor` is gone (slice 2, finished
 in slice 5); the runner registry and enrollment (slice 3), runner dial-out
-(slice 4), scheduling and profiles (slice 5), and ownership and
-reconciliation (slice 6); see
+(slice 4), scheduling and profiles (slice 5), ownership and
+reconciliation (slice 6), and clients (slice 7); see
 [As built: slice 3](#as-built-slice-3), [slice 4](#as-built-slice-4),
-[slice 5](#as-built-slice-5) and [slice 6](#as-built-slice-6). Nothing else
-is implemented. The owner chose
+[slice 5](#as-built-slice-5), [slice 6](#as-built-slice-6) and
+[slice 7](#as-built-slice-7). Nothing else is implemented. The owner chose
 the model (runners as registered machines; actors and executors as what runs on
 them; runs instead of sessions); open questions are at the end. This note
 absorbs slice 9 (persistence) of the
@@ -124,7 +124,9 @@ Buildkite agents and Tailscale auth keys:
 3. **Clients** (the CLI, people, tools): on the control host, the Unix socket
    protected by file permissions (`0700` directory, `0600` socket, set
    explicitly). Remotely, a per-client token from a pairing step, revocable,
-   recorded as the principal on every trace event the client causes.
+   recorded as the principal on every trace event the client causes. The
+   control daemon's own token stays the bootstrap and admin credential. As
+   built in [slice 7](#as-built-slice-7).
 4. **Actors** keep channel-bound identity: an actor reaches the control plane
    only through its own guest channel, bound to its run.
 5. **Refuse unauthenticated network listeners**: a TCP listener on a
@@ -132,7 +134,8 @@ Buildkite agents and Tailscale auth keys:
 
 Transport encryption comes from the tunnel (SSH, Cloudflare Tunnel/Access);
 needy serves no TLS (owner decision, 2026-11-10). The runner credential is a
-per-runner random token, not a key pair (owner decision, 2026-11-10).
+per-runner random token, not a key pair (owner decision, 2026-11-10); so is
+a client's token (owner decision, 2026-11-10).
 
 ## Connection direction
 
@@ -169,7 +172,8 @@ kind, state), processes (instance, origin, state). On start the control plane
 loads runs and waits for runners to reconnect and report; instances no runner
 reports are marked lost; runs whose actor is gone end `failed` with the reason.
 `trace.db` stays separate. Runs, instances and processes are as built in
-[slice 6](#as-built-slice-6); clients wait for slice 7.
+[slice 6](#as-built-slice-6); clients and pairing codes in
+[slice 7](#as-built-slice-7).
 
 ## Interactive actor
 
@@ -207,8 +211,8 @@ as `examples/cli` and `examples/local` do); profile executor entries lose
 6. **Ownership and reconciliation** (done, 2026-11-10): runs, instances and
    processes in `state.db`; run-scoped cleanup on runners; reconnect and
    restart reconciliation.
-7. **Clients**: pairing, per-client tokens, principals in the trace; `report`
-   and `run logs` through the control plane.
+7. **Clients** (done, 2026-11-10): pairing, per-client tokens, principals in
+   the trace; `report` and `run logs -f` through the control plane.
 8. **Interactive actor**: PTY driver, `run -it`, `run attach`.
 
 ## As built: slice 3
@@ -563,6 +567,99 @@ CLI's tests kill a control daemon (`SIGKILL`) during a run on a runner
 daemon and restart it: the run is listed `failed` with the reason and the
 runner's process ends.
 
+## As built: slice 7
+
+**Persistence.** A third migration, `m20261110_000070_clients`, adds two
+tables to `state.db` (`needy_daemon::store`, module `clients`):
+
+| Table | Columns |
+| --- | --- |
+| `pairing_codes` | `id` (key), `hash`, `name` (the client's name once it pairs), `created_ms`, `expires_ms`, `used_ms` |
+| `clients` | `id` (key), `name`, `pairing_code` (its ID), `token_hash` (cleared at revocation), `created_ms`, `last_used_ms`, `revoked_ms` |
+
+**Secrets.** A pairing code is `needy-pair.<id>.<64 hex digits>`, a client
+token `needy-client.<id>.<64 hex digits>`, made and checked as join tokens
+and runner credentials are: 32 random bytes, only the SHA-256 stored,
+compared in constant time, shown once. A wrong secret, an unknown ID and a
+malformed code all read "the pairing code is not valid"; only a caller with
+the secret learns that it expired or was used.
+
+**Pairing.** `needy client pair create [--ttl 10m] [--name NAME]` (an
+operator, or a client) creates a single-use code; the name is a DNS label,
+`client-<code ID>` by default, and no client that is not revoked and no open
+code may hold it, so `client:NAME` in a trace names one client. `needy
+client pair --endpoint URL CODE` calls `ClientService.Pair` without a bearer
+token (the code authenticates it), and stores the returned token on the
+client. Ten minutes is long enough to carry a code to another machine by
+hand and short enough that an unused one rarely matters, so pairing codes
+are not listed or revoked (`TODO(clients)` in `control.rs`).
+
+**Client side.** The CLI keeps one token per endpoint in
+`credentials.json` in its config directory (`$XDG_CONFIG_HOME/needy`, or
+`NEEDY_CONFIG_DIR`; the `TODO(config)` in `paths.rs` now covers only the
+build cache): `{version: 1, endpoints: {ENDPOINT: {client_id, name, token,
+paired_at_ms}}}`, keyed by the endpoint as given without a trailing `/`,
+written 0600 in a 0700 directory through a temporary file renamed over the
+old one. Every command presents `NEEDY_TOKEN` when set (an operator with the
+control token), else the stored token for its endpoint, else none. A file
+of another version is an error, not overwritten. An endpoint reached under
+two spellings (`localhost` and `127.0.0.1`) needs two pairings; resolving
+them would guess at what a tunnel forwards.
+
+**Authentication.** `Caller::Cli` is renamed `Caller::Operator`, and a new
+`Caller::Client { id, name }` comes from a client token, which
+`Clients::credential` resolves. A client has an operator's rights except
+the runner methods (`PERMISSION_DENIED`); its token works on a listener with
+or without a control token, so a client is named even on the control
+socket. A token shaped like a client token that no client holds (revoked or
+never issued) is `UNAUTHENTICATED` everywhere. The control token remains the
+bootstrap and admin credential; nothing else changed for it, and no other
+compatibility path was added. Every adapter now reads the request's caller
+(set by the middleware) instead of its listener's. `last_used_ms` is written
+at most once a minute, so authenticating a request is a read.
+
+**Principals in the trace.** `needy_core::types::Principal` is `operator`,
+`client:NAME`, `runner:NAME` or `actor:RUN`, one string in a payload. The
+event schema is version 2: `run.create`, `run.stop` and `exec.start` carry
+`by` (absent when the control plane acts on its own, such as stopping runs
+at shutdown, and for its own copy-in and mirror-out), and a new `exec.kill
+{process, executor, signal, by}` records a signal sent to a run's process
+through the control plane (`needy kill`). The trace crate still knows no
+event types: the principal lives in core's payloads, not in the envelope.
+`Event::decode` reads versions 1 and 2 (`READ_VERSIONS`): a version 1
+payload is a version 2 payload without `by`, so traces written before and
+events an older guest build pushes still decode, with no principal. The
+adapters set who asks (`Caller::principal`) on `NewRun`, `ExecSpec`,
+`Runs::stop` and `Processes::kill`. `needy fs cp` is an exec, so its
+`exec.start` names the client; routed commands name `actor:RUN`.
+`runner:NAME` has no event yet: runners reach only their own streams. The
+report shows `Started by` and `Stopped by` (JSON `started_by`,
+`stopped_by`).
+
+**Report and logs through the control plane.** `RunService.GetRunEvents`
+streams a run's stored events (an ID, a prefix or `latest`; the daemon
+flushes a live run's trace first) and `needy report` renders them on the
+client; `needy report --local` keeps the offline path that reads this
+machine's `trace.db`. `GetRunLogsRequest.follow` keeps the console stream
+open: the daemon reads the console file again every 250 ms (polling, see
+the `NOTICE` at `FOLLOW_POLL`) until the run is no longer `running` or the
+caller leaves, and `needy run logs -f` prints each chunk as it arrives. A
+follow of a run that is not running returns what the console holds.
+
+**Tests.** The store (codes: TTL, single use, names, revocation, hashes
+only, `last_used` resolution); the adapters over the fake (pairing needs no
+token, a client token reaches operator methods and is named, a revoked one
+is refused, a client token is refused the runner methods, events in
+messages of 1000, followed logs); the daemon in-process (pair, use, revoke,
+refused; `run.create`, `exec.start`, `exec.kill` and `run.stop` name the
+client and the operator in the events read back through `GetRunEvents`;
+followed logs end with the run); the CLI against a control daemon on a
+loopback TCP port with a control token, from a second home whose state
+directory holds no `trace.db`: pair, the token file 0600, a spent code,
+`run create`, `exec`, `run logs -f` until `run stop`, `report` human and
+JSON naming `client:laptop`, `--local` failing, `client ls`, `client
+revoke`, refused.
+
 ## Open questions
 
 - **The control plane as a runner**: is the control host implicitly a local
@@ -599,6 +696,15 @@ runner's process ends.
 - **Processes outside runs**: the in-memory map of processes the daemon
   has seen (for `attach`, `kill` and `ps`) still grows until it exits, and
   processes outside runs are not in `state.db`. Prune, persist, or both?
+- **Client scopes**: a client token has every operator right (owner's
+  slice 7 scope). Read-only clients (reports and logs only), or clients
+  limited to their own runs, would need a scope on the pairing code, as join
+  tokens have.
+- **Client token rotation**: a client re-pairs to get a new token; the old
+  one stays valid until revoked. Should `client pair` revoke the token it
+  replaces on the same endpoint?
+- **Pruning clients**: revoked clients and used or expired pairing codes stay
+  in `state.db` and `client ls`, as removed runners do.
 - **Silent processes after a lost client**: an exec whose client left, on a
   runner as on any executor, ends only when the process next writes. Should
   the executor end a non-detached process as soon as its stream ends?

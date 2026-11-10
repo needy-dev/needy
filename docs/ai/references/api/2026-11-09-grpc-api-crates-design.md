@@ -47,7 +47,8 @@ ones; removed field numbers are `reserved`.
 | `RunService` | `CreateRun` | unary | Creates a run from a profile's YAML, its directory and its name; optionally starts the actor |
 | | `GetRun`, `ListRuns` | unary | Running, stopped, finished and failed runs |
 | | `StopRun` | unary | Stops a run and releases its executors |
-| | `GetRunLogs` | server stream | The actor's console output so far; `NOT_FOUND` when the run has no actor |
+| | `GetRunLogs` | server stream | The actor's console output so far; with `follow`, then what it writes until the run stops running (the control plane reads the console every 250 ms). `NOT_FOUND` when the run has no actor |
+| | `GetRunEvents` | server stream | A run's trace events (an ID, a prefix or `latest`) as stored: `seq`, `time_ms`, `kind`, `version`, JSON `payload`, up to 1000 per message, each naming the full run ID. Clients decode them with `needy_core::event`; `needy report` renders them |
 | | `Decide` | unary | Where a command runs and how it is rewritten. The actor's proxy calls it with the command's ancestry |
 | `ProcessService` | `Exec` | bidirectional stream | Start (`ExecStart`) or attach (`ExecAttach`), then stdin, signals and resizes; responses carry `event`, `started`, output, `exited` or `error` |
 | | `ListProcesses`, `KillProcess` | unary | The process table, of a run or a runner (`runner`); a signal by name |
@@ -62,24 +63,32 @@ ones; removed field numbers are `reserved`.
 | | `ListRunners`, `RotateRunner`, `RemoveRunner` | unary | Runners with their status (`online`, `offline`, `removed`); ask for a new credential; revoke one (which also ends its control stream) |
 | | `Control` | bidirectional stream | A runner's control stream, opened by the runner: the control plane sends `RunnerTask`s (`exec`, `list_processes`, `kill_process`) with IDs, the runner `TaskResult`s for list and kill |
 | | `Task` | bidirectional stream | One exec task's stream, opened by the runner: first `task_id`, then the exec's `ExecResponse`s up (or a `TaskError`) and its `ExecRequest`s down |
+| `ClientService` | `CreatePairingCode` | unary | A pairing code: TTL and the client's name (a DNS label; `client-<code ID>` when empty). Its secret is in the response only |
+| | `Pair` | unary | Pairing code → the client and its token (once). Needs no bearer token |
+| | `ListClients`, `RevokeClient` | unary | Every client with when it paired, was last used (to a minute) and was revoked; revoke one by ID |
 
 Who serves what:
 
 - The control daemon's socket serves `HealthService`, `RunService`,
-  `ProcessService` and `RunnerService`.
+  `ProcessService`, `RunnerService` and `ClientService`.
 - An executor daemon, and the control daemon's in-process local executor,
   serve `HealthService` and `ProcessService`.
 - Each actor gets a listener bound to its run (a vsock Unix socket), with
   the caller `Caller::Actor { run }`. It serves `HealthService`,
   `GuestService`, `RunService` and `ProcessService`; `Decide`, `Exec`,
   `ListProcesses` and the guest calls act on that run whatever the request
-  names, and `CreateRun`, `StopRun` and `GetRunLogs` are refused.
-  The control socket's caller is `Caller::Cli`, which `GuestService` refuses.
+  names, and `CreateRun`, `StopRun`, `GetRunLogs` and `GetRunEvents` are
+  refused. The control socket's caller is `Caller::Operator`, which
+  `GuestService` refuses.
 - On the control socket, a request with a runner's credential is from
   `Caller::Runner { name }` and reaches `RunnerService.Heartbeat`, `Control`
   and `Task` only; an operator's token gets `PERMISSION_DENIED` from
   `Control` and `Task`. The other `RunnerService` methods but `Join` need the
-  operator (`Caller::Cli`).
+  operator (`Caller::Operator`) or a client.
+- A request with a paired client's token is from `Caller::Client { id, name
+  }`, which has the operator's rights everywhere except the runner methods
+  (`PERMISSION_DENIED`), on a listener with or without a control token. A
+  revoked client's token is `UNAUTHENTICATED`. `Pair` needs no bearer token.
 - `ExecStart.runner` and `ListProcessesRequest.runner` name a runner's
   machine outside any run (`needy exec --runner`, `ps --runner`); with
   `run_id` it is `INVALID_ARGUMENT`, from an actor `PERMISSION_DENIED`, and a
@@ -194,7 +203,7 @@ tests/       exec and files against an in-process ExecutorService
 
 ```text
 src/
-  control.rs          Runs, Processes, Guest, Runners; Caller; ControlError; domain types
+  control.rs          Runs, Processes, Guest, Runners, Clients; Caller; ControlError; domain types
   server.rs           Server: services for one Caller; bind every listener, then serve
   termination.rs      SIGINT, SIGTERM, SIGHUP (Ctrl-C on Windows) as a CancellationToken
   middleware/
@@ -202,12 +211,14 @@ src/
   protocol/
     domain.rs         generated <-> domain conversions, one function per direction
     status.rs         ControlError -> tonic::Status, one table
-    grpc/v1/          health, run, process, guest, runner adapters
+    grpc/v1/          health, run, process, guest, runner, client adapters
 ```
 
-- **Domain traits.** `Runs` (`create`, `get`, `list`, `stop`, `logs`,
-  `decide`), `Processes` (`exec`, `list`, `kill`), `Guest` (`config`,
-  `event`, `exit`, `fetch_files`, `push_files`) and `Runners`
+- **Domain traits.** `Runs` (`create`, `get`, `list`, `stop`, `logs` as a
+  stream, `events`, `decide`, `check`), `Processes` (`exec`, `list`,
+  `kill`), `Guest` (`config`, `event`, `exit`, `fetch_files`,
+  `push_files`), `Clients` (`create_pairing_code`, `pair`, `clients`,
+  `revoke`, `credential` for the middleware) and `Runners`
   (`create_join_token`, `join_tokens`, `revoke_join_token`, `join`,
   `heartbeat`, `runners`, `rotate`, `remove`, `credential` for the
   middleware, and `control` and `task` for a runner's streams) take and
@@ -219,16 +230,21 @@ src/
   implements the generated `ProcessService`, which `Server::process_service`
   serves as is, since `core-executor` sits below `api-server`;
   `ExecutorService::open` serves the same exec from any request stream, which
-  a runner uses for its task streams.
-- **`Caller`**: each server has its listener's caller, `Cli` on the
+  a runner uses for its task streams. The adapters pass who asks
+  (`Caller::principal`) into `NewRun.by`, `ExecSpec.by`, `Runs::stop` and
+  `Processes::kill`, and the daemon records it on the trace events they
+  cause.
+- **`Caller`**: each server has its listener's caller, `Operator` on the
   control socket and on an executor daemon, `Actor { run }` on an actor's
   listener. The middleware (`Credentials`) puts the caller of each request
   into its extensions: the listener's for the control token or, without one,
-  for any token; `Runner { name }` for a runner's credential, which
+  for any other token; `Runner { name }` for a runner's credential, which
   `Runners::credential` resolves against `state.db`, on the runner methods
-  only; and none (`UNAUTHENTICATED`) for a token shaped like a runner
-  credential that no runner holds. `Join` and the health check need no
-  token. The adapters
+  only; `Client { id, name }` for a client's token, which
+  `Clients::credential` resolves; and none (`UNAUTHENTICATED`) for a token
+  shaped like a runner credential or a client token that nobody holds.
+  `Join`, `Pair` and the health check need no token. Every adapter reads
+  the request's caller, not the listener's. The adapters
   apply it: an actor's calls act on its own run, and the run
   operations an actor may not call are refused before the daemon sees them.
 - **`Server::bind`** binds every listener before any serves, so a socket
@@ -241,7 +257,7 @@ src/
   | `ControlError` | Status | Example |
   | --- | --- | --- |
   | `Denied { message, events }` | `PERMISSION_DENIED`, details `ExecRefusal` | a rule or fault refused an exec; an actor stopping a run; a runner role outside its join token's scope |
-  | `Unauthenticated` | `UNAUTHENTICATED` | an invalid, expired, spent or revoked join token |
+  | `Unauthenticated` | `UNAUTHENTICATED` | an invalid, expired, spent or revoked join token; an invalid, expired or used pairing code |
   | `NotFound` | `NOT_FOUND` | no such run, process or mapping |
   | `Invalid` | `INVALID_ARGUMENT` | an unspecified origin; a guest event of another schema version |
   | `Failed` | `FAILED_PRECONDITION` | an invalid profile; a command that cannot start |

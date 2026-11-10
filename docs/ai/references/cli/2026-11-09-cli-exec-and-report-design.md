@@ -10,14 +10,15 @@ note. Profiles are described in
 ```text
 needy daemon   [--mode control|executor|runner]  # control plane; executor or runner on every other machine
 needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
-needy run  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
+needy run  create|ls|stop|logs [-f] [--group G] # one actor plus its executors; logs prints (and follows) its console
 needy exec     [--run ID | --executor NAME | --runner NAME] -- CMD …   # run a command through placement
 needy ps [-a] [--run ID | --runner NAME] | attach ID | kill ID   # manage detached processes
 needy fs       cp [--run ID | --runner] SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
-needy report   RUN|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE]
+needy report   RUN|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE] [--local]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
 needy runner   token create [--ttl 1h] [--uses N] [--roles R,…] [--labels K=V,…] | token ls | token revoke ID
 needy runner   ls | rotate NAME | rm NAME      # runners that joined this control plane
+needy client   pair create [--ttl 10m] [--name NAME] | pair CODE | ls | revoke ID   # paired clients
 ```
 
 Every command takes `--endpoint` (or `NEEDY_ENDPOINT`) and `-v`, which turns
@@ -65,6 +66,40 @@ b5eac210aee1  -     finished  -      build=docker (released)   0
 
 `run logs RUN` prints the actor's
 serial console: the guest's boot messages and the driving program's terminal.
+With `-f/--follow` it keeps printing what the actor writes, as it arrives,
+until the run stops running (its driving program exits, it fails or it is
+stopped); the control plane streams it (`GetRunLogs.follow`), so it works
+from any client.
+
+### Clients
+
+Every command reaches the control plane at `--endpoint` (or
+`NEEDY_ENDPOINT`; the control socket by default) and presents a bearer token:
+`NEEDY_TOKEN` when it is set, else the client token stored for that endpoint,
+else none. On the control host the socket needs none; elsewhere a machine
+pairs once:
+
+```text
+# where the control plane is reachable with the control token
+NEEDY_TOKEN=… needy --endpoint http://127.0.0.1:7443 client pair create --name laptop
+needy: pairing code 1a2b3c4d5e6f for client laptop, valid until …; it is not shown again
+needy-pair.1a2b3c4d5e6f.…
+# on the client
+needy --endpoint http://127.0.0.1:7443 client pair needy-pair.1a2b3c4d5e6f.…
+needy: paired as client laptop (6f5e4d3c2b1a); its token for http://127.0.0.1:7443 is in ~/.config/needy/credentials.json
+```
+
+`client pair create` prints the code alone on stdout; `--ttl` defaults to 10
+minutes and `--name` to `client-<code ID>`. `client pair CODE` sends no token
+(the code authenticates it) and stores the client token in
+`credentials.json` in the config directory (`$XDG_CONFIG_HOME/needy`, or
+`NEEDY_CONFIG_DIR`), keyed by the endpoint as given without a trailing `/`,
+written 0600 in a 0700 directory through a temporary file; pairing again
+replaces it. `client ls` prints `ID`, `NAME`, `STATE` (`active` or
+`revoked`), `PAIRED` and `LAST USED`, or JSON with `-o json`; `client revoke
+ID` prints nothing. A revoked client's next command is `needy: missing or
+invalid bearer token`, exit 1. See
+[As built: slice 7](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-7).
 
 ### Runners
 
@@ -343,8 +378,13 @@ in three formats that `-o/--output` picks:
 - `json`: a stable JSON summary of the same data (below).
 
 `--file FILE` writes the report to a file instead of stdout, without colors.
+The control plane sends the run's events (`RunService.GetRunEvents`), so any
+client it reaches can report on any run; `--local` reads this machine's
+`trace.db` instead (`NEEDY_STATE_DIR`), offline on the control host.
 `needy_core::report::render` renders every format from the run's events
-and does no IO; the CLI picks the format and whether to color.
+and does no IO; the CLI picks the format and whether to color. The human
+report names who created and stopped the run (`Started by`, `Stopped by`)
+when the trace records it.
 
 ```text
 Run       b5eac210aee1  (profile smoke)
@@ -380,6 +420,7 @@ The JSON summary has these fields:
 | `duration_ms` | From the create to the first end, or to the last event. |
 | `actor_exit` | `{code, signal}` of the driving program, or `null`. |
 | `failure` | Why the run failed, or `null`. |
+| `started_by`, `stopped_by` | The principal of `run.create` and `run.stop` (`operator`, `client:NAME`), or `null` when the trace does not say (a version 1 trace; a stop at the control plane's shutdown). |
 | `dropped_events` | Events the trace dropped; the counts may be low by as many. |
 | `route_names` | The names the actor routes (`["*"]` for every exec), or `null` without an actor. |
 | `commands` | `routed` (`[{executor, commands, failed}]`), `kept_on_actor`, `cli`, `denied`, `faults`, `failed`, `model_calls`. |
@@ -445,8 +486,9 @@ Actor network: openrouter.ai (142)
 
 ### Current state
 
-`needy report` reads the run's events from `trace.db` with the SQLite
-sink's reader, decodes each into a typed `needy_core::event` value, and
+`needy report` gets the run's events from the control plane, which reads
+them from `trace.db` with the SQLite sink's reader (or reads them itself with
+`--local`), decodes each into a typed `needy_core::event` value, and
 renders them with `needy_core::report::render`, which does no IO. The
 markdown format is described here; an event of
 another schema version is an error that names the event instead of a partial
