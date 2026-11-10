@@ -890,6 +890,49 @@ no tokens.
 `needy report` still reads the local `trace.db` (slice 7), so reports were
 read on the host with its state directory.
 
+## Ownership and reconciliation
+
+Slice 6 of [runners and runs](2026-11-10-runner-and-run-design.md#as-built-slice-6)
+(`560833a`, `758c7a1`): runs, instances and processes in `state.db`;
+`EndRun` and runner reports; the runners' 2-minute grace period; restart
+reconciliation without re-adopting actors. Run on 2026-11-10.
+
+`make check` and `make test` pass on the Mac; `make check` on Linux.
+
+On one Mac (Apple silicon, macOS), a control daemon with a stand-in actor
+(the hidden `--kvm` and a fake image) and runner `mac`, joined through a
+local socket proxy that could be stopped, with `--disconnect-grace 20s`; a
+run's executor on `mac`, a detached `sleep 600` in it:
+
+| Check | Result |
+| --- | --- |
+| The proxy restarted under a live run | The runner connects again; the control plane logs `claimed 1 processes`; the sleep keeps running; `run stop` ends it |
+| Control daemon stopped by `SIGTERM`, then started | The run is `stopped`, the sleep gone at the shutdown; `run ls` after the start lists every earlier run. A first build ended the runners' control streams before stopping the runs, so the sleep lived until the runner reported to the next daemon; fixed in `758c7a1` |
+| Control daemon killed (`SIGKILL`), then started | The sleep runs while the daemon is down; at the start the run is `failed`, `the control plane restarted; the actor was lost`, `mac=runner (released)`, and the runner's report ends the sleep |
+| Control daemon killed and left down for 25 s | The runner logs `did not come back within 20s` and ends the sleep at 20 s; the run is `failed` at the next start |
+| Control daemon killed with the proxy down, then started | After 60 s: `mac=runner (lost)`, `runner mac did not report executor mac within 60s`; the runner had ended the sleep at its grace period |
+| Nothing left | Pass |
+
+Across machines: a control daemon on the Linux KVM host on a loopback TCP
+listener with a control token and `--local-runner kvm`, built from a scratch
+copy of the committed tree, with the slice 4 actor image; runner `kvm` on the
+same host; runner `mac` on the Mac joined through `ssh -L` only.
+
+| Check | Result |
+| --- | --- |
+| opencode in the actor on `kvm`, its shells on `mac`, the Mac workspace mounted | `finished`, exit 0, `hello.py` in the Mac workspace; the run's `sftp-server` on the Mac ended at the finish (`ended 1 processes`), no child of the runner left |
+| The same profile with `sleep 600` as the driving program, a detached `sleep 600` on `mac`, `run stop` | Before: `sftp-server` and `sleep` under the runner; after: none |
+| The same, then the control daemon killed (`SIGKILL`) and started | The real Firecracker survives the kill; the new daemon logs `ending its actor's VM (firecracker …), which a restarted control plane does not adopt` and `ended failed at start`; no Firecracker left; the Mac runner connects again through the tunnel and its report ends `sftp-server` and `sleep` (`ended 2 processes`); `run ls`: `failed`, `the control plane restarted; the actor was lost` |
+| A run with a Docker executor on `kvm`, the control daemon killed and started | The container outlives the kill and is removed at the start; `build=docker (released)` |
+| `examples/smoke`, `examples/chaos`, `examples/cli` placed on `kvm` | `finished`: `google`, `hello-from-actor`, `hi-from-executor`, `routed exit=7`; `Input/output error` on `broken.json`, `curl exit=126`, `+101.0°C ALARM (CRIT)`, `result.txt` mirrored out, `report`: 3 faults by kind; `exec --run` rc 0 and rc 4, `run stop` releases the container |
+| Nothing left | Pass: no daemon, Firecracker or container on the host; no runner, `sftp-server` or run process on the Mac; the tunnel stopped |
+
+Observed, not changed: under a heavily loaded Mac, the CLI test
+`a_runner_daemon_joins_restarts_without_its_join_token_and_ends_when_removed`
+failed twice in about fifteen full `make test` runs with the restarted
+runner never heartbeating within 20 s; it passed 25 times alone and in
+six runs of the CLI tests alone. Not reproduced with logs.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
