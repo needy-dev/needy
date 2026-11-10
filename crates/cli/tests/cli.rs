@@ -980,11 +980,28 @@ fn terminate_twice(mut daemon: Child) -> (Duration, Output) {
 // once, non-zero, naming the runs it did not clean up.
 #[test]
 fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
+  use std::os::unix::fs::PermissionsExt;
   let home = Home::new();
   let daemon = spawn_daemon(&home, "control");
+  // An actor whose VM ignores SIGTERM keeps the run's stop, and so the
+  // graceful shutdown, busy for the VM's stop grace period.
+  let firecracker = home.path().join("image").join("firecracker");
+  std::fs::write(
+    &firecracker,
+    "#!/bin/sh\ntrap '' TERM\ntouch \"$(dirname \"$3\")/trapped\"\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n",
+  )
+  .unwrap();
+  std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
   let run = create_run(&home, NATIVE_PROFILE);
   let (mut attached, sleep) = attach_sleep(&home, &["exec", "--run", &run]);
 
+  // The VM ignores SIGTERM once it says so.
+  let trapped = home.path().join("state").join("runs").join(&run).join("trapped");
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !trapped.exists() {
+    assert!(Instant::now() < deadline, "the stand-in VM did not start");
+    std::thread::sleep(Duration::from_millis(20));
+  }
   let (elapsed, output) = terminate_twice(daemon);
   attached.kill().ok();
   attached.wait().unwrap();

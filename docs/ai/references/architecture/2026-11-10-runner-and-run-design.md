@@ -539,7 +539,16 @@ tests.
 
 The reconciled run gets no `run.fail` in its trace (`TODO(trace)`: a new
 `Dispatch` would number events from 0); `state.db` and `run ls` carry the
-reason. A graceful shutdown still stops every run first, as before.
+reason.
+
+**Graceful shutdown.** A control daemon stopped by a termination signal
+stops every run as soon as the signal comes, before it ends the runners'
+control streams, so the runners hear `EndRun` and nothing of the runs stays
+on them. Before slice 6 the streams ended first and the runs stopped after
+the server's 5 s grace for open calls; a run's open execs now end at once
+with the run (`daemon shutting down`), and only calls outside runs get the
+grace. Found on the Mac: a detached process of a run outlived the shutdown
+until the runner connected to the next control plane.
 
 **Tests.** The store's API (`store::runs`); a run's life visible after an
 in-process restart (shutdown and start on the same directories); through a

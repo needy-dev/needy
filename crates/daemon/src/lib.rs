@@ -172,6 +172,10 @@ pub struct Daemon {
   pub(crate) cancel: CancellationToken,
   /// Set when [`Daemon::shutdown`] begins, so a stream it ends says why.
   shutting_down: Arc<AtomicBool>,
+  /// Set once the runs are stopped for a shutdown: serving starts it, and
+  /// [`Daemon::shutdown`] waits for the same stop instead of starting
+  /// another.
+  runs_stopped: Arc<tokio::sync::OnceCell<()>>,
 }
 
 #[cfg(unix)]
@@ -241,6 +245,7 @@ impl Daemon {
       creates: TaskTracker::new(),
       cancel,
       shutting_down: Arc::default(),
+      runs_stopped: Arc::default(),
     };
     daemon.reconcile_open_runs().await.context("cannot reconcile the runs in state.db")?;
     Ok(daemon)
@@ -282,12 +287,14 @@ impl Daemon {
     tracing::info!("control daemon listening on {listen}");
     // Runners' control streams never end on their own; they end as the
     // server stops, so its grace period does not wait for them, and the
-    // runners connect again to whoever serves next.
-    let links = self.links.clone();
+    // runners connect again to whoever serves next. The runs stop first,
+    // while the streams can still tell the runners to end their processes.
+    let daemon = self.clone();
     let stopping = stop.clone();
     self.tasks.spawn(async move {
       stopping.cancelled().await;
-      links.close_all();
+      daemon.stop_runs().await;
+      daemon.links.close_all();
     });
     server.serve(stop).await?;
     Ok(())
@@ -308,6 +315,21 @@ impl Daemon {
   /// order they were created, then the daemon's own tasks and the local
   /// executor's processes, and waits for them.
   pub async fn shutdown(&self) {
+    self.stop_runs().await;
+    self.cancel.cancel();
+    self.host.shutdown().await;
+    self.tasks.close();
+    self.tasks.wait().await;
+  }
+
+  /// The first part of [`Daemon::shutdown`]: unwinds the runs being
+  /// created and stops every other run. Serving calls it before it ends the
+  /// runners' control streams, so the runners hear that the runs ended.
+  async fn stop_runs(&self) {
+    self.runs_stopped.get_or_init(|| self.stop_every_run()).await;
+  }
+
+  async fn stop_every_run(&self) {
     self.shutting_down.store(true, Ordering::SeqCst);
     // A create sees its cancelled token before its next step and unwinds
     // through its rollback. A create that finished meanwhile is running
@@ -324,10 +346,6 @@ impl Daemon {
         tracing::warn!("run {}: {e}", run.id);
       }
     }
-    self.cancel.cancel();
-    self.host.shutdown().await;
-    self.tasks.close();
-    self.tasks.wait().await;
   }
 }
 

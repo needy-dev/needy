@@ -214,3 +214,65 @@ files:
   assert_eq!(last.kind, "run.fail");
   assert!(last.payload.get().contains("copy-in seed"), "{}", last.payload.get());
 }
+
+// ROOT CAUSE:
+//
+// If the control daemon was stopped by a termination signal during a run
+// on a runner, the run's processes kept running on the runner until it
+// connected to the next control daemon, because serving ended the runners'
+// control streams as soon as the signal came, before the shutdown stopped
+// the runs and told the runners to end them.
+//
+// Before the fix, the sleep below outlived the daemon's shutdown.
+// The fix stops the runs first, then ends the control streams.
+#[tokio::test]
+async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_it_drops_them() {
+  const TOKEN: &str = "control-secret";
+  let started = testing::daemon().await;
+  let daemon = started.daemon.clone();
+  let socket = started.dir.path().join("ctl.sock");
+  let endpoint = format!("unix:{}", socket.display());
+  let stop = tokio_util::sync::CancellationToken::new();
+  let serving = tokio::spawn({
+    let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
+    async move {
+      daemon.serve_until(&endpoint, Some(TOKEN.into()), stop).await.unwrap();
+      daemon.shutdown().await;
+    }
+  });
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let operator = needy_api_client::Client::connect(&endpoint).await.unwrap().with_token(TOKEN).unwrap();
+  let request = needy_api_client::proto::v1::CreateJoinTokenRequest {
+    ttl_ms: 60_000,
+    uses: 1,
+    ..Default::default()
+  };
+  let token = operator.runners().create_join_token(request).await.unwrap().into_inner().token;
+  let runner_state = tempfile::tempdir().unwrap();
+  let config = crate::runner::Config {
+    state_dir: runner_state.path().to_path_buf(),
+    control: Some(endpoint.clone()),
+    join_token: Some(token),
+    name: "far".into(),
+    roles: [needy_core::types::RunnerRole::Executor].into(),
+    labels: Default::default(),
+    grace: crate::runner::DISCONNECT_GRACE,
+  };
+  let runner = crate::runner::Runner::start(config).await.unwrap();
+  let runner_stop = tokio_util::sync::CancellationToken::new();
+  let _runner_stop = runner_stop.clone().drop_guard();
+  tokio::spawn(runner.serve(runner_stop));
+  while daemon.links.get("far").is_none() {
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let profile = "executors:\n  far: { runner: far }\ncommands:\n  - { match: \"**\", to: far }\n";
+  let created = Runs::create(&daemon, new_run(profile, started.dir.path())).await.unwrap();
+  let (_, pid) = testing::detached_sleep(&daemon, &created.id).await;
+
+  stop.cancel();
+  tokio::time::timeout(Duration::from_secs(20), serving).await.expect("the daemon shuts down").unwrap();
+
+  assert!(testing::ended(pid).await, "process {pid} outlived the daemon's shutdown");
+}
