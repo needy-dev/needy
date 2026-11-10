@@ -49,14 +49,13 @@ pub fn shell_code(exit: &Exit) -> i32 {
 
 /// The status a client reports when an exec stream ended before the command
 /// exited, so the command's own status is unknown. A shell reserves 255 for
-/// an exit status out of range, which no exit or signal maps to here.
+/// an exit status out of range. No signal maps to it here, but a command that
+/// runs `exit 255` also reports 255, so the status alone does not tell the
+/// two apart; the client's message does.
 // TODO(provenance): no POSIX or bash manual text reserves 255 for an
 // out-of-range status; the only source found is the non-normative Advanced
 // Bash-Scripting Guide (https://tldp.org/LDP/abs/html/exitcodes.html, read
 // 2026-11-10).
-// REVIEW: `shell_code` passes an exit code through unchanged, so a command
-// that runs `exit 255` also reports 255; "no exit maps to here" holds only for
-// signals.
 pub const ENDED: i32 = 255;
 
 /// Accepts `SIGTERM`, `TERM` or a number, and returns the signal name.

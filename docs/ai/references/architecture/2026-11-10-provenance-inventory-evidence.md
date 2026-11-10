@@ -59,7 +59,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | 23 | fake coretemp core IDs step by 4 | `images/kernel/fake_coretemp.c:62` | TODO(provenance) | none found |
 | 24 | `--device host:mode` | `crates/core-executor/src/provider/docker.rs:248` | fixed | <https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1005-L1016>; `device` follows `validateLinuxPath` (`#L1092-L1130`) and `parseLinuxDevice` (`#L999-L1033`); test `a_device_parses_as_docker_does` |
 | 25 | `ENDED = 255` reserved status | `crates/core-executor/src/signals.rs:53` | TODO(provenance) | only the non-normative Advanced Bash-Scripting Guide |
-| 26 | "no exit maps to 255" | `crates/core-executor/src/signals.rs:57` | REVIEW | `shell_code` passes `exit 255` through |
+| 26 | "no exit maps to 255" | `crates/core-executor/src/signals.rs:57` | fixed | `shell_code` passes `exit 255` through; the comment now says so (no behavior change, no test) |
 
 ## Cited items
 
