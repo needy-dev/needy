@@ -28,6 +28,27 @@ static struct platform_device *pdev;
 static struct device *hwdev;
 static int ncores;
 
+/* TODO(provenance): core IDs stepping by 4 (0, 4, 8, ...) match no cited
+ * topology; record the machine they were copied from. */
+#define CORE_ID_STEP 4
+#define MAX_CORES 64
+/* The real driver puts the package in temp1 and Core N in temp(N+2)
+ * (https://github.com/torvalds/linux/blob/v6.18/drivers/hwmon/coretemp.c#L427-L436);
+ * hwmon names channel ch temp(ch+1), so Core N is channel N+1 and the
+ * channels between core IDs exist but are hidden. */
+#define MAX_CHANNEL ((MAX_CORES - 1) * CORE_ID_STEP + 1)
+
+static bool is_core(int ch)
+{
+	return ch >= 1 && (ch - 1) % CORE_ID_STEP == 0 && (ch - 1) / CORE_ID_STEP < ncores;
+}
+
+/* 0 for the package, 1 for the first core, 2 for the second, ... */
+static int sensor_index(int ch)
+{
+	return ch == 0 ? 0 : (ch - 1) / CORE_ID_STEP + 1;
+}
+
 static long reading(int channel)
 {
 	/* `avenrun` is fixed point with FSHIFT fraction bits, so the shift is
@@ -37,39 +58,39 @@ static long reading(int channel)
 	return override_mc ? override_mc : t;
 }
 
-static umode_t visible(const void *d, enum hwmon_sensor_types type, u32 attr, int ch) { return 0444; }
+static umode_t visible(const void *d, enum hwmon_sensor_types type, u32 attr, int ch)
+{
+	return ch == 0 || is_core(ch) ? 0444 : 0;
+}
 
 static int read(struct device *dev, enum hwmon_sensor_types type, u32 attr, int ch, long *val)
 {
 	switch (attr) {
-	case hwmon_temp_input: *val = reading(ch); return 0;
+	case hwmon_temp_input: *val = reading(sensor_index(ch)); return 0;
 	/* The real driver reads crit (TjMax) and max (TjMax minus the target
 	 * offset) from MSR IA32_TEMPERATURE_TARGET: https://github.com/torvalds/linux/blob/v6.18/drivers/hwmon/coretemp.c#L268-L328.
 	 * TODO(provenance): the fixed 80 C max and 100 C crit name no CPU or
 	 * capture; record which CPU's TjMax they stand for. */
 	case hwmon_temp_max:   *val = 80000; return 0;
 	case hwmon_temp_crit:  *val = 100000; return 0;
-	case hwmon_temp_crit_alarm: *val = reading(ch) >= 100000; return 0;
+	case hwmon_temp_crit_alarm: *val = reading(sensor_index(ch)) >= 100000; return 0;
 	}
 	return -EOPNOTSUPP;
 }
 
 static int read_string(struct device *dev, enum hwmon_sensor_types type, u32 attr, int ch, const char **str)
 {
-	/* REVIEW: the real driver names temp1 the package and Core N's file
-	 * temp(N+2) (https://github.com/torvalds/linux/blob/v6.18/drivers/hwmon/coretemp.c#L427-L436), while
-	 * channel ch here is temp(ch+1), so "Core 4" lands in temp2, not temp6.
-	 * TODO(provenance): core IDs stepping by 4 (0, 4, 8, ...) match no cited
-	 * topology; record the machine they were copied from. */
-	static char labels[65][16];
+	/* Channel ch is Core ch-1 (see MAX_CHANNEL). */
+	static char labels[MAX_CORES + 1][16];
+	int i = sensor_index(ch);
 	if (ch == 0) snprintf(labels[0], 16, "Package id 0");
-	else snprintf(labels[ch], 16, "Core %d", (ch - 1) * 4);
-	*str = labels[ch];
+	else snprintf(labels[i], 16, "Core %d", ch - 1);
+	*str = labels[i];
 	return 0;
 }
 
 static const struct hwmon_ops ops = { .is_visible = visible, .read = read, .read_string = read_string };
-static u32 temp_cfg[66];
+static u32 temp_cfg[MAX_CHANNEL + 2]; /* zero-terminated */
 static struct hwmon_channel_info temp_info = { .type = hwmon_temp, .config = temp_cfg };
 static const struct hwmon_channel_info *infos[] = { &temp_info, NULL };
 static const struct hwmon_chip_info chip = { .ops = &ops, .info = infos };
@@ -77,8 +98,10 @@ static const struct hwmon_chip_info chip = { .ops = &ops, .info = infos };
 static int __init fake_init(void)
 {
 	int i;
-	ncores = min_t(int, num_online_cpus(), 64);
-	for (i = 0; i <= ncores; i++)
+	ncores = min_t(int, num_online_cpus(), MAX_CORES);
+	/* hwmon stops at the first zero config, so the hidden channels between
+	 * cores need one too; `visible` hides them. */
+	for (i = 0; i <= (ncores - 1) * CORE_ID_STEP + 1; i++)
 		temp_cfg[i] = HWMON_T_INPUT | HWMON_T_LABEL | HWMON_T_MAX | HWMON_T_CRIT | HWMON_T_CRIT_ALARM;
 	pdev = platform_device_register_simple("coretemp", 0, NULL, 0);
 	if (IS_ERR(pdev)) return PTR_ERR(pdev);
