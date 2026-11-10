@@ -14,6 +14,9 @@ use nix::sched::CloneFlags;
 use super::write_param;
 
 /// The built-in fake coretemp's parameters.
+// Source: https://github.com/torvalds/linux/blob/v6.18/Documentation/ABI/stable/sysfs-module (built-in code with a
+// parameter gets `/sys/module/<name>/parameters/`); `fake_coretemp.c` in
+// `images/kernel/` declares `base_mc` and `override_mc` with mode 0644.
 const CORETEMP: &str = "/sys/module/fake_coretemp/parameters";
 
 /// Sets the hostname and the sensors' idle readings.
@@ -72,5 +75,11 @@ pub(super) fn offset_uptime(offset_secs: i64) {
     return;
   }
   // Offsets are written once, before the namespace's first process.
+  // Source: https://github.com/torvalds/linux/blob/v6.18/fs/proc/base.c#L1671-L1684 (`<clock> <secs> <nanosecs>` per
+  // line, clock `monotonic` or `boottime`) and
+  // https://github.com/torvalds/linux/blob/v6.18/kernel/time/namespace.c#L383-L461 (refused once the namespace has a
+  // process).
+  // Reference: https://man7.org/linux/man-pages/man7/time_namespaces.7.html
+  // (man-pages 6.19, read 2026-11-10).
   write_param("/proc/self/timens_offsets", &format!("monotonic {offset_secs} 0\nboottime {offset_secs} 0\n"));
 }

@@ -7,6 +7,9 @@ use nix::net::if_::InterfaceFlags;
 use nix::sys::socket::{AddressFamily, SockFlag, SockType};
 
 /// Where the driving program's `HTTP_PROXY` points.
+// 3128 is Squid's default HTTP proxy port, which proxy-aware programs expect:
+// https://github.com/squid-cache/squid/blob/SQUID_7_8/src/Common.am#L14
+// Reference: https://github.com/squid-cache/squid/blob/SQUID_7_8/src/cf.data.pre#L2620-L2621
 pub(super) const GATEWAY_LISTEN: &str = "127.0.0.1:3128";
 
 // NOTICE: nix wraps neither `SIOCGIFFLAGS` nor `SIOCSIFFLAGS`; its ioctl
@@ -55,6 +58,7 @@ pub(super) async fn forward_gateway(port: u32) {
       }
     };
     tokio::spawn(async move {
+      // CID 2 is the host, `VMADDR_CID_HOST`: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131
       let mut outbound = match tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(2, port)).await {
         Ok(outbound) => outbound,
         Err(e) => {

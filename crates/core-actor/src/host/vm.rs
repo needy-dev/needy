@@ -14,9 +14,20 @@ use needy_core::recipe::{CompiledRecipe, VmIdentity};
 use serde_json::json;
 
 /// The guest's vsock context ID; the host is always 2.
+// Source: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131 (`VMADDR_CID_HOST`
+// is 2); 3 is the first CID left for guests and Firecracker's own example,
+// https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/docs/vsock.md#L114-L126 (with `v.sock_<port>` for guest-initiated
+// connections, which `host_port` builds).
 const GUEST_CID: u32 = 3;
 
 /// The guest kernel's command line. `init=` starts needy's guest init.
+// Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/docs/getting-started.md#L260
+// (`console=ttyS0 reboot=k panic=1`); `reboot=k` makes a guest reboot end the
+// Firecracker process on x86: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/FAQ.md#L181-L204.
+// `pci=off` (added below for a VM without PCI identity) was in older
+// Firecracker defaults; v1.17.0's default command line no longer has it,
+// https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/vmm_config/boot_source.rs#L9-L20.
+// Reference: https://docs.kernel.org/6.18/admin-guide/kernel-parameters.html
 const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4";
 
 #[derive(Debug, thiserror::Error)]
@@ -177,6 +188,12 @@ fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
   }
   if let Some(smbios) = &identity.smbios {
     // `key=value;…`; a `;` inside a value would end it early.
+    // REVIEW: the patch's `smbios.rs` reads `product_serial` and
+    // `product_uuid` (its `DEFAULTS` table in `images/firecracker/needy.patch`),
+    // not the `serial` and `uuid` keys sent here, so the recipe's serial and
+    // the seed's UUID never reach the guest: it gets the patch's fixed GCE
+    // serial and UUID. `chassis_vendor` and `board_serial` are never sent and
+    // also stay GCE's. Found by reading both sides on 2026-11-10; not run.
     let chassis_type = smbios.chassis_type.map(|n| n.to_string());
     let fields = [
       ("bios_date", smbios.bios_date.as_deref()),

@@ -70,6 +70,11 @@ async fn boot() -> Result<()> {
     tracing::warn!("cannot bring the loopback interface up: {e}");
   }
   // Programs may not execute code from a memfd.
+  // Source: https://github.com/torvalds/linux/blob/v6.18/include/linux/pid_namespace.h#L21-L23
+  // (2 = MEMFD_NOEXEC_SCOPE_NOEXEC_ENFORCED) and https://github.com/torvalds/linux/blob/v6.18/mm/memfd.c#L345-L366
+  // (a `memfd_create` without flags gets MFD_NOEXEC_SEAL; MFD_EXEC fails with
+  // EACCES).
+  // Reference: https://github.com/torvalds/linux/blob/v6.18/Documentation/userspace-api/mfd_noexec.rst?plain=1#L54-L80
   write_param("/proc/sys/vm/memfd_noexec", "2");
 
   let client = super::daemon().await?;

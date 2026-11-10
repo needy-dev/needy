@@ -8,6 +8,11 @@ use std::path::Path;
 /// The stubs' directory, last on the driving program's `PATH`.
 pub(in crate::guest) const STUB_DIR: &str = "/run/needy/bin";
 /// The actor's own programs, searched before the stubs.
+// Source: https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19
+// (`defaultUnixPathEnv`, the PATH a container gets) and Debian's root PATH,
+// https://sources.debian.org/src/base-files/13.8%2Bdeb13u7/share/profile/#L5
+// Reference: https://github.com/systemd/systemd/blob/v257/src/basic/path-util.h#L23
+// (`DEFAULT_PATH_COMPAT`, the same string).
 pub(super) const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Creates a stub for each plain command name the actor lacks.
