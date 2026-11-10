@@ -121,6 +121,35 @@ fn raptor_lake_identity_on_raptor_lake_is_clean() {
   assert!(compile(&recipe, &raptor_lake(), 1).findings.is_empty());
 }
 
+/// A real host's `/proc/cpuinfo` from `testdata` (see `testdata/SOURCES.md`).
+fn cpuinfo(fixture: &str) -> HostInfo {
+  let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/recipe/testdata").join(fixture);
+  HostInfo::from_cpuinfo(&std::fs::read_to_string(path).unwrap())
+}
+
+// ROOT CAUSE:
+//
+// If a recipe named SSE3 as Linux's `/proc/cpuinfo` does (`pni`), it got
+// "unknown feature", and `sse3` never matched a host's flags, because the
+// feature table used the name `sse3`, which Linux does not show.
+//
+// Before the fix, `hide: [pni]` was reported as unknown and left CPUID
+// alone, and `require: [sse3]` failed on every host.
+// The fix keeps every feature name the one `/proc/cpuinfo` shows.
+#[test]
+fn sse3_is_named_pni_as_in_proc_cpuinfo() {
+  let host = cpuinfo("cpuinfo-raptor-lake.txt");
+  let recipe = load("cpu: { signature: { family: 6, model: 183, stepping: 1 }, features: { require: [pni], hide: [pni] } }");
+
+  let c = compile(&recipe, &host, 1);
+
+  assert!(c.findings.is_empty(), "{:?}", c.findings);
+  let modifiers = c.cpu_template["cpuid_modifiers"].as_array().unwrap();
+  let leaf1 = modifiers.iter().find(|m| m["leaf"] == "0x1").unwrap()["modifiers"].as_array().unwrap();
+  let ecx = leaf1.iter().find(|m| m["register"] == "ecx").unwrap()["bitmap"].as_str().unwrap();
+  assert_eq!(ecx, format!("0b{}0", "x".repeat(31)), "pni is CPUID.01H:ECX[0]");
+}
+
 #[test]
 fn vendor_disagreement_warns() {
   let recipe = load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"0e:11:22:33:44:55\" }\nos: { kernel: { release: 6.8.0-1-aws } }");

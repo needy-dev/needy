@@ -34,7 +34,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 
 | # | Item | File | Status | Evidence |
 | --- | --- | --- | --- | --- |
-| 1 | `sse3` feature name | `crates/core/src/recipe/cpu.rs:49` | REVIEW | Linux shows `pni`: `K/arch/x86/include/asm/cpufeatures.h#L106` |
+| 1 | `sse3` feature name | `crates/core/src/recipe/cpu.rs:49` | fixed | Linux shows `pni`: `K/arch/x86/include/asm/cpufeatures.h#L106`; the table now says `pni`; test `sse3_is_named_pni_as_in_proc_cpuinfo` on the captured `testdata/cpuinfo-raptor-lake.txt` |
 | 2 | `hybrid_cpu` feature name | `crates/core/src/recipe/cpu.rs:111` | REVIEW | no quoted name, never in `/proc/cpuinfo`: `K/arch/x86/include/asm/cpufeatures.h#L425` |
 | 3 | `hybrid_cpu` in the Raptor Lake test flags | `crates/core/src/recipe/mod_test.rs:14` | REVIEW | as item 2 |
 | 4 | `hybrid_cpu` in the Broadwell hide list | `examples/opencode/gce.recipe.yaml:13` | REVIEW | as item 2 |
@@ -74,6 +74,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | `/proc/cpuinfo` line format | `crates/core/src/recipe/host.rs` | `K/arch/x86/kernel/cpu/proc.c#L70-L79`, `#L104-L107` | proc_cpuinfo(5) |
 | cpuinfo test fixture (hand-written) | `crates/core-actor/src/host/testdata/SOURCES.md` | `K/arch/x86/kernel/cpu/proc.c#L70-L130` | proc_cpuinfo(5) |
 | KVM CPUID fixtures | `crates/core/src/recipe/testdata/SOURCES.md` | capture command and machine roles (before this audit) | KVM API |
+| Raptor Lake cpuinfo fixture (captured) | `crates/core/src/recipe/testdata/SOURCES.md` | capture command, machine role and date; `K/arch/x86/kernel/cpu/proc.c#L70-L130` | proc_cpuinfo(5) |
 | SMBIOS chassis type numbers | `crates/core/src/recipe/identity.rs` `chassis_number` | DSP0134 3.7.0 section 7.4.1, Table 17 | DSP0134 3.8.0 |
 | UUID version 4 bits | `crates/core/src/recipe/identity.rs` `session_uuid` | RFC 9562 sections 4.1, 4.2, 5.4 | RFC 9562 |
 | DMI vendor strings | `crates/core/src/recipe/identity.rs` `vendor_of_dmi` | `https://github.com/systemd/systemd/blob/v257/src/basic/virt.c#L172-L190` | public `dmidecode` output |

@@ -23,3 +23,17 @@ one, so they decide which hide modifiers a recipe may emit on that host.
 
 Cascade Lake has no CPUID leaf 07H, subleaf 1 (its leaf 07H, subleaf 0 reports
 0 in EAX, the highest valid subleaf), so KVM lists none; Raptor Lake has it.
+
+## `cpuinfo-raptor-lake.txt`
+
+The first processor's block of `/proc/cpuinfo` on a Linux KVM host with an
+Intel Core i5-13600KF (Raptor Lake, family 6, model 183), Debian 13, kernel
+7.1, captured on 2026-11-10 with
+`awk 'BEGIN{RS=""} NR==1{print; exit}' /proc/cpuinfo`. Nothing was removed or
+changed; the other 19 processors' blocks were left out.
+
+- Source: the line format is Linux's `show_cpuinfo`,
+  <https://github.com/torvalds/linux/blob/v6.18/arch/x86/kernel/cpu/proc.c#L70-L130>.
+- Reference: <https://man7.org/linux/man-pages/man5/proc_cpuinfo.5.html>.
+
+SSE3 shows as `pni`.

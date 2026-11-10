@@ -46,11 +46,10 @@ pub(super) fn encode_signature(sig: &Signature) -> u32 {
 // kernel can clear `hle` and `rtm` at boot (`tsx=off`,
 // https://github.com/torvalds/linux/blob/v6.18/arch/x86/kernel/cpu/tsx.c#L171-L175).
 const FEATURES: &[(&str, u32, u32, &str, u32)] = &[
-  // REVIEW: Linux names this flag `pni`, not `sse3` (`X86_FEATURE_XMM3 ( 4*32+ 0)
+  // NOTICE: SSE3 shows as `pni` in `/proc/cpuinfo` (`X86_FEATURE_XMM3 ( 4*32+ 0)
   // /* "pni" SSE-3 */`, https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/cpufeatures.h#L106),
-  // so `sse3` never matches a host's `/proc/cpuinfo` and a recipe that hides
-  // `pni` gets "unknown feature".
-  ("sse3", 1, 0, "ecx", 0),
+  // so recipes name it `pni`; `sse3` would never match a host's flags.
+  ("pni", 1, 0, "ecx", 0),
   ("pclmulqdq", 1, 0, "ecx", 1),
   ("ssse3", 1, 0, "ecx", 9),
   ("fma", 1, 0, "ecx", 12),
