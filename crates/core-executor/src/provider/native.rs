@@ -20,7 +20,7 @@ impl Native {
     InstanceHandle {
       runtime: "native",
       id: "local".into(),
-      client: self.client.clone(),
+      executor: std::sync::Arc::new(self.client.clone()),
       sftp: sftp_command(&format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH)),
       workspace: String::new(),
     }

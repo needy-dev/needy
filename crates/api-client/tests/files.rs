@@ -12,6 +12,7 @@ fn target() -> Target {
   Target {
     executor: String::new(),
     run: String::new(),
+    runner: String::new(),
     origin: Origin::Files,
   }
 }

@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 use crate::control::*;
 use crate::protocol::grpc::v1::health::Health;
 use crate::server::{Listen, Server};
+use needy_api_proto::v1;
 
 #[derive(Default)]
 pub struct Fake {
@@ -145,8 +146,12 @@ impl Processes for Fake {
     Ok(stream)
   }
 
-  async fn list(&self, run: &str) -> Result<Vec<ProcessInfo>> {
-    self.call(format!("list {run:?}"));
+  async fn list(&self, run: &str, runner: &str) -> Result<Vec<ProcessInfo>> {
+    if runner.is_empty() {
+      self.call(format!("list {run:?}"));
+    } else {
+      self.call(format!("list {run:?} on runner {runner}"));
+    }
     Ok(vec![ProcessInfo {
       process: "p1".into(),
       argv: vec!["sleep".into()],
@@ -330,6 +335,32 @@ impl Runners for Fake {
       REVOKED_CREDENTIAL => Credential::Refused,
       _ => Credential::Other,
     }
+  }
+
+  /// Announces one list task.
+  async fn control(&self, runner: &str, _results: FromRunner<v1::ControlRequest>) -> Result<ToRunner<v1::ControlResponse>> {
+    self.call(format!("control {runner}"));
+    let task = v1::ControlResponse {
+      payload: Some(v1::control_response::Payload::Task(v1::RunnerTask {
+        id: 1,
+        kind: Some(v1::runner_task::Kind::ListProcesses(v1::ListProcessesRequest::default())),
+      })),
+    };
+    Ok(Box::pin(tokio_stream::iter([task])))
+  }
+
+  /// Sends one line of input for task 7 and refuses every other task.
+  async fn task(&self, runner: &str, task: u64, _responses: FromRunner<v1::TaskRequest>) -> Result<ToRunner<v1::TaskResponse>> {
+    self.call(format!("task {runner} {task}"));
+    if task != 7 {
+      return Err(ControlError::NotFound("no such task".into()));
+    }
+    let request = v1::TaskResponse {
+      exec: Some(v1::ExecRequest {
+        payload: Some(v1::exec_request::Payload::Stdin(b"hi".to_vec())),
+      }),
+    };
+    Ok(Box::pin(tokio_stream::iter([request])))
   }
 }
 

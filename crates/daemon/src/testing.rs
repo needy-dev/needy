@@ -99,6 +99,13 @@ pub struct Served {
   _stop: DropGuard,
 }
 
+impl Served {
+  /// The daemon's temporary directory.
+  pub fn dir(&self) -> &Path {
+    self._started.dir.path()
+  }
+}
+
 pub async fn serve(started: Started, token: Option<&str>) -> Served {
   let socket = started.dir.path().join("api.sock");
   let bound = started.daemon.server(token.map(str::to_string)).bind(&[Listen::Unix(socket.clone())]).await.unwrap();

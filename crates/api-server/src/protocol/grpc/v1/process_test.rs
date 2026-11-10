@@ -122,16 +122,7 @@ async fn an_actor_lists_only_its_own_run() {
   })
   .await;
 
-  let listed = served
-    .client
-    .processes()
-    .list_processes(ListProcessesRequest {
-      run_id: String::new(),
-    })
-    .await
-    .unwrap()
-    .into_inner()
-    .processes;
+  let listed = served.client.processes().list_processes(ListProcessesRequest::default()).await.unwrap().into_inner().processes;
 
   assert_eq!(served.fake.calls(), [r#"list "s-actor""#]);
   assert_eq!(listed[0].run_id, "s-actor");
@@ -156,4 +147,34 @@ async fn killing_a_missing_process_is_not_found() {
 
   assert_eq!(status.code(), Code::NotFound);
   assert_eq!(status.message(), "no such process");
+}
+
+#[tokio::test]
+async fn an_actor_cannot_name_a_runner() {
+  let served = serve(Caller::Actor {
+    run: "s-actor".into(),
+  })
+  .await;
+
+  let request = ListProcessesRequest {
+    runner: "mac".into(),
+    ..Default::default()
+  };
+  let status = served.client.processes().list_processes(request).await.unwrap_err();
+
+  assert_eq!((status.code(), status.message()), (tonic::Code::PermissionDenied, "an actor cannot name a runner"));
+  assert!(served.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn a_client_lists_one_runner_s_processes() {
+  let served = serve(Caller::Cli).await;
+
+  let request = ListProcessesRequest {
+    runner: "mac".into(),
+    ..Default::default()
+  };
+  served.client.processes().list_processes(request).await.unwrap();
+
+  assert_eq!(served.fake.calls(), [r#"list "" on runner mac"#]);
 }

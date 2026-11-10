@@ -17,6 +17,8 @@ pub mod remote;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use needy_api_client::Client;
 use needy_config::profile::{Executor, User};
 
@@ -72,13 +74,14 @@ pub struct InstanceSpec {
 
 /// A created instance: how to reach it and what the daemon needs to know
 /// about it.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InstanceHandle {
-  /// `native`, `remote` or `docker`.
+  /// `native`, `remote`, `docker`, or `runner` for a runner's own machine.
   pub runtime: &'static str,
-  /// The machine (`local`), the remote URL or the container name.
+  /// The machine (`local`), the remote URL, the container name or the
+  /// runner's name.
   pub id: String,
-  pub client: Client,
+  pub executor: Arc<dyn needy_api_client::Executor>,
   /// The SFTP server command a workspace mount runs on the instance.
   pub sftp: Vec<String>,
   /// The working directory of a command that names none; empty for the

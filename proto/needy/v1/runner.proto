@@ -3,12 +3,22 @@ syntax = "proto3";
 
 package needy.v1;
 
+import "needy/v1/process.proto";
+
 // RunnerService is the control plane's runner registry: join tokens, the
-// runners that joined with them, and their heartbeats.
+// runners that joined with them, their heartbeats, and the streams runners
+// open to take tasks.
 //
 // Operators call it with the control daemon's token. `Join` needs no bearer
-// token: the join token in the request authenticates it. `Heartbeat` is the
-// only method a runner's credential reaches.
+// token: the join token in the request authenticates it. `Heartbeat`,
+// `Control` and `Task` are the only methods a runner's credential reaches.
+//
+// Runners dial the control plane and never listen. A runner keeps one
+// control stream (`Control`); the control plane announces each task on it
+// with an ID. A task with one request and one reply (list or kill
+// processes) is answered on the control stream; for an exec the runner
+// opens a `Task` stream that carries the exec's own `ExecRequest` and
+// `ExecResponse` messages.
 service RunnerService {
   // Create a join token. Its secret is in the response only.
   rpc CreateJoinToken(CreateJoinTokenRequest) returns (CreateJoinTokenResponse);
@@ -28,6 +38,16 @@ service RunnerService {
   rpc RotateRunner(RotateRunnerRequest) returns (RotateRunnerResponse);
   // Revoke a runner's credentials. It stays listed as removed.
   rpc RemoveRunner(RemoveRunnerRequest) returns (RemoveRunnerResponse);
+  // A runner's control stream, open while the runner is connected: the
+  // control plane sends tasks, the runner the results of the tasks that
+  // take one reply. A runner that connects again replaces its earlier
+  // stream. Authenticated by the runner's credential.
+  rpc Control(stream ControlRequest) returns (stream ControlResponse);
+  // One exec task's stream, opened by the runner: its first request names
+  // the task, its later requests carry the exec's responses, and the
+  // control plane's responses carry the exec's requests, the first being
+  // the start or the attach. Authenticated by the runner's credential.
+  rpc Task(stream TaskRequest) returns (stream TaskResponse);
 }
 
 // What a runner can host.
@@ -157,3 +177,67 @@ message RemoveRunnerRequest {
 }
 
 message RemoveRunnerResponse {}
+
+// From a runner on its control stream.
+message ControlRequest {
+  oneof payload {
+    TaskResult result = 1;
+  }
+}
+
+// From the control plane on a runner's control stream.
+message ControlResponse {
+  oneof payload {
+    RunnerTask task = 1;
+  }
+}
+
+// A task the control plane needs a runner to carry out.
+message RunnerTask {
+  // Unique among the tasks of one control stream.
+  uint64 id = 1;
+  oneof kind {
+    // Open a `Task` stream for this task.
+    ExecTask exec = 2;
+    // Answered on the control stream.
+    ListProcessesRequest list_processes = 3;
+    // Answered on the control stream.
+    KillProcessRequest kill_process = 4;
+  }
+}
+
+// An exec: its start or attach comes on the task's own stream.
+message ExecTask {}
+
+// The result of a task answered on the control stream.
+message TaskResult {
+  uint64 task_id = 1;
+  oneof result {
+    ListProcessesResponse list_processes = 2;
+    KillProcessResponse kill_process = 3;
+    TaskError error = 4;
+  }
+}
+
+// Why a runner refused or failed a task, as the gRPC status its process
+// service returned.
+message TaskError {
+  // A `google.rpc.Code` value.
+  int32 code = 1;
+  string message = 2;
+}
+
+message TaskRequest {
+  oneof payload {
+    // The first request: the task this stream is for.
+    uint64 task_id = 1;
+    ExecResponse exec = 2;
+    // The exec could not start or attach, or its stream failed; nothing
+    // follows.
+    TaskError error = 3;
+  }
+}
+
+message TaskResponse {
+  ExecRequest exec = 1;
+}

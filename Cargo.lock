@@ -1987,6 +1987,7 @@ dependencies = [
 name = "needy-api-client"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "backon",
  "hyper-util",
  "needy-api-proto",
@@ -2179,6 +2180,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "backon",
+ "futures-util",
  "libc",
  "needy-api-client",
  "needy-api-server",

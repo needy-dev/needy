@@ -29,6 +29,15 @@ impl<P> Adapter<P> {
       Caller::Runner { .. } => Err(ControlError::denied("runners cannot run processes here").into()),
     }
   }
+
+  /// The runner a call names; an actor's commands are placed by its
+  /// run's rules and may not name one.
+  fn runner(&self, named: String) -> Result<String, Status> {
+    match &self.caller {
+      Caller::Actor { .. } if !named.is_empty() => Err(ControlError::denied("an actor cannot name a runner").into()),
+      _ => Ok(named),
+    }
+  }
 }
 
 /// The caller's requests after the first, as input. A client stream that
@@ -57,6 +66,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
       Some(exec_request::Payload::Start(start)) => {
         let mut spec = domain::exec_spec(start).map_err(ControlError::from)?;
         spec.run = self.run(spec.run)?;
+        spec.runner = self.runner(spec.runner)?;
         ExecOpen::Start(spec)
       }
       Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
@@ -75,8 +85,10 @@ impl<P: Processes> ProcessService for Adapter<P> {
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
-    let run = self.run(request.into_inner().run_id)?;
-    let processes = self.processes.list(&run).await?.into_iter().map(domain::proto_process_info).collect();
+    let request = request.into_inner();
+    let run = self.run(request.run_id)?;
+    let runner = self.runner(request.runner)?;
+    let processes = self.processes.list(&run, &runner).await?.into_iter().map(domain::proto_process_info).collect();
     Ok(Response::new(ListProcessesResponse { processes }))
   }
 

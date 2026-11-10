@@ -1,6 +1,6 @@
 //! `needy daemon`: a control daemon, an executor daemon on any machine
-//! that runs commands, or a runner: an executor daemon that joined a
-//! control plane.
+//! that runs commands, or a runner: a machine that joined a control plane
+//! and dials it for the commands to run.
 
 use std::path::PathBuf;
 
@@ -15,8 +15,8 @@ enum Mode {
   Executor,
   /// Manage runs, actors and executors, and the runners that joined.
   Control,
-  /// Join a control plane as a runner, send it heartbeats, and run
-  /// processes on this machine as `executor` does.
+  /// Join a control plane as a runner, keep a connection to it, and run
+  /// the processes it asks for on this machine. Listens nowhere.
   Runner,
 }
 
@@ -25,6 +25,7 @@ pub struct Args {
   #[arg(long, value_enum, default_value = "executor")]
   mode: Mode,
   /// Where to listen: unix:/path or HOST:PORT. Defaults to the endpoint.
+  /// Not in runner mode, which dials the control plane instead.
   #[arg(long)]
   listen: Option<String>,
   /// Executor name reported to clients: `local` by default. A runner's
@@ -73,6 +74,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 }
 
 async fn serve(args: Args, ctx: &Context) -> Result<i32> {
+  if matches!(args.mode, Mode::Runner) && (args.listen.is_some() || args.token_env.is_some()) {
+    bail!("a runner dials the control plane and listens nowhere; --listen and --token-env are for the executor and control modes");
+  }
   let listen = match args.listen {
     Some(listen) => listen,
     None => ctx.endpoint()?,
@@ -100,7 +104,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         roles: args.roles.into_iter().collect(),
         labels: args.labels.into_iter().collect(),
       };
-      needy_daemon::runner::serve(config, &listen, token).await?;
+      needy_daemon::runner::serve(config).await?;
     }
     #[cfg(not(unix))]
     Mode::Control => anyhow::bail!("the control daemon needs a Unix host"),

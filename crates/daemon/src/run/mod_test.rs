@@ -264,6 +264,7 @@ async fn detached_sleep(daemon: &crate::Daemon, run: &str) -> i64 {
     detach: true,
     run: run.into(),
     executor: String::new(),
+    runner: String::new(),
     no_stdin: true,
     origin: needy_core::types::Origin::Cli,
     search_path_if_missing: false,

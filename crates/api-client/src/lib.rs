@@ -5,6 +5,8 @@
 //! `vsock://CID:PORT`. Every call carries the bearer token when the caller
 //! sets one; the library never reads a token from the environment.
 //!
+//! - [`Executor`]: what serves `ProcessService` to a caller: a daemon over
+//!   gRPC ([`Client`]), or a runner over the stream it dialed.
 //! - [`ready`]: connect and wait until the server answers its health check.
 //! - [`exec`]: exec streams: start or attach, input, events, run to
 //!   completion.
@@ -16,11 +18,18 @@ pub mod exec;
 pub mod files;
 pub mod ready;
 
+use std::pin::Pin;
+use std::time::Duration;
+
 use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
 use needy_api_proto::v1::process_service_client::ProcessServiceClient;
 use needy_api_proto::v1::run_service_client::RunServiceClient;
 use needy_api_proto::v1::runner_service_client::RunnerServiceClient;
+use needy_api_proto::v1::{ExecRequest, ExecResponse, KillProcessRequest, ListProcessesRequest, ListProcessesResponse};
+use tokio::sync::mpsc;
+use tokio_stream::Stream;
+use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -51,20 +60,43 @@ pub struct Client {
   auth: BearerAuth,
 }
 
+// NOTICE: HTTP/2 pings every 20 s, answered within 20 s, find a connection
+// that died without a reset (a sleeping laptop, a dropped tunnel) in under a
+// minute; the server pings at the same interval.
+const KEEP_ALIVE: Duration = Duration::from_secs(20);
+
 impl Client {
   /// Connects to a daemon endpoint. HTTPS uses the platform's root
   /// certificates. A malformed endpoint, or one this platform cannot reach
   /// (vsock outside Linux), is [`Error::InvalidEndpoint`].
   pub async fn connect(url: &str) -> Result<Self> {
+    Self::connect_with(url, false).await
+  }
+
+  /// [`Client::connect`] for long-lived streams, such as a runner's control
+  /// stream: the connection is pinged while idle, so one that died silently
+  /// fails its streams instead of leaving them open forever.
+  pub async fn connect_kept_alive(url: &str) -> Result<Self> {
+    Self::connect_with(url, true).await
+  }
+
+  async fn connect_with(url: &str, keep_alive: bool) -> Result<Self> {
+    let configure = move |endpoint: Endpoint| {
+      if keep_alive {
+        endpoint.http2_keep_alive_interval(KEEP_ALIVE).keep_alive_timeout(KEEP_ALIVE).keep_alive_while_idle(true)
+      } else {
+        endpoint
+      }
+    };
     if let Some(path) = url.strip_prefix("unix:") {
-      return Ok(Self::from_channel(connect_unix(path.to_string()).await?));
+      return Ok(Self::from_channel(connect_unix(configure(placeholder()), path.to_string()).await?));
     }
     if let Some(rest) = url.strip_prefix("vsock://") {
       let (cid, port) = rest
         .split_once(':')
         .and_then(|(c, p)| Some((c.parse::<u32>().ok()?, p.parse::<u32>().ok()?)))
         .ok_or_else(|| Error::InvalidEndpoint(url.to_string()))?;
-      return Ok(Self::from_channel(connect_vsock(cid, port).await?));
+      return Ok(Self::from_channel(connect_vsock(configure(placeholder()), cid, port).await?));
     }
     if !(url.starts_with("http://") || url.starts_with("https://")) {
       return Err(Error::InvalidEndpoint(url.to_string()));
@@ -73,7 +105,7 @@ impl Client {
     if url.starts_with("https://") {
       endpoint = endpoint.tls_config(ClientTlsConfig::new().with_native_roots())?;
     }
-    Ok(Self::from_channel(endpoint.connect().await?))
+    Ok(Self::from_channel(configure(endpoint).connect().await?))
   }
 
   /// Wraps an existing channel, for example one with a custom TLS setup.
@@ -115,15 +147,48 @@ impl Client {
   }
 }
 
+/// An exec stream's responses, as the executor sends them.
+pub type Responses = Pin<Box<dyn Stream<Item = Result<ExecResponse, Status>> + Send>>;
+
+/// What serves `ProcessService` to a caller: a daemon reached over gRPC
+/// ([`Client`]), or a runner that dialed the control plane, which reaches it
+/// over the runner's own streams. Calls fail as `ProcessService` would, with
+/// its statuses.
+#[async_trait::async_trait]
+pub trait Executor: Send + Sync {
+  /// Opens an exec stream; the first request starts or attaches. Returns
+  /// once the executor accepted it, or with the status it refused it with.
+  async fn exec(&self, requests: mpsc::Receiver<ExecRequest>) -> Result<Responses, Status>;
+  async fn list_processes(&self, request: ListProcessesRequest) -> Result<ListProcessesResponse, Status>;
+  async fn kill_process(&self, request: KillProcessRequest) -> Result<(), Status>;
+}
+
+#[async_trait::async_trait]
+impl Executor for Client {
+  async fn exec(&self, requests: mpsc::Receiver<ExecRequest>) -> Result<Responses, Status> {
+    let responses = self.processes().exec(ReceiverStream::new(requests)).await?.into_inner();
+    Ok(Box::pin(responses))
+  }
+
+  async fn list_processes(&self, request: ListProcessesRequest) -> Result<ListProcessesResponse, Status> {
+    Ok(self.processes().list_processes(request).await?.into_inner())
+  }
+
+  async fn kill_process(&self, request: KillProcessRequest) -> Result<(), Status> {
+    self.processes().kill_process(request).await?;
+    Ok(())
+  }
+}
+
 fn placeholder() -> Endpoint {
   // The URI is ignored by custom connectors but must parse.
   Endpoint::from_static("http://needy.local")
 }
 
 #[cfg(unix)]
-async fn connect_unix(path: String) -> Result<Channel> {
+async fn connect_unix(endpoint: Endpoint, path: String) -> Result<Channel> {
   Ok(
-    placeholder()
+    endpoint
       .connect_with_connector(tower::service_fn(move |_: Uri| {
         let path = path.clone();
         async move {
@@ -136,14 +201,14 @@ async fn connect_unix(path: String) -> Result<Channel> {
 }
 
 #[cfg(not(unix))]
-async fn connect_unix(path: String) -> Result<Channel> {
+async fn connect_unix(_endpoint: Endpoint, path: String) -> Result<Channel> {
   Err(Error::InvalidEndpoint(format!("unix:{path}")))
 }
 
 #[cfg(target_os = "linux")]
-async fn connect_vsock(cid: u32, port: u32) -> Result<Channel> {
+async fn connect_vsock(endpoint: Endpoint, cid: u32, port: u32) -> Result<Channel> {
   Ok(
-    placeholder()
+    endpoint
       .connect_with_connector(tower::service_fn(move |_: Uri| async move {
         let stream = tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(cid, port)).await?;
         Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
@@ -153,6 +218,6 @@ async fn connect_vsock(cid: u32, port: u32) -> Result<Channel> {
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn connect_vsock(cid: u32, port: u32) -> Result<Channel> {
+async fn connect_vsock(_endpoint: Endpoint, cid: u32, port: u32) -> Result<Channel> {
   Err(Error::InvalidEndpoint(format!("vsock://{cid}:{port} needs Linux")))
 }

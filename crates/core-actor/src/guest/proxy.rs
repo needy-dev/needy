@@ -104,6 +104,7 @@ async fn proxy() -> Result<i32> {
     detach: false,
     run_id: String::new(),
     executor: decision.target,
+    runner: String::new(),
     no_stdin: false,
     origin: Origin::ActorProxy.into(),
     search_path_if_missing: decision.search_path_if_missing,

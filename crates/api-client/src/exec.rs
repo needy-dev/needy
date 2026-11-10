@@ -2,14 +2,14 @@
 //! events, or run it to completion.
 
 use needy_api_proto::v1::{
-  ExecAttach, ExecEvent, ExecExited, ExecRefusal, ExecRequest, ExecResponse, ExecStart, ExecStarted, WindowSize, exec_request, exec_response,
+  ExecAttach, ExecEvent, ExecExited, ExecRefusal, ExecRequest, ExecStart, ExecStarted, WindowSize, exec_request, exec_response,
 };
 use needy_common::process::Exit;
 use prost::Message as _;
 use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt as _;
 
-use crate::{Client, Error, Result};
+use crate::{Error, Executor, Responses, Result};
 
 // NOTICE: 64 requests in flight keep a fast writer ahead of the network
 // without buffering much; input chunks are at most 1 MiB.
@@ -20,7 +20,7 @@ const CHUNK: usize = 1 << 20;
 /// the input; a process that was not detached then ends.
 pub struct ExecStream {
   input: Input,
-  responses: tonic::Streaming<ExecResponse>,
+  responses: Responses,
 }
 
 /// Sends a process input, signals and window changes. Clones share the
@@ -53,28 +53,28 @@ impl ExecStream {
   /// [`Kind::Denied`](crate::Kind::Denied) when a rule or a fault refused it
   /// (see [`Error::refusal`]), [`Kind::Failed`](crate::Kind::Failed) when the
   /// command cannot start.
-  pub async fn start(client: &Client, start: ExecStart) -> Result<Self> {
-    Self::open(client, exec_request::Payload::Start(start)).await
+  pub async fn start(executor: &dyn Executor, start: ExecStart) -> Result<Self> {
+    Self::open(executor, exec_request::Payload::Start(start)).await
   }
 
   /// Attaches to a running or finished process; with `replay`, its buffered
   /// output comes first. With `window`, a process on a terminal is resized
   /// to the attaching client's.
-  pub async fn attach(client: &Client, process_id: &str, replay: bool, window: Option<WindowSize>) -> Result<Self> {
+  pub async fn attach(executor: &dyn Executor, process_id: &str, replay: bool, window: Option<WindowSize>) -> Result<Self> {
     let attach = ExecAttach {
       process_id: process_id.to_string(),
       replay,
       window,
     };
-    Self::open(client, exec_request::Payload::Attach(attach)).await
+    Self::open(executor, exec_request::Payload::Attach(attach)).await
   }
 
-  async fn open(client: &Client, first: exec_request::Payload) -> Result<Self> {
+  async fn open(executor: &dyn Executor, first: exec_request::Payload) -> Result<Self> {
     let (tx, rx) = mpsc::channel::<ExecRequest>(QUEUE);
     let input = Input(tx);
     // The receiver is alive and the channel empty, so this cannot fail.
     input.send(first).await?;
-    let responses = client.processes().exec(ReceiverStream::new(rx)).await?.into_inner();
+    let responses = executor.exec(rx).await?;
     Ok(Self { input, responses })
   }
 
@@ -87,7 +87,7 @@ impl ExecStream {
   /// ends before the process exited is [`Error::Ended`] with its reason.
   pub async fn next(&mut self) -> Result<Option<Event>> {
     loop {
-      let Some(message) = self.responses.message().await? else {
+      let Some(message) = self.responses.next().await.transpose()? else {
         return Ok(None);
       };
       let event = match message.payload {

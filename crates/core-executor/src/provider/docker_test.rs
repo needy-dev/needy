@@ -279,9 +279,9 @@ async fn create_and_destroy_an_executor_container() {
   })
   .await
   .unwrap();
-  let mut responses = handle.client.processes().exec(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+  let mut responses = handle.executor.exec(rx).await.unwrap();
   let mut stdout = Vec::new();
-  while let Some(message) = responses.message().await.unwrap() {
+  while let Some(message) = tokio_stream::StreamExt::next(&mut responses).await.transpose().unwrap() {
     match message.payload {
       Some(exec_response::Payload::Stdout(bytes)) => stdout.extend(bytes),
       Some(exec_response::Payload::Exited(_)) => break,

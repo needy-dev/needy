@@ -1,25 +1,36 @@
 //! The runner role: a machine that joined a control plane. On its first
 //! start it joins with a join token and keeps the credential it gets in
 //! `runner.json` in its state directory (mode 0600); later starts reuse
-//! that credential. It sends heartbeats while it runs, and serves the
-//! executor role on its own listener as `needy daemon --mode executor` does.
-//
-// TODO(runner-dial-out): the control plane still dials this runner's
-// executor listener through a profile's `remote` executor; slice 4 of the
-// runners-and-runs design replaces that with a control stream the runner
-// opens, and the listener goes away.
+//! that credential. It sends heartbeats while it runs, and dials the
+//! control plane for work: it keeps one control stream open, connecting
+//! again with backoff when it drops, and opens a task stream for each exec
+//! the control plane announces (see the daemon's `link` module for the
+//! control plane's side). It never listens.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::sync::{Arc, Mutex};
+
 use anyhow::{Context as _, Result, bail};
-use needy_api_client::proto::v1::{HeartbeatRequest, JoinRequest};
+use backon::BackoffBuilder as _;
+use futures_util::StreamExt as _;
+use needy_api_client::proto::v1::process_service_server::ProcessService as _;
+use needy_api_client::proto::v1::{
+  ControlRequest, HeartbeatRequest, JoinRequest, KillProcessResponse, TaskError, TaskRequest, TaskResult, control_request, control_response,
+  runner_task, task_request, task_result,
+};
 use needy_api_client::{Client, Kind};
 use needy_api_server::protocol::domain::proto_runner_role;
 use needy_core::types::RunnerRole;
+use needy_core_executor::process::Host;
+use needy_core_executor::service::ExecutorService;
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// Where a runner keeps its credential, in its state directory.
 const ENROLLMENT: &str = "runner.json";
@@ -30,6 +41,18 @@ const ENROLLMENT: &str = "runner.json";
 // tunnel comes back; one small call every 5 s per waiting runner costs
 // nothing.
 const RETRY: Duration = Duration::from_secs(5);
+
+// NOTICE: how a runner whose control stream dropped connects again: soon
+// after a restart of the control plane or a tunnel (0.5 s, doubling, with
+// jitter), and at most every 15 s while it stays away, the heartbeat
+// interval's default, so a runner is back within one interval of the
+// control plane.
+const RECONNECT_MIN: Duration = Duration::from_millis(500);
+const RECONNECT_MAX: Duration = Duration::from_secs(15);
+
+// NOTICE: results of list and kill tasks queued for the control stream; they
+// are small and answered as they come.
+const RESULTS: usize = 64;
 
 /// How a runner starts.
 #[derive(Debug, Clone)]
@@ -66,6 +89,9 @@ pub struct Runner {
   /// Connected on the first heartbeat, so a control plane that is not up
   /// yet only delays heartbeats.
   client: Option<Client>,
+  /// The current credential, shared with the dialer, which presents it on
+  /// every stream it opens.
+  credential: Arc<Mutex<String>>,
   /// As the control plane last said; `None` until it said.
   interval: Option<Duration>,
 }
@@ -102,6 +128,7 @@ impl Runner {
     Ok(Self {
       path,
       control,
+      credential: Arc::new(Mutex::new(enrollment.credential.clone())),
       enrollment,
       roles: config.roles,
       labels: config.labels,
@@ -137,6 +164,7 @@ impl Runner {
       self.enrollment.credential = beat.credential;
       store(&self.path, &self.enrollment)?;
       self.client = Some(client.with_token(&self.enrollment.credential)?);
+      *self.credential.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.enrollment.credential.clone();
       tracing::info!("runner {}: stored a rotated credential", self.enrollment.name);
     }
     Ok(())
@@ -153,13 +181,7 @@ impl Runner {
         // instead of leaving both valid for an interval.
         Ok(()) if self.enrollment.credential != before => Duration::ZERO,
         Ok(()) => self.interval.unwrap_or(RETRY),
-        Err(e) if refused(&e) => {
-          bail!(
-            "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
-             delete {} and join again with a new join token",
-            self.path.display()
-          )
-        }
+        Err(e) if refused(&e) => return Err(refusal(&self.path)),
         Err(e) => {
           tracing::warn!("runner {}: heartbeat: {e:#}", self.enrollment.name);
           // The connection is made again for the next heartbeat.
@@ -173,6 +195,16 @@ impl Runner {
       }
     }
   }
+}
+
+/// The error a runner ends with once the control plane refuses its
+/// credential.
+fn refusal(path: &Path) -> anyhow::Error {
+  anyhow::anyhow!(
+    "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
+     delete {} and join again with a new join token",
+    path.display()
+  )
 }
 
 /// Whether the control plane refused the runner's credential, rather than
@@ -246,34 +278,273 @@ fn store(path: &Path, enrollment: &Enrollment) -> Result<()> {
   write().with_context(|| format!("cannot write {}", path.display()))
 }
 
-/// Joins or loads the credential, then serves the executor role on `listen`
-/// (`executor_token` for its clients) and sends heartbeats, until a
-/// termination signal. Ends with an error when the control plane refuses
-/// the runner's credential; the executor's processes are stopped first.
-pub async fn serve(config: Config, listen: &str, executor_token: Option<String>) -> Result<()> {
-  let runner = Runner::start(config).await?;
-  let name = runner.name().to_string();
-  // The first heartbeat goes out at once, so a refused credential stops
-  // the executor role right after it started.
-  let refusal = CancellationToken::new();
-  let stop_beats = CancellationToken::new();
-  let beats = {
-    let refusal = refusal.clone();
-    let stop = stop_beats.clone();
-    tokio::spawn(async move {
-      let ended = runner.run(stop).await;
-      if ended.is_err() {
-        refusal.cancel();
+impl Runner {
+  /// Sends heartbeats and takes tasks from the control plane until `stop`,
+  /// then kills the processes it started. Ends with an error when the
+  /// control plane refuses the runner's credential.
+  pub async fn serve(self, stop: CancellationToken) -> Result<()> {
+    let ending = stop.child_token();
+    let service = ExecutorService {
+      host: Host::default(),
+      name: self.name().to_string(),
+    };
+    let host = service.host.clone();
+    let dialer = Dialer {
+      control: self.control.clone(),
+      name: self.name().to_string(),
+      path: self.path.clone(),
+      credential: self.credential.clone(),
+      service,
+      tasks: TaskTracker::new(),
+    };
+    let tasks = dialer.tasks.clone();
+    let dialing = {
+      let ending = ending.clone();
+      tokio::spawn(async move {
+        let dialed = dialer.run(ending.clone()).await;
+        ending.cancel();
+        dialed
+      })
+    };
+    let beaten = self.run(ending.clone()).await;
+    ending.cancel();
+    let dialed = dialing.await.context("the dialer failed")?;
+    host.shutdown().await;
+    tasks.close();
+    tasks.wait().await;
+    beaten.and(dialed)
+  }
+}
+
+/// The runner's side of its control stream and task streams.
+struct Dialer {
+  control: String,
+  name: String,
+  /// `runner.json`, named when the credential is refused.
+  path: PathBuf,
+  credential: Arc<Mutex<String>>,
+  service: ExecutorService,
+  /// The tasks the control plane asked for; they end with `stop`.
+  tasks: TaskTracker,
+}
+
+impl Dialer {
+  /// Keeps the control stream open until `stop`, connecting again with
+  /// backoff whenever it ends. Fails when the control plane refuses the
+  /// credential.
+  async fn run(&self, stop: CancellationToken) -> Result<()> {
+    let backoff = || {
+      backon::ExponentialBuilder::default()
+        .with_min_delay(RECONNECT_MIN)
+        .with_max_delay(RECONNECT_MAX)
+        .with_jitter()
+        .without_max_times()
+        .build()
+    };
+    let mut delays = backoff();
+    loop {
+      let mut connected = false;
+      let ended = tokio::select! {
+        ended = self.session(&stop, &mut connected) => ended,
+        () = stop.cancelled() => return Ok(()),
+      };
+      match ended {
+        Err(e) if refused(&e) => return Err(refusal(&self.path)),
+        Err(e) => tracing::warn!("runner {}: control stream: {e:#}", self.name),
+        Ok(()) => tracing::info!("runner {}: the control plane ended the control stream", self.name),
       }
-      ended
-    })
+      // A stream that was open starts the backoff over.
+      if connected {
+        delays = backoff();
+      }
+      let delay = delays.next().unwrap_or(RECONNECT_MAX);
+      tokio::select! {
+        () = tokio::time::sleep(delay) => {}
+        () = stop.cancelled() => return Ok(()),
+      }
+    }
+  }
+
+  /// A client presenting the current credential.
+  fn authenticated(&self, client: &Client) -> Result<Client> {
+    let credential = self.credential.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    Ok(client.clone().with_token(&credential)?)
+  }
+
+  /// One control stream, from connecting until it ends.
+  async fn session(&self, stop: &CancellationToken, connected: &mut bool) -> Result<()> {
+    let client =
+      Client::connect_kept_alive(&self.control).await.with_context(|| format!("cannot reach the control plane at {}", self.control))?;
+    let (results, rx) = mpsc::channel(RESULTS);
+    let mut tasks =
+      self.authenticated(&client)?.runners().control(ReceiverStream::new(rx)).await.map_err(needy_api_client::Error::from)?.into_inner();
+    *connected = true;
+    tracing::info!("runner {}: connected to the control plane at {}", self.name, self.control);
+    while let Some(message) = tasks.message().await.map_err(needy_api_client::Error::from)? {
+      let Some(control_response::Payload::Task(task)) = message.payload else {
+        continue;
+      };
+      let Some(kind) = task.kind else {
+        continue;
+      };
+      let id = task.id;
+      let service = self.service.clone();
+      let stop = stop.clone();
+      match kind {
+        runner_task::Kind::Exec(_) => {
+          // A task stream presents the credential current when it opens.
+          let client = self.authenticated(&client)?;
+          let name = self.name.clone();
+          self.tasks.spawn(async move {
+            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id)).await {
+              tracing::warn!("runner {name}: exec task {id}: {e:#}");
+            }
+          });
+        }
+        kind => {
+          let results = results.clone();
+          self.tasks.spawn(async move {
+            let Some(result) = stop.run_until_cancelled(answer(&service, kind)).await else {
+              return;
+            };
+            let message = ControlRequest {
+              payload: Some(control_request::Payload::Result(TaskResult {
+                task_id: id,
+                result: Some(result),
+              })),
+            };
+            // The stream ended; the control plane gave up on the task.
+            if results.send(message).await.is_err() {
+              tracing::debug!("task {id}: the control stream ended before its result");
+            }
+          });
+        }
+      }
+    }
+    Ok(())
+  }
+}
+
+/// Carries out a task answered on the control stream.
+async fn answer(service: &ExecutorService, kind: runner_task::Kind) -> task_result::Result {
+  let answered = match kind {
+    runner_task::Kind::ListProcesses(request) => {
+      service.list_processes(tonic::Request::new(request)).await.map(|list| task_result::Result::ListProcesses(list.into_inner()))
+    }
+    runner_task::Kind::KillProcess(request) => {
+      service.kill_process(tonic::Request::new(request)).await.map(|_| task_result::Result::KillProcess(KillProcessResponse {}))
+    }
+    runner_task::Kind::Exec(_) => Err(tonic::Status::invalid_argument("an exec task has its own stream")),
   };
-  tracing::info!("runner {name} serving the executor role");
-  let served = crate::executor::serve_until(listen, name, executor_token, refusal).await;
-  stop_beats.cancel();
-  let beaten = beats.await.context("the heartbeat task failed")?;
-  served?;
-  beaten
+  answered.unwrap_or_else(|status| task_result::Result::Error(task_error(&status)))
+}
+
+fn task_error(status: &tonic::Status) -> TaskError {
+  TaskError {
+    code: status.code() as i32,
+    message: status.message().to_string(),
+  }
+}
+
+/// Opens the task stream of exec task `id` and runs the exec on it: the
+/// control plane's requests go to this machine's process service, its
+/// responses back up. When the control plane leaves the stream, or the
+/// connection ends, the exec's client is gone: a process it did not detach
+/// ends as with any client that leaves.
+async fn exec(client: Client, service: ExecutorService, id: u64) -> Result<()> {
+  let (up, rx) = mpsc::channel::<TaskRequest>(RESULTS);
+  let named = TaskRequest {
+    payload: Some(task_request::Payload::TaskId(id)),
+  };
+  up.send(named).await.context("the task stream closed")?;
+  let mut down = client.runners().task(ReceiverStream::new(rx)).await.map_err(needy_api_client::Error::from)?.into_inner();
+  // Set once the control plane's side ends or fails, so the output below
+  // stops with it.
+  let left = CancellationToken::new();
+  let (requests, inbound) = mpsc::channel(RESULTS);
+  // NOTICE: the control plane's side is read until it ends, even after the
+  // exec ended or was refused: dropping it would reset the stream, and the
+  // reset can overtake the last responses (the refusal, the exit) still on
+  // their way up.
+  let pump = {
+    let left = left.clone();
+    async move {
+      loop {
+        match down.message().await {
+          Ok(Some(message)) => {
+            if let Some(request) = message.exec
+              && requests.send(Ok(request)).await.is_err()
+            {
+              tracing::debug!("exec task {id}: a request after the exec ended");
+            }
+          }
+          Ok(None) => break,
+          Err(status) => {
+            tracing::debug!("exec task {id}: task stream: {}", status.message());
+            break;
+          }
+        }
+      }
+      left.cancel();
+    }
+  };
+  let relay = async move {
+    let error = |status: &tonic::Status| TaskRequest {
+      payload: Some(task_request::Payload::Error(task_error(status))),
+    };
+    let mut responses = match service.open(Box::pin(ReceiverStream::new(inbound))).await {
+      Ok(responses) => responses,
+      Err(status) => {
+        // The control plane gave up waiting; nothing to tell it.
+        if up.send(error(&status)).await.is_err() {
+          tracing::debug!("exec task {id}: the control plane left before the refusal");
+        }
+        return;
+      }
+    };
+    loop {
+      let response = tokio::select! {
+        response = responses.next() => response,
+        () = left.cancelled() => break,
+      };
+      let Some(response) = response else {
+        break;
+      };
+      let (message, last) = match response {
+        Ok(response) => (
+          TaskRequest {
+            payload: Some(task_request::Payload::Exec(response)),
+          },
+          false,
+        ),
+        Err(status) => (error(&status), true),
+      };
+      if up.send(message).await.is_err() || last {
+        break;
+      }
+    }
+  };
+  tokio::join!(pump, relay);
+  Ok(())
+}
+
+/// Joins or loads the credential, then sends heartbeats and takes tasks
+/// from the control plane until a termination signal; the processes it
+/// started are killed then. A second termination signal ends that where it
+/// is and fails, naming the processes still running. Ends with an error when
+/// the control plane refuses the runner's credential.
+pub async fn serve(config: Config) -> Result<()> {
+  let runner = Runner::start(config).await?;
+  let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
+  tracing::info!("runner {} dialing the control plane at {}", runner.name(), runner.control);
+  match termination.unless_forced(runner.serve(termination.stop())).await {
+    Some(served) => served,
+    None => {
+      let message = "exited at a second termination signal before the runner's processes were killed";
+      tracing::error!("{message}");
+      bail!(message)
+    }
+  }
 }
 
 #[cfg(all(test, unix))]

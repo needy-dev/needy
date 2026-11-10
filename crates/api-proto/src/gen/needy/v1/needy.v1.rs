@@ -199,6 +199,11 @@ pub struct ExecStart {
     /// names a path itself leaves it unset and fails when the path is missing.
     #[prost(bool, tag="12")]
     pub search_path_if_missing: bool,
+    /// Runner name: run on that runner's own machine, outside any run. Empty
+    /// for a run's or this daemon's executors. Set at most one of `run_id`,
+    /// `executor` and `runner`.
+    #[prost(string, tag="13")]
+    pub runner: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecAttach {
@@ -332,6 +337,9 @@ pub mod exec_response {
 pub struct ListProcessesRequest {
     #[prost(string, tag="1")]
     pub run_id: ::prost::alloc::string::String,
+    /// Only this runner's processes. Not with `run_id`.
+    #[prost(string, tag="2")]
+    pub runner: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ProcessInfo {
@@ -759,6 +767,117 @@ pub struct RemoveRunnerRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RemoveRunnerResponse {
+}
+/// From a runner on its control stream.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ControlRequest {
+    #[prost(oneof="control_request::Payload", tags="1")]
+    pub payload: ::core::option::Option<control_request::Payload>,
+}
+/// Nested message and enum types in `ControlRequest`.
+pub mod control_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        Result(super::TaskResult),
+    }
+}
+/// From the control plane on a runner's control stream.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlResponse {
+    #[prost(oneof="control_response::Payload", tags="1")]
+    pub payload: ::core::option::Option<control_response::Payload>,
+}
+/// Nested message and enum types in `ControlResponse`.
+pub mod control_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        Task(super::RunnerTask),
+    }
+}
+/// A task the control plane needs a runner to carry out.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunnerTask {
+    /// Unique among the tasks of one control stream.
+    #[prost(uint64, tag="1")]
+    pub id: u64,
+    #[prost(oneof="runner_task::Kind", tags="2, 3, 4")]
+    pub kind: ::core::option::Option<runner_task::Kind>,
+}
+/// Nested message and enum types in `RunnerTask`.
+pub mod runner_task {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Kind {
+        /// Open a `Task` stream for this task.
+        #[prost(message, tag="2")]
+        Exec(super::ExecTask),
+        /// Answered on the control stream.
+        #[prost(message, tag="3")]
+        ListProcesses(super::ListProcessesRequest),
+        /// Answered on the control stream.
+        #[prost(message, tag="4")]
+        KillProcess(super::KillProcessRequest),
+    }
+}
+/// An exec: its start or attach comes on the task's own stream.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecTask {
+}
+/// The result of a task answered on the control stream.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskResult {
+    #[prost(uint64, tag="1")]
+    pub task_id: u64,
+    #[prost(oneof="task_result::Result", tags="2, 3, 4")]
+    pub result: ::core::option::Option<task_result::Result>,
+}
+/// Nested message and enum types in `TaskResult`.
+pub mod task_result {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Result {
+        #[prost(message, tag="2")]
+        ListProcesses(super::ListProcessesResponse),
+        #[prost(message, tag="3")]
+        KillProcess(super::KillProcessResponse),
+        #[prost(message, tag="4")]
+        Error(super::TaskError),
+    }
+}
+/// Why a runner refused or failed a task, as the gRPC status its process
+/// service returned.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskError {
+    /// A `google.rpc.Code` value.
+    #[prost(int32, tag="1")]
+    pub code: i32,
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TaskRequest {
+    #[prost(oneof="task_request::Payload", tags="1, 2, 3")]
+    pub payload: ::core::option::Option<task_request::Payload>,
+}
+/// Nested message and enum types in `TaskRequest`.
+pub mod task_request {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        /// The first request: the task this stream is for.
+        #[prost(uint64, tag="1")]
+        TaskId(u64),
+        #[prost(message, tag="2")]
+        Exec(super::ExecResponse),
+        /// The exec could not start or attach, or its stream failed; nothing
+        /// follows.
+        #[prost(message, tag="3")]
+        Error(super::TaskError),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskResponse {
+    #[prost(message, optional, tag="1")]
+    pub exec: ::core::option::Option<ExecRequest>,
 }
 /// What a runner can host.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]

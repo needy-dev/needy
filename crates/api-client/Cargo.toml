@@ -8,6 +8,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+async-trait.workspace = true
 backon.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
 needy-api-proto.workspace = true

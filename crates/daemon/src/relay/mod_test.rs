@@ -26,6 +26,7 @@ fn spec(argv: &[&str], run: &str, executor: &str) -> ExecSpec {
     detach: false,
     run: run.into(),
     executor: executor.into(),
+    runner: String::new(),
     no_stdin: true,
     origin: Origin::Cli,
     search_path_if_missing: false,
@@ -159,7 +160,7 @@ async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
   let daemon = &started.daemon;
   let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let outputs = daemon.exec(ExecOpen::Start(spec(&["sh", "-c", "echo done; exit 4"], &created.id, "here")), attached()).await.unwrap();
-  let process = Processes::list(daemon, &created.id).await.unwrap()[0].process.clone();
+  let process = Processes::list(daemon, &created.id, "").await.unwrap()[0].process.clone();
   finish(outputs).await;
 
   let attached = daemon
@@ -211,7 +212,7 @@ async fn processes_on_an_executor_two_instances_share_are_listed_once() {
   let in_run = start_detached(daemon, &["sleep", "30"], &created.id, "").await;
   let outside = start_detached(daemon, &["sleep", "30"], "", "").await;
 
-  let listed: Vec<(String, String)> = Processes::list(daemon, "").await.unwrap().into_iter().map(|p| (p.process, p.executor)).collect();
+  let listed: Vec<(String, String)> = Processes::list(daemon, "", "").await.unwrap().into_iter().map(|p| (p.process, p.executor)).collect();
 
   assert_eq!(listed, [(in_run, "here".to_string()), (outside, "local".to_string())]);
   Runs::stop(daemon, &created.id).await.unwrap();

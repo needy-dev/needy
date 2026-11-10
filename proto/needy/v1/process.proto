@@ -43,6 +43,10 @@ message ExecStart {
   // sets it for a command the actor resolved on its own path; a start that
   // names a path itself leaves it unset and fails when the path is missing.
   bool search_path_if_missing = 12;
+  // Runner name: run on that runner's own machine, outside any run. Empty
+  // for a run's or this daemon's executors. Set at most one of `run_id`,
+  // `executor` and `runner`.
+  string runner = 13;
 
   reserved 10;
 }
@@ -152,6 +156,8 @@ message ExecResponse {
 
 message ListProcessesRequest {
   string run_id = 1;
+  // Only this runner's processes. Not with `run_id`.
+  string runner = 2;
 }
 
 message ProcessInfo {

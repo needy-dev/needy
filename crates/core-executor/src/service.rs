@@ -3,7 +3,7 @@
 
 use std::pin::Pin;
 
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt as _};
 use needy_api_proto::v1::process_service_server::ProcessService;
 use needy_api_proto::v1::{
   ExecExited, ExecRequest, ExecResponse, ExecStarted, KillProcessRequest, KillProcessResponse, ListProcessesRequest, ListProcessesResponse,
@@ -16,6 +16,10 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::process::{Error, Exit, Host, Input, Output, Proc, Spec, Subscriber, Subscription};
 
 pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecResponse, Status>> + Send>>;
+
+/// A client's exec requests after the first: from a gRPC stream, or from a
+/// runner's task stream.
+pub type Inbound = Pin<Box<dyn Stream<Item = Result<ExecRequest, Status>> + Send>>;
 
 #[derive(Clone)]
 pub struct ExecutorService {
@@ -38,7 +42,7 @@ fn exited(exit: &Exit) -> ExecResponse {
 fn stream_process(
   host: &Host,
   proc: std::sync::Arc<Proc>,
-  mut inbound: Streaming<ExecRequest>,
+  mut inbound: Inbound,
   started: ExecStarted,
   subscription: Subscription,
   detach: bool,
@@ -50,13 +54,13 @@ fn stream_process(
   tasks.spawn(async move {
     loop {
       let message = tokio::select! {
-        message = inbound.message() => message,
+        message = inbound.next() => message,
         () = input_cancel.cancelled() => break,
       };
       let payload = match message {
-        Ok(Some(message)) => message.payload,
-        Ok(None) => break,
-        Err(status) => {
+        Some(Ok(message)) => message.payload,
+        None => break,
+        Some(Err(status)) => {
           tracing::debug!("process {}: client stream: {status}", input_proc.id);
           break;
         }
@@ -175,13 +179,13 @@ fn info(proc: &Proc, executor: &str) -> ProcessInfo {
   }
 }
 
-#[tonic::async_trait]
-impl ProcessService for ExecutorService {
-  type ExecStream = ExecStream;
-
-  async fn exec(&self, request: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
-    let mut inbound = request.into_inner();
-    let first = inbound.message().await?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
+impl ExecutorService {
+  /// Starts or attaches to a process for the client whose requests are
+  /// `inbound`, the first of which starts or attaches, and returns the
+  /// process's stream to that client. `exec` serves this over gRPC; a
+  /// runner serves it over the task streams it opens to its control plane.
+  pub async fn open(&self, mut inbound: Inbound) -> Result<ExecStream, Status> {
+    let first = inbound.next().await.transpose()?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
     match first.payload {
       Some(exec_request::Payload::Start(start)) => {
         let tty = start.tty.map(|t| (t.rows.max(1) as u16, t.cols.max(1) as u16));
@@ -214,7 +218,7 @@ impl ProcessService for ExecutorService {
             used: f.used.clone(),
           }),
         };
-        Ok(Response::new(stream_process(&self.host, proc, inbound, started, subscription, start.detach)))
+        Ok(stream_process(&self.host, proc, inbound, started, subscription, start.detach))
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let proc = self.host.get(&attach.process_id).ok_or_else(|| Status::not_found("no such process"))?;
@@ -238,10 +242,19 @@ impl ProcessService for ExecutorService {
           proc.send(Input::Resize(window.rows.max(1) as u16, window.cols.max(1) as u16));
         }
         // An attached client never owns the process.
-        Ok(Response::new(stream_process(&self.host, proc, inbound, started, subscription, true)))
+        Ok(stream_process(&self.host, proc, inbound, started, subscription, true))
       }
       _ => Err(Status::invalid_argument("the first request must start or attach")),
     }
+  }
+}
+
+#[tonic::async_trait]
+impl ProcessService for ExecutorService {
+  type ExecStream = ExecStream;
+
+  async fn exec(&self, request: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
+    Ok(Response::new(self.open(Box::pin(request.into_inner())).await?))
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {

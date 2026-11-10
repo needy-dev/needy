@@ -2,8 +2,10 @@
 //! who is calling ([`Caller`]), and the errors ([`ControlError`]) that
 //! `protocol::status` maps to gRPC statuses in one table.
 //!
-//! Nothing here is generated code. The adapters in `protocol::grpc` convert
-//! requests into these types, call the traits, and convert the results back.
+//! Nothing here is generated code, except the messages of a runner's own
+//! streams (see [`Runners::control`]). The adapters in `protocol::grpc`
+//! convert requests into these types, call the traits, and convert the
+//! results back.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::pin::Pin;
@@ -24,10 +26,7 @@ pub enum Caller {
   /// run; it may not create, stop or read the logs of runs.
   Actor { run: String },
   /// A runner, by the credential it presented on the control listener. It
-  /// reaches `RunnerService.Heartbeat` only.
-  // TODO(runner-dial-out): a runner's control stream and per-task streams
-  // (slice 4 of the runners-and-runs design) are the next methods a runner
-  // reaches.
+  /// reaches `RunnerService.Heartbeat`, `Control` and `Task` only.
   Runner { name: String },
 }
 
@@ -185,6 +184,8 @@ pub struct ExecSpec {
   pub run: String,
   /// Empty to let the run's rules decide.
   pub executor: String,
+  /// A runner's own machine, outside any run; empty otherwise.
+  pub runner: String,
   pub no_stdin: bool,
   pub origin: Origin,
   /// Run the program of the same name on the executor's PATH when `argv[0]`
@@ -252,8 +253,9 @@ pub trait Processes: Send + Sync + 'static {
   /// Starts or attaches to a process; `input` is the rest of the caller's
   /// stream.
   async fn exec(&self, open: ExecOpen, input: Inputs) -> Result<Outputs>;
-  /// The processes of `run`, or of every executor when it is empty.
-  async fn list(&self, run: &str) -> Result<Vec<ProcessInfo>>;
+  /// The processes of `run`, or of the runner `runner`, or of every
+  /// executor and connected runner when both are empty.
+  async fn list(&self, run: &str, runner: &str) -> Result<Vec<ProcessInfo>>;
   async fn kill(&self, process: &str, signal: &str) -> Result<()>;
 }
 
@@ -431,7 +433,13 @@ pub enum Credential {
   Other,
 }
 
-/// The control plane's runner registry.
+/// What a runner sends on one of its streams; an error is the stream
+/// failing, such as the runner's connection ending.
+pub type FromRunner<T> = Pin<Box<dyn Stream<Item = std::result::Result<T, tonic::Status>> + Send>>;
+/// What the control plane sends a runner on one of its streams.
+pub type ToRunner<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
+
+/// The control plane's runner registry, and the streams runners open to it.
 #[async_trait::async_trait]
 pub trait Runners: Send + Sync + 'static {
   async fn create_join_token(&self, request: NewJoinToken) -> Result<CreatedJoinToken>;
@@ -446,4 +454,24 @@ pub trait Runners: Send + Sync + 'static {
   /// Whose credential a bearer token is. The middleware calls it for every
   /// token that is not the control token.
   async fn credential(&self, token: &str) -> Credential;
+  /// The control stream of `runner`: `results` are what it answers, the
+  /// returned stream the tasks it gets. It replaces an earlier control
+  /// stream of the same runner.
+  // NOTICE: a runner's streams carry the exec protocol's own messages
+  // (`ExecRequest`, `ExecResponse`) unchanged, so terminal behavior,
+  // backpressure and refusals work as on any executor; converting them to
+  // domain types here and back in the daemon would only copy them.
+  async fn control(
+    &self,
+    runner: &str,
+    results: FromRunner<needy_api_proto::v1::ControlRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::ControlResponse>>;
+  /// The stream `runner` opened for its exec task `task`: `responses` are
+  /// the exec's responses, the returned stream its requests.
+  async fn task(
+    &self,
+    runner: &str,
+    task: u64,
+    responses: FromRunner<needy_api_proto::v1::TaskRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::TaskResponse>>;
 }

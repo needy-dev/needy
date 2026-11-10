@@ -88,6 +88,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     detach: args.detach,
     run_id: args.run,
     executor: args.executor,
+    runner: String::new(),
     no_stdin: !forward_stdin,
     origin: Origin::Cli.into(),
     // A path named on the command line must exist where it runs.

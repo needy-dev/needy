@@ -21,7 +21,11 @@ pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
 pub const JOIN: &str = "/needy.v1.RunnerService/Join";
 
 /// The methods a runner's credential reaches.
-pub const RUNNER_METHODS: &[&str] = &["/needy.v1.RunnerService/Heartbeat"];
+pub const RUNNER_METHODS: &[&str] = &[
+  "/needy.v1.RunnerService/Heartbeat",
+  "/needy.v1.RunnerService/Control",
+  "/needy.v1.RunnerService/Task",
+];
 
 /// Decides who a request is from.
 #[async_trait::async_trait]

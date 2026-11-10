@@ -6,7 +6,7 @@
 use needy_api_proto::v1::{ExecStart, Origin};
 
 use crate::exec::ExecStream;
-use crate::{Client, Error, Kind, Result};
+use crate::{Error, Executor, Kind, Result};
 
 /// Where the executor's `tar` runs, and who asks.
 pub struct Target {
@@ -14,12 +14,14 @@ pub struct Target {
   pub executor: String,
   /// Empty outside a run.
   pub run: String,
+  /// A runner's own machine instead of an executor; empty otherwise.
+  pub runner: String,
   pub origin: Origin,
 }
 
 /// Unpacks `archive` into the directory `dir` on the executor, creating
 /// `dir` and its missing parents first.
-pub async fn push(client: &Client, target: &Target, archive: Vec<u8>, dir: &str) -> Result<()> {
+pub async fn push(client: &dyn Executor, target: &Target, archive: Vec<u8>, dir: &str) -> Result<()> {
   make_dir(client, target, dir).await?;
   let argv = ["tar", "-x", "-f", "-", "-C", dir];
   run(client, target, &argv, Some(archive)).await?;
@@ -34,7 +36,7 @@ pub async fn push(client: &Client, target: &Target, archive: Vec<u8>, dir: &str)
 /// known here (through a run the client talks to the control daemon), so
 /// `mkdir -p` runs first, and where no `mkdir` program can start, as on
 /// Windows, `cmd`'s built-in `mkdir`, which creates parents too.
-async fn make_dir(client: &Client, target: &Target, dir: &str) -> Result<()> {
+async fn make_dir(client: &dyn Executor, target: &Target, dir: &str) -> Result<()> {
   match run(client, target, &["mkdir", "-p", "--", dir], None).await {
     Err(e @ Error::Status(_)) if e.kind() == Kind::Failed => {
       tracing::debug!("no mkdir program on the executor ({e}); trying cmd");
@@ -49,18 +51,19 @@ async fn make_dir(client: &Client, target: &Target, dir: &str) -> Result<()> {
 
 /// Packs `path`, relative to the directory `dir` on the executor; `.` packs
 /// the directory's contents.
-pub async fn pull(client: &Client, target: &Target, dir: &str, path: &str) -> Result<Vec<u8>> {
+pub async fn pull(client: &dyn Executor, target: &Target, dir: &str, path: &str) -> Result<Vec<u8>> {
   let argv = ["tar", "-c", "-f", "-", "-C", dir, path];
   run(client, target, &argv, None).await
 }
 
 /// Runs `argv` (`tar`, or what prepares for it) on the executor and returns
 /// its standard output.
-async fn run(client: &Client, target: &Target, argv: &[&str], stdin: Option<Vec<u8>>) -> Result<Vec<u8>> {
+async fn run(client: &dyn Executor, target: &Target, argv: &[&str], stdin: Option<Vec<u8>>) -> Result<Vec<u8>> {
   let start = ExecStart {
     argv: argv.iter().map(|a| a.to_string()).collect(),
     executor: target.executor.clone(),
     run_id: target.run.clone(),
+    runner: target.runner.clone(),
     no_stdin: stdin.is_none(),
     origin: target.origin.into(),
     // macOS tar would otherwise add AppleDouble `._` files.

@@ -7,14 +7,16 @@
 use std::sync::Arc;
 
 use needy_api_proto::v1::runner_service_server::RunnerService;
+use needy_api_proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse, task_request};
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, CreateJoinTokenResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest, JoinResponse, ListJoinTokensRequest,
   ListJoinTokensResponse, ListRunnersRequest, ListRunnersResponse, RemoveRunnerRequest, RemoveRunnerResponse, RevokeJoinTokenRequest,
   RevokeJoinTokenResponse, RotateRunnerRequest, RotateRunnerResponse,
 };
-use tonic::{Request, Response, Status};
+use tokio_stream::StreamExt as _;
+use tonic::{Request, Response, Status, Streaming};
 
-use super::caller;
+use super::{Streamed, caller};
 use crate::control::{Caller, ControlError, Runners};
 use crate::protocol::domain;
 
@@ -31,10 +33,40 @@ impl<R> Adapter<R> {
       Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied("only operators manage runners").into()),
     }
   }
+
+  /// The runner making a call only a runner may make.
+  fn runner<T>(&self, request: &Request<T>, what: &str) -> Result<String, Status> {
+    match caller(&self.caller, request) {
+      Caller::Runner { name } => Ok(name),
+      Caller::Cli | Caller::Actor { .. } => Err(ControlError::denied(format!("only runners {what}")).into()),
+    }
+  }
 }
 
 #[tonic::async_trait]
 impl<R: Runners> RunnerService for Adapter<R> {
+  type ControlStream = Streamed<ControlResponse>;
+  type TaskStream = Streamed<TaskResponse>;
+
+  async fn control(&self, request: Request<Streaming<ControlRequest>>) -> Result<Response<Self::ControlStream>, Status> {
+    let runner = self.runner(&request, "open a control stream")?;
+    let tasks = self.runners.control(&runner, Box::pin(request.into_inner())).await?;
+    Ok(Response::new(Box::pin(tasks.map(Ok))))
+  }
+
+  async fn task(&self, request: Request<Streaming<TaskRequest>>) -> Result<Response<Self::TaskStream>, Status> {
+    let runner = self.runner(&request, "open task streams")?;
+    let mut inbound = request.into_inner();
+    let task = match inbound.message().await? {
+      Some(TaskRequest {
+        payload: Some(task_request::Payload::TaskId(task)),
+      }) => task,
+      _ => return Err(ControlError::Invalid("the first request of a task stream must name its task".into()).into()),
+    };
+    let requests = self.runners.task(&runner, task, Box::pin(inbound)).await?;
+    Ok(Response::new(Box::pin(requests.map(Ok))))
+  }
+
   async fn create_join_token(&self, request: Request<CreateJoinTokenRequest>) -> Result<Response<CreateJoinTokenResponse>, Status> {
     self.operator(&request)?;
     let request = domain::new_join_token(request.into_inner()).map_err(ControlError::from)?;

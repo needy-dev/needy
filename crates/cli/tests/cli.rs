@@ -1709,3 +1709,13 @@ fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
   assert_eq!(again.status.code(), Some(1));
   assert!(stderr(&again).contains("has no uses left"), "{}", stderr(&again));
 }
+
+#[test]
+fn a_runner_listens_nowhere() {
+  let home = Home::new();
+
+  let output = home.run(&["daemon", "--mode", "runner", "--listen", "127.0.0.1:0"]);
+
+  assert_eq!(output.status.code(), Some(1));
+  assert!(stderr(&output).contains("a runner dials the control plane and listens nowhere"), "{}", stderr(&output));
+}

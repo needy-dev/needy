@@ -486,7 +486,7 @@ impl Provider for Docker {
     Ok(InstanceHandle {
       runtime: "docker",
       id: container.name,
-      client,
+      executor: std::sync::Arc::new(client),
       sftp: vec!["/usr/lib/openssh/sftp-server".into()],
       workspace: container.workspace,
     })

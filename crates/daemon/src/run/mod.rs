@@ -523,6 +523,7 @@ impl Daemon {
     let instances = run.take_executors();
     let request = ListProcessesRequest {
       run_id: run.id.clone(),
+      ..Default::default()
     };
     // Instances that share an executor list the same processes.
     let mut asked: Vec<(&'static str, &str)> = Vec::new();
@@ -532,8 +533,8 @@ impl Daemon {
         continue;
       }
       asked.push(executor);
-      let processes = match instance.handle.client.processes().list_processes(request.clone()).await {
-        Ok(list) => list.into_inner().processes,
+      let processes = match instance.handle.executor.list_processes(request.clone()).await {
+        Ok(list) => list.processes,
         Err(status) => {
           tracing::warn!("run {}: cannot list its processes on executor {}: {}", run.id, instance.name, status.message());
           continue;
@@ -546,7 +547,7 @@ impl Daemon {
           process_id: process.process_id.clone(),
           signal: "SIGKILL".into(),
         };
-        if let Err(status) = instance.handle.client.processes().kill_process(kill).await {
+        if let Err(status) = instance.handle.executor.kill_process(kill).await {
           tracing::warn!("run {}: cannot end process {} on executor {}: {}", run.id, process.process_id, instance.name, status.message());
         }
       }

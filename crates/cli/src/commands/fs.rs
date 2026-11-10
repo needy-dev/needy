@@ -93,6 +93,7 @@ fn target(run: &str, executor: &str) -> Target {
   Target {
     executor: executor.to_string(),
     run: run.to_string(),
+    runner: String::new(),
     origin: Origin::Fs,
   }
 }

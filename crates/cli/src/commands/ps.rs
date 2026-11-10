@@ -131,7 +131,10 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
   let list = connection
     .processes()
-    .list_processes(ListProcessesRequest { run_id: args.run })
+    .list_processes(ListProcessesRequest {
+      run_id: args.run,
+      ..Default::default()
+    })
     .await
     .map_err(needy_api_client::Error::from)?
     .into_inner();

@@ -1,4 +1,5 @@
 use needy_api_client::Client;
+use needy_api_proto::v1::{ControlRequest, TaskRequest, control_response, exec_request, task_request};
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, HeartbeatRequest, JoinRequest, JoinTokenState, ListRunnersRequest, ListRunsRequest, RotateRunnerRequest,
   RunnerRole, RunnerStatus,
@@ -134,4 +135,53 @@ async fn an_operator_lists_rotates_and_removes_runners() {
   assert_eq!(listed[0].roles().collect::<Vec<_>>(), [RunnerRole::Executor]);
   assert_eq!(listed[0].labels["os"], "darwin");
   assert_eq!(served.fake.calls(), ["list runners", "rotate mac", "remove mac"]);
+}
+
+#[tokio::test]
+async fn a_runner_opens_its_control_stream_and_gets_tasks() {
+  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let (_results, rx) = tokio::sync::mpsc::channel::<ControlRequest>(1);
+
+  let mut tasks =
+    with(&served.client, MAC_CREDENTIAL).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+  let first = tasks.message().await.unwrap().unwrap();
+
+  let Some(control_response::Payload::Task(task)) = first.payload else {
+    panic!("{first:?}")
+  };
+  assert_eq!(task.id, 1);
+  assert_eq!(served.fake.calls(), ["control mac"]);
+}
+
+#[tokio::test]
+async fn a_task_stream_names_its_task_first() {
+  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let runner = with(&served.client, MAC_CREDENTIAL);
+  let named = TaskRequest {
+    payload: Some(task_request::Payload::TaskId(7)),
+  };
+  let unnamed = TaskRequest {
+    payload: Some(task_request::Payload::Exec(Default::default())),
+  };
+
+  let mut requests = runner.runners().task(tokio_stream::iter([named])).await.unwrap().into_inner();
+  let first = requests.message().await.unwrap().unwrap();
+  let status = runner.runners().task(tokio_stream::iter([unnamed])).await.unwrap_err();
+
+  assert_eq!(first.exec.unwrap().payload, Some(exec_request::Payload::Stdin(b"hi".to_vec())));
+  assert_eq!((status.code(), status.message()), (Code::InvalidArgument, "the first request of a task stream must name its task"));
+  assert_eq!(served.fake.calls(), ["task mac 7"]);
+}
+
+#[tokio::test]
+async fn only_runners_open_control_and_task_streams() {
+  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let operator = with(&served.client, CONTROL_TOKEN);
+
+  let control = operator.runners().control(tokio_stream::iter(Vec::<ControlRequest>::new())).await.unwrap_err();
+  let task = operator.runners().task(tokio_stream::iter(Vec::<TaskRequest>::new())).await.unwrap_err();
+
+  assert_eq!((control.code(), control.message()), (Code::PermissionDenied, "only runners open a control stream"));
+  assert_eq!((task.code(), task.message()), (Code::PermissionDenied, "only runners open task streams"));
+  assert!(served.fake.calls().is_empty());
 }

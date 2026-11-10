@@ -5,9 +5,10 @@
 //! join and heartbeat response, so whether a runner is online is decided by
 //! the same clock and interval that the runner follows.
 
+use needy_api_client::proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse};
 use needy_api_server::control::{
-  Beat, ControlError, CreatedJoinToken, Credential, JoinTokenInfo, JoinTokenState, Joined, Joining, NewJoinToken, Result, RunnerInfo,
-  RunnerReport, RunnerStatus, Runners,
+  Beat, ControlError, CreatedJoinToken, Credential, FromRunner, JoinTokenInfo, JoinTokenState, Joined, Joining, NewJoinToken, Result,
+  RunnerInfo, RunnerReport, RunnerStatus, Runners, ToRunner,
 };
 use needy_common::time::now_ms;
 
@@ -158,6 +159,8 @@ impl Runners for Daemon {
 
   async fn remove(&self, runner: &str) -> Result<()> {
     self.state.remove(runner, now_ms()).await.map_err(control_error)?;
+    // Its control stream ends; connecting again, the runner is refused.
+    self.links.close(runner);
     tracing::info!("runner {runner} removed");
     Ok(())
   }
@@ -174,6 +177,14 @@ impl Runners for Daemon {
         Credential::Refused
       }
     }
+  }
+
+  async fn control(&self, runner: &str, results: FromRunner<ControlRequest>) -> Result<ToRunner<ControlResponse>> {
+    Ok(self.links.open(runner, results, &self.tasks, &self.cancel))
+  }
+
+  async fn task(&self, runner: &str, task: u64, responses: FromRunner<TaskRequest>) -> Result<ToRunner<TaskResponse>> {
+    self.links.task(runner, task, responses)
   }
 }
 

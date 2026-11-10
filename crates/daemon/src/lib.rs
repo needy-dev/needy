@@ -13,6 +13,8 @@
 //!   the gateway.
 //! - `guest`: the actor's side of its run (`GuestService`).
 //! - `runners`: the runner registry (`RunnerService`) over `store`.
+//! - `link`: runners' control streams and task streams, and the executor
+//!   that reaches a connected runner's machine through them.
 //! - `store`: `state.db`, the control plane's own state.
 //! - [`executor`]: the executor role.
 //!
@@ -35,6 +37,8 @@ mod actor;
 mod files;
 #[cfg(unix)]
 mod guest;
+#[cfg(unix)]
+mod link;
 #[cfg(unix)]
 mod pool;
 #[cfg(unix)]
@@ -119,6 +123,8 @@ pub struct Daemon {
   pub(crate) state: store::Store,
   pub(crate) runs: Arc<Registry>,
   pub(crate) pool: Arc<Pool>,
+  /// The runners whose control streams are open.
+  pub(crate) links: Arc<link::Links>,
   /// This machine, always available as the `local` executor.
   pub(crate) local: Arc<Instance>,
   /// The local executor's processes.
@@ -195,6 +201,7 @@ impl Daemon {
       runs: Arc::new(Registry::default()),
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, docker)),
+      links: Arc::default(),
       host,
       processes: Arc::default(),
       tasks,
@@ -237,6 +244,15 @@ impl Daemon {
   async fn serve_until(&self, listen: &str, token: Option<String>, stop: CancellationToken) -> Result<()> {
     let server = self.server(token).bind(&[Listen::parse(listen)]).await?;
     tracing::info!("control daemon listening on {listen}");
+    // Runners' control streams never end on their own; they end as the
+    // server stops, so its grace period does not wait for them, and the
+    // runners connect again to whoever serves next.
+    let links = self.links.clone();
+    let stopping = stop.clone();
+    self.tasks.spawn(async move {
+      stopping.cancelled().await;
+      links.close_all();
+    });
     server.serve(stop).await?;
     Ok(())
   }

@@ -84,13 +84,28 @@ struct Relay {
 }
 
 impl Daemon {
-  /// The instance where a command outside any run executes: this machine, or
-  /// the one pooled instance of executor `name`.
-  async fn outside_run(&self, name: &str) -> Result<Arc<Instance>, ControlError> {
+  /// The instance where a command outside any run executes: the runner
+  /// `runner`'s machine, this machine, or the one pooled instance of
+  /// executor `name`.
+  async fn outside_run(&self, name: &str, runner: &str) -> Result<Arc<Instance>, ControlError> {
+    if !runner.is_empty() {
+      if !name.is_empty() {
+        return Err(ControlError::Invalid("name an executor or a runner, not both".into()));
+      }
+      return self.runner_instance(runner);
+    }
     match name {
       "" | "local" => Ok(self.local.clone()),
       name => self.pool.named(name).await,
     }
+  }
+
+  /// A connected runner's machine; one that is not connected fails at once.
+  fn runner_instance(&self, runner: &str) -> Result<Arc<Instance>, ControlError> {
+    if self.links.get(runner).is_none() {
+      return Err(ControlError::Unavailable(crate::link::not_connected(runner)));
+    }
+    Ok(Instance::runner(runner, &self.links))
   }
 
   fn process(&self, process: &str) -> Result<Known, ControlError> {
@@ -141,11 +156,14 @@ impl Processes for Daemon {
         // an empty ID.
         let run: Option<Arc<Run>> = match spec.run.as_str() {
           "" => None,
+          _ if !spec.runner.is_empty() => {
+            return Err(ControlError::Invalid("a command in a run is placed by the run's rules; name a run or a runner, not both".into()));
+          }
           id => Some(self.runs.find_open(id)?),
         };
         let (instance, decided) = match &run {
           Some(run) => routing::place(run, &mut spec).await?,
-          None => (self.outside_run(&spec.executor).await?, Vec::new()),
+          None => (self.outside_run(&spec.executor, &spec.runner).await?, Vec::new()),
         };
         if spec.cwd.is_empty() && !instance.handle.workspace.is_empty() {
           spec.cwd = instance.handle.workspace.clone();
@@ -199,14 +217,14 @@ impl Processes for Daemon {
     for event in decided {
       out_tx.send(Ok(ExecOutput::Trace(event))).await.map_err(|_| ControlError::Internal("exec output channel closed".into()))?;
     }
-    let client = &relay.instance.handle.client;
+    let executor = &*relay.instance.handle.executor;
     let upstream = match upstream {
-      Upstream::Start(spec) => ExecStream::start(client, domain::proto_exec_start(spec)).await,
+      Upstream::Start(spec) => ExecStream::start(executor, domain::proto_exec_start(spec)).await,
       Upstream::Attach {
         process,
         replay,
         window,
-      } => ExecStream::attach(client, &process, replay, window.map(domain::proto_window)).await,
+      } => ExecStream::attach(executor, &process, replay, window.map(domain::proto_window)).await,
     }
     .map_err(relayed)?;
     // A run's relays stop with the run; the others with the daemon.
@@ -239,19 +257,28 @@ impl Processes for Daemon {
     Ok(Box::pin(ReceiverStream::new(out_rx)))
   }
 
-  async fn list(&self, run: &str) -> Result<Vec<ProcessInfo>, ControlError> {
-    // An empty or unknown run lists every executor; the executors keep
-    // only the run's processes.
-    let instances: Vec<Arc<Instance>> = match self.runs.find(run) {
-      Ok(run) => run.executors().into_values().collect(),
-      Err(_) => {
-        let mut all = vec![self.local.clone()];
-        all.extend(self.pool.instances().await);
-        all
+  async fn list(&self, run: &str, runner: &str) -> Result<Vec<ProcessInfo>, ControlError> {
+    // An empty or unknown run lists every executor and connected runner;
+    // the executors keep only the run's processes.
+    let instances: Vec<Arc<Instance>> = if !runner.is_empty() {
+      if !run.is_empty() {
+        return Err(ControlError::Invalid("name a run or a runner, not both".into()));
+      }
+      vec![self.runner_instance(runner)?]
+    } else {
+      match self.runs.find(run) {
+        Ok(run) => run.executors().into_values().collect(),
+        Err(_) => {
+          let mut all = vec![self.local.clone()];
+          all.extend(self.pool.instances().await);
+          all.extend(self.links.names().iter().map(|runner| Instance::runner(runner, &self.links)));
+          all
+        }
       }
     };
     let request = ListProcessesRequest {
       run_id: run.to_string(),
+      ..Default::default()
     };
     let mut processes = Vec::new();
     // Instances that share one executor, such as this machine's `local` and
@@ -264,10 +291,11 @@ impl Processes for Daemon {
         continue;
       }
       asked.push(executor);
-      // An executor that does not answer has nothing to list.
-      match instance.handle.client.processes().list_processes(request.clone()).await {
+      // An executor that does not answer has nothing to list, unless it
+      // is the runner the caller named.
+      match instance.handle.executor.list_processes(request.clone()).await {
         Ok(list) => {
-          for p in list.into_inner().processes {
+          for p in list.processes {
             let mut p = domain::process_info(p);
             // A process is named by the instance it was started through;
             // one this daemon did not start, by the first that listed it.
@@ -277,6 +305,7 @@ impl Processes for Daemon {
             processes.push(p);
           }
         }
+        Err(status) if !runner.is_empty() => return Err(relayed(status.into())),
         Err(status) => tracing::debug!("executor {}: cannot list processes: {}", instance.name, status.message()),
       }
     }
@@ -290,7 +319,7 @@ impl Processes for Daemon {
       process_id: process.to_string(),
       signal: signal.to_string(),
     };
-    instance.handle.client.processes().kill_process(request).await.map_err(|s| relayed(s.into()))?;
+    instance.handle.executor.kill_process(request).await.map_err(|s| relayed(s.into()))?;
     Ok(())
   }
 }
@@ -357,6 +386,16 @@ impl Relay {
             client_gone = true;
           }
           continue;
+        }
+        // The executor's stream ended before the process exited, such as
+        // a runner's connection; the caller learns why, as when the
+        // daemon ends a stream.
+        Err(needy_api_client::Error::Ended { reason }) => {
+          let reason = reason.unwrap_or_else(|| format!("the stream from executor {} ended", self.instance.name));
+          if out_tx.send(Ok(ExecOutput::Ended(reason))).await.is_err() {
+            tracing::debug!("exec relay: the client left before the stream ended");
+          }
+          break;
         }
         Err(e) => {
           if out_tx.send(Err(relayed(e))).await.is_err() {

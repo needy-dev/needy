@@ -6,7 +6,6 @@ use needy_api_server::control::Caller;
 use needy_api_server::{Health, Listen, Server};
 use needy_core_executor::process::Host;
 use needy_core_executor::service::ExecutorService;
-use tokio_util::sync::CancellationToken;
 
 /// Serves `ProcessService` as the executor `name` on `listen` (`unix:/path`
 /// or `HOST:PORT`); clients present `token` when one is set. On a
@@ -14,12 +13,6 @@ use tokio_util::sync::CancellationToken;
 /// second termination signal ends that where it is and fails, naming the
 /// processes still running; the caller should then exit.
 pub async fn serve(listen: &str, name: String, token: Option<String>) -> Result<()> {
-  serve_until(listen, name, token, CancellationToken::new()).await
-}
-
-/// [`serve`], which also stops as on a first termination signal when
-/// `stop` is cancelled, such as when a runner's credential is refused.
-pub async fn serve_until(listen: &str, name: String, token: Option<String>, stop: CancellationToken) -> Result<()> {
   let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
@@ -32,11 +25,6 @@ pub async fn serve_until(listen: &str, name: String, token: Option<String>, stop
   };
   let server = Server::new(health, Caller::Cli).token(token).process_service(service).bind(&[Listen::parse(listen)]).await?;
   tracing::info!("executor listening on {listen}");
-  let stopping = termination.stop();
-  tokio::spawn(async move {
-    stop.cancelled().await;
-    stopping.cancel();
-  });
   let ended = termination
     .unless_forced(async {
       let served = server.serve(termination.stop()).await;

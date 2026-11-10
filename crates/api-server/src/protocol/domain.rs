@@ -269,6 +269,7 @@ pub fn exec_spec(start: v1::ExecStart) -> Result<ExecSpec, Error> {
     detach: start.detach,
     run: start.run_id,
     executor: start.executor,
+    runner: start.runner,
     no_stdin: start.no_stdin,
     search_path_if_missing: start.search_path_if_missing,
   })
@@ -284,6 +285,7 @@ pub fn proto_exec_start(spec: ExecSpec) -> v1::ExecStart {
     detach: spec.detach,
     run_id: spec.run,
     executor: spec.executor,
+    runner: spec.runner,
     no_stdin: spec.no_stdin,
     origin: proto_origin(spec.origin).into(),
     search_path_if_missing: spec.search_path_if_missing,

@@ -18,6 +18,8 @@ use needy_config::profile::{OnFull, Runtime};
 use needy_core_executor::provider::{Docker, InstanceHandle, InstanceSpec, Native, Provider, Remote};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
+use crate::link::{Links, RunnerExecutor};
+
 /// One executor instance and what the daemon knows about it.
 pub struct Instance {
   /// The executor's name in the profile.
@@ -25,8 +27,9 @@ pub struct Instance {
   /// The pool key; empty for this machine's own instance.
   pub key: String,
   pub handle: InstanceHandle,
-  /// The provider that created the instance and destroys it.
-  provider: Arc<dyn Provider>,
+  /// The provider that created the instance and destroys it; `None` for a
+  /// runner's machine, which nothing creates.
+  provider: Option<Arc<dyn Provider>>,
   /// Actor path prefix to executor path prefix.
   pub path_map: BTreeMap<String, String>,
   slots: Option<Arc<Semaphore>>,
@@ -45,7 +48,37 @@ impl Instance {
       name: "local".into(),
       key: String::new(),
       handle: native.machine(),
-      provider: native.clone(),
+      provider: Some(native.clone()),
+      path_map: BTreeMap::new(),
+      slots: None,
+      on_full: OnFull::Wait,
+      refs: AtomicUsize::new(1),
+    })
+  }
+
+  /// A connected runner's own machine, for commands outside any run
+  /// (`needy exec --runner`). It is never pooled and never destroyed.
+  // TODO(runner-select): profiles cannot place executors on runners yet;
+  // `runner:` selectors in profiles are slice 5 of the runners-and-runs
+  // design, which pools runner instances by key like other runtimes.
+  pub fn runner(runner: &str, links: &Arc<Links>) -> Arc<Self> {
+    let executor = RunnerExecutor {
+      runner: runner.to_string(),
+      links: links.clone(),
+    };
+    Arc::new(Self {
+      name: runner.to_string(),
+      key: String::new(),
+      handle: InstanceHandle {
+        runtime: "runner",
+        id: runner.to_string(),
+        executor: Arc::new(executor),
+        // TODO(runner-select): a workspace mount on a runner needs its
+        // platform's SFTP server; mounts reach runners with slice 5.
+        sftp: Vec::new(),
+        workspace: String::new(),
+      },
+      provider: None,
       path_map: BTreeMap::new(),
       slots: None,
       on_full: OnFull::Wait,
@@ -133,6 +166,9 @@ impl Pool {
   async fn create(&self, spec: &InstanceSpec) -> Result<Arc<Instance>> {
     let provider: Arc<dyn Provider> = match spec.config.runtime {
       Runtime::Native => self.native.clone(),
+      // TODO(runner-select): replaced by runner executors once profiles
+      // select runners (slice 5); until then a profile reaches another
+      // machine through an executor daemon it dials.
       Runtime::Remote => self.remote.clone(),
       Runtime::Docker => self.docker.clone().context("Docker is not available on this machine")?,
       // TODO(provider): containerd, firecracker and k8s providers are
@@ -144,7 +180,7 @@ impl Pool {
       name: spec.name.clone(),
       key: spec.key.clone(),
       handle,
-      provider,
+      provider: Some(provider),
       path_map: spec.config.path_map.clone(),
       slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
       on_full: spec.config.on_full,
@@ -162,7 +198,9 @@ impl Pool {
       }
       instances.retain(|_, cell| !cell.get().is_some_and(|v| Arc::ptr_eq(v, instance)));
     }
-    if let Err(e) = instance.provider.destroy(&instance.handle).await {
+    if let Some(provider) = &instance.provider
+      && let Err(e) = provider.destroy(&instance.handle).await
+    {
       tracing::warn!("executor {}: cannot destroy {}: {e}", instance.name, instance.handle.id);
     }
   }
