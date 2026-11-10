@@ -6,6 +6,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use needy_api_client::proto::v1::{self, CreateRunRequest, GetRunLogsRequest, ListRunsRequest, Run, StopRunRequest};
 use needy_core::types::RunState;
+use needy_core_executor::relay;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
@@ -15,8 +16,8 @@ use crate::output::{self, OutputFormat, Row};
 // TODO(run-ux): a bare `needy run --profile X [-- cmd]` as `run create` is
 // left out: with the driving program as an optional trailing argument, a
 // program named `ls`, `stop`, `logs` or `create` would parse as a
-// subcommand. Revisit with `run -it` and `run attach` (slice 8 of the
-// runners-and-runs design) or on an owner decision.
+// subcommand. Slice 8 keeps `run create -it` and `run attach`; reopen the
+// shorthand on an owner-approved parsing grammar.
 #[derive(clap::Args)]
 pub struct Args {
   #[command(subcommand)]
@@ -27,6 +28,15 @@ pub struct Args {
 enum Command {
   /// Create a run from a profile and start its actor.
   Create {
+    /// Run the driving program on a terminal, available to `run attach`.
+    #[arg(short = 't')]
+    tty: bool,
+    /// Attach to the driving program immediately and return its exit code.
+    #[arg(short = 'i', requires = "tty")]
+    interactive: bool,
+    /// Keys that leave the run running; empty turns detaching off.
+    #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
+    detach_keys: String,
     /// Profile YAML; relative paths in it resolve against its directory.
     #[arg(long)]
     profile: PathBuf,
@@ -50,6 +60,19 @@ enum Command {
   },
   /// Stop a run and release its executors.
   Stop { run: String },
+  /// Attach to the driving program's terminal until it exits or you detach.
+  Attach {
+    run: String,
+    /// Do not draw the current screen before streaming output.
+    #[arg(long)]
+    no_replay: bool,
+    /// Watch without sending input, signals or window changes.
+    #[arg(long)]
+    read_only: bool,
+    /// Keys that leave the run running; empty turns detaching off.
+    #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
+    detach_keys: String,
+  },
   /// Print the actor's console output: boot messages and the driving program's terminal.
   Logs {
     run: String,
@@ -72,6 +95,8 @@ struct RunRow {
   signal: Option<String>,
   /// Why the run failed, with its causes.
   failure: Option<String>,
+  /// Whether the driving program has a terminal available to `run attach`.
+  tty: bool,
 }
 
 #[derive(Serialize)]
@@ -164,6 +189,7 @@ impl TryFrom<Run> for RunRow {
       exit_code,
       signal,
       failure: (!s.failure.is_empty()).then_some(s.failure),
+      tty: s.tty,
     })
   }
 }
@@ -189,11 +215,16 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let fail = needy_api_client::Error::from;
   match args.command {
     Command::Create {
+      tty,
+      interactive,
+      detach_keys,
       profile,
       group,
       name,
       command,
     } => {
+      // Refuse invalid keys before creating a run that the caller cannot leave.
+      relay::DetachKeys::parse(&detach_keys)?;
       let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
       // The daemon may run on another machine: it gets the profile and its
       // recipe as text, not paths to read.
@@ -208,12 +239,19 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           group,
           name,
           actor_command: command,
+          tty: tty.then(relay::window),
+          wait_for_attach: interactive,
         })
         .await
         .map_err(fail)?
         .into_inner()
         .run
         .unwrap_or_default();
+      if interactive {
+        // Keep the run ID out of the driving program's terminal output.
+        output::message(format!("run {}", run.run_id));
+        return attach(&connection, run.run_id, true, false, &detach_keys).await;
+      }
       println!("{}", run.run_id);
     }
     Command::Ls { output: format } => {
@@ -225,6 +263,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Stop { run } => {
       let connection = crate::cli::connect(&endpoint).await?;
       connection.runs().stop_run(StopRunRequest { run_id: run }).await.map_err(fail)?;
+    }
+    Command::Attach {
+      run,
+      no_replay,
+      read_only,
+      detach_keys,
+    } => {
+      let connection = crate::cli::connect(&endpoint).await?;
+      return attach(&connection, run, !no_replay, read_only, &detach_keys).await;
     }
     Command::Logs { run, follow } => {
       let connection = crate::cli::connect(&endpoint).await?;
@@ -245,6 +292,17 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
   }
   Ok(0)
+}
+
+/// Connects the local terminal to a run through the ordinary process relay.
+async fn attach(connection: &needy_api_client::Client, run: String, replay: bool, read_only: bool, detach_keys: &str) -> Result<i32> {
+  let request = v1::ExecAttach {
+    run_id: run,
+    replay,
+    read_only,
+    ..Default::default()
+  };
+  super::attach::relay(connection, request, detach_keys).await
 }
 
 #[cfg(test)]

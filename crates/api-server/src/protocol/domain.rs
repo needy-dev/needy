@@ -236,6 +236,9 @@ pub fn proto_runner(runner: RunnerInfo) -> v1::Runner {
 // ------------------------------------------------------------- runs
 
 pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
+  if request.wait_for_attach && request.tty.is_none() {
+    return Err(Error::Missing("terminal for wait_for_attach"));
+  }
   if request.profile_name.is_empty() {
     return Err(Error::Missing("profile"));
   }
@@ -248,6 +251,11 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     actor_command: request.actor_command,
     // The adapter sets who asks; the wire does not say.
     by: None,
+    tty: request.tty.map(|w| WindowSize {
+      rows: w.rows,
+      cols: w.cols,
+    }),
+    wait_for_attach: request.wait_for_attach,
   })
 }
 
@@ -307,6 +315,7 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
     created_at_ms: run.created_ms,
     profile: run.profile,
     actor_exit: run.actor_exit.map(proto_exit),
+    tty: run.tty,
     failure: run.failure.unwrap_or_default(),
   }
 }
@@ -498,6 +507,9 @@ pub fn proto_exit(exit: Exit) -> v1::ExecExited {
 
 pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
   v1::GetConfigResponse {
+    tty: config.tty.map(proto_window),
+    process_port: config.process_port,
+    wait_for_attach: config.wait_for_attach,
     run_id: config.run,
     user: Some(v1::GuestUser {
       name: config.user.name,

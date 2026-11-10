@@ -241,8 +241,9 @@ observes signal death through `wait`.
 
 The daemon, not the client, owns a process and its PTY, as a containerd shim
 owns task IO. A client may disconnect without stopping the process.
-`needy attach ID` reconnects and first replays recent output from a bounded
-buffer. Long-running commands such as `pnpm dev` or watch-mode tests depend on
+`needy attach ID` reconnects and first redraws a terminal's current screen
+from its model, or replays recent pipe output from a bounded buffer.
+Long-running commands such as `pnpm dev` or watch-mode tests depend on
 this, for both people and driving programs.
 
 A finished process stays in `needy ps`, with its exit, and can be attached
@@ -286,9 +287,12 @@ Implemented on every executor platform: PTY or pipes, raw mode, resize, signal
 forwarding, stdin half-close, exit with a signal name, detach, attach with a
 256 KiB replay buffer, finished processes listed for 10 minutes, `json` and
 `ndjson` output with the placement events, and backpressure from a slow
-starting client to the process. An attached client that falls behind is
-disconnected instead, so it never holds back the process or another client
-(see the [terminal note](2026-11-10-terminal-attach-design.md), G5). `--events` is not
+starting client to the process. A terminal viewer that falls behind skips
+output and gets a fresh redraw; a pipe viewer is disconnected instead.
+`run create -t/-it` and `run attach` give the driving program the same terminal
+behavior. See the [terminal note](2026-11-10-terminal-attach-design.md) and
+[automated and live-probe evidence](2026-11-11-interactive-actor-evidence.md).
+`--events` is not
 implemented yet, and `json` does not include events. On Windows a signal
 terminates the process tree; terminals use ConPTY through portable-pty but do
 not work yet in a daemon started in session 0 (see the closed-loop results).

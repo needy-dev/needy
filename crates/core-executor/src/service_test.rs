@@ -177,6 +177,7 @@ fn attach(process: &str, window: Option<(u32, u32)>, read_only: bool) -> ExecAtt
     replay: false,
     window: window.map(|(rows, cols)| WindowSize { rows, cols }),
     read_only,
+    ..Default::default()
   }
 }
 

@@ -83,6 +83,12 @@ pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -
           }
         }
         Event::Exited(_) => break,
+        Event::Detached => {
+          // Mount streams never request detach; losing their replies ends
+          // the mount instead of leaving sshfs waiting for an answer.
+          tracing::warn!("mount {target}: the SFTP stream detached unexpectedly");
+          break;
+        }
         Event::Started(_) | Event::Stderr(_) | Event::Trace(_) => {}
       }
     }

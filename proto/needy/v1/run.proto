@@ -39,6 +39,13 @@ message CreateRunRequest {
   // The actor's recipe as YAML with its `extends` chain merged, when
   // `actor.recipe` names a file. Empty for a built-in recipe or none.
   string recipe_yaml = 8;
+  // Run the driving program on a terminal of this size, which `needy run
+  // attach` connects to. Unset: no terminal, stdin `/dev/null`, output to
+  // the actor's console.
+  WindowSize tty = 9;
+  // With tty: start the program after its first terminal client subscribed,
+  // so `run create -it` also receives a program that exits immediately.
+  bool wait_for_attach = 10;
 
   // The client's profile directory, which the daemon cannot read when it
   // runs on another machine.
@@ -76,6 +83,8 @@ message Run {
   ExecExited actor_exit = 9;
   // Why the run failed, with its causes. Empty unless it failed.
   string failure = 10;
+  // The driving program runs on a terminal (`CreateRunRequest.tty`).
+  bool tty = 11;
 
   reserved 4;
 }

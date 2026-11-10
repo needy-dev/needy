@@ -144,6 +144,7 @@ async fn attaching_to_a_workspace_mount_is_refused() {
     .exec(
       ExecOpen::Attach {
         process: process.clone(),
+        run: String::new(),
         replay: true,
         window: None,
         read_only: false,
@@ -172,6 +173,7 @@ async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
     .exec(
       ExecOpen::Attach {
         process,
+        run: String::new(),
         replay: true,
         window: None,
         read_only: false,
@@ -289,6 +291,7 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
   let input: Inputs = Box::pin(tokio_stream::iter([ExecInput::Stdin(b"\n".to_vec())]).chain(tokio_stream::pending()));
   let open = ExecOpen::Attach {
     process,
+    run: String::new(),
     replay: false,
     window: Some(WindowSize {
       rows: 40,
@@ -353,4 +356,151 @@ async fn a_starting_client_that_detaches_through_the_daemon_leaves_the_process_r
   let listed = Processes::list(daemon, &created.id, "").await.unwrap();
   assert!(listed.iter().any(|p| p.process == process && p.running), "{listed:?}");
   Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+}
+
+/// A guest process service behind Firecracker's host-initiated vsock
+/// handshake. The VM is a stand-in; the PTY, transport and relay are real.
+async fn terminal_guest(started: &testing::Started, command: &str) -> (String, needy_core_executor::process::Host) {
+  use needy_api_client::proto::v1::process_service_server::ProcessServiceServer;
+  use needy_api_server::control::WindowSize;
+  use needy_core_executor::process::{Host, Spec};
+  use needy_core_executor::service::ExecutorService;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  let mut request = new_run(PROFILE, started.dir.path());
+  request.tty = Some(WindowSize { rows: 24, cols: 80 });
+  let info = Runs::create(&started.daemon, request).await.unwrap();
+  let run = started.daemon.runs.find(&info.id).unwrap();
+  let path = needy_core_actor::host::vm::vsock(&run.dir);
+  // The stand-in VM creates a file here to report it started.
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while !path.exists() {
+    assert!(tokio::time::Instant::now() < deadline, "the stand-in VM did not start");
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+  std::fs::remove_file(&path).unwrap();
+  let listener = tokio::net::UnixListener::bind(&path).unwrap();
+  let host = Host::default();
+  host
+    .spawn(Spec {
+      argv: vec!["sh".into(), "-c".into(), command.into()],
+      tty: Some((24, 80)),
+      run_id: info.id.clone(),
+      ..Default::default()
+    })
+    .unwrap();
+  let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener).then(|stream| async move {
+    let mut stream = stream?;
+    let mut request = Vec::new();
+    loop {
+      let byte = stream.read_u8().await?;
+      request.push(byte);
+      if byte == b'\n' {
+        break;
+      }
+    }
+    assert_eq!(request, format!("CONNECT {}\n", crate::actor::PROCESS_PORT).as_bytes());
+    stream.write_all(b"OK 1234\n").await?;
+    Ok::<_, std::io::Error>(stream)
+  });
+  let service = ExecutorService {
+    host: host.clone(),
+    name: "actor".into(),
+  };
+  // The test host lives until explicit shutdown below. In particular, a
+  // graceful test server must not make `run stop` wait for an open client.
+  let stop = started.daemon.cancel.clone();
+  started.daemon.tasks.spawn(async move {
+    tonic::transport::Server::builder()
+      .add_service(ProcessServiceServer::new(service))
+      .serve_with_incoming_shutdown(incoming, stop.cancelled_owned())
+      .await
+      .unwrap();
+  });
+  (info.id, host)
+}
+
+fn attach_run(run: &str) -> ExecOpen {
+  ExecOpen::Attach {
+    process: String::new(),
+    run: run.into(),
+    replay: true,
+    window: None,
+    read_only: false,
+  }
+}
+
+#[tokio::test]
+async fn attaching_to_a_runs_driving_program_forwards_input_and_its_exit() {
+  use needy_api_server::control::ExecInput;
+  let started = testing::daemon().await;
+  let (run, host) = terminal_guest(&started, "read -r line; printf 'received:%s\\n' \"$line\"; exit 7").await;
+  let (tx, rx) = tokio::sync::mpsc::channel(4);
+  let input: Inputs = Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx));
+  let mut outputs = started.daemon.exec(attach_run(&run), input).await.unwrap();
+  assert!(matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)));
+  tx.send(ExecInput::Stdin(b"hello\n".to_vec())).await.unwrap();
+  let (output, exit) = tokio::time::timeout(Duration::from_secs(5), finish(outputs)).await.unwrap();
+  assert!(output.contains("received:hello"), "{output:?}");
+  assert_eq!(exit.unwrap().code, Some(7));
+  Runs::stop(&started.daemon, &run, needy_core::types::Principal::Operator).await.unwrap();
+  host.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_interactive_create_tells_the_guest_to_wait_for_its_client() {
+  use needy_api_server::control::{Guest, WindowSize};
+  let started = testing::daemon().await;
+  let size = WindowSize { rows: 31, cols: 97 };
+  let mut request = new_run(PROFILE, started.dir.path());
+  request.tty = Some(size);
+  request.wait_for_attach = true;
+  let run = Runs::create(&started.daemon, request).await.unwrap();
+  let config = Guest::config(&started.daemon, &run.id).await.unwrap();
+  assert_eq!(config.tty, Some(size));
+  assert!(config.wait_for_attach);
+  assert_eq!(config.process_port, crate::actor::PROCESS_PORT);
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
+}
+
+// ROOT CAUSE:
+// An actor attach was registered under the daemon rather than its run.
+// Stopping the run therefore left the relay open after its VM ended.
+#[tokio::test]
+async fn stopping_a_run_ends_its_driving_programs_attach() {
+  let started = testing::daemon().await;
+  let (run, host) = terminal_guest(&started, "read -r line").await;
+  let mut outputs = started.daemon.exec(attach_run(&run), attached()).await.unwrap();
+  assert!(matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)));
+  Runs::stop(&started.daemon, &run, needy_core::types::Principal::Operator).await.unwrap();
+  let rest = tokio::time::timeout(Duration::from_secs(2), outputs.collect::<Vec<_>>()).await.expect("attach must stop with its run");
+  assert!(matches!(rest.last(), Some(Ok(ExecOutput::Ended(reason))) if reason == "run stopped"), "{rest:?}");
+  assert!(!rest.iter().any(|event| matches!(event, Ok(ExecOutput::Exited(_)))), "{rest:?}");
+  host.shutdown().await;
+}
+
+// A connected vsock peer can stop answering during boot. Cancellation
+// must interrupt the handshake, not only the retry delay after it fails.
+#[tokio::test]
+async fn stopping_a_run_interrupts_an_unanswered_terminal_handshake() {
+  use needy_api_server::control::WindowSize;
+  let started = testing::daemon().await;
+  let mut request = new_run(PROFILE, started.dir.path());
+  request.tty = Some(WindowSize { rows: 24, cols: 80 });
+  let info = Runs::create(&started.daemon, request).await.unwrap();
+  let run = started.daemon.runs.find(&info.id).unwrap();
+  let path = needy_core_actor::host::vm::vsock(&run.dir);
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while !path.exists() {
+    assert!(tokio::time::Instant::now() < deadline);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+  std::fs::remove_file(&path).unwrap();
+  let listener = tokio::net::UnixListener::bind(&path).unwrap();
+  let daemon = started.daemon.clone();
+  let id = info.id.clone();
+  let attaching = tokio::spawn(async move { daemon.exec(attach_run(&id), attached()).await });
+  let (_unanswered, _) = listener.accept().await.unwrap();
+  Runs::stop(&started.daemon, &info.id, needy_core::types::Principal::Operator).await.unwrap();
+  let result = tokio::time::timeout(Duration::from_secs(2), attaching).await.expect("the stopped run must interrupt its handshake").unwrap();
+  assert!(matches!(result, Err(ControlError::Unavailable(_))));
 }

@@ -26,28 +26,25 @@ pub struct Args {
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
-  relay(&connection, &args.process_id, args.no_replay, args.read_only, &args.detach_keys).await
+  let attach = ExecAttach {
+    process_id: args.process_id,
+    replay: !args.no_replay,
+    read_only: args.read_only,
+    ..Default::default()
+  };
+  relay(&connection, attach, &args.detach_keys).await
 }
 
-/// Attaches this terminal to `process` until it exits or the user types
+/// Attaches this terminal to a process or run until it exits or the user types
 /// `detach_keys`; the exit code as `needy exec` returns it.
-pub(crate) async fn relay(
-  connection: &needy_api_client::Client,
-  process: &str,
-  no_replay: bool,
-  read_only: bool,
-  detach_keys: &str,
-) -> Result<i32> {
+pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: ExecAttach, detach_keys: &str) -> Result<i32> {
   let detach_keys = relay::DetachKeys::parse(detach_keys)?;
   let tty = relay::interactive();
   // The process's terminal takes this client's size, so a full-screen
   // program redraws for it, unless the client only watches.
-  let attach = ExecAttach {
-    process_id: process.to_string(),
-    replay: !no_replay,
-    window: tty.then(relay::window),
-    read_only,
-  };
+  attach.window = tty.then(relay::window);
+  let read_only = attach.read_only;
+  let run = attach.run_id.clone();
   let stream = ExecStream::attach(connection, attach).await?;
   let options = relay::Options {
     tty,
@@ -55,5 +52,11 @@ pub(crate) async fn relay(
     read_only,
     detach_keys: detach_keys.filter(|_| tty),
   };
-  super::exec::status(relay::run(stream, options).await)
+  match relay::run(stream, options).await {
+    Ok(relay::Ended::Detached { .. }) if !run.is_empty() => {
+      crate::output::message(format!("detached from run {run}; `needy run attach {run}` returns to it"));
+      Ok(0)
+    }
+    ended => super::exec::status(ended),
+  }
 }

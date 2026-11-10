@@ -685,6 +685,108 @@ fn run_create_explains_profile_and_group() {
   assert!(!help("--group <GROUP>").contains("[default"), "{text}");
 }
 
+#[test]
+fn run_create_on_a_terminal_can_be_attached_later() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("profile.yaml", NATIVE_PROFILE);
+
+  let created = home.run(&[
+    "run",
+    "create",
+    "-t",
+    "--profile",
+    profile.to_str().unwrap(),
+  ]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  let id = stdout(&created).trim().to_string();
+  let listed = home.run(&["run", "ls", "-o", "json"]);
+  let rows: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+  let run = rows.as_array().unwrap().iter().find(|r| r["id"] == id).unwrap();
+  assert_eq!(run["tty"], true);
+}
+
+#[test]
+fn run_attach_explains_when_the_driving_program_has_no_terminal() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let run = create_run(&home, NATIVE_PROFILE);
+
+  let output = home.run(&["run", "attach", &run]);
+
+  assert_eq!(output.status.code(), Some(1));
+  assert!(stderr(&output).contains("has no terminal; create the run with `needy run create -t`"), "{}", stderr(&output));
+}
+
+#[test]
+fn run_create_interactive_requires_a_terminal() {
+  let home = Home::new();
+  let output = home.run(&["run", "create", "-i", "--profile", "example.yaml"]);
+  assert_eq!(output.status.code(), Some(2));
+  assert!(stderr(&output).contains("-t"), "{}", stderr(&output));
+}
+
+// ROOT CAUSE:
+//
+// A fast driving program could exit and reboot its VM before `-it` attached.
+// The run recorded its result, but the client waited for a terminal that
+// no longer existed. An interactive create now subscribes before starting
+// the program and drains its output and exit before rebooting the guest.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "requires usable KVM and NEEDY_TEST_ACTOR_IMAGE built from this tree"]
+fn an_immediately_exiting_interactive_actor_returns_its_output_and_exit() {
+  let image = std::env::var_os("NEEDY_TEST_ACTOR_IMAGE").expect("set NEEDY_TEST_ACTOR_IMAGE to a freshly built actor image");
+  let home = Home::new();
+  let child = home
+    .needy()
+    .args(["daemon", "--mode", "control", "--actor-image"])
+    .arg(image)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+  let _daemon = Daemon { child };
+  let socket = home.path().join("run/daemon.sock");
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    assert!(Instant::now() < deadline, "the daemon did not listen");
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  let profile = home.write("profile.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\n");
+  let mut client = home
+    .needy()
+    .args(["run", "create", "-it", "--profile"])
+    .arg(profile)
+    .args(["--", "sh", "-c", "printf 'short-run\\n'; exit 9"])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  let deadline = Instant::now() + Duration::from_secs(15);
+  let mut timed_out = false;
+  while client.try_wait().unwrap().is_none() {
+    if Instant::now() >= deadline {
+      client.kill().unwrap();
+      timed_out = true;
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  let output = client.wait_with_output().unwrap();
+  // A real VM does not share the stand-in's parent-liveness loop. Stop
+  // every run in this isolated test home before reporting a failed check.
+  let listed = home.run(&["run", "ls", "-o", "json"]);
+  let runs: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+  for run in runs.as_array().unwrap() {
+    let stopped = home.run(&["run", "stop", run["id"].as_str().unwrap()]);
+    assert!(stopped.status.success(), "{}", stderr(&stopped));
+  }
+  assert!(!timed_out, "the fast actor did not return: {}", stderr(&output));
+  assert_eq!(output.status.code(), Some(9), "{}", stderr(&output));
+  assert!(stdout(&output).contains("short-run"), "{}", stdout(&output));
+}
+
 // The runners-and-runs design renamed *session* to *run* without a
 // compatibility alias (principle 7 of the module layout redesign).
 #[test]

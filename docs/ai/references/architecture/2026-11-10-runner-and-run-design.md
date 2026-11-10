@@ -1,13 +1,14 @@
 # Runners and runs
 
-**Status**: design, 2026-11-10. Slices 1 to 7 are implemented: *session* is
+**Status**: design, updated 2026-11-11. Slices 1 to 8 are implemented: *session* is
 renamed *run* and `needy run create --no-actor` is gone (slice 2, finished
 in slice 5); the runner registry and enrollment (slice 3), runner dial-out
 (slice 4), scheduling and profiles (slice 5), ownership and
 reconciliation (slice 6), and clients (slice 7); see
 [As built: slice 3](#as-built-slice-3), [slice 4](#as-built-slice-4),
 [slice 5](#as-built-slice-5), [slice 6](#as-built-slice-6) and
-[slice 7](#as-built-slice-7). Nothing else is implemented. The owner chose
+[slice 7](#as-built-slice-7) and [slice 8](#as-built-slice-8). Other proposals
+remain deferred. The owner chose
 the model (runners as registered machines; actors and executors as what runs on
 them; runs instead of sessions); open questions are at the end. This note
 absorbs slice 9 (persistence) of the
@@ -213,7 +214,8 @@ as `examples/cli` and `examples/local` do); profile executor entries lose
    restart reconciliation.
 7. **Clients** (done, 2026-11-10): pairing, per-client tokens, principals in
    the trace; `report` and `run logs -f` through the control plane.
-8. **Interactive actor**: PTY driver, `run -it`, `run attach`.
+8. **Interactive actor** (done, 2026-11-11): PTY driver, `run create -it`,
+   `run attach`.
 
 ## As built: slice 3
 
@@ -659,6 +661,31 @@ directory holds no `trace.db`: pair, the token file 0600, a spent code,
 `run create`, `exec`, `run logs -f` until `run stop`, `report` human and
 JSON naming `client:laptop`, `--local` failing, `client ls`, `client
 revoke`, refused.
+
+## As built: slice 8
+
+`run create -t` starts the driving program on a guest PTY and returns the
+run ID; `-it` also attaches and returns its exit code. `run attach RUN`
+reuses the process relay, including redraw, resize, detach keys and read-only
+viewers. The shorthand `run -it` remains deferred in favor of the explicit
+`create` subcommand; `TODO(run-ux)` marks the parsing decision in the CLI.
+
+The run request carries `tty` and `wait_for_attach`; guest configuration
+carries those plus `process_port`. Init serves the same process host as
+executors over vsock. The daemon reaches it through Firecracker's Unix-socket
+handshake and forwards the attach with its run lifetime. Init's owner reader
+continues copying output to the serial console while all viewers are away.
+
+For `-it`, init's child waits on a separate local socket until the first
+terminal subscription is installed. The program can then exit immediately
+without losing its output or result. On exit, init allows active terminal
+streams up to three seconds to drain before rebooting; an abandoned client
+cannot keep the VM alive indefinitely. A run created with `-t` alone starts
+without waiting for any client.
+
+Rebuild the guest image together with the host binary. Automated tests and
+live probes from a Mac through an SSH local forward to a Linux KVM host are
+recorded in [Interactive actor: implementation and evidence](../cli/2026-11-11-interactive-actor-evidence.md).
 
 ## Open questions
 

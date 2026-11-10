@@ -72,6 +72,27 @@ impl Instance {
     })
   }
 
+  /// The process service a run's actor serves for its driving program on a
+  /// terminal. It is never pooled; the actor's VM ends it.
+  pub fn actor(run: &str, executor: Arc<dyn needy_api_client::Executor>) -> Arc<Self> {
+    Arc::new(Self {
+      name: "actor".into(),
+      key: String::new(),
+      handle: InstanceHandle {
+        runtime: "actor",
+        id: run.to_string(),
+        executor,
+        sftp: Vec::new(),
+        workspace: String::new(),
+      },
+      provider: None,
+      path_map: BTreeMap::new(),
+      slots: None,
+      on_full: OnFull::Wait,
+      refs: AtomicUsize::new(1),
+    })
+  }
+
   /// The runner whose own process space the instance is, which owns its
   /// processes; `None` on the control host.
   pub fn on_runner(&self) -> Option<&str> {

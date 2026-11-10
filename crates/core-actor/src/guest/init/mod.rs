@@ -26,6 +26,14 @@ use anyhow::Result;
 use needy_api_proto::v1::{GetConfigRequest, ReportExitRequest};
 
 pub(super) fn main() -> ! {
+  // Init started again by itself as a plain process (not PID 1) only
+  // switches to the user and runs the driving program on its terminal.
+  let args: Vec<String> = std::env::args().skip(1).collect();
+  if std::process::id() != 1 && args.first().map(String::as_str) == Some(driver::AS_USER) {
+    let error = driver::as_user(&args[1..]);
+    eprintln!("needy init: cannot run the driving program: {error:#}");
+    std::process::exit(127);
+  }
   console_logging();
   if let Err(e) = super::runtime().block_on(boot()) {
     tracing::error!("{e:#}");
@@ -100,11 +108,20 @@ async fn boot() -> Result<()> {
   write_param("/sys/module/binfmt_needy/parameters/route_uid", &user.uid.to_string());
   write_param("/sys/module/binfmt_needy/parameters/route", &config.route_names.join(","));
 
-  let (code, signal) = match driver::run(&config, &home).await {
-    Ok(status) => {
+  let driven = match &config.tty {
+    Some(window) => {
+      let size = (u16::try_from(window.rows).unwrap_or(u16::MAX), u16::try_from(window.cols).unwrap_or(u16::MAX));
+      driver::run_on_terminal(&config, &home, size).await.map(|exit| (exit.code, exit.signal))
+    }
+    None => driver::run(&config, &home).await.map(|status| {
       use std::os::unix::process::ExitStatusExt;
-      tracing::info!("the driving program exited: {status}");
       (status.code(), status.signal().map(needy_core_executor::signals::name).unwrap_or_default())
+    }),
+  };
+  let (code, signal) = match driven {
+    Ok((code, signal)) => {
+      tracing::info!("the driving program exited: code {code:?}, signal {signal:?}");
+      (code, signal)
     }
     Err(e) => {
       tracing::error!("driving program: {e:#}");

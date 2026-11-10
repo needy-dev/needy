@@ -70,163 +70,6 @@ pub struct RevokeClientRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RevokeClientResponse {
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuestCopy {
-    /// Mapping name in the profile.
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// Path inside the actor.
-    #[prost(string, tag="2")]
-    pub path: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuestFault {
-    /// Milliseconds after the driving program starts.
-    #[prost(int64, tag="1")]
-    pub at_ms: i64,
-    /// Sensor reading to force, in millidegrees Celsius.
-    #[prost(int32, tag="2")]
-    pub temp_mc: i32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FetchFilesRequest {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FetchFilesResponse {
-    #[prost(bytes="vec", tag="1")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PushFilesRequest {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(bytes="vec", tag="2")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PushFilesResponse {
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuestUser {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(uint32, tag="2")]
-    pub uid: u32,
-    #[prost(uint32, tag="3")]
-    pub gid: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuestMount {
-    /// Path inside the actor.
-    #[prost(string, tag="1")]
-    pub target: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub executor: ::prost::alloc::string::String,
-    /// Path on the executor.
-    #[prost(string, tag="3")]
-    pub source: ::prost::alloc::string::String,
-    #[prost(bool, tag="4")]
-    pub writable: bool,
-    /// Command that serves SFTP on stdin and stdout on the executor.
-    #[prost(string, repeated, tag="5")]
-    pub sftp_command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GuestSensor {
-    #[prost(string, tag="1")]
-    pub chip: ::prost::alloc::string::String,
-    #[prost(int32, tag="2")]
-    pub idle_mc: i32,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetConfigRequest {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetConfigResponse {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(message, optional, tag="2")]
-    pub user: ::core::option::Option<GuestUser>,
-    /// Executable names or paths the kernel hands to the proxy.
-    #[prost(string, repeated, tag="3")]
-    pub route_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, tag="4")]
-    pub hostname: ::prost::alloc::string::String,
-    #[prost(int64, tag="5")]
-    pub uptime_offset_secs: i64,
-    #[prost(message, repeated, tag="6")]
-    pub mounts: ::prost::alloc::vec::Vec<GuestMount>,
-    #[prost(string, repeated, tag="7")]
-    pub command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(map="string, string", tag="8")]
-    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    #[prost(string, tag="9")]
-    pub cwd: ::prost::alloc::string::String,
-    /// Port on the host (CID 2) that serves the actor gateway.
-    #[prost(uint32, tag="10")]
-    pub gateway_port: u32,
-    #[prost(message, repeated, tag="11")]
-    pub sensors: ::prost::alloc::vec::Vec<GuestSensor>,
-    #[prost(message, repeated, tag="12")]
-    pub copy_in: ::prost::alloc::vec::Vec<GuestCopy>,
-    #[prost(message, repeated, tag="13")]
-    pub mirror_out: ::prost::alloc::vec::Vec<GuestCopy>,
-    #[prost(message, repeated, tag="14")]
-    pub hwmon_faults: ::prost::alloc::vec::Vec<GuestFault>,
-}
-/// An event observed inside the actor. The listener the guest calls is bound to
-/// its run, so the event names none.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct TraceEvent {
-    #[prost(int64, tag="2")]
-    pub time_ms: i64,
-    /// The event kind, for example "fault.injected".
-    #[prost(string, tag="3")]
-    pub kind: ::prost::alloc::string::String,
-    /// The kind's payload: a JSON object whose schema is `needy_core::event`.
-    #[prost(string, tag="5")]
-    pub payload: ::prost::alloc::string::String,
-    /// The payload's schema version, `needy_core::event::SCHEMA_VERSION` of the
-    /// guest's build. The daemon refuses a version it does not read.
-    #[prost(uint32, tag="6")]
-    pub version: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PushEventsRequest {
-    #[prost(message, optional, tag="1")]
-    pub event: ::core::option::Option<TraceEvent>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct PushEventsResponse {
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReportExitRequest {
-    #[prost(int32, optional, tag="1")]
-    pub code: ::core::option::Option<i32>,
-    #[prost(string, tag="2")]
-    pub signal: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ReportExitResponse {
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CheckRequest {
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CheckResponse {
-    #[prost(string, tag="1")]
-    pub instance_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub version: ::prost::alloc::string::String,
-    /// "control" for a daemon that manages runs, "executor" for one that only runs processes.
-    #[prost(string, tag="3")]
-    pub role: ::prost::alloc::string::String,
-    /// Operating system and architecture of the machine, for example "linux/x86_64".
-    #[prost(string, tag="4")]
-    pub platform: ::prost::alloc::string::String,
-}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WindowSize {
     #[prost(uint32, tag="1")]
@@ -293,6 +136,10 @@ pub struct ExecAttach {
     /// window size.
     #[prost(bool, tag="4")]
     pub read_only: bool,
+    /// With an empty `process_id`: the driving program of this run's actor,
+    /// which must run on a terminal.
+    #[prost(string, tag="5")]
+    pub run_id: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecRequest {
@@ -514,6 +361,172 @@ impl Origin {
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestCopy {
+    /// Mapping name in the profile.
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Path inside the actor.
+    #[prost(string, tag="2")]
+    pub path: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestFault {
+    /// Milliseconds after the driving program starts.
+    #[prost(int64, tag="1")]
+    pub at_ms: i64,
+    /// Sensor reading to force, in millidegrees Celsius.
+    #[prost(int32, tag="2")]
+    pub temp_mc: i32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FetchFilesRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FetchFilesResponse {
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PushFilesRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(bytes="vec", tag="2")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PushFilesResponse {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestUser {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub uid: u32,
+    #[prost(uint32, tag="3")]
+    pub gid: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestMount {
+    /// Path inside the actor.
+    #[prost(string, tag="1")]
+    pub target: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub executor: ::prost::alloc::string::String,
+    /// Path on the executor.
+    #[prost(string, tag="3")]
+    pub source: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub writable: bool,
+    /// Command that serves SFTP on stdin and stdout on the executor.
+    #[prost(string, repeated, tag="5")]
+    pub sftp_command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestSensor {
+    #[prost(string, tag="1")]
+    pub chip: ::prost::alloc::string::String,
+    #[prost(int32, tag="2")]
+    pub idle_mc: i32,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetConfigRequest {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetConfigResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="2")]
+    pub user: ::core::option::Option<GuestUser>,
+    /// Executable names or paths the kernel hands to the proxy.
+    #[prost(string, repeated, tag="3")]
+    pub route_names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag="4")]
+    pub hostname: ::prost::alloc::string::String,
+    #[prost(int64, tag="5")]
+    pub uptime_offset_secs: i64,
+    #[prost(message, repeated, tag="6")]
+    pub mounts: ::prost::alloc::vec::Vec<GuestMount>,
+    #[prost(string, repeated, tag="7")]
+    pub command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(map="string, string", tag="8")]
+    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(string, tag="9")]
+    pub cwd: ::prost::alloc::string::String,
+    /// Port on the host (CID 2) that serves the actor gateway.
+    #[prost(uint32, tag="10")]
+    pub gateway_port: u32,
+    #[prost(message, repeated, tag="11")]
+    pub sensors: ::prost::alloc::vec::Vec<GuestSensor>,
+    #[prost(message, repeated, tag="12")]
+    pub copy_in: ::prost::alloc::vec::Vec<GuestCopy>,
+    #[prost(message, repeated, tag="13")]
+    pub mirror_out: ::prost::alloc::vec::Vec<GuestCopy>,
+    #[prost(message, repeated, tag="14")]
+    pub hwmon_faults: ::prost::alloc::vec::Vec<GuestFault>,
+    /// Run the driving program on a terminal of this size and serve
+    /// `ProcessService` for it on vsock port `process_port`; unset for none.
+    #[prost(message, optional, tag="15")]
+    pub tty: ::core::option::Option<WindowSize>,
+    #[prost(uint32, tag="16")]
+    pub process_port: u32,
+    /// Subscribe the first terminal client before starting the program.
+    #[prost(bool, tag="17")]
+    pub wait_for_attach: bool,
+}
+/// An event observed inside the actor. The listener the guest calls is bound to
+/// its run, so the event names none.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct TraceEvent {
+    #[prost(int64, tag="2")]
+    pub time_ms: i64,
+    /// The event kind, for example "fault.injected".
+    #[prost(string, tag="3")]
+    pub kind: ::prost::alloc::string::String,
+    /// The kind's payload: a JSON object whose schema is `needy_core::event`.
+    #[prost(string, tag="5")]
+    pub payload: ::prost::alloc::string::String,
+    /// The payload's schema version, `needy_core::event::SCHEMA_VERSION` of the
+    /// guest's build. The daemon refuses a version it does not read.
+    #[prost(uint32, tag="6")]
+    pub version: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PushEventsRequest {
+    #[prost(message, optional, tag="1")]
+    pub event: ::core::option::Option<TraceEvent>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PushEventsResponse {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReportExitRequest {
+    #[prost(int32, optional, tag="1")]
+    pub code: ::core::option::Option<i32>,
+    #[prost(string, tag="2")]
+    pub signal: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ReportExitResponse {
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckRequest {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckResponse {
+    #[prost(string, tag="1")]
+    pub instance_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub version: ::prost::alloc::string::String,
+    /// "control" for a daemon that manages runs, "executor" for one that only runs processes.
+    #[prost(string, tag="3")]
+    pub role: ::prost::alloc::string::String,
+    /// Operating system and architecture of the machine, for example "linux/x86_64".
+    #[prost(string, tag="4")]
+    pub platform: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreateRunRequest {
     /// Profile as YAML text, self-contained: its `extends` chain merged and its
     /// host paths absolute. The daemon reads no path on the client's machine.
@@ -534,6 +547,15 @@ pub struct CreateRunRequest {
     /// `actor.recipe` names a file. Empty for a built-in recipe or none.
     #[prost(string, tag="8")]
     pub recipe_yaml: ::prost::alloc::string::String,
+    /// Run the driving program on a terminal of this size, which `needy run
+    /// attach` connects to. Unset: no terminal, stdin `/dev/null`, output to
+    /// the actor's console.
+    #[prost(message, optional, tag="9")]
+    pub tty: ::core::option::Option<WindowSize>,
+    /// With tty: start the program after its first terminal client subscribed,
+    /// so `run create -it` also receives a program that exits immediately.
+    #[prost(bool, tag="10")]
+    pub wait_for_attach: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
@@ -576,6 +598,9 @@ pub struct Run {
     /// Why the run failed, with its causes. Empty unless it failed.
     #[prost(string, tag="10")]
     pub failure: ::prost::alloc::string::String,
+    /// The driving program runs on a terminal (`CreateRunRequest.tty`).
+    #[prost(bool, tag="11")]
+    pub tty: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRunResponse {

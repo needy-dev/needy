@@ -109,6 +109,13 @@ impl Client {
     Ok(Self::from_channel(configure(endpoint).connect().await?))
   }
 
+  /// Connects to a guest's vsock `port` through the host side of a
+  /// Firecracker vsock device, the Unix socket `path`. A port no one in the
+  /// guest listens on fails.
+  pub async fn connect_firecracker_vsock(path: &std::path::Path, port: u32) -> Result<Self> {
+    Ok(Self::from_channel(connect_firecracker_vsock(placeholder(), path.to_path_buf(), port).await?))
+  }
+
   /// Wraps an existing channel, for example one with a custom TLS setup.
   pub fn from_channel(channel: Channel) -> Self {
     Self {
@@ -203,6 +210,50 @@ async fn connect_unix(endpoint: Endpoint, path: String) -> Result<Channel> {
       }))
       .await?,
   )
+}
+
+/// Firecracker's host-initiated vsock: the host writes `CONNECT <port>` on
+/// the device's Unix socket and reads `OK <host port>` before the stream
+/// carries the connection.
+// Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/docs/vsock.md#L46-L67
+// Reference: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/docs/vsock.md#host-initiated-connections
+#[cfg(unix)]
+async fn connect_firecracker_vsock(endpoint: Endpoint, path: std::path::PathBuf, port: u32) -> Result<Channel> {
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  Ok(
+    endpoint
+      .connect_with_connector(tower::service_fn(move |_: Uri| {
+        let path = path.clone();
+        async move {
+          let mut stream = tokio::net::UnixStream::connect(path).await?;
+          stream.write_all(format!("CONNECT {port}\n").as_bytes()).await?;
+          // Read the answer byte by byte: what follows its newline belongs
+          // to the connection.
+          let mut answer = Vec::new();
+          loop {
+            let byte = stream.read_u8().await?;
+            if byte == b'\n' {
+              break;
+            }
+            answer.push(byte);
+            if answer.len() > 64 {
+              break;
+            }
+          }
+          if !answer.starts_with(b"OK ") {
+            let answer = String::from_utf8_lossy(&answer).into_owned();
+            return Err(std::io::Error::new(std::io::ErrorKind::ConnectionRefused, format!("vsock port {port}: {answer:?}")));
+          }
+          Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+        }
+      }))
+      .await?,
+  )
+}
+
+#[cfg(not(unix))]
+async fn connect_firecracker_vsock(_endpoint: Endpoint, path: std::path::PathBuf, port: u32) -> Result<Channel> {
+  Err(Error::InvalidEndpoint(format!("{}:{port} needs Unix", path.display())))
 }
 
 #[cfg(not(unix))]

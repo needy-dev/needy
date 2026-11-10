@@ -1,11 +1,13 @@
 # Terminals, attach and the interactive actor
 
-**Status**: design, 2026-11-10. The fixes G2, G4, G5, G7, G8 and G9 are
-implemented (see the table); the rest is not. The gap list was verified against the code at `e4c6480`; the
+**Status**: implemented, updated 2026-11-11. G1–G10 are implemented;
+automated and live-probe evidence for the interactive actor is in
+[Interactive actor: implementation and evidence](2026-11-11-interactive-actor-evidence.md).
+The original gap list was verified against the code at `e4c6480`; the
 design follows a study of [herdr](https://github.com/ogulcancelik/herdr) (Rust, a server that owns PTY
 panes and redraws them from a terminal model) and of an earlier Go project by
 the owner that bridges PTYs to remote clients. Items marked *fix* are bug fixes;
-the rest needs owner approval per item.
+the remaining design items received owner approval in the runners-and-runs work.
 
 Related notes:
 
@@ -17,16 +19,16 @@ Related notes:
 
 | ID | Gap | Where | Kind | Status |
 | --- | --- | --- | --- | --- |
-| G1 | Attaching to a full-screen TUI shows garbage: the replay is the last 256 KiB of raw bytes, which can start inside the alternate screen or an escape sequence and turns the program's modes on in the attaching terminal | `core-executor` `process/proc.rs` replay | design | open (design) |
+| G1 | Attaching to a full-screen TUI shows garbage: the replay is the last 256 KiB of raw bytes, which can start inside the alternate screen or an escape sequence and turns the program's modes on in the attaching terminal | `core-executor` `process/proc.rs` replay | design | implemented: draw the current screen from `vt100`, then restore tracked input modes |
 | G2 | An attach carries no window size; the client sends one only on SIGWINCH, so an attacher of the same size gets no redraw | `ExecAttach`, `cli` `attach.rs`, `relay/signals.rs` | *fix* | fixed: `ExecAttach.window`; the executor resizes the terminal after subscribing the client |
-| G3 | No detach key: leaving means killing the client; leaving a non-detached `exec -t` sends SIGHUP to the process | `relay`, `service.rs` | design | open (design) |
+| G3 | No detach key: leaving means killing the client; leaving a non-detached `exec -t` sends SIGHUP to the process | `relay`, `service.rs` | design | implemented: `--detach-keys`, default `ctrl-]`; enhanced keyboard encodings recognized, pasted content excluded |
 | G4 | Only raw mode is restored on exit; alternate screen, mouse, bracketed paste, focus and keyboard modes leak into the user's shell | `relay/terminal.rs` | *fix* | fixed: restore on the relay's end, a panic hook and a second SIGTERM or SIGHUP; the alternate screen is left only when the output entered it |
-| G5 | One slow client stalls the program and every other client: output fan-out awaits each subscriber in turn under a lock | `process/proc.rs` emit | *fix* | fixed: the starting client keeps its backpressure; an attached client that falls behind is dropped with `RESOURCE_EXHAUSTED` (`TODO(terminal-model)`: skip and redraw) |
-| G6 | No arbitration: input from all clients interleaves, any client's resize wins, no read-only viewer | `process/` | design | open (design) |
+| G5 | One slow client stalls the program and every other client: output fan-out awaits each subscriber in turn under a lock | `process/proc.rs` emit | *fix* | fixed: the starting client keeps its backpressure; terminal viewers skip output and receive a fresh redraw; lagging pipe viewers are disconnected |
+| G6 | No arbitration: input from all clients interleaves, any client's resize wins, no read-only viewer | `process/` | design | implemented: size belongs to the last client that attached or typed; read-only viewers send no input, signals or size |
 | G7 | End of input on a PTY is written as `0x04`, which a raw-mode TUI reads as Ctrl-D | `process/pty.rs` | *fix* | fixed: the terminal's VEOF only with ICANON; in raw mode input just stops |
 | G8 | Possible exit hang: if a descendant keeps the PTY open, the reader never sees end of file and `Exited` is never sent (repro to write: `exec -t sh -c 'setsid sleep 600 & exit 3'`) | `process/pty.rs` | *fix* if the repro fails | fixed: reproduced on Linux, not on macOS, once the descendant has its own session before the exit (the literal repro usually loses that race and its descendant dies of the hangup); the output reader stops after the 500 ms drain |
 | G9 | The client's `TERM` is forwarded even when the executor lacks the terminfo entry; `COLORTERM` is not forwarded | `relay`, exec start | *fix* | fixed: `xterm-256color` when the executor has no terminfo entry, recorded as `term_fallback` in `exec.start`; `COLORTERM` forwarded |
-| G10 | The actor's driving program runs with stdin `/dev/null` and output to the serial console: it cannot be interactive | `core-actor` `guest/init/driver.rs` | design | open (design) |
+| G10 | The actor's driving program runs with stdin `/dev/null` and output to the serial console: it cannot be interactive | `core-actor` `guest/init/driver.rs` | design | implemented: `run create -t/-it`, `run attach`; guest PTY and process service over vsock, independent console reader |
 
 Smaller: window sizes are cast to `u16` without clamping; the PTY input queue is
 unbounded, so a large paste grows the executor's memory.

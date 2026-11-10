@@ -119,8 +119,16 @@ async fn proxy() -> Result<i32> {
       None => return Err(error.into()),
     },
   };
-  let exit = match relay::run(stream, tty, true).await {
-    Ok(exit) => exit,
+  // Detach belongs to the outer run client. A routed child must report its
+  // command's exit to its parent, so it never consumes detach keys itself.
+  let options = relay::Options {
+    tty,
+    stdin: true,
+    ..Default::default()
+  };
+  let exit = match relay::run(stream, options).await {
+    Ok(relay::Ended::Exited(exit)) => exit,
+    Ok(relay::Ended::Detached { .. }) => anyhow::bail!("the routed command detached without a detach request"),
     // The command's status is unknown; the parent sees 255, not success.
     Err(error) if error.ended() => {
       message(&error);

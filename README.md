@@ -96,6 +96,12 @@ needy run logs -f RUN    # the actor's console, followed
 needy report latest
 ```
 
+For an interactive driving program, use `needy run create -it --profile
+PROFILE`. `ctrl-]` detaches; `needy run attach RUN` returns to its terminal.
+Automated tests and live probes on a Linux KVM host from a Mac are recorded
+in the [interactive actor evidence](docs/ai/references/cli/2026-11-11-interactive-actor-evidence.md).
+Rebuild the actor image when updating to this terminal protocol.
+
 Needy keeps the trace and run directories in `$XDG_STATE_HOME/needy`, images in
 `$XDG_DATA_HOME/needy`, client tokens in `$XDG_CONFIG_HOME/needy` and the
 daemon's socket in `$XDG_RUNTIME_DIR/needy` (the state directory on macOS).

@@ -81,6 +81,9 @@ message ExecAttach {
   // Watch only: the executor ignores this client's input, signals and
   // window size.
   bool read_only = 4;
+  // With an empty `process_id`: the driving program of this run's actor,
+  // which must run on a terminal.
+  string run_id = 5;
 }
 
 message ExecRequest {

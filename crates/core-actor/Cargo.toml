@@ -40,7 +40,10 @@ needy-config.workspace = true
 needy-core-executor.workspace = true
 nix = { workspace = true, features = ["fs", "hostname", "ioctl", "mount", "net", "process", "reboot", "sched", "signal", "socket"] }
 procfs-core.workspace = true
-tokio-vsock.workspace = true
+# `tonic014`: the process service for a driving program on a terminal is
+# served on a vsock listener.
+tokio-vsock = { workspace = true, features = ["tonic014"] }
+tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]

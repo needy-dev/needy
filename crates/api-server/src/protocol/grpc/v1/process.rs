@@ -70,6 +70,12 @@ impl<P: Processes> ProcessService for Adapter<P> {
       }
       Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
         process: attach.process_id,
+        // An actor reaches only its own run.
+        run: if attach.run_id.is_empty() {
+          attach.run_id
+        } else {
+          run(&caller, attach.run_id)?
+        },
         replay: attach.replay,
         window: attach.window.map(|w| WindowSize {
           rows: w.rows,

@@ -41,6 +41,16 @@ ones; removed field numbers are `reserved`.
 
 ## Services
 
+Interactive actors (2026-11-11): `CreateRunRequest.tty` gives the driving
+program a terminal and `wait_for_attach` postpones startup until the first
+client subscribes; the latter requires `tty`. `Run.tty` reports whether a live
+run has that terminal. `ExecAttach` names either `process_id` or `run_id`, and
+the daemon resolves a run to its actor's driving program. `GetConfigResponse`
+carries `tty`, `wait_for_attach` and `process_port` to init. Init serves
+`ProcessService` at that vsock port; `Client::connect_firecracker_vsock`
+performs the host-side handshake. Host binaries and guest images must be
+rebuilt together. See the [automated and live-probe evidence](../cli/2026-11-11-interactive-actor-evidence.md).
+
 | Service | RPC | Shape | What it does |
 | --- | --- | --- | --- |
 | `HealthService` | `Check` | unary | Instance ID, version, role (`control` or `executor`) and platform. The only RPC that needs no token |

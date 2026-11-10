@@ -121,6 +121,10 @@ pub struct NewRun {
   pub actor_command: Vec<String>,
   /// Who asks for the run.
   pub by: Option<Principal>,
+  /// Run the driving program on a terminal of this size.
+  pub tty: Option<WindowSize>,
+  /// Start only after the first terminal client subscribed (`run create -it`).
+  pub wait_for_attach: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,6 +146,8 @@ pub struct RunInfo {
   /// How the actor's driving program ended; `None` while it runs, without
   /// an actor, or when the VM ended before the program reported its exit.
   pub actor_exit: Option<Exit>,
+  /// The driving program runs on a terminal.
+  pub tty: bool,
   /// Why the run failed, with its causes.
   pub failure: Option<String>,
 }
@@ -254,8 +260,11 @@ pub enum ExecOpen {
   Start(ExecSpec),
   /// `window` is the attaching client's terminal size, if it has one; a
   /// `read_only` client only watches.
+  /// An empty `process` with a `run` attaches to the run's driving
+  /// program.
   Attach {
     process: String,
+    run: String,
     replay: bool,
     window: Option<WindowSize>,
     read_only: bool,
@@ -378,6 +387,13 @@ pub struct GuestConfig {
   pub copy_in: Vec<GuestCopy>,
   pub mirror_out: Vec<GuestCopy>,
   pub hwmon_faults: Vec<GuestFault>,
+  /// The driving program's terminal; `None` for none.
+  pub tty: Option<WindowSize>,
+  /// The vsock port the guest serves `ProcessService` on when the driving
+  /// program has a terminal.
+  pub process_port: u32,
+  /// Subscribe the first terminal client before starting the program.
+  pub wait_for_attach: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

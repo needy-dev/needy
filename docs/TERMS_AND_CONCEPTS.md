@@ -23,6 +23,11 @@ The program inside an actor that drives the work: an agent harness, a test
 suite or an acceptance script. Needy never routes the driving program itself;
 only the commands it starts.
 
+With `run create -t`, the driving program has a terminal; `-it` also
+attaches immediately. `run attach RUN` reconnects to that terminal, and
+detaching leaves the run alive. Init keeps its output in the actor's console
+while no client is attached. See the [automated and live-probe evidence](ai/references/cli/2026-11-11-interactive-actor-evidence.md).
+
 ### Harness
 
 One kind of driving program: an agent loop such as opencode, Codex or an

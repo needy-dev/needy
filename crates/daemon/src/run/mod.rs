@@ -63,6 +63,13 @@ pub struct Run {
   pub state: State,
   /// The actor's driving program.
   pub actor_command: Vec<String>,
+  /// The driving program's terminal size at the start; `None` runs it
+  /// without one.
+  pub tty: Option<needy_api_server::control::WindowSize>,
+  /// The actor's process service for that terminal, once connected.
+  pub terminal: tokio::sync::OnceCell<Arc<Instance>>,
+  /// The initial interactive client must subscribe before the program starts.
+  pub wait_for_attach: bool,
   pub recipe: Option<CompiledRecipe>,
   pub injector: Arc<Injector>,
   pub trace: Dispatch,
@@ -164,6 +171,7 @@ impl Run {
       // program's exit has none; `actor.vm.exit` in the trace has the VM's.
       actor_exit: lock(&self.actor_exit).clone(),
       failure: lock(&self.failure).clone(),
+      tty: self.tty.is_some(),
     }
   }
 
@@ -357,6 +365,9 @@ impl Registry {
       profile: record.profile_name,
       actor_exit: record.actor_exit,
       failure: record.failure,
+      // NOTICE: `state.db` does not keep whether the driving program had a
+      // terminal; an ended run cannot be attached anyway.
+      tty: false,
     })
   }
 
@@ -506,6 +517,9 @@ impl Daemon {
       dir,
       state: State::new(),
       actor_command,
+      tty: request.tty,
+      wait_for_attach: request.wait_for_attach,
+      terminal: tokio::sync::OnceCell::new(),
       recipe,
       trace,
       executors: Mutex::new(BTreeMap::new()),

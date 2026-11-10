@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use needy_api_server::control::Caller;
+use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
 use needy_core::types::{Network, RunState};
@@ -19,12 +19,16 @@ use needy_core_actor::host::{gateway, vm};
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
+use crate::pool::Instance;
 use crate::run::Run;
 use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 
 /// Ports the actor reaches on the host over vsock.
 pub const GUEST_PORT: u32 = 7000;
 pub const GATEWAY_PORT: u32 = 7001;
+/// The port the guest serves `ProcessService` on for a driving program on
+/// a terminal; the host connects to it.
+pub const PROCESS_PORT: u32 = 7002;
 
 // NOTICE: the guest's state is not kept, so Firecracker gets a short time to
 // exit on `SIGTERM` before it is killed; a run's stop waits this long at
@@ -84,6 +88,40 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   daemon.save_instance(&record).await;
   run.tasks.spawn(watch(daemon.clone(), run.clone(), vm, actor));
   Ok(())
+}
+
+/// How long an attach waits for the actor's process service: the guest
+/// serves it once it started the driving program, after boot and setup.
+// NOTICE: setup includes workspace mounts and copy-in, which take seconds on
+// a large workspace; a minute covers them, and an attach to a run whose
+// actor never serves its terminal fails then.
+const TERMINAL_WAIT: Duration = Duration::from_secs(60);
+
+/// The process service of `run`'s actor for its driving program on a
+/// terminal, reached through the VM's vsock device. Waits for the guest to
+/// serve it while the run runs.
+pub async fn terminal(run: &Arc<Run>) -> Result<Arc<Instance>, ControlError> {
+  let path = vm::vsock(&run.dir);
+  let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
+  loop {
+    // Bound the connection itself, including the Firecracker handshake:
+    // a peer that accepts but never answers must not hold `run attach`.
+    let connected = tokio::select! {
+      () = run.cancel.cancelled() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
+      connected = tokio::time::timeout_at(deadline, needy_api_client::Client::connect_firecracker_vsock(&path, PROCESS_PORT)) => {
+        connected.map_err(|_| ControlError::Unavailable(format!("timed out waiting for the terminal of run {}", run.id)))?
+      }
+    };
+    let error = match connected {
+      Ok(client) => return Ok(Instance::actor(&run.id, Arc::new(client))),
+      Err(e) => e,
+    };
+    if tokio::time::Instant::now() >= deadline || run.cancel.is_cancelled() {
+      return Err(ControlError::Unavailable(format!("the actor of run {} does not serve its terminal: {error}", run.id)));
+    }
+    tracing::debug!("run {}: the actor's terminal is not served yet: {error}", run.id);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+  }
 }
 
 /// Serves the run's API to the actor on its vsock port, as

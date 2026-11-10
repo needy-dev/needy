@@ -23,9 +23,9 @@ use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::Daemon;
 use crate::pool::{Instance, Slot};
 use crate::run::{self, Run};
+use crate::{Daemon, actor};
 use crate::{routing, store};
 
 type Sender = mpsc::Sender<Result<ExecOutput, ControlError>>;
@@ -120,6 +120,25 @@ impl Daemon {
     Ok(Instance::runner(runner, &self.links))
   }
 
+  /// The driving program of run `id`'s actor, on its terminal: the
+  /// process the actor's process service runs.
+  async fn driving_program(&self, id: &str) -> Result<(String, Known), ControlError> {
+    let run = self.runs.find_open(id).await?;
+    if run.tty.is_none() {
+      return Err(ControlError::Failed(format!(
+        "the driving program of run {} has no terminal; create the run with `needy run create -t`",
+        run.id
+      )));
+    }
+    let instance = run.terminal.get_or_try_init(|| actor::terminal(&run)).await?.clone();
+    let listed = instance.handle.executor.list_processes(ListProcessesRequest::default()).await.map_err(|s| relayed(s.into()))?;
+    let Some(process) = listed.processes.into_iter().find(|p| p.tty) else {
+      return Err(ControlError::Unavailable(format!("the actor of run {} serves no terminal", run.id)));
+    };
+    let known = self.sighted(&process.process_id, &instance, None, Some(run.id.clone()));
+    Ok((process.process_id, known))
+  }
+
   fn process(&self, process: &str) -> Result<Known, ControlError> {
     let processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     processes.get(process).cloned().ok_or_else(|| ControlError::NotFound("no such process".into()))
@@ -195,16 +214,25 @@ impl Processes for Daemon {
       }
       ExecOpen::Attach {
         process,
+        run,
         replay,
         window,
         read_only,
       } => {
-        let known = self.process(&process)?;
+        let (process, known) = match (process.as_str(), run.as_str()) {
+          ("", "") => return Err(ControlError::Invalid("name a process or a run".into())),
+          ("", run) => self.driving_program(run).await?,
+          (process, "") => (process.to_string(), self.process(process)?),
+          _ => return Err(ControlError::Invalid("name a process or a run, not both".into())),
+        };
         // An attach forwards the caller's input: keystrokes in an SFTP or tar
         // stream corrupt it, and its output is binary.
         if let Some(origin) = known.origin.filter(|o| o.is_internal()) {
           return Err(ControlError::denied(format!("process {process} is needy's own (origin {origin}); it cannot be attached")));
         }
+        // An attach shares the process's run lifetime even though it adds
+        // no second exec record to that run's trace or state.db.
+        let owner = known.run.as_deref().and_then(|id| self.runs.exact(id));
         let relay = Relay {
           instance: known.instance,
           trace: None,
@@ -217,7 +245,7 @@ impl Processes for Daemon {
           requested,
         };
         (
-          None,
+          owner,
           relay,
           Vec::new(),
           Upstream::Attach {
@@ -248,6 +276,7 @@ impl Processes for Daemon {
           replay,
           window: window.map(domain::proto_window),
           read_only,
+          run_id: String::new(),
         };
         ExecStream::attach(executor, attach).await
       }

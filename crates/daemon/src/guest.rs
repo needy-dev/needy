@@ -130,6 +130,9 @@ impl Guest for Daemon {
       copy_in,
       mirror_out,
       hwmon_faults,
+      tty: run.tty,
+      process_port: crate::actor::PROCESS_PORT,
+      wait_for_attach: run.wait_for_attach,
     })
   }
 

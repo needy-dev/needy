@@ -56,6 +56,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     profile: "fake".into(),
     actor_exit: None,
     failure: None,
+    tty: false,
   }
 }
 

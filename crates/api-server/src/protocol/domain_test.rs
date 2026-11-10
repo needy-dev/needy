@@ -4,6 +4,16 @@ use needy_core::types::Origin;
 use super::*;
 
 #[test]
+fn waiting_for_a_terminal_client_requires_a_terminal() {
+  let request = v1::CreateRunRequest {
+    profile_name: "example".into(),
+    wait_for_attach: true,
+    ..Default::default()
+  };
+  assert_eq!(new_run(request).unwrap_err(), Error::Missing("terminal for wait_for_attach"));
+}
+
+#[test]
 fn every_origin_survives_the_wire() {
   for value in [
     Origin::Cli,
