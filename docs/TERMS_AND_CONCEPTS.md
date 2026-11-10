@@ -53,7 +53,8 @@ A `needy daemon` process. In **control** mode it is the control plane:
 lifecycle of actors and executor instances, routing, the actor gateway, the
 trace and the runner registry. In **executor** mode it only runs processes on
 its own machine. In **runner** mode it joins a control plane as a runner,
-sends it heartbeats, and runs processes as in executor mode.
+sends it heartbeats, and runs the processes the control plane asks for over
+the connection it dialed; it listens nowhere.
 
 *Avoid*: server.
 
@@ -70,11 +71,25 @@ Runners are registered (`needy runner token create`, then a join), listed
 runner's name is a DNS label. Designed in
 [Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md).
 
-Roles do not yet carry their runtimes or providers, and profiles do not yet
-select runners; until then a runner also serves the executor role on its own
-listener, which a profile's `remote` executor dials.
+A runner dials the control plane and keeps a **control stream** open on which
+the control plane announces **tasks**; for an exec the runner opens a **task
+stream** that carries the exec. `needy exec --runner NAME` runs a command on a
+connected runner's machine. Roles do not yet carry their runtimes or
+providers, and profiles do not yet select runners; until then a profile
+reaches another machine through a `remote` executor and `needy daemon --mode
+executor` there.
 
 *Avoid*: agent, worker, node.
+
+### Control stream and task stream
+
+A runner's **control stream** is the one long-lived stream it opens to the
+control plane (`RunnerService.Control`) while it runs; it connects again with
+backoff when the stream drops. The control plane announces each **task** on
+it with an ID: listing or killing processes, answered on the control stream,
+or an exec, for which the runner opens a **task stream**
+(`RunnerService.Task`) that carries the exec's own messages. A runner whose
+control stream is not open is *not connected*; tasks for it fail at once.
 
 ### Join token
 
@@ -101,7 +116,8 @@ heartbeat, and the old one stops working once the runner uses the new one;
 One execution of a driving program in an actor, with the executor instances
 bound to it, started from a profile, and its trace and report. One RL rollout
 is one run. A run can also have no actor, for `needy exec`
-(`needy run create --no-actor`, until `exec --runner` replaces it; see
+(`needy run create --no-actor`, until profiles place executors on runners;
+`exec --runner` already covers a runner's own machine; see
 [Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)).
 
 A run is `creating` while it acquires its executors, copies files in and

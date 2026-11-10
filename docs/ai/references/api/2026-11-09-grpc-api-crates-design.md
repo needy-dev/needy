@@ -3,8 +3,8 @@
 **Status**: current, 2026-11-10. Describes the schema, the generation and the
 client and server crates as they are after slice 7 of the
 [module layout redesign](../architecture/2026-11-09-module-layout-redesign.md)
-and slice 3 of [runners and runs](../architecture/2026-11-10-runner-and-run-design.md)
-(`RunnerService`, per-request callers).
+and slices 3 and 4 of [runners and runs](../architecture/2026-11-10-runner-and-run-design.md)
+(`RunnerService`, per-request callers; runners' control and task streams).
 
 The daemon speaks gRPC only. The previous HTTP API was removed on 2026-11-09.
 The layout follows AUV: one canonical `proto/` tree, a crate of generated
@@ -50,7 +50,7 @@ ones; removed field numbers are `reserved`.
 | | `GetRunLogs` | server stream | The actor's console output so far; `NOT_FOUND` when the run has no actor |
 | | `Decide` | unary | Where a command runs and how it is rewritten. The actor's proxy calls it with the command's ancestry |
 | `ProcessService` | `Exec` | bidirectional stream | Start (`ExecStart`) or attach (`ExecAttach`), then stdin, signals and resizes; responses carry `event`, `started`, output, `exited` or `error` |
-| | `ListProcesses`, `KillProcess` | unary | The process table; a signal by name |
+| | `ListProcesses`, `KillProcess` | unary | The process table, of a run or a runner (`runner`); a signal by name |
 | `GuestService` | `GetConfig` | unary | The actor's configuration: user, routed names, identity, mounts, driving program, files, hwmon faults |
 | | `PushEvents` | client stream | Events observed inside the actor, such as an injected hwmon fault |
 | | `ReportExit` | unary | The driving program's exit |
@@ -58,8 +58,10 @@ ones; removed field numbers are `reserved`.
 | `RunnerService` | `CreateJoinToken` | unary | A join token: TTL, uses, allowed roles, labels. Its secret is in the response only |
 | | `ListJoinTokens`, `RevokeJoinToken` | unary | Every join token with its state (`valid`, `expired`, `used-up`, `revoked`), without secrets |
 | | `Join` | unary | Join token, name, roles, labels → the runner's credential (once) and the heartbeat interval. Needs no bearer token |
-| | `Heartbeat` | unary | A runner's roles and labels; answers the interval and, after a rotation, a new credential. The only method a runner credential reaches |
-| | `ListRunners`, `RotateRunner`, `RemoveRunner` | unary | Runners with their status (`online`, `offline`, `removed`); ask for a new credential; revoke one |
+| | `Heartbeat` | unary | A runner's roles and labels; answers the interval and, after a rotation, a new credential |
+| | `ListRunners`, `RotateRunner`, `RemoveRunner` | unary | Runners with their status (`online`, `offline`, `removed`); ask for a new credential; revoke one (which also ends its control stream) |
+| | `Control` | bidirectional stream | A runner's control stream, opened by the runner: the control plane sends `RunnerTask`s (`exec`, `list_processes`, `kill_process`) with IDs, the runner `TaskResult`s for list and kill |
+| | `Task` | bidirectional stream | One exec task's stream, opened by the runner: first `task_id`, then the exec's `ExecResponse`s up (or a `TaskError`) and its `ExecRequest`s down |
 
 Who serves what:
 
@@ -74,8 +76,16 @@ Who serves what:
   names, and `CreateRun`, `StopRun` and `GetRunLogs` are refused.
   The control socket's caller is `Caller::Cli`, which `GuestService` refuses.
 - On the control socket, a request with a runner's credential is from
-  `Caller::Runner { name }` and reaches `RunnerService.Heartbeat` only; the
-  other `RunnerService` methods but `Join` need the operator (`Caller::Cli`).
+  `Caller::Runner { name }` and reaches `RunnerService.Heartbeat`, `Control`
+  and `Task` only; an operator's token gets `PERMISSION_DENIED` from
+  `Control` and `Task`. The other `RunnerService` methods but `Join` need the
+  operator (`Caller::Cli`).
+- `ExecStart.runner` and `ListProcessesRequest.runner` name a runner's
+  machine outside any run (`needy exec --runner`, `ps --runner`); with
+  `run_id` it is `INVALID_ARGUMENT`, from an actor `PERMISSION_DENIED`, and a
+  runner whose control stream is not open is `UNAVAILABLE` (`runner NAME is
+  not connected`). The stream protocol is in
+  [As built: slice 4](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-4).
 
 ### Exec
 
@@ -145,7 +155,8 @@ then without `.profile`, or the directory's name for a file named only
 
 ```text
 src/
-  lib.rs     Client: connect to unix:/path, http(s)://, vsock://CID:PORT (Linux); with_token
+  lib.rs     Client: connect to unix:/path, http(s)://, vsock://CID:PORT (Linux); with_token;
+             connect_kept_alive (HTTP/2 pings); Executor, which Client implements
   ready.rs   wait(endpoint, within): connect and retry until the health check answers
   error.rs   Error and Kind
   exec.rs    ExecStream: start, attach, input (stdin, eof, signal, resize), next event, run to completion
@@ -160,6 +171,11 @@ tests/       exec and files against an in-process ExecutorService
   transient (the server is not up: a transport error or `UNAVAILABLE`); a
   malformed endpoint, or vsock outside Linux, fails at once. Providers wait
   10 s for an executor, the guest 5 s for the daemon's vsock listener.
+- **`Executor`** is what serves `ProcessService` to a caller: `exec` (a
+  request channel in, the responses out), `list_processes`, `kill_process`.
+  `Client` implements it over gRPC; the control daemon implements it for a
+  connected runner over the runner's control and task streams, so
+  `ExecStream` and `files` take `&dyn Executor` and work on both.
 - **`Kind`** is the inverse of the server's status table: `Unauthenticated`,
   `Denied`, `NotFound`, `Invalid`, `Failed`, `Exhausted`, `Unavailable`,
   `Other`. `Error::refusal` decodes a refused exec's `ExecRefusal` events.
@@ -193,13 +209,17 @@ src/
   `decide`), `Processes` (`exec`, `list`, `kill`), `Guest` (`config`,
   `event`, `exit`, `fetch_files`, `push_files`) and `Runners`
   (`create_join_token`, `join_tokens`, `revoke_join_token`, `join`,
-  `heartbeat`, `runners`, `rotate`, `remove`, and `credential` for the
-  middleware) take and return
-  `needy_core` and `control` types. `Processes::exec` takes an `ExecOpen`
+  `heartbeat`, `runners`, `rotate`, `remove`, `credential` for the
+  middleware, and `control` and `task` for a runner's streams) take and
+  return `needy_core` and `control` types; `control` and `task` take and
+  return the generated stream messages (`FromRunner`, `ToRunner`), since a
+  task stream carries the exec's `ExecRequest` and `ExecResponse` unchanged. `Processes::exec` takes an `ExecOpen`
   (start or attach) and the rest of the caller's stream as `ExecInput`s, and
   returns a stream of `ExecOutput`s. The executor's `ExecutorService` still
   implements the generated `ProcessService`, which `Server::process_service`
-  serves as is, since `core-executor` sits below `api-server`.
+  serves as is, since `core-executor` sits below `api-server`;
+  `ExecutorService::open` serves the same exec from any request stream, which
+  a runner uses for its task streams.
 - **`Caller`**: each server has its listener's caller, `Cli` on the
   control socket and on an executor daemon, `Actor { run }` on an actor's
   listener. The middleware (`Credentials`) puts the caller of each request

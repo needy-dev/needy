@@ -1,10 +1,11 @@
 # Runners and runs
 
-**Status**: design, 2026-11-10. Slice 2 is partly implemented: *session* is
-renamed *run* everywhere, while `--no-actor` stays as `needy run create
---no-actor` until `exec --runner` exists. Slice 3 (runner registry and
-enrollment) is implemented; see [As built: slice 3](#as-built-slice-3).
-Nothing else is implemented. The owner chose
+**Status**: design, 2026-11-10. Slice 2 is implemented but for one piece:
+*session* is renamed *run* everywhere and `exec --runner` exists, while
+`needy run create --no-actor` stays until slice 5 lets profiles place
+executors on runners. Slice 3 (runner registry and enrollment) and slice 4
+(runner dial-out) are implemented; see [As built: slice 3](#as-built-slice-3)
+and [As built: slice 4](#as-built-slice-4). Nothing else is implemented. The owner chose
 the model (runners as registered machines; actors and executors as what runs on
 them; runs instead of sessions); open questions are at the end. This note
 absorbs slice 9 (persistence) of the
@@ -140,7 +141,9 @@ Consequences:
   with outbound connections only. Only the control plane is reachable (directly
   or through Cloudflare Tunnel + Access).
 - A runner that reconnects reports the instances and processes it still has;
-  the control plane reconciles them (below).
+  the control plane reconciles them (below; slice 6, not built).
+
+The streams as built are in [As built: slice 4](#as-built-slice-4).
 
 ## Ownership and cleanup
 
@@ -185,8 +188,9 @@ slices that touch them; `--no-actor` sessions are removed in favor of
 3. **Runner registry and enrollment** (done, 2026-11-10): `state.db` with
    runners, join tokens, credentials; `runner token create/ls/revoke`,
    `runner ls/rotate/rm`; `daemon --mode runner --join`.
-4. **Runner dial-out**: control stream and per-task streams; the `remote`
-   executor provider is replaced by runners.
+4. **Runner dial-out** (done, 2026-11-10): control stream and per-task
+   streams; `exec`, `ps` and `fs cp` reach a runner with `--runner`. The
+   `remote` executor provider stays until slice 5 replaces it.
 5. **Scheduling and profiles**: `runner:` selectors for actors and executors;
    `profile check` through the control plane.
 6. **Ownership and reconciliation**: run-scoped cleanup on runners; restart
@@ -271,16 +275,92 @@ runner's name may join again with a new join token.
 [--labels …]` joins on its first start; later starts reuse `runner.json` and
 need neither the join token nor `--join`. The token never appears in the
 process's arguments. `--name` defaults to the host name's first label in
-lowercase. A restart under another name than the stored one is refused. It
-still serves the executor role on `--listen` as `--mode executor` does, and
-profiles still reach it through a `remote` executor (`TODO(runner-dial-out)`,
-slice 4). Roles are declared by `--roles` (default `executor`); detecting them,
+lowercase. A restart under another name than the stored one is refused. In
+slice 3 it still served the executor role on `--listen` as `--mode executor`
+does; slice 4 removed that listener (see below). Roles are declared by `--roles` (default `executor`); detecting them,
 such as `/dev/kvm` for the actor role, is a follow-up (`TODO(runner-roles)`).
 
 **Status table.** `ControlError::Unauthenticated` → `UNAUTHENTICATED` was
 added for an invalid, expired, spent or revoked join token; a role or label
 outside the token's scope is `PERMISSION_DENIED`, a name that is taken
 `FAILED_PRECONDITION`.
+
+## As built: slice 4
+
+**Streams.** Two new `RunnerService` methods, both reached only by a runner's
+credential (`Caller::Runner`); an operator's token gets `PERMISSION_DENIED`:
+
+| RPC | Opened by | Up (runner → control plane) | Down (control plane → runner) |
+| --- | --- | --- | --- |
+| `Control(stream ControlRequest) returns (stream ControlResponse)` | the runner, once, kept open | `TaskResult { task_id, list_processes \| kill_process \| error }` | `RunnerTask { id, exec \| list_processes \| kill_process }` |
+| `Task(stream TaskRequest) returns (stream TaskResponse)` | the runner, once per exec task | first `task_id`, then `exec: ExecResponse` …, or `error: TaskError` | `exec: ExecRequest`, the first being the start or the attach |
+
+For an exec (`exec`, `attach`, `fs cp`, which runs `tar` over exec) the
+control plane announces `RunnerTask { id, exec }` on the control stream and
+waits for the runner to open `Task` with that ID; the exec's own
+`ExecRequest` and `ExecResponse` messages then travel unchanged, so terminal
+mode, window sizes, signals, replay, backpressure and refusals behave as on
+any executor. The runner sends the first response only once its process
+service accepted the start or attach, or `TaskError { code, message }` (the
+gRPC status, such as `FAILED_PRECONDITION` for a command that cannot start)
+in its place; the control plane returns that status to its caller as an
+executor would. List and kill are one request and one reply, so their
+result comes back on the control stream (`TaskResult`): a task stream for
+them would cost a round trip and carry nothing. Task IDs count up per
+control stream. The control plane waits 10 s for a task stream or a result;
+a runner whose connection died without a reset then fails the task instead
+of holding the caller.
+
+On the control plane a connected runner is an `Executor`
+(`needy_api_client::Executor`, which `Client` also implements), so the relay,
+`ps`, `kill` and file copies use one code path for a daemon reached over gRPC
+and a runner reached over its streams. The executor looks the runner's
+current stream up on every call, so a process started before a reconnect
+can be listed, attached and killed after it.
+
+**Heartbeats stay unary.** Liveness (`online` within three intervals) and
+the crash-safe rotation pickup of slice 3 pair one request with one response
+and were verified that way; the control stream answers a different question,
+whether a task can reach the runner now. A runner whose control stream is not
+open fails a task at once with `runner NAME is not connected`
+(`UNAVAILABLE`), even while `runner ls` still shows it `online` from its last
+heartbeat. Moving heartbeats onto the control stream is a follow-up if one
+connection per runner matters.
+
+**Reconnect.** The runner connects with HTTP/2 pings every 20 s
+(`Client::connect_kept_alive`), so a connection that dies without a reset
+fails within a minute. When its control stream ends or fails it connects
+again with exponential backoff (`backon`): 0.5 s doubling, with jitter, at
+most 15 s, starting over after a stream that was open. A credential the
+control plane refuses ends the runner as a refused heartbeat does. A new
+control stream of the same runner replaces the older one. Execs in flight
+when the connection drops end for their callers with `ended` ("the
+connection ended before the command exited: runner NAME disconnected", exit
+255 in `needy exec`). On the runner, an exec whose task stream ended has lost
+its client: a process it did not detach gets the same hangup as with any
+client that leaves (when it next writes, see the follow-ups), and detached
+processes keep running. The runner does not report or reconcile its
+processes when it reconnects (`TODO(runner-ownership)`, slice 6).
+
+**Ends.** `runner rm` ends the runner's control stream, so the runner connects
+again at once, is refused and exits. The control daemon ends every control
+stream when it stops serving, so its shutdown grace period does not wait for
+them.
+
+**No listener.** `needy daemon --mode runner` listens nowhere and refuses
+`--listen` and `--token-env`; it serves its processes only over the streams it
+opened. Nothing needed the slice 3 listener: profiles reach another machine
+through `needy daemon --mode executor` and a `remote` executor, as before.
+
+**Profiles: the CLI-only cut.** Profiles cannot place executors on runners
+yet; that needs the `runner:` selectors, pooling by key and a runner's
+platform for workspace mounts, which are slice 5
+(`TODO(runner-select)` in the pool and on the `remote` provider). A runner's
+machine is reachable outside any run: `needy exec --runner NAME`, `needy ps
+--runner NAME`, `needy fs cp --runner SRC NAME:DIR`; attach and kill go by
+process ID. `ps` without a filter also lists every connected runner's
+processes. A command names a run or a runner, not both (`INVALID_ARGUMENT`).
+`needy run create --no-actor` stays for Docker executors until slice 5.
 
 ## Open questions
 
@@ -296,3 +376,9 @@ outside the token's scope is `PERMISSION_DENIED`, a name that is taken
   join.
 - **Pruning**: removed runners and spent, expired or revoked join tokens stay
   in `state.db` and in the listings. Prune them after a while, or on request?
+- **One connection per runner**: heartbeats stay unary beside the control
+  stream (as built). Should they move onto it, so that `online` means "a task
+  can reach it now"?
+- **Silent processes after a lost client**: an exec whose client left, on a
+  runner as on any executor, ends only when the process next writes. Should
+  the executor end a non-detached process as soon as its stream ends?

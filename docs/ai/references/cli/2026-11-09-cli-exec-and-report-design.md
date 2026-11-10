@@ -11,9 +11,9 @@ note. Profiles are described in
 needy daemon   [--mode control|executor|runner]  # control plane; executor or runner on every other machine
 needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
 needy run  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
-needy exec     [--run ID] -- CMD …         # run a command through placement
-needy ps [-a] [--run ID] | attach ID | kill ID   # manage detached processes
-needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
+needy exec     [--run ID | --executor NAME | --runner NAME] -- CMD …   # run a command through placement
+needy ps [-a] [--run ID | --runner NAME] | attach ID | kill ID   # manage detached processes
+needy fs       cp [--run ID | --runner] SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
 needy report   RUN|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
 needy runner   token create [--ttl 1h] [--uses N] [--roles R,…] [--labels K=V,…] | token ls | token revoke ID
@@ -34,7 +34,9 @@ workspace mount). The last three are needy's own processes; `ps` hides them
 unless `-a/--all` asks for them, in the table and in JSON alike, whose
 objects carry `run` and `origin`. The control daemon records the origin
 from the start it relays; a process it did not start shows `-` (JSON
-`null`). `--run ID` lists one run's processes. `STATE` is `running`,
+`null`). `--run ID` lists one run's processes, `--runner NAME` one runner's;
+without either, `ps` lists every executor's and every connected runner's.
+`STATE` is `running`,
 `exited` or `killed` (a signal ended it); `EXIT` is the exit code or the
 signal name, empty while the process runs. JSON carries `state`,
 `exit_code` and `signal` as separate fields.
@@ -84,11 +86,25 @@ On the machine, `needy daemon --mode runner --join ENDPOINT
 --join-token-env NAME` (or `--join-token-file PATH`) joins once and keeps its
 credential in `runner.json` in its state directory; later starts need neither
 the token nor `--join`. `--name` defaults to the host name's first label,
-`--roles` to `executor`; `--labels` adds `KEY=VALUE` labels. It serves the
-executor role on `--listen` as `--mode executor` does, and exits 1 when the
-control plane refuses its credential. The control daemon's
+`--roles` to `executor`; `--labels` adds `KEY=VALUE` labels. It dials the
+control plane and listens nowhere (`--listen` and `--token-env` are refused
+in runner mode), connects again with backoff when its connection drops, and
+exits 1 when the control plane refuses its credential. The control daemon's
 `--heartbeat-interval` (15 s) sets how often runners report. See
-[runners and runs](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-3).
+[runners and runs](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-3)
+and [slice 4](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-4).
+
+`needy exec --runner NAME -- CMD` runs a command on a connected runner's
+machine, outside any run, with every option of `exec` (`-t`, `-T`, `-d`,
+`--output`); `ps --runner NAME` lists that runner's processes, and `fs cp
+--runner SRC NAME:DIR` (or `NAME:PATH DIR`) copies to or from it. `attach`
+and `kill` take the process ID as for any process. A runner that is not
+connected fails at once: `needy: runner NAME is not connected`, exit 1. A
+command in flight when the runner's connection drops exits 255 with `needy:
+the connection ended before the command exited: runner NAME disconnected`.
+`--runner` excludes `--run` and `--executor`. Profiles do not place executors
+on runners yet (slice 5); `run create --no-actor` stays for Docker executors
+until then.
 
 Benchmarks are a developer task, not a product command: `cargo xtask bench`
 runs the latency and throughput probes, and `cargo xtask bench run --profile
@@ -142,8 +158,8 @@ Deliberately absent:
   of the actor. Custom analysis, such as LLM judges or regression across models,
   runs outside needy on exported data.
 - **No device `attach`.** A machine that can execute runs `needy daemon` and the
-  actor's daemon connects to it. Executors behind NAT may later get a dial-out
-  option on `needy daemon`. `needy attach` reattaches to a detached process.
+  actor's daemon connects to it, or joins as a runner, which dials the control
+  plane (`--mode runner`). `needy attach` reattaches to a detached process.
 
 ## `needy exec`
 
@@ -240,10 +256,12 @@ Required schema changes:
   replays and follows output; add `ListProcesses` and `KillProcess`.
 - Each response that reports a placement names the executor.
 
-If executors later dial out, use one control stream plus one stream per task,
-all opened by the executor: the daemon announces task 42 on the control stream,
-and the executor opens `Exec(task_id=42)`. This stays plain gRPC without a
-custom multiplexer.
+Runners dial out with one control stream plus one stream per task, all opened
+by the runner: the control plane announces task 42 on the control stream
+(`RunnerService.Control`), and the runner opens `RunnerService.Task` naming
+task 42, which carries the exec's own messages. This stays plain gRPC without
+a custom multiplexer. Built in slice 4 of
+[runners and runs](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-4).
 
 ## Trace
 

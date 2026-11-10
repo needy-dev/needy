@@ -121,18 +121,21 @@ exposing it through a tunnel such as `ssh -R` or Cloudflare Tunnel:
 NEEDY_TOKEN=... needy daemon --mode executor --listen 127.0.0.1:7401 --token-env NEEDY_TOKEN
 ```
 
-A machine can also join the control plane as a **runner** with a join token,
-then report to it with its own credential; `needy runner ls` lists runners and
-whether they are online. Transport encryption comes from the tunnel:
+A machine can also join the control plane as a **runner** with a join token.
+A runner dials the control plane and keeps that connection open, so it needs
+no listening port, only a way to reach the control plane (such as `ssh -L`).
+Transport encryption comes from the tunnel:
 
 ```sh
 needy runner token create --ttl 1h --roles executor     # on the control host
 JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
 needy runner ls
+needy exec --runner mac -- uname -a                     # on the control host
+needy ps --runner mac
 ```
 
-Profiles do not select runners yet; a runner also serves the executor role as
-above. See [runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md).
+Profiles do not select runners yet; a profile reaches another machine through
+an executor daemon as above. See [runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md).
 
 Examples:
 
