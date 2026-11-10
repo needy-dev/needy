@@ -842,6 +842,54 @@ left ends only when it next writes, on a runner as on the local executor
 (the control daemon's relay notices the client is gone on its next output).
 It is an open question in the design.
 
+## Scheduling and profiles
+
+Slice 5 of [runners and runs](2026-11-10-runner-and-run-design.md#as-built-slice-5)
+(`4d734fa`): `runner:` selectors place the actor and executors; runners
+report their host in heartbeats; `profile check` asks the control plane; the
+`remote` provider and `run create --no-actor` are gone. Run on 2026-11-10.
+
+`make check` and `make test` pass on the Mac; `make check` on Linux. The
+daemon's tests join runners in process and set a runner's reported host to
+check a recipe against a CPU without AVX-512; every run in the daemon's and
+the CLI's tests starts a stand-in Firecracker.
+
+On one Mac (Apple silicon, macOS), a control daemon and runner `mac`
+(`executor` role, `os=darwin`) joined over the control socket:
+
+| Check | Result |
+| --- | --- |
+| A no-actor workflow: `exec -T --runner mac` of `uname -s`, of a command that exits 7 with stdout and stderr, `fs cp --runner` of a directory | Pass: `Darwin`; `rc=7`; the file reads back |
+| `run create --no-actor` | Refused by the argument parser, exit 2 |
+| `profile check` through the daemon: executors `mac: { runner: mac }`, `darwin: { runner: { labels: [os=darwin] } }`, `linux: { runner: { labels: [os=linux] } }`, `build: { runner: mac, provider: docker }`, `--cmd "swift build"` | `executors: build (runner mac), darwin (runner mac), linux (unresolved), mac (runner mac)`; `error: executors.build: runner mac cannot create Docker executors yet …`; `error: executors.linux: no connected runner with the executor role has labels os=linux; candidates: mac (no label os=linux)`; `swift build` on `executor mac`; exit 1 |
+| The same profile with `--local` | No findings (no selector resolved, no host CPU flags on macOS), exit 0 |
+| `actor: { runner: mac }` | `error: actor: runner mac cannot host an actor: its roles are executor`, exit 1 |
+| A profile with `runtime: remote` and `remote:` | `executors.mac.remote: remote executors were removed: join the machine as a runner … and select it with runner: NAME`, exit 1 |
+| `run create` of a runner-placed profile on a host without KVM | Refused before anything is acquired: `this host has no usable KVM` |
+| Nothing left | Pass |
+
+Across machines: a control daemon on the Linux KVM host (a 13th-generation
+Intel desktop CPU without AVX-512) on a loopback TCP listener with a control
+token and `--local-runner kvm`, built from a scratch copy of the committed
+tree, with the slice 4 actor image; runner `kvm` on the same host (`actor`
+and `executor` roles, `kvm=1,os=linux`); runner `mac` on the Mac joined
+through `ssh -L` only. The profiles carry runner selectors only, no URLs and
+no tokens.
+
+| Check | Result |
+| --- | --- |
+| `runner ls` from the Mac; `exec -T --runner mac` and `--runner kvm` of `uname -s` | Both `online`; `Darwin`, `Linux` |
+| `profile check` from the Mac of opencode-on-actor, commands-on-Mac (`actor: { runner: kvm }`, `executors: { mac: { runner: mac } }`, `--cmd "bash -c ls"`) | `actor: runner kvm (<the KVM host's CPU model>)`, `executors: mac (runner mac)`, both commands on `executor mac`, exit 0 |
+| `profile check` from the Mac of `actor: { runner: { labels: [kvm] }, recipe: builtin:gce-ubuntu-22.04 }` | Five errors from the KVM host's CPU: `Skylake-SP/Cascade Lake needs avx512f, but the host CPU (…) lacks it` (and `avx512dq`, `avx512cd`, `avx512bw`, `avx512vl`), warnings for host features to hide, exit 1. With `--local` on the Mac: no findings |
+| opencode in the actor on `kvm`, its shells on runner `mac`, the Mac workspace mounted in the actor (served by `/usr/libexec/sftp-server` through the runner's streams); `ollama` `qwen3:14b` on the host | Every run `finished`, exit 0. The model wrote `hello.py` into the Mac workspace in at least two of seven runs and ran `python3 hello.py` with the bash tool in one, which printed `Darwin` and the Mac's host name; the other runs answered without tool calls. `report`: `routed to mac 1`, `bash on mac 1 slowest 41 ms`. Each run's `sftp-server` on the Mac ended `killed SIGKILL` |
+| `examples/smoke` with `actor: { runner: { labels: [kvm] } }` and `build: { runner: kvm, provider: docker }`, from the host's CLI | `finished`: `google`, `hello-from-actor`, `hi-from-executor`, `routed exit=7`; `run ls` shows `build=docker`; `report`: 4 routed, 1 failed |
+| `examples/chaos`, placed the same way | `finished`: `Input/output error` on `broken.json`, `curl exit=126`, `+101.0°C ALARM (CRIT)`; `report`: 3 faults by kind; `result.txt` mirrored out |
+| `examples/cli`, placed the same way, its actor only waiting | `exec --run` of `uname -a` (rc 0) and `exit 4` (rc 4); the container carries `needy.run=<id>`; `run stop` releases it. A first version whose actor ran `sh -c 'while :; do sleep 3600; done'` had its `sleep` routed to the Docker executor by the profile's `**` rule; the examples now run `sleep infinity` as the driving program, which is never routed (`report`: 1 routed, `uname`) |
+| Nothing left | Pass: no daemon, Firecracker or container on the host; the Mac runner and the tunnel stopped |
+
+`needy report` still reads the local `trace.db` (slice 7), so reports were
+read on the host with its state directory.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
