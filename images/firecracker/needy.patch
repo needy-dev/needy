@@ -39,12 +39,18 @@ and https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8fac
 
 New file: SMBIOS tables in guest memory.
 Source: DMTF SMBIOS DSP0134 3.7.0, https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.7.0.pdf
-- `_SM3_` entry point: section 5.2.2, Table 2 (length 18h, version 3.0,
-  64-bit table address), found in the 000F0000h-000FFFFFh scan range.
+- `_SM_` entry point: section 5.2.1, Table 1 (length 1Fh, version 2.4,
+  `_DMI_` intermediate anchor, 32-bit table address), found in the
+  000F0000h-000FFFFFh scan range; Linux looks for it on 16-byte boundaries
+  there, https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi_scan.c#L581-L643
+  and #L741-L757.
 - Type 0: section 7.1, Table 6; characteristics bit 3 "not supported",
-  Table 7; extension bytes, Tables 8 and 9.
-- Type 1: section 7.2; UUID byte order, Table 11 (first three fields
-  little-endian); wake-up type 06h power switch, Table 12.
+  Table 7; extension bytes, Tables 8 and 9 (byte 2 bit 2, targeted content
+  distribution).
+- Type 1: section 7.2; UUID byte order, section 7.2.1 (the first three
+  fields are little-endian only from version 2.6; Linux reads a 2.4 UUID in
+  the order written, dmi_scan.c#L254-L263); wake-up type 06h power switch,
+  Table 12.
 - Type 2: section 7.3; feature flags bit 0 hosting board, Table 14; board
   type 0Ah motherboard, Table 15.
 - Type 3: section 7.4; chassis types, Table 17; state 03h safe, Table 18;
@@ -54,12 +60,13 @@ The DEFAULTS are a Google Compute Engine identity; the strings match public
 `dmidecode` output from GCE VMs, e.g.
 https://github.com/sosreport/sos/issues/2699#issuecomment-925894041 (an
 issue page, not pinned).
-REVIEW: the same output shows real GCE serials as `GoogleCloud-` plus the 32
-hex digits of the system UUID and the board serial `Board-GoogleCloud-` plus
-the same 32; the 16-digit board serial below matches neither. It also shows
-"SMBIOS 2.4 present" with a 32-bit entry point, not 3.0, and BIOS
-characteristics extension byte 2 bit 2 (targeted content distribution, 04h),
-where the Type 0 bytes below set bit 3 (UEFI supported, 08h).
+The same output gives the formats used below: the system serial
+`GoogleCloud-` and the board serial `Board-GoogleCloud-`, each followed by the
+32 hex digits of the system UUID; "SMBIOS 2.4 present"; and "Targeted
+content distribution is supported" (extension byte 2, bit 2).
+TODO: the same output shows "BIOS Revision: 1.0" and the UUID as the board's
+asset tag, where these tables give 0.0 and none; left for the owner, as they
+were not part of the identity fixes of 2026-11-10.
 The keys are Linux's `/sys/class/dmi/id` names,
 https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L59;
 `identity_env` sends every key whose default is a GCE value, so the DEFAULTS
@@ -68,8 +75,8 @@ TODO(provenance): the DEFAULTS' serial and UUID values themselves have no
 recorded source.
 --- a/src/vmm/src/arch/x86_64/smbios.rs	1970-01-01 08:00:00.000000000 +0800
 +++ b/src/vmm/src/arch/x86_64/smbios.rs	2026-11-09 07:16:28.314107439 +0800
-@@ -0,0 +1,169 @@
-+// Experiment: SMBIOS 3.0 tables at the legacy scan address so the guest
+@@ -0,0 +1,179 @@
++// Experiment: SMBIOS 2.4 tables at the legacy scan address so the guest
 +// kernel and dmidecode see a configured machine identity.
 +// Enabled by NEEDY_SMBIOS="key=value;key=value". Missing keys use GCE values.
 +
@@ -94,7 +101,7 @@ recorded source.
 +    ("board_vendor", "Google"),
 +    ("board_name", "Google Compute Engine"),
 +    ("board_version", ""),
-+    ("board_serial", "Board-GoogleCloud-6B1F5C2E0D4A9E8B"),
++    ("board_serial", "Board-GoogleCloud-6B1F5C2E0D4A9E8B7C3D2A1F0E9D8C7B"),
 +    ("chassis_vendor", "Google"),
 +    ("chassis_type", "1"),
 +    ("chassis_serial", ""),
@@ -113,7 +120,9 @@ recorded source.
 +    }
 +}
 +
-+fn structure(out: &mut Vec<u8>, kind: u8, handle: u16, fields: &[u8], strings: Strings) {
++/// Appends one structure and returns its size, strings included.
++fn structure(out: &mut Vec<u8>, kind: u8, handle: u16, fields: &[u8], strings: Strings) -> usize {
++    let start = out.len();
 +    out.push(kind);
 +    out.push(u8::try_from(4 + fields.len()).unwrap());
 +    out.extend_from_slice(&handle.to_le_bytes());
@@ -126,6 +135,7 @@ recorded source.
 +        out.push(0);
 +    }
 +    out.push(0);
++    out.len() - start
 +}
 +
 +fn uuid_bytes(text: &str) -> [u8; 16] {
@@ -137,10 +147,8 @@ recorded source.
 +            .and_then(|h| u8::from_str_radix(h, 16).ok())
 +            .unwrap_or(0);
 +    }
-+    // SMBIOS 2.6+ stores the first three fields little-endian.
-+    b[0..4].reverse();
-+    b[4..6].reverse();
-+    b[6..8].reverse();
++    // SMBIOS 2.4 stores the UUID in the order written; only 2.6 and later
++    // store the first three fields little-endian.
 +    b
 +}
 +
@@ -163,6 +171,7 @@ recorded source.
 +    let Some(v) = values() else { return Ok(()) };
 +    let g = |k: &str| v.get(k).map(String::as_str).unwrap_or("");
 +    let mut table = Vec::new();
++    let mut sizes = Vec::new();
 +
 +    // Type 0: BIOS information.
 +    let mut s = Strings::default();
@@ -174,8 +183,9 @@ recorded source.
 +    f.push(date);
 +    f.push(0); // ROM size
 +    f.extend_from_slice(&(1u64 << 3).to_le_bytes()); // characteristics not supported
-+    f.extend_from_slice(&[0x00, 0x08, 0x00, 0x00, 0xff, 0xff]);
-+    structure(&mut table, 0, 0, &f, s);
++    // Extension byte 2 bit 2: targeted content distribution, as on GCE.
++    f.extend_from_slice(&[0x00, 0x04, 0x00, 0x00, 0xff, 0xff]);
++    sizes.push(structure(&mut table, 0, 0, &f, s));
 +
 +    // Type 1: system information.
 +    let mut s = Strings::default();
@@ -189,7 +199,7 @@ recorded source.
 +    f.push(0x06); // wake-up: power switch
 +    f.push(s.add(g("product_sku")));
 +    f.push(s.add(g("product_family")));
-+    structure(&mut table, 1, 1, &f, s);
++    sizes.push(structure(&mut table, 1, 1, &f, s));
 +
 +    // Type 2: baseboard information.
 +    let mut s = Strings::default();
@@ -204,7 +214,7 @@ recorded source.
 +    ];
 +    f.extend_from_slice(&3u16.to_le_bytes()); // chassis handle
 +    f.extend_from_slice(&[0x0a, 0]); // motherboard, no contained handles
-+    structure(&mut table, 2, 2, &f, s);
++    sizes.push(structure(&mut table, 2, 2, &f, s));
 +
 +    // Type 3: chassis information.
 +    let mut s = Strings::default();
@@ -219,20 +229,27 @@ recorded source.
 +    f.extend_from_slice(&[0x03, 0x03, 0x03, 0x02]);
 +    f.extend_from_slice(&0u32.to_le_bytes());
 +    f.extend_from_slice(&[0, 0, 0, 0x03]);
-+    structure(&mut table, 3, 3, &f, s);
++    sizes.push(structure(&mut table, 3, 3, &f, s));
 +
 +    // Type 127: end of table.
-+    structure(&mut table, 127, 0x7f, &[], Strings::default());
++    sizes.push(structure(&mut table, 127, 0x7f, &[], Strings::default()));
 +
-+    let mut ep = [0u8; 24];
-+    ep[0..5].copy_from_slice(b"_SM3_");
-+    ep[6] = 24;
-+    ep[7] = 3; // SMBIOS 3.0.0
-+    ep[10] = 1;
-+    ep[12..16].copy_from_slice(&u32::try_from(table.len()).unwrap().to_le_bytes());
-+    ep[16..24].copy_from_slice(&TABLE_ADDR.to_le_bytes());
-+    let sum = ep.iter().fold(0u8, |a, b| a.wrapping_add(*b));
-+    ep[5] = 0u8.wrapping_sub(sum);
++    // 32-bit entry point: `_SM_`, then the `_DMI_` intermediate one at 10h.
++    let checksum = |bytes: &[u8]| 0u8.wrapping_sub(bytes.iter().fold(0u8, |a, b| a.wrapping_add(*b)));
++    let mut ep = [0u8; 31];
++    ep[0..4].copy_from_slice(b"_SM_");
++    ep[5] = 31;
++    ep[6] = 2; // SMBIOS 2.4
++    ep[7] = 4;
++    let largest = sizes.iter().copied().max().unwrap_or(0);
++    ep[8..10].copy_from_slice(&u16::try_from(largest).unwrap().to_le_bytes());
++    ep[16..21].copy_from_slice(b"_DMI_");
++    ep[22..24].copy_from_slice(&u16::try_from(table.len()).unwrap().to_le_bytes());
++    ep[24..28].copy_from_slice(&u32::try_from(TABLE_ADDR).unwrap().to_le_bytes());
++    ep[28..30].copy_from_slice(&u16::try_from(sizes.len()).unwrap().to_le_bytes());
++    ep[30] = 0x24; // BCD revision 2.4
++    ep[21] = checksum(&ep[16..31]);
++    ep[4] = checksum(&ep);
 +
 +    mem.write_slice(&table, GuestAddress(TABLE_ADDR))?;
 +    mem.write_slice(&ep, GuestAddress(ENTRY_ADDR))?;

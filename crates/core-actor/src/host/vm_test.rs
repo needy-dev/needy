@@ -143,6 +143,25 @@ fn every_smbios_key_needy_sends_is_one_the_patched_firecracker_reads() {
   assert_eq!(sent["chassis_vendor"], "Google");
 }
 
+// ROOT CAUSE:
+//
+// If NEEDY_SMBIOS lacked the serials, the patch's GCE defaults had a 16-digit
+// board serial, while real GCE board serials are `Board-GoogleCloud-` and the
+// system UUID's 32 hex digits, as the system serial is `GoogleCloud-` and the
+// same 32, because the default was typed in shortened.
+//
+// Before the fix, the default board serial was
+// `Board-GoogleCloud-6B1F5C2E0D4A9E8B`.
+// The fix keeps both default serials derived from the default UUID.
+#[test]
+fn the_patchs_default_serials_carry_its_default_uuid_as_gce_does() {
+  let defaults = patch_smbios_defaults();
+
+  let hex = defaults["product_uuid"].replace('-', "").to_ascii_uppercase();
+  assert_eq!(defaults["product_serial"], format!("GoogleCloud-{hex}"));
+  assert_eq!(defaults["board_serial"], format!("Board-GoogleCloud-{hex}"));
+}
+
 #[test]
 fn a_dell_identity_sends_no_google_value() {
   let recipe = needy_config::recipe::load(&Source::builtin("dell-optiplex-ubuntu-24.04")).unwrap();
