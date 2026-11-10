@@ -290,6 +290,9 @@ impl Daemon {
     if let Err(refused) = session.state.advance(SessionState::Running) {
       tracing::debug!("session {id}: {refused}");
     }
+    // `needy report` right after the create must find the session and its
+    // `session.create`.
+    session.trace.flush().await;
     Ok(session)
   }
 

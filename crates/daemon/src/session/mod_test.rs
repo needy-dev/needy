@@ -35,6 +35,34 @@ async fn a_created_session_runs_on_its_executor_until_stopped() {
   assert!(matches!(Sessions::stop(daemon, &created.id).await, Err(ControlError::NotFound(_))), "a stopped session is not stopped again");
 }
 
+// ROOT CAUSE:
+//
+// If `needy report` ran right after `session create` returned, it sometimes
+// found no session or no `session.create` (the CLI test
+// `report_names_the_profile_after_its_file` failed about once in eight full
+// runs), because a create only queued `session.create` on the trace's worker
+// and returned without waiting for the sinks to write it.
+//
+// Before the fix, a create returned with its `session.create` still queued.
+// The fix keeps the create's events written when the create returns, as a
+// stop and a failed create already flushed theirs.
+//
+// The test runtime has one thread, so the trace worker runs only when the
+// test awaits; reading the unbuffered JSONL sink without awaiting sees what
+// the create itself waited for.
+#[tokio::test]
+async fn a_created_session_has_its_create_in_the_trace_when_create_returns() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
+
+  let trace = started.dir.path().join("state/sessions").join(&created.id).join("trace.jsonl");
+  let lines = std::fs::read_to_string(&trace).unwrap_or_default();
+  let kinds: Vec<String> =
+    lines.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["kind"].as_str().unwrap().to_string()).collect();
+  assert!(kinds.iter().any(|kind| kind == "session.create"), "{kinds:?}");
+}
+
 #[tokio::test]
 async fn a_session_whose_profile_is_invalid_is_listed_as_failed() {
   let started = testing::daemon().await;
