@@ -165,15 +165,16 @@ fn vendor_of_dmi(vendor: &str) -> &'static str {
 // (00:0D:3A), #L9137 (00:22:48) and #L21843 (60:45:BD). GCE's 42:01 is a
 // locally administered prefix seen on GCE NICs (see
 // crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml), not an OUI.
-// REVIEW: AWS ENI MACs are locally administered with varying first octets;
-// AWS's own examples start with 02:,
+// AWS ENI MACs are locally administered; AWS's own examples start with 02:,
 // https://github.com/awsdocs/amazon-ec2-user-guide/blob/e3707c431483ec0ffffcabebd36cf799ba682cd0/doc_source/instancedata-data-retrieval.md#L400
-// so `0e:` names only some of them.
+// NOTICE: 02: is any locally administered address's first octet, so a MAC
+// made up elsewhere with it also reads as AWS; real ENIs also use other
+// first octets, which name no vendor here.
 fn vendor_of_mac(mac: &str) -> Option<&'static str> {
   let m = mac.to_ascii_lowercase();
   if m.starts_with("42:01:") {
     Some("gce")
-  } else if m.starts_with("0e:") {
+  } else if m.starts_with("02:") {
     Some("aws")
   } else if ["00:0d:3a:", "00:22:48:", "60:45:bd:"].iter().any(|p| m.starts_with(p)) {
     Some("azure")

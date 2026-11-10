@@ -167,7 +167,7 @@ fn hybrid_cpu_is_not_a_recipe_feature() {
 
 #[test]
 fn vendor_disagreement_warns() {
-  let recipe = load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"0e:11:22:33:44:55\" }\nos: { kernel: { release: 6.8.0-1-aws } }");
+  let recipe = load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"02:11:22:33:44:55\" }\nos: { kernel: { release: 6.8.0-1-aws } }");
   let c = compile(&recipe, &HostInfo::default(), 1);
   assert!(c.findings.iter().any(|f| f.message.contains("machine identity disagrees")), "{:?}", c.findings);
 }
@@ -252,6 +252,24 @@ fn the_dell_builtin_matches_its_cited_probe_and_kernel_build() {
   assert_eq!(smbios.bios_date.as_deref(), Some("10/27/2022"));
   assert_eq!(smbios.board_name.as_deref(), Some("0VC8RJ"));
   assert_eq!(smbios.chassis_type, Some(3), "Desktop");
+}
+
+// ROOT CAUSE:
+//
+// If a GCE identity carried an AWS MAC such as AWS's own documented example
+// `02:29:96:8f:6a:2d`, the vendor check did not see the mismatch, because it
+// took `0e:` as AWS's prefix while AWS's examples use `02:`.
+//
+// Before the fix, the MAC named no vendor and no warning was given.
+// The fix takes `02:` as AWS's prefix, as its documentation shows.
+#[test]
+fn an_aws_mac_from_awss_documentation_disagrees_with_a_gce_identity() {
+  let recipe = load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"02:29:96:8f:6a:2d\" }");
+
+  let c = compile(&recipe, &HostInfo::default(), 1);
+
+  let messages: Vec<_> = c.findings.iter().map(|f| f.message.clone()).collect();
+  assert_eq!(messages, ["machine identity disagrees: DMI vendor=gce, MAC prefix=aws, metadata provider=gce, kernel release=gce"]);
 }
 
 #[test]
