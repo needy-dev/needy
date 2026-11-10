@@ -202,6 +202,9 @@ async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
   };
   assert!(message.contains(&format!("this host has no usable KVM: cannot open {}", kvm.display())), "{message}");
   assert!(message.contains("2026-11-10-container-actor-runtime-design.md"), "{message}");
+  // Seen on a cloud host without KVM: the OS error was printed twice, once
+  // in the message and once as its cause.
+  assert_eq!(message.matches("(os error 2)").count(), 1, "{message}");
   let listed = Sessions::list(daemon).await.unwrap();
   assert_eq!(listed[0].state, SessionState::Failed);
   assert!(!session_dir(&started, &listed[0].id).join("firecracker.pid").exists(), "firecracker was started");

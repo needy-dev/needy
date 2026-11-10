@@ -31,14 +31,15 @@ pub enum Error {
   },
   #[error("cannot start firecracker")]
   Spawn(#[source] std::io::Error),
+  // NOTICE: the OS error is part of the message and not its `source`, so a
+  // caller that prints the error with its causes says it once.
   #[error(
-    "this host has no usable KVM: cannot open {}: {source}; a firecracker actor needs it. A container actor runtime, which would not, is designed in docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md but not available yet",
+    "this host has no usable KVM: cannot open {}: {error}; a firecracker actor needs it. A container actor runtime, which would not, is designed in docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md but not available yet",
     path.display()
   )]
   Kvm {
     path: PathBuf,
-    #[source]
-    source: std::io::Error,
+    error: std::io::Error,
   },
 }
 
@@ -53,9 +54,9 @@ pub const KVM: &str = "/dev/kvm";
 /// Firecracker opens it. A host without KVM, or whose KVM the daemon's user
 /// may not use, fails here instead of in a VM that exits at once.
 pub fn check_kvm(path: &Path) -> Result<(), Error> {
-  std::fs::OpenOptions::new().read(true).write(true).open(path).map(drop).map_err(|source| Error::Kvm {
+  std::fs::OpenOptions::new().read(true).write(true).open(path).map(drop).map_err(|error| Error::Kvm {
     path: path.to_path_buf(),
-    source,
+    error,
   })
 }
 
