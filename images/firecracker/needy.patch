@@ -1,4 +1,20 @@
+needy's Firecracker patch: the CPU brand string, the CPUID hypervisor bit,
+SMBIOS tables and PCI bridge IDs, read from the NEEDY_* environment that
+`identity_env` in `crates/core-actor/src/host/vm.rs` sets.
 
+Applies to: Firecracker v1.17.0, commit 95f868c8e345b1cc8faccd1a3c910b4989dc3f58
+(`git ls-remote` of tag v1.17.0 peels to it); `patch -p1 --dry-run` on that
+tree succeeded on 2026-11-10. `images/Dockerfile` pins FIRECRACKER_VERSION.
+Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src
+Reference: https://github.com/firecracker-microvm/firecracker/releases/tag/v1.17.0
+
+The text before each file's header below is a note for readers; patch skips
+text outside the hunks.
+
+Hunk 1 declares the new `smbios` module next to `mptable`; hunk 2 writes the
+SMBIOS tables after `create_acpi_tables` in `configure_system_for_boot`.
+Upstream lines: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/arch/x86_64/mod.rs#L17-L22
+and https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/arch/x86_64/mod.rs#L299-L304
 --- a/src/vmm/src/arch/x86_64/mod.rs	2026-09-04 18:36:26.000000000 +0800
 +++ b/src/vmm/src/arch/x86_64/mod.rs	2026-11-09 07:16:28.327153378 +0800
 @@ -17,6 +17,7 @@
@@ -21,6 +37,33 @@
  }
  
 
+New file: SMBIOS tables in guest memory.
+Source: DMTF SMBIOS DSP0134 3.7.0, https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.7.0.pdf
+- `_SM3_` entry point: section 5.2.2, Table 2 (length 18h, version 3.0,
+  64-bit table address), found in the 000F0000h-000FFFFFh scan range.
+- Type 0: section 7.1, Table 6; characteristics bit 3 "not supported",
+  Table 7; extension bytes, Tables 8 and 9.
+- Type 1: section 7.2; UUID byte order, Table 11 (first three fields
+  little-endian); wake-up type 06h power switch, Table 12.
+- Type 2: section 7.3; feature flags bit 0 hosting board, Table 14; board
+  type 0Ah motherboard, Table 15.
+- Type 3: section 7.4; chassis types, Table 17; state 03h safe, Table 18;
+  security status 03h none, Table 19.
+- Type 127 end of table: section 7.49.
+The DEFAULTS are a Google Compute Engine identity; the strings match public
+`dmidecode` output from GCE VMs, e.g.
+https://github.com/sosreport/sos/issues/2699#issuecomment-925894041 (an
+issue page, not pinned).
+REVIEW: the same output shows real GCE serials as `GoogleCloud-` plus the 32
+hex digits of the system UUID and the board serial `Board-GoogleCloud-` plus
+the same 32; the 16-digit board serial below matches neither. It also shows
+"SMBIOS 2.4 present" with a 32-bit entry point, not 3.0, and BIOS
+characteristics extension byte 2 bit 2 (targeted content distribution, 04h),
+where the Type 0 bytes below set bit 3 (UEFI supported, 08h).
+REVIEW: `identity_env` sends `serial` and `uuid`, but this file reads
+`product_serial` and `product_uuid`, so those two stay the DEFAULTS.
+TODO(provenance): the DEFAULTS' serial and UUID values themselves have no
+recorded source.
 --- a/src/vmm/src/arch/x86_64/smbios.rs	1970-01-01 08:00:00.000000000 +0800
 +++ b/src/vmm/src/arch/x86_64/smbios.rs	2026-11-09 07:16:28.314107439 +0800
 @@ -0,0 +1,169 @@
@@ -194,6 +237,9 @@
 +    Ok(())
 +}
 
+Replaces the brand string (CPUID leaves 80000002H-80000004H) that
+Firecracker derives from the host's with NEEDY_BRAND_STRING.
+Upstream lines: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/cpu_config/x86_64/cpuid/intel/normalize.rs#L282-L287
 --- a/src/vmm/src/cpu_config/x86_64/cpuid/intel/normalize.rs	2026-09-04 18:36:26.000000000 +0800
 +++ b/src/vmm/src/cpu_config/x86_64/cpuid/intel/normalize.rs	2026-11-09 05:11:40.020965822 +0800
 @@ -282,6 +282,15 @@
@@ -213,6 +259,9 @@
          self.apply_brand_string(&default_brand_string)
              .map_err(NormalizeCpuidError::ApplyBrandString)?;
 
+Leaves CPUID.01H:ECX[31] (hypervisor present) clear when
+NEEDY_HIDE_HYPERVISOR is set; upstream always sets it.
+Upstream lines: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/cpu_config/x86_64/cpuid/normalize.rs#L249-L255
 --- a/src/vmm/src/cpu_config/x86_64/cpuid/normalize.rs	2026-09-04 18:36:26.000000000 +0800
 +++ b/src/vmm/src/cpu_config/x86_64/cpuid/normalize.rs	2026-11-09 05:11:40.017799065 +0800
 @@ -249,7 +249,7 @@
@@ -225,6 +274,10 @@
          // CPUID.01H:EDX[28] (Mnemonic: HTT)
          // Max APIC IDs reserved field is Valid. A value of 0 for HTT indicates there is only a
 
+Adds a configuration-space-only ISA bridge (class 06h, subclass 01h) at
+00:01.0 when NEEDY_PCI_ISA_BRIDGE is set, as an i440FX machine such as a GCE
+VM has one there.
+Upstream lines: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/devices/pci/pci_segment.rs#L66-L72
 --- a/src/vmm/src/devices/pci/pci_segment.rs	2026-09-04 18:36:26.000000000 +0800
 +++ b/src/vmm/src/devices/pci/pci_segment.rs	2026-11-09 07:16:28.329648954 +0800
 @@ -66,7 +66,25 @@
@@ -255,6 +308,11 @@
          let pci_config_mmio = Arc::new(Mutex::new(PciConfigMmio::new(Arc::clone(&pci_bus))));
          let mmio_config_address = PCI_MMCONFIG_START + PCI_MMIO_CONFIG_SIZE_PER_SEGMENT * id as u64;
 
+Takes the root bridge's vendor, device and revision from
+NEEDY_PCI_HOST_BRIDGE instead of upstream's Intel 8086:0d57
+(https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/pci/bus.rs#L27-L28), and adds `parse_pci_id`.
+Upstream lines: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/pci/bus.rs#L41-L51
+and https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/pci/bus.rs#L56-L61
 --- a/src/vmm/src/pci/bus.rs	2026-09-04 18:36:26.000000000 +0800
 +++ b/src/vmm/src/pci/bus.rs	2026-11-09 07:16:28.329507469 +0800
 @@ -41,11 +41,16 @@
