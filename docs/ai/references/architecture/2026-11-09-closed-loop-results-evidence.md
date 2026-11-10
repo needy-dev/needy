@@ -784,6 +784,64 @@ only outbound connections:
 | `examples/cli` through `run create --no-actor` | `exec --run` of `uname -s` (rc 0) and `exit 4` (rc 4); `fs cp --run` and `cat` of the copy; `run stop` |
 | Nothing left | Pass: both daemons and the Mac runner stopped, no Firecracker |
 
+## Runner dial-out
+
+Slice 4 of [runners and runs](2026-11-10-runner-and-run-design.md#as-built-slice-4)
+(`e74e0d6`, `c1f9fc0`): a runner keeps a control stream to the control plane
+and opens a task stream per exec; `exec`, `ps` and `fs cp` take `--runner`;
+the runner listens nowhere. Also `1c7194a`: `needy report` opens `trace.db`
+read-only. Run on 2026-11-10.
+
+`make check` and `make test` pass on the Mac; `make check` on Linux. The
+daemon's tests run a control plane and a runner in one process (the runner
+dials through a socket proxy the test can cut); the CLI's tests run both as
+`needy` processes.
+
+On one Mac (Apple silicon, macOS), a control daemon and a runner with
+separate state, data and runtime directories, the runner joined over the
+control socket:
+
+| Check | Result |
+| --- | --- |
+| `exec -T --runner mac`: stdout and stderr apart and exit 7; stdin; `SIGTERM` death; a missing program; `--output json`; `uname -s` | Pass: `rc=7 out=out err=err`; `hello`; 143; 127 with `cannot start …`; `"executor":"mac","exit_code":2`; `Darwin` |
+| `exec -t --runner mac` under `script` after `stty rows 33 cols 111` | Pass: a `/dev/ttys…` terminal, `33 111`, exit 4, the client's mode resets after the last byte |
+| A program that enters the alternate screen and bracketed paste, under `script` | Pass: `stty -g` before and after are equal; the client writes `CSI ? 1049 l`, `CSI ? 2004 l` and the others |
+| `exec -d -t`, `ps --runner mac`, `attach` from a 41x101 terminal, `kill -s SIGKILL` | Pass: `running` under `mac`; the attach replays `started` and the process prints `41 101`; `killed SIGKILL` |
+| `fs cp --runner` of a directory to the runner and back; a missing path | Pass: both files read back; `tar on mac failed: tar: could not chdir to …`, exit 1 |
+| Restart the control daemon with an `exec --runner` in flight and a detached `sleep` | The client exits with `the connection ended before the command exited: daemon shutting down`; the runner connects again 0.6 s after the new daemon starts; `ps --runner mac` lists both `sleep`s still running (origin `-`: the new daemon did not start them); `kill` ends them |
+| Nothing left | Pass |
+
+Across machines with no inbound port on the runner: a control daemon on the
+Linux KVM host on a loopback TCP listener with a control token, built from a
+scratch copy of the committed tree, and an actor image built from
+`examples/opencode/gce.recipe.yaml` into the same scratch directory. The Mac
+reaches it through `ssh -L` only (no `-R`); `lsof` shows the runner with no
+listening socket and two outbound connections to the tunnel (heartbeats and
+the control stream). Commands run on the KVM host:
+
+| Check | Result |
+| --- | --- |
+| `runner ls` | `mac  online  executor  os=darwin` |
+| `uname -s` on the host, then `exec -T --runner mac -- uname -s` | `Linux`, `Darwin` |
+| stdout and stderr apart and exit 7; stdin; a missing program; a runner that is not connected | Pass: `rc=7 stderr=err`; `piped`; 127; `needy: runner ghost is not connected`, exit 1 |
+| `exec -t --runner mac` under `script` after `stty rows 33 cols 111` | Pass: `/dev/ttys000` on the Mac, `33 111`, exit 4 |
+| `exec -d -t`, `ps --runner mac`, `attach` under `script` from 41x101 | Pass: `running` under `mac`, the replay `started`, then `41 101`. The attach ended under `timeout`, whose `SIGTERM` the attach client forwarded, so the process ended `killed SIGTERM` |
+| `exec -d --runner mac -- sleep 300`, `kill -s SIGKILL` | Pass: `killed SIGKILL` |
+| `fs cp --runner` of a file to the Mac and back | Pass: `across` both ways |
+| Restart the control daemon | The runner connects again through the tunnel; `exec --runner mac` works 0.9 s after the new daemon starts |
+| `examples/smoke` through the same control daemon | `finished`, `google`, `hello-from-actor`, `hi-from-executor`, `routed exit=7`; `report`: 4 routed, 1 failed |
+| `examples/chaos` | `finished`: `Input/output error` on `broken.json`, `curl exit=126`, `+101.0°C ALARM (CRIT)`, 3 faults by kind, `result.txt` mirrored out |
+| `examples/cli` through `run create --no-actor` | `exec --run` of `uname -a` (rc 0) and `exit 4` (rc 4); `fs cp --run` and `cat`; `exec -d`; `ps --run`; `run stop`; `report`: 4 commands from `needy exec` |
+| Nothing left | Pass: the control daemon, the Mac runner and the tunnel stopped; no Firecracker, no container |
+
+A playground host was not joined: it cannot reach the control plane through
+an `ssh -L` from the Mac without a relay, so it was skipped.
+
+Observed, not changed in this slice: a non-detached process whose client
+left ends only when it next writes, on a runner as on the local executor
+(the control daemon's relay notices the client is gone on its next output).
+It is an open question in the design.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
