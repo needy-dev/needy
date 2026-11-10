@@ -39,6 +39,30 @@ impl Store {
     Ok(Self { db })
   }
 
+  /// Opens the database at `path` read-only, for a reader such as `needy
+  /// report`, and checks its schema before anything else. Nothing is
+  /// created, migrated or switched to WAL: a reader never changes the file.
+  async fn read(path: &Path) -> Result<Self, Error> {
+    // NOTICE: `mode=ro` rather than `immutable=1`: the daemon may be writing
+    // the database while a report reads it, which `immutable` would not
+    // see (`https://www.sqlite.org/uri.html#uriimmutable`).
+    let url = format!("sqlite://{}?mode=ro", path.display());
+    let mut options = ConnectOptions::new(url);
+    options.sqlx_logging(false);
+    let db = Database::connect(options).await?;
+    if has_other_schema(&db).await? {
+      return Err(Error::Schema(path.to_path_buf()));
+    }
+    Ok(Self { db })
+  }
+
+  /// Whether this crate's migrations created the tables; an empty
+  /// database has none and no runs.
+  async fn has_trace(&self) -> Result<bool, Error> {
+    let manager = SchemaManager::new(&self.db);
+    Ok(manager.has_table("seaql_migrations").await? && manager.has_table("runs").await?)
+  }
+
   /// A sink that writes one run's events.
   pub fn sink(&self) -> Sqlite {
     Sqlite {
@@ -107,7 +131,10 @@ pub async fn load(path: &Path, run: &str) -> Result<Loaded, Error> {
   if !path.exists() {
     return Err(Error::NoDatabase(PathBuf::from(path)));
   }
-  let store = Store::open(path).await?;
+  let store = Store::read(path).await?;
+  if !store.has_trace().await? {
+    return Err(Error::NoRun(run.to_string()));
+  }
   let mut query = entity::run::Entity::find()
     .order_by_desc(entity::run::Column::FirstMs)
     // NOTICE: runs that started in the same millisecond keep the order

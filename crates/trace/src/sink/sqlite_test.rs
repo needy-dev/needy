@@ -116,3 +116,65 @@ async fn a_database_with_another_schema_is_refused() {
   assert!(matches!(&error, Error::Schema(p) if *p == path), "{error}");
   assert!(error.to_string().contains("move it away"), "{error}");
 }
+
+// ROOT CAUSE:
+//
+// If `needy report` read a `trace.db` with another schema, the file switched
+// to WAL mode before the schema check refused it, because `load` opened the
+// database through `Store::open`, which opens it read-write, sets WAL and
+// migrates.
+//
+// Before the fix, a refused report changed the journal mode of a database it
+// only read. The fix opens it read-only and checks the schema first, so a
+// reader never changes the file.
+#[tokio::test]
+async fn a_refused_report_leaves_the_database_unchanged() {
+  use sea_orm::{ConnectionTrait, Database};
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("trace.db");
+  let old = Database::connect(format!("sqlite://{}?mode=rwc", path.display())).await.unwrap();
+  old
+    .execute_unprepared(
+      "CREATE TABLE seaql_migrations (version TEXT PRIMARY KEY, applied_at BIGINT NOT NULL);
+       INSERT INTO seaql_migrations VALUES ('m20261109_000010_trace_envelope', 0);
+       CREATE TABLE sessions (id TEXT PRIMARY KEY, first_ms BIGINT NOT NULL);",
+    )
+    .await
+    .unwrap();
+  old.close().await.unwrap();
+  let before = std::fs::read(&path).unwrap();
+
+  let error = load(&path, "latest").await.err().unwrap();
+
+  assert!(matches!(&error, Error::Schema(p) if *p == path), "{error}");
+  assert!(std::fs::read(&path).unwrap() == before, "the database's bytes changed");
+  let mut entries: Vec<String> =
+    std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+  entries.sort();
+  assert_eq!(entries, ["trace.db"], "a reader left a journal behind");
+}
+
+#[tokio::test]
+async fn reading_an_empty_database_creates_no_tables() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("trace.db");
+  std::fs::write(&path, b"").unwrap();
+
+  let error = load(&path, "latest").await.err().unwrap();
+
+  assert!(matches!(&error, Error::NoRun(s) if s == "latest"), "{error}");
+  assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "a reader wrote to an empty database");
+}
+
+#[tokio::test]
+async fn a_database_the_daemon_closed_reads_back() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("trace.db");
+  let store = Store::open(&path).await.unwrap();
+  store.sink().write(&event("abc1", 0, 10, "run.create", serde_json::json!({}))).await.unwrap();
+  store.db.close().await.unwrap();
+
+  let loaded = load(&path, "latest").await.unwrap();
+
+  assert_eq!((loaded.run.as_str(), loaded.events.len()), ("abc1", 1));
+}
