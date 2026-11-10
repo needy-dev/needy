@@ -1,6 +1,16 @@
 # A Dell OptiPlex desktop running Ubuntu 24.04 on bare metal: no hypervisor,
 # real sensors, an Alder Lake CPU.
+#
+# Provenance (checked 2026-11-10; inventory in
+# docs/ai/references/architecture/2026-11-10-provenance-inventory-evidence.md):
+# public hardware probes of OptiPlex 7000 desktops, e.g. one with an i7-12700:
+# https://github.com/linuxhw/DMI/blob/57b21bc6fdd863380e99c228c22aafcd1509528c/Desktop/Dell/OptiPlex/OptiPlex%207000/089EBFAFFD4C
+# (all 13 probes: https://github.com/linuxhw/DMI/tree/57b21bc6fdd863380e99c228c22aafcd1509528c/Desktop/Dell/OptiPlex/OptiPlex%207000).
 cpu:
+  # Source: Intel 12th Gen Core datasheet 655258 Rev 011, Table 100 (p. 205):
+  # S-processor 8+8, CPUID 90672h = family 6, model 151, stepping 2,
+  # https://cdrdv2-public.intel.com/655258/655258-011.pdf; the probe above
+  # shows `Family 6, Model 151, Stepping 2`.
   brand: "12th Gen Intel(R) Core(TM) i7-12700"
   signature: { family: 6, model: 151, stepping: 2 }
   hypervisor: hidden
@@ -9,6 +19,11 @@ memory: 16GiB
 os:
   image: ubuntu:24.04
   kernel:
+    # Source: https://launchpad.net/ubuntu/+source/linux/6.8.0-49.49 and its
+    # amd64 build, https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/29233125
+    # REVIEW: that build's `vmlinuz` (decompressed on 2026-11-10) says
+    # `#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4 02:06:24 UTC 2024`, as below,
+    # but `buildd@lcy02-amd64-028`, not lcy02-amd64-103.
     release: 6.8.0-49-generic
     version: "#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4 02:06:24 UTC 2024"
     build: { user: buildd, host: lcy02-amd64-103 }
@@ -19,18 +34,34 @@ firmware:
     sys_vendor: Dell Inc.
     product_name: OptiPlex 7000
     product_version: ""
+    # REVIEW: no BIOS 1.21.0 is published for the OptiPlex 7000: LVFS lists
+    # 1.20.0 (2024-03-08) then 1.22.0 (2024-05-15),
+    # https://web.archive.org/web/20250620094041/https://fwupd.org/lvfs/devices/com.dell.uefi896e9574.firmware
+    # The probe above has 1.7.3, 10/27/2022.
     bios: { vendor: Dell Inc., version: 1.21.0, date: 06/11/2024 }
     board_vendor: Dell Inc.
+    # REVIEW: no OptiPlex 7000 probe has board 0C8MHW; the i7-12700 ones
+    # have 0VC8RJ, 0FG47G and 0NNFGG, the micro ones 0VNM11. All 13 report
+    # chassis type Desktop (3), not Tower (7).
     board_name: 0C8MHW
     chassis_type: tower
     serial: "{hash}"
 devices:
   pci:
+    # Source: https://github.com/pciutils/pciids/blob/2393ed647fe52d620f2840e24af5222889dca5ac/pci.ids#L39110
+    # and datasheet 655258 Table 102 (p. 206): S LGA 8+4 host bridge 4668h;
+    # revision 02 from public `lspci` output of an i7-12700K,
+    # https://web.archive.org/web/20250420225942/https://forum.proxmox.com/threads/proxmox-freezing.156753/
     host_bridge: "8086:4668:02"
+  # TODO(provenance): the idle readings (coretemp 34 C, nvme 33 C, acpitz
+  # 27.8 C), load gain and noise name no capture or public source.
   sensors:
     - { chip: coretemp, per_core: true, idle_c: 34, load_gain_c: 7, noise_c: 1.5 }
     - { chip: nvme, idle_c: 33 }
     - { chip: acpitz, idle_c: 27.8 }
 network:
+  # Source: https://github.com/systemd/systemd/blob/v257/man/systemd.net-naming-scheme.xml#L596-L602
+  # (`enp0s31f6`, the onboard I219 at 00:1f.6); OUI b0:7b:25 is Dell Inc.,
+  # https://gitlab.com/wireshark/wireshark/-/blob/v4.4.0/epan/manuf-data.c#L29209
   interface: enp0s31f6
   mac: "b0:7b:25:{seq}:12:34"

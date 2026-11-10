@@ -1,6 +1,17 @@
 # A Google Compute Engine N1 VM (Broadwell Xeon), as far as the driving program
 # can tell. Broadwell has no AVX-512, so this recipe fits hosts without it; the
 # features hidden below are ones a Broadwell CPU does not have.
+# Source: https://web.archive.org/web/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms
+# (N1 and E2 Broadwell E5-2696V4, 2.2 GHz base); family 6, model 79 is
+# BROADWELL_X, https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/intel-family.h#L89
+# The hide list was checked on 2026-11-10 against QEMU's Broadwell model and
+# LLVM's Broadwell features (cited at MODELS in crates/core/src/recipe/cpu.rs):
+# none of them is a Broadwell feature.
+# TODO(provenance): stepping 0 has no pinned source; a public GCE cpuinfo
+# with model 79, stepping 0 is https://github.com/googlecolab/colabtools/issues/1937
+# (an issue page, not pinned).
+# REVIEW: `hybrid_cpu` never appears in a host's /proc/cpuinfo (see FEATURES
+# in crates/core/src/recipe/cpu.rs); hiding it still clears the CPUID bit.
 extends: builtin:gce-ubuntu-22.04
 cpu:
   brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"

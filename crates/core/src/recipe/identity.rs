@@ -46,6 +46,8 @@ pub(super) fn fill_placeholders(text: &str, seed: u64) -> String {
   text.replace("{hash}", &format!("{:08x}", mix(seed, 1) as u32)).replace("{seq}", &format!("{:02x}", mix(seed, 2) as u8))
 }
 
+// Version 4 bits in octet 6 and variant 10 in octet 8: RFC 9562 sections 4.1,
+// 4.2 and 5.4, https://www.rfc-editor.org/rfc/rfc9562.html#section-5.4
 fn session_uuid(seed: u64) -> String {
   let a = mix(seed, 10);
   let b = mix(seed, 11);
@@ -58,6 +60,10 @@ fn session_uuid(seed: u64) -> String {
   format!("{}-{}-{}-{}-{}", &hex[0..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..32])
 }
 
+// Source: DMTF SMBIOS DSP0134 3.7.0, section 7.4.1, Table 17 "System
+// Enclosure or Chassis Types" (01h Other ... 23h Mini PC),
+// https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.7.0.pdf
+// Reference: https://www.dmtf.org/sites/default/files/standards/documents/DSP0134_3.8.0.pdf (same table)
 fn chassis_number(value: &ChassisType) -> Option<u32> {
   let name = match value {
     ChassisType::Code(n) => return Some(*n),
@@ -125,6 +131,9 @@ pub(super) fn pci_id(text: &str, revision: Option<&str>) -> Result<PciId, String
   })
 }
 
+// Real DMI vendors are `Google`, `Amazon EC2` and `Microsoft Corporation`;
+// systemd matches similar strings,
+// https://github.com/systemd/systemd/blob/v257/src/basic/virt.c#L172-L190
 fn vendor_of_dmi(vendor: &str) -> &'static str {
   let v = vendor.to_ascii_lowercase();
   if v.contains("google") {
@@ -138,6 +147,15 @@ fn vendor_of_dmi(vendor: &str) -> &'static str {
   }
 }
 
+// Source: Azure's OUIs are Microsoft's in
+// https://gitlab.com/wireshark/wireshark/-/blob/v4.4.0/epan/manuf-data.c#L3748
+// (00:0D:3A), #L9137 (00:22:48) and #L21843 (60:45:BD). GCE's 42:01 is a
+// locally administered prefix seen on GCE NICs (see
+// crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml), not an OUI.
+// REVIEW: AWS ENI MACs are locally administered with varying first octets;
+// AWS's own examples start with 02:,
+// https://github.com/awsdocs/amazon-ec2-user-guide/blob/e3707c431483ec0ffffcabebd36cf799ba682cd0/doc_source/instancedata-data-retrieval.md#L400
+// so `0e:` names only some of them.
 fn vendor_of_mac(mac: &str) -> Option<&'static str> {
   let m = mac.to_ascii_lowercase();
   if m.starts_with("42:01:") {
@@ -151,6 +169,10 @@ fn vendor_of_mac(mac: &str) -> Option<&'static str> {
   }
 }
 
+// Ubuntu's kernel flavours: https://launchpad.net/ubuntu/+source/linux-gcp/6.8.0-1073.81,
+// https://launchpad.net/ubuntu/+source/linux-aws/6.8.0-1069.74,
+// https://launchpad.net/ubuntu/+source/linux-azure/6.8.0-1073.82 and
+// https://launchpad.net/ubuntu/+source/linux/6.8.0-49.49 (`-generic`).
 fn vendor_of_kernel(release: &str) -> Option<&'static str> {
   if release.ends_with("-gcp") {
     Some("gce")

@@ -9,6 +9,11 @@ fn load(yaml: &str) -> Recipe {
   needy_config::recipe::load(&Source::text(yaml, ".")).unwrap()
 }
 
+// A hand-picked subset of a Raptor Lake host's flags, not a capture; the
+// names follow https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/cpufeatures.h.
+// REVIEW: `hybrid_cpu` is listed although Linux never shows it in
+// `/proc/cpuinfo` (no quoted name, cpufeatures.h#L425), so the test that
+// warns about it exercises a flag no real host reports.
 const RAPTOR_LAKE_FLAGS: &str = "fpu vme sse sse2 ssse3 fma sse4_1 sse4_2 avx avx2 bmi1 bmi2 adx sha_ni gfni vaes vpclmulqdq avx_vnni serialize hybrid_cpu movdiri movdir64b waitpkg umip pku ospke rdseed clflushopt clwb";
 
 fn raptor_lake() -> HostInfo {

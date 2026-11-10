@@ -1,6 +1,21 @@
 # A Google Compute Engine VM running Ubuntu 22.04. Cloud VMs show a
 # hypervisor, so the hypervisor bit stays visible.
+#
+# Provenance (checked 2026-11-10; inventory in
+# docs/ai/references/architecture/2026-11-10-provenance-inventory-evidence.md):
+# - DMI strings: public `dmidecode` output from GCE VMs, e.g.
+#   https://github.com/sosreport/sos/issues/2699#issuecomment-925894041
+#   (an issue page, not pinned); cloud-init's GCE check reads the same values,
+#   https://github.com/canonical/cloud-init/blob/c9b9eef30252f6470e0b132d831ceb4de2521c38/cloudinit/sources/DataSourceGCE.py#L323-L335
+#   Reference: https://web.archive.org/web/20240225130331/https://cloud.google.com/compute/docs/instances/detect-compute-engine
 cpu:
+  # Source: https://web.archive.org/web/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms
+  # (Cascade Lake Platinum 8273CL, 2.2 GHz base); CPUID 50657h = family 6,
+  # model 85, stepping 7 in Intel spec update 338848 Rev 028, p. 12,
+  # https://cdrdv2-public.intel.com/338848/338848_2nd%20Gen%20Intel%C2%AE%20Xeon%C2%AE%20Scalable%20Processors%20Specification%20Update_Rev028US.pdf
+  # REVIEW: the archived page lists that 2.2 GHz Cascade Lake only for the
+  # A2 and G2 GPU machine types; a 2-vCPU, 4 GiB VM without a GPU (N1, N2,
+  # E2) would show Broadwell at 2.20GHz (model 79) or Cascade Lake at 2.80GHz.
   brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
   signature: { family: 6, model: 85, stepping: 7 }
   hypervisor: visible
@@ -9,9 +24,17 @@ memory: 4GiB
 os:
   image: ubuntu:22.04
   kernel:
+    # Source: https://launchpad.net/ubuntu/+source/linux-gcp-6.5/6.5.0-1020.20~22.04.1
+    # and its amd64 build, https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/28152459
+    # REVIEW: that build's `vmlinuz` (linux-image-unsigned-6.5.0-1020-gcp
+    # 6.5.0-1020.20~22.04.1, decompressed on 2026-11-10) says
+    # `#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024` and
+    # `buildd@lcy02-amd64-115`; the date and host below match neither.
     release: 6.5.0-1020-gcp
     version: "#20~22.04.1-Ubuntu SMP Fri Mar  1 10:04:32 UTC 2024"
     build: { user: buildd, host: lcy02-amd64-033 }
+  # TODO(provenance): the `instance-` prefix (the Cloud Console's default VM
+  # name) has no cited source.
   hostname: "instance-{hash}"
 firmware:
   dmi:
@@ -21,15 +44,32 @@ firmware:
     bios: { vendor: Google, version: Google, date: 01/01/2011 }
     board_vendor: Google
     board_name: Google Compute Engine
+    # TODO(provenance): no public GCE SMBIOS type 3 dump was found for
+    # "Other" (1).
     chassis_type: other
+    # REVIEW: real GCE serials are `GoogleCloud-` and the 32 upper-case hex
+    # digits of the system UUID (the sos issue above; cloud-init only checks
+    # the prefix); `{hash}` is 8 lower-case digits unrelated to the UUID.
     serial: "GoogleCloud-{hash}"
 devices:
   pci:
+    # Source: https://github.com/pciutils/pciids/blob/2393ed647fe52d620f2840e24af5222889dca5ac/pci.ids#L33582
+    # (8086:1237 440FX) and #L39850 (8086:7110 PIIX4 ISA); revisions 02 and
+    # 03 from GCE `lspci` output,
+    # https://web.archive.org/web/20240301211908/https://michalwojcik.com.pl/2022/05/12/linux-server-information-gathering/
     host_bridge: "8086:1237:02"
     extra:
       - { id: "8086:7110", class: isa-bridge, revision: "03" }
   sensors: []
 network:
+  # Source: the same archived page shows `ens4` (virtio-net in PCI slot 4,
+  # `ens<slot>` per https://github.com/systemd/systemd/blob/v257/man/systemd.net-naming-scheme.xml#L161-L188)
+  # and `ether 42:01:0a:1f:1e:0a` for `inet 10.31.30.10`: 42:01, then the
+  # internal IPv4 address in hex. 0a:80:00 is 10.128.0, us-central1's default
+  # subnet 10.128.0.0/20,
+  # https://web.archive.org/web/20240105143455/https://cloud.google.com/vpc/docs/subnets
+  # REVIEW: `{seq}` can be 00 or 01, the subnet's network and gateway
+  # addresses, which no VM gets.
   interface: ens4
   mac: "42:01:0a:80:00:{seq}"
   metadata: { provider: gce }
