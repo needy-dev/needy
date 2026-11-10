@@ -65,10 +65,15 @@ pub struct Started {
 
 pub async fn daemon() -> Started {
   let dir = tempfile::tempdir().unwrap();
+  // A stand-in KVM device: a file the daemon can open for reading and
+  // writing. A test removes it to stand for a host without KVM.
+  let kvm = dir.path().join("kvm");
+  std::fs::write(&kvm, "").unwrap();
   let daemon = Daemon::start(Config {
     state_dir: dir.path().join("state"),
     runtime_dir: dir.path().join("run"),
     actor_image: dir.path().join("image"),
+    kvm,
     docker_image: "needy-executor:latest".into(),
   })
   .await
@@ -87,6 +92,23 @@ pub fn fake_image(dir: &Path, script: &str) {
   let firecracker = dir.join("firecracker");
   std::fs::write(&firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
   std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// A stand-in Firecracker that runs until its session's actor exits through
+/// [`exit_actor`], as a guest reboots after its init reported the driving
+/// program's exit.
+pub const REBOOTS_AFTER_EXIT: &str = r#"dir=$(dirname "$3"); touch "$dir/v.sock"; while [ ! -e "$dir/rebooted" ]; do sleep 0.02; done"#;
+
+/// Reports that the driving program of session `id` exited with 0, as the
+/// guest's init does, then lets its [`REBOOTS_AFTER_EXIT`] VM exit.
+pub async fn exit_actor(started: &Started, id: &str) {
+  use needy_api_server::control::Guest;
+  let exit = needy_common::process::Exit {
+    code: Some(0),
+    signal: String::new(),
+  };
+  Guest::exit(&started.daemon, id, exit).await.unwrap();
+  std::fs::write(started.dir.path().join("state/sessions").join(id).join("rebooted"), "").unwrap();
 }
 
 /// Whether process `pid` exists.

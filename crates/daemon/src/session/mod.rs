@@ -63,6 +63,9 @@ pub struct Session {
   released: Mutex<Vec<ExecutorRef>>,
   /// How the actor's driving program ended, as its init reported it.
   actor_exit: Mutex<Option<Exit>>,
+  /// Why the session failed after it was created, such as an actor whose VM
+  /// exited before its driving program did.
+  failure: Mutex<Option<String>>,
   /// The session's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -96,6 +99,25 @@ impl Session {
     *lock(&self.actor_exit) = Some(exit);
   }
 
+  /// How the actor's driving program ended, once its init reported it.
+  pub fn actor_exit(&self) -> Option<Exit> {
+    lock(&self.actor_exit).clone()
+  }
+
+  /// Fails the session for `reason`, unless it already ended, and records
+  /// the reason as `session.fail`.
+  pub fn fail(&self, reason: String) {
+    // The reason is in place before the state says `failed`.
+    *lock(&self.failure) = Some(reason.clone());
+    match self.state.advance(SessionState::Failed) {
+      Ok(_) => self.emit(&Event::SessionFail(SessionFail { reason })),
+      Err(refused) => {
+        tracing::debug!("session {}: {refused}", self.id);
+        *lock(&self.failure) = None;
+      }
+    }
+  }
+
   pub fn info(&self) -> SessionInfo {
     SessionInfo {
       id: self.id.clone(),
@@ -109,7 +131,7 @@ impl Session {
       // NOTICE: an actor whose VM ended before init reported the driving
       // program's exit has none; `actor.vm.exit` in the trace has the VM's.
       actor_exit: lock(&self.actor_exit).clone(),
-      failure: None,
+      failure: lock(&self.failure).clone(),
     }
   }
 
@@ -329,6 +351,7 @@ impl Daemon {
       executors: Mutex::new(BTreeMap::new()),
       released: Mutex::new(Vec::new()),
       actor_exit: Mutex::new(None),
+      failure: Mutex::new(None),
       tasks: TaskTracker::new(),
       cancel,
     }))
@@ -439,8 +462,8 @@ impl Daemon {
 
   /// Gives back what a session whose actor exited holds: it mirrors out,
   /// releases its executors and removes the actor's sockets. The session
-  /// stays listed as finished until it is stopped, which then has nothing
-  /// left to release.
+  /// stays listed as finished or failed until it is stopped, which then has
+  /// nothing left to release.
   pub(crate) async fn finish_session(&self, session: &Session) {
     if let Err(e) = files::mirror_out(session).await {
       tracing::warn!("mirror-out for {}: {e:#}", session.id);
@@ -454,10 +477,10 @@ impl Daemon {
   pub(crate) async fn stop_session(&self, session: &Arc<Session>) -> Result<(), ControlError> {
     let stopping = match session.state.advance(SessionState::Stopping) {
       Ok(_) => true,
-      // The actor finished first and that state stays; finishing released
-      // its executors already.
+      // The actor finished or failed first and that state stays; ending
+      // released its executors already.
       Err(Refused {
-        from: SessionState::Finished,
+        from: SessionState::Finished | SessionState::Failed,
         ..
       }) => false,
       Err(refused) => return Err(ControlError::Failed(format!("session {}: {refused}", session.id))),

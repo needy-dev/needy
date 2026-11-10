@@ -88,6 +88,9 @@ pub struct Config {
   pub runtime_dir: PathBuf,
   /// The actor's `vmlinux`, `rootfs.ext4` and `firecracker`.
   pub actor_image: PathBuf,
+  /// The KVM device an actor's Firecracker opens:
+  /// `needy_core_actor::host::vm::KVM` outside tests.
+  pub kvm: PathBuf,
   /// The image of Docker executors that name none.
   pub docker_image: String,
 }

@@ -59,3 +59,12 @@ fn an_actor_that_exits_while_its_session_is_created_finishes_it() {
   assert_eq!(state.advance(Finished), Ok(Creating));
   assert_eq!(state.advance(Running).unwrap_err().from, Finished);
 }
+
+#[test]
+fn a_running_session_whose_actor_never_reported_an_exit_can_fail() {
+  let state = State::new();
+  state.advance(Running).unwrap();
+  assert_eq!(state.advance(Failed), Ok(Running));
+  assert_eq!(state.advance(Stopping).unwrap_err().from, Failed);
+  assert_eq!(state.get(), Failed);
+}

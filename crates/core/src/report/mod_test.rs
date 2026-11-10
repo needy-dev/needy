@@ -283,21 +283,29 @@ fn a_session_stopped_after_it_finished_reports_finished() {
 // ROOT CAUSE:
 //
 // If the actor's VM exited without its driving program reporting an exit,
-// the daemon's state became `finished` but the report did not count the VM's
-// exit as an end, so a later stop made it say `stopped`.
+// such as a Firecracker that refused its CPU template or found no KVM, the
+// report said `finished` with no findings, because it counted the VM's exit
+// as a finish.
 //
-// The fix counts `actor.vm_exit` as the end the daemon's state machine
-// counts it as.
+// Before the fix, an actor that never started read as a clean session.
+// The fix counts a VM exit before any `actor.exit` as a failure, which the
+// daemon records as `session.fail` with the reason; a later stop keeps it.
 #[test]
-fn a_vm_exit_without_a_driver_exit_reports_finished() {
+fn a_vm_exit_without_a_driver_exit_reports_failed_with_the_reason() {
   let events = vec![
     create(1_000),
     at(
       2_000,
       Event::ActorVmExit(ActorVmExit {
-        code: Some(0),
+        code: Some(1),
         signal: None,
         error: None,
+      }),
+    ),
+    at(
+      2_000,
+      Event::SessionFail(SessionFail {
+        reason: "the actor's VM exited before its driving program did: firecracker exited with code 1".into(),
       }),
     ),
     at(9_000, Event::SessionStop(SessionStop {})),
@@ -305,7 +313,37 @@ fn a_vm_exit_without_a_driver_exit_reports_finished() {
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
-  assert_eq!(line_after(&report, "| Duration"), "| 1.0s | finished | - | 0 | 0 | 0 | 0 | 0 |");
+  assert_eq!(line_after(&report, "| Duration"), "| 1.0s | failed | - | 0 | 0 | 0 | 0 | 0 |");
+  assert!(
+    report.contains("- ❌ Session failed: the actor's VM exited before its driving program did: firecracker exited with code 1\n"),
+    "{report}"
+  );
+}
+
+#[test]
+fn a_vm_exit_after_the_driver_exit_reports_finished() {
+  let events = vec![
+    create(1_000),
+    at(
+      2_000,
+      Event::ActorExit(ActorExit {
+        code: Some(0),
+        signal: None,
+      }),
+    ),
+    at(
+      2_100,
+      Event::ActorVmExit(ActorVmExit {
+        code: Some(0),
+        signal: None,
+        error: None,
+      }),
+    ),
+  ];
+
+  let report = render("7f3a", &events, Level::Summary, Format::Markdown);
+
+  assert_eq!(line_after(&report, "| Duration"), "| 1.0s | finished | exit 0 | 0 | 0 | 0 | 0 | 0 |");
 }
 
 #[test]

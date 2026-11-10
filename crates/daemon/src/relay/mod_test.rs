@@ -244,8 +244,9 @@ async fn exec_refusal(daemon: &crate::Daemon, session: &str) -> String {
 async fn an_exec_in_an_ended_session_says_it_ended_and_how() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  testing::fake_image(&started.dir.path().join("image"), r#"touch "$(dirname "$3")/v.sock"; sleep 0.2"#);
+  testing::fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
   let finished = Sessions::create(daemon, testing::new_actor_session(PROFILE, started.dir.path())).await.unwrap();
+  testing::exit_actor(&started, &finished.id).await;
   let stopped = Sessions::create(daemon, new_session(PROFILE, started.dir.path())).await.unwrap();
   Sessions::stop(daemon, &stopped.id).await.unwrap();
   let released = async {

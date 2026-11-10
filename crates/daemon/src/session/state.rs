@@ -3,8 +3,8 @@
 //! ```text
 //! Creating ──► Running ──► Stopping ──► Stopped
 //!    │            │
-//!    ├──► Failed  └──► Finished (the actor's driving program exited)
-//!    └──► Finished
+//!    ├──► Failed  ├──► Finished (the actor's driving program exited)
+//!    └──► Finished└──► Failed (the actor's VM exited before it did)
 //! ```
 //!
 //! `Stopped`, `Finished` and `Failed` are terminal: the first one reached
@@ -61,7 +61,7 @@ impl State {
 
 fn allowed(from: SessionState, to: SessionState) -> bool {
   use SessionState::*;
-  matches!((from, to), (Creating, Running | Failed | Finished) | (Running, Stopping | Finished) | (Stopping, Stopped))
+  matches!((from, to), (Creating, Running | Failed | Finished) | (Running, Stopping | Finished | Failed) | (Stopping, Stopped))
 }
 
 #[cfg(test)]

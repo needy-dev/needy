@@ -71,6 +71,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         state_dir: paths.state,
         runtime_dir: paths.runtime,
         actor_image: image,
+        kvm: needy_core_actor::host::vm::KVM.into(),
         docker_image: args.docker_image,
       })
       .await?;

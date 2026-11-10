@@ -31,6 +31,32 @@ pub enum Error {
   },
   #[error("cannot start firecracker")]
   Spawn(#[source] std::io::Error),
+  #[error(
+    "this host has no usable KVM: cannot open {}: {source}; a firecracker actor needs it. A container actor runtime, which would not, is designed in docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md but not available yet",
+    path.display()
+  )]
+  Kvm {
+    path: PathBuf,
+    #[source]
+    source: std::io::Error,
+  },
+}
+
+/// The KVM device Firecracker opens.
+// Source: https://github.com/rust-vmm/kvm/blob/b4c9ed8df95a9e10a68f50f5ef5e7d04108759ba/kvm-ioctls/src/ioctls/system.rs#L97-L128
+// (kvm-ioctls v0.25.0, which Firecracker v1.17.0 uses: `Kvm::new` opens
+// `/dev/kvm` with `O_RDWR`).
+// Reference: https://www.kernel.org/doc/html/v6.12/virt/kvm/api.html#general-description
+pub const KVM: &str = "/dev/kvm";
+
+/// Fails unless `path`, the KVM device, opens for reading and writing, as
+/// Firecracker opens it. A host without KVM, or whose KVM the daemon's user
+/// may not use, fails here instead of in a VM that exits at once.
+pub fn check_kvm(path: &Path) -> Result<(), Error> {
+  std::fs::OpenOptions::new().read(true).write(true).open(path).map(drop).map_err(|source| Error::Kvm {
+    path: path.to_path_buf(),
+    source,
+  })
 }
 
 /// The files `needy build` writes for actors.

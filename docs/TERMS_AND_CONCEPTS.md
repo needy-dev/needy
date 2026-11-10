@@ -74,8 +74,9 @@ RL rollout is one session. A session can also have no actor, for `needy exec`.
 A session is `creating` while it acquires its executors, copies files in and
 starts its actor, then `running`. It ends `stopped` (after `stopping`, by
 `needy session stop`), `finished` (its actor's driving program exited) or
-`failed` (its create failed). The first of these end states stays: stopping a
-finished session releases its executors but keeps it `finished`.
+`failed` (its create failed, or its actor's VM exited before the driving
+program did, with the reason). The first of these end states stays: stopping a
+finished or failed session releases its executors but keeps its state.
 
 *Avoid*: rollout. The [runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)
 design renames *session* to **run**; until that lands, *session* is the

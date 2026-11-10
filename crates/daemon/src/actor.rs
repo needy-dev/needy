@@ -33,6 +33,7 @@ const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 /// Starts the actor of `session`: its guest listener, its gateway, then its
 /// VM.
 pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
+  vm::check_kvm(&daemon.config.kvm)?;
   let image = vm::Image::new(&daemon.config.actor_image);
   image.check()?;
   let launch = vm::Launch::new(&image, &session.dir, session.recipe.as_ref());
@@ -143,6 +144,8 @@ pub fn remove_sockets(dir: &Path) {
 
 /// Waits for the VM to exit, which it does when the guest reboots after the
 /// driving program, then stops the actor's tasks and finishes the session.
+/// A VM that exits before the driving program reported its exit fails the
+/// session instead, with the VM's exit and the end of its log as the reason.
 async fn watch(daemon: Daemon, session: Arc<Session>, mut vm: vm::Vm, actor: CancellationToken) {
   let waited = tokio::select! {
     waited = vm.wait() => waited,
@@ -170,11 +173,55 @@ async fn watch(daemon: Daemon, session: Arc<Session>, mut vm: vm::Vm, actor: Can
     },
   };
   actor.cancel();
-  session.emit(&Event::ActorVmExit(exit));
-  if let Err(refused) = session.state.advance(SessionState::Finished) {
-    tracing::debug!("session {}: {refused}", session.id);
+  session.emit(&Event::ActorVmExit(exit.clone()));
+  if session.actor_exit().is_some() {
+    if let Err(refused) = session.state.advance(SessionState::Finished) {
+      tracing::debug!("session {}: {refused}", session.id);
+    }
+  } else {
+    let reason = vm_failure(&exit, &vm::console(&session.dir));
+    tracing::warn!("session {} failed: {reason}", session.id);
+    session.fail(reason);
   }
   daemon.finish_session(&session).await;
+  // `needy report` right after the end must see it.
+  session.trace.flush().await;
+}
+
+/// How many of the last lines of the VM's log a failure quotes.
+const FAILURE_LOG_LINES: usize = 5;
+
+/// Why a session whose VM exited before its driving program did failed: the
+/// VM's exit and the last lines of the log Firecracker and the guest's
+/// console share, on one line.
+fn vm_failure(exit: &ActorVmExit, log: &Path) -> String {
+  let status = match exit {
+    ActorVmExit {
+      error: Some(error), ..
+    } => format!("waiting for firecracker failed: {error}"),
+    ActorVmExit {
+      code: Some(code), ..
+    } => format!("firecracker exited with code {code}"),
+    ActorVmExit {
+      signal: Some(signal),
+      ..
+    } => format!("firecracker was killed by {signal}"),
+    ActorVmExit { .. } => "firecracker exited".to_string(),
+  };
+  let mut reason = format!("the actor's VM exited before its driving program did: {status}");
+  match std::fs::read(log) {
+    Ok(bytes) => {
+      let text = String::from_utf8_lossy(&bytes);
+      let lines: Vec<&str> = text.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+      let tail = &lines[lines.len().saturating_sub(FAILURE_LOG_LINES)..];
+      if !tail.is_empty() {
+        reason.push_str("; its log ends: ");
+        reason.push_str(&tail.join(" | "));
+      }
+    }
+    Err(e) => reason.push_str(&format!("; cannot read {}: {e}", log.display())),
+  }
+  reason
 }
 
 #[cfg(test)]

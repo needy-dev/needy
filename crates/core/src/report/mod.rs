@@ -112,7 +112,7 @@ struct Tally {
   // says `stopped`; the events cannot tell it from an exit before the stop.
   state: Option<SessionState>,
   actor_exit: Option<ActorExit>,
-  /// Why the session failed to start.
+  /// Why the session failed.
   failure: Option<String>,
   /// Events the trace dropped.
   dropped: u64,
@@ -161,9 +161,10 @@ impl Tally {
         self.end(time_ms, SessionState::Finished);
         self.actor_exit = Some(exit.clone());
       }
-      // The daemon finishes a session whose VM exited, even when its driving
-      // program reported no exit.
-      Event::ActorVmExit(_) => self.end(time_ms, SessionState::Finished),
+      // A VM exit after the driving program's `actor.exit` ended nothing
+      // new; one before it is the failure the daemon records next as
+      // `session.fail`, with the reason.
+      Event::ActorVmExit(_) => self.end(time_ms, SessionState::Failed),
       Event::ActorConfig(config) => self.route_names = Some(config.route_names.clone()),
       Event::ExecDecide(decide) => {
         match &decide.outcome {

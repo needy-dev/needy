@@ -112,9 +112,10 @@ async fn stopping_a_session_stops_its_guest_listener_and_removes_its_sockets() {
 async fn an_actor_that_exits_releases_its_executors_and_sockets() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  fake_image(&started.dir.path().join("image"), r#"touch "$(dirname "$3")/v.sock"; sleep 0.2"#);
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
   let created = Sessions::create(daemon, new_actor_session(PROFILE, started.dir.path())).await.unwrap();
   let dir = session_dir(&started, &created.id);
+  testing::exit_actor(&started, &created.id).await;
 
   let released = async {
     while !(daemon.pool.instances().await.is_empty() && sockets(&dir).is_empty()) {
@@ -127,4 +128,82 @@ async fn an_actor_that_exits_releases_its_executors_and_sockets() {
   assert_eq!(listed[0].state, SessionState::Finished);
   Sessions::stop(daemon, &created.id).await.unwrap();
   assert_eq!(Sessions::get(daemon, &created.id).await.unwrap().state, SessionState::Finished);
+}
+
+// ROOT CAUSE:
+//
+// If the actor's VM exited without its driving program having reported an
+// exit, such as a Firecracker that refused the recipe's CPU template, the
+// session was `finished` with no findings, because the VM watch finished
+// every session whose VM exited.
+//
+// Before the fix, `session ls` and `report` said `finished` and only
+// `session logs` showed why.
+// The fix ends such a session `failed`, with the VM's exit status and the
+// end of its log as the reason, recorded as `session.fail`.
+#[tokio::test]
+async fn a_vm_that_exits_before_its_driving_program_fails_the_session_with_the_reason() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(
+    &started.dir.path().join("image"),
+    r#"echo "Running Firecracker"; echo "Error: Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1"; exit 1"#,
+  );
+  let created = Sessions::create(daemon, new_actor_session(PROFILE, started.dir.path())).await.unwrap();
+
+  // The session ends, then gives back its executors.
+  let ended = async {
+    loop {
+      let info = Sessions::get(daemon, &created.id).await.unwrap();
+      let open = matches!(info.state, SessionState::Creating | SessionState::Running);
+      if !open && daemon.pool.instances().await.is_empty() {
+        return info;
+      }
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+  };
+  let info = tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the session did not end and release its executors");
+
+  assert_eq!(info.state, SessionState::Failed);
+  let failure = info.failure.unwrap_or_default();
+  assert!(failure.starts_with("the actor's VM exited before its driving program did: firecracker exited with code 1"), "{failure}");
+  assert!(failure.contains("Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1"), "{failure}");
+
+  // A stop keeps the failure and flushes the trace.
+  Sessions::stop(daemon, &created.id).await.unwrap();
+  assert_eq!(Sessions::get(daemon, &created.id).await.unwrap().state, SessionState::Failed);
+  let trace = std::fs::read_to_string(session_dir(&started, &created.id).join("trace.jsonl")).unwrap();
+  assert!(trace.contains("\"session.fail\""), "{trace}");
+}
+
+// ROOT CAUSE:
+//
+// If the host had no `/dev/kvm`, `session create` of a profile with an actor
+// exited 0, because the daemon started Firecracker, which exited at once,
+// and the session then read as `finished`.
+//
+// Before the fix, the missing KVM showed only in `session logs`.
+// The fix checks the KVM device before anything starts and fails the create
+// with a message that names it.
+#[tokio::test]
+async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), LONG_RUNNING);
+  let kvm = started.dir.path().join("kvm");
+  std::fs::remove_file(&kvm).unwrap();
+
+  let created = tokio::time::timeout(Duration::from_secs(5), Sessions::create(daemon, new_actor_session(PROFILE, started.dir.path())))
+    .await
+    .expect("the create fails at once");
+
+  let Err(needy_api_server::control::ControlError::Failed(message)) = created else {
+    panic!("a create without KVM must fail");
+  };
+  assert!(message.contains(&format!("this host has no usable KVM: cannot open {}", kvm.display())), "{message}");
+  assert!(message.contains("2026-11-10-container-actor-runtime-design.md"), "{message}");
+  let listed = Sessions::list(daemon).await.unwrap();
+  assert_eq!(listed[0].state, SessionState::Failed);
+  assert!(!session_dir(&started, &listed[0].id).join("firecracker.pid").exists(), "firecracker was started");
+  assert!(daemon.pool.instances().await.is_empty());
 }

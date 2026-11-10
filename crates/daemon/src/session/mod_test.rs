@@ -287,9 +287,10 @@ async fn a_finished_session_ends_its_processes_on_a_remote_executor() {
   let remote = testing::Executor::start().await;
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  fake_image(&started.dir.path().join("image"), r#"touch "$(dirname "$3")/v.sock"; sleep 1"#);
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
   let created = Sessions::create(daemon, new_actor_session(&remote_profile(&remote.endpoint), started.dir.path())).await.unwrap();
   let pid = detached_sleep(daemon, &created.id).await;
+  testing::exit_actor(&started, &created.id).await;
 
   assert!(ended(pid).await, "process {pid} outlived its finished session");
   assert_eq!(Sessions::get(daemon, &created.id).await.unwrap().state, SessionState::Finished);
