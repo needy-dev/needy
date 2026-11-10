@@ -13,7 +13,7 @@ fn actor() -> Caller {
 
 #[tokio::test]
 async fn the_control_socket_serves_no_guest() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let status = served.client.guest().get_config(GetConfigRequest {}).await.unwrap_err();
 
@@ -34,7 +34,7 @@ async fn the_actor_gets_its_run_s_configuration() {
 }
 
 fn pushed(version: u32) -> PushEventsRequest {
-  let event = Event::RunStop(RunStop {});
+  let event = Event::RunStop(RunStop::default());
   PushEventsRequest {
     event: Some(TraceEvent {
       time_ms: 99,
@@ -52,7 +52,7 @@ async fn guest_events_are_decoded_into_the_run() {
   served.client.guest().push_events(tokio_stream::iter([pushed(SCHEMA_VERSION)])).await.unwrap();
 
   let events = served.fake.events.lock().unwrap();
-  assert_eq!(*events, [("s-actor".to_string(), 99, Event::RunStop(RunStop {}))]);
+  assert_eq!(*events, [("s-actor".to_string(), 99, Event::RunStop(RunStop::default()))]);
 }
 
 #[tokio::test]

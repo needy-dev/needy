@@ -19,7 +19,7 @@ async fn an_over_long_socket_path_fails_to_bind_with_the_path() {
   // Longer than `sun_path` on every Unix (104 bytes on macOS, 108 on Linux).
   let socket = dir.path().join("x".repeat(120)).join("api.sock");
 
-  let error = Server::new(health(), Caller::Cli).bind(&[Listen::Unix(socket.clone())]).await.err().unwrap();
+  let error = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket.clone())]).await.err().unwrap();
 
   assert!(error.to_string().contains(&socket.display().to_string()), "{error}");
 }
@@ -31,14 +31,14 @@ async fn a_stale_socket_is_replaced() {
   std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
   std::fs::write(&socket, "left by an earlier daemon").unwrap();
 
-  let bound = Server::new(health(), Caller::Cli).bind(&[Listen::Unix(socket.clone())]).await;
+  let bound = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket.clone())]).await;
 
   assert!(bound.is_ok(), "{:?}", bound.err());
 }
 
 #[tokio::test]
 async fn health_needs_no_token_and_everything_else_does() {
-  let served = serve_with(Caller::Cli, Some("secret")).await;
+  let served = serve_with(Caller::Operator, Some("secret")).await;
 
   let health = served.client.health().check(CheckRequest {}).await.unwrap().into_inner();
   let refused = served.client.runs().list_runs(ListRunsRequest {}).await.unwrap_err();
@@ -54,7 +54,7 @@ async fn health_needs_no_token_and_everything_else_does() {
 async fn serving_ends_when_cancelled() {
   let dir = tempfile::tempdir().unwrap();
   let socket = dir.path().join("api.sock");
-  let bound = Server::new(health(), Caller::Cli).bind(&[Listen::Unix(socket)]).await.unwrap();
+  let bound = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket)]).await.unwrap();
   let cancel = CancellationToken::new();
   let serving = tokio::spawn(bound.serve(cancel.clone()));
 
@@ -66,9 +66,9 @@ async fn serving_ends_when_cancelled() {
 
 #[tokio::test]
 async fn a_tcp_listener_off_loopback_needs_a_token() {
-  let open = Server::new(health(), Caller::Cli).bind(&[Listen::Tcp("0.0.0.0:0".into())]).await;
-  let loopback = Server::new(health(), Caller::Cli).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await;
-  let with_token = Server::new(health(), Caller::Cli).token(Some("secret".into())).bind(&[Listen::Tcp("0.0.0.0:0".into())]).await;
+  let open = Server::new(health(), Caller::Operator).bind(&[Listen::Tcp("0.0.0.0:0".into())]).await;
+  let loopback = Server::new(health(), Caller::Operator).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await;
+  let with_token = Server::new(health(), Caller::Operator).token(Some("secret".into())).bind(&[Listen::Tcp("0.0.0.0:0".into())]).await;
 
   assert!(matches!(open, Err(Error::Unauthenticated(Listen::Tcp(ref address))) if address == "0.0.0.0:0"), "{:?}", open.err());
   assert!(loopback.is_ok(), "{:?}", loopback.err());

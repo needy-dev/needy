@@ -23,7 +23,7 @@ pub async fn serve(listen: &str, name: String, token: Option<String>) -> Result<
     host: host.clone(),
     name,
   };
-  let server = Server::new(health, Caller::Cli).token(token).process_service(service).bind(&[Listen::parse(listen)]).await?;
+  let server = Server::new(health, Caller::Operator).token(token).process_service(service).bind(&[Listen::parse(listen)]).await?;
   tracing::info!("executor listening on {listen}");
   let ended = termination
     .unless_forced(async {

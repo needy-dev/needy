@@ -1,6 +1,6 @@
 use needy_api_proto::v1::{
-  Ancestor, CheckProfileRequest, CreateRunRequest, DecideRequest, FindingSeverity, GetRunLogsRequest, GetRunRequest, ListRunsRequest,
-  StopRunRequest,
+  Ancestor, CheckProfileRequest, CreateRunRequest, DecideRequest, FindingSeverity, GetRunEventsRequest, GetRunLogsRequest, GetRunRequest,
+  ListRunsRequest, StopRunRequest,
 };
 use tonic::Code;
 
@@ -24,7 +24,7 @@ fn create() -> CreateRunRequest {
 
 #[tokio::test]
 async fn the_cli_creates_a_run_and_reads_its_state_as_an_enum() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let run = served.client.runs().create_run(create()).await.unwrap().into_inner().run.unwrap();
 
@@ -36,7 +36,7 @@ async fn the_cli_creates_a_run_and_reads_its_state_as_an_enum() {
 
 #[tokio::test]
 async fn a_create_that_names_no_profile_is_invalid() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
   let request = CreateRunRequest {
     profile_name: String::new(),
     ..create()
@@ -66,6 +66,7 @@ async fn an_actor_cannot_create_stop_or_read_the_logs_of_runs() {
     .clone()
     .get_run_logs(GetRunLogsRequest {
       run_id: "s-actor".into(),
+      ..Default::default()
     })
     .await
     .unwrap_err();
@@ -84,7 +85,7 @@ async fn an_actor_cannot_create_stop_or_read_the_logs_of_runs() {
 
 #[tokio::test]
 async fn a_missing_run_is_not_found() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let status = served
     .client
@@ -101,7 +102,7 @@ async fn a_missing_run_is_not_found() {
 
 #[tokio::test]
 async fn runs_are_listed_and_stopped() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let list = served.client.runs().list_runs(ListRunsRequest {}).await.unwrap().into_inner().runs;
   served
@@ -114,18 +115,19 @@ async fn runs_are_listed_and_stopped() {
     .unwrap();
 
   assert_eq!(list.iter().map(|s| s.run_id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
-  assert_eq!(served.fake.calls(), ["stop s2"]);
+  assert_eq!(served.fake.calls(), ["stop s2 by operator"]);
 }
 
 #[tokio::test]
 async fn logs_arrive_in_chunks_that_add_up() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let mut stream = served
     .client
     .runs()
     .get_run_logs(GetRunLogsRequest {
       run_id: "s1".into(),
+      ..Default::default()
     })
     .await
     .unwrap()
@@ -165,7 +167,7 @@ async fn an_actor_decides_within_its_own_run_whatever_the_request_names() {
 
 #[tokio::test]
 async fn the_cli_decides_within_the_run_it_names() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let response = served.client.runs().decide(decide("s1", &["python3"])).await.unwrap().into_inner();
 
@@ -186,7 +188,7 @@ async fn a_refused_or_local_route_maps_to_the_wire_shape() {
 
 #[tokio::test]
 async fn the_cli_checks_a_profile_and_reads_placements_and_findings() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
   let request = CheckProfileRequest {
     profile_yaml: "{}".into(),
     recipe_yaml: String::new(),
@@ -213,4 +215,70 @@ async fn an_actor_cannot_check_profiles() {
 
   assert_eq!(status.code(), Code::PermissionDenied);
   assert!(served.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn followed_logs_stream_each_read_and_end_with_the_run() {
+  let served = serve(Caller::Operator).await;
+
+  let request = GetRunLogsRequest {
+    run_id: "s1".into(),
+    follow: true,
+  };
+  let mut stream = served.client.runs().get_run_logs(request).await.unwrap().into_inner();
+  let mut reads = Vec::new();
+  while let Some(chunk) = stream.message().await.unwrap() {
+    reads.push(String::from_utf8(chunk.data).unwrap());
+  }
+
+  assert_eq!(reads, ["boot\n", "later\n"]);
+  assert_eq!(served.fake.calls(), ["logs s1 follow=true"]);
+}
+
+#[tokio::test]
+async fn run_events_arrive_in_order_in_messages_that_name_the_full_run() {
+  let served = serve(Caller::Operator).await;
+
+  let request = GetRunEventsRequest { run_id: "s".into() };
+  let mut stream = served.client.runs().get_run_events(request).await.unwrap().into_inner();
+  let mut sizes = Vec::new();
+  let mut seqs = Vec::new();
+  while let Some(message) = stream.message().await.unwrap() {
+    assert_eq!(message.run_id, "s1");
+    sizes.push(message.events.len());
+    seqs.extend(message.events.iter().map(|e| e.seq));
+  }
+
+  assert_eq!(sizes, [1000, 1000, 500]);
+  assert_eq!(seqs, (0..2500).collect::<Vec<_>>());
+}
+
+#[tokio::test]
+async fn a_run_without_events_is_one_message_that_names_it() {
+  let served = serve(Caller::Operator).await;
+
+  let request = GetRunEventsRequest {
+    run_id: "empty".into(),
+  };
+  let mut stream = served.client.runs().get_run_events(request).await.unwrap().into_inner();
+  let first = stream.message().await.unwrap().unwrap();
+
+  assert_eq!((first.run_id.as_str(), first.events.len()), ("empty", 0));
+  assert!(stream.message().await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_actor_cannot_read_run_events() {
+  let served = serve(actor()).await;
+
+  let refused = served
+    .client
+    .runs()
+    .get_run_events(GetRunEventsRequest {
+      run_id: "s1".into(),
+    })
+    .await
+    .unwrap_err();
+
+  assert_eq!(refused.code(), Code::PermissionDenied);
 }

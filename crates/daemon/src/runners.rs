@@ -78,14 +78,21 @@ impl Daemon {
   }
 }
 
-/// Each store error as one row of the status table.
-fn control_error(error: Error) -> ControlError {
+/// Each store error of the runner and client registries as one row of the
+/// status table.
+pub(crate) fn control_error(error: Error) -> ControlError {
   let message = error.to_string();
   match error {
-    Error::InvalidJoinToken | Error::Expired(_) | Error::UsedUp(_) | Error::Revoked(_) => ControlError::Unauthenticated(message),
-    Error::NoJoinToken(_) | Error::NoRunner(_) => ControlError::NotFound(message),
+    Error::InvalidJoinToken
+    | Error::Expired(_)
+    | Error::UsedUp(_)
+    | Error::Revoked(_)
+    | Error::InvalidPairingCode
+    | Error::PairingCodeExpired(_)
+    | Error::PairingCodeUsed(_) => ControlError::Unauthenticated(message),
+    Error::NoJoinToken(_) | Error::NoRunner(_) | Error::NoClient(_) => ControlError::NotFound(message),
     Error::OutOfScope(_) => ControlError::denied(message),
-    Error::RunnerExists(_) => ControlError::Failed(message),
+    Error::RunnerExists(_) | Error::ClientExists(_) => ControlError::Failed(message),
     Error::Invalid(_) => ControlError::Invalid(message),
     Error::Schema(_) | Error::Corrupt(_) | Error::Database(_) => {
       tracing::error!("state.db: {error:#}");

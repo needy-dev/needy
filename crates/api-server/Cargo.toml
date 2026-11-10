@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 http.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true

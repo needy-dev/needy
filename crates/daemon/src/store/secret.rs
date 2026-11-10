@@ -1,9 +1,10 @@
-//! Join tokens and runner credentials: generating them, and checking one
+//! Join tokens, runner credentials, pairing codes and client tokens:
+//! generating them, and checking one
 //! against its stored hash.
 //!
 //! A secret is `<kind>.<id>.<64 hex digits>`: 32 random bytes after a prefix
-//! that names its kind and the row it belongs to (a join token's ID or a
-//! runner's name), so a check reads one row and compares one hash. Only the
+//! that names its kind and the row it belongs to (a join token's, a pairing
+//! code's or a client's ID, or a runner's name), so a check reads one row and compares one hash. Only the
 //! SHA-256 of the whole string is stored. A salted, slow hash is not needed:
 //! the secret has 256 bits of entropy, so the hash cannot be guessed back.
 
@@ -15,6 +16,10 @@ use subtle::ConstantTimeEq as _;
 pub const JOIN: &str = "needy-join";
 /// The prefix of a runner credential.
 pub const RUNNER: &str = "needy-runner";
+/// The prefix of a pairing code.
+pub const PAIRING: &str = "needy-pair";
+/// The prefix of a client token.
+pub const CLIENT: &str = "needy-client";
 
 /// A secret in plain text, returned once to whoever it is for. Its `Debug`
 /// form does not show it.

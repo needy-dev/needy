@@ -2,6 +2,7 @@
 
 mod cli;
 mod commands;
+mod credentials;
 mod logging;
 mod output;
 mod paths;

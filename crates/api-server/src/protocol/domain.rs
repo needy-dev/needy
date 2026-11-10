@@ -19,8 +19,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use needy_core::types::{Origin, RunState, RunnerRole};
 
 use crate::control::{
-  ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement, ProcessInfo,
-  ProfileCheck, ProfileToCheck, Route, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started, Target, WindowSize,
+  ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
+  ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started, StoredEvent,
+  Target, WindowSize,
 };
 
 /// A request field with no domain meaning.
@@ -141,6 +142,26 @@ pub fn proto_join_token(token: JoinTokenInfo) -> v1::JoinToken {
   }
 }
 
+pub fn proto_client(client: ClientInfo) -> v1::Client {
+  v1::Client {
+    id: client.id,
+    name: client.name,
+    created_at_ms: client.created_ms,
+    last_used_at_ms: client.last_used_ms.unwrap_or(0),
+    revoked_at_ms: client.revoked_ms.unwrap_or(0),
+  }
+}
+
+pub fn proto_stored_event(event: StoredEvent) -> v1::StoredEvent {
+  v1::StoredEvent {
+    seq: event.seq,
+    time_ms: event.time_ms,
+    kind: event.kind,
+    version: event.version,
+    payload: event.payload,
+  }
+}
+
 pub fn joining(request: v1::JoinRequest) -> Result<Joining, Error> {
   if request.join_token.is_empty() {
     return Err(Error::Missing("join token"));
@@ -225,6 +246,8 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     group: request.group,
     name: request.name,
     actor_command: request.actor_command,
+    // The adapter sets who asks; the wire does not say.
+    by: None,
   })
 }
 
@@ -335,6 +358,8 @@ pub fn exec_spec(start: v1::ExecStart) -> Result<ExecSpec, Error> {
     runner: start.runner,
     no_stdin: start.no_stdin,
     search_path_if_missing: start.search_path_if_missing,
+    // The adapter sets who asks; the wire does not say.
+    by: None,
   })
 }
 

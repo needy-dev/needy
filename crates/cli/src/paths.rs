@@ -8,11 +8,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use etcetera::BaseStrategy;
 
-// TODO(config): the config directory (`$XDG_CONFIG_HOME/needy`) and the build
-// cache (`$XDG_CACHE_HOME/needy`) have no reader yet. Add them when the config
-// slice (2) reads user configuration or `needy build` keeps a cache.
+// TODO(config): the build cache (`$XDG_CACHE_HOME/needy`) has no reader yet.
+// Add it when `needy build` keeps a cache. The config directory holds only
+// the client tokens `needy client pair` stores (`credentials`); user
+// configuration waits for the config slice.
 #[derive(Debug, Clone)]
 pub struct Paths {
+  /// Client tokens by endpoint: `$XDG_CONFIG_HOME/needy`, or
+  /// `NEEDY_CONFIG_DIR`.
+  pub config: PathBuf,
   /// `trace.db`, runs and the daemon log: `$XDG_STATE_HOME/needy`, or
   /// `NEEDY_STATE_DIR`.
   pub state: PathBuf,
@@ -27,10 +31,12 @@ impl Paths {
   pub fn resolve() -> Result<Self> {
     let base = etcetera::choose_base_strategy().context("cannot find the home directory; set NEEDY_STATE_DIR and NEEDY_DATA_DIR")?;
     let data = dir("NEEDY_DATA_DIR").unwrap_or_else(|| base.data_dir().join("needy"));
+    let config = dir("NEEDY_CONFIG_DIR").unwrap_or_else(|| base.config_dir().join("needy"));
     // Windows has no state directory; its data directory is per user too.
     let state = dir("NEEDY_STATE_DIR").unwrap_or_else(|| base.state_dir().unwrap_or_else(|| base.data_dir()).join("needy"));
     let runtime = dir("NEEDY_RUNTIME_DIR").or_else(|| base.runtime_dir().map(|d| d.join("needy"))).unwrap_or_else(|| state.clone());
     Ok(Self {
+      config,
       state,
       data,
       runtime,
@@ -40,6 +46,11 @@ impl Paths {
   /// The control daemon's socket, which the CLI reaches by default.
   pub fn socket(&self) -> PathBuf {
     self.runtime.join("daemon.sock")
+  }
+
+  /// The client tokens `needy client pair` stores, by endpoint.
+  pub fn credentials(&self) -> PathBuf {
+    self.config.join("credentials.json")
   }
 
   /// The image `needy build` writes and the daemon boots by default.

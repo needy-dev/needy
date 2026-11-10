@@ -25,7 +25,7 @@ struct Secret;
 #[async_trait::async_trait]
 impl Authenticator for Secret {
   async fn authenticate(&self, _method: &str, token: &str) -> Option<Caller> {
-    (token == "secret").then_some(Caller::Cli)
+    (token == "secret").then_some(Caller::Operator)
   }
 }
 

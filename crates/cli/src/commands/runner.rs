@@ -129,13 +129,13 @@ fn labels_cell(labels: &BTreeMap<String, String>) -> String {
   labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")
 }
 
-fn time(ms: i64) -> String {
+pub(crate) fn time(ms: i64) -> String {
   let at = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0));
   humantime::format_rfc3339_seconds(at).to_string()
 }
 
 /// How long ago `ms` was on this machine's clock, to the second.
-fn ago(ms: i64) -> String {
+pub(crate) fn ago(ms: i64) -> String {
   let seconds = u64::try_from(needy_common::time::now_ms().saturating_sub(ms) / 1000).unwrap_or(0);
   format!("{} ago", humantime::format_duration(Duration::from_secs(seconds)))
 }

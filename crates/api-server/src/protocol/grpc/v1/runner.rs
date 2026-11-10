@@ -29,7 +29,7 @@ impl<R> Adapter<R> {
   /// Refuses a call only an operator may make.
   fn operator<T>(&self, request: &Request<T>) -> Result<(), Status> {
     match caller(&self.caller, request) {
-      Caller::Cli => Ok(()),
+      Caller::Operator | Caller::Client { .. } => Ok(()),
       Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied("only operators manage runners").into()),
     }
   }
@@ -38,7 +38,7 @@ impl<R> Adapter<R> {
   fn runner<T>(&self, request: &Request<T>, what: &str) -> Result<String, Status> {
     match caller(&self.caller, request) {
       Caller::Runner { name } => Ok(name),
-      Caller::Cli | Caller::Actor { .. } => Err(ControlError::denied(format!("only runners {what}")).into()),
+      Caller::Operator | Caller::Client { .. } | Caller::Actor { .. } => Err(ControlError::denied(format!("only runners {what}")).into()),
     }
   }
 }

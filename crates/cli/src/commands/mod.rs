@@ -4,6 +4,7 @@
 
 pub mod attach;
 pub mod build;
+pub mod client;
 pub mod daemon;
 pub mod exec;
 pub mod fs;

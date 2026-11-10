@@ -25,7 +25,7 @@ impl<G> Adapter<G> {
   fn run(&self) -> Result<&str, Status> {
     match &self.caller {
       Caller::Actor { run } => Ok(run),
-      Caller::Cli | Caller::Runner { .. } => Err(ControlError::denied("not an actor listener").into()),
+      Caller::Operator | Caller::Client { .. } | Caller::Runner { .. } => Err(ControlError::denied("not an actor listener").into()),
     }
   }
 }
@@ -44,7 +44,7 @@ impl<G: Guest> GuestService for Adapter<G> {
       let Some(pushed) = message.event else {
         continue;
       };
-      // The guest build's schema version must be this daemon's.
+      // The guest build's schema version must be one this daemon reads.
       let event = Event::decode(&pushed.kind, pushed.version, &pushed.payload)
         .map_err(|e| ControlError::Invalid(format!("guest event {}: {e}", pushed.kind)))?;
       self.guest.event(run, pushed.time_ms, event).await?;

@@ -10,7 +10,7 @@ use needy_api_proto::v1::{
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::Streamed;
+use super::{Streamed, caller};
 use crate::control::{Caller, ControlError, ExecOpen, Inputs, Processes, WindowSize};
 use crate::protocol::{domain, status};
 
@@ -19,24 +19,21 @@ pub struct Adapter<P> {
   pub caller: Caller,
 }
 
-impl<P> Adapter<P> {
-  /// The run a call acts on: an actor's own, or the one the request
-  /// names.
-  fn run(&self, named: String) -> Result<String, Status> {
-    match &self.caller {
-      Caller::Actor { run } => Ok(run.clone()),
-      Caller::Cli => Ok(named),
-      Caller::Runner { .. } => Err(ControlError::denied("runners cannot run processes here").into()),
-    }
+/// The run a call acts on: an actor's own, or the one the request names.
+fn run(caller: &Caller, named: String) -> Result<String, Status> {
+  match caller {
+    Caller::Actor { run } => Ok(run.clone()),
+    Caller::Operator | Caller::Client { .. } => Ok(named),
+    Caller::Runner { .. } => Err(ControlError::denied("runners cannot run processes here").into()),
   }
+}
 
-  /// The runner a call names; an actor's commands are placed by its
-  /// run's rules and may not name one.
-  fn runner(&self, named: String) -> Result<String, Status> {
-    match &self.caller {
-      Caller::Actor { .. } if !named.is_empty() => Err(ControlError::denied("an actor cannot name a runner").into()),
-      _ => Ok(named),
-    }
+/// The runner a call names; an actor's commands are placed by its run's
+/// rules and may not name one.
+fn runner(caller: &Caller, named: String) -> Result<String, Status> {
+  match caller {
+    Caller::Actor { .. } if !named.is_empty() => Err(ControlError::denied("an actor cannot name a runner").into()),
+    _ => Ok(named),
   }
 }
 
@@ -60,13 +57,15 @@ impl<P: Processes> ProcessService for Adapter<P> {
   type ExecStream = Streamed<ExecResponse>;
 
   async fn exec(&self, request: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
+    let caller = caller(&self.caller, &request);
     let mut inbound = request.into_inner();
     let first = inbound.message().await?.ok_or_else(|| ControlError::Invalid("empty request stream".into()))?;
     let open = match first.payload {
       Some(exec_request::Payload::Start(start)) => {
         let mut spec = domain::exec_spec(start).map_err(ControlError::from)?;
-        spec.run = self.run(spec.run)?;
-        spec.runner = self.runner(spec.runner)?;
+        spec.run = run(&caller, spec.run)?;
+        spec.runner = runner(&caller, spec.runner)?;
+        spec.by = Some(caller.principal());
         ExecOpen::Start(spec)
       }
       Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
@@ -85,16 +84,18 @@ impl<P: Processes> ProcessService for Adapter<P> {
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
+    let caller = caller(&self.caller, &request);
     let request = request.into_inner();
-    let run = self.run(request.run_id)?;
-    let runner = self.runner(request.runner)?;
+    let run = run(&caller, request.run_id)?;
+    let runner = runner(&caller, request.runner)?;
     let processes = self.processes.list(&run, &runner).await?.into_iter().map(domain::proto_process_info).collect();
     Ok(Response::new(ListProcessesResponse { processes }))
   }
 
   async fn kill_process(&self, request: Request<KillProcessRequest>) -> Result<Response<KillProcessResponse>, Status> {
+    let caller = caller(&self.caller, &request);
     let request = request.into_inner();
-    self.processes.kill(&request.process_id, &request.signal).await?;
+    self.processes.kill(&request.process_id, &request.signal, caller.principal()).await?;
     Ok(Response::new(KillProcessResponse {}))
   }
 }

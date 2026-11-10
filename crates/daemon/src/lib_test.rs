@@ -34,6 +34,7 @@ async fn shutdown_stops_runs_and_the_local_executors_processes() {
     no_stdin: true,
     origin: Origin::Cli,
     search_path_if_missing: false,
+    by: None,
   };
   let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
   let pid = loop {
@@ -78,6 +79,7 @@ async fn shutdown_ends_open_streams_saying_the_daemon_is_shutting_down() {
       no_stdin: true,
       origin: Origin::Cli,
       search_path_if_missing: false,
+      by: None,
     };
     let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
     while !matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)) {}

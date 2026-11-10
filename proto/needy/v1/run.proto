@@ -14,6 +14,9 @@ service RunService {
   // Stream the actor's console output: the guest's boot messages and the
   // driving program's terminal. NOT_FOUND when the run has no actor.
   rpc GetRunLogs(GetRunLogsRequest) returns (stream GetRunLogsResponse);
+  // Stream a run's trace events in order, as the control plane's trace
+  // database holds them, for `needy report` on any client.
+  rpc GetRunEvents(GetRunEventsRequest) returns (stream GetRunEventsResponse);
   // Decide where a command runs and how it is rewritten.
   rpc Decide(DecideRequest) returns (DecideResponse);
   // Check a profile against the runners it would run on: its runner
@@ -116,10 +119,39 @@ message StopRunResponse {}
 
 message GetRunLogsRequest {
   string run_id = 1;
+  // Keep streaming what the actor writes until the run ends or the caller
+  // leaves.
+  bool follow = 2;
 }
 
 message GetRunLogsResponse {
   bytes data = 1;
+}
+
+message GetRunEventsRequest {
+  // A run ID, an ID prefix (the run that started last among those it
+  // matches), or `latest`.
+  string run_id = 1;
+}
+
+message GetRunEventsResponse {
+  // The full run ID.
+  string run_id = 1;
+  repeated StoredEvent events = 2;
+}
+
+// One trace event as stored. The payload's schema belongs to its kind and
+// version; clients decode it with the same rules as the control plane.
+message StoredEvent {
+  // The event's place in its run, from 0.
+  uint64 seq = 1;
+  int64 time_ms = 2;
+  // For example `exec.decide`.
+  string kind = 3;
+  // The payload schema version.
+  uint32 version = 4;
+  // A JSON object.
+  string payload = 5;
 }
 
 message DecideRequest {

@@ -31,6 +31,7 @@ impl Home {
     for name in [
       "NEEDY_ENDPOINT",
       "NEEDY_TOKEN",
+      "XDG_CONFIG_HOME",
       "XDG_STATE_HOME",
       "XDG_DATA_HOME",
       "XDG_RUNTIME_DIR",
@@ -38,6 +39,7 @@ impl Home {
       command.env_remove(name);
     }
     command
+      .env("NEEDY_CONFIG_DIR", self.path().join("config"))
       .env("NEEDY_STATE_DIR", self.path().join("state"))
       .env("NEEDY_DATA_DIR", self.path().join("data"))
       .env("NEEDY_RUNTIME_DIR", self.path().join("run"))
@@ -397,7 +399,7 @@ fn report_names_the_profile_after_its_file() {
 }
 
 #[test]
-fn run_stop_is_traced_without_attributes() {
+fn run_stop_is_traced_with_who_stopped_the_run() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
@@ -408,7 +410,7 @@ fn run_stop_is_traced_without_attributes() {
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
   let stop = report.lines().find(|l| l.contains("| run.stop |")).unwrap_or_else(|| panic!("{report}"));
-  assert!(stop.ends_with("| run.stop | `{}` |"), "{stop}");
+  assert!(stop.ends_with(r#"| run.stop | `{"by":"operator"}` |"#), "{stop}");
   assert!(report.lines().nth(2).is_some_and(|l| !l.contains("incomplete")), "{report}");
 }
 
@@ -699,7 +701,7 @@ fn the_session_command_is_gone() {
 fn state_directory_follows_needy_state_dir() {
   let home = Home::new();
 
-  let output = home.run(&["report"]);
+  let output = home.run(&["report", "--local"]);
 
   assert_eq!(output.status.code(), Some(1));
   let expected = home.path().join("state").join("trace.db");
@@ -710,7 +712,8 @@ fn state_directory_follows_needy_state_dir() {
 fn state_directory_defaults_to_xdg_state_home() {
   let home = Home::new();
 
-  let output = home.needy().env_remove("NEEDY_STATE_DIR").env("XDG_STATE_HOME", home.path().join("xdg")).arg("report").output().unwrap();
+  let output =
+    home.needy().env_remove("NEEDY_STATE_DIR").env("XDG_STATE_HOME", home.path().join("xdg")).args(["report", "--local"]).output().unwrap();
 
   let expected = home.path().join("xdg").join("needy").join("trace.db");
   assert!(stderr(&output).contains(expected.to_str().unwrap()), "{}", stderr(&output));
@@ -1222,9 +1225,11 @@ fn report_defaults_to_plain_text() {
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
   let mut lines = report.lines();
-  assert_eq!(lines.next(), Some(format!("Run       {run}  (profile review)").as_str()));
-  assert_eq!(lines.next(), Some("State     stopped"));
-  assert!(lines.next().is_some_and(|l| l.starts_with("Duration  ") && l.ends_with('s')), "{report}");
+  assert_eq!(lines.next(), Some(format!("Run         {run}  (profile review)").as_str()));
+  assert_eq!(lines.next(), Some("State       stopped"));
+  assert!(lines.next().is_some_and(|l| l.starts_with("Duration    ") && l.ends_with('s')), "{report}");
+  assert_eq!(lines.next(), Some("Started by  operator"));
+  assert_eq!(lines.next(), Some("Stopped by  operator"));
   assert!(report.contains("\nCommands\n  routed to here   1  (1 failed)\n"), "{report}");
   assert!(report.contains("\nTop commands\n  sh on here  1  slowest "), "{report}");
   assert!(!report.contains('\u{1b}'), "no colors when stdout is not a terminal: {report}");
@@ -2023,4 +2028,163 @@ fn a_control_plane_killed_during_a_run_fails_it_at_restart_and_its_runner_ends_t
 /// Whether process `pid` is gone now.
 fn gone_now(pid: u32) -> bool {
   !Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success()
+}
+
+// ------------------------------------------------------------- clients
+
+const CONTROL_TOKEN: &str = "control-secret";
+
+/// A control daemon on a loopback TCP port that needs `CONTROL_TOKEN`, as
+/// one reached through a tunnel, and its endpoint.
+fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
+  let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+  let listen = format!("127.0.0.1:{port}");
+  let child = home
+    .needy()
+    .args([
+      "daemon",
+      "--mode",
+      "control",
+      "--listen",
+      &listen,
+      "--token-env",
+      "NEEDY_TEST_CONTROL_TOKEN",
+    ])
+    .env("NEEDY_TEST_CONTROL_TOKEN", CONTROL_TOKEN)
+    .args(stand_in_actor(home))
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while std::net::TcpStream::connect(&listen).is_err() {
+    assert!(Instant::now() < deadline, "the daemon did not listen on {listen}");
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  (Daemon { child }, format!("http://{listen}"))
+}
+
+/// `needy` against `endpoint` as the operator, with the control token.
+fn as_operator(home: &Home, endpoint: &str, args: &[&str]) -> Output {
+  home.needy().args(["--endpoint", endpoint]).args(args).env("NEEDY_TOKEN", CONTROL_TOKEN).output().unwrap()
+}
+
+/// `needy` against `endpoint` with only what `home` stored.
+fn as_client(home: &Home, endpoint: &str, args: &[&str]) -> Output {
+  home.needy().args(["--endpoint", endpoint]).args(args).output().unwrap()
+}
+
+/// A pairing code the operator created for a client named `name`.
+fn pairing_code(control: &Home, endpoint: &str, name: &str) -> String {
+  let created = as_operator(control, endpoint, &["client", "pair", "create", "--name", name]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  assert!(stderr(&created).contains("it is not shown again"), "{}", stderr(&created));
+  stdout(&created).trim().to_string()
+}
+
+#[test]
+fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  // Without a token the control plane refuses the client.
+  let refused = as_client(&laptop, &endpoint, &["run", "ls"]);
+  assert_eq!(refused.status.code(), Some(1));
+
+  let code = pairing_code(&control, &endpoint, "laptop");
+  let paired = as_client(&laptop, &endpoint, &["client", "pair", &code]);
+
+  assert!(paired.status.success(), "{}", stderr(&paired));
+  assert!(stderr(&paired).contains("paired as client laptop"), "{}", stderr(&paired));
+  let credentials = laptop.path().join("config").join("credentials.json");
+  assert_eq!(std::fs::metadata(&credentials).unwrap().permissions().mode() & 0o777, 0o600);
+  let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
+  assert!(stored["endpoints"][&endpoint]["token"].as_str().unwrap().starts_with("needy-client."), "{stored}");
+  let listed = as_client(&laptop, &endpoint, &["run", "ls"]);
+  assert!(listed.status.success(), "{}", stderr(&listed));
+  // The code was spent.
+  let again = as_client(&Home::new(), &endpoint, &["client", "pair", &code]);
+  assert_eq!(again.status.code(), Some(1));
+  assert!(stderr(&again).contains("was used already"), "{}", stderr(&again));
+}
+
+#[test]
+fn a_revoked_client_is_refused_and_listed_as_revoked() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+  let listed = as_operator(&control, &endpoint, &["client", "ls", "-o", "json"]);
+  let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+  let id = clients[0]["id"].as_str().unwrap().to_string();
+  assert_eq!((clients[0]["name"].as_str(), clients[0]["state"].as_str()), (Some("laptop"), Some("active")));
+
+  let revoked = as_operator(&control, &endpoint, &["client", "revoke", &id]);
+  let refused = as_client(&laptop, &endpoint, &["run", "ls"]);
+
+  assert!(revoked.status.success(), "{}", stderr(&revoked));
+  assert_eq!(refused.status.code(), Some(1));
+  assert!(stderr(&refused).contains("missing or invalid bearer token"), "{}", stderr(&refused));
+  let text = stdout(&as_operator(&control, &endpoint, &["client", "ls"]));
+  let rows = table(&text);
+  assert_eq!(rows[0], ["ID", "NAME", "STATE", "PAIRED", "LAST USED"]);
+  assert_eq!(&rows[1][..3], [id.as_str(), "laptop", "revoked"]);
+}
+
+#[test]
+fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  // The client's state directory is its own: it cannot read the control
+  // plane's `trace.db`.
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+  let profile = laptop.write("review.profile.yaml", NATIVE_PROFILE);
+  let created = as_client(&laptop, &endpoint, &["run", "create", "--profile", profile.to_str().unwrap()]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  let run = stdout(&created).trim().to_string();
+  assert_eq!(as_client(&laptop, &endpoint, &["exec", "--run", &run, "--", "sh", "-c", "exit 2"]).status.code(), Some(2));
+  // The stand-in actor prints two lines; `-f` follows until the run stops.
+  let mut follow = laptop.needy().args(["--endpoint", &endpoint, "run", "logs", "-f", &run]).stdout(Stdio::piped()).spawn().unwrap();
+  std::thread::sleep(Duration::from_millis(500));
+  assert!(follow.try_wait().unwrap().is_none(), "run logs -f ended while the run runs");
+  assert!(as_client(&laptop, &endpoint, &["run", "stop", &run]).status.success());
+  let deadline = Instant::now() + Duration::from_secs(10);
+  while follow.try_wait().unwrap().is_none() {
+    assert!(Instant::now() < deadline, "run logs -f did not end with the run");
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  let followed = follow.wait_with_output().unwrap();
+
+  let human = as_client(&laptop, &endpoint, &["report", &run]);
+  let json = as_client(&laptop, &endpoint, &["report", &run[..6], "-o", "json"]);
+  let local = as_client(&laptop, &endpoint, &["report", "--local", &run]);
+
+  assert_eq!(stdout(&followed), "boot\nhello from the actor\n");
+  assert!(human.status.success(), "{}", stderr(&human));
+  let report = stdout(&human);
+  assert!(report.contains("\nStarted by  client:laptop\n"), "{report}");
+  assert!(report.contains("\nStopped by  client:laptop\n"), "{report}");
+  assert!(report.contains("routed to here   1  (1 failed)"), "{report}");
+  let summary: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+  assert_eq!((summary["run"].as_str(), summary["state"].as_str()), (Some(run.as_str()), Some("stopped")));
+  assert_eq!((summary["started_by"].as_str(), summary["stopped_by"].as_str()), (Some("client:laptop"), Some("client:laptop")));
+  assert_eq!(local.status.code(), Some(1), "the client has no trace.db of its own");
+  assert!(stderr(&local).contains("no trace database"), "{}", stderr(&local));
+}
+
+#[test]
+fn the_operator_is_named_in_the_report_of_a_run_it_started() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let run = create_run(&home, NATIVE_PROFILE);
+  assert!(home.run(&["run", "stop", &run]).status.success());
+
+  let json = home.run(&["report", &run, "-o", "json"]);
+
+  let summary: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+  assert_eq!((summary["started_by"].as_str(), summary["stopped_by"].as_str()), (Some("operator"), Some("operator")));
 }

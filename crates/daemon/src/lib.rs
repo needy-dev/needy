@@ -13,13 +13,15 @@
 //!   the gateway.
 //! - `guest`: the actor's side of its run (`GuestService`).
 //! - `runners`: the runner registry (`RunnerService`) over `store`.
+//! - `clients`: the client registry (`ClientService`) over `store`:
+//!   pairing codes and the clients' own tokens.
 //! - `schedule`: which runner a profile's `runner:` selector names, and
 //!   where an actor or executor of a run is created.
 //! - `check`: `profile check` through the control plane.
 //! - `link`: runners' control streams and task streams, and the executor
 //!   that reaches a connected runner's machine through them.
-//! - `store`: `state.db`, the control plane's own state: the runner
-//!   registry, and runs with their instances and processes.
+//! - `store`: `state.db`, the control plane's own state: the runner and
+//!   client registries, and runs with their instances and processes.
 //! - `reconcile`: who ends a run's instances and processes, and what the
 //!   control plane does with the runs it finds open at start and with a
 //!   runner's report when it connects.
@@ -38,6 +40,8 @@ pub mod runner;
 mod actor;
 #[cfg(unix)]
 mod check;
+#[cfg(unix)]
+mod clients;
 #[cfg(unix)]
 mod files;
 #[cfg(unix)]
@@ -209,7 +213,7 @@ impl Daemon {
     };
     // A socket that cannot bind, such as a path over `sun_path`, fails
     // start-up here with its path.
-    let local_server = Server::new(health, Caller::Cli).process_service(service).bind(&[Listen::Unix(local_sock.clone())]).await?;
+    let local_server = Server::new(health, Caller::Operator).process_service(service).bind(&[Listen::Unix(local_sock.clone())]).await?;
     let stop = cancel.clone();
     tasks.spawn(async move {
       if let Err(e) = local_server.serve(stop).await {
@@ -300,15 +304,17 @@ impl Daemon {
     Ok(())
   }
 
-  /// The control API: runs, processes and the runner registry, for the
-  /// CLI holding `token`, and for runners holding their credentials.
+  /// The control API: runs, processes and the runner and client
+  /// registries, for the operator holding `token` (the bootstrap and admin
+  /// credential), for paired clients holding their own tokens, and for
+  /// runners holding their credentials.
   pub(crate) fn server(&self, token: Option<String>) -> Server {
     let api = Arc::new(self.clone());
     let health = Health {
       instance_id: uuid::Uuid::new_v4().to_string(),
       role: "control",
     };
-    Server::new(health, Caller::Cli).token(token).runs(api.clone()).processes(api.clone()).runners(api)
+    Server::new(health, Caller::Operator).token(token).runs(api.clone()).processes(api.clone()).runners(api.clone()).clients(api)
   }
 
   /// Unwinds the runs being created, stops every other run in the
@@ -342,7 +348,7 @@ impl Daemon {
     self.creates.close();
     self.creates.wait().await;
     for run in self.runs.live() {
-      if let Err(e) = self.stop_run(&run).await {
+      if let Err(e) = self.stop_run(&run, None).await {
         tracing::warn!("run {}: {e}", run.id);
       }
     }

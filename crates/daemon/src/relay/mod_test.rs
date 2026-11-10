@@ -30,6 +30,7 @@ fn spec(argv: &[&str], run: &str, executor: &str) -> ExecSpec {
     no_stdin: true,
     origin: Origin::Cli,
     search_path_if_missing: false,
+    by: None,
   }
 }
 
@@ -89,7 +90,10 @@ async fn stopping_a_run_ends_its_commands_streams() {
       break;
     }
   }
-  tokio::time::timeout(Duration::from_secs(10), Runs::stop(daemon, &created.id)).await.expect("the stop waits for no command").unwrap();
+  tokio::time::timeout(Duration::from_secs(10), Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator))
+    .await
+    .expect("the stop waits for no command")
+    .unwrap();
   let (_, exit) = tokio::time::timeout(Duration::from_secs(10), finish(outputs)).await.unwrap();
   assert_eq!(exit, None, "the relay ended with the run, before the command exited");
 }
@@ -110,7 +114,7 @@ async fn a_stream_its_run_stop_ends_says_run_stopped() {
   let mut outputs = daemon.exec(ExecOpen::Start(spec(&["sleep", "30"], &created.id, "")), attached()).await.unwrap();
   while !matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)) {}
 
-  Runs::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
   let rest: Vec<_> = tokio::time::timeout(Duration::from_secs(10), outputs.collect::<Vec<_>>()).await.unwrap();
 
   assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "run stopped"), "{rest:?}");
@@ -151,7 +155,7 @@ async fn attaching_to_a_workspace_mount_is_refused() {
     panic!("attaching to a workspace mount must be refused");
   };
   assert_eq!(message, format!("process {process} is needy's own (origin actor-mount); it cannot be attached"));
-  Runs::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
 }
 
 #[tokio::test]
@@ -215,7 +219,7 @@ async fn processes_on_an_executor_two_instances_share_are_listed_once() {
   let listed: Vec<(String, String)> = Processes::list(daemon, "", "").await.unwrap().into_iter().map(|p| (p.process, p.executor)).collect();
 
   assert_eq!(listed, [(in_run, "here".to_string()), (outside, "local".to_string())]);
-  Runs::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
   daemon.shutdown().await;
 }
 
@@ -243,7 +247,7 @@ async fn an_exec_in_an_ended_run_says_it_ended_and_how() {
   let finished = Runs::create(daemon, testing::new_run(PROFILE, started.dir.path())).await.unwrap();
   testing::exit_actor(&started.daemon, started.dir.path(), &finished.id).await;
   let stopped = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
-  Runs::stop(daemon, &stopped.id).await.unwrap();
+  Runs::stop(daemon, &stopped.id, needy_core::types::Principal::Operator).await.unwrap();
   let released = async {
     while !daemon.pool.instances().await.is_empty() {
       tokio::time::sleep(Duration::from_millis(20)).await;
@@ -292,7 +296,7 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
   let (stdout, _) = tokio::time::timeout(Duration::from_secs(10), finish(daemon.exec(open, input).await.unwrap())).await.unwrap();
 
   assert!(stdout.contains("40 100"), "{stdout:?}");
-  Runs::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
 }
 
 // The terminal note's G9: the executor's fallback for an unknown `TERM` is
@@ -309,7 +313,7 @@ async fn a_terminal_type_the_executor_replaced_is_recorded_in_exec_start() {
     ..spec(&["true"], &created.id, "")
   };
   finish(daemon.exec(ExecOpen::Start(on_a_terminal), attached()).await.unwrap()).await;
-  Runs::stop(daemon, &created.id).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
 
   let trace = std::fs::read_to_string(started.dir.path().join("state/runs").join(&created.id).join("trace.jsonl")).unwrap();
   let start = trace.lines().find(|l| l.contains("\"exec.start\"")).unwrap_or_else(|| panic!("{trace}"));

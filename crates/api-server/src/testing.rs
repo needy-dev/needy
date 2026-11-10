@@ -9,7 +9,7 @@ use needy_api_client::Client;
 use needy_common::process::Exit;
 use needy_core::event::{Event, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, RunState, RunnerRole};
+use needy_core::types::{Origin, Principal, RunState, RunnerRole};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -40,7 +40,7 @@ impl Fake {
 
 /// The event a refused exec carries.
 pub fn refusal_event() -> Event {
-  Event::RunStop(RunStop {})
+  Event::RunStop(RunStop::default())
 }
 
 fn info(id: &str, name: &str) -> RunInfo {
@@ -62,7 +62,10 @@ fn info(id: &str, name: &str) -> RunInfo {
 #[async_trait::async_trait]
 impl Runs for Fake {
   async fn create(&self, request: NewRun) -> Result<RunInfo> {
-    self.call(format!("create {}", request.profile_name));
+    match &request.by {
+      Some(Principal::Operator) | None => self.call(format!("create {}", request.profile_name)),
+      Some(by) => self.call(format!("create {} by {by}", request.profile_name)),
+    }
     Ok(info("s1", &request.name))
   }
 
@@ -77,15 +80,46 @@ impl Runs for Fake {
     Ok(vec![info("s1", "one"), info("s2", "two")])
   }
 
-  async fn stop(&self, id: &str) -> Result<()> {
-    self.call(format!("stop {id}"));
+  async fn stop(&self, id: &str, by: Principal) -> Result<()> {
+    self.call(format!("stop {id} by {by}"));
     Ok(())
   }
 
-  async fn logs(&self, id: &str) -> Result<Vec<u8>> {
-    self.call(format!("logs {id}"));
-    // Larger than one message, so the adapter must chunk it.
-    Ok(vec![b'c'; 3 << 20])
+  /// Without `follow`, more than one message, so the adapter must chunk
+  /// it; with it, two reads and the end of the run.
+  async fn logs(&self, id: &str, follow: bool) -> Result<Logs> {
+    self.call(format!("logs {id} follow={follow}"));
+    let reads = if follow {
+      vec![Ok(b"boot\n".to_vec()), Ok(b"later\n".to_vec())]
+    } else {
+      vec![Ok(vec![b'c'; 3 << 20])]
+    };
+    Ok(Box::pin(tokio_stream::iter(reads)))
+  }
+
+  /// Run `s1` has 2500 events, more than one message holds; `empty` has
+  /// none.
+  async fn events(&self, run: &str) -> Result<RunEvents> {
+    self.call(format!("events {run}"));
+    let count = match run {
+      "s" | "s1" | "latest" => 2500,
+      "empty" => 0,
+      _ => return Err(ControlError::NotFound(format!("no run matches {run}"))),
+    };
+    let events = (0..count)
+      .map(|seq| StoredEvent {
+        seq,
+        time_ms: 1000 + seq as i64,
+        kind: "run.stop".into(),
+        version: needy_core::event::SCHEMA_VERSION,
+        payload: "{}".into(),
+      })
+      .collect();
+    let run = if run == "empty" { "empty" } else { "s1" };
+    Ok(RunEvents {
+      run: run.into(),
+      events,
+    })
   }
 
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route> {
@@ -133,7 +167,10 @@ impl Processes for Fake {
   async fn exec(&self, open: ExecOpen, mut input: Inputs) -> Result<Outputs> {
     let (process, executor) = match open {
       ExecOpen::Start(spec) => {
-        self.call(format!("exec {} in {:?} from {:?}", spec.argv.join(" "), spec.run, spec.origin));
+        match &spec.by {
+          Some(Principal::Operator) | None => self.call(format!("exec {} in {:?} from {:?}", spec.argv.join(" "), spec.run, spec.origin)),
+          Some(by) => self.call(format!("exec {} in {:?} from {:?} by {by}", spec.argv.join(" "), spec.run, spec.origin)),
+        }
         if spec.argv.first().map(String::as_str) == Some("refuse") {
           return Err(ControlError::Denied {
             message: "denied: refused".into(),
@@ -189,8 +226,11 @@ impl Processes for Fake {
     }])
   }
 
-  async fn kill(&self, process: &str, signal: &str) -> Result<()> {
-    self.call(format!("kill {process} {signal}"));
+  async fn kill(&self, process: &str, signal: &str, by: Principal) -> Result<()> {
+    match by {
+      Principal::Operator => self.call(format!("kill {process} {signal}")),
+      by => self.call(format!("kill {process} {signal} by {by}")),
+    }
     match process {
       "p1" => Ok(()),
       _ => Err(ControlError::NotFound("no such process".into())),
@@ -384,6 +424,67 @@ impl Runners for Fake {
   }
 }
 
+/// Tokens the fake's client registry knows: `CLIENT_TOKEN` is the client
+/// `laptop`'s; `REVOKED_CLIENT_TOKEN` was revoked.
+pub const CLIENT_TOKEN: &str = "needy-client.c1.good";
+pub const REVOKED_CLIENT_TOKEN: &str = "needy-client.c2.old";
+pub const PAIRING_CODE: &str = "needy-pair.k1.secret";
+
+fn fake_client() -> ClientInfo {
+  ClientInfo {
+    id: "c1".into(),
+    name: "laptop".into(),
+    created_ms: 1,
+    last_used_ms: None,
+    revoked_ms: None,
+  }
+}
+
+#[async_trait::async_trait]
+impl Clients for Fake {
+  async fn create_pairing_code(&self, request: NewPairingCode) -> Result<CreatedPairingCode> {
+    self.call(format!("create pairing code ttl={} name={}", request.ttl_ms, request.name));
+    Ok(CreatedPairingCode {
+      id: "k1".into(),
+      name: "laptop".into(),
+      expires_ms: 1 + request.ttl_ms,
+      code: PAIRING_CODE.into(),
+    })
+  }
+
+  async fn pair(&self, code: &str) -> Result<Paired> {
+    self.call(format!("pair {code}"));
+    if code != PAIRING_CODE {
+      return Err(ControlError::Unauthenticated("the pairing code is not valid".into()));
+    }
+    Ok(Paired {
+      client: fake_client(),
+      token: CLIENT_TOKEN.into(),
+    })
+  }
+
+  async fn clients(&self) -> Result<Vec<ClientInfo>> {
+    self.call("list clients".into());
+    Ok(vec![fake_client()])
+  }
+
+  async fn revoke(&self, id: &str) -> Result<()> {
+    self.call(format!("revoke client {id}"));
+    Ok(())
+  }
+
+  async fn credential(&self, token: &str) -> Credential {
+    match token {
+      CLIENT_TOKEN => Credential::Client {
+        id: "c1".into(),
+        name: "laptop".into(),
+      },
+      REVOKED_CLIENT_TOKEN => Credential::Refused,
+      _ => Credential::Other,
+    }
+  }
+}
+
 /// A server for `caller` with every service on the fake, on a socket in a
 /// temporary directory, and a client of it. The server stops with the
 /// returned token's guard.
@@ -412,6 +513,7 @@ pub async fn serve_with(caller: Caller, token: Option<&str>) -> Served {
     .processes(fake.clone())
     .guest(fake.clone())
     .runners(fake.clone())
+    .clients(fake.clone())
     .bind(&[Listen::Unix(socket.clone())])
     .await
     .unwrap();

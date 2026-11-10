@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, build, daemon, exec, fs, kill, profile, ps, report, run, runner};
+use crate::commands::{attach, build, client, daemon, exec, fs, kill, profile, ps, report, run, runner};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -47,11 +47,13 @@ enum Command {
   Run(run::Args),
   /// Manage runners: machines that joined this control plane, and join tokens.
   Runner(runner::Args),
+  /// Pair this machine with a control plane, and manage paired clients.
+  Client(client::Args),
   /// Build an actor image from a recipe, and the executor image.
   Build(build::Args),
   /// Check a profile: show routing decisions, matching faults and the recipe's findings.
   Profile(profile::Args),
-  /// Write a markdown report of a run.
+  /// Report on a run from its trace: who started it, what ran where.
   Report(report::Args),
 }
 
@@ -75,13 +77,34 @@ impl Context {
   }
 }
 
-/// Connects to a daemon, presenting the token in `NEEDY_TOKEN` when it is set.
+/// Connects to a daemon, presenting the token in `NEEDY_TOKEN` when it is
+/// set, or else the client token `needy client pair` stored for `endpoint`.
 pub async fn connect(endpoint: &str) -> Result<Client> {
-  let client = Client::connect(endpoint).await.with_context(|| format!("cannot reach the daemon at {endpoint}"))?;
-  Ok(match std::env::var("NEEDY_TOKEN") {
-    Ok(token) if !token.is_empty() => client.with_token(&token)?,
-    _ => client,
+  let client = connect_without_token(endpoint).await?;
+  Ok(match token(endpoint)? {
+    Some(token) => client.with_token(&token)?,
+    None => client,
   })
+}
+
+/// Connects to a daemon without presenting a token, for `Pair`.
+pub async fn connect_without_token(endpoint: &str) -> Result<Client> {
+  Client::connect(endpoint).await.with_context(|| format!("cannot reach the daemon at {endpoint}"))
+}
+
+/// The bearer token for `endpoint`: `NEEDY_TOKEN`, which wins so an
+/// operator can act with the control token, or the stored client token.
+fn token(endpoint: &str) -> Result<Option<String>> {
+  if let Ok(token) = std::env::var("NEEDY_TOKEN")
+    && !token.is_empty()
+  {
+    return Ok(Some(token));
+  }
+  // Without a home directory there is no stored token to find.
+  let Ok(paths) = Paths::resolve() else {
+    return Ok(None);
+  };
+  Ok(crate::credentials::find(&paths.credentials(), endpoint)?.map(|credential| credential.token))
 }
 
 /// Parses the command line, runs the command and returns the exit code.
@@ -126,6 +149,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Fs(args) => fs::run(args, &ctx).await,
       Command::Run(args) => run::run(args, &ctx).await,
       Command::Runner(args) => runner::run(args, &ctx).await,
+      Command::Client(args) => client::run(args, &ctx).await,
       Command::Build(args) => build::run(args, &ctx).await,
       Command::Profile(args) => profile::run(args, &ctx).await,
       Command::Report(args) => report::run(args, &ctx).await,

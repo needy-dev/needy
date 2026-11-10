@@ -32,7 +32,9 @@ pub struct Args {
   /// name, by default this machine's host name up to its first dot.
   #[arg(long)]
   name: Option<String>,
-  /// Environment variable holding the bearer token clients must present.
+  /// Environment variable holding the control token: the bootstrap and
+  /// admin credential, with which an operator also pairs clients (`needy
+  /// client pair create`); paired clients present their own tokens.
   /// Required to listen on a TCP address other than loopback.
   #[arg(long)]
   token_env: Option<String>,

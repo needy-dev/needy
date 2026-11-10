@@ -51,7 +51,12 @@ enum Command {
   /// Stop a run and release its executors.
   Stop { run: String },
   /// Print the actor's console output: boot messages and the driving program's terminal.
-  Logs { run: String },
+  Logs {
+    run: String,
+    /// Keep printing what the actor writes until the run stops running.
+    #[arg(short, long)]
+    follow: bool,
+  },
 }
 
 #[derive(Serialize)]
@@ -221,12 +226,20 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let connection = crate::cli::connect(&endpoint).await?;
       connection.runs().stop_run(StopRunRequest { run_id: run }).await.map_err(fail)?;
     }
-    Command::Logs { run } => {
+    Command::Logs { run, follow } => {
       let connection = crate::cli::connect(&endpoint).await?;
-      let mut stream = connection.runs().get_run_logs(GetRunLogsRequest { run_id: run }).await.map_err(fail)?.into_inner();
+      let request = GetRunLogsRequest {
+        run_id: run,
+        follow,
+      };
+      let mut stream = connection.runs().get_run_logs(request).await.map_err(fail)?.into_inner();
       let mut stdout = tokio::io::stdout();
       while let Some(chunk) = stream.message().await.map_err(fail)? {
         stdout.write_all(&chunk.data).await?;
+        // A followed console shows each line as it arrives.
+        if follow {
+          stdout.flush().await?;
+        }
       }
       stdout.flush().await?;
     }

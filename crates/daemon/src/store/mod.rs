@@ -1,13 +1,15 @@
 //! `state.db`: the control plane's own state, separate from `trace.db`.
 //! It holds the runner registry (join tokens and the runners that joined
-//! with them) and runs with the instances and processes they hold
-//! ([`runs`]).
+//! with them), the client registry (pairing codes and the clients that
+//! paired with them, [`clients`]) and runs with the instances and processes
+//! they hold ([`runs`]).
 //!
 //! Secrets are stored as hashes only ([`secret`]). Every time is passed in
 //! by the caller in Unix milliseconds, so expiry is decided by one clock.
 //!
 //! Schema changes go through [`migration`]; do not issue DDL anywhere else.
 
+mod clients;
 mod entity;
 mod migration;
 mod runs;
@@ -25,6 +27,7 @@ use sea_orm_migration::{MigratorTrait as _, SchemaManager};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+pub use self::clients::{Client, is_client_token};
 use self::entity::{join_token, runner};
 pub use self::runs::{
   InstanceKind, InstanceRecord, InstanceState, ProcessRecord, ProcessState, RunRecord, actor_instance, executor_instance,
@@ -54,6 +57,18 @@ pub enum Error {
   RunnerExists(String),
   #[error("no runner {0}")]
   NoRunner(String),
+  /// Malformed, unknown, or with a wrong secret: which of these is not
+  /// said, so a guess learns nothing.
+  #[error("the pairing code is not valid")]
+  InvalidPairingCode,
+  #[error("pairing code {0} expired")]
+  PairingCodeExpired(String),
+  #[error("pairing code {0} was used already")]
+  PairingCodeUsed(String),
+  #[error("a client named {0} exists; revoke it first or pair with another name")]
+  ClientExists(String),
+  #[error("no client {0}")]
+  NoClient(String),
   /// A malformed name, label or limit.
   #[error("{0}")]
   Invalid(String),
@@ -365,13 +380,18 @@ fn admit(scope: &Scope, report: Report) -> Result<(BTreeSet<RunnerRole>, BTreeMa
 /// A runner's name is part of its credential and of `runner ls`, so it is
 /// a DNS label: lowercase letters, digits and `-`.
 fn check_name(name: &str) -> Result<()> {
+  check_label("runner", name)
+}
+
+/// A name that is a DNS label: lowercase letters, digits and `-`.
+fn check_label(what: &str, name: &str) -> Result<()> {
   let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
   let valid = (1..=63).contains(&name.len()) && name.chars().all(allowed) && !name.starts_with('-') && !name.ends_with('-');
   if valid {
     return Ok(());
   }
   Err(Error::Invalid(format!(
-    "invalid runner name {name:?}: use 1 to 63 lowercase letters, digits and '-', starting and ending with a letter or digit"
+    "invalid {what} name {name:?}: use 1 to 63 lowercase letters, digits and '-', starting and ending with a letter or digit"
   )))
 }
 

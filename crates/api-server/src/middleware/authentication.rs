@@ -11,7 +11,7 @@ use tonic::Status;
 use tonic::body::Body;
 use tower::{Layer, Service};
 
-use crate::control::{Caller, Credential, Runners};
+use crate::control::{Caller, Clients, Credential, Runners};
 
 /// Methods that a client may call without a token.
 pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
@@ -19,6 +19,10 @@ pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
 /// Joining needs no bearer token: the join token in the request
 /// authenticates it. Public only where the runner registry is served.
 pub const JOIN: &str = "/needy.v1.RunnerService/Join";
+
+/// Pairing needs no bearer token: the pairing code in the request
+/// authenticates it. Public only where the client registry is served.
+pub const PAIR: &str = "/needy.v1.ClientService/Pair";
 
 /// The methods a runner's credential reaches.
 pub const RUNNER_METHODS: &[&str] = &[
@@ -51,20 +55,22 @@ impl Token {
 }
 
 /// The policy of one server: its listener's caller for the control token
-/// (or for any request when it has none), and a runner for a runner's
-/// credential, on the runner methods only. A token shaped like a runner
-/// credential that no runner holds is refused even without a control token,
-/// so a removed runner learns that it was removed.
+/// (or for any request when it has none), a runner for a runner's
+/// credential, on the runner methods only, and a client for a paired
+/// client's token. A token shaped like a runner credential or a client token
+/// that nobody holds is refused even without a control token, so a removed
+/// runner or a revoked client learns that it was.
 pub struct Credentials {
   pub listener: Caller,
   pub token: Token,
   pub runners: Option<Arc<dyn Runners>>,
+  pub clients: Option<Arc<dyn Clients>>,
 }
 
 #[async_trait::async_trait]
 impl Authenticator for Credentials {
   async fn authenticate(&self, method: &str, token: &str) -> Option<Caller> {
-    if PUBLIC_METHODS.contains(&method) || (self.runners.is_some() && method == JOIN) {
+    if PUBLIC_METHODS.contains(&method) || (self.runners.is_some() && method == JOIN) || (self.clients.is_some() && method == PAIR) {
       return Some(self.listener.clone());
     }
     if self.token.0.is_some() && self.token.accepts(token) {
@@ -76,7 +82,18 @@ impl Authenticator for Credentials {
       match runners.credential(token).await {
         Credential::Runner(name) => return RUNNER_METHODS.contains(&method).then_some(Caller::Runner { name }),
         Credential::Refused => return None,
-        Credential::Other => {}
+        Credential::Client { .. } | Credential::Other => {}
+      }
+    }
+    if let Some(clients) = &self.clients
+      && !token.is_empty()
+    {
+      match clients.credential(token).await {
+        // A client has an operator's rights; the services refuse it the
+        // runner methods, as they refuse the operator.
+        Credential::Client { id, name } => return Some(Caller::Client { id, name }),
+        Credential::Refused => return None,
+        Credential::Runner(_) | Credential::Other => {}
       }
     }
     self.token.0.is_none().then(|| self.listener.clone())

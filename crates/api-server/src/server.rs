@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use needy_api_proto::v1::client_service_server::ClientServiceServer;
 use needy_api_proto::v1::guest_service_server::GuestServiceServer;
 use needy_api_proto::v1::health_service_server::HealthServiceServer;
 use needy_api_proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
@@ -14,9 +15,9 @@ use needy_api_proto::v1::runner_service_server::RunnerServiceServer;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
-use crate::control::{Caller, Guest, Processes, Runners, Runs};
+use crate::control::{Caller, Clients, Guest, Processes, Runners, Runs};
 use crate::middleware::authentication::{AuthLayer, Credentials, Token};
-use crate::protocol::grpc::v1::{guest, health::Health, process, run, runner};
+use crate::protocol::grpc::v1::{client, guest, health::Health, process, run, runner};
 
 // NOTICE: once cancelled, a server stops accepting and lets open calls
 // finish; an attached exec stream may never finish, so it gets 5 s.
@@ -79,6 +80,8 @@ pub struct Server {
   token: Option<String>,
   /// The runner registry, which also authenticates runners' credentials.
   runners: Option<Arc<dyn Runners>>,
+  /// The client registry, which also authenticates clients' tokens.
+  clients: Option<Arc<dyn Clients>>,
 }
 
 impl Server {
@@ -89,6 +92,7 @@ impl Server {
       caller,
       token: None,
       runners: None,
+      clients: None,
     }
   }
 
@@ -115,6 +119,18 @@ impl Server {
       caller,
     }));
     self.runners = Some(runners);
+    self
+  }
+
+  /// `ClientService`. Requests that present a client's token are then
+  /// from that client, and `Pair` needs no bearer token.
+  pub fn clients<C: Clients>(mut self, clients: Arc<C>) -> Self {
+    let caller = self.caller.clone();
+    self.routes = self.routes.add_service(ClientServiceServer::new(client::Adapter {
+      clients: clients.clone(),
+      caller,
+    }));
+    self.clients = Some(clients);
     self
   }
 
@@ -159,6 +175,7 @@ impl Server {
         listener: self.caller,
         token: Token(self.token),
         runners: self.runners,
+        clients: self.clients,
       },
       listeners,
     })

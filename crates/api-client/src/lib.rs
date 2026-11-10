@@ -21,6 +21,7 @@ pub mod ready;
 use std::pin::Pin;
 use std::time::Duration;
 
+use needy_api_proto::v1::client_service_client::ClientServiceClient;
 use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
 use needy_api_proto::v1::process_service_client::ProcessServiceClient;
@@ -140,6 +141,10 @@ impl Client {
 
   pub fn runners(&self) -> RunnerServiceClient<Service> {
     RunnerServiceClient::new(self.service())
+  }
+
+  pub fn clients(&self) -> ClientServiceClient<Service> {
+    ClientServiceClient::new(self.service())
   }
 
   pub fn guest(&self) -> GuestServiceClient<Service> {

@@ -3,7 +3,7 @@ use std::time::Duration;
 use needy_config::profile::FaultKind;
 
 use super::*;
-use crate::types::{Effect, Fired, Network, Origin, Outcome, Placement};
+use crate::types::{Effect, Fired, Network, Origin, Outcome, Placement, Principal};
 
 fn argv(s: &str) -> Vec<String> {
   s.split_whitespace().map(str::to_string).collect()
@@ -21,8 +21,11 @@ fn every_kind() -> Vec<Event> {
         runtime: "docker".into(),
         instance: "needy-build".into(),
       }],
+      by: Some(Principal::Client("laptop".into())),
     }),
-    Event::RunStop(RunStop {}),
+    Event::RunStop(RunStop {
+      by: Some(Principal::Operator),
+    }),
     Event::RunFail(RunFail {
       reason: "executor build: no such image".into(),
     }),
@@ -74,6 +77,13 @@ fn every_kind() -> Vec<Event> {
         requested: "xterm-ghostty".into(),
         used: "xterm-256color".into(),
       }),
+      by: Some(Principal::Actor("0a1b2c3d".into())),
+    }),
+    Event::ExecKill(ExecKill {
+      process: "p1".into(),
+      executor: "build".into(),
+      signal: "TERM".into(),
+      by: Some(Principal::Client("laptop".into())),
     }),
     Event::ExecExit(ExecExit {
       process: "p1".into(),
@@ -163,7 +173,7 @@ fn payloads_are_plain_json_objects() {
 
 #[test]
 fn a_run_stop_carries_no_attributes() {
-  assert_eq!(Event::RunStop(RunStop {}).payload(), "{}");
+  assert_eq!(Event::RunStop(RunStop::default()).payload(), "{}");
 }
 
 #[test]
@@ -200,10 +210,33 @@ fn an_exec_start_without_a_term_fallback_has_no_such_key() {
     argv: argv("ls"),
     origin: Origin::Cli,
     term_fallback: None,
+    by: None,
   });
 
   let payload = start.payload();
 
   assert!(!payload.contains("term_fallback"), "{payload}");
   assert_eq!(Event::decode("exec.start", SCHEMA_VERSION, &payload).unwrap(), start);
+}
+
+// Version 2 added `by`; version 1 rows, from traces written before it and
+// from guests built before it, read with no principal.
+#[test]
+fn a_version_1_payload_reads_without_a_principal() {
+  let create = r#"{"name":"demo","group":"g","profile":"smoke","executors":[]}"#;
+  let Event::RunCreate(create) = Event::decode("run.create", 1, create).unwrap() else {
+    panic!("not a run.create")
+  };
+  assert_eq!(create.by, None);
+  assert_eq!(Event::decode("run.stop", 1, "{}").unwrap(), Event::RunStop(RunStop { by: None }));
+  assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION + 1, "{}"), Err(DecodeError::Version { .. })));
+}
+
+#[test]
+fn a_principal_is_one_string_in_the_payload() {
+  let stop = Event::RunStop(RunStop {
+    by: Some(Principal::Client("laptop".into())),
+  });
+  assert_eq!(stop.payload(), r#"{"by":"client:laptop"}"#);
+  assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION, r#"{"by":"someone"}"#), Err(DecodeError::Payload { .. })));
 }

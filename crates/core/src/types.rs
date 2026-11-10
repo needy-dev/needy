@@ -180,6 +180,70 @@ impl std::str::FromStr for RunnerRole {
 #[error("unknown runner role {0:?}; known roles are actor and executor")]
 pub struct UnknownRole(pub String);
 
+/// Who caused something the trace records: a run created or stopped, a
+/// command started, a signal sent. Written as `operator` (the control
+/// daemon's token or its socket), `client:NAME` (a paired client's token),
+/// `runner:NAME` (a runner's credential) or `actor:RUN` (an actor, through
+/// its own guest channel).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Principal {
+  Operator,
+  Client(String),
+  Runner(String),
+  Actor(String),
+}
+
+impl fmt::Display for Principal {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Operator => f.write_str("operator"),
+      Self::Client(name) => write!(f, "client:{name}"),
+      Self::Runner(name) => write!(f, "runner:{name}"),
+      Self::Actor(run) => write!(f, "actor:{run}"),
+    }
+  }
+}
+
+impl std::str::FromStr for Principal {
+  type Err = UnknownPrincipal;
+
+  fn from_str(text: &str) -> Result<Self, UnknownPrincipal> {
+    let unknown = || UnknownPrincipal(text.to_string());
+    if text == "operator" {
+      return Ok(Self::Operator);
+    }
+    let (kind, name) = text.split_once(':').ok_or_else(unknown)?;
+    if name.is_empty() {
+      return Err(unknown());
+    }
+    match kind {
+      "client" => Ok(Self::Client(name.to_string())),
+      "runner" => Ok(Self::Runner(name.to_string())),
+      "actor" => Ok(Self::Actor(name.to_string())),
+      _ => Err(unknown()),
+    }
+  }
+}
+
+// A principal is one string in a trace payload, as `Display` writes it.
+impl Serialize for Principal {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(self)
+  }
+}
+
+impl<'de> Deserialize<'de> for Principal {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    text.parse().map_err(serde::de::Error::custom)
+  }
+}
+
+/// A principal this build cannot read.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown principal {0:?}; a principal is operator, client:NAME, runner:NAME or actor:RUN")]
+pub struct UnknownPrincipal(pub String);
+
 /// The network a request came from, at a gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

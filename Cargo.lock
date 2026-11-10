@@ -2019,6 +2019,7 @@ name = "needy-api-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "http",
  "needy-api-client",
  "needy-api-proto",

@@ -2,7 +2,7 @@ use needy_config::profile::FaultKind;
 
 use super::*;
 use crate::event::*;
-use crate::types::{Effect, Fired, Network, Origin, Outcome, Placement};
+use crate::types::{Effect, Fired, Network, Origin, Outcome, Placement, Principal};
 
 fn argv(s: &str) -> Vec<String> {
   s.split_whitespace().map(str::to_string).collect()
@@ -41,6 +41,7 @@ fn start(origin: Origin, command: &str) -> Event {
     argv: argv(command),
     origin,
     term_fallback: None,
+    by: None,
   })
 }
 
@@ -67,6 +68,7 @@ fn actor_run() -> Vec<Recorded> {
         group: "demo".into(),
         profile: "smoke".into(),
         executors: vec![],
+        by: None,
       }),
     ),
     at(
@@ -104,7 +106,7 @@ fn actor_run() -> Vec<Recorded> {
         signal: None,
       }),
     ),
-    at(7_000, Event::RunStop(RunStop {})),
+    at(7_000, Event::RunStop(RunStop::default())),
   ]
 }
 
@@ -203,6 +205,7 @@ fn a_failed_run_shows_its_state_and_reason() {
         group: "demo".into(),
         profile: "smoke".into(),
         executors: vec![],
+        by: None,
       }),
     ),
     at(
@@ -249,6 +252,7 @@ fn create(time_ms: i64) -> Recorded {
       group: "demo".into(),
       profile: "smoke".into(),
       executors: vec![],
+      by: None,
     }),
   )
 }
@@ -272,7 +276,7 @@ fn a_run_stopped_after_it_finished_reports_finished() {
         signal: None,
       }),
     ),
-    at(9_000, Event::RunStop(RunStop {})),
+    at(9_000, Event::RunStop(RunStop::default())),
   ];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
@@ -308,7 +312,7 @@ fn a_vm_exit_without_a_driver_exit_reports_failed_with_the_reason() {
         reason: "the actor's VM exited before its driving program did: firecracker exited with code 1".into(),
       }),
     ),
-    at(9_000, Event::RunStop(RunStop {})),
+    at(9_000, Event::RunStop(RunStop::default())),
   ];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
@@ -348,7 +352,7 @@ fn a_vm_exit_after_the_driver_exit_reports_finished() {
 
 #[test]
 fn a_run_stopped_while_running_reports_stopped() {
-  let events = vec![create(1_000), at(3_000, Event::RunStop(RunStop {}))];
+  let events = vec![create(1_000), at(3_000, Event::RunStop(RunStop::default()))];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
@@ -364,7 +368,7 @@ fn a_run_stopped_while_running_reports_stopped() {
 // The fix shows tenths of a second under a minute, and coarser units above.
 #[test]
 fn a_sub_second_run_shows_its_duration() {
-  let events = vec![create(1_000), at(1_800, Event::RunStop(RunStop {}))];
+  let events = vec![create(1_000), at(1_800, Event::RunStop(RunStop::default()))];
 
   let report = render("7f3a", &events, Level::Summary, Format::Markdown);
 
@@ -434,7 +438,7 @@ fn the_human_report_has_no_markdown() {
 
 #[test]
 fn the_human_report_omits_empty_sections() {
-  let events = vec![create(1_000), at(1_800, Event::RunStop(RunStop {}))];
+  let events = vec![create(1_000), at(1_800, Event::RunStop(RunStop::default()))];
 
   let report = human(&events);
 
@@ -506,4 +510,65 @@ fn the_detailed_json_report_adds_the_timeline() {
   let first = &json["events"][0];
   assert_eq!((&first["offset_ms"], &first["kind"]), (&serde_json::json!(0), &serde_json::json!("run.create")));
   assert_eq!(first["payload"]["profile"], "smoke");
+}
+
+fn by(principal: Principal) -> Option<Principal> {
+  Some(principal)
+}
+
+/// A run a client created and the operator stopped.
+fn attributed_run() -> Vec<Recorded> {
+  vec![
+    at(
+      1_000,
+      Event::RunCreate(RunCreate {
+        name: "demo".into(),
+        group: "demo".into(),
+        profile: "smoke".into(),
+        executors: vec![],
+        by: by(Principal::Client("laptop".into())),
+      }),
+    ),
+    at(
+      2_000,
+      Event::RunStop(RunStop {
+        by: by(Principal::Operator),
+      }),
+    ),
+  ]
+}
+
+#[test]
+fn the_human_report_says_who_started_and_stopped_the_run() {
+  let report = human(&attributed_run());
+
+  let head: Vec<&str> = report.lines().take(5).collect();
+  assert_eq!(
+    head,
+    [
+      "Run         7f3a  (profile smoke)",
+      "State       stopped",
+      "Duration    1.0s",
+      "Started by  client:laptop",
+      "Stopped by  operator",
+    ]
+  );
+}
+
+#[test]
+fn the_json_report_names_who_started_and_stopped_the_run() {
+  let report = render("7f3a", &attributed_run(), Level::Summary, Format::Json);
+  let json: serde_json::Value = serde_json::from_str(&report).unwrap();
+
+  assert_eq!(json["started_by"], "client:laptop");
+  assert_eq!(json["stopped_by"], "operator");
+}
+
+#[test]
+fn a_report_of_a_trace_without_principals_leaves_them_out() {
+  let report = human(&actor_run());
+  assert!(!report.contains("Started by"), "{report}");
+
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &actor_run(), Level::Summary, Format::Json)).unwrap();
+  assert!(json["started_by"].is_null());
 }

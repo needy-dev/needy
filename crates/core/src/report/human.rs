@@ -75,6 +75,12 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     ("State".into(), state),
     ("Duration".into(), duration(s.duration_ms)),
   ];
+  if let Some(by) = &s.started_by {
+    head.push(("Started by".into(), by.clone()));
+  }
+  if let Some(by) = &s.stopped_by {
+    head.push(("Stopped by".into(), by.clone()));
+  }
   if s.dropped_events > 0 {
     head.push(("Warning".into(), format!("the trace is incomplete: {} events were dropped, so the counts may be low", s.dropped_events)));
   }

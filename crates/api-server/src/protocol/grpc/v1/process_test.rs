@@ -19,7 +19,7 @@ fn start(argv: &[&str]) -> ExecStart {
 
 #[tokio::test]
 async fn an_exec_carries_input_to_the_daemon_and_output_back() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let output = ExecStream::start(&served.client, start(&["cat"])).await.unwrap().run(Some(b"hello".to_vec())).await.unwrap();
 
@@ -50,12 +50,12 @@ async fn an_actor_execs_within_its_own_run() {
   };
 
   assert_eq!(started.executor, "s-actor");
-  assert_eq!(served.fake.calls(), [r#"exec python3 in "s-actor" from ActorProxy"#]);
+  assert_eq!(served.fake.calls(), [r#"exec python3 in "s-actor" from ActorProxy by actor:s-actor"#]);
 }
 
 #[tokio::test]
 async fn a_refused_exec_is_denied_with_its_events_in_the_details() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let error = ExecStream::start(&served.client, start(&["refuse"])).await.err().unwrap();
 
@@ -67,7 +67,7 @@ async fn a_refused_exec_is_denied_with_its_events_in_the_details() {
 
 #[tokio::test]
 async fn a_full_executor_is_resource_exhausted() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let error = ExecStream::start(&served.client, start(&["full"])).await.err().unwrap();
 
@@ -76,7 +76,7 @@ async fn a_full_executor_is_resource_exhausted() {
 
 #[tokio::test]
 async fn an_unspecified_origin_is_invalid() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
   let request = ExecStart {
     origin: Origin::Unspecified.into(),
     ..start(&["true"])
@@ -91,7 +91,7 @@ async fn an_unspecified_origin_is_invalid() {
 
 #[tokio::test]
 async fn a_stream_must_start_or_attach_first() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
   let (tx, rx) = mpsc::channel(1);
   tx.send(ExecRequest {
     payload: Some(exec_request::Payload::Stdin(b"x".to_vec())),
@@ -107,7 +107,7 @@ async fn a_stream_must_start_or_attach_first() {
 
 #[tokio::test]
 async fn an_attach_names_the_process_and_replay() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let stream = ExecStream::attach(&served.client, "p9", true, None).await.unwrap();
   drop(stream);
@@ -133,7 +133,7 @@ async fn an_actor_lists_only_its_own_run() {
 
 #[tokio::test]
 async fn killing_a_missing_process_is_not_found() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let status = served
     .client
@@ -168,7 +168,7 @@ async fn an_actor_cannot_name_a_runner() {
 
 #[tokio::test]
 async fn a_client_lists_one_runner_s_processes() {
-  let served = serve(Caller::Cli).await;
+  let served = serve(Caller::Operator).await;
 
   let request = ListProcessesRequest {
     runner: "mac".into(),

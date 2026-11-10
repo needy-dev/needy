@@ -3,6 +3,7 @@
 //! decides anything about the run; [`Caller`](crate::control::Caller)
 //! only scopes what an actor may name.
 
+pub mod client;
 pub mod guest;
 pub mod health;
 pub mod process;

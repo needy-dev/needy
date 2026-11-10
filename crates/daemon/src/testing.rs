@@ -36,7 +36,7 @@ impl Executor {
       host: Host::default(),
       name: "local".into(),
     };
-    let bound = Server::new(health, Caller::Cli).process_service(service).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
+    let bound = Server::new(health, Caller::Operator).process_service(service).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
     let cancel = CancellationToken::new();
     tokio::spawn(bound.serve(cancel.clone()));
     let endpoint = format!("unix:{}", socket.display());
@@ -125,6 +125,7 @@ pub async fn detached_sleep(daemon: &Daemon, run: &str) -> (String, i64) {
     no_stdin: true,
     origin: needy_core::types::Origin::Cli,
     search_path_if_missing: false,
+    by: None,
   };
   let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
   loop {
@@ -152,6 +153,7 @@ pub async fn detached_sleep_on_runner(daemon: &Daemon, runner: &str) -> (String,
     no_stdin: true,
     origin: needy_core::types::Origin::Cli,
     search_path_if_missing: false,
+    by: None,
   };
   let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
   loop {

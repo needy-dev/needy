@@ -14,9 +14,9 @@ use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
 use needy_api_server::control::{ControlError, ExecInput, ExecOpen, ExecOutput, Inputs, Outputs, ProcessInfo, Processes};
 use needy_api_server::protocol::domain;
 use needy_common::time::now_ms;
-use needy_core::event::{Event, ExecExit, ExecStart, TermFallback};
+use needy_core::event::{Event, ExecExit, ExecKill, ExecStart, TermFallback};
 use needy_core::intercept::StreamFilter;
-use needy_core::types::Origin;
+use needy_core::types::{Origin, Principal};
 use needy_trace::Dispatch;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
@@ -57,6 +57,8 @@ fn relayed(e: needy_api_client::Error) -> ControlError {
 pub(crate) struct Known {
   instance: Arc<Instance>,
   origin: Option<Origin>,
+  /// The run whose trace records signals sent to it; `None` outside runs.
+  run: Option<String>,
 }
 
 /// What the relay asks the instance for.
@@ -80,6 +82,9 @@ struct Relay {
   /// The run whose executor runs the process, which `state.db` records it
   /// under; `None` outside a run and for an attach.
   run: Option<String>,
+  /// Who asked for the command; `None` for an attach and for the control
+  /// plane's own.
+  by: Option<Principal>,
   argv: Vec<String>,
   detach: bool,
   filter: Option<Arc<dyn StreamFilter>>,
@@ -116,33 +121,32 @@ impl Daemon {
     processes.get(process).cloned().ok_or_else(|| ControlError::NotFound("no such process".into()))
   }
 
-  fn process_instance(&self, process: &str) -> Result<Arc<Instance>, ControlError> {
-    self.process(process).map(|known| known.instance)
-  }
-
   /// What the daemon knows of `process`, which `instance` listed: what it
   /// recorded, or else `instance` and `origin`, which are then recorded.
-  fn sighted(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>) -> Known {
+  fn sighted(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>, run: Option<String>) -> Known {
     let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     processes
       .entry(process.to_string())
       .or_insert_with(|| Known {
         instance: instance.clone(),
         origin,
+        run,
       })
       .clone()
   }
 
   /// Records the instance of `process` and, when this daemon started it, its
   /// origin; a later sighting without an origin keeps the one recorded.
-  fn remember(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>) {
+  fn remember(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>, run: Option<String>) {
     let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let origin = origin.or_else(|| processes.get(process).and_then(|known| known.origin));
+    let run = run.or_else(|| processes.get(process).and_then(|known| known.run.clone()));
     processes.insert(
       process.to_string(),
       Known {
         instance: instance.clone(),
         origin,
+        run,
       },
     );
   }
@@ -177,6 +181,7 @@ impl Processes for Daemon {
           trace: run.as_ref().map(|s| s.trace.clone()),
           origin: Some(origin),
           run: run.as_ref().map(|r| r.id.clone()),
+          by: spec.by.clone(),
           argv: spec.argv.clone(),
           detach: spec.detach,
           filter: run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
@@ -200,6 +205,7 @@ impl Processes for Daemon {
           trace: None,
           origin: None,
           run: None,
+          by: None,
           argv: Vec::new(),
           detach: false,
           filter: None,
@@ -304,7 +310,7 @@ impl Processes for Daemon {
             let mut p = domain::process_info(p);
             // A process is named by the instance it was started through;
             // one this daemon did not start, by the first that listed it.
-            let known = self.sighted(&p.process, &instance, p.origin);
+            let known = self.sighted(&p.process, &instance, p.origin, Some(p.run.clone()).filter(|run| !run.is_empty()));
             p.executor = known.instance.name.clone();
             p.origin = known.origin;
             processes.push(p);
@@ -318,13 +324,23 @@ impl Processes for Daemon {
     Ok(processes)
   }
 
-  async fn kill(&self, process: &str, signal: &str) -> Result<(), ControlError> {
-    let instance = self.process_instance(process)?;
+  async fn kill(&self, process: &str, signal: &str, by: Principal) -> Result<(), ControlError> {
+    let known = self.process(process)?;
     let request = KillProcessRequest {
       process_id: process.to_string(),
       signal: signal.to_string(),
     };
-    instance.handle.executor.kill_process(request).await.map_err(|s| relayed(s.into()))?;
+    known.instance.handle.executor.kill_process(request).await.map_err(|s| relayed(s.into()))?;
+    // A run that ended has closed its trace; its processes were ended with
+    // it.
+    if let Some(run) = known.run.as_deref().and_then(|run| self.runs.exact(run)) {
+      run.emit(&Event::ExecKill(ExecKill {
+        process: process.to_string(),
+        executor: known.instance.name.clone(),
+        signal: signal.to_string(),
+        by: Some(by),
+      }));
+    }
     Ok(())
   }
 }
@@ -443,7 +459,7 @@ impl Relay {
       let output = match output {
         client_exec::Event::Started(started) => {
           process_id = started.process_id.clone();
-          daemon.remember(&started.process_id, &self.instance, self.origin);
+          daemon.remember(&started.process_id, &self.instance, self.origin, self.run.clone());
           self.record_start(&daemon, &process_id, started_ms).await;
           if let (Some(origin), Some(trace)) = (self.origin, &self.trace) {
             // From the request to the process running, placement and a
@@ -460,6 +476,7 @@ impl Relay {
                   requested: f.requested.clone(),
                   used: f.used.clone(),
                 }),
+                by: self.by.clone(),
               }),
             );
           }

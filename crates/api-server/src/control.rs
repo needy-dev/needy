@@ -13,21 +13,43 @@ use std::pin::Pin;
 use needy_common::process::Exit;
 use needy_core::event::{Event, ExecutorRef};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, RunState, RunnerRole};
+use needy_core::types::{Origin, Principal, RunState, RunnerRole};
 use tokio_stream::Stream;
 
-/// Who is calling, fixed by the listener the call arrived on.
+/// Who is calling: the listener the call arrived on decides, unless the
+/// middleware identified the caller by its bearer token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Caller {
-  /// A client of the control socket: the CLI, or another tool holding the
-  /// daemon's token.
-  Cli,
+  /// A client of the control socket, or one holding the daemon's own
+  /// token: the bootstrap and admin credential.
+  Operator,
+  /// A paired client, by its own token. It has an operator's rights; the
+  /// trace names it `client:NAME`.
+  Client { id: String, name: String },
   /// An actor, on the listener bound to its run. Its calls act on that
   /// run; it may not create, stop or read the logs of runs.
   Actor { run: String },
   /// A runner, by the credential it presented on the control listener. It
   /// reaches `RunnerService.Heartbeat`, `Control` and `Task` only.
   Runner { name: String },
+}
+
+impl Caller {
+  /// Who the trace says caused what this caller asks for.
+  pub fn principal(&self) -> Principal {
+    match self {
+      Self::Operator => Principal::Operator,
+      Self::Client { name, .. } => Principal::Client(name.clone()),
+      Self::Actor { run } => Principal::Actor(run.clone()),
+      Self::Runner { name } => Principal::Runner(name.clone()),
+    }
+  }
+
+  /// Whether the caller has an operator's rights: the operator itself, or
+  /// a paired client.
+  pub fn is_operator(&self) -> bool {
+    matches!(self, Self::Operator | Self::Client { .. })
+  }
 }
 
 /// Why the daemon refused or failed a call. Each variant is one row of the
@@ -97,6 +119,8 @@ pub struct NewRun {
   pub name: String,
   /// Overrides the profile's driving program when not empty.
   pub actor_command: Vec<String>,
+  /// Who asks for the run.
+  pub by: Option<Principal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -182,15 +206,40 @@ pub struct ProfileFinding {
   pub message: String,
 }
 
+/// A run's actor console: chunks as they are read.
+pub type Logs = Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>;
+
+/// One trace event as stored: its payload is JSON of `kind`'s schema at
+/// `version`, which clients decode with `needy_core::event`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredEvent {
+  pub seq: u64,
+  pub time_ms: i64,
+  pub kind: String,
+  pub version: u32,
+  pub payload: String,
+}
+
+/// A run's trace events, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunEvents {
+  /// The full run ID.
+  pub run: String,
+  pub events: Vec<StoredEvent>,
+}
+
 #[async_trait::async_trait]
 pub trait Runs: Send + Sync + 'static {
   async fn create(&self, request: NewRun) -> Result<RunInfo>;
   /// A running, finished, stopped or failed run by ID.
   async fn get(&self, id: &str) -> Result<RunInfo>;
   async fn list(&self) -> Result<Vec<RunInfo>>;
-  async fn stop(&self, id: &str) -> Result<()>;
-  /// The actor's console output so far.
-  async fn logs(&self, id: &str) -> Result<Vec<u8>>;
+  async fn stop(&self, id: &str, by: Principal) -> Result<()>;
+  /// The actor's console output so far, and with `follow` what it writes
+  /// next, until the run ends.
+  async fn logs(&self, id: &str, follow: bool) -> Result<Logs>;
+  /// The trace events of `run`: an ID, an ID prefix or `latest`.
+  async fn events(&self, run: &str) -> Result<RunEvents>;
   /// Places a command the actor's proxy routed.
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route>;
   /// Checks a profile against the runners it would run on; creates nothing.
@@ -231,6 +280,9 @@ pub struct ExecSpec {
   /// Run the program of the same name on the executor's PATH when `argv[0]`
   /// is an absolute path the executor does not have. Set by routing only.
   pub search_path_if_missing: bool,
+  /// Who asks for the command; `None` for the control plane's own, and on
+  /// the wire to an executor, which records no trace.
+  pub by: Option<Principal>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -296,7 +348,7 @@ pub trait Processes: Send + Sync + 'static {
   /// The processes of `run`, or of the runner `runner`, or of every
   /// executor and connected runner when both are empty.
   async fn list(&self, run: &str, runner: &str) -> Result<Vec<ProcessInfo>>;
-  async fn kill(&self, process: &str, signal: &str) -> Result<()>;
+  async fn kill(&self, process: &str, signal: &str, by: Principal) -> Result<()>;
 }
 
 // ---------------------------------------------------------------- guest
@@ -473,15 +525,17 @@ pub struct RunnerInfo {
   pub join_token: String,
 }
 
-/// What a bearer token is to the runner registry.
+/// What a bearer token is to the runner registry or the client registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
   /// The credential of this runner.
   Runner(String),
-  /// Shaped like a runner credential, but no runner holds it: removed,
-  /// rotated away, or never issued.
+  /// The token of this paired client.
+  Client { id: String, name: String },
+  /// Shaped like a runner credential or a client token, but nobody holds
+  /// it: removed, revoked, rotated away, or never issued.
   Refused,
-  /// Not a runner credential.
+  /// Not a credential of this registry.
   Other,
 }
 
@@ -526,4 +580,59 @@ pub trait Runners: Send + Sync + 'static {
     task: u64,
     responses: FromRunner<needy_api_proto::v1::TaskRequest>,
   ) -> Result<ToRunner<needy_api_proto::v1::TaskResponse>>;
+}
+
+// -------------------------------------------------------------- clients
+
+/// A pairing code to create.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewPairingCode {
+  pub ttl_ms: i64,
+  /// The client's name once it pairs; empty for one derived from the
+  /// code's ID.
+  pub name: String,
+}
+
+/// A pairing code just created, with its secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedPairingCode {
+  pub id: String,
+  pub name: String,
+  pub expires_ms: i64,
+  pub code: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientInfo {
+  pub id: String,
+  pub name: String,
+  pub created_ms: i64,
+  pub last_used_ms: Option<i64>,
+  pub revoked_ms: Option<i64>,
+}
+
+/// A client that paired, with its token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paired {
+  pub client: ClientInfo,
+  pub token: String,
+}
+
+/// The control plane's client registry: pairing codes and the clients
+/// that paired with them.
+// TODO(clients): listing and revoking pairing codes is left out: a code is
+// single-use and short-lived (10 minutes by default), so an unused one
+// expires before it matters. Add `ListPairingCodes` and a revoke when an
+// owner asks for longer-lived codes.
+#[async_trait::async_trait]
+pub trait Clients: Send + Sync + 'static {
+  async fn create_pairing_code(&self, request: NewPairingCode) -> Result<CreatedPairingCode>;
+  /// Spends a pairing code and returns the new client's token.
+  async fn pair(&self, code: &str) -> Result<Paired>;
+  /// Every client, including revoked ones.
+  async fn clients(&self) -> Result<Vec<ClientInfo>>;
+  async fn revoke(&self, id: &str) -> Result<()>;
+  /// Whose token a bearer token is. The middleware calls it for every
+  /// token that is not the control token.
+  async fn credential(&self, token: &str) -> Credential;
 }

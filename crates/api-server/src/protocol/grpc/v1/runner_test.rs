@@ -33,7 +33,7 @@ fn with(client: &Client, token: &str) -> Client {
 
 #[tokio::test]
 async fn an_operator_creates_a_join_token_whose_secret_is_in_the_response() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let request = CreateJoinTokenRequest {
     ttl_ms: 60_000,
     uses: 2,
@@ -51,7 +51,7 @@ async fn an_operator_creates_a_join_token_whose_secret_is_in_the_response() {
 
 #[tokio::test]
 async fn joining_needs_no_bearer_token_even_where_the_control_token_is_required() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
 
   let joined = served.client.runners().join(join()).await.unwrap().into_inner();
   let wrong = JoinRequest {
@@ -68,7 +68,7 @@ async fn joining_needs_no_bearer_token_even_where_the_control_token_is_required(
 
 #[tokio::test]
 async fn a_join_with_an_unspecified_role_is_invalid() {
-  let served = serve_with(Caller::Cli, None).await;
+  let served = serve_with(Caller::Operator, None).await;
   let request = JoinRequest {
     roles: vec![RunnerRole::Unspecified as i32],
     ..join()
@@ -82,7 +82,7 @@ async fn a_join_with_an_unspecified_role_is_invalid() {
 
 #[tokio::test]
 async fn a_heartbeat_with_a_runner_credential_names_that_runner_and_carries_a_rotated_credential() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
 
   let beat = with(&served.client, MAC_CREDENTIAL).runners().heartbeat(heartbeat()).await.unwrap().into_inner();
 
@@ -92,7 +92,7 @@ async fn a_heartbeat_with_a_runner_credential_names_that_runner_and_carries_a_ro
 
 #[tokio::test]
 async fn an_operator_cannot_send_heartbeats() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
 
   let status = with(&served.client, CONTROL_TOKEN).runners().heartbeat(heartbeat()).await.unwrap_err();
 
@@ -101,7 +101,7 @@ async fn an_operator_cannot_send_heartbeats() {
 
 #[tokio::test]
 async fn a_runner_credential_reaches_heartbeats_only() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let runner = with(&served.client, MAC_CREDENTIAL);
 
   let list = runner.runners().list_runners(ListRunnersRequest {}).await.unwrap_err();
@@ -114,7 +114,7 @@ async fn a_runner_credential_reaches_heartbeats_only() {
 
 #[tokio::test]
 async fn a_revoked_runner_credential_is_refused_even_on_a_listener_without_a_token() {
-  let served = serve_with(Caller::Cli, None).await;
+  let served = serve_with(Caller::Operator, None).await;
 
   let status = with(&served.client, REVOKED_CREDENTIAL).runners().heartbeat(heartbeat()).await.unwrap_err();
   let open = served.client.runners().list_runners(ListRunnersRequest {}).await.unwrap().into_inner();
@@ -125,7 +125,7 @@ async fn a_revoked_runner_credential_is_refused_even_on_a_listener_without_a_tok
 
 #[tokio::test]
 async fn an_operator_lists_rotates_and_removes_runners() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let runners = with(&served.client, CONTROL_TOKEN).runners();
 
   let listed = runners.clone().list_runners(ListRunnersRequest {}).await.unwrap().into_inner().runners;
@@ -139,7 +139,7 @@ async fn an_operator_lists_rotates_and_removes_runners() {
 
 #[tokio::test]
 async fn a_runner_opens_its_control_stream_and_gets_tasks() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let (_results, rx) = tokio::sync::mpsc::channel::<ControlRequest>(1);
 
   let mut tasks =
@@ -155,7 +155,7 @@ async fn a_runner_opens_its_control_stream_and_gets_tasks() {
 
 #[tokio::test]
 async fn a_task_stream_names_its_task_first() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let runner = with(&served.client, MAC_CREDENTIAL);
   let named = TaskRequest {
     payload: Some(task_request::Payload::TaskId(7)),
@@ -175,7 +175,7 @@ async fn a_task_stream_names_its_task_first() {
 
 #[tokio::test]
 async fn only_runners_open_control_and_task_streams() {
-  let served = serve_with(Caller::Cli, Some(CONTROL_TOKEN)).await;
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let operator = with(&served.client, CONTROL_TOKEN);
 
   let control = operator.runners().control(tokio_stream::iter(Vec::<ControlRequest>::new())).await.unwrap_err();

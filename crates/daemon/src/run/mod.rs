@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
-use needy_api_server::control::{ControlError, NewRun, ProfileCheck, ProfileToCheck, Route, RunInfo, Runs};
+use needy_api_server::control::{ControlError, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunInfo, Runs, StoredEvent};
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::Source;
@@ -29,7 +29,7 @@ use needy_core::chaos::Injector;
 use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::CompiledRecipe;
-use needy_core::types::{RunState, RunnerRole};
+use needy_core::types::{Principal, RunState, RunnerRole};
 use needy_core_actor::host::vm;
 use needy_core_executor::provider::InstanceSpec;
 use needy_trace::Dispatch;
@@ -78,6 +78,8 @@ pub struct Run {
   /// The runner its actor was placed on, once placed; `None` for the
   /// control host.
   actor_runner: Mutex<Option<String>>,
+  /// Who asked for the run, as `run.create` records it.
+  created_by: Option<Principal>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -170,6 +172,70 @@ impl Run {
     // whole.
     self.executors.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
   }
+}
+
+/// How often a followed console is read again for what the actor wrote.
+// NOTICE: polling, not a file watcher: the console is one file that
+// Firecracker appends to, and a quarter second is as quick as a person
+// reading `run logs -f` needs; a watcher (`notify`) would add a dependency
+// and a platform backend for no visible gain.
+const FOLLOW_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// The console at `path` from its start, then what the actor writes
+/// next, until `run` is no longer running or the caller leaves.
+fn follow_console(run: Arc<Run>, path: PathBuf) -> Logs {
+  use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+  let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, ControlError>>(16);
+  let cancel = run.cancel.clone();
+  let tasks = run.tasks.clone();
+  tasks.spawn(async move {
+    let mut offset = 0u64;
+    loop {
+      // The state is read before the file, so the read after the run
+      // stopped running is the last and catches everything it wrote.
+      let running = run.state.get() == RunState::Running && !cancel.is_cancelled();
+      let read = async {
+        let mut file = tokio::fs::File::open(&path).await?;
+        file.seek(std::io::SeekFrom::Start(offset)).await?;
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+      };
+      match read.await {
+        Ok(bytes) if !bytes.is_empty() => {
+          offset += bytes.len() as u64;
+          if tx.send(Ok(bytes)).await.is_err() {
+            return;
+          }
+        }
+        Ok(_) => {}
+        // The VM has not created its console yet.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+          // The caller may be gone; there is nobody else to tell.
+          let _ = tx.send(Err(ControlError::Internal(format!("cannot read {}: {e}", path.display())))).await;
+          return;
+        }
+      }
+      if !running {
+        return;
+      }
+      tokio::select! {
+        () = tokio::time::sleep(FOLLOW_POLL) => {}
+        () = cancel.cancelled() => {}
+        () = tx.closed() => return,
+      }
+    }
+  });
+  Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
+/// The trace events of `run` in `trace.db`, as a control error.
+async fn load_trace(db: &Path, run: &str) -> Result<needy_trace::sink::sqlite::Loaded, ControlError> {
+  needy_trace::sink::sqlite::load(db, run).await.map_err(|e| match e {
+    needy_trace::Error::NoRun(_) | needy_trace::Error::NoDatabase(_) => ControlError::NotFound(format!("no trace of a run matching {run}")),
+    e => ControlError::Internal(format!("{}: {e}", db.display())),
+  })
 }
 
 pub fn emit(trace: &Dispatch, event: &Event) {
@@ -447,6 +513,7 @@ impl Daemon {
       actor_exit: Mutex::new(None),
       failure: Mutex::new(None),
       actor_runner: Mutex::new(None),
+      created_by: request.by.clone(),
       tasks: TaskTracker::new(),
       cancel,
     }))
@@ -510,6 +577,7 @@ impl Daemon {
       group: run.group.clone(),
       profile: run.profile_name.clone(),
       executors: executor_refs(&run.executors()),
+      by: run.created_by.clone(),
     }));
     unwinding(run)?;
     files::copy_in(run).await?;
@@ -593,8 +661,9 @@ impl Daemon {
   }
 
   /// Stops a running or finished run: its tasks, mirror-out, its
-  /// executors, its trace.
-  pub(crate) async fn stop_run(&self, run: &Arc<Run>) -> Result<(), ControlError> {
+  /// executors, its trace. `by` is who asked; `None` when the control plane
+  /// stops it on its own, as at shutdown.
+  pub(crate) async fn stop_run(&self, run: &Arc<Run>, by: Option<Principal>) -> Result<(), ControlError> {
     let stopping = match run.state.advance(RunState::Stopping) {
       Ok(_) => true,
       // The actor finished or failed first and that state stays; ending
@@ -619,7 +688,7 @@ impl Daemon {
       tracing::warn!("run {}: {refused}", run.id);
     }
     self.release_executors(run).await;
-    run.emit(&Event::RunStop(RunStop {}));
+    run.emit(&Event::RunStop(RunStop { by }));
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
     run.trace.flush().await;
@@ -806,22 +875,50 @@ impl Runs for Daemon {
     self.runs.list().await
   }
 
-  async fn stop(&self, id: &str) -> Result<(), ControlError> {
+  async fn stop(&self, id: &str, by: Principal) -> Result<(), ControlError> {
     let run = self.runs.find(id)?;
-    self.stop_run(&run).await
+    self.stop_run(&run, Some(by)).await
   }
 
-  async fn logs(&self, id: &str) -> Result<Vec<u8>, ControlError> {
+  async fn logs(&self, id: &str, follow: bool) -> Result<Logs, ControlError> {
     let info = self.runs.find_info(id).await?;
     // Firecracker writes the guest's serial console here.
     let path = vm::console(&self.run_dir(&info.id));
-    // TODO(run-logs): follow a running actor's console (`--follow`); not
-    // needed by the QA item, which asks for the output so far.
-    match tokio::fs::read(&path).await {
-      Ok(bytes) => Ok(bytes),
-      Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ControlError::NotFound(format!("run {id} has no actor console"))),
-      Err(e) => Err(ControlError::Internal(format!("cannot read {}: {e}", path.display()))),
+    let live = self.runs.exact(&info.id).filter(|run| follow && run.state.get() == RunState::Running);
+    let Some(run) = live else {
+      // The output so far: a run that ended writes nothing more.
+      return match tokio::fs::read(&path).await {
+        Ok(bytes) => Ok(Box::pin(tokio_stream::iter([Ok(bytes)]))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ControlError::NotFound(format!("run {id} has no actor console"))),
+        Err(e) => Err(ControlError::Internal(format!("cannot read {}: {e}", path.display()))),
+      };
+    };
+    Ok(follow_console(run, path))
+  }
+
+  async fn events(&self, run: &str) -> Result<RunEvents, ControlError> {
+    let db = self.config.state_dir.join("trace.db");
+    let mut loaded = load_trace(&db, run).await?;
+    // A live run's last events may still be queued for the sinks.
+    if let Some(live) = self.runs.exact(&loaded.run) {
+      live.trace.flush().await;
+      loaded = load_trace(&db, &loaded.run).await?;
     }
+    let events = loaded
+      .events
+      .into_iter()
+      .map(|event| StoredEvent {
+        seq: event.seq,
+        time_ms: event.time_ms,
+        kind: event.kind,
+        version: event.version,
+        payload: event.payload.get().to_string(),
+      })
+      .collect();
+    Ok(RunEvents {
+      run: loaded.run,
+      events,
+    })
   }
 
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route, ControlError> {

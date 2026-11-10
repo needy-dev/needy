@@ -8,13 +8,13 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
   fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![Box::new(CreateRunners), Box::new(CreateRuns)]
+    vec![
+      Box::new(CreateRunners),
+      Box::new(CreateRuns),
+      Box::new(CreateClients),
+    ]
   }
 }
-
-// TODO(persistence): clients join `state.db` in slice 7 of the
-// runners-and-runs design
-// (`docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`).
 
 /// The `runners` and `join_tokens` tables.
 struct CreateRunners;
@@ -225,5 +225,75 @@ impl MigrationTrait for CreateRuns {
     manager.drop_table(Table::drop().table(Processes::Table).to_owned()).await?;
     manager.drop_table(Table::drop().table(Instances::Table).to_owned()).await?;
     manager.drop_table(Table::drop().table(Runs::Table).to_owned()).await
+  }
+}
+
+/// The `clients` and `pairing_codes` tables.
+struct CreateClients;
+
+impl MigrationName for CreateClients {
+  fn name(&self) -> &str {
+    "m20261110_000070_clients"
+  }
+}
+
+#[derive(DeriveIden)]
+enum Clients {
+  Table,
+  Id,
+  Name,
+  PairingCode,
+  TokenHash,
+  CreatedMs,
+  LastUsedMs,
+  RevokedMs,
+}
+
+#[derive(DeriveIden)]
+enum PairingCodes {
+  Table,
+  Id,
+  Hash,
+  Name,
+  CreatedMs,
+  ExpiresMs,
+  UsedMs,
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateClients {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .create_table(
+        Table::create()
+          .table(Clients::Table)
+          .col(ColumnDef::new(Clients::Id).text().not_null().primary_key())
+          .col(ColumnDef::new(Clients::Name).text().not_null())
+          .col(ColumnDef::new(Clients::PairingCode).text().not_null())
+          .col(ColumnDef::new(Clients::TokenHash).blob())
+          .col(ColumnDef::new(Clients::CreatedMs).big_integer().not_null())
+          .col(ColumnDef::new(Clients::LastUsedMs).big_integer())
+          .col(ColumnDef::new(Clients::RevokedMs).big_integer())
+          .to_owned(),
+      )
+      .await?;
+    manager
+      .create_table(
+        Table::create()
+          .table(PairingCodes::Table)
+          .col(ColumnDef::new(PairingCodes::Id).text().not_null().primary_key())
+          .col(ColumnDef::new(PairingCodes::Hash).blob().not_null())
+          .col(ColumnDef::new(PairingCodes::Name).text().not_null())
+          .col(ColumnDef::new(PairingCodes::CreatedMs).big_integer().not_null())
+          .col(ColumnDef::new(PairingCodes::ExpiresMs).big_integer().not_null())
+          .col(ColumnDef::new(PairingCodes::UsedMs).big_integer())
+          .to_owned(),
+      )
+      .await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.drop_table(Table::drop().table(PairingCodes::Table).to_owned()).await?;
+    manager.drop_table(Table::drop().table(Clients::Table).to_owned()).await
   }
 }

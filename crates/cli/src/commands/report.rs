@@ -1,13 +1,16 @@
 //! `needy report`: a report of a run from the trace, as plain text for
-//! people, markdown or JSON. Events are read with the SQLite sink's reader,
-//! decoded into `needy_core::event` values and rendered by
-//! `needy_core::report`; this command picks the format and the colors.
+//! people, markdown or JSON. The control plane sends the run's events
+//! (`RunService.GetRunEvents`), so any client it reaches can report; with
+//! `--local` they are read from this machine's `trace.db` instead, offline.
+//! Either way they are decoded into `needy_core::event` values and rendered
+//! by `needy_core::report`; this command picks the format and the colors.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::ValueEnum;
+use needy_api_client::proto::v1::GetRunEventsRequest;
 use needy_core::event::{Event, Recorded};
 use needy_core::report;
 
@@ -40,6 +43,11 @@ pub struct Args {
   /// Write the report to this file instead of stdout.
   #[arg(long)]
   file: Option<PathBuf>,
+  /// Read the trace database in this machine's state directory
+  /// (`NEEDY_STATE_DIR`) instead of asking the control plane, as on the
+  /// control host with no daemon running.
+  #[arg(long)]
+  local: bool,
 }
 
 /// Colors only for a terminal, and not when `NO_COLOR` is set
@@ -48,20 +56,70 @@ fn color(to_file: bool) -> bool {
   !to_file && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
 }
 
-pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  // NOTICE: the report reads the trace database directly, so it needs the
-  // daemon's state directory on this machine.
+/// One stored event, from either source.
+struct Stored {
+  seq: u64,
+  time_ms: i64,
+  kind: String,
+  version: u32,
+  payload: String,
+}
+
+/// The run's full ID and its events, from this machine's `trace.db`.
+async fn local_events(ctx: &Context, run: &str) -> Result<(String, Vec<Stored>)> {
   let db = ctx.paths()?.state.join("trace.db");
   if !db.exists() {
     anyhow::bail!("no trace database at {}; is NEEDY_STATE_DIR the daemon's?", db.display());
   }
-  let loaded = needy_trace::sink::sqlite::load(&db, &args.run).await?;
+  let loaded = needy_trace::sink::sqlite::load(&db, run).await?;
   let events = loaded
     .events
+    .into_iter()
+    .map(|event| Stored {
+      seq: event.seq,
+      time_ms: event.time_ms,
+      kind: event.kind,
+      version: event.version,
+      payload: event.payload.get().to_string(),
+    })
+    .collect();
+  Ok((loaded.run, events))
+}
+
+/// The run's full ID and its events, from the control plane.
+async fn remote_events(ctx: &Context, run: &str) -> Result<(String, Vec<Stored>)> {
+  let fail = needy_api_client::Error::from;
+  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  let request = GetRunEventsRequest {
+    run_id: run.to_string(),
+  };
+  let mut stream = connection.runs().get_run_events(request).await.map_err(fail)?.into_inner();
+  let mut id = String::new();
+  let mut events = Vec::new();
+  while let Some(message) = stream.message().await.map_err(fail)? {
+    id = message.run_id;
+    events.extend(message.events.into_iter().map(|event| Stored {
+      seq: event.seq,
+      time_ms: event.time_ms,
+      kind: event.kind,
+      version: event.version,
+      payload: event.payload,
+    }));
+  }
+  Ok((id, events))
+}
+
+pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let (run, stored) = if args.local {
+    local_events(ctx, &args.run).await?
+  } else {
+    remote_events(ctx, &args.run).await?
+  };
+  let events = stored
     .iter()
     .map(|stored| {
-      let event = Event::decode(&stored.kind, stored.version, stored.payload.get())
-        .with_context(|| format!("run {}: event {} ({}) cannot be read", loaded.run, stored.seq, stored.kind))?;
+      let event = Event::decode(&stored.kind, stored.version, &stored.payload)
+        .with_context(|| format!("run {run}: event {} ({}) cannot be read", stored.seq, stored.kind))?;
       Ok(Recorded {
         time_ms: stored.time_ms,
         event,
@@ -79,7 +137,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Format::Markdown => report::Format::Markdown,
     Format::Json => report::Format::Json,
   };
-  let text = report::render(&loaded.run, &events, level, format);
+  let text = report::render(&run, &events, level, format);
   match args.file {
     Some(path) => std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?,
     None => print!("{text}"),

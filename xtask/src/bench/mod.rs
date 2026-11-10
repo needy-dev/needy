@@ -153,7 +153,10 @@ mod run {
     }
     let mut logs = client
       .runs()
-      .get_run_logs(GetRunLogsRequest { run_id: id.clone() })
+      .get_run_logs(GetRunLogsRequest {
+        run_id: id.clone(),
+        follow: false,
+      })
       .await
       .map_err(|s| anyhow::anyhow!("run {id} logs: {}", s.message()))?
       .into_inner();

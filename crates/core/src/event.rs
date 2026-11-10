@@ -8,12 +8,23 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Fired, Network, Origin, Outcome};
+use crate::types::{Fired, Network, Origin, Outcome, Principal};
 
-/// The version of the payload schema. Rows of another version are rejected.
-// NOTICE: version 0 is the flat string-attribute rows written before this
-// schema; they are not read (module layout redesign, principle 7).
-pub const SCHEMA_VERSION: u32 = 1;
+/// The version of the payload schema that producers write.
+///
+/// Version 2 added who caused an event (`by`: `run.create`, `run.stop`,
+/// `exec.start`) and `exec.kill`.
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// The versions [`Event::decode`] reads. Rows of another version are
+/// rejected.
+// NOTICE: version 1 payloads are version 2 payloads without `by` and
+// without `exec.kill`, so they decode with the same types: `by` reads as
+// `None`. Traces written before version 2, and events a guest built before it
+// pushes, stay readable. Version 0 is the flat string-attribute rows written
+// before the typed schema; they are not read (module layout redesign,
+// principle 7).
+pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = 1..=SCHEMA_VERSION;
 
 /// Declares the kinds, their names on the wire and their payload types.
 macro_rules! events {
@@ -67,7 +78,7 @@ macro_rules! events {
 
       /// Rebuilds an event from its stored kind, schema version and payload.
       pub fn decode(kind: &str, version: u32, payload: &str) -> Result<Event, DecodeError> {
-        if version != SCHEMA_VERSION {
+        if !READ_VERSIONS.contains(&version) {
           return Err(DecodeError::Version { found: version, expected: SCHEMA_VERSION });
         }
         let kind: EventKind = kind.parse()?;
@@ -98,6 +109,8 @@ events! {
   ExecDecide(ExecDecide) = "exec.decide",
   ExecStart(ExecStart) = "exec.start",
   ExecExit(ExecExit) = "exec.exit",
+  /// A signal sent to a run's process through the control plane.
+  ExecKill(ExecKill) = "exec.kill",
   FaultInjected(Fired) = "fault.injected",
   NetRequest(NetRequest) = "net.request",
   NetConnect(NetConnect) = "net.connect",
@@ -129,7 +142,7 @@ impl std::str::FromStr for EventKind {
 pub enum DecodeError {
   #[error("unknown event kind {0:?}")]
   Kind(String),
-  #[error("event schema version {found} is not {expected}")]
+  #[error("event schema version {found} is not one this build reads (1 to {expected})")]
   Version { found: u32, expected: u32 },
   #[error("invalid {kind} payload")]
   Payload {
@@ -154,6 +167,10 @@ pub struct RunCreate {
   /// The profile's name.
   pub profile: String,
   pub executors: Vec<ExecutorRef>,
+  /// Who caused it; absent in version 1 traces and for what the control
+  /// plane does on its own, such as stopping runs when it shuts down.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub by: Option<Principal>,
 }
 
 /// An executor instance a run uses.
@@ -165,9 +182,14 @@ pub struct ExecutorRef {
   pub instance: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RunStop {}
+pub struct RunStop {
+  /// Who caused it; absent in version 1 traces and for what the control
+  /// plane does on its own, such as stopping runs when it shuts down.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub by: Option<Principal>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -267,6 +289,10 @@ pub struct ExecStart {
   /// has no terminfo entry for. Absent when kept.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub term_fallback: Option<TermFallback>,
+  /// Who caused it; absent in version 1 traces and for what the control
+  /// plane does on its own, such as stopping runs when it shuts down.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub by: Option<Principal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,6 +313,22 @@ pub struct ExecExit {
   pub signal: Option<String>,
   /// Wall time from start to exit.
   pub ms: u64,
+}
+
+/// A signal sent to a run's process; its `exec.exit` follows when the
+/// process ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecKill {
+  pub process: String,
+  /// The executor's name in the profile.
+  pub executor: String,
+  /// As given, such as `TERM`; empty for the executor's default.
+  pub signal: String,
+  /// Who caused it; absent in version 1 traces and for what the control
+  /// plane does on its own, such as stopping runs when it shuts down.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub by: Option<Principal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

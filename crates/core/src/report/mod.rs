@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::event::{ActorExit, Event, Recorded};
 use crate::pattern::basename;
-use crate::types::{Network, Origin, Outcome, Placement, RunState};
+use crate::types::{Network, Origin, Outcome, Placement, Principal, RunState};
 
 /// How much the report shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +114,9 @@ struct Tally {
   actor_exit: Option<ActorExit>,
   /// Why the run failed.
   failure: Option<String>,
+  /// Who created the run, and who stopped it.
+  started_by: Option<Principal>,
+  stopped_by: Option<Principal>,
   /// Events the trace dropped.
   dropped: u64,
   /// The actor's route names; `Some(None)` routes every exec.
@@ -149,9 +152,13 @@ impl Tally {
       Event::RunCreate(create) => {
         self.profile = Some(create.profile.clone());
         self.created = Some(time_ms);
+        self.started_by = create.by.clone();
         self.state.get_or_insert(RunState::Running);
       }
-      Event::RunStop(_) => self.end(time_ms, RunState::Stopped),
+      Event::RunStop(stop) => {
+        self.end(time_ms, RunState::Stopped);
+        self.stopped_by = stop.by.clone();
+      }
       Event::RunFail(fail) => {
         self.end(time_ms, RunState::Failed);
         self.failure = Some(fail.reason.clone());
@@ -229,7 +236,12 @@ impl Tally {
       }
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
-      Event::ActorStart(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
+      Event::ActorStart(_)
+      | Event::ExecKill(_)
+      | Event::FilesCopyIn(_)
+      | Event::FilesMirrorOut(_)
+      | Event::NetError(_)
+      | Event::TraceTiming(_) => {}
     }
   }
 
@@ -291,6 +303,13 @@ pub struct Summary {
   pub actor_exit: Option<ActorExit>,
   /// Why the run failed.
   pub failure: Option<String>,
+  /// Who created the run (`operator`, `client:NAME`, …); `None` when the
+  /// trace does not say, such as one written before principals were
+  /// recorded.
+  pub started_by: Option<String>,
+  /// Who stopped the run; `None` when it was not stopped, or the control
+  /// plane stopped it on its own.
+  pub stopped_by: Option<String>,
   /// Events the trace dropped; the counts are low by about as many.
   pub dropped_events: u64,
   /// The command names the actor routes, `["*"]` for every exec; `None`
@@ -448,6 +467,8 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     duration_ms: (ended - created).max(0),
     actor_exit: t.actor_exit.clone(),
     failure: t.failure.clone(),
+    started_by: t.started_by.as_ref().map(Principal::to_string),
+    stopped_by: t.stopped_by.as_ref().map(Principal::to_string),
     dropped_events: t.dropped,
     route_names: t.route_names.clone().map(|names| names.unwrap_or_else(|| vec!["*".to_string()])),
     commands: Commands {
@@ -505,6 +526,10 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
     )?;
   }
   writeln!(out, "## Overview\n")?;
+  let by = |principal: &Option<Principal>| principal.as_ref().map_or("-".to_string(), Principal::to_string);
+  if t.started_by.is_some() || t.stopped_by.is_some() {
+    writeln!(out, "Started by `{}`, stopped by `{}`.\n", by(&t.started_by), by(&t.stopped_by))?;
+  }
   writeln!(
     out,
     "| Duration | State | Driving program | Routed to executor | Kept on actor | CLI commands | Failed | Model calls (actor gateway) |"

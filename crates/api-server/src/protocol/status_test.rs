@@ -24,7 +24,7 @@ fn each_error_has_its_code_and_keeps_its_message() {
 
 #[test]
 fn a_denied_command_carries_its_events_as_an_exec_refusal() {
-  let event = Event::RunStop(RunStop {});
+  let event = Event::RunStop(RunStop::default());
   let error = ControlError::Denied {
     message: "fault injected: ECONNREFUSED".into(),
     events: vec![event.clone()],

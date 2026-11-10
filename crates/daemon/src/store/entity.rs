@@ -173,3 +173,57 @@ pub mod process {
 
   impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod client {
+  //! A paired client, including revoked ones.
+
+  use sea_orm::entity::prelude::*;
+
+  #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+  #[sea_orm(table_name = "clients")]
+  pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: String,
+    /// What the trace names it: `client:NAME`.
+    pub name: String,
+    /// The ID of the pairing code it paired with.
+    pub pairing_code: String,
+    /// The SHA-256 of its token; `None` once revoked.
+    pub token_hash: Option<Vec<u8>>,
+    pub created_ms: i64,
+    /// Its last request, written at most once a minute.
+    pub last_used_ms: Option<i64>,
+    pub revoked_ms: Option<i64>,
+  }
+
+  #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+  pub enum Relation {}
+
+  impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod pairing_code {
+  //! A pairing code, including expired and used ones.
+
+  use sea_orm::entity::prelude::*;
+
+  #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+  #[sea_orm(table_name = "pairing_codes")]
+  pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: String,
+    /// The SHA-256 of the code.
+    pub hash: Vec<u8>,
+    /// The name of the client that pairs with it.
+    pub name: String,
+    pub created_ms: i64,
+    pub expires_ms: i64,
+    /// When a client paired with it; a code is used once.
+    pub used_ms: Option<i64>,
+  }
+
+  #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+  pub enum Relation {}
+
+  impl ActiveModelBehavior for ActiveModel {}
+}

@@ -86,7 +86,7 @@ async fn a_runner_that_connects_again_keeps_the_processes_of_a_live_run() {
 
   assert!(testing::running(pid), "the process of a live run was ended when its runner connected again");
   assert_eq!(Runs::get(daemon, &run.id).await.unwrap().state, RunState::Running);
-  Runs::stop(daemon, &run.id).await.unwrap();
+  Runs::stop(daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
   assert!(testing::ended(pid).await, "process {pid} outlived its run");
 }
 
@@ -98,7 +98,7 @@ async fn a_runner_that_connects_again_is_told_to_end_a_run_that_stopped_meanwhil
   let (process, pid) = testing::detached_sleep(daemon, &run.id).await;
   far.proxy.down();
   eventually("the runner disconnects", async || daemon.links.get("far").is_none()).await;
-  Runs::stop(daemon, &run.id).await.unwrap();
+  Runs::stop(daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
   let while_away = testing::running(pid);
 
   far.proxy.restore();
@@ -122,8 +122,8 @@ async fn a_runner_that_cannot_reach_the_control_plane_ends_the_processes_of_runs
   assert!(testing::running(outside), "a process outside any run belongs to no run and stays");
   far.proxy.restore();
   eventually("the runner connects again", async || daemon.links.get("far").is_some()).await;
-  Runs::stop(daemon, &run.id).await.unwrap();
-  needy_api_server::control::Processes::kill(daemon, &outside_id, "SIGKILL").await.unwrap();
+  Runs::stop(daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
+  needy_api_server::control::Processes::kill(daemon, &outside_id, "SIGKILL", needy_core::types::Principal::Operator).await.unwrap();
 }
 
 // ---------------------------------------------------- control-plane restart
