@@ -85,3 +85,41 @@ fn unpack_overwrites_an_earlier_build() {
 
   assert_eq!(std::fs::read(out.join("vmlinux")).unwrap(), b"new");
 }
+
+/// The `ARG`s the `kernel` stage of `images/Dockerfile` declares.
+fn kernel_stage_args() -> Vec<String> {
+  let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/Dockerfile");
+  let text = std::fs::read_to_string(dockerfile).unwrap();
+  text
+    .lines()
+    .skip_while(|line| !line.starts_with("FROM ") || !line.ends_with(" AS kernel"))
+    .skip(1)
+    .take_while(|line| !line.starts_with("FROM "))
+    .filter_map(|line| line.strip_prefix("ARG "))
+    .map(|arg| arg.split('=').next().unwrap().to_string())
+    .collect()
+}
+
+// ROOT CAUSE:
+//
+// If a recipe set `os.kernel.release` or `version`, the actor's `uname` did
+// not show it, because `needy build` passed them as build arguments the
+// Dockerfile's kernel stage never declared, and BuildKit drops undeclared
+// build arguments without an error.
+//
+// Before the fix, `NEEDY_KERNEL_RELEASE` and `NEEDY_KERNEL_VERSION` were
+// passed and ignored.
+// The fix keeps every kernel build variable a recipe yields declared in the
+// kernel stage.
+#[test]
+fn every_kernel_build_variable_of_a_recipe_is_an_arg_of_the_kernel_stage() {
+  let args = kernel_stage_args();
+  for name in needy_config::builtin::recipes() {
+    let recipe = needy_config::recipe::load(&Source::builtin(name)).unwrap();
+    let compiled = needy_core::recipe::compile(&recipe, &needy_core::recipe::HostInfo::default(), 0);
+    assert!(compiled.kernel_build_env.contains_key("KERNELRELEASE"), "{name}");
+    for key in compiled.kernel_build_env.keys() {
+      assert!(args.contains(key), "{name}: {key} is not an ARG of the kernel stage: {args:?}");
+    }
+  }
+}

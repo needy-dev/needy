@@ -64,7 +64,7 @@ fn compiles_gce_recipe() {
   assert_eq!(c.interface.as_deref(), Some("ens4"));
   assert_eq!(c.metadata.as_ref().unwrap()["provider"], "gce");
   assert_eq!(c.os_image.as_deref(), Some("ubuntu:22.04"));
-  assert_eq!(c.kernel_build_env["NEEDY_KERNEL_RELEASE"], "6.5.0-1020-gcp");
+  assert_eq!(c.kernel_build_env["KERNELRELEASE"], "6.5.0-1020-gcp");
   assert_eq!(c.kernel_build_env["KBUILD_BUILD_USER"], "buildd");
 
   let modifiers = c.cpu_template["cpuid_modifiers"].as_array().unwrap();
@@ -189,8 +189,54 @@ fn builtin(name: &str, seed: u64) -> CompiledRecipe {
 fn the_gce_builtin_kernel_is_the_cited_ubuntu_build() {
   let c = builtin("gce-ubuntu-22.04", 1);
 
-  assert_eq!(c.kernel_build_env["NEEDY_KERNEL_VERSION"], "#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024");
+  assert_eq!(c.kernel_build_env["KBUILD_BUILD_VERSION"], "20~22.04.1-Ubuntu SMP");
+  assert_eq!(c.kernel_build_env["KBUILD_BUILD_TIMESTAMP"], "Wed May  1 02:03:24 UTC 2024");
   assert_eq!(c.kernel_build_env["KBUILD_BUILD_HOST"], "lcy02-amd64-115");
+}
+
+// ROOT CAUSE:
+//
+// If an actor was built from a recipe with `os.kernel.release` and `version`,
+// `uname -a` and `/proc/version` still showed the guest kernel's own
+// `6.18.62 #1 SMP PREEMPT_DYNAMIC <build date>`, because the recipe's strings
+// reached the image build as `NEEDY_KERNEL_RELEASE` and `NEEDY_KERNEL_VERSION`,
+// which nothing in `images/Dockerfile` read.
+//
+// Before the fix, the GCE built-in's actor said `6.18.62` and `#1 ...`.
+// The fix passes the kernel's own make variables: `KERNELRELEASE` for
+// `UTS_RELEASE`, and the version split into `KBUILD_BUILD_VERSION` (the build
+// number with the recipe's flags) and `KBUILD_BUILD_TIMESTAMP` for
+// `UTS_VERSION`.
+#[test]
+fn the_recipe_kernel_release_and_version_are_the_kernels_make_variables() {
+  let gce = builtin("gce-ubuntu-22.04", 1).kernel_build_env;
+  let dell = builtin("dell-optiplex-ubuntu-24.04", 1).kernel_build_env;
+
+  assert_eq!(gce["KERNELRELEASE"], "6.5.0-1020-gcp");
+  assert_eq!(gce["KBUILD_BUILD_VERSION"], "20~22.04.1-Ubuntu SMP");
+  assert_eq!(gce["KBUILD_BUILD_TIMESTAMP"], "Wed May  1 02:03:24 UTC 2024");
+  assert_eq!(dell["KERNELRELEASE"], "6.8.0-49-generic");
+  assert_eq!(dell["KBUILD_BUILD_VERSION"], "49-Ubuntu SMP PREEMPT_DYNAMIC");
+  assert_eq!(dell["KBUILD_BUILD_TIMESTAMP"], "Mon Nov  4 02:06:24 UTC 2024");
+}
+
+#[test]
+fn a_kernel_version_without_a_build_number_and_date_is_a_finding_and_not_applied() {
+  let c = compile(&load("os: { kernel: { version: \"custom\" } }"), &HostInfo::default(), 0);
+
+  assert!(!c.kernel_build_env.contains_key("KBUILD_BUILD_VERSION"), "{:?}", c.kernel_build_env);
+  assert_eq!(c.findings.len(), 1, "{:?}", c.findings);
+  assert!(c.findings[0].message.contains("os.kernel.version"), "{:?}", c.findings);
+}
+
+#[test]
+fn a_kernel_release_the_kernel_cannot_hold_is_an_error() {
+  let long = "6".repeat(65);
+  let c = compile(&load(&format!("os: {{ kernel: {{ release: \"{long}\" }} }}")), &HostInfo::default(), 0);
+  let spaced = compile(&load("os: { kernel: { release: \"6.5 gcp\" } }"), &HostInfo::default(), 0);
+
+  assert_eq!(c.findings.iter().filter(|f| f.severity == Severity::Error).count(), 1, "{:?}", c.findings);
+  assert_eq!(spaced.findings.iter().filter(|f| f.severity == Severity::Error).count(), 1, "{:?}", spaced.findings);
 }
 
 // ROOT CAUSE:

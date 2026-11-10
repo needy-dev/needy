@@ -4,6 +4,7 @@
 mod cpu;
 mod host;
 mod identity;
+mod kernel;
 
 use std::collections::BTreeMap;
 
@@ -51,11 +52,14 @@ pub struct CompiledRecipe {
   pub identity: VmIdentity,
   /// Firecracker custom CPU template.
   pub cpu_template: serde_json::Value,
-  /// Variables for building the guest kernel.
+  /// Make variables for building the guest kernel, passed to
+  /// `images/Dockerfile` as build arguments of its `kernel` stage.
   pub kernel_build_env: BTreeMap<String, String>,
   pub hostname: Option<String>,
   pub uptime_offset_secs: i64,
   pub sensors: Vec<SensorSpec>,
+  /// TODO(actor-network): checked against the identity's vendor only; no
+  /// actor has a NIC to carry it (see `needy_core_actor::host::vm::Launch`).
   pub network_mac: Option<String>,
   pub interface: Option<String>,
   pub metadata: Option<serde_json::Value>,
@@ -106,19 +110,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
 
   let cpu_template = cpu::cpu_template(&recipe.cpu, hidden, host, &mut findings);
 
-  let mut kernel_build_env = BTreeMap::new();
-  let kernel = &recipe.os.kernel;
-  for (key, value) in [
-    ("NEEDY_KERNEL_RELEASE", &kernel.release),
-    ("NEEDY_KERNEL_VERSION", &kernel.version),
-    ("KBUILD_BUILD_USER", &kernel.build.user),
-    ("KBUILD_BUILD_HOST", &kernel.build.host),
-    ("KBUILD_BUILD_TIMESTAMP", &kernel.build.timestamp),
-  ] {
-    if let Some(value) = value {
-      kernel_build_env.insert(key.to_string(), value.clone());
-    }
-  }
+  let kernel_build_env = kernel::build_env(&recipe.os.kernel, &mut findings);
 
   let uptime_offset_secs = recipe.os.uptime.map_or(0, |d| d.as_secs() as i64);
 

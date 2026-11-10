@@ -36,6 +36,10 @@ COPY --from=needy-windows /needy.exe /needy.exe
 # pinned by KERNEL_VERSION).
 FROM ubuntu:24.04 AS kernel
 ARG KERNEL_VERSION
+# The recipe's kernel identity (`crates/core/src/recipe/kernel.rs` says how
+# each one becomes `uname` and `/proc/version`). Empty keeps the kernel's own.
+ARG KERNELRELEASE=
+ARG KBUILD_BUILD_VERSION=
 ARG KBUILD_BUILD_USER=builder
 ARG KBUILD_BUILD_HOST=needy
 ARG KBUILD_BUILD_TIMESTAMP=
@@ -52,9 +56,25 @@ RUN echo "obj-y += binfmt_needy.o" >> fs/Makefile \
  && echo "obj-y += fake_coretemp.o" >> drivers/hwmon/Makefile \
  && scripts/kconfig/merge_config.sh -m .config /tmp/needy.config >/dev/null \
  && scripts/config -d LOCALVERSION_AUTO --set-str LOCALVERSION "" \
- && make -s olddefconfig \
- && KBUILD_BUILD_USER=$KBUILD_BUILD_USER KBUILD_BUILD_HOST=$KBUILD_BUILD_HOST \
-    KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP" make -s -j"$(nproc)" vmlinux
+ && make -s olddefconfig
+# NOTICE: `KERNELRELEASE` works only on the make command line: the top
+# Makefile assigns it, which hides the environment's value, and only a value
+# whose origin is not that file replaces `scripts/setlocalversion`:
+# https://github.com/gregkh/linux/blob/c3f63d70f236bb7685e6d11d1d9b5b351552e600/Makefile#L378-L381
+# and #L1279-L1283 (v6.18.62). `KBUILD_BUILD_VERSION` from a recipe already
+# holds the recipe's `SMP`/`PREEMPT_DYNAMIC` flags, so the configuration's
+# flags (`smp-flag-y`, `preempt-flag-y`) are emptied on the command line, which
+# overrides init/Makefile's assignments in the sub-make:
+# https://github.com/gregkh/linux/blob/c3f63d70f236bb7685e6d11d1d9b5b351552e600/init/Makefile#L27-L38
+# Both are internal names of this kernel version; recheck them when
+# KERNEL_VERSION changes. Every module is built in (`obj-y`), so no module's
+# vermagic has to match the new release.
+RUN set --; \
+    if [ -n "$KERNELRELEASE" ]; then set -- "$@" "KERNELRELEASE=$KERNELRELEASE"; fi; \
+    if [ -n "$KBUILD_BUILD_VERSION" ]; then set -- "$@" smp-flag-y= preempt-flag-y=; fi; \
+    KBUILD_BUILD_VERSION="$KBUILD_BUILD_VERSION" KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
+    KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST" KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP" \
+    make -s -j"$(nproc)" "$@" vmlinux
 
 # Firecracker with needy's CPUID, SMBIOS and PCI identity patch, linked
 # statically against musl as upstream releases are, so it runs on any Linux

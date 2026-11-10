@@ -118,7 +118,7 @@ loaded, including paths a parent wrote.
 | `cpu.topology` | vCPU count and topology leaves | VM start | Partly built into Firecracker |
 | `memory` | `mem_size_mib`; real | VM start | Native |
 | `os.image` | OCI image to ext4 rootfs | Build | Verified |
-| `os.kernel.*` | `LOCALVERSION`, `KBUILD_BUILD_USER`, `KBUILD_BUILD_HOST`, `KBUILD_BUILD_TIMESTAMP` | Build | Straightforward |
+| `os.kernel.*` | `release` as `make KERNELRELEASE=` (`UTS_RELEASE`); `version` split into `KBUILD_BUILD_VERSION` (build number and the recipe's flags, the configuration's flags emptied) and `KBUILD_BUILD_TIMESTAMP` (`UTS_VERSION`); `KBUILD_BUILD_USER`, `KBUILD_BUILD_HOST` (`crates/core/src/recipe/kernel.rs`) | Build | Verified |
 | `os.hostname` | Rootfs overlay or kernel command line | Build or start | Straightforward |
 | `os.uptime` | Time namespace offset for driving processes, plus logs dated to match | Run time | To do |
 | `firmware.dmi` | Built-in fake DMI driven by module parameters, or an SMBIOS table added to Firecracker | Build or start | To do |

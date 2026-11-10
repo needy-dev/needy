@@ -151,6 +151,11 @@ impl Launch {
       "machine-config": {"vcpu_count": vcpus, "mem_size_mib": mem_mib},
       "vsock": {"guest_cid": GUEST_CID, "uds_path": path(&vsock(dir))},
     });
+    // TODO(actor-network): the recipe's `network_mac` (and `interface`) are
+    // unused in actors: the VM gets no `network-interfaces` entry, so the
+    // guest has only `lo` and reaches the network through the gateway
+    // forwarder over vsock. Giving the actor a NIC that carries the recipe's
+    // MAC waits for an owner decision on the actor's network.
     if let Some(r) = recipe
       && r.cpu_template.get("cpuid_modifiers").and_then(|m| m.as_array()).is_some_and(|m| !m.is_empty())
     {
