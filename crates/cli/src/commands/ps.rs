@@ -1,4 +1,5 @@
-//! `needy ps`: list processes of a run, or of every executor. Needy's
+//! `needy ps`: list processes of a run, of a runner, or of every executor
+//! and connected runner. Needy's
 //! own processes (file transfers and workspace mounts) are hidden unless
 //! `--all` asks for them.
 
@@ -15,6 +16,14 @@ pub struct Args {
   /// Only this run's processes.
   #[arg(long, default_value = "", hide_default_value = true)]
   run: String,
+  /// Only this runner's processes.
+  #[arg(
+    long,
+    default_value = "",
+    hide_default_value = true,
+    conflicts_with = "run"
+  )]
+  runner: String,
   /// Also list needy's own processes: file transfers and workspace mounts.
   #[arg(short = 'a', long)]
   all: bool,
@@ -133,7 +142,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     .processes()
     .list_processes(ListProcessesRequest {
       run_id: args.run,
-      ..Default::default()
+      runner: args.runner,
     })
     .await
     .map_err(needy_api_client::Error::from)?

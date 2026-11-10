@@ -1710,6 +1710,114 @@ fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
   assert!(stderr(&again).contains("has no uses left"), "{}", stderr(&again));
 }
 
+/// A runner daemon, killed when dropped.
+struct RunnerDaemon(Child);
+
+impl Drop for RunnerDaemon {
+  fn drop(&mut self) {
+    // The test is over; a runner that already exited needs no kill.
+    if self.0.kill().is_ok() {
+      self.0.wait().unwrap();
+    }
+  }
+}
+
+/// A runner `mac` joined to `control`, once `needy ps --runner mac` reaches
+/// it through its control stream.
+fn connected_runner(machine: &Home, control: &Home) -> RunnerDaemon {
+  let token = create_join_token(control, &[]);
+  let runner = RunnerDaemon(spawn_runner(machine, control, Some(&token)));
+  let deadline = Instant::now() + Duration::from_secs(20);
+  loop {
+    let ps = control.run(&["ps", "--runner", "mac"]);
+    if ps.status.success() {
+      return runner;
+    }
+    assert!(Instant::now() < deadline, "the runner did not connect: {}", stderr(&ps));
+    std::thread::sleep(Duration::from_millis(50));
+  }
+}
+
+#[test]
+fn exec_on_a_runner_returns_the_command_exit_code_and_output() {
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let machine = Home::new();
+  let _runner = connected_runner(&machine, &control);
+
+  let output = control.run(&[
+    "exec",
+    "-T",
+    "--runner",
+    "mac",
+    "--",
+    "sh",
+    "-c",
+    "echo hi; echo oops >&2; exit 3",
+  ]);
+  let missing = control.run(&["exec", "--runner", "mac", "--", "needy-no-such-command"]);
+  let json = control.run(&[
+    "exec",
+    "--runner",
+    "mac",
+    "--output",
+    "json",
+    "--",
+    "sh",
+    "-c",
+    "kill -KILL $$",
+  ]);
+
+  assert_eq!((output.status.code(), stdout(&output).as_str(), stderr(&output).as_str()), (Some(3), "hi\n", "oops\n"));
+  assert_eq!(missing.status.code(), Some(127), "{}", stderr(&missing));
+  let json: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+  assert_eq!((json["executor"].as_str(), json["signal"].as_str()), (Some("mac"), Some("SIGKILL")));
+}
+
+#[test]
+fn a_detached_process_on_a_runner_is_listed_and_killed_and_files_copy_to_it() {
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let machine = Home::new();
+  let _runner = connected_runner(&machine, &control);
+  let source = control.write("hello.txt", "hello runner\n");
+  let destination = machine.path().join("copied");
+
+  let detached = control.run(&["exec", "-d", "--runner", "mac", "--", "sleep", "600"]);
+  let id = stdout(&detached).trim().to_string();
+  let listed = control.run(&["ps", "--runner", "mac", "-o", "json"]);
+  let killed = control.run(&["kill", "-s", "SIGKILL", &id]);
+  let copied = control.run(&[
+    "fs",
+    "cp",
+    "--runner",
+    source.to_str().unwrap(),
+    &format!("mac:{}", destination.display()),
+  ]);
+
+  assert!(detached.status.success(), "{}", stderr(&detached));
+  let rows: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
+  let row = rows.as_array().unwrap().iter().find(|r| r["id"] == id.as_str()).expect("listed");
+  assert_eq!((row["executor"].as_str(), row["state"].as_str()), (Some("mac"), Some("running")));
+  assert!(killed.status.success(), "{}", stderr(&killed));
+  assert!(copied.status.success(), "{}", stderr(&copied));
+  assert_eq!(std::fs::read_to_string(destination.join("hello.txt")).unwrap(), "hello runner\n");
+}
+
+#[test]
+fn exec_on_a_runner_that_is_not_connected_fails_at_once() {
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let started = Instant::now();
+
+  let exec = control.run(&["exec", "--runner", "ghost", "--", "true"]);
+  let ps = control.run(&["ps", "--runner", "ghost"]);
+
+  assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
+  assert_eq!((exec.status.code(), stderr(&exec).as_str()), (Some(1), "needy: runner ghost is not connected\n"));
+  assert_eq!((ps.status.code(), stderr(&ps).as_str()), (Some(1), "needy: runner ghost is not connected\n"));
+}
+
 #[test]
 fn a_runner_listens_nowhere() {
   let home = Home::new();
@@ -1718,4 +1826,13 @@ fn a_runner_listens_nowhere() {
 
   assert_eq!(output.status.code(), Some(1));
   assert!(stderr(&output).contains("a runner dials the control plane and listens nowhere"), "{}", stderr(&output));
+}
+
+#[test]
+fn exec_names_a_runner_or_a_run_not_both() {
+  let home = Home::new();
+
+  let output = home.run(&["exec", "--runner", "mac", "--run", "r1", "--", "true"]);
+
+  assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }

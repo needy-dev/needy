@@ -57,6 +57,9 @@ pub struct Args {
   /// Run on this executor instead of letting rules decide.
   #[arg(long, default_value = "", hide_default_value = true)]
   executor: String,
+  /// Run on this runner's machine, outside any run.
+  #[arg(long, default_value = "", hide_default_value = true, conflicts_with_all = ["run", "executor"])]
+  runner: String,
   #[arg(long, value_enum, default_value = "human")]
   output: Output,
   #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
@@ -88,7 +91,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     detach: args.detach,
     run_id: args.run,
     executor: args.executor,
-    runner: String::new(),
+    runner: args.runner,
     no_stdin: !forward_stdin,
     origin: Origin::Cli.into(),
     // A path named on the command line must exist where it runs.

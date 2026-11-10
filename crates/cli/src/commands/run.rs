@@ -38,10 +38,11 @@ enum Command {
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
     /// Create executors only; do not start the actor.
-    // TODO(runner): replaced by exec --runner in slice 4 of the runners-and-runs
-    // design (`docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`);
-    // kept until runners exist, since the Docker executor workflow
-    // (`examples/cli`) depends on it.
+    // TODO(runner-select): `exec --runner` (slice 4 of the runners-and-runs
+    // design, `docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`)
+    // covers a native executor on a runner; this stays until slice 5 lets
+    // profiles place executors (Docker ones too, as in `examples/cli`) on
+    // runners, and then goes.
     #[arg(long)]
     no_actor: bool,
     /// Override the actor's driving program.
