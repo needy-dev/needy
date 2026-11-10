@@ -3,7 +3,7 @@
 //! runs commands on the runner through the control plane.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+
 use std::time::Duration;
 
 use needy_api_client::exec::{Event, ExecStream};
@@ -16,50 +16,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::runner::{Config, Runner};
-use crate::testing::{self, Served};
+use crate::testing::{self, Proxy, Served};
 
 const CONTROL_TOKEN: &str = "control-secret";
-
-/// A Unix socket that forwards every connection to `target`, until cut.
-struct Proxy {
-  endpoint: String,
-  connections: std::sync::Arc<std::sync::Mutex<Vec<JoinHandle<()>>>>,
-  _accept: JoinHandle<()>,
-}
-
-impl Proxy {
-  fn start(dir: &Path, target: &str) -> Self {
-    let socket = dir.join("proxy.sock");
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    let target = target.strip_prefix("unix:").unwrap().to_string();
-    let connections: std::sync::Arc<std::sync::Mutex<Vec<JoinHandle<()>>>> = Default::default();
-    let open = connections.clone();
-    let accept = tokio::spawn(async move {
-      while let Ok((mut inbound, _)) = listener.accept().await {
-        let target = target.clone();
-        let forward = tokio::spawn(async move {
-          if let Ok(mut outbound) = tokio::net::UnixStream::connect(&target).await {
-            // Either side closing ends the connection.
-            let _copied = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
-          }
-        });
-        open.lock().unwrap().push(forward);
-      }
-    });
-    Self {
-      endpoint: format!("unix:{}", socket.display()),
-      connections,
-      _accept: accept,
-    }
-  }
-
-  /// Drops every open connection at once, as a dying tunnel does.
-  fn cut(&self) {
-    for connection in self.connections.lock().unwrap().drain(..) {
-      connection.abort();
-    }
-  }
-}
 
 /// A control plane, a runner `mac` joined to it through a proxy, and an
 /// operator's client. The runner stops when `stop` is cancelled.
@@ -89,6 +48,7 @@ impl Setup {
       name: "mac".into(),
       roles: [RunnerRole::Executor].into(),
       labels: BTreeMap::new(),
+      grace: crate::runner::DISCONNECT_GRACE,
     };
     let runner = Runner::start(config).await.unwrap();
     let stop = CancellationToken::new();

@@ -53,6 +53,9 @@ message ExecutorRef {
   string instance = 3;
   // The run gave the executor back: it stopped, finished or failed.
   bool released = 4;
+  // The control plane restarted, and no runner reported the instance
+  // within the time it waits for reports: whether it still runs is unknown.
+  bool lost = 5;
 }
 
 message Run {

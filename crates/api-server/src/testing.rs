@@ -51,6 +51,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     state: RunState::Running,
     executors: Vec::new(),
     released: Vec::new(),
+    lost: Vec::new(),
     created_ms: 1,
     profile: "fake".into(),
     actor_exit: None,

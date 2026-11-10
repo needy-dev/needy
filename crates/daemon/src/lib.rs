@@ -18,7 +18,11 @@
 //! - `check`: `profile check` through the control plane.
 //! - `link`: runners' control streams and task streams, and the executor
 //!   that reaches a connected runner's machine through them.
-//! - `store`: `state.db`, the control plane's own state.
+//! - `store`: `state.db`, the control plane's own state: the runner
+//!   registry, and runs with their instances and processes.
+//! - `reconcile`: who ends a run's instances and processes, and what the
+//!   control plane does with the runs it finds open at start and with a
+//!   runner's report when it connects.
 //! - [`executor`]: the executor role.
 //!
 //! Every long-lived task has an owner: the daemon or a run (whose actor
@@ -26,10 +30,6 @@
 //! `TaskTracker` under its `CancellationToken`; stopping the owner cancels
 //! them and waits for them.
 //
-// TODO(persistence): runs, instances and processes in `state.db`,
-// reconciled on start, are slices 6 and 7 of the runners-and-runs design
-// (which absorbed slice 9 of the module layout redesign); until then they
-// live in memory and `state.db` holds the runner registry only.
 
 pub mod executor;
 pub mod runner;
@@ -46,6 +46,8 @@ mod guest;
 mod link;
 #[cfg(unix)]
 mod pool;
+#[cfg(unix)]
+mod reconcile;
 #[cfg(unix)]
 mod relay;
 #[cfg(unix)]
@@ -125,7 +127,13 @@ pub struct Config {
   // dial-out (the VM's lifecycle and its guest channel relayed through the
   // runner); until then only this runner hosts placed actors.
   pub local_runner: Option<String>,
+  /// How long a restarted control plane waits for runners to report the
+  /// instances of the runs it left open: [`REPORT_WAIT`] outside tests.
+  pub report_wait: Duration,
 }
+
+#[cfg(unix)]
+pub use reconcile::REPORT_WAIT;
 
 #[cfg(unix)]
 /// The control daemon. Clones share it.
@@ -134,7 +142,8 @@ pub struct Daemon {
   pub(crate) config: Arc<Config>,
   /// `trace.db`, shared by the runs' SQLite sinks.
   pub(crate) traces: Store,
-  /// `state.db`: the runner registry.
+  /// `state.db`: the runner registry, and runs with their instances and
+  /// processes.
   pub(crate) state: store::Store,
   pub(crate) runs: Arc<Registry>,
   pub(crate) pool: Arc<Pool>,
@@ -150,8 +159,10 @@ pub struct Daemon {
   host: Host,
   /// The instance each process the daemon has seen runs on, for `attach`
   /// and `kill`, and who started it, for `ps`.
-  // TODO(persistence): this map grows until the daemon exits; slice 9
-  // keeps processes in `state.db`.
+  // TODO(persistence): this map grows until the daemon exits. `state.db`
+  // records the processes of runs (slice 6 of the runners-and-runs design)
+  // but not the instances `attach` and `kill` reach them through, nor
+  // processes outside runs; pruning it waits for an owner decision.
   pub(crate) processes: Arc<Mutex<HashMap<String, relay::Known>>>,
   /// The daemon's own tasks: the local executor and the relays of commands
   /// outside any run.
@@ -165,8 +176,9 @@ pub struct Daemon {
 
 #[cfg(unix)]
 impl Daemon {
-  /// Opens `state.db` and the trace store and starts the in-process local
-  /// executor.
+  /// Opens `state.db` and the trace store, starts the in-process local
+  /// executor, and reconciles the runs a previous control plane left open
+  /// (`reconcile`).
   pub async fn start(config: Config) -> Result<Self> {
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
@@ -214,13 +226,13 @@ impl Daemon {
       }
     };
     let links: Arc<link::Links> = Arc::default();
-    Ok(Self {
+    let daemon = Self {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, docker, links.clone())),
       config: Arc::new(config),
       traces,
+      runs: Arc::new(Registry::new(state.clone())),
       state,
-      runs: Arc::new(Registry::default()),
       links,
       runner_hosts: Arc::default(),
       host,
@@ -229,7 +241,9 @@ impl Daemon {
       creates: TaskTracker::new(),
       cancel,
       shutting_down: Arc::default(),
-    })
+    };
+    daemon.reconcile_open_runs().await.context("cannot reconcile the runs in state.db")?;
+    Ok(daemon)
   }
 
   /// Serves the control API on `listen` until a termination signal, then
@@ -249,8 +263,9 @@ impl Daemon {
       Some(served) => served,
       None => {
         let left: Vec<String> = self.runs.live().iter().map(|s| s.id.clone()).collect();
-        // NOTICE: the runs' executors, VMs and sockets stay behind; no
-        // daemon reconciles them until slice 9 keeps runs in `state.db`.
+        // NOTICE: the runs' executors, VMs and sockets stay behind until the
+        // next control daemon on this state directory reconciles them at
+        // start, and runners end their processes after their grace period.
         let message = if left.is_empty() {
           "exited at a second termination signal before the shutdown ended".to_string()
         } else {

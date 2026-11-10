@@ -16,9 +16,10 @@ import "needy/v1/process.proto";
 // Runners dial the control plane and never listen. A runner keeps one
 // control stream (`Control`); the control plane announces each task on it
 // with an ID. A task with one request and one reply (list or kill
-// processes) is answered on the control stream; for an exec the runner
-// opens a `Task` stream that carries the exec's own `ExecRequest` and
-// `ExecResponse` messages.
+// processes, end a run) is answered on the control stream; for an exec the
+// runner opens a `Task` stream that carries the exec's own `ExecRequest` and
+// `ExecResponse` messages. A runner's first message on every control stream
+// reports the processes of runs it still runs.
 service RunnerService {
   // Create a join token. Its secret is in the response only.
   rpc CreateJoinToken(CreateJoinTokenRequest) returns (CreateJoinTokenResponse);
@@ -210,7 +211,17 @@ message RemoveRunnerResponse {}
 message ControlRequest {
   oneof payload {
     TaskResult result = 1;
+    // Sent first on every control stream: the processes the runner still
+    // runs for runs. The control plane claims those of runs that are live
+    // and ends the others with `EndRun`.
+    RunnerReport report = 2;
   }
+}
+
+// What a runner still runs for runs when it connects.
+message RunnerReport {
+  // Its running processes that belong to a run (`run_id` set).
+  repeated ProcessInfo processes = 1;
 }
 
 // From the control plane on a runner's control stream.
@@ -231,7 +242,24 @@ message RunnerTask {
     ListProcessesRequest list_processes = 3;
     // Answered on the control stream.
     KillProcessRequest kill_process = 4;
+    // End everything the runner runs for a run. Answered on the control
+    // stream.
+    EndRun end_run = 5;
   }
+}
+
+// A run ended, or is not one the control plane knows: the runner kills its
+// processes, including a workspace mount's SFTP server.
+message EndRun {
+  string run_id = 1;
+}
+
+message EndRunResponse {
+  // The run's processes after the end, those that exited before it
+  // included.
+  repeated ProcessInfo processes = 1;
+  // The IDs of the processes this task killed.
+  repeated string ended = 2;
 }
 
 // An exec: its start or attach comes on the task's own stream.
@@ -244,6 +272,7 @@ message TaskResult {
     ListProcessesResponse list_processes = 2;
     KillProcessResponse kill_process = 3;
     TaskError error = 4;
+    EndRunResponse end_run = 5;
   }
 }
 

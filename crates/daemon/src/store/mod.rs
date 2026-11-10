@@ -1,6 +1,7 @@
 //! `state.db`: the control plane's own state, separate from `trace.db`.
-//! It holds the runner registry: join tokens and the runners that joined
-//! with them.
+//! It holds the runner registry (join tokens and the runners that joined
+//! with them) and runs with the instances and processes they hold
+//! ([`runs`]).
 //!
 //! Secrets are stored as hashes only ([`secret`]). Every time is passed in
 //! by the caller in Unix milliseconds, so expiry is decided by one clock.
@@ -9,6 +10,7 @@
 
 mod entity;
 mod migration;
+mod runs;
 mod secret;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +26,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use self::entity::{join_token, runner};
+pub use self::runs::{
+  InstanceKind, InstanceRecord, InstanceState, ProcessRecord, ProcessState, RunRecord, actor_instance, executor_instance,
+};
 pub use self::secret::Secret;
 
 #[derive(Debug, thiserror::Error)]

@@ -24,8 +24,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::Daemon;
 use crate::pool::{Instance, Slot};
-use crate::routing;
 use crate::run::{self, Run};
+use crate::{routing, store};
 
 type Sender = mpsc::Sender<Result<ExecOutput, ControlError>>;
 
@@ -77,6 +77,9 @@ struct Relay {
   trace: Option<Dispatch>,
   /// `None` for an attach, which records nothing.
   origin: Option<Origin>,
+  /// The run whose executor runs the process, which `state.db` records it
+  /// under; `None` outside a run and for an attach.
+  run: Option<String>,
   argv: Vec<String>,
   detach: bool,
   filter: Option<Arc<dyn StreamFilter>>,
@@ -159,7 +162,7 @@ impl Processes for Daemon {
           _ if !spec.runner.is_empty() => {
             return Err(ControlError::Invalid("a command in a run is placed by the run's rules; name a run or a runner, not both".into()));
           }
-          id => Some(self.runs.find_open(id)?),
+          id => Some(self.runs.find_open(id).await?),
         };
         let (instance, decided) = match &run {
           Some(run) => routing::place(run, &mut spec).await?,
@@ -173,6 +176,7 @@ impl Processes for Daemon {
           instance,
           trace: run.as_ref().map(|s| s.trace.clone()),
           origin: Some(origin),
+          run: run.as_ref().map(|r| r.id.clone()),
           argv: spec.argv.clone(),
           detach: spec.detach,
           filter: run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
@@ -195,6 +199,7 @@ impl Processes for Daemon {
           instance: known.instance,
           trace: None,
           origin: None,
+          run: None,
           argv: Vec::new(),
           detach: false,
           filter: None,
@@ -364,6 +369,36 @@ async fn forward_input(
 }
 
 impl Relay {
+  /// Records in `state.db` that a run's process started.
+  async fn record_start(&self, daemon: &Daemon, process: &str, started_ms: i64) {
+    let Some(run) = &self.run else {
+      return;
+    };
+    let record = store::ProcessRecord {
+      id: process.to_string(),
+      run: run.clone(),
+      instance: store::executor_instance(run, &self.instance.name),
+      origin: self.origin,
+      state: store::ProcessState::Running,
+      exit: None,
+      started_ms,
+      ended_ms: None,
+    };
+    if let Err(e) = daemon.state.save_process(&record).await {
+      tracing::warn!("run {run}: cannot write process {process} to state.db: {e:#}");
+    }
+  }
+
+  /// Records in `state.db` how a run's process exited.
+  async fn record_exit(&self, daemon: &Daemon, process: &str, exit: &needy_common::process::Exit) {
+    let Some(run) = &self.run else {
+      return;
+    };
+    if let Err(e) = daemon.state.end_process(process, store::ProcessState::Exited, Some(exit.clone()), now_ms()).await {
+      tracing::warn!("run {run}: cannot write the exit of process {process} to state.db: {e:#}");
+    }
+  }
+
   /// Relays the process's output to the caller until it exits. The slot is
   /// held until then: a detached process keeps it after the caller leaves,
   /// so the stream is drained without a caller.
@@ -409,6 +444,7 @@ impl Relay {
         client_exec::Event::Started(started) => {
           process_id = started.process_id.clone();
           daemon.remember(&started.process_id, &self.instance, self.origin);
+          self.record_start(&daemon, &process_id, started_ms).await;
           if let (Some(origin), Some(trace)) = (self.origin, &self.trace) {
             // From the request to the process running, placement and a
             // wait for the executor's slot included.
@@ -440,6 +476,7 @@ impl Relay {
         }
         client_exec::Event::Stderr(bytes) => ExecOutput::Stderr(bytes),
         client_exec::Event::Exited(exit) => {
+          self.record_exit(&daemon, &process_id, &exit).await;
           if let (Some(origin), Some(trace)) = (self.origin, &self.trace) {
             run::emit(
               trace,

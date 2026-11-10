@@ -253,42 +253,12 @@ async fn with_runner_far() -> (testing::Served, testing::JoinedRunner) {
   (served, runner)
 }
 
-/// Starts a detached `sleep 300` in `run` and returns its process ID on
-/// the executor.
 async fn detached_sleep(daemon: &crate::Daemon, run: &str) -> i64 {
-  use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes};
-  use tokio_stream::StreamExt as _;
-  let spec = ExecSpec {
-    argv: vec!["sleep".into(), "300".into()],
-    cwd: String::new(),
-    env: Default::default(),
-    clear_env: false,
-    tty: None,
-    detach: true,
-    run: run.into(),
-    executor: String::new(),
-    runner: String::new(),
-    no_stdin: true,
-    origin: needy_core::types::Origin::Cli,
-    search_path_if_missing: false,
-  };
-  let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
-  loop {
-    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
-      break started.pid;
-    }
-  }
+  testing::detached_sleep(daemon, run).await.1
 }
 
-/// Waits up to ten seconds for process `pid` to end.
 async fn ended(pid: i64) -> bool {
-  for _ in 0..200 {
-    if !testing::running(pid) {
-      return true;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-  }
-  false
+  testing::ended(pid).await
 }
 
 // ROOT CAUSE:
@@ -419,4 +389,44 @@ commands:
   let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.runtime.as_str(), e.instance.as_str())).collect();
   assert_eq!(executors, [("build", "runner", "kvm")]);
   Runs::stop(served.daemon(), &created.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_runs_life_is_written_to_state_db_and_listed_after_a_restart() {
+  use crate::store::{InstanceState, ProcessState, executor_instance};
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let (process, _) = testing::detached_sleep(daemon, &created.id).await;
+  let running = daemon.state.run(&created.id).await.unwrap().unwrap();
+  let held = daemon.state.instances_of(&created.id).await.unwrap();
+
+  Runs::stop(daemon, &created.id).await.unwrap();
+  let restarted = testing::restart(started).await;
+  let daemon = &restarted.daemon;
+
+  assert_eq!(running.state, RunState::Running);
+  assert_eq!(running.profile_name, "test");
+  assert!(running.profile_yaml.contains("here"), "{}", running.profile_yaml);
+  let kinds: Vec<(&str, InstanceState)> = held.iter().map(|i| (i.id.as_str(), i.state)).collect();
+  let actor = format!("{}:actor", created.id);
+  let here = executor_instance(&created.id, "here");
+  assert_eq!(
+    kinds,
+    [
+      (actor.as_str(), InstanceState::Running),
+      (here.as_str(), InstanceState::Running)
+    ]
+  );
+  let listed = Runs::list(daemon).await.unwrap();
+  assert_eq!(listed.len(), 1);
+  assert_eq!((listed[0].id.as_str(), listed[0].state), (created.id.as_str(), RunState::Stopped));
+  let released: Vec<&str> = listed[0].released.iter().map(|e| e.name.as_str()).collect();
+  assert_eq!(released, ["here"]);
+  assert_eq!(Runs::get(daemon, &created.name).await.unwrap().state, RunState::Stopped, "found by name after the restart");
+  let stored = daemon.state.instances_of(&created.id).await.unwrap();
+  assert!(stored.iter().all(|i| i.state == InstanceState::Released), "{stored:?}");
+  let sleep = daemon.state.process(&process).await.unwrap().unwrap();
+  assert_eq!((sleep.state, sleep.instance.as_str()), (ProcessState::Ended, here.as_str()));
+  assert_eq!(sleep.origin, Some(needy_core::types::Origin::Cli));
 }

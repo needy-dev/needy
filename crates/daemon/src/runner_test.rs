@@ -42,6 +42,7 @@ fn config(served: &Served, state_dir: &std::path::Path, join_token: Option<Strin
     name: "mac".into(),
     roles: [RunnerRole::Executor].into(),
     labels: BTreeMap::from([("os".to_string(), "darwin".to_string())]),
+    grace: crate::runner::DISCONNECT_GRACE,
   }
 }
 

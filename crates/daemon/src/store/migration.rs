@@ -8,12 +8,12 @@ pub struct Migrator;
 #[async_trait::async_trait]
 impl MigratorTrait for Migrator {
   fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-    vec![Box::new(CreateRunners)]
+    vec![Box::new(CreateRunners), Box::new(CreateRuns)]
   }
 }
 
-// TODO(persistence): runs, instances, processes and clients join `state.db`
-// in slices 6 and 7 of the runners-and-runs design
+// TODO(persistence): clients join `state.db` in slice 7 of the
+// runners-and-runs design
 // (`docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`).
 
 /// The `runners` and `join_tokens` tables.
@@ -99,5 +99,131 @@ impl MigrationTrait for CreateRunners {
   async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
     manager.drop_table(Table::drop().table(JoinTokens::Table).to_owned()).await?;
     manager.drop_table(Table::drop().table(Runners::Table).to_owned()).await
+  }
+}
+
+/// The `runs`, `instances` and `processes` tables.
+struct CreateRuns;
+
+impl MigrationName for CreateRuns {
+  fn name(&self) -> &str {
+    "m20261110_000060_runs"
+  }
+}
+
+#[derive(DeriveIden)]
+enum Runs {
+  Table,
+  Id,
+  Name,
+  GroupName,
+  ProfileName,
+  ProfileYaml,
+  State,
+  CreatedMs,
+  UpdatedMs,
+  ActorExitCode,
+  ActorExitSignal,
+  Failure,
+  ActorRunner,
+}
+
+#[derive(DeriveIden)]
+enum Instances {
+  Table,
+  Id,
+  Run,
+  Name,
+  Kind,
+  Runner,
+  Provider,
+  Runtime,
+  Handle,
+  Pid,
+  State,
+  CreatedMs,
+  EndedMs,
+}
+
+#[derive(DeriveIden)]
+enum Processes {
+  Table,
+  Id,
+  Run,
+  Instance,
+  Origin,
+  State,
+  ExitCode,
+  ExitSignal,
+  StartedMs,
+  EndedMs,
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for CreateRuns {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .create_table(
+        Table::create()
+          .table(Runs::Table)
+          .col(ColumnDef::new(Runs::Id).text().not_null().primary_key())
+          .col(ColumnDef::new(Runs::Name).text().not_null())
+          .col(ColumnDef::new(Runs::GroupName).text().not_null())
+          .col(ColumnDef::new(Runs::ProfileName).text().not_null())
+          .col(ColumnDef::new(Runs::ProfileYaml).text().not_null())
+          .col(ColumnDef::new(Runs::State).text().not_null())
+          .col(ColumnDef::new(Runs::CreatedMs).big_integer().not_null())
+          .col(ColumnDef::new(Runs::UpdatedMs).big_integer().not_null())
+          .col(ColumnDef::new(Runs::ActorExitCode).integer())
+          .col(ColumnDef::new(Runs::ActorExitSignal).text())
+          .col(ColumnDef::new(Runs::Failure).text())
+          .col(ColumnDef::new(Runs::ActorRunner).text())
+          .to_owned(),
+      )
+      .await?;
+    manager
+      .create_table(
+        Table::create()
+          .table(Instances::Table)
+          .col(ColumnDef::new(Instances::Id).text().not_null().primary_key())
+          .col(ColumnDef::new(Instances::Run).text().not_null())
+          .col(ColumnDef::new(Instances::Name).text().not_null())
+          .col(ColumnDef::new(Instances::Kind).text().not_null())
+          .col(ColumnDef::new(Instances::Runner).text())
+          .col(ColumnDef::new(Instances::Provider).text().not_null())
+          .col(ColumnDef::new(Instances::Runtime).text().not_null())
+          .col(ColumnDef::new(Instances::Handle).text().not_null())
+          .col(ColumnDef::new(Instances::Pid).big_integer())
+          .col(ColumnDef::new(Instances::State).text().not_null())
+          .col(ColumnDef::new(Instances::CreatedMs).big_integer().not_null())
+          .col(ColumnDef::new(Instances::EndedMs).big_integer())
+          .to_owned(),
+      )
+      .await?;
+    manager.create_index(Index::create().name("instances_run").table(Instances::Table).col(Instances::Run).to_owned()).await?;
+    manager.create_index(Index::create().name("instances_state").table(Instances::Table).col(Instances::State).to_owned()).await?;
+    manager
+      .create_table(
+        Table::create()
+          .table(Processes::Table)
+          .col(ColumnDef::new(Processes::Id).text().not_null().primary_key())
+          .col(ColumnDef::new(Processes::Run).text().not_null())
+          .col(ColumnDef::new(Processes::Instance).text().not_null())
+          .col(ColumnDef::new(Processes::Origin).text())
+          .col(ColumnDef::new(Processes::State).text().not_null())
+          .col(ColumnDef::new(Processes::ExitCode).integer())
+          .col(ColumnDef::new(Processes::ExitSignal).text())
+          .col(ColumnDef::new(Processes::StartedMs).big_integer().not_null())
+          .col(ColumnDef::new(Processes::EndedMs).big_integer())
+          .to_owned(),
+      )
+      .await?;
+    manager.create_index(Index::create().name("processes_run").table(Processes::Table).col(Processes::Run).to_owned()).await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.drop_table(Table::drop().table(Processes::Table).to_owned()).await?;
+    manager.drop_table(Table::drop().table(Instances::Table).to_owned()).await?;
+    manager.drop_table(Table::drop().table(Runs::Table).to_owned()).await
   }
 }

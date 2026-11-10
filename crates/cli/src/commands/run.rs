@@ -41,7 +41,9 @@ enum Command {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
   },
-  /// List runs, including stopped and failed ones.
+  /// List runs, including stopped and failed ones, also across control
+  /// plane restarts. An executor no runner reported after a restart shows
+  /// `(lost)`.
   Ls {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
@@ -73,6 +75,9 @@ struct ExecutorCell {
   runtime: String,
   /// The run gave it back when it stopped, finished or failed.
   released: bool,
+  /// The control plane restarted and no runner reported it: whether it
+  /// still runs is unknown.
+  lost: bool,
 }
 
 /// How many characters of a failure the EXIT column shows; JSON has all of it.
@@ -92,7 +97,11 @@ impl Row for RunRow {
       }
     };
     let executors = self.executors.iter().map(|e| {
-      let suffix = if e.released { " (released)" } else { "" };
+      let suffix = match (e.lost, e.released) {
+        (true, _) => " (lost)",
+        (false, true) => " (released)",
+        (false, false) => "",
+      };
       format!("{}={}{suffix}", e.name, e.runtime)
     });
     // Empty while the driving program runs.
@@ -140,6 +149,7 @@ impl TryFrom<Run> for RunRow {
           name: e.name,
           runtime: e.runtime,
           released: e.released,
+          lost: e.lost,
         })
         .collect(),
       id: s.run_id,

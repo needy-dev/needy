@@ -10,10 +10,11 @@
 //! the control stream as a `TaskResult`. For an exec the runner opens a task
 //! stream (`RunnerService.Task`) whose first request names the task; the
 //! exec's own `ExecRequest`s go down it and its `ExecResponse`s come up.
-//
-// TODO(runner-ownership): a runner that connects again does not report the
-// processes it still has, and the control plane does not reconcile them;
-// that is slice 6 of the runners-and-runs design.
+//!
+//! A runner's first message on a control stream is its report: the
+//! processes of runs it still runs. The link hands it to the daemon, which
+//! claims those of live runs and ends the others (`crate::reconcile`); an
+//! `EndRun` task ends a run's processes on the runner.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,9 +23,9 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::{
-  ControlRequest, ControlResponse, ExecEnded, ExecRequest, ExecResponse, ExecTask, KillProcessRequest, ListProcessesRequest,
-  ListProcessesResponse, RunnerTask, TaskError, TaskRequest, TaskResponse, control_request, control_response, exec_response, runner_task,
-  task_request, task_result,
+  ControlRequest, ControlResponse, EndRun, EndRunResponse, ExecEnded, ExecRequest, ExecResponse, ExecTask, KillProcessRequest,
+  ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, TaskError, TaskRequest, TaskResponse, control_request,
+  control_response, exec_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Executor, Responses};
 use needy_api_server::control::{ControlError, FromRunner, ToRunner};
@@ -44,6 +45,10 @@ const ANSWER: Duration = Duration::from_secs(10);
 // its control stream as fast as it can spawn tasks, so a short queue only
 // absorbs bursts such as `ps` across many processes.
 const QUEUE: usize = 64;
+
+/// What the daemon does with a runner's report: called with the runner's
+/// name.
+pub(crate) type OnReport = Box<dyn Fn(&str, RunnerReport) + Send + Sync>;
 
 /// The connected runners, by name.
 #[derive(Default)]
@@ -95,13 +100,15 @@ impl Links {
 
   /// Opens the control stream of `runner`, replacing an earlier one, and
   /// returns the tasks to send it. `results` are read by a task in `tasks`
-  /// until the runner's side ends or `cancel`.
+  /// until the runner's side ends or `cancel`; the runner's report goes to
+  /// `on_report`.
   pub(crate) fn open(
     self: &Arc<Self>,
     runner: &str,
     mut results: FromRunner<ControlRequest>,
     tasks: &TaskTracker,
     cancel: &CancellationToken,
+    on_report: OnReport,
   ) -> ToRunner<ControlResponse> {
     let (tx, rx) = mpsc::channel(QUEUE);
     let link = Arc::new(Link {
@@ -127,6 +134,9 @@ impl Links {
           () = stop.cancelled() => break,
         };
         match message {
+          Some(Ok(ControlRequest {
+            payload: Some(control_request::Payload::Report(report)),
+          })) => on_report(&reader.runner, report),
           Some(Ok(message)) => reader.answer(message),
           Some(Err(status)) => {
             tracing::info!("runner {}: control stream: {}", reader.runner, status.message());
@@ -168,6 +178,19 @@ impl Links {
       }
     }
     link.close();
+  }
+
+  /// Tells `runner` that run `run` ended: it kills the run's processes.
+  /// Returns the run's processes as the runner left them.
+  pub(crate) async fn end_run(&self, runner: &str, run: &str) -> Result<EndRunResponse, Status> {
+    let link = self.get(runner).ok_or_else(|| Status::unavailable(not_connected(runner)))?;
+    let task = runner_task::Kind::EndRun(EndRun {
+      run_id: run.to_string(),
+    });
+    match link.ask(task).await? {
+      task_result::Result::EndRun(ended) => Ok(ended),
+      _ => Err(Status::internal(format!("runner {runner} answered the end of a run with something else"))),
+    }
   }
 
   /// Hands the task stream `runner` opened for `task` to the exec waiting

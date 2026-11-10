@@ -68,3 +68,108 @@ pub mod join_token {
 
   impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod run {
+  //! A run, live or ended, as the control plane last wrote it.
+
+  use sea_orm::entity::prelude::*;
+
+  #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+  #[sea_orm(table_name = "runs")]
+  pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: String,
+    pub name: String,
+    /// `group` is an SQL keyword.
+    pub group_name: String,
+    pub profile_name: String,
+    /// The profile the client resolved, as YAML.
+    pub profile_yaml: String,
+    /// `RunState` in snake case.
+    pub state: String,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+    pub actor_exit_code: Option<i32>,
+    pub actor_exit_signal: Option<String>,
+    pub failure: Option<String>,
+    /// The runner the actor was placed on; `None` for the control host.
+    pub actor_runner: Option<String>,
+  }
+
+  #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+  pub enum Relation {}
+
+  impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod instance {
+  //! A run's hold on an actor or an executor instance. Runs that share a
+  //! pooled instance have a row each.
+
+  use sea_orm::entity::prelude::*;
+
+  #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+  #[sea_orm(table_name = "instances")]
+  pub struct Model {
+    /// `RUN:actor` or `RUN:executor:NAME`.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: String,
+    pub run: String,
+    /// The executor's name in the profile, or `actor`.
+    pub name: String,
+    /// `actor` or `executor`.
+    pub kind: String,
+    /// The runner that owns it; `None` for the control host.
+    pub runner: Option<String>,
+    /// `firecracker`, `native` or `docker`.
+    pub provider: String,
+    /// The executor's runtime as `run ls` shows it: `native`, `docker`,
+    /// `runner`; `firecracker` for an actor.
+    pub runtime: String,
+    /// The container's name, the runner's name, `local`, or the VM's
+    /// directory.
+    pub handle: String,
+    /// The VM's Firecracker process.
+    pub pid: Option<i64>,
+    /// `running`, `released`, `ended` or `lost`.
+    pub state: String,
+    pub created_ms: i64,
+    pub ended_ms: Option<i64>,
+  }
+
+  #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+  pub enum Relation {}
+
+  impl ActiveModelBehavior for ActiveModel {}
+}
+
+pub mod process {
+  //! A process a run's executor ran.
+
+  use sea_orm::entity::prelude::*;
+
+  #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+  #[sea_orm(table_name = "processes")]
+  pub struct Model {
+    /// The process ID its executor gave it.
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub id: String,
+    pub run: String,
+    /// The instance row it runs on.
+    pub instance: String,
+    /// `Origin` in kebab case; `None` for a process a runner reported that
+    /// this control plane did not start.
+    pub origin: Option<String>,
+    /// `running`, `exited`, `ended` or `lost`.
+    pub state: String,
+    pub exit_code: Option<i32>,
+    pub exit_signal: Option<String>,
+    pub started_ms: i64,
+    pub ended_ms: Option<i64>,
+  }
+
+  #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+  pub enum Relation {}
+
+  impl ActiveModelBehavior for ActiveModel {}
+}

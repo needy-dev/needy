@@ -75,6 +75,12 @@ pub struct Args {
   /// This runner's labels: KEY=VALUE,...
   #[arg(long, value_delimiter = ',', value_parser = crate::commands::runner::label)]
   labels: Vec<(String, String)>,
+  /// How long a runner that cannot reach the control plane keeps the
+  /// processes of runs before it ends them (runner mode).
+  // NOTICE: hidden: the default (`needy_daemon::runner::DISCONNECT_GRACE`)
+  // is the design's; a shorter one lets a test see the runner end them.
+  #[arg(long, value_name = "DURATION", hide = true, value_parser = humantime::parse_duration)]
+  disconnect_grace: Option<std::time::Duration>,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -87,6 +93,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 async fn serve(args: Args, ctx: &Context) -> Result<i32> {
   if !matches!(args.mode, Mode::Control) && (args.local_runner.is_some() || args.kvm.is_some()) {
     bail!("--local-runner and --kvm are for the control mode");
+  }
+  if !matches!(args.mode, Mode::Runner) && args.disconnect_grace.is_some() {
+    bail!("--disconnect-grace is for the runner mode");
   }
   if matches!(args.mode, Mode::Runner) && (args.listen.is_some() || args.token_env.is_some()) {
     bail!("a runner dials the control plane and listens nowhere; --listen and --token-env are for the executor and control modes");
@@ -117,6 +126,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         name,
         roles: args.roles.into_iter().collect(),
         labels: args.labels.into_iter().collect(),
+        grace: args.disconnect_grace.unwrap_or(needy_daemon::runner::DISCONNECT_GRACE),
       };
       needy_daemon::runner::serve(config).await?;
     }
@@ -134,6 +144,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         docker_image: args.docker_image,
         heartbeat_interval: args.heartbeat_interval,
         local_runner: args.local_runner,
+        report_wait: needy_daemon::REPORT_WAIT,
       })
       .await?;
       // Runs are stopped even when serving failed.

@@ -110,6 +110,9 @@ pub struct RunInfo {
   /// The executors the run held and gave back when it stopped,
   /// finished or failed.
   pub released: Vec<ExecutorRef>,
+  /// The executors no runner reported after the control plane restarted:
+  /// whether they still run is unknown.
+  pub lost: Vec<ExecutorRef>,
   pub created_ms: i64,
   pub profile: String,
   /// How the actor's driving program ended; `None` while it runs, without

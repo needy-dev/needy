@@ -32,3 +32,38 @@ fn an_unknown_run_state_is_refused() {
 
   assert_eq!(error.to_string(), "unknown run state 42");
 }
+
+#[test]
+fn run_ls_marks_a_lost_executor_and_a_released_one() {
+  let run = Run {
+    run_id: "r1".into(),
+    name: "r1".into(),
+    group: "r1".into(),
+    state: v1::RunState::Failed as i32,
+    executors: vec![
+      v1::ExecutorRef {
+        name: "mac".into(),
+        runtime: "runner".into(),
+        instance: "mac".into(),
+        released: true,
+        lost: true,
+      },
+      v1::ExecutorRef {
+        name: "build".into(),
+        runtime: "docker".into(),
+        instance: "c1".into(),
+        released: true,
+        lost: false,
+      },
+    ],
+    failure: "the control plane restarted; the actor was lost".into(),
+    ..Default::default()
+  };
+
+  let row = RunRow::try_from(run).unwrap();
+
+  let cells = row.cells();
+  assert_eq!(cells[2], "failed");
+  assert_eq!(cells[4], "mac=runner (lost), build=docker (released)");
+  assert_eq!(cells[5], "the control plane restarted; the actor was lost");
+}

@@ -66,6 +66,9 @@ sha2 = "0.10"
 shell-words = "1"
 shellexpand = "3"
 subtle = "2"
+# Processes only: a restarted control plane finds the Firecracker of a run
+# it lost by its command line.
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"

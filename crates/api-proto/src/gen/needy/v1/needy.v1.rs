@@ -462,6 +462,10 @@ pub struct ExecutorRef {
     /// The run gave the executor back: it stopped, finished or failed.
     #[prost(bool, tag="4")]
     pub released: bool,
+    /// The control plane restarted, and no runner reported the instance
+    /// within the time it waits for reports: whether it still runs is unknown.
+    #[prost(bool, tag="5")]
+    pub lost: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Run {
@@ -874,7 +878,7 @@ pub struct RemoveRunnerResponse {
 /// From a runner on its control stream.
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ControlRequest {
-    #[prost(oneof="control_request::Payload", tags="1")]
+    #[prost(oneof="control_request::Payload", tags="1, 2")]
     pub payload: ::core::option::Option<control_request::Payload>,
 }
 /// Nested message and enum types in `ControlRequest`.
@@ -883,7 +887,19 @@ pub mod control_request {
     pub enum Payload {
         #[prost(message, tag="1")]
         Result(super::TaskResult),
+        /// Sent first on every control stream: the processes the runner still
+        /// runs for runs. The control plane claims those of runs that are live
+        /// and ends the others with `EndRun`.
+        #[prost(message, tag="2")]
+        Report(super::RunnerReport),
     }
+}
+/// What a runner still runs for runs when it connects.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunnerReport {
+    /// Its running processes that belong to a run (`run_id` set).
+    #[prost(message, repeated, tag="1")]
+    pub processes: ::prost::alloc::vec::Vec<ProcessInfo>,
 }
 /// From the control plane on a runner's control stream.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -905,7 +921,7 @@ pub struct RunnerTask {
     /// Unique among the tasks of one control stream.
     #[prost(uint64, tag="1")]
     pub id: u64,
-    #[prost(oneof="runner_task::Kind", tags="2, 3, 4")]
+    #[prost(oneof="runner_task::Kind", tags="2, 3, 4, 5")]
     pub kind: ::core::option::Option<runner_task::Kind>,
 }
 /// Nested message and enum types in `RunnerTask`.
@@ -921,7 +937,28 @@ pub mod runner_task {
         /// Answered on the control stream.
         #[prost(message, tag="4")]
         KillProcess(super::KillProcessRequest),
+        /// End everything the runner runs for a run. Answered on the control
+        /// stream.
+        #[prost(message, tag="5")]
+        EndRun(super::EndRun),
     }
+}
+/// A run ended, or is not one the control plane knows: the runner kills its
+/// processes, including a workspace mount's SFTP server.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EndRun {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EndRunResponse {
+    /// The run's processes after the end, those that exited before it
+    /// included.
+    #[prost(message, repeated, tag="1")]
+    pub processes: ::prost::alloc::vec::Vec<ProcessInfo>,
+    /// The IDs of the processes this task killed.
+    #[prost(string, repeated, tag="2")]
+    pub ended: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// An exec: its start or attach comes on the task's own stream.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
@@ -932,7 +969,7 @@ pub struct ExecTask {
 pub struct TaskResult {
     #[prost(uint64, tag="1")]
     pub task_id: u64,
-    #[prost(oneof="task_result::Result", tags="2, 3, 4")]
+    #[prost(oneof="task_result::Result", tags="2, 3, 4, 5")]
     pub result: ::core::option::Option<task_result::Result>,
 }
 /// Nested message and enum types in `TaskResult`.
@@ -945,6 +982,8 @@ pub mod task_result {
         KillProcess(super::KillProcessResponse),
         #[prost(message, tag="4")]
         Error(super::TaskError),
+        #[prost(message, tag="5")]
+        EndRun(super::EndRunResponse),
     }
 }
 /// Why a runner refused or failed a task, as the gRPC status its process

@@ -6,6 +6,12 @@
 //! again with backoff when it drops, and opens a task stream for each exec
 //! the control plane announces (see the daemon's `link` module for the
 //! control plane's side). It never listens.
+//!
+//! Every process a run starts here carries the run's ID. The runner reports
+//! those still running whenever it connects, and ends a run's processes
+//! when the control plane says the run ended. While it cannot reach the
+//! control plane it keeps them for [`DISCONNECT_GRACE`], then ends them
+//! itself.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -18,14 +24,14 @@ use backon::BackoffBuilder as _;
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::process_service_server::ProcessService as _;
 use needy_api_client::proto::v1::{
-  ControlRequest, HeartbeatRequest, JoinRequest, KillProcessResponse, TaskError, TaskRequest, TaskResult, control_request, control_response,
-  runner_task, task_request, task_result,
+  ControlRequest, EndRunResponse, HeartbeatRequest, JoinRequest, KillProcessResponse, ListProcessesRequest, ProcessInfo, RunnerReport,
+  TaskError, TaskRequest, TaskResult, control_request, control_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Client, Kind};
 use needy_api_server::control::RunnerHost;
 use needy_api_server::protocol::domain::{proto_runner_host, proto_runner_role};
 use needy_core::types::RunnerRole;
-use needy_core_executor::process::Host;
+use needy_core_executor::process::{Host, Input};
 use needy_core_executor::service::ExecutorService;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -55,6 +61,22 @@ const RECONNECT_MAX: Duration = Duration::from_secs(15);
 // are small and answered as they come.
 const RESULTS: usize = 64;
 
+/// How long a runner that lost the control plane keeps the processes of
+/// runs before it ends them itself.
+// NOTICE: 2 minutes is eight reconnect attempts at the 15 s backoff cap
+// (`RECONNECT_MAX`): enough for a control plane or a tunnel that restarts to
+// come back and decide (claim the processes of live runs, end the others),
+// while a control plane that is gone for good, such as one killed on another
+// machine, leaves a run's processes and a workspace mount's SFTP server
+// running for minutes, not hours. A restarted control plane fails the runs
+// whose actors it lost anyway, so waiting longer keeps nothing useful alive.
+pub const DISCONNECT_GRACE: Duration = Duration::from_secs(120);
+
+// NOTICE: how long ending a run waits for its killed processes to exit, so
+// the answer lists their exits. `SIGKILL` cannot be caught; a process still
+// running after 5 s is stuck in the kernel and is reported running.
+const END_WAIT: Duration = Duration::from_secs(5);
+
 /// How a runner starts.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -69,6 +91,9 @@ pub struct Config {
   // `/dev/kvm` for the actor role) is a follow-up of slice 3.
   pub roles: BTreeSet<RunnerRole>,
   pub labels: BTreeMap<String, String>,
+  /// How long it keeps the processes of runs while it cannot reach the
+  /// control plane: [`DISCONNECT_GRACE`] outside tests.
+  pub grace: Duration,
 }
 
 /// What a runner keeps between starts.
@@ -97,6 +122,7 @@ pub struct Runner {
   credential: Arc<Mutex<String>>,
   /// As the control plane last said; `None` until it said.
   interval: Option<Duration>,
+  grace: Duration,
 }
 
 impl Runner {
@@ -138,6 +164,7 @@ impl Runner {
       host: host(),
       client: None,
       interval,
+      grace: config.grace,
     })
   }
 
@@ -315,6 +342,8 @@ impl Runner {
       credential: self.credential.clone(),
       service,
       tasks: TaskTracker::new(),
+      grace: self.grace,
+      orphaned: Mutex::default(),
     };
     let tasks = dialer.tasks.clone();
     let dialing = {
@@ -345,6 +374,11 @@ struct Dialer {
   service: ExecutorService,
   /// The tasks the control plane asked for; they end with `stop`.
   tasks: TaskTracker,
+  /// How long the processes of runs outlive a lost control plane.
+  grace: Duration,
+  /// Set while the control plane is unreachable: cancelling it keeps the
+  /// processes of runs that the grace period would end.
+  orphaned: Mutex<Option<CancellationToken>>,
 }
 
 impl Dialer {
@@ -367,6 +401,10 @@ impl Dialer {
         ended = self.session(&stop, &mut connected) => ended,
         () = stop.cancelled() => return Ok(()),
       };
+      // The processes of runs wait for the control plane to come back.
+      if connected {
+        self.orphan(&stop);
+      }
       match ended {
         Err(e) if refused(&e) => return Err(refusal(&self.path)),
         Err(e) => tracing::warn!("runner {}: control stream: {e:#}", self.name),
@@ -384,6 +422,45 @@ impl Dialer {
     }
   }
 
+  /// Starts the grace period of the processes of runs, unless one is
+  /// running: they end when it passes before a control stream opens.
+  fn orphan(&self, stop: &CancellationToken) {
+    let mut orphaned = self.orphaned.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if orphaned.is_some() {
+      return;
+    }
+    let claimed = CancellationToken::new();
+    *orphaned = Some(claimed.clone());
+    let (service, name, grace, stop) = (self.service.clone(), self.name.clone(), self.grace, stop.clone());
+    self.tasks.spawn(async move {
+      tokio::select! {
+        () = tokio::time::sleep(grace) => {}
+        () = claimed.cancelled() => return,
+        () = stop.cancelled() => return,
+      }
+      let runs: BTreeSet<String> = run_processes(&service).await.into_iter().map(|p| p.run_id).collect();
+      if runs.is_empty() {
+        return;
+      }
+      tracing::warn!(
+        "runner {name}: the control plane did not come back within {grace:?}; ending the processes of runs {}",
+        runs.iter().cloned().collect::<Vec<_>>().join(", ")
+      );
+      for run in runs {
+        end_run(&service, &run).await;
+      }
+    });
+  }
+
+  /// A control stream opened: the control plane decides about the
+  /// processes of runs from the report, so the grace period stops.
+  fn reconnected(&self) {
+    let orphaned = self.orphaned.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    if let Some(claimed) = orphaned {
+      claimed.cancel();
+    }
+  }
+
   /// A client presenting the current credential.
   fn authenticated(&self, client: &Client) -> Result<Client> {
     let credential = self.credential.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
@@ -395,9 +472,17 @@ impl Dialer {
     let client =
       Client::connect_kept_alive(&self.control).await.with_context(|| format!("cannot reach the control plane at {}", self.control))?;
     let (results, rx) = mpsc::channel(RESULTS);
+    // The first message says what the runner still runs for runs.
+    let report = ControlRequest {
+      payload: Some(control_request::Payload::Report(RunnerReport {
+        processes: run_processes(&self.service).await,
+      })),
+    };
+    results.send(report).await.context("the control stream closed")?;
     let mut tasks =
       self.authenticated(&client)?.runners().control(ReceiverStream::new(rx)).await.map_err(needy_api_client::Error::from)?.into_inner();
     *connected = true;
+    self.reconnected();
     tracing::info!("runner {}: connected to the control plane at {}", self.name, self.control);
     while let Some(message) = tasks.message().await.map_err(needy_api_client::Error::from)? {
       let Some(control_response::Payload::Task(task)) = message.payload else {
@@ -453,9 +538,58 @@ async fn answer(service: &ExecutorService, kind: runner_task::Kind) -> task_resu
     runner_task::Kind::KillProcess(request) => {
       service.kill_process(tonic::Request::new(request)).await.map(|_| task_result::Result::KillProcess(KillProcessResponse {}))
     }
+    runner_task::Kind::EndRun(request) => Ok(task_result::Result::EndRun(end_run(service, &request.run_id).await)),
     runner_task::Kind::Exec(_) => Err(tonic::Status::invalid_argument("an exec task has its own stream")),
   };
   answered.unwrap_or_else(|status| task_result::Result::Error(task_error(&status)))
+}
+
+/// The running processes that belong to a run.
+async fn run_processes(service: &ExecutorService) -> Vec<ProcessInfo> {
+  match service.list_processes(tonic::Request::new(ListProcessesRequest::default())).await {
+    Ok(list) => list.into_inner().processes.into_iter().filter(|p| p.running && !p.run_id.is_empty()).collect(),
+    // NOTICE: listing this machine's own table does not fail; an error
+    // would mean nothing to report.
+    Err(status) => {
+      tracing::warn!("cannot list this runner's processes: {}", status.message());
+      Vec::new()
+    }
+  }
+}
+
+/// Kills the running processes of run `run`, a workspace mount's SFTP
+/// server among them, and waits a little for them to exit.
+// TODO(runner-docker): a runner creates no containers yet (Docker executors
+// run on the control host, which removes them); one that does removes the
+// run's containers here too.
+async fn end_run(service: &ExecutorService, run: &str) -> EndRunResponse {
+  let procs: Vec<_> = service.host.list().into_iter().filter(|p| p.run_id == run && p.exit().is_none()).collect();
+  let mut ended = Vec::new();
+  for proc in &procs {
+    // NOTICE: SIGKILL, as the executors' own shutdown uses: the run is over,
+    // and a process that ignores SIGTERM would stay.
+    proc.send(Input::Signal("SIGKILL".into()));
+    ended.push(proc.id.clone());
+  }
+  if !procs.is_empty() {
+    tracing::info!("run {run}: ended {} processes", procs.len());
+  }
+  let exits = futures_util::future::join_all(procs.iter().map(|p| p.wait()));
+  if tokio::time::timeout(END_WAIT, exits).await.is_err() {
+    tracing::warn!("run {run}: a killed process did not exit within {END_WAIT:?}");
+  }
+  let request = ListProcessesRequest {
+    run_id: run.to_string(),
+    ..Default::default()
+  };
+  let processes = match service.list_processes(tonic::Request::new(request)).await {
+    Ok(list) => list.into_inner().processes,
+    Err(status) => {
+      tracing::warn!("run {run}: cannot list its processes: {}", status.message());
+      Vec::new()
+    }
+  };
+  EndRunResponse { processes, ended }
 }
 
 fn task_error(status: &tonic::Status) -> TaskError {

@@ -5,6 +5,11 @@
 //! `creating`. A create that fails unwinds what it did and is kept as a
 //! failed run; a stopped run is kept as stopped, so `run ls`,
 //! `run logs` and `report` still find it.
+//!
+//! Every change of a run's state, and of the instances and processes it
+//! holds, is written to `state.db` where its trace event is emitted, so
+//! ended runs are listed from there, also after a restart, and a restarted
+//! control plane reconciles the runs it finds open (`crate::reconcile`).
 
 pub mod state;
 
@@ -33,8 +38,10 @@ use needy_trace::sink::jsonl::Jsonl;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::pool::Instance;
+use crate::pool::{Instance, Site};
+use crate::store::{self, InstanceKind, InstanceRecord, InstanceState, RunRecord};
 use crate::{Daemon, actor, failed, files, routing, schedule};
+use needy_api_server::control::Placement;
 use state::{Refused, State};
 
 /// Events a run's trace queue holds before it drops them.
@@ -49,6 +56,8 @@ pub struct Run {
   pub group: String,
   pub profile_name: String,
   pub profile: Profile,
+  /// The profile as the client resolved it, kept in `state.db`.
+  profile_yaml: String,
   pub created_ms: i64,
   pub dir: PathBuf,
   pub state: State,
@@ -66,6 +75,9 @@ pub struct Run {
   /// Why the run failed after it was created, such as an actor whose VM
   /// exited before its driving program did.
   failure: Mutex<Option<String>>,
+  /// The runner its actor was placed on, once placed; `None` for the
+  /// control host.
+  actor_runner: Mutex<Option<String>>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -118,6 +130,23 @@ impl Run {
     }
   }
 
+  /// The run as `state.db` keeps it, at `now`.
+  fn record(&self, now: i64) -> RunRecord {
+    RunRecord {
+      id: self.id.clone(),
+      name: self.name.clone(),
+      group: self.group.clone(),
+      profile_name: self.profile_name.clone(),
+      profile_yaml: self.profile_yaml.clone(),
+      state: self.state.get(),
+      created_ms: self.created_ms,
+      updated_ms: now,
+      actor_exit: self.actor_exit(),
+      failure: lock(&self.failure).clone(),
+      actor_runner: lock(&self.actor_runner).clone(),
+    }
+  }
+
   pub fn info(&self) -> RunInfo {
     RunInfo {
       id: self.id.clone(),
@@ -126,6 +155,7 @@ impl Run {
       state: self.state.get(),
       executors: executor_refs(&self.executors()),
       released: lock(&self.released).clone(),
+      lost: Vec::new(),
       created_ms: self.created_ms,
       profile: self.profile_name.clone(),
       // NOTICE: an actor whose VM ended before init reported the driving
@@ -159,18 +189,21 @@ fn executor_refs(executors: &BTreeMap<String, Arc<Instance>>) -> Vec<ExecutorRef
 
 // ------------------------------------------------------------- registry
 
-/// Live runs in the order they were created, and ended ones.
-#[derive(Default)]
+/// Live runs in the order they were created; ended runs are read from
+/// `state.db`.
 pub struct Registry {
   live: Mutex<Vec<Arc<Run>>>,
-  /// Runs that were stopped or failed to create, kept so `run ls`
-  /// and `run logs` still find them.
-  // TODO(persistence): this list lives in memory and grows until the daemon
-  // exits; slice 9 keeps runs in `state.db`.
-  ended: Mutex<Vec<RunInfo>>,
+  store: store::Store,
 }
 
 impl Registry {
+  pub fn new(store: store::Store) -> Self {
+    Self {
+      live: Mutex::default(),
+      store,
+    }
+  }
+
   pub fn live(&self) -> Vec<Arc<Run>> {
     lock(&self.live).clone()
   }
@@ -180,16 +213,21 @@ impl Registry {
     pick(id, &lock(&self.live), |s| (&s.id, &s.name))?.ok_or_else(no_such_run)
   }
 
+  /// The live run whose ID is exactly `id`.
+  pub fn exact(&self, id: &str) -> Option<Arc<Run>> {
+    lock(&self.live).iter().find(|run| run.id == id).cloned()
+  }
+
   /// The run `id` names, for a new command: one being created or
   /// running. A run that finished, stopped or failed is an error that
   /// says so, with its state.
-  pub fn find_open(&self, id: &str) -> Result<Arc<Run>, ControlError> {
+  pub async fn find_open(&self, id: &str) -> Result<Arc<Run>, ControlError> {
     let info = match self.find(id) {
       Ok(run) => match run.state.get() {
         RunState::Creating | RunState::Running => return Ok(run),
         _ => run.info(),
       },
-      Err(ControlError::NotFound(_)) => self.find_info(id)?,
+      Err(ControlError::NotFound(_)) => self.find_info(id).await?,
       Err(e) => return Err(e),
     };
     Err(ControlError::NotFound(format!("run {} has ended: {}", info.id, info.state)))
@@ -197,29 +235,79 @@ impl Registry {
 
   /// The live or ended run `id` names; live runs are looked at
   /// first.
-  fn find_info(&self, id: &str) -> Result<RunInfo, ControlError> {
+  async fn find_info(&self, id: &str) -> Result<RunInfo, ControlError> {
     if let Some(run) = pick(id, &lock(&self.live), |s| (&s.id, &s.name))? {
       return Ok(run.info());
     }
-    pick(id, &lock(&self.ended), |s| (&s.id, &s.name))?.ok_or_else(no_such_run)
+    let record = match self.store.run(id).await.map_err(stored)? {
+      Some(exact) => exact,
+      None => {
+        let stored = self.store.runs().await.map_err(stored)?;
+        pick(id, &stored, |r| (&r.id, &r.name))?.ok_or_else(no_such_run)?
+      }
+    };
+    self.stored_info(record).await
   }
 
-  fn list(&self) -> Vec<RunInfo> {
-    let mut runs: Vec<_> = lock(&self.live).iter().map(|s| s.info()).collect();
-    runs.extend(lock(&self.ended).iter().cloned());
+  /// Every run, live and ended, oldest first.
+  async fn list(&self) -> Result<Vec<RunInfo>, ControlError> {
+    let live = self.live();
+    let mut runs: Vec<RunInfo> = live.iter().map(|run| run.info()).collect();
+    for record in self.store.runs().await.map_err(stored)? {
+      if !live.iter().any(|run| run.id == record.id) {
+        runs.push(self.stored_info(record).await?);
+      }
+    }
     runs.sort_by_key(|s| s.created_ms);
-    runs
+    Ok(runs)
+  }
+
+  /// An ended run as `state.db` has it, with its executors by the state of
+  /// its hold on them.
+  async fn stored_info(&self, record: RunRecord) -> Result<RunInfo, ControlError> {
+    let instances = self.store.instances_of(&record.id).await.map_err(stored)?;
+    let (mut executors, mut released, mut lost) = (Vec::new(), Vec::new(), Vec::new());
+    for instance in instances.into_iter().filter(|i| i.kind == InstanceKind::Executor) {
+      let reference = ExecutorRef {
+        name: instance.name,
+        runtime: instance.runtime,
+        instance: instance.handle,
+      };
+      match instance.state {
+        InstanceState::Running => executors.push(reference),
+        InstanceState::Released | InstanceState::Ended => released.push(reference),
+        InstanceState::Lost => lost.push(reference),
+      }
+    }
+    Ok(RunInfo {
+      id: record.id,
+      name: record.name,
+      group: record.group,
+      state: record.state,
+      executors,
+      released,
+      lost,
+      created_ms: record.created_ms,
+      profile: record.profile_name,
+      actor_exit: record.actor_exit,
+      failure: record.failure,
+    })
   }
 
   fn insert(&self, run: Arc<Run>) {
     lock(&self.live).push(run);
   }
 
-  /// Moves run `info.id` from the live runs to the ended ones.
-  fn end(&self, info: RunInfo) {
-    lock(&self.live).retain(|s| s.id != info.id);
-    lock(&self.ended).push(info);
+  /// Removes run `id` from the live runs; `state.db` keeps it.
+  fn end(&self, id: &str) {
+    lock(&self.live).retain(|s| s.id != id);
   }
+}
+
+/// A failure to read `state.db`, for the caller.
+fn stored(error: store::Error) -> ControlError {
+  tracing::error!("state.db: {error:#}");
+  ControlError::Internal(format!("cannot read the runs: {error}"))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -276,11 +364,12 @@ impl Daemon {
     let run = match prepared {
       Ok(prepared) => prepared,
       Err(error) => {
-        self.record_failure(&id, &request, created_ms, &trace, &error, Vec::new()).await;
+        self.record_failure(&id, &request, created_ms, &trace, &error, None).await;
         return Err(error);
       }
     };
     self.runs.insert(run.clone());
+    self.save_run(&run).await;
     let provisioned = self.provision(&run).await.and_then(|()| unwinding(&run));
     if let Err(error) = provisioned {
       self.rollback(&run, &request, &error).await;
@@ -290,6 +379,7 @@ impl Daemon {
     if let Err(refused) = run.state.advance(RunState::Running) {
       tracing::debug!("run {id}: {refused}");
     }
+    self.save_run(&run).await;
     // `needy report` right after the create must find the run and its
     // `run.create`.
     run.trace.flush().await;
@@ -345,6 +435,7 @@ impl Daemon {
       profile_name: request.profile_name.clone(),
       injector: Arc::new(Injector::new(&profile.chaos)),
       profile,
+      profile_yaml: request.profile_yaml.clone(),
       created_ms,
       dir,
       state: State::new(),
@@ -355,6 +446,7 @@ impl Daemon {
       released: Mutex::new(Vec::new()),
       actor_exit: Mutex::new(None),
       failure: Mutex::new(None),
+      actor_runner: Mutex::new(None),
       tasks: TaskTracker::new(),
       cancel,
     }))
@@ -378,6 +470,10 @@ impl Daemon {
     if let Some(refusal) = self.actor_refusal(&actor) {
       bail!("actor: {refusal}");
     }
+    *lock(&run.actor_runner) = match &actor {
+      Placement::Runner(name) => Some(name.clone()),
+      Placement::ControlHost => None,
+    };
     actor::check_host(self)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
@@ -406,6 +502,7 @@ impl Daemon {
       };
       unwinding(run)?;
       let instance = self.pool.acquire(spec, &site).await.with_context(|| format!("executor {exec_name}"))?;
+      self.save_instance(&executor_record(run, &instance, &site, config.provider)).await;
       run.lock_executors().insert(exec_name.clone(), instance);
     }
     run.emit(&Event::RunCreate(RunCreate {
@@ -432,12 +529,13 @@ impl Daemon {
     run.tasks.wait().await;
     self.release_executors(run).await;
     actor::remove_sockets(&run.dir);
-    let released = lock(&run.released).clone();
-    self.record_failure(&run.id, request, run.created_ms, &run.trace, error, released).await;
+    self.runs.end(&run.id);
+    let actor_runner = lock(&run.actor_runner).clone();
+    self.record_failure(&run.id, request, run.created_ms, &run.trace, error, actor_runner).await;
   }
 
-  /// Keeps a failed create as a failed run, with the executors it
-  /// `released`, and records why.
+  /// Keeps a failed create as a failed run in `state.db`, and records
+  /// why.
   async fn record_failure(
     &self,
     id: &str,
@@ -445,7 +543,7 @@ impl Daemon {
     created_ms: i64,
     trace: &Dispatch,
     error: &anyhow::Error,
-    released: Vec<ExecutorRef>,
+    actor_runner: Option<String>,
   ) {
     tracing::warn!("run {id} failed: {error:#}");
     let or_id = |value: &str| {
@@ -455,18 +553,22 @@ impl Daemon {
         value.to_string()
       }
     };
-    self.runs.end(RunInfo {
+    let record = RunRecord {
       id: id.to_string(),
       name: or_id(&request.name),
       group: or_id(&request.group),
+      profile_name: request.profile_name.clone(),
+      profile_yaml: request.profile_yaml.clone(),
       state: RunState::Failed,
-      executors: Vec::new(),
-      released,
       created_ms,
-      profile: request.profile_name.clone(),
+      updated_ms: now_ms(),
       actor_exit: None,
       failure: Some(format!("{error:#}")),
-    });
+      actor_runner,
+    };
+    if let Err(e) = self.state.save_run(&record).await {
+      tracing::warn!("run {id}: cannot write it to state.db: {e:#}");
+    }
     emit(
       trace,
       &Event::RunFail(RunFail {
@@ -482,6 +584,7 @@ impl Daemon {
   /// stays listed as finished or failed until it is stopped, which then has
   /// nothing left to release.
   pub(crate) async fn finish_run(&self, run: &Run) {
+    self.save_run(run).await;
     if let Err(e) = files::mirror_out(run).await {
       tracing::warn!("mirror-out for {}: {e:#}", run.id);
     }
@@ -502,6 +605,9 @@ impl Daemon {
       }) => false,
       Err(refused) => return Err(ControlError::Failed(format!("run {}: {refused}", run.id))),
     };
+    if stopping {
+      self.save_run(run).await;
+    }
     // The relays of the run's commands and its actor's tasks stop.
     run.cancel.cancel();
     run.tasks.close();
@@ -518,25 +624,19 @@ impl Daemon {
     // summary is written now.
     run.trace.flush().await;
     actor::remove_sockets(&run.dir);
-    self.runs.end(run.info());
+    self.save_run(run).await;
+    self.runs.end(&run.id);
     Ok(())
   }
 
   /// Ends the processes the run started on its executors, such as
   /// detached commands and a workspace mount's `sftp-server`, then gives
-  /// the executors back.
-  // TODO(runner-ownership): the control daemon asks each executor here, so a
-  // daemon that exits first leaves the processes behind; the runner owns a
-  // run's processes and ends them in the design of
-  // `docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`
-  // ("Ownership and cleanup").
+  /// the executors back. A runner ends the run's processes itself when told
+  /// the run ended (`EndRun`); the control host's executors are asked
+  /// process by process.
   async fn release_executors(&self, run: &Run) {
     let instances = run.take_executors();
-    let request = ListProcessesRequest {
-      run_id: run.id.clone(),
-      ..Default::default()
-    };
-    // Instances that share an executor list the same processes.
+    // Instances that share an executor run the same processes.
     let mut asked: Vec<(&'static str, &str)> = Vec::new();
     for instance in instances.values() {
       let executor = (instance.handle.runtime, instance.handle.id.as_str());
@@ -544,31 +644,67 @@ impl Daemon {
         continue;
       }
       asked.push(executor);
-      let processes = match instance.handle.executor.list_processes(request.clone()).await {
-        Ok(list) => list.processes,
-        Err(status) => {
-          tracing::warn!("run {}: cannot list its processes on executor {}: {}", run.id, instance.name, status.message());
-          continue;
-        }
-      };
-      for process in processes.into_iter().filter(|p| p.running) {
-        // NOTICE: SIGKILL, as the executors' own shutdown uses: the run
-        // is over, and a process that ignores SIGTERM would stay.
-        let kill = KillProcessRequest {
-          process_id: process.process_id.clone(),
-          signal: "SIGKILL".into(),
-        };
-        if let Err(status) = instance.handle.executor.kill_process(kill).await {
-          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run.id, process.process_id, instance.name, status.message());
-        }
+      match instance.on_runner() {
+        Some(runner) => self.end_on_runner(&run.id, runner).await,
+        None => self.end_on_control_host(run, instance).await,
       }
     }
     for instance in instances.values() {
+      let row = store::executor_instance(&run.id, &instance.name);
+      if let Err(e) = self.state.set_instance_state(&row, InstanceState::Released, now_ms()).await {
+        tracing::warn!("run {}: cannot write the release of executor {} to state.db: {e:#}", run.id, instance.name);
+      }
       self.pool.release(instance).await;
     }
   }
 
-  fn run_dir(&self, id: &str) -> PathBuf {
+  /// Kills the run's processes on an executor of the control host, which
+  /// does not know runs: by listing them and killing each.
+  async fn end_on_control_host(&self, run: &Run, instance: &Instance) {
+    let request = ListProcessesRequest {
+      run_id: run.id.clone(),
+      ..Default::default()
+    };
+    let processes = match instance.handle.executor.list_processes(request).await {
+      Ok(list) => list.processes,
+      Err(status) => {
+        tracing::warn!("run {}: cannot list its processes on executor {}: {}", run.id, instance.name, status.message());
+        return;
+      }
+    };
+    let mut ended = Vec::new();
+    for process in processes.iter().filter(|p| p.running) {
+      // NOTICE: SIGKILL, as the executors' own shutdown uses: the run
+      // is over, and a process that ignores SIGTERM would stay.
+      let kill = KillProcessRequest {
+        process_id: process.process_id.clone(),
+        signal: "SIGKILL".into(),
+      };
+      match instance.handle.executor.kill_process(kill).await {
+        Ok(()) => ended.push(process.process_id.clone()),
+        Err(status) => {
+          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run.id, process.process_id, instance.name, status.message())
+        }
+      }
+    }
+    self.record_ended(&processes, &ended).await;
+  }
+
+  /// Writes run `run` as it stands now to `state.db`.
+  pub(crate) async fn save_run(&self, run: &Run) {
+    if let Err(e) = self.state.save_run(&run.record(now_ms())).await {
+      tracing::warn!("run {}: cannot write it to state.db: {e:#}", run.id);
+    }
+  }
+
+  /// Writes a run's hold on an instance to `state.db`.
+  pub(crate) async fn save_instance(&self, record: &InstanceRecord) {
+    if let Err(e) = self.state.save_instance(record).await {
+      tracing::warn!("run {}: cannot write instance {} to state.db: {e:#}", record.run, record.id);
+    }
+  }
+
+  pub(crate) fn run_dir(&self, id: &str) -> PathBuf {
     self.config.state_dir.join("runs").join(id)
   }
 
@@ -601,6 +737,27 @@ impl Daemon {
         timing: config.timing,
       },
     )
+  }
+}
+
+/// The row of `run`'s hold on the executor `instance` created at `site`.
+fn executor_record(run: &Run, instance: &Instance, site: &Site, provider: needy_config::profile::Provider) -> InstanceRecord {
+  InstanceRecord {
+    id: store::executor_instance(&run.id, &instance.name),
+    run: run.id.clone(),
+    name: instance.name.clone(),
+    kind: InstanceKind::Executor,
+    runner: match site {
+      Site::Runner { name, .. } => Some(name.clone()),
+      Site::ControlHost => None,
+    },
+    provider: format!("{provider:?}").to_lowercase(),
+    runtime: instance.handle.runtime.to_string(),
+    handle: instance.handle.id.clone(),
+    pid: None,
+    state: InstanceState::Running,
+    created_ms: now_ms(),
+    ended_ms: None,
   }
 }
 
@@ -642,11 +799,11 @@ impl Runs for Daemon {
   }
 
   async fn get(&self, id: &str) -> Result<RunInfo, ControlError> {
-    self.runs.find_info(id)
+    self.runs.find_info(id).await
   }
 
   async fn list(&self) -> Result<Vec<RunInfo>, ControlError> {
-    Ok(self.runs.list())
+    self.runs.list().await
   }
 
   async fn stop(&self, id: &str) -> Result<(), ControlError> {
@@ -655,7 +812,7 @@ impl Runs for Daemon {
   }
 
   async fn logs(&self, id: &str) -> Result<Vec<u8>, ControlError> {
-    let info = self.runs.find_info(id)?;
+    let info = self.runs.find_info(id).await?;
     // Firecracker writes the guest's serial console here.
     let path = vm::console(&self.run_dir(&info.id));
     // TODO(run-logs): follow a running actor's console (`--follow`); not

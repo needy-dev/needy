@@ -428,6 +428,22 @@ impl Docker {
   }
 
   /// Removes a container by name; one that is gone already is fine.
+  /// Removes the container `name` and its socket's directory, as
+  /// `destroy` does, without a handle: for a container a control daemon
+  /// that restarted finds in its records. A container that is gone already
+  /// is not an error.
+  pub async fn remove_instance(&self, name: &str) -> Result<(), Error> {
+    self.remove(name).await?;
+    // The socket stays behind its container; the workspace is the user's.
+    let dir = socket_dir(&self.options, name);
+    if let Err(e) = std::fs::remove_dir_all(&dir)
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!("cannot remove {}: {e}", dir.display());
+    }
+    Ok(())
+  }
+
   async fn remove(&self, name: &str) -> Result<(), Error> {
     let options = RemoveContainerOptionsBuilder::default().force(true).build();
     match self.docker.remove_container(name, Some(options)).await {
@@ -493,15 +509,7 @@ impl Provider for Docker {
   }
 
   async fn destroy(&self, handle: &InstanceHandle) -> Result<(), Error> {
-    self.remove(&handle.id).await?;
-    // The socket stays behind its container; the workspace is the user's.
-    let dir = socket_dir(&self.options, &handle.id);
-    if let Err(e) = std::fs::remove_dir_all(&dir)
-      && e.kind() != std::io::ErrorKind::NotFound
-    {
-      tracing::warn!("cannot remove {}: {e}", dir.display());
-    }
-    Ok(())
+    self.remove_instance(&handle.id).await
   }
 }
 

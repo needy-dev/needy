@@ -194,7 +194,14 @@ impl Runners for Daemon {
   }
 
   async fn control(&self, runner: &str, results: FromRunner<ControlRequest>) -> Result<ToRunner<ControlResponse>> {
-    Ok(self.links.open(runner, results, &self.tasks, &self.cancel))
+    // The runner's report goes to `reconcile`, outside the stream's reader.
+    let daemon = self.clone();
+    let on_report: crate::link::OnReport = Box::new(move |runner, report| {
+      let reconciling = daemon.clone();
+      let runner = runner.to_string();
+      daemon.tasks.spawn(async move { reconciling.reconcile_runner(&runner, report.processes).await });
+    });
+    Ok(self.links.open(runner, results, &self.tasks, &self.cancel, on_report))
   }
 
   async fn task(&self, runner: &str, task: u64, responses: FromRunner<TaskRequest>) -> Result<ToRunner<TaskResponse>> {

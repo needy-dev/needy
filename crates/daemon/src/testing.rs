@@ -68,7 +68,12 @@ pub async fn daemon_with_heartbeat(interval: Duration) -> Started {
 /// start from a stand-in image whose VM runs until it is stopped
 /// ([`PARKED`]); a test writes another with [`fake_image`].
 pub async fn daemon_with(adjust: impl FnOnce(&mut Config)) -> Started {
-  let dir = tempfile::tempdir().unwrap();
+  daemon_in(tempfile::tempdir().unwrap(), adjust).await
+}
+
+/// A control daemon as [`daemon_with`] makes it, in `dir`, whose `state`
+/// directory a test may have written already.
+pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Started {
   // A stand-in KVM device: a file the daemon can open for reading and
   // writing. A test removes it to stand for a host without KVM.
   let kvm = dir.path().join("kvm");
@@ -82,10 +87,89 @@ pub async fn daemon_with(adjust: impl FnOnce(&mut Config)) -> Started {
     docker_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
+    report_wait: crate::REPORT_WAIT,
   };
   adjust(&mut config);
   let daemon = Daemon::start(config).await.unwrap();
   Started { daemon, dir }
+}
+
+/// Shuts `started`'s daemon down, as a termination signal does, and starts
+/// another on the same directories, as a restart does.
+pub async fn restart(started: Started) -> Started {
+  started.daemon.shutdown().await;
+  let config = (*started.daemon.config).clone();
+  drop(started.daemon);
+  let daemon = Daemon::start(config).await.unwrap();
+  Started {
+    daemon,
+    dir: started.dir,
+  }
+}
+
+/// Starts a detached `sleep 300` in run `run` and returns its process ID
+/// on the executor and its PID.
+pub async fn detached_sleep(daemon: &Daemon, run: &str) -> (String, i64) {
+  use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes};
+  use tokio_stream::StreamExt as _;
+  let spec = ExecSpec {
+    argv: vec!["sleep".into(), "300".into()],
+    cwd: String::new(),
+    env: Default::default(),
+    clear_env: false,
+    tty: None,
+    detach: true,
+    run: run.into(),
+    executor: String::new(),
+    runner: String::new(),
+    no_stdin: true,
+    origin: needy_core::types::Origin::Cli,
+    search_path_if_missing: false,
+  };
+  let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
+  loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break (started.process, started.pid);
+    }
+  }
+}
+
+/// Starts a detached `sleep 300` on runner `runner`'s machine, outside any
+/// run, and returns its process ID and its PID.
+pub async fn detached_sleep_on_runner(daemon: &Daemon, runner: &str) -> (String, i64) {
+  use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes};
+  use tokio_stream::StreamExt as _;
+  let spec = ExecSpec {
+    argv: vec!["sleep".into(), "300".into()],
+    cwd: String::new(),
+    env: Default::default(),
+    clear_env: false,
+    tty: None,
+    detach: true,
+    run: String::new(),
+    executor: String::new(),
+    runner: runner.into(),
+    no_stdin: true,
+    origin: needy_core::types::Origin::Cli,
+    search_path_if_missing: false,
+  };
+  let mut outputs = daemon.exec(ExecOpen::Start(spec), Box::pin(tokio_stream::pending())).await.unwrap();
+  loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break (started.process, started.pid);
+    }
+  }
+}
+
+/// Waits up to ten seconds for process `pid` to end.
+pub async fn ended(pid: i64) -> bool {
+  for _ in 0..200 {
+    if !running(pid) {
+      return true;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  false
 }
 
 /// A stand-in Firecracker whose VM runs until its run stops it, or until
@@ -134,6 +218,21 @@ pub async fn join_runner(
   roles: &[needy_core::types::RunnerRole],
   labels: &[(&str, &str)],
 ) -> JoinedRunner {
+  let config = crate::runner::Config {
+    state_dir: Default::default(),
+    control: Some(served.endpoint.clone()),
+    join_token: None,
+    name: name.into(),
+    roles: roles.iter().copied().collect(),
+    labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+    grace: crate::runner::DISCONNECT_GRACE,
+  };
+  join_runner_with(served, operator, config).await
+}
+
+/// Joins a runner configured as `config` (its state directory and join
+/// token are the helper's) and waits as [`join_runner`] does.
+pub async fn join_runner_with(served: &Served, operator: &needy_api_client::Client, mut config: crate::runner::Config) -> JoinedRunner {
   let request = needy_api_client::proto::v1::CreateJoinTokenRequest {
     ttl_ms: 60_000,
     uses: 1,
@@ -141,20 +240,15 @@ pub async fn join_runner(
   };
   let token = operator.runners().create_join_token(request).await.unwrap().into_inner().token;
   let state = tempfile::tempdir().unwrap();
-  let config = crate::runner::Config {
-    state_dir: state.path().to_path_buf(),
-    control: Some(served.endpoint.clone()),
-    join_token: Some(token),
-    name: name.into(),
-    roles: roles.iter().copied().collect(),
-    labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
-  };
+  config.state_dir = state.path().to_path_buf();
+  config.join_token = Some(token);
+  let name = config.name.clone();
   let runner = crate::runner::Runner::start(config).await.unwrap();
   let stop = CancellationToken::new();
   tokio::spawn(runner.serve(stop.clone()));
   let daemon = served.daemon();
   let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-  while daemon.links.get(name).is_none() || daemon.runner_host(name).is_none() {
+  while daemon.links.get(&name).is_none() || daemon.runner_host(&name).is_none() {
     assert!(tokio::time::Instant::now() < deadline, "runner {name} did not connect");
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
@@ -225,5 +319,64 @@ pub fn new_run(profile_yaml: &str, dir: &Path) -> NewRun {
     recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
     profile_name: "test".into(),
     ..NewRun::default()
+  }
+}
+
+/// A Unix socket that forwards every connection to `target`, until cut.
+pub struct Proxy {
+  pub endpoint: String,
+  connections: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+  /// Set while new connections are closed at once, as with a tunnel that
+  /// is down.
+  refusing: Arc<std::sync::atomic::AtomicBool>,
+  _accept: tokio::task::JoinHandle<()>,
+}
+
+impl Proxy {
+  pub fn start(dir: &Path, target: &str) -> Self {
+    let socket = dir.join("proxy.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let target = target.strip_prefix("unix:").unwrap().to_string();
+    let connections: Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> = Default::default();
+    let refusing: Arc<std::sync::atomic::AtomicBool> = Default::default();
+    let (open, refused) = (connections.clone(), refusing.clone());
+    let accept = tokio::spawn(async move {
+      while let Ok((mut inbound, _)) = listener.accept().await {
+        if refused.load(std::sync::atomic::Ordering::SeqCst) {
+          continue;
+        }
+        let target = target.clone();
+        let forward = tokio::spawn(async move {
+          if let Ok(mut outbound) = tokio::net::UnixStream::connect(&target).await {
+            // Either side closing ends the connection.
+            let _copied = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+          }
+        });
+        open.lock().unwrap().push(forward);
+      }
+    });
+    Self {
+      endpoint: format!("unix:{}", socket.display()),
+      connections,
+      refusing,
+      _accept: accept,
+    }
+  }
+
+  /// Drops every open connection at once, as a dying tunnel does.
+  pub fn cut(&self) {
+    for connection in self.connections.lock().unwrap().drain(..) {
+      connection.abort();
+    }
+  }
+
+  /// Cuts every connection and closes new ones until [`Proxy::restore`].
+  pub fn down(&self) {
+    self.refusing.store(true, std::sync::atomic::Ordering::SeqCst);
+    self.cut();
+  }
+
+  pub fn restore(&self) {
+    self.refusing.store(false, std::sync::atomic::Ordering::SeqCst);
   }
 }

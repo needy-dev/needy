@@ -108,6 +108,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     docker_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
+    report_wait: crate::REPORT_WAIT,
   };
 
   let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");
@@ -164,7 +165,7 @@ async fn shutdown_unwinds_a_run_being_created() {
   };
   Runners::join(daemon, joining).await.unwrap();
   let (results, from_runner) = tokio::sync::mpsc::channel(1);
-  let _tasks = Runners::control(daemon, "b", Box::pin(tokio_stream::wrappers::ReceiverStream::new(from_runner))).await.unwrap();
+  let mut tasks = Runners::control(daemon, "b", Box::pin(tokio_stream::wrappers::ReceiverStream::new(from_runner))).await.unwrap();
   let seed = started.dir.path().join("seed");
   std::fs::create_dir_all(&seed).unwrap();
   let profile = format!(
@@ -185,9 +186,9 @@ files:
     let request = new_run(&profile, started.dir.path());
     async move { Runs::create(&daemon, request).await }
   });
-  while daemon.pool.instances().await.len() < 2 {
-    tokio::time::sleep(Duration::from_millis(20)).await;
-  }
+  // The copy-in to runner b is under way once its exec task is announced.
+  let announced = tokio::time::timeout(Duration::from_secs(20), tokio_stream::StreamExt::next(&mut tasks)).await;
+  assert!(matches!(announced, Ok(Some(_))), "the copy-in's task was not announced");
 
   let shutdown = tokio::spawn({
     let daemon = daemon.clone();

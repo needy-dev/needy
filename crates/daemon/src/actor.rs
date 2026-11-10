@@ -20,6 +20,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
 use crate::run::Run;
+use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 
 /// Ports the actor reaches on the host over vsock.
 pub const GUEST_PORT: u32 = 7000;
@@ -64,6 +65,23 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     vcpus: launch.vcpus,
     mem_mib: launch.mem_mib,
   }));
+  // A restarted control plane finds the VM by its PID and directory.
+  let record = InstanceRecord {
+    id: store::actor_instance(&run.id),
+    run: run.id.clone(),
+    name: "actor".into(),
+    kind: InstanceKind::Actor,
+    // The control plane runs it, also when placed on its own runner.
+    runner: None,
+    provider: "firecracker".into(),
+    runtime: "firecracker".into(),
+    handle: run.dir.display().to_string(),
+    pid: Some(i64::from(vm.pid())),
+    state: InstanceState::Running,
+    created_ms: needy_common::time::now_ms(),
+    ended_ms: None,
+  };
+  daemon.save_instance(&record).await;
   run.tasks.spawn(watch(daemon.clone(), run.clone(), vm, actor));
   Ok(())
 }
@@ -159,9 +177,11 @@ async fn watch(daemon: Daemon, run: Arc<Run>, mut vm: vm::Vm, actor: Cancellatio
       if let Err(e) = vm.stop(VM_STOP_GRACE).await {
         tracing::warn!("run {}: cannot stop firecracker {}: {e}", run.id, vm.pid());
       }
+      release_actor(&daemon, &run).await;
       return;
     }
   };
+  release_actor(&daemon, &run).await;
   let exit = match waited {
     Ok(status) => {
       use std::os::unix::process::ExitStatusExt;
@@ -191,6 +211,14 @@ async fn watch(daemon: Daemon, run: Arc<Run>, mut vm: vm::Vm, actor: Cancellatio
   daemon.finish_run(&run).await;
   // `needy report` right after the end must see it.
   run.trace.flush().await;
+}
+
+/// Records in `state.db` that run `run`'s actor ended.
+async fn release_actor(daemon: &Daemon, run: &Run) {
+  let id = store::actor_instance(&run.id);
+  if let Err(e) = daemon.state.set_instance_state(&id, InstanceState::Released, needy_common::time::now_ms()).await {
+    tracing::warn!("run {}: cannot write the end of its actor to state.db: {e:#}", run.id);
+  }
 }
 
 /// How many of the last lines of the VM's log a failure quotes.

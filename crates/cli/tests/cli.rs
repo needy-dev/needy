@@ -481,7 +481,7 @@ fn run_ls_json_keeps_names_and_carries_released_executors_and_the_failure() {
 
   let runs: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
   assert_eq!((&runs[0]["name"], &runs[0]["group"]), (&serde_json::json!(stopped), &serde_json::json!(stopped)));
-  assert_eq!(runs[0]["executors"], serde_json::json!([{ "name": "here", "runtime": "native", "released": true }]));
+  assert_eq!(runs[0]["executors"], serde_json::json!([{ "name": "here", "runtime": "native", "released": true, "lost": false }]));
   assert_eq!(
     (&runs[0]["exit_code"], &runs[0]["signal"], &runs[0]["failure"]),
     (&serde_json::Value::Null, &serde_json::Value::Null, &serde_json::Value::Null)
@@ -1941,4 +1941,69 @@ fn exec_names_a_runner_or_a_run_not_both() {
   let output = home.run(&["exec", "--runner", "mac", "--run", "r1", "--", "true"]);
 
   assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+}
+
+/// A run whose commands all go to runner `mac`.
+const RUNNER_PROFILE: &str = r#"
+executors:
+  mac: { runner: mac }
+commands:
+  - { match: "**", to: mac }
+"#;
+
+/// Waits up to 20 s for process `pid` to end.
+fn gone(pid: u32) -> bool {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while Instant::now() < deadline {
+    // Signal 0 checks that the process exists without signalling it.
+    if !Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success() {
+      return true;
+    }
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  false
+}
+
+#[test]
+fn a_control_plane_killed_during_a_run_fails_it_at_restart_and_its_runner_ends_the_runs_processes() {
+  let control = Home::new();
+  let mut daemon = Daemon::start(&control);
+  let machine = Home::new();
+  let _runner = connected_runner(&machine, &control);
+  let run = create_run(&control, RUNNER_PROFILE);
+  let pid_file = machine.path().join("sleep.pid");
+  let script = format!("echo $$ > {}; exec sleep 300", pid_file.display());
+  detach(&control, &run, &["sh", "-c", &script]);
+  let deadline = Instant::now() + Duration::from_secs(20);
+  let pid = loop {
+    if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<u32>() {
+      break pid;
+    }
+    assert!(Instant::now() < deadline, "the detached process did not start");
+    std::thread::sleep(Duration::from_millis(50));
+  };
+
+  // SIGKILL: the control plane ends nothing on its way out.
+  daemon.child.kill().unwrap();
+  daemon.child.wait().unwrap();
+  let still_running = !gone_now(pid);
+  // The killed daemon left its socket, which `Daemon::start` waits for.
+  std::fs::remove_file(control.path().join("run").join("daemon.sock")).unwrap();
+  let _restarted = Daemon::start(&control);
+  let ended = gone(pid);
+  let listed = control.run(&["run", "ls", "-o", "json"]);
+  let table = control.run(&["run", "ls"]);
+
+  assert!(still_running, "the runner ended the run's process as soon as the control plane died");
+  assert!(ended, "process {pid} outlived its run across a control plane restart");
+  let rows: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
+  let row = rows.as_array().unwrap().iter().find(|r| r["id"] == run.as_str()).expect("the run is listed after the restart");
+  assert_eq!(row["state"], "failed");
+  assert_eq!(row["failure"], "the control plane restarted; the actor was lost");
+  assert!(stdout(&table).contains("failed"), "{}", stdout(&table));
+}
+
+/// Whether process `pid` is gone now.
+fn gone_now(pid: u32) -> bool {
+  !Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success()
 }

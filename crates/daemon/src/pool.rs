@@ -72,6 +72,12 @@ impl Instance {
     })
   }
 
+  /// The runner whose own process space the instance is, which owns its
+  /// processes; `None` on the control host.
+  pub fn on_runner(&self) -> Option<&str> {
+    (self.handle.runtime == RUNNER).then_some(self.handle.id.as_str())
+  }
+
   /// Takes a slot for one command. A full instance refuses the command with
   /// `on_full: reject` and makes it wait otherwise.
   // TODO(executor-pool): `on_full: new` waits like `wait`; a second instance
@@ -89,6 +95,9 @@ impl Instance {
   }
 }
 
+/// The runtime of a runner's own process space.
+const RUNNER: &str = "runner";
+
 /// A runner's own process space, reached over its streams.
 fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace: String) -> InstanceHandle {
   let executor = RunnerExecutor {
@@ -96,7 +105,7 @@ fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace:
     links: links.clone(),
   };
   InstanceHandle {
-    runtime: "runner",
+    runtime: RUNNER,
     id: runner.to_string(),
     executor: Arc::new(executor),
     sftp,
@@ -228,6 +237,11 @@ impl Pool {
     {
       tracing::warn!("executor {}: cannot destroy {}: {e}", instance.name, instance.handle.id);
     }
+  }
+
+  /// The control host's Docker provider, when it could be set up.
+  pub fn docker(&self) -> Option<&Arc<Docker>> {
+    self.docker.as_ref()
   }
 
   /// Every pooled instance.

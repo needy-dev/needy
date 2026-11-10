@@ -270,13 +270,15 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
     executors: run
       .executors
       .into_iter()
-      .map(|e| (e, false))
-      .chain(run.released.into_iter().map(|e| (e, true)))
-      .map(|(e, released)| v1::ExecutorRef {
+      .map(|e| (e, false, false))
+      .chain(run.released.into_iter().map(|e| (e, true, false)))
+      .chain(run.lost.into_iter().map(|e| (e, true, true)))
+      .map(|(e, released, lost)| v1::ExecutorRef {
         name: e.name,
         runtime: e.runtime,
         instance: e.instance,
         released,
+        lost,
       })
       .collect(),
     created_at_ms: run.created_ms,
