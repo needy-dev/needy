@@ -98,8 +98,10 @@ impl Daemon {
       .unwrap();
     let socket = home.path().join("run").join("daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(20);
-    while !socket.exists() {
-      assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+    // A connection, not the file: the file appears before the daemon
+    // listens, and a client that connects in between is refused.
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+      assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
       std::thread::sleep(Duration::from_millis(50));
     }
     Self { child }
@@ -741,8 +743,10 @@ fn spawn_daemon(home: &Home, mode: &str) -> Child {
   let daemon = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  while !socket.exists() {
-    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+  // A connection, not the file: the file appears before the daemon
+  // listens, and a client that connects in between is refused.
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
   daemon
@@ -1387,8 +1391,10 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
   let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  while !socket.exists() {
-    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+  // A connection, not the file: the file appears before the daemon
+  // listens, and a client that connects in between is refused.
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
   let _daemon = Daemon { child };
@@ -1429,8 +1435,10 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
     .unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  while !socket.exists() {
-    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+  // A connection, not the file: the file appears before the daemon
+  // listens, and a client that connects in between is refused.
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
   let _daemon = Daemon { child };
@@ -1718,8 +1726,10 @@ fn spawn_control_with_fast_heartbeats(home: &Home) -> Daemon {
     .unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  while !socket.exists() {
-    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+  // A connection, not the file: the file appears before the daemon
+  // listens, and a client that connects in between is refused.
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
   Daemon { child }
