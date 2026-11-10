@@ -12,6 +12,8 @@
 //! - `actor`: wires a run to its actor: the VM, the guest listener and
 //!   the gateway.
 //! - `guest`: the actor's side of its run (`GuestService`).
+//! - `runners`: the runner registry (`RunnerService`) over `store`.
+//! - `store`: `state.db`, the control plane's own state.
 //! - [`executor`]: the executor role.
 //!
 //! Every long-lived task has an owner: the daemon or a run (whose actor
@@ -19,9 +21,10 @@
 //! `TaskTracker` under its `CancellationToken`; stopping the owner cancels
 //! them and waits for them.
 //
-// TODO(persistence): `store/` (`state.db` with runs, instances and
-// processes, reconciled on start) is slice 9 of the module layout redesign;
-// until then runs and processes live in memory.
+// TODO(persistence): runs, instances and processes in `state.db`,
+// reconciled on start, are slices 6 and 7 of the runners-and-runs design
+// (which absorbed slice 9 of the module layout redesign); until then they
+// live in memory and `state.db` holds the runner registry only.
 
 pub mod executor;
 
@@ -39,6 +42,10 @@ mod relay;
 mod routing;
 #[cfg(unix)]
 mod run;
+#[cfg(unix)]
+mod runners;
+#[cfg(unix)]
+mod store;
 
 #[cfg(all(test, unix))]
 mod testing;
@@ -51,6 +58,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(unix)]
 use std::sync::{Arc, Mutex};
+#[cfg(unix)]
+use std::time::Duration;
 
 #[cfg(unix)]
 use anyhow::{Context, Result, bail};
@@ -82,7 +91,7 @@ use crate::run::Registry;
 /// Where the control daemon keeps its state and finds its images.
 #[derive(Debug, Clone)]
 pub struct Config {
-  /// `trace.db` and the runs' directories.
+  /// `state.db`, `trace.db` and the runs' directories.
   pub state_dir: PathBuf,
   /// The local executor's socket.
   pub runtime_dir: PathBuf,
@@ -93,6 +102,9 @@ pub struct Config {
   pub kvm: PathBuf,
   /// The image of Docker executors that name none.
   pub docker_image: String,
+  /// How often runners send a heartbeat; told to them in every join and
+  /// heartbeat response.
+  pub heartbeat_interval: Duration,
 }
 
 #[cfg(unix)]
@@ -102,6 +114,8 @@ pub struct Daemon {
   pub(crate) config: Arc<Config>,
   /// `trace.db`, shared by the runs' SQLite sinks.
   pub(crate) traces: Store,
+  /// `state.db`: the runner registry.
+  pub(crate) state: store::Store,
   pub(crate) runs: Arc<Registry>,
   pub(crate) pool: Arc<Pool>,
   /// This machine, always available as the `local` executor.
@@ -125,7 +139,8 @@ pub struct Daemon {
 
 #[cfg(unix)]
 impl Daemon {
-  /// Opens the trace store and starts the in-process local executor.
+  /// Opens `state.db` and the trace store and starts the in-process local
+  /// executor.
   pub async fn start(config: Config) -> Result<Self> {
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
@@ -134,6 +149,8 @@ impl Daemon {
     create_private_dir(&runs_dir).with_context(|| format!("cannot create {}", runs_dir.display()))?;
     let trace_db = config.state_dir.join("trace.db");
     let traces = Store::open(&trace_db).await.with_context(|| format!("cannot open {}", trace_db.display()))?;
+    let state_db = config.state_dir.join("state.db");
+    let state = store::Store::open(&state_db).await.with_context(|| format!("cannot open {}", state_db.display()))?;
     let tasks = TaskTracker::new();
     let cancel = CancellationToken::new();
 
@@ -173,6 +190,7 @@ impl Daemon {
     Ok(Self {
       config: Arc::new(config),
       traces,
+      state,
       runs: Arc::new(Registry::default()),
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, docker)),
@@ -216,15 +234,21 @@ impl Daemon {
   }
 
   async fn serve_until(&self, listen: &str, token: Option<String>, stop: CancellationToken) -> Result<()> {
+    let server = self.server(token).bind(&[Listen::parse(listen)]).await?;
+    tracing::info!("control daemon listening on {listen}");
+    server.serve(stop).await?;
+    Ok(())
+  }
+
+  /// The control API: runs, processes and the runner registry, for the
+  /// CLI holding `token`, and for runners holding their credentials.
+  pub(crate) fn server(&self, token: Option<String>) -> Server {
     let api = Arc::new(self.clone());
     let health = Health {
       instance_id: uuid::Uuid::new_v4().to_string(),
       role: "control",
     };
-    let server = Server::new(health, Caller::Cli).token(token).runs(api.clone()).processes(api).bind(&[Listen::parse(listen)]).await?;
-    tracing::info!("control daemon listening on {listen}");
-    server.serve(stop).await?;
-    Ok(())
+    Server::new(health, Caller::Cli).token(token).runs(api.clone()).processes(api.clone()).runners(api)
   }
 
   /// Unwinds the runs being created, stops every other run in the

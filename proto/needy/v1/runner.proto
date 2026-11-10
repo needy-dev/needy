@@ -1,0 +1,159 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+// RunnerService is the control plane's runner registry: join tokens, the
+// runners that joined with them, and their heartbeats.
+//
+// Operators call it with the control daemon's token. `Join` needs no bearer
+// token: the join token in the request authenticates it. `Heartbeat` is the
+// only method a runner's credential reaches.
+service RunnerService {
+  // Create a join token. Its secret is in the response only.
+  rpc CreateJoinToken(CreateJoinTokenRequest) returns (CreateJoinTokenResponse);
+  // Every join token, including expired, spent and revoked ones.
+  rpc ListJoinTokens(ListJoinTokensRequest) returns (ListJoinTokensResponse);
+  rpc RevokeJoinToken(RevokeJoinTokenRequest) returns (RevokeJoinTokenResponse);
+  // Register a runner with a join token. Returns its credential, once.
+  rpc Join(JoinRequest) returns (JoinResponse);
+  // A runner reports that it is alive and what it can host. Authenticated
+  // by the runner's credential.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // Every runner, including removed ones.
+  rpc ListRunners(ListRunnersRequest) returns (ListRunnersResponse);
+  // Ask for a new credential for a runner. The runner receives it in its
+  // next heartbeat response; its old credential stays valid until it uses
+  // the new one.
+  rpc RotateRunner(RotateRunnerRequest) returns (RotateRunnerResponse);
+  // Revoke a runner's credentials. It stays listed as removed.
+  rpc RemoveRunner(RemoveRunnerRequest) returns (RemoveRunnerResponse);
+}
+
+// What a runner can host.
+enum RunnerRole {
+  RUNNER_ROLE_UNSPECIFIED = 0;
+  RUNNER_ROLE_ACTOR = 1;
+  RUNNER_ROLE_EXECUTOR = 2;
+}
+
+enum JoinTokenState {
+  JOIN_TOKEN_STATE_UNSPECIFIED = 0;
+  JOIN_TOKEN_STATE_VALID = 1;
+  JOIN_TOKEN_STATE_EXPIRED = 2;
+  // No uses are left.
+  JOIN_TOKEN_STATE_USED_UP = 3;
+  JOIN_TOKEN_STATE_REVOKED = 4;
+}
+
+enum RunnerStatus {
+  RUNNER_STATUS_UNSPECIFIED = 0;
+  // A heartbeat arrived within the last three heartbeat intervals.
+  RUNNER_STATUS_ONLINE = 1;
+  RUNNER_STATUS_OFFLINE = 2;
+  RUNNER_STATUS_REMOVED = 3;
+}
+
+message JoinToken {
+  // Public; names the token in listings and in `RevokeJoinToken`.
+  string id = 1;
+  // The roles a runner may declare; empty allows every role.
+  repeated RunnerRole roles = 2;
+  // Labels every runner that joins with it gets.
+  map<string, string> labels = 3;
+  int64 created_at_ms = 4;
+  int64 expires_at_ms = 5;
+  uint32 uses_left = 6;
+  JoinTokenState state = 7;
+}
+
+message CreateJoinTokenRequest {
+  // Required, positive.
+  int64 ttl_ms = 1;
+  // How many runners may join with it. Required, at least 1.
+  uint32 uses = 2;
+  repeated RunnerRole roles = 3;
+  map<string, string> labels = 4;
+}
+
+message CreateJoinTokenResponse {
+  JoinToken join_token = 1;
+  // The secret to hand to the runner; not stored, not shown again.
+  string token = 2;
+}
+
+message ListJoinTokensRequest {}
+
+message ListJoinTokensResponse {
+  repeated JoinToken join_tokens = 1;
+}
+
+message RevokeJoinTokenRequest {
+  string id = 1;
+}
+
+message RevokeJoinTokenResponse {}
+
+message JoinRequest {
+  string join_token = 1;
+  // A DNS label: lowercase letters, digits and '-'.
+  string name = 2;
+  // At least one, within the join token's roles.
+  repeated RunnerRole roles = 3;
+  map<string, string> labels = 4;
+}
+
+message JoinResponse {
+  Runner runner = 1;
+  // The runner's credential, a bearer token for `Heartbeat`. Not stored,
+  // not shown again.
+  string credential = 2;
+  // How often the control plane expects a heartbeat.
+  int64 heartbeat_interval_ms = 3;
+}
+
+message HeartbeatRequest {
+  // What the runner can host now, within its join token's scope.
+  repeated RunnerRole roles = 1;
+  map<string, string> labels = 2;
+}
+
+message HeartbeatResponse {
+  // A new credential after `RotateRunner`, empty otherwise. The runner keeps
+  // it and uses it from its next call on; that use retires the old one.
+  string credential = 1;
+  int64 heartbeat_interval_ms = 2;
+}
+
+message Runner {
+  string name = 1;
+  repeated RunnerRole roles = 2;
+  // Its own labels and those of its join token.
+  map<string, string> labels = 3;
+  RunnerStatus status = 4;
+  int64 created_at_ms = 5;
+  // Its last heartbeat, or its join.
+  int64 last_seen_at_ms = 6;
+  // A new credential was asked for and the runner has not used it yet.
+  bool rotating = 7;
+  // The ID of the join token it joined with.
+  string join_token_id = 8;
+}
+
+message ListRunnersRequest {}
+
+message ListRunnersResponse {
+  repeated Runner runners = 1;
+}
+
+message RotateRunnerRequest {
+  string name = 1;
+}
+
+message RotateRunnerResponse {}
+
+message RemoveRunnerRequest {
+  string name = 1;
+}
+
+message RemoveRunnerResponse {}

@@ -614,5 +614,250 @@ impl RunState {
         }
     }
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JoinToken {
+    /// Public; names the token in listings and in `RevokeJoinToken`.
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    /// The roles a runner may declare; empty allows every role.
+    #[prost(enumeration="RunnerRole", repeated, tag="2")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    /// Labels every runner that joins with it gets.
+    #[prost(map="string, string", tag="3")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(int64, tag="4")]
+    pub created_at_ms: i64,
+    #[prost(int64, tag="5")]
+    pub expires_at_ms: i64,
+    #[prost(uint32, tag="6")]
+    pub uses_left: u32,
+    #[prost(enumeration="JoinTokenState", tag="7")]
+    pub state: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateJoinTokenRequest {
+    /// Required, positive.
+    #[prost(int64, tag="1")]
+    pub ttl_ms: i64,
+    /// How many runners may join with it. Required, at least 1.
+    #[prost(uint32, tag="2")]
+    pub uses: u32,
+    #[prost(enumeration="RunnerRole", repeated, tag="3")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    #[prost(map="string, string", tag="4")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateJoinTokenResponse {
+    #[prost(message, optional, tag="1")]
+    pub join_token: ::core::option::Option<JoinToken>,
+    /// The secret to hand to the runner; not stored, not shown again.
+    #[prost(string, tag="2")]
+    pub token: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListJoinTokensRequest {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListJoinTokensResponse {
+    #[prost(message, repeated, tag="1")]
+    pub join_tokens: ::prost::alloc::vec::Vec<JoinToken>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeJoinTokenRequest {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeJoinTokenResponse {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JoinRequest {
+    #[prost(string, tag="1")]
+    pub join_token: ::prost::alloc::string::String,
+    /// A DNS label: lowercase letters, digits and '-'.
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    /// At least one, within the join token's roles.
+    #[prost(enumeration="RunnerRole", repeated, tag="3")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    #[prost(map="string, string", tag="4")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JoinResponse {
+    #[prost(message, optional, tag="1")]
+    pub runner: ::core::option::Option<Runner>,
+    /// The runner's credential, a bearer token for `Heartbeat`. Not stored,
+    /// not shown again.
+    #[prost(string, tag="2")]
+    pub credential: ::prost::alloc::string::String,
+    /// How often the control plane expects a heartbeat.
+    #[prost(int64, tag="3")]
+    pub heartbeat_interval_ms: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HeartbeatRequest {
+    /// What the runner can host now, within its join token's scope.
+    #[prost(enumeration="RunnerRole", repeated, tag="1")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    #[prost(map="string, string", tag="2")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HeartbeatResponse {
+    /// A new credential after `RotateRunner`, empty otherwise. The runner keeps
+    /// it and uses it from its next call on; that use retires the old one.
+    #[prost(string, tag="1")]
+    pub credential: ::prost::alloc::string::String,
+    #[prost(int64, tag="2")]
+    pub heartbeat_interval_ms: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Runner {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration="RunnerRole", repeated, tag="2")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    /// Its own labels and those of its join token.
+    #[prost(map="string, string", tag="3")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(enumeration="RunnerStatus", tag="4")]
+    pub status: i32,
+    #[prost(int64, tag="5")]
+    pub created_at_ms: i64,
+    /// Its last heartbeat, or its join.
+    #[prost(int64, tag="6")]
+    pub last_seen_at_ms: i64,
+    /// A new credential was asked for and the runner has not used it yet.
+    #[prost(bool, tag="7")]
+    pub rotating: bool,
+    /// The ID of the join token it joined with.
+    #[prost(string, tag="8")]
+    pub join_token_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListRunnersRequest {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListRunnersResponse {
+    #[prost(message, repeated, tag="1")]
+    pub runners: ::prost::alloc::vec::Vec<Runner>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateRunnerRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateRunnerResponse {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveRunnerRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveRunnerResponse {
+}
+/// What a runner can host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RunnerRole {
+    Unspecified = 0,
+    Actor = 1,
+    Executor = 2,
+}
+impl RunnerRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUNNER_ROLE_UNSPECIFIED",
+            Self::Actor => "RUNNER_ROLE_ACTOR",
+            Self::Executor => "RUNNER_ROLE_EXECUTOR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUNNER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUNNER_ROLE_ACTOR" => Some(Self::Actor),
+            "RUNNER_ROLE_EXECUTOR" => Some(Self::Executor),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum JoinTokenState {
+    Unspecified = 0,
+    Valid = 1,
+    Expired = 2,
+    /// No uses are left.
+    UsedUp = 3,
+    Revoked = 4,
+}
+impl JoinTokenState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "JOIN_TOKEN_STATE_UNSPECIFIED",
+            Self::Valid => "JOIN_TOKEN_STATE_VALID",
+            Self::Expired => "JOIN_TOKEN_STATE_EXPIRED",
+            Self::UsedUp => "JOIN_TOKEN_STATE_USED_UP",
+            Self::Revoked => "JOIN_TOKEN_STATE_REVOKED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "JOIN_TOKEN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "JOIN_TOKEN_STATE_VALID" => Some(Self::Valid),
+            "JOIN_TOKEN_STATE_EXPIRED" => Some(Self::Expired),
+            "JOIN_TOKEN_STATE_USED_UP" => Some(Self::UsedUp),
+            "JOIN_TOKEN_STATE_REVOKED" => Some(Self::Revoked),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RunnerStatus {
+    Unspecified = 0,
+    /// A heartbeat arrived within the last three heartbeat intervals.
+    Online = 1,
+    Offline = 2,
+    Removed = 3,
+}
+impl RunnerStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUNNER_STATUS_UNSPECIFIED",
+            Self::Online => "RUNNER_STATUS_ONLINE",
+            Self::Offline => "RUNNER_STATUS_OFFLINE",
+            Self::Removed => "RUNNER_STATUS_REMOVED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUNNER_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUNNER_STATUS_ONLINE" => Some(Self::Online),
+            "RUNNER_STATUS_OFFLINE" => Some(Self::Offline),
+            "RUNNER_STATUS_REMOVED" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
 include!("needy.v1.tonic.rs");
 // @@protoc_insertion_point(module)

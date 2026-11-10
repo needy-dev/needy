@@ -136,6 +136,50 @@ impl fmt::Display for Origin {
   }
 }
 
+/// What a runner can host. On the wire it is the `needy.v1.RunnerRole`
+/// enum; `needy_api_server::protocol::domain` maps between the two.
+// TODO(runner-roles): a role does not carry its runtimes (`firecracker`,
+// `container`) or providers (`native`, `docker`) yet, as the runners-and-runs
+// design sketches; scheduling (slice 5) is the first reader that needs them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunnerRole {
+  /// Hosts actors.
+  Actor,
+  /// Hosts executors.
+  Executor,
+}
+
+impl RunnerRole {
+  pub const ALL: [Self; 2] = [Self::Actor, Self::Executor];
+
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Actor => "actor",
+      Self::Executor => "executor",
+    }
+  }
+}
+
+impl fmt::Display for RunnerRole {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl std::str::FromStr for RunnerRole {
+  type Err = UnknownRole;
+
+  fn from_str(text: &str) -> Result<Self, UnknownRole> {
+    Self::ALL.into_iter().find(|role| role.as_str() == text).ok_or_else(|| UnknownRole(text.to_string()))
+  }
+}
+
+/// A role name this build does not know.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown runner role {0:?}; known roles are actor and executor")]
+pub struct UnknownRole(pub String);
+
 /// The network a request came from, at a gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

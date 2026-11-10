@@ -20,6 +20,7 @@ use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
 use needy_api_proto::v1::process_service_client::ProcessServiceClient;
 use needy_api_proto::v1::run_service_client::RunServiceClient;
+use needy_api_proto::v1::runner_service_client::RunnerServiceClient;
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
@@ -103,6 +104,10 @@ impl Client {
 
   pub fn runs(&self) -> RunServiceClient<Service> {
     RunServiceClient::new(self.service())
+  }
+
+  pub fn runners(&self) -> RunnerServiceClient<Service> {
+    RunnerServiceClient::new(self.service())
   }
 
   pub fn guest(&self) -> GuestServiceClient<Service> {

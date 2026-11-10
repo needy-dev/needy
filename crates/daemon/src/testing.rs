@@ -4,6 +4,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use needy_api_server::control::{Caller, NewRun};
 use needy_api_server::{Health, Listen, Server};
@@ -64,6 +65,11 @@ pub struct Started {
 }
 
 pub async fn daemon() -> Started {
+  daemon_with_heartbeat(Duration::from_secs(15)).await
+}
+
+/// A control daemon whose runners send a heartbeat every `interval`.
+pub async fn daemon_with_heartbeat(interval: Duration) -> Started {
   let dir = tempfile::tempdir().unwrap();
   // A stand-in KVM device: a file the daemon can open for reading and
   // writing. A test removes it to stand for a host without KVM.
@@ -75,10 +81,33 @@ pub async fn daemon() -> Started {
     actor_image: dir.path().join("image"),
     kvm,
     docker_image: "needy-executor:latest".into(),
+    heartbeat_interval: interval,
   })
   .await
   .unwrap();
   Started { daemon, dir }
+}
+
+/// A control daemon serving its API on a socket in its directory, for
+/// the CLI holding `token`, and a client without a token.
+pub struct Served {
+  /// Keeps the daemon and its directory.
+  _started: Started,
+  pub client: needy_api_client::Client,
+  _stop: DropGuard,
+}
+
+pub async fn serve(started: Started, token: Option<&str>) -> Served {
+  let socket = started.dir.path().join("api.sock");
+  let bound = started.daemon.server(token.map(str::to_string)).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
+  let cancel = CancellationToken::new();
+  tokio::spawn(bound.serve(cancel.clone()));
+  let client = needy_api_client::Client::connect(&format!("unix:{}", socket.display())).await.unwrap();
+  Served {
+    _started: started,
+    client,
+    _stop: cancel.drop_guard(),
+  }
 }
 
 /// Writes a stand-in actor image into `dir`: empty kernel and root file

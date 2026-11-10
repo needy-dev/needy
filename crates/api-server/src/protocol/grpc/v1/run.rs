@@ -24,6 +24,7 @@ impl<S> Adapter<S> {
     match self.caller {
       Caller::Cli => Ok(()),
       Caller::Actor { .. } => Err(ControlError::denied(refusal).into()),
+      Caller::Runner { .. } => Err(ControlError::denied("runners cannot manage runs").into()),
     }
   }
 }
@@ -71,6 +72,7 @@ impl<S: Runs> RunService for Adapter<S> {
     let run = match &self.caller {
       Caller::Actor { run } => run.clone(),
       Caller::Cli => std::mem::take(&mut request.run_id),
+      Caller::Runner { .. } => return Err(ControlError::denied("runners cannot place commands").into()),
     };
     let route = self.runs.decide(&run, domain::exec_context(request)).await?;
     Ok(Response::new(domain::proto_route(route)))

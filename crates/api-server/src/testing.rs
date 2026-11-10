@@ -9,7 +9,7 @@ use needy_api_client::Client;
 use needy_common::process::Exit;
 use needy_core::event::{Event, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, RunState};
+use needy_core::types::{Origin, RunState, RunnerRole};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -243,6 +243,96 @@ impl Guest for Fake {
   }
 }
 
+fn fake_runner(name: &str) -> RunnerInfo {
+  RunnerInfo {
+    name: name.into(),
+    roles: [RunnerRole::Executor].into(),
+    labels: [("os".to_string(), "darwin".to_string())].into(),
+    status: RunnerStatus::Online,
+    created_ms: 1,
+    last_seen_ms: 2,
+    rotating: false,
+    join_token: "t1".into(),
+  }
+}
+
+/// Credentials the fake knows: `needy-runner.mac.good` is the runner
+/// `mac`'s; `needy-runner.gone.old` was revoked.
+pub const MAC_CREDENTIAL: &str = "needy-runner.mac.good";
+pub const REVOKED_CREDENTIAL: &str = "needy-runner.gone.old";
+
+#[async_trait::async_trait]
+impl Runners for Fake {
+  async fn create_join_token(&self, request: NewJoinToken) -> Result<CreatedJoinToken> {
+    self.call(format!("create token ttl={} uses={} roles={:?} labels={:?}", request.ttl_ms, request.uses, request.roles, request.labels));
+    Ok(CreatedJoinToken {
+      info: JoinTokenInfo {
+        id: "t1".into(),
+        roles: request.roles,
+        labels: request.labels,
+        created_ms: 1,
+        expires_ms: 1 + request.ttl_ms,
+        uses_left: request.uses,
+        state: JoinTokenState::Valid,
+      },
+      token: "needy-join.t1.secret".into(),
+    })
+  }
+
+  async fn join_tokens(&self) -> Result<Vec<JoinTokenInfo>> {
+    self.call("list tokens".into());
+    Ok(Vec::new())
+  }
+
+  async fn revoke_join_token(&self, id: &str) -> Result<()> {
+    self.call(format!("revoke {id}"));
+    Ok(())
+  }
+
+  async fn join(&self, request: Joining) -> Result<Joined> {
+    self.call(format!("join {} with {} as {:?}", request.name, request.join_token, request.report.roles));
+    if request.join_token != "needy-join.t1.secret" {
+      return Err(ControlError::Unauthenticated("the join token is not valid".into()));
+    }
+    Ok(Joined {
+      runner: fake_runner(&request.name),
+      credential: MAC_CREDENTIAL.into(),
+      heartbeat_interval_ms: 15_000,
+    })
+  }
+
+  async fn heartbeat(&self, runner: &str, report: RunnerReport) -> Result<Beat> {
+    self.call(format!("heartbeat {runner} {:?}", report.roles));
+    Ok(Beat {
+      credential: Some("needy-runner.mac.new".into()),
+      heartbeat_interval_ms: 15_000,
+    })
+  }
+
+  async fn runners(&self) -> Result<Vec<RunnerInfo>> {
+    self.call("list runners".into());
+    Ok(vec![fake_runner("mac")])
+  }
+
+  async fn rotate(&self, runner: &str) -> Result<()> {
+    self.call(format!("rotate {runner}"));
+    Ok(())
+  }
+
+  async fn remove(&self, runner: &str) -> Result<()> {
+    self.call(format!("remove {runner}"));
+    Ok(())
+  }
+
+  async fn credential(&self, token: &str) -> Credential {
+    match token {
+      MAC_CREDENTIAL => Credential::Runner("mac".into()),
+      REVOKED_CREDENTIAL => Credential::Refused,
+      _ => Credential::Other,
+    }
+  }
+}
+
 /// A server for `caller` with every service on the fake, on a socket in a
 /// temporary directory, and a client of it. The server stops with the
 /// returned token's guard.
@@ -270,6 +360,7 @@ pub async fn serve_with(caller: Caller, token: Option<&str>) -> Served {
     .runs(fake.clone())
     .processes(fake.clone())
     .guest(fake.clone())
+    .runners(fake.clone())
     .bind(&[Listen::Unix(socket.clone())])
     .await
     .unwrap();

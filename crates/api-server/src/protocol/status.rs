@@ -4,6 +4,7 @@
 //! | Error | Code | Details |
 //! | --- | --- | --- |
 //! | `Denied` | `PERMISSION_DENIED` | `ExecRefusal` with the refused command's events |
+//! | `Unauthenticated` | `UNAUTHENTICATED` | |
 //! | `NotFound` | `NOT_FOUND` | |
 //! | `Invalid` | `INVALID_ARGUMENT` | |
 //! | `Failed` | `FAILED_PRECONDITION` | |
@@ -26,6 +27,7 @@ pub fn status(error: ControlError) -> Status {
       };
       Status::with_details(Code::PermissionDenied, message, details.encode_to_vec().into())
     }
+    ControlError::Unauthenticated(message) => Status::unauthenticated(message),
     ControlError::NotFound(message) => Status::not_found(message),
     ControlError::Invalid(message) => Status::invalid_argument(message),
     ControlError::Failed(message) => Status::failed_precondition(message),

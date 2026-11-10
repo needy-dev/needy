@@ -22,10 +22,11 @@ pub struct Adapter<P> {
 impl<P> Adapter<P> {
   /// The run a call acts on: an actor's own, or the one the request
   /// names.
-  fn run(&self, named: String) -> String {
+  fn run(&self, named: String) -> Result<String, Status> {
     match &self.caller {
-      Caller::Actor { run } => run.clone(),
-      Caller::Cli => named,
+      Caller::Actor { run } => Ok(run.clone()),
+      Caller::Cli => Ok(named),
+      Caller::Runner { .. } => Err(ControlError::denied("runners cannot run processes here").into()),
     }
   }
 }
@@ -55,7 +56,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
     let open = match first.payload {
       Some(exec_request::Payload::Start(start)) => {
         let mut spec = domain::exec_spec(start).map_err(ControlError::from)?;
-        spec.run = self.run(spec.run);
+        spec.run = self.run(spec.run)?;
         ExecOpen::Start(spec)
       }
       Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
@@ -74,7 +75,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
-    let run = self.run(request.into_inner().run_id);
+    let run = self.run(request.into_inner().run_id)?;
     let processes = self.processes.list(&run).await?.into_iter().map(domain::proto_process_info).collect();
     Ok(Response::new(ListProcessesResponse { processes }))
   }

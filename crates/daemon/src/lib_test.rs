@@ -104,6 +104,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     actor_image: dir.path().join("image"),
     kvm: dir.path().join("kvm"),
     docker_image: "needy-executor:latest".into(),
+    heartbeat_interval: Duration::from_secs(15),
   };
 
   let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");

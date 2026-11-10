@@ -5,13 +5,13 @@
 //! Nothing here is generated code. The adapters in `protocol::grpc` convert
 //! requests into these types, call the traits, and convert the results back.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::pin::Pin;
 
 use needy_common::process::Exit;
 use needy_core::event::{Event, ExecutorRef};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, RunState};
+use needy_core::types::{Origin, RunState, RunnerRole};
 use tokio_stream::Stream;
 
 /// Who is calling, fixed by the listener the call arrived on.
@@ -23,6 +23,12 @@ pub enum Caller {
   /// An actor, on the listener bound to its run. Its calls act on that
   /// run; it may not create, stop or read the logs of runs.
   Actor { run: String },
+  /// A runner, by the credential it presented on the control listener. It
+  /// reaches `RunnerService.Heartbeat` only.
+  // TODO(runner-dial-out): a runner's control stream and per-task streams
+  // (slice 4 of the runners-and-runs design) are the next methods a runner
+  // reaches.
+  Runner { name: String },
 }
 
 /// Why the daemon refused or failed a call. Each variant is one row of the
@@ -34,6 +40,10 @@ pub enum ControlError {
   /// chaos injected and the placement decision.
   #[error("{message}")]
   Denied { message: String, events: Vec<Event> },
+  /// A secret in the request, such as a join token, is not valid. A
+  /// missing or wrong bearer token is refused by the middleware instead.
+  #[error("{0}")]
+  Unauthenticated(String),
   #[error("{0}")]
   NotFound(String),
   /// The request is malformed.
@@ -317,4 +327,123 @@ pub trait Guest: Send + Sync + 'static {
   async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>>;
   /// A mirror-out mapping's archive.
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()>;
+}
+
+// -------------------------------------------------------------- runners
+
+/// A join token to create.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NewJoinToken {
+  pub ttl_ms: i64,
+  pub uses: u32,
+  /// The roles a runner may declare; empty allows every role.
+  pub roles: BTreeSet<RunnerRole>,
+  /// Labels every runner that joins with it gets.
+  pub labels: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinTokenState {
+  Valid,
+  Expired,
+  UsedUp,
+  Revoked,
+}
+
+/// A join token without its secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JoinTokenInfo {
+  pub id: String,
+  pub roles: BTreeSet<RunnerRole>,
+  pub labels: BTreeMap<String, String>,
+  pub created_ms: i64,
+  pub expires_ms: i64,
+  pub uses_left: u32,
+  pub state: JoinTokenState,
+}
+
+/// A join token just created, with its secret.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedJoinToken {
+  pub info: JoinTokenInfo,
+  pub token: String,
+}
+
+/// What a runner declares when it joins and at each heartbeat.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerReport {
+  pub roles: BTreeSet<RunnerRole>,
+  pub labels: BTreeMap<String, String>,
+}
+
+/// A runner asking to join.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Joining {
+  pub join_token: String,
+  pub name: String,
+  pub report: RunnerReport,
+}
+
+/// A runner that joined, with its credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Joined {
+  pub runner: RunnerInfo,
+  pub credential: String,
+  pub heartbeat_interval_ms: i64,
+}
+
+/// The answer to a heartbeat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Beat {
+  /// A new credential after a rotation.
+  pub credential: Option<String>,
+  pub heartbeat_interval_ms: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerStatus {
+  Online,
+  Offline,
+  Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunnerInfo {
+  pub name: String,
+  pub roles: BTreeSet<RunnerRole>,
+  pub labels: BTreeMap<String, String>,
+  pub status: RunnerStatus,
+  pub created_ms: i64,
+  pub last_seen_ms: i64,
+  pub rotating: bool,
+  pub join_token: String,
+}
+
+/// What a bearer token is to the runner registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Credential {
+  /// The credential of this runner.
+  Runner(String),
+  /// Shaped like a runner credential, but no runner holds it: removed,
+  /// rotated away, or never issued.
+  Refused,
+  /// Not a runner credential.
+  Other,
+}
+
+/// The control plane's runner registry.
+#[async_trait::async_trait]
+pub trait Runners: Send + Sync + 'static {
+  async fn create_join_token(&self, request: NewJoinToken) -> Result<CreatedJoinToken>;
+  async fn join_tokens(&self) -> Result<Vec<JoinTokenInfo>>;
+  async fn revoke_join_token(&self, id: &str) -> Result<()>;
+  async fn join(&self, request: Joining) -> Result<Joined>;
+  async fn heartbeat(&self, runner: &str, report: RunnerReport) -> Result<Beat>;
+  /// Every runner, including removed ones.
+  async fn runners(&self) -> Result<Vec<RunnerInfo>>;
+  async fn rotate(&self, runner: &str) -> Result<()>;
+  async fn remove(&self, runner: &str) -> Result<()>;
+  /// Whose credential a bearer token is. The middleware calls it for every
+  /// token that is not the control token.
+  async fn credential(&self, token: &str) -> Credential;
 }

@@ -18,7 +18,14 @@ needy-core.workspace = true
 needy-core-actor.workspace = true
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["sqlite", "jsonl", "timing"] }
+rand.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -30,3 +37,4 @@ libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+tonic.workspace = true

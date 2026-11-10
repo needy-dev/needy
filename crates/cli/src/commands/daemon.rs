@@ -37,6 +37,10 @@ pub struct Args {
   /// Docker image for docker executors without their own image.
   #[arg(long, default_value = "needy-executor:latest")]
   docker_image: String,
+  /// How often runners send a heartbeat (control mode). A runner is
+  /// offline after three intervals without one.
+  #[arg(long, default_value = "15s", value_parser = humantime::parse_duration)]
+  heartbeat_interval: std::time::Duration,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -73,6 +77,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         actor_image: image,
         kvm: needy_core_actor::host::vm::KVM.into(),
         docker_image: args.docker_image,
+        heartbeat_interval: args.heartbeat_interval,
       })
       .await?;
       // Runs are stopped even when serving failed.

@@ -6,6 +6,7 @@ use super::*;
 fn each_error_has_its_code_and_keeps_its_message() {
   let table = [
     (ControlError::denied("actors cannot stop runs"), Code::PermissionDenied),
+    (ControlError::Unauthenticated("the join token is not valid".into()), Code::Unauthenticated),
     (ControlError::NotFound("no such run".into()), Code::NotFound),
     (ControlError::Invalid("the exec origin is unspecified".into()), Code::InvalidArgument),
     (ControlError::Failed("invalid profile: x".into()), Code::FailedPrecondition),

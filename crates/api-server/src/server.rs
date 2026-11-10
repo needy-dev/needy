@@ -10,12 +10,13 @@ use needy_api_proto::v1::guest_service_server::GuestServiceServer;
 use needy_api_proto::v1::health_service_server::HealthServiceServer;
 use needy_api_proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
 use needy_api_proto::v1::run_service_server::RunServiceServer;
+use needy_api_proto::v1::runner_service_server::RunnerServiceServer;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
-use crate::control::{Caller, Guest, Processes, Runs};
-use crate::middleware::authentication::{AuthLayer, Token};
-use crate::protocol::grpc::v1::{guest, health::Health, process, run};
+use crate::control::{Caller, Guest, Processes, Runners, Runs};
+use crate::middleware::authentication::{AuthLayer, Credentials, Token};
+use crate::protocol::grpc::v1::{guest, health::Health, process, run, runner};
 
 // NOTICE: once cancelled, a server stops accepting and lets open calls
 // finish; an attached exec stream may never finish, so it gets 5 s.
@@ -76,6 +77,8 @@ pub struct Server {
   routes: Routes,
   caller: Caller,
   token: Option<String>,
+  /// The runner registry, which also authenticates runners' credentials.
+  runners: Option<Arc<dyn Runners>>,
 }
 
 impl Server {
@@ -85,11 +88,13 @@ impl Server {
       routes: Routes::new(HealthServiceServer::new(health)),
       caller,
       token: None,
+      runners: None,
     }
   }
 
-  /// The bearer token every method but health needs; any token is accepted
-  /// when there is none.
+  /// The bearer token every method but health (and `Join`) needs; any
+  /// token is accepted when there is none. A runner's credential is no
+  /// substitute: it reaches the runner methods only.
   pub fn token(mut self, token: Option<String>) -> Self {
     self.token = token;
     self
@@ -98,6 +103,18 @@ impl Server {
   pub fn runs<S: Runs>(mut self, runs: Arc<S>) -> Self {
     let caller = self.caller.clone();
     self.routes = self.routes.add_service(RunServiceServer::new(run::Adapter { runs, caller }));
+    self
+  }
+
+  /// `RunnerService`. Requests that present a runner's credential are then
+  /// from that runner, and `Join` needs no bearer token.
+  pub fn runners<R: Runners>(mut self, runners: Arc<R>) -> Self {
+    let caller = self.caller.clone();
+    self.routes = self.routes.add_service(RunnerServiceServer::new(runner::Adapter {
+      runners: runners.clone(),
+      caller,
+    }));
+    self.runners = Some(runners);
     self
   }
 
@@ -138,7 +155,11 @@ impl Server {
     }
     Ok(Bound {
       routes: self.routes,
-      token: self.token,
+      credentials: Credentials {
+        listener: self.caller,
+        token: Token(self.token),
+        runners: self.runners,
+      },
       listeners,
     })
   }
@@ -221,7 +242,7 @@ impl Listener {
 /// A server bound to its listeners.
 pub struct Bound {
   routes: Routes,
-  token: Option<String>,
+  credentials: Credentials,
   listeners: Vec<(Listen, Listener)>,
 }
 
@@ -229,7 +250,7 @@ impl Bound {
   /// Serves every listener until `cancel`, then lets open calls finish for
   /// a grace period.
   pub async fn serve(self, cancel: CancellationToken) -> Result<(), Error> {
-    let auth = AuthLayer::new(Token(self.token));
+    let auth = AuthLayer::new(self.credentials);
     let mut serving = tokio::task::JoinSet::new();
     for (listen, listener) in self.listeners {
       let router = tonic::transport::Server::builder()

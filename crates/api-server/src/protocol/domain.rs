@@ -14,9 +14,14 @@ use needy_api_proto::v1;
 use needy_common::process::Exit;
 use needy_core::event::Event;
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, RunState};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::control::{ExecInput, ExecOutput, ExecSpec, GuestConfig, NewRun, ProcessInfo, Route, RunInfo, Started, Target, WindowSize};
+use needy_core::types::{Origin, RunState, RunnerRole};
+
+use crate::control::{
+  ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, ProcessInfo, Route, RunInfo,
+  RunnerInfo, RunnerReport, RunnerStatus, Started, Target, WindowSize,
+};
 
 /// A request field with no domain meaning.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -66,6 +71,115 @@ pub fn proto_run_state(state: RunState) -> v1::RunState {
     RunState::Stopped => v1::RunState::Stopped,
     RunState::Finished => v1::RunState::Finished,
     RunState::Failed => v1::RunState::Failed,
+  }
+}
+
+// -------------------------------------------------------------- runners
+
+/// The roles a request names; every one must be known and specified.
+pub fn runner_roles(values: &[i32]) -> Result<BTreeSet<RunnerRole>, Error> {
+  const FIELD: &str = "runner role";
+  values
+    .iter()
+    .map(|&value| match v1::RunnerRole::try_from(value) {
+      Ok(v1::RunnerRole::Unspecified) => Err(Error::Unspecified(FIELD)),
+      Ok(v1::RunnerRole::Actor) => Ok(RunnerRole::Actor),
+      Ok(v1::RunnerRole::Executor) => Ok(RunnerRole::Executor),
+      Err(_) => Err(Error::Unknown {
+        field: FIELD,
+        value,
+      }),
+    })
+    .collect()
+}
+
+pub fn proto_runner_role(role: RunnerRole) -> v1::RunnerRole {
+  match role {
+    RunnerRole::Actor => v1::RunnerRole::Actor,
+    RunnerRole::Executor => v1::RunnerRole::Executor,
+  }
+}
+
+fn proto_runner_roles(roles: &BTreeSet<RunnerRole>) -> Vec<i32> {
+  roles.iter().map(|&role| proto_runner_role(role) as i32).collect()
+}
+
+fn labels(labels: HashMap<String, String>) -> BTreeMap<String, String> {
+  labels.into_iter().collect()
+}
+
+fn proto_labels(labels: BTreeMap<String, String>) -> HashMap<String, String> {
+  labels.into_iter().collect()
+}
+
+pub fn new_join_token(request: v1::CreateJoinTokenRequest) -> Result<NewJoinToken, Error> {
+  Ok(NewJoinToken {
+    roles: runner_roles(&request.roles)?,
+    ttl_ms: request.ttl_ms,
+    uses: request.uses,
+    labels: labels(request.labels),
+  })
+}
+
+// NOTICE: proto -> `JoinTokenState` and `RunnerStatus` live on the client
+// side (`needy-cli`), the only reader of them on the wire.
+pub fn proto_join_token(token: JoinTokenInfo) -> v1::JoinToken {
+  let state = match token.state {
+    JoinTokenState::Valid => v1::JoinTokenState::Valid,
+    JoinTokenState::Expired => v1::JoinTokenState::Expired,
+    JoinTokenState::UsedUp => v1::JoinTokenState::UsedUp,
+    JoinTokenState::Revoked => v1::JoinTokenState::Revoked,
+  };
+  v1::JoinToken {
+    id: token.id,
+    roles: proto_runner_roles(&token.roles),
+    labels: proto_labels(token.labels),
+    created_at_ms: token.created_ms,
+    expires_at_ms: token.expires_ms,
+    uses_left: token.uses_left,
+    state: state as i32,
+  }
+}
+
+pub fn joining(request: v1::JoinRequest) -> Result<Joining, Error> {
+  if request.join_token.is_empty() {
+    return Err(Error::Missing("join token"));
+  }
+  if request.name.is_empty() {
+    return Err(Error::Missing("runner name"));
+  }
+  Ok(Joining {
+    report: RunnerReport {
+      roles: runner_roles(&request.roles)?,
+      labels: labels(request.labels),
+    },
+    join_token: request.join_token,
+    name: request.name,
+  })
+}
+
+pub fn runner_report(request: v1::HeartbeatRequest) -> Result<RunnerReport, Error> {
+  Ok(RunnerReport {
+    roles: runner_roles(&request.roles)?,
+    labels: labels(request.labels),
+  })
+}
+
+pub fn proto_runner(runner: RunnerInfo) -> v1::Runner {
+  let status = match runner.status {
+    RunnerStatus::Online => v1::RunnerStatus::Online,
+    RunnerStatus::Offline => v1::RunnerStatus::Offline,
+    RunnerStatus::Removed => v1::RunnerStatus::Removed,
+  };
+  v1::Runner {
+    roles: proto_runner_roles(&runner.roles),
+    name: runner.name,
+    labels: proto_labels(runner.labels),
+    status: status as i32,
+    created_at_ms: runner.created_ms,
+    last_seen_at_ms: runner.last_seen_ms,
+    rotating: runner.rotating,
+    join_token_id: runner.join_token,
   }
 }
 

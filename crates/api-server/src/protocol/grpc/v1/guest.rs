@@ -25,7 +25,7 @@ impl<G> Adapter<G> {
   fn run(&self) -> Result<&str, Status> {
     match &self.caller {
       Caller::Actor { run } => Ok(run),
-      Caller::Cli => Err(ControlError::denied("not an actor listener").into()),
+      Caller::Cli | Caller::Runner { .. } => Err(ControlError::denied("not an actor listener").into()),
     }
   }
 }
