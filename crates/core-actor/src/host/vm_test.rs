@@ -85,10 +85,75 @@ fn the_firecracker_environment_carries_the_recipe_identity() {
   assert_eq!(env["NEEDY_PCI_ISA_BRIDGE"], "8086:7110:03");
   let smbios = &env["NEEDY_SMBIOS"];
   assert!(smbios.starts_with("bios_date=01/01/2011;bios_vendor=Google;bios_version=Google;"), "{smbios}");
-  assert!(smbios.contains(";product_name=Google Compute Engine;product_version=;"), "{smbios}");
+  assert!(smbios.contains(";product_name=Google Compute Engine;"), "{smbios}");
+  assert!(smbios.contains(";product_version=;"), "{smbios}");
   assert!(smbios.contains("chassis_type=1;"), "{smbios}");
-  assert!(smbios.contains(";sys_vendor=Google;"), "{smbios}");
-  assert!(smbios.ends_with(&format!(";uuid={}", recipe.identity.smbios.as_ref().unwrap().uuid)), "{smbios}");
+  assert!(smbios.ends_with(";sys_vendor=Google"), "{smbios}");
+  assert!(smbios.contains(&format!(";product_uuid={};", recipe.identity.smbios.as_ref().unwrap().uuid)), "{smbios}");
+}
+
+/// The keys `images/firecracker/needy.patch` reads from `NEEDY_SMBIOS`, with
+/// their defaults: the `("key", "value")` rows of its `DEFAULTS` table.
+fn patch_smbios_defaults() -> BTreeMap<String, String> {
+  let patch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/firecracker/needy.patch");
+  let text = std::fs::read_to_string(&patch).unwrap();
+  let table = text.split("const DEFAULTS").nth(1).unwrap().split("];").next().unwrap();
+  table
+    .lines()
+    .filter_map(|line| {
+      let row = line.trim_start_matches('+').trim().strip_prefix("(\"")?.strip_suffix("\"),")?;
+      let (key, value) = row.split_once("\", \"")?;
+      Some((key.to_string(), value.to_string()))
+    })
+    .collect()
+}
+
+fn smbios_keys(value: &str) -> BTreeMap<String, String> {
+  value.split(';').filter_map(|pair| pair.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+}
+
+// ROOT CAUSE:
+//
+// If a recipe set a serial, the guest still showed the patch's fixed GCE
+// serial and UUID, because `identity_env` sent them as `serial` and `uuid`
+// while the patched Firecracker reads `product_serial` and `product_uuid`
+// (the names of `/sys/class/dmi/id`), and it never sent `chassis_vendor` or
+// `board_serial`, so those stayed Google's on every machine.
+//
+// Before the fix, `dmidecode -t system` in an actor showed
+// `GoogleCloud-6B1F5C2E0D4A9E8B7C3D2A1F0E9D8C7B` whatever the recipe said.
+// The fix keeps every key needy sends one the patch reads, and sends every
+// key whose patch default is a GCE value, so no default leaks into the guest.
+#[test]
+fn every_smbios_key_needy_sends_is_one_the_patched_firecracker_reads() {
+  let recipe = gce("firmware: { dmi: { serial: \"GoogleCloud-{hash}\" } }");
+  let smbios = recipe.identity.smbios.clone().unwrap();
+  let defaults = patch_smbios_defaults();
+  assert!(defaults.contains_key("product_serial"), "{defaults:?}");
+
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let sent = smbios_keys(&env["NEEDY_SMBIOS"]);
+
+  let unread: Vec<_> = sent.keys().filter(|key| !defaults.contains_key(*key)).collect();
+  assert!(unread.is_empty(), "the patch does not read {unread:?}");
+  let leaked: Vec<_> = defaults.iter().filter(|(key, value)| !value.is_empty() && !sent.contains_key(*key)).map(|(key, _)| key).collect();
+  assert!(leaked.is_empty(), "the patch's defaults stay for {leaked:?}");
+  assert_eq!(sent["product_serial"], smbios.serial.unwrap());
+  assert_eq!(sent["product_uuid"], smbios.uuid);
+  assert_eq!(sent["chassis_vendor"], "Google");
+}
+
+#[test]
+fn a_dell_identity_sends_no_google_value() {
+  let recipe = needy_config::recipe::load(&Source::builtin("dell-optiplex-ubuntu-24.04")).unwrap();
+  let recipe = needy_core::recipe::compile(&recipe, &HostInfo::default(), 7);
+
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let sent = smbios_keys(&env["NEEDY_SMBIOS"]);
+
+  assert!(sent.values().all(|v| !v.contains("Google")), "{sent:?}");
+  assert_eq!(sent["chassis_vendor"], "Dell Inc.");
+  assert_eq!(sent["board_serial"], "");
 }
 
 #[test]
@@ -116,7 +181,10 @@ fn smbios_values_cannot_end_a_field_early() {
 
   let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
 
-  assert_eq!(env["NEEDY_SMBIOS"], "product_name=a,b;uuid=u");
+  assert_eq!(
+    env["NEEDY_SMBIOS"],
+    "bios_date=;bios_vendor=;bios_version=;board_name=;board_serial=;board_vendor=;chassis_type=;chassis_vendor=;product_name=a,b;product_serial=;product_uuid=u;product_version=;sys_vendor="
+  );
 }
 
 #[test]

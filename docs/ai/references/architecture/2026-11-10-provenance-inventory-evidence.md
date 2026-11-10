@@ -19,6 +19,9 @@ Status:
   value came from.
 - **REVIEW**: the value disagrees with its source; the evidence is at the
   definition. Nothing was fixed.
+- **fixed**: was REVIEW; the identity fixes of 2026-11-10 made the value
+  match its source, and the definition is cited. The row keeps the original
+  finding.
 
 Counts: 46 cited items (the second table), 9 `TODO(provenance)` markers and
 18 `REVIEW` markers (the first table, 26 rows).
@@ -47,7 +50,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | 14 | Dell sensor readings | `crates/config/src/builtin/recipes/dell-optiplex-ubuntu-24.04.yaml:56` | TODO(provenance) | none found |
 | 15 | Broadwell stepping 0 | `examples/opencode/gce.recipe.yaml:10` | TODO(provenance) | only an unpinned issue page |
 | 16 | AWS MAC prefix `0e:` | `crates/core/src/recipe/identity.rs:155` | REVIEW | AWS examples use `02:`: <https://github.com/awsdocs/amazon-ec2-user-guide/blob/e3707c431483ec0ffffcabebd36cf799ba682cd0/doc_source/instancedata-data-retrieval.md#L400> |
-| 17 | SMBIOS keys `serial` and `uuid` never reach the guest | `crates/core-actor/src/host/vm.rs:191` and `images/firecracker/needy.patch:63` | REVIEW | the patch reads `product_serial` and `product_uuid`; found by reading both sides, not run |
+| 17 | SMBIOS keys `serial` and `uuid` never reach the guest | `crates/core-actor/src/host/vm.rs:191` and `images/firecracker/needy.patch:63` | fixed | the patch reads `product_serial` and `product_uuid`; needy now sends those, `chassis_vendor` and `board_serial` under the `/sys/class/dmi/id` names, `K/drivers/firmware/dmi-id.c#L41-L59`; test `every_smbios_key_needy_sends_is_one_the_patched_firecracker_reads` |
 | 18 | Patch board serial, SMBIOS 3.0, extension byte 2 | `images/firecracker/needy.patch:57` | REVIEW | GCE shows 32-digit serials, SMBIOS 2.4 and "targeted content distribution" (bit 2); the patch sets bit 3 (UEFI), DSP0134 3.7.0 Table 9 |
 | 19 | Patch default serial and UUID values | `images/firecracker/needy.patch:65` | TODO(provenance) | none found |
 | 20 | fake coretemp idle, load and noise model | `images/kernel/fake_coretemp.c:18` | TODO(provenance) | none found |

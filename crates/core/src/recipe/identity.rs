@@ -17,6 +17,8 @@ pub struct Smbios {
   pub serial: Option<String>,
   pub board_vendor: Option<String>,
   pub board_name: Option<String>,
+  /// The chassis manufacturer: the system's, as on GCE and Dell machines.
+  pub chassis_vendor: Option<String>,
   pub bios_vendor: Option<String>,
   pub bios_version: Option<String>,
   pub bios_date: Option<String>,
@@ -86,7 +88,7 @@ fn chassis_number(value: &ChassisType) -> Option<u32> {
 }
 
 /// The SMBIOS tables for a recipe's DMI; board fields fall back to the
-/// system's.
+/// system's, and the chassis vendor is the system's.
 pub(super) fn smbios(dmi: &Dmi, seed: u64, findings: &mut Vec<Finding>) -> Smbios {
   let fill = |value: Option<&str>| value.map(|text| fill_placeholders(text, seed));
   let chassis_type = dmi.chassis_type.as_ref().and_then(|value| {
@@ -103,6 +105,7 @@ pub(super) fn smbios(dmi: &Dmi, seed: u64, findings: &mut Vec<Finding>) -> Smbio
     serial: fill(dmi.serial.as_ref().map(|t| t.as_str())),
     board_vendor: fill(dmi.board_vendor.as_deref().or(dmi.sys_vendor.as_deref())),
     board_name: fill(dmi.board_name.as_deref().or(dmi.product_name.as_deref())),
+    chassis_vendor: fill(dmi.sys_vendor.as_deref()),
     bios_vendor: fill(dmi.bios.vendor.as_deref()),
     bios_version: fill(dmi.bios.version.as_deref()),
     bios_date: fill(dmi.bios.date.as_deref()),

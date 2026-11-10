@@ -187,29 +187,33 @@ fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
     env.insert("NEEDY_HIDE_HYPERVISOR".into(), "1".into());
   }
   if let Some(smbios) = &identity.smbios {
-    // `key=value;…`; a `;` inside a value would end it early.
-    // REVIEW: the patch's `smbios.rs` reads `product_serial` and
-    // `product_uuid` (its `DEFAULTS` table in `images/firecracker/needy.patch`),
-    // not the `serial` and `uuid` keys sent here, so the recipe's serial and
-    // the seed's UUID never reach the guest: it gets the patch's fixed GCE
-    // serial and UUID. `chassis_vendor` and `board_serial` are never sent and
-    // also stay GCE's. Found by reading both sides on 2026-11-10; not run.
+    // `key=value;…`; a `;` inside a value would end it early. The keys are
+    // the names the patch's `DEFAULTS` table reads, which are Linux's
+    // `/sys/class/dmi/id` attribute names,
+    // https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L59
+    // Every key whose patch default is a GCE value is sent, empty when the
+    // recipe has none, so no default leaks into another machine's identity.
+    // TODO(smbios-board-serial): the recipe has no board serial yet, so it is
+    // sent empty ("Not Specified"); a recipe field opens when a machine's
+    // board serial has a cited format.
     let chassis_type = smbios.chassis_type.map(|n| n.to_string());
     let fields = [
       ("bios_date", smbios.bios_date.as_deref()),
       ("bios_vendor", smbios.bios_vendor.as_deref()),
       ("bios_version", smbios.bios_version.as_deref()),
       ("board_name", smbios.board_name.as_deref()),
+      ("board_serial", None),
       ("board_vendor", smbios.board_vendor.as_deref()),
       ("chassis_type", chassis_type.as_deref()),
+      ("chassis_vendor", smbios.chassis_vendor.as_deref()),
       ("product_name", smbios.product_name.as_deref()),
+      ("product_serial", smbios.serial.as_deref()),
+      ("product_uuid", Some(smbios.uuid.as_str())),
       ("product_version", smbios.product_version.as_deref()),
-      ("serial", smbios.serial.as_deref()),
       ("sys_vendor", smbios.sys_vendor.as_deref()),
-      ("uuid", Some(smbios.uuid.as_str())),
     ];
     let value =
-      fields.iter().filter_map(|(key, value)| value.map(|v| format!("{key}={}", v.replace(';', ",")))).collect::<Vec<_>>().join(";");
+      fields.iter().map(|(key, value)| format!("{key}={}", value.unwrap_or_default().replace(';', ","))).collect::<Vec<_>>().join(";");
     env.insert("NEEDY_SMBIOS".into(), value);
   }
   if let Some(id) = identity.pci_host_bridge {

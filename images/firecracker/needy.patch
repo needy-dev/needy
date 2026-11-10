@@ -60,8 +60,10 @@ the same 32; the 16-digit board serial below matches neither. It also shows
 "SMBIOS 2.4 present" with a 32-bit entry point, not 3.0, and BIOS
 characteristics extension byte 2 bit 2 (targeted content distribution, 04h),
 where the Type 0 bytes below set bit 3 (UEFI supported, 08h).
-REVIEW: `identity_env` sends `serial` and `uuid`, but this file reads
-`product_serial` and `product_uuid`, so those two stay the DEFAULTS.
+The keys are Linux's `/sys/class/dmi/id` names,
+https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L59;
+`identity_env` sends every key whose default is a GCE value, so the DEFAULTS
+apply only when NEEDY_SMBIOS lacks a key.
 TODO(provenance): the DEFAULTS' serial and UUID values themselves have no
 recorded source.
 --- a/src/vmm/src/arch/x86_64/smbios.rs	1970-01-01 08:00:00.000000000 +0800
