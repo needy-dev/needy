@@ -207,3 +207,37 @@ async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
   assert!(!session_dir(&started, &listed[0].id).join("firecracker.pid").exists(), "firecracker was started");
   assert!(daemon.pool.instances().await.is_empty());
 }
+
+// ROOT CAUSE:
+//
+// If the host had no KVM, a create with executors acquired them first (for
+// Docker, creating containers or failing on a missing image) and checked KVM
+// only when it started the actor, because the check sat in the actor's
+// start, after the executors.
+//
+// Before the fix, `examples/smoke` on a host without KVM and without the
+// executor image failed on the image, not on KVM.
+// The fix checks KVM before the session acquires anything.
+#[tokio::test]
+async fn a_create_without_kvm_fails_before_it_acquires_executors() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), LONG_RUNNING);
+  std::fs::remove_file(started.dir.path().join("kvm")).unwrap();
+  // Acquiring `far` fails: its token's variable is not set.
+  let profile = r#"
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  far: { runtime: remote, remote: { url: "unix:/nonexistent.sock", token_env: NEEDY_TEST_UNSET_TOKEN } }
+commands:
+  - { match: "**", to: far }
+"#;
+
+  let Err(needy_api_server::control::ControlError::Failed(message)) =
+    Sessions::create(daemon, new_actor_session(profile, started.dir.path())).await
+  else {
+    panic!("a create without KVM must fail");
+  };
+
+  assert!(message.contains("this host has no usable KVM"), "{message}");
+}

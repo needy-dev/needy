@@ -367,6 +367,9 @@ impl Daemon {
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
   async fn provision(&self, session: &Arc<Session>, request: &NewSession) -> Result<()> {
+    if request.start_actor {
+      actor::check_host(self)?;
+    }
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
     let hostname = session.recipe.as_ref().and_then(|r| r.hostname.clone());
     for (exec_name, config) in &session.profile.executors {

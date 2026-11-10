@@ -30,10 +30,16 @@ pub const GATEWAY_PORT: u32 = 7001;
 // most for its VM.
 const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
+/// Fails unless this host can run an actor's VM. A create checks this
+/// before it acquires anything, so a host without KVM fails at once.
+pub fn check_host(daemon: &Daemon) -> Result<()> {
+  vm::check_kvm(&daemon.config.kvm)?;
+  Ok(())
+}
+
 /// Starts the actor of `session`: its guest listener, its gateway, then its
 /// VM.
 pub async fn start(daemon: &Daemon, session: &Arc<Session>) -> Result<()> {
-  vm::check_kvm(&daemon.config.kvm)?;
   let image = vm::Image::new(&daemon.config.actor_image);
   image.check()?;
   let launch = vm::Launch::new(&image, &session.dir, session.recipe.as_ref());
