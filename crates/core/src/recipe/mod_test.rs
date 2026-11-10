@@ -231,6 +231,29 @@ fn the_gce_builtin_mac_is_never_the_subnets_network_or_gateway() {
   }
 }
 
+// ROOT CAUSE:
+//
+// If the Dell built-in was compiled, its kernel build host, BIOS version and
+// board did not match the sources it cites, because they were typed in: no
+// OptiPlex 7000 BIOS 1.21.0 was published, no public probe has board 0C8MHW
+// or a Tower chassis, and the Ubuntu build says `lcy02-amd64-028`.
+//
+// Before the fix, the guest showed BIOS 1.21.0 (06/11/2024), board 0C8MHW
+// and chassis type 7.
+// The fix takes BIOS, board and chassis from the cited i7-12700 probe
+// (linuxhw 089EBFAFFD4C) and the build host from that build's `vmlinuz`.
+#[test]
+fn the_dell_builtin_matches_its_cited_probe_and_kernel_build() {
+  let c = builtin("dell-optiplex-ubuntu-24.04", 1);
+  let smbios = c.identity.smbios.unwrap();
+
+  assert_eq!(c.kernel_build_env["KBUILD_BUILD_HOST"], "lcy02-amd64-028");
+  assert_eq!(smbios.bios_version.as_deref(), Some("1.7.3"));
+  assert_eq!(smbios.bios_date.as_deref(), Some("10/27/2022"));
+  assert_eq!(smbios.board_name.as_deref(), Some("0VC8RJ"));
+  assert_eq!(smbios.chassis_type, Some(3), "Desktop");
+}
+
 #[test]
 fn builtins_compile() {
   for name in needy_config::builtin::recipes() {
@@ -241,7 +264,7 @@ fn builtins_compile() {
   let dell = compile(&load("extends: builtin:dell-optiplex-ubuntu-24.04"), &HostInfo::default(), 3);
   assert_eq!(dell.sensors.len(), 3);
   assert_eq!(dell.sensors[0].idle_mc, 34000);
-  assert_eq!(dell.identity.smbios.as_ref().unwrap().chassis_type, Some(7));
+  assert_eq!(dell.identity.smbios.as_ref().unwrap().chassis_type, Some(3));
 }
 
 #[test]

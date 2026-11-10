@@ -21,12 +21,12 @@ os:
   kernel:
     # Source: https://launchpad.net/ubuntu/+source/linux/6.8.0-49.49 and its
     # amd64 build, https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/29233125
-    # REVIEW: that build's `vmlinuz` (decompressed on 2026-11-10) says
-    # `#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4 02:06:24 UTC 2024`, as below,
-    # but `buildd@lcy02-amd64-028`, not lcy02-amd64-103.
+    # The version string and build host are that build's `vmlinuz`
+    # (decompressed on 2026-11-10): `#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4
+    # 02:06:24 UTC 2024` and `buildd@lcy02-amd64-028`.
     release: 6.8.0-49-generic
     version: "#49-Ubuntu SMP PREEMPT_DYNAMIC Mon Nov  4 02:06:24 UTC 2024"
-    build: { user: buildd, host: lcy02-amd64-103 }
+    build: { user: buildd, host: lcy02-amd64-028 }
   hostname: "optiplex-{hash}"
   uptime: 2d7h
 firmware:
@@ -34,17 +34,15 @@ firmware:
     sys_vendor: Dell Inc.
     product_name: OptiPlex 7000
     product_version: ""
-    # REVIEW: no BIOS 1.21.0 is published for the OptiPlex 7000: LVFS lists
-    # 1.20.0 (2024-03-08) then 1.22.0 (2024-05-15),
+    # BIOS, board and chassis are the i7-12700 probe above (089EBFAFFD4C):
+    # BIOS 1.7.3 dated 10/27/2022, board 0VC8RJ, chassis Desktop. LVFS lists
+    # 1.7.3 for the OptiPlex 7000 (published 2022-11-14),
     # https://web.archive.org/web/20250620094041/https://fwupd.org/lvfs/devices/com.dell.uefi896e9574.firmware
-    # The probe above has 1.7.3, 10/27/2022.
-    bios: { vendor: Dell Inc., version: 1.21.0, date: 06/11/2024 }
+    # and all 13 probes report chassis type Desktop (3).
+    bios: { vendor: Dell Inc., version: 1.7.3, date: 10/27/2022 }
     board_vendor: Dell Inc.
-    # REVIEW: no OptiPlex 7000 probe has board 0C8MHW; the i7-12700 ones
-    # have 0VC8RJ, 0FG47G and 0NNFGG, the micro ones 0VNM11. All 13 report
-    # chassis type Desktop (3), not Tower (7).
-    board_name: 0C8MHW
-    chassis_type: tower
+    board_name: 0VC8RJ
+    chassis_type: desktop
     serial: "{hash}"
 devices:
   pci:

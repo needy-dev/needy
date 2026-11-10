@@ -33,8 +33,8 @@ fn a_built_in_recipe_has_its_identity() {
   assert_eq!(r.os.uptime.map(|d| d.as_secs()), Some(2 * 86400 + 7 * 3600));
   assert_eq!(r.os.hostname.as_ref().map(|t| t.as_str()), Some("optiplex-{hash}"));
   let dmi = r.firmware.dmi.as_ref().unwrap();
-  assert_eq!(dmi.chassis_type, Some(ChassisType::Name("tower".into())));
-  assert_eq!(dmi.bios.version.as_deref(), Some("1.21.0"));
+  assert_eq!(dmi.chassis_type, Some(ChassisType::Name("desktop".into())));
+  assert_eq!(dmi.bios.version.as_deref(), Some("1.7.3"));
   assert_eq!(r.devices.sensors.len(), 3);
   assert_eq!(r.devices.sensors[2].idle_c, 27.8);
   assert_eq!(r.network.mac.as_ref().map(|t| t.as_str()), Some("b0:7b:25:{seq}:12:34"));
