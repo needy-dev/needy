@@ -21,7 +21,7 @@ actor:
   network:
     upstream: { model.needy: "http://127.0.0.1:11434" }
 executors:
-  build: { runtime: docker, key: "{run}" }
+  build: { provider: docker, key: "{run}" }
 commands:
   - { match: "{true,head} **", to: build }
 files:

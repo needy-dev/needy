@@ -1,6 +1,10 @@
-# No actor: a Docker executor for `needy exec --run`.
+# A Docker executor for `needy exec --run`. The actor only waits: the
+# commands come from `needy exec`, which the rules send to `build`.
+# `needy exec --runner NAME` reaches a runner's machine without a run.
 user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  command: [sleep, infinity]
 executors:
-  build: { runtime: docker, key: "{run}" }
+  build: { provider: docker, key: "{run}" }
 commands:
   - { match: "**", to: build }

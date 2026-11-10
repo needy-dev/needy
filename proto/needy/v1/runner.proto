@@ -136,6 +136,34 @@ message HeartbeatRequest {
   // What the runner can host now, within its join token's scope.
   repeated RunnerRole roles = 1;
   map<string, string> labels = 2;
+  // The machine the runner runs on. The control plane checks a recipe
+  // against the host its actor would run on, and picks the SFTP server of a
+  // workspace mount by the platform.
+  RunnerHost host = 3;
+}
+
+// A runner's machine.
+message RunnerHost {
+  // The operating system and CPU architecture as Rust names them
+  // (`std::env::consts`): "linux", "macos"; "x86_64", "aarch64".
+  string os = 1;
+  string arch = 2;
+  // From `/proc/cpuinfo` on Linux; empty elsewhere.
+  string cpu_vendor = 3;
+  string cpu_model = 4;
+  repeated string cpu_flags = 5;
+  // The CPUID entries its KVM supports; unset without a usable KVM.
+  KvmCpuid kvm_cpuid = 6;
+}
+
+// What `KVM_GET_SUPPORTED_CPUID` reported.
+message KvmCpuid {
+  repeated CpuidEntry entries = 1;
+}
+
+message CpuidEntry {
+  uint32 leaf = 1;
+  uint32 subleaf = 2;
 }
 
 message HeartbeatResponse {

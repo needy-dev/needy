@@ -12,7 +12,7 @@ fn a_consistent_profile_has_no_findings() {
 default_executor: build
 unknown: build
 executors:
-  build: { runtime: docker }
+  build: { provider: docker }
 presets:
   mac: { to: build, use: [env] }
   env: { env: { set: { CI: "1" } } }
@@ -90,4 +90,14 @@ fn unknown_file_mappings_are_errors() {
       "error: commands[0] (git **) adds unknown file mapping \"cache\"",
     ]
   );
+}
+
+// Before providers had to be named, an executor with `docker:` options was a
+// Docker one by default; now the default is `native`, which would ignore
+// them silently.
+#[test]
+fn docker_options_on_a_native_executor_are_an_error() {
+  let found = findings("executors: { build: { docker: { image: debian } } }");
+
+  assert_eq!(found, ["error: executors.build has `docker:` options but its provider is native; add `provider: docker`"]);
 }

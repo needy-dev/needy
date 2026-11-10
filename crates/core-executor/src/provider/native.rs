@@ -1,4 +1,4 @@
-//! The `native` runtime: this machine, through the daemon's own executor.
+//! The `native` provider: this machine, through the daemon's own executor.
 //! There is nothing to create; every instance shares the machine.
 
 use needy_api_client::Client;

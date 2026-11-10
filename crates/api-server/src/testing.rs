@@ -104,6 +104,25 @@ impl Runs for Fake {
       search_path_if_missing: false,
     })
   }
+
+  /// The actor on runner `kvm`, executor `mac` on runner `mac` and `build`
+  /// on the control host, with one error finding.
+  async fn check(&self, profile: ProfileToCheck) -> Result<ProfileCheck> {
+    self.call(format!("check {}", profile.profile_yaml));
+    Ok(ProfileCheck {
+      actor: Some(Placement::Runner("kvm".into())),
+      executors: [
+        ("build".to_string(), Placement::ControlHost),
+        ("mac".to_string(), Placement::Runner("mac".into())),
+      ]
+      .into(),
+      actor_cpu: "Fake CPU".into(),
+      findings: vec![ProfileFinding {
+        error: true,
+        message: "recipe: avx512f is missing".into(),
+      }],
+    })
+  }
 }
 
 #[async_trait::async_trait]

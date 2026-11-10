@@ -71,6 +71,13 @@ fn report(report: RunnerReport) -> store::Report {
   }
 }
 
+impl Daemon {
+  /// The machine `runner` last reported in a heartbeat.
+  pub(crate) fn runner_host(&self, runner: &str) -> Option<needy_api_server::control::RunnerHost> {
+    self.runner_hosts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(runner).cloned()
+  }
+}
+
 /// Each store error as one row of the status table.
 fn control_error(error: Error) -> ControlError {
   let message = error.to_string();
@@ -134,8 +141,15 @@ impl Runners for Daemon {
     })
   }
 
-  async fn heartbeat(&self, runner: &str, reported: RunnerReport) -> Result<Beat> {
+  async fn heartbeat(&self, runner: &str, mut reported: RunnerReport) -> Result<Beat> {
+    let host = reported.host.take();
     let credential = self.state.heartbeat(runner, report(reported), now_ms()).await.map_err(control_error)?;
+    // Only an accepted heartbeat tells the control plane about a machine.
+    if let Some(host) = host {
+      // NOTICE: one insert under the lock, so a panic elsewhere leaves the
+      // map whole.
+      self.runner_hosts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(runner.to_string(), host);
+    }
     if credential.is_some() {
       tracing::info!("runner {runner}: handed out a rotated credential");
     }

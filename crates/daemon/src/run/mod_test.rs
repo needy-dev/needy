@@ -4,12 +4,12 @@ use needy_api_server::control::{ControlError, Runs};
 use needy_core::intercept::ExecContext;
 use needy_core::types::RunState;
 
-use crate::testing::{self, fake_image, new_actor_run, new_run};
+use crate::testing::{self, fake_image, new_run};
 
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -147,20 +147,17 @@ async fn a_prefix_of_several_runs_is_ambiguous() {
 async fn a_failed_create_releases_the_executors_it_acquired() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let remote = testing::Executor::start().await;
-  // `b` is acquired after `a` and fails: its token's variable is not set.
-  let profile = format!(
-    r#"
-user: {{ name: agent, uid: 1000, gid: 1000 }}
+  // `b` is acquired after `a` and fails: no provider creates Firecracker
+  // executors.
+  let profile = r#"
+user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  a: {{ runtime: native }}
-  b: {{ runtime: remote, remote: {{ url: "{}", token_env: NEEDY_TEST_UNSET_TOKEN }} }}
+  a: { provider: native }
+  b: { provider: firecracker }
 commands:
-  - {{ match: "**", to: a }}
-"#,
-    remote.endpoint
-  );
-  let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(&profile, started.dir.path())).await else {
+  - { match: "**", to: a }
+"#;
+  let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, started.dir.path())).await else {
     panic!("a create whose executor fails must fail");
   };
   assert!(message.contains("executor b"), "{message}");
@@ -185,7 +182,7 @@ async fn a_create_whose_actor_cannot_start_releases_its_executors_and_sockets() 
   // listen.
   std::fs::set_permissions(image.join("firecracker"), std::fs::Permissions::from_mode(0o644)).unwrap();
 
-  let Err(ControlError::Failed(message)) = Runs::create(daemon, new_actor_run(PROFILE, started.dir.path())).await else {
+  let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await else {
     panic!("a create whose actor cannot start must fail");
   };
   assert!(message.contains("firecracker"), "{message}");
@@ -236,18 +233,24 @@ async fn a_finished_run_keeps_its_driving_programs_exit() {
   assert_eq!(finished.failure, None);
 }
 
-/// A profile whose every command runs on executor `far`, the remote
-/// executor at `endpoint`.
-fn remote_profile(endpoint: &str) -> String {
-  format!(
-    r#"
-user: {{ name: agent, uid: 1000, gid: 1000 }}
+/// A profile whose every command runs on executor `far`, a native
+/// executor on runner `far`.
+const RUNNER_PROFILE: &str = r#"
+user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  far: {{ runtime: remote, remote: {{ url: "{endpoint}" }} }}
+  far: { runner: far }
 commands:
-  - {{ match: "**", to: far }}
-"#
-  )
+  - { match: "**", to: far }
+"#;
+
+const CONTROL_TOKEN: &str = "control-secret";
+
+/// A served control plane with runner `far` joined and connected.
+async fn with_runner_far() -> (testing::Served, testing::JoinedRunner) {
+  let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
+  let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
+  let runner = testing::join_runner(&served, &operator, "far", &[needy_core::types::RunnerRole::Executor], &[]).await;
+  (served, runner)
 }
 
 /// Starts a detached `sleep 300` in `run` and returns its process ID on
@@ -297,13 +300,13 @@ async fn ended(pid: i64) -> bool {
 //
 // Before the fix, the sleep below outlived its run.
 // The fix kills the processes a run started on each of its executors
-// before it releases them.
+// before it releases them. Runners replaced remote executors; a runner's
+// machine outlives its runs in the same way.
 #[tokio::test]
-async fn stopping_a_run_ends_its_processes_on_a_remote_executor() {
-  let remote = testing::Executor::start().await;
-  let started = testing::daemon().await;
-  let daemon = &started.daemon;
-  let created = Runs::create(daemon, new_run(&remote_profile(&remote.endpoint), started.dir.path())).await.unwrap();
+async fn stopping_a_run_ends_its_processes_on_a_runner() {
+  let (served, _far) = with_runner_far().await;
+  let daemon = served.daemon();
+  let created = Runs::create(daemon, new_run(RUNNER_PROFILE, served.dir())).await.unwrap();
   let pid = detached_sleep(daemon, &created.id).await;
 
   Runs::stop(daemon, &created.id).await.unwrap();
@@ -312,14 +315,13 @@ async fn stopping_a_run_ends_its_processes_on_a_remote_executor() {
 }
 
 #[tokio::test]
-async fn a_finished_run_ends_its_processes_on_a_remote_executor() {
-  let remote = testing::Executor::start().await;
-  let started = testing::daemon().await;
-  let daemon = &started.daemon;
-  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
-  let created = Runs::create(daemon, new_actor_run(&remote_profile(&remote.endpoint), started.dir.path())).await.unwrap();
+async fn a_finished_run_ends_its_processes_on_a_runner() {
+  let (served, _far) = with_runner_far().await;
+  let daemon = served.daemon();
+  fake_image(&served.dir().join("image"), testing::REBOOTS_AFTER_EXIT);
+  let created = Runs::create(daemon, new_run(RUNNER_PROFILE, served.dir())).await.unwrap();
   let pid = detached_sleep(daemon, &created.id).await;
-  testing::exit_actor(&started, &created.id).await;
+  testing::exit_actor(daemon, served.dir(), &created.id).await;
 
   assert!(ended(pid).await, "process {pid} outlived its finished run");
   assert_eq!(Runs::get(daemon, &created.id).await.unwrap().state, RunState::Finished);
@@ -339,7 +341,7 @@ async fn a_finished_run_ends_its_processes_on_a_remote_executor() {
 #[tokio::test]
 async fn a_run_is_created_from_a_profile_whose_directory_the_daemon_cannot_read() {
   let client = tempfile::tempdir().unwrap();
-  std::fs::write(client.path().join("base.yaml"), "user: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { runtime: native }\n")
+  std::fs::write(client.path().join("base.yaml"), "user: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { provider: native }\n")
     .unwrap();
   std::fs::write(client.path().join("r.recipe.yaml"), "extends: builtin:gce-ubuntu-22.04\nos: { hostname: from-the-client }\n").unwrap();
   let yaml = "extends: base.yaml\nactor: { recipe: r.recipe.yaml }\ncommands:\n  - { match: \"**\", to: here }\n";
@@ -352,4 +354,69 @@ async fn a_run_is_created_from_a_profile_whose_directory_the_daemon_cannot_read(
   let run = started.daemon.runs.find(&created.id).unwrap();
   assert_eq!(run.recipe.as_ref().and_then(|r| r.hostname.as_deref()), Some("from-the-client"));
   assert_eq!(created.executors.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["here"]);
+}
+
+#[tokio::test]
+async fn a_create_whose_selector_names_no_connected_runner_fails_before_it_acquires_anything() {
+  let (served, _far) = with_runner_far().await;
+  let daemon = served.daemon();
+  let profile = r#"
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  a: { provider: native }
+  mac: { runner: { labels: [os=darwin] } }
+"#;
+
+  let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, served.dir())).await else {
+    panic!("a create whose selector names no runner must fail");
+  };
+
+  assert!(
+    message.contains("executor mac: no connected runner with the executor role has labels os=darwin; candidates: far (no label os=darwin)"),
+    "{message}"
+  );
+  assert!(daemon.pool.instances().await.is_empty());
+  let listed = Runs::list(daemon).await.unwrap();
+  assert!(listed[0].released.is_empty(), "nothing was acquired: {:?}", listed[0].released);
+}
+
+#[tokio::test]
+async fn an_actor_on_a_runner_other_than_the_control_hosts_own_fails_the_create() {
+  let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
+  let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
+  let _far = testing::join_runner(&served, &operator, "far", &[needy_core::types::RunnerRole::Actor], &[]).await;
+  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runner: far }\n";
+
+  let Err(ControlError::Failed(message)) = Runs::create(served.daemon(), new_run(profile, served.dir())).await else {
+    panic!("an actor on another runner must fail the create");
+  };
+
+  assert!(message.starts_with("actor: runner far cannot host actors yet"), "{message}");
+}
+
+#[tokio::test]
+async fn an_actor_on_the_control_hosts_own_runner_starts_here() {
+  let started = testing::daemon_with(|config| config.local_runner = Some("kvm".into())).await;
+  let served = testing::serve(started, Some(CONTROL_TOKEN)).await;
+  let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
+  let roles = [
+    needy_core::types::RunnerRole::Actor,
+    needy_core::types::RunnerRole::Executor,
+  ];
+  let _kvm = testing::join_runner(&served, &operator, "kvm", &roles, &[("kvm", "")]).await;
+  let profile = r#"
+user: { name: agent, uid: 1000, gid: 1000 }
+actor: { runner: { labels: [kvm] } }
+executors:
+  build: { runner: kvm }
+commands:
+  - { match: "**", to: build }
+"#;
+
+  let created = Runs::create(served.daemon(), new_run(profile, served.dir())).await.unwrap();
+
+  assert_eq!(created.state, RunState::Running);
+  let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.runtime.as_str(), e.instance.as_str())).collect();
+  assert_eq!(executors, [("build", "runner", "kvm")]);
+  Runs::stop(served.daemon(), &created.id).await.unwrap();
 }

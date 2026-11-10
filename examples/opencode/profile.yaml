@@ -27,7 +27,7 @@ actor:
 
 executors:
   build:
-    runtime: docker
+    provider: docker
     key: "{run}"
     max_procs: 8
 

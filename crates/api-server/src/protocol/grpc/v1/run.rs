@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use needy_api_proto::v1::run_service_server::RunService;
 use needy_api_proto::v1::{
-  CreateRunRequest, CreateRunResponse, DecideRequest, DecideResponse, GetRunLogsRequest, GetRunLogsResponse, GetRunRequest, GetRunResponse,
-  ListRunsRequest, ListRunsResponse, StopRunRequest, StopRunResponse,
+  CheckProfileRequest, CheckProfileResponse, CreateRunRequest, CreateRunResponse, DecideRequest, DecideResponse, GetRunLogsRequest,
+  GetRunLogsResponse, GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse, StopRunRequest, StopRunResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -76,6 +76,12 @@ impl<S: Runs> RunService for Adapter<S> {
     };
     let route = self.runs.decide(&run, domain::exec_context(request)).await?;
     Ok(Response::new(domain::proto_route(route)))
+  }
+
+  async fn check_profile(&self, request: Request<CheckProfileRequest>) -> Result<Response<CheckProfileResponse>, Status> {
+    self.cli_only("actors cannot check profiles")?;
+    let check = self.runs.check(domain::profile_to_check(request.into_inner())).await?;
+    Ok(Response::new(domain::proto_profile_check(check)))
   }
 }
 

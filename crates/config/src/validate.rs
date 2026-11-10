@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::profile::{Actions, Profile, Side, UnknownPolicy};
+use crate::profile::{Actions, Profile, Provider, Side, UnknownPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -64,6 +64,13 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
     && !executor(name)
   {
     findings.push(Finding::error(format!("unknown names unknown executor {name:?}")));
+  }
+  for (name, executor) in &profile.executors {
+    if executor.docker.is_some() && executor.provider != Provider::Docker {
+      let provider = format!("{:?}", executor.provider).to_lowercase();
+      findings
+        .push(Finding::error(format!("executors.{name} has `docker:` options but its provider is {provider}; add `provider: docker`")));
+    }
   }
   for name in &profile.run_files {
     if !profile.files.mappings.contains_key(name) {

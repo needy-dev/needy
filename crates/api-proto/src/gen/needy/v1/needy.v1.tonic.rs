@@ -1586,6 +1586,30 @@ pub mod run_service_client {
                 .insert(GrpcMethod::new("needy.v1.RunService", "Decide"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn check_profile(
+            &mut self,
+            request: impl tonic::IntoRequest<super::CheckProfileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckProfileResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.RunService/CheckProfile",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.RunService", "CheckProfile"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1637,6 +1661,13 @@ pub mod run_service_server {
             &self,
             request: tonic::Request<super::DecideRequest>,
         ) -> std::result::Result<tonic::Response<super::DecideResponse>, tonic::Status>;
+        async fn check_profile(
+            &self,
+            request: tonic::Request<super::CheckProfileRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::CheckProfileResponse>,
+            tonic::Status,
+        >;
     }
     #[derive(Debug)]
     pub struct RunServiceServer<T> {
@@ -1966,6 +1997,51 @@ pub mod run_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = DecideSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.RunService/CheckProfile" => {
+                    #[allow(non_camel_case_types)]
+                    struct CheckProfileSvc<T: RunService>(pub Arc<T>);
+                    impl<
+                        T: RunService,
+                    > tonic::server::UnaryService<super::CheckProfileRequest>
+                    for CheckProfileSvc<T> {
+                        type Response = super::CheckProfileResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::CheckProfileRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunService>::check_profile(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = CheckProfileSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

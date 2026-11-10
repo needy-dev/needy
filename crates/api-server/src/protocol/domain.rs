@@ -19,8 +19,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use needy_core::types::{Origin, RunState, RunnerRole};
 
 use crate::control::{
-  ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, ProcessInfo, Route, RunInfo,
-  RunnerInfo, RunnerReport, RunnerStatus, Started, Target, WindowSize,
+  ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement, ProcessInfo,
+  ProfileCheck, ProfileToCheck, Route, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started, Target, WindowSize,
 };
 
 /// A request field with no domain meaning.
@@ -152,6 +152,7 @@ pub fn joining(request: v1::JoinRequest) -> Result<Joining, Error> {
     report: RunnerReport {
       roles: runner_roles(&request.roles)?,
       labels: labels(request.labels),
+      host: None,
     },
     join_token: request.join_token,
     name: request.name,
@@ -162,7 +163,35 @@ pub fn runner_report(request: v1::HeartbeatRequest) -> Result<RunnerReport, Erro
   Ok(RunnerReport {
     roles: runner_roles(&request.roles)?,
     labels: labels(request.labels),
+    host: request.host.map(runner_host),
   })
+}
+
+fn runner_host(host: v1::RunnerHost) -> RunnerHost {
+  RunnerHost {
+    os: host.os,
+    arch: host.arch,
+    cpu: needy_core::recipe::HostInfo {
+      flags: host.cpu_flags.into_iter().collect(),
+      vendor: host.cpu_vendor,
+      model_name: host.cpu_model,
+      kvm_cpuid: host.kvm_cpuid.map(|cpuid| cpuid.entries.into_iter().map(|e| (e.leaf, e.subleaf)).collect()),
+    },
+  }
+}
+
+/// A runner's machine as its heartbeats carry it.
+pub fn proto_runner_host(host: &RunnerHost) -> v1::RunnerHost {
+  v1::RunnerHost {
+    os: host.os.clone(),
+    arch: host.arch.clone(),
+    cpu_vendor: host.cpu.vendor.clone(),
+    cpu_model: host.cpu.model_name.clone(),
+    cpu_flags: host.cpu.flags.iter().cloned().collect(),
+    kvm_cpuid: host.cpu.kvm_cpuid.as_ref().map(|entries| v1::KvmCpuid {
+      entries: entries.iter().map(|&(leaf, subleaf)| v1::CpuidEntry { leaf, subleaf }).collect(),
+    }),
+  }
 }
 
 pub fn proto_runner(runner: RunnerInfo) -> v1::Runner {
@@ -195,9 +224,41 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     profile_name: request.profile_name,
     group: request.group,
     name: request.name,
-    start_actor: request.start_actor,
     actor_command: request.actor_command,
   })
+}
+
+pub fn profile_to_check(request: v1::CheckProfileRequest) -> ProfileToCheck {
+  ProfileToCheck {
+    profile_yaml: request.profile_yaml,
+    recipe_yaml: request.recipe_yaml,
+  }
+}
+
+pub fn proto_profile_check(check: ProfileCheck) -> v1::CheckProfileResponse {
+  let placement = |placement: Placement| v1::Placement {
+    runner: match placement {
+      Placement::ControlHost => String::new(),
+      Placement::Runner(name) => name,
+    },
+  };
+  v1::CheckProfileResponse {
+    actor: check.actor.map(placement),
+    executors: check.executors.into_iter().map(|(name, p)| (name, placement(p))).collect(),
+    actor_cpu: check.actor_cpu,
+    findings: check
+      .findings
+      .into_iter()
+      .map(|finding| v1::ProfileFinding {
+        severity: if finding.error {
+          v1::FindingSeverity::Error
+        } else {
+          v1::FindingSeverity::Warning
+        } as i32,
+        message: finding.message,
+      })
+      .collect(),
+  }
 }
 
 pub fn proto_run(run: RunInfo) -> v1::Run {

@@ -439,9 +439,6 @@ pub struct CreateRunRequest {
     pub group: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub name: ::prost::alloc::string::String,
-    /// Start the actor; false creates executors only, for `needy exec`.
-    #[prost(bool, tag="5")]
-    pub start_actor: bool,
     /// Override the driving program of the actor.
     #[prost(string, repeated, tag="6")]
     pub actor_command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
@@ -578,6 +575,45 @@ pub struct DecideResponse {
     #[prost(bool, tag="7")]
     pub search_path_if_missing: bool,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckProfileRequest {
+    /// As in `CreateRunRequest`.
+    #[prost(string, tag="1")]
+    pub profile_yaml: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub recipe_yaml: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CheckProfileResponse {
+    /// Where the actor would run; unset when its runner selector does not
+    /// resolve, which a finding explains.
+    #[prost(message, optional, tag="1")]
+    pub actor: ::core::option::Option<Placement>,
+    /// Where each executor would run, by name; an executor whose selector does
+    /// not resolve is missing, and a finding explains why.
+    #[prost(map="string, message", tag="2")]
+    pub executors: ::std::collections::HashMap<::prost::alloc::string::String, Placement>,
+    /// The model name of the CPU the recipe was checked against; empty when the
+    /// actor's host did not report one.
+    #[prost(string, tag="3")]
+    pub actor_cpu: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="4")]
+    pub findings: ::prost::alloc::vec::Vec<ProfileFinding>,
+}
+/// The host an actor or executor would run on.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Placement {
+    /// A runner's name; empty for the control host itself.
+    #[prost(string, tag="1")]
+    pub runner: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProfileFinding {
+    #[prost(enumeration="FindingSeverity", tag="1")]
+    pub severity: i32,
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
+}
 /// A run's life cycle. The first terminal state (stopped, finished or
 /// failed) wins.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -618,6 +654,35 @@ impl RunState {
             "RUN_STATE_STOPPED" => Some(Self::Stopped),
             "RUN_STATE_FINISHED" => Some(Self::Finished),
             "RUN_STATE_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FindingSeverity {
+    Unspecified = 0,
+    Error = 1,
+    Warning = 2,
+}
+impl FindingSeverity {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FINDING_SEVERITY_UNSPECIFIED",
+            Self::Error => "FINDING_SEVERITY_ERROR",
+            Self::Warning => "FINDING_SEVERITY_WARNING",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FINDING_SEVERITY_UNSPECIFIED" => Some(Self::Unspecified),
+            "FINDING_SEVERITY_ERROR" => Some(Self::Error),
+            "FINDING_SEVERITY_WARNING" => Some(Self::Warning),
             _ => None,
         }
     }
@@ -711,6 +776,44 @@ pub struct HeartbeatRequest {
     pub roles: ::prost::alloc::vec::Vec<i32>,
     #[prost(map="string, string", tag="2")]
     pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// The machine the runner runs on. The control plane checks a recipe
+    /// against the host its actor would run on, and picks the SFTP server of a
+    /// workspace mount by the platform.
+    #[prost(message, optional, tag="3")]
+    pub host: ::core::option::Option<RunnerHost>,
+}
+/// A runner's machine.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunnerHost {
+    /// The operating system and CPU architecture as Rust names them
+    /// (`std::env::consts`): "linux", "macos"; "x86_64", "aarch64".
+    #[prost(string, tag="1")]
+    pub os: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub arch: ::prost::alloc::string::String,
+    /// From `/proc/cpuinfo` on Linux; empty elsewhere.
+    #[prost(string, tag="3")]
+    pub cpu_vendor: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub cpu_model: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="5")]
+    pub cpu_flags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The CPUID entries its KVM supports; unset without a usable KVM.
+    #[prost(message, optional, tag="6")]
+    pub kvm_cpuid: ::core::option::Option<KvmCpuid>,
+}
+/// What `KVM_GET_SUPPORTED_CPUID` reported.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvmCpuid {
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<CpuidEntry>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CpuidEntry {
+    #[prost(uint32, tag="1")]
+    pub leaf: u32,
+    #[prost(uint32, tag="2")]
+    pub subleaf: u32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct HeartbeatResponse {

@@ -77,7 +77,7 @@ fn a_fired_fault_names_its_kind_target_and_effect() {
 fn exec_decide_chain_runs_rules_then_chaos() {
   let p = profile(
     r#"
-executors: { build: { runtime: docker } }
+executors: { build: { provider: docker } }
 commands:
   - { match: "curl **", when: { has: [-k] }, deny: insecure }
   - { match: "**", to: build }

@@ -1,4 +1,7 @@
-use needy_api_proto::v1::{Ancestor, CreateRunRequest, DecideRequest, GetRunLogsRequest, GetRunRequest, ListRunsRequest, StopRunRequest};
+use needy_api_proto::v1::{
+  Ancestor, CheckProfileRequest, CreateRunRequest, DecideRequest, FindingSeverity, GetRunLogsRequest, GetRunRequest, ListRunsRequest,
+  StopRunRequest,
+};
 use tonic::Code;
 
 use crate::control::Caller;
@@ -179,4 +182,35 @@ async fn a_refused_or_local_route_maps_to_the_wire_shape() {
   assert_eq!((refused.target.as_str(), refused.deny.as_str()), ("", "denied: no deleting"));
   assert_eq!((local.target.as_str(), local.deny.as_str()), ("actor", ""));
   assert_eq!(local.env.get("SET").map(String::as_str), Some("1"));
+}
+
+#[tokio::test]
+async fn the_cli_checks_a_profile_and_reads_placements_and_findings() {
+  let served = serve(Caller::Cli).await;
+  let request = CheckProfileRequest {
+    profile_yaml: "{}".into(),
+    recipe_yaml: String::new(),
+  };
+
+  let check = served.client.runs().check_profile(request).await.unwrap().into_inner();
+
+  assert_eq!(check.actor.unwrap().runner, "kvm");
+  assert_eq!(check.executors["mac"].runner, "mac");
+  // The control host is an empty runner name.
+  assert_eq!(check.executors["build"].runner, "");
+  assert_eq!(check.actor_cpu, "Fake CPU");
+  assert_eq!(check.findings.len(), 1);
+  assert_eq!(check.findings[0].severity(), FindingSeverity::Error);
+  assert_eq!(check.findings[0].message, "recipe: avx512f is missing");
+  assert_eq!(served.fake.calls(), ["check {}"]);
+}
+
+#[tokio::test]
+async fn an_actor_cannot_check_profiles() {
+  let served = serve(actor()).await;
+
+  let status = served.client.runs().check_profile(CheckProfileRequest::default()).await.unwrap_err();
+
+  assert_eq!(status.code(), Code::PermissionDenied);
+  assert!(served.fake.calls().is_empty());
 }

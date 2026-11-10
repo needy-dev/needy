@@ -123,7 +123,6 @@ mod run {
         profile_yaml: resolved.yaml,
         recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
         profile_name: needy_config::profile::name(&path),
-        start_actor: true,
         ..Default::default()
       })
       .await

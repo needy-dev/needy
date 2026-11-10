@@ -34,7 +34,8 @@ actor:
       openrouter.ai: { header: Authorization, secret: OPENROUTER_KEY }
 executors:
   build:
-    runtime: docker
+    runner: { labels: [kvm, os=linux] }
+    provider: docker
     docker:
       build: { context: ./env, dockerfile: Dockerfile.build, target: toolchain, args: { RUST_VERSION: "1.97" } }
       args: [--cpus=4, --memory=8g]
@@ -44,8 +45,7 @@ executors:
     max_instances: 16
     idle_timeout: 10m
   mac:
-    runtime: remote
-    remote: { url: "https://mac-mini.example.com:7331" }
+    runner: mac
     key: "{rule}"
     max_procs: 1
 executor_network:
@@ -100,14 +100,26 @@ fn loads_every_section() {
   assert_eq!(p.actor.network.inject["openrouter.ai"].secret, "OPENROUTER_KEY");
 
   let build = &p.executors["build"];
-  assert_eq!(build.runtime, Runtime::Docker);
+  assert_eq!(build.provider, Provider::Docker);
+  let labels = vec![
+    LabelMatch {
+      key: "kvm".into(),
+      value: None,
+    },
+    LabelMatch {
+      key: "os".into(),
+      value: Some("linux".into()),
+    },
+  ];
+  assert_eq!(build.runner, Some(RunnerSelector::Labels(labels)));
   assert_eq!(secs(build.idle_timeout), Some(600));
   assert_eq!(build.max_procs, Some(4));
   let docker = build.docker.as_ref().unwrap();
   assert_eq!(docker.args, ["--cpus=4", "--memory=8g"]);
   assert_eq!(docker.build.as_ref().unwrap().args["RUST_VERSION"], "1.97");
   let mac = &p.executors["mac"];
-  assert_eq!(mac.runtime, Runtime::Remote);
+  assert_eq!(mac.provider, Provider::Native);
+  assert_eq!(mac.runner, Some(RunnerSelector::Name("mac".into())));
   assert_eq!(mac.key.as_str(), "{rule}");
   assert_eq!(mac.on_full, OnFull::Wait);
   assert!(p.executor_network.record);
@@ -168,7 +180,8 @@ fn executor_defaults() {
   let p = load_text("executors: { build: {} }").unwrap();
 
   let build = &p.executors["build"];
-  assert_eq!(build.runtime, Runtime::Docker);
+  assert_eq!(build.runner, None);
+  assert_eq!(build.provider, Provider::Native);
   assert_eq!(build.key.as_str(), "{run}");
   assert_eq!(build.on_full, OnFull::Wait);
 }
@@ -203,8 +216,8 @@ actor:
   command: [sh, -c, "echo base"]
   network: { allow: [a.example.com], upstream: { model.needy: "http://127.0.0.1:1" } }
 executors:
-  build: { runtime: docker, max_procs: 4, key: "{profile}" }
-  mac: { runtime: remote, remote: { url: "http://127.0.0.1:2" } }
+  build: { provider: docker, max_procs: 4, key: "{profile}" }
+  mac: { runner: mac }
 presets:
   quiet: { env: { set: { QUIET: "1" } } }
 commands:
@@ -243,7 +256,8 @@ files:
   let build = &p.executors["build"];
   assert_eq!(build.max_procs, Some(8));
   assert_eq!(build.key.as_str(), "{profile}");
-  assert_eq!(p.executors["mac"].runtime, Runtime::Remote);
+  assert_eq!(p.executors["mac"].runner, Some(RunnerSelector::Name("mac".into())));
+  assert_eq!(build.provider, Provider::Docker);
   assert!(p.presets.contains_key("quiet"));
   assert!(!p.files.mappings["workspace"].writable);
   assert_eq!(p.files.mappings["workspace"].mode, FileMode::Mount);
@@ -371,7 +385,7 @@ fn bad_values_are_rejected() {
   let err = load_text("executors: { build: { idle_timeout: soon } }").unwrap_err().to_string();
   assert!(err.contains("executors.build.idle_timeout: invalid duration \"soon\""), "{err}");
 
-  let err = load_text("executors: { build: { runtime: podman } }").unwrap_err().to_string();
+  let err = load_text("executors: { build: { provider: podman } }").unwrap_err().to_string();
   assert!(err.contains("unknown variant `podman`"), "{err}");
 
   let err = load_text("chaos: { faults: [{ on: file.read }] }").unwrap_err().to_string();
@@ -449,7 +463,7 @@ fn a_file_named_profile_takes_its_directory_name() {
 #[test]
 fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   let dir = files(&[
-    ("base.yaml", "executors:\n  here: { runtime: native }\n"),
+    ("base.yaml", "executors:\n  here: { provider: native }\n"),
     (
       "p/profile.yaml",
       "extends: ../base.yaml\nexecutors:\n  here: { workspace: ws/ }\nfiles:\n  seed: { mode: copy-in, from: \"host:./seed/\", to: \"actor:~/seed/\" }\n  out: { mode: mirror-out, from: \"actor:~/out/\", to: \"host:~/out/\" }\n",
@@ -482,4 +496,73 @@ fn a_resolved_profile_carries_its_recipe_file_but_not_a_built_in_one() {
   assert_eq!(recipe.os.hostname.map(|h| h.as_str().to_string()), Some("h1".into()));
   assert_eq!(recipe.network.metadata.and_then(|m| m.file), Some(format!("{}/meta.yaml", dir.path().display())));
   assert_eq!(built_in.recipe_yaml, None);
+}
+
+#[test]
+fn the_actor_selects_a_runner_by_name_or_labels() {
+  let p = load_text("actor: { runner: kvm }").unwrap();
+  assert_eq!(p.actor.runner, Some(RunnerSelector::Name("kvm".into())));
+
+  let p = load_text("actor: { runner: { labels: [kvm] } }").unwrap();
+  let kvm = LabelMatch {
+    key: "kvm".into(),
+    value: None,
+  };
+  assert_eq!(p.actor.runner, Some(RunnerSelector::Labels(vec![kvm])));
+
+  assert_eq!(load_text("{}").unwrap().actor.runner, None);
+}
+
+#[test]
+fn a_runner_selector_of_another_form_is_rejected() {
+  let err = load_text("executors: { mac: { runner: { name: mac } } }").unwrap_err().to_string();
+  assert!(err.contains("executors.mac.runner: a runner selector is a runner's name or { labels: [KEY, KEY=VALUE, ...] }"), "{err}");
+
+  let err = load_text("executors: { mac: { runner: { labels: [] } } }").unwrap_err().to_string();
+  assert!(err.contains("executors.mac.runner: `labels` selects no runner when empty"), "{err}");
+
+  let err = load_text("executors: { mac: { runner: { labels: [=darwin] } } }").unwrap_err().to_string();
+  assert!(err.contains("a label is KEY or KEY=VALUE, not \"=darwin\""), "{err}");
+
+  let err = load_text("executors: { mac: { runner: \"\" } }").unwrap_err().to_string();
+  assert!(err.contains("a runner's name is empty"), "{err}");
+}
+
+#[test]
+fn a_label_match_needs_the_key_and_any_value_it_names() {
+  let labels: std::collections::BTreeMap<String, String> = [
+    ("os".to_string(), "darwin".to_string()),
+    ("kvm".to_string(), String::new()),
+  ]
+  .into();
+  let parse = |text: &str| text.parse::<LabelMatch>().unwrap();
+
+  assert!(parse("kvm").matches(&labels));
+  assert!(parse("os").matches(&labels));
+  assert!(parse("os=darwin").matches(&labels));
+  assert!(!parse("os=linux").matches(&labels));
+  assert!(!parse("gpu").matches(&labels));
+}
+
+// Remote executors were removed with slice 5 of the runners-and-runs
+// design; a profile that still names them gets the replacement, not
+// "unknown field".
+#[test]
+fn a_remote_executor_is_refused_naming_runners_instead() {
+  let err = load_text("executors: { mac: { runtime: remote, remote: { url: \"http://127.0.0.1:1\" } } }").unwrap_err().to_string();
+  assert!(err.contains("executors.mac.remote: remote executors were removed"), "{err}");
+  assert!(err.contains("select it with `runner: NAME`"), "{err}");
+
+  let err = load_text("executors: { mac: { runtime: remote } }").unwrap_err().to_string();
+  assert!(err.contains("executors.mac.runtime: remote executors were removed"), "{err}");
+}
+
+#[test]
+fn runtime_is_refused_naming_provider() {
+  let err = load_text("executors: { build: { runtime: docker } }").unwrap_err().to_string();
+  assert!(err.contains("executors.build.runtime: `runtime` is now `provider` (`provider: docker`)"), "{err}");
+
+  // A client resolving the profile for the daemon refuses it the same way.
+  let err = resolve(&Source::text("executors: { build: { runtime: native } }", "/base")).unwrap_err().to_string();
+  assert!(err.contains("`provider: native`"), "{err}");
 }

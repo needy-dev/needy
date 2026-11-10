@@ -11,7 +11,7 @@ use crate::testing::{self, new_run};
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -240,8 +240,8 @@ async fn an_exec_in_an_ended_run_says_it_ended_and_how() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
   testing::fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
-  let finished = Runs::create(daemon, testing::new_actor_run(PROFILE, started.dir.path())).await.unwrap();
-  testing::exit_actor(&started, &finished.id).await;
+  let finished = Runs::create(daemon, testing::new_run(PROFILE, started.dir.path())).await.unwrap();
+  testing::exit_actor(&started.daemon, started.dir.path(), &finished.id).await;
   let stopped = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   Runs::stop(daemon, &stopped.id).await.unwrap();
   let released = async {

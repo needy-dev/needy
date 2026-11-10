@@ -7,6 +7,7 @@ mod executor;
 mod files;
 mod network;
 mod rules;
+mod runner;
 mod trace;
 
 use std::collections::BTreeMap;
@@ -16,10 +17,11 @@ use serde::Deserialize;
 
 pub use actor::{Actor, Limits};
 pub use chaos::{Chaos, Fault, FaultKind, Readings};
-pub use executor::{Docker, DockerBuild, Executor, OnFull, Remote, Runtime};
+pub use executor::{Docker, DockerBuild, Executor, OnFull, Provider};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
 pub use network::{Injection, NetworkPolicy};
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
+pub use runner::{LabelMatch, RunnerSelector};
 pub use trace::{Trace, TraceSink};
 
 use crate::{Error, Kind, Source, merge, source};
@@ -90,6 +92,7 @@ const MERGE: merge::Rules = merge::Rules {
 /// Reads a profile and its `extends` chain.
 pub fn load(source: &Source) -> Result<Profile, Error> {
   let document = source::read_chain(source, Kind::Profile, &MERGE)?;
+  refuse_removed(&document, source)?;
   let mut profile: Profile = source::deserialize(document, Kind::Profile, source)?;
   profile.base_dir = source.base_dir();
   // `~` means the profile user's home, known only after the whole chain
@@ -127,6 +130,7 @@ pub struct Resolved {
 // (`docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`).
 pub fn resolve(source: &Source) -> Result<Resolved, Error> {
   let mut document = source::read_chain(source, Kind::Profile, &MERGE)?;
+  refuse_removed(&document, source)?;
   let base = source.base_dir();
   absolute_host_paths(&mut document, &base);
   let profile: Profile = source::deserialize(document.clone(), Kind::Profile, source)?;
@@ -141,6 +145,47 @@ pub fn resolve(source: &Source) -> Result<Resolved, Error> {
     yaml: source::serialize(&document, Kind::Profile, source)?,
     recipe_yaml,
   })
+}
+
+/// Refuses the keys runners replaced, naming what replaces them, instead of
+/// the bare "unknown field" a removed key would get.
+// NOTICE: no compatibility (principle 7 of the module layout redesign):
+// these keys are refused, not translated.
+fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), Error> {
+  use serde_yaml::Value;
+  let Some(Value::Mapping(executors)) = document.get("executors") else {
+    return Ok(());
+  };
+  for (name, executor) in executors {
+    let name = name.as_str().unwrap_or_default();
+    let message = if executor.get("remote").is_some() || executor.get("runtime").and_then(Value::as_str) == Some("remote") {
+      let key = if executor.get("remote").is_some() {
+        "remote"
+      } else {
+        "runtime"
+      };
+      Some((
+        key,
+        "remote executors were removed: join the machine as a runner (`needy runner token create`, then `needy daemon --mode runner`) \
+         and select it with `runner: NAME`"
+          .to_string(),
+      ))
+    } else if let Some(runtime) = executor.get("runtime") {
+      let runtime = runtime.as_str().unwrap_or("…");
+      Some(("runtime", format!("`runtime` is now `provider` (`provider: {runtime}`); select the machine with `runner:`")))
+    } else {
+      None
+    };
+    if let Some((key, message)) = message {
+      return Err(Error::Invalid {
+        kind: Kind::Profile,
+        origin: source.to_string(),
+        path: format!("executors.{name}.{key}"),
+        message,
+      });
+    }
+  }
+  Ok(())
 }
 
 /// Makes the relative host paths of a merged profile absolute against

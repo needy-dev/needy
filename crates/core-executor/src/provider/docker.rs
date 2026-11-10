@@ -1,4 +1,4 @@
-//! The `docker` runtime: one container per instance, running
+//! The `docker` provider: one container per instance, running
 //! `needy daemon --mode executor` on a socket in a directory shared with the
 //! host. Containers are created through the Docker API (`bollard`).
 //!

@@ -10,7 +10,7 @@ use crate::testing::{self, new_run, running};
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -107,6 +107,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     kvm: dir.path().join("kvm"),
     docker_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
+    local_runner: None,
   };
 
   let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");
@@ -129,31 +130,62 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
 // daemon left to release them.
 // The fix runs the create under its run's token, which shutdown
 // cancels and waits for: the create unwinds through its rollback and
-// records `run.fail` saying the daemon shut down.
+// records `run.fail`.
+//
+// NOTICE: the create is held in its copy-in by a runner that is connected
+// but never answers. When the stall ends the copy-in fails, so the reason
+// recorded is the runner's, not "the daemon shut down" that the next step's
+// check would give; an earlier version held the create in a `remote`
+// executor that came up late, which runners replaced.
 #[tokio::test]
 async fn shutdown_unwinds_a_run_being_created() {
+  use needy_api_server::control::{Joining, NewJoinToken, RunnerReport, Runners};
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  // `b`'s executor does not listen yet, so the create waits for it after
-  // it acquired `a`.
-  let late = started.dir.path().join("late.sock");
+  // Runner `b` joins and opens a control stream, but answers no task.
+  let token = Runners::create_join_token(
+    daemon,
+    NewJoinToken {
+      ttl_ms: 60_000,
+      uses: 1,
+      ..Default::default()
+    },
+  )
+  .await
+  .unwrap()
+  .token;
+  let joining = Joining {
+    join_token: token,
+    name: "b".into(),
+    report: RunnerReport {
+      roles: [needy_core::types::RunnerRole::Executor].into(),
+      ..Default::default()
+    },
+  };
+  Runners::join(daemon, joining).await.unwrap();
+  let (results, from_runner) = tokio::sync::mpsc::channel(1);
+  let _tasks = Runners::control(daemon, "b", Box::pin(tokio_stream::wrappers::ReceiverStream::new(from_runner))).await.unwrap();
+  let seed = started.dir.path().join("seed");
+  std::fs::create_dir_all(&seed).unwrap();
   let profile = format!(
     r#"
 user: {{ name: agent, uid: 1000, gid: 1000 }}
 executors:
-  a: {{ runtime: native }}
-  b: {{ runtime: remote, remote: {{ url: "unix:{}" }} }}
+  a: {{ provider: native }}
+  b: {{ runner: b }}
 commands:
   - {{ match: "**", to: a }}
+files:
+  seed: {{ mode: copy-in, from: "host:{}", to: "executor:b:/tmp/needy-seed" }}
 "#,
-    late.display()
+    seed.display()
   );
   let creating = tokio::spawn({
     let daemon = daemon.clone();
     let request = new_run(&profile, started.dir.path());
     async move { Runs::create(&daemon, request).await }
   });
-  while daemon.pool.instances().await.is_empty() {
+  while daemon.pool.instances().await.len() < 2 {
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
 
@@ -162,14 +194,16 @@ commands:
     async move { daemon.shutdown().await }
   });
   tokio::time::sleep(Duration::from_millis(200)).await;
-  let _remote = testing::Executor::start_at(&late).await;
+  assert!(!shutdown.is_finished(), "shutdown returned while a create was in progress");
+  // The runner's connection ends; its copy-in fails.
+  drop(results);
   let created = tokio::time::timeout(Duration::from_secs(20), creating).await.expect("the create ends").unwrap();
   tokio::time::timeout(Duration::from_secs(20), shutdown).await.expect("shutdown ends").unwrap();
 
   let Err(ControlError::Failed(message)) = created else {
     panic!("a create the daemon's shutdown interrupted must fail, not {created:?}");
   };
-  assert!(message.contains("the daemon shut down"), "{message}");
+  assert!(message.contains("copy-in seed"), "{message}");
   assert!(daemon.pool.instances().await.is_empty(), "the unwound create still holds an executor");
   let listed = Runs::list(daemon).await.unwrap();
   assert_eq!(listed.len(), 1);
@@ -177,5 +211,5 @@ commands:
   let trace = needy_trace::sink::sqlite::load(&started.dir.path().join("state/trace.db"), &listed[0].id).await.unwrap();
   let last = trace.events.last().unwrap();
   assert_eq!(last.kind, "run.fail");
-  assert!(last.payload.get().contains("the daemon shut down"), "{}", last.payload.get());
+  assert!(last.payload.get().contains("copy-in seed"), "{}", last.payload.get());
 }

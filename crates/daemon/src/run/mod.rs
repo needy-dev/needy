@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
-use needy_api_server::control::{ControlError, NewRun, Route, RunInfo, Runs};
+use needy_api_server::control::{ControlError, NewRun, ProfileCheck, ProfileToCheck, Route, RunInfo, Runs};
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::Source;
@@ -24,7 +24,7 @@ use needy_core::chaos::Injector;
 use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::CompiledRecipe;
-use needy_core::types::RunState;
+use needy_core::types::{RunState, RunnerRole};
 use needy_core_actor::host::vm;
 use needy_core_executor::provider::InstanceSpec;
 use needy_trace::Dispatch;
@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::pool::Instance;
-use crate::{Daemon, actor, failed, files, routing};
+use crate::{Daemon, actor, failed, files, routing, schedule};
 use state::{Refused, State};
 
 /// Events a run's trace queue holds before it drops them.
@@ -281,7 +281,7 @@ impl Daemon {
       }
     };
     self.runs.insert(run.clone());
-    let provisioned = self.provision(&run, &request).await.and_then(|()| unwinding(&run));
+    let provisioned = self.provision(&run).await.and_then(|()| unwinding(&run));
     if let Err(error) = provisioned {
       self.rollback(&run, &request, &error).await;
       return Err(error);
@@ -360,7 +360,8 @@ impl Daemon {
     }))
   }
 
-  /// Acquires the run's executors, copies files in and starts its actor.
+  /// Places the run's actor and executors on their hosts, acquires the
+  /// executors, copies files in and starts the actor.
   /// A cancelled run token ends it before its next step.
   // NOTICE: a step in progress, such as a provider creating a container or
   // pulling its image, runs to its end: the providers are not safe to drop
@@ -369,13 +370,25 @@ impl Daemon {
   // the providers can unwind a create themselves, so shutdown need not wait
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
-  async fn provision(&self, run: &Arc<Run>, request: &NewRun) -> Result<()> {
-    if request.start_actor {
-      actor::check_host(self)?;
+  async fn provision(&self, run: &Arc<Run>) -> Result<()> {
+    // Where everything goes is decided before anything is acquired, so a
+    // selector that names no runner fails the create at once.
+    let runners = self.candidates().await?;
+    let actor = schedule::placement(run.profile.actor.runner.as_ref(), RunnerRole::Actor, &runners).context("actor")?;
+    if let Some(refusal) = self.actor_refusal(&actor) {
+      bail!("actor: {refusal}");
+    }
+    actor::check_host(self)?;
+    let mut sites = Vec::new();
+    for (exec_name, config) in &run.profile.executors {
+      let placement =
+        schedule::placement(config.runner.as_ref(), RunnerRole::Executor, &runners).with_context(|| format!("executor {exec_name}"))?;
+      let site = self.site(&placement, config.provider).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
+      sites.push(site);
     }
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
     let hostname = run.recipe.as_ref().and_then(|r| r.hostname.clone());
-    for (exec_name, config) in &run.profile.executors {
+    for ((exec_name, config), site) in run.profile.executors.iter().zip(sites) {
       let key = config.key.render(&[
         ("run", &run.id),
         ("group", &run.group),
@@ -392,7 +405,7 @@ impl Daemon {
         hostname: hostname.clone(),
       };
       unwinding(run)?;
-      let instance = self.pool.acquire(spec).await.with_context(|| format!("executor {exec_name}"))?;
+      let instance = self.pool.acquire(spec, &site).await.with_context(|| format!("executor {exec_name}"))?;
       run.lock_executors().insert(exec_name.clone(), instance);
     }
     run.emit(&Event::RunCreate(RunCreate {
@@ -403,10 +416,8 @@ impl Daemon {
     }));
     unwinding(run)?;
     files::copy_in(run).await?;
-    if request.start_actor {
-      unwinding(run)?;
-      actor::start(self, run).await?;
-    }
+    unwinding(run)?;
+    actor::start(self, run).await?;
     Ok(())
   }
 
@@ -659,6 +670,10 @@ impl Runs for Daemon {
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route, ControlError> {
     let run = self.runs.find(run)?;
     Ok(routing::route(&run, ctx).await)
+  }
+
+  async fn check(&self, profile: ProfileToCheck) -> Result<ProfileCheck, ControlError> {
+    self.check_profile(profile).await
   }
 }
 

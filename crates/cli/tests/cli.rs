@@ -56,6 +56,31 @@ impl Home {
   }
 }
 
+/// The arguments that give a control daemon a stand-in actor: an image
+/// whose `firecracker` prints two console lines and runs until the daemon
+/// stops it or exits, and a stand-in KVM device, so runs start on hosts
+/// without KVM. The guest never boots: commands reach a run's executors
+/// through `needy exec --run`.
+fn stand_in_actor(home: &Home) -> Vec<String> {
+  use std::os::unix::fs::PermissionsExt;
+  let image = home.path().join("image");
+  std::fs::create_dir_all(&image).unwrap();
+  std::fs::write(image.join("vmlinux"), "").unwrap();
+  std::fs::write(image.join("rootfs.ext4"), "").unwrap();
+  let firecracker = image.join("firecracker");
+  let script = "#!/bin/sh\necho boot\necho hello from the actor\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n";
+  std::fs::write(&firecracker, script).unwrap();
+  std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let kvm = home.path().join("kvm");
+  std::fs::write(&kvm, "").unwrap();
+  vec![
+    "--actor-image".into(),
+    image.display().to_string(),
+    "--kvm".into(),
+    kvm.display().to_string(),
+  ]
+}
+
 /// A control daemon on the home's default socket, stopped on drop.
 struct Daemon {
   child: Child,
@@ -63,7 +88,14 @@ struct Daemon {
 
 impl Daemon {
   fn start(home: &Home) -> Self {
-    let child = home.needy().args(["daemon", "--mode", "control"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let child = home
+      .needy()
+      .args(["daemon", "--mode", "control"])
+      .args(stand_in_actor(home))
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .spawn()
+      .unwrap();
     let socket = home.path().join("run").join("daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(20);
     while !socket.exists() {
@@ -95,7 +127,7 @@ fn stderr(output: &Output) -> String {
 const NATIVE_PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 commands:
   - { match: "rm **", deny: no deleting here }
   - { match: "**", to: here }
@@ -111,13 +143,7 @@ const BROKEN_PROFILE: &str = "user: { name: agent, uid: 1000, gid: 1000 }\ndefau
 
 fn create_run(home: &Home, profile: &str) -> String {
   let profile = home.write("profile.yaml", profile);
-  let output = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    profile.to_str().unwrap(),
-  ]);
+  let output = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
   assert!(output.status.success(), "run create: {}", stderr(&output));
   stdout(&output).trim().to_string()
 }
@@ -284,13 +310,7 @@ fn run_create_names_a_missing_profile() {
   let home = Home::new();
   let missing = home.path().join("missing.yaml");
 
-  let output = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    missing.to_str().unwrap(),
-  ]);
+  let output = home.run(&["run", "create", "--profile", missing.to_str().unwrap()]);
 
   assert_eq!(output.status.code(), Some(1));
   assert!(stderr(&output).contains(missing.to_str().unwrap()), "{}", stderr(&output));
@@ -300,15 +320,9 @@ fn run_create_names_a_missing_profile() {
 fn run_create_refuses_a_profile_with_errors() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let profile = home.write("profile.yaml", "executors: { here: { runtime: native } }\ncommands: [{ match: \"**\", to: hier }]\n");
+  let profile = home.write("profile.yaml", "executors: { here: { provider: native } }\ncommands: [{ match: \"**\", to: hier }]\n");
 
-  let output = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    profile.to_str().unwrap(),
-  ]);
+  let output = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
 
   assert_eq!(output.status.code(), Some(1));
   let message = stderr(&output);
@@ -325,7 +339,6 @@ fn run_ls_shows_stopped_and_failed_runs() {
   let failed = home.run(&[
     "run",
     "create",
-    "--no-actor",
     "--name",
     "broken",
     "--profile",
@@ -350,13 +363,7 @@ fn a_failed_run_create_records_run_fail_with_the_reason() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let broken = home.write("broken.yaml", BROKEN_PROFILE);
-  let failed = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    broken.to_str().unwrap(),
-  ]);
+  let failed = home.run(&["run", "create", "--profile", broken.to_str().unwrap()]);
   assert_eq!(failed.status.code(), Some(1));
 
   let output = home.run(&["report", "latest", "-o", "markdown"]);
@@ -376,13 +383,7 @@ fn report_names_the_profile_after_its_file() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
-  let created = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    profile.to_str().unwrap(),
-  ]);
+  let created = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
   assert!(created.status.success(), "{}", stderr(&created));
   let run = stdout(&created).trim().to_string();
 
@@ -440,7 +441,6 @@ fn run_ls_shows_released_executors_and_why_a_run_failed() {
   let failed = home.run(&[
     "run",
     "create",
-    "--no-actor",
     "--name",
     "broken",
     "--profile",
@@ -473,13 +473,7 @@ fn run_ls_json_keeps_names_and_carries_released_executors_and_the_failure() {
   let stopped = create_run(&home, NATIVE_PROFILE);
   assert!(home.run(&["run", "stop", &stopped]).status.success());
   let broken = home.write("broken.yaml", BROKEN_PROFILE);
-  home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    broken.to_str().unwrap(),
-  ]);
+  home.run(&["run", "create", "--profile", broken.to_str().unwrap()]);
 
   let output = home.run(&["run", "ls", "-o", "json"]);
 
@@ -498,21 +492,30 @@ fn run_logs_prints_the_actor_console() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
-  // Firecracker writes the console here; this run has no actor, so the
-  // test writes it.
-  std::fs::write(home.path().join("state/runs").join(&run).join("console.log"), "boot\nhello from the actor\n").unwrap();
-
-  let output = home.run(&["run", "logs", &run]);
+  // The stand-in Firecracker prints two lines to the console.
+  let deadline = Instant::now() + Duration::from_secs(10);
+  let output = loop {
+    let output = home.run(&["run", "logs", &run]);
+    if stdout(&output).lines().count() == 2 || Instant::now() > deadline {
+      break output;
+    }
+    std::thread::sleep(Duration::from_millis(50));
+  };
 
   assert!(output.status.success(), "{}", stderr(&output));
   assert_eq!(stdout(&output), "boot\nhello from the actor\n");
 }
 
 #[test]
-fn run_logs_without_an_actor_says_so() {
+fn run_logs_of_a_run_whose_actor_never_started_says_so() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let run = create_run(&home, NATIVE_PROFILE);
+  let broken = home.write("broken.yaml", BROKEN_PROFILE);
+  let failed = home.run(&["run", "create", "--profile", broken.to_str().unwrap()]);
+  assert_eq!(failed.status.code(), Some(1));
+  let run = stdout(&home.run(&["run", "ls", "-o", "json"]));
+  let runs: Vec<serde_json::Value> = serde_json::from_str(&run).unwrap();
+  let run = runs[0]["id"].as_str().unwrap().to_string();
 
   let output = home.run(&["run", "logs", &run]);
 
@@ -528,6 +531,7 @@ fn profile_check_splits_quoted_commands_and_shows_matching_faults() {
   let output = home.run(&[
     "profile",
     "check",
+    "--local",
     profile.to_str().unwrap(),
     "--cmd",
     "curl 'http://example.com/a b'",
@@ -569,7 +573,7 @@ fn profile_check_accepts_every_example_profile() {
   assert!(profiles.len() >= 8, "{profiles:?}");
 
   for profile in profiles {
-    let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+    let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 
     assert!(output.status.success(), "{}: {}{}", profile.display(), stdout(&output), stderr(&output));
     assert!(!stdout(&output).contains("error:"), "{}: {}", profile.display(), stdout(&output));
@@ -584,7 +588,7 @@ fn profile_check_reports_unknown_names_and_exits_1() {
     "executors: { build: {} }\ncommands:\n  - { match: \"git **\", to: biuld }\n  - { match: \"make **\", use: [fast] }\n",
   );
 
-  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 
   assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
   let text = stdout(&output);
@@ -612,13 +616,56 @@ fn profile_check_compiles_a_built_in_recipe() {
   let home = Home::new();
   let profile = home.write("profile.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n");
 
-  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 
   // The host CPU decides whether the recipe has findings, so only the
   // compiled machine is checked here.
   let text = stdout(&output);
   assert!(text.contains("recipe: 2 vCPU, 4096 MiB"), "{text}{}", stderr(&output));
   assert!(text.contains("  smbios: sys_vendor=Google, product_name=Google Compute Engine,"), "{text}");
+}
+
+#[test]
+fn profile_check_asks_the_control_plane_where_the_profile_would_run() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("profile.yaml", NATIVE_PROFILE);
+
+  let output = home.run(&["profile", "check", profile.to_str().unwrap(), "--cmd", "ls"]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  let text = stdout(&output);
+  assert!(text.contains("\nactor: the control host\n"), "{text}");
+  assert!(text.contains("\nexecutors: here (the control host)\n"), "{text}");
+  assert!(text.lines().any(|l| l.starts_with("ls ") && l.contains("executor here")), "{text}");
+}
+
+#[test]
+fn profile_check_through_the_control_plane_names_a_runner_nobody_joined_as_and_exits_1() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("profile.yaml", "executors: { mac: { runner: mac } }\nactor: { runner: { labels: [kvm] } }\n");
+
+  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+
+  assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+  let text = stdout(&output);
+  assert!(text.contains("\nactor: unresolved\n"), "{text}");
+  assert!(text.contains("\nexecutors: mac (unresolved)\n"), "{text}");
+  assert!(text.contains("error: actor: no connected runner with the actor role has labels kvm; no runner has joined\n"), "{text}");
+  assert!(text.contains("error: executors.mac: no runner is named mac; no runner has joined\n"), "{text}");
+}
+
+// Runs without an actor were removed with slice 5 of the runners-and-runs
+// design; `needy exec --runner` runs commands without one.
+#[test]
+fn run_create_has_no_no_actor_flag() {
+  let home = Home::new();
+
+  let output = home.run(&["run", "create", "--help"]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert!(!stdout(&output).contains("--no-actor"), "{}", stdout(&output));
 }
 
 #[test]
@@ -686,7 +733,12 @@ fn kill(pid: u32, name: &str) {
 
 /// A daemon in `mode` on the home's socket whose stderr the test reads.
 fn spawn_daemon(home: &Home, mode: &str) -> Child {
-  let daemon = home.needy().args(["daemon", "--mode", mode]).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+  let mut command = home.needy();
+  command.args(["daemon", "--mode", mode]);
+  if mode == "control" {
+    command.args(stand_in_actor(home));
+  }
+  let daemon = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
   while !socket.exists() {
@@ -1139,13 +1191,7 @@ fn report_defaults_to_plain_text() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
-  let created = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    profile.to_str().unwrap(),
-  ]);
+  let created = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
   let run = stdout(&created).trim().to_string();
   assert!(home.run(&["exec", "--run", &run, "--", "sh", "-c", "exit 2"]).status.code() == Some(2));
   assert!(home.run(&["run", "stop", &run]).status.success());
@@ -1281,9 +1327,10 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
   let mut command = Command::new("sh");
   command.args([
     "-c",
-    "umask 000; exec \"$0\" daemon --mode control",
+    "umask 000; exec \"$0\" daemon --mode control \"$@\"",
     needy.get_program().to_str().unwrap(),
   ]);
+  command.args(stand_in_actor(&home));
   for (name, value) in needy.get_envs() {
     match value {
       Some(value) => command.env(name, value),
@@ -1324,8 +1371,15 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   let home = Home::new();
   let elsewhere = home.path().join("elsewhere");
   std::fs::create_dir_all(&elsewhere).unwrap();
-  let child =
-    home.needy().args(["daemon", "--mode", "control"]).current_dir(&elsewhere).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let child = home
+    .needy()
+    .args(["daemon", "--mode", "control"])
+    .args(stand_in_actor(&home))
+    .current_dir(&elsewhere)
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
   while !socket.exists() {
@@ -1338,13 +1392,7 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   home.write("p/gce.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\n");
   let profile = home.write("p/profile.yaml", "extends: base.yaml\nactor: { recipe: gce.recipe.yaml }\n");
 
-  let output = home.run(&[
-    "run",
-    "create",
-    "--no-actor",
-    "--profile",
-    profile.to_str().unwrap(),
-  ]);
+  let output = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
 
   assert!(output.status.success(), "{}", stderr(&output));
 }
@@ -1616,6 +1664,7 @@ fn spawn_control_with_fast_heartbeats(home: &Home) -> Daemon {
       "--heartbeat-interval",
       "200ms",
     ])
+    .args(stand_in_actor(home))
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()

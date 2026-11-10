@@ -22,7 +22,8 @@ use needy_api_client::proto::v1::{
   runner_task, task_request, task_result,
 };
 use needy_api_client::{Client, Kind};
-use needy_api_server::protocol::domain::proto_runner_role;
+use needy_api_server::control::RunnerHost;
+use needy_api_server::protocol::domain::{proto_runner_host, proto_runner_role};
 use needy_core::types::RunnerRole;
 use needy_core_executor::process::Host;
 use needy_core_executor::service::ExecutorService;
@@ -86,6 +87,8 @@ pub struct Runner {
   enrollment: Enrollment,
   roles: BTreeSet<RunnerRole>,
   labels: BTreeMap<String, String>,
+  /// This machine, read once at start and reported in every heartbeat.
+  host: RunnerHost,
   /// Connected on the first heartbeat, so a control plane that is not up
   /// yet only delays heartbeats.
   client: Option<Client>,
@@ -132,6 +135,7 @@ impl Runner {
       enrollment,
       roles: config.roles,
       labels: config.labels,
+      host: host(),
       client: None,
       interval,
     })
@@ -157,6 +161,7 @@ impl Runner {
     let request = HeartbeatRequest {
       roles: self.roles.iter().map(|&role| proto_runner_role(role) as i32).collect(),
       labels: self.labels.clone().into_iter().collect(),
+      host: Some(proto_runner_host(&self.host)),
     };
     let beat = client.runners().heartbeat(request).await.map_err(needy_api_client::Error::from)?.into_inner();
     self.interval = interval(beat.heartbeat_interval_ms);
@@ -194,6 +199,20 @@ impl Runner {
         () = tokio::time::sleep(wait) => {}
       }
     }
+  }
+}
+
+/// This machine: its platform, and its CPU and KVM for the control plane's
+/// recipe checks.
+fn host() -> RunnerHost {
+  let cpu = needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
+    tracing::warn!("cannot read this machine's CPU; the control plane skips recipe checks against it: {e}");
+    Default::default()
+  });
+  RunnerHost {
+    os: std::env::consts::OS.into(),
+    arch: std::env::consts::ARCH.into(),
+    cpu,
   }
 }
 

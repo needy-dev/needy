@@ -17,7 +17,7 @@ actor:
       echo "== hwmon"; sensors | grep -m1 Package; sleep 3; sensors | grep -m1 Package
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
-  build: { runtime: docker, key: "{run}" }
+  build: { provider: docker, key: "{run}" }
 commands:
   - { match: "{python3,curl} **", to: build }
 files:

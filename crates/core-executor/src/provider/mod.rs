@@ -3,8 +3,12 @@
 //! daemon's pool decides when to create one and when to destroy it.
 //!
 //! - [`native`]: this machine, through the daemon's in-process executor.
-//! - [`remote`]: another machine's needy daemon.
 //! - [`docker`]: a container running `needy daemon --mode executor`.
+//!
+//! A runner's own machine needs no provider: the daemon reaches it over the
+//! runner's streams. The `remote` provider, which dialed another machine's
+//! `needy daemon --mode executor`, was removed when profiles began to select
+//! runners (slice 5 of the runners-and-runs design).
 //!
 //! TODO(provider): `containerd`, `firecracker` and `k8s` runtimes are new
 //! files here; each needs owner approval of its slice. Until then the daemon
@@ -12,7 +16,6 @@
 
 pub mod docker;
 pub mod native;
-pub mod remote;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -24,15 +27,12 @@ use needy_config::profile::{Executor, User};
 
 pub use docker::Docker;
 pub use native::Native;
-pub use remote::Remote;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   /// The executor's profile entry cannot be run as written.
   #[error("{0}")]
   Config(String),
-  #[error("{name} is not set")]
-  MissingEnv { name: String },
   #[error("cannot create {path}")]
   Directory {
     path: PathBuf,
@@ -76,10 +76,9 @@ pub struct InstanceSpec {
 /// about it.
 #[derive(Clone)]
 pub struct InstanceHandle {
-  /// `native`, `remote`, `docker`, or `runner` for a runner's own machine.
+  /// `native`, `docker`, or `runner` for a runner's own machine.
   pub runtime: &'static str,
-  /// The machine (`local`), the remote URL, the container name or the
-  /// runner's name.
+  /// The machine (`local`), the container name or the runner's name.
   pub id: String,
   pub executor: Arc<dyn needy_api_client::Executor>,
   /// The SFTP server command a workspace mount runs on the instance.
@@ -95,7 +94,7 @@ pub trait Provider: Send + Sync {
   async fn create(&self, spec: &InstanceSpec) -> Result<InstanceHandle, Error>;
 
   /// Destroys an instance this provider created. Instances that the
-  /// provider does not own (this machine, a remote daemon) are left alone.
+  /// provider does not own (this machine) are left alone.
   async fn destroy(&self, handle: &InstanceHandle) -> Result<(), Error>;
 }
 
@@ -118,8 +117,9 @@ fn host_path(path: &str, base: &Path) -> PathBuf {
   }
 }
 
-/// The SFTP server for a platform as `CheckResponse.platform` names it.
-fn sftp_command(platform: &str) -> Vec<String> {
+/// The SFTP server for a platform as `CheckResponse.platform` names it, or
+/// as `std::env::consts::OS` does (`macos`, `windows`, `linux`).
+pub fn sftp_command(platform: &str) -> Vec<String> {
   if platform.starts_with("macos") {
     vec!["/usr/libexec/sftp-server".into()]
   } else if platform.starts_with("windows") {

@@ -37,14 +37,6 @@ enum Command {
     /// A name to address the run by instead of its ID.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
-    /// Create executors only; do not start the actor.
-    // TODO(runner-select): `exec --runner` (slice 4 of the runners-and-runs
-    // design, `docs/ai/references/architecture/2026-11-10-runner-and-run-design.md`)
-    // covers a native executor on a runner; this stays until slice 5 lets
-    // profiles place executors (Docker ones too, as in `examples/cli`) on
-    // runners, and then goes.
-    #[arg(long)]
-    no_actor: bool,
     /// Override the actor's driving program.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     command: Vec<String>,
@@ -103,7 +95,7 @@ impl Row for RunRow {
       let suffix = if e.released { " (released)" } else { "" };
       format!("{}={}{suffix}", e.name, e.runtime)
     });
-    // Empty while the driving program runs, and for a run without an actor.
+    // Empty while the driving program runs.
     let exit = match (&self.exit_code, &self.signal, &self.failure) {
       (Some(code), _, _) => code.to_string(),
       (None, Some(signal), _) => signal.clone(),
@@ -185,7 +177,6 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       profile,
       group,
       name,
-      no_actor,
       command,
     } => {
       let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
@@ -201,7 +192,6 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           profile_name: needy_config::profile::name(&path),
           group,
           name,
-          start_actor: !no_actor,
           actor_command: command,
         })
         .await

@@ -7,7 +7,7 @@ const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here:
-    runtime: native
+    provider: native
     path_map: { /home/agent/workspace: /srv/ws }
 commands:
   - { match: "rm **", deny: no deleting here }
@@ -98,7 +98,7 @@ async fn an_under_rule_matches_the_ancestry_decide_carries() {
   const UNDER: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 commands:
   - { match: "python3 **", to: here }
   - { match: "python3 **", when: { under: "bash **" }, deny: under bash }

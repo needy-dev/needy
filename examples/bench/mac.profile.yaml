@@ -22,8 +22,7 @@ actor:
     upstream: { model.needy: "http://127.0.0.1:11434" }
 executors:
   mac:
-    runtime: remote
-    remote: { url: "http://127.0.0.1:17401", token_env: NEEDY_MAC_TOKEN }
+    runner: mac
     workspace: /Users/user/needy-ws/demo
     path_map: { /home/agent/workspace: /Users/user/needy-ws/demo }
 commands:

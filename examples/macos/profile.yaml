@@ -1,5 +1,7 @@
-# The actor runs on a Linux KVM host; Apple toolchain commands run on a Mac
-# executor reached through a tunnel. The Mac workspace is mounted in the actor.
+# The actor runs on a Linux KVM host; Apple toolchain commands run on runner
+# `mac`, a Mac that joined the control plane (`needy runner token create`,
+# then `needy daemon --mode runner` on the Mac). The Mac workspace is mounted
+# in the actor.
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
@@ -27,8 +29,7 @@ actor:
 
 executors:
   mac:
-    runtime: remote
-    remote: { url: "http://127.0.0.1:17401", token_env: NEEDY_MAC_TOKEN }
+    runner: mac
     workspace: /Users/user/needy-ws/demo
     path_map: { /home/agent/workspace: /Users/user/needy-ws/demo }
     max_procs: 4

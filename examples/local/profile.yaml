@@ -1,9 +1,14 @@
-# Runs on any machine without KVM: no actor, this machine as a native executor.
-# Shows copy-in, mirror-out, chaos on commands and the run's trace.
+# This machine as a native executor for `needy exec --run`: copy-in,
+# mirror-out, chaos on commands and the run's trace. Every run has an actor,
+# so the control host needs KVM; the actor only waits. Without KVM,
+# `needy exec --runner NAME` runs commands on a runner's machine, without
+# rules, chaos or a trace.
 user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  command: [sleep, infinity]
 executors:
   here:
-    runtime: native
+    provider: native
     workspace: /tmp/needy-native-ws
 commands:
   - { match: "**", to: here }

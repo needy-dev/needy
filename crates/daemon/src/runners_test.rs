@@ -46,6 +46,7 @@ fn heartbeat() -> HeartbeatRequest {
   HeartbeatRequest {
     roles: vec![RunnerRole::Executor as i32],
     labels: [("os".to_string(), "darwin".to_string())].into(),
+    host: None,
   }
 }
 

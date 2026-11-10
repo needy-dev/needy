@@ -5,13 +5,13 @@ use crate::testing::{self, new_run};
 const NO_MOUNT: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 "#;
 
 const WORKSPACE_MOUNT: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 files:
   workspace: { mode: mount, from: "executor:here:/srv/ws/", to: "actor:~/workspace/", writable: true }
 run_files: [workspace]

@@ -16,6 +16,10 @@ service RunService {
   rpc GetRunLogs(GetRunLogsRequest) returns (stream GetRunLogsResponse);
   // Decide where a command runs and how it is rewritten.
   rpc Decide(DecideRequest) returns (DecideResponse);
+  // Check a profile against the runners it would run on: its runner
+  // selectors resolve, and its recipe fits the CPU of the host its actor
+  // would run on. Creates nothing.
+  rpc CheckProfile(CheckProfileRequest) returns (CheckProfileResponse);
 }
 
 message CreateRunRequest {
@@ -24,8 +28,6 @@ message CreateRunRequest {
   string profile_yaml = 1;
   string group = 3;
   string name = 4;
-  // Start the actor; false creates executors only, for `needy exec`.
-  bool start_actor = 5;
   // Override the driving program of the actor.
   repeated string actor_command = 6;
   // The profile's name in listings, traces and reports, for example its file
@@ -39,6 +41,10 @@ message CreateRunRequest {
   // runs on another machine.
   reserved 2;
   reserved "profile_dir";
+  // Whether to start the actor. Every run has an actor; `needy exec
+  // --runner` runs commands without one.
+  reserved 5;
+  reserved "start_actor";
 }
 
 message ExecutorRef {
@@ -142,4 +148,40 @@ message DecideResponse {
   string deny = 6;
   // The value of `ExecStart.search_path_if_missing` for the routed exec.
   bool search_path_if_missing = 7;
+}
+
+message CheckProfileRequest {
+  // As in `CreateRunRequest`.
+  string profile_yaml = 1;
+  string recipe_yaml = 2;
+}
+
+message CheckProfileResponse {
+  // Where the actor would run; unset when its runner selector does not
+  // resolve, which a finding explains.
+  Placement actor = 1;
+  // Where each executor would run, by name; an executor whose selector does
+  // not resolve is missing, and a finding explains why.
+  map<string, Placement> executors = 2;
+  // The model name of the CPU the recipe was checked against; empty when the
+  // actor's host did not report one.
+  string actor_cpu = 3;
+  repeated ProfileFinding findings = 4;
+}
+
+// The host an actor or executor would run on.
+message Placement {
+  // A runner's name; empty for the control host itself.
+  string runner = 1;
+}
+
+message ProfileFinding {
+  FindingSeverity severity = 1;
+  string message = 2;
+}
+
+enum FindingSeverity {
+  FINDING_SEVERITY_UNSPECIFIED = 0;
+  FINDING_SEVERITY_ERROR = 1;
+  FINDING_SEVERITY_WARNING = 2;
 }

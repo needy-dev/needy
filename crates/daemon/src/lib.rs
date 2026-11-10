@@ -13,6 +13,9 @@
 //!   the gateway.
 //! - `guest`: the actor's side of its run (`GuestService`).
 //! - `runners`: the runner registry (`RunnerService`) over `store`.
+//! - `schedule`: which runner a profile's `runner:` selector names, and
+//!   where an actor or executor of a run is created.
+//! - `check`: `profile check` through the control plane.
 //! - `link`: runners' control streams and task streams, and the executor
 //!   that reaches a connected runner's machine through them.
 //! - `store`: `state.db`, the control plane's own state.
@@ -34,6 +37,8 @@ pub mod runner;
 #[cfg(unix)]
 mod actor;
 #[cfg(unix)]
+mod check;
+#[cfg(unix)]
 mod files;
 #[cfg(unix)]
 mod guest;
@@ -49,6 +54,8 @@ mod routing;
 mod run;
 #[cfg(unix)]
 mod runners;
+#[cfg(unix)]
+mod schedule;
 #[cfg(unix)]
 mod store;
 
@@ -69,7 +76,7 @@ use std::time::Duration;
 #[cfg(unix)]
 use anyhow::{Context, Result, bail};
 #[cfg(unix)]
-use needy_api_server::control::{Caller, ControlError};
+use needy_api_server::control::{Caller, ControlError, RunnerHost};
 #[cfg(unix)]
 use needy_api_server::{Health, Listen, Server, create_private_dir};
 #[cfg(unix)]
@@ -110,6 +117,14 @@ pub struct Config {
   /// How often runners send a heartbeat; told to them in every join and
   /// heartbeat response.
   pub heartbeat_interval: Duration,
+  /// The runner that runs on this host, as the operator says
+  /// (`--local-runner`). An actor placed on it, and its Docker executors,
+  /// are created by the control plane itself; `None` when no runner runs
+  /// here.
+  // TODO(runner-actor): actors on other runners need the actor role over
+  // dial-out (the VM's lifecycle and its guest channel relayed through the
+  // runner); until then only this runner hosts placed actors.
+  pub local_runner: Option<String>,
 }
 
 #[cfg(unix)]
@@ -125,6 +140,10 @@ pub struct Daemon {
   pub(crate) pool: Arc<Pool>,
   /// The runners whose control streams are open.
   pub(crate) links: Arc<link::Links>,
+  /// Each runner's machine as its last heartbeat reported it.
+  // NOTICE: kept in memory: a runner reports it in every heartbeat, so a
+  // control plane that restarts knows it again within one heartbeat.
+  pub(crate) runner_hosts: Arc<Mutex<HashMap<String, RunnerHost>>>,
   /// This machine, always available as the `local` executor.
   pub(crate) local: Arc<Instance>,
   /// The local executor's processes.
@@ -194,14 +213,16 @@ impl Daemon {
         None
       }
     };
+    let links: Arc<link::Links> = Arc::default();
     Ok(Self {
+      local: Instance::machine(&native),
+      pool: Arc::new(Pool::new(native, docker, links.clone())),
       config: Arc::new(config),
       traces,
       state,
       runs: Arc::new(Registry::default()),
-      local: Instance::machine(&native),
-      pool: Arc::new(Pool::new(native, docker)),
-      links: Arc::default(),
+      links,
+      runner_hosts: Arc::default(),
       host,
       processes: Arc::default(),
       tasks,

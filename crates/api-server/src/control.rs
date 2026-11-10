@@ -95,7 +95,6 @@ pub struct NewRun {
   pub group: String,
   /// Empty for the run's ID.
   pub name: String,
-  pub start_actor: bool,
   /// Overrides the profile's driving program when not empty.
   pub actor_command: Vec<String>,
 }
@@ -144,6 +143,42 @@ pub enum Target {
   Refused(String),
 }
 
+/// A profile to check against the runners it would run on.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileToCheck {
+  /// As in [`NewRun`].
+  pub profile_yaml: String,
+  pub recipe_yaml: String,
+}
+
+/// Where a profile would run, and what the control plane found.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProfileCheck {
+  /// Where the actor would run; `None` when its selector does not resolve.
+  pub actor: Option<Placement>,
+  /// Where each executor would run; one whose selector does not resolve is
+  /// missing.
+  pub executors: BTreeMap<String, Placement>,
+  /// The model name of the CPU the recipe was checked against; empty when
+  /// unknown.
+  pub actor_cpu: String,
+  pub findings: Vec<ProfileFinding>,
+}
+
+/// The host an actor or executor would run on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Placement {
+  /// The control host itself.
+  ControlHost,
+  Runner(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProfileFinding {
+  pub error: bool,
+  pub message: String,
+}
+
 #[async_trait::async_trait]
 pub trait Runs: Send + Sync + 'static {
   async fn create(&self, request: NewRun) -> Result<RunInfo>;
@@ -155,6 +190,8 @@ pub trait Runs: Send + Sync + 'static {
   async fn logs(&self, id: &str) -> Result<Vec<u8>>;
   /// Places a command the actor's proxy routed.
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route>;
+  /// Checks a profile against the runners it would run on; creates nothing.
+  async fn check(&self, profile: ProfileToCheck) -> Result<ProfileCheck>;
 }
 
 // ------------------------------------------------------------ processes
@@ -376,6 +413,18 @@ pub struct CreatedJoinToken {
 pub struct RunnerReport {
   pub roles: BTreeSet<RunnerRole>,
   pub labels: BTreeMap<String, String>,
+  /// Its machine; heartbeats carry it, a join does not.
+  pub host: Option<RunnerHost>,
+}
+
+/// A runner's machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunnerHost {
+  /// As `std::env::consts` names them: `linux`, `macos`; `x86_64`, `aarch64`.
+  pub os: String,
+  pub arch: String,
+  /// Its CPU and the CPUID entries its KVM supports, for recipe checks.
+  pub cpu: needy_core::recipe::HostInfo,
 }
 
 /// A runner asking to join.

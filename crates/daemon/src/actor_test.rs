@@ -4,12 +4,12 @@ use std::time::Duration;
 use needy_api_server::control::Runs;
 use needy_core::types::RunState;
 
-use crate::testing::{self, fake_image, new_actor_run, running};
+use crate::testing::{self, fake_image, new_run, running};
 
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { runtime: native }
+  here: { provider: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -61,7 +61,7 @@ fn run_dir(started: &testing::Started, id: &str) -> PathBuf {
 async fn stopping_a_run_stops_its_vm() {
   let started = testing::daemon().await;
   fake_image(&started.dir.path().join("image"), LONG_RUNNING);
-  let created = Runs::create(&started.daemon, new_actor_run(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let pid = firecracker_pid(&run_dir(&started, &created.id)).await;
   assert!(running(pid));
 
@@ -86,7 +86,7 @@ async fn stopping_a_run_stops_its_guest_listener_and_removes_its_sockets() {
   let started = testing::daemon().await;
   fake_image(&started.dir.path().join("image"), LONG_RUNNING);
   let daemon_tasks = started.daemon.tasks.len();
-  let created = Runs::create(&started.daemon, new_actor_run(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let dir = run_dir(&started, &created.id);
   firecracker_pid(&dir).await;
   assert_eq!(sockets(&dir), ["v.sock", "v.sock_7000", "v.sock_7001"]);
@@ -113,9 +113,9 @@ async fn an_actor_that_exits_releases_its_executors_and_sockets() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
   fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
-  let created = Runs::create(daemon, new_actor_run(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   let dir = run_dir(&started, &created.id);
-  testing::exit_actor(&started, &created.id).await;
+  testing::exit_actor(&started.daemon, started.dir.path(), &created.id).await;
 
   let released = async {
     while !(daemon.pool.instances().await.is_empty() && sockets(&dir).is_empty()) {
@@ -149,7 +149,7 @@ async fn a_vm_that_exits_before_its_driving_program_fails_the_run_with_the_reaso
     &started.dir.path().join("image"),
     r#"echo "Running Firecracker"; echo "Error: Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1"; exit 1"#,
   );
-  let created = Runs::create(daemon, new_actor_run(PROFILE, started.dir.path())).await.unwrap();
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
 
   // The run ends, then gives back its executors.
   let ended = async {
@@ -193,7 +193,7 @@ async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
   let kvm = started.dir.path().join("kvm");
   std::fs::remove_file(&kvm).unwrap();
 
-  let created = tokio::time::timeout(Duration::from_secs(5), Runs::create(daemon, new_actor_run(PROFILE, started.dir.path())))
+  let created = tokio::time::timeout(Duration::from_secs(5), Runs::create(daemon, new_run(PROFILE, started.dir.path())))
     .await
     .expect("the create fails at once");
 
@@ -227,16 +227,16 @@ async fn a_create_without_kvm_fails_before_it_acquires_executors() {
   let daemon = &started.daemon;
   fake_image(&started.dir.path().join("image"), LONG_RUNNING);
   std::fs::remove_file(started.dir.path().join("kvm")).unwrap();
-  // Acquiring `far` fails: its token's variable is not set.
+  // Acquiring `far` fails: no provider creates Firecracker executors.
   let profile = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  far: { runtime: remote, remote: { url: "unix:/nonexistent.sock", token_env: NEEDY_TEST_UNSET_TOKEN } }
+  far: { provider: firecracker }
 commands:
   - { match: "**", to: far }
 "#;
 
-  let Err(needy_api_server::control::ControlError::Failed(message)) = Runs::create(daemon, new_actor_run(profile, started.dir.path())).await
+  let Err(needy_api_server::control::ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, started.dir.path())).await
   else {
     panic!("a create without KVM must fail");
   };

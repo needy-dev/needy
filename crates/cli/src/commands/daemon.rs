@@ -40,6 +40,17 @@ pub struct Args {
   /// Defaults to the image `needy build` writes.
   #[arg(long)]
   actor_image: Option<PathBuf>,
+  /// The runner that runs on this host (control mode). The control plane
+  /// starts actors placed on it and creates its Docker executors itself;
+  /// actors and Docker executors go nowhere else yet.
+  #[arg(long, value_name = "NAME")]
+  local_runner: Option<String>,
+  /// The KVM device checked before an actor starts (control mode).
+  // NOTICE: Firecracker opens /dev/kvm itself; another path only makes sense
+  // with a stand-in Firecracker from --actor-image, as the CLI's tests use on
+  // hosts without KVM. Hidden for that reason.
+  #[arg(long, value_name = "PATH", hide = true)]
+  kvm: Option<PathBuf>,
   /// Docker image for docker executors without their own image.
   #[arg(long, default_value = "needy-executor:latest")]
   docker_image: String,
@@ -74,6 +85,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 }
 
 async fn serve(args: Args, ctx: &Context) -> Result<i32> {
+  if !matches!(args.mode, Mode::Control) && (args.local_runner.is_some() || args.kvm.is_some()) {
+    bail!("--local-runner and --kvm are for the control mode");
+  }
   if matches!(args.mode, Mode::Runner) && (args.listen.is_some() || args.token_env.is_some()) {
     bail!("a runner dials the control plane and listens nowhere; --listen and --token-env are for the executor and control modes");
   }
@@ -116,9 +130,10 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         state_dir: paths.state,
         runtime_dir: paths.runtime,
         actor_image: image,
-        kvm: needy_core_actor::host::vm::KVM.into(),
+        kvm: args.kvm.unwrap_or_else(|| needy_core_actor::host::vm::KVM.into()),
         docker_image: args.docker_image,
         heartbeat_interval: args.heartbeat_interval,
+        local_runner: args.local_runner,
       })
       .await?;
       // Runs are stopped even when serving failed.

@@ -2,7 +2,7 @@
 //! their slots.
 //!
 //! Runs whose executor key renders equal share one instance. The pool
-//! creates an instance through its runtime's provider on the first
+//! creates an instance through its provider on the first
 //! [`Pool::acquire`] and destroys it when the last holder releases it. An
 //! instance with `max_procs` has that many slots; a command takes one for as
 //! long as it runs, and `on_full` decides what a command does when none is
@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::ControlError;
-use needy_config::profile::{OnFull, Runtime};
-use needy_core_executor::provider::{Docker, InstanceHandle, InstanceSpec, Native, Provider, Remote};
+use needy_config::profile::{self, OnFull};
+use needy_core_executor::provider::{Docker, InstanceHandle, InstanceSpec, Native, Provider, sftp_command};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::link::{Links, RunnerExecutor};
@@ -58,26 +58,12 @@ impl Instance {
 
   /// A connected runner's own machine, for commands outside any run
   /// (`needy exec --runner`). It is never pooled and never destroyed.
-  // TODO(runner-select): profiles cannot place executors on runners yet;
-  // `runner:` selectors in profiles are slice 5 of the runners-and-runs
-  // design, which pools runner instances by key like other runtimes.
   pub fn runner(runner: &str, links: &Arc<Links>) -> Arc<Self> {
-    let executor = RunnerExecutor {
-      runner: runner.to_string(),
-      links: links.clone(),
-    };
     Arc::new(Self {
       name: runner.to_string(),
       key: String::new(),
-      handle: InstanceHandle {
-        runtime: "runner",
-        id: runner.to_string(),
-        executor: Arc::new(executor),
-        // TODO(runner-select): a workspace mount on a runner needs its
-        // platform's SFTP server; mounts reach runners with slice 5.
-        sftp: Vec::new(),
-        workspace: String::new(),
-      },
+      // No run mounts a workspace from it.
+      handle: runner_handle(runner, links, Vec::new(), String::new()),
       provider: None,
       path_map: BTreeMap::new(),
       slots: None,
@@ -103,6 +89,33 @@ impl Instance {
   }
 }
 
+/// A runner's own process space, reached over its streams.
+fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace: String) -> InstanceHandle {
+  let executor = RunnerExecutor {
+    runner: runner.to_string(),
+    links: links.clone(),
+  };
+  InstanceHandle {
+    runtime: "runner",
+    id: runner.to_string(),
+    executor: Arc::new(executor),
+    sftp,
+    workspace,
+  }
+}
+
+/// Where the pool creates an instance, as the scheduler placed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Site {
+  /// This host: the daemon's own process space or its Docker. A Docker
+  /// executor on the control host's own runner is created here too.
+  ControlHost,
+  /// A runner's own process space, reached over its streams; `os` is its
+  /// operating system as it reported it, which picks the SFTP server of a
+  /// workspace mount.
+  Runner { name: String, os: String },
+}
+
 /// One key's instance: created once by the first acquire, which the others
 /// of that key wait for.
 type KeyCell = Arc<OnceCell<Arc<Instance>>>;
@@ -114,18 +127,19 @@ pub struct Pool {
   /// created outside it.
   instances: Mutex<HashMap<String, KeyCell>>,
   native: Arc<Native>,
-  remote: Arc<Remote>,
   /// `None` when the Docker client could not be set up (a bad `DOCKER_HOST`).
   docker: Option<Arc<Docker>>,
+  /// The runners whose control streams are open, for instances on them.
+  links: Arc<Links>,
 }
 
 impl Pool {
-  pub fn new(native: Arc<Native>, docker: Option<Docker>) -> Self {
+  pub fn new(native: Arc<Native>, docker: Option<Docker>, links: Arc<Links>) -> Self {
     Self {
       instances: Mutex::new(HashMap::new()),
       native,
-      remote: Arc::new(Remote),
       docker: docker.map(Arc::new),
+      links,
     }
   }
 
@@ -135,13 +149,14 @@ impl Pool {
     self.instances.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
   }
 
-  /// The instance for the spec's key, created through the executor's
-  /// provider when no run holds one yet. Acquires of one key share one
-  /// creation; a failed creation leaves the key free for the next acquire.
-  pub async fn acquire(&self, spec: InstanceSpec) -> Result<Arc<Instance>> {
+  /// The instance for the spec's key at `site`, created through the
+  /// executor's provider when no run holds one yet. Acquires of one key
+  /// share one creation; a failed creation leaves the key free for the next
+  /// acquire.
+  pub async fn acquire(&self, spec: InstanceSpec, site: &Site) -> Result<Arc<Instance>> {
     loop {
       let cell = self.lock().entry(spec.key.clone()).or_default().clone();
-      let created = cell.get_or_try_init(|| self.create(&spec)).await;
+      let created = cell.get_or_try_init(|| self.create(&spec, site)).await;
       let mut instances = self.lock();
       let current = instances.get(&spec.key).is_some_and(|c| Arc::ptr_eq(c, &cell));
       match created {
@@ -162,25 +177,35 @@ impl Pool {
     }
   }
 
-  /// Creates the instance of `spec` through its runtime's provider.
-  async fn create(&self, spec: &InstanceSpec) -> Result<Arc<Instance>> {
-    let provider: Arc<dyn Provider> = match spec.config.runtime {
-      Runtime::Native => self.native.clone(),
-      // TODO(runner-select): replaced by runner executors once profiles
-      // select runners (slice 5); until then a profile reaches another
-      // machine through an executor daemon it dials.
-      Runtime::Remote => self.remote.clone(),
-      Runtime::Docker => self.docker.clone().context("Docker is not available on this machine")?,
+  /// Creates the instance of `spec` at `site` through its provider.
+  async fn create(&self, spec: &InstanceSpec, site: &Site) -> Result<Arc<Instance>> {
+    let (handle, provider): (InstanceHandle, Option<Arc<dyn Provider>>) = match (spec.config.provider, site) {
+      (profile::Provider::Native, Site::ControlHost) => (self.native.create(spec).await?, Some(self.native.clone())),
+      (profile::Provider::Docker, Site::ControlHost) => {
+        let docker = self.docker.clone().context("Docker is not available on this machine")?;
+        (docker.create(spec).await?, Some(docker))
+      }
+      // The runner's machine outlives its runs; nothing creates or
+      // destroys it. Its workspace is a path on that machine, as written.
+      (profile::Provider::Native, Site::Runner { name, os }) => {
+        let workspace = spec.config.workspace.clone().unwrap_or_default();
+        (runner_handle(name, &self.links, sftp_command(os), workspace), None)
+      }
+      // TODO(runner-docker): a runner creating containers itself (create and
+      // destroy tasks on its control stream, execs relayed to the
+      // container) is deferred; the scheduler places Docker executors on
+      // the control host, including those on its own runner, and refuses
+      // other runners before this point.
+      (profile::Provider::Docker, Site::Runner { name, .. }) => bail!("runner {name} cannot create Docker executors yet"),
       // TODO(provider): containerd, firecracker and k8s providers are
       // deferred; see `needy_core_executor::provider`.
-      other => bail!("runtime {other:?} is not supported yet"),
+      (other, _) => bail!("provider {other:?} is not supported yet"),
     };
-    let handle = provider.create(spec).await?;
     Ok(Arc::new(Instance {
       name: spec.name.clone(),
       key: spec.key.clone(),
       handle,
-      provider: Some(provider),
+      provider,
       path_map: spec.config.path_map.clone(),
       slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
       on_full: spec.config.on_full,

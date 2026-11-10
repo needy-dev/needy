@@ -43,7 +43,7 @@ fn profile(yaml: &str) -> Profile {
 fn composition_example_from_the_doc() {
   let p = profile(
     r#"
-executors: { build: { runtime: docker }, mac: { runtime: remote } }
+executors: { build: { provider: docker }, mac: { runner: mac } }
 presets:
   clean-env: { env: { clear: true, pass: [PATH, HOME, LANG, TERM] } }
   mac:       { to: mac }
