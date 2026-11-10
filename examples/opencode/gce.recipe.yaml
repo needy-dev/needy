@@ -10,14 +10,12 @@
 # TODO(provenance): stepping 0 has no pinned source; a public GCE cpuinfo
 # with model 79, stepping 0 is https://github.com/googlecolab/colabtools/issues/1937
 # (an issue page, not pinned).
-# REVIEW: `hybrid_cpu` never appears in a host's /proc/cpuinfo (see FEATURES
-# in crates/core/src/recipe/cpu.rs); hiding it still clears the CPUID bit.
 extends: builtin:gce-ubuntu-22.04
 cpu:
   brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
   signature: { family: 6, model: 79, stepping: 0 }
   features:
     hide: [avx_vnni, serialize, gfni, vaes, vpclmulqdq, movdiri, movdir64b, waitpkg,
-           sha_ni, clflushopt, clwb, umip, pku, ospke, la57, hybrid_cpu]
+           sha_ni, clflushopt, clwb, umip, pku, ospke, la57]
   topology: { cores: 2, threads_per_core: 1 }
 memory: 4GiB

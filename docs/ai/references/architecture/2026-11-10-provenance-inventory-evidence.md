@@ -35,9 +35,9 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | # | Item | File | Status | Evidence |
 | --- | --- | --- | --- | --- |
 | 1 | `sse3` feature name | `crates/core/src/recipe/cpu.rs:49` | fixed | Linux shows `pni`: `K/arch/x86/include/asm/cpufeatures.h#L106`; the table now says `pni`; test `sse3_is_named_pni_as_in_proc_cpuinfo` on the captured `testdata/cpuinfo-raptor-lake.txt` |
-| 2 | `hybrid_cpu` feature name | `crates/core/src/recipe/cpu.rs:111` | REVIEW | no quoted name, never in `/proc/cpuinfo`: `K/arch/x86/include/asm/cpufeatures.h#L425` |
-| 3 | `hybrid_cpu` in the Raptor Lake test flags | `crates/core/src/recipe/mod_test.rs:14` | REVIEW | as item 2 |
-| 4 | `hybrid_cpu` in the Broadwell hide list | `examples/opencode/gce.recipe.yaml:13` | REVIEW | as item 2 |
+| 2 | `hybrid_cpu` feature name | `crates/core/src/recipe/cpu.rs:111` | fixed | no quoted name, never in `/proc/cpuinfo`: `K/arch/x86/include/asm/cpufeatures.h#L425`; KVM never passes the bit to a guest, `K/arch/x86/kvm/cpuid.c#L967-L985` (bit 15 clear in `KVM_GET_SUPPORTED_CPUID` on the hybrid host). The entry and its `newer` checks were removed; test `hybrid_cpu_is_not_a_recipe_feature` |
+| 3 | `hybrid_cpu` in the Raptor Lake test flags | `crates/core/src/recipe/mod_test.rs:14` | fixed | the hand-written flags were replaced by the captured `testdata/cpuinfo-raptor-lake.txt` |
+| 4 | `hybrid_cpu` in the Broadwell hide list | `examples/opencode/gce.recipe.yaml:13` | fixed | removed from the hide list, as item 2 |
 | 5 | GCE CPU, Cascade Lake @ 2.20GHz | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:16` | REVIEW | only A2 and G2 GPU types: `WB/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms` |
 | 6 | GCE kernel date and build host | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:29` | REVIEW | image says `Wed May  1 02:03:24 UTC 2024`, `lcy02-amd64-115`: <https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/28152459> |
 | 7 | GCE hostname prefix `instance-` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:36` | TODO(provenance) | none found |
@@ -126,5 +126,5 @@ the example files were left as they are.
 
 - Fix the items marked REVIEW above; each needs an owner decision on the
   correct value.
-- `check_cpu` cannot see `hybrid_cpu` from `/proc/cpuinfo`; reading CPUID
-  would let the check work.
+- `hybrid_cpu` was removed rather than read from CPUID: KVM does not pass
+  the bit to a guest, so there is nothing to hide.

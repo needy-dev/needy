@@ -9,17 +9,9 @@ fn load(yaml: &str) -> Recipe {
   needy_config::recipe::load(&Source::text(yaml, ".")).unwrap()
 }
 
-// A hand-picked subset of a Raptor Lake host's flags, not a capture; the
-// names follow https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/cpufeatures.h.
-// REVIEW: `hybrid_cpu` is listed although Linux never shows it in
-// `/proc/cpuinfo` (no quoted name, cpufeatures.h#L425), so the test that
-// warns about it exercises a flag no real host reports.
-const RAPTOR_LAKE_FLAGS: &str = "fpu vme sse sse2 ssse3 fma sse4_1 sse4_2 avx avx2 bmi1 bmi2 adx sha_ni gfni vaes vpclmulqdq avx_vnni serialize hybrid_cpu movdiri movdir64b waitpkg umip pku ospke rdseed clflushopt clwb";
-
+/// The captured `/proc/cpuinfo` of a Raptor Lake host (see `testdata/SOURCES.md`).
 fn raptor_lake() -> HostInfo {
-  HostInfo::from_cpuinfo(&format!(
-    "processor\t: 0\nvendor_id\t: GenuineIntel\nmodel name\t: 13th Gen Intel(R) Core(TM) i5-13600KF\nflags\t\t: {RAPTOR_LAKE_FLAGS}\n"
-  ))
+  cpuinfo("cpuinfo-raptor-lake.txt")
 }
 
 const GCE: &str = r#"
@@ -111,7 +103,6 @@ fn cascade_lake_on_raptor_lake() {
   assert!(errors.iter().any(|f| f.message.contains("avx512f")), "{errors:?}");
   let warnings: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Warning).map(|f| f.message.clone()).collect();
   assert!(warnings.iter().any(|w| w.contains("avx_vnni")), "{warnings:?}");
-  assert!(warnings.iter().any(|w| w.contains("hybrid_cpu")), "{warnings:?}");
   assert!(!warnings.iter().any(|w| w.contains("serialize")), "hidden features do not warn");
 }
 
@@ -148,6 +139,30 @@ fn sse3_is_named_pni_as_in_proc_cpuinfo() {
   let leaf1 = modifiers.iter().find(|m| m["leaf"] == "0x1").unwrap()["modifiers"].as_array().unwrap();
   let ecx = leaf1.iter().find(|m| m["register"] == "ecx").unwrap()["bitmap"].as_str().unwrap();
   assert_eq!(ecx, format!("0b{}0", "x".repeat(31)), "pni is CPUID.01H:ECX[0]");
+}
+
+// ROOT CAUSE:
+//
+// If the host CPU was hybrid, as the Raptor Lake host in `testdata` is,
+// `check_cpu` never warned about `hybrid_cpu`, because Linux has no
+// `/proc/cpuinfo` name for CPUID.07H:EDX[15]. The guest cannot see that bit
+// either: KVM leaves it out of the CPUID it supports, so hiding it changed
+// nothing.
+//
+// Before the fix, `hide: [hybrid_cpu]` was accepted silently and the warning
+// was dead code.
+// The fix drops `hybrid_cpu` from the feature table and the model checks,
+// so a recipe that names it is told the feature is unknown.
+#[test]
+fn hybrid_cpu_is_not_a_recipe_feature() {
+  let host = cpuinfo("cpuinfo-raptor-lake.txt");
+  assert!(!host.flags.contains("hybrid_cpu"), "a hybrid host shows no such flag");
+  let recipe = load("cpu: { signature: { family: 6, model: 79, stepping: 0 }, features: { hide: [hybrid_cpu] } }");
+
+  let c = compile(&recipe, &host, 1);
+
+  let messages: Vec<_> = c.findings.iter().map(|f| f.message.clone()).collect();
+  assert!(messages.contains(&"cpu.features.hide: unknown feature \"hybrid_cpu\"".to_string()), "{messages:?}");
 }
 
 #[test]

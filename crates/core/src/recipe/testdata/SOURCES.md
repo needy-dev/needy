@@ -36,4 +36,5 @@ changed; the other 19 processors' blocks were left out.
   <https://github.com/torvalds/linux/blob/v6.18/arch/x86/kernel/cpu/proc.c#L70-L130>.
 - Reference: <https://man7.org/linux/man-pages/man5/proc_cpuinfo.5.html>.
 
-SSE3 shows as `pni`.
+SSE3 shows as `pni`. The host is hybrid (it has `/sys/devices/cpu_core` and
+`/sys/devices/cpu_atom`), yet no flag names that.

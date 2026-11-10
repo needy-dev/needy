@@ -107,12 +107,14 @@ const FEATURES: &[(&str, u32, u32, &str, u32)] = &[
   ("avx512_vp2intersect", 7, 0, "edx", 8),
   ("md_clear", 7, 0, "edx", 10),
   ("serialize", 7, 0, "edx", 14),
-  // REVIEW: the bit is right, but Linux shows no `hybrid_cpu` flag: the define
-  // has no quoted name (`X86_FEATURE_HYBRID_CPU (18*32+15) /* This part has
-  // CPUs of more than one type */`, https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/cpufeatures.h#L425),
-  // so `check_cpu` never sees it in a real host's flags (the tests' Raptor
-  // Lake flags in `mod_test.rs` list it by hand).
-  ("hybrid_cpu", 7, 0, "edx", 15),
+  // NOTICE: CPUID.07H:EDX[15] (hybrid) has no entry. Linux shows no flag for
+  // it (`X86_FEATURE_HYBRID_CPU (18*32+15)` has no quoted name,
+  // https://github.com/torvalds/linux/blob/v6.18/arch/x86/include/asm/cpufeatures.h#L425),
+  // and KVM leaves it out of the CPUID a guest can get (no `HYBRID_CPU` in
+  // `CPUID_7_EDX`, https://github.com/torvalds/linux/blob/v6.18/arch/x86/kvm/cpuid.c#L967-L985;
+  // `KVM_GET_SUPPORTED_CPUID` on a hybrid i5-13600KF host returned bit 15
+  // clear on 2026-11-10), so a guest never sees it and hiding it does nothing.
+  // Add it back only if KVM starts passing the bit through.
   ("tsxldtrk", 7, 0, "edx", 16),
   ("pconfig", 7, 0, "edx", 18),
   ("amx_bf16", 7, 0, "edx", 22),
@@ -224,8 +226,7 @@ struct ModelProfile {
 // - Alder Lake and Raptor Lake: QEMU has no client model; https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/llvm/lib/Target/X86/X86.td#L1272-L1296
 //   (`raptorlake` uses the Alder Lake features, #L1859-L1869).
 // Every `requires` entry is in the source's list and every `newer` entry is
-// not, except `hybrid_cpu`, which neither source lists (see the REVIEW in
-// FEATURES: Linux never shows it, so its `newer` check never fires).
+// not.
 // Reference: https://github.com/qemu/qemu/blob/v10.1.0/docs/system/cpu-models-x86.rst.inc
 const MODELS: &[ModelProfile] = &[
   ModelProfile {
@@ -239,7 +240,6 @@ const MODELS: &[ModelProfile] = &[
       "sha_ni",
       "avx_vnni",
       "serialize",
-      "hybrid_cpu",
       "gfni",
       "vaes",
       "vpclmulqdq",
@@ -258,7 +258,6 @@ const MODELS: &[ModelProfile] = &[
     newer: &[
       "avx_vnni",
       "serialize",
-      "hybrid_cpu",
       "amx_tile",
       "amx_int8",
       "amx_bf16",
@@ -280,7 +279,6 @@ const MODELS: &[ModelProfile] = &[
     newer: &[
       "avx_vnni",
       "serialize",
-      "hybrid_cpu",
       "amx_tile",
       "amx_int8",
       "amx_bf16",
@@ -298,7 +296,7 @@ const MODELS: &[ModelProfile] = &[
       "serialize",
       "avx512_fp16",
     ],
-    newer: &["hybrid_cpu"],
+    newer: &[],
   },
   ModelProfile {
     family: 6,
