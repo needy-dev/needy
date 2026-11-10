@@ -105,7 +105,7 @@ Needy keeps the trace and run directories in `$XDG_STATE_HOME/needy`, images in
 stdin and stdout are terminals:
 
 ```sh
-needy run create --no-actor --profile examples/cli/profile.yaml
+needy run create --profile examples/cli/profile.yaml   # an actor that only waits
 needy exec --run RUN -- uname -a
 needy exec -t --run RUN -- ssh user@host     # interactive
 needy exec -d --run RUN -- pnpm dev          # prints a process ID
@@ -114,14 +114,8 @@ needy exec --output ndjson --run RUN -- make test
 needy fs cp ./src build:/home/agent/workspace
 ```
 
-A Mac or Windows machine becomes an executor by running the daemon and
-exposing it through a tunnel such as `ssh -R` or Cloudflare Tunnel:
-
-```sh
-NEEDY_TOKEN=... needy daemon --mode executor --listen 127.0.0.1:7401 --token-env NEEDY_TOKEN
-```
-
-A machine can also join the control plane as a **runner** with a join token.
+Another machine, such as a Mac, joins the control plane as a **runner** with a
+join token.
 A runner dials the control plane and keeps that connection open, so it needs
 no listening port, only a way to reach the control plane (such as `ssh -L`).
 Transport encryption comes from the tunnel:
@@ -134,23 +128,37 @@ needy exec --runner mac -- uname -a                     # on the control host
 needy ps --runner mac
 ```
 
-Profiles do not select runners yet; a profile reaches another machine through
-an executor daemon as above. See [runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md).
+Profiles place executors and the actor on runners by name or labels, with no
+addresses or secrets in the profile:
+
+```yaml
+actor: { runner: kvm }                       # the control host's own runner
+executors:
+  mac: { runner: mac }                       # the Mac's own process space
+  build: { runner: { labels: [kvm] }, provider: docker }
+```
+
+Actors and Docker executors run on the control host for now: on it directly
+(no `runner:`), or on the runner the control daemon names as its own with
+`needy daemon --mode control --local-runner kvm`. See
+[runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md#as-built-slice-5).
 
 Examples:
 
 | Profile | Shows |
 | --- | --- |
 | [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model through the gateway, shells in Docker |
-| [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on a Mac |
+| [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
-| [`examples/local`](examples/local/profile.yaml) | No KVM needed: copy-in, mirror-out, chaos and the trace on this machine |
+| [`examples/local`](examples/local/profile.yaml) | This machine as a native executor for `needy exec --run`: copy-in, mirror-out, chaos and the trace |
 | [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out on the actor, a file fault on the workspace, an exec fault and an overheating sensor |
-| [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec` |
+| [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec --run`, with an actor that only waits |
 
-`needy profile check PROFILE --cmd "git status"` shows where commands would run,
-the chaos faults that match them and the recipe's consistency findings.
+`needy profile check PROFILE --cmd "git status"` asks the control plane where
+the actor and executors would run, checks the recipe against the CPU of the
+actor's host, and shows where commands would run and the chaos faults that
+match them; `--local` checks offline against this machine.
 
 ## Documentation
 

@@ -102,9 +102,19 @@ and `kill` take the process ID as for any process. A runner that is not
 connected fails at once: `needy: runner NAME is not connected`, exit 1. A
 command in flight when the runner's connection drops exits 255 with `needy:
 the connection ended before the command exited: runner NAME disconnected`.
-`--runner` excludes `--run` and `--executor`. Profiles do not place executors
-on runners yet (slice 5); `run create --no-actor` stays for Docker executors
-until then.
+`--runner` excludes `--run` and `--executor`. Profiles place executors and the
+actor on runners with `runner:` selectors (slice 5); `run create --no-actor`
+is gone: every run has an actor, and a run whose actor only waits
+(`examples/cli`) serves `needy exec --run`. `needy daemon --mode control
+--local-runner NAME` names the runner on the control host, which hosts
+actors and Docker executors placed on it.
+
+`needy profile check PROFILE` sends the resolved profile to the control plane
+(`RunService.CheckProfile`) and prints where the actor and each executor
+would run, the CPU the recipe was checked against (the actor's runner's, as
+its heartbeats report it), the findings, and the `--cmd` decisions; it exits
+1 on an error finding. `--local` checks offline against this machine's CPU
+and resolves no selector.
 
 Benchmarks are a developer task, not a product command: `cargo xtask bench`
 runs the latency and throughput probes, and `cargo xtask bench run --profile

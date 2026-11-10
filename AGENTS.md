@@ -14,8 +14,10 @@ Dependencies point downward; a crate never depends on one above it.
   dispatches to the guest init and proxy by `argv[0]`.
 - `crates/daemon` (`needy-daemon`): the control plane's policy and the
   executor role: `run` (create, get, list, stop, and the run state
-  transitions), `pool` (instances by key, refcounts, slots), `routing` (the
-  `exec.decide` chain, path maps), `relay` (exec streams and their stream
+  transitions), `pool` (instances by key, refcounts, slots), `schedule`
+  (which runner a profile's `runner:` selector names, and where an actor or
+  executor is created), `check` (`profile check` through the control plane),
+  `routing` (the `exec.decide` chain, path maps), `relay` (exec streams and their stream
   filters), `files` (copy-in, mirror-out), `actor` and `guest` (a run's
   VM, gateway and guest API), `runners` (the runner registry) over `store`
   (`state.db`, SeaORM, separate from `trace.db`), and the `executor` and
@@ -33,8 +35,8 @@ Dependencies point downward; a crate never depends on one above it.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is
   the process service one machine serves; `provider` creates and destroys
-  executor instances (`native`, `remote`, `docker` through `bollard`) and owns
-  the Docker run-option policy; `relay` connects an exec stream to the local
+  executor instances (`native`, `docker` through `bollard`) and owns the
+  Docker run-option policy; `relay` connects an exec stream to the local
   terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a
@@ -283,8 +285,9 @@ one, add its provenance or a `TODO(provenance):` naming what is missing.
 - The repository has Rust unit coverage for profiles, rules, recipes, chaos,
   archives, signals and bearer authentication. The daemon is tested in
   process through `needy-api-server`'s traits with a native executor
-  (runs, pool, routing, relay, shutdown, the runner registry and the
-  runner role); actors and Docker executors are
+  (runs, pool, routing, relay, shutdown, the runner registry, the
+  runner role, scheduling and profile checks, with runners joined in
+  process and a stand-in Firecracker); real actors and Docker executors are
   verified end to end on hosts (see the closed-loop results).
 - Add regression tests for behavior changes and keep them narrow.
 - Use `cargo test` for the full suite and include regression tests for bug

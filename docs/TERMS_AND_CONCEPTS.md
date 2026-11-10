@@ -38,8 +38,10 @@ runs on, not the executor (see Runner).
 
 ### Executor instance
 
-One running executor, created from a profile's executor entry. Commands whose
-instance key is equal share one instance.
+One running executor, created from a profile's executor entry by its
+**provider** on the runner its selector names: `native` (the runner's own
+process space) or `docker` (a container). Commands whose instance key is
+equal share one instance.
 
 ### Instance key
 
@@ -52,7 +54,7 @@ inputs, so a run can be replayed.
 A `needy daemon` process. In **control** mode it is the control plane:
 lifecycle of actors and executor instances, routing, the actor gateway, the
 trace and the runner registry. In **executor** mode it only runs processes on
-its own machine. In **runner** mode it joins a control plane as a runner,
+its own machine, as inside a Docker executor's container. In **runner** mode it joins a control plane as a runner,
 sends it heartbeats, and runs the processes the control plane asks for over
 the connection it dialed; it listens nowhere.
 
@@ -74,12 +76,28 @@ runner's name is a DNS label. Designed in
 A runner dials the control plane and keeps a **control stream** open on which
 the control plane announces **tasks**; for an exec the runner opens a **task
 stream** that carries the exec. `needy exec --runner NAME` runs a command on a
-connected runner's machine. Roles do not yet carry their runtimes or
-providers, and profiles do not yet select runners; until then a profile
-reaches another machine through a `remote` executor and `needy daemon --mode
-executor` there.
+connected runner's machine. Each heartbeat reports the runner's **host**: its
+platform, CPU and the CPUID entries its KVM supports. Profiles place executors
+and actors on runners with **runner selectors**. Roles do not yet carry their
+runtimes or providers.
 
 *Avoid*: agent, worker, node.
+
+### Runner selector
+
+A profile's `runner:` on an executor or the actor: a runner's name, or
+`{ labels: [KEY, KEY=VALUE] }` for the one connected runner with the role and
+every label. Without one, the actor or executor runs on the control host
+itself. The control plane resolves selectors when a run is created
+(**scheduling**); a selector that names no connected runner, or labels that
+fit several, is an error naming the candidates.
+
+### Local runner
+
+The runner that runs on the control host, named by `needy daemon --mode
+control --local-runner NAME`. Actors and Docker executors placed on it are
+created by the control plane itself; as built, actors and Docker executors
+run nowhere else.
 
 ### Control stream and task stream
 
@@ -115,9 +133,9 @@ heartbeat, and the old one stops working once the runner uses the new one;
 
 One execution of a driving program in an actor, with the executor instances
 bound to it, started from a profile, and its trace and report. One RL rollout
-is one run. A run can also have no actor, for `needy exec`
-(`needy run create --no-actor`, until profiles place executors on runners;
-`exec --runner` already covers a runner's own machine; see
+is one run. Every run has an actor; `needy exec --runner` runs commands on a
+runner's machine without a run, and a run whose actor only waits serves
+`needy exec --run` (see
 [Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)).
 
 A run is `creating` while it acquires its executors, copies files in and

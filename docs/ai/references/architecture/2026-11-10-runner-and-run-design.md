@@ -1,11 +1,11 @@
 # Runners and runs
 
-**Status**: design, 2026-11-10. Slice 2 is implemented but for one piece:
-*session* is renamed *run* everywhere and `exec --runner` exists, while
-`needy run create --no-actor` stays until slice 5 lets profiles place
-executors on runners. Slice 3 (runner registry and enrollment) and slice 4
-(runner dial-out) are implemented; see [As built: slice 3](#as-built-slice-3)
-and [As built: slice 4](#as-built-slice-4). Nothing else is implemented. The owner chose
+**Status**: design, 2026-11-10. Slices 1 to 5 are implemented: *session* is
+renamed *run* and `needy run create --no-actor` is gone (slice 2, finished
+in slice 5); the runner registry and enrollment (slice 3), runner dial-out
+(slice 4), and scheduling and profiles (slice 5); see
+[As built: slice 3](#as-built-slice-3), [slice 4](#as-built-slice-4) and
+[slice 5](#as-built-slice-5). Nothing else is implemented. The owner chose
 the model (runners as registered machines; actors and executors as what runs on
 them; runs instead of sessions); open questions are at the end. This note
 absorbs slice 9 (persistence) of the
@@ -93,8 +93,7 @@ Executors and the actor select runners by name or labels:
 
 ```yaml
 actor:
-  runtime: firecracker
-  runner: { labels: [kvm] }         # any runner with the actor role and these labels
+  runner: { labels: [kvm] }         # the connected runner with the actor role and these labels
 executors:
   mac:  { runner: mac }             # a native executor on a named runner
   build: { runner: { labels: [kvm] }, provider: docker, key: "{run}" }
@@ -103,7 +102,11 @@ commands:
 ```
 
 `profile check` asks the control plane, which checks the recipe against the
-runner the actor would be scheduled on.
+runner the actor would be scheduled on. As built, with the cuts this slice
+made, in [As built: slice 5](#as-built-slice-5). An actor `runtime:`
+(`firecracker`, `container`) is not a profile key yet; the
+[container actor runtime](2026-11-10-container-actor-runtime-design.md) is
+designed, not built.
 
 ## Enrollment and authentication
 
@@ -177,7 +180,10 @@ replay. Designed in
 No compatibility (principle 7 of the module layout redesign): `session` is
 renamed `run` in the proto, the CLI, the daemon, the trace and the docs in the
 slices that touch them; `--no-actor` sessions are removed in favor of
-`exec --runner`; profile executor entries lose `url` and `token_env`.
+`exec --runner` (done in slice 5; a workflow that needs a profile's rules
+and executors without a driving program uses a run whose actor only waits,
+as `examples/cli` and `examples/local` do); profile executor entries lose
+`url` and `token_env` (done in slice 5).
 
 ## Slices (proposed)
 
@@ -190,9 +196,10 @@ slices that touch them; `--no-actor` sessions are removed in favor of
    `runner ls/rotate/rm`; `daemon --mode runner --join`.
 4. **Runner dial-out** (done, 2026-11-10): control stream and per-task
    streams; `exec`, `ps` and `fs cp` reach a runner with `--runner`. The
-   `remote` executor provider stays until slice 5 replaces it.
-5. **Scheduling and profiles**: `runner:` selectors for actors and executors;
-   `profile check` through the control plane.
+   `remote` executor provider stayed until slice 5 replaced it.
+5. **Scheduling and profiles** (done, 2026-11-10): `runner:` selectors for
+   actors and executors; `profile check` through the control plane; the
+   `remote` provider and `run create --no-actor` removed.
 6. **Ownership and reconciliation**: run-scoped cleanup on runners; restart
    reconciliation from `state.db`.
 7. **Clients**: pairing, per-client tokens, principals in the trace; `report`
@@ -352,20 +359,117 @@ them.
 opened. Nothing needed the slice 3 listener: profiles reach another machine
 through `needy daemon --mode executor` and a `remote` executor, as before.
 
-**Profiles: the CLI-only cut.** Profiles cannot place executors on runners
-yet; that needs the `runner:` selectors, pooling by key and a runner's
-platform for workspace mounts, which are slice 5
-(`TODO(runner-select)` in the pool and on the `remote` provider). A runner's
+**Profiles: the CLI-only cut.** In slice 4 profiles could not place
+executors on runners yet; slice 5 added that (below). A runner's
 machine is reachable outside any run: `needy exec --runner NAME`, `needy ps
 --runner NAME`, `needy fs cp --runner SRC NAME:DIR`; attach and kill go by
 process ID. `ps` without a filter also lists every connected runner's
 processes. A command names a run or a runner, not both (`INVALID_ARGUMENT`).
-`needy run create --no-actor` stays for Docker executors until slice 5.
+
+## As built: slice 5
+
+**Profile schema.** An executor is `{ runner: SELECTOR, provider: native |
+docker, … }` and the actor takes `runner: SELECTOR` beside its recipe and
+command. A selector is a runner's name (`runner: mac`) or `runner: { labels:
+[KEY, KEY=VALUE] }`; `KEY` matches the label with any value. Without
+`runner:` an actor or executor runs on the control host itself, as before
+runners. `provider` defaults to `native`: the runner's own process space, or
+the control daemon's for an executor without `runner:`. An executor with
+`docker:` options and another provider is an error finding, since the
+default changed from Docker. `containerd`, `firecracker` and `k8s` stay
+refused at create (`TODO(provider)`). Removed, with no compatibility:
+`runtime:` (its message names `provider:`), `runtime: remote` and `remote:
+{url, token_env}` (the message says to join the machine as a runner), the
+`remote` provider, and `run create --no-actor` with the `start_actor` field
+of `CreateRunRequest` (reserved): every run has an actor.
+
+**Scheduling** (`needy_daemon::schedule`, a pure function over the runners
+the registry holds). `runner: NAME` picks that runner; it must have joined,
+hold the role (`actor` or `executor`) and be connected (its control stream
+open, not merely `online`). A label selector picks the one connected runner
+with the role and every label. No match is an error that names every runner
+and why it does not fit (`mac (no label os=linux)`, `kvm-2 (not
+connected)`, `gpu (no actor role)`); several matches are an error naming
+them, so a run never lands on a machine by chance and the same profile
+against the same connected runners always lands in the same place.
+Choosing among several (by load, by name) is `TODO(runner-schedule)` and an
+open question. A run's create resolves every selector before it acquires
+anything, so a selector that does not resolve fails the create with nothing
+to release.
+
+**Docker on runners: the control-host cut.** A runner reaches the control
+plane through its task streams only; creating a container on a runner would
+need create and destroy tasks on its control stream and execs relayed to
+the container through the runner. That is deferred
+(`TODO(runner-docker)` in the pool and the scheduler). The control daemon
+names the runner that runs on its own host, `needy daemon --mode control
+--local-runner NAME`; a Docker executor placed on that runner is created by
+the control daemon's own Docker provider, as before. `provider: docker` on
+any other runner is refused when the run is created and by `profile check`.
+`native` on any runner, including the local one, goes through the runner's
+streams, so it runs as the runner's user in the runner's process space; its
+`workspace` is a path on the runner, as written, and a workspace mount runs
+the SFTP server of the runner's platform (`/usr/libexec/sftp-server` on
+macOS).
+
+**Actor placement: the control-host cut.** An actor runs where its VM can be
+started: the control host. `actor: { runner: … }` is resolved like any
+selector, against runners with the `actor` role, and must name the control
+daemon's `--local-runner`; any other runner fails the create with `runner
+NAME cannot host actors yet`. Running an actor on another runner needs the
+actor role over dial-out (the VM's lifecycle and its guest channel relayed
+through the runner), `TODO(runner-actor)`. The recipe is compiled against
+the control host's CPU when the run is created, which for the local runner
+is the same machine.
+
+**Host reports.** Every heartbeat carries the runner's machine
+(`HeartbeatRequest.host`, `RunnerHost`): its operating system and
+architecture as Rust names them, its CPU vendor, model and flags from
+`/proc/cpuinfo` (empty off Linux), and the CPUID entries its KVM supports
+(unset without a usable KVM). The runner reads it once at start. The
+control plane keeps the last report per runner in memory, since a runner
+reports it again within one heartbeat of a control plane restart; a join
+carries none.
+
+**`profile check` through the control plane.** `RunService.CheckProfile`
+takes the resolved profile and recipe as `CreateRun` does, creates nothing,
+and returns where the actor and each executor would run (a runner's name,
+or the control host), the CPU model the recipe was checked against, and
+findings: the profile's own, a selector that does not resolve, an actor or
+Docker executor placed where this slice cannot run it, and the recipe
+compiled against the host of the actor: the scheduled runner's reported
+CPU, or the control host's own. A runner that reported no host yet is a
+warning, and the recipe's host checks are skipped. The CLI prints the
+placements, the control plane's findings, the recipe summary (which does
+not depend on the host) and the `--cmd` decisions, and exits 1 on an error.
+`needy profile check --local` checks offline against this machine's CPU and
+resolves no selector.
+
+**Tests.** The daemon's tests run a control plane with joined, connected
+runners in one process, and set a runner's reported host through
+`Runners::heartbeat` to check the recipe against a CPU without AVX-512.
+Every run now starts an actor, so the daemon's and the CLI's tests start a
+stand-in Firecracker from a fake image against a stand-in KVM device (the
+control daemon's hidden `--kvm` flag; Firecracker itself opens `/dev/kvm`).
+The pool's regression test for a slow creation used the `remote` provider
+and was dropped; the providers left create at once or need Docker
+(`TODO(test)` in the pool's tests).
 
 ## Open questions
 
 - **The control plane as a runner**: is the control host implicitly a local
-  runner, or does it join like any other?
+  runner, or does it join like any other? As built in slice 5, both: an
+  actor or executor without `runner:` runs on the control host directly,
+  and a runner that joined from the control host is named its own with
+  `--local-runner`, an operator's statement the control plane does not
+  verify. Detecting it (a machine identity in the host report) would remove
+  the flag.
+- **Several runners that fit a label selector**: slice 5 refuses the
+  ambiguity. Should a run pick one (least loaded, first by name), and how
+  does a replay then land on the same machine?
+- **Actors and Docker executors on other runners**: both need tasks beyond
+  exec, list and kill on the control stream (`TODO(runner-actor)`,
+  `TODO(runner-docker)`). Which comes first?
 - **Groups**: does `{group}` (executors shared across runs) survive, now that
   runners are shared resources anyway?
 - **Warm pools**: pre-started actors per runner; out of scope for now.

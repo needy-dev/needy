@@ -48,6 +48,11 @@ the recorded answer. It is off by default.
   and a rule's `files:`. Each problem is an error finding. `needy profile
   check` prints the findings and exits 1 on an error; run create refuses
   the profile.
+- `needy profile check` asks the control plane, which adds what only it
+  knows: whether each `runner:` selector resolves among the connected
+  runners, and the recipe checked against the CPU of the host the actor
+  would run on (a runner reports its CPU and KVM in every heartbeat).
+  `--local` checks offline against this machine.
 
 ## Profile structure
 
@@ -61,6 +66,7 @@ extends: base.yaml               # optional parent profile; see Extends
 user: { name: agent, uid: 1000, gid: 1000 }   # same on the actor and every executor; ~ = /home/agent
 
 actor:
+  runner: kvm                    # optional; the control host when absent, see Runners
   recipe: gce-e2-standard-4
   limits: { single_process: true, self_replace: true }
   network:
@@ -90,14 +96,16 @@ trace: { sinks: [sqlite, jsonl], timing: false }   # see Trace
 
 ## Executors
 
-Needy does not schedule and does not track live resource use. Resource limits
-belong to each runtime's own options. Needy keeps a pool of executor instances
+Needy places executors on runners by selector (see Runners) but does not
+balance load or track live resource use. Resource limits belong to each
+provider's own options. Needy keeps a pool of executor instances
 indexed by key and a counter per instance.
 
 ```yaml
 executors:
   build:
-    runtime: docker
+    runner: { labels: [kvm] }             # see Runners
+    provider: docker
     docker:
       build:                              # image build: docker build options
         context: ./env
@@ -112,22 +120,43 @@ executors:
     idle_timeout: 10m
 
   vm:
-    runtime: firecracker
+    provider: firecracker                 # not built yet
     recipe: gce-e2-standard-4             # same machine as the actor
     key: "{run}"
     max_procs: 2
 
   mac:
-    runtime: remote                       # another machine's needy daemon; nothing to build
-    remote: { url: https://mac-mini.local:7331 }
+    runner: mac                           # a Mac that joined as a runner; nothing to build
+    workspace: /Users/user/work
     key: "{rule}"
     max_procs: 1
     on_full: wait
 ```
 
-Runtimes: `native` (this machine), `docker`, `containerd`, `firecracker`, `k8s`
-and `remote`. `native` and `remote` machines are managed by their owners and
-have no build step.
+Providers: `native` (the default: the runner's own process space, or the
+control host's without `runner:`), `docker`, and `containerd`, `firecracker`
+and `k8s`, which are refused when a run is created until each is built.
+`native` machines are managed by their owners and have no build step. An
+executor with `docker:` options and another provider is an error. `runtime:`
+was renamed `provider:`; `runtime: remote` and `remote: {url, token_env}`
+were removed (2026-11-10): a machine joins as a runner and the profile
+selects it, and loading a profile that still has them says so.
+
+### Runners
+
+`runner:` places an executor or the actor on a runner, a machine that joined
+the control plane ([runners and runs](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-5)):
+
+| Form | Picks |
+| --- | --- |
+| absent | The control host itself |
+| `runner: NAME` | That runner, which must hold the role and be connected |
+| `runner: { labels: [KEY, KEY=VALUE] }` | The one connected runner with the role and every label; `KEY` matches any value. None or several is an error naming the candidates. |
+
+The control plane resolves selectors when a run is created, before it
+acquires anything. As built, actors and Docker executors run on the control
+host: directly, or on the runner the control daemon names as its own
+(`--local-runner`); other placements are refused with a clear error.
 
 ### Instance key
 
