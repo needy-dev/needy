@@ -11,3 +11,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-09 | [Module layout redesign](2026-11-09-module-layout-redesign.md) | design |
 | 2026-11-10 | [Container actor runtime](2026-11-10-container-actor-runtime-design.md) | design |
 | 2026-11-10 | [Runners and runs](2026-11-10-runner-and-run-design.md) | design |
+| 2026-11-10 | [Provenance inventory](2026-11-10-provenance-inventory-evidence.md) | evidence |
