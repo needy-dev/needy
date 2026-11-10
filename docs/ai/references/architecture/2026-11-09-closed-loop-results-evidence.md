@@ -730,6 +730,28 @@ built into a scratch directory and a daemon with its own state there:
 Still not the recipe's: the compiler in `/proc/version` is the image's
 (`gcc 13.3.0`, binutils 2.42), since recipes have no compiler field.
 
+## Re-verified after renaming session to run
+
+`608e412` renames *session* to *run* end to end (proto `RunService`, the
+daemon's `run` module, `{run}`, `run_files`, `run.*` events, the trace's
+`runs` table under a new migration name, `needy run create|ls|logs|stop`,
+`exec`, `ps` and `fs cp --run`). Run on 2026-11-10 on the Linux KVM host:
+`make check` (with the Linux-only guest code), an actor image built from
+`examples/opencode/gce.recipe.yaml` into a scratch directory, and a daemon
+with its own state there. The executor container kept the existing
+`needy-executor:latest`: the process API changed field names only, not
+numbers.
+
+| Check | Result |
+| --- | --- |
+| `make check` on Linux; `make test` three times on the Mac | Pass |
+| `needy session ls` | exit 2, `unrecognized subcommand 'session'` |
+| `examples/smoke` through `needy run create` | `finished`, `google`, `routed exit=7`; `run logs` prints the console; `report` says `Run …`, 4 routed and 1 failed |
+| `examples/chaos` | `finished`: copy-in, `Input/output error` on `broken.json`, `curl exit=126`, `+101.0°C ALARM (CRIT)`, 3 faults by kind, `result.txt` mirrored out |
+| `examples/cli` through `run create --no-actor` | `exec --run` of `uname -a` (rc 0) and `exit 4` (rc 4); `fs cp --run` and `cat` of the copy; `exec -d` of `sleep`; `ps --run` shows the `RUN` column; the container carries `needy.run=<id>` |
+| `run ls`, `run stop`, `report` | The Docker run `stopped` with `build=docker (released)`; its report counts 4 commands from `needy exec`; `report -o json` has a `run` key |
+| Nothing left | Pass: no daemon, Firecracker or container |
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.
