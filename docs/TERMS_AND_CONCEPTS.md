@@ -50,19 +50,49 @@ inputs, so a run can be replayed.
 ### Daemon
 
 A `needy daemon` process. In **control** mode it is the control plane:
-lifecycle of actors and executor instances, routing, the actor gateway and the
-trace. In **executor** mode it only runs processes on its own machine.
+lifecycle of actors and executor instances, routing, the actor gateway, the
+trace and the runner registry. In **executor** mode it only runs processes on
+its own machine. In **runner** mode it joins a control plane as a runner,
+sends it heartbeats, and runs processes as in executor mode.
 
 *Avoid*: server.
 
-### Runner (provisional)
+### Runner
 
-A machine running `needy daemon` that has joined a control plane, with the
-roles it can host (`actor` with its runtimes, `executor` with its providers)
-and labels. Runners are registered, listed, rotated and removed; actors and
-executors are instances that run on them. Designed in
-[Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md);
-not implemented yet.
+A machine running `needy daemon --mode runner` that has joined a control
+plane. It declares the **roles** it can host (`actor`, `executor`) and
+**labels** (`KEY=VALUE`), and sends a heartbeat at the interval the control
+plane sets (15 s by default); it is *online* while one arrived within the last
+three intervals, else *offline*, and *removed* once an operator removed it.
+Runners are registered (`needy runner token create`, then a join), listed
+(`needy runner ls`), rotated (`needy runner rotate`) and removed
+(`needy runner rm`). Actors and executors are instances that run on them; a
+runner's name is a DNS label. Designed in
+[Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md).
+
+Roles do not yet carry their runtimes or providers, and profiles do not yet
+select runners; until then a runner also serves the executor role on its own
+listener, which a profile's `remote` executor dials.
+
+*Avoid*: agent, worker, node.
+
+### Join token
+
+A short-lived secret an operator creates with `needy runner token create` and
+hands to one machine so it can join as a runner. It has a time to live, a
+number of uses (1 by default), the roles it allows (every role when it names
+none) and labels it gives every runner that joins with it. The control plane
+stores only its hash; it is shown once. A token that expired, is used up or
+was revoked is refused.
+
+### Runner credential
+
+The secret a runner gets when it joins, its bearer token for heartbeats from
+then on; the join token is not needed again. The runner keeps it in
+`runner.json` in its state directory (mode 0600); the control plane stores
+only its hash. `needy runner rotate` hands the runner a new one at its next
+heartbeat, and the old one stops working once the runner uses the new one;
+`needy runner rm` revokes it.
 
 ## Runs and configuration
 

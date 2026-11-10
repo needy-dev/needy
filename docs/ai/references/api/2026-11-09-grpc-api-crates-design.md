@@ -2,7 +2,9 @@
 
 **Status**: current, 2026-11-10. Describes the schema, the generation and the
 client and server crates as they are after slice 7 of the
-[module layout redesign](../architecture/2026-11-09-module-layout-redesign.md).
+[module layout redesign](../architecture/2026-11-09-module-layout-redesign.md)
+and slice 3 of [runners and runs](../architecture/2026-11-10-runner-and-run-design.md)
+(`RunnerService`, per-request callers).
 
 The daemon speaks gRPC only. The previous HTTP API was removed on 2026-11-09.
 The layout follows AUV: one canonical `proto/` tree, a crate of generated
@@ -19,7 +21,8 @@ proto/
     ├── health.proto   HealthService
     ├── run.proto  RunService
     ├── process.proto  ProcessService
-    └── guest.proto    GuestService
+    ├── guest.proto    GuestService
+    └── runner.proto   RunnerService
 crates/
 ├── api-proto/        needy-api-proto: generated prost and tonic code (src/gen, committed)
 ├── api-client/       needy-api-client: connect, readiness, exec streams, files over exec
@@ -52,11 +55,16 @@ ones; removed field numbers are `reserved`.
 | | `PushEvents` | client stream | Events observed inside the actor, such as an injected hwmon fault |
 | | `ReportExit` | unary | The driving program's exit |
 | | `FetchFiles`, `PushFiles` | server / client stream | Tar archives for copy-in and mirror-out |
+| `RunnerService` | `CreateJoinToken` | unary | A join token: TTL, uses, allowed roles, labels. Its secret is in the response only |
+| | `ListJoinTokens`, `RevokeJoinToken` | unary | Every join token with its state (`valid`, `expired`, `used-up`, `revoked`), without secrets |
+| | `Join` | unary | Join token, name, roles, labels → the runner's credential (once) and the heartbeat interval. Needs no bearer token |
+| | `Heartbeat` | unary | A runner's roles and labels; answers the interval and, after a rotation, a new credential. The only method a runner credential reaches |
+| | `ListRunners`, `RotateRunner`, `RemoveRunner` | unary | Runners with their status (`online`, `offline`, `removed`); ask for a new credential; revoke one |
 
 Who serves what:
 
-- The control daemon's socket serves `HealthService`, `RunService` and
-  `ProcessService`.
+- The control daemon's socket serves `HealthService`, `RunService`,
+  `ProcessService` and `RunnerService`.
 - An executor daemon, and the control daemon's in-process local executor,
   serve `HealthService` and `ProcessService`.
 - Each actor gets a listener bound to its run (a vsock Unix socket), with
@@ -65,6 +73,9 @@ Who serves what:
   `ListProcesses` and the guest calls act on that run whatever the request
   names, and `CreateRun`, `StopRun` and `GetRunLogs` are refused.
   The control socket's caller is `Caller::Cli`, which `GuestService` refuses.
+- On the control socket, a request with a runner's credential is from
+  `Caller::Runner { name }` and reaches `RunnerService.Heartbeat` only; the
+  other `RunnerService` methods but `Join` need the operator (`Caller::Cli`).
 
 ### Exec
 
@@ -104,11 +115,15 @@ listener is bound to a run, so the event names none.
 | --- | --- | --- |
 | `Origin` (`process.proto`) | `CLI`, `FS`, `FILES`, `ACTOR_PROXY`, `ACTOR_MOUNT` | `needy_core::types::Origin` |
 | `RunState` (`run.proto`) | `CREATING`, `RUNNING`, `STOPPING`, `STOPPED`, `FINISHED`, `FAILED` | `needy_core::types::RunState` |
+| `RunnerRole` (`runner.proto`) | `ACTOR`, `EXECUTOR` | `needy_core::types::RunnerRole` |
+| `JoinTokenState`, `RunnerStatus` (`runner.proto`) | `VALID`, `EXPIRED`, `USED_UP`, `REVOKED`; `ONLINE`, `OFFLINE`, `REMOVED` | `control::JoinTokenState`, `control::RunnerStatus` |
 
 Each enum has an `_UNSPECIFIED` zero value, as Buf's STANDARD lint requires.
 Each direction has one function. `needy_api_server::protocol::domain` reads
 `Origin` and writes `RunState`; the CLI's `run` command reads
-`RunState`, since it is the only reader of run states on the wire. A
+`RunState`, since it is the only reader of run states on the wire.
+`RunnerRole` is read by `domain` (requests) and the CLI's `runner` command
+(listings); `JoinTokenState` and `RunnerStatus` are read by the CLI only. A
 zero value or a value this build does not know is refused with an error that
 names the field, never read as a default. Producers on the client side (the
 CLI, the proxy, the mount) set the proto enum directly.
@@ -163,27 +178,37 @@ tests/       exec and files against an in-process ExecutorService
 
 ```text
 src/
-  control.rs          Runs, Processes, Guest; Caller; ControlError; domain types
+  control.rs          Runs, Processes, Guest, Runners; Caller; ControlError; domain types
   server.rs           Server: services for one Caller; bind every listener, then serve
   termination.rs      SIGINT, SIGTERM, SIGHUP (Ctrl-C on Windows) as a CancellationToken
   middleware/
-    authentication.rs AuthLayer, Authenticator, Token
+    authentication.rs AuthLayer, Authenticator, Credentials, Token
   protocol/
     domain.rs         generated <-> domain conversions, one function per direction
     status.rs         ControlError -> tonic::Status, one table
-    grpc/v1/          health, run, process, guest adapters
+    grpc/v1/          health, run, process, guest, runner adapters
 ```
 
 - **Domain traits.** `Runs` (`create`, `get`, `list`, `stop`, `logs`,
-  `decide`), `Processes` (`exec`, `list`, `kill`) and `Guest` (`config`,
-  `event`, `exit`, `fetch_files`, `push_files`) take and return
+  `decide`), `Processes` (`exec`, `list`, `kill`), `Guest` (`config`,
+  `event`, `exit`, `fetch_files`, `push_files`) and `Runners`
+  (`create_join_token`, `join_tokens`, `revoke_join_token`, `join`,
+  `heartbeat`, `runners`, `rotate`, `remove`, and `credential` for the
+  middleware) take and return
   `needy_core` and `control` types. `Processes::exec` takes an `ExecOpen`
   (start or attach) and the rest of the caller's stream as `ExecInput`s, and
   returns a stream of `ExecOutput`s. The executor's `ExecutorService` still
   implements the generated `ProcessService`, which `Server::process_service`
   serves as is, since `core-executor` sits below `api-server`.
-- **`Caller`** is fixed per server: `Cli` on the control socket and on an
-  executor daemon, `Actor { run }` on an actor's listener. The adapters
+- **`Caller`**: each server has its listener's caller, `Cli` on the
+  control socket and on an executor daemon, `Actor { run }` on an actor's
+  listener. The middleware (`Credentials`) puts the caller of each request
+  into its extensions: the listener's for the control token or, without one,
+  for any token; `Runner { name }` for a runner's credential, which
+  `Runners::credential` resolves against `state.db`, on the runner methods
+  only; and none (`UNAUTHENTICATED`) for a token shaped like a runner
+  credential that no runner holds. `Join` and the health check need no
+  token. The adapters
   apply it: an actor's calls act on its own run, and the run
   operations an actor may not call are refused before the daemon sees them.
 - **`Server::bind`** binds every listener before any serves, so a socket
@@ -195,7 +220,8 @@ src/
 
   | `ControlError` | Status | Example |
   | --- | --- | --- |
-  | `Denied { message, events }` | `PERMISSION_DENIED`, details `ExecRefusal` | a rule or fault refused an exec; an actor stopping a run |
+  | `Denied { message, events }` | `PERMISSION_DENIED`, details `ExecRefusal` | a rule or fault refused an exec; an actor stopping a run; a runner role outside its join token's scope |
+  | `Unauthenticated` | `UNAUTHENTICATED` | an invalid, expired, spent or revoked join token |
   | `NotFound` | `NOT_FOUND` | no such run, process or mapping |
   | `Invalid` | `INVALID_ARGUMENT` | an unspecified origin; a guest event of another schema version |
   | `Failed` | `FAILED_PRECONDITION` | an invalid profile; a command that cannot start |

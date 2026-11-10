@@ -17,7 +17,9 @@ Dependencies point downward; a crate never depends on one above it.
   transitions), `pool` (instances by key, refcounts, slots), `routing` (the
   `exec.decide` chain, path maps), `relay` (exec streams and their stream
   filters), `files` (copy-in, mirror-out), `actor` and `guest` (a run's
-  VM, gateway and guest API), and `executor`. It implements
+  VM, gateway and guest API), `runners` (the runner registry) over `store`
+  (`state.db`, SeaORM, separate from `trace.db`), and the `executor` and
+  `runner` roles. It implements
   `needy-api-server`'s domain traits and serves them through its `Server`; it
   never builds a gRPC status. Every long-lived task belongs to the daemon's
   or a run's `TaskTracker`. Mechanisms live below.
@@ -66,11 +68,12 @@ Dependencies point downward; a crate never depends on one above it.
   exec; `Error` maps a status to a `Kind`. The CLI, the proxy, the providers,
   the daemon's relay and xtask use it instead of raw streams.
 - `crates/api-server` (`needy-api-server`): the inbound side. `control` holds
-  the domain traits (`Runs`, `Processes`, `Guest`), `Caller` (the CLI, or
-  an actor bound to its run) and `ControlError`; `server` binds every
-  listener before serving; `protocol` has the gRPC adapters, the proto <->
-  domain conversions and the one status table; `middleware` is bearer
-  authentication; `termination` turns signals into cancellation.
+  the domain traits (`Runs`, `Processes`, `Guest`, `Runners`), `Caller` (the
+  CLI, an actor bound to its run, or a runner by its credential) and
+  `ControlError`; `server` binds every listener before serving; `protocol`
+  has the gRPC adapters, the proto <-> domain conversions and the one status
+  table; `middleware` is bearer authentication, which decides each request's
+  caller; `termination` turns signals into cancellation.
 - `xtask` (`cargo xtask`): developer tasks that are not product commands,
   today the `bench` latency and throughput probes.
 - `proto/`: canonical API schemas, linted and generated with Buf.
@@ -280,7 +283,8 @@ one, add its provenance or a `TODO(provenance):` naming what is missing.
 - The repository has Rust unit coverage for profiles, rules, recipes, chaos,
   archives, signals and bearer authentication. The daemon is tested in
   process through `needy-api-server`'s traits with a native executor
-  (runs, pool, routing, relay, shutdown); actors and Docker executors are
+  (runs, pool, routing, relay, shutdown, the runner registry and the
+  runner role); actors and Docker executors are
   verified end to end on hosts (see the closed-loop results).
 - Add regression tests for behavior changes and keep them narrow.
 - Use `cargo test` for the full suite and include regression tests for bug

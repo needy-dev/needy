@@ -477,7 +477,10 @@ src/
 ```
 
 The daemon implements `api-server::control`. It keeps its own state in
-`state.db`, separate from `trace.db`.
+`state.db`, separate from `trace.db`. Since slice 3 of
+[runners and runs](2026-11-10-runner-and-run-design.md#as-built-slice-3),
+which absorbed slice 9, `store/` holds the runner registry (runners and join
+tokens); runs, instances and processes are still in memory.
 
 As built in slice 8:
 

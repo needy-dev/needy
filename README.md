@@ -42,7 +42,8 @@ work takes effect.
 | --- | --- |
 | **actor** | Runs the driving program. Usually one stateless microVM. |
 | **executor** | Where routed operations take effect: a container, microVM, pod or device. Several actors may share one executor. |
-| **daemon** | The control plane: lifecycle, routing rules, network gateways and the trace. |
+| **daemon** | The control plane: lifecycle, routing rules, network gateways, the trace and the runner registry. |
+| **runner** | A machine that joined the control plane and reports what it can host. |
 | **recipe** | One machine: image, kernel, CPU, memory, firmware, devices and network identity. |
 | **profile** | One run: which recipes to use, routing rules, network policies, chaos and file mappings. |
 | **run** | One actor and the executors bound to it. |
@@ -119,6 +120,19 @@ exposing it through a tunnel such as `ssh -R` or Cloudflare Tunnel:
 ```sh
 NEEDY_TOKEN=... needy daemon --mode executor --listen 127.0.0.1:7401 --token-env NEEDY_TOKEN
 ```
+
+A machine can also join the control plane as a **runner** with a join token,
+then report to it with its own credential; `needy runner ls` lists runners and
+whether they are online. Transport encryption comes from the tunnel:
+
+```sh
+needy runner token create --ttl 1h --roles executor     # on the control host
+JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
+needy runner ls
+```
+
+Profiles do not select runners yet; a runner also serves the executor role as
+above. See [runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md).
 
 Examples:
 

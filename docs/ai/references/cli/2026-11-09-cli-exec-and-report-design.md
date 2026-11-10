@@ -8,7 +8,7 @@ note. Profiles are described in
 ## Command surface
 
 ```text
-needy daemon                                   # control plane; also runs on every executor machine
+needy daemon   [--mode control|executor|runner]  # control plane; executor or runner on every other machine
 needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
 needy run  create|ls|stop|logs [--group G] # one actor plus its executors; logs prints its console
 needy exec     [--run ID] -- CMD …         # run a command through placement
@@ -16,6 +16,8 @@ needy ps [-a] [--run ID] | attach ID | kill ID   # manage detached processes
 needy fs       cp SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
 needy report   RUN|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
+needy runner   token create [--ttl 1h] [--uses N] [--roles R,…] [--labels K=V,…] | token ls | token revoke ID
+needy runner   ls | rotate NAME | rm NAME      # runners that joined this control plane
 ```
 
 Every command takes `--endpoint` (or `NEEDY_ENDPOINT`) and `-v`, which turns
@@ -57,6 +59,37 @@ b5eac210aee1  -     finished  -      build=docker (released)   0
 `run logs RUN` prints the actor's
 serial console: the guest's boot messages and the driving program's terminal.
 
+### Runners
+
+The `runner` commands talk to the control daemon with the control token, as
+every other command does. `runner token create` prints the join token alone on
+stdout (and its ID on stderr); it is not shown again. `runner token ls`
+prints `ID`, `STATE` (`valid`, `expired`, `used-up`, `revoked`), `USES LEFT`,
+`EXPIRES` (RFC 3339, UTC), `ROLES` (`any` when the token names none) and
+`LABELS`. `runner ls` prints `NAME`, `STATUS` (`online`, `offline` or
+`removed`, with `(rotating)` while a new credential waits to be used),
+`ROLES`, `LABELS` and `LAST SEEN` (how long ago, by this machine's clock):
+
+```text
+NAME  STATUS  ROLES             LABELS     LAST SEEN
+kvm   online  actor,executor    kvm=true   3s ago
+mac   online  executor          os=darwin  9s ago
+```
+
+Both take `-o json`, whose objects carry the times as Unix milliseconds and
+`roles` and `labels` as an array and an object. `runner rotate` and `runner
+rm` print nothing; a name no runner has is `needy: no runner NAME`, exit 1.
+
+On the machine, `needy daemon --mode runner --join ENDPOINT
+--join-token-env NAME` (or `--join-token-file PATH`) joins once and keeps its
+credential in `runner.json` in its state directory; later starts need neither
+the token nor `--join`. `--name` defaults to the host name's first label,
+`--roles` to `executor`; `--labels` adds `KEY=VALUE` labels. It serves the
+executor role on `--listen` as `--mode executor` does, and exits 1 when the
+control plane refuses its credential. The control daemon's
+`--heartbeat-interval` (15 s) sets how often runners report. See
+[runners and runs](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-3).
+
 Benchmarks are a developer task, not a product command: `cargo xtask bench`
 runs the latency and throughput probes, and `cargo xtask bench run --profile
 examples/bench/profile.yaml` builds them for the actor and runs them in a
@@ -68,7 +101,7 @@ bench profile records with `trace: { timing: true }`.
 
 | Directory | Default | Override | Holds |
 | --- | --- | --- | --- |
-| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `trace.db`, `runs/` (each with its `trace.jsonl`), executor sockets and workspaces, the daemon log |
+| State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `state.db` (the runner registry), `trace.db`, `runs/` (each with its `trace.jsonl`), executor sockets and workspaces, the daemon log; on a runner, `runner.json` (its credential, 0600) |
 | Data | `$XDG_DATA_HOME/needy` | `NEEDY_DATA_DIR` | `images/default`, which `needy build` writes and the daemon boots |
 | Runtime | `$XDG_RUNTIME_DIR/needy`, else the state directory (macOS) | `NEEDY_RUNTIME_DIR` | `daemon.sock`, the default endpoint, and `local.sock` |
 

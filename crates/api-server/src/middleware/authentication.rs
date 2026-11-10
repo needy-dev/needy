@@ -141,7 +141,7 @@ where
     // NOTICE: the service that was polled ready serves this request, and a
     // fresh clone takes its place for the next one; the usual pattern for a
     // middleware that awaits before calling inner
-    // (`https://docs.rs/tower/latest/tower/trait.Service.html#be-careful-when-cloning-inner-services`).
+    // (`https://docs.rs/tower/0.5.3/tower/trait.Service.html#be-careful-when-cloning-inner-services`).
     let fresh = self.inner.clone();
     let mut inner = std::mem::replace(&mut self.inner, fresh);
     let auth = self.auth.clone();
