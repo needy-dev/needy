@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, build, daemon, exec, fs, kill, profile, ps, report, run};
+use crate::commands::{attach, build, daemon, exec, fs, kill, profile, ps, report, run, runner};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -45,6 +45,8 @@ enum Command {
   Fs(fs::Args),
   /// Manage runs: one actor and its executors.
   Run(run::Args),
+  /// Manage runners: machines that joined this control plane, and join tokens.
+  Runner(runner::Args),
   /// Build an actor image from a recipe, and the executor image.
   Build(build::Args),
   /// Check a profile: show routing decisions, matching faults and the recipe's findings.
@@ -123,6 +125,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Kill(args) => kill::run(args, &ctx).await,
       Command::Fs(args) => fs::run(args, &ctx).await,
       Command::Run(args) => run::run(args, &ctx).await,
+      Command::Runner(args) => runner::run(args, &ctx).await,
       Command::Build(args) => build::run(args, &ctx).await,
       Command::Profile(args) => profile::run(args, &ctx).await,
       Command::Report(args) => report::run(args, &ctx).await,

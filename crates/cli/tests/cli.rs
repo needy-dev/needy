@@ -1502,3 +1502,105 @@ fn exec_on_a_terminal_forwards_colorterm_and_replaces_an_unknown_term() {
   assert!(output.status.success(), "{}", stderr(&output));
   assert!(stdout(&output).contains("[xterm-256color] [needy-test-colors]"), "{:?}", stdout(&output));
 }
+
+// ------------------------------------------------------------- runners
+
+/// `needy runner token create` with `args`: the token it printed.
+fn create_join_token(home: &Home, args: &[&str]) -> String {
+  let output = home.needy().args(["runner", "token", "create"]).args(args).output().unwrap();
+  assert!(output.status.success(), "token create: {}", stderr(&output));
+  stdout(&output).trim().to_string()
+}
+
+#[test]
+fn runner_token_create_prints_the_token_once_and_ls_lists_it_without_the_secret() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+
+  let token = create_join_token(
+    &home,
+    &[
+      "--ttl",
+      "1h",
+      "--uses",
+      "2",
+      "--roles",
+      "executor",
+      "--labels",
+      "os=darwin,arch=arm64",
+    ],
+  );
+  let table = home.run(&["runner", "token", "ls"]);
+  let json = home.run(&["runner", "token", "ls", "-o", "json"]);
+
+  let id = token.split('.').nth(1).unwrap();
+  assert!(token.starts_with("needy-join."), "{token}");
+  assert!(!stdout(&json).contains(&token));
+  let table = stdout(&table);
+  let lines: Vec<&str> = table.lines().collect();
+  assert_eq!(lines[0].split_whitespace().collect::<Vec<_>>(), ["ID", "STATE", "USES", "LEFT", "EXPIRES", "ROLES", "LABELS"]);
+  let cells: Vec<&str> = lines[1].split_whitespace().collect();
+  assert_eq!((cells[0], cells[1], cells[2]), (id, "valid", "2"));
+  assert_eq!(&cells[cells.len() - 2..], ["executor", "arch=arm64,os=darwin"]);
+  assert!(!table.contains(&token));
+  let rows: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
+  assert_eq!(rows[0]["id"], id);
+  assert_eq!(rows[0]["state"], "valid");
+  assert_eq!(rows[0]["roles"], serde_json::json!(["executor"]));
+  assert_eq!(rows[0]["labels"]["os"], "darwin");
+}
+
+#[test]
+fn runner_token_revoke_shows_it_revoked() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let token = create_join_token(&home, &[]);
+  let id = token.split('.').nth(1).unwrap();
+
+  let revoked = home.run(&["runner", "token", "revoke", id]);
+  let listed = home.run(&["runner", "token", "ls", "-o", "json"]);
+  let missing = home.run(&["runner", "token", "revoke", "nope"]);
+
+  assert!(revoked.status.success(), "{}", stderr(&revoked));
+  let rows: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
+  assert_eq!(rows[0]["state"], "revoked");
+  assert_eq!(rows[0]["roles"], serde_json::json!([]), "a token without roles allows every role");
+  assert_eq!(missing.status.code(), Some(1));
+  assert_eq!(stderr(&missing), "needy: no join token nope\n");
+}
+
+#[test]
+fn runner_token_create_refuses_an_unknown_role_and_a_malformed_label() {
+  let home = Home::new();
+
+  let role = home.run(&["runner", "token", "create", "--roles", "builder"]);
+  let label = home.run(&["runner", "token", "create", "--labels", "os"]);
+
+  assert_eq!(role.status.code(), Some(2));
+  assert!(stderr(&role).contains("unknown runner role \"builder\""), "{}", stderr(&role));
+  assert_eq!(label.status.code(), Some(2));
+  assert!(stderr(&label).contains("a label is KEY=VALUE"), "{}", stderr(&label));
+}
+
+#[test]
+fn runner_ls_without_runners_prints_the_header() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+
+  let output = home.run(&["runner", "ls"]);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert_eq!(stdout(&output).split_whitespace().collect::<Vec<_>>(), ["NAME", "STATUS", "ROLES", "LABELS", "LAST", "SEEN"]);
+}
+
+#[test]
+fn runner_rotate_and_rm_name_a_missing_runner() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+
+  let rotate = home.run(&["runner", "rotate", "ghost"]);
+  let rm = home.run(&["runner", "rm", "ghost"]);
+
+  assert_eq!((rotate.status.code(), stderr(&rotate).as_str()), (Some(1), "needy: no runner ghost\n"));
+  assert_eq!((rm.status.code(), stderr(&rm).as_str()), (Some(1), "needy: no runner ghost\n"));
+}
