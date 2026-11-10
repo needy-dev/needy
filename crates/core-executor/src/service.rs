@@ -13,7 +13,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::process::{Error, Exit, Host, Input, Output, Proc, Spec, Subscriber, Subscription};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use crate::process::{Client, Error, Exit, Host, Input, Output, Proc, Spec, Subscriber, Subscription};
 
 pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecResponse, Status>> + Send>>;
 
@@ -38,10 +41,12 @@ fn exited(exit: &Exit) -> ExecResponse {
 
 /// Streams a process to one client, from `subscription`, until it exits or
 /// the client leaves. A client that leaves a process it did not detach takes
-/// the process down. The stream's tasks belong to `host`.
+/// the process down; `detach` is set when the process started detached or
+/// the client sent a `detach` request. The stream's tasks belong to `host`.
 fn stream_process(
   host: &Host,
-  proc: std::sync::Arc<Proc>,
+  proc: Arc<Proc>,
+  client: Client,
   mut inbound: Inbound,
   started: ExecStarted,
   subscription: Subscription,
@@ -51,7 +56,12 @@ fn stream_process(
   let (tx, rx) = mpsc::channel::<Result<ExecResponse, Status>>(64);
   let input_proc = proc.clone();
   let input_cancel = cancel.clone();
+  let detach = Arc::new(AtomicBool::new(detach));
+  let detach_input = detach.clone();
+  let ack = tx.clone();
   tasks.spawn(async move {
+    // The client leaves the process's seats when its input ends.
+    let client = client;
     loop {
       let message = tokio::select! {
         message = inbound.next() => message,
@@ -66,10 +76,21 @@ fn stream_process(
         }
       };
       match payload {
-        Some(exec_request::Payload::Stdin(bytes)) => input_proc.send(Input::Stdin(bytes)),
-        Some(exec_request::Payload::StdinEof(_)) => input_proc.send(Input::Eof),
-        Some(exec_request::Payload::Signal(sig)) => input_proc.send(Input::Signal(sig)),
-        Some(exec_request::Payload::Resize(size)) => input_proc.send(Input::Resize(size.rows as u16, size.cols as u16)),
+        Some(exec_request::Payload::Stdin(bytes)) => client.send(Input::Stdin(bytes)),
+        Some(exec_request::Payload::StdinEof(_)) => client.send(Input::Eof),
+        Some(exec_request::Payload::Signal(sig)) => client.send(Input::Signal(sig)),
+        Some(exec_request::Payload::Resize(size)) => client.send(Input::Resize(clamp(size.rows), clamp(size.cols))),
+        Some(exec_request::Payload::Detach(_)) => {
+          detach_input.store(true, Ordering::SeqCst);
+          let detached = ExecResponse {
+            payload: Some(exec_response::Payload::Detached(true)),
+          };
+          // The client waits for this before it leaves; one that left
+          // already needs no answer.
+          if ack.send(Ok(detached)).await.is_err() {
+            tracing::debug!("process {}: the client left before its detach was answered", input_proc.id);
+          }
+        }
         // A second start or attach on one stream has no meaning.
         Some(exec_request::Payload::Start(_) | exec_request::Payload::Attach(_)) | None => {}
       }
@@ -88,11 +109,11 @@ fn stream_process(
 }
 
 async fn relay_output(
-  proc: std::sync::Arc<Proc>,
+  proc: Arc<Proc>,
   tx: mpsc::Sender<Result<ExecResponse, Status>>,
   started: ExecStarted,
   mut subscription: Subscription,
-  detach: bool,
+  detach: Arc<AtomicBool>,
 ) {
   let send = |event| {
     let tx = tx.clone();
@@ -128,10 +149,15 @@ async fn relay_output(
       return;
     }
   }
-  if !alive && !detach && proc.exit().is_none() {
+  if !alive && !detach.load(Ordering::SeqCst) && proc.exit().is_none() {
     let sig = if proc.tty { "SIGHUP" } else { "SIGTERM" };
     proc.send(Input::Signal(sig.into()));
   }
+}
+
+/// A window dimension as a terminal takes it: at least 1, at most `u16`.
+fn clamp(n: u32) -> u16 {
+  u16::try_from(n.max(1)).unwrap_or(u16::MAX)
 }
 
 /// A command that cannot start is a failed precondition, which clients
@@ -188,7 +214,7 @@ impl ExecutorService {
     let first = inbound.next().await.transpose()?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
     match first.payload {
       Some(exec_request::Payload::Start(start)) => {
-        let tty = start.tty.map(|t| (t.rows.max(1) as u16, t.cols.max(1) as u16));
+        let tty = start.tty.map(|t| (clamp(t.rows), clamp(t.cols)));
         let spec = Spec {
           argv: start.argv,
           cwd: start.cwd,
@@ -207,6 +233,7 @@ impl ExecutorService {
         // inside `Host::spawn`, before the output pumps start, would close
         // that gap if it is ever observed.
         let subscription = proc.subscribe(true, Subscriber::Owner);
+        let client = proc.join(tty, false);
         let started = ExecStarted {
           process_id: proc.id.clone(),
           executor: self.name.clone(),
@@ -218,7 +245,7 @@ impl ExecutorService {
             used: f.used.clone(),
           }),
         };
-        Ok(stream_process(&self.host, proc, inbound, started, subscription, start.detach))
+        Ok(stream_process(&self.host, proc, client, inbound, started, subscription, start.detach))
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let proc = self.host.get(&attach.process_id).ok_or_else(|| Status::not_found("no such process"))?;
@@ -234,15 +261,12 @@ impl ExecutorService {
           }),
         };
         let subscription = proc.subscribe(attach.replay, Subscriber::Viewer);
-        // Resized after subscribing, so the redraw a full-screen program
-        // makes for the new size reaches this client.
-        if let Some(window) = attach.window
-          && proc.tty
-        {
-          proc.send(Input::Resize(window.rows.max(1) as u16, window.cols.max(1) as u16));
-        }
+        // Joined after subscribing: the attaching client owns the size, and
+        // the redraw a full-screen program makes for it reaches this client.
+        let window = attach.window.filter(|_| proc.tty).map(|w| (clamp(w.rows), clamp(w.cols)));
+        let client = proc.join(window, attach.read_only);
         // An attached client never owns the process.
-        Ok(stream_process(&self.host, proc, inbound, started, subscription, true))
+        Ok(stream_process(&self.host, proc, client, inbound, started, subscription, true))
       }
       _ => Err(Status::invalid_argument("the first request must start or attach")),
     }

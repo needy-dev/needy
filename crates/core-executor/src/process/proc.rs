@@ -44,6 +44,98 @@ pub struct Proc {
   owner_order: tokio::sync::Mutex<()>,
   exited: watch::Receiver<Option<Exit>>,
   finished_at: OnceLock<Instant>,
+  /// Who may type and whose window size the terminal has.
+  seats: Mutex<Seats>,
+}
+
+/// The clients of a process, for arbitration: the client that last attached
+/// or sent input owns the terminal's size; when it leaves, the next most
+/// recent takes over. A read-only client never owns it and cannot type.
+// TODO(terminal-arbitration): an exclusive writer (`--takeover`, herdr's
+// direct attach) is not offered; the terminal note's open questions keep it
+// until an owner asks for it.
+struct Seats {
+  next: u64,
+  /// Advances at each attach and input, ordering the clients by activity.
+  clock: u64,
+  /// The size the terminal has now; `None` for pipes.
+  window: Option<(u16, u16)>,
+  clients: Vec<Seat>,
+}
+
+struct Seat {
+  id: u64,
+  window: Option<(u16, u16)>,
+  active: u64,
+  read_only: bool,
+}
+
+impl Seats {
+  /// The size the terminal should have now, when it differs from the one it
+  /// has: that of the most recently active client that has one.
+  fn resize(&mut self) -> Option<(u16, u16)> {
+    self.window?;
+    let owner = self.clients.iter().filter(|c| !c.read_only && c.window.is_some()).max_by_key(|c| c.active)?;
+    let window = owner.window.filter(|w| Some(*w) != self.window)?;
+    self.window = Some(window);
+    Some(window)
+  }
+}
+
+/// One client of a process: its input goes through [`Client::send`], which
+/// arbitrates the window size. Dropping it leaves the process to the other
+/// clients.
+pub struct Client {
+  proc: Arc<Proc>,
+  id: u64,
+  read_only: bool,
+}
+
+impl Client {
+  /// Sends input as this client: typing makes it the size's owner; a resize
+  /// is kept as its size and applied while it owns the size. A read-only
+  /// client's input is dropped.
+  pub fn send(&self, input: Input) {
+    if self.read_only {
+      tracing::debug!("process {}: input from a read-only client refused", self.proc.id);
+      return;
+    }
+    let resize = {
+      let mut seats = self.proc.lock_seats();
+      let clock = seats.clock + 1;
+      let Some(seat) = seats.clients.iter_mut().find(|c| c.id == self.id) else {
+        return;
+      };
+      match &input {
+        Input::Stdin(_) => seat.active = clock,
+        Input::Resize(rows, cols) => seat.window = Some(((*rows).max(1), (*cols).max(1))),
+        Input::Eof | Input::Signal(_) => {}
+      }
+      if matches!(input, Input::Stdin(_)) {
+        seats.clock = clock;
+      }
+      seats.resize()
+    };
+    if let Some((rows, cols)) = resize {
+      self.proc.send(Input::Resize(rows, cols));
+    }
+    if !matches!(input, Input::Resize(..)) {
+      self.proc.send(input);
+    }
+  }
+}
+
+impl Drop for Client {
+  fn drop(&mut self) {
+    let resize = {
+      let mut seats = self.proc.lock_seats();
+      seats.clients.retain(|c| c.id != self.id);
+      seats.resize()
+    };
+    if let Some((rows, cols)) = resize {
+      self.proc.send(Input::Resize(rows, cols));
+    }
+  }
 }
 
 struct Fanout {
@@ -126,6 +218,12 @@ impl Proc {
       owner_order: tokio::sync::Mutex::new(()),
       exited,
       finished_at: OnceLock::new(),
+      seats: Mutex::new(Seats {
+        next: 0,
+        clock: 0,
+        window: spec.tty.filter(|_| tty),
+        clients: Vec::new(),
+      }),
     });
     let ends = Ends {
       input: input_rx,
@@ -269,6 +367,38 @@ impl Proc {
     self.finished_at.get_or_init(Instant::now);
     // `send_replace` stores the exit even when no waiter is subscribed.
     ends.send_replace(Some(exit));
+  }
+
+  /// Joins the process as a client with its terminal's `window`, which it
+  /// then owns unless it is `read_only`.
+  pub fn join(self: &Arc<Self>, window: Option<(u16, u16)>, read_only: bool) -> Client {
+    let (id, resize) = {
+      let mut seats = self.lock_seats();
+      seats.next += 1;
+      seats.clock += 1;
+      let (id, active) = (seats.next, seats.clock);
+      seats.clients.push(Seat {
+        id,
+        window: window.map(|(rows, cols)| (rows.max(1), cols.max(1))),
+        active,
+        read_only,
+      });
+      (id, seats.resize())
+    };
+    if let Some((rows, cols)) = resize {
+      self.send(Input::Resize(rows, cols));
+    }
+    Client {
+      proc: self.clone(),
+      id,
+      read_only,
+    }
+  }
+
+  fn lock_seats(&self) -> std::sync::MutexGuard<'_, Seats> {
+    // NOTICE: every change under the lock is a push, a remove or a field
+    // store, so a panic elsewhere leaves the seats whole.
+    self.seats.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
   }
 
   /// Follows a window size change in the terminal model.

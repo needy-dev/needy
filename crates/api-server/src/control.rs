@@ -252,11 +252,13 @@ pub trait Runs: Send + Sync + 'static {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecOpen {
   Start(ExecSpec),
-  /// `window` is the attaching client's terminal size, if it has one.
+  /// `window` is the attaching client's terminal size, if it has one; a
+  /// `read_only` client only watches.
   Attach {
     process: String,
     replay: bool,
     window: Option<WindowSize>,
+    read_only: bool,
   },
 }
 
@@ -298,6 +300,8 @@ pub enum ExecInput {
   Eof,
   Signal(String),
   Resize(WindowSize),
+  /// The caller leaves without ending the process.
+  Detach,
 }
 
 /// What an exec stream carries to its caller.
@@ -314,6 +318,8 @@ pub enum ExecOutput {
   /// The daemon ends the stream before the process exited, for this
   /// reason; nothing follows.
   Ended(String),
+  /// The executor took the caller's [`ExecInput::Detach`].
+  Detached,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

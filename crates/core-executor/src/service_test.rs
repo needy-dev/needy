@@ -1,10 +1,11 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use needy_api_client::exec::Event;
 use needy_api_client::exec::ExecStream;
 use needy_api_client::{Client, Kind};
 use needy_api_proto::v1::process_service_server::ProcessServiceServer;
-use needy_api_proto::v1::{ExecStart, WindowSize};
+use needy_api_proto::v1::{ExecAttach, ExecStart, WindowSize};
 use tokio_stream::wrappers::UnixListenerStream;
 
 use super::*;
@@ -164,18 +165,145 @@ async fn attaching_resizes_the_terminal_to_the_attaching_client() {
   };
   drop(started);
 
-  let attached = ExecStream::attach(
-    &executor.client,
-    &process,
-    false,
-    Some(WindowSize {
-      rows: 40,
-      cols: 100,
-    }),
-  )
-  .await
-  .unwrap();
+  let attached = ExecStream::attach(&executor.client, attach(&process, Some((40, 100)), false)).await.unwrap();
   let output = attached.run(Some(b"\n".to_vec())).await.unwrap();
 
   assert!(String::from_utf8_lossy(&output.stdout).contains("40 100"), "{:?}", String::from_utf8_lossy(&output.stdout));
+}
+
+fn attach(process: &str, window: Option<(u32, u32)>, read_only: bool) -> ExecAttach {
+  ExecAttach {
+    process_id: process.into(),
+    replay: false,
+    window: window.map(|(rows, cols)| WindowSize { rows, cols }),
+    read_only,
+  }
+}
+
+/// Starts `script` on a 24x80 terminal; the stream and the process's ID.
+async fn start_tty(executor: &Executor, script: &str) -> (ExecStream, String) {
+  let start = ExecStart {
+    argv: vec!["sh".into(), "-c".into(), script.into()],
+    tty: Some(WindowSize { rows: 24, cols: 80 }),
+    ..Default::default()
+  };
+  let mut stream = ExecStream::start(&executor.client, start).await.unwrap();
+  loop {
+    if let Some(Event::Started(started)) = stream.next().await.unwrap() {
+      return (stream, started.process_id);
+    }
+  }
+}
+
+/// Reads `stream` until its output contains `marker`; all of it.
+async fn read_until(stream: &mut ExecStream, marker: &str) -> String {
+  let mut text = String::new();
+  let read = async {
+    while !text.contains(marker) {
+      match stream.next().await.unwrap() {
+        Some(Event::Stdout(bytes)) => text.push_str(&String::from_utf8_lossy(&bytes)),
+        Some(Event::Exited(_)) | None => break,
+        Some(_) => {}
+      }
+    }
+  };
+  tokio::time::timeout(std::time::Duration::from_secs(10), read).await.unwrap_or_else(|_| panic!("no {marker:?}"));
+  text
+}
+
+async fn running(executor: &Executor, process: &str) -> bool {
+  let list = needy_api_client::Executor::list_processes(&executor.client, Default::default()).await.unwrap();
+  list.processes.iter().any(|p| p.process_id == process && p.running)
+}
+
+// The client that started a process leaves without ending it once it sent
+// `detach` (G3); without it, leaving hangs the process up.
+#[tokio::test]
+async fn a_starting_client_that_detaches_leaves_the_process_running() {
+  let executor = executor().await;
+  // NOTICE: a process notices a client that left when it next writes (see
+  // the runners note's open questions), so both keep writing.
+  let writer = "while :; do echo tick; sleep 0.05; done";
+  let (detached, kept) = start_tty(&executor, writer).await;
+  detached.input().detach().await.unwrap();
+  // The detach is a request on the stream; it is read before the stream
+  // closes.
+  tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+  drop(detached);
+  let (left, ended) = start_tty(&executor, writer).await;
+  drop(left);
+  tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+  assert!(running(&executor, &kept).await);
+  assert!(!running(&executor, &ended).await);
+  kill(&executor, &kept).await;
+}
+
+async fn kill(executor: &Executor, process: &str) {
+  let request = needy_api_proto::v1::KillProcessRequest {
+    process_id: process.into(),
+    signal: "SIGKILL".into(),
+  };
+  needy_api_client::Executor::kill_process(&executor.client, request).await.unwrap();
+}
+
+// A read-only viewer's input never reaches the process (G6).
+#[tokio::test]
+async fn a_read_only_viewer_cannot_type() {
+  let executor = executor().await;
+  let (mut owner, process) = start_tty(&executor, "read line; echo got:$line").await;
+  let viewer = ExecStream::attach(&executor.client, attach(&process, None, true)).await.unwrap();
+  viewer.input().stdin(b"viewer\n".to_vec()).await.unwrap();
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+  owner.input().stdin(b"owner\n".to_vec()).await.unwrap();
+
+  let text = read_until(&mut owner, "got:").await;
+  let text = text + &read_until(&mut owner, "\n").await;
+  assert!(text.contains("got:owner"), "{text:?}");
+  assert!(!text.contains("viewer"), "{text:?}");
+  kill(&executor, &process).await;
+}
+
+// The client that last attached or typed owns the window size; when it
+// leaves, the next most recent takes over, and a read-only viewer never
+// does (G6).
+#[tokio::test]
+async fn the_last_active_client_owns_the_window_size() {
+  let executor = executor().await;
+  let (mut owner, process) = start_tty(&executor, "while read line; do echo size:$(stty size):; done").await;
+  let viewer = ExecStream::attach(&executor.client, attach(&process, Some((30, 100)), false)).await.unwrap();
+  let watcher = ExecStream::attach(&executor.client, attach(&process, Some((10, 10)), true)).await.unwrap();
+  watcher.input().resize(WindowSize { rows: 11, cols: 11 }).await.unwrap();
+  owner.input().stdin(b"\n".to_vec()).await.unwrap();
+  // The owner typed last: its size.
+  assert!(read_until(&mut owner, "size:24 80:").await.contains("size:24 80:"));
+
+  // A resize from a client that does not own the size waits.
+  viewer
+    .input()
+    .resize(WindowSize {
+      rows: 40,
+      cols: 120,
+    })
+    .await
+    .unwrap();
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+  owner.input().stdin(b"\n".to_vec()).await.unwrap();
+  assert!(read_until(&mut owner, "size:24 80:").await.contains("size:24 80:"));
+
+  // The viewer types: its last size.
+  viewer.input().stdin(b"\n".to_vec()).await.unwrap();
+  assert!(read_until(&mut owner, "size:40 120:").await.contains("size:40 120:"));
+
+  // The owner typed again, then left after detaching: the viewer takes over.
+  owner.input().stdin(b"\n".to_vec()).await.unwrap();
+  read_until(&mut owner, "size:24 80:").await;
+  owner.input().detach().await.unwrap();
+  drop(owner);
+  tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+  let mut viewer = viewer;
+  viewer.input().stdin(b"\n".to_vec()).await.unwrap();
+  assert!(read_until(&mut viewer, "size:40 120:").await.contains("size:40 120:"));
+  drop(watcher);
+  kill(&executor, &process).await;
 }

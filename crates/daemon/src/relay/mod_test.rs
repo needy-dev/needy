@@ -146,6 +146,7 @@ async fn attaching_to_a_workspace_mount_is_refused() {
         process: process.clone(),
         replay: true,
         window: None,
+        read_only: false,
       },
       attached(),
     )
@@ -173,6 +174,7 @@ async fn attaching_to_an_exited_command_replays_its_output_and_exit() {
         process,
         replay: true,
         window: None,
+        read_only: false,
       },
       attached(),
     )
@@ -292,6 +294,7 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
       rows: 40,
       cols: 100,
     }),
+    read_only: false,
   };
   let (stdout, _) = tokio::time::timeout(Duration::from_secs(10), finish(daemon.exec(open, input).await.unwrap())).await.unwrap();
 
@@ -318,4 +321,36 @@ async fn a_terminal_type_the_executor_replaced_is_recorded_in_exec_start() {
   let trace = std::fs::read_to_string(started.dir.path().join("state/runs").join(&created.id).join("trace.jsonl")).unwrap();
   let start = trace.lines().find(|l| l.contains("\"exec.start\"")).unwrap_or_else(|| panic!("{trace}"));
   assert!(start.contains(r#""term_fallback":{"requested":"needy-no-such-terminal","used":"xterm-256color"}"#), "{start}");
+}
+
+// G3 of the terminal note: a starting client that sends `detach` through the
+// control plane leaves its process running when it goes; the daemon then
+// drains the stream without it.
+#[tokio::test]
+async fn a_starting_client_that_detaches_through_the_daemon_leaves_the_process_running() {
+  use needy_api_server::control::{ExecInput, WindowSize};
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let on_a_terminal = ExecSpec {
+    tty: Some(WindowSize { rows: 24, cols: 80 }),
+    ..spec(&["sh", "-c", "while :; do echo tick; sleep 0.05; done"], &created.id, "")
+  };
+  let (input_tx, input_rx) = tokio::sync::mpsc::channel(4);
+  let input: Inputs = Box::pin(tokio_stream::wrappers::ReceiverStream::new(input_rx));
+  let mut outputs = daemon.exec(ExecOpen::Start(on_a_terminal), input).await.unwrap();
+  let process = loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break started.process;
+    }
+  };
+  input_tx.send(ExecInput::Detach).await.unwrap();
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  drop(outputs);
+  drop(input_tx);
+  tokio::time::sleep(Duration::from_millis(500)).await;
+
+  let listed = Processes::list(daemon, &created.id, "").await.unwrap();
+  assert!(listed.iter().any(|p| p.process == process && p.running), "{listed:?}");
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
 }

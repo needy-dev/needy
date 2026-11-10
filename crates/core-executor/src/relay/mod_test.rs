@@ -70,7 +70,9 @@ async fn the_relay_returns_the_exit_code() {
   let executor = executor().await;
   let stream = ExecStream::start(&executor.client, start(&["sh", "-c", "exit 7"], false)).await.unwrap();
 
-  let exit = run(stream, false, false).await.unwrap();
+  let Ended::Exited(exit) = run(stream, Options::default()).await.unwrap() else {
+    panic!("nobody detached");
+  };
 
   assert_eq!(
     exit,
@@ -87,7 +89,9 @@ async fn the_relay_returns_a_signal_death_by_name() {
   let executor = executor().await;
   let stream = ExecStream::start(&executor.client, start(&["sh", "-c", "kill -TERM $$"], false)).await.unwrap();
 
-  let exit = run(stream, false, false).await.unwrap();
+  let Ended::Exited(exit) = run(stream, Options::default()).await.unwrap() else {
+    panic!("nobody detached");
+  };
 
   assert_eq!(
     exit,
@@ -108,7 +112,16 @@ async fn a_detached_process_can_be_listed_attached_with_replay_and_killed() {
 
   // An attached client sees the output, live or replayed, and leaves the
   // process running when it goes.
-  let mut attached = ExecStream::attach(&executor.client, &id, true, None).await.unwrap();
+  let mut attached = ExecStream::attach(
+    &executor.client,
+    needy_api_proto::v1::ExecAttach {
+      process_id: id.clone(),
+      replay: true,
+      ..Default::default()
+    },
+  )
+  .await
+  .unwrap();
   started(&mut attached).await;
   let first = attached.next().await.unwrap();
   assert_eq!(first, Some(Event::Stdout(b"ready\n".to_vec())));
@@ -125,7 +138,16 @@ async fn a_detached_process_can_be_listed_attached_with_replay_and_killed() {
     })
     .await
     .unwrap();
-  let attached = ExecStream::attach(&executor.client, &id, true, None).await.unwrap();
+  let attached = ExecStream::attach(
+    &executor.client,
+    needy_api_proto::v1::ExecAttach {
+      process_id: id.clone(),
+      replay: true,
+      ..Default::default()
+    },
+  )
+  .await
+  .unwrap();
   let (replayed, exit) = read(attached).await;
 
   assert_eq!(replayed, "ready\n");

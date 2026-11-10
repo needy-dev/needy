@@ -75,6 +75,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
           rows: w.rows,
           cols: w.cols,
         }),
+        read_only: attach.read_only,
       },
       _ => return Err(ControlError::Invalid("the first request must start or attach".into()).into()),
     };

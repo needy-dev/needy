@@ -195,7 +195,7 @@ impl Processes for Fake {
         match item {
           ExecInput::Stdin(bytes) => echoed.extend(bytes),
           ExecInput::Eof => break,
-          ExecInput::Signal(_) | ExecInput::Resize(_) => {}
+          ExecInput::Signal(_) | ExecInput::Resize(_) | ExecInput::Detach => {}
         }
       }
       echoed

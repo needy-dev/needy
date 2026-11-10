@@ -7,10 +7,11 @@
 mod filter;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use needy_api_client::exec::{self as client_exec, ExecStream};
-use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
+use needy_api_client::proto::v1::{ExecAttach, KillProcessRequest, ListProcessesRequest};
 use needy_api_server::control::{ControlError, ExecInput, ExecOpen, ExecOutput, Inputs, Outputs, ProcessInfo, Processes};
 use needy_api_server::protocol::domain;
 use needy_common::time::now_ms;
@@ -68,6 +69,7 @@ enum Upstream {
     process: String,
     replay: bool,
     window: Option<needy_api_server::control::WindowSize>,
+    read_only: bool,
   },
 }
 
@@ -86,7 +88,9 @@ struct Relay {
   /// plane's own.
   by: Option<Principal>,
   argv: Vec<String>,
-  detach: bool,
+  /// The process keeps running when the caller leaves: it started detached,
+  /// or the caller sent `detach`.
+  detach: Arc<AtomicBool>,
   filter: Option<Arc<dyn StreamFilter>>,
   requested: Instant,
 }
@@ -183,7 +187,7 @@ impl Processes for Daemon {
           run: run.as_ref().map(|r| r.id.clone()),
           by: spec.by.clone(),
           argv: spec.argv.clone(),
-          detach: spec.detach,
+          detach: Arc::new(AtomicBool::new(spec.detach)),
           filter: run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
           requested,
         };
@@ -193,6 +197,7 @@ impl Processes for Daemon {
         process,
         replay,
         window,
+        read_only,
       } => {
         let known = self.process(&process)?;
         // An attach forwards the caller's input: keystrokes in an SFTP or tar
@@ -207,7 +212,7 @@ impl Processes for Daemon {
           run: None,
           by: None,
           argv: Vec::new(),
-          detach: false,
+          detach: Arc::new(AtomicBool::new(false)),
           filter: None,
           requested,
         };
@@ -219,6 +224,7 @@ impl Processes for Daemon {
             process,
             replay,
             window,
+            read_only,
           },
         )
       }
@@ -235,7 +241,16 @@ impl Processes for Daemon {
         process,
         replay,
         window,
-      } => ExecStream::attach(executor, &process, replay, window.map(domain::proto_window)).await,
+        read_only,
+      } => {
+        let attach = ExecAttach {
+          process_id: process,
+          replay,
+          window: window.map(domain::proto_window),
+          read_only,
+        };
+        ExecStream::attach(executor, attach).await
+      }
     }
     .map_err(relayed)?;
     // A run's relays stop with the run; the others with the daemon.
@@ -248,6 +263,7 @@ impl Processes for Daemon {
       upstream.input(),
       relay.filter.clone(),
       relay.trace.clone(),
+      relay.detach.clone(),
       out_tx.clone(),
     )));
     let daemon = self.clone();
@@ -351,6 +367,7 @@ async fn forward_input(
   upstream: client_exec::Input,
   filter: Option<Arc<dyn StreamFilter>>,
   trace: Option<Dispatch>,
+  detach: Arc<AtomicBool>,
   out_tx: Sender,
 ) {
   while let Some(mut message) = input.next().await {
@@ -377,6 +394,12 @@ async fn forward_input(
       ExecInput::Eof => upstream.eof().await,
       ExecInput::Signal(name) => upstream.signal(&name).await,
       ExecInput::Resize(size) => upstream.resize(domain::proto_window(size)).await,
+      ExecInput::Detach => {
+        // Set before the executor hears it, so the relay drains the stream
+        // once the caller is gone instead of dropping it.
+        detach.store(true, Ordering::SeqCst);
+        upstream.detach().await
+      }
     };
     if sent.is_err() {
       break;
@@ -431,7 +454,7 @@ impl Relay {
         // goes on.
         Err(needy_api_client::Error::Remote(message)) => {
           if !client_gone && out_tx.send(Ok(ExecOutput::Error(message))).await.is_err() {
-            if !self.detach {
+            if !self.detach.load(Ordering::SeqCst) {
               break;
             }
             client_gone = true;
@@ -511,6 +534,7 @@ impl Relay {
           done = true;
           ExecOutput::Exited(exit)
         }
+        client_exec::Event::Detached => ExecOutput::Detached,
         // Executors place nothing, so they send no trace events.
         client_exec::Event::Trace(_) => continue,
       };
@@ -521,7 +545,7 @@ impl Relay {
         break;
       }
       if !client_gone && out_tx.send(Ok(output)).await.is_err() {
-        if !self.detach {
+        if !self.detach.load(Ordering::SeqCst) {
           break;
         }
         client_gone = true;

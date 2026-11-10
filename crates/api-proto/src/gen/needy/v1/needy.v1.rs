@@ -289,10 +289,14 @@ pub struct ExecAttach {
     /// size.
     #[prost(message, optional, tag="3")]
     pub window: ::core::option::Option<WindowSize>,
+    /// Watch only: the executor ignores this client's input, signals and
+    /// window size.
+    #[prost(bool, tag="4")]
+    pub read_only: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecRequest {
-    #[prost(oneof="exec_request::Payload", tags="1, 2, 3, 4, 5, 6")]
+    #[prost(oneof="exec_request::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
     pub payload: ::core::option::Option<exec_request::Payload>,
 }
 /// Nested message and enum types in `ExecRequest`.
@@ -312,6 +316,10 @@ pub mod exec_request {
         Signal(::prost::alloc::string::String),
         #[prost(message, tag="6")]
         Resize(super::WindowSize),
+        /// The client leaves without ending the process: it may close the
+        /// stream, and the process keeps running as if started with `detach`.
+        #[prost(bool, tag="7")]
+        Detach(bool),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -377,7 +385,7 @@ pub struct ExecRefusal {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecResponse {
-    #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8")]
     pub payload: ::core::option::Option<exec_response::Payload>,
 }
 /// Nested message and enum types in `ExecResponse`.
@@ -403,6 +411,10 @@ pub mod exec_response {
         /// `ended` also ended before the process exited, for a reason unknown.
         #[prost(message, tag="7")]
         Ended(super::ExecEnded),
+        /// The executor took the client's `detach`: the client may close the
+        /// stream now and the process keeps running.
+        #[prost(bool, tag="8")]
+        Detached(bool),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

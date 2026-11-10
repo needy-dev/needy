@@ -399,6 +399,7 @@ pub fn exec_input(payload: v1::exec_request::Payload) -> Option<ExecInput> {
       rows: size.rows,
       cols: size.cols,
     })),
+    Payload::Detach(_) => Some(ExecInput::Detach),
     Payload::Start(_) | Payload::Attach(_) => None,
   }
 }
@@ -423,6 +424,7 @@ pub fn proto_exec_output(output: ExecOutput) -> v1::ExecResponse {
     ExecOutput::Exited(exit) => Payload::Exited(proto_exit(exit)),
     ExecOutput::Error(message) => Payload::Error(message),
     ExecOutput::Ended(reason) => Payload::Ended(v1::ExecEnded { reason }),
+    ExecOutput::Detached => Payload::Detached(true),
   };
   v1::ExecResponse {
     payload: Some(payload),

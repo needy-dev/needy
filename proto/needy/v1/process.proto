@@ -78,6 +78,9 @@ message ExecAttach {
   // to it, so a full-screen program redraws for the client. Unset keeps the
   // size.
   WindowSize window = 3;
+  // Watch only: the executor ignores this client's input, signals and
+  // window size.
+  bool read_only = 4;
 }
 
 message ExecRequest {
@@ -89,6 +92,9 @@ message ExecRequest {
     // Signal name, for example "SIGINT". Numbers differ between platforms.
     string signal = 5;
     WindowSize resize = 6;
+    // The client leaves without ending the process: it may close the
+    // stream, and the process keeps running as if started with `detach`.
+    bool detach = 7;
   }
 }
 
@@ -153,6 +159,9 @@ message ExecResponse {
     // no `exited` follows. A stream that closes without `exited` or
     // `ended` also ended before the process exited, for a reason unknown.
     ExecEnded ended = 7;
+    // The executor took the client's `detach`: the client may close the
+    // stream now and the process keeps running.
+    bool detached = 8;
   }
 }
 

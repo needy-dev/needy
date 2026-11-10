@@ -38,6 +38,9 @@ pub enum Event {
   Stdout(Vec<u8>),
   Stderr(Vec<u8>),
   Exited(Exit),
+  /// The executor took this client's [`Input::detach`]; the stream may be
+  /// dropped and the process keeps running.
+  Detached,
 }
 
 /// A process run to completion.
@@ -57,15 +60,11 @@ impl ExecStream {
     Self::open(executor, exec_request::Payload::Start(start)).await
   }
 
-  /// Attaches to a running or finished process; with `replay`, its buffered
-  /// output comes first. With `window`, a process on a terminal is resized
-  /// to the attaching client's.
-  pub async fn attach(executor: &dyn Executor, process_id: &str, replay: bool, window: Option<WindowSize>) -> Result<Self> {
-    let attach = ExecAttach {
-      process_id: process_id.to_string(),
-      replay,
-      window,
-    };
+  /// Attaches to a running or finished process. With `replay`, what came
+  /// before comes first: a terminal's current screen, or the buffered
+  /// output of pipes. A process on a terminal takes the `window` of the
+  /// client that last attached or typed; a `read_only` client only watches.
+  pub async fn attach(executor: &dyn Executor, attach: ExecAttach) -> Result<Self> {
     Self::open(executor, exec_request::Payload::Attach(attach)).await
   }
 
@@ -96,6 +95,7 @@ impl ExecStream {
         Some(exec_response::Payload::Stdout(bytes)) => Event::Stdout(bytes),
         Some(exec_response::Payload::Stderr(bytes)) => Event::Stderr(bytes),
         Some(exec_response::Payload::Exited(exited)) => Event::Exited(exit(exited)),
+        Some(exec_response::Payload::Detached(_)) => Event::Detached,
         Some(exec_response::Payload::Error(message)) => return Err(Error::Remote(message)),
         Some(exec_response::Payload::Ended(ended)) => {
           return Err(Error::Ended {
@@ -128,7 +128,7 @@ impl ExecStream {
         Some(Event::Stdout(bytes)) => stdout.extend(bytes),
         Some(Event::Stderr(bytes)) => stderr.extend(bytes),
         Some(Event::Exited(exit)) => break exit,
-        Some(Event::Trace(_) | Event::Started(_)) => {}
+        Some(Event::Trace(_) | Event::Started(_) | Event::Detached) => {}
         None => return Err(Error::Ended { reason: None }),
       }
     };
@@ -171,6 +171,12 @@ impl Input {
 
   pub async fn resize(&self, size: WindowSize) -> Result<()> {
     self.send(exec_request::Payload::Resize(size)).await
+  }
+
+  /// Leaves without ending the process: once this is sent, closing the
+  /// stream leaves the process running.
+  pub async fn detach(&self) -> Result<()> {
+    self.send(exec_request::Payload::Detach(true)).await
   }
 }
 

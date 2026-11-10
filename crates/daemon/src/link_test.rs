@@ -220,7 +220,16 @@ async fn a_detached_process_on_a_runner_is_listed_attached_and_killed() {
   };
   drop(started);
   let listed = list(&client, "mac").await.unwrap();
-  let mut attached = ExecStream::attach(&client, &process.process_id, true, None).await.unwrap();
+  let mut attached = ExecStream::attach(
+    &client,
+    needy_api_client::proto::v1::ExecAttach {
+      process_id: process.process_id.clone(),
+      replay: true,
+      ..Default::default()
+    },
+  )
+  .await
+  .unwrap();
   let mut replayed = String::new();
   while !replayed.contains("ready") {
     if let Some(Event::Stdout(bytes)) = attached.next().await.unwrap() {

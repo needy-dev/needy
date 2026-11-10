@@ -12,7 +12,6 @@ use clap::ValueEnum;
 use needy_api_client::exec::{Event, ExecStream};
 use needy_api_client::proto::v1::{ExecEvent, ExecStart, ExecStarted, Origin};
 use needy_api_client::{Error, Kind};
-use needy_common::process::Exit;
 use needy_core_executor::{relay, signals};
 use serde_json::{Value, json};
 
@@ -43,6 +42,10 @@ pub struct Args {
   /// Start the process, print its ID and return.
   #[arg(short = 'd')]
   detach: bool,
+  /// Keys that leave a command on a terminal running, as Docker writes
+  /// them (`ctrl-p,ctrl-q`); empty turns detaching off.
+  #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
+  detach_keys: String,
   #[arg(long)]
   cwd: Option<String>,
   /// Set an environment variable, KEY=VALUE.
@@ -67,6 +70,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let detach_keys = relay::DetachKeys::parse(&args.detach_keys)?;
   let interactive = relay::interactive();
   let tty = (args.tty || (interactive && !args.no_tty)) && args.output == Output::Human;
   let window = tty.then(relay::window);
@@ -106,7 +110,16 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     return detached(&mut stream, args.output).await;
   }
   match args.output {
-    Output::Human => status(relay::run(stream, tty, forward_stdin).await),
+    Output::Human => {
+      let options = relay::Options {
+        tty,
+        stdin: forward_stdin,
+        // Detach keys are read from a terminal only; piped input is data.
+        detach_keys: detach_keys.filter(|_| tty),
+        ..relay::Options::default()
+      };
+      status(relay::run(stream, options).await)
+    }
     Output::Json | Output::Ndjson => {
       let _forward = relay::Forward::start(stream.input(), forward_stdin, false);
       events(stream, args.output).await
@@ -114,11 +127,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   }
 }
 
-/// The exit code of a relayed command: its own, or 255 with a message when
-/// the stream ended before it exited.
-pub(crate) fn status(relayed: Result<Exit, relay::Error>) -> Result<i32> {
+/// The exit code of a relayed command: its own, 0 when the user detached,
+/// or 255 with a message when the stream ended before it exited.
+pub(crate) fn status(relayed: Result<relay::Ended, relay::Error>) -> Result<i32> {
   match relayed {
-    Ok(exit) => Ok(signals::shell_code(&exit)),
+    Ok(relay::Ended::Exited(exit)) => Ok(signals::shell_code(&exit)),
+    Ok(relay::Ended::Detached { process }) => {
+      output::message(format!("detached from process {process}; `needy attach {process}` returns to it"));
+      Ok(0)
+    }
     Err(error) if error.ended() => {
       output::message(&error);
       Ok(signals::ENDED)
@@ -238,6 +255,8 @@ async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
           line(&event_line(&event)?)?;
         }
       }
+      // These formats never send `detach`.
+      Event::Detached => {}
     }
   };
   drop(stream);
