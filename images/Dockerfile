@@ -52,17 +52,46 @@ RUN echo "obj-y += binfmt_needy.o" >> fs/Makefile \
  && KBUILD_BUILD_USER=$KBUILD_BUILD_USER KBUILD_BUILD_HOST=$KBUILD_BUILD_HOST \
     KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP" make -s -j"$(nproc)" vmlinux
 
-# Firecracker with needy's CPUID, SMBIOS and PCI identity patch.
+# Firecracker with needy's CPUID, SMBIOS and PCI identity patch, linked
+# statically against musl as upstream releases are, so it runs on any Linux
+# host whatever its glibc (Debian 12 has 2.36; a glibc build needed 2.38).
+# Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/tools/release.sh#L64
+# and #L162-L164 (v1.17.0: musl is the default libc and the only one releases use).
+# Reference: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/docs/getting-started.md#building-firecracker
+# NOTICE: the `seccompiler` crate links `libseccomp`
+# (https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/seccompiler/build.rs#L4-L7),
+# so a static musl `libseccomp` goes into `/usr/local/lib`, and `musl-gcc`
+# gets the kernel headers, as upstream's development container does:
+# https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/tools/devctr/Dockerfile#L41-L45
+# and #L73-L90. The SHA-256 is the release's `libseccomp-2.6.1.tar.gz.SHA256SUM`:
+# https://github.com/seccomp/libseccomp/releases/tag/v2.6.1
 FROM rust:1 AS firecracker
 ARG FIRECRACKER_VERSION
-RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev libseccomp-dev cmake patch \
- && rm -rf /var/lib/apt/lists/*
+ARG LIBSECCOMP_VERSION=2.6.1
+ARG LIBSECCOMP_SHA256=501f66c667225d53791b97e1d7cf85ab764c297d04881f60f38f451c4b0ee1be
+RUN apt-get update && apt-get install -y --no-install-recommends libclang-dev cmake patch musl-tools gperf \
+ && rm -rf /var/lib/apt/lists/* \
+ && cd /usr/include/x86_64-linux-musl \
+ && ln -s ../x86_64-linux-gnu/asm asm && ln -s ../linux linux && ln -s ../asm-generic asm-generic
+RUN curl -fsSL -o /tmp/libseccomp.tar.gz \
+      https://github.com/seccomp/libseccomp/releases/download/v${LIBSECCOMP_VERSION}/libseccomp-${LIBSECCOMP_VERSION}.tar.gz \
+ && echo "${LIBSECCOMP_SHA256}  /tmp/libseccomp.tar.gz" | sha256sum -c - \
+ && mkdir /tmp/libseccomp && tar xzf /tmp/libseccomp.tar.gz -C /tmp/libseccomp --strip-components=1 \
+ && cd /tmp/libseccomp \
+ && CC="musl-gcc -static" ./configure --prefix=/usr/local --enable-static=yes --enable-shared=false \
+ && make -s -j"$(nproc)" && make -s install \
+ && rm -rf /tmp/libseccomp /tmp/libseccomp.tar.gz
 WORKDIR /fc
 RUN curl -fsSL https://github.com/firecracker-microvm/firecracker/archive/refs/tags/${FIRECRACKER_VERSION}.tar.gz | tar xz --strip-components=1
 COPY images/firecracker/needy.patch /tmp/
+# The build fails unless the result is static: no program interpreter and no
+# shared libraries.
 RUN patch -p1 < /tmp/needy.patch \
- && cargo build --release -p firecracker --target x86_64-unknown-linux-gnu \
- && cp build/cargo_target/x86_64-unknown-linux-gnu/release/firecracker /firecracker
+ && cargo build --release -p firecracker --target x86_64-unknown-linux-musl \
+ && cp build/cargo_target/x86_64-unknown-linux-musl/release/firecracker /firecracker \
+ && if readelf -lW /firecracker | grep -q INTERP || readelf -dW /firecracker | grep -q '(NEEDED)'; then \
+      echo "firecracker is not statically linked:" >&2; readelf -dW /firecracker | grep '(NEEDED)' >&2; exit 1; \
+    fi
 
 # Actor userland: the driving program's world. `systemd` is not run (needy's
 # init is PID 1); it brings `systemd-detect-virt`, which a cloud VM has and
