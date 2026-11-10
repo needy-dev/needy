@@ -577,7 +577,8 @@ configures the VM in about 70 ms on B.
    the container (`auto_remove`).
 
 2. **The example recipe cannot boot on a host CPU without CPUID leaf 7,
-   subleaf 1.** `examples/opencode/gce.recipe.yaml` hides `avx_vnni`, which
+   subleaf 1.** (Fixed by `cd25f96`; see "Re-verified after the recipe,
+   failed-actor and static Firecracker fixes".) `examples/opencode/gce.recipe.yaml` hides `avx_vnni`, which
    `crates/core/src/recipe/cpu.rs` maps to leaf 7, subleaf 1, EAX bit 4. On
    B, Firecracker refuses the template:
    `Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1`,
@@ -588,7 +589,8 @@ configures the VM in about 70 ms on B.
    not verified.
 
 3. **An actor that never starts is reported as `finished` with no
-   findings.** This happens when Firecracker exits at once: no `/dev/kvm`
+   findings.** (Fixed by `40a5d12`, `1fad5c0` and `9f55744`; see "Re-verified
+   after the recipe, failed-actor and static Firecracker fixes".) This happens when Firecracker exits at once: no `/dev/kvm`
    (A, C), the CPUID refusal (B), or the glibc mismatch (C). Then
    `session create` exits 0 and prints the ID, `session ls` says `finished`,
    and `report` says `finished` with driving program `-`, "No findings" and
@@ -599,7 +601,9 @@ configures the VM in about 70 ms on B.
    `/dev/kvm`, create a session from a profile with only `actor.recipe` and
    `actor.command: [/bin/true]`.
 
-4. **The patched Firecracker does not run on Debian 12.** `images/Dockerfile`
+4. **The patched Firecracker does not run on Debian 12.** (Fixed by
+   `2823c1e`; see "Re-verified after the recipe, failed-actor and static
+   Firecracker fixes".) `images/Dockerfile`
    builds it for `x86_64-unknown-linux-gnu` in the `rust:1` stage, so it
    needs glibc 2.38. On C:
    `firecracker: /lib/x86_64-linux-gnu/libc.so.6: version 'GLIBC_2.38' not found`.
@@ -607,6 +611,54 @@ configures the VM in about 70 ms on B.
    is unaffected.
 
 No product code was changed in this pass.
+
+## Re-verified after the recipe, failed-actor and static Firecracker fixes
+
+The tree at `9f55744` was run on 2026-11-10 on the Linux host and on the three
+cloud VMs A, B and C above. The fixes are:
+
+- `cd25f96`: a recipe hides a feature only in CPUID entries the host's KVM
+  supports. The host side reads `KVM_GET_SUPPORTED_CPUID` through
+  `kvm-ioctls`, as Firecracker does. A hide in an entry KVM lacks is left out
+  of the CPU template with a warning, because the guest cannot see that
+  feature. A feature the recipe requires and the host lacks is still an error.
+- `40a5d12`, `1fad5c0`, `9f55744`: a host without a usable KVM device fails
+  `session create` of an actor at once, before any executor is acquired, with
+  a message that names the device. The message says the container actor
+  runtime is designed but not available yet. A VM that exits before its
+  driving program reported an exit ends the session `failed`, recorded as
+  `session.fail`. The reason has Firecracker's exit status and the last five
+  lines of its log. `session ls` and `report` show it.
+- `2823c1e`: `images/Dockerfile` builds Firecracker for
+  `x86_64-unknown-linux-musl` against a static musl `libseccomp`, as upstream
+  releases are built. The build fails if the binary has a program interpreter
+  or needs a shared library. Before the change, this check failed the gnu
+  build (`libgcc_s.so.1`, `libc.so.6`). The musl build also gets Firecracker's
+  default seccomp filter, which upstream ships only for musl targets.
+
+The actor image (`vmlinux`, `rootfs.ext4`, `firecracker`, the static
+`needy`) was built on the Linux host with `needy build --recipe
+examples/opencode/gce.recipe.yaml`. Only the files each VM needs were copied.
+A and C got `needy` and `firecracker`. B got the image, the examples and
+`needy-executor:latest` (`docker save`, built earlier and not rebuilt). Each
+control daemon ran in the background, as root on the VMs with umask 022, with
+its state in a scratch directory through `NEEDY_STATE_DIR`, `NEEDY_RUNTIME_DIR`
+and `NEEDY_DATA_DIR`.
+
+| Loop | Linux host | A | B | C |
+| --- | --- | --- | --- | --- |
+| `firecracker` is static: `file` says `static-pie linked`, `ldd` says `statically linked`, `firecracker --version` prints `Firecracker v1.17.0` | Pass | Pass | Pass | Pass, glibc 2.36 |
+| `needy profile check examples/smoke/profile.yaml` | Pass: no warning about `avx_vnni` | Not run | Pass, exit 0: `warning: recipe: cpu.features.hide: avx_vnni has no effect: this host's KVM has no CPUID leaf 0x7, subleaf 0x1, so the guest cannot see it`, and the earlier `avx512f` warning | Not run |
+| `examples/smoke` with the unmodified `examples/opencode/gce.recipe.yaml` | Pass: `finished`, exit 0, `google`, `routed exit=7`, the report counts 4 routed and 1 failed | Not applicable | Pass: the same output; 2.1 s from create to `finished`; no CPUID refusal in the console | Not applicable |
+| `examples/chaos` with the same recipe | Pass: copy-in, `Input/output error` on `broken.json`, `ECONNREFUSED` and exit 126 for `curl`, `+101.0°C ALARM (CRIT)`, 3 faults by kind | Not applicable | Pass, the same | Not applicable |
+| `session create` of `examples/smoke` without `/dev/kvm` | Not applicable | Pass: exit 1 after 17 ms with `needy: this host has no usable KVM: cannot open /dev/kvm: No such file or directory (os error 2); a firecracker actor needs it. A container actor runtime, …, is designed in docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md but not available yet`; `session ls` says `failed` with the message in EXIT; `report` says `failed` with the reason; no container was created | Not applicable | Pass, the same, after 9 ms |
+| No VM, container or daemon left after `session stop` and the daemon's `SIGTERM` | Pass | Pass | Pass | Pass |
+
+A VM that exits before its driving program did was not reproduced on a host:
+each such cause seen on these VMs (no KVM, the CPUID refusal) is now caught
+earlier or gone. The daemon test
+`a_vm_that_exits_before_its_driving_program_fails_the_session_with_the_reason`
+covers it with a stand-in Firecracker that prints the CPUID refusal and exits 1.
 
 ## Latency and throughput
 
