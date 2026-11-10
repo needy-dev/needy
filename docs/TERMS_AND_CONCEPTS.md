@@ -83,6 +83,36 @@ runtimes or providers.
 
 *Avoid*: agent, worker, node.
 
+### Ownership and grace period
+
+A runner **owns** the processes it runs for a run: each carries the run's
+ID. When a run ends, the control plane tells every runner it held an
+executor on to **end the run**, and the runner kills the run's processes,
+a workspace mount's SFTP server among them. A runner that cannot reach the
+control plane keeps them for its **grace period** (2 minutes), then ends
+them itself; processes outside any run (`needy exec --runner`) are never
+ended this way.
+
+### Reconciliation
+
+What a control plane does with what it finds. When a runner connects it
+**reports** the processes of runs it still runs; the control plane
+**claims** those of live runs that hold an executor on it and tells it to
+end the others. When a control plane starts, it loads from `state.db` the
+runs it left open: it does not adopt their actors, so each ends `failed`
+(`the control plane restarted; the actor was lost`), or `stopped` if it was
+stopping; it ends a still-running actor VM and removes their control-host
+containers, and waits for runners to report the instances the runs held
+there.
+
+### Lost instance
+
+An instance of a run that nobody reported after the control plane
+restarted: no runner reported it within the wait (60 s), or it was one of
+the control host's own native executors, whose processes a killed daemon
+leaves unrecorded. Whether it still runs is unknown; `run ls` marks it
+`(lost)`. The runner's own grace period still ends its processes.
+
 ### Runner selector
 
 A profile's `runner:` on an executor or the actor: a runner's name, or
@@ -141,9 +171,12 @@ runner's machine without a run, and a run whose actor only waits serves
 A run is `creating` while it acquires its executors, copies files in and
 starts its actor, then `running`. It ends `stopped` (after `stopping`, by
 `needy run stop`), `finished` (its actor's driving program exited) or
-`failed` (its create failed, or its actor's VM exited before the driving
-program did, with the reason). The first of these end states stays: stopping a
-finished or failed run releases its executors but keeps its state.
+`failed` (its create failed, its actor's VM exited before the driving
+program did, or the control plane restarted and lost its actor, with the
+reason). The first of these end states stays: stopping a
+finished or failed run releases its executors but keeps its state. The
+control plane writes every change of a run's state, and of the instances
+and processes it holds, to `state.db`.
 
 *Avoid*: session (the earlier name), rollout.
 

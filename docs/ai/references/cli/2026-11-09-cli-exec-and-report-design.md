@@ -41,15 +41,20 @@ without either, `ps` lists every executor's and every connected runner's.
 signal name, empty while the process runs. JSON carries `state`,
 `exit_code` and `signal` as separate fields.
 
-`run ls` lists stopped, finished and failed runs with their state
-until the daemon exits. Its columns are `ID`, `NAME`, `STATE`, `GROUP`,
+`run ls` lists stopped, finished and failed runs with their state from
+the control plane's `state.db`, so they stay listed across control plane
+restarts. Its columns are `ID`, `NAME`, `STATE`, `GROUP`,
 `EXECUTORS` and `EXIT`. `NAME` and `GROUP` show `-` when they were not
 given and default to the ID; JSON keeps the real values. `EXECUTORS` keeps
 the executors a run had after it gives them back, marked
-`build=docker (released)`. `EXIT` is the driving program's exit code or
+`build=docker (released)`; an executor that no runner reported after a
+control plane restart is marked `mac=runner (lost)`. A run that was
+running when its control plane died ends `failed` with `the control plane
+restarted; the actor was lost` at the next start. `EXIT` is the driving program's exit code or
 signal, or the first 48 characters of why a failed run failed; it is
 empty while the driving program runs and for a run without an actor. JSON
-carries `executors` as objects with `name`, `runtime` and `released`, and
+carries `executors` as objects with `name`, `runtime`, `released` and
+`lost`, and
 `exit_code`, `signal` and `failure` (the whole reason) as separate fields.
 
 ```text

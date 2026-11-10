@@ -1,11 +1,13 @@
 # Runners and runs
 
-**Status**: design, 2026-11-10. Slices 1 to 5 are implemented: *session* is
+**Status**: design, 2026-11-10. Slices 1 to 6 are implemented: *session* is
 renamed *run* and `needy run create --no-actor` is gone (slice 2, finished
 in slice 5); the runner registry and enrollment (slice 3), runner dial-out
-(slice 4), and scheduling and profiles (slice 5); see
-[As built: slice 3](#as-built-slice-3), [slice 4](#as-built-slice-4) and
-[slice 5](#as-built-slice-5). Nothing else is implemented. The owner chose
+(slice 4), scheduling and profiles (slice 5), and ownership and
+reconciliation (slice 6); see
+[As built: slice 3](#as-built-slice-3), [slice 4](#as-built-slice-4),
+[slice 5](#as-built-slice-5) and [slice 6](#as-built-slice-6). Nothing else
+is implemented. The owner chose
 the model (runners as registered machines; actors and executors as what runs on
 them; runs instead of sessions); open questions are at the end. This note
 absorbs slice 9 (persistence) of the
@@ -144,7 +146,7 @@ Consequences:
   with outbound connections only. Only the control plane is reachable (directly
   or through Cloudflare Tunnel + Access).
 - A runner that reconnects reports the instances and processes it still has;
-  the control plane reconciles them (below; slice 6, not built).
+  the control plane reconciles them (below; as built in slice 6).
 
 The streams as built are in [As built: slice 4](#as-built-slice-4).
 
@@ -155,7 +157,8 @@ and lives on a runner. When a run ends, the control plane tells each runner to
 end that run's instances; the runner kills the run's processes (including a
 workspace mount's `sftp-server`) and removes its containers. A runner that
 loses the control plane keeps running instances for a grace period and ends
-them if the control plane does not claim them on reconnect.
+them if the control plane does not claim them on reconnect. As built in
+[slice 6](#as-built-slice-6).
 
 ## Persistence (`state.db`)
 
@@ -165,7 +168,8 @@ principal), runs (state, profile, timestamps, result), instances (run, runner,
 kind, state), processes (instance, origin, state). On start the control plane
 loads runs and waits for runners to reconnect and report; instances no runner
 reports are marked lost; runs whose actor is gone end `failed` with the reason.
-`trace.db` stays separate.
+`trace.db` stays separate. Runs, instances and processes are as built in
+[slice 6](#as-built-slice-6); clients wait for slice 7.
 
 ## Interactive actor
 
@@ -200,8 +204,9 @@ as `examples/cli` and `examples/local` do); profile executor entries lose
 5. **Scheduling and profiles** (done, 2026-11-10): `runner:` selectors for
    actors and executors; `profile check` through the control plane; the
    `remote` provider and `run create --no-actor` removed.
-6. **Ownership and reconciliation**: run-scoped cleanup on runners; restart
-   reconciliation from `state.db`.
+6. **Ownership and reconciliation** (done, 2026-11-10): runs, instances and
+   processes in `state.db`; run-scoped cleanup on runners; reconnect and
+   restart reconciliation.
 7. **Clients**: pairing, per-client tokens, principals in the trace; `report`
    and `run logs` through the control plane.
 8. **Interactive actor**: PTY driver, `run -it`, `run attach`.
@@ -346,8 +351,8 @@ connection ended before the command exited: runner NAME disconnected", exit
 255 in `needy exec`). On the runner, an exec whose task stream ended has lost
 its client: a process it did not detach gets the same hangup as with any
 client that leaves (when it next writes, see the follow-ups), and detached
-processes keep running. The runner does not report or reconcile its
-processes when it reconnects (`TODO(runner-ownership)`, slice 6).
+processes keep running. In slice 4 the runner did not report or
+reconcile its processes when it reconnected; slice 6 added that.
 
 **Ends.** `runner rm` ends the runner's control stream, so the runner connects
 again at once, is refused and exits. The control daemon ends every control
@@ -455,6 +460,100 @@ The pool's regression test for a slow creation used the `remote` provider
 and was dropped; the providers left create at once or need Docker
 (`TODO(test)` in the pool's tests).
 
+## As built: slice 6
+
+**Persistence.** A second migration, `m20261110_000060_runs`, adds three
+tables to `state.db` (`needy_daemon::store`, module `runs`). States are
+words, exits a code and a signal name.
+
+| Table | Columns |
+| --- | --- |
+| `runs` | `id` (key), `name`, `group_name`, `profile_name`, `profile_yaml` (the resolved profile), `state`, `created_ms`, `updated_ms`, `actor_exit_code`, `actor_exit_signal`, `failure`, `actor_runner` (the actor's placement; empty for the control host) |
+| `instances` | `id` (key: `RUN:actor`, `RUN:executor:NAME`), `run`, `name`, `kind` (`actor`, `executor`), `runner` (the runner that owns it; empty for the control host), `provider` (`firecracker`, `native`, `docker`), `runtime` (as `run ls` shows it), `handle` (container name, runner name, `local`, or the VM's directory), `pid` (the VM's Firecracker), `state` (`running`, `released`, `ended`, `lost`), `created_ms`, `ended_ms` |
+| `processes` | `id` (key: the executor's process ID), `run`, `instance`, `origin` (empty for a process a runner reported that this control plane did not start), `state` (`running`, `exited`, `ended`, `lost`), `exit_code`, `exit_signal`, `started_ms`, `ended_ms` |
+
+An instance row is a run's hold on an instance: runs sharing a pooled
+executor have a row each. Writes happen where the trace events are emitted:
+the run at `run.create`, `running`, `stopping`, `stopped`, `finished` and
+`failed` (a failed create included); an executor when acquired and
+released; the actor when its VM starts and ends; a process when the relay
+sees it start and exit, and when a run's end kills it. The registry keeps
+live runs in memory and reads ended ones from `state.db`, so `run ls`,
+`run logs` and `GetRun` find them after a restart; the in-memory list of
+ended runs is gone.
+
+**Ownership protocol.** Two additions to `RunnerService`'s streams:
+
+| Message | Direction | Meaning |
+| --- | --- | --- |
+| `ControlRequest.report: RunnerReport { processes }` | runner → control plane, first on every control stream | The runner's running processes that carry a run ID |
+| `RunnerTask.end_run: EndRun { run_id }`, answered by `TaskResult.end_run: EndRunResponse { processes, ended }` | control plane → runner | Kill the run's processes (`SIGKILL`, a workspace mount's `sftp-server` included), wait up to 5 s for them to exit, and return the run's processes after the end with the IDs this task killed |
+
+When a run ends (stop, finish, a failed create), the control plane sends
+`EndRun` to each runner it held a native executor on, in place of listing
+and killing processes one by one; the control host's own executors (the
+daemon's native executor, Docker containers, which are removed anyway) keep
+the list-and-kill path. A runner that is not connected then is not waited
+for: its report on reconnect, or its grace period, ends them. On a report,
+the control plane claims the processes of runs that are `creating` or
+`running` and hold an executor on that runner (recording them if it did not
+know them), and sends `EndRun` for every other run; instance rows a restart
+left `running` on that runner become `ended`.
+
+**Grace period on runners: 2 minutes** (`runner::DISCONNECT_GRACE`). It
+starts when a control stream that was open ends and stops when a new one
+opens; when it passes, the runner ends every run's processes itself
+(processes outside runs stay). Two minutes is eight reconnect attempts at
+the 15 s backoff cap, enough for a control plane or a tunnel restart to come
+back and decide; a control plane gone for good leaves a run's processes for
+minutes, not hours. A restarted control plane fails the runs whose actors
+it lost anyway (below), so a longer grace keeps nothing useful alive. The
+hidden flag `needy daemon --mode runner --disconnect-grace` shortens it for
+tests.
+
+**Control plane restart.** `Daemon::start` loads the runs left `creating`,
+`running` or `stopping` before it serves:
+
+- The actor is **not re-adopted** (decision, 2026-11-10). The Firecracker
+  of an actor on the control host survives a killed daemon, and the vsock
+  sockets are paths a new daemon could bind again, but the VM is no longer
+  its child (its exit status cannot be collected), the guest's connections
+  in flight broke (routed commands, the gateway's), and the run's chaos
+  counters and trace sequence lived in the old daemon's memory, so an
+  adopted run would no longer replay deterministically. The new daemon
+  kills a still-running Firecracker (`SIGKILL`) after checking that the
+  PID's command line names the run's `vm.json` (`sysinfo`; a PID another
+  process took is left alone), and removes the run's sockets.
+- The run ends `failed` with `the control plane restarted; the actor was
+  lost` (`… while the run was being created; its actor was lost` for a
+  create), or `stopped` if it was stopping.
+- Its Docker containers on the control host are removed (`ended`); its
+  native executor on the control host is marked `lost`
+  (`TODO(runner-ownership)` in `reconcile`: a daemon killed with `SIGKILL`
+  leaves those processes orphaned and unrecorded).
+- Its instances on runners wait for the runners to report, at most **60 s**
+  (`REPORT_WAIT`, four times the reconnect backoff cap, shorter than the
+  runners' grace period): a report makes them `ended` (after `EndRun`); the
+  rest become `lost`, with their processes. `run ls` shows them
+  `mac=runner (lost)` (`ExecutorRef.lost`, a new proto field).
+
+The reconciled run gets no `run.fail` in its trace (`TODO(trace)`: a new
+`Dispatch` would number events from 0); `state.db` and `run ls` carry the
+reason. A graceful shutdown still stops every run first, as before.
+
+**Tests.** The store's API (`store::runs`); a run's life visible after an
+in-process restart (shutdown and start on the same directories); through a
+control plane and a runner dialing through a proxy that can be cut or taken
+down: a reconnect keeps a live run's process, a run stopped while the
+runner was away is ended on its report, a runner past its grace period ends
+a run's process and leaves one outside runs; a seeded `state.db` with a
+stand-in leftover VM: the run fails with the reason, the VM is killed, the
+unreported runner instance and the control host's native one are lost; a
+PID another process took is left alone; a stopping run ends stopped. The
+CLI's tests kill a control daemon (`SIGKILL`) during a run on a runner
+daemon and restart it: the run is listed `failed` with the reason and the
+runner's process ends.
+
 ## Open questions
 
 - **The control plane as a runner**: is the control host implicitly a local
@@ -483,6 +582,14 @@ and was dropped; the providers left create at once or need Docker
 - **One connection per runner**: heartbeats stay unary beside the control
   stream (as built). Should they move onto it, so that `online` means "a task
   can reach it now"?
+- **Graceful restarts**: a control plane stopped by a termination signal
+  still stops every run, and one killed fails them at the next start. With
+  actors that cannot be adopted (slice 6) both end the run; a mode that
+  keeps runs through an upgrade would need the actor's guest channel and
+  its run's state to survive the daemon.
+- **Processes outside runs**: the in-memory map of processes the daemon
+  has seen (for `attach`, `kill` and `ps`) still grows until it exits, and
+  processes outside runs are not in `state.db`. Prune, persist, or both?
 - **Silent processes after a lost client**: an exec whose client left, on a
   runner as on any executor, ends only when the process next writes. Should
   the executor end a non-detached process as soon as its stream ends?
