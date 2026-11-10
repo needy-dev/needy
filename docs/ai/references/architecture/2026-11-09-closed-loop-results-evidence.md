@@ -660,6 +660,42 @@ earlier or gone. The daemon test
 `a_vm_that_exits_before_its_driving_program_fails_the_session_with_the_reason`
 covers it with a stand-in Firecracker that prints the CPUID refusal and exits 1.
 
+## Re-verified after the identity fixes
+
+The provenance audit's findings
+([`2026-11-10-provenance-inventory-evidence.md`](2026-11-10-provenance-inventory-evidence.md))
+were fixed in `9e1e669` to `d873c23` and run on 2026-11-10 on the Linux KVM
+host (Intel Core i5-13600KF, a hybrid Raptor Lake CPU). Each actor image was
+built twice with `needy build --recipe` (no `--executor`): once from
+`a36f735`, before the fixes, and once from `d873c23`, into a scratch directory,
+from `examples/opencode/gce.recipe.yaml` and from
+`builtin:dell-optiplex-ubuntu-24.04` (the host's CPU accepts both). A probe
+profile ran as uid 0 in each actor; every daemon ran in the background with
+its state in a scratch directory. The serials and UUIDs below are the
+generated ones.
+
+| Check | Before (`a36f735`) | After (`d873c23`) |
+| --- | --- | --- |
+| GCE `dmidecode -t system -t baseboard` | Serial `GoogleCloud-6B1F5C2E0D4A9E8B7C3D2A1F0E9D8C7B` and UUID `6b1f5c2e-…` (the patch's defaults, whatever the seed); board serial `Board-GoogleCloud-6B1F5C2E0D4A9E8B` | Serial `GoogleCloud-CAAC3C4E8BA44C1BAF4327A5333ED04F`, UUID `caac3c4e-8ba4-4c1b-af43-27a5333ed04f`, board serial `Board-GoogleCloud-CAAC3C4E8BA44C1BAF4327A5333ED04F` |
+| GCE `dmidecode` header and BIOS | `SMBIOS 3.0.0 present`; `UEFI is supported` | `SMBIOS 2.4 present`; `Targeted content distribution is supported`, as on GCE |
+| Dell `/sys/class/dmi/id` | `chassis_vendor=Google`, `board_serial=Board-GoogleCloud-…`, `product_serial=GoogleCloud-…`; BIOS `1.21.0`, `06/11/2024`; board `0C8MHW`; chassis type 7 | `chassis_vendor=Dell Inc.`, empty board serial, `product_serial=89431f96` (the recipe's `{hash}`); BIOS `1.7.3`, `10/27/2022`; board `0VC8RJ`; chassis type 3 (Desktop) |
+| `/proc/version` build host | not checked | GCE `buildd@lcy02-amd64-115`, Dell `buildd@lcy02-amd64-028` |
+| `ls /sys/class/hwmon/hwmon0/`, `sensors` | Core 0 in `temp2`, Core 4 in `temp3`, …, Core 28 in `temp9` | Core N in `temp(N+2)`: `temp2`, `temp6`, …, `temp30`; package in `temp1`; `sensors` lists the same labels |
+| `/proc/cpuinfo` flags in the actors | `pni` present; no `hybrid_cpu` | The same; `KVM_GET_SUPPORTED_CPUID` on the host returns CPUID.07H:EDX bit 15 (hybrid) clear |
+| `needy profile check` of `examples/smoke` and `examples/chaos` | not run | exit 0, no findings |
+| `examples/smoke` (GCE image) | not run | Pass: `finished`, `google`, `routed exit=7`, 4 routed and 1 failed |
+| `examples/chaos` (GCE image) | not run | Pass: `Input/output error` on `broken.json`, `curl exit=126`, `+101.0°C ALARM (CRIT)`, 3 faults by kind, `result.txt` mirrored out |
+| Nothing left | Pass | Pass: no daemon, Firecracker or container |
+
+Not changed by these fixes, seen on the way:
+
+- `uname -a` shows the guest kernel's own release and date (`6.18.62 #1 SMP
+  PREEMPT_DYNAMIC …`), not the recipe's `os.kernel.release` and `version`:
+  `images/Dockerfile` reads only the `KBUILD_BUILD_*` build arguments, and
+  nothing consumes `NEEDY_KERNEL_RELEASE` or `NEEDY_KERNEL_VERSION`.
+- The probe actor has no network interface, and `network.mac` is compiled
+  but not applied anywhere, so the MAC fixes are checked by unit tests only.
+
 ## Latency and throughput
 
 Release builds. `p50 / p99` in milliseconds unless stated.

@@ -26,6 +26,12 @@ Status:
 Counts: 46 cited items (the second table), 9 `TODO(provenance)` markers and
 18 `REVIEW` markers (the first table, 26 rows).
 
+After the identity fixes (`9e1e669` to `d873c23`, 2026-11-10): 16 rows are
+fixed; row 5 is still REVIEW and the 9 `TODO(provenance)` rows are unchanged,
+as they need the owner. The fixes were run in actors; see "Re-verified after
+the identity fixes" in
+[`2026-11-09-closed-loop-results-evidence.md`](2026-11-09-closed-loop-results-evidence.md).
+
 Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 `https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58`
 (v1.17.0), `WB` = `https://web.archive.org/web`.
@@ -124,7 +130,9 @@ the example files were left as they are.
 
 ## Follow-up candidates
 
-- Fix the items marked REVIEW above; each needs an owner decision on the
-  correct value.
+- Row 5 (the GCE built-in's Cascade Lake CPU) needs an owner decision on the
+  machine type.
+- The patch's BIOS revision (GCE shows 1.0) and board asset tag (GCE shows
+  the UUID) are marked `TODO` in `images/firecracker/needy.patch`.
 - `hybrid_cpu` was removed rather than read from CPUID: KVM does not pass
   the bit to a guest, so there is nothing to hide.
