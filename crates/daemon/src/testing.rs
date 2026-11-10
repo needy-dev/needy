@@ -94,6 +94,8 @@ pub struct Served {
   /// Keeps the daemon and its directory.
   _started: Started,
   pub client: needy_api_client::Client,
+  /// `unix:` and the socket.
+  pub endpoint: String,
   _stop: DropGuard,
 }
 
@@ -102,10 +104,12 @@ pub async fn serve(started: Started, token: Option<&str>) -> Served {
   let bound = started.daemon.server(token.map(str::to_string)).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
   let cancel = CancellationToken::new();
   tokio::spawn(bound.serve(cancel.clone()));
-  let client = needy_api_client::Client::connect(&format!("unix:{}", socket.display())).await.unwrap();
+  let endpoint = format!("unix:{}", socket.display());
+  let client = needy_api_client::Client::connect(&endpoint).await.unwrap();
   Served {
     _started: started,
     client,
+    endpoint,
     _stop: cancel.drop_guard(),
   }
 }

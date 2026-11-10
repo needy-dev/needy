@@ -34,6 +34,7 @@ bollard = { version = "0.21", features = ["buildkit", "time"] }
 bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 futures-util = "0.3"
+gethostname = "1"
 glob-match = "0.2"
 http = "1"
 http-body-util = "0.1"

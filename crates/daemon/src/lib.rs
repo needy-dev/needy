@@ -27,6 +27,7 @@
 // live in memory and `state.db` holds the runner registry only.
 
 pub mod executor;
+pub mod runner;
 
 #[cfg(unix)]
 mod actor;

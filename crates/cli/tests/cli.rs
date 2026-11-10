@@ -1604,3 +1604,108 @@ fn runner_rotate_and_rm_name_a_missing_runner() {
   assert_eq!((rotate.status.code(), stderr(&rotate).as_str()), (Some(1), "needy: no runner ghost\n"));
   assert_eq!((rm.status.code(), stderr(&rm).as_str()), (Some(1), "needy: no runner ghost\n"));
 }
+
+/// A control daemon whose runners send a heartbeat every 200 ms.
+fn spawn_control_with_fast_heartbeats(home: &Home) -> Daemon {
+  let child = home
+    .needy()
+    .args([
+      "daemon",
+      "--mode",
+      "control",
+      "--heartbeat-interval",
+      "200ms",
+    ])
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .unwrap();
+  let socket = home.path().join("run").join("daemon.sock");
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while !socket.exists() {
+    assert!(Instant::now() < deadline, "the daemon did not create {}", socket.display());
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  Daemon { child }
+}
+
+/// `needy daemon --mode runner` in its own home, joining `control`.
+fn spawn_runner(home: &Home, control: &Home, join_token: Option<&str>) -> Child {
+  let endpoint = format!("unix:{}", control.path().join("run").join("daemon.sock").display());
+  let mut command = home.needy();
+  command.args([
+    "daemon", "--mode", "runner", "--join", &endpoint, "--name", "mac", "--labels", "os=test",
+  ]);
+  if let Some(token) = join_token {
+    command.args(["--join-token-env", "NEEDY_TEST_JOIN_TOKEN"]).env("NEEDY_TEST_JOIN_TOKEN", token);
+  }
+  command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
+}
+
+/// The runner `name` as `needy runner ls -o json` shows it, once `check`
+/// holds for it.
+fn runner_when(control: &Home, name: &str, check: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  loop {
+    let output = control.run(&["runner", "ls", "-o", "json"]);
+    let rows: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap_or_default();
+    if let Some(row) = rows.as_array().into_iter().flatten().find(|r| r["name"] == name && check(r)) {
+      return row.clone();
+    }
+    assert!(Instant::now() < deadline, "runner {name}: {}", stdout(&output));
+    std::thread::sleep(Duration::from_millis(50));
+  }
+}
+
+#[test]
+fn a_runner_daemon_joins_restarts_without_its_join_token_and_ends_when_removed() {
+  let control = Home::new();
+  let _daemon = spawn_control_with_fast_heartbeats(&control);
+  let token = create_join_token(&control, &["--roles", "executor"]);
+  let machine = Home::new();
+
+  let first = spawn_runner(&machine, &control, Some(&token));
+  let joined = runner_when(&control, "mac", |r| r["status"] == "online");
+  kill(first.id(), "TERM");
+  exited(first);
+  let second = spawn_runner(&machine, &control, None);
+  let restarted = runner_when(&control, "mac", |r| r["last_seen_at_ms"].as_i64() > joined["last_seen_at_ms"].as_i64());
+  let rm = control.run(&["runner", "rm", "mac"]);
+  let refused = exited(second);
+
+  assert_eq!(joined["labels"]["os"], "test");
+  assert_eq!(joined["roles"], serde_json::json!(["executor"]));
+  assert_eq!(restarted["status"], "online");
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(machine.path().join("state").join("runner.json")).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+  }
+  assert!(rm.status.success(), "{}", stderr(&rm));
+  assert_eq!(refused.status.code(), Some(1));
+  assert!(stderr(&refused).contains("the control plane refused this runner's credential"), "{}", stderr(&refused));
+  assert_eq!(runner_when(&control, "mac", |_| true)["status"], "removed");
+}
+
+#[test]
+fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let expired = create_join_token(&control, &["--ttl", "1ms"]);
+  let spent = create_join_token(&control, &[]);
+  let used = Home::new();
+  let first = spawn_runner(&used, &control, Some(&spent));
+  runner_when(&control, "mac", |r| r["status"] == "online");
+  kill(first.id(), "TERM");
+  exited(first);
+  std::thread::sleep(Duration::from_millis(5));
+
+  let late = exited(spawn_runner(&Home::new(), &control, Some(&expired)));
+  let again = exited(spawn_runner(&Home::new(), &control, Some(&spent)));
+
+  assert_eq!(late.status.code(), Some(1));
+  assert!(stderr(&late).contains("expired"), "{}", stderr(&late));
+  assert_eq!(again.status.code(), Some(1));
+  assert!(stderr(&again).contains("has no uses left"), "{}", stderr(&again));
+}

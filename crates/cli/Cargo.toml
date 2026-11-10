@@ -19,6 +19,7 @@ clap.workspace = true
 comfy-table.workspace = true
 etcetera.workspace = true
 futures-util.workspace = true
+gethostname.workspace = true
 humantime.workspace = true
 ignore.workspace = true
 needy-api-client.workspace = true
