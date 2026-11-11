@@ -1050,6 +1050,85 @@ Not working yet:
 | Mac → Windows 64 MiB from PowerShell | 35 MiB/s |
 | LAN ping Mac → Windows | 8.0 ms average |
 
+## Container actors
+
+Slices 2 to 4 of the
+[container actor runtime](2026-11-10-container-actor-runtime-design.md#as-built-slices-2-to-4)
+(`fad602e`, `7e91fdb`) and the build-cache fix (`4990137`). Run on 2026-11-11
+and 2026-11-12.
+
+`make check` and `make test` pass on the Mac and on the Linux KVM host. The
+static `needy` and the images came from `needy build --container` on the KVM
+host; the two hosts without KVM got the binary and images through the Mac
+(the AMD host as a `docker save` archive, since it resolves no names for
+apt or Docker Hub; its resolver was left alone and the Debian packages below
+were fetched from `deb.debian.org` on the Mac and installed with `dpkg -i`).
+
+Hosts, all without `/dev/kvm`, root, Docker CE 29.9:
+
+- **AMD host**: a 2-vCPU AMD EPYC cloud VM, 8 GB, Debian 13, kernel 6.12; an
+  empty `/sys/class/hwmon`. Installed: `sshfs` 3.7.3-1.2~deb13u1, `fuse3`
+  3.17.2-3, `lxcfs` 6.0.4-1+deb13u1.
+- **Intel host**: a 2-vCPU Intel Cascade Lake cloud VM, 4 GB, Debian 12,
+  kernel 6.1; no `/sys/class/hwmon`. Installed: `sshfs` 3.7.3-1.2~deb12u1,
+  `fuse3` 3.14.0-4, `lxcfs` 5.0.3-1+deb12u1, and gVisor `runsc`
+  20261102.0 from gVisor's apt repository as
+  <https://gvisor.dev/docs/user_guide/install/> says (read 2026-11-11; no
+  versioned page), registered with `runsc install -- --host-uds=all` and
+  `systemctl reload docker`.
+
+Everything above stays installed. The control daemon ran as root with the
+state under the repository's `.tmp`; profiles are
+[`examples/container`](../../../../examples/container/profile.yaml) (smoke)
+and `examples/container/chaos.yaml`, with `oci_runtime: runsc` for gVisor.
+
+| Check | AMD host, `runc` | Intel host, `runc` | Intel host, `runsc` |
+| --- | --- | --- | --- |
+| Smoke: hostname, CPU brand, CPU count, DMI | `instance-…`, `Intel(R) Xeon(R) CPU @ 2.20GHz`, 2 processors, `Google Compute Engine` | the same | the same; `uname` `4.19.0-gvisor` |
+| Smoke: memory (`free -m`) | 4096 MiB total (lxcfs, the recipe's limit) | 3925 MiB (the host's whole memory, under the 4 GiB limit) | 3925 MiB (gVisor's view) |
+| Smoke: routed `python3` on the Docker executor, workspace both ways, exit code | `hello-from-actor`, `hi-from-executor`, `routed exit=7` | the same | the same |
+| Chaos: copy-in with a filter, file EIO on the mount, exec fault | `note.txt` only, `Input/output error` on `broken.json`, `curl exit=126` | the same | the same |
+| Chaos: hwmon fault at 2 s | `+38.0°C`, then `+101.0°C ALARM (CRIT)` | `No sensors found!` (no `/sys/class/hwmon` to mount over; `profile check` warns) | `+38.0°C`, then `+101.0°C ALARM (CRIT)` |
+| Chaos: mirror-out | `out/<run>/result.txt` | the same | the same |
+| `run create -it` bash: input, `stty size`, exit | `inside-42`, `30 100`, exit 3 | the same | not run |
+| `run create -t`, `run attach`, detach (`ctrl-]`), attach again, exit | first attach exits 0 detached, run `running`; second attach exit 5, run `finished` with 5 | the same | not run |
+| `profile check` | warnings: shim routing gap, cpuid, pci, kernel, idle sensors | the same with `hwmon: … no /sys/class/hwmon` | gVisor's own `/proc` and kernel, cpuid, pci |
+| Report | `Actor  container (runc)` and the routing note | the same | `Actor  container (runsc)` |
+| Nothing left | no container, sshfs process or mount | the same | the same |
+
+Found on the way, all fixed in `7e91fdb`:
+
+- **gVisor keeps containers from host Unix sockets.** The first `runsc` run
+  failed after 5 s with `cannot reach the daemon at
+  unix:/.needy/channels/guest.sock`. It works once runsc runs with
+  `--host-uds=all`, and `check_host` now refuses a `runsc` registered
+  without it, naming the command.
+- **gVisor has no `/proc/diskstats` or `/proc/swaps`**, so binding lxcfs
+  over them failed the container's start; under `runsc` no lxcfs view is
+  mounted, since gVisor's own follow the container.
+- **A container cannot create `/sys/class/hwmon` in sysfs**, so the sensors
+  need the host's directory under `runc`; gVisor's sysfs takes the mount
+  anywhere. The first chaos runs also had no sensors because a recipe
+  without a `coretemp` entry got none; every actor now gets the guest
+  kernel's coretemp, as every VM does.
+- **The KVM host's runs need a short state directory**: the executor socket
+  under a deep `.tmp` path exceeded `sun_path`, which the daemon reports.
+
+The image: `needy-actor:latest` is 430 MB, one layer. Every program on
+`PATH` is one of 464 hard links to `/.needy/proxy`. In the actor
+`/proc/self/exe` names the real program (`/.needy/real/usr/bin/ls`), so the
+shim passes `argv[0]` through.
+
+Firecracker regression on the Linux KVM host, built from the same tree:
+`examples/smoke` finished with `google`, `hello-from-actor`,
+`hi-from-executor`, `routed exit=7` and `Actor  firecracker` in the report;
+`examples/chaos` finished with `Input/output error`, `curl exit=126`,
+`+101.0°C ALARM (CRIT)` and 3 faults; no Firecracker or container left.
+
+The build-cache fix was not reproduced with two trees on one builder; it is
+covered by the Dockerfile test and by the rebuilds on the KVM host, which
+shares the cache with other trees there.
+
 ## Not yet verified
 
 - Windows terminals, and a Windows workspace mounted into an actor.

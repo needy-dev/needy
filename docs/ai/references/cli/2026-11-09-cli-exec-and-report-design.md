@@ -9,7 +9,7 @@ note. Profiles are described in
 
 ```text
 needy daemon   [--mode control|executor|runner]  # control plane; executor or runner on every other machine
-needy build    [--recipe FILE] [--out DIR] [--executor]  # build machine images through the Docker API
+needy build    [--recipe FILE] [--out DIR] [--executor] [--container]  # build machine images through the Docker API
 needy run  create|ls|stop|logs [-f] [--group G] # one actor plus its executors; logs prints (and follows) its console
 needy exec     [--run ID | --executor NAME | --runner NAME] -- CMD …   # run a command through placement
 needy ps [-a] [--run ID | --runner NAME] | attach ID | kill ID   # manage detached processes
@@ -447,6 +447,7 @@ The JSON summary has these fields:
 | `started_by`, `stopped_by` | The principal of `run.create` and `run.stop` (`operator`, `client:NAME`), or `null` when the trace does not say (a version 1 trace; a stop at the control plane's shutdown). |
 | `dropped_events` | Events the trace dropped; the counts may be low by as many. |
 | `route_names` | The names the actor routes (`["*"]` for every exec), or `null` without an actor. |
+| `actor_runtime` | What ran the actor (`firecracker`, `container (runc)`, `container (runsc)`), or `null` without an actor or in a trace from before schema version 4. |
 | `commands` | `routed` (`[{executor, commands, failed}]`), `kept_on_actor`, `cli`, `denied`, `faults`, `failed`, `model_calls`. |
 | `top_commands` | `[{command, executor, count, slowest_ms}]`, most frequent first. |
 | `slowest_commands` | `[{command, ms}]`, the three slowest. |
@@ -548,6 +549,10 @@ report. Implemented today:
   payload. Per-decision tables are not implemented.
 
 ## `needy build`
+
+`--container` also builds `needy-actor:latest`, the container actor's image
+(target `actor-container`, whose last step makes the build-time shims), and
+`--executor` the `needy-executor` image.
 
 Builds a machine image from a [recipe](../config/2026-11-09-recipe-design.md):
 kernel, rootfs, Firecracker configuration and identity overlay. Actors and

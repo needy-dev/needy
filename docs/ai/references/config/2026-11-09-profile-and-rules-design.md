@@ -66,7 +66,8 @@ extends: base.yaml               # optional parent profile; see Extends
 user: { name: agent, uid: 1000, gid: 1000 }   # same on the actor and every executor; ~ = /home/agent
 
 actor:
-  runtime: firecracker           # required: firecracker (a microVM, needs /dev/kvm) | container (not implemented yet)
+  runtime: firecracker           # required: firecracker (a microVM, needs /dev/kvm) | container
+  # container: { oci_runtime: runsc, image: needy-actor:latest }   # required with `container`: runc | runsc
   runner: kvm                    # optional; the control host when absent, see Runners
   recipe: gce-e2-standard-4
   limits: { single_process: true, self_replace: true }

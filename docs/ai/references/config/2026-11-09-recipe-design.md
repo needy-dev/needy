@@ -129,6 +129,16 @@ loaded, including paths a parent wrote.
 | `network.interface` | Kernel command line or udev rule | VM start | Straightforward |
 | `network.metadata` | Firecracker MMDS | VM start | Native |
 
+A container actor presents the identity through files instead: the recipe's
+`/proc/cpuinfo`, DMI and hwmon files bind-mounted over the host's, and
+Docker's hostname; it cannot present the `CPUID` instruction, PCI IDs, the
+kernel version or the uptime offset (the
+[container actor runtime design](../architecture/2026-11-10-container-actor-runtime-design.md#identity)
+has the table). `required:` lists the identity fields an actor must present
+(`hostname`, `cpuinfo`, `cpuid`, `dmi`, `pci`, `hwmon`, `kernel`, `uptime`);
+a runtime that does not present one is an error in `profile check` and
+`run create`, and a warning otherwise.
+
 `network.mac` is compiled and checked against the recipe's vendor, but not
 applied in actors yet: an actor has only `lo` and reaches the network through
 the gateway forwarder over vsock, and a NIC to carry the MAC waits for an

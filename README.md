@@ -96,6 +96,16 @@ needy run logs -f RUN    # the actor's console, followed
 needy report latest
 ```
 
+On a Linux host without KVM, the actor can be a container that Docker runs
+with `runc` or gVisor's `runsc` (`actor: { runtime: container, container: {
+oci_runtime: runsc } }`); `needy build --container` builds its image, and
+[`examples/container`](examples/container/profile.yaml) runs the smoke test
+in one. It needs `sshfs` for workspace mounts and lxcfs for resource views
+under `runc`, and presents less of a recipe than a VM (no CPUID or PCI
+identity): `needy profile check` says what, and the
+[container actor runtime design](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity)
+has the table.
+
 For an interactive driving program, use `needy run create -it --profile
 PROFILE`. `ctrl-]` detaches; `needy run attach RUN` returns to its terminal.
 Automated tests and live probes on a Linux KVM host from a Mac are recorded

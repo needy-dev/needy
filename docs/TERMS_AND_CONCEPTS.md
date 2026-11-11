@@ -10,8 +10,8 @@ Background: [actor and executor separation](ai/references/architecture/2026-11-0
 
 ### Actor
 
-The side that runs the driving program. Usually one Firecracker microVM built
-from a recipe. The program's view of the world, including the recipe identity,
+The side that runs the driving program: one Firecracker microVM, or one
+container on a host without KVM, built from a recipe. The program's view of the world, including the recipe identity,
 lives here. Actors are stateless: a read-only root and a throwaway writable
 layer.
 
@@ -20,11 +20,15 @@ layer.
 ### Actor runtime
 
 What runs an actor next to the daemon, named by the profile's required
-`actor.runtime`: `firecracker` (a microVM; needs `/dev/kvm`) is the only one
-implemented. `container` is accepted by the schema and refused as not
-implemented yet. The runtime starts, waits for and stops the actor, and
-names the channels the daemon serves (guest API, gateway) and dials
-(terminal). See the [container actor runtime design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md).
+`actor.runtime`: `firecracker` (a microVM; needs `/dev/kvm`) or `container`
+(an OCI container through Docker, with the required
+`actor.container.oci_runtime`: `runc`, or gVisor's `runsc`; Linux only). The
+runtime starts, waits for and stops the actor, names the channels the daemon
+serves (guest API, gateway) and dials (terminal), and says who sets the actor
+up: a VM's init inside, or the container runtime from the host (workspace
+mounts, hostname, identity files). The report names it (`Actor  container
+(runsc)`), since it decides the isolation. See the
+[container actor runtime design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md).
 
 ### Driving program
 
@@ -102,13 +106,12 @@ actor **runtimes** (`firecracker`, `container`) or executor **providers**
 (`native`, `docker`), written `actor(firecracker) executor(docker,native)`. A
 runner detects them when it starts: a KVM device that opens for reading and
 writing and a complete actor image give `actor(firecracker)` (Linux only); a
-Docker daemon that answers gives `executor(docker)`, and gVisor's `runsc`
-registered with it `actor(container)`, which is reported but hosts no actor
-until the container actor runtime is built; `executor(native)` is always
-there. `--roles` restricts a runner to some roles and cannot add one the
+Docker daemon that answers gives `executor(docker)` and `actor(container)`
+(whether it has the profile's OCI runtime and the container actor image is
+checked when a run is created); `executor(native)` is always there. `--roles` restricts a runner to some roles and cannot add one the
 machine lacks. Capabilities travel in the join and every heartbeat, are kept
 in `state.db`, and are what scheduling and `profile check` match: an actor
-needs `actor(firecracker)`, an executor `executor(PROVIDER)`. A join token's
+needs `actor(RUNTIME)` of its runtime, an executor `executor(PROVIDER)`. A join token's
 scope still names roles.
 
 ### Ownership and grace period
@@ -298,8 +301,17 @@ found by a launcher resolver. Rules match the effective command.
 
 ### Route list
 
-The executable names the actor's kernel hands to the proxy. Execs not on it
-run in the actor without consulting the daemon.
+The executable names the actor hands to the proxy: its kernel in a VM, its
+shims in a container. Execs not on it run in the actor without consulting
+the daemon.
+
+### Shim
+
+In a container actor, a hard link to `/.needy/proxy` in place of each
+program that was on the image's `PATH` when the image was built; the real
+program is at `/.needy/real/<path>`. A shim runs its real program with the
+caller's argv, or hands the exec to the proxy when the run routes its name.
+Programs created after the build and run directly are not routed.
 
 ### Proxy
 
@@ -354,7 +366,8 @@ firmware, devices, network identity. A recipe defines it.
 
 Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide`, a payload and the
-payload's schema version (2 since principals; version 1 rows still read).
+payload's schema version (4 since `actor.start` names its runtime; versions 1 to 3
+still read).
 The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
 the run directory. Terminal output is not part of the trace.
 

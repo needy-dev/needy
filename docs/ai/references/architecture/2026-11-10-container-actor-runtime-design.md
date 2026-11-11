@@ -1,9 +1,10 @@
 # Container actor runtime
 
-**Status**: design, 2026-11-10. Slice 1 (the runtime abstraction) is
-implemented, see [As built: slice 1](#as-built-slice-1); the container runtime
-is not. The owner's decisions are under [Decisions](#decisions); two open
-questions remain.
+**Status**: design, 2026-11-10; slices 1 to 4 implemented 2026-11-11, see
+[As built: slice 1](#as-built-slice-1) and
+[As built: slices 2 to 4](#as-built-slices-2-to-4). The owner's decisions are
+under [Decisions](#decisions). Evidence:
+[Closed-loop results, container actors](2026-11-09-closed-loop-results-evidence.md#container-actors).
 
 Related notes:
 
@@ -43,7 +44,7 @@ owned by the run like the `Vm` handle today. Implementations:
 | Runtime | Backend | Needs |
 | --- | --- | --- |
 | `firecracker` | `host::firecracker` (was `host::vm`) | `/dev/kvm` |
-| `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Docker; gVisor's `runsc` registered as a Docker runtime for `runsc` |
+| `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Linux, Docker, `sshfs` for workspace mounts, lxcfs for resource views (`runc`); gVisor's `runsc` registered as a Docker runtime with `--host-uds=all` for `runsc` |
 | `container` on macOS and Windows | Docker API through `bollard` against Docker Desktop, whose Linux containers run inside a VM (WSL 2 on Windows) | Docker Desktop |
 | `apple-container` | Apple's `container` (each container is a lightweight Linux VM on Apple silicon) | macOS with Apple's `container` installed |
 | `wsl`, `hyper-v` | later: a WSL distribution or a Hyper-V VM as the actor on Windows (`TODO(windows-actor)`) | Windows |
@@ -56,9 +57,9 @@ Profile:
 ```yaml
 actor:
   runtime: container        # required: firecracker | container
-  container:
-    oci_runtime: runsc      # runc | runsc
-    image: needy-actor:latest
+  container:                # required with `container`, refused otherwise
+    oci_runtime: runsc      # required: runc | runsc
+    image: needy-actor:latest   # the default; `needy build --container` builds it
 ```
 
 ## What changes per mechanism
@@ -120,20 +121,28 @@ them under `runc`; deferred until a profile needs it.
 
 ### Identity
 
+Filled from the runs of 2026-11-11 (see the evidence linked above); a recipe
+field name in parentheses is what `required:` takes.
+
 | Field | Firecracker | `runc` | `runsc` (gVisor) |
 | --- | --- | --- | --- |
-| Hostname | yes | yes (UTS namespace) | yes |
-| `/proc/cpuinfo` brand and flags | yes | file bind-mounted over it | to be tested: gVisor synthesizes `/proc` |
-| `CPUID` instruction | yes (patched Firecracker) | no, host values | no, host values unless the host has CPUID faulting |
-| DMI (`/sys/class/dmi/id`) | yes | files bind-mounted | to be tested |
-| PCI IDs | yes | no | no |
-| hwmon sensors and the hwmon fault | yes (guest kernel module) | files bind-mounted; the daemon rewrites them for faults | to be tested |
-| Kernel version (`uname -r`) | recipe kernel | host kernel | gVisor's reported version |
-| Firecracker fingerprints (MPTABLE `FC`, ACPI `FIRECK`, MAC `02:fc`) | present today, see follow-ups | none | none |
+| Hostname (`hostname`) | yes | yes: Docker's `hostname` (UTS namespace) | yes, the same |
+| `/proc/cpuinfo` brand, signature, flags, CPU count (`cpuinfo`) | yes | yes: a file generated from the host's first processor block and the recipe, bind-mounted read-only | yes: gVisor accepts the bind mount over its own `/proc/cpuinfo` (`model name: unknown` without it) |
+| `CPUID` instruction (`cpuid`) | yes (patched Firecracker) | no, host values | no, host values |
+| DMI, `/sys/class/dmi/id` (`dmi`) | yes | yes where the host has `/sys/class/dmi/id` to mount over (a container cannot create a directory in sysfs); a directory of generated files, serials and UUID root-only as the kernel makes them | yes on any host: gVisor's own sysfs has `/sys/class/dmi` |
+| PCI IDs (`pci`) | yes | no | no |
+| hwmon sensors and the hwmon fault (`hwmon`) | yes (guest kernel module, readings follow load) | yes where the host has a `/sys/class/hwmon` directory to mount over (an empty one will do): generated coretemp files, idle readings (the recipe's, else 38 °C); the daemon rewrites them for a fault (`+101.0°C ALARM (CRIT)` seen). Without the directory, no sensors, with a warning | yes on any host: gVisor takes the mount; the fault seen the same way |
+| Resource views (`/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/loadavg`, `/proc/diskstats`, `/proc/swaps`, `/sys/devices/system/cpu/online`) | the VM's own | lxcfs's files bind-mounted, never over `/proc/cpuinfo` (`free` showed the recipe's 4096 MiB on an 8 GB host, lxcfs 6.0.4; and 3925 MiB, the host's whole memory, under the recipe's 4 GiB limit on a 4 GB host, lxcfs 5.0.3); without lxcfs the host's, with a warning | gVisor's own, which follow the container's memory limit; no `/proc/diskstats` or `/proc/swaps` exist |
+| Kernel version, `uname -r` (`kernel`) | recipe kernel | host kernel | `4.19.0-gvisor` |
+| Uptime offset (`uptime`) | yes (time namespace) | no: the container's uptime (lxcfs) | no: the sandbox's |
+| Fingerprints | Firecracker's (MPTABLE `FC`, ACPI `FIRECK`, MAC `02:fc`), see follow-ups | Docker's (`/.dockerenv`, cgroup paths) | gVisor's (`/proc/gvisor`, `/proc/sentry-meminfo`, `dmesg`'s `Starting gVisor...`) |
 
-`profile check` lists, for the chosen runtime, each recipe field it cannot
-provide, as a warning. A recipe may mark fields as required; a required field
-the runtime cannot provide is an error.
+`profile check` lists, for the chosen runtime on the actor's host, each part
+of the identity it does not present, as a warning (`actor: cpuid
+(container): …`). A recipe's `required:` lists the identity fields an actor
+must present (`hostname`, `cpuinfo`, `cpuid`, `dmi`, `pci`, `hwmon`,
+`kernel`, `uptime`); a required field the runtime does not present is an
+error in `profile check` and fails `run create` before anything is acquired.
 
 ### Isolation
 
@@ -150,7 +159,8 @@ isolation a trace came from.
 1. **Runtime abstraction** (done, 2026-11-11, see
    [As built: slice 1](#as-built-slice-1)): `ActorRuntime` with the
    Firecracker implementation only; no behavior change.
-2. **Container runtime with `runc`**: guest API and gateway over Unix sockets,
+2. **Container runtime with `runc`** (done, 2026-11-11, as are 3 and 4, see
+   [As built: slices 2 to 4](#as-built-slices-2-to-4)): guest API and gateway over Unix sockets,
    init in container mode, the container actor image with build-time shims,
    host-side workspace mounts.
    Verify `examples/smoke` and `examples/chaos` in a container on a host
@@ -218,11 +228,116 @@ Implemented 2026-11-11; no behavior change for Firecracker actors.
   (`capabilities::firecracker`) still names `host::firecracker` itself: it
   is about the Firecracker runtime by definition.
 
+## As built: slices 2 to 4
+
+Implemented 2026-11-11.
+
+**Runtime** (`core-actor::host::container`). `Container` implements
+`ActorRuntime` over an `Engine` trait (the Docker API through `bollard`;
+tests stand in for it). The container is `needy-actor-<run>`, from the
+profile's image, entrypoint `/.needy/init` as root, `HostConfig.runtime` the
+profile's `oci_runtime`, `network_mode: none`, a read-only root, tmpfs at
+`/tmp`, `/var/tmp`, `/run` and the user's home (owned by the user, `exec`),
+`nano_cpus` the recipe's vCPUs (at most the host's) and `memory` its memory.
+Its stdout and stderr are copied into `console.log`, which `run logs` reads.
+Waiting returns Docker's exit code as the wait status; stopping is Docker's
+stop with the grace, then the wait; both detach the host-side mounts and
+remove the container. A Docker that cannot be reached fails `check_host`
+with the reason. A restarted control plane ends a leftover container actor by
+its name and detaches its mounts (`reconcile`).
+
+**Channels.** `Channels` gained `Terminal::Unix` and `guest_for_every_user`.
+A container's guest, gateway and process sockets are in the run's
+`channels/` directory, bind-mounted at `/.needy/channels`; init finds them at
+those fixed paths, as a VM's init dials fixed vsock ports, so the guest
+configuration needed no new field. The daemon opens the guest socket (0666)
+and its directory (0755) after binding them, since the driving program's
+proxy runs as the profile's user; the run's directory around them stays
+0700 on the host.
+
+**Setup.** `ActorRuntime::setup` says who mounts the workspace and presents
+the hostname and sensors: `Guest` (a VM's init) or `Host` (the container
+runtime). Under `Host` the daemon sends init no mounts, hostname, sensors,
+hwmon faults or uptime offset; it passes the workspace mounts to
+`ActorRuntime::start`, which runs `sshfs` in passive mode on the daemon's
+machine over an exec stream opened through the run's own guest socket (so
+the stream is the actor's and the SFTP fault tap applies), and bind-mounts
+each mount point into the container. The daemon schedules hwmon faults
+itself and records them as init does (`fault.injected`).
+
+**Init in a container** (`guest::in_container`: the guest socket exists)
+skips the system mounts, `lo`, `memfd_noexec`, the home tmpfs, the hostname
+and the sensors, forwards `127.0.0.1:3128` to `gateway.sock`, serves the
+terminal's process service on `process.sock`, turns routing on by writing
+`/run/needy/route` (user ID and route names), and exits (0, or 1 after a
+failed boot) instead of rebooting. Its route stubs are links to the proxy.
+
+**Shims.** `images/container/shim.sh` is the last step of the
+`container-root` stage: for each directory on Docker's default `PATH` (by
+physical path, once), every executable is copied to `/.needy/real/<path>`
+and replaced by a hard link to `/.needy/proxy`; a link whose target lies
+outside those directories becomes a shim whose real program is a link to
+the target; links into them stay links. The `actor-container` stage copies
+the result into one layer (`needy-actor`, about 430 MB; the 464 hard links
+share one inode). `needy` started through a link whose `/proc/self/exe` has
+a `/.needy/real` twin is a shim (`guest::shim`): it reads the route file and
+`execv`s the real program with the caller's argv unchanged, or hands the exec
+to the proxy when the route's user runs a listed name (matched as the kernel
+module matches: `AT_EXECFN`, its file name, the shim's file name, and
+`argv[0]` with its file name, which covers a script's interpreter). Init
+starts the driving program, and the proxy a kept command, through their real
+paths, so neither is routed.
+
+**Identity** (`core::recipe::files` for the text, `core-actor::host::identity`
+for the files). `/proc/cpuinfo` is generated from the host's first processor
+block: the recipe's brand and signature, one block per recipe vCPU with its
+topology, hidden flags removed, `hypervisor` after `rdrand` when the recipe
+shows it, the kernel's padding kept. DMI attributes are written with the
+kernel's modes; the sensors are the guest kernel's fake coretemp (package
+and one core per vCPU, idle at the recipe's `coretemp` or 38 °C). lxcfs's
+views are mounted under `runc` where `/var/lib/lxcfs` has them. The compiled
+recipe gained `cpu` (a `CpuView`) and `required`; `ActorRuntime` gained
+`overheat` and `identity_gaps`, which `profile check` and `run create` turn
+into findings.
+
+**gVisor** (slice 3). Installed from gVisor's apt repository as its install
+guide says; runsc `release-20261102.0`. It keeps containers from host Unix
+sockets by default, and init then cannot reach `guest.sock`; registered with
+`runsc install -- --host-uds=all` (open for the guest API and gateway, create
+for the process socket) everything works, and `check_host` refuses a `runsc`
+registered without it, naming that command. Host-side sshfs mounts pass
+through gVisor's gofer. The identity differences are in the table above.
+
+**Capabilities and scheduling.** A runner whose Docker answers reports
+`actor(container)`, whatever OCI runtimes it has (checked when a run is
+created, on the control host, where actors run); `schedule::Need::Actor`
+carries the runtime.
+
+**Image and build.** `needy build --container` builds `needy-actor:latest`
+(target `actor-container`): the actor-root's programs without systemd and
+sshfs.
+
+Gaps, each marked in the code:
+
+- Executables created after the image was built and run directly are not
+  routed (`profile check` warns; `TODO(container-routing)` above).
+- `vm.memfd_noexec` is not set in a container actor
+  (`TODO(container-actor)` in `guest/init/mod.rs`).
+- The uptime offset is not applied (`TODO(container-actor)` in the daemon's
+  `guest.rs`); sensor readings do not follow load.
+- Docker Desktop, Apple's `container`, WSL and Hyper-V need the loopback TCP
+  transport (`TODO(container-runtime)` on `Endpoint` and `Terminal`).
+- The `actor(container)` capability does not carry the OCI runtimes
+  (`TODO(runner-actor)` on `ActorRuntime::Container`).
+
 ## Open questions
 
-- **gVisor and identity files**: whether `runsc` accepts bind mounts over
-  `/proc/cpuinfo`, `/sys/class/dmi/id` and `/sys/class/hwmon`. Settled by slice
-  3's experiment.
-- **Shim and the real program's own `argv[0]`**: programs that behave by
-  `argv[0]` (busybox, `python3` vs `python3.11`) must receive their original
-  name when the proxy executes `/.needy/real/...`.
+None left from the design; the two it had were settled by slices 2 and 3:
+
+- **gVisor and identity files**: `runsc` accepts bind mounts over
+  `/proc/cpuinfo`, `/sys/class/dmi/id` and `/sys/class/hwmon`, and over
+  lxcfs's `/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/loadavg` and
+  `/sys/devices/system/cpu/online`, but not over `/proc/diskstats` or
+  `/proc/swaps`, which its `/proc` lacks.
+- **Shim and the real program's own `argv[0]`**: the shim executes
+  `/.needy/real/...` with the caller's argv, `argv[0]` included.
