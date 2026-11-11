@@ -283,7 +283,11 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
 // failed with "transport error" (seen 2026-11-12 with `run create -it`). A
 // health check waits for the service: the process service has no health
 // service and answers `Unimplemented`; the closed relay fails the call with
-// `Unknown` ("transport error"), not `Unavailable`.
+// `Unknown` ("transport error"), not `Unavailable`. A socket Apple's
+// `container` publishes (`--publish-socket`, an apple-container actor's
+// process socket) accepts on the host in the same way, seen the same day
+// with `container` 1.7.1, see
+// `docs/ai/references/architecture/2026-11-12-apple-container-actor-evidence.md`.
 async fn connect_terminal(path: &Path) -> Result<needy_api_client::Client, needy_api_client::Error> {
   let client = needy_api_client::Client::connect(&format!("unix:{}", path.display())).await?;
   match client.health().check(needy_api_client::proto::v1::CheckRequest {}).await {
