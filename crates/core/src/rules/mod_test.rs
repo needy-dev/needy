@@ -256,10 +256,38 @@ fn route_names_from_rules() {
   assert!(names.contains(&"git".to_string()));
   assert!(names.contains(&"cargo".to_string()));
   assert!(names.contains(&"bash".to_string()));
-  assert!(!names.contains(&"uname".to_string()));
+  assert!(names.contains(&"uname".to_string()), "a rule placing on the actor is still asked about");
   assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: \"**\", to: build }]")), None);
   assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ndefault_executor: build")), None);
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: uname, to: actor }]")), Some(vec![]));
+  assert_eq!(route_names(&profile("actor: { runtime: firecracker }")), Some(vec![]));
+}
+
+// ROOT CAUSE:
+//
+// If a rule had no `to:` (it only denied, or only changed the environment,
+// arguments, working directory, timeout or faults), its command never
+// reached the daemon from an actor, so the rule silently did nothing there,
+// because the route list held only names some rule placed on an executor.
+//
+// Before the fix, `{ match: "rm -rf **", deny: ... }` left `rm` off the list.
+// The fix keeps the name of every rule's command on the list.
+#[test]
+fn route_names_include_rules_without_a_placement() {
+  let deny = profile("actor: { runtime: firecracker }\ncommands: [{ match: \"rm -rf **\", deny: \"not here\" }]");
+  let names = route_names(&deny).unwrap();
+  assert!(names.contains(&"rm".to_string()), "{names:?}");
+  assert!(names.contains(&"sh".to_string()), "a shell may run the denied command: {names:?}");
+
+  let env = profile("actor: { runtime: firecracker }\ncommands: [{ match: \"npm **\", env: { set: { CI: \"1\" } } }]");
+  assert!(route_names(&env).unwrap().contains(&"npm".to_string()));
+
+  let preset =
+    profile("actor: { runtime: firecracker }\npresets: { quiet: { timeout: 5s } }\ncommands: [{ match: \"{curl,wget} **\", use: [quiet] }]");
+  let names = route_names(&preset).unwrap();
+  assert!(names.contains(&"curl".to_string()) && names.contains(&"wget".to_string()), "{names:?}");
+
+  // A pattern that may match any program still asks about every exec.
+  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: \"** --force\", deny: no }]")), None);
 }
 
 #[test]

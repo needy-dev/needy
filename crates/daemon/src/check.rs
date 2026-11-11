@@ -54,7 +54,7 @@ const CONTAINER_ROUTING_GAP: &str = "actor: a container actor routes by shims ma
   created at run time (installed with pip or npm, or compiled in the workspace) and run directly stays in the actor \
   whatever the rules say; programs on the image's PATH, and scripts through their interpreters, are routed";
 
-/// Whether `profile` routes any command away from the actor.
+/// Whether any of `profile`'s rules applies to a command in the actor.
 fn routes_anything(profile: &Profile) -> bool {
   needy_core::rules::route_names(profile).is_none_or(|names| !names.is_empty())
 }

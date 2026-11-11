@@ -16,7 +16,7 @@ use needy_config::profile::{Profile, UnknownPolicy};
 use crate::intercept::{ExecContext, ExecDecide};
 use crate::pattern::Pattern;
 use crate::types::{Decision, Outcome, Placement};
-use actions::{Accumulated, combine, placement_name};
+use actions::{Accumulated, combine};
 
 /// A profile's rules with their patterns compiled once, the first
 /// `exec.decide` interceptor.
@@ -163,9 +163,14 @@ fn unknown_placement(profile: &Profile) -> Placement {
   }
 }
 
-/// Executable names the actor's kernel should hand to the proxy: literal
-/// command names that some rule may place on an executor. `None` when a
-/// wildcard rule or a default executor means every exec must be asked about.
+/// Executable names the actor hands to the proxy (the `binfmt_needy` route
+/// parameter in a VM, the shims' route list in a container): the literal
+/// command names of every rule, whatever its actions. A rule that only
+/// denies, or only changes the environment, arguments, working directory,
+/// timeout or faults, must reach the daemon as much as one that places the
+/// command on an executor; a program missing here runs in the actor
+/// untouched. `None` when a wildcard rule or a default executor means every
+/// exec must be asked about.
 pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
   if profile.default_executor.is_some() {
     return None;
@@ -174,15 +179,11 @@ pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
     return None;
   }
   let mut names = Vec::new();
+  // TODO(route-list): `chaos.faults` with `on: exec` match commands too and
+  // likewise never fire in the actor for a name off this list; left out of
+  // the deny-only fix (D7, 2026-11-12), which the owner scoped to rules.
+  // Add their patterns' names once the owner asks for it.
   for rule in &profile.commands {
-    let actions = combine(profile, &rule.actions);
-    let places_on_executor = match placement_name(&actions).as_deref() {
-      Some("actor") | None => false,
-      Some(_) => true,
-    };
-    if !places_on_executor {
-      continue;
-    }
     names.extend(Pattern::compile(&rule.matcher).command_names()?);
   }
   if !names.is_empty() {

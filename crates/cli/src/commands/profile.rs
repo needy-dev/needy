@@ -143,7 +143,7 @@ fn check_local(path: &Path, commands: &[String]) -> Result<i32> {
 }
 
 fn print_route_names(profile: &Profile) {
-  println!("kernel route names: {}", rules::route_names(profile).map(|n| n.join(",")).unwrap_or_else(|| "* (every exec)".into()));
+  println!("route names: {}", rules::route_names(profile).map(|n| n.join(",")).unwrap_or_else(|| "* (every exec)".into()));
 }
 
 /// Prints the recipe compiled against `host` and returns its findings.

@@ -605,6 +605,24 @@ fn profile_check_reports_unknown_names_and_exits_1() {
   assert!(text.contains("error: commands[1] (make **) uses unknown preset \"fast\"\n"), "{text}");
 }
 
+// A rule without `to:` must still reach the daemon from an actor, so
+// `profile check` lists its command among the route names.
+#[test]
+fn profile_check_lists_route_names_of_rules_without_a_placement() {
+  let home = Home::new();
+  let profile = home.write(
+    "profile.yaml",
+    "actor: { runtime: firecracker }\ncommands:\n  - { match: \"rm -rf **\", deny: \"not here\" }\n  - { match: \"npm **\", env: { set: { CI: \"1\" } } }\n",
+  );
+
+  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+
+  let text = stdout(&output);
+  let line = text.lines().find(|l| l.starts_with("route names: ")).unwrap_or_else(|| panic!("{text}{}", stderr(&output)));
+  let names: Vec<&str> = line["route names: ".len()..].split(',').collect();
+  assert!(names.contains(&"rm") && names.contains(&"npm") && names.contains(&"sh"), "{line}");
+}
+
 // Captures used to sit directly under `when`, where a misspelt condition
 // became a capture that never matched. They now go under `captures:`.
 #[test]
