@@ -264,14 +264,24 @@ async fn an_exec_in_an_ended_run_says_it_ended_and_how() {
   assert_eq!(exec_refusal(daemon, &stopped.id).await, format!("run {} has ended: stopped", stopped.id));
 }
 
+/// `step` within 10 s, or a failure naming `what` instead of a test that
+/// blocks the suite.
+async fn within<T>(what: &str, step: impl std::future::Future<Output = T>) -> T {
+  tokio::time::timeout(Duration::from_secs(10), step).await.unwrap_or_else(|_| panic!("{what} did not finish within 10 s"))
+}
+
 // G2 of the terminal note: the daemon passes the attaching client's window
 // size on to the executor.
+// NOTICE: every step is bounded: one run of the whole suite hung here for
+// over an hour at 0% CPU on an unbounded await, and 860 runs since (alone,
+// in parallel copies and under CPU load, on that tree and on later ones)
+// did not hang again; a hang now fails naming the step it stopped in.
 #[tokio::test]
 async fn attaching_through_the_daemon_resizes_the_terminal() {
   use needy_api_server::control::{ExecInput, WindowSize};
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let created = within("the create", Runs::create(daemon, new_run(PROFILE, started.dir.path()))).await.unwrap();
   let on_a_terminal = ExecSpec {
     tty: Some(WindowSize { rows: 24, cols: 80 }),
     ..spec(&["sh", "-c", "read line; stty size"], &created.id, "")
@@ -281,12 +291,15 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
       detach: true,
       ..on_a_terminal
     };
-    let mut outputs = daemon.exec(ExecOpen::Start(detached), attached()).await.unwrap();
-    loop {
-      if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
-        break started.process;
+    let mut outputs = within("the detached start", daemon.exec(ExecOpen::Start(detached), attached())).await.unwrap();
+    within("the detached start's `started`", async {
+      loop {
+        if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+          break started.process;
+        }
       }
-    }
+    })
+    .await
   };
 
   let input: Inputs = Box::pin(tokio_stream::iter([ExecInput::Stdin(b"\n".to_vec())]).chain(tokio_stream::pending()));
@@ -300,10 +313,11 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
     }),
     read_only: false,
   };
-  let (stdout, _) = tokio::time::timeout(Duration::from_secs(10), finish(daemon.exec(open, input).await.unwrap())).await.unwrap();
+  let attached = within("the attach", daemon.exec(open, input)).await.unwrap();
+  let (stdout, _) = within("the attached command's exit", finish(attached)).await;
 
   assert!(stdout.contains("40 100"), "{stdout:?}");
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  within("the stop", Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator)).await.unwrap();
 }
 
 // The terminal note's G9: the executor's fallback for an unknown `TERM` is
