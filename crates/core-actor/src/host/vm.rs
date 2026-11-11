@@ -44,8 +44,12 @@ pub enum Error {
   Spawn(#[source] std::io::Error),
   // NOTICE: the OS error is part of the message and not its `source`, so a
   // caller that prints the error with its causes says it once.
+  // TODO(container-actor): a runtime that needs no KVM is designed in
+  // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`;
+  // the message names it once it ships. The message itself names no
+  // repository path: a user with only the binary cannot follow one.
   #[error(
-    "this host has no usable KVM: cannot open {}: {error}; a firecracker actor needs it. A container actor runtime, which would not, is designed in docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md but not available yet",
+    "this host has no usable KVM: cannot open {}: {error}; every run needs it for its Firecracker actor. Without KVM, commands outside runs still work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
     path.display()
   )]
   Kvm {

@@ -207,7 +207,13 @@ async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
     panic!("a create without KVM must fail");
   };
   assert!(message.contains(&format!("this host has no usable KVM: cannot open {}", kvm.display())), "{message}");
-  assert!(message.contains("2026-11-10-container-actor-runtime-design.md"), "{message}");
+  // A user with only the binary is told what works without KVM, not
+  // pointed at a design note in the repository.
+  assert!(
+    message.contains("Without KVM, commands outside runs still work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`"),
+    "{message}"
+  );
+  assert!(!message.contains("docs/"), "{message}");
   // Seen on a cloud host without KVM: the OS error was printed twice, once
   // in the message and once as its cause.
   assert_eq!(message.matches("(os error 2)").count(), 1, "{message}");
