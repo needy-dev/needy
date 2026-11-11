@@ -169,6 +169,9 @@ pub async fn copy_in(run: &Run) -> Result<()> {
 // failure; a column for it changes the `Run` message and waits for the owner.
 pub async fn mirror_out(run: &Run) {
   for (name, mapping) in &run.profile.files.mappings {
+    if !selected(run, name) {
+      continue;
+    }
     let (FileMode::MirrorOut, Side::Executor { name: exec, path }, Side::Host(dst)) = (mapping.mode, &mapping.from, &mapping.to) else {
       continue;
     };
@@ -201,6 +204,10 @@ pub async fn mirror_out(run: &Run) {
 }
 
 /// The archive of copy-in mapping `name` for the actor.
+// TODO(run-files): `fetch` and `push` serve any mapping the actor names,
+// while the actor is only told the ones `run_files` selects (`guest.rs`);
+// refusing an unselected name here is a guest API change that waits for the
+// owner.
 pub async fn fetch(run: &Run, name: &str) -> Result<Vec<u8>, ControlError> {
   let mapping = run
     .profile

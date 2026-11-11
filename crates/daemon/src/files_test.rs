@@ -71,6 +71,43 @@ async fn a_mirror_out_under_a_directory_the_control_host_does_not_have_fails_the
   assert!(!elsewhere.exists(), "the refused mirror-out created its tree");
 }
 
+// ROOT CAUSE:
+//
+// If a profile listed `run_files`, mirror-out from an executor at the stop
+// still unpacked every executor-to-host mapping on the host, because it
+// skipped the `run_files` selection that copy-in, the host-path check and
+// the actor's file list apply.
+//
+// Before the fix, a mapping the run did not select wrote the host.
+// The fix mirrors out only the mappings the run selects, as copy-in does.
+#[tokio::test]
+async fn a_mirror_out_from_an_executor_the_run_files_do_not_name_does_not_run() {
+  let started = testing::daemon().await;
+  let source = started.dir.path().join("produced");
+  std::fs::create_dir_all(&source).unwrap();
+  std::fs::write(source.join("result.txt"), "done").unwrap();
+  let chosen = started.dir.path().join("chosen");
+  let other = started.dir.path().join("other");
+  let mut yaml = profile(&format!(
+    "  chosen: {{ mode: mirror-out, from: \"executor:here:{src}\", to: \"host:{chosen}\" }}\n  \
+     other: {{ mode: mirror-out, from: \"executor:here:{src}\", to: \"host:{other}\" }}",
+    src = source.display(),
+    chosen = chosen.display(),
+    other = other.display(),
+  ));
+  yaml.push_str("run_files: [chosen]\n");
+  let created = Runs::create(&started.daemon, new_run(&yaml, started.dir.path())).await.unwrap();
+
+  Runs::stop(&started.daemon, &created.id, Principal::Operator).await.unwrap();
+
+  assert_eq!(std::fs::read_to_string(chosen.join("result.txt")).unwrap(), "done");
+  assert!(!other.exists(), "a mirror-out run_files does not name wrote the host");
+  let trace = needy_trace::sink::sqlite::load(&started.dir.path().join("state/trace.db"), &created.id).await.unwrap();
+  let mirrored: Vec<&str> = trace.events.iter().filter(|e| e.kind == "files.mirror_out").map(|e| e.payload.get()).collect();
+  assert_eq!(mirrored.len(), 1, "{mirrored:?}");
+  assert!(mirrored[0].contains(r#""name":"chosen""#), "{mirrored:?}");
+}
+
 #[tokio::test]
 async fn a_mirror_out_that_fails_at_the_stop_is_recorded_for_the_report() {
   let started = testing::daemon().await;
