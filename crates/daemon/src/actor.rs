@@ -21,6 +21,7 @@ use needy_core_actor::host::container::Container;
 use needy_core_actor::host::firecracker::{self, Firecracker};
 use needy_core_actor::host::gateway;
 use needy_core_actor::host::runtime::{self, ActorRuntime, Channels, Endpoint, HostMount, RunningActor, Setup, Start, Terminal};
+use needy_core_actor::host::vz::{self, Vz};
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
@@ -49,6 +50,10 @@ pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<
       };
       Ok(Box::new(Container::new(options.oci_runtime, options.image.clone())))
     }
+    Runtime::Vz => Ok(Box::new(Vz {
+      image: vz::Image::new(&daemon.config.actor_image),
+      vfkit: vz::VFKIT.into(),
+    })),
   }
 }
 

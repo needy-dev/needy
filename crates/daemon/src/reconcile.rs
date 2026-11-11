@@ -166,7 +166,13 @@ impl Daemon {
             self.write_instance_state(instance, state, now).await;
           }
           (InstanceKind::Actor, _) => {
-            let state = end_leftover_vm(instance).await;
+            // A VM's process names a file in the run's directory on its
+            // command line: Firecracker its `vm.json`, vfkit its pidfile.
+            let marker = match instance.runtime.as_str() {
+              "vz" => needy_core_actor::host::vz::pidfile(Path::new(&instance.handle)),
+              _ => Path::new(&instance.handle).join("vm.json"),
+            };
+            let state = end_leftover_vm(instance, &marker).await;
             self.write_instance_state(instance, state, now).await;
           }
           // The runner reports it when it connects; see `reconcile_runner`.
@@ -293,9 +299,9 @@ impl Daemon {
   }
 }
 
-/// Ends the Firecracker of an actor a previous control plane started, if
-/// it still runs, and says whether it did (`Ended`) or found none
-/// (`Lost`).
+/// Ends the VM process (Firecracker, vfkit) of an actor a previous control
+/// plane started, if it still runs, and says whether it did (`Ended`) or
+/// found none (`Lost`).
 ///
 /// A restarted control plane does not adopt it. The VM is no longer its
 /// child, so its exit cannot be collected; the guest's connections to the
@@ -304,34 +310,33 @@ impl Daemon {
 /// adopted run would no longer replay deterministically. Ending it and
 /// failing the run says what happened.
 // NOTICE: the PID is checked against the process's command line, which
-// names the run's `vm.json`, so a PID another process took since is left
-// alone.
-async fn end_leftover_vm(instance: &InstanceRecord) -> InstanceState {
+// names `marker`, a file in the run's directory (Firecracker's `vm.json`,
+// vfkit's pidfile), so a PID another process took since is left alone.
+async fn end_leftover_vm(instance: &InstanceRecord, marker: &Path) -> InstanceState {
   use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal, System, UpdateKind};
   let Some(pid) = instance.pid.and_then(|pid| u32::try_from(pid).ok()) else {
     return InstanceState::Lost;
   };
   let pid = sysinfo::Pid::from_u32(pid);
-  let config = Path::new(&instance.handle).join("vm.json");
   let Ok(mut system) = System::new() else {
     tracing::warn!("run {}: cannot read this machine's processes to find its actor's VM", instance.run);
     return InstanceState::Lost;
   };
   let alive = |system: &mut System| {
     system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always));
-    system.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie && p.cmd().iter().any(|arg| Path::new(arg) == config))
+    system.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie && p.cmd().iter().any(|arg| Path::new(arg) == marker))
   };
   if !alive(&mut system) {
     return InstanceState::Lost;
   }
-  tracing::warn!("run {}: ending its actor's VM (firecracker {pid}), which a restarted control plane does not adopt", instance.run);
+  tracing::warn!("run {}: ending its actor's VM ({} {pid}), which a restarted control plane does not adopt", instance.run, instance.runtime);
   if !system.process(pid).and_then(|p| p.kill_with(Signal::Kill)).unwrap_or(false) {
-    tracing::warn!("run {}: cannot kill firecracker {pid}", instance.run);
+    tracing::warn!("run {}: cannot kill the VM process {pid}", instance.run);
   }
   let deadline = tokio::time::Instant::now() + VM_END_WAIT;
   while alive(&mut system) {
     if tokio::time::Instant::now() >= deadline {
-      tracing::warn!("run {}: firecracker {pid} did not exit within {VM_END_WAIT:?} of SIGKILL", instance.run);
+      tracing::warn!("run {}: the VM process {pid} did not exit within {VM_END_WAIT:?} of SIGKILL", instance.run);
       break;
     }
     tokio::time::sleep(Duration::from_millis(50)).await;

@@ -13,6 +13,7 @@ fn kvm_host() -> Facts {
   Facts {
     firecracker: Ok(()),
     docker: runtimes(&["runc"]),
+    vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
   }
 }
 
@@ -21,6 +22,7 @@ fn mac() -> Facts {
   Facts {
     firecracker: Err("Firecracker runs on Linux only".into()),
     docker: Err("no Docker daemon answers".into()),
+    vz: Err("cannot run vfkit".into()),
   }
 }
 
@@ -29,7 +31,7 @@ fn a_kvm_host_with_docker_hosts_both_actor_runtimes_and_docker_and_native_execut
   let detected = detect(&kvm_host());
 
   assert_eq!(detected.capabilities.to_string(), "actor(container,firecracker) executor(docker,native)");
-  assert!(detected.missing.is_empty(), "{:?}", detected.missing);
+  assert_eq!(detected.missing, ["actor(vz): Virtualization.framework actors run on macOS on Apple silicon only"]);
 }
 
 #[test]
@@ -43,6 +45,7 @@ fn a_machine_without_kvm_or_docker_hosts_native_executors_only() {
       "actor(firecracker): Firecracker runs on Linux only",
       "executor(docker): no Docker daemon answers",
       "actor(container): no Docker daemon answers",
+      "actor(vz): cannot run vfkit",
     ]
   );
 }
@@ -54,6 +57,7 @@ fn a_docker_daemon_without_kvm_hosts_container_actors() {
   let facts = Facts {
     firecracker: Err("cannot open /dev/kvm: No such file or directory".into()),
     docker: runtimes(&["runc"]),
+    vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
   };
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(container) executor(docker,native)");
@@ -81,9 +85,28 @@ fn a_role_the_machine_cannot_host_is_warned_about_and_not_added() {
     warnings,
     [
       "--roles names actor, which this machine cannot host (actor(firecracker): Firecracker runs on Linux only; \
-      actor(container): no Docker daemon answers); it is left out"
+      actor(container): no Docker daemon answers; actor(vz): cannot run vfkit); it is left out"
     ]
   );
+}
+
+#[test]
+fn an_apple_silicon_mac_with_vfkit_and_the_image_hosts_vz_actors() {
+  let facts = Facts {
+    firecracker: Err("Firecracker runs on Linux only".into()),
+    docker: Err("no Docker daemon answers".into()),
+    vz: Ok(()),
+  };
+
+  assert_eq!(detect(&facts).capabilities.to_string(), "actor(vz) executor(native)");
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[tokio::test]
+async fn vz_needs_apple_silicon_macos() {
+  let dir = tempfile::tempdir().unwrap();
+
+  assert_eq!(super::vz(dir.path()).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");
 }
 
 #[cfg(target_os = "linux")]

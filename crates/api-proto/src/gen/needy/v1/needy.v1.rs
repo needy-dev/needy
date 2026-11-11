@@ -1233,6 +1233,9 @@ pub enum ActorRuntime {
     /// gVisor's `runsc` registered with Docker. Reported only: no actor is
     /// scheduled on it until the container actor runtime is built.
     Container = 2,
+    /// Apple silicon macOS with vfkit and the `vz` actor image (Image,
+    /// rootfs.ext4): a Virtualization.framework VM.
+    Vz = 3,
 }
 impl ActorRuntime {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1244,6 +1247,7 @@ impl ActorRuntime {
             Self::Unspecified => "ACTOR_RUNTIME_UNSPECIFIED",
             Self::Firecracker => "ACTOR_RUNTIME_FIRECRACKER",
             Self::Container => "ACTOR_RUNTIME_CONTAINER",
+            Self::Vz => "ACTOR_RUNTIME_VZ",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1252,6 +1256,7 @@ impl ActorRuntime {
             "ACTOR_RUNTIME_UNSPECIFIED" => Some(Self::Unspecified),
             "ACTOR_RUNTIME_FIRECRACKER" => Some(Self::Firecracker),
             "ACTOR_RUNTIME_CONTAINER" => Some(Self::Container),
+            "ACTOR_RUNTIME_VZ" => Some(Self::Vz),
             _ => None,
         }
     }

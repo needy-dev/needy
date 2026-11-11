@@ -68,6 +68,9 @@ enum ActorRuntime {
   // gVisor's `runsc` registered with Docker. Reported only: no actor is
   // scheduled on it until the container actor runtime is built.
   ACTOR_RUNTIME_CONTAINER = 2;
+  // Apple silicon macOS with vfkit and the `vz` actor image (Image,
+  // rootfs.ext4): a Virtualization.framework VM.
+  ACTOR_RUNTIME_VZ = 3;
 }
 
 // How a runner can create an executor.

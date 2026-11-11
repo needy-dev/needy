@@ -48,6 +48,9 @@ pub enum Runtime {
   Firecracker,
   /// An OCI container through Docker, for hosts without KVM.
   Container,
+  /// A Virtualization.framework VM through vfkit, on Apple silicon macOS:
+  /// needy's arm64 kernel and rootfs, as Firecracker boots them on Linux.
+  Vz,
 }
 
 /// A container actor's options.
@@ -99,6 +102,7 @@ impl Runtime {
     match self {
       Runtime::Firecracker => "firecracker",
       Runtime::Container => "container",
+      Runtime::Vz => "vz",
     }
   }
 }

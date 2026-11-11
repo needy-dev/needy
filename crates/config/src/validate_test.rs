@@ -124,3 +124,10 @@ fn container_options_on_a_firecracker_actor_are_an_error() {
 
   assert_eq!(found, ["error: actor.container is for `runtime: container`; this actor's runtime is firecracker"]);
 }
+
+#[test]
+fn container_options_on_a_vz_actor_are_an_error() {
+  let found = findings("actor: { runtime: vz, container: { oci_runtime: runc } }");
+
+  assert_eq!(found, ["error: actor.container is for `runtime: container`; this actor's runtime is vz"]);
+}

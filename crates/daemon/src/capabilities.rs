@@ -7,6 +7,8 @@
 //! - `actor(container)`: a Docker daemon that answers. Whether it has the
 //!   OCI runtime a profile names (`runc`, gVisor's `runsc`) and the
 //!   container actor image is checked when the run is created.
+//! - `actor(vz)`: macOS on Apple silicon, a `vfkit` that runs, and a
+//!   complete `vz` actor image (Image, rootfs.ext4).
 //! - `executor(docker)`: a Docker daemon that answers.
 //! - `executor(native)`: always, on every platform a runner runs on.
 //!
@@ -33,6 +35,9 @@ pub struct Facts {
   pub firecracker: Result<(), String>,
   /// The runtimes the Docker daemon registered.
   pub docker: Result<BTreeSet<String>, String>,
+  /// A Virtualization.framework VM can start: Apple silicon macOS, vfkit
+  /// and the `vz` actor image.
+  pub vz: Result<(), String>,
 }
 
 /// The capabilities found, and why each one that is not is missing.
@@ -68,6 +73,12 @@ pub fn detect(facts: &Facts) -> Detected {
       missing.push(format!("executor(docker): {why}"));
       missing.push(format!("actor(container): {why}"));
     }
+  }
+  match &facts.vz {
+    Ok(()) => {
+      capabilities.actor.insert(ActorRuntime::Vz);
+    }
+    Err(why) => missing.push(format!("actor(vz): {why}")),
   }
   Detected {
     capabilities,
@@ -113,8 +124,19 @@ fn kvm_error(error: &needy_core_actor::host::firecracker::Error) -> String {
   }
 }
 
-/// Reads this machine: KVM at `kvm`, the actor image in `image`, and the
-/// Docker daemon.
+/// Whether a `vz` actor can start on this machine with the actor image in
+/// `image`: Apple silicon macOS, vfkit and the image.
+pub async fn vz(image: &Path) -> Result<(), String> {
+  use needy_core_actor::host::vz;
+  if !vz::supported_host() {
+    return Err("Virtualization.framework actors run on macOS on Apple silicon only".into());
+  }
+  vz::check_vfkit(Path::new(vz::VFKIT)).await.map_err(|e| e.to_string())?;
+  vz::Image::new(image).check().map_err(|e| e.to_string())
+}
+
+/// Reads this machine: KVM at `kvm`, the actor image in `image`, the
+/// Docker daemon and vfkit.
 pub async fn probe(kvm: &Path, image: &Path) -> Facts {
   let docker = needy_core_executor::provider::docker::runtimes(DOCKER_WAIT)
     .await
@@ -122,6 +144,7 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
   Facts {
     firecracker: firecracker(kvm, image),
     docker,
+    vz: vz(image).await,
   }
 }
 

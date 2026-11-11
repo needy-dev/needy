@@ -190,6 +190,9 @@ pub enum ActorRuntime {
   // needs to once actors run on runners other than the control host's own,
   // which probes its Docker directly.
   Container,
+  /// A Virtualization.framework VM through vfkit: Apple silicon macOS,
+  /// vfkit on `PATH` and the `vz` actor image (`Image`, `rootfs.ext4`).
+  Vz,
 }
 
 impl ActorRuntime {
@@ -197,6 +200,7 @@ impl ActorRuntime {
     match self {
       Self::Firecracker => "firecracker",
       Self::Container => "container",
+      Self::Vz => "vz",
     }
   }
 }

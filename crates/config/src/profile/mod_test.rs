@@ -541,7 +541,7 @@ fn the_actor_runtime_is_required() {
   assert!(err.contains("actor: missing field `runtime`"), "{err}");
 
   let err = load_text("actor: { runtime: qemu }\n").unwrap_err().to_string();
-  assert!(err.contains("actor.runtime: unknown variant `qemu`, expected `firecracker` or `container`"), "{err}");
+  assert!(err.contains("actor.runtime: unknown variant `qemu`, expected one of `firecracker`, `container`, `vz`"), "{err}");
 }
 
 #[test]
