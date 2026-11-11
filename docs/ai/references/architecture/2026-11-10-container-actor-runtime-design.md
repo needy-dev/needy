@@ -2,9 +2,12 @@
 
 **Status**: design, 2026-11-10; slices 1 to 4 implemented 2026-11-11, see
 [As built: slice 1](#as-built-slice-1) and
-[As built: slices 2 to 4](#as-built-slices-2-to-4). The owner's decisions are
-under [Decisions](#decisions). Evidence:
-[Closed-loop results, container actors](2026-11-09-closed-loop-results-evidence.md#container-actors).
+[As built: slices 2 to 4](#as-built-slices-2-to-4); the `apple-container`
+runtime implemented 2026-11-12, see
+[As built: apple-container](#as-built-apple-container). The owner's decisions
+are under [Decisions](#decisions). Evidence:
+[Closed-loop results, container actors](2026-11-09-closed-loop-results-evidence.md#container-actors)
+and [Apple `container` actor evidence](2026-11-12-apple-container-actor-evidence.md).
 
 Related notes:
 
@@ -46,7 +49,7 @@ owned by the run like the `Vm` handle today. Implementations:
 | `firecracker` | `host::firecracker` (was `host::vm`) | `/dev/kvm` |
 | `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Linux, Docker, `sshfs` for workspace mounts, lxcfs for resource views (`runc`); gVisor's `runsc` registered as a Docker runtime with `--host-uds=all` for `runsc` |
 | `container` on macOS and Windows | Docker API through `bollard` against Docker Desktop, whose Linux containers run inside a VM (WSL 2 on Windows) | Docker Desktop |
-| `apple-container` | Apple's `container` (each container is a lightweight Linux VM on Apple silicon) | macOS with Apple's `container` installed |
+| `apple-container` | Apple's `container` CLI (each container is a lightweight Linux VM on Apple silicon), see [As built: apple-container](#as-built-apple-container) | macOS on Apple silicon with Apple's `container` installed and its services running; Docker (Docker Desktop or OrbStack) to build the image |
 | `vz` (name provisional) | `host::vz`: needy's arm64 kernel and rootfs in a Virtualization.framework VM, vfkit as the VM process; the Firecracker actor's guest (init as PID 1, `binfmt_needy`, sshfs inside, vsock channels bridged to Unix sockets). Built 2026-11-12, see [vz actor evidence](2026-11-12-vz-actor-evidence.md) | macOS on Apple silicon, vfkit, the `vz` actor image (`needy build`) |
 | `wsl`, `hyper-v` | later: a WSL distribution or a Hyper-V VM as the actor on Windows (`TODO(windows-actor)`) | Windows |
 
@@ -57,10 +60,10 @@ Profile:
 
 ```yaml
 actor:
-  runtime: container        # required: firecracker | container
-  container:                # required with `container`, refused otherwise
-    oci_runtime: runsc      # required: runc | runsc
-    image: needy-actor:latest   # the default; `needy build --container` builds it
+  runtime: container        # required: firecracker | container | apple-container
+  container:                # required with `container`, optional with `apple-container`, refused with `firecracker`
+    oci_runtime: runsc      # required with `container`: runc | runsc; refused with `apple-container`
+    image: needy-actor:latest   # the default; `needy build --container` (Docker) or `--apple-container` builds it
 ```
 
 ## What changes per mechanism
@@ -87,7 +90,7 @@ the VM's file sharing. So each runtime returns its transport:
 | `firecracker` | vsock (host-side Unix sockets of the VM) |
 | `container` on Linux | host Unix sockets bind-mounted into the container |
 | `container` on Docker Desktop | a TCP port on the host's loopback, reached from the container as `host.docker.internal`, authenticated by a per-run token |
-| `apple-container` | vsock if Apple's `container` exposes it to clients, otherwise loopback TCP with a per-run token (to be settled by an experiment) |
+| `apple-container` | host Unix sockets (settled 2026-11-12): the guest and gateway sockets mounted into the container one file each, which the CLI relays over vsock; the process socket published from the container (`--publish-socket`). No loopback TCP |
 
 ### Exec routing with build-time shims
 
@@ -122,21 +125,22 @@ them under `runc`; deferred until a profile needs it.
 
 ### Identity
 
-Filled from the runs of 2026-11-11 (see the evidence linked above); a recipe
-field name in parentheses is what `required:` takes.
+Filled from the runs of 2026-11-11 and, for `apple-container`, of 2026-11-12
+(see the evidence linked above); a recipe field name in parentheses is what
+`required:` takes.
 
-| Field | Firecracker | `runc` | `runsc` (gVisor) |
-| --- | --- | --- | --- |
-| Hostname (`hostname`) | yes | yes: Docker's `hostname` (UTS namespace) | yes, the same |
-| `/proc/cpuinfo` brand, signature, flags, CPU count (`cpuinfo`) | yes | yes: a file generated from the host's first processor block and the recipe, bind-mounted read-only | yes: gVisor accepts the bind mount over its own `/proc/cpuinfo` (`model name: unknown` without it) |
-| `CPUID` instruction (`cpuid`) | yes (patched Firecracker) | no, host values | no, host values |
-| DMI, `/sys/class/dmi/id` (`dmi`) | yes | yes where the host has `/sys/class/dmi/id` to mount over (a container cannot create a directory in sysfs); a directory of generated files, serials and UUID root-only as the kernel makes them | yes on any host: gVisor's own sysfs has `/sys/class/dmi` |
-| PCI IDs (`pci`) | yes | no | no |
-| hwmon sensors and the hwmon fault (`hwmon`) | yes (guest kernel module, readings follow load) | yes where the host has a `/sys/class/hwmon` directory to mount over (an empty one will do): generated coretemp files, idle readings (the recipe's, else 38 °C); the daemon rewrites them for a fault (`+101.0°C ALARM (CRIT)` seen). Without the directory, no sensors, with a warning | yes on any host: gVisor takes the mount; the fault seen the same way |
-| Resource views (`/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/loadavg`, `/proc/diskstats`, `/proc/swaps`, `/sys/devices/system/cpu/online`) | the VM's own | lxcfs's files bind-mounted, never over `/proc/cpuinfo` (`free` showed the recipe's 4096 MiB on an 8 GB host, lxcfs 6.0.4; and 3925 MiB, the host's whole memory, under the recipe's 4 GiB limit on a 4 GB host, lxcfs 5.0.3); without lxcfs the host's, with a warning | gVisor's own, which follow the container's memory limit; no `/proc/diskstats` or `/proc/swaps` exist |
-| Kernel version, `uname -r` (`kernel`) | recipe kernel | host kernel | `4.19.0-gvisor` |
-| Uptime offset (`uptime`) | yes (time namespace) | no: the container's uptime (lxcfs) | no: the sandbox's |
-| Fingerprints | Firecracker's (MPTABLE `FC`, ACPI `FIRECK`, MAC `02:fc`), see follow-ups | Docker's (`/.dockerenv`, cgroup paths) | gVisor's (`/proc/gvisor`, `/proc/sentry-meminfo`, `dmesg`'s `Starting gVisor...`) |
+| Field | Firecracker | `runc` | `runsc` (gVisor) | `apple-container` (default kernel) |
+| --- | --- | --- | --- | --- |
+| Hostname (`hostname`) | yes | yes: Docker's `hostname` (UTS namespace) | yes, the same | yes: init sets it (`CAP_SYS_ADMIN` in the VM) |
+| `/proc/cpuinfo` brand, signature, flags, CPU count (`cpuinfo`) | yes | yes: a file generated from the host's first processor block and the recipe, bind-mounted read-only | yes: gVisor accepts the bind mount over its own `/proc/cpuinfo` (`model name: unknown` without it) | no: the arm64 VM's (Apple implementer `0x61`); a file mount would work, see the gaps |
+| `CPUID` instruction (`cpuid`) | yes (patched Firecracker) | no, host values | no, host values | no: an Apple silicon core |
+| DMI, `/sys/class/dmi/id` (`dmi`) | yes | yes where the host has `/sys/class/dmi/id` to mount over (a container cannot create a directory in sysfs); a directory of generated files, serials and UUID root-only as the kernel makes them | yes on any host: gVisor's own sysfs has `/sys/class/dmi` | no: the kernel has no `CONFIG_DMI`, and sysfs takes no new directory |
+| PCI IDs (`pci`) | yes | no | no | no: virtio |
+| hwmon sensors and the hwmon fault (`hwmon`) | yes (guest kernel module, readings follow load) | yes where the host has a `/sys/class/hwmon` directory to mount over (an empty one will do): generated coretemp files, idle readings (the recipe's, else 38 °C); the daemon rewrites them for a fault (`+101.0°C ALARM (CRIT)` seen). Without the directory, no sensors, with a warning | yes on any host: gVisor takes the mount; the fault seen the same way | no: the kernel has no hwmon; the fault has no effect and is not recorded |
+| Resource views (`/proc/meminfo`, `/proc/stat`, `/proc/uptime`, `/proc/loadavg`, `/proc/diskstats`, `/proc/swaps`, `/sys/devices/system/cpu/online`) | the VM's own | lxcfs's files bind-mounted, never over `/proc/cpuinfo` (`free` showed the recipe's 4096 MiB on an 8 GB host, lxcfs 6.0.4; and 3925 MiB, the host's whole memory, under the recipe's 4 GiB limit on a 4 GB host, lxcfs 5.0.3); without lxcfs the host's, with a warning | gVisor's own, which follow the container's memory limit; no `/proc/diskstats` or `/proc/swaps` exist | the VM's own (`--memory`); one CPU more than asked |
+| Kernel version, `uname -r` (`kernel`) | recipe kernel | host kernel | `4.19.0-gvisor` | Apple's default (Kata 6.18) |
+| Uptime offset (`uptime`) | yes (time namespace) | no: the container's uptime (lxcfs) | no: the sandbox's | no: the VM's |
+| Fingerprints | Firecracker's (MPTABLE `FC`, ACPI `FIRECK`, MAC `02:fc`), see follow-ups | Docker's (`/.dockerenv`, cgroup paths) | gVisor's (`/proc/gvisor`, `/proc/sentry-meminfo`, `dmesg`'s `Starting gVisor...`) | Apple's (`vminitd`, the Kata kernel string, relayed sockets in `/proc/net/unix`) |
 
 `profile check` lists, for the chosen runtime on the actor's host, each part
 of the identity it does not present, as a warning (`actor: cpuid
@@ -151,6 +155,9 @@ error in `profile check` and fails `run create` before anything is acquired.
   hosts dedicated to one run.
 - `runsc`: a user-space kernel between the program and the host. Weaker than a
   microVM and with syscall overhead, but no KVM.
+- `apple-container`: a lightweight VM per actor (Virtualization.framework)
+  with Apple's kernel. The container holds `CAP_SYS_ADMIN` inside its VM for
+  init's mounts; the driving program runs without capabilities.
 
 The report shows the runtime of each run so a reader knows which
 isolation a trace came from.
@@ -326,10 +333,63 @@ Gaps, each marked in the code:
   (`TODO(container-actor)` in `guest/init/mod.rs`).
 - The uptime offset is not applied (`TODO(container-actor)` in the daemon's
   `guest.rs`); sensor readings do not follow load.
-- Docker Desktop, Apple's `container`, WSL and Hyper-V need the loopback TCP
-  transport (`TODO(container-runtime)` on `Endpoint` and `Terminal`).
+- Docker Desktop, WSL and Hyper-V need the loopback TCP transport
+  (`TODO(container-runtime)` on `Endpoint` and `Terminal`); Apple's
+  `container` does not (see [As built: apple-container](#as-built-apple-container)).
 - The `actor(container)` capability does not carry the OCI runtimes
   (`TODO(runner-actor)` on `ActorRuntime::Container`).
+
+## As built: apple-container
+
+Implemented 2026-11-12, from an experiment with an actor wired by hand; the
+commands, timings and results are in the
+[Apple `container` actor evidence](2026-11-12-apple-container-actor-evidence.md).
+
+**Runtime** (`core-actor::host::apple_container`). `AppleContainer`
+implements `ActorRuntime` by driving Apple's `container` CLI through a `Cli`
+trait (the process is the boundary; tests stand in for it). The actor is
+`container run --name needy-actor-<run> --network none --cpus N --memory M
+--cap-add CAP_SYS_ADMIN --tmpfs ... --entrypoint /.needy/init IMAGE`, run in
+the foreground: its output is `console.log`, its exit code the actor's.
+Stopping is `container stop --time GRACE`, then the wait; both delete the
+container. A restarted control plane deletes a leftover actor by its run's
+name (`reconcile`). `check_host` asks `container system status` and
+`container image inspect IMAGE`; off macOS the CLI is refused at once.
+
+**Channels.** The same files as the container runtime's (`channels/` in the
+run's directory, `/.needy/channels/*.sock` in the actor), but mounted one by
+one: `guest.sock` and `gateway.sock` as `--volume` file mounts, which the CLI
+relays into the VM over vsock (a mounted directory of sockets fails there),
+and `process.sock` as `--publish-socket`, which the CLI listens on and
+connects to init's socket for. Because the host side of a published socket
+accepts before init serves it, the daemon counts a terminal connection only
+once the process service answers a request.
+
+**Root file system.** Writable, unlike a Docker container actor's: `vminitd`
+reaches a published socket on the container's root file system, outside its
+mounts, so init's process socket cannot be in a tmpfs. Each container has its
+own copy of the image's file system, which ends with it
+(`TODO(apple-container)` in `launch`).
+
+**Setup.** `Setup::GuestMounts`: init mounts the workspace with sshfs inside
+and sets the recipe's hostname, as a VM's init does (the container has
+`CAP_SYS_ADMIN` in its own VM; the driving program has no capabilities); the
+daemon sends it no sensors, hwmon faults or uptime offset, which Apple's
+default kernel cannot present. The container actor image therefore has
+`sshfs` and `fuse3`.
+
+**Identity** with Apple's default kernel (Kata 6.18, arm64): the recipe's
+hostname; no DMI, hwmon or uptime offset; `/proc/cpuinfo` and the kernel are
+the VM's; the VM has one CPU more than asked. `identity_gaps` lists each, and
+a field the recipe requires fails `run create`. The needy-built arm64 kernel
+(`-k`) that would bring `binfmt_needy`, the fake sensors and DMI is a separate
+slice (`TODO(apple-container-kernel)`).
+
+**Capability and build.** A runner on macOS whose `container` services answer
+reports `actor(apple-container)`. `needy build --apple-container` builds
+`needy-actor:latest` for linux/arm64 through Docker and loads it with
+`container image load`; the `needy` and `container-root` stages build for the
+platform's `TARGETARCH`.
 
 ## Open questions
 

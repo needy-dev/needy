@@ -122,6 +122,17 @@ end to end on one Mac, ready in about 0.27 s
 ([vz actor evidence](docs/ai/references/architecture/2026-11-12-vz-actor-evidence.md));
 [`examples/vz`](examples/vz/profile.yaml) runs the smoke test.
 
+On a Mac with Apple silicon, the actor can be a container that Apple's
+[`container`](https://github.com/apple/container) runs in its own lightweight
+VM (`actor: { runtime: apple-container }`); `needy build --apple-container`
+builds its image through Docker and loads it, and
+[`examples/apple-container`](examples/apple-container/profile.yaml) runs the
+smoke and chaos tests in one with this Mac as the executor. Verified end to
+end, including `-it` and `run attach`, on one Apple silicon laptop with
+`container` 1.7.1 ([evidence](docs/ai/references/architecture/2026-11-12-apple-container-actor-evidence.md));
+with Apple's default kernel it presents the recipe's hostname but no DMI,
+sensors or x86 CPU.
+
 For an interactive driving program, use `needy run create -it --profile
 PROFILE`. `ctrl-]` detaches; `needy run attach RUN` returns to its terminal.
 Automated tests and live probes on a Linux KVM host from a Mac are recorded

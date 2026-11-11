@@ -32,9 +32,11 @@ Dependencies point downward; a crate never depends on one above it.
   gateway and terminal channels the daemon serves or dials), `firecracker`
   implements it: it builds the Firecracker configuration from a compiled
   recipe and owns the Firecracker process; `container` implements it for
-  Docker containers, and `vz` for Virtualization.framework VMs on Apple
-  silicon (vfkit's arguments from a compiled recipe, the vfkit process); and
-  `gateway` is the actor gateway on the `net.*` interceptors.
+  Docker containers (`identity` writes the recipe's files), `vz` for
+  Virtualization.framework VMs on Apple silicon (vfkit's arguments from a
+  compiled recipe, the vfkit process), and `apple_container` over Apple's
+  `container` CLI on a Mac; and `gateway` is the actor gateway on the
+  `net.*` interceptors.
 - `crates/core-executor` (`needy-core-executor`): where commands run.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is
