@@ -37,6 +37,31 @@ async fn a_stale_socket_is_replaced() {
 }
 
 #[tokio::test]
+async fn a_socket_where_a_server_answers_is_in_use_and_kept() {
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("api.sock");
+  let _live = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+
+  let error = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket.clone())]).await.err().unwrap();
+
+  assert!(matches!(error, Error::InUse(_)), "{error}");
+  assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok(), "the live socket was removed");
+}
+
+#[tokio::test]
+async fn a_socket_file_another_server_bound_since_is_not_removed() {
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("api.sock");
+  let bound = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
+  std::fs::remove_file(&socket).unwrap();
+  let _other = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+
+  drop(bound);
+
+  assert!(socket.exists(), "the other server's socket was removed");
+}
+
+#[tokio::test]
 async fn health_needs_no_token_and_everything_else_does() {
   let served = serve_with(Caller::Operator, Some("secret")).await;
 
@@ -54,7 +79,7 @@ async fn health_needs_no_token_and_everything_else_does() {
 async fn serving_ends_when_cancelled() {
   let dir = tempfile::tempdir().unwrap();
   let socket = dir.path().join("api.sock");
-  let bound = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket)]).await.unwrap();
+  let bound = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
   let cancel = CancellationToken::new();
   let serving = tokio::spawn(bound.serve(cancel.clone()));
 
@@ -62,6 +87,7 @@ async fn serving_ends_when_cancelled() {
 
   let served = tokio::time::timeout(Duration::from_secs(5), serving).await.expect("serve did not end");
   assert!(served.unwrap().is_ok());
+  assert!(!socket.exists(), "the socket outlived the server");
 }
 
 #[tokio::test]

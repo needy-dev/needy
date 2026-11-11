@@ -184,7 +184,7 @@ bench profile records with `trace: { timing: true }`.
 | --- | --- | --- | --- |
 | State | `$XDG_STATE_HOME/needy` | `NEEDY_STATE_DIR` | `state.db` (the runner registry), `trace.db`, `runs/` (each with its `trace.jsonl`), executor sockets and workspaces, the daemon log; on a runner, `runner.json` (its credential, 0600) |
 | Data | `$XDG_DATA_HOME/needy` | `NEEDY_DATA_DIR` | `images/default`, which `needy build` writes and the daemon boots |
-| Runtime | `$XDG_RUNTIME_DIR/needy`, else the state directory (macOS) | `NEEDY_RUNTIME_DIR` | `daemon.sock`, the default endpoint, and `local.sock` |
+| Runtime | `$XDG_RUNTIME_DIR/needy`, else the state directory (macOS) | `NEEDY_RUNTIME_DIR` | `daemon.sock`, the default endpoint, and `local.sock`; the daemon removes both when it exits, also at a second termination signal, and refuses to start while another daemon answers on them |
 
 Windows uses its known folders through `etcetera`. `~/.needy` is not read.
 

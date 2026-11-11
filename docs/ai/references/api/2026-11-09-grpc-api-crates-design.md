@@ -263,9 +263,12 @@ src/
   operations an actor may not call are refused before the daemon sees them.
 - **`Server::bind`** binds every listener before any serves, so a socket
   path over `sun_path` or a taken port fails start-up at once with the
-  address; a Unix socket's directory is created and a stale socket replaced.
-  `serve` stops accepting when its token is cancelled and gives open calls
-  5 s, since an attached exec may never end.
+  address; a Unix socket's directory is created and a stale socket, where
+  no server answers, replaced. A socket where a server answers is
+  `Error::InUse`, and the daemon does not start. `serve` stops accepting
+  when its token is cancelled and gives open calls 5 s, since an attached
+  exec may never end; it removes the socket files it bound when it returns
+  or is dropped (a forced exit), unless another server bound the path since.
 - **Status table** (`protocol::status`):
 
   | `ControlError` | Status | Example |

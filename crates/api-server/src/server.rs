@@ -65,6 +65,9 @@ pub enum Error {
   Unauthenticated(Listen),
   #[error("unix sockets are not supported here: {0}")]
   Unsupported(Listen),
+  /// A server answers on the Unix socket already; its file is left alone.
+  #[error("another server is listening on {0}")]
+  InUse(Listen),
   #[error("serving {listen}")]
   Serve {
     listen: Listen,
@@ -157,14 +160,28 @@ impl Server {
 
   /// Binds every listener, or none: the first that cannot bind is the
   /// error. A Unix socket's directory is created, and a socket left by an
-  /// earlier server is replaced. Without a token, a TCP listener on a
+  /// earlier server that no longer listens is replaced; one where a server
+  /// still answers is [`Error::InUse`]. The socket files this server binds
+  /// are removed when it stops serving, or when [`Bound`] is dropped
+  /// without serving. Without a token, a TCP listener on a
   /// non-loopback address is refused ([`Error::Unauthenticated`]); one on a
   /// loopback address, where tunnels end, starts with a warning. A TCP
   /// listener on port 0 gets a free port; [`Bound::addresses`] tells which.
   pub async fn bind(self, listen: &[Listen]) -> Result<Bound, Error> {
     let mut listeners = Vec::with_capacity(listen.len());
+    #[cfg(unix)]
+    let mut sockets = Vec::new();
     for listen in listen {
       let listener = Listener::bind(listen).await?;
+      #[cfg(unix)]
+      if let (Listener::Unix(_), Listen::Unix(path)) = (&listener, listen) {
+        // Held from here, so a later listener that fails to bind removes
+        // this one's file too.
+        sockets.push(SocketFile::bound(path).map_err(|source| Error::Bind {
+          listen: listen.clone(),
+          source,
+        })?);
+      }
       if self.token.is_none() {
         listener.check_unauthenticated(listen)?;
       }
@@ -179,8 +196,81 @@ impl Server {
         clients: self.clients,
       },
       listeners,
+      #[cfg(unix)]
+      sockets,
     })
   }
+}
+
+/// A Unix socket file a server bound, removed when this is dropped: when
+/// the server stops serving, and also when its `serve` future is dropped
+/// where it was, as a forced exit does.
+#[cfg(unix)]
+struct SocketFile {
+  path: PathBuf,
+  /// The file's device and inode at bind, so a socket another server bound
+  /// at the same path since is not removed.
+  id: (u64, u64),
+}
+
+#[cfg(unix)]
+impl SocketFile {
+  fn bound(path: &Path) -> std::io::Result<Self> {
+    Ok(Self {
+      path: path.to_path_buf(),
+      id: Self::id(path)?,
+    })
+  }
+
+  fn id(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    Ok((metadata.dev(), metadata.ino()))
+  }
+}
+
+#[cfg(unix)]
+impl Drop for SocketFile {
+  fn drop(&mut self) {
+    // NOTICE: between the check and the removal another server could replace
+    // the file. One that starts while this server still listens is refused
+    // (`Error::InUse`), so only a start in the moment between this server's
+    // listener closing and this drop can lose its socket.
+    match Self::id(&self.path) {
+      Ok(id) if id == self.id => {
+        if let Err(e) = std::fs::remove_file(&self.path)
+          && e.kind() != std::io::ErrorKind::NotFound
+        {
+          tracing::warn!("cannot remove {}: {e}", self.path.display());
+        }
+      }
+      // Removed already, or replaced by another server's socket.
+      _ => {}
+    }
+  }
+}
+
+/// Clears `path` for a new socket: a file where no server answers, such as
+/// the socket of a server that was killed, is removed; a socket where one
+/// answers is [`Error::InUse`].
+#[cfg(unix)]
+async fn clear_stale_socket(path: &Path, listen: &Listen) -> Result<(), Error> {
+  match tokio::net::UnixStream::connect(path).await {
+    Ok(_) => return Err(Error::InUse(listen.clone())),
+    // NOTICE: a full accept backlog makes a non-blocking connect fail with
+    // `EAGAIN` on Linux (`unix(7)`); a server still listens there.
+    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => return Err(Error::InUse(listen.clone())),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    // Refused: nobody listens. Any other error, such as a file that is not
+    // a socket, leaves the file to the removal below, as before.
+    Err(_) => {}
+  }
+  if let Err(e) = std::fs::remove_file(path)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    tracing::warn!("cannot remove {}: {e}", path.display());
+  }
+  Ok(())
 }
 
 /// Creates `dir` and its missing parents with mode 0700, whatever the
@@ -217,11 +307,7 @@ impl Listener {
         if let Some(parent) = path.parent() {
           create_private_dir(parent).map_err(failed)?;
         }
-        if let Err(e) = std::fs::remove_file(path)
-          && e.kind() != std::io::ErrorKind::NotFound
-        {
-          tracing::warn!("cannot remove {}: {e}", path.display());
-        }
+        clear_stale_socket(path, listen).await?;
         // An over-long path is an `InvalidInput` error here, not a
         // truncated name.
         let listener = tokio::net::UnixListener::bind(path).map_err(failed)?;
@@ -276,6 +362,9 @@ pub struct Bound {
   routes: Routes,
   credentials: Credentials,
   listeners: Vec<(Listen, Listener)>,
+  /// The Unix socket files bound, removed when this server stops serving.
+  #[cfg(unix)]
+  sockets: Vec<SocketFile>,
 }
 
 impl Bound {
@@ -287,6 +376,9 @@ impl Bound {
   /// Serves every listener until `cancel`, then lets open calls finish for
   /// a grace period.
   pub async fn serve(self, cancel: CancellationToken) -> Result<(), Error> {
+    // Dropped when this returns or is dropped, which removes the files.
+    #[cfg(unix)]
+    let _sockets = self.sockets;
     let auth = AuthLayer::new(self.credentials);
     let mut serving = tokio::task::JoinSet::new();
     for (listen, listener) in self.listeners {

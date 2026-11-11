@@ -1158,6 +1158,9 @@ fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
   assert!(elapsed < Duration::from_secs(2), "the daemon took {elapsed:?} to exit after the second SIGTERM");
   assert_eq!(output.status.code(), Some(1));
   assert!(stderr(&output).contains(&run), "the exit names the run it left: {}", stderr(&output));
+  // Even a forced exit removes the daemon's own sockets.
+  assert!(!home.path().join("run").join("daemon.sock").exists(), "daemon.sock is left behind");
+  assert!(!home.path().join("run").join("local.sock").exists(), "local.sock is left behind");
 }
 
 #[test]
@@ -1175,6 +1178,103 @@ fn a_second_sigterm_makes_the_executor_exit_at_once() {
   assert!(elapsed < Duration::from_secs(2), "the executor took {elapsed:?} to exit after the second SIGTERM");
   assert_eq!(output.status.code(), Some(1));
   assert!(stderr(&output).contains("these processes were not killed"), "{}", stderr(&output));
+  assert!(!home.path().join("run").join("daemon.sock").exists(), "daemon.sock is left behind");
+}
+
+/// Waits for `daemon` to exit by itself and returns its output.
+fn daemon_exit(mut daemon: Child) -> Output {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while daemon.try_wait().unwrap().is_none() {
+    if Instant::now() >= deadline {
+      daemon.kill().ok();
+      panic!("the daemon did not exit: {:?}", daemon.wait_with_output().unwrap());
+    }
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  daemon.wait_with_output().unwrap()
+}
+
+// ROOT CAUSE:
+//
+// If a daemon exited, even gracefully at SIGTERM, its Unix sockets stayed
+// in the runtime directory, because nothing removed a socket file once its
+// listener closed; only the next start replaced it.
+//
+// Before the fix, `daemon.sock` and `local.sock` outlived the daemon.
+// The fix removes the sockets a server bound when it stops serving.
+#[test]
+fn a_control_daemon_removes_its_sockets_when_it_exits_at_sigterm() {
+  let home = Home::new();
+  let daemon = spawn_daemon(&home, "control");
+  let run = home.path().join("run");
+  assert!(run.join("local.sock").exists());
+
+  kill(daemon.id(), "TERM");
+  let output = daemon_exit(daemon);
+
+  assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+  assert!(!run.join("daemon.sock").exists(), "daemon.sock is left behind");
+  assert!(!run.join("local.sock").exists(), "local.sock is left behind");
+}
+
+#[test]
+fn an_executor_daemon_removes_its_socket_when_it_exits_at_sigterm() {
+  let home = Home::new();
+  let daemon = spawn_daemon(&home, "executor");
+
+  kill(daemon.id(), "TERM");
+  let output = daemon_exit(daemon);
+
+  assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+  assert!(!home.path().join("run").join("daemon.sock").exists(), "daemon.sock is left behind");
+}
+
+#[test]
+fn a_daemon_starts_over_stale_sockets_nobody_listens_on() {
+  let home = Home::new();
+  let run = home.path().join("run");
+  std::fs::create_dir_all(&run).unwrap();
+  // A daemon that was killed leaves its sockets bound to no listener.
+  for name in ["daemon.sock", "local.sock"] {
+    drop(std::os::unix::net::UnixListener::bind(run.join(name)).unwrap());
+  }
+
+  let _daemon = Daemon::start(&home);
+
+  assert!(home.run(&["ps"]).status.success());
+}
+
+// ROOT CAUSE:
+//
+// If a daemon started while another listened on the same socket, it took
+// the socket over, because binding removed whatever file was at the path
+// without asking whether a server still answered there.
+//
+// Before the fix, the second daemon unlinked the first one's sockets and
+// served in its place, and the first one served on nothing reachable.
+// The fix refuses to start, naming the socket another server listens on.
+#[test]
+fn a_second_daemon_on_the_same_sockets_is_refused() {
+  use std::os::unix::fs::MetadataExt;
+  let home = Home::new();
+  let _first = Daemon::start(&home);
+  let socket = home.path().join("run").join("daemon.sock");
+  let first_socket = std::fs::metadata(&socket).unwrap().ino();
+
+  let second = home
+    .needy()
+    .args(["daemon", "--mode", "control"])
+    .args(stand_in_actor(&home))
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  let output = daemon_exit(second);
+
+  assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+  assert!(stderr(&output).contains("another server is listening on unix:"), "{}", stderr(&output));
+  assert_eq!(std::fs::metadata(&socket).unwrap().ino(), first_socket, "the first daemon's socket was replaced");
+  assert!(home.run(&["ps"]).status.success(), "the first daemon no longer answers");
 }
 
 /// The table rows `needy ps` prints, split into cells by two or more spaces.

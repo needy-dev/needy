@@ -218,7 +218,12 @@ impl Daemon {
     };
     // A socket that cannot bind, such as a path over `sun_path`, fails
     // start-up here with its path.
-    let local_server = Server::new(health, Caller::Operator).process_service(service).bind(&[Listen::Unix(local_sock.clone())]).await?;
+    let local_server = match Server::new(health, Caller::Operator).process_service(service).bind(&[Listen::Unix(local_sock.clone())]).await {
+      Err(e @ needy_api_server::server::Error::InUse(_)) => {
+        return Err(anyhow::Error::new(e).context(format!("another daemon uses the runtime directory {}", config.runtime_dir.display())));
+      }
+      bound => bound?,
+    };
     let stop = cancel.clone();
     tasks.spawn(async move {
       if let Err(e) = local_server.serve(stop).await {
@@ -286,6 +291,18 @@ impl Daemon {
         } else {
           format!("exited at a second termination signal; these runs were not cleaned up: {}", left.join(", "))
         };
+        // The control socket went with the dropped shutdown. The local
+        // executor serves in a task, which the process exit ends without
+        // dropping, so its socket is removed here while it still serves:
+        // nobody else can have bound it then. Once `cancel` is cancelled
+        // that server stops and removes the file itself.
+        let local_sock = self.config.runtime_dir.join("local.sock");
+        if !self.cancel.is_cancelled()
+          && let Err(e) = std::fs::remove_file(&local_sock)
+          && e.kind() != std::io::ErrorKind::NotFound
+        {
+          tracing::warn!("cannot remove {}: {e}", local_sock.display());
+        }
         tracing::error!("{message}");
         bail!(message)
       }
