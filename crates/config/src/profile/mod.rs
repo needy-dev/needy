@@ -116,6 +116,14 @@ pub fn load(source: &Source) -> Result<Profile, Error> {
     mapping.from = mapping.from.clone().expand_home(&user);
     mapping.to = mapping.to.clone().expand_home(&user);
   }
+  // A `path_map` key is an actor path, so its `~` is the user's home there,
+  // as on a file mapping's actor side; routing and `profile check` both read
+  // the expanded key.
+  // NOTICE: a value is a path on the executor's machine, whose home this
+  // profile does not know, so it keeps a `~` as written.
+  for executor in profile.executors.values_mut() {
+    executor.path_map = std::mem::take(&mut executor.path_map).into_iter().map(|(from, to)| (user.expand_home(&from), to)).collect();
+  }
   Ok(profile)
 }
 

@@ -372,7 +372,9 @@ maps `argv[0]`, the command runs from the mapped path. Any other absolute
 `argv[0]`, such as the actor's `/usr/bin/python3`, is sent as it is, and the
 executor runs it from that path when the path exists there; otherwise it runs
 the program of the same name from its own `PATH`. When neither exists, the
-error names the original path. A command placed with `--executor`, or run
+error names the original path. A `path_map` key is an actor path: a leading
+`~` in it is the profile user's home, as on a file mapping's actor side; a
+value is a path on the executor's machine and keeps a `~` as written. A command placed with `--executor`, or run
 without a run, is never rewritten and gets no `PATH` fallback.
 
 ### Composition

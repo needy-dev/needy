@@ -116,3 +116,32 @@ commands:
   let refused = Runs::decide(&started.daemon, &created.id, asked).await.unwrap();
   assert_eq!(refused.target, Target::Refused("denied: under bash".into()));
 }
+
+// ROOT CAUSE:
+//
+// If a `path_map` key started with `~`, routing compared it as written, so
+// `~/workspace` never matched the actor's `/home/<user>/workspace` and a
+// routed command kept the actor's paths, while file mappings already
+// expanded `~` to the profile user's home.
+//
+// Before the fix, `{ ~/workspace: /srv/ws }` mapped nothing.
+// The fix expands a leading `~` of every `path_map` key to the profile
+// user's home when the profile loads, as file mappings do.
+#[tokio::test]
+async fn a_path_map_key_under_the_users_home_maps_the_actors_home() {
+  const TILDE: &str = r#"
+actor: { runtime: firecracker }
+user: { name: dev, uid: 1000, gid: 1000 }
+executors:
+  here: { provider: native, path_map: { "~/workspace": /srv/ws } }
+commands:
+  - { match: "python3 **", to: here }
+"#;
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(TILDE, started.dir.path())).await.unwrap();
+  let asked = ctx(&["python3", "/home/dev/workspace/a.py"], "/home/dev/workspace/sub");
+  let route = Runs::decide(&started.daemon, &created.id, asked).await.unwrap();
+  assert_eq!(route.target, Target::Executor("here".into()));
+  assert_eq!(route.argv, ["python3", "/srv/ws/a.py"]);
+  assert_eq!(route.cwd, "/srv/ws/sub");
+}

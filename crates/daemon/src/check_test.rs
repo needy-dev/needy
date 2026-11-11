@@ -232,6 +232,44 @@ async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
 
 // ROOT CAUSE:
 //
+// If a `path_map` key started with `~`, the check compared it as written
+// against the actor's expanded working directory, so it warned about a
+// directory the entry was meant to cover; routing did not expand it either.
+//
+// Before the fix, `{ ~/workspace: ... }` and `{ ~: ... }` covered nothing.
+// The fix expands a leading `~` of every `path_map` key to the profile
+// user's home when the profile loads, so the check and routing read the
+// same key.
+#[tokio::test]
+async fn a_path_map_key_under_the_users_home_covers_the_actors_cwd() {
+  let served = control().await;
+  let _mac = runner(&served, "mac", "executor(native)", &[]).await;
+
+  let check = check(
+    &served,
+    r#"
+actor: { runtime: firecracker, cwd: ~/workspace/project }
+user: { name: dev, uid: 1000, gid: 1000 }
+executors:
+  workspace: { runner: mac, path_map: { "~/workspace": /Users/user/work } }
+  home: { runner: mac, path_map: { "~": /Users/user } }
+  other: { runner: mac, path_map: { "~/elsewhere": /Users/user/elsewhere } }
+"#,
+  )
+  .await;
+
+  assert_eq!(
+    messages(&check),
+    [
+      "warning: executors.other: commands routed to runner mac keep the actor's working directory /home/dev/workspace/project, \
+       which no path_map entry maps to a directory on that machine; add one, for example \
+       `path_map: { /home/dev/workspace/project: /path/on/mac }`"
+    ]
+  );
+}
+
+// ROOT CAUSE:
+//
 // If the actor's host had no usable KVM, `profile check` reported nothing,
 // because only `run create` probed the KVM device.
 //
