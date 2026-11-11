@@ -8,6 +8,7 @@ use tokio_stream::StreamExt as _;
 use crate::testing::{self, new_run, running};
 
 const PROFILE: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { provider: native }
@@ -173,6 +174,7 @@ async fn shutdown_unwinds_a_run_being_created() {
   let profile = format!(
     r#"
 user: {{ name: agent, uid: 1000, gid: 1000 }}
+actor: {{ runtime: firecracker }}
 executors:
   a: {{ provider: native }}
   b: {{ runner: b }}
@@ -269,7 +271,7 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
   while daemon.links.get("far").is_none() {
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
-  let profile = "executors:\n  far: { runner: far }\ncommands:\n  - { match: \"**\", to: far }\n";
+  let profile = "actor: { runtime: firecracker }\nexecutors:\n  far: { runner: far }\ncommands:\n  - { match: \"**\", to: far }\n";
   let created = Runs::create(&daemon, new_run(profile, started.dir.path())).await.unwrap();
   let (_, pid) = testing::detached_sleep(&daemon, &created.id).await;
 

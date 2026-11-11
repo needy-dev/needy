@@ -10,9 +10,8 @@ use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
 use needy_core::types::RunState;
 
-use crate::actor::GATEWAY_PORT;
 use crate::run::Run;
-use crate::{Daemon, files};
+use crate::{Daemon, actor, files};
 
 /// The workspace mounts of `run`: executor directories mounted into the
 /// actor over SFTP.
@@ -60,6 +59,7 @@ fn default_cwd(home: &str, mounts: &[GuestMount]) -> String {
 impl Guest for Daemon {
   async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
     let run = self.runs.find(run)?;
+    let channels = actor::channels(self, &run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
     let profile = &run.profile;
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
@@ -115,7 +115,7 @@ impl Guest for Daemon {
       command: run.actor_command.clone(),
       env: profile.actor.env.clone().into_iter().collect(),
       cwd,
-      gateway_port: GATEWAY_PORT,
+      gateway_port: channels.gateway_port,
       sensors: recipe
         .map(|r| {
           r.sensors
@@ -131,7 +131,7 @@ impl Guest for Daemon {
       mirror_out,
       hwmon_faults,
       tty: run.tty,
-      process_port: crate::actor::PROCESS_PORT,
+      process_port: channels.process_port,
       wait_for_attach: run.wait_for_attach,
     })
   }

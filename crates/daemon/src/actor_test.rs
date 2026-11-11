@@ -7,6 +7,7 @@ use needy_core::types::RunState;
 use crate::testing::{self, fake_image, new_run, running};
 
 const PROFILE: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { provider: native }
@@ -241,6 +242,7 @@ async fn a_create_without_kvm_fails_before_it_acquires_executors() {
   std::fs::remove_file(started.dir.path().join("kvm")).unwrap();
   // Acquiring `far` fails: no provider creates Firecracker executors.
   let profile = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   far: { provider: firecracker }

@@ -2,7 +2,7 @@
 //! joined and connected, and the host each one reports.
 
 use needy_api_client::Client;
-use needy_api_server::control::{Placement, ProfileCheck, ProfileToCheck, RunnerHost, RunnerReport, Runners, Runs};
+use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileToCheck, RunnerHost, RunnerReport, Runners, Runs};
 
 use crate::testing::{self, JoinedRunner, Served};
 
@@ -65,7 +65,7 @@ async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_schedu
   let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
   report_host(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")], host_without_avx512()).await;
 
-  let check = check(&served, "actor: { runner: { labels: [kvm] }, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
+  let check = check(&served, "actor: { runtime: firecracker, runner: { labels: [kvm] }, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
 
   assert_eq!(check.actor, Some(Placement::Runner("kvm".into())));
   assert_eq!(check.actor_cpu, "Example CPU without AVX-512");
@@ -87,7 +87,7 @@ async fn executor_selectors_resolve_to_runners_or_the_control_host() {
   let check = check(
     &served,
     r#"
-actor: { runner: kvm }
+actor: { runtime: firecracker, runner: kvm }
 executors:
   mac: { runner: { labels: [os=darwin] }, path_map: { /home/agent: /Users/user/work } }
   build: { runner: kvm, provider: docker }
@@ -108,7 +108,11 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
   let served = control().await;
   let _mac = runner(&served, "mac", "executor(native)", &[("os", "darwin")]).await;
 
-  let check = check(&served, "executors:\n  linux: { runner: { labels: [os=linux] } }\n  gone: { runner: windows }\n").await;
+  let check = check(
+    &served,
+    "actor: { runtime: firecracker }\nexecutors:\n  linux: { runner: { labels: [os=linux] } }\n  gone: { runner: windows }\n",
+  )
+  .await;
 
   assert!(!check.executors.contains_key("linux"));
   assert_eq!(
@@ -125,7 +129,7 @@ async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_findi
   let served = control().await;
   let _far = runner(&served, "far", "actor(firecracker)", &[]).await;
 
-  let check = check(&served, "actor: { runner: far }").await;
+  let check = check(&served, "actor: { runtime: firecracker, runner: far }").await;
 
   assert_eq!(check.actor, Some(Placement::Runner("far".into())));
   let found = messages(&check);
@@ -138,7 +142,7 @@ async fn docker_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding
   let served = control().await;
   let _mac = runner(&served, "mac", "executor(docker,native)", &[]).await;
 
-  let check = check(&served, "executors: { build: { runner: mac, provider: docker } }").await;
+  let check = check(&served, "actor: { runtime: firecracker }\nexecutors: { build: { runner: mac, provider: docker } }").await;
 
   let found = messages(&check);
   assert_eq!(found.len(), 1, "{found:?}");
@@ -151,7 +155,7 @@ async fn docker_on_a_runner_without_docker_is_an_error_finding_naming_the_runner
   let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[]).await;
   let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
-  let check = check(&served, "executors: { build: { runner: mac, provider: docker } }").await;
+  let check = check(&served, "actor: { runtime: firecracker }\nexecutors: { build: { runner: mac, provider: docker } }").await;
 
   assert!(!check.executors.contains_key("build"));
   assert_eq!(
@@ -167,7 +171,7 @@ async fn a_runner_that_reported_no_host_skips_the_recipe_checks_with_a_warning()
   // As after a restart of the control plane, before the next heartbeat.
   served.daemon().runner_hosts.lock().unwrap().clear();
 
-  let check = check(&served, "actor: { runner: kvm, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
+  let check = check(&served, "actor: { runtime: firecracker, runner: kvm, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
 
   assert_eq!(check.actor_cpu, "");
   assert_eq!(messages(&check), ["warning: runner kvm has not reported its host yet; the recipe's host checks are skipped"]);
@@ -193,6 +197,7 @@ async fn a_native_executor_on_another_runner_without_a_path_map_for_the_actors_d
   let check = check(
     &served,
     r#"
+actor: { runtime: firecracker }
 executors:
   mac: { runner: mac, workspace: /Users/user/work }
   mapped: { runner: mac, path_map: { /home/agent: /Users/user/work } }
@@ -216,8 +221,11 @@ async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
   let served = control().await;
   let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
-  let check =
-    check(&served, "actor: { cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n").await;
+  let check = check(
+    &served,
+    "actor: { runtime: firecracker, cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n",
+  )
+  .await;
 
   assert_eq!(messages(&check), Vec::<String>::new());
 }
@@ -236,7 +244,7 @@ async fn a_control_host_without_kvm_is_an_error_finding_naming_it() {
   let kvm = served.dir().join("kvm");
   std::fs::remove_file(&kvm).unwrap();
 
-  let check = check(&served, "actor: { command: [sh] }").await;
+  let check = check(&served, "actor: { runtime: firecracker, command: [sh] }").await;
 
   let found = messages(&check);
   assert_eq!(found.len(), 1, "{found:?}");
@@ -252,19 +260,42 @@ async fn the_control_hosts_own_runner_without_kvm_is_an_error_finding_naming_it(
   let _kvm = runner(&served, "kvm", "actor(firecracker)", &[]).await;
   std::fs::remove_file(served.dir().join("kvm")).unwrap();
 
-  let check = check(&served, "actor: { runner: kvm }").await;
+  let check = check(&served, "actor: { runtime: firecracker, runner: kvm }").await;
 
   let found = messages(&check);
   assert_eq!(found.len(), 1, "{found:?}");
   assert!(found[0].starts_with("error: actor: on runner kvm (the control host): this host has no usable KVM"), "{found:?}");
 }
 
+// REVIEW: on 2026-11-11 the owner decided a profile without `actor:` is
+// checked for its routing and executors only; the same day's explicit
+// `actor.runtime` decision makes `actor:` required, so such a profile no
+// longer loads. Needs the owner's call on which one stands.
 #[tokio::test]
-async fn a_profile_without_an_actor_is_not_checked_for_kvm() {
+async fn a_profile_without_an_actor_is_refused_for_its_missing_runtime() {
+  let served = control().await;
+  std::fs::remove_file(served.dir().join("kvm")).unwrap();
+  let request = ProfileToCheck {
+    profile_yaml: "executors: { here: {} }".into(),
+    recipe_yaml: String::new(),
+  };
+
+  let Err(ControlError::Invalid(message)) = Runs::check(served.daemon(), request).await else {
+    panic!("a profile without an actor must be refused");
+  };
+
+  assert!(message.contains("missing field `actor`"), "{message}");
+}
+
+#[tokio::test]
+async fn a_container_actor_is_refused_and_not_checked_for_kvm() {
   let served = control().await;
   std::fs::remove_file(served.dir().join("kvm")).unwrap();
 
-  let check = check(&served, "executors: { here: {} }").await;
+  let check = check(&served, "actor: { runtime: container }").await;
 
-  assert_eq!(messages(&check), Vec::<String>::new());
+  assert_eq!(
+    messages(&check),
+    ["error: actor.runtime: the container runtime is not implemented yet; use `firecracker`, which needs /dev/kvm"]
+  );
 }

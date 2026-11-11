@@ -21,7 +21,7 @@ use needy_api_client::Client;
 /// The daemon's guest listener, as the actor reaches it.
 // Source: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131
 // (`VMADDR_CID_HOST` is 2). Port 7000 is needy's own choice,
-// `GUEST_PORT` in `crates/daemon/src/actor.rs`.
+// `GUEST_PORT` in `crates/core-actor/src/host/firecracker.rs`.
 const DAEMON: &str = "vsock://2:7000";
 
 /// The actor's init: sets the machine up, runs the driving program, and

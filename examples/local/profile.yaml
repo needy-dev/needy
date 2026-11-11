@@ -5,6 +5,7 @@
 # rules, chaos or a trace.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
+  runtime: firecracker
   command: [sleep, infinity]
 executors:
   here:

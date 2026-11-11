@@ -164,7 +164,7 @@ addresses or secrets in the profile, and a runner without the capability an
 instance needs is an error naming the runners that have it:
 
 ```yaml
-actor: { runner: kvm }                       # the control host's own runner
+actor: { runtime: firecracker, runner: kvm } # the control host's own runner
 executors:
   mac: { runner: mac }                       # the Mac's own process space
   build: { runner: { labels: [kvm] }, provider: docker }

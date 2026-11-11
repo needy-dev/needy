@@ -3,6 +3,7 @@
 # `needy exec --runner NAME` reaches a runner's machine without a run.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
+  runtime: firecracker
   command: [sleep, infinity]
 executors:
   build:

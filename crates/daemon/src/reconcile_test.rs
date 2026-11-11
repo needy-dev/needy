@@ -18,6 +18,7 @@ use crate::testing::{self, JoinedRunner, Proxy, Served, new_run};
 const CONTROL_TOKEN: &str = "control-secret";
 
 const PROFILE: &str = r#"
+actor: { runtime: firecracker }
 executors:
   far: { runner: far }
 commands:
@@ -138,6 +139,7 @@ async fn a_runner_that_cannot_reach_the_control_plane_ends_the_processes_of_runs
 #[tokio::test]
 async fn a_process_the_control_plane_forgot_is_listed_with_the_executor_and_origin_state_db_recorded() {
   const NAMED: &str = r#"
+actor: { runtime: firecracker }
 executors:
   remote: { runner: far }
 commands:

@@ -2,6 +2,7 @@
 # fault on the shared workspace, an exec fault and a scheduled overheat.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
+  runtime: firecracker
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh

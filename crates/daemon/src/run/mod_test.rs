@@ -7,6 +7,7 @@ use needy_core::types::RunState;
 use crate::testing::{self, fake_image, new_run};
 
 const PROFILE: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { provider: native }
@@ -70,7 +71,7 @@ async fn a_created_run_has_its_create_in_the_trace_when_create_returns() {
 async fn a_run_whose_profile_is_invalid_is_listed_as_failed() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let profile = "commands:\n  - { match: \"**\", to: nowhere }\n";
+  let profile = "actor: { runtime: firecracker }\ncommands:\n  - { match: \"**\", to: nowhere }\n";
   let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, started.dir.path())).await else {
     panic!("an invalid profile must fail the create");
   };
@@ -153,6 +154,7 @@ async fn a_failed_create_releases_the_executors_it_acquired() {
   // `b` is acquired after `a` and fails: no provider creates Firecracker
   // executors.
   let profile = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   a: { provider: native }
@@ -239,6 +241,7 @@ async fn a_finished_run_keeps_its_driving_programs_exit() {
 /// A profile whose every command runs on executor `far`, a native
 /// executor on runner `far`.
 const RUNNER_PROFILE: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   far: { runner: far }
@@ -317,7 +320,7 @@ async fn a_run_is_created_from_a_profile_whose_directory_the_daemon_cannot_read(
   std::fs::write(client.path().join("base.yaml"), "user: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { provider: native }\n")
     .unwrap();
   std::fs::write(client.path().join("r.recipe.yaml"), "extends: builtin:gce-ubuntu-22.04\nos: { hostname: from-the-client }\n").unwrap();
-  let yaml = "extends: base.yaml\nactor: { recipe: r.recipe.yaml }\ncommands:\n  - { match: \"**\", to: here }\n";
+  let yaml = "extends: base.yaml\nactor: { runtime: firecracker, recipe: r.recipe.yaml }\ncommands:\n  - { match: \"**\", to: here }\n";
   let request = new_run(yaml, client.path());
   drop(client);
   let started = testing::daemon().await;
@@ -334,6 +337,7 @@ async fn a_create_whose_selector_names_no_connected_runner_fails_before_it_acqui
   let (served, _far) = with_runner_far().await;
   let daemon = served.daemon();
   let profile = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   a: { provider: native }
@@ -358,7 +362,7 @@ async fn an_actor_on_a_runner_other_than_the_control_hosts_own_fails_the_create(
   let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
   let _far = testing::join_runner(&served, &operator, "far", "actor(firecracker)", &[]).await;
-  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runner: far }\n";
+  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runtime: firecracker, runner: far }\n";
 
   let Err(ControlError::Failed(message)) = Runs::create(served.daemon(), new_run(profile, served.dir())).await else {
     panic!("an actor on another runner must fail the create");
@@ -375,7 +379,7 @@ async fn an_actor_on_the_control_hosts_own_runner_starts_here() {
   let _kvm = testing::join_runner(&served, &operator, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
   let profile = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
-actor: { runner: { labels: [kvm] } }
+actor: { runtime: firecracker, runner: { labels: [kvm] } }
 executors:
   build: { runner: kvm }
 commands:

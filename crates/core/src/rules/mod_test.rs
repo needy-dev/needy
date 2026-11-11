@@ -43,6 +43,7 @@ fn profile(yaml: &str) -> Profile {
 fn composition_example_from_the_doc() {
   let p = profile(
     r#"
+actor: { runtime: firecracker }
 executors: { build: { provider: docker }, mac: { runner: mac } }
 presets:
   clean-env: { env: { clear: true, pass: [PATH, HOME, LANG, TERM] } }
@@ -101,6 +102,7 @@ commands:
 fn env_args_wrap_exec_and_cwd() {
   let p = profile(
     r#"
+actor: { runtime: firecracker }
 commands:
   - match: "pytest **"
     args: { append: [-p, no:cacheprovider] }
@@ -136,6 +138,7 @@ commands:
 fn when_conditions() {
   let p = profile(
     r#"
+actor: { runtime: firecracker }
 default_executor: build
 commands:
   - { match: "node **", when: { cwd: "/home/agent/workspace/**" }, to: a }
@@ -165,7 +168,7 @@ commands:
 
 #[test]
 fn builtin_launchers() {
-  let p = profile("commands: [{ match: \"git **\", to: build }]");
+  let p = profile("actor: { runtime: firecracker }\ncommands: [{ match: \"git **\", to: build }]");
   for cmd in [
     "env -i FOO=1 git status",
     "sudo -u root git status",
@@ -194,6 +197,7 @@ fn builtin_launchers() {
 fn user_resolvers() {
   let p = profile(
     r#"
+actor: { runtime: firecracker }
 resolvers:
   - { match: "mytool run {script} **", effective: "{script} **" }
   - { match: "make **", sticky: true }
@@ -213,6 +217,7 @@ fn shell_scripts() {
   let mut c = ctx("x");
   let p = profile(
     r#"
+actor: { runtime: firecracker }
 unknown: actor
 commands:
   - { match: "{git,make} **", to: build }
@@ -237,7 +242,7 @@ commands:
   c.argv = vec!["bash".into(), "-c".into(), "CI=1 'git' \"log\" -1".into()];
   assert_eq!(decide(&p, &c).outcome, on("build"));
 
-  let sticky = profile("unknown: build\ncommands: [{ match: \"git **\", to: build }]");
+  let sticky = profile("actor: { runtime: firecracker }\nunknown: build\ncommands: [{ match: \"git **\", to: build }]");
   c.argv = vec!["sh".into(), "-c".into(), "git log > out".into()];
   assert_eq!(decide(&sticky, &c).outcome, on("build"));
 }
@@ -245,22 +250,23 @@ commands:
 #[test]
 fn route_names_from_rules() {
   let p = profile(
-    "commands:\n  - { match: \"{git,make} **\", to: build }\n  - { match: uname, to: actor }\n  - { match: \"cargo **\", executor: build }\n",
+    "actor: { runtime: firecracker }\ncommands:\n  - { match: \"{git,make} **\", to: build }\n  - { match: uname, to: actor }\n  - { match: \"cargo **\", executor: build }\n",
   );
   let names = route_names(&p).unwrap();
   assert!(names.contains(&"git".to_string()));
   assert!(names.contains(&"cargo".to_string()));
   assert!(names.contains(&"bash".to_string()));
   assert!(!names.contains(&"uname".to_string()));
-  assert_eq!(route_names(&profile("commands: [{ match: \"**\", to: build }]")), None);
-  assert_eq!(route_names(&profile("default_executor: build")), None);
-  assert_eq!(route_names(&profile("commands: [{ match: uname, to: actor }]")), Some(vec![]));
+  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: \"**\", to: build }]")), None);
+  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ndefault_executor: build")), None);
+  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: uname, to: actor }]")), Some(vec![]));
 }
 
 #[test]
 fn files_and_faults_accumulate() {
   let p = profile(
     r#"
+actor: { runtime: firecracker }
 commands:
   - { match: "**", files: [a] }
   - match: "xcodebuild **"

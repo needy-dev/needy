@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::profile::{Actions, Profile, Provider, Side, UnknownPolicy};
+use crate::profile::{Actions, Profile, Provider, Runtime, Side, UnknownPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -54,6 +54,12 @@ impl fmt::Display for Finding {
 /// mappings it defines.
 pub fn profile(profile: &Profile) -> Vec<Finding> {
   let mut findings = Vec::new();
+  // TODO(container-runtime): refused until slice 2 of
+  // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`
+  // implements it.
+  if profile.actor.runtime == Runtime::Container {
+    findings.push(Finding::error("actor.runtime: the container runtime is not implemented yet; use `firecracker`, which needs /dev/kvm"));
+  }
   let executor = |name: &str| profile.executors.contains_key(name);
   if let Some(name) = &profile.default_executor
     && !executor(name)

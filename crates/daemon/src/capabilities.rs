@@ -109,14 +109,14 @@ pub fn firecracker(kvm: &Path, image: &Path) -> Result<(), String> {
   if !cfg!(target_os = "linux") {
     return Err("Firecracker runs on Linux only".into());
   }
-  needy_core_actor::host::vm::check_kvm(kvm).map_err(|e| format!("cannot open {}: {}", kvm.display(), kvm_error(&e)))?;
-  needy_core_actor::host::vm::Image::new(image).check().map_err(|e| e.to_string())
+  needy_core_actor::host::firecracker::check_kvm(kvm).map_err(|e| format!("cannot open {}: {}", kvm.display(), kvm_error(&e)))?;
+  needy_core_actor::host::firecracker::Image::new(image).check().map_err(|e| e.to_string())
 }
 
 /// The OS error of a KVM check, without the check's advice.
-fn kvm_error(error: &needy_core_actor::host::vm::Error) -> String {
+fn kvm_error(error: &needy_core_actor::host::firecracker::Error) -> String {
   match error {
-    needy_core_actor::host::vm::Error::Kvm { error, .. } => error.to_string(),
+    needy_core_actor::host::firecracker::Error::Kvm { error, .. } => error.to_string(),
     other => other.to_string(),
   }
 }

@@ -7,7 +7,7 @@ use super::*;
 
 /// The `docker:` options of a profile's executor, written as YAML.
 fn docker(yaml: &str) -> DockerConfig {
-  let text = format!("executors: {{ build: {{ provider: docker, docker: {yaml} }} }}");
+  let text = format!("actor: {{ runtime: firecracker }}\nexecutors: {{ build: {{ provider: docker, docker: {yaml} }} }}");
   let profile = needy_config::profile::load(&Source::text(text, "/home/user/profile")).unwrap();
   profile.executors["build"].docker.clone().unwrap()
 }

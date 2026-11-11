@@ -3,12 +3,14 @@ use needy_api_server::control::{Guest, Runs};
 use crate::testing::{self, new_run};
 
 const NO_MOUNT: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { provider: native }
 "#;
 
 const WORKSPACE_MOUNT: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { provider: native }
@@ -44,6 +46,6 @@ async fn an_actor_with_a_workspace_mount_starts_in_the_workspace() {
 
 #[tokio::test]
 async fn an_actor_cwd_wins_over_the_default() {
-  let profile = format!("{NO_MOUNT}actor: {{ cwd: /tmp }}\n");
+  let profile = NO_MOUNT.replace("actor: { runtime: firecracker }", "actor: { runtime: firecracker, cwd: /tmp }");
   assert_eq!(cwd(&profile).await, "/tmp");
 }

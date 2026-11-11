@@ -30,7 +30,7 @@ use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::CompiledRecipe;
 use needy_core::types::{Principal, RunState};
-use needy_core_actor::host::vm;
+use needy_core_actor::host::runtime;
 use needy_core_executor::provider::InstanceSpec;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
@@ -555,7 +555,7 @@ impl Daemon {
       Placement::Runner(name) => Some(name.clone()),
       Placement::ControlHost => None,
     };
-    actor::check_host(self)?;
+    actor::check_host(self, run)?;
     files::check_host_paths(run)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
@@ -611,7 +611,7 @@ impl Daemon {
     run.tasks.close();
     run.tasks.wait().await;
     self.release_executors(run).await;
-    actor::remove_sockets(&run.dir);
+    actor::remove_sockets(self, run.profile.actor.runtime, &run.dir);
     self.runs.end(&run.id);
     let actor_runner = lock(&run.actor_runner).clone();
     self.record_failure(&run.id, request, run.created_ms, &run.trace, error, actor_runner).await;
@@ -670,7 +670,7 @@ impl Daemon {
     self.save_run(run).await;
     files::mirror_out(run).await;
     self.release_executors(run).await;
-    actor::remove_sockets(&run.dir);
+    actor::remove_sockets(self, run.profile.actor.runtime, &run.dir);
   }
 
   /// Stops a running or finished run: its tasks, mirror-out, its
@@ -703,7 +703,7 @@ impl Daemon {
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
     run.trace.flush().await;
-    actor::remove_sockets(&run.dir);
+    actor::remove_sockets(self, run.profile.actor.runtime, &run.dir);
     self.save_run(run).await;
     self.runs.end(&run.id);
     Ok(())
@@ -893,8 +893,9 @@ impl Runs for Daemon {
 
   async fn logs(&self, id: &str, follow: bool) -> Result<Logs, ControlError> {
     let info = self.runs.find_info(id).await?;
-    // Firecracker writes the guest's serial console here.
-    let path = vm::console(&self.run_dir(&info.id));
+    // The actor's runtime writes its console here (Firecracker: the guest's
+    // serial console).
+    let path = runtime::log(&self.run_dir(&info.id));
     let live = self.runs.exact(&info.id).filter(|run| follow && run.state.get() == RunState::Running);
     let Some(run) = live else {
       // The output so far: a run that ended writes nothing more.

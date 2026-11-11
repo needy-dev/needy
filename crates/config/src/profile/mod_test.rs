@@ -25,6 +25,7 @@ fn secs(d: Option<crate::value::Duration>) -> Option<u64> {
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
+  runtime: firecracker
   recipe: gce-e2-standard-4
   limits: { single_process: true, self_replace: true }
   command: opencode run hello
@@ -93,6 +94,7 @@ fn loads_every_section() {
 
   assert_eq!(p.user.home(), "/home/agent");
   assert_eq!(p.base_dir, Path::new("/base"));
+  assert_eq!(p.actor.runtime, Runtime::Firecracker);
   assert_eq!(p.actor.recipe.as_deref(), Some("gce-e2-standard-4"));
   assert!(p.actor.limits.single_process);
   assert_eq!(&*p.actor.command, ["opencode", "run", "hello"]);
@@ -169,8 +171,8 @@ fn loads_every_section() {
 }
 
 #[test]
-fn an_empty_profile_has_the_defaults() {
-  let p = load_text("# nothing yet\n").unwrap();
+fn a_profile_that_names_only_its_actor_runtime_has_the_defaults() {
+  let p = load_text("actor: { runtime: firecracker }\n").unwrap();
 
   assert_eq!(p.user.name, "agent");
   assert_eq!((p.user.uid, p.user.gid), (1000, 1000));
@@ -181,7 +183,7 @@ fn an_empty_profile_has_the_defaults() {
 
 #[test]
 fn executor_defaults() {
-  let p = load_text("executors: { build: {} }").unwrap();
+  let p = load_text("actor: { runtime: firecracker }\nexecutors: { build: {} }").unwrap();
 
   let build = &p.executors["build"];
   assert_eq!(build.runner, None);
@@ -192,7 +194,7 @@ fn executor_defaults() {
 
 #[test]
 fn a_file_profile_resolves_against_its_directory() {
-  let dir = files(&[("team/profile.yaml", "user: { name: dev }")]);
+  let dir = files(&[("team/profile.yaml", "user: { name: dev }\nactor: { runtime: firecracker }")]);
 
   let p = load(&Source::file(dir.path().join("team/profile.yaml"))).unwrap();
 
@@ -217,6 +219,7 @@ fn extends_merges_maps_and_replaces_scalars_and_lists() {
       r#"
 default_executor: build
 actor:
+  runtime: firecracker
   command: [sh, -c, "echo base"]
   network: { allow: [a.example.com], upstream: { model.needy: "http://127.0.0.1:1" } }
 executors:
@@ -279,7 +282,7 @@ files:
 #[test]
 fn a_null_in_the_child_removes_the_parent_value() {
   let dir = files(&[
-    ("base.yaml", "default_executor: build\n"),
+    ("base.yaml", "actor: { runtime: firecracker }\ndefault_executor: build\n"),
     ("child.yaml", "extends: base.yaml\ndefault_executor: ~\n"),
   ]);
 
@@ -293,7 +296,7 @@ fn extends_resolves_against_the_extending_file() {
   let dir = files(&[
     ("a/child.yaml", "extends: ../b/middle.yaml\n"),
     ("b/middle.yaml", "extends: base.yaml\nuser: { uid: 1001 }\n"),
-    ("b/base.yaml", "user: { name: dev, uid: 1, gid: 7 }\n"),
+    ("b/base.yaml", "user: { name: dev, uid: 1, gid: 7 }\nactor: { runtime: firecracker }\n"),
   ]);
 
   let p = load(&Source::file(dir.path().join("a/child.yaml"))).unwrap();
@@ -304,7 +307,7 @@ fn extends_resolves_against_the_extending_file() {
 
 #[test]
 fn text_extends_resolves_against_its_base_dir() {
-  let dir = files(&[("base.yaml", "user: { name: dev }\n")]);
+  let dir = files(&[("base.yaml", "user: { name: dev }\nactor: { runtime: firecracker }\n")]);
 
   let p = load(&Source::text("extends: base.yaml\n", dir.path())).unwrap();
 
@@ -419,7 +422,10 @@ fn yaml_syntax_errors_name_the_line() {
 
 #[test]
 fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
-  let p = load_text("user: { name: dev }\nfiles: { out: { mode: mirror-out, from: \"executor:b:~\", to: \"host:~/out\" } }").unwrap();
+  let p = load_text(
+    "user: { name: dev }\nactor: { runtime: firecracker }\nfiles: { out: { mode: mirror-out, from: \"executor:b:~\", to: \"host:~/out\" } }",
+  )
+  .unwrap();
 
   assert_eq!(
     p.files.mappings["out"].from,
@@ -435,7 +441,7 @@ fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
 
 #[test]
 fn trace_defaults_to_sqlite_and_jsonl_without_timing() {
-  let p = load_text("# nothing yet\n").unwrap();
+  let p = load_text("actor: { runtime: firecracker }\n").unwrap();
 
   assert_eq!(p.trace.sinks, [TraceSink::Sqlite, TraceSink::Jsonl]);
   assert!(!p.trace.timing);
@@ -443,11 +449,11 @@ fn trace_defaults_to_sqlite_and_jsonl_without_timing() {
 
 #[test]
 fn trace_selects_sinks_and_timing() {
-  let p = load_text("trace: { sinks: [jsonl], timing: true }\n").unwrap();
+  let p = load_text("actor: { runtime: firecracker }\ntrace: { sinks: [jsonl], timing: true }\n").unwrap();
 
   assert_eq!(p.trace.sinks, [TraceSink::Jsonl]);
   assert!(p.trace.timing);
-  assert!(load_text("trace: { sinks: [] }\n").unwrap().trace.sinks.is_empty());
+  assert!(load_text("actor: { runtime: firecracker }\ntrace: { sinks: [] }\n").unwrap().trace.sinks.is_empty());
   let err = load_text("trace: { sinks: [otel] }\n").unwrap_err().to_string();
   assert!(err.contains("trace.sinks[0]: unknown variant `otel`, expected `sqlite` or `jsonl`"), "{err}");
 }
@@ -469,7 +475,7 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   let dir = files(&[
     (
       "base.yaml",
-      "executors:\n  here: { provider: native }\n  box: { provider: docker, docker: { mounts: [{ type: bind, source: cache, target: /c }, { type: volume, source: v, target: /v }] } }\n",
+      "actor: { runtime: firecracker }\nexecutors:\n  here: { provider: native }\n  box: { provider: docker, docker: { mounts: [{ type: bind, source: cache, target: /c }, { type: volume, source: v, target: /v }] } }\n",
     ),
     (
       "p/profile.yaml",
@@ -496,8 +502,8 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
 fn a_resolved_profile_carries_its_recipe_file_but_not_a_built_in_one() {
   let dir = files(&[
     ("r.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\nos: { hostname: h1 }\nnetwork: { metadata: { file: meta.yaml } }\n"),
-    ("file.yaml", "actor: { recipe: r.recipe.yaml }\n"),
-    ("builtin.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n"),
+    ("file.yaml", "actor: { runtime: firecracker, recipe: r.recipe.yaml }\n"),
+    ("builtin.yaml", "actor: { runtime: firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n"),
   ]);
 
   let from_file = resolve(&Source::file(dir.path().join("file.yaml"))).unwrap();
@@ -511,17 +517,31 @@ fn a_resolved_profile_carries_its_recipe_file_but_not_a_built_in_one() {
 
 #[test]
 fn the_actor_selects_a_runner_by_name_or_labels() {
-  let p = load_text("actor: { runner: kvm }").unwrap();
+  let p = load_text("actor: { runtime: firecracker, runner: kvm }").unwrap();
   assert_eq!(p.actor.runner, Some(RunnerSelector::Name("kvm".into())));
 
-  let p = load_text("actor: { runner: { labels: [kvm] } }").unwrap();
+  let p = load_text("actor: { runtime: firecracker, runner: { labels: [kvm] } }").unwrap();
   let kvm = LabelMatch {
     key: "kvm".into(),
     value: None,
   };
   assert_eq!(p.actor.runner, Some(RunnerSelector::Labels(vec![kvm])));
 
-  assert_eq!(load_text("{}").unwrap().actor.runner, None);
+  assert_eq!(load_text("actor: { runtime: firecracker }").unwrap().actor.runner, None);
+}
+
+// needy never chooses an actor's isolation for the profile: there is no
+// default runtime, and a profile without one does not load.
+#[test]
+fn the_actor_runtime_is_required() {
+  let err = load_text("user: { name: dev }\n").unwrap_err().to_string();
+  assert!(err.contains("missing field `actor`"), "{err}");
+
+  let err = load_text("actor: { command: [sh] }\n").unwrap_err().to_string();
+  assert!(err.contains("actor: missing field `runtime`"), "{err}");
+
+  let err = load_text("actor: { runtime: qemu }\n").unwrap_err().to_string();
+  assert!(err.contains("actor.runtime: unknown variant `qemu`, expected `firecracker` or `container`"), "{err}");
 }
 
 #[test]
@@ -591,6 +611,7 @@ fn on_full_new_is_refused_naming_wait_and_reject() {
 fn docker_run_options_are_typed_fields() {
   let p = load_text(
     r#"
+actor: { runtime: firecracker }
 executors:
   build:
     provider: docker
@@ -669,7 +690,7 @@ executors:
 #[test]
 fn gpus_are_all_a_count_or_device_ids() {
   let gpus = |text: &str| {
-    load_text(&format!("executors: {{ build: {{ provider: docker, docker: {{ gpus: {text} }} }} }}"))
+    load_text(&format!("actor: {{ runtime: firecracker }}\nexecutors: {{ build: {{ provider: docker, docker: {{ gpus: {text} }} }} }}"))
       .map(|p| p.executors["build"].docker.clone().unwrap().gpus.unwrap())
       .map_err(|e| e.to_string())
   };

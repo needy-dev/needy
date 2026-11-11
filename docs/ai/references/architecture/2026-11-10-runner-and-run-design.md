@@ -453,8 +453,12 @@ CPU, or the control host's own. A runner that reported no host yet is a
 warning, and the recipe's host checks are skipped. Since 2026-11-11 (owner
 decision) an actor whose host has no usable KVM is an error naming the host
 (`on the control host: …`, `on runner NAME (the control host): …`): the
-check probes the KVM device as `run create` does. A profile that writes no
-`actor:` is not checked for KVM. The CLI prints the
+check probes the KVM device as `run create` does, through the actor's
+runtime (`ActorRuntime::check_host`). A profile that wrote no `actor:` was
+not checked for KVM; since `actor.runtime` became required (slice 1 of the
+[container actor runtime](2026-11-10-container-actor-runtime-design.md)),
+such a profile no longer loads. REVIEW: the two owner decisions of
+2026-11-11 conflict here and need the owner's call. The CLI prints the
 placements, the control plane's findings, the recipe summary (which does
 not depend on the host) and the `--cmd` decisions, and exits 1 on an error.
 `needy profile check --local` checks offline against this machine's CPU and

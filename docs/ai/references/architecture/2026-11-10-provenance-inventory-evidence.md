@@ -125,8 +125,8 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | binfmt_needy ordering and interpreter swap | `images/kernel/binfmt_needy.c` | `K/fs/binfmt_script.c#L121-L138`, `K/fs/exec.c#L91-L99`, `K/fs/binfmt_elf.c#L275` | kernel binfmt-misc admin guide 6.18 |
 | Firecracker patch base and hunks | `images/firecracker/needy.patch` | FC v1.17.0, per-hunk upstream lines | release v1.17.0 |
 | SMBIOS structures in the patch | `images/firecracker/needy.patch` | DSP0134 3.7.0 Tables 2, 6-9, 11, 12, 14, 15, 17-19 | as left |
-| vsock host CID 2, guest CID 3 | `crates/core-actor/src/host/vm.rs`, `crates/core-actor/src/guest/mod.rs`, `crates/core-actor/src/guest/init/network.rs` | `K/include/uapi/linux/vm_sockets.h#L126-L131` | `FC/docs/vsock.md#L114-L126` |
-| Guest boot arguments | `crates/core-actor/src/host/vm.rs` | `FC/docs/getting-started.md#L260`, `FC/FAQ.md#L181-L204` | kernel-parameters 6.18 |
+| vsock host CID 2, guest CID 3 | `crates/core-actor/src/host/firecracker.rs`, `crates/core-actor/src/guest/mod.rs`, `crates/core-actor/src/guest/init/network.rs` | `K/include/uapi/linux/vm_sockets.h#L126-L131` | `FC/docs/vsock.md#L114-L126` |
+| Guest boot arguments | `crates/core-actor/src/host/firecracker.rs` | `FC/docs/getting-started.md#L260`, `FC/FAQ.md#L181-L204` | kernel-parameters 6.18 |
 | `vm.memfd_noexec = 2` | `crates/core-actor/src/guest/init/mod.rs` | `K/include/linux/pid_namespace.h#L21-L23`, `K/mm/memfd.c#L345-L366` | `K/Documentation/userspace-api/mfd_noexec.rst` |
 | `timens_offsets` format | `crates/core-actor/src/guest/init/identity.rs` | `K/fs/proc/base.c#L1671-L1684`, `K/kernel/time/namespace.c#L383-L461` | time_namespaces(7) |
 | `/sys/module/.../parameters` | `crates/core-actor/src/guest/init/identity.rs` | `K/Documentation/ABI/stable/sysfs-module` | as left |

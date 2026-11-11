@@ -7,6 +7,7 @@ fn profile(files: &str) -> String {
   format!(
     r#"
 user: {{ name: agent, uid: 1000, gid: 1000 }}
+actor: {{ runtime: firecracker }}
 executors:
   here: {{ provider: native }}
 commands:

@@ -4,6 +4,7 @@ use needy_core::intercept::ExecContext;
 use crate::testing::{self, new_run};
 
 const PROFILE: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here:
@@ -96,6 +97,7 @@ async fn a_denied_command_is_refused_with_the_rules_message() {
 #[tokio::test]
 async fn an_under_rule_matches_the_ancestry_decide_carries() {
   const UNDER: &str = r#"
+actor: { runtime: firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { provider: native }

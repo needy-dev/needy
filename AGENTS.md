@@ -27,10 +27,12 @@ Dependencies point downward; a crate never depends on one above it.
   or a run's `TaskTracker`. Mechanisms live below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
   is the in-guest init and exec-routing proxy, on `nix`, logging to the
-  console. `host` runs next to the VM: `detect` reads this machine's CPU,
-  `vm` builds the Firecracker configuration from a compiled recipe and owns
-  the Firecracker process, and `gateway` is the actor gateway on the `net.*`
-  interceptors.
+  console. `host` runs next to the actor: `detect` reads this machine's CPU,
+  `runtime` is the `ActorRuntime` trait (start, wait, stop, and the guest,
+  gateway and terminal channels the daemon serves or dials), `firecracker`
+  implements it: it builds the Firecracker configuration from a compiled
+  recipe and owns the Firecracker process, and `gateway` is the actor gateway
+  on the `net.*` interceptors.
 - `crates/core-executor` (`needy-core-executor`): where commands run.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is

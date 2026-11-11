@@ -16,7 +16,7 @@
 //! reports by then are marked lost.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -189,7 +189,11 @@ impl Daemon {
           }
         }
       }
-      actor::remove_sockets(&self.run_dir(&record.id));
+      // The run's profile names its actor's runtime, whose sockets these are.
+      match needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), PathBuf::new())) {
+        Ok(profile) => actor::remove_sockets(self, profile.actor.runtime, &self.run_dir(&record.id)),
+        Err(e) => tracing::warn!("run {}: cannot read its profile to remove its actor's sockets: {e:#}", record.id),
+      }
       record.state = if before == RunState::Stopping {
         RunState::Stopped
       } else {
@@ -298,6 +302,9 @@ impl Daemon {
 // NOTICE: the PID is checked against the process's command line, which
 // names the run's `vm.json`, so a PID another process took since is left
 // alone.
+// TODO(container-runtime): this ends a `firecracker` actor only; ending a
+// leftover container actor, chosen by the record's `runtime`, comes with
+// slice 2 of the container actor runtime design.
 async fn end_leftover_vm(instance: &InstanceRecord) -> InstanceState {
   use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal, System, UpdateKind};
   let Some(pid) = instance.pid.and_then(|pid| u32::try_from(pid).ok()) else {

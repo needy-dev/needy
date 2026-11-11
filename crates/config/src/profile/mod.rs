@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub use actor::{Actor, Limits};
+pub use actor::{Actor, Limits, Runtime};
 pub use chaos::{Chaos, Fault, FaultKind, Readings};
 pub use executor::{Cpus, Device, Docker, DockerBuild, Executor, Gpus, MemorySwap, Mount, OnFull, Provider, Ulimit};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
@@ -27,25 +27,39 @@ pub use trace::{Trace, TraceSink};
 use crate::{Error, Kind, Source, merge, source};
 
 /// One run: machines, routing rules, networks, files and chaos.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+// NOTICE: no container-level `#[serde(default)]`: `actor` is required, since
+// its `runtime` is (see `Actor`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
+  #[serde(default)]
   pub user: User,
   pub actor: Actor,
+  #[serde(default)]
   pub executors: BTreeMap<String, Executor>,
+  #[serde(default)]
   pub executor_network: NetworkPolicy,
   /// Named blocks of actions that rules reuse with `use:`.
+  #[serde(default)]
   pub presets: BTreeMap<String, Actions>,
   /// Every rule that matches applies, in order.
+  #[serde(default)]
   pub commands: Vec<Rule>,
+  #[serde(default)]
   pub files: Files,
   /// The mappings this run uses; empty means all of them.
+  #[serde(default)]
   pub run_files: Vec<String>,
+  #[serde(default)]
   pub chaos: Chaos,
+  #[serde(default)]
   pub resolvers: Vec<Resolver>,
+  #[serde(default)]
   pub unknown: UnknownPolicy,
   /// Where commands that no rule places run; the actor when absent.
+  #[serde(default)]
   pub default_executor: Option<String>,
+  #[serde(default)]
   pub trace: Trace,
   /// The directory that relative paths in the profile resolve against.
   #[serde(skip)]

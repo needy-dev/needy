@@ -1,5 +1,6 @@
-//! The actor's Firecracker VM: its configuration from a compiled recipe, and
-//! a handle that owns the Firecracker process.
+//! The `firecracker` actor runtime: the actor's Firecracker VM, its
+//! configuration from a compiled recipe, and a handle that owns the
+//! Firecracker process.
 //!
 //! A VM keeps its files in one directory: `vm.json` (the configuration),
 //! `console.log` (the guest's serial console) and `v.sock` (the vsock device,
@@ -12,6 +13,18 @@ use std::time::Duration;
 
 use needy_core::recipe::{CompiledRecipe, VmIdentity};
 use serde_json::json;
+
+pub use super::runtime::Error;
+use super::runtime::{ActorRuntime, Channels, Endpoint, RunningActor, Terminal};
+
+/// Ports the actor reaches on the host over vsock.
+// NOTICE: needy's own choices; the guest's init dials `GUEST_PORT` as
+// `vsock://2:7000` in `crates/core-actor/src/guest/mod.rs`.
+pub const GUEST_PORT: u32 = 7000;
+pub const GATEWAY_PORT: u32 = 7001;
+/// The port the guest serves `ProcessService` on for a driving program on
+/// a terminal; the host connects to it.
+pub const PROCESS_PORT: u32 = 7002;
 
 /// The guest's vsock context ID; the host is always 2.
 // Source: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131 (`VMADDR_CID_HOST`
@@ -29,34 +42,6 @@ const GUEST_CID: u32 = 3;
 // https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/vmm_config/boot_source.rs#L9-L20.
 // Reference: https://docs.kernel.org/6.18/admin-guide/kernel-parameters.html
 const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4";
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-  #[error("actor image is missing {}; run `needy build`", .0.display())]
-  Missing(PathBuf),
-  #[error("cannot write {}", path.display())]
-  Write {
-    path: PathBuf,
-    #[source]
-    source: std::io::Error,
-  },
-  #[error("cannot start firecracker")]
-  Spawn(#[source] std::io::Error),
-  // NOTICE: the OS error is part of the message and not its `source`, so a
-  // caller that prints the error with its causes says it once.
-  // TODO(container-actor): a runtime that needs no KVM is designed in
-  // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`;
-  // the message names it once it ships. The message itself names no
-  // repository path: a user with only the binary cannot follow one.
-  #[error(
-    "this host has no usable KVM: cannot open {}: {error}; every run needs it for its Firecracker actor. Without KVM, commands outside runs still work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
-    path.display()
-  )]
-  Kvm {
-    path: PathBuf,
-    error: std::io::Error,
-  },
-}
 
 /// The KVM device Firecracker opens.
 // Source: https://github.com/rust-vmm/kvm/blob/b4c9ed8df95a9e10a68f50f5ef5e7d04108759ba/kvm-ioctls/src/ioctls/system.rs#L97-L128
@@ -115,9 +100,49 @@ pub fn host_port(dir: &Path, port: u32) -> PathBuf {
   PathBuf::from(name)
 }
 
-/// The guest's serial console, as Firecracker writes it.
+/// The guest's serial console, as Firecracker writes it: the actor's log.
 pub fn console(dir: &Path) -> PathBuf {
-  dir.join("console.log")
+  super::runtime::log(dir)
+}
+
+/// The `firecracker` runtime: actors in microVMs booted from `image`, on
+/// the KVM device `kvm`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Firecracker {
+  pub image: Image,
+  /// [`KVM`] outside tests.
+  pub kvm: PathBuf,
+}
+
+impl ActorRuntime for Firecracker {
+  fn name(&self) -> &'static str {
+    "firecracker"
+  }
+
+  fn check_host(&self) -> Result<(), Error> {
+    check_kvm(&self.kvm)
+  }
+
+  fn channels(&self, dir: &Path) -> Channels {
+    let guest = host_port(dir, GUEST_PORT);
+    let gateway = host_port(dir, GATEWAY_PORT);
+    Channels {
+      sockets: vec![vsock(dir), guest.clone(), gateway.clone()],
+      guest: Endpoint::Unix(guest),
+      gateway: Endpoint::Unix(gateway),
+      terminal: Terminal::FirecrackerVsock {
+        device: vsock(dir),
+        port: PROCESS_PORT,
+      },
+      gateway_port: GATEWAY_PORT,
+      process_port: PROCESS_PORT,
+    }
+  }
+
+  fn start(&self, dir: &Path, recipe: Option<&CompiledRecipe>) -> Result<Box<dyn RunningActor>, Error> {
+    let launch = Launch::new(&self.image, dir, recipe);
+    Ok(Box::new(Vm::start(&launch)?))
+  }
 }
 
 /// How one VM starts: Firecracker's configuration, arguments and
@@ -242,6 +267,8 @@ fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
 pub struct Vm {
   child: tokio::process::Child,
   pid: u32,
+  vcpus: u32,
+  mem_mib: u32,
 }
 
 impl Vm {
@@ -271,22 +298,38 @@ impl Vm {
       .map_err(Error::Spawn)?;
     // NOTICE: `id` is `None` only after the child was waited for.
     let pid = child.id().unwrap_or(0);
-    Ok(Vm { child, pid })
+    Ok(Vm {
+      child,
+      pid,
+      vcpus: launch.vcpus,
+      mem_mib: launch.mem_mib,
+    })
   }
+}
 
+#[async_trait::async_trait]
+impl RunningActor for Vm {
   /// The Firecracker process's ID.
-  pub fn pid(&self) -> u32 {
+  fn pid(&self) -> u32 {
     self.pid
   }
 
+  fn vcpus(&self) -> u32 {
+    self.vcpus
+  }
+
+  fn mem_mib(&self) -> u32 {
+    self.mem_mib
+  }
+
   /// Waits until Firecracker exits.
-  pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+  async fn wait(&mut self) -> std::io::Result<ExitStatus> {
     self.child.wait().await
   }
 
   /// Stops Firecracker and waits until it is gone: `SIGTERM` first, then
   /// `SIGKILL` if it is still running after `grace`.
-  pub async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
+  async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
     // Signalling a process that was already waited for could reach another
     // process that took its ID.
     if let Some(status) = self.child.try_wait()? {
@@ -316,5 +359,5 @@ impl Vm {
 }
 
 #[cfg(all(test, unix))]
-#[path = "vm_test.rs"]
+#[path = "firecracker_test.rs"]
 mod tests;

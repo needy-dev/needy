@@ -130,6 +130,7 @@ fn stderr(output: &Output) -> String {
 /// Runs every command on this machine, refuses `rm` and fails `curl`.
 const NATIVE_PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
+actor: { runtime: firecracker }
 executors:
   here: { provider: native }
 commands:
@@ -143,7 +144,8 @@ chaos:
 
 /// A profile the daemon refuses when it creates the run: its default
 /// executor does not exist.
-const BROKEN_PROFILE: &str = "user: { name: agent, uid: 1000, gid: 1000 }\ndefault_executor: missing-executor\n";
+const BROKEN_PROFILE: &str =
+  "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runtime: firecracker }\ndefault_executor: missing-executor\n";
 
 fn create_run(home: &Home, profile: &str) -> String {
   let profile = home.write("profile.yaml", profile);
@@ -324,7 +326,10 @@ fn run_create_names_a_missing_profile() {
 fn run_create_refuses_a_profile_with_errors() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let profile = home.write("profile.yaml", "executors: { here: { provider: native } }\ncommands: [{ match: \"**\", to: hier }]\n");
+  let profile = home.write(
+    "profile.yaml",
+    "actor: { runtime: firecracker }\nexecutors: { here: { provider: native } }\ncommands: [{ match: \"**\", to: hier }]\n",
+  );
 
   let output = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
 
@@ -589,7 +594,7 @@ fn profile_check_reports_unknown_names_and_exits_1() {
   let home = Home::new();
   let profile = home.write(
     "profile.yaml",
-    "executors: { build: {} }\ncommands:\n  - { match: \"git **\", to: biuld }\n  - { match: \"make **\", use: [fast] }\n",
+    "actor: { runtime: firecracker }\nexecutors: { build: {} }\ncommands:\n  - { match: \"git **\", to: biuld }\n  - { match: \"make **\", use: [fast] }\n",
   );
 
   let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
@@ -605,7 +610,10 @@ fn profile_check_reports_unknown_names_and_exits_1() {
 #[test]
 fn profile_check_rejects_flattened_captures() {
   let home = Home::new();
-  let profile = home.write("profile.yaml", "commands: [{ match: \"node {script}\", when: { script: \"**/cli.js\" }, to: actor }]\n");
+  let profile = home.write(
+    "profile.yaml",
+    "actor: { runtime: firecracker }\ncommands: [{ match: \"node {script}\", when: { script: \"**/cli.js\" }, to: actor }]\n",
+  );
 
   let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
 
@@ -618,7 +626,7 @@ fn profile_check_rejects_flattened_captures() {
 #[test]
 fn profile_check_compiles_a_built_in_recipe() {
   let home = Home::new();
-  let profile = home.write("profile.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n");
+  let profile = home.write("profile.yaml", "actor: { runtime: firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n");
 
   let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 
@@ -641,7 +649,7 @@ fn profile_check_compiles_a_built_in_recipe() {
 #[test]
 fn profile_check_says_which_recipe_values_each_run_generates() {
   let home = Home::new();
-  let profile = home.write("profile.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n");
+  let profile = home.write("profile.yaml", "actor: { runtime: firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n");
 
   let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 
@@ -672,7 +680,8 @@ fn profile_check_asks_the_control_plane_where_the_profile_would_run() {
 fn profile_check_through_the_control_plane_names_a_runner_nobody_joined_as_and_exits_1() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
-  let profile = home.write("profile.yaml", "executors: { mac: { runner: mac } }\nactor: { runner: { labels: [kvm] } }\n");
+  let profile =
+    home.write("profile.yaml", "executors: { mac: { runner: mac } }\nactor: { runtime: firecracker, runner: { labels: [kvm] } }\n");
 
   let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
 
@@ -784,7 +793,7 @@ fn an_immediately_exiting_interactive_actor_returns_its_output_and_exit() {
     assert!(Instant::now() < deadline, "the daemon did not listen");
     std::thread::sleep(Duration::from_millis(20));
   }
-  let profile = home.write("profile.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\n");
+  let profile = home.write("profile.yaml", "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runtime: firecracker }\n");
   let mut client = home
     .needy()
     .args(["run", "create", "-it", "--profile"])
@@ -1602,7 +1611,7 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   std::fs::create_dir_all(home.path().join("p")).unwrap();
   home.write("p/base.yaml", NATIVE_PROFILE);
   home.write("p/gce.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\n");
-  let profile = home.write("p/profile.yaml", "extends: base.yaml\nactor: { recipe: gce.recipe.yaml }\n");
+  let profile = home.write("p/profile.yaml", "extends: base.yaml\nactor: { runtime: firecracker, recipe: gce.recipe.yaml }\n");
 
   let output = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
 
@@ -2322,6 +2331,7 @@ fn exec_names_a_runner_or_a_run_not_both() {
 
 /// A run whose commands all go to runner `mac`.
 const RUNNER_PROFILE: &str = r#"
+actor: { runtime: firecracker }
 executors:
   mac: { runner: mac }
 commands:

@@ -1,5 +1,7 @@
-//! The actor's host side: what runs next to the VM on the daemon's machine.
+//! The actor's host side: what runs next to the actor on the daemon's
+//! machine.
 
 pub mod detect;
+pub mod firecracker;
 pub mod gateway;
-pub mod vm;
+pub mod runtime;

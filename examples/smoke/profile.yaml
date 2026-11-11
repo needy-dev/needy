@@ -3,6 +3,7 @@
 # Compute Engine VM.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
+  runtime: firecracker
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh

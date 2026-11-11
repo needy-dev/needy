@@ -134,7 +134,7 @@ impl Daemon {
         run.id
       )));
     }
-    let instance = run.terminal.get_or_try_init(|| actor::terminal(&run)).await?.clone();
+    let instance = run.terminal.get_or_try_init(|| actor::terminal(self, &run)).await?.clone();
     let listed = instance.handle.executor.list_processes(ListProcessesRequest::default()).await.map_err(|s| relayed(s.into()))?;
     let Some(process) = listed.processes.into_iter().find(|p| p.tty) else {
       return Err(ControlError::Unavailable(format!("the actor of run {} serves no terminal", run.id)));
