@@ -338,31 +338,7 @@ impl RunningActor for Vm {
   /// Stops Firecracker and waits until it is gone: `SIGTERM` first, then
   /// `SIGKILL` if it is still running after `grace`.
   async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-    // Signalling a process that was already waited for could reach another
-    // process that took its ID.
-    if let Some(status) = self.child.try_wait()? {
-      return Ok(status);
-    }
-    #[cfg(unix)]
-    {
-      use nix::sys::signal::{Signal, kill};
-      use nix::unistd::Pid;
-      match kill(Pid::from_raw(self.pid as i32), Signal::SIGTERM) {
-        Ok(()) => {
-          if let Ok(waited) = tokio::time::timeout(grace, self.child.wait()).await {
-            return waited;
-          }
-          tracing::warn!("firecracker {} did not stop within {grace:?} of SIGTERM; killing it", self.pid);
-        }
-        // It exited between `try_wait` and the signal; `wait` below reaps it.
-        Err(nix::errno::Errno::ESRCH) => {}
-        Err(e) => return Err(e.into()),
-      }
-    }
-    #[cfg(not(unix))]
-    let _ = grace;
-    self.child.start_kill()?;
-    self.child.wait().await
+    super::runtime::stop_process(&mut self.child, "firecracker", grace).await
   }
 }
 

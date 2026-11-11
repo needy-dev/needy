@@ -9,3 +9,4 @@ pub mod gateway;
 #[cfg(unix)]
 pub mod identity;
 pub mod runtime;
+pub mod vz;

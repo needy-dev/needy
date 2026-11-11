@@ -231,6 +231,37 @@ pub trait ActorRuntime: Send + Sync {
   }
 }
 
+/// Stops `child`, the host process `name` that runs a VM, and waits until it
+/// is gone: `SIGTERM` first, then `SIGKILL` if it is still running after
+/// `grace`.
+pub(crate) async fn stop_process(child: &mut tokio::process::Child, name: &str, grace: Duration) -> std::io::Result<ExitStatus> {
+  // Signalling a process that was already waited for could reach another
+  // process that took its ID.
+  if let Some(status) = child.try_wait()? {
+    return Ok(status);
+  }
+  #[cfg(unix)]
+  if let Some(pid) = child.id() {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+    match kill(Pid::from_raw(pid as i32), Signal::SIGTERM) {
+      Ok(()) => {
+        if let Ok(waited) = tokio::time::timeout(grace, child.wait()).await {
+          return waited;
+        }
+        tracing::warn!("{name} {pid} did not stop within {grace:?} of SIGTERM; killing it");
+      }
+      // It exited between `try_wait` and the signal; `wait` below reaps it.
+      Err(nix::errno::Errno::ESRCH) => {}
+      Err(e) => return Err(e.into()),
+    }
+  }
+  #[cfg(not(unix))]
+  let _ = (name, grace);
+  child.start_kill()?;
+  child.wait().await
+}
+
 /// A started actor. The handle owns it: the actor ends on its own after its
 /// driving program, or when the handle stops it.
 #[async_trait::async_trait]
