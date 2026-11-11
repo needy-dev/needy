@@ -209,7 +209,28 @@ pub struct JoinedRunner {
   _stop: DropGuard,
 }
 
-/// Joins a runner `name` with `roles` and `labels` to `served` through
+/// Capabilities as `runner ls` writes them: `actor(firecracker)
+/// executor(docker,native)`.
+pub fn capabilities(text: &str) -> needy_core::types::Capabilities {
+  use needy_core::types::{ActorRuntime, ExecutorProvider};
+  let mut capabilities = needy_core::types::Capabilities::default();
+  for role in text.split_whitespace() {
+    let (role, kinds) = role.trim_end_matches(')').split_once('(').expect("ROLE(KIND,...)");
+    for kind in kinds.split(',') {
+      match (role, kind) {
+        ("actor", "firecracker") => capabilities.actor.insert(ActorRuntime::Firecracker),
+        ("actor", "container") => capabilities.actor.insert(ActorRuntime::Container),
+        ("executor", "native") => capabilities.executor.insert(ExecutorProvider::Native),
+        ("executor", "docker") => capabilities.executor.insert(ExecutorProvider::Docker),
+        other => panic!("unknown capability {other:?}"),
+      };
+    }
+  }
+  capabilities
+}
+
+/// Joins a runner `name` with `capabilities` (as [`capabilities`] reads
+/// them) and `labels` to `served` through
 /// `operator` (a client holding the control token), starts it and waits
 /// until its control stream is open and its first heartbeat reported its
 /// host.
@@ -217,7 +238,7 @@ pub async fn join_runner(
   served: &Served,
   operator: &needy_api_client::Client,
   name: &str,
-  roles: &[needy_core::types::RunnerRole],
+  capabilities: &str,
   labels: &[(&str, &str)],
 ) -> JoinedRunner {
   let config = crate::runner::Config {
@@ -225,7 +246,7 @@ pub async fn join_runner(
     control: Some(served.endpoint.clone()),
     join_token: None,
     name: name.into(),
-    roles: roles.iter().copied().collect(),
+    capabilities: self::capabilities(capabilities),
     labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
     grace: crate::runner::DISCONNECT_GRACE,
   };

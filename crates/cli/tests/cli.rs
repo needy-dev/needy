@@ -680,7 +680,7 @@ fn profile_check_through_the_control_plane_names_a_runner_nobody_joined_as_and_e
   let text = stdout(&output);
   assert!(text.contains("\nactor: unresolved\n"), "{text}");
   assert!(text.contains("\nexecutors: mac (unresolved)\n"), "{text}");
-  assert!(text.contains("error: actor: no connected runner with the actor role has labels kvm; no runner has joined\n"), "{text}");
+  assert!(text.contains("error: actor: no connected runner with actor(firecracker) has labels kvm; no runner has joined\n"), "{text}");
   assert!(text.contains("error: executors.mac: no runner is named mac; no runner has joined\n"), "{text}");
 }
 
@@ -1848,7 +1848,19 @@ fn runner_ls_without_runners_prints_the_header() {
   let output = home.run(&["runner", "ls"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
-  assert_eq!(stdout(&output).split_whitespace().collect::<Vec<_>>(), ["NAME", "STATUS", "ROLES", "LABELS", "LAST", "SEEN"]);
+  assert_eq!(
+    stdout(&output).split_whitespace().collect::<Vec<_>>(),
+    [
+      "NAME",
+      "STATUS",
+      "CAPABILITIES",
+      "HOST",
+      "CPU",
+      "LABELS",
+      "LAST",
+      "SEEN"
+    ]
+  );
 }
 
 #[test]
@@ -1900,6 +1912,9 @@ fn spawn_runner(home: &Home, control: &Home, join_token: Option<&str>) -> Child 
   if let Some(token) = join_token {
     command.args(["--join-token-env", "NEEDY_TEST_JOIN_TOKEN"]).env("NEEDY_TEST_JOIN_TOKEN", token);
   }
+  // NOTICE: a Docker daemon nobody listens for, so the runner detects the
+  // same capabilities on a host with Docker as on one without.
+  command.env("DOCKER_HOST", format!("unix://{}", home.path().join("no-docker.sock").display()));
   command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
 }
 
@@ -1937,12 +1952,15 @@ fn a_runner_daemon_joins_restarts_without_its_join_token_and_ends_when_removed()
   // heartbeat after more than the three intervals that keep it online.
   let restarted =
     runner_when(&control, "mac", |r| r["status"] == "online" && r["last_seen_at_ms"].as_i64() > left["last_seen_at_ms"].as_i64());
+  let reported = runner_when(&control, "mac", |r| !r["host"].is_null());
   let rm = control.run(&["runner", "rm", "mac"]);
   let refused = exited(second);
 
   assert_eq!(joined["labels"]["os"], "test");
-  assert_eq!(joined["roles"], serde_json::json!(["executor"]));
+  assert_eq!(joined["capabilities"], serde_json::json!({"actor": [], "executor": ["native"]}));
   assert_eq!(restarted["labels"]["os"], "test");
+  assert_eq!(reported["host"]["os"], std::env::consts::OS);
+  assert_eq!(reported["host"]["arch"], std::env::consts::ARCH);
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
@@ -2118,6 +2136,59 @@ fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
   assert!(stderr(&late).contains("expired"), "{}", stderr(&late));
   assert_eq!(again.status.code(), Some(1));
   assert!(stderr(&again).contains("has no uses left"), "{}", stderr(&again));
+}
+
+/// `needy daemon --mode runner` for `mac` with `extra` arguments, run to
+/// its exit or until `control` lists it, then killed.
+fn runner_with(machine: &Home, control: &Home, extra: &[String]) -> Child {
+  let token = create_join_token(control, &[]);
+  let endpoint = format!("unix:{}", control.path().join("run").join("daemon.sock").display());
+  machine
+    .needy()
+    .args([
+      "daemon", "--mode", "runner", "--join", &endpoint, "--name", "mac",
+    ])
+    .args(extra)
+    .args(["--join-token-env", "NEEDY_TEST_JOIN_TOKEN"])
+    .env("NEEDY_TEST_JOIN_TOKEN", token)
+    .env("DOCKER_HOST", format!("unix://{}", machine.path().join("no-docker.sock").display()))
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap()
+}
+
+// A KVM device that opens and a complete actor image give the firecracker
+// runtime; only Linux runs Firecracker.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_runner_with_kvm_and_the_actor_image_detects_the_firecracker_runtime() {
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let machine = Home::new();
+
+  let runner = RunnerDaemon(runner_with(&machine, &control, &stand_in_actor(&machine)));
+  let joined = runner_when(&control, "mac", |r| r["status"] == "online" && !r["host"].is_null());
+  let table = control.run(&["runner", "ls"]);
+  drop(runner);
+
+  assert_eq!(joined["capabilities"], serde_json::json!({"actor": ["firecracker"], "executor": ["native"]}));
+  assert!(stdout(&table).contains("actor(firecracker) executor(native)"), "{}", stdout(&table));
+}
+
+#[test]
+fn a_runner_restricted_to_roles_this_machine_cannot_host_warns_and_does_not_start() {
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let machine = Home::new();
+  let no_kvm = machine.path().join("no-kvm").display().to_string();
+
+  let refused = exited(runner_with(&machine, &control, &["--roles".into(), "actor".into(), "--kvm".into(), no_kvm]));
+
+  assert_eq!(refused.status.code(), Some(1));
+  let text = stderr(&refused);
+  assert!(text.contains("--roles names actor, which this machine cannot host"), "{text}");
+  assert!(text.contains("this machine can host none of the roles --roles names"), "{text}");
 }
 
 /// A runner daemon, killed when dropped.

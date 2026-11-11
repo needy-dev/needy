@@ -413,6 +413,15 @@ fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Resu
   Ok(())
 }
 
+/// The OCI runtimes this machine's Docker daemon (`DOCKER_HOST`, else its
+/// default socket) has registered, such as `runc` and gVisor's `runsc`; an
+/// error when it does not answer within `wait`.
+pub async fn runtimes(wait: std::time::Duration) -> Result<BTreeSet<String>, Error> {
+  let docker = bollard::Docker::connect_with_defaults()?.with_timeout(wait);
+  let info = docker.info().await?;
+  Ok(info.runtimes.unwrap_or_default().into_keys().collect())
+}
+
 /// The Docker runtime on this machine's Docker daemon.
 pub struct Docker {
   docker: bollard::Docker,

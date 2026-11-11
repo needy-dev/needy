@@ -1,8 +1,8 @@
 use needy_api_client::Client;
 use needy_api_proto::v1::{ControlRequest, TaskRequest, control_response, exec_request, task_request};
 use needy_api_proto::v1::{
-  CreateJoinTokenRequest, HeartbeatRequest, JoinRequest, JoinTokenState, ListRunnersRequest, ListRunsRequest, RotateRunnerRequest,
-  RunnerRole, RunnerStatus,
+  CreateJoinTokenRequest, ExecutorProvider, HeartbeatRequest, JoinRequest, JoinTokenState, ListRunnersRequest, ListRunsRequest,
+  RotateRunnerRequest, RunnerCapabilities, RunnerRole, RunnerStatus,
 };
 use tonic::Code;
 
@@ -11,18 +11,25 @@ use crate::testing::{MAC_CREDENTIAL, REVOKED_CREDENTIAL, serve_with};
 
 const CONTROL_TOKEN: &str = "control-secret";
 
+fn native() -> Option<RunnerCapabilities> {
+  Some(RunnerCapabilities {
+    executor: vec![ExecutorProvider::Native as i32],
+    ..Default::default()
+  })
+}
+
 fn join() -> JoinRequest {
   JoinRequest {
     join_token: "needy-join.t1.secret".into(),
     name: "mac".into(),
-    roles: vec![RunnerRole::Executor as i32],
+    capabilities: native(),
     ..Default::default()
   }
 }
 
 fn heartbeat() -> HeartbeatRequest {
   HeartbeatRequest {
-    roles: vec![RunnerRole::Executor as i32],
+    capabilities: native(),
     ..Default::default()
   }
 }
@@ -67,16 +74,19 @@ async fn joining_needs_no_bearer_token_even_where_the_control_token_is_required(
 }
 
 #[tokio::test]
-async fn a_join_with_an_unspecified_role_is_invalid() {
+async fn a_join_with_an_unspecified_provider_is_invalid() {
   let served = serve_with(Caller::Operator, None).await;
   let request = JoinRequest {
-    roles: vec![RunnerRole::Unspecified as i32],
+    capabilities: Some(RunnerCapabilities {
+      executor: vec![ExecutorProvider::Unspecified as i32],
+      ..Default::default()
+    }),
     ..join()
   };
 
   let status = served.client.runners().join(request).await.unwrap_err();
 
-  assert_eq!((status.code(), status.message()), (Code::InvalidArgument, "the runner role is unspecified"));
+  assert_eq!((status.code(), status.message()), (Code::InvalidArgument, "the executor provider is unspecified"));
   assert!(served.fake.calls().is_empty());
 }
 
@@ -87,7 +97,7 @@ async fn a_heartbeat_with_a_runner_credential_names_that_runner_and_carries_a_ro
   let beat = with(&served.client, MAC_CREDENTIAL).runners().heartbeat(heartbeat()).await.unwrap().into_inner();
 
   assert_eq!(beat.credential, "needy-runner.mac.new");
-  assert_eq!(served.fake.calls(), ["heartbeat mac {Executor}"]);
+  assert_eq!(served.fake.calls(), ["heartbeat mac executor(native)"]);
 }
 
 #[tokio::test]
@@ -132,7 +142,7 @@ async fn an_operator_lists_rotates_and_removes_runners() {
   runners.clone().rotate_runner(RotateRunnerRequest { name: "mac".into() }).await.unwrap();
   runners.clone().remove_runner(needy_api_proto::v1::RemoveRunnerRequest { name: "mac".into() }).await.unwrap();
 
-  assert_eq!(listed[0].roles().collect::<Vec<_>>(), [RunnerRole::Executor]);
+  assert_eq!(listed[0].capabilities.as_ref().unwrap().executor().collect::<Vec<_>>(), [ExecutorProvider::Native]);
   assert_eq!(listed[0].labels["os"], "darwin");
   assert_eq!(served.fake.calls(), ["list runners", "rotate mac", "remove mac"]);
 }

@@ -2,10 +2,12 @@
 //!
 //! The rule is deterministic and leaves no choice to chance:
 //!
-//! - `runner: NAME` picks that runner. It must have joined, hold the role
-//!   (`actor` or `executor`) and be connected (its control stream open).
-//! - `runner: { labels: [...] }` picks the one connected runner that holds
-//!   the role and carries every label. None is an error naming every
+//! - `runner: NAME` picks that runner. It must have joined, have the
+//!   capability the instance needs (`actor(firecracker)` for an actor,
+//!   `executor(PROVIDER)` for an executor) and be connected (its control
+//!   stream open).
+//! - `runner: { labels: [...] }` picks the one connected runner that has the
+//!   capability and carries every label. None is an error naming every
 //!   candidate and why it does not fit; several are an error naming them.
 //!
 //! So the same profile against the same connected runners always lands on
@@ -16,12 +18,13 @@
 // decides how a run should pick, see the runners-and-runs design's open
 // questions.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+use std::fmt;
 
 use anyhow::Context as _;
 use needy_api_server::control::Placement;
 use needy_config::profile::{LabelMatch, Provider, RunnerSelector};
-use needy_core::types::RunnerRole;
+use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
 
 use crate::Daemon;
 use crate::pool::Site;
@@ -30,10 +33,63 @@ use crate::pool::Site;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
   pub name: String,
-  pub roles: BTreeSet<RunnerRole>,
+  /// As it last reported them.
+  pub capabilities: Capabilities,
   pub labels: BTreeMap<String, String>,
   /// Its control stream is open, so a task reaches it now.
   pub connected: bool,
+}
+
+/// What an instance needs of the runner it is placed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Need {
+  /// An actor, which runs in a Firecracker microVM.
+  // TODO(container-runtime): an actor on `actor(container)` once the
+  // container actor runtime is built, see
+  // docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md;
+  // until then a runner that reports only that runtime hosts no actor.
+  Actor,
+  /// An executor of this provider; `None` for a provider no runner reports
+  /// (`containerd`, `firecracker`, `k8s`), which needs the executor role
+  /// only and is refused when the run is created.
+  Executor(Option<ExecutorProvider>),
+}
+
+impl Need {
+  /// What an executor of `provider` needs.
+  pub fn executor(provider: Provider) -> Self {
+    Self::Executor(match provider {
+      Provider::Native => Some(ExecutorProvider::Native),
+      Provider::Docker => Some(ExecutorProvider::Docker),
+      Provider::Containerd | Provider::Firecracker | Provider::K8s => None,
+    })
+  }
+
+  fn role(self) -> RunnerRole {
+    match self {
+      Self::Actor => RunnerRole::Actor,
+      Self::Executor(_) => RunnerRole::Executor,
+    }
+  }
+
+  /// Whether a runner with `capabilities` can host the instance.
+  pub fn met_by(self, capabilities: &Capabilities) -> bool {
+    match self {
+      Self::Actor => capabilities.actor.contains(&ActorRuntime::Firecracker),
+      Self::Executor(Some(provider)) => capabilities.executor.contains(&provider),
+      Self::Executor(None) => !capabilities.executor.is_empty(),
+    }
+  }
+}
+
+impl fmt::Display for Need {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::Actor => write!(f, "actor({})", ActorRuntime::Firecracker),
+      Self::Executor(Some(provider)) => write!(f, "executor({provider})"),
+      Self::Executor(None) => f.write_str("the executor role"),
+    }
+  }
 }
 
 /// Why a selector names no runner.
@@ -41,27 +97,29 @@ pub struct Candidate {
 pub enum Unschedulable {
   #[error("no runner is named {name}; {}", joined(.known))]
   NoSuchRunner { name: String, known: Vec<String> },
-  #[error("runner {name} cannot host an {role}: its roles are {}", list_roles(.roles))]
-  LacksRole {
+  #[error("runner {name} cannot host {need}: it has {capabilities}; {}", list_able(*.need, .able))]
+  Lacks {
     name: String,
-    role: RunnerRole,
-    roles: BTreeSet<RunnerRole>,
+    need: Need,
+    capabilities: Capabilities,
+    /// The runners that have it.
+    able: Vec<String>,
   },
   #[error("runner {0} is not connected")]
   NotConnected(String),
-  #[error("no connected runner with the {role} role has labels {}; {}", list_labels(.labels), list_candidates(.candidates))]
+  #[error("no connected runner with {need} has labels {}; {}", list_labels(.labels), list_candidates(.candidates))]
   NoMatch {
-    role: RunnerRole,
+    need: Need,
     labels: Vec<LabelMatch>,
     /// Each runner and why it does not fit.
     candidates: Vec<(String, String)>,
   },
   #[error(
-    "labels {} fit {} connected runners with the {role} role: {}; name one with `runner: NAME` or add a label that tells them apart",
+    "labels {} fit {} connected runners with {need}: {}; name one with `runner: NAME` or add a label that tells them apart",
     list_labels(.labels), .matches.len(), .matches.join(", ")
   )]
   Ambiguous {
-    role: RunnerRole,
+    need: Need,
     labels: Vec<LabelMatch>,
     matches: Vec<String>,
   },
@@ -75,11 +133,12 @@ fn joined(known: &[String]) -> String {
   }
 }
 
-fn list_roles(roles: &BTreeSet<RunnerRole>) -> String {
-  if roles.is_empty() {
-    return "none".into();
+fn list_able(need: Need, able: &[String]) -> String {
+  if able.is_empty() {
+    format!("no runner has {need}")
+  } else {
+    format!("runners with {need}: {}", able.join(", "))
   }
-  roles.iter().map(|r| r.as_str()).collect::<Vec<_>>().join(", ")
 }
 
 fn list_labels(labels: &[LabelMatch]) -> String {
@@ -94,9 +153,9 @@ fn list_candidates(candidates: &[(String, String)]) -> String {
   format!("candidates: {}", listed.join(", "))
 }
 
-/// The runner `selector` names for an instance of `role`, by the rule in the
-/// module documentation.
-pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) -> Result<String, Unschedulable> {
+/// The runner `selector` names for an instance that needs `need`, by the
+/// rule in the module documentation.
+pub fn pick(selector: &RunnerSelector, need: Need, runners: &[Candidate]) -> Result<String, Unschedulable> {
   let mut runners: Vec<&Candidate> = runners.iter().collect();
   runners.sort_by(|a, b| a.name.cmp(&b.name));
   match selector {
@@ -107,11 +166,12 @@ pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) 
           known: runners.iter().map(|r| r.name.clone()).collect(),
         });
       };
-      if !runner.roles.contains(&role) {
-        return Err(Unschedulable::LacksRole {
+      if !need.met_by(&runner.capabilities) {
+        return Err(Unschedulable::Lacks {
           name: name.clone(),
-          role,
-          roles: runner.roles.clone(),
+          need,
+          capabilities: runner.capabilities.clone(),
+          able: runners.iter().filter(|r| need.met_by(&r.capabilities)).map(|r| r.name.clone()).collect(),
         });
       }
       if !runner.connected {
@@ -123,7 +183,7 @@ pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) 
       let mut matches = Vec::new();
       let mut misfits = Vec::new();
       for runner in runners {
-        match misfit(runner, role, wanted) {
+        match misfit(runner, need, wanted) {
           None => matches.push(runner.name.clone()),
           Some(why) => misfits.push((runner.name.clone(), why)),
         }
@@ -131,7 +191,7 @@ pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) 
       match matches.len() {
         1 => Ok(matches.remove(0)),
         0 => Err(Unschedulable::NoMatch {
-          role,
+          need,
           labels: wanted.clone(),
           candidates: misfits,
         }),
@@ -141,7 +201,7 @@ pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) 
         // error until the owner picks a policy and decides how a replay lands
         // on the same runner (owner decision, 2026-11-11).
         _ => Err(Unschedulable::Ambiguous {
-          role,
+          need,
           labels: wanted.clone(),
           matches,
         }),
@@ -150,11 +210,14 @@ pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) 
   }
 }
 
-/// Why `runner` does not fit a label selector for `role`, or `None` when it
+/// Why `runner` does not fit a label selector for `need`, or `None` when it
 /// does.
-fn misfit(runner: &Candidate, role: RunnerRole, wanted: &[LabelMatch]) -> Option<String> {
-  if !runner.roles.contains(&role) {
-    return Some(format!("no {role} role"));
+fn misfit(runner: &Candidate, need: Need, wanted: &[LabelMatch]) -> Option<String> {
+  if !runner.capabilities.roles().contains(&need.role()) {
+    return Some(format!("no {} role", need.role()));
+  }
+  if !need.met_by(&runner.capabilities) {
+    return Some(format!("has {}", runner.capabilities));
   }
   if let Some(missing) = wanted.iter().find(|label| !label.matches(&runner.labels)) {
     return Some(format!("no label {missing}"));
@@ -167,12 +230,12 @@ fn misfit(runner: &Candidate, role: RunnerRole, wanted: &[LabelMatch]) -> Option
 
 // ------------------------------------------------------------- placement
 
-/// The host a `runner:` selector names for an instance of `role`: the
-/// control host itself when there is no selector.
-pub(crate) fn placement(selector: Option<&RunnerSelector>, role: RunnerRole, runners: &[Candidate]) -> Result<Placement, Unschedulable> {
+/// The host a `runner:` selector names for an instance that needs `need`:
+/// the control host itself when there is no selector.
+pub(crate) fn placement(selector: Option<&RunnerSelector>, need: Need, runners: &[Candidate]) -> Result<Placement, Unschedulable> {
   match selector {
     None => Ok(Placement::ControlHost),
-    Some(selector) => pick(selector, role, runners).map(Placement::Runner),
+    Some(selector) => pick(selector, need, runners).map(Placement::Runner),
   }
 }
 
@@ -187,7 +250,7 @@ impl Daemon {
         .map(|runner| Candidate {
           connected: self.links.get(&runner.name).is_some(),
           name: runner.name,
-          roles: runner.roles,
+          capabilities: runner.capabilities,
           labels: runner.labels,
         })
         .collect(),

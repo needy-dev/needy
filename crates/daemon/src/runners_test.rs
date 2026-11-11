@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  CreateJoinTokenRequest, HeartbeatRequest, JoinRequest, JoinTokenState, ListJoinTokensRequest, ListRunnersRequest, RemoveRunnerRequest,
-  RevokeJoinTokenRequest, RotateRunnerRequest, RunnerRole, RunnerStatus,
+  CreateJoinTokenRequest, ExecutorProvider, HeartbeatRequest, JoinRequest, JoinTokenState, ListJoinTokensRequest, ListRunnersRequest,
+  RemoveRunnerRequest, RevokeJoinTokenRequest, RotateRunnerRequest, RunnerCapabilities, RunnerStatus,
 };
 use tonic::Code;
 
@@ -36,17 +36,24 @@ fn join(token: &str, name: &str) -> JoinRequest {
   JoinRequest {
     join_token: token.into(),
     name: name.into(),
-    roles: vec![RunnerRole::Executor as i32],
     labels: [("os".to_string(), "darwin".to_string())].into(),
+    capabilities: native(),
   }
 }
 
-/// A heartbeat reports the runner's roles and labels whole.
+fn native() -> Option<RunnerCapabilities> {
+  Some(RunnerCapabilities {
+    executor: vec![ExecutorProvider::Native as i32],
+    ..Default::default()
+  })
+}
+
+/// A heartbeat reports the runner's capabilities and labels whole.
 fn heartbeat() -> HeartbeatRequest {
   HeartbeatRequest {
-    roles: vec![RunnerRole::Executor as i32],
     labels: [("os".to_string(), "darwin".to_string())].into(),
     host: None,
+    capabilities: native(),
   }
 }
 

@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use needy_api_server::control::Runs;
 use needy_common::process::Exit;
-use needy_core::types::{RunState, RunnerRole};
+use needy_core::types::RunState;
 
 use crate::store::{
   self, InstanceKind, InstanceRecord, InstanceState, ProcessRecord, ProcessState, RunRecord, actor_instance, executor_instance,
@@ -40,7 +40,7 @@ async fn far(grace: Duration) -> Far {
     control: Some(proxy.endpoint.clone()),
     join_token: None,
     name: "far".into(),
-    roles: [RunnerRole::Executor].into(),
+    capabilities: crate::testing::capabilities("executor(native)"),
     labels: BTreeMap::new(),
     grace,
   };

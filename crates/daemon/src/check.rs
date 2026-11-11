@@ -5,12 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::schedule::Need;
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFinding, ProfileToCheck};
 use needy_config::Source;
 use needy_config::profile::{Actor, Executor, Profile};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::HostInfo;
-use needy_core::types::RunnerRole;
 
 use crate::pool::Site;
 use crate::{Daemon, failed, schedule};
@@ -60,7 +60,7 @@ impl Daemon {
     }));
     let runners = self.candidates().await.map_err(failed)?;
 
-    match schedule::placement(profile.actor.runner.as_ref(), RunnerRole::Actor, &runners) {
+    match schedule::placement(profile.actor.runner.as_ref(), Need::Actor, &runners) {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
@@ -80,7 +80,7 @@ impl Daemon {
       self.check_recipe(reference, &request.recipe_yaml, actor.as_ref(), &mut check);
     }
     for (name, executor) in &profile.executors {
-      match schedule::placement(executor.runner.as_ref(), RunnerRole::Executor, &runners) {
+      match schedule::placement(executor.runner.as_ref(), Need::executor(executor.provider), &runners) {
         Ok(placement) => {
           match self.site(&placement, executor.provider) {
             Err(refusal) => check.findings.push(error(format!("executors.{name}: {refusal}"))),

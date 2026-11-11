@@ -5,7 +5,6 @@ use needy_api_client::Client;
 use needy_api_client::proto::v1::{
   CreateJoinTokenRequest, ListRunnersRequest, RemoveRunnerRequest, RotateRunnerRequest, Runner as Listed, RunnerStatus,
 };
-use needy_core::types::RunnerRole;
 use tokio_util::sync::CancellationToken;
 
 use super::*;
@@ -40,7 +39,7 @@ fn config(served: &Served, state_dir: &std::path::Path, join_token: Option<Strin
     control: Some(served.endpoint.clone()),
     join_token,
     name: "mac".into(),
-    roles: [RunnerRole::Executor].into(),
+    capabilities: crate::testing::capabilities("executor(native)"),
     labels: BTreeMap::from([("os".to_string(), "darwin".to_string())]),
     grace: crate::runner::DISCONNECT_GRACE,
   }

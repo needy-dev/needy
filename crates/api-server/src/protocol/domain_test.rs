@@ -42,7 +42,7 @@ fn an_unknown_origin_is_refused() {
 
 fn heartbeat_with(host: &RunnerHost) -> v1::HeartbeatRequest {
   v1::HeartbeatRequest {
-    roles: vec![v1::RunnerRole::Actor as i32],
+    capabilities: None,
     labels: Default::default(),
     host: Some(proto_runner_host(host)),
   }
@@ -84,9 +84,31 @@ fn a_host_without_kvm_keeps_its_cpuid_unknown() {
 #[test]
 fn a_heartbeat_without_a_host_reports_none() {
   let request = v1::HeartbeatRequest {
-    roles: vec![v1::RunnerRole::Executor as i32],
+    capabilities: None,
     ..Default::default()
   };
 
   assert_eq!(runner_report(request).unwrap().host, None);
+}
+
+#[test]
+fn a_runners_capabilities_survive_the_wire() {
+  use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider};
+  let kvm = Capabilities {
+    actor: [ActorRuntime::Firecracker, ActorRuntime::Container].into(),
+    executor: [ExecutorProvider::Native, ExecutorProvider::Docker].into(),
+  };
+
+  assert_eq!(capabilities(Some(proto_capabilities(&kvm))).unwrap(), kvm);
+  assert_eq!(capabilities(None).unwrap(), Capabilities::default());
+}
+
+#[test]
+fn an_unknown_actor_runtime_is_refused() {
+  let reported = v1::RunnerCapabilities {
+    actor: vec![42],
+    ..Default::default()
+  };
+
+  assert_eq!(capabilities(Some(reported)).unwrap_err().to_string(), "unknown actor runtime 42");
 }

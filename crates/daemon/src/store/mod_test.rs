@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use needy_core::types::RunnerRole;
+use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
 
 use super::*;
 
@@ -17,6 +17,27 @@ fn roles(roles: &[RunnerRole]) -> BTreeSet<RunnerRole> {
   roles.iter().copied().collect()
 }
 
+fn native() -> Capabilities {
+  Capabilities {
+    executor: [ExecutorProvider::Native].into(),
+    ..Default::default()
+  }
+}
+
+fn firecracker() -> Capabilities {
+  Capabilities {
+    actor: [ActorRuntime::Firecracker].into(),
+    ..Default::default()
+  }
+}
+
+fn kvm() -> Capabilities {
+  Capabilities {
+    actor: [ActorRuntime::Firecracker].into(),
+    executor: [ExecutorProvider::Native, ExecutorProvider::Docker].into(),
+  }
+}
+
 fn labels(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
   pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
 }
@@ -31,7 +52,7 @@ fn any_scope(uses: u32) -> NewJoinToken {
 
 fn executor() -> Report {
   Report {
-    roles: roles(&[RunnerRole::Executor]),
+    capabilities: native(),
     labels: BTreeMap::new(),
   }
 }
@@ -66,7 +87,7 @@ async fn joining_returns_a_credential_that_authenticates_the_runner() {
   let (runner, credential) = store.join(token.expose(), "mac", executor(), NOW + 5).await.unwrap();
 
   assert_eq!(runner.name, "mac");
-  assert_eq!(runner.roles, roles(&[RunnerRole::Executor]));
+  assert_eq!(runner.capabilities, native());
   assert_eq!(runner.last_seen_ms, NOW + 5);
   assert_eq!(store.authenticate(credential.expose()).await.unwrap().as_deref(), Some("mac"));
   assert_eq!(store.authenticate("needy-runner.mac.0000").await.unwrap(), None);
@@ -147,15 +168,15 @@ async fn a_join_token_limits_the_roles_and_assigns_its_labels() {
   };
   let (_, token) = store.create_join_token(scoped, NOW).await.unwrap();
   let actor = Report {
-    roles: roles(&[RunnerRole::Actor, RunnerRole::Executor]),
+    capabilities: kvm(),
     labels: BTreeMap::new(),
   };
   let conflicting = Report {
-    roles: roles(&[RunnerRole::Executor]),
+    capabilities: native(),
     labels: labels(&[("os", "linux")]),
   };
   let fitting = Report {
-    roles: roles(&[RunnerRole::Executor]),
+    capabilities: native(),
     labels: labels(&[("arch", "arm64")]),
   };
 
@@ -163,14 +184,14 @@ async fn a_join_token_limits_the_roles_and_assigns_its_labels() {
   let other_label = store.join(token.expose(), "b", conflicting, NOW).await.unwrap_err();
   let (runner, _) = store.join(token.expose(), "c", fitting, NOW).await.unwrap();
 
-  assert_eq!(too_many_roles.to_string(), "the join token does not allow the role actor");
+  assert_eq!(too_many_roles.to_string(), "the join token does not allow the role actor; start the runner with --roles executor");
   assert_eq!(other_label.to_string(), "the join token sets the label os=darwin, not os=linux");
   assert_eq!(runner.labels, labels(&[("arch", "arm64"), ("os", "darwin")]));
   assert_eq!(store.join_tokens().await.unwrap()[0].uses_left, 2, "refused joins spend no use");
 }
 
 #[tokio::test]
-async fn a_heartbeat_updates_last_seen_roles_and_labels_within_the_scope() {
+async fn a_heartbeat_updates_last_seen_capabilities_and_labels_within_the_scope() {
   let (store, _dir) = store().await;
   let scoped = NewJoinToken {
     scope: Scope {
@@ -183,13 +204,13 @@ async fn a_heartbeat_updates_last_seen_roles_and_labels_within_the_scope() {
   let (_, token) = store.create_join_token(scoped, NOW).await.unwrap();
   store.join(token.expose(), "mac", executor(), NOW).await.unwrap();
   let report = Report {
-    roles: roles(&[RunnerRole::Executor]),
+    capabilities: kvm().within(&roles(&[RunnerRole::Executor])),
     labels: labels(&[("gpu", "none")]),
   };
 
   let rotated = store.heartbeat("mac", report, NOW + 15_000).await.unwrap();
   let outside = Report {
-    roles: roles(&[RunnerRole::Actor]),
+    capabilities: firecracker(),
     labels: BTreeMap::new(),
   };
   let refused = store.heartbeat("mac", outside, NOW + 30_000).await.unwrap_err();
@@ -199,6 +220,7 @@ async fn a_heartbeat_updates_last_seen_roles_and_labels_within_the_scope() {
   let runner = &store.runners().await.unwrap()[0];
   assert_eq!(runner.last_seen_ms, NOW + 15_000);
   assert_eq!(runner.labels, labels(&[("gpu", "none"), ("os", "darwin")]));
+  assert_eq!(runner.capabilities.to_string(), "executor(docker,native)");
 }
 
 #[tokio::test]
@@ -252,11 +274,11 @@ async fn names_labels_and_token_limits_are_checked() {
   let (store, _dir) = store().await;
   let (_, token) = store.create_join_token(any_scope(5), NOW).await.unwrap();
   let bad_label = Report {
-    roles: roles(&[RunnerRole::Executor]),
+    capabilities: native(),
     labels: labels(&[("a b", "c")]),
   };
   let no_roles = Report {
-    roles: BTreeSet::new(),
+    capabilities: Capabilities::default(),
     labels: BTreeMap::new(),
   };
 
@@ -295,4 +317,22 @@ async fn a_database_another_schema_wrote_is_refused() {
   let error = Store::open(&path).await.err().unwrap();
 
   assert!(matches!(error, Error::Schema(_)), "{error}");
+}
+
+// A state.db from before capabilities has a `roles` column; the migration
+// replaces it, and the runner reports its capabilities at its next
+// heartbeat.
+#[tokio::test]
+async fn a_runner_registry_from_before_capabilities_migrates_and_takes_them_at_the_next_heartbeat() {
+  let (store, dir) = store().await;
+  joined(&store, "mac").await;
+  migration::Migrator::down(&store.db, Some(1)).await.unwrap();
+  drop(store);
+
+  let store = Store::open(&dir.path().join("state.db")).await.unwrap();
+  let migrated = store.runners().await.unwrap()[0].capabilities.clone();
+  store.heartbeat("mac", executor(), NOW + 1).await.unwrap();
+
+  assert_eq!(migrated, Capabilities::default());
+  assert_eq!(store.runners().await.unwrap()[0].capabilities, native());
 }

@@ -11,7 +11,6 @@ use needy_api_client::proto::v1::{
   CreateJoinTokenRequest, ExecStart, KillProcessRequest, ListProcessesRequest, Origin, ProcessInfo, RemoveRunnerRequest, WindowSize,
 };
 use needy_api_client::{Client, Error, Kind};
-use needy_core::types::RunnerRole;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -46,7 +45,7 @@ impl Setup {
       control: Some(proxy.endpoint.clone()),
       join_token: Some(token),
       name: "mac".into(),
-      roles: [RunnerRole::Executor].into(),
+      capabilities: crate::testing::capabilities("executor(native)"),
       labels: BTreeMap::new(),
       grace: crate::runner::DISCONNECT_GRACE,
     };

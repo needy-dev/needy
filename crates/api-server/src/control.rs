@@ -13,7 +13,7 @@ use std::pin::Pin;
 use needy_common::process::Exit;
 use needy_core::event::{Event, ExecutorRef};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, Principal, RunState, RunnerRole};
+use needy_core::types::{Capabilities, Origin, Principal, RunState, RunnerRole};
 use tokio_stream::Stream;
 
 /// Who is calling: the listener the call arrived on decides, unless the
@@ -490,7 +490,8 @@ pub struct CreatedJoinToken {
 /// What a runner declares when it joins and at each heartbeat.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunnerReport {
-  pub roles: BTreeSet<RunnerRole>,
+  /// What it can host; its roles must be within its join token's.
+  pub capabilities: Capabilities,
   pub labels: BTreeMap<String, String>,
   /// Its machine; heartbeats carry it, a join does not.
   pub host: Option<RunnerHost>,
@@ -540,13 +541,16 @@ pub enum RunnerStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerInfo {
   pub name: String,
-  pub roles: BTreeSet<RunnerRole>,
+  /// As it last reported them.
+  pub capabilities: Capabilities,
   pub labels: BTreeMap<String, String>,
   pub status: RunnerStatus,
   pub created_ms: i64,
   pub last_seen_ms: i64,
   pub rotating: bool,
   pub join_token: String,
+  /// Its machine, once a heartbeat reported it to this control plane.
+  pub host: Option<RunnerHost>,
 }
 
 /// What a bearer token is to the runner registry or the client registry.

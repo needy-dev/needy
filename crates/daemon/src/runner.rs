@@ -29,8 +29,8 @@ use needy_api_client::proto::v1::{
 };
 use needy_api_client::{Client, Kind};
 use needy_api_server::control::RunnerHost;
-use needy_api_server::protocol::domain::{proto_runner_host, proto_runner_role};
-use needy_core::types::RunnerRole;
+use needy_api_server::protocol::domain::{proto_capabilities, proto_runner_host};
+use needy_core::types::Capabilities;
 use needy_core_executor::process::{Host, Input};
 use needy_core_executor::service::ExecutorService;
 use serde::{Deserialize, Serialize};
@@ -87,9 +87,9 @@ pub struct Config {
   /// Needed on the first start only.
   pub join_token: Option<String>,
   pub name: String,
-  // TODO(runner-roles): roles are declared by flags; detecting them (such as
-  // `/dev/kvm` for the actor role) is a follow-up of slice 3.
-  pub roles: BTreeSet<RunnerRole>,
+  /// What it reports it can host: detected at start and restricted by
+  /// `--roles` (`crate::capabilities::of_this_machine`).
+  pub capabilities: Capabilities,
   pub labels: BTreeMap<String, String>,
   /// How long it keeps the processes of runs while it cannot reach the
   /// control plane: [`DISCONNECT_GRACE`] outside tests.
@@ -110,7 +110,7 @@ pub struct Runner {
   path: PathBuf,
   control: String,
   enrollment: Enrollment,
-  roles: BTreeSet<RunnerRole>,
+  capabilities: Capabilities,
   labels: BTreeMap<String, String>,
   /// This machine, read once at start and reported in every heartbeat.
   host: RunnerHost,
@@ -159,7 +159,7 @@ impl Runner {
       control,
       credential: Arc::new(Mutex::new(enrollment.credential.clone())),
       enrollment,
-      roles: config.roles,
+      capabilities: config.capabilities,
       labels: config.labels,
       host: host(),
       client: None,
@@ -186,9 +186,9 @@ impl Runner {
       }
     };
     let request = HeartbeatRequest {
-      roles: self.roles.iter().map(|&role| proto_runner_role(role) as i32).collect(),
       labels: self.labels.clone().into_iter().collect(),
       host: Some(proto_runner_host(&self.host)),
+      capabilities: Some(proto_capabilities(&self.capabilities)),
     };
     let beat = client.runners().heartbeat(request).await.map_err(needy_api_client::Error::from)?.into_inner();
     self.interval = interval(beat.heartbeat_interval_ms);
@@ -266,8 +266,8 @@ async fn join(config: &Config, control: &str, join_token: &str, path: &Path) -> 
   let request = JoinRequest {
     join_token: join_token.to_string(),
     name: config.name.clone(),
-    roles: config.roles.iter().map(|&role| proto_runner_role(role) as i32).collect(),
     labels: config.labels.clone().into_iter().collect(),
+    capabilities: Some(proto_capabilities(&config.capabilities)),
   };
   let joined = client.runners().join(request).await.map_err(needy_api_client::Error::from).context("cannot join the control plane")?;
   let joined = joined.into_inner();

@@ -31,8 +31,9 @@ impl Daemon {
       None => RunnerStatus::Offline,
     };
     RunnerInfo {
+      host: self.runner_host(&runner.name),
       name: runner.name,
-      roles: runner.roles,
+      capabilities: runner.capabilities,
       labels: runner.labels,
       status,
       created_ms: runner.created_ms,
@@ -66,7 +67,7 @@ fn join_token_info(token: store::JoinToken, now: i64) -> JoinTokenInfo {
 
 fn report(report: RunnerReport) -> store::Report {
   store::Report {
-    roles: report.roles,
+    capabilities: report.capabilities,
     labels: report.labels,
   }
 }

@@ -2,7 +2,7 @@
 //! decisions, placements, run states, exec origins and injected faults.
 //! Values users write live in `needy-config`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -137,10 +137,8 @@ impl fmt::Display for Origin {
 }
 
 /// What a runner can host. On the wire it is the `needy.v1.RunnerRole`
-/// enum; `needy_api_server::protocol::domain` maps between the two.
-// TODO(runner-roles): a role does not carry its runtimes (`firecracker`,
-// `container`) or providers (`native`, `docker`) yet, as the runners-and-runs
-// design sketches; scheduling (slice 5) is the first reader that needs them.
+/// enum; `needy_api_server::protocol::domain` maps between the two. A
+/// runner's roles are those its [`Capabilities`] name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunnerRole {
@@ -179,6 +177,128 @@ impl std::str::FromStr for RunnerRole {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown runner role {0:?}; known roles are actor and executor")]
 pub struct UnknownRole(pub String);
+
+/// How a runner can run an actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorRuntime {
+  /// A Firecracker microVM: a usable KVM and the actor image.
+  Firecracker,
+  /// gVisor's `runsc` registered with Docker.
+  // TODO(container-runtime): reported only; no actor is scheduled on it until
+  // the container actor runtime is built, see
+  // docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md.
+  Container,
+}
+
+impl ActorRuntime {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Firecracker => "firecracker",
+      Self::Container => "container",
+    }
+  }
+}
+
+impl fmt::Display for ActorRuntime {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+/// How a runner can create an executor. A profile's `provider:` names one;
+/// the providers no runner reports (`containerd`, `firecracker`, `k8s`) are
+/// refused when a run is created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorProvider {
+  /// The runner's own process space; every runner has it.
+  Native,
+  /// A container the runner's Docker daemon creates.
+  Docker,
+}
+
+impl ExecutorProvider {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Native => "native",
+      Self::Docker => "docker",
+    }
+  }
+}
+
+impl fmt::Display for ExecutorProvider {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+/// What a runner can host: each role with its runtimes or providers. It
+/// holds a role when that role has at least one. Written as
+/// `actor(firecracker) executor(docker,native)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Capabilities {
+  pub actor: BTreeSet<ActorRuntime>,
+  pub executor: BTreeSet<ExecutorProvider>,
+}
+
+impl Capabilities {
+  /// The roles it holds.
+  pub fn roles(&self) -> BTreeSet<RunnerRole> {
+    let mut roles = BTreeSet::new();
+    if !self.actor.is_empty() {
+      roles.insert(RunnerRole::Actor);
+    }
+    if !self.executor.is_empty() {
+      roles.insert(RunnerRole::Executor);
+    }
+    roles
+  }
+
+  /// Only those of `roles`.
+  pub fn within(&self, roles: &BTreeSet<RunnerRole>) -> Self {
+    let keep = |role| roles.contains(&role);
+    Self {
+      actor: if keep(RunnerRole::Actor) {
+        self.actor.clone()
+      } else {
+        BTreeSet::new()
+      },
+      executor: if keep(RunnerRole::Executor) {
+        self.executor.clone()
+      } else {
+        BTreeSet::new()
+      },
+    }
+  }
+
+  pub fn is_empty(&self) -> bool {
+    self.actor.is_empty() && self.executor.is_empty()
+  }
+}
+
+impl fmt::Display for Capabilities {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    // Each role's runtimes or providers by name, as the CLI lists them.
+    fn role<T: fmt::Display>(role: RunnerRole, kinds: &BTreeSet<T>) -> Option<String> {
+      let mut names: Vec<String> = kinds.iter().map(T::to_string).collect();
+      names.sort();
+      (!names.is_empty()).then(|| format!("{role}({})", names.join(",")))
+    }
+    let roles: Vec<String> = [
+      role(RunnerRole::Actor, &self.actor),
+      role(RunnerRole::Executor, &self.executor),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if roles.is_empty() {
+      return f.write_str("none");
+    }
+    f.write_str(&roles.join(" "))
+  }
+}
 
 /// Who caused something the trace records: a run created or stopped, a
 /// command started, a signal sent. Written as `operator` (the control

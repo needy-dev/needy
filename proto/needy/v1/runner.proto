@@ -51,11 +51,39 @@ service RunnerService {
   rpc Task(stream TaskRequest) returns (stream TaskResponse);
 }
 
-// What a runner can host.
+// What a runner can host. A join token's scope names roles; a runner
+// reports its `RunnerCapabilities`, whose roles are those with at least one
+// runtime or provider.
 enum RunnerRole {
   RUNNER_ROLE_UNSPECIFIED = 0;
   RUNNER_ROLE_ACTOR = 1;
   RUNNER_ROLE_EXECUTOR = 2;
+}
+
+// How a runner can run an actor.
+enum ActorRuntime {
+  ACTOR_RUNTIME_UNSPECIFIED = 0;
+  // A usable KVM and the actor image (vmlinux, rootfs.ext4, firecracker).
+  ACTOR_RUNTIME_FIRECRACKER = 1;
+  // gVisor's `runsc` registered with Docker. Reported only: no actor is
+  // scheduled on it until the container actor runtime is built.
+  ACTOR_RUNTIME_CONTAINER = 2;
+}
+
+// How a runner can create an executor.
+enum ExecutorProvider {
+  EXECUTOR_PROVIDER_UNSPECIFIED = 0;
+  // The runner's own process space; every runner has it.
+  EXECUTOR_PROVIDER_NATIVE = 1;
+  // A Docker daemon the runner reaches.
+  EXECUTOR_PROVIDER_DOCKER = 2;
+}
+
+// What a runner can host: each role with its runtimes or providers. A role
+// with none is a role it does not hold.
+message RunnerCapabilities {
+  repeated ActorRuntime actor = 1;
+  repeated ExecutorProvider executor = 2;
 }
 
 enum JoinTokenState {
@@ -119,9 +147,12 @@ message JoinRequest {
   string join_token = 1;
   // A DNS label: lowercase letters, digits and '-'.
   string name = 2;
-  // At least one, within the join token's roles.
-  repeated RunnerRole roles = 3;
+  reserved 3;
+  reserved "roles";
   map<string, string> labels = 4;
+  // What the runner detected, restricted by its `--roles`. At least one
+  // role, each within the join token's roles.
+  RunnerCapabilities capabilities = 5;
 }
 
 message JoinResponse {
@@ -134,13 +165,16 @@ message JoinResponse {
 }
 
 message HeartbeatRequest {
-  // What the runner can host now, within its join token's scope.
-  repeated RunnerRole roles = 1;
+  reserved 1;
+  reserved "roles";
   map<string, string> labels = 2;
   // The machine the runner runs on. The control plane checks a recipe
   // against the host its actor would run on, and picks the SFTP server of a
   // workspace mount by the platform.
   RunnerHost host = 3;
+  // What the runner can host now, as at its join; its roles stay within its
+  // join token's scope.
+  RunnerCapabilities capabilities = 4;
 }
 
 // A runner's machine.
@@ -176,7 +210,8 @@ message HeartbeatResponse {
 
 message Runner {
   string name = 1;
-  repeated RunnerRole roles = 2;
+  reserved 2;
+  reserved "roles";
   // Its own labels and those of its join token.
   map<string, string> labels = 3;
   RunnerStatus status = 4;
@@ -187,6 +222,11 @@ message Runner {
   bool rotating = 7;
   // The ID of the join token it joined with.
   string join_token_id = 8;
+  // As it last reported them, in its join or a heartbeat.
+  RunnerCapabilities capabilities = 9;
+  // Its machine as its last heartbeat to this control plane process
+  // reported it; unset until one did.
+  RunnerHost host = 10;
 }
 
 message ListRunnersRequest {}

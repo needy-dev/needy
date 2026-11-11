@@ -161,7 +161,7 @@ async fn shutdown_unwinds_a_run_being_created() {
     join_token: token,
     name: "b".into(),
     report: RunnerReport {
-      roles: [needy_core::types::RunnerRole::Executor].into(),
+      capabilities: crate::testing::capabilities("executor(native)"),
       ..Default::default()
     },
   };
@@ -258,7 +258,7 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
     control: Some(endpoint.clone()),
     join_token: Some(token),
     name: "far".into(),
-    roles: [needy_core::types::RunnerRole::Executor].into(),
+    capabilities: crate::testing::capabilities("executor(native)"),
     labels: Default::default(),
     grace: crate::runner::DISCONNECT_GRACE,
   };

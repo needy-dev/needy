@@ -1,0 +1,154 @@
+//! What this machine can host as a runner, found at start: its
+//! capabilities, each role with its runtimes or providers.
+//!
+//! - `actor(firecracker)`: Linux, a KVM device that opens for reading and
+//!   writing (as Firecracker opens it), and a complete actor image (vmlinux,
+//!   rootfs.ext4 and the patched firecracker).
+//! - `actor(container)`: gVisor's `runsc` registered with a Docker daemon
+//!   that answers. Reported, not scheduled (`TODO(container-runtime)` on
+//!   `needy_core::types::ActorRuntime::Container`).
+//! - `executor(docker)`: a Docker daemon that answers.
+//! - `executor(native)`: always, on every platform a runner runs on.
+//!
+//! [`probe`] reads the machine; [`detect`] and [`restrict`] decide from what
+//! it read, so the rules are tested without the machine.
+
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::time::Duration;
+
+use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
+
+// NOTICE: how long a runner waits for the Docker daemon at start. A local
+// socket answers in milliseconds; a Docker Desktop that is not running
+// fails at once. 3 s bounds a daemon that hangs without delaying the
+// runner's join much.
+const DOCKER_WAIT: Duration = Duration::from_secs(3);
+
+/// The name a Docker daemon registers gVisor's runtime under.
+// Reference: https://gvisor.dev/docs/user_guide/install/ (`sudo runsc install`,
+// then `docker run --runtime=runsc`); the page has no versioned permalink,
+// retrieved 2026-11-11.
+const RUNSC: &str = "runsc";
+
+/// What [`probe`] read from this machine: for each fact, the value or why
+/// it is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Facts {
+  /// A Firecracker microVM can start: KVM and the actor image.
+  pub firecracker: Result<(), String>,
+  /// The runtimes the Docker daemon registered.
+  pub docker: Result<BTreeSet<String>, String>,
+}
+
+/// The capabilities found, and why each one that is not is missing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Detected {
+  pub capabilities: Capabilities,
+  /// One line per missing runtime or provider, such as `actor(firecracker):
+  /// cannot open /dev/kvm`.
+  pub missing: Vec<String>,
+}
+
+/// The capabilities `facts` give, by the rules in the module documentation.
+pub fn detect(facts: &Facts) -> Detected {
+  let mut capabilities = Capabilities {
+    executor: [ExecutorProvider::Native].into(),
+    ..Default::default()
+  };
+  let mut missing = Vec::new();
+  match &facts.firecracker {
+    Ok(()) => {
+      capabilities.actor.insert(ActorRuntime::Firecracker);
+    }
+    Err(why) => missing.push(format!("actor(firecracker): {why}")),
+  }
+  match &facts.docker {
+    Ok(runtimes) => {
+      capabilities.executor.insert(ExecutorProvider::Docker);
+      if runtimes.contains(RUNSC) {
+        capabilities.actor.insert(ActorRuntime::Container);
+      } else {
+        missing.push(format!("actor(container): Docker has no {RUNSC} runtime"));
+      }
+    }
+    Err(why) => {
+      missing.push(format!("executor(docker): {why}"));
+      missing.push(format!("actor(container): {why}"));
+    }
+  }
+  Detected {
+    capabilities,
+    missing,
+  }
+}
+
+/// The capabilities a runner reports: those detected, within `roles` when
+/// the operator named some (`--roles`), and a warning for each named role
+/// this machine cannot host. Naming a role adds no capability.
+pub fn restrict(detected: &Detected, roles: Option<&BTreeSet<RunnerRole>>) -> (Capabilities, Vec<String>) {
+  let Some(roles) = roles else {
+    return (detected.capabilities.clone(), Vec::new());
+  };
+  let held = detected.capabilities.roles();
+  let warnings = roles
+    .iter()
+    .filter(|role| !held.contains(role))
+    .map(|role| {
+      let prefix = format!("{role}(");
+      let why: Vec<&str> = detected.missing.iter().filter(|line| line.starts_with(&prefix)).map(String::as_str).collect();
+      format!("--roles names {role}, which this machine cannot host ({}); it is left out", why.join("; "))
+    })
+    .collect();
+  (detected.capabilities.within(roles), warnings)
+}
+
+/// Whether a Firecracker actor can start on this machine with the KVM
+/// device `kvm` and the actor image in `image`.
+pub fn firecracker(kvm: &Path, image: &Path) -> Result<(), String> {
+  if !cfg!(target_os = "linux") {
+    return Err("Firecracker runs on Linux only".into());
+  }
+  needy_core_actor::host::vm::check_kvm(kvm).map_err(|e| format!("cannot open {}: {}", kvm.display(), kvm_error(&e)))?;
+  needy_core_actor::host::vm::Image::new(image).check().map_err(|e| e.to_string())
+}
+
+/// The OS error of a KVM check, without the check's advice.
+fn kvm_error(error: &needy_core_actor::host::vm::Error) -> String {
+  match error {
+    needy_core_actor::host::vm::Error::Kvm { error, .. } => error.to_string(),
+    other => other.to_string(),
+  }
+}
+
+/// Reads this machine: KVM at `kvm`, the actor image in `image`, and the
+/// Docker daemon.
+pub async fn probe(kvm: &Path, image: &Path) -> Facts {
+  let docker = needy_core_executor::provider::docker::runtimes(DOCKER_WAIT)
+    .await
+    .map_err(|e| format!("no Docker daemon answers: {:#}", anyhow::Error::from(e)));
+  Facts {
+    firecracker: firecracker(kvm, image),
+    docker,
+  }
+}
+
+/// What this machine reports as a runner: probed, detected and restricted
+/// to `roles` as [`restrict`] does, with what is missing logged. The
+/// warnings are logged too, and returned for the operator.
+pub async fn of_this_machine(kvm: &Path, image: &Path, roles: Option<&BTreeSet<RunnerRole>>) -> (Capabilities, Vec<String>) {
+  let detected = detect(&probe(kvm, image).await);
+  for line in &detected.missing {
+    tracing::info!("not detected: {line}");
+  }
+  let (capabilities, warnings) = restrict(&detected, roles);
+  for warning in &warnings {
+    tracing::warn!("{warning}");
+  }
+  tracing::info!("capabilities: {capabilities}");
+  (capabilities, warnings)
+}
+
+#[cfg(test)]
+#[path = "capabilities_test.rs"]
+mod tests;

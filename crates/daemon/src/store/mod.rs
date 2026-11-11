@@ -18,7 +18,7 @@ mod secret;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use needy_core::types::RunnerRole;
+use needy_core::types::{Capabilities, RunnerRole};
 use sea_orm::{
   ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, ConnectOptions, ConnectionTrait as _, Database, DatabaseConnection, DbErr,
   EntityTrait as _, IntoActiveModel as _, QueryFilter as _, QueryOrder as _, TransactionTrait as _,
@@ -110,7 +110,8 @@ pub struct JoinToken {
 /// What a runner declares when it joins and at each heartbeat.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Report {
-  pub roles: BTreeSet<RunnerRole>,
+  /// What it can host; the roles it names must be within the join token's.
+  pub capabilities: Capabilities,
   pub labels: BTreeMap<String, String>,
 }
 
@@ -118,7 +119,8 @@ pub struct Report {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Runner {
   pub name: String,
-  pub roles: BTreeSet<RunnerRole>,
+  /// As it last reported them.
+  pub capabilities: Capabilities,
   /// Its own labels and those its join token set.
   pub labels: BTreeMap<String, String>,
   /// What its join token allowed; heartbeats stay within it.
@@ -225,7 +227,7 @@ impl Store {
       return Err(Error::UsedUp(row.id));
     }
     let scope = join_token_of(row.clone())?.scope;
-    let (roles, labels) = admit(&scope, report)?;
+    let (capabilities, labels) = admit(&scope, report)?;
     let existing = runner::Entity::find_by_id(name).one(&txn).await?;
     if existing.as_ref().is_some_and(|r| r.removed_ms.is_none()) {
       return Err(Error::RunnerExists(name.to_string()));
@@ -236,7 +238,7 @@ impl Store {
     let credential = Secret::generate(secret::RUNNER, name);
     let joined = runner::Model {
       name: name.to_string(),
-      roles: json(&roles)?,
+      capabilities: json(&capabilities)?,
       labels: json(&labels)?,
       scope_roles: json(&scope.roles)?,
       scope_labels: json(&scope.labels)?,
@@ -286,9 +288,9 @@ impl Store {
   pub async fn heartbeat(&self, name: &str, report: Report, now: i64) -> Result<Option<Secret>> {
     let row = self.active(name).await?;
     let current = runner_of(row.clone())?;
-    let (roles, labels) = admit(&current.scope, report)?;
+    let (capabilities, labels) = admit(&current.scope, report)?;
     let mut beat = row.into_active_model();
-    beat.roles = Set(json(&roles)?);
+    beat.capabilities = Set(json(&capabilities)?);
     beat.labels = Set(json(&labels)?);
     beat.last_seen_ms = Set(now);
     // A credential handed out before and not used yet is replaced: the
@@ -360,16 +362,25 @@ async fn has_other_schema(db: &DatabaseConnection) -> Result<bool> {
   Ok(applied.iter().any(|m| !known.contains(&m.version)))
 }
 
-/// The roles and labels a runner gets for `report` within `scope`: its own
-/// roles, which the scope must allow, and its own labels with the scope's.
-fn admit(scope: &Scope, report: Report) -> Result<(BTreeSet<RunnerRole>, BTreeMap<String, String>)> {
-  if report.roles.is_empty() {
+/// The capabilities and labels a runner gets for `report` within `scope`:
+/// its own capabilities, whose roles the scope must allow, and its own
+/// labels with the scope's.
+fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String, String>)> {
+  let roles: BTreeSet<RunnerRole> = report.capabilities.roles();
+  if roles.is_empty() {
     return Err(Error::Invalid("a runner needs at least one role".into()));
   }
   if !scope.roles.is_empty()
-    && let Some(role) = report.roles.iter().find(|role| !scope.roles.contains(role))
+    && let Some(role) = roles.iter().find(|role| !scope.roles.contains(role))
   {
-    return Err(Error::OutOfScope(format!("the join token does not allow the role {role}")));
+    // A runner detects its roles, so it may hold more than the token allows;
+    // `--roles` leaves the others out.
+    let allowed: Vec<&str> = roles.intersection(&scope.roles).map(|r| r.as_str()).collect();
+    let hint = match allowed.is_empty() {
+      true => String::new(),
+      false => format!("; start the runner with --roles {}", allowed.join(",")),
+    };
+    return Err(Error::OutOfScope(format!("the join token does not allow the role {role}{hint}")));
   }
   check_labels(&report.labels)?;
   let mut labels = report.labels;
@@ -383,7 +394,7 @@ fn admit(scope: &Scope, report: Report) -> Result<(BTreeSet<RunnerRole>, BTreeMa
       }
     }
   }
-  Ok((report.roles, labels))
+  Ok((report.capabilities, labels))
 }
 
 /// A runner's name is part of its credential and of `runner ls`, so it is
@@ -441,7 +452,7 @@ fn join_token_of(row: join_token::Model) -> Result<JoinToken> {
 
 fn runner_of(row: runner::Model) -> Result<Runner> {
   Ok(Runner {
-    roles: parse(&row.roles)?,
+    capabilities: parse(&row.capabilities)?,
     labels: parse(&row.labels)?,
     scope: Scope {
       roles: parse(&row.scope_roles)?,

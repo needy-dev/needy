@@ -33,6 +33,7 @@
 //! them and waits for them.
 //
 
+pub mod capabilities;
 pub mod executor;
 pub mod runner;
 

@@ -11,8 +11,9 @@ pub mod runner {
   pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub name: String,
-    /// The roles the runner last reported, a JSON array.
-    pub roles: String,
+    /// The capabilities the runner last reported, a JSON object of each
+    /// role's runtimes or providers (`needy_core::types::Capabilities`).
+    pub capabilities: String,
     /// The labels the runner last reported with those of its join token,
     /// a JSON object.
     pub labels: String,

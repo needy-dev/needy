@@ -838,6 +838,15 @@ impl FindingSeverity {
         }
     }
 }
+/// What a runner can host: each role with its runtimes or providers. A role
+/// with none is a role it does not hold.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunnerCapabilities {
+    #[prost(enumeration="ActorRuntime", repeated, tag="1")]
+    pub actor: ::prost::alloc::vec::Vec<i32>,
+    #[prost(enumeration="ExecutorProvider", repeated, tag="2")]
+    pub executor: ::prost::alloc::vec::Vec<i32>,
+}
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JoinToken {
     /// Public; names the token in listings and in `RevokeJoinToken`.
@@ -902,11 +911,12 @@ pub struct JoinRequest {
     /// A DNS label: lowercase letters, digits and '-'.
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
-    /// At least one, within the join token's roles.
-    #[prost(enumeration="RunnerRole", repeated, tag="3")]
-    pub roles: ::prost::alloc::vec::Vec<i32>,
     #[prost(map="string, string", tag="4")]
     pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// What the runner detected, restricted by its `--roles`. At least one
+    /// role, each within the join token's roles.
+    #[prost(message, optional, tag="5")]
+    pub capabilities: ::core::option::Option<RunnerCapabilities>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct JoinResponse {
@@ -922,9 +932,6 @@ pub struct JoinResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct HeartbeatRequest {
-    /// What the runner can host now, within its join token's scope.
-    #[prost(enumeration="RunnerRole", repeated, tag="1")]
-    pub roles: ::prost::alloc::vec::Vec<i32>,
     #[prost(map="string, string", tag="2")]
     pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
     /// The machine the runner runs on. The control plane checks a recipe
@@ -932,6 +939,10 @@ pub struct HeartbeatRequest {
     /// workspace mount by the platform.
     #[prost(message, optional, tag="3")]
     pub host: ::core::option::Option<RunnerHost>,
+    /// What the runner can host now, as at its join; its roles stay within its
+    /// join token's scope.
+    #[prost(message, optional, tag="4")]
+    pub capabilities: ::core::option::Option<RunnerCapabilities>,
 }
 /// A runner's machine.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -979,8 +990,6 @@ pub struct HeartbeatResponse {
 pub struct Runner {
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
-    #[prost(enumeration="RunnerRole", repeated, tag="2")]
-    pub roles: ::prost::alloc::vec::Vec<i32>,
     /// Its own labels and those of its join token.
     #[prost(map="string, string", tag="3")]
     pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
@@ -997,6 +1006,13 @@ pub struct Runner {
     /// The ID of the join token it joined with.
     #[prost(string, tag="8")]
     pub join_token_id: ::prost::alloc::string::String,
+    /// As it last reported them, in its join or a heartbeat.
+    #[prost(message, optional, tag="9")]
+    pub capabilities: ::core::option::Option<RunnerCapabilities>,
+    /// Its machine as its last heartbeat to this control plane process
+    /// reported it; unset until one did.
+    #[prost(message, optional, tag="10")]
+    pub host: ::core::option::Option<RunnerHost>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListRunnersRequest {
@@ -1168,7 +1184,9 @@ pub struct TaskResponse {
     #[prost(message, optional, tag="1")]
     pub exec: ::core::option::Option<ExecRequest>,
 }
-/// What a runner can host.
+/// What a runner can host. A join token's scope names roles; a runner
+/// reports its `RunnerCapabilities`, whose roles are those with at least one
+/// runtime or provider.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RunnerRole {
@@ -1194,6 +1212,71 @@ impl RunnerRole {
             "RUNNER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
             "RUNNER_ROLE_ACTOR" => Some(Self::Actor),
             "RUNNER_ROLE_EXECUTOR" => Some(Self::Executor),
+            _ => None,
+        }
+    }
+}
+/// How a runner can run an actor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ActorRuntime {
+    Unspecified = 0,
+    /// A usable KVM and the actor image (vmlinux, rootfs.ext4, firecracker).
+    Firecracker = 1,
+    /// gVisor's `runsc` registered with Docker. Reported only: no actor is
+    /// scheduled on it until the container actor runtime is built.
+    Container = 2,
+}
+impl ActorRuntime {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACTOR_RUNTIME_UNSPECIFIED",
+            Self::Firecracker => "ACTOR_RUNTIME_FIRECRACKER",
+            Self::Container => "ACTOR_RUNTIME_CONTAINER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACTOR_RUNTIME_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTOR_RUNTIME_FIRECRACKER" => Some(Self::Firecracker),
+            "ACTOR_RUNTIME_CONTAINER" => Some(Self::Container),
+            _ => None,
+        }
+    }
+}
+/// How a runner can create an executor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutorProvider {
+    Unspecified = 0,
+    /// The runner's own process space; every runner has it.
+    Native = 1,
+    /// A Docker daemon the runner reaches.
+    Docker = 2,
+}
+impl ExecutorProvider {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTOR_PROVIDER_UNSPECIFIED",
+            Self::Native => "EXECUTOR_PROVIDER_NATIVE",
+            Self::Docker => "EXECUTOR_PROVIDER_DOCKER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTOR_PROVIDER_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTOR_PROVIDER_NATIVE" => Some(Self::Native),
+            "EXECUTOR_PROVIDER_DOCKER" => Some(Self::Docker),
             _ => None,
         }
     }

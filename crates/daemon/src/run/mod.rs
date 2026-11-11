@@ -29,7 +29,7 @@ use needy_core::chaos::Injector;
 use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::CompiledRecipe;
-use needy_core::types::{Principal, RunState, RunnerRole};
+use needy_core::types::{Principal, RunState};
 use needy_core_actor::host::vm;
 use needy_core_executor::provider::InstanceSpec;
 use needy_trace::Dispatch;
@@ -547,7 +547,7 @@ impl Daemon {
     // Where everything goes is decided before anything is acquired, so a
     // selector that names no runner fails the create at once.
     let runners = self.candidates().await?;
-    let actor = schedule::placement(run.profile.actor.runner.as_ref(), RunnerRole::Actor, &runners).context("actor")?;
+    let actor = schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor, &runners).context("actor")?;
     if let Some(refusal) = self.actor_refusal(&actor) {
       bail!("actor: {refusal}");
     }
@@ -559,8 +559,8 @@ impl Daemon {
     files::check_host_paths(run)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
-      let placement =
-        schedule::placement(config.runner.as_ref(), RunnerRole::Executor, &runners).with_context(|| format!("executor {exec_name}"))?;
+      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::executor(config.provider), &runners)
+        .with_context(|| format!("executor {exec_name}"))?;
       let site = self.site(&placement, config.provider).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
       sites.push(site);
     }

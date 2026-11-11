@@ -9,7 +9,7 @@ use clap::Subcommand;
 use needy_api_client::proto::v1::{
   self, CreateJoinTokenRequest, ListJoinTokensRequest, ListRunnersRequest, RemoveRunnerRequest, RevokeJoinTokenRequest, RotateRunnerRequest,
 };
-use needy_core::types::RunnerRole;
+use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
 use serde::Serialize;
 
 use crate::cli::Context;
@@ -96,6 +96,33 @@ fn role(value: i32) -> Result<RunnerRole> {
     Ok(v1::RunnerRole::Executor) => Ok(RunnerRole::Executor),
     Err(_) => bail!("unknown runner role {value}"),
   }
+}
+
+/// What a runner reported it can host, from the wire. Unspecified and
+/// unknown runtimes and providers are errors, as roles are.
+fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabilities> {
+  let reported = reported.unwrap_or_default();
+  let actor = reported
+    .actor
+    .iter()
+    .map(|&value| match v1::ActorRuntime::try_from(value) {
+      Ok(v1::ActorRuntime::Unspecified) => bail!("the actor runtime is unspecified"),
+      Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
+      Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
+      Err(_) => bail!("unknown actor runtime {value}"),
+    })
+    .collect::<Result<_>>()?;
+  let executor = reported
+    .executor
+    .iter()
+    .map(|&value| match v1::ExecutorProvider::try_from(value) {
+      Ok(v1::ExecutorProvider::Unspecified) => bail!("the executor provider is unspecified"),
+      Ok(v1::ExecutorProvider::Native) => Ok(ExecutorProvider::Native),
+      Ok(v1::ExecutorProvider::Docker) => Ok(ExecutorProvider::Docker),
+      Err(_) => bail!("unknown executor provider {value}"),
+    })
+    .collect::<Result<_>>()?;
+  Ok(Capabilities { actor, executor })
 }
 
 fn roles(values: &[i32]) -> Result<Vec<String>> {
@@ -191,13 +218,28 @@ impl TryFrom<v1::JoinToken> for TokenRow {
   }
 }
 
+/// A runner's machine as `runner ls` shows it.
+#[derive(Serialize)]
+struct HostRow {
+  os: String,
+  arch: String,
+  /// Empty off Linux.
+  cpu_vendor: String,
+  cpu_model: String,
+  /// Whether KVM answered with its supported CPUID entries.
+  kvm: bool,
+}
+
 #[derive(Serialize)]
 struct RunnerRow {
   name: String,
   status: String,
   /// A new credential was asked for and the runner has not used it yet.
   rotating: bool,
-  roles: Vec<String>,
+  /// Each role it holds with its runtimes or providers.
+  capabilities: Capabilities,
+  /// Unset until the runner's first heartbeat to this control plane.
+  host: Option<HostRow>,
   labels: BTreeMap<String, String>,
   created_at_ms: i64,
   last_seen_at_ms: i64,
@@ -205,7 +247,15 @@ struct RunnerRow {
 }
 
 impl Row for RunnerRow {
-  const HEADER: &'static [&'static str] = &["NAME", "STATUS", "ROLES", "LABELS", "LAST SEEN"];
+  const HEADER: &'static [&'static str] = &[
+    "NAME",
+    "STATUS",
+    "CAPABILITIES",
+    "HOST",
+    "CPU",
+    "LABELS",
+    "LAST SEEN",
+  ];
 
   fn cells(&self) -> Vec<String> {
     let status = if self.rotating {
@@ -213,10 +263,17 @@ impl Row for RunnerRow {
     } else {
       self.status.clone()
     };
+    let (host, cpu) = match &self.host {
+      Some(host) if host.cpu_model.is_empty() => (format!("{}/{}", host.os, host.arch), "-".to_string()),
+      Some(host) => (format!("{}/{}", host.os, host.arch), host.cpu_model.clone()),
+      None => ("-".into(), "-".into()),
+    };
     vec![
       self.name.clone(),
       status,
-      self.roles.join(","),
+      self.capabilities.to_string(),
+      host,
+      cpu,
       labels_cell(&self.labels),
       ago(self.last_seen_at_ms),
     ]
@@ -229,7 +286,14 @@ impl TryFrom<v1::Runner> for RunnerRow {
   fn try_from(runner: v1::Runner) -> Result<Self> {
     Ok(Self {
       status: runner_status(runner.status)?.into(),
-      roles: roles(&runner.roles)?,
+      capabilities: capabilities(runner.capabilities)?,
+      host: runner.host.map(|host| HostRow {
+        kvm: host.kvm_cpuid.is_some(),
+        os: host.os,
+        arch: host.arch,
+        cpu_vendor: host.cpu_vendor,
+        cpu_model: host.cpu_model,
+      }),
       name: runner.name,
       rotating: runner.rotating,
       labels: runner.labels.into_iter().collect(),

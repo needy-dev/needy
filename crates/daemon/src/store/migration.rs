@@ -12,6 +12,7 @@ impl MigratorTrait for Migrator {
       Box::new(CreateRunners),
       Box::new(CreateRuns),
       Box::new(CreateClients),
+      Box::new(RunnerCapabilities),
     ]
   }
 }
@@ -42,6 +43,7 @@ enum Runners {
   CreatedMs,
   LastSeenMs,
   RemovedMs,
+  Capabilities,
 }
 
 #[derive(DeriveIden)]
@@ -295,5 +297,42 @@ impl MigrationTrait for CreateClients {
   async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
     manager.drop_table(Table::drop().table(PairingCodes::Table).to_owned()).await?;
     manager.drop_table(Table::drop().table(Clients::Table).to_owned()).await
+  }
+}
+
+/// A runner's reported roles become its capabilities: each role with its
+/// runtimes or providers.
+struct RunnerCapabilities;
+
+impl MigrationName for RunnerCapabilities {
+  fn name(&self) -> &str {
+    "m20261111_000080_runner_capabilities"
+  }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RunnerCapabilities {
+  // NOTICE: a runner that joined before keeps an empty object until its next
+  // heartbeat reports its capabilities, within one heartbeat interval. Its
+  // old roles are not converted: a runner of this version reports them, and
+  // one of an earlier version is refused, since it reports none.
+  // NOTICE: SQLite takes one change per `ALTER TABLE`, so the column is added
+  // and the old one dropped in two statements.
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .alter_table(
+        Table::alter().table(Runners::Table).add_column(ColumnDef::new(Runners::Capabilities).text().not_null().default("{}")).to_owned(),
+      )
+      .await?;
+    manager.alter_table(Table::alter().table(Runners::Table).drop_column(Runners::Roles).to_owned()).await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .alter_table(
+        Table::alter().table(Runners::Table).add_column(ColumnDef::new(Runners::Roles).text().not_null().default("[]")).to_owned(),
+      )
+      .await?;
+    manager.alter_table(Table::alter().table(Runners::Table).drop_column(Runners::Capabilities).to_owned()).await
   }
 }

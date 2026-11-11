@@ -16,7 +16,7 @@ use needy_core::event::Event;
 use needy_core::intercept::ExecContext;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use needy_core::types::{Origin, RunState, RunnerRole};
+use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, Origin, RunState, RunnerRole};
 
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
@@ -105,6 +105,54 @@ fn proto_runner_roles(roles: &BTreeSet<RunnerRole>) -> Vec<i32> {
   roles.iter().map(|&role| proto_runner_role(role) as i32).collect()
 }
 
+/// The capabilities a runner reports; every runtime and provider must be
+/// known and specified. None reported is none at all.
+pub fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabilities, Error> {
+  let reported = reported.unwrap_or_default();
+  let actor = reported
+    .actor
+    .iter()
+    .map(|&value| match v1::ActorRuntime::try_from(value) {
+      Ok(v1::ActorRuntime::Unspecified) => Err(Error::Unspecified("actor runtime")),
+      Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
+      Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
+      Err(_) => Err(Error::Unknown {
+        field: "actor runtime",
+        value,
+      }),
+    })
+    .collect::<Result<_, _>>()?;
+  let executor = reported
+    .executor
+    .iter()
+    .map(|&value| match v1::ExecutorProvider::try_from(value) {
+      Ok(v1::ExecutorProvider::Unspecified) => Err(Error::Unspecified("executor provider")),
+      Ok(v1::ExecutorProvider::Native) => Ok(ExecutorProvider::Native),
+      Ok(v1::ExecutorProvider::Docker) => Ok(ExecutorProvider::Docker),
+      Err(_) => Err(Error::Unknown {
+        field: "executor provider",
+        value,
+      }),
+    })
+    .collect::<Result<_, _>>()?;
+  Ok(Capabilities { actor, executor })
+}
+
+pub fn proto_capabilities(capabilities: &Capabilities) -> v1::RunnerCapabilities {
+  let runtime = |runtime: &ActorRuntime| match runtime {
+    ActorRuntime::Firecracker => v1::ActorRuntime::Firecracker as i32,
+    ActorRuntime::Container => v1::ActorRuntime::Container as i32,
+  };
+  let provider = |provider: &ExecutorProvider| match provider {
+    ExecutorProvider::Native => v1::ExecutorProvider::Native as i32,
+    ExecutorProvider::Docker => v1::ExecutorProvider::Docker as i32,
+  };
+  v1::RunnerCapabilities {
+    actor: capabilities.actor.iter().map(runtime).collect(),
+    executor: capabilities.executor.iter().map(provider).collect(),
+  }
+}
+
 fn labels(labels: HashMap<String, String>) -> BTreeMap<String, String> {
   labels.into_iter().collect()
 }
@@ -171,7 +219,7 @@ pub fn joining(request: v1::JoinRequest) -> Result<Joining, Error> {
   }
   Ok(Joining {
     report: RunnerReport {
-      roles: runner_roles(&request.roles)?,
+      capabilities: capabilities(request.capabilities)?,
       labels: labels(request.labels),
       host: None,
     },
@@ -182,7 +230,7 @@ pub fn joining(request: v1::JoinRequest) -> Result<Joining, Error> {
 
 pub fn runner_report(request: v1::HeartbeatRequest) -> Result<RunnerReport, Error> {
   Ok(RunnerReport {
-    roles: runner_roles(&request.roles)?,
+    capabilities: capabilities(request.capabilities)?,
     labels: labels(request.labels),
     host: request.host.map(runner_host),
   })
@@ -222,7 +270,8 @@ pub fn proto_runner(runner: RunnerInfo) -> v1::Runner {
     RunnerStatus::Removed => v1::RunnerStatus::Removed,
   };
   v1::Runner {
-    roles: proto_runner_roles(&runner.roles),
+    capabilities: Some(proto_capabilities(&runner.capabilities)),
+    host: runner.host.as_ref().map(proto_runner_host),
     name: runner.name,
     labels: proto_labels(runner.labels),
     status: status as i32,

@@ -3,7 +3,6 @@
 
 use needy_api_client::Client;
 use needy_api_server::control::{Placement, ProfileCheck, ProfileToCheck, RunnerHost, RunnerReport, Runners, Runs};
-use needy_core::types::RunnerRole::{self, Actor, Executor};
 
 use crate::testing::{self, JoinedRunner, Served};
 
@@ -19,15 +18,15 @@ fn operator(served: &Served) -> Client {
   served.client.clone().with_token(CONTROL_TOKEN).unwrap()
 }
 
-async fn runner(served: &Served, name: &str, roles: &[RunnerRole], labels: &[(&str, &str)]) -> JoinedRunner {
-  testing::join_runner(served, &operator(served), name, roles, labels).await
+async fn runner(served: &Served, name: &str, capabilities: &str, labels: &[(&str, &str)]) -> JoinedRunner {
+  testing::join_runner(served, &operator(served), name, capabilities, labels).await
 }
 
 /// Reports `host` for `runner`, as its heartbeat does; a heartbeat reports
-/// the roles and labels whole.
-async fn report_host(served: &Served, runner: &str, roles: &[RunnerRole], labels: &[(&str, &str)], host: RunnerHost) {
+/// the capabilities and labels whole.
+async fn report_host(served: &Served, runner: &str, capabilities: &str, labels: &[(&str, &str)], host: RunnerHost) {
   let report = RunnerReport {
-    roles: roles.iter().copied().collect(),
+    capabilities: testing::capabilities(capabilities),
     labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
     host: Some(host),
   };
@@ -63,8 +62,8 @@ fn messages(check: &ProfileCheck) -> Vec<String> {
 #[tokio::test]
 async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_scheduled_on() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", &[Actor, Executor], &[("kvm", "")]).await;
-  report_host(&served, "kvm", &[Actor, Executor], &[("kvm", "")], host_without_avx512()).await;
+  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
+  report_host(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")], host_without_avx512()).await;
 
   let check = check(&served, "actor: { runner: { labels: [kvm] }, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
 
@@ -82,8 +81,8 @@ async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_schedu
 #[tokio::test]
 async fn executor_selectors_resolve_to_runners_or_the_control_host() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", &[Actor, Executor], &[("kvm", "")]).await;
-  let _mac = runner(&served, "mac", &[Executor], &[("os", "darwin")]).await;
+  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
+  let _mac = runner(&served, "mac", "executor(native)", &[("os", "darwin")]).await;
 
   let check = check(
     &served,
@@ -107,7 +106,7 @@ executors:
 #[tokio::test]
 async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
   let served = control().await;
-  let _mac = runner(&served, "mac", &[Executor], &[("os", "darwin")]).await;
+  let _mac = runner(&served, "mac", "executor(native)", &[("os", "darwin")]).await;
 
   let check = check(&served, "executors:\n  linux: { runner: { labels: [os=linux] } }\n  gone: { runner: windows }\n").await;
 
@@ -116,7 +115,7 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
     messages(&check),
     [
       "error: executors.gone: no runner is named windows; the runners are mac",
-      "error: executors.linux: no connected runner with the executor role has labels os=linux; candidates: mac (no label os=linux)",
+      "error: executors.linux: no connected runner with executor(native) has labels os=linux; candidates: mac (no label os=linux)",
     ]
   );
 }
@@ -124,7 +123,7 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
 #[tokio::test]
 async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding() {
   let served = control().await;
-  let _far = runner(&served, "far", &[Actor], &[]).await;
+  let _far = runner(&served, "far", "actor(firecracker)", &[]).await;
 
   let check = check(&served, "actor: { runner: far }").await;
 
@@ -137,7 +136,7 @@ async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_findi
 #[tokio::test]
 async fn docker_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding() {
   let served = control().await;
-  let _mac = runner(&served, "mac", &[Executor], &[]).await;
+  let _mac = runner(&served, "mac", "executor(docker,native)", &[]).await;
 
   let check = check(&served, "executors: { build: { runner: mac, provider: docker } }").await;
 
@@ -147,9 +146,24 @@ async fn docker_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding
 }
 
 #[tokio::test]
+async fn docker_on_a_runner_without_docker_is_an_error_finding_naming_the_runners_with_docker() {
+  let served = control().await;
+  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[]).await;
+  let _mac = runner(&served, "mac", "executor(native)", &[]).await;
+
+  let check = check(&served, "executors: { build: { runner: mac, provider: docker } }").await;
+
+  assert!(!check.executors.contains_key("build"));
+  assert_eq!(
+    messages(&check),
+    ["error: executors.build: runner mac cannot host executor(docker): it has executor(native); runners with executor(docker): kvm"]
+  );
+}
+
+#[tokio::test]
 async fn a_runner_that_reported_no_host_skips_the_recipe_checks_with_a_warning() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", &[Actor], &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(firecracker)", &[]).await;
   // As after a restart of the control plane, before the next heartbeat.
   served.daemon().runner_hosts.lock().unwrap().clear();
 
@@ -173,8 +187,8 @@ async fn a_runner_that_reported_no_host_skips_the_recipe_checks_with_a_warning()
 #[tokio::test]
 async fn a_native_executor_on_another_runner_without_a_path_map_for_the_actors_directory_is_a_warning() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", &[Actor, Executor], &[]).await;
-  let _mac = runner(&served, "mac", &[Executor], &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[]).await;
+  let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
   let check = check(
     &served,
@@ -200,7 +214,7 @@ executors:
 #[tokio::test]
 async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
   let served = control().await;
-  let _mac = runner(&served, "mac", &[Executor], &[]).await;
+  let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
   let check =
     check(&served, "actor: { cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n").await;
@@ -235,7 +249,7 @@ async fn a_control_host_without_kvm_is_an_error_finding_naming_it() {
 #[tokio::test]
 async fn the_control_hosts_own_runner_without_kvm_is_an_error_finding_naming_it() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", &[Actor], &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(firecracker)", &[]).await;
   std::fs::remove_file(served.dir().join("kvm")).unwrap();
 
   let check = check(&served, "actor: { runner: kvm }").await;

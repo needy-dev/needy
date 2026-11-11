@@ -39,7 +39,8 @@ pub struct Args {
   #[arg(long)]
   token_env: Option<String>,
   /// Directory with the actor's vmlinux, rootfs.ext4 and firecracker.
-  /// Defaults to the image `needy build` writes.
+  /// Defaults to the image `needy build` writes. A runner holds the actor
+  /// role with the firecracker runtime only when it is complete.
   #[arg(long)]
   actor_image: Option<PathBuf>,
   /// The runner that runs on this host (control mode). The control plane
@@ -47,7 +48,8 @@ pub struct Args {
   /// actors and Docker executors go nowhere else yet.
   #[arg(long, value_name = "NAME")]
   local_runner: Option<String>,
-  /// The KVM device checked before an actor starts (control mode).
+  /// The KVM device checked before an actor starts (control mode), and to
+  /// detect the firecracker runtime (runner mode).
   // NOTICE: Firecracker opens /dev/kvm itself; another path only makes sense
   // with a stand-in Firecracker from --actor-image, as the CLI's tests use on
   // hosts without KVM. Hidden for that reason.
@@ -71,9 +73,12 @@ pub struct Args {
   /// File holding the join token (runner mode, first start only).
   #[arg(long, value_name = "PATH")]
   join_token_file: Option<PathBuf>,
-  /// What this runner can host: actor, executor.
-  #[arg(long, value_delimiter = ',', default_value = "executor")]
-  roles: Vec<needy_core::types::RunnerRole>,
+  /// Restrict this runner to these roles: actor, executor. Without it the
+  /// runner holds every role it detects (a usable KVM and the actor image
+  /// for actors; native, and Docker when it answers, for executors). A
+  /// role this machine cannot host is warned about and left out.
+  #[arg(long, value_delimiter = ',')]
+  roles: Option<Vec<needy_core::types::RunnerRole>>,
   /// This runner's labels: KEY=VALUE,...
   #[arg(long, value_delimiter = ',', value_parser = crate::commands::runner::label)]
   labels: Vec<(String, String)>,
@@ -93,8 +98,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 }
 
 async fn serve(args: Args, ctx: &Context) -> Result<i32> {
-  if !matches!(args.mode, Mode::Control) && (args.local_runner.is_some() || args.kvm.is_some()) {
-    bail!("--local-runner and --kvm are for the control mode");
+  if !matches!(args.mode, Mode::Control) && args.local_runner.is_some() {
+    bail!("--local-runner is for the control mode");
+  }
+  if matches!(args.mode, Mode::Executor) && args.kvm.is_some() {
+    bail!("--kvm is for the control and runner modes");
+  }
+  if !matches!(args.mode, Mode::Runner) && args.roles.is_some() {
+    bail!("--roles is for the runner mode");
   }
   if !matches!(args.mode, Mode::Runner) && args.disconnect_grace.is_some() {
     bail!("--disconnect-grace is for the runner mode");
@@ -121,12 +132,23 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         Some(name) => name,
         None => host_name()?,
       };
+      let paths = ctx.paths()?;
+      let image = args.actor_image.unwrap_or_else(|| paths.default_image());
+      let kvm = args.kvm.unwrap_or_else(|| needy_core_actor::host::vm::KVM.into());
+      let roles: Option<std::collections::BTreeSet<_>> = args.roles.map(|roles| roles.into_iter().collect());
+      let (capabilities, warnings) = needy_daemon::capabilities::of_this_machine(&kvm, &image, roles.as_ref()).await;
+      for warning in &warnings {
+        crate::output::message(format_args!("warning: {warning}"));
+      }
+      if capabilities.is_empty() {
+        bail!("this machine can host none of the roles --roles names");
+      }
       let config = needy_daemon::runner::Config {
-        state_dir: ctx.paths()?.state,
+        state_dir: paths.state,
         control: args.join,
         join_token: join_token(args.join_token_env.as_deref(), args.join_token_file.as_deref())?,
         name,
-        roles: args.roles.into_iter().collect(),
+        capabilities,
         labels: args.labels.into_iter().collect(),
         grace: args.disconnect_grace.unwrap_or(needy_daemon::runner::DISCONNECT_GRACE),
       };

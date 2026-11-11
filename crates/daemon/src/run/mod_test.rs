@@ -252,7 +252,7 @@ const CONTROL_TOKEN: &str = "control-secret";
 async fn with_runner_far() -> (testing::Served, testing::JoinedRunner) {
   let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
-  let runner = testing::join_runner(&served, &operator, "far", &[needy_core::types::RunnerRole::Executor], &[]).await;
+  let runner = testing::join_runner(&served, &operator, "far", "executor(native)", &[]).await;
   (served, runner)
 }
 
@@ -345,7 +345,7 @@ executors:
   };
 
   assert!(
-    message.contains("executor mac: no connected runner with the executor role has labels os=darwin; candidates: far (no label os=darwin)"),
+    message.contains("executor mac: no connected runner with executor(native) has labels os=darwin; candidates: far (no label os=darwin)"),
     "{message}"
   );
   assert!(daemon.pool.instances().await.is_empty());
@@ -357,7 +357,7 @@ executors:
 async fn an_actor_on_a_runner_other_than_the_control_hosts_own_fails_the_create() {
   let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
-  let _far = testing::join_runner(&served, &operator, "far", &[needy_core::types::RunnerRole::Actor], &[]).await;
+  let _far = testing::join_runner(&served, &operator, "far", "actor(firecracker)", &[]).await;
   let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runner: far }\n";
 
   let Err(ControlError::Failed(message)) = Runs::create(served.daemon(), new_run(profile, served.dir())).await else {
@@ -372,11 +372,7 @@ async fn an_actor_on_the_control_hosts_own_runner_starts_here() {
   let started = testing::daemon_with(|config| config.local_runner = Some("kvm".into())).await;
   let served = testing::serve(started, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
-  let roles = [
-    needy_core::types::RunnerRole::Actor,
-    needy_core::types::RunnerRole::Executor,
-  ];
-  let _kvm = testing::join_runner(&served, &operator, "kvm", &roles, &[("kvm", "")]).await;
+  let _kvm = testing::join_runner(&served, &operator, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
   let profile = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 actor: { runner: { labels: [kvm] } }

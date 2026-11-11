@@ -9,7 +9,7 @@ use needy_api_client::Client;
 use needy_common::process::Exit;
 use needy_core::event::{Event, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Origin, Principal, RunState, RunnerRole};
+use needy_core::types::{Capabilities, ExecutorProvider, Origin, Principal, RunState};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -312,13 +312,17 @@ impl Guest for Fake {
 fn fake_runner(name: &str) -> RunnerInfo {
   RunnerInfo {
     name: name.into(),
-    roles: [RunnerRole::Executor].into(),
+    capabilities: Capabilities {
+      executor: [ExecutorProvider::Native].into(),
+      ..Default::default()
+    },
     labels: [("os".to_string(), "darwin".to_string())].into(),
     status: RunnerStatus::Online,
     created_ms: 1,
     last_seen_ms: 2,
     rotating: false,
     join_token: "t1".into(),
+    host: None,
   }
 }
 
@@ -356,7 +360,7 @@ impl Runners for Fake {
   }
 
   async fn join(&self, request: Joining) -> Result<Joined> {
-    self.call(format!("join {} with {} as {:?}", request.name, request.join_token, request.report.roles));
+    self.call(format!("join {} with {} as {}", request.name, request.join_token, request.report.capabilities));
     if request.join_token != "needy-join.t1.secret" {
       return Err(ControlError::Unauthenticated("the join token is not valid".into()));
     }
@@ -368,7 +372,7 @@ impl Runners for Fake {
   }
 
   async fn heartbeat(&self, runner: &str, report: RunnerReport) -> Result<Beat> {
-    self.call(format!("heartbeat {runner} {:?}", report.roles));
+    self.call(format!("heartbeat {runner} {}", report.capabilities));
     Ok(Beat {
       credential: Some("needy-runner.mac.new".into()),
       heartbeat_interval_ms: 15_000,
