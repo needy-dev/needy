@@ -133,7 +133,7 @@ pub(crate) fn status(relayed: Result<relay::Ended, relay::Error>) -> Result<i32>
   match relayed {
     Ok(relay::Ended::Exited(exit)) => Ok(signals::shell_code(&exit)),
     Ok(relay::Ended::Detached { process }) => {
-      output::message(format!("detached from process {process}; `needy attach {process}` returns to it"));
+      output::after_terminal(format!("detached from process {process}; `needy attach {process}` returns to it"));
       Ok(0)
     }
     Err(error) if error.ended() => {

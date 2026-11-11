@@ -54,7 +54,7 @@ pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: Exe
   };
   match relay::run(stream, options).await {
     Ok(relay::Ended::Detached { .. }) if !run.is_empty() => {
-      crate::output::message(format!("detached from run {run}; `needy run attach {run}` returns to it"));
+      crate::output::after_terminal(format!("detached from run {run}; `needy run attach {run}` returns to it"));
       Ok(0)
     }
     ended => super::exec::status(ended),

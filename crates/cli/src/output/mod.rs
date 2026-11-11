@@ -38,3 +38,20 @@ pub fn print_table<R: Row>(rows: &[R]) {
 pub fn message(message: impl std::fmt::Display) {
   eprintln!("needy: {message}");
 }
+
+/// Prints a message after a terminal session the user left, such as a
+/// detach. It starts on a line of its own.
+pub fn after_terminal(message: impl std::fmt::Display) {
+  eprint!("{}", after_terminal_line(message));
+}
+
+/// The bytes of [`after_terminal`]: the program's prompt may have left the
+/// cursor mid-line, and the terminal is out of raw mode by now, so `\r\n`
+/// starts the message at the first column of the next line.
+fn after_terminal_line(message: impl std::fmt::Display) -> String {
+  format!("\r\nneedy: {message}\n")
+}
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;
