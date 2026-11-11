@@ -1,6 +1,8 @@
-//! `needy build`: builds the Firecracker actor image and, with `--container`
-//! and `--executor`, the container actor and executor Docker images from
-//! `images/Dockerfile`, through the Docker API with BuildKit.
+//! `needy build`: builds the actor image this host's VM runtime boots (the
+//! Firecracker actor's on Linux, the `vz` actor's on Apple silicon macOS)
+//! and, with `--container` and `--executor`, the container actor and
+//! executor Docker images from `images/Dockerfile`, through the Docker API
+//! with BuildKit.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -26,8 +28,9 @@ pub struct Args {
   /// `builtin:NAME`.
   #[arg(long)]
   recipe: Option<String>,
-  /// Output directory for vmlinux, rootfs.ext4 and firecracker. Defaults to
-  /// the image the daemon boots.
+  /// Output directory for the actor image: vmlinux, rootfs.ext4 and
+  /// firecracker, or on Apple silicon macOS Image, initrd and rootfs.ext4
+  /// for `vz` actors. Defaults to the image the daemon boots.
   #[arg(long)]
   out: Option<PathBuf>,
   /// Also build the `needy-executor` Docker image.
@@ -68,11 +71,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   // keeps them; the tar is unpacked here and removed. Remove this when the
   // local exporter applies `Stat.mode`.
   let archive = out.join(".needy-build.tar");
+  let (target, platform) = actor_target();
   build(
     &docker,
     &context,
     BuildImageOptions {
-      target: "actor".into(),
+      target: target.into(),
+      platform: platform.into(),
       buildargs: Some(build_args),
       outputs: Some(ImageBuildOutput::Tar(archive.display().to_string())),
       ..options()
@@ -108,6 +113,19 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     .await?;
   }
   Ok(0)
+}
+
+/// The Dockerfile target of the actor image this host boots, and the
+/// platform to build it for (empty for the builder's own).
+// NOTICE: a Mac's Docker (Docker Desktop, OrbStack) builds in an arm64 Linux
+// VM, so the `vz` image builds natively there; `linux/arm64` is named so an
+// x86 builder would fail instead of making an image the Mac cannot boot.
+fn actor_target() -> (&'static str, &'static str) {
+  if needy_core_actor::host::vz::supported_host() {
+    ("actor-vz", "linux/arm64")
+  } else {
+    ("actor", "")
+  }
 }
 
 fn options() -> BuildImageOptions {
