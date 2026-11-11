@@ -25,6 +25,9 @@ struct Extras {
   /// alternate screen; the top is the last element.
   keyboard: [Vec<u16>; 2],
   title: Option<Vec<u8>>,
+  /// Answers to the cursor position queries in the bytes processed last,
+  /// with the cursor where each query found it.
+  answers: Vec<u8>,
 }
 
 impl Extras {
@@ -53,6 +56,15 @@ impl vt100::Callbacks for Extras {
   fn unhandled_csi(&mut self, screen: &mut vt100::Screen, i1: Option<u8>, _i2: Option<u8>, params: &[&[u16]], c: char) {
     let first = params.first().and_then(|p| p.first()).copied();
     match (i1, c) {
+      // Source: https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1383-L1387
+      // (`CSI 6 n`, DSR, is answered `CSI r ; c R`, 1-based), xterm patch 412.
+      // TODO(terminal-queries): DSR 5 (status), `CSI ? 6 n` (DECXCPR) and
+      // DA1 are not answered: no program needy runs was seen to wait for
+      // them. Answer them when one does.
+      (None, 'n') if first == Some(6) => {
+        let (row, col) = screen.cursor_position();
+        self.answers.extend_from_slice(cursor_report(row, col).as_bytes());
+      }
       // Source: https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1006
       // and #L1125 (DEC private mode 1004, set and reset), xterm patch 412.
       (Some(b'?'), 'h' | 'l') => {
@@ -114,8 +126,17 @@ impl Screen {
     }
   }
 
-  pub(super) fn process(&mut self, bytes: &[u8]) {
+  /// Follows `bytes` and returns the answers a terminal would send to the
+  /// cursor position queries in them.
+  pub(super) fn process(&mut self, bytes: &[u8]) -> Vec<u8> {
     self.parser.process(bytes);
+    std::mem::take(&mut self.parser.callbacks_mut().answers)
+  }
+
+  /// The answer to a cursor position query now.
+  pub(super) fn cursor_report(&self) -> Vec<u8> {
+    let (row, col) = self.parser.screen().cursor_position();
+    cursor_report(row, col).into_bytes()
   }
 
   pub(super) fn resize(&mut self, rows: u16, cols: u16) {
@@ -176,6 +197,13 @@ fn main_screen(screen: &vt100::Screen) -> vt100::Screen {
   *scratch.screen_mut() = screen.clone();
   scratch.process(b"\x1b[?1049l");
   scratch.screen().clone()
+}
+
+/// A cursor position report for `vt100`'s 0-based `row` and `col`.
+// NOTICE: the position is absolute; a program in origin mode (DECOM) expects
+// it relative to its scroll region, which `vt100` does not expose.
+fn cursor_report(row: u16, col: u16) -> String {
+  format!("\x1b[{};{}R", u32::from(row) + 1, u32::from(col) + 1)
 }
 
 fn dimensions(rows: u16, cols: u16) -> (NonZeroU16, NonZeroU16) {

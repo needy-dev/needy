@@ -63,6 +63,10 @@ struct Seats {
   /// The size the terminal has now; `None` for pipes.
   window: Option<(u16, u16)>,
   clients: Vec<Seat>,
+  /// The program asked for the cursor position while a client terminal
+  /// could answer, and no client typed since. If the last such client
+  /// leaves first, the executor answers.
+  unanswered: bool,
 }
 
 struct Seat {
@@ -81,6 +85,12 @@ impl Seats {
     let window = owner.window.filter(|w| Some(*w) != self.window)?;
     self.window = Some(window);
     Some(window)
+  }
+
+  /// Whether a client terminal that can type, and so answers the program's
+  /// terminal queries, is attached.
+  fn answering(&self) -> bool {
+    self.clients.iter().any(|c| !c.read_only && c.window.is_some())
   }
 }
 
@@ -115,6 +125,8 @@ impl Client {
       }
       if matches!(input, Input::Stdin(_)) {
         seats.clock = clock;
+        // A terminal answers a query at once, before anything typed after.
+        seats.unanswered = false;
       }
       seats.resize()
     };
@@ -129,13 +141,21 @@ impl Client {
 
 impl Drop for Client {
   fn drop(&mut self) {
-    let resize = {
+    let (resize, answer) = {
       let mut seats = self.proc.lock_seats();
       seats.clients.retain(|c| c.id != self.id);
-      seats.resize()
+      let answer = seats.unanswered && !seats.answering();
+      if answer {
+        seats.unanswered = false;
+      }
+      (seats.resize(), answer)
     };
     if let Some((rows, cols)) = resize {
       self.proc.send(Input::Resize(rows, cols));
+    }
+    // The program still waits for the answer this client did not send.
+    if answer && let Some(report) = self.proc.lock_fanout().screen.as_ref().map(Screen::cursor_report) {
+      self.proc.send(Input::Stdin(report));
     }
   }
 }
@@ -226,6 +246,7 @@ impl Proc {
         clock: 0,
         window: spec.tty.filter(|_| tty),
         clients: Vec::new(),
+        unanswered: false,
       }),
     });
     let ends = Ends {
@@ -302,9 +323,9 @@ impl Proc {
   /// the owner, whom the process waits for. No lock is held while it waits.
   pub(super) async fn emit(&self, event: Output) {
     let _order = self.owner_order.lock().await;
-    let owner = {
+    let (owner, answers) = {
       let mut fanout = self.lock_fanout();
-      fanout.record(&event);
+      let answers = fanout.record(&event);
       let last = matches!(event, Output::Exit(_));
       let Fanout {
         screen, viewers, ..
@@ -349,12 +370,16 @@ impl Proc {
           Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
       });
-      if last {
+      let owner = if last {
         fanout.owner.take()
       } else {
         fanout.owner.clone()
-      }
+      };
+      (owner, answers)
     };
+    if !answers.is_empty() {
+      self.answer(answers);
+    }
     if let Some(owner) = owner
       && owner.send(event).await.is_err()
     {
@@ -364,6 +389,41 @@ impl Proc {
         fanout.owner = None;
       }
     }
+  }
+
+  /// Answers the program's cursor position queries, `answers`, unless a
+  /// client terminal that can type is attached: that terminal shows the
+  /// program and answers them itself. The executor answers only for a
+  /// program nobody watches, or one only read-only viewers watch, whose
+  /// input is dropped.
+  // NOTICE: the executor never answers alongside a client terminal, and it
+  // does not filter the terminal's answer out of the client's input instead:
+  // an answer cannot be told from a key (`CSI 1 ; 2 R` is also Shift+F3,
+  // https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1388-L1396),
+  // so either way a second answer or a lost key would reach the program.
+  // ConPTY asks once when it starts with `PSEUDOCONSOLE_INHERIT_CURSOR` and
+  // reads no input until it is answered. portable-pty 0.9.0 always passes
+  // that flag
+  // (https://docs.rs/crate/portable-pty/0.9.0/source/src/win/psuedocon.rs#83-91),
+  // so not asking would need a fork of it; answering also serves any
+  // program, on any platform, that asks while nobody watches.
+  // Source: https://github.com/microsoft/terminal/blob/v1.25.3131.0/src/winconpty/winconpty.cpp#L448-L460
+  // and https://github.com/microsoft/terminal/blob/v1.25.3131.0/src/host/VtIo.cpp#L183-L193
+  // Reference: https://learn.microsoft.com/en-us/windows/console/createpseudoconsole
+  // (retrieved 2026-11-11; the page has no versions).
+  // TODO(terminal-arbitration): two client terminals that can type both
+  // answer, as they did before the executor answered at all; the program
+  // reads two answers. Only one owner of the terminal's input would fix
+  // that; see the terminal note's open questions.
+  fn answer(&self, answers: Vec<u8>) {
+    {
+      let mut seats = self.lock_seats();
+      if seats.answering() {
+        seats.unanswered = true;
+        return;
+      }
+    }
+    self.send(Input::Stdin(answers));
   }
 
   /// Publishes the exit to subscribers, then to waiters; from then on the
@@ -423,11 +483,14 @@ impl Proc {
 }
 
 impl Fanout {
-  fn record(&mut self, event: &Output) {
+  /// Records `event`; returns the answers to the cursor position queries in
+  /// it.
+  fn record(&mut self, event: &Output) -> Vec<u8> {
+    let mut answers = Vec::new();
     match event {
       Output::Stdout(b) | Output::Stderr(b) => {
         if let Some(screen) = self.screen.as_mut() {
-          screen.process(b);
+          answers = screen.process(b);
         }
         self.bytes += b.len();
         self.events.push_back(event.clone());
@@ -441,6 +504,7 @@ impl Fanout {
       }
       Output::Exit(exit) => self.finished = Some(exit.clone()),
     }
+    answers
   }
 }
 

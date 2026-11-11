@@ -355,7 +355,10 @@ impl ExecutorService {
         // inside `Host::spawn`, before the output pumps start, would close
         // that gap if it is ever observed.
         let subscription = proc.subscribe(true, Subscriber::Owner);
-        let client = proc.join(tty, false);
+        // A client that starts a process detached leaves at once; it joins
+        // without a terminal, so it never stands for one that would answer
+        // the program's terminal queries.
+        let client = proc.join(tty.filter(|_| !start.detach), false);
         let started = ExecStarted {
           process_id: proc.id.clone(),
           executor: self.name.clone(),

@@ -59,6 +59,17 @@ fn keyboard_flags_belong_to_their_screen() {
 }
 
 #[test]
+fn a_cursor_position_query_is_answered_with_the_cursor_where_it_was_asked() {
+  let mut screen = Screen::new((24, 80));
+  // Two queries in one chunk, the cursor moved between them; other
+  // reports (DSR 5) are not answered.
+  let answers = screen.process(b"\x1b[3;5H\x1b[6n\x1b[5n\x1b[10;20Hx\x1b[6n");
+  assert_eq!(answers, b"\x1b[3;5R\x1b[10;21R");
+  assert!(screen.process(b"more").is_empty());
+  assert_eq!(screen.cursor_report(), b"\x1b[10;25R");
+}
+
+#[test]
 fn resize_follows_the_terminal() {
   let mut screen = Screen::new((5, 20));
   screen.resize(8, 30);

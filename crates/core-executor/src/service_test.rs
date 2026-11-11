@@ -408,3 +408,96 @@ async fn a_silent_process_ends_when_its_client_leaves_without_detaching() {
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
   }
 }
+
+/// Moves the cursor to row 3, column 5, asks the terminal where the cursor
+/// is (DSR 6) and waits for the answer, as ConPTY does when it starts; exits
+/// 0 when the answer says row 3, column 5.
+const ASKS_FOR_THE_CURSOR: &str = r#"stty -icanon -echo min 1 time 0
+printf '\033[3;5H\033[6n'
+reply=$(dd bs=1 count=6 2>/dev/null)
+if [ "$reply" = "$(printf '\033[3;5R')" ]; then echo answered; exit 0; fi
+echo "wrong answer"; exit 1"#;
+
+/// Waits until `process` exits by itself, at most 5 seconds, and returns its
+/// exit code. One still running then is killed, so the test fails instead of
+/// hanging on its terminal's reader at the end.
+async fn exit_code(executor: &Executor, process: &str) -> Option<i32> {
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+  loop {
+    let list = needy_api_client::Executor::list_processes(&executor.client, Default::default()).await.unwrap();
+    let info = list.processes.into_iter().find(|p| p.process_id == process).expect("the process is listed");
+    if !info.running {
+      return info.exited.and_then(|e| e.code);
+    }
+    if tokio::time::Instant::now() > deadline {
+      kill(executor, process).await;
+      panic!("process {process} still runs");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+}
+
+/// Starts `script` detached on a 24x80 terminal and leaves it; its ID.
+async fn start_detached_tty(executor: &Executor, script: &str) -> String {
+  let start = ExecStart {
+    argv: vec!["sh".into(), "-c".into(), script.into()],
+    tty: Some(WindowSize { rows: 24, cols: 80 }),
+    detach: true,
+    ..Default::default()
+  };
+  let mut stream = ExecStream::start(&executor.client, start).await.unwrap();
+  loop {
+    if let Some(Event::Started(started)) = stream.next().await.unwrap() {
+      return started.process_id;
+    }
+  }
+}
+
+// ROOT CAUSE:
+//
+// If a program on a terminal asked for the cursor position (DSR 6) while no
+// client terminal was attached, as ConPTY does when it starts with
+// `PSEUDOCONSOLE_INHERIT_CURSOR`, it waited for an answer nobody sent, so
+// `exec -d -t` on Windows hung "running", drew nothing and could not end.
+//
+// Before the fix, only a client's terminal answered the query.
+// The fix answers it from the executor's terminal model when no client
+// terminal that can type is attached.
+#[tokio::test]
+async fn a_detached_program_that_asks_for_the_cursor_position_gets_an_answer() {
+  let executor = executor().await;
+  let process = start_detached_tty(&executor, ASKS_FOR_THE_CURSOR).await;
+
+  assert_eq!(exit_code(&executor, &process).await, Some(0));
+}
+
+// A client terminal that is attached answers the query itself; the executor
+// does not answer as well, so the program reads one answer, not two.
+#[tokio::test]
+async fn an_attached_terminal_answers_the_cursor_query_alone() {
+  let executor = executor().await;
+  let (mut client, process) = start_tty(&executor, ASKS_FOR_THE_CURSOR).await;
+  read_until(&mut client, "\x1b[6n").await;
+  tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+  let waited = running(&executor, &process).await;
+
+  client.input().stdin(b"\x1b[3;5R".to_vec()).await.unwrap();
+  let text = read_until(&mut client, "answered").await;
+  kill(&executor, &process).await;
+  assert!(waited, "the executor answered while a client terminal was attached");
+  assert!(text.contains("answered"), "{text:?}");
+}
+
+// A query a client terminal left unanswered when it went is answered by the
+// executor then.
+#[tokio::test]
+async fn a_cursor_query_a_departing_client_left_unanswered_is_answered() {
+  let executor = executor().await;
+  let process = start_detached_tty(&executor, &format!("read go\n{ASKS_FOR_THE_CURSOR}")).await;
+  let mut viewer = ExecStream::attach(&executor.client, attach(&process, Some((24, 80)), false)).await.unwrap();
+  viewer.input().stdin(b"go\n".to_vec()).await.unwrap();
+  read_until(&mut viewer, "\x1b[6n").await;
+  drop(viewer);
+
+  assert_eq!(exit_code(&executor, &process).await, Some(0));
+}

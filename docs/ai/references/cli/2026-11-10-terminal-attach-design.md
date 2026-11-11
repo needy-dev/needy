@@ -60,6 +60,12 @@ the title or the cursor shape; a small scanner records those.
 - End of input sends `0x04` only when the PTY is in canonical mode.
 - `TERM` falls back to `xterm-256color` when the executor has no terminfo entry
   for the client's value, recorded in the trace; `COLORTERM` is forwarded.
+- A cursor position query (`CSI 6 n`) is answered by the client terminal that
+  shows the program when one that can type is attached, and otherwise by the
+  executor from the model (a detached process, or one only read-only viewers
+  watch; also a query a departing client left unanswered). ConPTY asks once
+  at start and reads no input until answered, so `exec -d -t` on Windows
+  depends on this. Two writable clients still both answer.
 
 ### Interactive actor (G10)
 
