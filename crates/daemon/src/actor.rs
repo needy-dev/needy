@@ -166,7 +166,7 @@ fn serve_gateway(run: &Run, actor: &CancellationToken) -> Result<()> {
     }
   }
   let policy = gateway::Policy {
-    allow: network.allow.iter().map(|glob| glob.as_str().to_string()).collect(),
+    allow: network.allow.clone(),
     upstream: network.upstream.clone(),
     inject,
   };

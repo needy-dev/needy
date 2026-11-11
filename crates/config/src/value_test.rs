@@ -40,6 +40,25 @@ fn globs() {
 }
 
 #[test]
+fn host_globs_ignore_case() {
+  let h = |pattern: &str, host: &str| Glob::new(pattern).matches_host(host);
+  assert!(h("api.example.com", "API.Example.COM"));
+  assert!(h("*.Example.com", "api.example.COM"));
+  assert!(!h("api.example.com", "api.example.org"));
+}
+
+#[test]
+fn a_wildcard_subdomain_host_glob_also_matches_its_domain() {
+  let h = |pattern: &str, host: &str| Glob::new(pattern).matches_host(host);
+  assert!(h("*.example.com", "example.com"));
+  assert!(h("*.example.com", "api.example.com"));
+  assert!(h("*.example.com", "a.b.example.com"));
+  assert!(!h("*.example.com", "badexample.com"));
+  assert!(h("*", "example.com"));
+  assert!(h("{api,cdn}.example.com", "cdn.example.com"));
+}
+
+#[test]
 fn templates() {
   let key = Template::new("{run}:{cwd}");
   assert_eq!(key.render(&[("run", "abc")]), "abc:{cwd}");

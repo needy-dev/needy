@@ -265,6 +265,16 @@ impl Glob {
   pub fn matches(&self, text: &str) -> bool {
     glob_match::glob_match(&self.0, text)
   }
+
+  /// Whether `host` matches this pattern as a host name: case-insensitively
+  /// (host names are, RFC 4343), and with `*.example.com` also matching
+  /// `example.com` itself. The actor gateway's allowlist and the profile's
+  /// `network.allow` both use it, so a profile check and the gateway agree.
+  pub fn matches_host(&self, host: &str) -> bool {
+    let pattern = self.0.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    pattern.strip_prefix("*.").is_some_and(|domain| domain == host) || glob_match::glob_match(&pattern, &host)
+  }
 }
 
 impl fmt::Display for Glob {

@@ -8,6 +8,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use needy_config::value::Glob;
 use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetConnect, NetDeny, NetRequest};
 use needy_core::types::{Effect, Fired, Network};
@@ -73,7 +74,7 @@ impl Running {
 /// injects a header for it, with the faults in `chaos`.
 fn start(upstream: SocketAddr, chaos: &str) -> Running {
   let policy = Policy {
-    allow: vec!["127.0.0.1".into()],
+    allow: vec![Glob::new("127.0.0.1")],
     upstream: BTreeMap::from([("model.needy".to_string(), format!("http://{upstream}"))]),
     inject: BTreeMap::from([("model.needy".to_string(), ("authorization".to_string(), "Bearer test-secret".to_string()))]),
   };

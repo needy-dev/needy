@@ -13,6 +13,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-rustls.workspace = true
 hyper-util.workspace = true
+needy-config.workspace = true
 needy-core.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 serde_json.workspace = true
@@ -36,7 +37,6 @@ libc.workspace = true
 needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
-needy-config.workspace = true
 needy-core-executor.workspace = true
 nix = { workspace = true, features = ["fs", "hostname", "ioctl", "mount", "net", "process", "reboot", "sched", "signal", "socket"] }
 procfs-core.workspace = true
@@ -47,7 +47,6 @@ tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
-needy-config.workspace = true
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true
 tempfile.workspace = true

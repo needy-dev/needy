@@ -9,7 +9,7 @@ use crate::value::Glob;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct NetworkPolicy {
-  /// Hosts that may be reached.
+  /// Hosts that may be reached, matched by [`Glob::matches_host`].
   pub allow: Vec<Glob>,
   /// Headers the gateway adds, by host; never visible in the actor.
   pub inject: BTreeMap<String, Injection>,
@@ -20,7 +20,7 @@ pub struct NetworkPolicy {
 
 impl NetworkPolicy {
   pub fn allows(&self, host: &str) -> bool {
-    self.allow.iter().any(|pattern| pattern.matches(host))
+    self.allow.iter().any(|pattern| pattern.matches_host(host))
   }
 }
 

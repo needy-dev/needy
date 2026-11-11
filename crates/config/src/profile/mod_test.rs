@@ -97,6 +97,8 @@ fn loads_every_section() {
   assert_eq!(&*p.actor.command, ["opencode", "run", "hello"]);
   assert!(p.actor.network.allows("api.models.dev"));
   assert!(!p.actor.network.allows("example.com"));
+  assert!(p.actor.network.allows("API.Models.Dev"));
+  assert!(p.actor.network.allows("models.dev"));
   assert_eq!(p.actor.network.inject["openrouter.ai"].secret, "OPENROUTER_KEY");
 
   let build = &p.executors["build"];

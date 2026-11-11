@@ -94,6 +94,10 @@ chaos:
 trace: { sinks: [sqlite, jsonl], timing: false }   # see Trace
 ```
 
+A `network.allow` entry is a glob matched against the host name in any
+case, and `*.example.com` also matches `example.com` itself
+(`Glob::matches_host`, which the actor gateway and the profile share).
+
 ## Executors
 
 Needy places executors on runners by selector (see Runners) but does not

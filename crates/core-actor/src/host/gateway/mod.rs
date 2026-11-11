@@ -24,6 +24,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
+use needy_config::value::Glob;
 use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetDeny};
 use needy_core::intercept::{self, NetContext, NetDecide};
@@ -37,9 +38,10 @@ use tokio_util::task::TaskTracker;
 // NOTICE: no `Debug`: `inject` holds credentials.
 #[derive(Clone, Default)]
 pub struct Policy {
-  /// Host patterns that may be reached: `*`, `*.example.com` (which also
-  /// matches `example.com`), or a host.
-  pub allow: Vec<String>,
+  /// Host patterns that may be reached, matched by [`Glob::matches_host`]:
+  /// `*`, `*.example.com` (which also matches `example.com`), or a host, in
+  /// any case.
+  pub allow: Vec<Glob>,
   /// Host to the base URL its plain-HTTP requests are forwarded to. A mapped
   /// host is allowed.
   pub upstream: BTreeMap<String, String>,
@@ -51,13 +53,13 @@ pub struct Policy {
 /// The first `net.*` interceptor: a host that matches no pattern and has no
 /// upstream is denied.
 struct Allowlist {
-  patterns: Vec<String>,
+  patterns: Vec<Glob>,
   upstreams: Vec<String>,
 }
 
 impl Allowlist {
   fn allows(&self, host: &str) -> bool {
-    self.patterns.iter().any(|pattern| glob_host(pattern, host)) || self.upstreams.iter().any(|upstream| upstream == host)
+    self.patterns.iter().any(|pattern| pattern.matches_host(host)) || self.upstreams.iter().any(|upstream| upstream == host)
   }
 }
 
@@ -68,20 +70,6 @@ impl NetDecide for Allowlist {
     }
     decision
   }
-}
-
-// REVIEW: this host matcher differs from `needy_config::value::Glob` (exact
-// hosts ignore case, `*.example.com` matches `example.com`), which the
-// profile's `allows` uses. Kept as it was to keep the gateway's behavior;
-// sharing one matcher needs a decision on those two cases.
-fn glob_host(pattern: &str, host: &str) -> bool {
-  if pattern == "*" {
-    return true;
-  }
-  if let Some(suffix) = pattern.strip_prefix("*.") {
-    return host == suffix || host.ends_with(&format!(".{suffix}"));
-  }
-  pattern.eq_ignore_ascii_case(host)
 }
 
 type Body = BoxBody<Bytes, hyper::Error>;
