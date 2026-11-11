@@ -1942,6 +1942,149 @@ fn a_runner_daemon_joins_restarts_without_its_join_token_and_ends_when_removed()
   assert_eq!(runner_when(&control, "mac", |_| true)["status"], "removed");
 }
 
+/// A control plane whose `Join` answers only once the test releases it,
+/// and which refuses everything else. It stops when dropped.
+struct HeldJoin {
+  endpoint: String,
+  arrived: std::sync::mpsc::Receiver<()>,
+  release: std::sync::Arc<tokio::sync::Notify>,
+  _runtime: tokio::runtime::Runtime,
+}
+
+impl HeldJoin {
+  const CREDENTIAL: &str = "held-join-credential";
+
+  fn start(home: &Home) -> Self {
+    use needy_api_client::proto::v1::runner_service_server::{RunnerService, RunnerServiceServer};
+    use needy_api_client::proto::v1::{
+      ControlRequest, ControlResponse, CreateJoinTokenRequest, CreateJoinTokenResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest,
+      JoinResponse, ListJoinTokensRequest, ListJoinTokensResponse, ListRunnersRequest, ListRunnersResponse, RemoveRunnerRequest,
+      RemoveRunnerResponse, RevokeJoinTokenRequest, RevokeJoinTokenResponse, RotateRunnerRequest, RotateRunnerResponse, TaskRequest,
+      TaskResponse,
+    };
+    use std::sync::{Arc, Mutex};
+    use tonic::{Request, Response, Status, Streaming};
+
+    struct Held {
+      arrived: Mutex<std::sync::mpsc::Sender<()>>,
+      release: Arc<tokio::sync::Notify>,
+    }
+
+    fn refused<T>() -> Result<T, Status> {
+      Err(Status::unavailable("not part of the test"))
+    }
+
+    #[tonic::async_trait]
+    impl RunnerService for Held {
+      type ControlStream = tokio_stream::Empty<Result<ControlResponse, Status>>;
+      type TaskStream = tokio_stream::Empty<Result<TaskResponse, Status>>;
+
+      async fn join(&self, _: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
+        self.arrived.lock().unwrap().send(()).unwrap();
+        self.release.notified().await;
+        Ok(Response::new(JoinResponse {
+          runner: None,
+          credential: HeldJoin::CREDENTIAL.into(),
+          heartbeat_interval_ms: 60_000,
+        }))
+      }
+
+      async fn create_join_token(&self, _: Request<CreateJoinTokenRequest>) -> Result<Response<CreateJoinTokenResponse>, Status> {
+        refused()
+      }
+      async fn list_join_tokens(&self, _: Request<ListJoinTokensRequest>) -> Result<Response<ListJoinTokensResponse>, Status> {
+        refused()
+      }
+      async fn revoke_join_token(&self, _: Request<RevokeJoinTokenRequest>) -> Result<Response<RevokeJoinTokenResponse>, Status> {
+        refused()
+      }
+      async fn heartbeat(&self, _: Request<HeartbeatRequest>) -> Result<Response<HeartbeatResponse>, Status> {
+        refused()
+      }
+      async fn list_runners(&self, _: Request<ListRunnersRequest>) -> Result<Response<ListRunnersResponse>, Status> {
+        refused()
+      }
+      async fn rotate_runner(&self, _: Request<RotateRunnerRequest>) -> Result<Response<RotateRunnerResponse>, Status> {
+        refused()
+      }
+      async fn remove_runner(&self, _: Request<RemoveRunnerRequest>) -> Result<Response<RemoveRunnerResponse>, Status> {
+        refused()
+      }
+      async fn control(&self, _: Request<Streaming<ControlRequest>>) -> Result<Response<Self::ControlStream>, Status> {
+        refused()
+      }
+      async fn task(&self, _: Request<Streaming<TaskRequest>>) -> Result<Response<Self::TaskStream>, Status> {
+        refused()
+      }
+    }
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let socket = home.path().join("held.sock");
+    let listener = {
+      let _context = runtime.enter();
+      tokio::net::UnixListener::bind(&socket).unwrap()
+    };
+    let (arrived_tx, arrived) = std::sync::mpsc::channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let held = Held {
+      arrived: Mutex::new(arrived_tx),
+      release: release.clone(),
+    };
+    runtime.spawn(
+      tonic::transport::Server::builder()
+        .add_service(RunnerServiceServer::new(held))
+        .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(listener)),
+    );
+    Self {
+      endpoint: format!("unix:{}", socket.display()),
+      arrived,
+      release,
+      _runtime: runtime,
+    }
+  }
+}
+
+// ROOT CAUSE:
+//
+// If a runner daemon got a termination signal while it joined, it died of
+// the signal before it stored the credential the control plane had already
+// issued, because it listened for termination signals only after the join.
+// The join token's use was spent and the runner could not start again.
+//
+// Before the fix, the runner below died of SIGTERM without `runner.json`.
+// The fix listens before joining: the join ends, the credential is stored,
+// then the runner stops.
+#[test]
+fn a_runner_daemon_stopped_while_it_joins_keeps_its_credential() {
+  let machine = Home::new();
+  let control = HeldJoin::start(&machine);
+  let mut command = machine.needy();
+  command
+    .args([
+      "daemon",
+      "--mode",
+      "runner",
+      "--join",
+      &control.endpoint,
+      "--name",
+      "mac",
+      "--join-token-env",
+      "NEEDY_TEST_JOIN_TOKEN",
+    ])
+    .env("NEEDY_TEST_JOIN_TOKEN", "a-join-token");
+  let runner = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+  control.arrived.recv_timeout(Duration::from_secs(20)).expect("the runner joins");
+
+  kill(runner.id(), "TERM");
+  control.release.notify_one();
+  let output = exited(runner);
+
+  assert_eq!(output.status.code(), Some(0), "{output:?}");
+  let stored = std::fs::read_to_string(machine.path().join("state").join("runner.json")).unwrap();
+  let stored: serde_json::Value = serde_json::from_str(&stored).unwrap();
+  assert_eq!(stored["credential"], HeldJoin::CREDENTIAL);
+}
+
 #[test]
 fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
   let control = Home::new();

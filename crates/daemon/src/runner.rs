@@ -687,10 +687,16 @@ async fn exec(client: Client, service: ExecutorService, id: u64) -> Result<()> {
 /// is and fails, naming the processes still running. Ends with an error when
 /// the control plane refuses the runner's credential.
 pub async fn serve(config: Config) -> Result<()> {
-  let runner = Runner::start(config).await?;
+  // Listening before the join: a signal during it lets the join end and
+  // the credential be stored, which the control plane has already issued
+  // and counted against the join token, before the runner stops.
   let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
-  tracing::info!("runner {} dialing the control plane at {}", runner.name(), runner.control);
-  match termination.unless_forced(runner.serve(termination.stop())).await {
+  let served = async {
+    let runner = Runner::start(config).await?;
+    tracing::info!("runner {} dialing the control plane at {}", runner.name(), runner.control);
+    runner.serve(termination.stop()).await
+  };
+  match termination.unless_forced(served).await {
     Some(served) => served,
     None => {
       let message = "exited at a second termination signal before the runner's processes were killed";
