@@ -257,3 +257,53 @@ commands:
 
   assert!(message.contains("this host has no usable KVM"), "{message}");
 }
+
+// ROOT CAUSE:
+//
+// If `run attach` reached a vz actor before its guest served the process
+// service, vfkit accepted the connection on `process.sock` and closed it once
+// it could not reach the guest's vsock port, and the attach failed with
+// "transport error" instead of waiting, because a Unix connection that was
+// accepted counted as the terminal.
+//
+// The fix counts the terminal only once the service answers a call.
+#[tokio::test]
+async fn a_relay_that_accepts_and_closes_is_no_terminal_yet() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("process.sock");
+  let listener = tokio::net::UnixListener::bind(&path).unwrap();
+  // Like vfkit with no guest listening: accept, then close.
+  let relay = tokio::spawn(async move {
+    loop {
+      let (stream, _) = listener.accept().await.unwrap();
+      drop(stream);
+    }
+  });
+
+  let connected = super::connect_terminal(&path).await;
+  relay.abort();
+
+  assert!(connected.is_err(), "a closed relay counted as the terminal");
+}
+
+#[tokio::test]
+async fn a_served_process_service_is_the_terminal() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("process.sock");
+  let health = needy_api_server::Health {
+    instance_id: "test".into(),
+    role: "executor",
+  };
+  let listener = needy_api_server::Server::new(health, needy_api_server::control::Caller::Operator)
+    .bind(&[needy_api_server::Listen::Unix(path.clone())])
+    .await
+    .unwrap();
+  let stop = tokio_util::sync::CancellationToken::new();
+  let served = tokio::spawn(listener.serve(stop.clone()));
+
+  let connected = super::connect_terminal(&path).await;
+  stop.cancel();
+  served.await.unwrap().unwrap();
+
+  assert!(connected.is_ok(), "{:?}", connected.err());
+}

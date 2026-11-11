@@ -244,10 +244,7 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
       std::pin::Pin<Box<dyn std::future::Future<Output = Result<needy_api_client::Client, needy_api_client::Error>> + Send + 'a>>;
     let connect: Connecting<'_> = match &channels.terminal {
       Terminal::FirecrackerVsock { device, port } => Box::pin(needy_api_client::Client::connect_firecracker_vsock(device, *port)),
-      Terminal::Unix(path) => {
-        let endpoint = format!("unix:{}", path.display());
-        Box::pin(async move { needy_api_client::Client::connect(&endpoint).await })
-      }
+      Terminal::Unix(path) => Box::pin(connect_terminal(path)),
     };
     // Bound the connection itself, including the Firecracker handshake:
     // a peer that accepts but never answers must not hold `run attach`.
@@ -266,6 +263,24 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
     }
     tracing::debug!("run {}: the actor's terminal is not served yet: {error}", run.id);
     tokio::time::sleep(Duration::from_millis(200)).await;
+  }
+}
+
+/// Connects to an actor's process service on the Unix socket `path`, once
+/// the service itself answers.
+// NOTICE: a relay can accept before the actor serves: vfkit's `connect`
+// socket of a vz actor accepts and only then dials the guest's vsock port,
+// closing the connection when nothing listens there yet, so the first call
+// failed with "transport error" (seen 2026-11-12 with `run create -it`). A
+// health check waits for the service: the process service has no health
+// service and answers `Unimplemented`; the closed relay fails the call with
+// `Unknown` ("transport error"), not `Unavailable`.
+async fn connect_terminal(path: &Path) -> Result<needy_api_client::Client, needy_api_client::Error> {
+  let client = needy_api_client::Client::connect(&format!("unix:{}", path.display())).await?;
+  match client.health().check(needy_api_client::proto::v1::CheckRequest {}).await {
+    Ok(_) => Ok(client),
+    Err(status) if status.code() == tonic::Code::Unimplemented => Ok(client),
+    Err(status) => Err(needy_api_client::Error::Status(status)),
   }
 }
 
