@@ -1155,6 +1155,35 @@ The build-cache fix was not reproduced with two trees on one builder; it is
 covered by the Dockerfile test and by the rebuilds on the KVM host, which
 shares the cache with other trees there.
 
+## Owner decisions of 2026-11-12
+
+`0870344` (D7, rules without `to:` on the route list), `27ed0f6` (D2, `gpus`
+needs the operator), `360dc4b` (D3, join tokens and clients listed only on
+the control host's Unix socket), `a240a70` (D10, re-pairing revokes the old
+token), `e0a567e` (D4, `{time}` and the GCE BIOS date) and `6ab90f8` (D6,
+BIOS revision and board asset tag in the Firecracker patch). Run on
+2026-11-12. `make check` and `make test` pass on the Mac and on the Linux KVM
+host (Intel Core i5-13600KF). D2, D3 and D10 are covered by unit, adapter,
+daemon and CLI tests only.
+
+On the KVM host, an actor image was built from these commits before their
+rebase onto `c3a328f` (three commits on the daemon's sockets, terminal tests
+and docs), with `needy build --recipe examples/opencode/gce.recipe.yaml` (no
+`--executor`) into a scratch directory; the patch applied to Firecracker v1.17.0 there and in a
+`patch -p1 --dry-run` on the Mac. A control daemon ran in the background
+with its state in a scratch directory and ran one probe profile as uid 0: no
+executors, one rule `{ match: "rm -rf **", deny: "rm -rf is not allowed in
+this actor" }`, and the GCE recipe.
+
+| Check | Result |
+| --- | --- |
+| `profile check --local` | `route names: ash,bash,dash,rm,sh,zsh` (before D7 the list was empty, so `rm` never reached the daemon); `hostname generated per run`; `bios_date=07/16/2026` |
+| `rm -rf /tmp/needy-d7` in the actor (D7) | `needy: denied: rm -rf is not allowed in this actor`, exit 126, the directory still there; `rm -f` on a file in it ran in the actor, exit 0 |
+| Report | 1 denied (`denied command: /usr/bin/rm -rf /tmp/needy-d7: …`), 1 kept on actor; two `exec.decide` events from `actor-proxy` |
+| `hostname` (D4) | `instance-20261111-181341`, the UTC time of `run create`; `run.create` records `"recipe_time":"20261111-181341"` |
+| `dmidecode -t bios -t baseboard` (D4, D6) | `Release Date: 07/16/2026`, `BIOS Revision: 1.0`, `Targeted content distribution is supported`; board `Asset Tag:` the system UUID in upper case (`dmidecode -s system-uuid` gave the same UUID in lower case), as on the cited n2-standard-2 |
+| Nothing left | no daemon or Firecracker |
+
 ## Not yet verified
 
 - Windows terminals beyond live probes (see
