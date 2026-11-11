@@ -302,6 +302,12 @@ Every injected fault is a `fault.injected` trace event that names its kind,
 its target (the command, host, path or sensor) and its effect. `exec` faults
 are the second step of [rule evaluation](#evaluation).
 
+An `exec` fault applies in the actor as a rule does: its pattern's command
+names join the actor's route list (`profile check` prints it as `route
+names:`), so `{ on: exec, match: "curl **", errno: ECONNREFUSED }` fails
+`curl` in the actor even when no rule names `curl`. An `exec` fault without
+`match`, or whose pattern may match any program, routes every exec.
+
 ## Trace
 
 `trace:` selects where the run's events go and whether hook latencies are

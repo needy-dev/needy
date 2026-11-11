@@ -623,6 +623,22 @@ fn profile_check_lists_route_names_of_rules_without_a_placement() {
   assert!(names.contains(&"rm") && names.contains(&"npm") && names.contains(&"sh"), "{line}");
 }
 
+// An exec fault must reach the daemon from an actor even when no rule names
+// its command, so `profile check` lists the fault's command too.
+#[test]
+fn profile_check_lists_route_names_of_exec_faults() {
+  let home = Home::new();
+  let profile = home
+    .write("profile.yaml", "actor: { runtime: firecracker }\nchaos: { faults: [{ on: exec, match: \"curl **\", errno: ECONNREFUSED }] }\n");
+
+  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+
+  let text = stdout(&output);
+  let line = text.lines().find(|l| l.starts_with("route names: ")).unwrap_or_else(|| panic!("{text}{}", stderr(&output)));
+  let names: Vec<&str> = line["route names: ".len()..].split(',').collect();
+  assert!(names.contains(&"curl") && names.contains(&"sh"), "{line}");
+}
+
 // Captures used to sit directly under `when`, where a misspelt condition
 // became a capture that never matched. They now go under `captures:`.
 #[test]

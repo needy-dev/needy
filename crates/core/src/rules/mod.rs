@@ -11,7 +11,7 @@ mod launcher;
 mod shell;
 mod when;
 
-use needy_config::profile::{Profile, UnknownPolicy};
+use needy_config::profile::{FaultKind, Profile, UnknownPolicy};
 
 use crate::intercept::{ExecContext, ExecDecide};
 use crate::pattern::Pattern;
@@ -165,12 +165,13 @@ fn unknown_placement(profile: &Profile) -> Placement {
 
 /// Executable names the actor hands to the proxy (the `binfmt_needy` route
 /// parameter in a VM, the shims' route list in a container): the literal
-/// command names of every rule, whatever its actions. A rule that only
+/// command names of every rule, whatever its actions, and of every
+/// `chaos.faults` entry with `on: exec`. A rule that only
 /// denies, or only changes the environment, arguments, working directory,
 /// timeout or faults, must reach the daemon as much as one that places the
 /// command on an executor; a program missing here runs in the actor
-/// untouched. `None` when a wildcard rule or a default executor means every
-/// exec must be asked about.
+/// untouched. `None` when a wildcard rule or exec fault (or one without a
+/// pattern), or a default executor, means every exec must be asked about.
 pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
   if profile.default_executor.is_some() {
     return None;
@@ -179,12 +180,12 @@ pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
     return None;
   }
   let mut names = Vec::new();
-  // TODO(route-list): `chaos.faults` with `on: exec` match commands too and
-  // likewise never fire in the actor for a name off this list; left out of
-  // the deny-only fix (D7, 2026-11-12), which the owner scoped to rules.
-  // Add their patterns' names once the owner asks for it.
   for rule in &profile.commands {
     names.extend(Pattern::compile(&rule.matcher).command_names()?);
+  }
+  // An exec fault without a pattern matches every command.
+  for fault in profile.chaos.faults.iter().filter(|f| f.on == FaultKind::Exec) {
+    names.extend(Pattern::compile(fault.matcher.as_deref()?).command_names()?);
   }
   if !names.is_empty() {
     names.extend(shell::SHELLS.iter().map(|s| s.to_string()));

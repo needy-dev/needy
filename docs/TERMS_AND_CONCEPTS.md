@@ -305,8 +305,9 @@ The executable names the actor hands to the proxy: its kernel in a VM, its
 shims in a container. Execs not on it run in the actor without consulting
 the daemon. It holds the command name of every rule, whatever the rule does
 (place, deny, or change the environment, arguments, working directory,
-timeout or faults), and the shells; a rule whose pattern may match any
-program makes it `*`, every exec.
+timeout or faults), the command name of every `chaos.faults` entry with
+`on: exec`, and the shells; a rule or exec fault whose pattern may match any
+program, or an exec fault without a pattern, makes it `*`, every exec.
 
 ### Shim
 
