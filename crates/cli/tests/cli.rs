@@ -742,12 +742,19 @@ fn run_attach_explains_when_the_driving_program_has_no_terminal() {
   assert!(stderr(&output).contains("has no terminal; create the run with `needy run create -t`"), "{}", stderr(&output));
 }
 
+// ROOT CAUSE:
+//
+// If `run create` got `-i` without `-t`, clap's generic `requires` error
+// named the missing argument but not why `-i` needs it.
+//
+// Before the fix, the message was clap's usage error.
+// The fix says what `-i` does and that it needs `-t`, still as a usage error.
 #[test]
 fn run_create_interactive_requires_a_terminal() {
   let home = Home::new();
   let output = home.run(&["run", "create", "-i", "--profile", "example.yaml"]);
   assert_eq!(output.status.code(), Some(2));
-  assert!(stderr(&output).contains("-t"), "{}", stderr(&output));
+  assert_eq!(stderr(&output), "needy: `-i` attaches your terminal to the driving program, which needs one: use `-it`\n");
 }
 
 // ROOT CAUSE:

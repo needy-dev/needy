@@ -32,7 +32,9 @@ enum Command {
     #[arg(short = 't')]
     tty: bool,
     /// Attach to the driving program immediately and return its exit code.
-    #[arg(short = 'i', requires = "tty")]
+    /// Needs `-t`.
+    // Not clap's `requires`, whose error does not say why; `run` checks it.
+    #[arg(short = 'i')]
     interactive: bool,
     /// Keys that leave the run running; empty turns detaching off.
     #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
@@ -223,6 +225,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       name,
       command,
     } => {
+      // A usage error like clap's (exit 2), worded to say why.
+      if interactive && !tty {
+        output::message("`-i` attaches your terminal to the driving program, which needs one: use `-it`");
+        return Ok(2);
+      }
       // Refuse invalid keys before creating a run that the caller cannot leave.
       relay::DetachKeys::parse(&detach_keys)?;
       let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
