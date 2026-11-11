@@ -568,3 +568,12 @@ fn runtime_is_refused_naming_provider() {
   let err = resolve(&Source::text("executors: { build: { runtime: native } }", "/base")).unwrap_err().to_string();
   assert!(err.contains("`provider: native`"), "{err}");
 }
+
+// `on_full: new` was removed (owner decision, 2026-11-11): it waited like
+// `wait`, since a second instance per key was never built.
+#[test]
+fn on_full_new_is_refused_naming_wait_and_reject() {
+  let err = load_text("executors: { build: { on_full: new } }").unwrap_err().to_string();
+  assert!(err.contains("executors.build.on_full"), "{err}");
+  assert!(err.contains("unknown variant `new`, expected `wait` or `reject`"), "{err}");
+}

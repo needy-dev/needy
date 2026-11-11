@@ -68,12 +68,15 @@ pub enum Provider {
 }
 
 /// What a command does when its instance has no free slot.
+// NOTICE: `new` (start another instance with the same key) was removed
+// (owner decision, 2026-11-11): it waited like `wait`, since a second
+// instance per key needs `max_instances`, which is not built. A profile that
+// still names it is refused by serde's message naming `wait` and `reject`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnFull {
   #[default]
   Wait,
-  New,
   Reject,
 }
 

@@ -1054,5 +1054,6 @@ Not working yet:
 
 - Windows terminals, and a Windows workspace mounted into an actor.
 - Executor runtimes `containerd`, `firecracker` and `k8s`; pool settings
-  `max_instances`, `idle_timeout` and `on_full: new`; `continuous` mirror-out.
+  `max_instances`, `idle_timeout` and `on_full: new` (removed 2026-11-11: it
+  behaved like `wait`); `continuous` mirror-out.
 - Network policy for the executor network (only the actor gateway is enforced).

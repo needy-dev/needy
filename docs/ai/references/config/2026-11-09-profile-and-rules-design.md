@@ -119,7 +119,7 @@ executors:
       args: [--cpus=4, --memory=8g, --pids-limit=512]   # run options: docker run
     key: "{run}"
     max_procs: 4          # matched commands running at once per instance
-    on_full: wait         # wait | new | reject
+    on_full: wait         # wait | reject
     max_instances: 16
     idle_timeout: 10m
 
@@ -184,8 +184,11 @@ replayed.
 | `on_full` | Behaviour |
 | --- | --- |
 | `wait` | Queue until a slot frees; the command is slower. |
-| `new` | Start another instance with the same key. Becomes `wait` at `max_instances`. |
 | `reject` | Return an error. |
+
+`on_full: new` (start another instance with the same key) was removed
+(2026-11-11): it behaved like `wait`, since a second instance per key needs
+`max_instances`, which is not built. A profile that names it is refused.
 
 `idle_timeout` stops unused instances. Per-instance runtime limits multiplied by
 `max_instances` bound what one executor can take from its host.

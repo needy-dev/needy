@@ -101,16 +101,13 @@ impl Instance {
 
   /// Takes a slot for one command. A full instance refuses the command with
   /// `on_full: reject` and makes it wait otherwise.
-  // TODO(executor-pool): `on_full: new` waits like `wait`; a second instance
-  // per key needs `max_instances`, which is not verified yet (see the
-  // closed-loop results' "Not yet verified").
   pub async fn slot(&self) -> Result<Slot, ControlError> {
     let Some(slots) = &self.slots else {
       return Ok(None);
     };
     let permit = match self.on_full {
       OnFull::Reject => slots.clone().try_acquire_owned().map_err(|_| ControlError::Exhausted("executor is full".into()))?,
-      OnFull::Wait | OnFull::New => slots.clone().acquire_owned().await.map_err(|_| ControlError::Unavailable("executor closed".into()))?,
+      OnFull::Wait => slots.clone().acquire_owned().await.map_err(|_| ControlError::Unavailable("executor closed".into()))?,
     };
     Ok(Some(permit))
   }
