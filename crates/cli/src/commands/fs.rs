@@ -99,11 +99,13 @@ async fn cp(endpoint: &str, place: &Place, source: &str, destination: &str) -> R
   }
 }
 
-/// A failed `tar` names the executor; the daemon's refusals speak for
-/// themselves.
-fn tar_failed(executor: &str, error: needy_api_client::Error) -> anyhow::Error {
+/// A failed `tar` (or the `mkdir` before it) names the executor and the path
+/// of the copy, since tar's own message may not: Windows' bsdtar says
+/// `tar: : Couldn't visit directory` for a missing source. The daemon's
+/// refusals speak for themselves.
+fn tar_failed(executor: &str, path: &str, error: needy_api_client::Error) -> anyhow::Error {
   match error {
-    needy_api_client::Error::Failed { .. } => anyhow::anyhow!("tar on {executor} failed: {error}"),
+    needy_api_client::Error::Failed { .. } => anyhow::anyhow!("cannot copy {executor}:{path}: {error}"),
     error => error.into(),
   }
 }
@@ -137,7 +139,7 @@ async fn upload(endpoint: &str, place: &Place, executor: &str, local: &Path, rem
   .await??;
   let size = archive.len();
   let client = connect(endpoint).await?;
-  files::push(&client, &target(place, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, e))?;
+  files::push(&client, &target(place, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, remote_dir, e))?;
   tracing::info!("copied {size} bytes to {executor}:{remote_dir}");
   Ok(())
 }
@@ -145,7 +147,7 @@ async fn upload(endpoint: &str, place: &Place, executor: &str, local: &Path, rem
 async fn download(endpoint: &str, place: &Place, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
   let (parent, name) = split(remote);
   let client = connect(endpoint).await?;
-  let archive = files::pull(&client, &target(place, executor), &parent, &name).await.map_err(|e| tar_failed(executor, e))?;
+  let archive = files::pull(&client, &target(place, executor), &parent, &name).await.map_err(|e| tar_failed(executor, remote, e))?;
   let size = archive.len();
   let local_dir = local_dir.to_path_buf();
   tokio::task::spawn_blocking(move || -> Result<()> {
@@ -166,3 +168,7 @@ async fn download(endpoint: &str, place: &Place, executor: &str, remote: &str, l
   tracing::info!("copied {size} bytes from {executor}:{remote}");
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "fs_test.rs"]
+mod tests;
