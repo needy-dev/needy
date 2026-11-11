@@ -16,7 +16,7 @@ use needy_config::profile::{Fault, Profile};
 use needy_config::validate::{self, Finding, Severity};
 use needy_core::chaos::{Injector, Subject};
 use needy_core::intercept::ExecContext;
-use needy_core::recipe::VmIdentity;
+use needy_core::recipe::{Smbios, VmIdentity};
 use needy_core::rules;
 use needy_core::types::Outcome;
 use serde::Serialize;
@@ -152,12 +152,16 @@ fn print_recipe(profile: &Profile, host: &needy_core::recipe::HostInfo) -> Resul
     return Ok(Vec::new());
   };
   let recipe = needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
+  // A run compiles the recipe with a seed from its ID, which a check does
+  // not have. Compiling with two seeds shows which values the seed decides.
   let compiled = needy_core::recipe::compile(&recipe, host, 1);
+  let other = needy_core::recipe::compile(&recipe, host, 2);
+  let hostname = per_run(compiled.hostname.as_deref(), other.hostname.as_deref()).unwrap_or("not set");
   println!(
-    "recipe: {} vCPU, {} MiB, hostname {:?}, uptime offset {} s",
-    compiled.vcpus, compiled.mem_mib, compiled.hostname, compiled.uptime_offset_secs
+    "recipe: {} vCPU, {} MiB, hostname {hostname}, uptime offset {} s",
+    compiled.vcpus, compiled.mem_mib, compiled.uptime_offset_secs
   );
-  print_identity(&compiled.identity);
+  print_identity(&compiled.identity, &other.identity);
   Ok(
     compiled
       .findings
@@ -219,30 +223,48 @@ fn finish(profile: &Profile, findings: Vec<Finding>, commands: &[String]) -> Res
   Ok(code)
 }
 
-/// The machine a recipe presents through the hypervisor, one line per part.
-fn print_identity(identity: &VmIdentity) {
-  if let Some(brand) = &identity.cpu_brand {
+/// What a check prints for a value of the compiled recipe: the value, or
+/// `generated per run` when compiling with another seed (`other`) changes it.
+fn per_run<'a>(value: Option<&'a str>, other: Option<&str>) -> Option<&'a str> {
+  if value == other {
+    value
+  } else {
+    Some("generated per run")
+  }
+}
+
+/// The machine a recipe presents through the hypervisor, one line per part;
+/// `other` is the same recipe compiled with another seed.
+fn print_identity(identity: &VmIdentity, other: &VmIdentity) {
+  if let Some(brand) = per_run(identity.cpu_brand.as_deref(), other.cpu_brand.as_deref()) {
     println!("  cpu brand: {brand}");
   }
   if identity.hide_hypervisor {
     println!("  hypervisor: hidden");
   }
   if let Some(smbios) = &identity.smbios {
-    let chassis = smbios.chassis_type.map(|n| n.to_string());
-    let fields = [
-      ("sys_vendor", smbios.sys_vendor.as_deref()),
-      ("product_name", smbios.product_name.as_deref()),
-      ("product_version", smbios.product_version.as_deref()),
-      ("serial", smbios.serial.as_deref()),
-      ("board_vendor", smbios.board_vendor.as_deref()),
-      ("board_name", smbios.board_name.as_deref()),
-      ("bios_vendor", smbios.bios_vendor.as_deref()),
-      ("bios_version", smbios.bios_version.as_deref()),
-      ("bios_date", smbios.bios_date.as_deref()),
-      ("chassis_type", chassis.as_deref()),
-      ("uuid", Some(smbios.uuid.as_str())),
-    ];
-    let text = fields.iter().filter_map(|(k, v)| v.map(|v| format!("{k}={v}"))).collect::<Vec<_>>().join(", ");
+    let fields = |smbios: &Smbios| {
+      [
+        ("sys_vendor", smbios.sys_vendor.clone()),
+        ("product_name", smbios.product_name.clone()),
+        ("product_version", smbios.product_version.clone()),
+        ("serial", smbios.serial.clone()),
+        ("board_vendor", smbios.board_vendor.clone()),
+        ("board_name", smbios.board_name.clone()),
+        ("bios_vendor", smbios.bios_vendor.clone()),
+        ("bios_version", smbios.bios_version.clone()),
+        ("bios_date", smbios.bios_date.clone()),
+        ("chassis_type", smbios.chassis_type.map(|n| n.to_string())),
+        ("uuid", Some(smbios.uuid.clone())),
+      ]
+    };
+    let others = fields(other.smbios.as_ref().unwrap_or(smbios));
+    let text = fields(smbios)
+      .iter()
+      .zip(others.iter())
+      .filter_map(|((k, v), (_, o))| per_run(v.as_deref(), o.as_deref()).map(|v| format!("{k}={v}")))
+      .collect::<Vec<_>>()
+      .join(", ");
     println!("  smbios: {text}");
   }
   if let Some(id) = identity.pci_host_bridge {

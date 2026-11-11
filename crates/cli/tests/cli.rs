@@ -629,6 +629,30 @@ fn profile_check_compiles_a_built_in_recipe() {
   assert!(text.contains("  smbios: sys_vendor=Google, product_name=Google Compute Engine,"), "{text}");
 }
 
+// ROOT CAUSE:
+//
+// If a recipe's hostname or SMBIOS serial and UUID came from the run's
+// seed, `profile check` printed them compiled with a fixed seed of 1, and
+// the hostname with Debug formatting: `hostname Some("instance-…")`. A run
+// compiles the recipe with a seed from its ID, so it got other values.
+//
+// Before the fix, the check showed one fixed value the run never had.
+// The fix prints a value that depends on the seed as generated per run.
+#[test]
+fn profile_check_says_which_recipe_values_each_run_generates() {
+  let home = Home::new();
+  let profile = home.write("profile.yaml", "actor: { recipe: \"builtin:gce-ubuntu-22.04\" }\n");
+
+  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+
+  let text = stdout(&output);
+  assert!(text.contains("recipe: 2 vCPU, 4096 MiB, hostname generated per run, uptime offset"), "{text}{}", stderr(&output));
+  assert!(!text.contains("Some("), "{text}");
+  assert!(text.contains("serial=generated per run"), "{text}");
+  assert!(text.contains("uuid=generated per run"), "{text}");
+  assert!(text.contains("  cpu brand: Intel(R) Xeon(R) CPU @ 2.20GHz\n"), "{text}");
+}
+
 #[test]
 fn profile_check_asks_the_control_plane_where_the_profile_would_run() {
   let home = Home::new();
