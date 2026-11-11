@@ -52,9 +52,22 @@ pub(super) fn main() -> ! {
     std::process::exit(if booted.is_ok() { 0 } else { 1 });
   }
   nix::unistd::sync();
+  // NOTICE: how a guest ends its VM differs by architecture. On x86_64,
+  // Firecracker ends on a reboot (`reboot=k` on the kernel command line,
+  // https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/FAQ.md#L181-L204)
+  // and has no ACPI power-off. On arm64 a reboot is PSCI SYSTEM_RESET, which
+  // Virtualization.framework answers by restarting the guest (init then
+  // booted again and again in a vz actor, seen 2026-11-12 with vfkit 0.6.4),
+  // and a power-off is PSCI SYSTEM_OFF, which stops the VM and ends vfkit:
+  // https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/psci/psci.c#L309-L335
+  let mode = if cfg!(target_arch = "aarch64") {
+    nix::sys::reboot::RebootMode::RB_POWER_OFF
+  } else {
+    nix::sys::reboot::RebootMode::RB_AUTOBOOT
+  };
   // `reboot` returns only when it fails.
-  let Err(e) = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_AUTOBOOT);
-  tracing::error!("cannot reboot: {e}");
+  let Err(e) = nix::sys::reboot::reboot(mode);
+  tracing::error!("cannot end the VM ({mode:?}): {e}");
   loop {
     std::thread::sleep(Duration::from_secs(60));
   }
