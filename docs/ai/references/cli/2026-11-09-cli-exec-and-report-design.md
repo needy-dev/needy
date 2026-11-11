@@ -115,23 +115,31 @@ prints `ID`, `STATE` (`valid`, `expired`, `used-up`, `revoked`), `USES LEFT`,
 `EXPIRES` (RFC 3339, UTC), `ROLES` (`any` when the token names none) and
 `LABELS`. `runner ls` prints `NAME`, `STATUS` (`online`, `offline` or
 `removed`, with `(rotating)` while a new credential waits to be used),
-`ROLES`, `LABELS` and `LAST SEEN` (how long ago, by this machine's clock):
+`CAPABILITIES` (each role with its runtimes or providers), `HOST` (`os/arch`
+from the runner's last heartbeat, `-` before one), `CPU` (its model, `-` off
+Linux), `LABELS` and `LAST SEEN` (how long ago, by this machine's clock):
 
 ```text
-NAME  STATUS  ROLES             LABELS     LAST SEEN
-kvm   online  actor,executor    kvm=true   3s ago
-mac   online  executor          os=darwin  9s ago
+NAME  STATUS  CAPABILITIES                                HOST           CPU            LABELS     LAST SEEN
+kvm   online  actor(firecracker) executor(docker,native)  linux/x86_64   Example CPU    kvm=true   3s ago
+mac   online  executor(native)                            macos/aarch64  -              os=darwin  9s ago
 ```
 
-Both take `-o json`, whose objects carry the times as Unix milliseconds and
-`roles` and `labels` as an array and an object. `runner rotate` and `runner
+Both take `-o json`, whose objects carry the times as Unix milliseconds; a
+token's `roles` is an array, a runner's `capabilities` an object of role to
+runtimes or providers (`{"actor": ["firecracker"], "executor": ["native",
+"docker"]}`), its `host` an object (`os`, `arch`, `cpu_vendor`, `cpu_model`,
+`kvm`) or `null`, and `labels` an object. `runner rotate` and `runner
 rm` print nothing; a name no runner has is `needy: no runner NAME`, exit 1.
 
 On the machine, `needy daemon --mode runner --join ENDPOINT
 --join-token-env NAME` (or `--join-token-file PATH`) joins once and keeps its
 credential in `runner.json` in its state directory; later starts need neither
 the token nor `--join`. `--name` defaults to the host name's first label,
-`--roles` to `executor`; `--labels` adds `KEY=VALUE` labels. It dials the
+`--roles` to every role the machine is detected to host (see
+[capabilities](../architecture/2026-11-10-runner-and-run-design.md#as-built-capabilities));
+`--roles` restricts it, warning about a named role the machine cannot host;
+`--labels` adds `KEY=VALUE` labels. It dials the
 control plane and listens nowhere (`--listen` and `--token-env` are refused
 in runner mode), connects again with backoff when its connection drops, and
 exits 1 when the control plane refuses its credential. The control daemon's

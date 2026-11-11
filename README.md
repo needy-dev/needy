@@ -143,6 +143,9 @@ Transport encryption comes from the tunnel:
 needy runner token create --ttl 1h --roles executor     # on the control host
 JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
 needy runner ls
+#   NAME  STATUS  CAPABILITIES                                HOST          CPU  ...
+#   kvm   online  actor(firecracker) executor(docker,native)  linux/x86_64  ...
+#   mac   online  executor(native)                            macos/aarch64 -
 needy exec --runner mac -- uname -a                     # on the control host
 needy ps --runner mac
 ```
@@ -153,8 +156,12 @@ it outside the session, for example with
 or a scheduled task. Give full paths, and pass the token in a file: the
 process does not get the session's environment or working directory.
 
-Profiles place executors and the actor on runners by name or labels, with no
-addresses or secrets in the profile:
+A runner detects what it can host: `actor(firecracker)` with a usable KVM and
+the actor image, `executor(docker)` when a Docker daemon answers, and
+`executor(native)` always; `--roles` restricts it to some roles. Profiles
+place executors and the actor on runners by name or labels, with no
+addresses or secrets in the profile, and a runner without the capability an
+instance needs is an error naming the runners that have it:
 
 ```yaml
 actor: { runner: kvm }                       # the control host's own runner

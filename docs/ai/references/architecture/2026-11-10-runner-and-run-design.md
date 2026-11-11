@@ -50,8 +50,8 @@ Using needy on real machines (a KVM host, a Mac, cloud VMs) showed:
 
 | Term | Meaning |
 | --- | --- |
-| **Runner** | A machine running `needy daemon` that has joined a control plane. It declares **roles** it can host and **labels**. Runners are registered ahead of time, listed, rotated and removed. |
-| **Role** | What a runner can host: `actor` (with runtimes, e.g. `firecracker`, `container`) and `executor` (with providers, e.g. `native`, `docker`). |
+| **Runner** | A machine running `needy daemon` that has joined a control plane. It reports the **capabilities** it detects and **labels**. Runners are registered ahead of time, listed, rotated and removed. |
+| **Role** | What a runner can host: `actor` (with runtimes, e.g. `firecracker`, `container`) and `executor` (with providers, e.g. `native`, `docker`). A role with its runtimes or providers is a **capability**, written `actor(firecracker) executor(docker,native)`; see [As built: capabilities](#as-built-capabilities). |
 | **Actor** | An instance on a runner with the `actor` role: the sandbox that runs one driving program. Usually created per run and destroyed after it. |
 | **Executor** | An instance on a runner with the `executor` role where routed commands run: the runner's own process space (`native`) or a container it creates (`docker`). |
 | **Run** | One execution of a driving program in an actor, with the executors bound to it, the rules that route between them, and its trace and report. Replaces *session*. |
@@ -69,9 +69,9 @@ needy runner token create --ttl 1h [--uses N] [--roles executor] [--labels os=da
 needy runner token ls | revoke ID
 JOIN=<t> needy daemon --mode runner --join https://ctl.example.com --join-token-env JOIN   # on the machine
 needy runner ls
-#   NAME        STATUS  ROLES                                       LABELS
-#   kvm-1       online  actor(firecracker) executor(docker,native)  kvm
-#   mac         online  executor(native)                            os=darwin
+#   NAME   STATUS  CAPABILITIES                                HOST           CPU      LABELS     LAST SEEN
+#   kvm-1  online  actor(firecracker) executor(docker,native)  linux/x86_64   (model)  kvm        3s ago
+#   mac    online  executor(native)                            macos/aarch64  -        os=darwin  5s ago
 needy runner rotate mac
 needy runner rm mac
 
@@ -295,8 +295,8 @@ need neither the join token nor `--join`. The token never appears in the
 process's arguments. `--name` defaults to the host name's first label in
 lowercase. A restart under another name than the stored one is refused. In
 slice 3 it still served the executor role on `--listen` as `--mode executor`
-does; slice 4 removed that listener (see below). Roles are declared by `--roles` (default `executor`); detecting them,
-such as `/dev/kvm` for the actor role, is a follow-up (`TODO(runner-roles)`).
+does; slice 4 removed that listener (see below). Roles were declared by `--roles` (default `executor`) until
+[capabilities](#as-built-capabilities) replaced them with detection.
 
 **Status table.** `ControlError::Unauthenticated` → `UNAUTHENTICATED` was
 added for an invalid, expired, spent or revoked join token; a role or label
@@ -695,6 +695,76 @@ without waiting for any client.
 Rebuild the guest image together with the host binary. Automated tests and
 live probes from a Mac through an SSH local forward to a Linux KVM host are
 recorded in [Interactive actor: implementation and evidence](../cli/2026-11-11-interactive-actor-evidence.md).
+
+## As built: capabilities
+
+Owner decision of 2026-11-11: runners report, and the CLI shows,
+capabilities, and detect them.
+
+**Detection** (`needy_daemon::capabilities`, once at the runner's start):
+
+| Capability | When |
+| --- | --- |
+| `actor(firecracker)` | Linux, the KVM device (`/dev/kvm`, hidden `--kvm`) opens for reading and writing, and the actor image (`--actor-image`, else the one `needy build` writes) has vmlinux, rootfs.ext4 and firecracker |
+| `actor(container)` | a Docker daemon answers and lists `runsc` among its runtimes; reported, never scheduled (`TODO(container-runtime)`) |
+| `executor(docker)` | a Docker daemon (`DOCKER_HOST`, else its default socket) answers `info` within 3 s |
+| `executor(native)` | always, on Unix and Windows |
+
+`probe` reads the machine; `detect` (facts to capabilities, and a line for
+each one missing) and `restrict` are pure and tested without it. `--roles`
+is now optional: without it a runner holds every role it detects; with it,
+it keeps those roles only, and a named role the machine cannot host is a
+warning on stderr (with why, such as `cannot open /dev/kvm`) and is left
+out. A runner left with no role does not start. So a KVM host joins as
+`actor(firecracker) executor(docker,native)` without flags, where it joined
+as `executor` before.
+
+**Wire.** `RunnerCapabilities { repeated ActorRuntime actor; repeated
+ExecutorProvider executor }` (new enums, zero values refused) replaces the
+role lists: `JoinRequest.capabilities` (5), `HeartbeatRequest.capabilities`
+(4) and `Runner.capabilities` (9); the old `roles` fields are reserved.
+`Runner.host` (10) carries the machine the runner's last heartbeat reported
+to this control plane process, so `runner ls` shows the host report that
+heartbeats already carried. `RunnerRole` stays for join token scopes.
+
+**Persistence.** Migration `m20261111_000080_runner_capabilities` adds
+`runners.capabilities` (JSON `{"actor": [...], "executor": [...]}`, default
+`{}`) and drops `runners.roles`. A runner that joined before has none until
+its next heartbeat; runners of an earlier version report none and are
+refused (no compatibility path). The host report stays in memory, as in
+slice 5.
+
+**Join token scopes** still name roles: a runner's roles are those its
+capabilities name, and one outside the scope is refused as before, now with
+a hint (`start the runner with --roles executor`), since detection may find
+more roles than the token allows.
+
+**Scheduling and `profile check`.** A placement needs a capability:
+`actor(firecracker)` for an actor, `executor(PROVIDER)` for an executor
+(`containerd`, `firecracker` and `k8s` need the executor role only; the
+create refuses them). A named runner without it is an error naming its
+capabilities and the runners that have it (`runner mac cannot host
+executor(docker): it has executor(native); runners with executor(docker):
+kvm`); a label selector lists each candidate's capabilities when that is
+why it does not fit (`mac (has executor(native))`). The control-host cuts
+of slice 5 still apply after this check: Docker on a runner other than the
+local one, and actors off the control host, are refused as before.
+
+**CLI.** `runner ls` has columns NAME, STATUS, CAPABILITIES, HOST
+(`os/arch`), CPU (model), LABELS and LAST SEEN; JSON has `capabilities`
+(by role) and `host` (`os`, `arch`, `cpu_vendor`, `cpu_model`, `kvm`) or
+`null`.
+
+**Tests.** Detection rules and `--roles` over injected facts, the
+firecracker check against a stand-in KVM file and image (Linux); the wire
+round trip and refused values; the store (capabilities replaced by a
+heartbeat, scope refusal with the hint, the migration down and up);
+scheduling (a missing provider by name and by labels, the container runtime
+not scheduled); `profile check` with `provider: docker` on a runner without
+Docker; `runner ls` table and JSON; the CLI runner with a Docker daemon that
+does not answer (`executor(native)`), a stand-in KVM and image
+(`actor(firecracker) executor(native)`, Linux), and `--roles actor` on a
+machine without KVM (warned, not started).
 
 ## Open questions
 

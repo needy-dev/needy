@@ -68,8 +68,7 @@ the connection it dialed; it listens nowhere.
 ### Runner
 
 A machine running `needy daemon --mode runner` that has joined a control
-plane. It declares the **roles** it can host (`actor`, `executor`) and
-**labels** (`KEY=VALUE`), and sends a heartbeat at the interval the control
+plane. It reports its **capabilities** and **labels** (`KEY=VALUE`), and sends a heartbeat at the interval the control
 plane sets (15 s by default); it is *online* while one arrived within the last
 three intervals, else *offline*, and *removed* once an operator removed it.
 Runners are registered (`needy runner token create`, then a join), listed
@@ -83,10 +82,25 @@ the control plane announces **tasks**; for an exec the runner opens a **task
 stream** that carries the exec. `needy exec --runner NAME` runs a command on a
 connected runner's machine. Each heartbeat reports the runner's **host**: its
 platform, CPU and the CPUID entries its KVM supports. Profiles place executors
-and actors on runners with **runner selectors**. Roles do not yet carry their
-runtimes or providers.
+and actors on runners with **runner selectors**.
 
 *Avoid*: agent, worker, node.
+
+### Capabilities
+
+What a runner can host: each **role** it holds (`actor`, `executor`) with its
+actor **runtimes** (`firecracker`, `container`) or executor **providers**
+(`native`, `docker`), written `actor(firecracker) executor(docker,native)`. A
+runner detects them when it starts: a KVM device that opens for reading and
+writing and a complete actor image give `actor(firecracker)` (Linux only); a
+Docker daemon that answers gives `executor(docker)`, and gVisor's `runsc`
+registered with it `actor(container)`, which is reported but hosts no actor
+until the container actor runtime is built; `executor(native)` is always
+there. `--roles` restricts a runner to some roles and cannot add one the
+machine lacks. Capabilities travel in the join and every heartbeat, are kept
+in `state.db`, and are what scheduling and `profile check` match: an actor
+needs `actor(firecracker)`, an executor `executor(PROVIDER)`. A join token's
+scope still names roles.
 
 ### Ownership and grace period
 
@@ -121,8 +135,8 @@ leaves unrecorded. Whether it still runs is unknown; `run ls` marks it
 ### Runner selector
 
 A profile's `runner:` on an executor or the actor: a runner's name, or
-`{ labels: [KEY, KEY=VALUE] }` for the one connected runner with the role and
-every label. Without one, the actor or executor runs on the control host
+`{ labels: [KEY, KEY=VALUE] }` for the one connected runner with the capability
+the instance needs and every label. Without one, the actor or executor runs on the control host
 itself. The control plane resolves selectors when a run is created
 (**scheduling**); a selector that names no connected runner, or labels that
 fit several, is an error naming the candidates.
