@@ -147,6 +147,12 @@ needy exec --runner mac -- uname -a                     # on the control host
 needy ps --runner mac
 ```
 
+On Windows, a runner started in an SSH session ends with the session. Start
+it outside the session, for example with
+`Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{CommandLine='C:\needy\needy.exe daemon --mode runner --join http://127.0.0.1:7400 --join-token-file C:\needy\join.txt'}`
+or a scheduled task. Give full paths, and pass the token in a file: the
+process does not get the session's environment or working directory.
+
 Profiles place executors and the actor on runners by name or labels, with no
 addresses or secrets in the profile:
 
