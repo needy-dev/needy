@@ -135,6 +135,11 @@ pub fn pick(selector: &RunnerSelector, role: RunnerRole, runners: &[Candidate]) 
           labels: wanted.clone(),
           candidates: misfits,
         }),
+        // TODO(runner-schedule): a load-balancing policy plugs in here: it
+        // would choose one of `matches` (sorted by name) instead of refusing,
+        // and need each runner's load in `Candidate`. Ambiguity stays an
+        // error until the owner picks a policy and decides how a replay lands
+        // on the same runner (owner decision, 2026-11-11).
         _ => Err(Unschedulable::Ambiguous {
           role,
           labels: wanted.clone(),
