@@ -278,3 +278,51 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
 
   assert!(testing::ended(pid).await, "process {pid} outlived the daemon's shutdown");
 }
+
+// ROOT CAUSE:
+//
+// If a termination signal stopped the control daemon while a command
+// outside any run was attached, its client could see the stream cut without
+// "daemon shutting down", because only the runs' streams ended while the
+// server still served; the others waited out the server's grace period and
+// were ended by the shutdown after serving, racing the process's exit.
+//
+// Before the fix, the stream below stayed open after serving stopped.
+// The fix ends every open exec stream, with its reason, while the server
+// still serves and drains it.
+#[tokio::test]
+async fn a_stream_outside_a_run_hears_the_daemon_is_shutting_down_while_it_serves() {
+  const TOKEN: &str = "control-secret";
+  let started = testing::daemon().await;
+  let daemon = started.daemon.clone();
+  let socket = started.dir.path().join("ctl.sock");
+  let endpoint = format!("unix:{}", socket.display());
+  let stop = tokio_util::sync::CancellationToken::new();
+  // Serving only: the shutdown after it is what the stream must not need.
+  let serving = tokio::spawn({
+    let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
+    async move { daemon.serve_until(&endpoint, Some(TOKEN.into()), stop).await.unwrap() }
+  });
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let client = needy_api_client::Client::connect(&endpoint).await.unwrap().with_token(TOKEN).unwrap();
+  let start = needy_api_client::proto::v1::ExecStart {
+    argv: vec!["sleep".into(), "300".into()],
+    no_stdin: true,
+    origin: needy_api_client::proto::v1::Origin::Cli.into(),
+    ..Default::default()
+  };
+  let mut stream = needy_api_client::exec::ExecStream::start(&client, start).await.unwrap();
+  while !matches!(stream.next().await.unwrap(), Some(needy_api_client::exec::Event::Started(_))) {}
+
+  stop.cancel();
+  let ended = tokio::time::timeout(Duration::from_secs(20), stream.next()).await.expect("the stream ends while the daemon serves");
+  tokio::time::timeout(Duration::from_secs(20), serving).await.expect("serving ends").unwrap();
+  daemon.shutdown().await;
+
+  match ended {
+    Err(needy_api_client::Error::Ended { reason }) => assert_eq!(reason.as_deref(), Some("daemon shutting down")),
+    other => panic!("{other:?}"),
+  }
+}

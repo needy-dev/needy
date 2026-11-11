@@ -174,6 +174,10 @@ pub struct Daemon {
   /// Run creates in progress, which shutdown waits for.
   pub(crate) creates: TaskTracker,
   pub(crate) cancel: CancellationToken,
+  /// Ends the exec streams of commands outside any run. A child of
+  /// `cancel`, cancelled with the runs when a shutdown begins, so those
+  /// streams end while the server still serves, as a run's do.
+  pub(crate) outside_runs: CancellationToken,
   /// Set when [`Daemon::shutdown`] begins, so a stream it ends says why.
   shutting_down: Arc<AtomicBool>,
   /// Set once the runs are stopped for a shutdown: serving starts it, and
@@ -247,6 +251,7 @@ impl Daemon {
       processes: Arc::default(),
       tasks,
       creates: TaskTracker::new(),
+      outside_runs: cancel.child_token(),
       cancel,
       shutting_down: Arc::default(),
       runs_stopped: Arc::default(),
@@ -355,6 +360,10 @@ impl Daemon {
         tracing::warn!("run {}: {e}", run.id);
       }
     }
+    // The streams outside any run end now, while serving drains them, not
+    // after the server's grace period, when their reason may not reach the
+    // client before the process exits.
+    self.outside_runs.cancel();
   }
 }
 

@@ -282,10 +282,11 @@ impl Processes for Daemon {
       }
     }
     .map_err(relayed)?;
-    // A run's relays stop with the run; the others with the daemon.
+    // A run's relays stop with the run; the others when the daemon begins
+    // to shut down.
     let (tasks, cancel) = match &run {
       Some(run) => (&run.tasks, &run.cancel),
-      None => (&self.tasks, &self.cancel),
+      None => (&self.tasks, &self.outside_runs),
     };
     tasks.spawn(cancel.clone().run_until_cancelled_owned(forward_input(
       input,
