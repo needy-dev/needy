@@ -551,27 +551,70 @@ async fn a_client_attaching_to_a_full_screen_program_sees_the_programs_screen() 
 
 // A terminal viewer that falls behind skips output and is drawn the screen
 // again once it reads, instead of being dropped (G5, then G1).
-#[cfg(unix)]
+//
+// ROOT CAUSE (of this test's flakiness):
+//
+// If the test task drained the viewer's queue more than a second after the
+// owner read "burst done", the test timed out at "final", because the test
+// ran a real `sh` paced by `sleep 1`: the viewer's queue was still full
+// when "final" came, so the viewer skipped it as well, and a stale viewer
+// is drawn again only at the next output, which a program that then sleeps
+// 30 s never writes (the NOTICE in `Proc::emit`). Under load the owner's
+// render of the 400 kB burst alone could take that second.
+//
+// Before the fix, the test failed under load on a Linux KVM host (78 of
+// 300 runs, and 47 of 300 with every core busy, each at "final") although
+// the fan-out did what it is meant to.
+// The fix feeds the output to the fan-out directly, one event per `emit`,
+// and drains the viewer at fixed points between them, so the burst, the
+// drain and the next output come in one order with no process and no
+// clock.
 #[tokio::test]
 async fn a_terminal_viewer_that_falls_behind_is_redrawn_not_dropped() {
-  let host = Host::default();
-  let mut tty = spec(&[
-    "sh",
-    "-c",
-    r#"sleep 0.3; yes "$(printf '\033[2;1Hburst')" | head -c 400000; printf '\033[3;1Hburst done'; sleep 1; printf '\033[4;1Hfinal'; sleep 30"#,
-  ]);
+  use futures_util::FutureExt;
+  // NOTICE: more events than a subscriber's queue holds (64,
+  // `SUBSCRIBER_QUEUE` in `proc.rs`).
+  const BURST: usize = 200;
+  let mut tty = spec(&["writer"]);
   tty.tty = Some((6, 30));
-  let proc = host.spawn(tty).unwrap();
+  let (proc, _ends) = Proc::new(&tty, -1, true, None);
   let mut owner = proc.subscribe(true, Subscriber::Owner);
   let mut viewer = proc.subscribe(true, Subscriber::Viewer);
   let mut program = terminal(6, 30);
-  tokio::time::timeout(Duration::from_secs(20), render_until(&mut owner.live, &mut program, "burst done")).await.unwrap();
-
+  // Writes `text` as the program would, then draws what the owner got.
+  // NOTICE: `unconstrained`, as in the stalled-viewer test above: a
+  // budgeted `emit` would yield after 64 events in one poll although
+  // nothing holds it back.
+  let mut write = |text: &str| {
+    tokio::task::coop::unconstrained(proc.emit(Output::Stdout(Bytes::from(text.to_string()))))
+      .now_or_never()
+      .unwrap_or_else(|| panic!("the viewer held the program back at {text:?}"));
+    match owner.live.try_recv() {
+      Ok(Output::Stdout(bytes)) => program.process(&bytes),
+      other => panic!("the owner did not get {text:?}: {other:?}"),
+    }
+  };
+  // What the viewer's queue holds now, drawn on its terminal.
   let mut client = terminal(6, 30);
-  tokio::time::timeout(Duration::from_secs(20), render_until(&mut viewer.live, &mut client, "final")).await.unwrap();
-  tokio::time::timeout(Duration::from_secs(20), render_until(&mut owner.live, &mut program, "final")).await.unwrap();
+  let mut read = |client: &mut vt100::Parser| loop {
+    match viewer.live.try_recv() {
+      Ok(Output::Stdout(bytes)) => client.process(&bytes),
+      Ok(other) => panic!("the viewer got {other:?}"),
+      Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+      Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => panic!("the viewer was dropped"),
+    }
+  };
+
+  for i in 0..BURST {
+    write(&format!("\x1b[2;1Hburst {i}"));
+  }
+  write("\x1b[3;1Hburst done");
+  read(&mut client);
+  // The viewer skipped output it had no room for.
+  assert!(!client.screen().contents().contains("burst done"), "{}", client.screen().contents());
+  write("\x1b[4;1Hfinal");
+  read(&mut client);
 
   assert!(!viewer.fell_behind());
   assert_eq!(client.screen().contents(), program.screen().contents());
-  proc.send(Input::Signal("SIGKILL".into()));
 }

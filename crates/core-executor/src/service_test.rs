@@ -217,25 +217,56 @@ async fn running(executor: &Executor, process: &str) -> bool {
   list.processes.iter().any(|p| p.process_id == process && p.running)
 }
 
+/// Reads `stream` until `wanted` matches an event, and returns that event.
+async fn read_event(stream: &mut ExecStream, wanted: impl Fn(&Event) -> bool) -> Event {
+  let read = async {
+    loop {
+      match stream.next().await.unwrap() {
+        Some(event) if wanted(&event) => return event,
+        Some(_) => {}
+        None => panic!("the stream ended first"),
+      }
+    }
+  };
+  // NOTICE: a bound for a test that fails, not a wait the test relies on.
+  tokio::time::timeout(std::time::Duration::from_secs(20), read).await.expect("no such event")
+}
+
 // The client that started a process leaves without ending it once it sent
 // `detach` (G3); without it, leaving hangs the process up.
+//
+// ROOT CAUSE (of this test's flakiness):
+//
+// If the executor took more than 500 ms to hang up the process whose
+// client left without detaching, for its shell to die of the SIGHUP and for
+// the exit to be recorded, the test failed, because it slept 500 ms and then
+// expected that process to be gone. It also slept 100 ms for the detach to
+// be read instead of waiting for the executor's answer to it.
+//
+// Before the fix, the test failed under load on a Linux KVM host (3 of 300
+// runs; 244 of 300 with the 500 ms wait removed).
+// The fix waits for the events that say each step happened: the `detached`
+// answer, which the executor sends once the detach holds, and the hung-up
+// process's exit as a watcher sees it.
 #[tokio::test]
 async fn a_starting_client_that_detaches_leaves_the_process_running() {
   let executor = executor().await;
   // Both keep writing, so a hangup cannot wait for a silent process.
   let writer = "while :; do echo tick; sleep 0.05; done";
-  let (detached, kept) = start_tty(&executor, writer).await;
+  let (mut detached, kept) = start_tty(&executor, writer).await;
   detached.input().detach().await.unwrap();
-  // The detach is a request on the stream; it is read before the stream
-  // closes.
-  tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+  // The executor answers the detach once it holds; a client leaves after.
+  read_event(&mut detached, |event| matches!(event, Event::Detached)).await;
   drop(detached);
   let (left, ended) = start_tty(&executor, writer).await;
+  let mut watcher = ExecStream::attach(&executor.client, attach(&ended, None, true)).await.unwrap();
   drop(left);
-  tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+  let Event::Exited(exit) = read_event(&mut watcher, |event| matches!(event, Event::Exited(_))).await else {
+    unreachable!()
+  };
 
+  assert_eq!(exit.signal, "SIGHUP", "{exit:?}");
   assert!(running(&executor, &kept).await);
-  assert!(!running(&executor, &ended).await);
   kill(&executor, &kept).await;
 }
 
