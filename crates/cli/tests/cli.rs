@@ -2437,6 +2437,17 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   assert_eq!(&rows[1][..3], [id.as_str(), "laptop", "revoked"]);
 }
 
+// ROOT CAUSE:
+//
+// If the host was loaded, `run logs -f` printed nothing, because the test
+// stopped the run half a second after it started following, and the
+// stand-in Firecracker had not run its first line by then (seen: a
+// `/bin/sh` of the stand-in still asleep 2.7 s after the run started, under
+// eight copies of this test binary at once).
+//
+// Before the fix, the follow ended with the run before the console had
+// anything in it.
+// The fix stops the run only once `-f` has shown both console lines.
 #[test]
 fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   let control = Home::new();
@@ -2451,9 +2462,33 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   assert!(created.status.success(), "{}", stderr(&created));
   let run = stdout(&created).trim().to_string();
   assert_eq!(as_client(&laptop, &endpoint, &["exec", "--run", &run, "--", "sh", "-c", "exit 2"]).status.code(), Some(2));
-  // The stand-in actor prints two lines; `-f` follows until the run stops.
+  // The stand-in actor prints two lines; `-f` shows them while the run runs
+  // and follows until the run stops.
+  const CONSOLE: &str = "boot\nhello from the actor\n";
   let mut follow = laptop.needy().args(["--endpoint", &endpoint, "run", "logs", "-f", &run]).stdout(Stdio::piped()).spawn().unwrap();
-  std::thread::sleep(Duration::from_millis(500));
+  let (shown, printed) = std::sync::mpsc::channel();
+  let reader = std::thread::spawn({
+    use std::io::Read as _;
+    let mut out = follow.stdout.take().unwrap();
+    move || {
+      let mut text = Vec::new();
+      let mut chunk = [0u8; 256];
+      while let Ok(n @ 1..) = out.read(&mut chunk) {
+        text.extend_from_slice(&chunk[..n]);
+        // The test may have stopped waiting; the text is joined below.
+        let _ = shown.send(String::from_utf8_lossy(&text).into_owned());
+      }
+      String::from_utf8_lossy(&text).into_owned()
+    }
+  });
+  let deadline = Instant::now() + Duration::from_secs(20);
+  let mut seen = String::new();
+  while seen != CONSOLE {
+    match printed.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+      Ok(text) => seen = text,
+      Err(e) => panic!("run logs -f showed {seen:?} of the console ({e})"),
+    }
+  }
   assert!(follow.try_wait().unwrap().is_none(), "run logs -f ended while the run runs");
   assert!(as_client(&laptop, &endpoint, &["run", "stop", &run]).status.success());
   let deadline = Instant::now() + Duration::from_secs(10);
@@ -2461,13 +2496,13 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
     assert!(Instant::now() < deadline, "run logs -f did not end with the run");
     std::thread::sleep(Duration::from_millis(50));
   }
-  let followed = follow.wait_with_output().unwrap();
+  let followed = reader.join().unwrap();
 
   let human = as_client(&laptop, &endpoint, &["report", &run]);
   let json = as_client(&laptop, &endpoint, &["report", &run[..6], "-o", "json"]);
   let local = as_client(&laptop, &endpoint, &["report", "--local", &run]);
 
-  assert_eq!(stdout(&followed), "boot\nhello from the actor\n");
+  assert_eq!(followed, CONSOLE);
   assert!(human.status.success(), "{}", stderr(&human));
   let report = stdout(&human);
   assert!(report.contains("\nStarted by  client:laptop\n"), "{report}");
