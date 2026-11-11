@@ -457,8 +457,9 @@ check probes the KVM device as `run create` does, through the actor's
 runtime (`ActorRuntime::check_host`). A profile that wrote no `actor:` was
 not checked for KVM; since `actor.runtime` became required (slice 1 of the
 [container actor runtime](2026-11-10-container-actor-runtime-design.md)),
-such a profile no longer loads. REVIEW: the two owner decisions of
-2026-11-11 conflict here and need the owner's call. The CLI prints the
+such a profile no longer loads: every run has an actor (owner decision,
+2026-11-11), which supersedes checking a profile without `actor:` for its
+routing only. The CLI prints the
 placements, the control plane's findings, the recipe summary (which does
 not depend on the host) and the `--cmd` decisions, and exits 1 on an error.
 `needy profile check --local` checks offline against this machine's CPU and

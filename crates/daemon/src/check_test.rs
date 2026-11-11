@@ -267,10 +267,8 @@ async fn the_control_hosts_own_runner_without_kvm_is_an_error_finding_naming_it(
   assert!(found[0].starts_with("error: actor: on runner kvm (the control host): this host has no usable KVM"), "{found:?}");
 }
 
-// REVIEW: on 2026-11-11 the owner decided a profile without `actor:` is
-// checked for its routing and executors only; the same day's explicit
-// `actor.runtime` decision makes `actor:` required, so such a profile no
-// longer loads. Needs the owner's call on which one stands.
+// Every run has an actor (owner decision, 2026-11-11), so `actor:` with its
+// `runtime` is required and a profile without one does not load.
 #[tokio::test]
 async fn a_profile_without_an_actor_is_refused_for_its_missing_runtime() {
   let served = control().await;
