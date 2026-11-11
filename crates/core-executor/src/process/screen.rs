@@ -123,14 +123,23 @@ impl Screen {
     self.parser.set_size(rows, cols);
   }
 
-  /// The bytes that turn any terminal into this one: a reset, the
-  /// alternate screen when the program is on it, the screen's contents and
-  /// cursor, then the program's input modes and title.
+  /// The bytes that turn any terminal into this one: a reset, the main
+  /// screen and the alternate screen when the program is on it, the
+  /// screen's contents and cursor, then the program's input modes and title.
   pub(super) fn redraw(&self) -> Vec<u8> {
     let screen = self.parser.screen();
     let extras = self.parser.callbacks();
     let mut out = String::from(RESET);
     if screen.alternate_screen() {
+      // The program's main screen goes under the alternate one, so that
+      // when the program leaves the alternate screen the client shows the
+      // program's main screen rather than its own.
+      out.push_str(&main_screen(screen).contents_formatted());
+      // `CSI ? 1049 h` saves the cursor and its attributes, as the
+      // program's own did, then switches to the cleared alternate screen;
+      // the program's `CSI ? 1049 l` restores them.
+      // Source: https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1026-L1031
+      // and #L1168-L1172 (`Ps = 1 0 4 9`, set and reset), xterm patch 412.
       out.push_str("\x1b[?1049h");
     }
     // The contents, the cursor and `vt100`'s input modes (keypad, cursor
@@ -151,6 +160,22 @@ impl Screen {
     }
     out
   }
+}
+
+/// The program's main screen while it is on the alternate one, with the
+/// cursor and attributes it saved on entering the alternate screen.
+// NOTICE: `vt100` 0.18 keeps the main grid but formats only the active one.
+// A copy of the screen in a scratch parser leaves the alternate screen the
+// way the program will, so its active grid is the main one. Remove when
+// `vt100` exposes the main grid.
+// Source: https://docs.rs/vt100/0.18.1/src/vt100/screen.rs.html (`grid()`
+// picks `alternate_grid` while `MODE_ALTERNATE_SCREEN` is set).
+fn main_screen(screen: &vt100::Screen) -> vt100::Screen {
+  let (rows, cols) = screen.size();
+  let mut scratch = vt100::Parser::new(rows, cols, 0);
+  *scratch.screen_mut() = screen.clone();
+  scratch.process(b"\x1b[?1049l");
+  scratch.screen().clone()
 }
 
 fn dimensions(rows: u16, cols: u16) -> (NonZeroU16, NonZeroU16) {

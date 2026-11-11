@@ -66,3 +66,36 @@ fn resize_follows_the_terminal() {
   let attached = client(8, 30, &screen.redraw());
   assert_eq!(attached.screen().cell(7, 29).map(vt100::Cell::contents), Some("x"));
 }
+
+// ROOT CAUSE:
+//
+// If a client attached while the program was on the alternate screen and
+// the program then left it, the client showed its own old main screen
+// instead of the program's, because the redraw drew only the alternate
+// screen.
+//
+// Before the fix, the redraw entered the alternate screen on top of whatever
+// the client's main screen held.
+// The fix draws the program's main screen and cursor first, then enters the
+// alternate screen, so a later `ESC[?1049l` reveals the program's main screen.
+#[test]
+fn leaving_the_alternate_screen_after_an_attach_shows_the_programs_main_screen() {
+  let mut screen = Screen::new((6, 30));
+  let (rows, cols) = dimensions(6, 30);
+  let mut program = vt100::Parser::new(rows, cols, 0);
+  let before = b"shell$ ls\r\nfile-a  file-b\r\nshell$ vi\x1b[?1049h\x1b[2J\x1b[H~ editor\x1b[3;2H";
+  screen.process(before);
+  program.process(before);
+
+  let mut attached = client(6, 30, b"the client's own old main\r\nscreen, more of it");
+  attached.process(&screen.redraw());
+  assert!(attached.screen().alternate_screen());
+  assert_eq!(attached.screen().contents(), program.screen().contents());
+
+  let after = b"\x1b[?1049lafter";
+  program.process(after);
+  attached.process(after);
+  assert!(!attached.screen().alternate_screen());
+  assert_eq!(attached.screen().contents(), program.screen().contents());
+  assert_eq!(attached.screen().cursor_position(), program.screen().cursor_position());
+}
