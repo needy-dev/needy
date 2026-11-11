@@ -301,6 +301,15 @@ impl Store {
     Ok(credential)
   }
 
+  /// Records that the runner `name` was seen at `now` without a report, as
+  /// when it opens its control stream.
+  pub async fn seen(&self, name: &str, now: i64) -> Result<()> {
+    let mut row = self.active(name).await?.into_active_model();
+    row.last_seen_ms = Set(now);
+    row.update(&self.db).await?;
+    Ok(())
+  }
+
   /// Every runner, including removed ones, by name.
   pub async fn runners(&self) -> Result<Vec<Runner>> {
     let rows = runner::Entity::find().order_by_asc(runner::Column::Name).all(&self.db).await?;

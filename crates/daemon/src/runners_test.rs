@@ -119,6 +119,33 @@ async fn a_runner_is_offline_after_three_missed_heartbeats() {
   assert_eq!(listed[0].status(), RunnerStatus::Offline);
 }
 
+// ROOT CAUSE:
+//
+// If the control plane restarted, a runner opened its control stream again
+// at once, but `runner ls` showed the last seen time from before the
+// restart, and an offline status, until the runner's next heartbeat,
+// because only a heartbeat recorded that the runner was seen.
+//
+// Before the fix, opening the control stream did not touch `last_seen_ms`.
+// The fix records the runner as seen when its control stream opens.
+#[tokio::test]
+async fn a_runner_that_opens_its_control_stream_is_seen_at_once() {
+  let served = served(Duration::from_millis(100)).await;
+  let token = create_token(&served, 1).await;
+  let credential = served.client.runners().join(join(&token, "mac")).await.unwrap().into_inner().credential;
+  tokio::time::sleep(Duration::from_millis(350)).await;
+  let before = operator(&served).runners().list_runners(ListRunnersRequest {}).await.unwrap().into_inner().runners;
+  assert_eq!(before[0].status(), RunnerStatus::Offline);
+
+  let (_reports, rx) = tokio::sync::mpsc::channel(1);
+  let _control =
+    as_runner(&served, &credential).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+
+  let after = operator(&served).runners().list_runners(ListRunnersRequest {}).await.unwrap().into_inner().runners;
+  assert_eq!(after[0].status(), RunnerStatus::Online);
+  assert!(after[0].last_seen_at_ms >= before[0].last_seen_at_ms + 350, "{} then {}", before[0].last_seen_at_ms, after[0].last_seen_at_ms);
+}
+
 #[tokio::test]
 async fn the_control_token_is_still_required_for_operators() {
   let served = served(Duration::from_secs(15)).await;

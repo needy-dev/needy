@@ -201,6 +201,9 @@ impl Runners for Daemon {
   }
 
   async fn control(&self, runner: &str, results: FromRunner<ControlRequest>) -> Result<ToRunner<ControlResponse>> {
+    // A runner connecting, such as again after a restart of the control
+    // plane, is seen now, not at its next heartbeat.
+    self.state.seen(runner, now_ms()).await.map_err(control_error)?;
     // The runner's report goes to `reconcile`, outside the stream's reader.
     let daemon = self.clone();
     let on_report: crate::link::OnReport = Box::new(move |runner, report| {
