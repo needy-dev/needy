@@ -240,7 +240,7 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
   let serving = tokio::spawn({
     let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
     async move {
-      daemon.serve_until(&endpoint, Some(TOKEN.into()), stop).await.unwrap();
+      daemon.serve_until(std::slice::from_ref(&endpoint), Some(TOKEN.into()), stop).await.unwrap();
       daemon.shutdown().await;
     }
   });
@@ -303,7 +303,7 @@ async fn a_stream_outside_a_run_hears_the_daemon_is_shutting_down_while_it_serve
   // Serving only: the shutdown after it is what the stream must not need.
   let serving = tokio::spawn({
     let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
-    async move { daemon.serve_until(&endpoint, Some(TOKEN.into()), stop).await.unwrap() }
+    async move { daemon.serve_until(std::slice::from_ref(&endpoint), Some(TOKEN.into()), stop).await.unwrap() }
   });
   while std::os::unix::net::UnixStream::connect(&socket).is_err() {
     tokio::time::sleep(Duration::from_millis(20)).await;

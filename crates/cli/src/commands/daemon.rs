@@ -25,9 +25,12 @@ pub struct Args {
   #[arg(long, value_enum, default_value = "executor")]
   mode: Mode,
   /// Where to listen: unix:/path or HOST:PORT. Defaults to the endpoint.
-  /// Not in runner mode, which dials the control plane instead.
+  /// A control daemon may listen on several, such as its Unix socket, where
+  /// the operator lists join tokens and clients, and a TCP port for paired
+  /// clients; an executor on one. Not in runner mode, which dials the
+  /// control plane instead.
   #[arg(long)]
-  listen: Option<String>,
+  listen: Vec<String>,
   /// Executor name reported to clients: `local` by default. A runner's
   /// name, by default this machine's host name up to its first dot.
   #[arg(long)]
@@ -110,13 +113,16 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
   if !matches!(args.mode, Mode::Runner) && args.disconnect_grace.is_some() {
     bail!("--disconnect-grace is for the runner mode");
   }
-  if matches!(args.mode, Mode::Runner) && (args.listen.is_some() || args.token_env.is_some()) {
+  if matches!(args.mode, Mode::Runner) && (!args.listen.is_empty() || args.token_env.is_some()) {
     bail!("a runner dials the control plane and listens nowhere; --listen and --token-env are for the executor and control modes");
   }
   let listen = match args.listen {
-    Some(listen) => listen,
-    None => ctx.endpoint()?,
+    listen if listen.is_empty() => vec![ctx.endpoint()?],
+    listen => listen,
   };
+  if matches!(args.mode, Mode::Executor) && listen.len() > 1 {
+    bail!("an executor listens on one address; --listen was given {} times", listen.len());
+  }
   // A token variable that is not set must not leave the daemon open.
   let token = match &args.token_env {
     Some(name) => match std::env::var(name) {
@@ -126,7 +132,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
     None => None,
   };
   match args.mode {
-    Mode::Executor => needy_daemon::executor::serve(&listen, args.name.unwrap_or_else(|| "local".into()), token).await?,
+    Mode::Executor => needy_daemon::executor::serve(&listen[0], args.name.unwrap_or_else(|| "local".into()), token).await?,
     Mode::Runner => {
       let name = match args.name {
         Some(name) => name,

@@ -1,13 +1,13 @@
 use needy_api_client::Client;
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, CreatePairingCodeRequest, CreateRunRequest, ExecRequest, ExecStart, HeartbeatRequest, KillProcessRequest,
-  ListClientsRequest, ListRunsRequest, Origin, PairRequest, RemoveRunnerRequest, RevokeClientRequest, RevokeJoinTokenRequest,
-  RotateRunnerRequest, StopRunRequest, exec_request,
+  ListClientsRequest, ListJoinTokensRequest, ListRunnersRequest, ListRunsRequest, Origin, PairRequest, RemoveRunnerRequest,
+  RevokeClientRequest, RevokeJoinTokenRequest, RotateRunnerRequest, StopRunRequest, exec_request,
 };
 use tonic::Code;
 
 use crate::control::Caller;
-use crate::testing::{CLIENT_TOKEN, PAIRING_CODE, REVOKED_CLIENT_TOKEN, serve, serve_with};
+use crate::testing::{CLIENT_TOKEN, PAIRING_CODE, REVOKED_CLIENT_TOKEN, serve, serve_tcp, serve_with};
 
 const CONTROL_TOKEN: &str = "control-secret";
 
@@ -98,7 +98,6 @@ async fn a_client_token_reaches_operator_methods_and_is_named_as_the_principal()
   };
   let mut outputs = client.processes().exec(tokio_stream::iter([start])).await.unwrap().into_inner();
   while outputs.message().await.unwrap().is_some() {}
-  client.clients().list_clients(ListClientsRequest {}).await.unwrap();
 
   assert_eq!(
     served.fake.calls(),
@@ -107,7 +106,6 @@ async fn a_client_token_reaches_operator_methods_and_is_named_as_the_principal()
       "stop s1 by client:laptop",
       "kill p1 TERM by client:laptop",
       r#"exec true in "s1" from Cli by client:laptop"#,
-      "list clients",
     ]
   );
 }
@@ -197,4 +195,42 @@ async fn an_actor_cannot_manage_clients() {
 
   assert_eq!(refused.code(), Code::PermissionDenied);
   assert!(served.fake.calls().is_empty());
+}
+
+// Join tokens and clients are listed only on the control host itself
+// (owner decision, 2026-11-12): by the operator on the control daemon's
+// Unix socket, not over TCP even with the control token, and never by a
+// paired client. Runners stay listed for clients.
+#[tokio::test]
+async fn join_tokens_and_clients_are_listed_only_by_the_operator_on_the_unix_socket() {
+  let local = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  let remote = serve_tcp(Caller::Operator, Some(CONTROL_TOKEN)).await;
+
+  let operator = with(&local.client, CONTROL_TOKEN);
+  operator.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap();
+  operator.clients().list_clients(ListClientsRequest {}).await.unwrap();
+  assert_eq!(local.fake.calls(), ["list tokens", "list clients"]);
+
+  let tunnelled = with(&remote.client, CONTROL_TOKEN);
+  for refused in [
+    tunnelled.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap_err(),
+    tunnelled.clients().list_clients(ListClientsRequest {}).await.unwrap_err(),
+  ] {
+    assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
+    assert!(refused.message().contains("only on the control host's Unix socket, not over TCP"), "{}", refused.message());
+  }
+  for served in [&local, &remote] {
+    let client = with(&served.client, CLIENT_TOKEN);
+    for refused in [
+      client.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap_err(),
+      client.clients().list_clients(ListClientsRequest {}).await.unwrap_err(),
+    ] {
+      assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
+      assert!(refused.message().contains("paired client laptop may not"), "{}", refused.message());
+    }
+  }
+  assert!(remote.fake.calls().is_empty(), "{:?}", remote.fake.calls());
+
+  with(&remote.client, CLIENT_TOKEN).runners().list_runners(ListRunnersRequest {}).await.unwrap();
+  assert_eq!(remote.fake.calls(), ["list runners"]);
 }

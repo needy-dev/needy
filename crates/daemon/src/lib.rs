@@ -266,11 +266,12 @@ impl Daemon {
     Ok(daemon)
   }
 
-  /// Serves the control API on `listen` until a termination signal, then
-  /// shuts down with [`Daemon::shutdown`], also when serving failed. A
-  /// second termination signal ends the shutdown where it is and fails,
-  /// naming the runs it did not clean up; the caller should then exit.
-  pub async fn serve(&self, listen: &str, token: Option<String>) -> Result<()> {
+  /// Serves the control API on every address in `listen` until a
+  /// termination signal, then shuts down with [`Daemon::shutdown`], also
+  /// when serving failed. A second termination signal ends the shutdown
+  /// where it is and fails, naming the runs it did not clean up; the caller
+  /// should then exit.
+  pub async fn serve(&self, listen: &[String], token: Option<String>) -> Result<()> {
     let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
     let ended = termination
       .unless_forced(async {
@@ -309,8 +310,9 @@ impl Daemon {
     }
   }
 
-  async fn serve_until(&self, listen: &str, token: Option<String>, stop: CancellationToken) -> Result<()> {
-    let server = self.server(token).bind(&[Listen::parse(listen)]).await?;
+  async fn serve_until(&self, listen: &[String], token: Option<String>, stop: CancellationToken) -> Result<()> {
+    let listen: Vec<Listen> = listen.iter().map(|l| Listen::parse(l)).collect();
+    let server = self.server(token).bind(&listen).await?;
     // The bound address, not `listen`: a port 0 is the one the system picked.
     for address in server.addresses() {
       tracing::info!("control daemon listening on {address}");

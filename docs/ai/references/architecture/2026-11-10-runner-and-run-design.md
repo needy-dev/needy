@@ -624,10 +624,15 @@ the runner methods (`PERMISSION_DENIED`) and, since 2026-11-11 (owner
 decision), the administration of the control plane: creating and revoking
 join tokens, rotating and removing runners, creating pairing codes and
 revoking clients are the operator's only (`PERMISSION_DENIED`, "… needs the
-control token; paired client NAME may not"). Listing runners, join tokens
-and clients stays open to clients; its token works on a listener with
-or without a control token, so a client is named even on the control
-socket. A token shaped like a client token that no client holds (revoked or
+control token; paired client NAME may not"). Listing runners stays open to
+clients. Since 2026-11-12 (owner decision) join tokens and clients are
+listed only by the operator on the control host itself: on a Unix socket
+listener (the adapter checks for tonic's `UdsConnectInfo`), refused over TCP
+even with the control token ("… works only on the control host's Unix
+socket, not over TCP") and refused to paired clients on any listener. A
+control daemon takes `--listen` several times, so it can serve its Unix
+socket next to a TCP port. A client's token works on a listener with or
+without a control token, so a client is named even on the control socket. A token shaped like a client token that no client holds (revoked or
 never issued) is `UNAUTHENTICATED` everywhere. The control token remains the
 bootstrap and admin credential; nothing else changed for it, and no other
 compatibility path was added. Every adapter now reads the request's caller

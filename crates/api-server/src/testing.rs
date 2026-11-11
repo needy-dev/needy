@@ -507,6 +507,16 @@ pub async fn serve(caller: Caller) -> Served {
 pub async fn serve_with(caller: Caller, token: Option<&str>) -> Served {
   let dir = tempfile::tempdir().unwrap();
   let socket = dir.path().join("api.sock");
+  serve_on(caller, token, Listen::Unix(socket), dir).await
+}
+
+/// As [`serve_with`], on a loopback TCP port instead of a Unix socket, as a
+/// control plane reached through a tunnel.
+pub async fn serve_tcp(caller: Caller, token: Option<&str>) -> Served {
+  serve_on(caller, token, Listen::Tcp("127.0.0.1:0".into()), tempfile::tempdir().unwrap()).await
+}
+
+async fn serve_on(caller: Caller, token: Option<&str>, listen: Listen, dir: tempfile::TempDir) -> Served {
   let fake = std::sync::Arc::new(Fake::default());
   let health = Health {
     instance_id: "test".into(),
@@ -519,12 +529,16 @@ pub async fn serve_with(caller: Caller, token: Option<&str>) -> Served {
     .guest(fake.clone())
     .runners(fake.clone())
     .clients(fake.clone())
-    .bind(&[Listen::Unix(socket.clone())])
+    .bind(&[listen])
     .await
     .unwrap();
+  let endpoint = match &bound.addresses()[0] {
+    Listen::Unix(socket) => format!("unix:{}", socket.display()),
+    Listen::Tcp(address) => format!("http://{address}"),
+  };
   let cancel = CancellationToken::new();
   tokio::spawn(bound.serve(cancel.clone()));
-  let client = Client::connect(&format!("unix:{}", socket.display())).await.unwrap();
+  let client = Client::connect(&endpoint).await.unwrap();
   Served {
     fake,
     client,

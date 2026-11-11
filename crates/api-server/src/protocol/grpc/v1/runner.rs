@@ -16,7 +16,7 @@ use needy_api_proto::v1::{
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::{Streamed, administer, caller};
+use super::{Streamed, administer, administer_locally, caller};
 use crate::control::{Caller, ControlError, Runners};
 use crate::protocol::domain;
 
@@ -83,7 +83,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
   }
 
   async fn list_join_tokens(&self, request: Request<ListJoinTokensRequest>) -> Result<Response<ListJoinTokensResponse>, Status> {
-    self.operator(&request)?;
+    administer_locally(&self.caller, &request, "listing join tokens", "only operators manage runners")?;
     let join_tokens = self.runners.join_tokens().await?.into_iter().map(domain::proto_join_token).collect();
     Ok(Response::new(ListJoinTokensResponse { join_tokens }))
   }

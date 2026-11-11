@@ -1,8 +1,8 @@
 //! `ClientService` over [`Clients`].
 //!
-//! An operator (the control token or the control socket) and every paired
-//! client may list clients; only the operator creates pairing codes and
-//! revokes clients. `Pair` is public; the pairing code in the request
+//! Only the operator creates pairing codes and revokes clients (the control
+//! token, or the control socket), and lists clients only on the control
+//! host's Unix socket. `Pair` is public; the pairing code in the request
 //! authenticates it.
 
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use needy_api_proto::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{administer, caller};
+use super::{administer, administer_locally};
 use crate::control::{Caller, Clients, ControlError, NewPairingCode};
 use crate::protocol::domain;
 
@@ -24,14 +24,6 @@ pub struct Adapter<C> {
 }
 
 impl<C> Adapter<C> {
-  /// Refuses a call only an operator or a client may make.
-  fn operator<T>(&self, request: &Request<T>) -> Result<(), Status> {
-    if caller(&self.caller, request).is_operator() {
-      return Ok(());
-    }
-    Err(ControlError::denied("only operators and clients manage clients").into())
-  }
-
   /// Refuses a call only the operator may make: a client is refused too.
   fn admin<T>(&self, request: &Request<T>, what: &str) -> Result<(), Status> {
     administer(&self.caller, request, what, "only operators manage clients")
@@ -71,7 +63,7 @@ impl<C: Clients> ClientService for Adapter<C> {
   }
 
   async fn list_clients(&self, request: Request<ListClientsRequest>) -> Result<Response<ListClientsResponse>, Status> {
-    self.operator(&request)?;
+    administer_locally(&self.caller, &request, "listing clients", "only operators manage clients")?;
     let clients = self.clients.clients().await?.into_iter().map(domain::proto_client).collect();
     Ok(Response::new(ListClientsResponse { clients }))
   }

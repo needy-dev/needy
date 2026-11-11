@@ -2531,9 +2531,12 @@ const CONTROL_TOKEN: &str = "control-secret";
 // The fix lets the daemon bind port 0 itself and takes the port from the
 // daemon's own "listening on" line, so a test only talks to its own daemon.
 /// A control daemon on a loopback TCP port that needs `CONTROL_TOKEN`, as
-/// one reached through a tunnel, and its endpoint.
+/// one reached through a tunnel, and its endpoint. It also listens on
+/// `home`'s own socket, where the operator lists join tokens and clients
+/// (`as_local_operator`).
 fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
   use std::io::BufRead as _;
+  let socket = format!("unix:{}", home.path().join("run").join("daemon.sock").display());
   let mut child = home
     .needy()
     .args([
@@ -2541,6 +2544,8 @@ fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
       "-v",
       "--mode",
       "control",
+      "--listen",
+      &socket,
       "--listen",
       "127.0.0.1:0",
       "--token-env",
@@ -2569,7 +2574,9 @@ fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
   let listen = loop {
     let left = deadline.saturating_duration_since(Instant::now());
     let line = read.recv_timeout(left).unwrap_or_else(|e| panic!("the daemon did not listen ({e}): {seen:#?}"));
-    if let Some((_, address)) = line.split_once("control daemon listening on ") {
+    if let Some((_, address)) = line.split_once("control daemon listening on ")
+      && !address.starts_with("unix:")
+    {
       break address.trim().to_string();
     }
     seen.push(line);
@@ -2580,6 +2587,11 @@ fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
 /// `needy` against `endpoint` as the operator, with the control token.
 fn as_operator(home: &Home, endpoint: &str, args: &[&str]) -> Output {
   home.needy().args(["--endpoint", endpoint]).args(args).env("NEEDY_TOKEN", CONTROL_TOKEN).output().unwrap()
+}
+
+/// `needy` on the control host, against its Unix socket, as the operator.
+fn as_local_operator(home: &Home, args: &[&str]) -> Output {
+  home.needy().args(args).env("NEEDY_TOKEN", CONTROL_TOKEN).output().unwrap()
 }
 
 /// `needy` against `endpoint` with only what `home` stored.
@@ -2629,7 +2641,7 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
   assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
-  let listed = as_operator(&control, &endpoint, &["client", "ls", "-o", "json"]);
+  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
   assert_eq!((clients[0]["name"].as_str(), clients[0]["state"].as_str()), (Some("laptop"), Some("active")));
@@ -2640,7 +2652,7 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   assert!(revoked.status.success(), "{}", stderr(&revoked));
   assert_eq!(refused.status.code(), Some(1));
   assert!(stderr(&refused).contains("missing or invalid bearer token"), "{}", stderr(&refused));
-  let text = stdout(&as_operator(&control, &endpoint, &["client", "ls"]));
+  let text = stdout(&as_local_operator(&control, &["client", "ls"]));
   let rows = table(&text);
   assert_eq!(rows[0], ["ID", "NAME", "STATE", "PAIRED", "LAST USED"]);
   assert_eq!(&rows[1][..3], [id.as_str(), "laptop", "revoked"]);
@@ -2659,7 +2671,6 @@ fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() 
   let token = as_client(&laptop, &endpoint, &["runner", "token", "create"]);
   let remove = as_client(&laptop, &endpoint, &["runner", "rm", "mac"]);
   let pair = as_client(&laptop, &endpoint, &["client", "pair", "create"]);
-  let listed = as_client(&laptop, &endpoint, &["client", "ls", "-o", "json"]);
 
   for (refused, what) in [
     (&token, "creating join tokens"),
@@ -2669,13 +2680,51 @@ fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() 
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(refused));
     assert!(stderr(refused).contains(&format!("{what} needs the control token; paired client laptop may not")), "{}", stderr(refused));
   }
-  assert!(listed.status.success(), "{}", stderr(&listed));
+  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
   let revoke = as_client(&laptop, &endpoint, &["client", "revoke", &id]);
   assert_eq!(revoke.status.code(), Some(1), "{}", stderr(&revoke));
   assert!(stderr(&revoke).contains("revoking clients needs the control token"), "{}", stderr(&revoke));
   assert!(as_client(&laptop, &endpoint, &["run", "ls"]).status.success(), "the client was not revoked");
+}
+
+// Join tokens and clients are listed only on the control host's Unix socket
+// (owner decision, 2026-11-12): over TCP the control token is refused as a
+// paired client is. Runners stay listed for paired clients.
+#[test]
+fn join_tokens_and_clients_are_listed_only_on_the_control_hosts_socket() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+
+  for (args, what) in [
+    (&["client", "ls"][..], "listing clients"),
+    (&["runner", "token", "ls"][..], "listing join tokens"),
+  ] {
+    let local = as_local_operator(&control, args);
+    let tunnelled = as_operator(&control, &endpoint, args);
+    let client = as_client(&laptop, &endpoint, args);
+
+    assert!(local.status.success(), "{args:?}: {}", stderr(&local));
+    assert_eq!(tunnelled.status.code(), Some(1), "{args:?}: {}", stdout(&tunnelled));
+    assert!(
+      stderr(&tunnelled).contains(&format!("{what} works only on the control host's Unix socket, not over TCP")),
+      "{}",
+      stderr(&tunnelled)
+    );
+    assert_eq!(client.status.code(), Some(1), "{args:?}: {}", stdout(&client));
+    assert!(
+      stderr(&client).contains(&format!("{what} works only on the control host's Unix socket; paired client laptop may not")),
+      "{}",
+      stderr(&client)
+    );
+  }
+  assert!(stdout(&as_local_operator(&control, &["client", "ls"])).contains("laptop"));
+  let runners = as_client(&laptop, &endpoint, &["runner", "ls"]);
+  assert!(runners.status.success(), "{}", stderr(&runners));
 }
 
 // ROOT CAUSE:

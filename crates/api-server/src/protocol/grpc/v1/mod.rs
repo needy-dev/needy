@@ -47,3 +47,35 @@ fn administer<T>(listener: &Caller, request: &tonic::Request<T>, what: &str, oth
     Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied(others).into()),
   }
 }
+
+/// Refuses a call that reads the control plane's credentials (`what`, such
+/// as "listing join tokens") unless the operator makes it on the control
+/// host itself: on a Unix socket, which only the control host's own users
+/// reach. The control token over TCP and a paired client are refused (owner
+/// decision, 2026-11-12). `others` is the refusal for actors and runners.
+fn administer_locally<T>(listener: &Caller, request: &tonic::Request<T>, what: &str, others: &str) -> Result<(), Status> {
+  match caller(listener, request) {
+    Caller::Operator if over_unix_socket(request) => Ok(()),
+    Caller::Operator => Err(ControlError::denied(format!("{what} works only on the control host's Unix socket, not over TCP")).into()),
+    Caller::Client { name, .. } => {
+      Err(ControlError::denied(format!("{what} works only on the control host's Unix socket; paired client {name} may not")).into())
+    }
+    Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied(others).into()),
+  }
+}
+
+/// Whether `request` came over a Unix socket: tonic puts the connection's
+/// `UdsConnectInfo` into the extensions of every request it serves on one
+/// (`tonic-0.14.9/src/transport/server/mod.rs`, `ConnectInfoLayer`), and
+/// `TcpConnectInfo` on TCP.
+fn over_unix_socket<T>(request: &tonic::Request<T>) -> bool {
+  #[cfg(unix)]
+  {
+    request.extensions().get::<tonic::transport::server::UdsConnectInfo>().is_some()
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = request;
+    false
+  }
+}

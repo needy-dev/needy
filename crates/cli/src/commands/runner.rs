@@ -60,7 +60,8 @@ enum TokenCommand {
     #[arg(long, value_delimiter = ',', value_parser = label)]
     labels: Vec<(String, String)>,
   },
-  /// List join tokens, including expired, spent and revoked ones.
+  /// List join tokens, including expired, spent and revoked ones. Only the
+  /// operator, on the control host's Unix socket.
   Ls {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,

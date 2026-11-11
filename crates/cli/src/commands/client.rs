@@ -31,7 +31,8 @@ enum Command {
   /// Pair this machine with the control plane at `--endpoint` using a
   /// pairing code, and store its client token for that endpoint.
   Pair(PairArgs),
-  /// List paired clients, including revoked ones.
+  /// List paired clients, including revoked ones. Only the operator, on
+  /// the control host's Unix socket.
   Ls {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
