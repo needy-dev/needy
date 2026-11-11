@@ -9,6 +9,10 @@
 //!   container actor image is checked when the run is created.
 //! - `actor(vz)`: macOS on Apple silicon, a `vfkit` that runs, and a
 //!   complete `vz` actor image (Image, rootfs.ext4).
+//! - `actor(apple-container)`: macOS, Apple's `container` CLI on `PATH`, and
+//!   its services running (`container system status`). Whether its image
+//!   store has the container actor image is checked when the run is
+//!   created.
 //! - `executor(docker)`: a Docker daemon that answers.
 //! - `executor(native)`: always, on every platform a runner runs on.
 //!
@@ -38,6 +42,8 @@ pub struct Facts {
   /// A Virtualization.framework VM can start: Apple silicon macOS, vfkit
   /// and the `vz` actor image.
   pub vz: Result<(), String>,
+  /// Apple's `container` CLI is there and its services answer.
+  pub apple_container: Result<(), String>,
 }
 
 /// The capabilities found, and why each one that is not is missing.
@@ -79,6 +85,12 @@ pub fn detect(facts: &Facts) -> Detected {
       capabilities.actor.insert(ActorRuntime::Vz);
     }
     Err(why) => missing.push(format!("actor(vz): {why}")),
+  }
+  match &facts.apple_container {
+    Ok(()) => {
+      capabilities.actor.insert(ActorRuntime::AppleContainer);
+    }
+    Err(why) => missing.push(format!("actor(apple-container): {why}")),
   }
   Detected {
     capabilities,
@@ -136,7 +148,7 @@ pub async fn vz(image: &Path) -> Result<(), String> {
 }
 
 /// Reads this machine: KVM at `kvm`, the actor image in `image`, the
-/// Docker daemon and vfkit.
+/// Docker daemon, vfkit and Apple's `container`.
 pub async fn probe(kvm: &Path, image: &Path) -> Facts {
   let docker = needy_core_executor::provider::docker::runtimes(DOCKER_WAIT)
     .await
@@ -145,6 +157,27 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
     firecracker: firecracker(kvm, image),
     docker,
     vz: vz(image).await,
+    apple_container: apple_container().await,
+  }
+}
+
+/// Whether Apple's `container` can run actors here: its CLI and services.
+pub async fn apple_container() -> Result<(), String> {
+  #[cfg(unix)]
+  {
+    // The image does not matter for the services.
+    let runtime = needy_core_actor::host::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+    // NOTICE: `container system status` answers in about 50 ms on an Apple
+    // silicon laptop; 3 s bounds services that hang, as `DOCKER_WAIT` does
+    // for Docker.
+    match tokio::time::timeout(DOCKER_WAIT, runtime.services()).await {
+      Ok(services) => services.map_err(|e| e.to_string()),
+      Err(_) => Err(format!("`container system status` did not answer within {DOCKER_WAIT:?}")),
+    }
+  }
+  #[cfg(not(unix))]
+  {
+    Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into())
   }
 }
 

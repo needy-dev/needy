@@ -2074,7 +2074,16 @@ fn spawn_runner(home: &Home, control: &Home, join_token: Option<&str>) -> Child 
   // NOTICE: a Docker daemon nobody listens for, so the runner detects the
   // same capabilities on a host with Docker as on one without.
   command.env("DOCKER_HOST", format!("unix://{}", home.path().join("no-docker.sock").display()));
+  command.env("PATH", path_without_apple_container());
   command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
+}
+
+/// This test's `PATH` without the directories that hold Apple's `container`
+/// CLI, so a runner detects the same capabilities on a Mac with it as on a
+/// machine without it, as `DOCKER_HOST` does for Docker.
+fn path_without_apple_container() -> std::ffi::OsString {
+  let path = std::env::var_os("PATH").unwrap_or_default();
+  std::env::join_paths(std::env::split_paths(&path).filter(|dir| !dir.join("container").is_file())).unwrap()
 }
 
 /// The runner `name` as `needy runner ls -o json` shows it, once `check`
@@ -2311,6 +2320,7 @@ fn runner_with(machine: &Home, control: &Home, extra: &[String]) -> Child {
     .args(["--join-token-env", "NEEDY_TEST_JOIN_TOKEN"])
     .env("NEEDY_TEST_JOIN_TOKEN", token)
     .env("DOCKER_HOST", format!("unix://{}", machine.path().join("no-docker.sock").display()))
+    .env("PATH", path_without_apple_container())
     .stdout(Stdio::null())
     .stderr(Stdio::piped())
     .spawn()

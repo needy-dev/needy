@@ -14,6 +14,7 @@ fn kvm_host() -> Facts {
     firecracker: Ok(()),
     docker: runtimes(&["runc"]),
     vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
+    apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
   }
 }
 
@@ -23,6 +24,7 @@ fn mac() -> Facts {
     firecracker: Err("Firecracker runs on Linux only".into()),
     docker: Err("no Docker daemon answers".into()),
     vz: Err("cannot run vfkit".into()),
+    apple_container: Err("Apple's `container` CLI is not on PATH".into()),
   }
 }
 
@@ -31,7 +33,13 @@ fn a_kvm_host_with_docker_hosts_both_actor_runtimes_and_docker_and_native_execut
   let detected = detect(&kvm_host());
 
   assert_eq!(detected.capabilities.to_string(), "actor(container,firecracker) executor(docker,native)");
-  assert_eq!(detected.missing, ["actor(vz): Virtualization.framework actors run on macOS on Apple silicon only"]);
+  assert_eq!(
+    detected.missing,
+    [
+      "actor(vz): Virtualization.framework actors run on macOS on Apple silicon only",
+      "actor(apple-container): Apple's `container` runs on macOS only, on a Mac with Apple silicon"
+    ]
+  );
 }
 
 #[test]
@@ -46,8 +54,22 @@ fn a_machine_without_kvm_or_docker_hosts_native_executors_only() {
       "executor(docker): no Docker daemon answers",
       "actor(container): no Docker daemon answers",
       "actor(vz): cannot run vfkit",
+      "actor(apple-container): Apple's `container` CLI is not on PATH",
     ]
   );
+}
+
+#[test]
+fn a_mac_whose_apple_container_services_answer_hosts_apple_container_actors() {
+  let facts = Facts {
+    apple_container: Ok(()),
+    ..mac()
+  };
+
+  let detected = detect(&facts);
+
+  assert_eq!(detected.capabilities.to_string(), "actor(apple-container) executor(native)");
+  assert!(!detected.missing.iter().any(|line| line.starts_with("actor(apple-container)")), "{:?}", detected.missing);
 }
 
 #[test]
@@ -58,6 +80,7 @@ fn a_docker_daemon_without_kvm_hosts_container_actors() {
     firecracker: Err("cannot open /dev/kvm: No such file or directory".into()),
     docker: runtimes(&["runc"]),
     vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
+    apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
   };
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(container) executor(docker,native)");
@@ -85,7 +108,8 @@ fn a_role_the_machine_cannot_host_is_warned_about_and_not_added() {
     warnings,
     [
       "--roles names actor, which this machine cannot host (actor(firecracker): Firecracker runs on Linux only; \
-      actor(container): no Docker daemon answers; actor(vz): cannot run vfkit); it is left out"
+      actor(container): no Docker daemon answers; actor(vz): cannot run vfkit; actor(apple-container): Apple's `container` CLI is \
+      not on PATH); it is left out"
     ]
   );
 }
@@ -96,6 +120,7 @@ fn an_apple_silicon_mac_with_vfkit_and_the_image_hosts_vz_actors() {
     firecracker: Err("Firecracker runs on Linux only".into()),
     docker: Err("no Docker daemon answers".into()),
     vz: Ok(()),
+    apple_container: Err("Apple's `container` CLI is not on PATH".into()),
   };
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(vz) executor(native)");
