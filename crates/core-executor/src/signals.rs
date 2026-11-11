@@ -82,14 +82,16 @@ fn fits(_code: i32) -> bool {
 }
 
 /// The status a client reports when an exec stream ended before the command
-/// exited, so the command's own status is unknown. A shell reserves 255 for
-/// an exit status out of range. No signal maps to it here, but a command that
-/// runs `exit 255` also reports 255, so the status alone does not tell the
-/// two apart; the client's message does.
-// TODO(provenance): no POSIX or bash manual text reserves 255 for an
-// out-of-range status; the only source found is the non-normative Advanced
-// Bash-Scripting Guide (https://tldp.org/LDP/abs/html/exitcodes.html, read
-// 2026-11-10).
+/// exited, so the command's own status is unknown. No signal maps to it here,
+/// but a command that runs `exit 255` also reports 255, so the status alone
+/// does not tell the two apart; the client's message does.
+// NOTICE: 255 is needy's convention, not a reserved value. What constrains
+// it: a wait status carries only the low 8 bits of an exit status, so 255 is
+// the largest one a client can report
+// (https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html,
+// POSIX.1-2024 `exit`), and ssh(1) also exits 255 when it, not the remote
+// command, failed
+// (https://github.com/openssh/openssh-portable/blob/V_10_6_P2/ssh.1#L1578-L1581).
 pub const ENDED: i32 = 255;
 
 /// Accepts `SIGTERM`, `TERM` or a number, and returns the signal name.
