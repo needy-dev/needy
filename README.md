@@ -111,6 +111,17 @@ identity): `needy profile check` says what, and the
 [container actor runtime design](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity)
 has the table.
 
+On an Apple silicon Mac, the actor can be a Virtualization.framework VM
+(`actor: { runtime: vz }`, name provisional) that
+[vfkit](https://github.com/crc-org/vfkit) runs from needy's own arm64 kernel
+and rootfs: `brew install vfkit`, then `needy build`. Inside it is the
+Firecracker actor's guest, so `binfmt_needy` routes execs by absolute path
+too; the CPU stays an Apple arm64 core, with no DMI or PCI identity.
+Evidence: smoke, chaos, interactive runs and absolute-path routing verified
+end to end on one Mac, ready in about 0.27 s
+([vz actor evidence](docs/ai/references/architecture/2026-11-12-vz-actor-evidence.md));
+[`examples/vz`](examples/vz/profile.yaml) runs the smoke test.
+
 For an interactive driving program, use `needy run create -it --profile
 PROFILE`. `ctrl-]` detaches; `needy run attach RUN` returns to its terminal.
 Automated tests and live probes on a Linux KVM host from a Mac are recorded
@@ -172,7 +183,8 @@ or a scheduled task. Give full paths, and pass the token in a file: the
 process does not get the session's environment or working directory.
 
 A runner detects what it can host: `actor(firecracker)` with a usable KVM and
-the actor image, `executor(docker)` when a Docker daemon answers, and
+the actor image, `actor(vz)` on an Apple silicon Mac with vfkit and the `vz`
+actor image, `executor(docker)` when a Docker daemon answers, and
 `executor(native)` always; `--roles` restricts it to some roles. Profiles
 place executors and the actor on runners by name or labels, with no
 addresses or secrets in the profile, and a runner without the capability an

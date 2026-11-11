@@ -47,6 +47,7 @@ owned by the run like the `Vm` handle today. Implementations:
 | `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Linux, Docker, `sshfs` for workspace mounts, lxcfs for resource views (`runc`); gVisor's `runsc` registered as a Docker runtime with `--host-uds=all` for `runsc` |
 | `container` on macOS and Windows | Docker API through `bollard` against Docker Desktop, whose Linux containers run inside a VM (WSL 2 on Windows) | Docker Desktop |
 | `apple-container` | Apple's `container` (each container is a lightweight Linux VM on Apple silicon) | macOS with Apple's `container` installed |
+| `vz` (name provisional) | `host::vz`: needy's arm64 kernel and rootfs in a Virtualization.framework VM, vfkit as the VM process; the Firecracker actor's guest (init as PID 1, `binfmt_needy`, sshfs inside, vsock channels bridged to Unix sockets). Built 2026-11-12, see [vz actor evidence](2026-11-12-vz-actor-evidence.md) | macOS on Apple silicon, vfkit, the `vz` actor image (`needy build`) |
 | `wsl`, `hyper-v` | later: a WSL distribution or a Hyper-V VM as the actor on Windows (`TODO(windows-actor)`) | Windows |
 
 containerd directly (without Docker) is a later provider, like the executor
