@@ -83,7 +83,12 @@ what the work operates on and carries most audit rules.
 ## Getting started
 
 An actor host needs Linux with KVM and Docker. Executors need only the `needy`
-binary: Linux and macOS are fully supported; Windows works without terminals.
+binary. Linux and macOS executors are verified end to end with pipes and
+terminals ([evidence](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md#re-verified-after-the-hardening-and-terminal-fixes)).
+A Windows executor is verified end to end with pipes; its terminals (`exec -t`,
+and `exec -d -t`) have worked in live probes only, and a daemon started as a
+Windows service in session 0 is not verified
+([evidence](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md#windows-executor)).
 
 ```sh
 # On the actor host: build the actor image and the executor image.

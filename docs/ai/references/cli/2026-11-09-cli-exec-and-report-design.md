@@ -314,8 +314,13 @@ behavior. See the [terminal note](2026-11-10-terminal-attach-design.md) and
 [automated and live-probe evidence](2026-11-11-interactive-actor-evidence.md).
 `--events` is not
 implemented yet, and `json` does not include events. On Windows a signal
-terminates the process tree; terminals use ConPTY through portable-pty but do
-not work yet in a daemon started in session 0 (see the closed-loop results).
+terminates the process tree. Terminals use ConPTY through portable-pty; ConPTY
+asks for the cursor position at start, which the client terminal answers, or
+the executor from its model when no client terminal that can type is attached
+(`exec -d -t`). Windows terminals have worked in live probes only, and a daemon
+started as a Windows service in session 0 is not verified (see
+[Windows executor](../architecture/2026-11-09-closed-loop-results-evidence.md#terminals-after-the-cursor-position-fix)
+in the closed-loop results).
 
 ## gRPC
 

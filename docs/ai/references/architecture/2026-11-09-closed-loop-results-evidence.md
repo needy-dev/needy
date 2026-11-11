@@ -42,7 +42,7 @@ Tunnel: the executor listens locally and the tunnel carries the connection.
 | Chaos: scheduled hwmon fault | Pass: `sensors` shows `+101.0°C ALARM (CRIT)` two seconds after start |
 | Terminal recordings in asciicast v2 under `sessions/<id>/casts/` | Removed by design in the trace slice (owner, 2026-11-09): output bytes are not traced |
 | `needy report` from SQLite traces | Pass |
-| Windows executor: `needy.exe` cross-compiled with mingw, resident on Windows 11 | Pass with pipes; terminals do not work yet (see below) |
+| Windows executor: `needy.exe` cross-compiled with mingw, resident on Windows 11 | Pass with pipes; terminals do not work yet (see below; terminals have since worked in live probes, see [Terminals after the cursor position fix](#terminals-after-the-cursor-position-fix)) |
 
 Found on the way:
 
@@ -1044,6 +1044,32 @@ Not working yet:
 - **File routing into an actor.** Windows ships `sftp-server.exe` in
   `C:\Windows\System32\OpenSSH`, but a Windows workspace mount was not tried.
 
+### Terminals after the cursor position fix
+
+**Evidence level**: live probe, recorded 2026-11-12 from the multi-host test
+passes' report; their transcripts are not in this note. A live probe is not a
+support claim.
+
+The terminals above produced no output because ConPTY asks for the cursor
+position (`CSI 6 n`) once at start and reads no input until it is answered;
+portable-pty always starts it that way (see the NOTICE on `Proc::answer` in
+`crates/core-executor/src/process/proc.rs`). Nothing answered it then.
+
+| Check | Result |
+| --- | --- |
+| `needy exec -t` to a Windows executor from a client terminal that answers the cursor position query | Works: the program's output appears and its exit returns |
+| `needy exec -d -t` to a Windows executor after `980594a`, in which the executor answers the query from its terminal model when no client terminal that can type is attached | Works: the detached program starts |
+| The executor's answer, in process on Mac and Linux: `a_detached_program_that_asks_for_the_cursor_position_gets_an_answer`, `an_attached_terminal_answers_the_cursor_query_alone` and `a_cursor_query_a_departing_client_left_unanswered_is_answered` in `crates/core-executor/src/service_test.rs` | Pass (unit level; no ConPTY) |
+
+Not verified:
+
+- A daemon started as a Windows service (by the Service Control Manager, in
+  session 0), which the older `-t` failure above was attributed to.
+- A client on Windows whose terminal does not answer the cursor position
+  query.
+- Attach, resize, redraw and detach of a Windows terminal beyond the two
+  probes above, and full-screen programs.
+
 | Measurement | Result |
 | --- | --- |
 | Mac → Windows `cmd /c exit 0` through the tunnel | p50 36 ms, p99 129 ms |
@@ -1131,7 +1157,10 @@ shares the cache with other trees there.
 
 ## Not yet verified
 
-- Windows terminals, and a Windows workspace mounted into an actor.
+- Windows terminals beyond live probes (see
+  [Terminals after the cursor position fix](#terminals-after-the-cursor-position-fix)),
+  including a daemon started as a Windows service in session 0, and a Windows
+  workspace mounted into an actor.
 - Executor runtimes `containerd`, `firecracker` and `k8s`; pool settings
   `max_instances`, `idle_timeout` and `on_full: new` (removed 2026-11-11: it
   behaved like `wait`); `continuous` mirror-out.
