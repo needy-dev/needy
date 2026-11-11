@@ -118,8 +118,12 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     aligned(out, "  ", &rows);
     // Commands the actor's kernel does not route never reach needy, so
     // "kept on actor" undercounts them; say so only then.
-    if let Some(names) = s.route_names.as_ref().filter(|names| !names.iter().any(|n| n == "*")) {
-      writeln!(out, "  (kept on actor counts only the names the actor routes: {})", names.join(", "))?;
+    match s.route_names.as_ref().filter(|names| !names.iter().any(|n| n == "*")) {
+      Some(names) if names.is_empty() => {
+        writeln!(out, "  (the actor routes no command names, so kept on actor counts none of its commands)")?
+      }
+      Some(names) => writeln!(out, "  (kept on actor counts only the names the actor routes: {})", names.join(", "))?,
+      None => {}
     }
   }
 

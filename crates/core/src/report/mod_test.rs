@@ -429,6 +429,34 @@ fn the_human_report_counts_commands_per_executor_in_aligned_lines() {
   assert!(report.contains("  injected faults: 2 (exec (2))\n"), "{report}");
 }
 
+// ROOT CAUSE:
+//
+// If the actor routed no command names, the note under "Commands" joined an
+// empty list: `(kept on actor counts only the names the actor routes: )`.
+//
+// Before the fix, the note printed the list whatever its length.
+// The fix says that the actor routes no names, so nothing kept on it is
+// counted, in both the human and the Markdown report.
+#[test]
+fn an_actor_that_routes_no_names_says_so_instead_of_an_empty_list() {
+  let mut events = actor_run();
+  events[1].event = Event::ActorConfig(ActorConfig {
+    route_names: Some(vec![]),
+    mounts: vec![],
+  });
+
+  let report = human(&events);
+  assert!(!report.contains("routes: )"), "{report}");
+  assert!(report.contains("  (the actor routes no command names, so kept on actor counts none of its commands)\n"), "{report}");
+
+  let report = render("7f3a", &events, Level::Summary, Format::Markdown);
+  assert!(!report.contains("needy ()"), "{report}");
+  assert!(
+    report.contains("🏠 The actor routes no command names to needy, so commands it ran are not counted as kept on actor."),
+    "{report}"
+  );
+}
+
 #[test]
 fn the_human_report_has_no_markdown() {
   let report = human(&actor_run());

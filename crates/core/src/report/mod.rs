@@ -553,6 +553,9 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   match &t.route_names {
     None => writeln!(out, "🏠 No actor ran in this run.\n")?,
     Some(None) => writeln!(out, "🏠 Kept on actor counts every command the actor ran, except needy's own init and proxy.\n")?,
+    Some(Some(names)) if names.is_empty() => {
+      writeln!(out, "🏠 The actor routes no command names to needy, so commands it ran are not counted as kept on actor.\n")?
+    }
     Some(Some(names)) => {
       let names = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
       writeln!(
