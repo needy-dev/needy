@@ -1922,14 +1922,20 @@ fn a_runner_daemon_joins_restarts_without_its_join_token_and_ends_when_removed()
   let joined = runner_when(&control, "mac", |r| r["status"] == "online");
   kill(first.id(), "TERM");
   exited(first);
+  // Read after the first runner exited, which waits for a heartbeat in
+  // flight: a heartbeat it sent after `joined` is not the restart.
+  let left = runner_when(&control, "mac", |_| true);
   let second = spawn_runner(&machine, &control, None);
-  let restarted = runner_when(&control, "mac", |r| r["last_seen_at_ms"].as_i64() > joined["last_seen_at_ms"].as_i64());
+  // Online as a listing reads it: a slow listing can read a fresh
+  // heartbeat after more than the three intervals that keep it online.
+  let restarted =
+    runner_when(&control, "mac", |r| r["status"] == "online" && r["last_seen_at_ms"].as_i64() > left["last_seen_at_ms"].as_i64());
   let rm = control.run(&["runner", "rm", "mac"]);
   let refused = exited(second);
 
   assert_eq!(joined["labels"]["os"], "test");
   assert_eq!(joined["roles"], serde_json::json!(["executor"]));
-  assert_eq!(restarted["status"], "online");
+  assert_eq!(restarted["labels"]["os"], "test");
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
