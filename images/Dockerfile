@@ -7,13 +7,29 @@ ARG FIRECRACKER_VERSION=v1.17.0
 ARG OPENCODE_VERSION=v1.19.5
 
 # Static needy binary for guests and executors.
+# NOTICE: the cache mount on /src/target is shared by every build on this
+# builder, whatever source tree it came from: a cache mount's `id` defaults to
+# its target path, and "your build should work with any contents of the cache
+# directory as another build may overwrite the files",
+# https://github.com/moby/buildkit/blob/v0.16.0/frontend/dockerfile/docs/reference.md?plain=1#L745-L766
+# Cargo takes a workspace crate as fresh when no source file is newer than
+# the dep-info file of its last build,
+# https://github.com/rust-lang/cargo/blob/rust-1.85.0/src/cargo/core/compiler/fingerprint/mod.rs#L227-L237
+# and COPY keeps the context's mtimes, so a tree unpacked from `git archive`
+# (files dated at their commit) looked older than artifacts another tree had
+# left in the cache, and cargo shipped those. Touching the sources first makes
+# every workspace crate newer than anything in the cache, so it is rebuilt
+# from this tree; registry crates, fingerprinted by version and checksum, stay
+# cached. A cache `id` per tree would not do: two commits of one tree share
+# it, and the older-looking files of the second meet the first's artifacts.
 FROM rust:1 AS needy
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* \
  && rustup target add x86_64-unknown-linux-musl
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release --target x86_64-unknown-linux-musl -p needy-cli \
+    find /src -path /src/target -prune -o -type f -exec touch {} + \
+ && cargo build --release --target x86_64-unknown-linux-musl -p needy-cli \
  && cp target/x86_64-unknown-linux-musl/release/needy /needy
 
 # needy.exe for Windows executors.
@@ -22,8 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends gcc-mingw-w64-x
  && rustup target add x86_64-pc-windows-gnu
 WORKDIR /src
 COPY . .
+# NOTICE: the sources are touched for the reason given in the `needy` stage.
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release --target x86_64-pc-windows-gnu -p needy-cli \
+    find /src -path /src/target -prune -o -type f -exec touch {} + \
+ && cargo build --release --target x86_64-pc-windows-gnu -p needy-cli \
  && cp target/x86_64-pc-windows-gnu/release/needy.exe /needy.exe
 
 FROM scratch AS windows

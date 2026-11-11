@@ -123,3 +123,51 @@ fn every_kernel_build_variable_of_a_recipe_is_an_arg_of_the_kernel_stage() {
     }
   }
 }
+
+/// The `RUN` instructions of `images/Dockerfile`, each with its continued
+/// lines joined.
+fn run_instructions() -> Vec<String> {
+  let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/Dockerfile");
+  let text = std::fs::read_to_string(dockerfile).unwrap();
+  let mut runs = Vec::new();
+  let mut current: Option<String> = None;
+  for line in text.lines() {
+    let line = line.trim();
+    if line.starts_with('#') {
+      continue;
+    }
+    if let Some(run) = current.as_mut() {
+      run.push(' ');
+      run.push_str(line.trim_end_matches('\\'));
+    } else if line.starts_with("RUN ") {
+      current = Some(line.trim_end_matches('\\').to_string());
+    }
+    if !line.ends_with('\\')
+      && let Some(run) = current.take()
+    {
+      runs.push(run);
+    }
+  }
+  runs
+}
+
+// ROOT CAUSE:
+//
+// If two source trees were built on one host, the second could ship the
+// first's crates, because the BuildKit cache mount on /src/target is shared
+// by every build and cargo trusts mtimes: files unpacked from an archive of a
+// commit carry the commit's date, older than the artifacts already cached.
+//
+// Before the fix, `cargo build` ran on the copied tree as it was.
+// The fix touches every source file before cargo runs, so each workspace
+// crate is newer than any cached artifact and is rebuilt from this tree.
+#[test]
+fn every_cargo_build_on_a_shared_target_cache_touches_the_sources_first() {
+  let runs: Vec<String> = run_instructions().into_iter().filter(|run| run.contains("target=/src/target")).collect();
+  assert!(!runs.is_empty(), "no RUN mounts a cache on /src/target");
+  for run in runs {
+    let touch = run.find("-exec touch").unwrap_or_else(|| panic!("the sources are not touched: {run}"));
+    let cargo = run.find("cargo build").unwrap_or_else(|| panic!("no cargo build: {run}"));
+    assert!(touch < cargo, "the sources are touched after cargo builds: {run}");
+  }
+}
