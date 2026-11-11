@@ -138,8 +138,11 @@ async fn proxy() -> Result<i32> {
     Err(relay::Error::Terminated(signal)) => return Ok(128 + signals::number(signal).unwrap_or(1)),
     Err(error) => return Err(error.into()),
   };
-  if let Some(code) = exit.code {
-    return Ok(code);
+  if let Some(code) = signals::unrepresentable(&exit) {
+    message(signals::out_of_range_message(code));
+  }
+  if exit.code.is_some() {
+    return Ok(signals::shell_code(&exit));
   }
   // Die of the same signal so the parent's wait sees signal death.
   if let Some(signal) = signals::number(&exit.signal).and_then(|n| Signal::try_from(n).ok()) {

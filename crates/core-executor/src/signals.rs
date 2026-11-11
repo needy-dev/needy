@@ -39,12 +39,46 @@ pub fn name(number: i32) -> String {
   format!("SIG{number}")
 }
 
-/// Shell-style status: the exit code, or 128 plus the signal number.
+/// Shell-style status a client on this machine exits with for `exit`: the
+/// exit code, or 128 plus the signal number. A code this machine's exit
+/// status cannot carry, such as a Windows code above 255 seen on Unix, is
+/// [`OUT_OF_RANGE`]; [`unrepresentable`] names it for the client's message.
 pub fn shell_code(exit: &Exit) -> i32 {
   match exit.code {
-    Some(code) => code,
+    Some(code) if fits(code) => code,
+    Some(_) => OUT_OF_RANGE,
     None => 128 + number(&exit.signal).unwrap_or(1),
   }
+}
+
+/// The status for an exit code outside what an exit status carries here: a
+/// failure, never the code's low bits, which may be 0.
+pub const OUT_OF_RANGE: i32 = 1;
+
+/// The code of `exit` when [`shell_code`] cannot pass it on unchanged.
+pub fn unrepresentable(exit: &Exit) -> Option<i32> {
+  exit.code.filter(|code| !fits(*code))
+}
+
+/// What a client prints when [`unrepresentable`] names a code.
+pub fn out_of_range_message(code: i32) -> String {
+  format!("the command exited with code {code}, which an exit status here cannot carry; exiting with {OUT_OF_RANGE}")
+}
+
+/// Whether an exit status on this machine carries `code` whole.
+// Source: https://pubs.opengroup.org/onlinepubs/9799919799/functions/_exit.html#tag_17_02_03
+// (POSIX.1-2024, `_exit`: "only the least significant 8 bits (that is,
+// status & 0377) shall be available from wait() and waitpid()").
+// Reference: https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-exitprocess
+// (a Windows exit code is a 32-bit `UINT`, so it fits whole there).
+#[cfg(unix)]
+fn fits(code: i32) -> bool {
+  (0..=255).contains(&code)
+}
+
+#[cfg(not(unix))]
+fn fits(_code: i32) -> bool {
+  true
 }
 
 /// The status a client reports when an exec stream ended before the command

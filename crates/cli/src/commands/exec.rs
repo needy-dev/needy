@@ -12,6 +12,7 @@ use clap::ValueEnum;
 use needy_api_client::exec::{Event, ExecStream};
 use needy_api_client::proto::v1::{ExecEvent, ExecStart, ExecStarted, Origin};
 use needy_api_client::{Error, Kind};
+use needy_common::process::Exit;
 use needy_core_executor::{relay, signals};
 use serde_json::{Value, json};
 
@@ -131,7 +132,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 /// or 255 with a message when the stream ended before it exited.
 pub(crate) fn status(relayed: Result<relay::Ended, relay::Error>) -> Result<i32> {
   match relayed {
-    Ok(relay::Ended::Exited(exit)) => Ok(signals::shell_code(&exit)),
+    Ok(relay::Ended::Exited(exit)) => Ok(exit_code(&exit)),
     Ok(relay::Ended::Detached { process }) => {
       output::after_terminal(format!("detached from process {process}; `needy attach {process}` returns to it"));
       Ok(0)
@@ -144,6 +145,15 @@ pub(crate) fn status(relayed: Result<relay::Ended, relay::Error>) -> Result<i32>
     Err(relay::Error::Terminated(signal)) => Ok(128 + signals::number(signal).unwrap_or(1)),
     Err(error) => Err(error.into()),
   }
+}
+
+/// The client's exit code for the command's `exit`. A code the client's
+/// exit status cannot carry is a failure, and the real code is printed.
+fn exit_code(exit: &Exit) -> i32 {
+  if let Some(code) = signals::unrepresentable(exit) {
+    output::message(signals::out_of_range_message(code));
+  }
+  signals::shell_code(exit)
 }
 
 /// Exit code and output for a start the daemon refused, like a shell's: 126
@@ -247,7 +257,8 @@ async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
         }
         summary.insert("exit_code", json!(exit.code));
         summary.insert("signal", json!(exit.signal));
-        code = signals::shell_code(&exit);
+        // The JSON keeps the real code; only the exit status is mapped.
+        code = exit_code(&exit);
         break None;
       }
       Event::Trace(event) => {
@@ -301,3 +312,7 @@ fn line(value: &Value) -> Result<()> {
   println!("{}", serde_json::to_string(value)?);
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "exec_test.rs"]
+mod tests;

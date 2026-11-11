@@ -204,7 +204,12 @@ started, with `needy: the connection ended before the command started` and
 the reason; `--output json` then prints only `error`. A routed command in the
 actor gets the same codes from the proxy: 126 when a rule or fault refuses
 it, 127 when its program cannot start on the executor, 255 when the stream
-ends early. Any other error exits 1 with one `needy:` line.
+ends early. Any other error exits 1 with one `needy:` line. A code that the
+client's exit status cannot carry, such as a Windows command's
+`exit /b 256` seen by a client on Unix (where only the low 8 bits reach the
+parent), exits 1 with `needy: the command exited with code 256, which an
+exit status here cannot carry; exiting with 1`, never with its low bits;
+`--output json` and `ndjson` keep the real code.
 
 | Exit | Meaning |
 | --- | --- |
