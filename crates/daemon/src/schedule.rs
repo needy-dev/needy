@@ -190,7 +190,7 @@ impl Daemon {
   }
 
   /// Whether `runner` runs on this host, as the operator said.
-  fn is_local(&self, runner: &str) -> bool {
+  pub(crate) fn is_local(&self, runner: &str) -> bool {
     self.config.local_runner.as_deref() == Some(runner)
   }
 

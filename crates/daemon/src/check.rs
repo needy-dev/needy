@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFinding, ProfileToCheck};
 use needy_config::Source;
+use needy_config::profile::{Executor, Profile};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::HostInfo;
 use needy_core::types::RunnerRole;
 
+use crate::pool::Site;
 use crate::{Daemon, failed, schedule};
 
 fn error(message: String) -> ProfileFinding {
@@ -25,6 +27,26 @@ fn warning(message: String) -> ProfileFinding {
     error: false,
     message,
   }
+}
+
+/// The actor's working directory when no entry of `executor`'s path map
+/// covers it, so a command routed there keeps a path of the actor's.
+// NOTICE: without `actor.cwd` the actor starts in `~/workspace` when a
+// mount provides it, else in `~`; both are under `~`, so an entry for either
+// one counts. The mounts are not known until the run is created.
+fn unmapped_actor_cwd(profile: &Profile, executor: &Executor) -> Option<String> {
+  let home = profile.user.home();
+  let workspace = format!("{home}/workspace");
+  let candidates = match &profile.actor.cwd {
+    Some(cwd) => vec![profile.user.expand_home(cwd)],
+    None => vec![home.clone(), workspace],
+  };
+  let covers = |from: &str, path: &str| {
+    let from = from.trim_end_matches('/');
+    path == from || path.starts_with(&format!("{from}/"))
+  };
+  let mapped = candidates.iter().any(|cwd| executor.path_map.keys().any(|from| covers(from, cwd)));
+  (!mapped).then(|| candidates.into_iter().next().unwrap_or(home))
 }
 
 impl Daemon {
@@ -54,8 +76,19 @@ impl Daemon {
     for (name, executor) in &profile.executors {
       match schedule::placement(executor.runner.as_ref(), RunnerRole::Executor, &runners) {
         Ok(placement) => {
-          if let Err(refusal) = self.site(&placement, executor.provider) {
-            check.findings.push(error(format!("executors.{name}: {refusal}")));
+          match self.site(&placement, executor.provider) {
+            Err(refusal) => check.findings.push(error(format!("executors.{name}: {refusal}"))),
+            // The control host's own runner is the actor's machine.
+            Ok(Site::Runner { name: runner, .. }) if !self.is_local(&runner) => {
+              if let Some(cwd) = unmapped_actor_cwd(&profile, executor) {
+                check.findings.push(warning(format!(
+                  "executors.{name}: commands routed to runner {runner} keep the actor's working directory {cwd}, which \
+                   no path_map entry maps to a directory on that machine; add one, for example \
+                   `path_map: {{ {cwd}: /path/on/{runner} }}`"
+                )));
+              }
+            }
+            Ok(_) => {}
           }
           check.executors.insert(name.clone(), placement);
         }

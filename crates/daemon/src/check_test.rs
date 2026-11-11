@@ -90,7 +90,7 @@ async fn executor_selectors_resolve_to_runners_or_the_control_host() {
     r#"
 actor: { runner: kvm }
 executors:
-  mac: { runner: { labels: [os=darwin] } }
+  mac: { runner: { labels: [os=darwin] }, path_map: { /home/agent: /Users/user/work } }
   build: { runner: kvm, provider: docker }
   here: {}
 "#,
@@ -157,4 +157,53 @@ async fn a_runner_that_reported_no_host_skips_the_recipe_checks_with_a_warning()
 
   assert_eq!(check.actor_cpu, "");
   assert_eq!(messages(&check), ["warning: runner kvm has not reported its host yet; the recipe's host checks are skipped"]);
+}
+
+// ROOT CAUSE:
+//
+// If a native executor on a runner other than the control host's own had
+// no `path_map` for the actor's working directory, every command routed to
+// it kept the actor's directory (`/home/agent`), which that machine does not
+// have, and failed to start, while `profile check` found nothing. A
+// `workspace` does not help: it is the directory of a command that names
+// none, and a routed command names the actor's.
+//
+// Before the fix, the check said nothing about it.
+// The fix warns when no `path_map` entry covers the actor's directory there.
+#[tokio::test]
+async fn a_native_executor_on_another_runner_without_a_path_map_for_the_actors_directory_is_a_warning() {
+  let served = control().await;
+  let _kvm = runner(&served, "kvm", &[Actor, Executor], &[]).await;
+  let _mac = runner(&served, "mac", &[Executor], &[]).await;
+
+  let check = check(
+    &served,
+    r#"
+executors:
+  mac: { runner: mac, workspace: /Users/user/work }
+  mapped: { runner: mac, path_map: { /home/agent: /Users/user/work } }
+  own: { runner: kvm }
+  here: {}
+"#,
+  )
+  .await;
+
+  assert_eq!(
+    messages(&check),
+    [
+      "warning: executors.mac: commands routed to runner mac keep the actor's working directory /home/agent, which \
+       no path_map entry maps to a directory on that machine; add one, for example `path_map: { /home/agent: /path/on/mac }`"
+    ]
+  );
+}
+
+#[tokio::test]
+async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
+  let served = control().await;
+  let _mac = runner(&served, "mac", &[Executor], &[]).await;
+
+  let check =
+    check(&served, "actor: { cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n").await;
+
+  assert_eq!(messages(&check), Vec::<String>::new());
 }
