@@ -42,6 +42,9 @@ owned by the run like the `Vm` handle today. Implementations:
 | --- | --- | --- |
 | `firecracker` | today's `host::vm` | `/dev/kvm` |
 | `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Docker; gVisor's `runsc` registered as a Docker runtime for `runsc` |
+| `container` on macOS and Windows | Docker API through `bollard` against Docker Desktop, whose Linux containers run inside a VM (WSL 2 on Windows) | Docker Desktop |
+| `apple-container` | Apple's `container` (each container is a lightweight Linux VM on Apple silicon) | macOS with Apple's `container` installed |
+| `wsl`, `hyper-v` | later: a WSL distribution or a Hyper-V VM as the actor on Windows (`TODO(windows-actor)`) | Windows |
 
 containerd directly (without Docker) is a later provider, like the executor
 `TODO(provider)`.
@@ -60,13 +63,27 @@ actor:
 
 | Mechanism | Firecracker today | Container runtime |
 | --- | --- | --- |
-| Guest API (config, events, exit) | vsock to the daemon | Unix socket bind-mounted into the container at `/.needy/daemon.sock` |
+| Guest API (config, events, exit) | vsock to the daemon | a transport the runtime provides (see Guest transport): a host Unix socket bind-mounted at `/.needy/daemon.sock` for Linux containers; loopback TCP with a per-run token for VM-backed runtimes |
 | Gateway | vsock port, forwarded to local TCP by init | Unix socket bind-mounted; init's forwarder bridges local TCP to it. The container has no network except loopback (`network_mode: none`) |
 | Init | PID 1 in the VM, mounts `/proc` and friends, reboots at the end | PID 1 in the container (`/.needy/init`), skips the mounts the runtime already made, exits instead of rebooting |
 | Exec routing | `binfmt_needy` kernel module, route names as a module parameter | Shims, see below |
 | Workspace mount | `sshfs` in the guest over an exec stream | `sshfs` on the host side over the same exec stream, bind-mounted into the container; the SFTP fault tap is unchanged |
 | Copy-in, mirror-out | in the guest | unchanged (they run in the actor through init) |
 | Logs | serial console | container stdout and stderr |
+
+### Guest transport
+
+The guest API and the gateway are endpoints the runtime provides, not a fixed
+socket type. Docker Desktop (macOS, Windows) and Apple's `container` run Linux
+inside a VM, and a host Unix socket generally cannot be bind-mounted through
+the VM's file sharing. So each runtime returns its transport:
+
+| Runtime | Guest API and gateway transport |
+| --- | --- |
+| `firecracker` | vsock (host-side Unix sockets of the VM) |
+| `container` on Linux | host Unix sockets bind-mounted into the container |
+| `container` on Docker Desktop | a TCP port on the host's loopback, reached from the container as `host.docker.internal`, authenticated by a per-run token |
+| `apple-container` | vsock if Apple's `container` exposes it to clients, otherwise loopback TCP with a per-run token (to be settled by an experiment) |
 
 ### Exec routing with build-time shims
 
@@ -154,6 +171,11 @@ isolation a trace came from.
   build` builds it.
 - **Docker through `bollard` first** (owner, 2026-11-10); containerd directly is
   a later provider.
+
+- **Every run has an actor** (owner, 2026-11-11): there is no `actor: none`.
+  Hosts without KVM get actors through the container runtimes instead: Docker
+  on Linux, Docker Desktop or Apple's `container` on macOS, Docker Desktop on
+  Windows, and later WSL or Hyper-V on Windows.
 
 ## Open questions
 
