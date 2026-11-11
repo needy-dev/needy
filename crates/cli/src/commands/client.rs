@@ -149,7 +149,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         token: paired.token,
         paired_at_ms: client.created_at_ms,
       };
-      credentials::store(&path, &endpoint, credential)?;
+      if let Some(warning) = credentials::store(&path, &endpoint, credential)? {
+        output::message(format_args!("warning: {warning}"));
+      }
       output::message(format_args!("paired as client {} ({}); its token for {endpoint} is in {}", client.name, client.id, path.display()));
     }
     Command::Pair(PairArgs {

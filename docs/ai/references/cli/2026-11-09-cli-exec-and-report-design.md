@@ -99,7 +99,9 @@ minutes and `--name` to `client-<code ID>`. `client pair CODE` sends no token
 (the code authenticates it) and stores the client token in
 `credentials.json` in the config directory (`$XDG_CONFIG_HOME/needy`, or
 `NEEDY_CONFIG_DIR`), keyed by the endpoint as given without a trailing `/`,
-written 0600 in a 0700 directory through a temporary file; pairing again
+written 0600 through a temporary file in a directory created 0700 (an
+existing directory keeps its mode, and `client pair` warns when other users
+may enter it, as the daemon does for its state directories); pairing again
 replaces it. `client ls` prints `ID`, `NAME`, `STATE` (`active` or
 `revoked`), `PAIRED` and `LAST USED`, or JSON with `-o json`; `client revoke
 ID` prints nothing. A revoked client's next command is `needy: missing or

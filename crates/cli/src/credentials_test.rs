@@ -67,3 +67,34 @@ fn the_file_and_its_directory_are_private() {
   assert_eq!(mode(&config), 0o700);
   assert!(!config.join("credentials.json.tmp").exists());
 }
+
+// ROOT CAUSE:
+//
+// If the config directory existed already with mode 0755, `client pair`
+// wrote `credentials.json` 0600 into it and said nothing, because a
+// directory that exists keeps its mode (it may be a shared one).
+//
+// Before the fix, the directory stayed open to other users silently.
+// The fix keeps its mode, as the daemon does with its state directories,
+// and warns, naming the directory and its mode.
+#[cfg(unix)]
+#[test]
+fn an_existing_directory_open_to_others_is_kept_and_warned_about() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let dir = tempfile::tempdir().unwrap();
+  let config = dir.path().join("needy");
+  std::fs::create_dir(&config).unwrap();
+  std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let path = config.join("credentials.json");
+
+  let warning = store(&path, "http://127.0.0.1:7443", credential("t")).unwrap();
+
+  let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+  assert_eq!(mode(&path), 0o600);
+  assert_eq!(mode(&config), 0o755);
+  let warning = warning.expect("a warning about the directory");
+  assert!(warning.contains(&format!("{} is open to other users (mode 755)", config.display())), "{warning}");
+
+  let private = dir.path().join("private");
+  assert_eq!(store(&private.join("credentials.json"), "http://127.0.0.1:7443", credential("t")).unwrap(), None);
+}
