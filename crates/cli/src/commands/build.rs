@@ -2,7 +2,9 @@
 //! Firecracker actor's on Linux, the `vz` actor's on Apple silicon macOS)
 //! and, with `--container` and `--executor`, the container actor and
 //! executor Docker images from `images/Dockerfile`, through the Docker API
-//! with BuildKit.
+//! with BuildKit. With `--apple-container` it builds the container actor
+//! image for linux/arm64 instead of the VM's, and loads it into Apple's
+//! `container`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -39,6 +41,11 @@ pub struct Args {
   /// Also build the `needy-actor` Docker image, the container actor's.
   #[arg(long)]
   container: bool,
+  /// Build the `needy-actor` image for linux/arm64 and load it into Apple's
+  /// `container`, for `actor.runtime: apple-container` on a Mac with Apple
+  /// silicon, instead of the VM actor image.
+  #[arg(long, conflicts_with_all = ["recipe", "out"])]
+  apple_container: bool,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -61,33 +68,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
     build_args.extend(compiled.kernel_build_env);
   }
-  std::fs::create_dir_all(&out).with_context(|| format!("cannot create {}", out.display()))?;
-  let out = std::fs::canonicalize(&out)?;
   let context = tokio::task::spawn_blocking(move || pack_context(&root)).await??;
   let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
-  // NOTICE: bollard's local exporter (`ImageBuildOutput::Local`, bollard
-  // 0.21.1 `src/grpc/mod.rs`, `FileSendPacketImpl`) writes files without their
-  // modes, so `firecracker` would lose its executable bit. The tar exporter
-  // keeps them; the tar is unpacked here and removed. Remove this when the
-  // local exporter applies `Stat.mode`.
-  let archive = out.join(".needy-build.tar");
-  let (target, platform) = actor_target();
-  build(
-    &docker,
-    &context,
-    BuildImageOptions {
-      target: target.into(),
-      platform: platform.into(),
-      buildargs: Some(build_args),
-      outputs: Some(ImageBuildOutput::Tar(archive.display().to_string())),
-      ..options()
-    },
-  )
-  .await?;
-  let unpack_to = out.clone();
-  let unpack_from = archive.clone();
-  tokio::task::spawn_blocking(move || unpack(&unpack_from, &unpack_to)).await??;
-  std::fs::remove_file(&archive).with_context(|| format!("cannot remove {}", archive.display()))?;
+  if args.apple_container {
+    build_for_apple_container(&docker, &context, &ctx.paths()?.state).await?;
+  } else {
+    build_vm_image(&docker, &context, &out, build_args).await?;
+  }
   if args.container {
     build(
       &docker,
@@ -126,6 +113,102 @@ fn actor_target() -> (&'static str, &'static str) {
   } else {
     ("actor", "")
   }
+}
+
+/// Builds the actor image this host's VM runtime boots, with the recipe's
+/// kernel `build_args`, into `out`.
+async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args: HashMap<String, String>) -> Result<()> {
+  std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
+  let out = std::fs::canonicalize(out)?;
+  // NOTICE: bollard's local exporter (`ImageBuildOutput::Local`, bollard
+  // 0.21.1 `src/grpc/mod.rs`, `FileSendPacketImpl`) writes files without their
+  // modes, so `firecracker` would lose its executable bit. The tar exporter
+  // keeps them; the tar is unpacked here and removed. Remove this when the
+  // local exporter applies `Stat.mode`.
+  let archive = out.join(".needy-build.tar");
+  let (target, platform) = actor_target();
+  build(
+    docker,
+    context,
+    BuildImageOptions {
+      target: target.into(),
+      platform: platform.into(),
+      buildargs: Some(build_args),
+      outputs: Some(ImageBuildOutput::Tar(archive.display().to_string())),
+      ..options()
+    },
+  )
+  .await?;
+  let unpack_to = out.clone();
+  let unpack_from = archive.clone();
+  tokio::task::spawn_blocking(move || unpack(&unpack_from, &unpack_to)).await??;
+  std::fs::remove_file(&archive).with_context(|| format!("cannot remove {}", archive.display()))?;
+  Ok(())
+}
+
+/// Builds the container actor image for linux/arm64, the platform of Apple's
+/// `container` on Apple silicon, and loads it into Apple's image store
+/// through an archive in `scratch`, which is removed after.
+// NOTICE: Docker builds it (Docker Desktop or OrbStack on the Mac, whose
+// builder is arm64 natively); Apple's `container build` could build the
+// Dockerfile without Docker, but needy's build drives BuildKit through the
+// Docker API only.
+// TODO(apple-container): build with `container build` when there is no
+// Docker, if the owner wants Macs without Docker to build the image.
+async fn build_for_apple_container(docker: &Docker, context: &[u8], scratch: &Path) -> Result<()> {
+  let image = needy_config::profile::CONTAINER_IMAGE;
+  build(
+    docker,
+    context,
+    BuildImageOptions {
+      target: "actor-container".into(),
+      t: Some(image.into()),
+      platform: "linux/arm64".into(),
+      ..options()
+    },
+  )
+  .await?;
+  std::fs::create_dir_all(scratch).with_context(|| format!("cannot create {}", scratch.display()))?;
+  let archive = scratch.join(format!(".needy-actor-{}.tar", uuid::Uuid::new_v4()));
+  let loaded = match save_image(docker, image, &archive).await {
+    Ok(()) => {
+      output::message(format_args!("build: loading {image} into Apple's container"));
+      load_into_apple_container(image, &archive).await
+    }
+    Err(e) => Err(e),
+  };
+  if let Err(e) = std::fs::remove_file(&archive)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    tracing::warn!("cannot remove {}: {e}", archive.display());
+  }
+  loaded
+}
+
+#[cfg(unix)]
+async fn load_into_apple_container(image: &str, archive: &Path) -> Result<()> {
+  let runtime = needy_core_actor::host::apple_container::AppleContainer::new(image.into());
+  Ok(runtime.load(archive).await?)
+}
+
+#[cfg(not(unix))]
+async fn load_into_apple_container(_image: &str, _archive: &Path) -> Result<()> {
+  bail!("Apple's `container` runs on macOS only, on a Mac with Apple silicon")
+}
+
+/// Writes Docker's archive of `image`, as `docker save` writes it, to
+/// `path`.
+async fn save_image(docker: &Docker, image: &str, path: &Path) -> Result<()> {
+  use tokio::io::AsyncWriteExt as _;
+  let failed = || format!("cannot write {}", path.display());
+  let mut file = tokio::fs::File::create(path).await.with_context(failed)?;
+  let mut stream = docker.export_image(image);
+  while let Some(chunk) = stream.next().await {
+    let chunk = chunk.with_context(|| format!("cannot export {image} from Docker"))?;
+    file.write_all(&chunk).await.with_context(failed)?;
+  }
+  file.flush().await.with_context(failed)?;
+  Ok(())
 }
 
 fn options() -> BuildImageOptions {
