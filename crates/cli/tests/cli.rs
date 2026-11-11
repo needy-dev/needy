@@ -2034,34 +2034,63 @@ fn gone_now(pid: u32) -> bool {
 
 const CONTROL_TOKEN: &str = "control-secret";
 
+// ROOT CAUSE:
+//
+// If another test's listener took the port this helper picked, the test
+// talked to that listener and failed with "transport error" or "connection
+// refused", because the helper bound port 0, released the port and gave its
+// number to the daemon. macOS hands out port-0 ports in sequence, so a
+// daemon of another test started at the same time could get the same one.
+//
+// Before the fix, the daemon then failed with "Address already in use" while
+// the helper's readiness loop connected to the other test's listener.
+// The fix lets the daemon bind port 0 itself and takes the port from the
+// daemon's own "listening on" line, so a test only talks to its own daemon.
 /// A control daemon on a loopback TCP port that needs `CONTROL_TOKEN`, as
 /// one reached through a tunnel, and its endpoint.
 fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
-  let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-  let listen = format!("127.0.0.1:{port}");
-  let child = home
+  use std::io::BufRead as _;
+  let mut child = home
     .needy()
     .args([
       "daemon",
+      "-v",
       "--mode",
       "control",
       "--listen",
-      &listen,
+      "127.0.0.1:0",
       "--token-env",
       "NEEDY_TEST_CONTROL_TOKEN",
     ])
     .env("NEEDY_TEST_CONTROL_TOKEN", CONTROL_TOKEN)
     .args(stand_in_actor(home))
     .stdout(Stdio::null())
-    .stderr(Stdio::null())
+    .stderr(Stdio::piped())
     .spawn()
     .unwrap();
+  // The log is read to its end on another thread, so the daemon never
+  // blocks on a full pipe, and the bound below holds if it logs nothing.
+  let log = std::io::BufReader::new(child.stderr.take().unwrap());
+  let (lines, read) = std::sync::mpsc::channel();
+  std::thread::spawn(move || {
+    for line in log.lines().map_while(Result::ok) {
+      // The test stops listening once the daemon listens; the rest is
+      // only drained.
+      let _ = lines.send(line);
+    }
+  });
+  let daemon = Daemon { child };
   let deadline = Instant::now() + Duration::from_secs(20);
-  while std::net::TcpStream::connect(&listen).is_err() {
-    assert!(Instant::now() < deadline, "the daemon did not listen on {listen}");
-    std::thread::sleep(Duration::from_millis(50));
-  }
-  (Daemon { child }, format!("http://{listen}"))
+  let mut seen = Vec::new();
+  let listen = loop {
+    let left = deadline.saturating_duration_since(Instant::now());
+    let line = read.recv_timeout(left).unwrap_or_else(|e| panic!("the daemon did not listen ({e}): {seen:#?}"));
+    if let Some((_, address)) = line.split_once("control daemon listening on ") {
+      break address.trim().to_string();
+    }
+    seen.push(line);
+  };
+  (daemon, format!("http://{listen}"))
 }
 
 /// `needy` against `endpoint` as the operator, with the control token.

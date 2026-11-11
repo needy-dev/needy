@@ -24,7 +24,10 @@ pub async fn serve(listen: &str, name: String, token: Option<String>) -> Result<
     name,
   };
   let server = Server::new(health, Caller::Operator).token(token).process_service(service).bind(&[Listen::parse(listen)]).await?;
-  tracing::info!("executor listening on {listen}");
+  // The bound address, not `listen`: a port 0 is the one the system picked.
+  for address in server.addresses() {
+    tracing::info!("executor listening on {address}");
+  }
   let ended = termination
     .unless_forced(async {
       let served = server.serve(termination.stop()).await;

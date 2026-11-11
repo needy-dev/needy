@@ -159,7 +159,8 @@ impl Server {
   /// error. A Unix socket's directory is created, and a socket left by an
   /// earlier server is replaced. Without a token, a TCP listener on a
   /// non-loopback address is refused ([`Error::Unauthenticated`]); one on a
-  /// loopback address, where tunnels end, starts with a warning.
+  /// loopback address, where tunnels end, starts with a warning. A TCP
+  /// listener on port 0 gets a free port; [`Bound::addresses`] tells which.
   pub async fn bind(self, listen: &[Listen]) -> Result<Bound, Error> {
     let mut listeners = Vec::with_capacity(listen.len());
     for listen in listen {
@@ -167,7 +168,7 @@ impl Server {
       if self.token.is_none() {
         listener.check_unauthenticated(listen)?;
       }
-      listeners.push((listen.clone(), listener));
+      listeners.push((listener.address(listen), listener));
     }
     Ok(Bound {
       routes: self.routes,
@@ -239,6 +240,20 @@ impl Listener {
 }
 
 impl Listener {
+  /// Where this listener, bound for `listen`, listens: the port the system
+  /// picked for port 0, and the address a host name resolved to.
+  fn address(&self, listen: &Listen) -> Listen {
+    match self {
+      Self::Tcp(listener) => match listener.local_addr() {
+        Ok(address) => Listen::Tcp(address.to_string()),
+        // A bound socket has an address; `listen` is the next best name.
+        Err(_) => listen.clone(),
+      },
+      #[cfg(unix)]
+      Self::Unix(_) => listen.clone(),
+    }
+  }
+
   /// Refuses a TCP listener without a token unless only this machine can
   /// reach it. The bound address decides, so a host name is judged by what
   /// it resolved to.
@@ -264,6 +279,11 @@ pub struct Bound {
 }
 
 impl Bound {
+  /// The addresses this server listens on, in the order they were given.
+  pub fn addresses(&self) -> Vec<Listen> {
+    self.listeners.iter().map(|(listen, _)| listen.clone()).collect()
+  }
+
   /// Serves every listener until `cancel`, then lets open calls finish for
   /// a grace period.
   pub async fn serve(self, cancel: CancellationToken) -> Result<(), Error> {

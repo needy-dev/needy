@@ -288,7 +288,10 @@ impl Daemon {
 
   async fn serve_until(&self, listen: &str, token: Option<String>, stop: CancellationToken) -> Result<()> {
     let server = self.server(token).bind(&[Listen::parse(listen)]).await?;
-    tracing::info!("control daemon listening on {listen}");
+    // The bound address, not `listen`: a port 0 is the one the system picked.
+    for address in server.addresses() {
+      tracing::info!("control daemon listening on {address}");
+    }
     // Runners' control streams never end on their own; they end as the
     // server stops, so its grace period does not wait for them, and the
     // runners connect again to whoever serves next. The runs stop first,

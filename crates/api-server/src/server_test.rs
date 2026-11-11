@@ -75,6 +75,20 @@ async fn a_tcp_listener_off_loopback_needs_a_token() {
   assert!(with_token.is_ok(), "{:?}", with_token.err());
 }
 
+#[tokio::test]
+async fn a_tcp_listener_on_port_0_reports_the_port_it_got() {
+  let bound = Server::new(health(), Caller::Operator).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+
+  let addresses = bound.addresses();
+  let [Listen::Tcp(address)] = addresses.as_slice() else {
+    panic!("{addresses:?}");
+  };
+  let address: std::net::SocketAddr = address.parse().unwrap();
+  assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
+  assert_ne!(address.port(), 0);
+  assert!(std::net::TcpStream::connect(address).is_ok(), "nothing listens on {address}");
+}
+
 #[test]
 fn listen_addresses_are_unix_paths_or_host_and_port() {
   assert_eq!(Listen::parse("unix:/run/needy.sock"), Listen::Unix("/run/needy.sock".into()));
