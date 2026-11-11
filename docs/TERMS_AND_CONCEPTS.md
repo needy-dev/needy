@@ -30,6 +30,11 @@ mounts, hostname, identity files). The report names it (`Actor  container
 (runsc)`), since it decides the isolation. See the
 [container actor runtime design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md).
 
+Provisional, on the `poc/macos-native-actor` branch only: `macos-native`, the
+driving program as a process on a Mac, fenced by a Seatbelt profile (the
+**fence**), with shims alone on its `PATH`. No VM and no identity. See the
+[macOS native actor proof of concept](ai/references/architecture/2026-11-12-macos-native-actor-poc.md).
+
 ### Driving program
 
 The program inside an actor that drives the work: an agent harness, a test
@@ -316,6 +321,13 @@ program that was on the image's `PATH` when the image was built; the real
 program is at `/.needy/real/<path>`. A shim runs its real program with the
 caller's argv, or hands the exec to the proxy when the run routes its name.
 Programs created after the build and run directly are not routed.
+
+In a `macos-native` actor (provisional, proof of concept), a symbolic link to
+the needy binary, one per program name on the actor's search path, in a
+directory that is the driving program's whole `PATH`. Its real program cannot
+run inside the fence, so a command the daemon keeps, or one the run does not
+route, is started by the actor's init under the same fence with that one
+program allowed (a **kept command**).
 
 ### Proxy
 
