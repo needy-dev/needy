@@ -145,6 +145,8 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
     value
   });
 
+  // TODO(actor-network): the MAC is only checked against the vendor here;
+  // actors have no NIC to apply it to (see `needy_core_actor::host::vm`).
   let network_mac = recipe.network.mac.as_ref().map(|t| fill(t.as_str()));
   cpu::check_cpu(&recipe.cpu, host, &mut findings);
   findings.extend(identity::check_vendor(recipe, network_mac.as_deref()));

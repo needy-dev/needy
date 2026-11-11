@@ -129,6 +129,12 @@ loaded, including paths a parent wrote.
 | `network.interface` | Kernel command line or udev rule | VM start | Straightforward |
 | `network.metadata` | Firecracker MMDS | VM start | Native |
 
+`network.mac` is compiled and checked against the recipe's vendor, but not
+applied in actors yet: an actor has only `lo` and reaches the network through
+the gateway forwarder over vsock, and a NIC to carry the MAC waits for an
+owner decision on the actor's network (`TODO(actor-network)` in
+`crates/core-actor/src/host/vm.rs`).
+
 ## Raw overrides
 
 Not implemented: `needy-config` rejects a `firecracker:` key until the merge
