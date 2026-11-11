@@ -116,7 +116,9 @@ executors:
         dockerfile: Dockerfile.build
         target: toolchain
         args: { RUST_VERSION: "1.97" }
-      args: [--cpus=4, --memory=8g, --pids-limit=512]   # run options: docker run
+      cpus: 4                             # run options: typed fields, see Run options
+      memory: 8GiB
+      pids_limit: 512
     key: "{run}"
     max_procs: 4          # matched commands running at once per instance
     on_full: wait         # wait | reject
@@ -196,30 +198,84 @@ replayed.
 ### Builds
 
 `build` options and run options are separate: `docker.build.args` are build
-arguments, `docker.args` are `docker run` arguments. Builds are cached by the
-hash of their inputs. The resolved image digest is written to the trace, so a
-run can be reproduced after `latest` moves.
+arguments; run options are the typed `docker:` fields below. Builds are
+cached by the hash of their inputs. The resolved image digest is written to
+the trace, so a run can be reproduced after `latest` moves.
 
-### Pass-through limits
+### Run options
 
-Runtime options pass through, except fields the daemon owns:
+Run options are typed fields under `docker:` (2026-11-11). The daemon
+creates containers through the Docker API, and each field sets the API
+field that the matching `docker run` flag sets, with the value `docker run`
+would send (`crates/core-executor/src/provider/docker.rs` cites the
+docker/cli and bollard sources). They replaced `docker.args`, which took
+`docker run` strings and translated an allowlist of them; a profile that
+still has `docker.args` is refused with the list of fields, without
+compatibility.
 
-- **Set by the daemon, never overridden**: `--network` (the executor network and
-  gateway), the workspace mount, `--name`, `--label`, `--hostname` (the
-  recipe's), `--user` (the profile's `user`), `--entrypoint`, `--rm` and
-  `--detach`.
-- **Denied unless the daemon's operator configuration allows them**:
-  `--privileged`, `--cap-add`, `--device`, `--pid host`, mounting the host root.
+```yaml
+docker:
+  image: example.com/toolchain:1
+  cpus: 1.5                     # HostConfig.NanoCpus
+  cpu_shares: 512               # CpuShares
+  cpuset_cpus: "0-3"            # CpusetCpus
+  memory: 8GiB                  # Memory; sizes as in recipes, a bare number is MiB
+  memory_swap: unlimited        # MemorySwap: a size, or unlimited (-1)
+  shm_size: 64MiB               # ShmSize
+  pids_limit: 512               # PidsLimit
+  ulimits: { nofile: 1024, nproc: { soft: 64, hard: 128 } }   # Ulimits
+  env: { RUST_LOG: debug }      # Config.Env
+  workdir: /src                 # Config.WorkingDir
+  read_only: true               # ReadonlyRootfs
+  init: true                    # Init
+  mounts:                       # Mounts
+    - { type: bind, source: ./cache, target: /cache, read_only: true }
+    - { type: volume, source: cargo, target: /usr/local/cargo/registry }
+    - { type: tmpfs, target: /tmp, size: 1GiB }
+  add_host: { db.example.com: 192.0.2.10 }   # ExtraHosts
+  dns: [192.0.2.53]             # Dns
+  sysctls: { net.ipv4.ip_forward: "1" }      # Sysctls
+  gpus: all                     # DeviceRequests: all, a count, or [device IDs]
+  cap_drop: [NET_RAW]           # CapDrop
+```
 
-The daemon creates containers through the Docker API, so `docker.args` are
-translated rather than passed to `docker run`. Translated today: `--cpus`,
-`--memory`, `--memory-swap`, `--shm-size`, `--pids-limit`, `--cpuset-cpus`,
-`--env`, `--volume`, `--mount` (bind, volume, tmpfs), `--tmpfs`, `--cap-add`,
-`--cap-drop`, `--device`, `--pid`, `--ipc`, `--userns`, `--uts`,
-`--security-opt`, `--ulimit`, `--privileged`, `--read-only` and `--init`.
-Any other option is an error when the executor is created, not silently
-dropped. There is no operator configuration yet, so the privileged options
-are always refused.
+A value of the wrong form fails when the profile loads, with its path
+(`executors.build.docker.memory: invalid size unit "g"`). Paths in the
+container must be absolute. A relative bind `source` is resolved against the
+profile's directory, like `workspace`. A bind source must exist; Docker does
+not create it.
+
+Fields the daemon owns are not profile fields, so naming one is an unknown
+field: the network (the executor network and gateway), the workspace and
+socket mounts (a mount at or under either is refused), the name, labels, the
+hostname (the recipe's), the user (the profile's `user`), the entrypoint and
+command, and auto-removal.
+
+These fields are refused when the executor is created unless the daemon's
+operator allows them: `privileged`, `cap_add`, `devices`
+(`{ host, container, permissions }`), `pid`, `ipc`, `userns` or `uts` set to
+`host` (another container's namespace is fine), a `security_opt` with
+`unconfined`, and a bind mount whose source is outside the executor's
+workspace on the host. There is no operator configuration yet, so they are
+always refused. `gpus` is not among them: it asks the host's GPU runtime for
+GPUs as `docker run --gpus` does.
+
+`docker run` options without a field (ports, CPU period and quota, memory
+reservation, OOM settings, blkio, `--runtime`, storage options, GPU drivers
+and options, a tmpfs mode) are left out until a profile needs one.
+
+Evidence (2026-11-11, a Linux KVM host with Docker, cgroup v2 and one
+NVIDIA GPU behind the NVIDIA container runtime): unit tests cover the
+schema and the mapping to the container body; `cargo test` created an
+executor container with `memory`, `cpus` and `env` and read them back from
+its cgroup and environment. A run of a control daemon with `cpus: 1.5`,
+`memory: 512MiB`, `pids_limit: 256`, `env`, `add_host`, a 16 MiB `tmpfs`
+mount and `gpus: all`: `needy exec` read `memory.max` 536870912,
+`cpu.max` `150000 100000`, `pids.max` 256, the variable, the `/etc/hosts`
+entry and the tmpfs size, and `nvidia-smi -L` listed the GPU; `docker
+inspect` showed the matching `HostConfig` and a device request with count
+-1 and the `gpu` capability. A profile with `docker.args` and one with
+`privileged: true` were refused at `run create` with the messages above.
 
 containerd options are merged into the OCI spec as a JSON patch with the same
 fields protected.

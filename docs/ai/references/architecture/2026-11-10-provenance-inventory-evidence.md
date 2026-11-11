@@ -120,7 +120,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | Fallback `TERM` | `crates/core-executor/src/process/mod.rs` | ncurses-snapshots v6_5_20251227 `misc/terminfo.src#L5486-L5487` | terminfo(5) |
 | Windows signal numbers | `crates/core-executor/src/signals.rs` | POSIX.1-2024 `kill` | bash manual "Exit Status" |
 | Reset signal list | `crates/core-executor/src/process/platform/unix.rs` | wezterm `f8921727` `pty/src/unix.rs#L228-L255` (portable-pty 0.9.0) | POSIX.1-2024 `exec`, Shell 2.12 |
-| `docker run` option mapping | `crates/core-executor/src/provider/docker.rs` | docker/cli v28.5.1 `opts.go#L600-L712`, go-units v0.5.0 `size.go#L86-L88` | moby v28.5.1 `api/swagger.yaml` |
+| Typed `docker:` fields to the container body (2026-11-11) | `crates/core-executor/src/provider/docker.rs` | docker/cli v29.3.0 `opts.go#L604-L722`, `opts/gpus.go#L18-L99`; v28.5.1 `opts.go#L999-L1071` (devices); bollard-stubs 1.53.1-rc.29.3.1 `models.rs` | moby v28.5.1 `api/swagger.yaml` |
 | SFTP packet types | `crates/core/src/chaos/sftp.rs` | openssh-portable V_10_6_P2 `sftp.h#L36`, `#L58` | draft-ietf-secsh-filexfer-02 sections 3, 6.3, 7 |
 | SFTP status codes and errno mapping | `crates/core/src/chaos/sftp.rs` | sshfs-3.7.6 `sshfs.c#L1766-L1779`, `sftp.h#L89-L95` | as left |
 

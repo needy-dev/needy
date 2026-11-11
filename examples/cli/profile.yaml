@@ -5,6 +5,15 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   command: [sleep, infinity]
 executors:
-  build: { provider: docker, key: "{run}" }
+  build:
+    provider: docker
+    key: "{run}"
+    # Run options are typed fields, each a Docker API field (see the
+    # profile design note's "Run options").
+    docker:
+      cpus: 2
+      memory: 2GiB
+      pids_limit: 1024
+      env: { NEEDY_EXAMPLE: cli }
 commands:
   - { match: "**", to: build }
