@@ -7,6 +7,11 @@
 //! tokens and runner credentials ([`super::secret`]). A client's name is
 //! what the trace records it as (`client:NAME`), so two clients that are
 //! not revoked never share one.
+//!
+//! The name is also the client's identity across pairings (owner decision,
+//! 2026-11-12): a pairing code for the name of a client that is not
+//! revoked re-pairs that client, and pairing with it revokes the client's
+//! old token in the same transaction.
 
 use sea_orm::{
   ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, ConnectionTrait, EntityTrait as _, IntoActiveModel as _, QueryFilter as _,
@@ -63,7 +68,7 @@ impl Store {
     };
     check_label("client", &name)?;
     let txn = self.db.begin().await?;
-    check_name_free(&txn, &name, now).await?;
+    check_no_open_code(&txn, &name, now).await?;
     let code = Secret::generate(secret::PAIRING, &id);
     let row = pairing_code::Model {
       id,
@@ -79,7 +84,8 @@ impl Store {
   }
 
   /// Spends a pairing code and registers its client, whose token is
-  /// returned once. A pairing that fails spends nothing.
+  /// returned once, revoking the token of the client that held the name
+  /// before, if one did. A pairing that fails spends nothing.
   pub async fn pair(&self, code: &str, now: i64) -> Result<(Client, Secret)> {
     let id = secret::id(secret::PAIRING, code).ok_or(Error::InvalidPairingCode)?;
     let txn = self.db.begin().await?;
@@ -91,8 +97,12 @@ impl Store {
     if now >= row.expires_ms {
       return Err(Error::PairingCodeExpired(row.id));
     }
-    // Another code for the same name may have paired first.
-    check_client_name_free(&txn, &row.name).await?;
+    // Re-pairing: the client this name names gives up its old token.
+    let previous =
+      client::Entity::find().filter(client::Column::Name.eq(&row.name)).filter(client::Column::RevokedMs.is_null()).all(&txn).await?;
+    for old in previous {
+      revoke(&txn, old, now).await?;
+    }
     let mut used = row.clone().into_active_model();
     used.used_ms = Set(Some(now));
     used.update(&txn).await?;
@@ -149,19 +159,23 @@ impl Store {
   pub async fn revoke_client(&self, id: &str, now: i64) -> Result<()> {
     let row = client::Entity::find_by_id(id).one(&self.db).await?.ok_or_else(|| Error::NoClient(id.to_string()))?;
     if row.revoked_ms.is_none() {
-      let mut row = row.into_active_model();
-      row.token_hash = Set(None);
-      row.revoked_ms = Set(Some(now));
-      row.update(&self.db).await?;
+      revoke(&self.db, row, now).await?;
     }
     Ok(())
   }
 }
 
-/// Refuses `name` when a client that is not revoked has it, or a pairing
-/// code that can still be used will give it.
-async fn check_name_free(db: &impl ConnectionTrait, name: &str, now: i64) -> Result<()> {
-  check_client_name_free(db, name).await?;
+async fn revoke(db: &impl ConnectionTrait, row: client::Model, now: i64) -> Result<()> {
+  let mut row = row.into_active_model();
+  row.token_hash = Set(None);
+  row.revoked_ms = Set(Some(now));
+  row.update(db).await?;
+  Ok(())
+}
+
+/// Refuses `name` when a pairing code that can still be used will give it,
+/// so two codes never race to re-pair one client.
+async fn check_no_open_code(db: &impl ConnectionTrait, name: &str, now: i64) -> Result<()> {
   let open = pairing_code::Entity::find()
     .filter(pairing_code::Column::Name.eq(name))
     .filter(pairing_code::Column::UsedMs.is_null())
@@ -169,15 +183,7 @@ async fn check_name_free(db: &impl ConnectionTrait, name: &str, now: i64) -> Res
     .one(db)
     .await?;
   match open {
-    Some(_) => Err(Error::ClientExists(name.to_string())),
-    None => Ok(()),
-  }
-}
-
-async fn check_client_name_free(db: &impl ConnectionTrait, name: &str) -> Result<()> {
-  let taken = client::Entity::find().filter(client::Column::Name.eq(name)).filter(client::Column::RevokedMs.is_null()).one(db).await?;
-  match taken {
-    Some(_) => Err(Error::ClientExists(name.to_string())),
+    Some(_) => Err(Error::PairingCodeOpen(name.to_string())),
     None => Ok(()),
   }
 }

@@ -65,8 +65,8 @@ pub enum Error {
   PairingCodeExpired(String),
   #[error("pairing code {0} was used already")]
   PairingCodeUsed(String),
-  #[error("a client named {0} exists; revoke it first or pair with another name")]
-  ClientExists(String),
+  #[error("a pairing code for client {0} is open; pair with it or wait until it expires")]
+  PairingCodeOpen(String),
   #[error("no client {0}")]
   NoClient(String),
   /// A malformed name, label or limit.

@@ -597,8 +597,13 @@ the secret learns that it expired or was used.
 
 **Pairing.** `needy client pair create [--ttl 10m] [--name NAME]` (an
 operator; a client was allowed too until 2026-11-11, see below) creates a single-use code; the name is a DNS label,
-`client-<code ID>` by default, and no client that is not revoked and no open
-code may hold it, so `client:NAME` in a trace names one client. `needy
+`client-<code ID>` by default, and no other open code may hold it. The name
+is the client's identity (owner decision, 2026-11-12): a code for the name
+of a client that is not revoked re-pairs that client, and pairing with it
+revokes the client's old token in the same transaction, so `client:NAME` in
+a trace names one client and a client never holds two working tokens. Give
+two machines two names: a code for a name in use takes the name, and its
+token, from the machine that held it. `needy
 client pair --endpoint URL CODE` calls `ClientService.Pair` without a bearer
 token (the code authenticates it), and stores the returned token on the
 client. Ten minutes is long enough to carry a code to another machine by
@@ -817,9 +822,10 @@ machine without KVM (warned, not started).
   2026-11-11). Read-only clients (reports and logs only), or clients
   limited to their own runs, would need a scope on the pairing code, as join
   tokens have.
-- **Client token rotation**: a client re-pairs to get a new token; the old
-  one stays valid until revoked. Should `client pair` revoke the token it
-  replaces on the same endpoint?
+- **Client token rotation** (resolved 2026-11-12): a client re-pairs under
+  its name to get a new token, and pairing revokes the old one; the name,
+  not the endpoint, identifies the client, since the control plane knows
+  the name and cannot see which endpoint a client stored a token under.
 - **Pruning clients**: revoked clients and used or expired pairing codes stay
   in `state.db` and `client ls`, as removed runners do.
 - **Silent processes after a lost client** (resolved): an exec whose client

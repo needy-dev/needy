@@ -94,30 +94,50 @@ async fn a_wrong_secret_for_a_known_client_authenticates_nobody() {
   assert_eq!(store.authenticate_client("needy-runner.mac.00", NOW).await.unwrap(), None);
 }
 
+// A client is identified by its name (owner decision D10, 2026-11-12): the
+// name is its principal in the trace (`client:NAME`), the operator gives it
+// to the pairing code, and at most one client that is not revoked holds it.
+// Pairing again under the name re-pairs that client: the new token replaces
+// the old, which is revoked in the same transaction, so a client never holds
+// two working tokens.
 #[tokio::test]
-async fn a_name_in_use_is_refused_until_its_client_is_revoked() {
+async fn pairing_again_under_a_clients_name_revokes_its_old_token() {
   let (store, _dir) = store().await;
-  let (client, _) = paired(&store, "laptop").await;
+  let (old, old_token) = paired(&store, "laptop").await;
 
-  let taken = store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap_err();
-  store.revoke_client(&client.id, NOW).await.unwrap();
-  store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap();
+  let (_, code) = store.create_pairing_code("laptop", MINUTE_MS, NOW + 1).await.unwrap();
+  let (new, new_token) = store.pair(code.expose(), NOW + 2).await.unwrap();
 
-  assert!(matches!(taken, Error::ClientExists(ref name) if name == "laptop"), "{taken}");
+  assert_ne!(new.id, old.id);
+  assert_eq!(store.authenticate_client(old_token.expose(), NOW + 3).await.unwrap(), None);
+  assert_eq!(store.authenticate_client(new_token.expose(), NOW + 3).await.unwrap().map(|c| c.id), Some(new.id.clone()));
+  let listed: Vec<(String, Option<i64>)> = store.clients().await.unwrap().into_iter().map(|c| (c.id, c.revoked_ms)).collect();
+  assert_eq!(listed, [(old.id, Some(NOW + 2)), (new.id, None)]);
 }
 
 #[tokio::test]
-async fn a_derived_name_and_a_paired_name_stay_taken() {
+async fn a_name_with_an_open_pairing_code_is_refused() {
+  let (store, _dir) = store().await;
+  store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap();
+
+  let taken = store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap_err();
+  store.create_pairing_code("laptop", MINUTE_MS, NOW + MINUTE_MS).await.unwrap();
+
+  assert!(matches!(taken, Error::PairingCodeOpen(ref name) if name == "laptop"), "{taken}");
+}
+
+#[tokio::test]
+async fn a_derived_name_and_a_given_name_both_pair() {
   let (store, _dir) = store().await;
   let (_, first) = store.create_pairing_code("", MINUTE_MS, NOW).await.unwrap();
   let (_, second) = store.create_pairing_code("ci", MINUTE_MS, NOW).await.unwrap();
-  // A name the store derived is still a name another code may not take.
   let (one, _) = store.pair(first.expose(), NOW).await.unwrap();
   store.pair(second.expose(), NOW).await.unwrap();
 
   assert!(one.name.starts_with("client-"), "{}", one.name);
-  let dup = store.create_pairing_code("ci", MINUTE_MS, NOW).await.unwrap_err();
-  assert!(matches!(dup, Error::ClientExists(_)), "{dup}");
+  let names: Vec<String> = store.clients().await.unwrap().into_iter().map(|c| c.name).collect();
+  assert_eq!(names.len(), 2);
+  assert!(names.contains(&"ci".to_string()), "{names:?}");
 }
 
 #[tokio::test]

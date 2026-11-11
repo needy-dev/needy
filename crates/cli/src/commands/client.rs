@@ -61,7 +61,8 @@ enum PairCommand {
     #[arg(long, default_value = "10m", value_parser = humantime::parse_duration)]
     ttl: Duration,
     /// The client's name, which the trace records as `client:NAME`: a DNS
-    /// label. Defaults to `client-<code ID>`.
+    /// label. Defaults to `client-<code ID>`. The name of a paired client
+    /// re-pairs it: pairing with the code revokes its old token.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
   },
