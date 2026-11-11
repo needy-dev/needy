@@ -9,7 +9,6 @@ use needy_config::profile::{FaultKind, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
 use needy_core::types::RunState;
-use needy_core_actor::host::runtime::Setup;
 
 use crate::run::Run;
 use crate::{Daemon, actor, files};
@@ -94,7 +93,9 @@ impl Guest for Daemon {
     let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
     // A runtime that sets the actor up from the host made the mounts, the
     // hostname and the sensors, and applies the hwmon faults itself; init
-    // is told none of them.
+    // is told none of them. Under `GuestMounts` (Apple's `container`) init
+    // makes the mounts and sets the hostname, and is told no sensors,
+    // faults or uptime offset, which the actor's kernel cannot present.
     // TODO(container-actor): a container actor's uptime is the container's
     // (lxcfs's `/proc/uptime` when it is mounted); the recipe's offset needs
     // a time namespace init may not create there.
@@ -131,9 +132,11 @@ impl Guest for Daemon {
       process_port: channels.process_port,
       wait_for_attach: run.wait_for_attach,
     };
-    if setup == Setup::Host {
+    if !setup.mounts_in_guest() {
       config.mounts.clear();
       config.hostname.clear();
+    }
+    if !setup.identity_in_guest() {
       config.sensors.clear();
       config.hwmon_faults.clear();
       config.uptime_offset_secs = 0;

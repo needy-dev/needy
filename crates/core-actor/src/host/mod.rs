@@ -2,6 +2,8 @@
 //! machine.
 
 #[cfg(unix)]
+pub mod apple_container;
+#[cfg(unix)]
 pub mod container;
 pub mod detect;
 pub mod firecracker;

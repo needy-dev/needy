@@ -42,6 +42,9 @@ pub enum Error {
   /// The container runtime's Docker daemon refused or failed a request.
   #[error("{0}")]
   Docker(String),
+  /// Apple's `container` CLI is missing, or refused or failed a command.
+  #[error("{0}")]
+  AppleContainer(String),
   /// A workspace mount on the host side could not be made.
   #[error("cannot mount {target} on the host")]
   Mount {
@@ -71,8 +74,8 @@ pub struct Channels {
   // (`/.needy/channels/*.sock`), as a VM's init dials the fixed vsock port
   // of the guest API; the guest configuration carries ports only.
   // TODO(container-runtime): loopback TCP with a per-run token (Docker
-  // Desktop, Apple's `container`) needs the address and token in the guest
-  // configuration, proto first, with the first such runtime.
+  // Desktop) needs the address and token in the guest configuration, proto
+  // first, with the first such runtime.
   pub gateway_port: u32,
   /// What the actor's init is told to serve its process service on.
   pub process_port: u32,
@@ -92,11 +95,12 @@ pub struct Channels {
 pub enum Endpoint {
   /// A Unix socket on the daemon's machine. Firecracker forwards the guest's
   /// vsock connections to host port `P` to `v.sock_P`; a Linux container
-  /// actor has the socket's directory bind-mounted.
+  /// actor has the socket's directory bind-mounted; Apple's `container`
+  /// relays the socket file mounted into its VM over vsock.
   Unix(PathBuf),
   // TODO(container-runtime): loopback TCP with a per-run token, for runtimes
   // whose actors live in a VM that cannot reach a host Unix socket (Docker
-  // Desktop on macOS and Windows, Apple's `container`, WSL, Hyper-V); added
+  // Desktop on macOS and Windows, WSL, Hyper-V); added
   // with the first such runtime, see
   // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 }
@@ -107,8 +111,9 @@ pub enum Terminal {
   /// Firecracker's vsock device: connect to its socket `device`, then ask
   /// for guest port `port`.
   FirecrackerVsock { device: PathBuf, port: u32 },
-  /// A Unix socket the actor's init binds in a directory shared with the
-  /// daemon's machine: a container actor's bind-mounted channels.
+  /// A Unix socket on the daemon's machine that reaches the one the actor's
+  /// init binds: a Linux container actor's bind-mounted channels, or the
+  /// socket Apple's `container` publishes from its VM.
   Unix(PathBuf),
   // TODO(container-runtime): loopback TCP with a per-run token for VM-backed
   // container runtimes, with the first such runtime.
@@ -126,6 +131,26 @@ pub enum Setup {
   /// hostname and identity files from the host, since its init may not
   /// mount anything.
   Host,
+  /// Both: the actor's init mounts the workspace and sets the hostname, as
+  /// in a VM, and the runtime presents the rest of the identity from the
+  /// host, as for a container. Apple's `container`: its container is in a VM
+  /// with FUSE, where init may mount, but whose default kernel has no fake
+  /// sensors; and the Mac has no FUSE to mount on.
+  GuestMounts,
+}
+
+impl Setup {
+  /// Whether the actor's init mounts the workspace and sets the recipe's
+  /// hostname.
+  pub fn mounts_in_guest(self) -> bool {
+    matches!(self, Self::Guest | Self::GuestMounts)
+  }
+
+  /// Whether the actor's init presents the recipe's sensors, applies hwmon
+  /// faults and offsets the uptime.
+  pub fn identity_in_guest(self) -> bool {
+    self == Self::Guest
+  }
 }
 
 /// An executor directory mounted into the actor over SFTP, as the daemon
@@ -182,11 +207,11 @@ pub fn log(dir: &Path) -> PathBuf {
   dir.join("console.log")
 }
 
-/// What runs actors on this host: Firecracker, or a container through
-/// Docker.
-// TODO(container-runtime): `apple-container`, then `wsl` and `hyper-v`, come
-// later on the owner's word; Docker Desktop on macOS and Windows needs the
-// loopback TCP transport (see `Endpoint`).
+/// What runs actors on this host: Firecracker, a container through Docker,
+/// or a container under Apple's `container`.
+// TODO(container-runtime): `wsl` and `hyper-v` come later on the owner's
+// word; Docker Desktop on macOS and Windows needs the loopback TCP transport
+// (see `Endpoint`).
 #[async_trait::async_trait]
 pub trait ActorRuntime: Send + Sync {
   /// The runtime's name, as a profile's `actor.runtime` and `state.db`

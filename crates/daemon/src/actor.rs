@@ -145,10 +145,11 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     return Err(e);
   }
   // A runtime that sets the actor up from the host mounts the workspace
-  // itself; a VM's init does it inside.
-  let mounts = match runtime.setup() {
-    Setup::Host => mounts(run),
-    Setup::Guest => Vec::new(),
+  // itself; a VM's init, or an Apple `container` actor's, does it inside.
+  let mounts = if runtime.setup().mounts_in_guest() {
+    Vec::new()
+  } else {
+    mounts(run)
   };
   let start = Start {
     run: &run.id,
@@ -188,6 +189,8 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   };
   daemon.save_instance(&record).await;
   let name = runtime.name();
+  // Under `GuestMounts` (Apple's `container`) the actor has no sensors to
+  // set; `profile check` says so, and the faults are not recorded as fired.
   if runtime.setup() == Setup::Host {
     schedule_hwmon_faults(run, Arc::from(runtime), &actor);
   }
