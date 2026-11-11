@@ -150,6 +150,34 @@ Ollama's default port
 (<https://github.com/ollama/ollama/blob/v0.12.0/envconfig/config.go#L18-L20>);
 the example files were left as they are.
 
+## Checked on the Linux KVM host (2026-11-11)
+
+The commits for decisions 14 and 15 were shipped with `git archive` to the
+Linux KVM host (Intel Core i5-13600KF, Raptor Lake, no AVX-512): `make check`
+and `make test` pass there and on the Mac.
+
+`needy profile check --local` with `actor: { recipe: ... }`:
+
+- `builtin:gce-ubuntu-22.04`: `2 vCPU, 8192 MiB`, `cpu brand: Intel(R)
+  Xeon(R) CPU @ 2.80GHz`, `chassis_type=1`; exit 1 with six errors:
+  `cpu.features.require needs avx512_vnni` and `Skylake-SP/Cascade Lake
+  needs` avx512f, avx512dq, avx512cd, avx512bw and avx512vl. No warning: every
+  newer host feature is hidden. The N2 identity needs an AVX-512 host (a
+  Cascade Lake or later Xeon), so it was not booted here.
+- `builtin:dell-optiplex-ubuntu-24.04` and `examples/opencode/gce.recipe.yaml`
+  (Broadwell): exit 0, no findings.
+
+Actors built with `needy build --recipe` (no `--executor`) and run under a
+control daemon with its state in a scratch directory:
+
+- Dell, a probe as uid 1000: `sensors` shows `Package id 0: +34.0°C (high =
+  +80.0°C, crit = +100.0°C)` and Core 0, 4, ..., 28 at +35.0 to +40.0°C;
+  every `temp*_input` is a whole degree (`34000`, `36000`, ...), over three
+  reads a second apart; Core N is `temp(N+2)`. Finished, nothing left.
+- `examples/smoke` (the Broadwell example, now with `require: []`): `Intel(R)
+  Xeon(R) CPU @ 2.20GHz`, `google`, `hi-from-executor`, `routed exit=7`;
+  finished, nothing left.
+
 ## Follow-up candidates
 
 - The n2-standard-2 `dmidecode` (`SC`, 2026-07-31) shows a BIOS date of
