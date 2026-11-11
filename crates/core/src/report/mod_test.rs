@@ -500,6 +500,38 @@ fn the_human_report_of_a_failed_run_says_why() {
   assert!(report.ends_with("\nFindings\n  run failed: executor build: no such image\n"), "{report}");
 }
 
+// ROOT CAUSE:
+//
+// If a mirror-out failed, such as one whose `host:` path named a directory
+// of a remote client's machine, the control daemon only logged a warning,
+// so `needy report` said `No findings` and the results were lost unseen.
+//
+// Before the fix, the trace had no record of the failure.
+// The fix records `files.fail`, which the report lists as a finding.
+#[test]
+fn a_failed_file_transfer_is_a_finding() {
+  let events = vec![
+    create(1_000),
+    at(
+      2_000,
+      Event::FilesFail(FilesFail {
+        name: "results".into(),
+        transfer: Transfer::MirrorOut,
+        reason: "host path /Users/user/out is not on the control host".into(),
+      }),
+    ),
+    at(3_000, Event::RunStop(RunStop { by: None })),
+  ];
+
+  let human = human(&events);
+  let markdown = render("7f3a", &events, Level::Summary, Format::Markdown);
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &events, Level::Summary, Format::Json)).unwrap();
+
+  assert!(human.ends_with("\nFindings\n  mirror-out results failed: host path /Users/user/out is not on the control host\n"), "{human}");
+  assert!(markdown.contains("- ❌ Mirror-out `results` failed: host path /Users/user/out is not on the control host\n"), "{markdown}");
+  assert_eq!(json["findings"][0]["kind"], "files_failed");
+}
+
 #[test]
 fn the_json_report_summarizes_the_same_counts() {
   let report = render("7f3a", &actor_run(), Level::Summary, Format::Json);

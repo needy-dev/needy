@@ -13,14 +13,15 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 /// The version of the payload schema that producers write.
 ///
 /// Version 2 added who caused an event (`by`: `run.create`, `run.stop`,
-/// `exec.start`) and `exec.kill`.
-pub const SCHEMA_VERSION: u32 = 2;
+/// `exec.start`) and `exec.kill`; version 3 added `files.fail`.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
 // NOTICE: version 1 payloads are version 2 payloads without `by` and
-// without `exec.kill`, so they decode with the same types: `by` reads as
-// `None`. Traces written before version 2, and events a guest built before it
+// without `exec.kill`, and version 2 payloads are version 3 payloads without
+// `files.fail`, so they decode with the same types: `by` reads as `None`.
+// Traces written before version 3, and events a guest built before it
 // pushes, stay readable. Version 0 is the flat string-attribute rows written
 // before the typed schema; they are not read (module layout redesign,
 // principle 7).
@@ -106,6 +107,8 @@ events! {
   ActorExit(ActorExit) = "actor.exit",
   FilesCopyIn(FilesCopyIn) = "files.copy_in",
   FilesMirrorOut(FilesMirrorOut) = "files.mirror_out",
+  /// A copy-in or mirror-out failed.
+  FilesFail(FilesFail) = "files.fail",
   ExecDecide(ExecDecide) = "exec.decide",
   ExecStart(ExecStart) = "exec.start",
   ExecExit(ExecExit) = "exec.exit",
@@ -260,6 +263,33 @@ pub struct FilesMirrorOut {
   pub bytes: u64,
   /// Entries unpacked, when the daemon unpacked them.
   pub entries: Option<u64>,
+}
+
+/// Which way a file transfer goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Transfer {
+  CopyIn,
+  MirrorOut,
+}
+
+impl Transfer {
+  /// The mode's name as a profile writes it.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::CopyIn => "copy-in",
+      Self::MirrorOut => "mirror-out",
+    }
+  }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesFail {
+  /// The mapping's name.
+  pub name: String,
+  pub transfer: Transfer,
+  pub reason: String,
 }
 
 /// The `exec.decide` result for one command.

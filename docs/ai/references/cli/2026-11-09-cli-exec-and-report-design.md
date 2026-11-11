@@ -436,7 +436,7 @@ The JSON summary has these fields:
 | `top_commands` | `[{command, executor, count, slowest_ms}]`, most frequent first. |
 | `slowest_commands` | `[{command, ms}]`, the three slowest. |
 | `network` | `[{network, host, count}]` through the gateways, most frequent first. |
-| `findings` | `[{kind, message}]`; `kind` is `run_failed`, `probing`, `denied_command`, `denied_network` or `faults`. |
+| `findings` | `[{kind, message}]`; `kind` is `run_failed`, `files_failed` (a copy-in or mirror-out), `probing`, `denied_command`, `denied_network` or `faults`. |
 | `events` | `--level detailed` only: `[{offset_ms, kind, payload}]`. |
 
 Command names in every format are what the actor or the user typed: a

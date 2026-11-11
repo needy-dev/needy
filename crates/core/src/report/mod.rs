@@ -11,7 +11,7 @@ use std::fmt::Write;
 use needy_config::profile::FaultKind;
 use serde::Serialize;
 
-use crate::event::{ActorExit, Event, Recorded};
+use crate::event::{ActorExit, Event, Recorded, Transfer};
 use crate::pattern::basename;
 use crate::types::{Network, Origin, Outcome, Placement, Principal, RunState};
 
@@ -143,6 +143,9 @@ struct Tally {
   denials: Vec<(String, String)>,
   /// Denied hosts and their networks.
   net_denials: Vec<(String, Network)>,
+  /// Copy-ins and mirror-outs that failed: the mapping's transfer, name
+  /// and why.
+  files_failed: Vec<(Transfer, String, String)>,
   slowest: Vec<(u64, String)>,
 }
 
@@ -236,6 +239,7 @@ impl Tally {
       }
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
+      Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
       Event::ActorStart(_)
       | Event::ExecKill(_)
       | Event::FilesCopyIn(_)
@@ -386,6 +390,8 @@ pub struct Finding {
 #[serde(rename_all = "snake_case")]
 pub enum FindingKind {
   RunFailed,
+  /// A copy-in or mirror-out failed.
+  FilesFailed,
   /// Commands that only learn about the machine.
   Probing,
   DeniedCommand,
@@ -416,6 +422,9 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
   let mut find = |kind, message: String| findings.push(Finding { kind, message });
   if let Some(reason) = &t.failure {
     find(FindingKind::RunFailed, format!("run failed: {reason}"));
+  }
+  for (transfer, name, reason) in &t.files_failed {
+    find(FindingKind::FilesFailed, format!("{} {name} failed: {reason}", transfer.as_str()));
   }
   if !t.probes.is_empty() {
     let count = t.probes.values().sum::<usize>();
@@ -570,6 +579,14 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   if let Some(reason) = &t.failure {
     any = true;
     writeln!(out, "- ❌ Run failed: {reason}")?;
+  }
+  for (transfer, name, reason) in &t.files_failed {
+    any = true;
+    let transfer = match transfer {
+      Transfer::CopyIn => "Copy-in",
+      Transfer::MirrorOut => "Mirror-out",
+    };
+    writeln!(out, "- ❌ {transfer} `{name}` failed: {reason}")?;
   }
   if !t.probes.is_empty() {
     any = true;

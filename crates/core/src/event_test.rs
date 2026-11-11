@@ -61,6 +61,11 @@ fn every_kind() -> Vec<Event> {
       bytes: 512,
       entries: Some(3),
     }),
+    Event::FilesFail(FilesFail {
+      name: "out".into(),
+      transfer: Transfer::MirrorOut,
+      reason: "permission denied".into(),
+    }),
     Event::ExecDecide(ExecDecide {
       argv: argv("git status"),
       effective: argv("git status"),

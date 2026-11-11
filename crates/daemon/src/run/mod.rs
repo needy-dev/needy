@@ -556,6 +556,7 @@ impl Daemon {
       Placement::ControlHost => None,
     };
     actor::check_host(self)?;
+    files::check_host_paths(run)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
       let placement =
@@ -667,9 +668,7 @@ impl Daemon {
   /// nothing left to release.
   pub(crate) async fn finish_run(&self, run: &Run) {
     self.save_run(run).await;
-    if let Err(e) = files::mirror_out(run).await {
-      tracing::warn!("mirror-out for {}: {e:#}", run.id);
-    }
+    files::mirror_out(run).await;
     self.release_executors(run).await;
     actor::remove_sockets(&run.dir);
   }
@@ -695,9 +694,7 @@ impl Daemon {
     run.cancel.cancel();
     run.tasks.close();
     run.tasks.wait().await;
-    if let Err(e) = files::mirror_out(run).await {
-      tracing::warn!("mirror-out for {}: {e:#}", run.id);
-    }
+    files::mirror_out(run).await;
     if stopping && let Err(refused) = run.state.advance(RunState::Stopped) {
       tracing::warn!("run {}: {refused}", run.id);
     }

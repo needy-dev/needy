@@ -581,6 +581,12 @@ commands:
   the client runs on the control daemon's machine (`TODO(runner-files)`:
   moving files between a client and the control plane belongs to
   [runners and runs](../architecture/2026-11-10-runner-and-run-design.md)).
+  Until then, run create fails when a copy-in source does not exist or
+  cannot be read on the control host, or when a mirror-out destination
+  would not be under a directory the control host has (the profile's
+  directory for a relative path, the home for `~`, the parent of an absolute
+  path). A mirror-out that fails at the end of a run is recorded as
+  `files.fail` and is a `needy report` finding.
 - Filters follow rclone: ordered `+` and `-` rules, `**` for any depth, a
   leading `/` anchored at the mapping root.
 - Harness home directories contain credentials, such as Codex's `auth.json`.
