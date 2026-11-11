@@ -14,8 +14,8 @@
 //! old token in the same transaction.
 
 use sea_orm::{
-  ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, ConnectionTrait, EntityTrait as _, IntoActiveModel as _, QueryFilter as _,
-  QueryOrder as _, TransactionTrait as _,
+  ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, Condition, ConnectionTrait, EntityTrait as _, IntoActiveModel as _,
+  QueryFilter as _, QueryOrder as _, TransactionTrait as _,
 };
 
 use super::entity::{client, pairing_code};
@@ -35,6 +35,9 @@ pub struct PairingCode {
   pub name: String,
   pub created_ms: i64,
   pub expires_ms: i64,
+  /// The active client that holds the name when the code is created:
+  /// pairing with the code replaces it and revokes its token.
+  pub replaces: Option<Client>,
 }
 
 /// A client without its token.
@@ -54,21 +57,27 @@ pub fn is_client_token(token: &str) -> bool {
 }
 
 impl Store {
-  /// A pairing code for a client named `name` (empty for `client-<code
-  /// ID>`), and its secret, which is not stored and cannot be shown again.
+  /// A pairing code for a client named `name`, and its secret, which is
+  /// not stored and cannot be shown again. An empty `name` gets a fresh
+  /// `client-<code ID>` that no client or pairing code holds, so a code
+  /// without a name never replaces a client; the name of an active client
+  /// names that client in [`PairingCode::replaces`].
   pub async fn create_pairing_code(&self, name: &str, ttl_ms: i64, now: i64) -> Result<(PairingCode, Secret)> {
     if ttl_ms <= 0 {
       return Err(Error::Invalid("a pairing code needs a positive time to live".into()));
     }
-    let id = secret::random_id();
-    let name = if name.is_empty() {
-      format!("client-{id}")
-    } else {
-      name.to_string()
-    };
-    check_label("client", &name)?;
+    if !name.is_empty() {
+      check_label("client", name)?;
+    }
     let txn = self.db.begin().await?;
+    let (id, name) = if name.is_empty() {
+      fresh_name(&txn).await?
+    } else {
+      (secret::random_id(), name.to_string())
+    };
     check_no_open_code(&txn, &name, now).await?;
+    let replaces =
+      client::Entity::find().filter(client::Column::Name.eq(&name)).filter(client::Column::RevokedMs.is_null()).one(&txn).await?;
     let code = Secret::generate(secret::PAIRING, &id);
     let row = pairing_code::Model {
       id,
@@ -80,7 +89,9 @@ impl Store {
     };
     pairing_code::Entity::insert(row.clone().into_active_model()).exec(&txn).await?;
     txn.commit().await?;
-    Ok((pairing_code_of(row), code))
+    let mut created = pairing_code_of(row);
+    created.replaces = replaces.map(client_of);
+    Ok((created, code))
   }
 
   /// Spends a pairing code and registers its client, whose token is
@@ -173,6 +184,27 @@ async fn revoke(db: &impl ConnectionTrait, row: client::Model, now: i64) -> Resu
   Ok(())
 }
 
+/// A code ID and the `client-<code ID>` name it derives, which no client
+/// (active or revoked) and no pairing code (open, used or expired) holds.
+async fn fresh_name(db: &impl ConnectionTrait) -> Result<(String, String)> {
+  // NOTICE: IDs are 48 random bits, so a collision needs an operator to have
+  // given a client a name of the same shape; a few tries make the refusal
+  // below unreachable in practice.
+  for _ in 0..8 {
+    let id = secret::random_id();
+    let name = format!("client-{id}");
+    let client = client::Entity::find().filter(client::Column::Name.eq(&name)).one(db).await?;
+    let code = pairing_code::Entity::find()
+      .filter(Condition::any().add(pairing_code::Column::Id.eq(&id)).add(pairing_code::Column::Name.eq(&name)))
+      .one(db)
+      .await?;
+    if client.is_none() && code.is_none() {
+      return Ok((id, name));
+    }
+  }
+  Err(Error::Invalid("no fresh client name was found; give the pairing code a name".into()))
+}
+
 /// Refuses `name` when a pairing code that can still be used will give it,
 /// so two codes never race to re-pair one client.
 async fn check_no_open_code(db: &impl ConnectionTrait, name: &str, now: i64) -> Result<()> {
@@ -194,6 +226,7 @@ fn pairing_code_of(row: pairing_code::Model) -> PairingCode {
     name: row.name,
     created_ms: row.created_ms,
     expires_ms: row.expires_ms,
+    replaces: None,
   }
 }
 

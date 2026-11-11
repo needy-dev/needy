@@ -5,8 +5,10 @@ pub struct CreatePairingCodeRequest {
     /// Required, positive.
     #[prost(int64, tag="1")]
     pub ttl_ms: i64,
-    /// The name of the client that pairs with it: a DNS label. Empty for
-    /// `client-<code ID>`.
+    /// The name of the client that pairs with it: a DNS label. Empty for a
+    /// fresh `client-<code ID>` that no client, active or revoked, holds. The
+    /// name of an active client re-pairs it: see
+    /// `CreatePairingCodeResponse.replaces`.
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
 }
@@ -23,6 +25,11 @@ pub struct CreatePairingCodeResponse {
     /// The secret to hand to the client; not stored, not shown again.
     #[prost(string, tag="4")]
     pub code: ::prost::alloc::string::String,
+    /// The active client that holds `name` now. Pairing with this code
+    /// replaces it and revokes its token. Unset for a name no active client
+    /// holds.
+    #[prost(message, optional, tag="5")]
+    pub replaces: ::core::option::Option<Client>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PairRequest {

@@ -449,9 +449,17 @@ fn fake_client() -> ClientInfo {
 impl Clients for Fake {
   async fn create_pairing_code(&self, request: NewPairingCode) -> Result<CreatedPairingCode> {
     self.call(format!("create pairing code ttl={} name={}", request.ttl_ms, request.name));
+    // `laptop` is the fake's active client, so a code for its name
+    // replaces it.
+    let name = if request.name.is_empty() {
+      "client-k1".to_string()
+    } else {
+      request.name
+    };
     Ok(CreatedPairingCode {
       id: "k1".into(),
-      name: "laptop".into(),
+      replaces: (name == "laptop").then(fake_client),
+      name,
       expires_ms: 1 + request.ttl_ms,
       code: PAIRING_CODE.into(),
     })

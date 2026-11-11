@@ -61,8 +61,10 @@ enum PairCommand {
     #[arg(long, default_value = "10m", value_parser = humantime::parse_duration)]
     ttl: Duration,
     /// The client's name, which the trace records as `client:NAME`: a DNS
-    /// label. Defaults to `client-<code ID>`. The name of a paired client
-    /// re-pairs it: pairing with the code revokes its old token.
+    /// label. Without it the code gets a fresh `client-<code ID>` that no
+    /// client holds. The name of an active client re-pairs it: pairing with
+    /// the code replaces that client and revokes its token, and the command
+    /// says so.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
   },
@@ -133,6 +135,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         created.name,
         time(created.expires_at_ms)
       ));
+      if let Some(old) = &created.replaces {
+        output::message(format_args!("notice: pairing with this code will replace client {} ({}) and revoke its token", old.name, old.id));
+      }
       println!("{}", created.code);
     }
     Command::Pair(PairArgs {

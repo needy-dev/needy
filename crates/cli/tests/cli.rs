@@ -2663,6 +2663,40 @@ fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
   assert!(stderr(&again).contains("was used already"), "{}", stderr(&again));
 }
 
+// Re-pairing by name is explicit (owner decision, 2026-11-12): a code for an
+// active client's name is created, with a notice that pairing with it
+// replaces that client; a code without a name never takes an existing
+// client's.
+#[test]
+fn pair_create_tells_the_operator_which_client_a_named_code_replaces() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
+  let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+  let id = clients[0]["id"].as_str().unwrap().to_string();
+
+  let replacing = as_operator(&control, &endpoint, &["client", "pair", "create", "--name", "laptop"]);
+  let fresh = as_operator(&control, &endpoint, &["client", "pair", "create", "--name", "desk"]);
+  let unnamed = as_operator(&control, &endpoint, &["client", "pair", "create"]);
+
+  assert_eq!(replacing.status.code(), Some(0), "{}", stderr(&replacing));
+  let notice = format!("notice: pairing with this code will replace client laptop ({id}) and revoke its token");
+  assert!(stderr(&replacing).contains(&notice), "{}", stderr(&replacing));
+  assert!(stdout(&replacing).trim().starts_with("needy-pair."), "{}", stdout(&replacing));
+  for created in [&fresh, &unnamed] {
+    assert_eq!(created.status.code(), Some(0), "{}", stderr(created));
+    assert!(!stderr(created).contains("notice:"), "{}", stderr(created));
+  }
+  assert!(stderr(&unnamed).contains("for client client-"), "{}", stderr(&unnamed));
+  // Pairing with the replacing code revokes the old token.
+  let desk = Home::new();
+  assert!(as_client(&desk, &endpoint, &["client", "pair", stdout(&replacing).trim()]).status.success());
+  assert_eq!(as_client(&laptop, &endpoint, &["run", "ls"]).status.code(), Some(1));
+}
+
 #[test]
 fn a_revoked_client_is_refused_and_listed_as_revoked() {
   let control = Home::new();

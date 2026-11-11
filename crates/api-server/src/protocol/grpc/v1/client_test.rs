@@ -29,6 +29,27 @@ async fn an_operator_creates_a_pairing_code_whose_secret_is_in_the_response() {
   assert_eq!(served.fake.calls(), ["create pairing code ttl=600000 name=laptop"]);
 }
 
+// A code for an active client's name says which client pairing with it
+// replaces, so the CLI can tell the operator before the code is handed out.
+#[tokio::test]
+async fn a_pairing_code_for_an_active_clients_name_names_the_client_it_replaces() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  let operator = with(&served.client, CONTROL_TOKEN);
+  let request = |name: &str| CreatePairingCodeRequest {
+    ttl_ms: 600_000,
+    name: name.into(),
+  };
+
+  let replacing = operator.clients().create_pairing_code(request("laptop")).await.unwrap().into_inner();
+  let fresh = operator.clients().create_pairing_code(request("desk")).await.unwrap().into_inner();
+  let unnamed = operator.clients().create_pairing_code(request("")).await.unwrap().into_inner();
+
+  let replaced = replacing.replaces.unwrap();
+  assert_eq!((replaced.id.as_str(), replaced.name.as_str(), replaced.revoked_at_ms), ("c1", "laptop", 0));
+  assert_eq!((fresh.name.as_str(), fresh.replaces), ("desk", None));
+  assert_eq!((unnamed.name.as_str(), unnamed.replaces), ("client-k1", None));
+}
+
 #[tokio::test]
 async fn pairing_needs_no_bearer_token_even_where_the_control_token_is_required() {
   let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;

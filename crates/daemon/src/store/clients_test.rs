@@ -115,6 +115,44 @@ async fn pairing_again_under_a_clients_name_revokes_its_old_token() {
   assert_eq!(listed, [(old.id, Some(NOW + 2)), (new.id, None)]);
 }
 
+// The takeover is explicit (owner decision, 2026-11-12): a code for the name
+// of an active client names that client, so the operator is told before
+// handing the code out that pairing with it replaces the client.
+#[tokio::test]
+async fn a_code_for_an_active_clients_name_names_the_client_it_replaces() {
+  let (store, _dir) = store().await;
+  let (laptop, _) = paired(&store, "laptop").await;
+  let (revoked, _) = paired(&store, "old").await;
+  store.revoke_client(&revoked.id, NOW).await.unwrap();
+
+  let (replacing, _) = store.create_pairing_code("laptop", MINUTE_MS, NOW + 1).await.unwrap();
+  let (fresh, _) = store.create_pairing_code("desk", MINUTE_MS, NOW + 1).await.unwrap();
+  let (reused, _) = store.create_pairing_code("old", MINUTE_MS, NOW + 1).await.unwrap();
+
+  assert_eq!(replacing.replaces.map(|c| c.id), Some(laptop.id));
+  assert_eq!(fresh.replaces, None);
+  assert_eq!(reused.replaces, None, "a revoked client is not replaced");
+}
+
+// Without a name a code must never re-pair, and so silently replace, an
+// existing client: its generated name is one no client holds, active or
+// revoked.
+#[tokio::test]
+async fn a_code_without_a_name_gets_a_name_no_client_holds() {
+  let (store, _dir) = store().await;
+  let (laptop, _) = paired(&store, "laptop").await;
+  let (gone, _) = paired(&store, "").await;
+  store.revoke_client(&gone.id, NOW).await.unwrap();
+
+  let (code, _) = store.create_pairing_code("", MINUTE_MS, NOW + 1).await.unwrap();
+
+  assert!(code.name.starts_with("client-"), "{}", code.name);
+  assert_eq!(code.name, format!("client-{}", code.id));
+  assert_ne!(code.name, laptop.name);
+  assert_ne!(code.name, gone.name);
+  assert_eq!(code.replaces, None);
+}
+
 #[tokio::test]
 async fn a_name_with_an_open_pairing_code_is_refused() {
   let (store, _dir) = store().await;

@@ -24,12 +24,16 @@ impl Clients for Daemon {
   async fn create_pairing_code(&self, request: NewPairingCode) -> Result<CreatedPairingCode> {
     let created = self.state.create_pairing_code(&request.name, request.ttl_ms, now_ms()).await;
     let (code, secret) = created.map_err(control_error)?;
-    tracing::info!("pairing code {} created for client {}", code.id, code.name);
+    match &code.replaces {
+      Some(old) => tracing::info!("pairing code {} created for client {}, replacing client {}", code.id, code.name, old.id),
+      None => tracing::info!("pairing code {} created for client {}", code.id, code.name),
+    }
     Ok(CreatedPairingCode {
       id: code.id,
       name: code.name,
       expires_ms: code.expires_ms,
       code: secret.into_string(),
+      replaces: code.replaces.map(client_info),
     })
   }
 

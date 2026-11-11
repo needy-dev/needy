@@ -73,7 +73,7 @@ rebuilt together. See the [automated and live-probe evidence](../cli/2026-11-11-
 | | `ListRunners`, `RotateRunner`, `RemoveRunner` | unary | Runners with their status (`online`, `offline`, `removed`); ask for a new credential; revoke one (which also ends its control stream) |
 | | `Control` | bidirectional stream | A runner's control stream, opened by the runner: the control plane sends `RunnerTask`s (`exec`, `list_processes`, `kill_process`) with IDs, the runner `TaskResult`s for list and kill |
 | | `Task` | bidirectional stream | One exec task's stream, opened by the runner: first `task_id`, then the exec's `ExecResponse`s up (or a `TaskError`) and its `ExecRequest`s down |
-| `ClientService` | `CreatePairingCode` | unary | A pairing code: TTL and the client's name (a DNS label; `client-<code ID>` when empty). Its secret is in the response only |
+| `ClientService` | `CreatePairingCode` | unary | A pairing code: TTL and the client's name (a DNS label; a fresh `client-<code ID>` no client holds when empty). Its secret is in the response only; `replaces` names the active client that pairing with it replaces |
 | | `Pair` | unary | Pairing code → the client and its token (once). Needs no bearer token |
 | | `ListClients`, `RevokeClient` | unary | Every client with when it paired, was last used (to a minute) and was revoked; revoke one by ID |
 

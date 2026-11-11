@@ -616,8 +616,8 @@ pub trait Runners: Send + Sync + 'static {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewPairingCode {
   pub ttl_ms: i64,
-  /// The client's name once it pairs; empty for one derived from the
-  /// code's ID.
+  /// The client's name once it pairs; empty for a fresh one derived from
+  /// the code's ID, which no client holds.
   pub name: String,
 }
 
@@ -628,6 +628,9 @@ pub struct CreatedPairingCode {
   pub name: String,
   pub expires_ms: i64,
   pub code: String,
+  /// The active client that holds `name` now: pairing with the code
+  /// replaces it and revokes its token.
+  pub replaces: Option<ClientInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

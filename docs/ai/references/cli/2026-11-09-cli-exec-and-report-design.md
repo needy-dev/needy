@@ -95,7 +95,18 @@ needy: paired as client laptop (6f5e4d3c2b1a); its token for http://127.0.0.1:74
 ```
 
 `client pair create` prints the code alone on stdout; `--ttl` defaults to 10
-minutes and `--name` to `client-<code ID>`. `client pair CODE` sends no token
+minutes. Without `--name` the code gets a fresh `client-<code ID>` that no
+client, active or revoked, holds, so it never replaces one. `--name NAME`
+for an active client re-pairs it (owner decision, 2026-11-12): the code is
+created (exit 0) and stderr says so before it is handed out:
+
+```text
+needy: pairing code 1a2b3c4d5e6f for client laptop, valid until 2026-11-12 10:20:00; it is not shown again
+needy: notice: pairing with this code will replace client laptop (6f5e4d3c2b1a) and revoke its token
+```
+
+A name no active client holds creates the code without the notice.
+`client pair CODE` sends no token
 (the code authenticates it) and stores the client token in
 `credentials.json` in the config directory (`$XDG_CONFIG_HOME/needy`, or
 `NEEDY_CONFIG_DIR`), keyed by the endpoint as given without a trailing `/`,

@@ -597,13 +597,19 @@ the secret learns that it expired or was used.
 
 **Pairing.** `needy client pair create [--ttl 10m] [--name NAME]` (an
 operator; a client was allowed too until 2026-11-11, see below) creates a single-use code; the name is a DNS label,
-`client-<code ID>` by default, and no other open code may hold it. The name
+and no other open code may hold it. The name
 is the client's identity (owner decision, 2026-11-12): a code for the name
 of a client that is not revoked re-pairs that client, and pairing with it
 revokes the client's old token in the same transaction, so `client:NAME` in
 a trace names one client and a client never holds two working tokens. Give
 two machines two names: a code for a name in use takes the name, and its
-token, from the machine that held it. `needy
+token, from the machine that held it. The takeover is explicit (owner
+decision, 2026-11-12): only `--name NAME` takes over a client. Without it
+the code gets a fresh `client-<code ID>` that no client (active or revoked)
+or pairing code holds. With the name of an active client the code is still
+created, and `CreatePairingCodeResponse.replaces` names that client, so
+`client pair create` prints a notice that pairing with the code replaces
+it and revokes its token. `needy
 client pair --endpoint URL CODE` calls `ClientService.Pair` without a bearer
 token (the code authenticates it), and stores the returned token on the
 client. Ten minutes is long enough to carry a code to another machine by

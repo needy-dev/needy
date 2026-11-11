@@ -47,6 +47,7 @@ impl<C: Clients> ClientService for Adapter<C> {
       name: created.name,
       expires_at_ms: created.expires_ms,
       code: created.code,
+      replaces: created.replaces.map(domain::proto_client),
     }))
   }
 
