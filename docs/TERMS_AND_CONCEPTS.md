@@ -17,6 +17,15 @@ layer.
 
 *Avoid*: harness layer, caller, shallow layer.
 
+### Actor runtime
+
+What runs an actor next to the daemon, named by the profile's required
+`actor.runtime`: `firecracker` (a microVM; needs `/dev/kvm`) is the only one
+implemented. `container` is accepted by the schema and refused as not
+implemented yet. The runtime starts, waits for and stops the actor, and
+names the channels the daemon serves (guest API, gateway) and dials
+(terminal). See the [container actor runtime design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md).
+
 ### Driving program
 
 The program inside an actor that drives the work: an agent harness, a test

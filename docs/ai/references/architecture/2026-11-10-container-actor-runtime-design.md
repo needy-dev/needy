@@ -1,7 +1,9 @@
 # Container actor runtime
 
-**Status**: design, 2026-11-10. Nothing here is implemented. The owner's
-decisions are under [Decisions](#decisions); two open questions remain.
+**Status**: design, 2026-11-10. Slice 1 (the runtime abstraction) is
+implemented, see [As built: slice 1](#as-built-slice-1); the container runtime
+is not. The owner's decisions are under [Decisions](#decisions); two open
+questions remain.
 
 Related notes:
 
@@ -40,7 +42,7 @@ owned by the run like the `Vm` handle today. Implementations:
 
 | Runtime | Backend | Needs |
 | --- | --- | --- |
-| `firecracker` | today's `host::vm` | `/dev/kvm` |
+| `firecracker` | `host::firecracker` (was `host::vm`) | `/dev/kvm` |
 | `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Docker; gVisor's `runsc` registered as a Docker runtime for `runsc` |
 | `container` on macOS and Windows | Docker API through `bollard` against Docker Desktop, whose Linux containers run inside a VM (WSL 2 on Windows) | Docker Desktop |
 | `apple-container` | Apple's `container` (each container is a lightweight Linux VM on Apple silicon) | macOS with Apple's `container` installed |
@@ -145,8 +147,9 @@ isolation a trace came from.
 
 ## Slices (proposed)
 
-1. **Runtime abstraction**: `ActorRuntime` with the Firecracker implementation
-   only; no behavior change.
+1. **Runtime abstraction** (done, 2026-11-11, see
+   [As built: slice 1](#as-built-slice-1)): `ActorRuntime` with the
+   Firecracker implementation only; no behavior change.
 2. **Container runtime with `runc`**: guest API and gateway over Unix sockets,
    init in container mode, the container actor image with build-time shims,
    host-side workspace mounts.
@@ -171,11 +174,49 @@ isolation a trace came from.
   build` builds it.
 - **Docker through `bollard` first** (owner, 2026-11-10); containerd directly is
   a later provider.
-
 - **Every run has an actor** (owner, 2026-11-11): there is no `actor: none`.
   Hosts without KVM get actors through the container runtimes instead: Docker
   on Linux, Docker Desktop or Apple's `container` on macOS, Docker Desktop on
-  Windows, and later WSL or Hyper-V on Windows.
+  Windows, and later WSL or Hyper-V on Windows. The guest API and gateway are
+  therefore transports the runtime returns (see [Guest transport](#guest-transport)),
+  and the daemon stays transport-agnostic.
+
+## As built: slice 1
+
+Implemented 2026-11-11; no behavior change for Firecracker actors.
+
+- `core-actor::host::runtime` holds the `ActorRuntime` trait: `name`,
+  `check_host` (KVM for Firecracker), `channels(dir)` and
+  `start(dir, recipe)`, which returns a `RunningActor` handle with `pid`,
+  `vcpus`, `mem_mib`, `wait` and `stop(grace)`. `runtime::log(dir)` is the
+  actor's console file (`console.log`) every runtime writes.
+- `Channels` are the runtime-provided meeting points: `guest` and `gateway`
+  are `Endpoint`s the daemon serves (`Endpoint::Unix` only;
+  `TODO(container-runtime)` marks loopback TCP with a per-run token),
+  `terminal` is how the daemon dials the actor's process service
+  (`Terminal::FirecrackerVsock`), `gateway_port` and `process_port` are what
+  init is told, and `sockets` are the files the daemon removes when the actor
+  ends.
+- `core-actor::host::firecracker` (renamed from `host::vm`) implements it with
+  today's `Image`, `Launch` and `Vm`; the vsock ports (`GUEST_PORT`,
+  `GATEWAY_PORT`, `PROCESS_PORT`) moved there from the daemon.
+- The daemon picks the runtime from `actor.runtime` (`actor::runtime`) and no
+  longer names vsock: `actor.rs` serves and dials the channels, `guest.rs`
+  tells init the runtime's ports, and `run logs` reads `runtime::log`.
+  Reconciliation reads the runtime from the run's stored profile to remove
+  its sockets; ending a leftover actor is still Firecracker's only
+  (`TODO(container-runtime)` in `reconcile.rs`).
+- `actor.runtime` is required (`firecracker | container`), with no default;
+  `actor:` is therefore required too. Every example names `firecracker`.
+  `validate::profile` refuses `container` as not implemented yet, so
+  `profile check` and `run create` say so. A profile without `actor:`
+  therefore no longer loads, which ends the 2026-11-11 rule that such a
+  profile is checked for routing and executors only (REVIEW: needs the
+  owner's call, see the runners and runs design's profile check).
+- `profile check` probes the actor's host through `ActorRuntime::check_host`
+  instead of calling the KVM check directly. The runner capability probe
+  (`capabilities::firecracker`) still names `host::firecracker` itself: it
+  is about the Firecracker runtime by definition.
 
 ## Open questions
 
