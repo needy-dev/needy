@@ -23,8 +23,10 @@ pub enum Caller {
   /// A client of the control socket, or one holding the daemon's own
   /// token: the bootstrap and admin credential.
   Operator,
-  /// A paired client, by its own token. It has an operator's rights; the
-  /// trace names it `client:NAME`.
+  /// A paired client, by its own token. It has an operator's rights over
+  /// runs and processes, but not the administration only `Operator` may do:
+  /// join tokens, rotating and removing runners, pairing codes and revoking
+  /// clients. The trace names it `client:NAME`.
   Client { id: String, name: String },
   /// An actor, on the listener bound to its run. Its calls act on that
   /// run; it may not create, stop or read the logs of runs.
@@ -45,8 +47,8 @@ impl Caller {
     }
   }
 
-  /// Whether the caller has an operator's rights: the operator itself, or
-  /// a paired client.
+  /// Whether the caller has an operator's rights over runs and processes:
+  /// the operator itself, or a paired client.
   pub fn is_operator(&self) -> bool {
     matches!(self, Self::Operator | Self::Client { .. })
   }

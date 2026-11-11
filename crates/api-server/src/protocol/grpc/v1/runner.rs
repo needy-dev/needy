@@ -16,7 +16,7 @@ use needy_api_proto::v1::{
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::{Streamed, caller};
+use super::{Streamed, administer, caller};
 use crate::control::{Caller, ControlError, Runners};
 use crate::protocol::domain;
 
@@ -26,12 +26,17 @@ pub struct Adapter<R> {
 }
 
 impl<R> Adapter<R> {
-  /// Refuses a call only an operator may make.
+  /// Refuses a call only an operator or a client may make.
   fn operator<T>(&self, request: &Request<T>) -> Result<(), Status> {
     match caller(&self.caller, request) {
       Caller::Operator | Caller::Client { .. } => Ok(()),
       Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied("only operators manage runners").into()),
     }
+  }
+
+  /// Refuses a call only the operator may make: a client is refused too.
+  fn admin<T>(&self, request: &Request<T>, what: &str) -> Result<(), Status> {
+    administer(&self.caller, request, what, "only operators manage runners")
   }
 
   /// The runner making a call only a runner may make.
@@ -68,7 +73,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
   }
 
   async fn create_join_token(&self, request: Request<CreateJoinTokenRequest>) -> Result<Response<CreateJoinTokenResponse>, Status> {
-    self.operator(&request)?;
+    self.admin(&request, "creating join tokens")?;
     let request = domain::new_join_token(request.into_inner()).map_err(ControlError::from)?;
     let created = self.runners.create_join_token(request).await?;
     Ok(Response::new(CreateJoinTokenResponse {
@@ -84,7 +89,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
   }
 
   async fn revoke_join_token(&self, request: Request<RevokeJoinTokenRequest>) -> Result<Response<RevokeJoinTokenResponse>, Status> {
-    self.operator(&request)?;
+    self.admin(&request, "revoking join tokens")?;
     self.runners.revoke_join_token(&request.into_inner().id).await?;
     Ok(Response::new(RevokeJoinTokenResponse {}))
   }
@@ -118,13 +123,13 @@ impl<R: Runners> RunnerService for Adapter<R> {
   }
 
   async fn rotate_runner(&self, request: Request<RotateRunnerRequest>) -> Result<Response<RotateRunnerResponse>, Status> {
-    self.operator(&request)?;
+    self.admin(&request, "rotating runners")?;
     self.runners.rotate(&request.into_inner().name).await?;
     Ok(Response::new(RotateRunnerResponse {}))
   }
 
   async fn remove_runner(&self, request: Request<RemoveRunnerRequest>) -> Result<Response<RemoveRunnerResponse>, Status> {
-    self.operator(&request)?;
+    self.admin(&request, "removing runners")?;
     self.runners.remove(&request.into_inner().name).await?;
     Ok(Response::new(RemoveRunnerResponse {}))
   }

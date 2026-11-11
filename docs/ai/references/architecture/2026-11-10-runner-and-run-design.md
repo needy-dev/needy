@@ -587,7 +587,7 @@ malformed code all read "the pairing code is not valid"; only a caller with
 the secret learns that it expired or was used.
 
 **Pairing.** `needy client pair create [--ttl 10m] [--name NAME]` (an
-operator, or a client) creates a single-use code; the name is a DNS label,
+operator; a client was allowed too until 2026-11-11, see below) creates a single-use code; the name is a DNS label,
 `client-<code ID>` by default, and no client that is not revoked and no open
 code may hold it, so `client:NAME` in a trace names one client. `needy
 client pair --endpoint URL CODE` calls `ClientService.Pair` without a bearer
@@ -611,7 +611,12 @@ them would guess at what a tunnel forwards.
 **Authentication.** `Caller::Cli` is renamed `Caller::Operator`, and a new
 `Caller::Client { id, name }` comes from a client token, which
 `Clients::credential` resolves. A client has an operator's rights except
-the runner methods (`PERMISSION_DENIED`); its token works on a listener with
+the runner methods (`PERMISSION_DENIED`) and, since 2026-11-11 (owner
+decision), the administration of the control plane: creating and revoking
+join tokens, rotating and removing runners, creating pairing codes and
+revoking clients are the operator's only (`PERMISSION_DENIED`, "… needs the
+control token; paired client NAME may not"). Listing runners, join tokens
+and clients stays open to clients; its token works on a listener with
 or without a control token, so a client is named even on the control
 socket. A token shaped like a client token that no client holds (revoked or
 never issued) is `UNAUTHENTICATED` everywhere. The control token remains the
@@ -723,8 +728,9 @@ recorded in [Interactive actor: implementation and evidence](../cli/2026-11-11-i
 - **Processes outside runs**: the in-memory map of processes the daemon
   has seen (for `attach`, `kill` and `ps`) still grows until it exits, and
   processes outside runs are not in `state.db`. Prune, persist, or both?
-- **Client scopes**: a client token has every operator right (owner's
-  slice 7 scope). Read-only clients (reports and logs only), or clients
+- **Client scopes**: a client token has every operator right over runs and
+  processes, but not the control plane's administration (owner decision,
+  2026-11-11). Read-only clients (reports and logs only), or clients
   limited to their own runs, would need a scope on the pairing code, as join
   tokens have.
 - **Client token rotation**: a client re-pairs to get a new token; the old

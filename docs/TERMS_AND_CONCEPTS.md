@@ -174,8 +174,12 @@ and runners; day-to-day clients use their own **client tokens**.
 
 A program that calls the control plane on behalf of a person or a tool: the
 CLI on another machine, a script. A **paired** client holds its own **client
-token**, which has an operator's rights, is listed (`needy client ls`) and can
-be revoked (`needy client revoke ID`); the trace names it `client:NAME`. The
+token**, is listed (`needy client ls`) and can be revoked (`needy client
+revoke ID`); the trace names it `client:NAME`. A client drives runs (create,
+list, stop, exec, attach, kill, `ps`, `fs cp`, reports and logs) but does not
+administer the control plane: creating or revoking join tokens, rotating or
+removing runners, creating pairing codes and revoking clients need the control
+token. The
 CLI keeps one token per control plane endpoint in `credentials.json` in its
 config directory (`$XDG_CONFIG_HOME/needy`, mode 0600) and presents it to that
 endpoint; `NEEDY_TOKEN` overrides it. The control plane stores only the

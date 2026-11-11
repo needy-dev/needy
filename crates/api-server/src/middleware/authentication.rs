@@ -89,8 +89,9 @@ impl Authenticator for Credentials {
       && !token.is_empty()
     {
       match clients.credential(token).await {
-        // A client has an operator's rights; the services refuse it the
-        // runner methods, as they refuse the operator.
+        // A client has an operator's rights over runs; the services refuse
+        // it the runner methods, as they refuse the operator, and the
+        // administration only the control token may do.
         Credential::Client { id, name } => return Some(Caller::Client { id, name }),
         Credential::Refused => return None,
         Credential::Runner(_) | Credential::Other => {}

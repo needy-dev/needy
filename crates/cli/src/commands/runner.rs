@@ -34,15 +34,17 @@ enum Command {
     output: OutputFormat,
   },
   /// Give a runner a new credential at its next heartbeat. Its old one
-  /// works until it uses the new one.
+  /// works until it uses the new one. Needs the control token.
   Rotate { name: String },
-  /// Revoke a runner's credential. It stays listed as removed.
+  /// Revoke a runner's credential. It stays listed as removed. Needs the
+  /// control token.
   Rm { name: String },
 }
 
 #[derive(Subcommand)]
 enum TokenCommand {
-  /// Create a join token and print it. It is not shown again.
+  /// Create a join token and print it. It is not shown again. Needs the
+  /// control token.
   Create {
     /// How long the token can be used to join.
     #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
@@ -63,7 +65,8 @@ enum TokenCommand {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Revoke a join token. Runners that joined with it stay.
+  /// Revoke a join token. Runners that joined with it stay. Needs the
+  /// control token.
   Revoke { id: String },
 }
 

@@ -2437,6 +2437,38 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   assert_eq!(&rows[1][..3], [id.as_str(), "laptop", "revoked"]);
 }
 
+// A paired client drives runs but does not administer the control plane
+// (owner decision, 2026-11-11).
+#[test]
+fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+
+  let token = as_client(&laptop, &endpoint, &["runner", "token", "create"]);
+  let remove = as_client(&laptop, &endpoint, &["runner", "rm", "mac"]);
+  let pair = as_client(&laptop, &endpoint, &["client", "pair", "create"]);
+  let listed = as_client(&laptop, &endpoint, &["client", "ls", "-o", "json"]);
+
+  for (refused, what) in [
+    (&token, "creating join tokens"),
+    (&remove, "removing runners"),
+    (&pair, "creating pairing codes"),
+  ] {
+    assert_eq!(refused.status.code(), Some(1), "{}", stderr(refused));
+    assert!(stderr(refused).contains(&format!("{what} needs the control token; paired client laptop may not")), "{}", stderr(refused));
+  }
+  assert!(listed.status.success(), "{}", stderr(&listed));
+  let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+  let id = clients[0]["id"].as_str().unwrap().to_string();
+  let revoke = as_client(&laptop, &endpoint, &["client", "revoke", &id]);
+  assert_eq!(revoke.status.code(), Some(1), "{}", stderr(&revoke));
+  assert!(stderr(&revoke).contains("revoking clients needs the control token"), "{}", stderr(&revoke));
+  assert!(as_client(&laptop, &endpoint, &["run", "ls"]).status.success(), "the client was not revoked");
+}
+
 // ROOT CAUSE:
 //
 // If the host was loaded, `run logs -f` printed nothing, because the test

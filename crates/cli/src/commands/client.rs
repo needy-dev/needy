@@ -2,8 +2,8 @@
 //! clients that paired.
 //!
 //! An operator runs `needy client pair create` where it can reach the
-//! control plane with the control token (or as a client already paired)
-//! and hands the code to the new client, which runs `needy client pair
+//! control plane with the control token (a paired client may not) and
+//! hands the code to the new client, which runs `needy client pair
 //! --endpoint URL CODE`. The client's token is stored for that endpoint
 //! (`crate::credentials`) and presented by every later command that reaches
 //! it, so the trace names the client (`client:NAME`) as who did what.
@@ -36,7 +36,8 @@ enum Command {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Revoke a client's token. It stays listed as revoked.
+  /// Revoke a client's token. It stays listed as revoked. Needs the
+  /// control token.
   Revoke { id: String },
 }
 
@@ -53,7 +54,7 @@ struct PairArgs {
 #[derive(Subcommand)]
 enum PairCommand {
   /// Create a pairing code for one client and print it. It is not shown
-  /// again.
+  /// again. Needs the control token; a paired client may not.
   Create {
     /// How long the code can be used to pair.
     #[arg(long, default_value = "10m", value_parser = humantime::parse_duration)]

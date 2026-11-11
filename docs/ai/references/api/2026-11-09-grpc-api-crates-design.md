@@ -93,11 +93,15 @@ Who serves what:
 - On the control socket, a request with a runner's credential is from
   `Caller::Runner { name }` and reaches `RunnerService.Heartbeat`, `Control`
   and `Task` only; an operator's token gets `PERMISSION_DENIED` from
-  `Control` and `Task`. The other `RunnerService` methods but `Join` need the
-  operator (`Caller::Operator`) or a client.
+  `Control` and `Task`. Listing runners and join tokens needs the operator
+  (`Caller::Operator`) or a client; creating and revoking join tokens,
+  rotating and removing runners need the operator.
 - A request with a paired client's token is from `Caller::Client { id, name
   }`, which has the operator's rights everywhere except the runner methods
-  (`PERMISSION_DENIED`), on a listener with or without a control token. A
+  and the administration only the operator may do: join tokens, rotating and
+  removing runners, creating pairing codes and revoking clients
+  (`PERMISSION_DENIED`, "… needs the control token; paired client NAME may
+  not"), on a listener with or without a control token. A
   revoked client's token is `UNAUTHENTICATED`. `Pair` needs no bearer token.
 - `ExecStart.runner` and `ListProcessesRequest.runner` name a runner's
   machine outside any run (`needy exec --runner`, `ps --runner`); with

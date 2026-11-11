@@ -1,7 +1,8 @@
 use needy_api_client::Client;
 use needy_api_proto::v1::{
-  CreatePairingCodeRequest, CreateRunRequest, ExecRequest, ExecStart, HeartbeatRequest, KillProcessRequest, ListClientsRequest,
-  ListRunsRequest, Origin, PairRequest, RevokeClientRequest, StopRunRequest, exec_request,
+  CreateJoinTokenRequest, CreatePairingCodeRequest, CreateRunRequest, ExecRequest, ExecStart, HeartbeatRequest, KillProcessRequest,
+  ListClientsRequest, ListRunsRequest, Origin, PairRequest, RemoveRunnerRequest, RevokeClientRequest, RevokeJoinTokenRequest,
+  RotateRunnerRequest, StopRunRequest, exec_request,
 };
 use tonic::Code;
 
@@ -97,7 +98,7 @@ async fn a_client_token_reaches_operator_methods_and_is_named_as_the_principal()
   };
   let mut outputs = client.processes().exec(tokio_stream::iter([start])).await.unwrap().into_inner();
   while outputs.message().await.unwrap().is_some() {}
-  client.clients().revoke_client(RevokeClientRequest { id: "c2".into() }).await.unwrap();
+  client.clients().list_clients(ListClientsRequest {}).await.unwrap();
 
   assert_eq!(
     served.fake.calls(),
@@ -106,7 +107,7 @@ async fn a_client_token_reaches_operator_methods_and_is_named_as_the_principal()
       "stop s1 by client:laptop",
       "kill p1 TERM by client:laptop",
       r#"exec true in "s1" from Cli by client:laptop"#,
-      "revoke client c2",
+      "list clients",
     ]
   );
 }
@@ -150,6 +151,39 @@ async fn a_client_token_does_not_reach_the_runner_methods() {
   let refused = with(&served.client, CLIENT_TOKEN).runners().heartbeat(HeartbeatRequest::default()).await.unwrap_err();
 
   assert_eq!(refused.code(), Code::PermissionDenied);
+}
+
+// A paired client drives runs but does not administer the control plane
+// (owner decision, 2026-11-11): join tokens, runners and clients stay with
+// the control token.
+#[tokio::test]
+async fn a_client_token_cannot_manage_join_tokens_runners_or_clients() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  let client = with(&served.client, CLIENT_TOKEN);
+
+  let refusals = [
+    client.runners().create_join_token(CreateJoinTokenRequest::default()).await.unwrap_err(),
+    client.runners().revoke_join_token(RevokeJoinTokenRequest { id: "j1".into() }).await.unwrap_err(),
+    client.runners().rotate_runner(RotateRunnerRequest { name: "mac".into() }).await.unwrap_err(),
+    client.runners().remove_runner(RemoveRunnerRequest { name: "mac".into() }).await.unwrap_err(),
+    client.clients().create_pairing_code(CreatePairingCodeRequest::default()).await.unwrap_err(),
+    client.clients().revoke_client(RevokeClientRequest { id: "c2".into() }).await.unwrap_err(),
+  ];
+
+  for refused in refusals {
+    assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
+    assert!(refused.message().contains("needs the control token"), "{}", refused.message());
+  }
+  assert!(served.fake.calls().is_empty(), "{:?}", served.fake.calls());
+}
+
+#[tokio::test]
+async fn an_operator_revokes_a_client() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+
+  with(&served.client, CONTROL_TOKEN).clients().revoke_client(RevokeClientRequest { id: "c2".into() }).await.unwrap();
+
+  assert_eq!(served.fake.calls(), ["revoke client c2"]);
 }
 
 #[tokio::test]

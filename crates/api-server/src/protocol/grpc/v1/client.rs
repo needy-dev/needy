@@ -1,8 +1,9 @@
 //! `ClientService` over [`Clients`].
 //!
 //! An operator (the control token or the control socket) and every paired
-//! client may manage clients: a client has an operator's rights. `Pair` is
-//! public; the pairing code in the request authenticates it.
+//! client may list clients; only the operator creates pairing codes and
+//! revokes clients. `Pair` is public; the pairing code in the request
+//! authenticates it.
 
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use needy_api_proto::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use super::caller;
+use super::{administer, caller};
 use crate::control::{Caller, Clients, ControlError, NewPairingCode};
 use crate::protocol::domain;
 
@@ -30,12 +31,17 @@ impl<C> Adapter<C> {
     }
     Err(ControlError::denied("only operators and clients manage clients").into())
   }
+
+  /// Refuses a call only the operator may make: a client is refused too.
+  fn admin<T>(&self, request: &Request<T>, what: &str) -> Result<(), Status> {
+    administer(&self.caller, request, what, "only operators manage clients")
+  }
 }
 
 #[tonic::async_trait]
 impl<C: Clients> ClientService for Adapter<C> {
   async fn create_pairing_code(&self, request: Request<CreatePairingCodeRequest>) -> Result<Response<CreatePairingCodeResponse>, Status> {
-    self.operator(&request)?;
+    self.admin(&request, "creating pairing codes")?;
     let request = request.into_inner();
     let created = self
       .clients
@@ -71,7 +77,7 @@ impl<C: Clients> ClientService for Adapter<C> {
   }
 
   async fn revoke_client(&self, request: Request<RevokeClientRequest>) -> Result<Response<RevokeClientResponse>, Status> {
-    self.operator(&request)?;
+    self.admin(&request, "revoking clients")?;
     self.clients.revoke(&request.into_inner().id).await?;
     Ok(Response::new(RevokeClientResponse {}))
   }

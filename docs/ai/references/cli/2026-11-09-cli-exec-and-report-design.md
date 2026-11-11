@@ -21,6 +21,11 @@ needy runner   ls | rotate NAME | rm NAME      # runners that joined this contro
 needy client   pair create [--ttl 10m] [--name NAME] | pair CODE | ls | revoke ID   # paired clients
 ```
 
+A paired client may use every command above except `runner token create`,
+`runner token revoke`, `runner rotate`, `runner rm`, `client pair create` and
+`client revoke`, which need the control token (`NEEDY_TOKEN`) or the control
+socket; the control plane refuses them with "… needs the control token".
+
 Every command takes `--endpoint` (or `NEEDY_ENDPOINT`) and `-v`, which turns
 on logs on stderr: `-v` info, `-vv` debug for needy's crates, `-vvv`
 everything. Logs are off by default; the daemon also writes

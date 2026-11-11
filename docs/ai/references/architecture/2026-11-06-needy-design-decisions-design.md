@@ -158,6 +158,11 @@ bearer tokens are stored privately.
 Why: the product is self-hosted execution for a trusted operator, not a
 multi-tenant service.
 
+Notice (2026-11-11): paired clients of a control plane no longer administer
+it: join tokens, runner rotation and removal, pairing codes and client
+revocation need the control token. See the
+[runners and runs design](2026-11-10-runner-and-run-design.md#as-built-slice-7).
+
 ### D8. No implicit credentials
 
 **Status**: accepted, implemented

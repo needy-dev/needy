@@ -15,7 +15,7 @@ use std::pin::Pin;
 use tokio_stream::Stream;
 use tonic::Status;
 
-use crate::control::Caller;
+use crate::control::{Caller, ControlError};
 
 /// A server-streaming response.
 pub type Streamed<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -33,4 +33,17 @@ fn chunked<T: Send + 'static>(bytes: Vec<u8>, message: impl Fn(Vec<u8>) -> T) ->
 /// token, or else the listener's own.
 fn caller<T>(listener: &Caller, request: &tonic::Request<T>) -> Caller {
   request.extensions().get::<Caller>().cloned().unwrap_or_else(|| listener.clone())
+}
+
+/// Refuses a call that administers the control plane (`what`, such as
+/// "creating join tokens") unless the operator makes it: the control token,
+/// or the control socket without a client token. A paired client drives runs
+/// but does not change who may reach the control plane (owner decision,
+/// 2026-11-11). `others` is the refusal for actors and runners.
+fn administer<T>(listener: &Caller, request: &tonic::Request<T>, what: &str, others: &str) -> Result<(), Status> {
+  match caller(listener, request) {
+    Caller::Operator => Ok(()),
+    Caller::Client { name, .. } => Err(ControlError::denied(format!("{what} needs the control token; paired client {name} may not")).into()),
+    Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied(others).into()),
+  }
 }
