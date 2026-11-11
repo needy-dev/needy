@@ -3,6 +3,11 @@
 #   docker build -f images/Dockerfile --target actor --output type=local,dest=OUT .
 #   docker build -f images/Dockerfile --target executor -t needy-executor .
 #   docker build -f images/Dockerfile --target actor-container -t needy-actor .
+#   docker build -f images/Dockerfile --platform linux/arm64 --target actor-vz --output type=local,dest=OUT .
+# Stages build for the platform they run on: `uname -m` picks the musl
+# target, the kernel configuration and opencode's release. The Firecracker
+# actor (`actor`) is x86_64 only; the `vz` actor (`actor-vz`,
+# Virtualization.framework on Apple silicon) is arm64 only.
 ARG KERNEL_VERSION=6.18.62
 ARG FIRECRACKER_VERSION=v1.17.0
 ARG OPENCODE_VERSION=v1.19.5
@@ -25,13 +30,14 @@ ARG OPENCODE_VERSION=v1.19.5
 # it, and the older-looking files of the second meet the first's artifacts.
 FROM rust:1 AS needy
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* \
- && rustup target add x86_64-unknown-linux-musl
+ && rustup target add "$(uname -m)-unknown-linux-musl"
 WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
     find /src -path /src/target -prune -o -type f -exec touch {} + \
- && cargo build --release --target x86_64-unknown-linux-musl -p needy-cli \
- && cp target/x86_64-unknown-linux-musl/release/needy /needy
+ && target="$(uname -m)-unknown-linux-musl" \
+ && cargo build --release --target "$target" -p needy-cli \
+ && cp "target/$target/release/needy" /needy
 
 # needy.exe for Windows executors.
 FROM rust:1 AS needy-windows
@@ -51,6 +57,9 @@ COPY --from=needy-windows /needy.exe /needy.exe
 # Guest kernel: Firecracker CI config, needy fragment, exec routing and fake sensors.
 # Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
 # (v1.17.0; `images/kernel/firecracker-6.18.config` is an unchanged copy).
+# On arm64 (the `vz` actor) the base is Apple Containerization's arm64 config
+# with `needy-arm64.config` on top (provenance in that file), and the result
+# is the uncompressed `arch/arm64/boot/Image` Virtualization.framework boots.
 # Reference: https://www.kernel.org/ (stable 6.18.y; the tarball URL below is
 # pinned by KERNEL_VERSION).
 FROM ubuntu:24.04 AS kernel
@@ -67,13 +76,19 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /linux
 RUN curl -fsSL https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-${KERNEL_VERSION}.tar.xz | tar xJ --strip-components=1
-COPY images/kernel/firecracker-6.18.config .config
-COPY images/kernel/needy.config /tmp/needy.config
+COPY images/kernel/firecracker-6.18.config images/kernel/containerization-arm64.config /tmp/
+COPY images/kernel/needy.config images/kernel/needy-arm64.config /tmp/
 COPY images/kernel/binfmt_needy.c fs/
 COPY images/kernel/fake_coretemp.c drivers/hwmon/
 RUN echo "obj-y += binfmt_needy.o" >> fs/Makefile \
  && echo "obj-y += fake_coretemp.o" >> drivers/hwmon/Makefile \
- && scripts/kconfig/merge_config.sh -m .config /tmp/needy.config >/dev/null \
+ && if [ "$(uname -m)" = aarch64 ]; then \
+      cp /tmp/containerization-arm64.config .config \
+      && scripts/kconfig/merge_config.sh -m .config /tmp/needy.config /tmp/needy-arm64.config >/dev/null; \
+    else \
+      cp /tmp/firecracker-6.18.config .config \
+      && scripts/kconfig/merge_config.sh -m .config /tmp/needy.config >/dev/null; \
+    fi \
  && scripts/config -d LOCALVERSION_AUTO --set-str LOCALVERSION "" \
  && make -s olddefconfig
 # NOTICE: `KERNELRELEASE` works only on the make command line: the top
@@ -93,7 +108,7 @@ RUN set --; \
     if [ -n "$KBUILD_BUILD_VERSION" ]; then set -- "$@" smp-flag-y= preempt-flag-y=; fi; \
     KBUILD_BUILD_VERSION="$KBUILD_BUILD_VERSION" KBUILD_BUILD_USER="$KBUILD_BUILD_USER" \
     KBUILD_BUILD_HOST="$KBUILD_BUILD_HOST" KBUILD_BUILD_TIMESTAMP="$KBUILD_BUILD_TIMESTAMP" \
-    make -s -j"$(nproc)" "$@" vmlinux
+    make -s -j"$(nproc)" "$@" "$(if [ "$(uname -m)" = aarch64 ]; then echo Image; else echo vmlinux; fi)"
 
 # Firecracker with needy's CPUID, SMBIOS and PCI identity patch, linked
 # statically against musl as upstream releases are, so it runs on any Linux
@@ -146,7 +161,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
       pciutils dmidecode lm-sensors util-linux systemd \
  && rm -rf /var/lib/apt/lists/* /run/systemd/container \
  && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent \
- && curl -fsSL https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz \
+ && arch="$(case "$(uname -m)" in aarch64) echo arm64;; *) echo x64;; esac)" \
+ && curl -fsSL "https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-${arch}.tar.gz" \
     | tar xz -C /usr/local/bin opencode \
  && mkdir -p /.needy /home/agent/workspace && chown agent:agent /home/agent/workspace
 COPY --from=needy /needy /.needy/needy
@@ -175,6 +191,25 @@ FROM scratch AS actor
 COPY --from=kernel /linux/vmlinux /vmlinux
 COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=firecracker /firecracker /firecracker
+COPY --from=needy /needy /needy
+
+# The `vz` actor's files, built with `--platform linux/arm64`: the
+# uncompressed kernel Virtualization.framework boots, the actor rootfs and the
+# guest's needy. The VM process is vfkit, installed on the Mac, not built here.
+# NOTICE: `initrd` is an empty initramfs (a cpio archive with only its
+# trailer). vfkit always hands its Linux boot loader an initrd path, and an
+# empty one fails (`invalid initial RAM disk path`, vfkit 0.6.4,
+# https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/bootloader.go#L59-L63).
+# Without `/init` in it the kernel mounts `root=` and starts `init=` as it
+# does without an initrd: https://github.com/torvalds/linux/blob/v6.18/init/main.c#L1604-L1611
+FROM ubuntu:24.04 AS vz-initrd
+RUN apt-get update && apt-get install -y --no-install-recommends cpio && rm -rf /var/lib/apt/lists/* \
+ && cpio -o -H newc < /dev/null > /initrd
+
+FROM scratch AS actor-vz
+COPY --from=kernel /linux/arch/arm64/boot/Image /Image
+COPY --from=vz-initrd /initrd /initrd
+COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=needy /needy /needy
 
 # Container actor userland: the actor-root's programs without what only a VM

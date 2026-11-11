@@ -31,7 +31,12 @@ pub fn cpuinfo(path: &Path) -> std::io::Result<HostInfo> {
 // NOTICE: Firecracker first asks for the AMX state permission
 // (`request_dynamic_xstate_features`), which can add leaf 0xD subleaves; no
 // recipe feature lives there, so the entries read here suffice.
-#[cfg(target_os = "linux")]
+// NOTICE: `KVM_GET_SUPPORTED_CPUID` is x86 only: kvm-ioctls 0.25.1 defines
+// `get_supported_cpuid` under `#[cfg(target_arch = "x86_64")]`
+// (`src/ioctls/system.rs` L419-L420) and kvm-bindings 0.14.2 defines
+// `KVM_MAX_CPUID_ENTRIES` in `src/x86_64/fam_wrappers.rs` (L11), so an arm64
+// build (the `vz` actor's guest) reports none, as other systems do.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn kvm_cpuid() -> Option<std::collections::BTreeSet<(u32, u32)>> {
   let kvm = match kvm_ioctls::Kvm::new() {
     Ok(kvm) => kvm,
@@ -49,7 +54,7 @@ fn kvm_cpuid() -> Option<std::collections::BTreeSet<(u32, u32)>> {
   }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
 fn kvm_cpuid() -> Option<std::collections::BTreeSet<(u32, u32)>> {
   None
 }
