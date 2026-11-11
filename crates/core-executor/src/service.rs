@@ -145,7 +145,16 @@ async fn relay_output(
   // of the interval and goes with it.
   let mut sent_at: Option<Instant> = None;
   while alive {
-    let Some(event) = subscription.live.recv().await else {
+    // A client that leaves closes its stream; a process that writes nothing
+    // more is hung up then, not at its next output.
+    let next = tokio::select! {
+      next = subscription.live.recv() => next,
+      () = tx.closed() => {
+        alive = false;
+        break;
+      }
+    };
+    let Some(event) = next else {
       fell_behind(&proc, &tx, &subscription).await;
       break;
     };

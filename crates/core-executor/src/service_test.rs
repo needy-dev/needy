@@ -222,8 +222,7 @@ async fn running(executor: &Executor, process: &str) -> bool {
 #[tokio::test]
 async fn a_starting_client_that_detaches_leaves_the_process_running() {
   let executor = executor().await;
-  // NOTICE: a process notices a client that left when it next writes (see
-  // the runners note's open questions), so both keep writing.
+  // Both keep writing, so a hangup cannot wait for a silent process.
   let writer = "while :; do echo tick; sleep 0.05; done";
   let (detached, kept) = start_tty(&executor, writer).await;
   detached.input().detach().await.unwrap();
@@ -375,4 +374,37 @@ async fn small_writes_faster_than_the_client_reads_keep_its_connection() {
   assert_eq!(exit.code, Some(0));
   let expected: String = (1..=300).map(|i| format!("{i}\n")).collect();
   assert_eq!(stdout, expected);
+}
+
+// ROOT CAUSE:
+//
+// If the client that started a process left without detaching (it was
+// SIGKILLed) and the process wrote nothing afterwards, the process kept
+// running, because the executor noticed the departed client only when a
+// later output failed to send.
+//
+// Before the fix, `sleep 300` outlived its client on pipes and terminals.
+// The fix hangs the process up as soon as the client's stream closes.
+#[tokio::test]
+async fn a_silent_process_ends_when_its_client_leaves_without_detaching() {
+  let executor = executor().await;
+  let pipes = ExecStart {
+    argv: vec!["sleep".into(), "300".into()],
+    ..Default::default()
+  };
+  let mut piped = ExecStream::start(&executor.client, pipes).await.unwrap();
+  let piped_id = loop {
+    if let Some(Event::Started(started)) = piped.next().await.unwrap() {
+      break started.process_id;
+    }
+  };
+  let (on_terminal, terminal_id) = start_tty(&executor, "sleep 300").await;
+  drop(piped);
+  drop(on_terminal);
+
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+  while running(&executor, &piped_id).await || running(&executor, &terminal_id).await {
+    assert!(tokio::time::Instant::now() < deadline, "a silent process outlived its client");
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
 }

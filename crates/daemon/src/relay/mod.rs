@@ -454,7 +454,16 @@ async fn forward_input(
   detach: Arc<AtomicBool>,
   out_tx: Sender,
 ) {
-  while let Some(mut message) = input.next().await {
+  loop {
+    // A caller that left sends nothing more, even when its input never
+    // ended; the executor's stream closes without waiting for it.
+    let next = tokio::select! {
+      next = input.next() => next,
+      () = out_tx.closed() => None,
+    };
+    let Some(mut message) = next else {
+      break;
+    };
     if let (Some(filter), ExecInput::Stdin(bytes)) = (&filter, &message) {
       let filtered = filter.inbound(bytes);
       if let Some(trace) = &trace {
@@ -531,7 +540,20 @@ impl Relay {
     let mut process_id = String::new();
     let mut client_gone = false;
     loop {
-      let output = match upstream.next().await {
+      // A caller that leaves closes its stream. Without a detach, the
+      // executor's stream is dropped then, so the executor hangs the process
+      // up even if it writes nothing more; with one, the stream is drained.
+      let next = tokio::select! {
+        next = upstream.next() => next,
+        () = out_tx.closed(), if !client_gone => {
+          if !self.detach.load(Ordering::SeqCst) {
+            break;
+          }
+          client_gone = true;
+          continue;
+        }
+      };
+      let output = match next {
         Ok(Some(event)) => event,
         Ok(None) => break,
         // The executor reported an error instead of an exit; the stream

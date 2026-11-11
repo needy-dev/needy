@@ -356,7 +356,7 @@ when the connection drops end for their callers with `ended` ("the
 connection ended before the command exited: runner NAME disconnected", exit
 255 in `needy exec`). On the runner, an exec whose task stream ended has lost
 its client: a process it did not detach gets the same hangup as with any
-client that leaves (when it next writes, see the follow-ups), and detached
+client that leaves (as soon as its stream closes), and detached
 processes keep running. In slice 4 the runner did not report or
 reconcile its processes when it reconnected; slice 6 added that.
 
@@ -812,6 +812,7 @@ machine without KVM (warned, not started).
   replaces on the same endpoint?
 - **Pruning clients**: revoked clients and used or expired pairing codes stay
   in `state.db` and `client ls`, as removed runners do.
-- **Silent processes after a lost client**: an exec whose client left, on a
-  runner as on any executor, ends only when the process next writes. Should
-  the executor end a non-detached process as soon as its stream ends?
+- **Silent processes after a lost client** (resolved): an exec whose client
+  left without detaching, on a runner as on any executor, is hung up as soon
+  as the client's stream closes (the control plane's relay and the executor
+  both watch for it), not when the process next writes.

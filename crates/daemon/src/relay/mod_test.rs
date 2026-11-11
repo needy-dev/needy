@@ -533,3 +533,37 @@ async fn a_routed_command_whose_unmapped_cwd_is_missing_says_so_and_points_at_pa
   assert!(message.starts_with(&format!("cannot start sh: working directory {missing} does not exist")), "{message}");
   assert!(message.contains("executor here has no path_map entry for it"), "{message}");
 }
+
+// ROOT CAUSE:
+//
+// If the client of a non-detached exec left without detaching and the
+// process wrote nothing afterwards, the process kept running, because the
+// daemon's relay noticed the departed client only when a later output
+// failed to send, and only then dropped its stream to the executor.
+//
+// Before the fix, `sleep 300` outlived its client through the control plane.
+// The fix drops the executor's stream as soon as the client's closes.
+#[tokio::test]
+async fn a_silent_process_ends_when_its_client_leaves_the_daemon_without_detaching() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let mut outputs = daemon.exec(ExecOpen::Start(spec(&["sleep", "300"], &created.id, "")), attached()).await.unwrap();
+  let process = loop {
+    if let ExecOutput::Started(started) = outputs.next().await.unwrap().unwrap() {
+      break started.process;
+    }
+  };
+  drop(outputs);
+
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  loop {
+    let listed = Processes::list(daemon, &created.id, "").await.unwrap();
+    if !listed.iter().any(|p| p.process == process && p.running) {
+      break;
+    }
+    assert!(tokio::time::Instant::now() < deadline, "a silent process outlived its client: {listed:?}");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+}

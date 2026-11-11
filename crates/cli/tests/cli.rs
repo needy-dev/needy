@@ -1141,8 +1141,10 @@ fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
   let (elapsed, output) = terminate_twice(daemon);
   attached.kill().ok();
   attached.wait().unwrap();
-  // A forced exit leaves the sleep behind.
-  kill(sleep, "KILL");
+  // A forced exit may leave the sleep behind. The run's stop, which closed
+  // the sleep's stream to the executor, may have hung it up already, so the
+  // status of a `kill` that finds no process is irrelevant.
+  let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).stderr(Stdio::null()).status();
 
   assert!(elapsed < Duration::from_secs(2), "the daemon took {elapsed:?} to exit after the second SIGTERM");
   assert_eq!(output.status.code(), Some(1));
