@@ -33,6 +33,7 @@ fn every_kind() -> Vec<Event> {
       pid: 42,
       vcpus: 4,
       mem_mib: 16384,
+      runtime: Some("container (runsc)".into()),
     }),
     Event::ActorVmExit(ActorVmExit {
       code: Some(0),

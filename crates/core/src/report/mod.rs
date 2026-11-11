@@ -121,6 +121,8 @@ struct Tally {
   dropped: u64,
   /// The actor's route names; `Some(None)` routes every exec.
   route_names: Option<Option<Vec<String>>>,
+  /// What ran the actor.
+  actor_runtime: Option<String>,
   routed: usize,
   kept: usize,
   denied: usize,
@@ -240,12 +242,8 @@ impl Tally {
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
-      Event::ActorStart(_)
-      | Event::ExecKill(_)
-      | Event::FilesCopyIn(_)
-      | Event::FilesMirrorOut(_)
-      | Event::NetError(_)
-      | Event::TraceTiming(_) => {}
+      Event::ActorStart(start) => self.actor_runtime = start.runtime.clone(),
+      Event::ExecKill(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
     }
   }
 
@@ -293,6 +291,11 @@ pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> St
   }
 }
 
+/// What a container actor's routing leaves out: its shims are made when its
+/// image is built.
+pub(crate) const CONTAINER_ROUTING: &str = "A container actor routes only the programs its image had when it was built; \
+  programs created at run time and run directly stayed in the actor without a trace event.";
+
 /// What the human and JSON reports show: one run's outcome and counts.
 /// Its JSON form is `needy report -o json`; the CLI note lists its fields.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -319,6 +322,9 @@ pub struct Summary {
   /// The command names the actor routes, `["*"]` for every exec; `None`
   /// when no actor ran.
   pub route_names: Option<Vec<String>>,
+  /// What ran the actor (`firecracker`, `container (runc)`, `container
+  /// (runsc)`); `None` when no actor ran or the trace predates it.
+  pub actor_runtime: Option<String>,
   pub commands: Commands,
   /// Commands by name and executor, most frequent first.
   pub top_commands: Vec<TopCommand>,
@@ -480,6 +486,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     stopped_by: t.stopped_by.as_ref().map(Principal::to_string),
     dropped_events: t.dropped,
     route_names: t.route_names.clone().map(|names| names.unwrap_or_else(|| vec!["*".to_string()])),
+    actor_runtime: t.actor_runtime.clone(),
     commands: Commands {
       routed: t
         .routed_by
@@ -571,6 +578,12 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
         out,
         "🏠 Kept on actor counts only commands the actor's kernel routed to needy ({names}); other commands ran on the actor without a trace event.\n"
       )?;
+    }
+  }
+  if let Some(runtime) = &t.actor_runtime {
+    writeln!(out, "The actor ran in `{runtime}`.\n")?;
+    if runtime.starts_with("container") {
+      writeln!(out, "{CONTAINER_ROUTING}\n")?;
     }
   }
 

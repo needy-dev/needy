@@ -10,7 +10,7 @@ use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFi
 use needy_config::Source;
 use needy_config::profile::{Executor, Profile, Runtime};
 use needy_config::validate::{self, Severity};
-use needy_core::recipe::HostInfo;
+use needy_core::recipe::{CompiledRecipe, HostInfo};
 
 use crate::pool::Site;
 use crate::{Daemon, failed, schedule};
@@ -84,9 +84,24 @@ impl Daemon {
     if profile.actor.runtime == Runtime::Container && routes_anything(&profile) {
       check.findings.push(warning(CONTAINER_ROUTING_GAP.into()));
     }
-    if let Some(reference) = &profile.actor.recipe {
-      let actor = check.actor.clone();
-      self.check_recipe(reference, &request.recipe_yaml, actor.as_ref(), &mut check);
+    let recipe = match &profile.actor.recipe {
+      Some(reference) => {
+        let actor = check.actor.clone();
+        self.check_recipe(reference, &request.recipe_yaml, actor.as_ref(), &mut check)
+      }
+      None => None,
+    };
+    // What of the identity the runtime does not present, where the actor
+    // would run: this host (see `unusable_host`).
+    if check.actor.is_some()
+      && let Ok(runtime) = crate::actor::runtime(self, &profile.actor)
+    {
+      for (is_error, message) in crate::actor::identity_findings(runtime.as_ref(), recipe.as_ref()) {
+        check.findings.push(ProfileFinding {
+          error: is_error,
+          message: format!("actor: {message}"),
+        });
+      }
     }
     for (name, executor) in &profile.executors {
       match schedule::placement(executor.runner.as_ref(), Need::executor(executor.provider), &runners) {
@@ -133,14 +148,14 @@ impl Daemon {
   /// Compiles the recipe `reference` against the CPU of the host the actor
   /// would run on, as `prepare` does when the run is created, and adds its
   /// findings.
-  fn check_recipe(&self, reference: &str, recipe_yaml: &str, actor: Option<&Placement>, check: &mut ProfileCheck) {
+  fn check_recipe(&self, reference: &str, recipe_yaml: &str, actor: Option<&Placement>, check: &mut ProfileCheck) -> Option<CompiledRecipe> {
     // The client sends a recipe file's content; the daemon reads only its
     // built-in recipes.
     let source = match Source::reference(reference, Path::new("")) {
       builtin @ Source::Builtin(_) => builtin,
       _ if recipe_yaml.is_empty() => {
         check.findings.push(error(format!("recipe {reference} was not sent with the profile")));
-        return;
+        return None;
       }
       _ => Source::text(recipe_yaml.to_string(), PathBuf::new()),
     };
@@ -148,7 +163,7 @@ impl Daemon {
       Ok(recipe) => recipe,
       Err(e) => {
         check.findings.push(error(format!("recipe: {:#}", anyhow::Error::from(e))));
-        return;
+        return None;
       }
     };
     let host = match actor {
@@ -169,10 +184,11 @@ impl Daemon {
     };
     let compiled = needy_core::recipe::compile(&recipe, &host, 1);
     check.actor_cpu = host.model_name;
-    check.findings.extend(compiled.findings.into_iter().map(|f| ProfileFinding {
+    check.findings.extend(compiled.findings.iter().map(|f| ProfileFinding {
       error: f.severity == Severity::Error,
       message: format!("recipe: {}", f.message),
     }));
+    Some(compiled)
   }
 }
 

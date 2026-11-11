@@ -344,16 +344,10 @@ async fn end_leftover_vm(instance: &InstanceRecord) -> InstanceState {
 /// [`end_leftover_vm`] gives. The container is found by its run's name.
 async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
   // The OCI runtime and image do not matter for ending a container.
-  let runtime = match needy_core_actor::host::container::Container::new(
+  let runtime = needy_core_actor::host::container::Container::new(
     needy_config::profile::OciRuntime::Runc,
     needy_config::profile::CONTAINER_IMAGE.into(),
-  ) {
-    Ok(runtime) => runtime,
-    Err(e) => {
-      tracing::warn!("run {}: cannot end its actor's container: {e}", instance.run);
-      return InstanceState::Lost;
-    }
-  };
+  );
   tracing::warn!("run {}: ending its actor's container, which a restarted control plane does not adopt", instance.run);
   if runtime.end_leftover(&instance.run, Path::new(&instance.handle)).await {
     InstanceState::Ended

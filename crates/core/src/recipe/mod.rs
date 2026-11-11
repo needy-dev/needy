@@ -2,6 +2,7 @@
 //! run seed. Recipes themselves are loaded by `needy-config`.
 
 mod cpu;
+pub mod files;
 mod host;
 mod identity;
 mod kernel;
@@ -44,12 +45,28 @@ impl VmIdentity {
   }
 }
 
+/// What the recipe says of its CPU as `/proc/cpuinfo` shows it, for a
+/// container actor, whose identity files stand in for the CPUID a VM's
+/// patched Firecracker presents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CpuView {
+  pub brand: Option<String>,
+  /// Family, model and stepping.
+  pub signature: Option<(u32, u32, u32)>,
+  /// `/proc/cpuinfo` flag names to leave out.
+  pub hide: Vec<String>,
+  /// Whether the `hypervisor` flag shows; `None` keeps the host's.
+  pub hypervisor: Option<bool>,
+  pub threads_per_core: u32,
+}
+
 /// A recipe compiled for one host and run seed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledRecipe {
   pub vcpus: u32,
   pub mem_mib: u32,
   pub identity: VmIdentity,
+  pub cpu: CpuView,
   /// Firecracker custom CPU template.
   pub cpu_template: serde_json::Value,
   /// Make variables for building the guest kernel, passed to
@@ -64,6 +81,8 @@ pub struct CompiledRecipe {
   pub interface: Option<String>,
   pub metadata: Option<serde_json::Value>,
   pub os_image: Option<String>,
+  /// The identity fields the actor must present (`required:`).
+  pub required: Vec<needy_config::recipe::IdentityField>,
   pub findings: Vec<Finding>,
 }
 
@@ -150,10 +169,18 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
   let network_mac = recipe.network.mac.as_ref().map(|t| fill(t.as_str()));
   cpu::check_cpu(&recipe.cpu, host, &mut findings);
   findings.extend(identity::check_vendor(recipe, network_mac.as_deref()));
+  let cpu = CpuView {
+    brand: vm.cpu_brand.clone(),
+    signature: recipe.cpu.signature.as_ref().map(|s| (s.family, s.model, s.stepping)),
+    hide: recipe.cpu.features.hide.clone(),
+    hypervisor: recipe.cpu.hypervisor.map(|h| h == Hypervisor::Visible),
+    threads_per_core: recipe.cpu.topology.as_ref().map_or(1, |t| t.threads_per_core.max(1)),
+  };
   CompiledRecipe {
     vcpus,
     mem_mib,
     identity: vm,
+    cpu,
     cpu_template,
     kernel_build_env,
     hostname: recipe.os.hostname.as_ref().map(|t| fill(t.as_str())),
@@ -163,6 +190,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
     interface: recipe.network.interface.clone(),
     metadata,
     os_image: recipe.os.image.clone(),
+    required: recipe.required.clone(),
     findings,
   }
 }

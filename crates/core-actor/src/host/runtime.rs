@@ -157,6 +157,25 @@ pub struct Start<'a> {
   pub mounts: &'a [HostMount],
 }
 
+/// Something of a recipe's identity, or of the machine an actor presents,
+/// that a runtime does not provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Gap {
+  /// The identity field, or `None` for what is no recipe field (such as
+  /// lxcfs's resource views).
+  pub field: Option<needy_config::recipe::IdentityField>,
+  pub message: String,
+}
+
+impl Gap {
+  pub fn of(field: needy_config::recipe::IdentityField, message: impl Into<String>) -> Self {
+    Self {
+      field: Some(field),
+      message: message.into(),
+    }
+  }
+}
+
 /// The actor's log in its directory `dir`: every runtime writes its actor's
 /// console there, and `run logs` reads it.
 pub fn log(dir: &Path) -> PathBuf {
@@ -173,6 +192,12 @@ pub trait ActorRuntime: Send + Sync {
   /// The runtime's name, as a profile's `actor.runtime` and `state.db`
   /// spell it.
   fn name(&self) -> &'static str;
+
+  /// What runs the actor, as the trace and the report name it: the name,
+  /// with what decides the isolation where the name does not.
+  fn label(&self) -> String {
+    self.name().to_string()
+  }
 
   /// Fails unless this host can run the runtime's actors. A create checks
   /// this before it acquires anything.
@@ -196,6 +221,13 @@ pub trait ActorRuntime: Send + Sync {
   fn overheat(&self, dir: &Path, temp_mc: i32) -> Result<(), Error> {
     let _ = (dir, temp_mc);
     Err(Error::Unsupported("this actor's sensors are set inside it".into()))
+  }
+
+  /// What of `recipe` (or of a plain machine) this runtime's actors on this
+  /// host do not present. A Firecracker actor presents all of it.
+  fn identity_gaps(&self, recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
+    let _ = recipe;
+    Vec::new()
   }
 }
 

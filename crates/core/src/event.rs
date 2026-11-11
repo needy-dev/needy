@@ -13,14 +13,17 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 /// The version of the payload schema that producers write.
 ///
 /// Version 2 added who caused an event (`by`: `run.create`, `run.stop`,
-/// `exec.start`) and `exec.kill`; version 3 added `files.fail`.
-pub const SCHEMA_VERSION: u32 = 3;
+/// `exec.start`) and `exec.kill`; version 3 added `files.fail`; version 4
+/// added `actor.start`'s `runtime`.
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
 // NOTICE: version 1 payloads are version 2 payloads without `by` and
 // without `exec.kill`, and version 2 payloads are version 3 payloads without
-// `files.fail`, so they decode with the same types: `by` reads as `None`.
+// `files.fail`, and version 3 payloads are version 4 payloads without
+// `actor.start`'s `runtime`, so they decode with the same types: `by` and
+// `runtime` read as `None`.
 // Traces written before version 3, and events a guest built before it
 // pushes, stay readable. Version 0 is the flat string-attribute rows written
 // before the typed schema; they are not read (module layout redesign,
@@ -207,6 +210,11 @@ pub struct ActorStart {
   pub pid: u32,
   pub vcpus: u32,
   pub mem_mib: u32,
+  /// What ran the actor, which says how it was isolated: `firecracker`,
+  /// `container (runc)` or `container (runsc)`. `None` in traces before
+  /// version 4.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub runtime: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

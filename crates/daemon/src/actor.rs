@@ -47,7 +47,7 @@ pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<
       let Some(options) = &actor.container else {
         bail!("actor.container is missing");
       };
-      Ok(Box::new(Container::new(options.oci_runtime, options.image.clone())?))
+      Ok(Box::new(Container::new(options.oci_runtime, options.image.clone())))
     }
   }
 }
@@ -67,8 +67,37 @@ pub fn setup(daemon: &Daemon, run: &Run) -> Result<Setup> {
 /// before it acquires anything, so a host without KVM, or without the
 /// container's OCI runtime or image, fails at once.
 pub async fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
-  runtime(daemon, &run.profile.actor)?.check_host().await?;
+  let runtime = runtime(daemon, &run.profile.actor)?;
+  runtime.check_host().await?;
+  let mut required = Vec::new();
+  for (is_error, message) in identity_findings(runtime.as_ref(), run.recipe.as_ref()) {
+    if is_error {
+      required.push(message);
+    } else {
+      tracing::info!("run {}: {message}", run.id);
+    }
+  }
+  if !required.is_empty() {
+    bail!("{}", required.join("; "));
+  }
   Ok(())
+}
+
+/// What of `recipe` (or of a plain machine) `runtime` does not present, as
+/// findings: an error, `true`, for a field the recipe requires, a warning
+/// otherwise.
+pub fn identity_findings(runtime: &dyn ActorRuntime, recipe: Option<&needy_core::recipe::CompiledRecipe>) -> Vec<(bool, String)> {
+  runtime
+    .identity_gaps(recipe)
+    .into_iter()
+    .map(|gap| match gap.field {
+      Some(field) if recipe.is_some_and(|r| r.required.contains(&field)) => {
+        (true, format!("the recipe requires {}, which a {} actor does not present: {}", field.as_str(), runtime.name(), gap.message))
+      }
+      Some(field) => (false, format!("{} ({}): {}", field.as_str(), runtime.name(), gap.message)),
+      None => (false, format!("{}: {}", runtime.name(), gap.message)),
+    })
+    .collect()
 }
 
 /// The workspace mounts of `run`: executor directories mounted into the
@@ -134,6 +163,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     pid: vm.pid(),
     vcpus: vm.vcpus(),
     mem_mib: vm.mem_mib(),
+    runtime: Some(runtime.label()),
   }));
   // A restarted control plane finds the VM by its PID and directory.
   let record = InstanceRecord {

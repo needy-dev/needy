@@ -12,7 +12,7 @@ use super::*;
 struct Fake {
   calls: Mutex<Vec<String>>,
   bodies: Mutex<Vec<ContainerCreateBody>>,
-  runtimes: Vec<String>,
+  runtimes: Vec<(&'static str, &'static [&'static str])>,
   images: Vec<String>,
   code: i64,
   log: &'static str,
@@ -30,8 +30,8 @@ impl Fake {
 
 #[async_trait::async_trait]
 impl Engine for Fake {
-  async fn runtimes(&self) -> Result<BTreeSet<String>, Error> {
-    Ok(self.runtimes.iter().cloned().collect())
+  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
+    Ok(self.runtimes.iter().map(|(name, args)| (name.to_string(), args.iter().map(|a| a.to_string()).collect())).collect())
   }
 
   async fn has_image(&self, image: &str) -> Result<bool, Error> {
@@ -161,7 +161,7 @@ fn a_recipe_sets_the_hostname_and_the_memory_limit() {
 async fn a_host_without_the_oci_runtime_names_how_to_install_gvisor() {
   let (container, _) = runtime(
     Fake {
-      runtimes: vec!["runc".into()],
+      runtimes: vec![("runc", &[])],
       images: vec!["needy-actor:latest".into()],
       ..Default::default()
     },
@@ -178,7 +178,7 @@ async fn a_host_without_the_oci_runtime_names_how_to_install_gvisor() {
 async fn a_host_without_the_image_names_the_build_that_makes_it() {
   let (container, _) = runtime(
     Fake {
-      runtimes: vec!["runc".into()],
+      runtimes: vec![("runc", &[])],
       ..Default::default()
     },
     OciRuntime::Runc,
@@ -246,4 +246,64 @@ async fn stopping_an_actor_stops_its_container_within_the_grace_and_removes_it()
       "remove needy-actor-0123456789ab"
     ]
   );
+}
+
+// ROOT CAUSE:
+//
+// If the Docker socket could not be found, `profile check` reported nothing
+// about the container actor, because the runtime failed to construct and
+// the check skips a runtime it cannot construct as a profile error.
+//
+// Before the fix, a host without Docker passed the actor's host check.
+// The fix makes an unreachable Docker fail each use, `check_host` first.
+#[tokio::test]
+async fn a_docker_that_cannot_be_reached_fails_the_host_check_with_the_reason() {
+  let container = Container::with_engine(
+    OciRuntime::Runc,
+    "needy-actor:latest".into(),
+    Arc::new(Unreachable("no Docker daemon answers: socket missing".into())),
+  );
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert_eq!(error, "no Docker daemon answers: socket missing");
+}
+
+// ROOT CAUSE:
+//
+// If Docker ran gVisor with its defaults, the actor's init could not reach
+// the daemon, because gVisor keeps containers from host Unix sockets and the
+// actor's channels are bind-mounted host sockets.
+//
+// Before the fix, a `runsc` actor started and failed after 5 s with `cannot
+// reach the daemon at unix:/.needy/channels/guest.sock`.
+// The fix refuses the run up front, naming the registration that works.
+#[tokio::test]
+async fn gvisor_without_host_sockets_is_refused_with_the_registration_that_works() {
+  let (container, _) = runtime(
+    Fake {
+      runtimes: vec![("runc", &[]), ("runsc", &[])],
+      images: vec!["needy-actor:latest".into()],
+      ..Default::default()
+    },
+    OciRuntime::Runsc,
+  );
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert!(error.contains("runsc install -- --host-uds=all"), "{error}");
+}
+
+#[tokio::test]
+async fn gvisor_with_host_sockets_and_the_image_passes_the_host_check() {
+  let (container, _) = runtime(
+    Fake {
+      runtimes: vec![("runsc", &["--host-uds=all"])],
+      images: vec!["needy-actor:latest".into()],
+      ..Default::default()
+    },
+    OciRuntime::Runsc,
+  );
+
+  container.check_host().await.unwrap();
 }

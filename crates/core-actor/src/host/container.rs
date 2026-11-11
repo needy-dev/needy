@@ -17,7 +17,7 @@
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Arc;
@@ -28,7 +28,10 @@ use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
 use needy_config::profile::OciRuntime;
 
-use super::runtime::{ActorRuntime, Channels, Endpoint, Error, HostMount, RunningActor, Setup, Start, Terminal};
+use needy_core::recipe::CompiledRecipe;
+
+use super::identity;
+use super::runtime::{ActorRuntime, Channels, Endpoint, Error, Gap, HostMount, RunningActor, Setup, Start, Terminal};
 
 /// Where the actor's channels are in the container.
 pub const CHANNELS: &str = "/.needy/channels";
@@ -58,8 +61,9 @@ pub fn name(run: &str) -> String {
 /// container runtime), so tests stand in for it.
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
-  /// The OCI runtimes it has registered.
-  async fn runtimes(&self) -> Result<BTreeSet<String>, Error>;
+  /// The OCI runtimes it has registered, each with the arguments Docker
+  /// passes it (`runtimeArgs`).
+  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error>;
   async fn has_image(&self, image: &str) -> Result<bool, Error>;
   async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), Error>;
   /// Starts the container and returns its first process's host PID.
@@ -84,10 +88,14 @@ pub struct Container {
 
 impl Container {
   /// The runtime on this machine's Docker daemon (`DOCKER_HOST`, else its
-  /// default socket). Nothing is contacted until it is used.
-  pub fn new(oci_runtime: OciRuntime, image: String) -> Result<Self, Error> {
-    let docker = bollard::Docker::connect_with_defaults().map_err(|e| Error::Docker(format!("cannot reach Docker: {e}")))?;
-    Ok(Self::with_engine(oci_runtime, image, Arc::new(Docker(docker))))
+  /// default socket). Nothing is contacted until it is used; a Docker that
+  /// cannot be reached fails each use, `check_host` first, with the reason.
+  pub fn new(oci_runtime: OciRuntime, image: String) -> Self {
+    let engine: Arc<dyn Engine> = match bollard::Docker::connect_with_defaults() {
+      Ok(docker) => Arc::new(Docker(docker)),
+      Err(e) => Arc::new(Unreachable(format!("no Docker daemon answers: {e}"))),
+    };
+    Self::with_engine(oci_runtime, image, engine)
   }
 
   pub fn with_engine(oci_runtime: OciRuntime, image: String, engine: Arc<dyn Engine>) -> Self {
@@ -124,7 +132,7 @@ impl Container {
   /// The container for `start`, with the host-side mounts and identity
   /// files at `binds`.
   pub fn launch(&self, start: &Start<'_>, binds: Vec<String>) -> Launch {
-    let (vcpus, mem_mib) = start.recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048));
+    let (vcpus, mem_mib) = size(start.recipe);
     let user = start.user;
     let home = user.home();
     // NOTICE: the options are spelled out: Docker's tmpfs mounts default to
@@ -264,24 +272,49 @@ pub struct Launch {
   pub mem_mib: u32,
 }
 
+/// The vCPUs and memory of an actor of `recipe`, or of a plain 2 vCPU,
+/// 2 GiB machine without one, as a Firecracker actor's.
+fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
+  recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048))
+}
+
 #[async_trait::async_trait]
 impl ActorRuntime for Container {
   fn name(&self) -> &'static str {
     "container"
   }
 
+  fn label(&self) -> String {
+    format!("container ({})", self.oci_runtime.as_str())
+  }
+
   async fn check_host(&self) -> Result<(), Error> {
     let runtimes = self.engine.runtimes().await?;
     let oci = self.oci_runtime.as_str();
-    if !runtimes.contains(oci) {
+    let Some(args) = runtimes.get(oci) else {
       let how = match self.oci_runtime {
         // Reference: https://gvisor.dev/docs/user_guide/install/ (no
         // versioned page; read 2026-11-11): `runsc install` registers it.
         OciRuntime::Runsc => "; install gVisor and register it with `runsc install`, see https://gvisor.dev/docs/user_guide/install/",
         OciRuntime::Runc => "",
       };
-      let known: Vec<&str> = runtimes.iter().map(String::as_str).collect();
+      let known: Vec<&str> = runtimes.keys().map(String::as_str).collect();
       return Err(Error::Docker(format!("Docker has no {oci} runtime (it has {}){how}", known.join(", "))));
+    };
+    // NOTICE: gVisor keeps a container from host Unix sockets unless told
+    // otherwise, and the actor's channels are host sockets: init connects
+    // to the guest API and the gateway (`open`) and binds its process
+    // service (`create`). Observed with runsc release-20261102.0: init could
+    // not reach `guest.sock` until runsc ran with `--host-uds=all`.
+    // Reference: `runsc flags` (`-host-uds`: none|open|create|all, default
+    // none) and `runsc install --help` (`-- [args...]` become Docker's
+    // `runtimeArgs`).
+    if self.oci_runtime == OciRuntime::Runsc && !args.iter().any(|arg| arg == "--host-uds=all") {
+      return Err(Error::Docker(format!(
+        "Docker's runsc runtime keeps containers from host Unix sockets, which a container actor's channels are (its runtimeArgs are [{}]); \
+         register it with `runsc install -- --host-uds=all` and `systemctl reload docker`",
+        args.join(" ")
+      )));
     }
     if !self.engine.has_image(&self.image).await? {
       return Err(Error::Docker(format!("the container actor image {} is missing; run `needy build --container`", self.image)));
@@ -309,10 +342,21 @@ impl ActorRuntime for Container {
     Setup::Host
   }
 
+  fn overheat(&self, dir: &Path, temp_mc: i32) -> Result<(), Error> {
+    identity::overheat(dir, temp_mc)
+  }
+
+  fn identity_gaps(&self, recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
+    identity::gaps(recipe, self.oci_runtime, &identity::Host::read(Path::new("/")))
+  }
+
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error> {
     let user = start.user;
+    let host = identity::Host::read(Path::new("/"));
+    let mut binds = identity::prepare(start.dir, start.recipe, size(start.recipe).0, &host, self.oci_runtime)?;
     let mounts = Self::mount(start.dir, start.mounts, user.uid, user.gid).await?;
-    let launch = self.launch(start, mounts.iter().map(|(_, bind)| bind.clone()).collect());
+    binds.extend(mounts.iter().map(|(_, bind)| bind.clone()));
+    let launch = self.launch(start, binds);
     let points: Vec<PathBuf> = mounts.into_iter().map(|(point, _)| point).collect();
     let started = async {
       // A container left by an earlier daemon would block the name.
@@ -459,6 +503,44 @@ impl RunningActor for Running {
   }
 }
 
+/// A Docker daemon that cannot be reached, and why.
+struct Unreachable(String);
+
+#[async_trait::async_trait]
+impl Engine for Unreachable {
+  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+
+  async fn has_image(&self, _image: &str) -> Result<bool, Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+
+  async fn create(&self, _name: &str, _body: ContainerCreateBody) -> Result<(), Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+
+  async fn start(&self, _name: &str) -> Result<u32, Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+
+  fn logs(&self, _name: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
+    futures_util::stream::iter([Err(Error::Docker(self.0.clone()))]).boxed()
+  }
+
+  async fn wait(&self, _name: &str) -> Result<i64, Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+
+  async fn stop(&self, _name: &str, _grace: Duration) -> Result<(), Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+
+  async fn remove(&self, _name: &str) -> Result<(), Error> {
+    Err(Error::Docker(self.0.clone()))
+  }
+}
+
 /// The Docker daemon through `bollard`.
 struct Docker(bollard::Docker);
 
@@ -479,9 +561,9 @@ fn not_found(e: &bollard::errors::Error) -> bool {
 
 #[async_trait::async_trait]
 impl Engine for Docker {
-  async fn runtimes(&self) -> Result<BTreeSet<String>, Error> {
+  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
     let info = self.0.info().await.map_err(|e| Error::Docker(format!("no Docker daemon answers: {e}")))?;
-    Ok(info.runtimes.unwrap_or_default().into_keys().collect())
+    Ok(info.runtimes.unwrap_or_default().into_iter().map(|(name, runtime)| (name, runtime.runtime_args.unwrap_or_default())).collect())
   }
 
   async fn has_image(&self, image: &str) -> Result<bool, Error> {

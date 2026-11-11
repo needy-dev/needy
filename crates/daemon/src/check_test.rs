@@ -59,6 +59,44 @@ fn messages(check: &ProfileCheck) -> Vec<String> {
   check.findings.iter().map(|f| format!("{}: {}", if f.error { "error" } else { "warning" }, f.message)).collect()
 }
 
+const CONTAINER_ACTOR: &str = "actor: { runtime: container, container: { oci_runtime: runc }, recipe: ./machine.yaml }\n\
+  executors: { here: {} }\ncommands: [{ match: \"python3 **\", to: here }]";
+
+async fn check_container(served: &Served, recipe: &str) -> ProfileCheck {
+  let request = ProfileToCheck {
+    profile_yaml: CONTAINER_ACTOR.into(),
+    recipe_yaml: recipe.into(),
+  };
+  Runs::check(served.daemon(), request).await.unwrap()
+}
+
+#[tokio::test]
+async fn a_container_actor_is_warned_about_what_its_runtime_does_not_present() {
+  let served = control().await;
+
+  let check = check_container(&served, "extends: builtin:gce-ubuntu-22.04").await;
+
+  let messages = messages(&check);
+  assert!(
+    messages.iter().any(|m| m.starts_with("warning: actor: cpuid (container): the CPUID instruction shows the host's CPU")),
+    "{messages:?}"
+  );
+  assert!(messages.iter().any(|m| m.starts_with("warning: actor: a container actor routes by shims")), "{messages:?}");
+}
+
+#[tokio::test]
+async fn a_field_the_recipe_requires_and_a_container_cannot_present_is_an_error() {
+  let served = control().await;
+
+  let check = check_container(&served, "extends: builtin:gce-ubuntu-22.04\nrequired: [cpuid]").await;
+
+  let messages = messages(&check);
+  assert!(
+    messages.iter().any(|m| m.starts_with("error: actor: the recipe requires cpuid, which a container actor does not present")),
+    "{messages:?}"
+  );
+}
+
 #[tokio::test]
 async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_scheduled_on() {
   let served = control().await;

@@ -1372,6 +1372,7 @@ fn report_defaults_to_plain_text() {
   assert_eq!(lines.next(), Some(format!("Run         {run}  (profile review)").as_str()));
   assert_eq!(lines.next(), Some("State       stopped"));
   assert!(lines.next().is_some_and(|l| l.starts_with("Duration    ") && l.ends_with('s')), "{report}");
+  assert_eq!(lines.next(), Some("Actor       firecracker"));
   assert_eq!(lines.next(), Some("Started by  operator"));
   assert_eq!(lines.next(), Some("Stopped by  operator"));
   assert!(report.contains("\nCommands\n  routed to here   1  (1 failed)\n"), "{report}");

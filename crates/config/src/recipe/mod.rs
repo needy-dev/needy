@@ -36,9 +36,50 @@ pub struct Recipe {
   pub firmware: Firmware,
   pub devices: Devices,
   pub network: Network,
+  /// The identity fields an actor must present; a runtime that cannot is
+  /// an error in `profile check` and `run create`, where it is otherwise a
+  /// warning.
+  pub required: Vec<IdentityField>,
   /// The directory that relative paths in the recipe resolve against.
   #[serde(skip)]
   pub base_dir: PathBuf,
+}
+
+/// One part of a machine's identity, as a recipe requires it of the actor
+/// runtime (see the container actor runtime design's Identity table).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityField {
+  Hostname,
+  /// `/proc/cpuinfo`: brand, signature, flags, CPU count.
+  Cpuinfo,
+  /// The `CPUID` instruction itself.
+  Cpuid,
+  /// `/sys/class/dmi/id`.
+  Dmi,
+  /// PCI vendor and device IDs.
+  Pci,
+  /// hwmon sensors and the hwmon fault.
+  Hwmon,
+  /// `uname -r` and `/proc/version`.
+  Kernel,
+  /// The uptime offset.
+  Uptime,
+}
+
+impl IdentityField {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Hostname => "hostname",
+      Self::Cpuinfo => "cpuinfo",
+      Self::Cpuid => "cpuid",
+      Self::Dmi => "dmi",
+      Self::Pci => "pci",
+      Self::Hwmon => "hwmon",
+      Self::Kernel => "kernel",
+      Self::Uptime => "uptime",
+    }
+  }
 }
 
 /// Recipes declare no prepend lists; every list replaces the parent's.

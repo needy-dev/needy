@@ -6,4 +6,6 @@ pub mod container;
 pub mod detect;
 pub mod firecracker;
 pub mod gateway;
+#[cfg(unix)]
+pub mod identity;
 pub mod runtime;

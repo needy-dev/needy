@@ -632,3 +632,41 @@ fn a_report_of_a_trace_without_principals_leaves_them_out() {
   let json: serde_json::Value = serde_json::from_str(&render("7f3a", &actor_run(), Level::Summary, Format::Json)).unwrap();
   assert!(json["started_by"].is_null());
 }
+
+fn container_run() -> Vec<Recorded> {
+  let mut events = actor_run();
+  events.insert(
+    1,
+    at(
+      1_050,
+      Event::ActorStart(ActorStart {
+        pid: 7,
+        vcpus: 2,
+        mem_mib: 4096,
+        runtime: Some("container (runsc)".into()),
+      }),
+    ),
+  );
+  events
+}
+
+#[test]
+fn the_report_names_what_ran_the_actor() {
+  let report = human(&container_run());
+
+  assert!(report.contains("\nActor     container (runsc)\n"), "{report}");
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &container_run(), Level::Summary, Format::Json)).unwrap();
+  assert_eq!(json["actor_runtime"], "container (runsc)");
+}
+
+#[test]
+fn a_container_actors_report_says_what_its_routing_leaves_out() {
+  let report = human(&container_run());
+  assert!(report.contains("programs created at run time and run directly stayed in the actor"), "{report}");
+
+  let report = render("7f3a", &container_run(), Level::Summary, Format::Markdown);
+  assert!(report.contains("The actor ran in `container (runsc)`."), "{report}");
+  assert!(report.contains("A container actor routes only the programs its image had when it was built"), "{report}");
+
+  assert!(!human(&actor_run()).contains("container actor"), "a run without the runtime says nothing of it");
+}
