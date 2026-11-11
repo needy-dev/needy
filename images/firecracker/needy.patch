@@ -4,7 +4,7 @@ SMBIOS tables and PCI bridge IDs, read from the NEEDY_* environment that
 
 Applies to: Firecracker v1.17.0, commit 95f868c8e345b1cc8faccd1a3c910b4989dc3f58
 (`git ls-remote` of tag v1.17.0 peels to it); `patch -p1 --dry-run` on that
-tree succeeded on 2026-11-10. `images/Dockerfile` pins FIRECRACKER_VERSION.
+tree succeeded on 2026-11-12. `images/Dockerfile` pins FIRECRACKER_VERSION.
 Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src
 Reference: https://github.com/firecracker-microvm/firecracker/releases/tag/v1.17.0
 
@@ -46,13 +46,13 @@ Source: DMTF SMBIOS DSP0134 3.7.0, https://www.dmtf.org/sites/default/files/stan
   and #L741-L757.
 - Type 0: section 7.1, Table 6; characteristics bit 3 "not supported",
   Table 7; extension bytes, Tables 8 and 9 (byte 2 bit 2, targeted content
-  distribution).
+  distribution); system BIOS major and minor release at offsets 14h and 15h.
 - Type 1: section 7.2; UUID byte order, section 7.2.1 (the first three
   fields are little-endian only from version 2.6; Linux reads a 2.4 UUID in
   the order written, dmi_scan.c#L254-L263); wake-up type 06h power switch,
   Table 12.
-- Type 2: section 7.3; feature flags bit 0 hosting board, Table 14; board
-  type 0Ah motherboard, Table 15.
+- Type 2: section 7.3, Table 13 (asset tag string at offset 08h); feature
+  flags bit 0 hosting board, Table 14; board type 0Ah motherboard, Table 15.
 - Type 3: section 7.4; chassis types, Table 17; state 03h safe, Table 18;
   security status 03h none, Table 19.
 - Type 127 end of table: section 7.49.
@@ -64,9 +64,11 @@ The same output gives the formats used below: the system serial
 `GoogleCloud-` and the board serial `Board-GoogleCloud-`, each followed by the
 32 hex digits of the system UUID; "SMBIOS 2.4 present"; and "Targeted
 content distribution is supported" (extension byte 2, bit 2).
-TODO: the same output shows "BIOS Revision: 1.0" and the UUID as the board's
-asset tag, where these tables give 0.0 and none; left for the owner, as they
-were not part of the identity fixes of 2026-11-10.
+`dmidecode` on a real n2-standard-2 (captured 2026-07-31) shows "BIOS
+Revision: 1.0" (release 1.0) and the system UUID in upper case as the
+board's asset tag,
+https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/n2-standard-2/0/dmidecode/stdout#L18
+and #L26-L37; the tables do the same (owner decision, 2026-11-12).
 The keys are Linux's `/sys/class/dmi/id` names,
 https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L59;
 `identity_env` sends every key whose default is a GCE value, so the DEFAULTS
@@ -79,7 +81,7 @@ https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5
 so the default's nibble 9 is as plausible.
 --- a/src/vmm/src/arch/x86_64/smbios.rs	1970-01-01 08:00:00.000000000 +0800
 +++ b/src/vmm/src/arch/x86_64/smbios.rs	2026-11-09 07:16:28.314107439 +0800
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,181 @@
 +// Experiment: SMBIOS 2.4 tables at the legacy scan address so the guest
 +// kernel and dmidecode see a configured machine identity.
 +// Enabled by NEEDY_SMBIOS="key=value;key=value". Missing keys use GCE values.
@@ -106,6 +108,7 @@ so the default's nibble 9 is as plausible.
 +    ("board_name", "Google Compute Engine"),
 +    ("board_version", ""),
 +    ("board_serial", "Board-GoogleCloud-6B1F5C2E0D4A9E8B7C3D2A1F0E9D8C7B"),
++    ("board_asset_tag", "6B1F5C2E-0D4A-9E8B-7C3D-2A1F0E9D8C7B"),
 +    ("chassis_vendor", "Google"),
 +    ("chassis_type", "1"),
 +    ("chassis_serial", ""),
@@ -187,8 +190,9 @@ so the default's nibble 9 is as plausible.
 +    f.push(date);
 +    f.push(0); // ROM size
 +    f.extend_from_slice(&(1u64 << 3).to_le_bytes()); // characteristics not supported
-+    // Extension byte 2 bit 2: targeted content distribution, as on GCE.
-+    f.extend_from_slice(&[0x00, 0x04, 0x00, 0x00, 0xff, 0xff]);
++    // Extension byte 2 bit 2: targeted content distribution, and BIOS
++    // release 1.0, as on GCE.
++    f.extend_from_slice(&[0x00, 0x04, 0x01, 0x00, 0xff, 0xff]);
 +    sizes.push(structure(&mut table, 0, 0, &f, s));
 +
 +    // Type 1: system information.
@@ -212,7 +216,7 @@ so the default's nibble 9 is as plausible.
 +        s.add(g("board_name")),
 +        s.add(g("board_version")),
 +        s.add(g("board_serial")),
-+        0,    // asset tag
++        s.add(g("board_asset_tag")),
 +        0x01, // hosting board
 +        0,    // location in chassis
 +    ];

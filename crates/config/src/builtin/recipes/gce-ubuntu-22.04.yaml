@@ -95,6 +95,10 @@ firmware:
     # checks the prefix).
     serial: "GoogleCloud-{uuid_hex}"
     board_serial: "Board-GoogleCloud-{uuid_hex}"
+    # Source: the n2-standard-2 `dmidecode` above, type 2 "Base Board
+    # Information", `Asset Tag:` the system UUID of type 1 in upper case,
+    # https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/n2-standard-2/0/dmidecode/stdout#L26-L37
+    board_asset_tag: "{uuid_upper}"
 devices:
   pci:
     # Source: https://github.com/pciutils/pciids/blob/2393ed647fe52d620f2840e24af5222889dca5ac/pci.ids#L33582

@@ -162,6 +162,48 @@ fn the_patchs_default_serials_carry_its_default_uuid_as_gce_does() {
   assert_eq!(defaults["board_serial"], format!("Board-GoogleCloud-{hex}"));
 }
 
+/// The BIOS major and minor release bytes the patch writes in its type 0
+/// structure: the third and fourth of the extension bytes it appends after
+/// the characteristics.
+fn patch_bios_release() -> (u8, u8) {
+  let patch = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/firecracker/needy.patch");
+  let text = std::fs::read_to_string(&patch).unwrap();
+  let type0 = text.split("// Type 0: BIOS information.").nth(1).unwrap().split("// Type 1").next().unwrap();
+  let line = type0.lines().find(|l| l.contains("0xff, 0xff]")).unwrap();
+  let bytes: Vec<u8> = line
+    .split('[')
+    .nth(1)
+    .unwrap()
+    .split(']')
+    .next()
+    .unwrap()
+    .split(',')
+    .map(|b| u8::from_str_radix(b.trim().trim_start_matches("0x"), 16).unwrap())
+    .collect();
+  (bytes[2], bytes[3])
+}
+
+// A real n2-standard-2 shows `BIOS Revision: 1.0` and the system UUID, in
+// upper case, as the board's asset tag (owner decision D6, 2026-11-12;
+// the capture is cited in the patch). The patch gave 0.0 and no asset tag.
+#[test]
+fn the_patch_shows_gces_bios_revision_and_the_uuid_as_board_asset_tag() {
+  let defaults = patch_smbios_defaults();
+
+  assert_eq!(patch_bios_release(), (1, 0));
+  assert_eq!(defaults["board_asset_tag"], defaults["product_uuid"].to_ascii_uppercase());
+}
+
+#[test]
+fn the_gce_identity_sends_the_system_uuid_as_board_asset_tag() {
+  let recipe = gce("");
+  let uuid = recipe.identity.smbios.as_ref().unwrap().uuid.clone();
+
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+
+  assert_eq!(smbios_keys(&env["NEEDY_SMBIOS"])["board_asset_tag"], uuid.to_ascii_uppercase());
+}
+
 #[test]
 fn a_dell_identity_sends_no_google_value() {
   let recipe = needy_config::recipe::load(&Source::builtin("dell-optiplex-ubuntu-24.04")).unwrap();
@@ -202,7 +244,7 @@ fn smbios_values_cannot_end_a_field_early() {
 
   assert_eq!(
     env["NEEDY_SMBIOS"],
-    "bios_date=;bios_vendor=;bios_version=;board_name=;board_serial=;board_vendor=;chassis_type=;chassis_vendor=;product_name=a,b;product_serial=;product_uuid=u;product_version=;sys_vendor="
+    "bios_date=;bios_vendor=;bios_version=;board_asset_tag=;board_name=;board_serial=;board_vendor=;chassis_type=;chassis_vendor=;product_name=a,b;product_serial=;product_uuid=u;product_version=;sys_vendor="
   );
 }
 

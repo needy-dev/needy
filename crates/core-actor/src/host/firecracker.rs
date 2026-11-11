@@ -239,6 +239,7 @@ fn identity_env(identity: &VmIdentity) -> BTreeMap<String, String> {
       ("bios_date", smbios.bios_date.as_deref()),
       ("bios_vendor", smbios.bios_vendor.as_deref()),
       ("bios_version", smbios.bios_version.as_deref()),
+      ("board_asset_tag", smbios.board_asset_tag.as_deref()),
       ("board_name", smbios.board_name.as_deref()),
       ("board_serial", smbios.board_serial.as_deref()),
       ("board_vendor", smbios.board_vendor.as_deref()),

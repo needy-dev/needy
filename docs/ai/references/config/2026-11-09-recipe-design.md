@@ -77,8 +77,10 @@ devices:
 
 `{hash}` (8 hex digits) and `{seq}` (2 hex digits, 02 to ff, so a MAC that
 encodes an address never names a subnet's network or gateway) derive from the
-run seed. In `firmware.dmi.serial` and `board_serial`, `{uuid_hex}` is the
-system UUID's 32 upper-case hex digits, as GCE serials carry it. A replayed
+run seed. In `firmware.dmi.serial`, `board_serial` and `board_asset_tag`,
+`{uuid_hex}` is the system UUID's 32 upper-case hex digits, as GCE serials
+carry it, and `{uuid_upper}` the UUID in upper case with its dashes, as GCE's
+board asset tag carries it. A replayed
 run gets the same values; different runs get different serial
 numbers and MAC addresses. `{time}` is the time the run was created, in UTC,
 as `YYYYMMDD-HHMMSS`, the suffix the GCE Console gives a new VM's default

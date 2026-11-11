@@ -78,6 +78,10 @@ pub fn cpuinfo(host: &str, cpu: &CpuView, vcpus: u32) -> String {
 // Source: the attribute names and modes are `dmi-id.c`'s,
 // https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L62
 // and `sys_dmi_field_show` prints `%s\n`, #L22-L31.
+// TODO(container-actor): `board_asset_tag` (the GCE built-in's system UUID)
+// is presented only by the patched Firecracker; adding the file here was not
+// part of the SMBIOS slice D6 (2026-11-12), which the owner scoped to the
+// patch. Add it when container actors should match.
 pub fn dmi(smbios: &Smbios) -> Vec<(&'static str, String, u32)> {
   let chassis_type = smbios.chassis_type.map(|n| n.to_string());
   [

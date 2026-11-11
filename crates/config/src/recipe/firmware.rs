@@ -25,6 +25,9 @@ pub struct Dmi {
   pub serial: Option<Template>,
   /// The baseboard serial, with the same placeholders as `serial`.
   pub board_serial: Option<Template>,
+  /// The baseboard asset tag, with the same placeholders as `serial` and
+  /// `{uuid_upper}`, the system UUID in upper case.
+  pub board_asset_tag: Option<Template>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

@@ -20,6 +20,7 @@ pub struct Smbios {
   pub board_vendor: Option<String>,
   pub board_name: Option<String>,
   pub board_serial: Option<String>,
+  pub board_asset_tag: Option<String>,
   /// The chassis manufacturer: the system's, as on GCE and Dell machines.
   pub chassis_vendor: Option<String>,
   pub bios_vendor: Option<String>,
@@ -103,7 +104,10 @@ fn chassis_number(value: &ChassisType) -> Option<u32> {
 pub(super) fn smbios(dmi: &Dmi, run: &PerRun, findings: &mut Vec<Finding>) -> Smbios {
   let uuid = run_uuid(run.seed);
   let uuid_hex = uuid.replace('-', "").to_ascii_uppercase();
-  let fill = |value: Option<&str>| value.map(|text| fill_placeholders(text, run).replace("{uuid_hex}", &uuid_hex));
+  let uuid_upper = uuid.to_ascii_uppercase();
+  let fill = |value: Option<&str>| {
+    value.map(|text| fill_placeholders(text, run).replace("{uuid_hex}", &uuid_hex).replace("{uuid_upper}", &uuid_upper))
+  };
   let chassis_type = dmi.chassis_type.as_ref().and_then(|value| {
     let number = chassis_number(value);
     if number.is_none() {
@@ -119,6 +123,7 @@ pub(super) fn smbios(dmi: &Dmi, run: &PerRun, findings: &mut Vec<Finding>) -> Sm
     board_vendor: fill(dmi.board_vendor.as_deref().or(dmi.sys_vendor.as_deref())),
     board_name: fill(dmi.board_name.as_deref().or(dmi.product_name.as_deref())),
     board_serial: fill(dmi.board_serial.as_ref().map(|t| t.as_str())),
+    board_asset_tag: fill(dmi.board_asset_tag.as_ref().map(|t| t.as_str())),
     chassis_vendor: fill(dmi.sys_vendor.as_deref()),
     bios_vendor: fill(dmi.bios.vendor.as_deref()),
     bios_version: fill(dmi.bios.version.as_deref()),
