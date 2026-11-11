@@ -58,6 +58,7 @@ impl Need {
       needy_config::profile::Runtime::Firecracker => ActorRuntime::Firecracker,
       needy_config::profile::Runtime::Container => ActorRuntime::Container,
       needy_config::profile::Runtime::Vz => ActorRuntime::Vz,
+      needy_config::profile::Runtime::AppleContainer => ActorRuntime::AppleContainer,
     })
   }
 

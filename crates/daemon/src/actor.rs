@@ -14,9 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
-use needy_config::profile::{FaultKind, FileMode, Runtime, Side};
+use needy_config::profile::{ContainerActor, FaultKind, FileMode, Runtime, Side};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
 use needy_core::types::{Effect, Fired, Network, RunState};
+use needy_core_actor::host::apple_container::AppleContainer;
 use needy_core_actor::host::container::Container;
 use needy_core_actor::host::firecracker::{self, Firecracker};
 use needy_core_actor::host::gateway;
@@ -45,15 +46,20 @@ pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<
     Runtime::Container => {
       // `validate::profile` refuses a container actor without its options
       // before a create gets here.
-      let Some(options) = &actor.container else {
-        bail!("actor.container is missing");
+      let Some(ContainerActor {
+        oci_runtime: Some(oci_runtime),
+        image,
+      }) = &actor.container
+      else {
+        bail!("actor.container.oci_runtime is missing");
       };
-      Ok(Box::new(Container::new(options.oci_runtime, options.image.clone())))
+      Ok(Box::new(Container::new(*oci_runtime, image.clone())))
     }
     Runtime::Vz => Ok(Box::new(Vz {
       image: vz::Image::new(&daemon.config.actor_image),
       vfkit: vz::VFKIT.into(),
     })),
+    Runtime::AppleContainer => Ok(Box::new(AppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
   }
 }
 

@@ -370,3 +370,30 @@ async fn a_container_actor_without_its_options_is_refused_and_not_checked_for_kv
 
   assert_eq!(messages(&check), ["error: actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
 }
+
+// Apple's `container` exists on macOS only; `profile check` elsewhere says
+// so instead of failing when the run is created. (On a Mac the check asks
+// the real `container` CLI, so this runs on other systems.)
+#[cfg(not(target_os = "macos"))]
+#[tokio::test]
+async fn an_apple_container_actor_off_a_mac_is_an_error_that_says_why() {
+  let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
+
+  let check = check(&served, "actor: { runtime: apple-container }").await;
+
+  let messages = messages(&check);
+  assert!(
+    messages.iter().any(|m| m == "error: actor: on the control host: Apple's `container` runs on macOS only, on a Mac with Apple silicon"),
+    "{messages:?}"
+  );
+}
+
+#[tokio::test]
+async fn an_oci_runtime_on_an_apple_container_actor_is_refused() {
+  let served = control().await;
+
+  let check = check(&served, "actor: { runtime: apple-container, container: { oci_runtime: runc } }").await;
+
+  let messages = messages(&check);
+  assert!(messages.iter().any(|m| m.starts_with("error: actor.container.oci_runtime is for `runtime: container`")), "{messages:?}");
+}

@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::profile::{Actions, Profile, Provider, Runtime, Side, UnknownPolicy};
+use crate::profile::{Actions, ContainerActor, Profile, Provider, Runtime, Side, UnknownPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -55,12 +55,16 @@ impl fmt::Display for Finding {
 pub fn profile(profile: &Profile) -> Vec<Finding> {
   let mut findings = Vec::new();
   match (profile.actor.runtime, &profile.actor.container) {
-    (Runtime::Container, None) => {
+    (Runtime::Container, None | Some(ContainerActor { oci_runtime: None, .. })) => {
       findings.push(Finding::error("actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"))
     }
-    (runtime @ (Runtime::Firecracker | Runtime::Vz), Some(_)) => {
-      findings.push(Finding::error(format!("actor.container is for `runtime: container`; this actor's runtime is {}", runtime.as_str())))
-    }
+    (Runtime::AppleContainer, Some(ContainerActor { oci_runtime: Some(_), .. })) => findings.push(Finding::error(
+      "actor.container.oci_runtime is for `runtime: container`; Apple's `container` runs each actor in its own VM and has no OCI runtime to choose",
+    )),
+    (runtime @ (Runtime::Firecracker | Runtime::Vz), Some(_)) => findings.push(Finding::error(format!(
+      "actor.container is for `runtime: container` or `apple-container`; this actor's runtime is {}",
+      runtime.as_str()
+    ))),
     _ => {}
   }
   let executor = |name: &str| profile.executors.contains_key(name);

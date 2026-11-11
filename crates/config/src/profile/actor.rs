@@ -34,8 +34,9 @@ pub struct Actor {
   pub env: BTreeMap<String, String>,
   #[serde(default)]
   pub cwd: Option<String>,
-  /// How a `container` actor runs; required with that runtime, refused
-  /// with any other.
+  /// How a `container` or `apple-container` actor runs; required with
+  /// `container`, optional with `apple-container`, refused with
+  /// `firecracker`.
   #[serde(default)]
   pub container: Option<ContainerActor>,
 }
@@ -51,20 +52,35 @@ pub enum Runtime {
   /// A Virtualization.framework VM through vfkit, on Apple silicon macOS:
   /// needy's arm64 kernel and rootfs, as Firecracker boots them on Linux.
   Vz,
+  /// A container under Apple's `container` on a Mac with Apple silicon,
+  /// which runs each container in its own lightweight VM.
+  #[serde(rename = "apple-container")]
+  AppleContainer,
 }
 
-/// A container actor's options.
+/// A container actor's options. `validate::profile` checks which apply to
+/// the actor's runtime.
 // NOTICE: `oci_runtime` has no default, for the reason `runtime` has none:
 // `runc` and `runsc` isolate differently, and needy never chooses that for
-// the profile.
+// the profile. It is optional here only because `apple-container` refuses
+// it; `container` requires it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerActor {
-  /// The OCI runtime Docker runs the container with.
-  pub oci_runtime: OciRuntime,
-  /// The container actor image `needy build --container` builds.
+  /// The OCI runtime Docker runs the container with: `container` only.
+  #[serde(default)]
+  pub oci_runtime: Option<OciRuntime>,
+  /// The container actor image: `needy build --container` builds it for
+  /// Docker, `needy build --apple-container` for Apple's `container`.
   #[serde(default = "default_container_image")]
   pub image: String,
+}
+
+impl ContainerActor {
+  /// The image of an actor whose profile has no `container:` options.
+  pub fn image_of(options: Option<&ContainerActor>) -> String {
+    options.map_or_else(default_container_image, |o| o.image.clone())
+  }
 }
 
 /// The image of a container actor whose profile names none.
@@ -103,6 +119,7 @@ impl Runtime {
       Runtime::Firecracker => "firecracker",
       Runtime::Container => "container",
       Runtime::Vz => "vz",
+      Runtime::AppleContainer => "apple-container",
     }
   }
 }

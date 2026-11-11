@@ -541,7 +541,18 @@ fn the_actor_runtime_is_required() {
   assert!(err.contains("actor: missing field `runtime`"), "{err}");
 
   let err = load_text("actor: { runtime: qemu }\n").unwrap_err().to_string();
-  assert!(err.contains("actor.runtime: unknown variant `qemu`, expected one of `firecracker`, `container`, `vz`"), "{err}");
+  assert!(
+    err.contains("actor.runtime: unknown variant `qemu`, expected one of `firecracker`, `container`, `vz`, `apple-container`"),
+    "{err}"
+  );
+}
+
+#[test]
+fn apple_container_is_an_actor_runtime() {
+  let p = load_text("actor: { runtime: apple-container }").unwrap();
+
+  assert_eq!(p.actor.runtime, Runtime::AppleContainer);
+  assert_eq!(p.actor.runtime.as_str(), "apple-container");
 }
 
 #[test]
