@@ -255,12 +255,14 @@ command, and auto-removal.
 
 These fields are refused when the executor is created unless the daemon's
 operator allows them: `privileged`, `cap_add`, `devices`
-(`{ host, container, permissions }`), `pid`, `ipc`, `userns` or `uts` set to
-`host` (another container's namespace is fine), a `security_opt` with
+(`{ host, container, permissions }`), `gpus`, `pid`, `ipc`, `userns` or `uts`
+set to `host` (another container's namespace is fine), a `security_opt` with
 `unconfined`, and a bind mount whose source is outside the executor's
 workspace on the host. There is no operator configuration yet, so they are
-always refused. `gpus` is not among them: it asks the host's GPU runtime for
-GPUs as `docker run --gpus` does.
+always refused. `gpus` asks the host's GPU runtime for GPUs as
+`docker run --gpus` does; Docker grants that without `--privileged`, but
+GPUs are host devices, so they need the operator as `devices` do (owner
+decision, 2026-11-12).
 
 `docker run` options without a field (ports, CPU period and quota, memory
 reservation, OOM settings, blkio, `--runtime`, storage options, GPU drivers
@@ -276,7 +278,9 @@ mount and `gpus: all`: `needy exec` read `memory.max` 536870912,
 `cpu.max` `150000 100000`, `pids.max` 256, the variable, the `/etc/hosts`
 entry and the tmpfs size, and `nvidia-smi -L` listed the GPU; `docker
 inspect` showed the matching `HostConfig` and a device request with count
--1 and the `gpu` capability. A profile with `docker.args` and one with
+-1 and the `gpu` capability. (That run predates the operator gate on `gpus`; the provider now refuses the same
+`gpus: all` with `gpus all is not allowed by the operator`, which the unit test
+`privileged_fields_need_the_operator` covers.) A profile with `docker.args` and one with
 `privileged: true` were refused at `run create` with the messages above.
 
 containerd options are merged into the OCI spec as a JSON patch with the same

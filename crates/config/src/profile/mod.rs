@@ -200,8 +200,8 @@ fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), E
       Some((
         "docker.args",
         "`docker.args` was replaced by typed fields under `docker:`: cpus, cpu_shares, cpuset_cpus, memory, memory_swap, \
-         shm_size, pids_limit, ulimits, env, workdir, read_only, init, mounts, add_host, dns, sysctls, gpus, cap_drop, and, \
-         where the operator allows them, privileged, cap_add, devices, pid, ipc, userns, uts and security_opt"
+         shm_size, pids_limit, ulimits, env, workdir, read_only, init, mounts, add_host, dns, sysctls, cap_drop, and, \
+         where the operator allows them, privileged, cap_add, devices, gpus, pid, ipc, userns, uts and security_opt"
           .to_string(),
       ))
     } else {

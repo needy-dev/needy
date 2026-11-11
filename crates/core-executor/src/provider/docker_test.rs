@@ -172,7 +172,7 @@ type GpuRequest = (Option<i64>, Option<Vec<String>>, Option<Vec<Vec<String>>>);
 
 /// The GPU request `gpus` becomes.
 fn gpu_request(gpus: &str) -> GpuRequest {
-  let mut requests = body(&format!("{{ gpus: {gpus} }}"), &options()).host_config.unwrap().device_requests.unwrap();
+  let mut requests = body(&format!("{{ gpus: {gpus} }}"), &operator(&["gpus"])).host_config.unwrap().device_requests.unwrap();
   assert_eq!(requests.len(), 1);
   let request = requests.remove(0);
   assert_eq!(request.driver, None, "the runtime's default driver");
@@ -234,6 +234,8 @@ fn privileged_fields_need_the_operator() {
   assert_eq!(refusal("{ privileged: true }", &options()), "privileged is not allowed by the operator");
   assert_eq!(refusal("{ cap_add: [SYS_ADMIN] }", &options()), "cap_add SYS_ADMIN is not allowed by the operator");
   assert_eq!(refusal("{ devices: [{ host: /dev/fuse }] }", &options()), "devices /dev/fuse is not allowed by the operator");
+  assert_eq!(refusal("{ gpus: all }", &options()), "gpus all is not allowed by the operator");
+  assert_eq!(refusal("{ gpus: [\"0\"] }", &options()), "gpus 0 is not allowed by the operator");
   assert_eq!(refusal("{ pid: host }", &options()), "pid host is not allowed by the operator");
   assert_eq!(refusal("{ userns: host }", &options()), "userns host is not allowed by the operator");
   assert_eq!(

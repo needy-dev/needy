@@ -90,7 +90,7 @@ pub enum OnFull {
 ///
 /// Fields the daemon sets (hostname, user, entrypoint, command, network,
 /// name, labels, auto-removal, the workspace and socket mounts) are not
-/// here, so a profile cannot name them. `privileged`, `cap_add`, `devices`,
+/// here, so a profile cannot name them. `privileged`, `cap_add`, `devices`, `gpus`,
 /// a `host` `pid`, `ipc`, `userns` or `uts` mode, an `unconfined`
 /// `security_opt` and a bind mount outside the workspace are refused when
 /// the executor is created unless the operator allows them.
@@ -141,7 +141,8 @@ pub struct Docker {
   pub dns: Vec<IpAddr>,
   /// Namespaced kernel parameters: `net.ipv4.ip_forward: "1"`.
   pub sysctls: BTreeMap<String, String>,
-  /// GPUs for the container, through the host's GPU runtime.
+  /// GPUs for the container, through the host's GPU runtime; needs the
+  /// operator.
   pub gpus: Option<Gpus>,
   /// Capabilities to drop.
   pub cap_drop: Vec<String>,

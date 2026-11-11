@@ -37,7 +37,7 @@ pub struct Options {
   /// live under it.
   pub state_dir: PathBuf,
   /// Privileged profile fields the operator allows: `privileged`,
-  /// `cap_add`, `devices`, `pid`, `ipc`, `userns` and `uts` (their `host`
+  /// `cap_add`, `devices`, `gpus`, `pid`, `ipc`, `userns` and `uts` (their `host`
   /// mode), `security_opt` (an `unconfined` option), and `host_mounts` (a
   /// bind mount outside the executor's workspace).
   // TODO(operator): no operator configuration sets this yet, so privileged
@@ -203,10 +203,18 @@ fn apply_run_options(docker: &DockerConfig, base: &Path, allow: &[String], conta
       })
       .collect(),
   );
-  // REVIEW: `gpus` is not gated by the operator like `devices`: Docker
-  // grants it without `--privileged`, and the GPU runtime exposes only the
-  // requested GPUs. Gate it if operators need to keep GPUs from profiles.
-  host.device_requests = docker.gpus.as_ref().map(|gpus| vec![gpu_request(gpus)]);
+  // GPUs are host devices, so they need the operator as `devices` do
+  // (owner decision, 2026-11-12), although Docker grants them without
+  // `--privileged`.
+  if let Some(gpus) = &docker.gpus {
+    let what = match gpus {
+      Gpus::All => "all".to_string(),
+      Gpus::Count(count) => count.to_string(),
+      Gpus::Devices(ids) => ids.join(", "),
+    };
+    operator("gpus", format!("gpus {what}"))?;
+    host.device_requests = Some(vec![gpu_request(gpus)]);
+  }
 
   // The process and its names.
   body.env = some(docker.env.iter().map(|(name, value)| format!("{name}={value}")).collect());
