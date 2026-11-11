@@ -71,8 +71,12 @@ The keys are Linux's `/sys/class/dmi/id` names,
 https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/dmi-id.c#L41-L59;
 `identity_env` sends every key whose default is a GCE value, so the DEFAULTS
 apply only when NEEDY_SMBIOS lacks a key.
-TODO(provenance): the DEFAULTS' serial and UUID values themselves have no
-recorded source.
+The DEFAULTS' UUID 6b1f5c2e-0d4a-9e8b-7c3d-2a1f0e9d8c7b is needy's own
+made-up value, so no real VM's identity is copied (AGENTS.md, Private Data);
+its serials follow the format above. GCE UUIDs carry no RFC 9562 version
+(the sos issue's has version nibble 5, an n2-standard-2's has f:
+https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/n2-standard-2/0/dmidecode/stdout),
+so the default's nibble 9 is as plausible.
 --- a/src/vmm/src/arch/x86_64/smbios.rs	1970-01-01 08:00:00.000000000 +0800
 +++ b/src/vmm/src/arch/x86_64/smbios.rs	2026-11-09 07:16:28.314107439 +0800
 @@ -0,0 +1,179 @@
