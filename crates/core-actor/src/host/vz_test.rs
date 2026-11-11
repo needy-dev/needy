@@ -138,7 +138,15 @@ fn an_x86_recipe_is_not_faithful_on_arm64() {
 }
 
 #[tokio::test]
-async fn a_host_without_vfkit_fails_its_check_naming_vfkit() {
+async fn a_missing_vfkit_fails_its_check_naming_how_to_install_it() {
+  let error = check_vfkit(Path::new("/nonexistent/vfkit")).await.unwrap_err().to_string();
+
+  assert!(error.contains("cannot run /nonexistent/vfkit") && error.contains("brew install vfkit"), "{error}");
+}
+
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[tokio::test]
+async fn an_apple_silicon_mac_without_vfkit_fails_the_host_check() {
   let vz = Vz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: "/nonexistent/vfkit".into(),
@@ -146,7 +154,20 @@ async fn a_host_without_vfkit_fails_its_check_naming_vfkit() {
 
   let error = vz.check_host().await.unwrap_err().to_string();
 
-  assert!(error.contains("vfkit"), "{error}");
+  assert!(error.contains("brew install vfkit"), "{error}");
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[tokio::test]
+async fn another_host_fails_the_check_naming_the_runtimes_it_has() {
+  let vz = Vz {
+    image: Image::new(Path::new(IMAGE)),
+    vfkit: VFKIT.into(),
+  };
+
+  let error = vz.check_host().await.unwrap_err().to_string();
+
+  assert!(error.contains("macOS on Apple silicon only") && error.contains("runtime: firecracker"), "{error}");
 }
 
 #[tokio::test]
