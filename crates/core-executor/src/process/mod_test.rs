@@ -274,43 +274,63 @@ async fn shutdown_kills_running_processes_and_refuses_new_ones() {
 // The fix lets only the starting client hold the process back and drops a
 // viewer that cannot keep up, saying so.
 //
-// NOTICE: the program writes one line for each line of input, and the
-// owner sends the next line only after it read the last, so each line is
-// one output event. This test used to let the program write 3000 lines
-// freely; under load they were read in fewer chunks than the viewer's
-// queue holds, the viewer never fell behind, and the test failed.
-#[cfg(unix)]
+// ROOT CAUSE (of this test's flakiness):
+//
+// If the test's real `sh` and its pipes were slow or chunked its output
+// differently, the test failed although the fan-out was right, because it
+// judged the fan-out through things it did not control: how many output
+// events the pipe reader produced (3000 free lines read in fewer chunks than
+// the viewer's queue holds, fixed in `903070f` by pacing one line per event),
+// and then still the OS scheduler, the shell writing each `echo` in one
+// `write`, the exit being reaped, and a 20 s wall-clock bound around 200
+// paced round trips through a child process. The paced version did not fail
+// again in stress runs on macOS and Linux, so which of these failed on a Mac
+// is not known; the fan-out itself is not one of them.
+//
+// Before the fix, whether the viewer fell behind and whether the owner got
+// everything in time depended on that process.
+// The fix feeds the process's output to the fan-out directly, one event per
+// `emit`, as the pipe reader does, and checks that each `emit` completes
+// without waiting: a viewer that stopped reading makes it wait, so the
+// regression fails at the event that blocks, with no clock and no process.
 #[tokio::test]
 async fn a_viewer_that_stops_reading_holds_back_neither_the_process_nor_its_owner() {
+  use futures_util::FutureExt;
   // NOTICE: more events than a subscriber's queue holds (64,
   // `SUBSCRIBER_QUEUE` in `proc.rs`).
-  const LINES: usize = 200;
-  let host = Host::default();
-  let script = format!("i=0; while [ $i -lt {LINES} ]; do read line || exit 1; echo line $i; i=$((i+1)); done");
-  let proc = host.spawn(spec(&["sh", "-c", &script])).unwrap();
+  const EVENTS: usize = 200;
+  let (proc, ends) = Proc::new(&spec(&["writer"]), -1, false, None);
   let mut owner = proc.subscribe(true, Subscriber::Owner);
   let idle = proc.subscribe(true, Subscriber::Viewer);
 
-  let drained = async {
-    let mut lines = 0;
-    proc.send(Input::Stdin(b"\n".to_vec()));
-    while let Some(event) = owner.live.recv().await {
-      match event {
-        Output::Stdout(bytes) => {
-          lines += bytes.iter().filter(|&&b| b == b'\n').count();
-          proc.send(Input::Stdin(b"\n".to_vec()));
-        }
-        Output::Stderr(_) => {}
-        Output::Exit(exit) => return (lines, exit),
-      }
+  // NOTICE: every `emit` here runs inside one poll of this task, and each
+  // takes two operations of tokio's cooperative budget (128 per poll, the
+  // order lock and the owner's `send`), so a budgeted `emit` would yield at
+  // event 64 although nothing holds it back. `unconstrained` lifts the budget.
+  // Source: https://github.com/tokio-rs/tokio/blob/tokio-1.54.1/tokio/src/task/coop/mod.rs#L115-L117
+  // Reference: https://docs.rs/tokio/1.54.1/tokio/task/coop/fn.unconstrained.html
+  for i in 0..EVENTS {
+    let line = format!("line {i}\n");
+    tokio::task::coop::unconstrained(proc.emit(Output::Stdout(Bytes::from(line.clone()))))
+      .now_or_never()
+      .unwrap_or_else(|| panic!("a viewer that stopped reading held the process back at event {i}"));
+    match owner.live.try_recv() {
+      Ok(Output::Stdout(bytes)) => assert_eq!(bytes, line.as_bytes(), "the owner's event {i}"),
+      other => panic!("the owner did not get event {i}: {other:?}"),
     }
-    panic!("the owner's subscription closed before the exit");
+  }
+  let exit = Exit {
+    code: Some(0),
+    signal: String::new(),
   };
-  let (lines, exit) =
-    tokio::time::timeout(Duration::from_secs(20), drained).await.expect("a viewer that stopped reading held the process back");
+  tokio::task::coop::unconstrained(proc.finish(&ends.exit, exit.clone()))
+    .now_or_never()
+    .expect("a viewer that stopped reading held the exit back");
 
-  assert_eq!(exit.code, Some(0));
-  assert_eq!(lines, LINES);
+  match owner.live.try_recv() {
+    Ok(Output::Exit(got)) => assert_eq!(got, exit),
+    other => panic!("the owner did not get the exit: {other:?}"),
+  }
   assert!(idle.fell_behind());
 }
 
