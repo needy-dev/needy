@@ -193,6 +193,11 @@ pub enum ActorRuntime {
   /// A Virtualization.framework VM through vfkit: Apple silicon macOS,
   /// vfkit on `PATH` and the `vz` actor image (`Image`, `rootfs.ext4`).
   Vz,
+  /// Apple's `container` CLI on a Mac, whose services answer. Whether the
+  /// container actor image is in its image store is checked when a run is
+  /// created.
+  #[serde(rename = "apple-container")]
+  AppleContainer,
 }
 
 impl ActorRuntime {
@@ -201,6 +206,7 @@ impl ActorRuntime {
       Self::Firecracker => "firecracker",
       Self::Container => "container",
       Self::Vz => "vz",
+      Self::AppleContainer => "apple-container",
     }
   }
 }

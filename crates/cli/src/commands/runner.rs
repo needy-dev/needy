@@ -111,6 +111,7 @@ fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabilities
       Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
       Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
       Ok(v1::ActorRuntime::Vz) => Ok(ActorRuntime::Vz),
+      Ok(v1::ActorRuntime::AppleContainer) => Ok(ActorRuntime::AppleContainer),
       Err(_) => bail!("unknown actor runtime {value}"),
     })
     .collect::<Result<_>>()?;

@@ -71,6 +71,8 @@ enum ActorRuntime {
   // Apple silicon macOS with vfkit and the `vz` actor image (Image,
   // rootfs.ext4): a Virtualization.framework VM.
   ACTOR_RUNTIME_VZ = 3;
+  // Apple's `container` CLI on a Mac, whose services answer.
+  ACTOR_RUNTIME_APPLE_CONTAINER = 4;
 }
 
 // How a runner can create an executor.

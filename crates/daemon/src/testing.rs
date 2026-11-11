@@ -221,6 +221,7 @@ pub fn capabilities(text: &str) -> needy_core::types::Capabilities {
         ("actor", "firecracker") => capabilities.actor.insert(ActorRuntime::Firecracker),
         ("actor", "container") => capabilities.actor.insert(ActorRuntime::Container),
         ("actor", "vz") => capabilities.actor.insert(ActorRuntime::Vz),
+        ("actor", "apple-container") => capabilities.actor.insert(ActorRuntime::AppleContainer),
         ("executor", "native") => capabilities.executor.insert(ExecutorProvider::Native),
         ("executor", "docker") => capabilities.executor.insert(ExecutorProvider::Docker),
         other => panic!("unknown capability {other:?}"),
