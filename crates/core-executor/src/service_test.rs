@@ -308,3 +308,71 @@ async fn the_last_active_client_owns_the_window_size() {
   drop(watcher);
   kill(&executor, &process).await;
 }
+
+// ROOT CAUSE:
+//
+// If a process wrote many small chunks while its client read more slowly
+// than they came, the client's HTTP/2 connection ended with GOAWAY
+// ENHANCE_YOUR_CALM `too_many_data_frames`, failing every stream on it,
+// because the executor sent each chunk as a message, so as a DATA frame of
+// its own, and h2 (0.4.16 and later) ends a connection on which too many
+// small DATA frames wait unread. A Windows runner hit it with
+// `powershell -Command 1..100000`, which writes each number and each line
+// end on its own: the control plane ended the runner's connection.
+//
+// Before the fix, every chunk read from the process was a message.
+// The fix sends a process's output at most once per batch interval, the
+// chunks of one stream merged, so a burst of small writes arrives as a few
+// frames.
+#[tokio::test]
+async fn small_writes_faster_than_the_client_reads_keep_its_connection() {
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let service = ExecutorService {
+    host: Host::default(),
+    name: "test".into(),
+  };
+  tokio::spawn(
+    tonic::transport::Server::builder()
+      .add_service(ProcessServiceServer::new(service))
+      .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+  );
+  // NOTICE: h2's budget for unread small DATA frames is half the target
+  // connection window and at least 25600; a frame under 256 bytes costs 256
+  // minus its length (sources at `BATCH_INTERVAL` in `service.rs`). With
+  // HTTP/2's initial 65535-byte window that is about 140 frames of a few
+  // bytes, so a few hundred writes show what a client's default 5 MiB
+  // window shows at about ten thousand.
+  let channel = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
+    .unwrap()
+    .initial_connection_window_size(65_535)
+    .connect()
+    .await
+    .unwrap();
+  let client = Client::from_channel(channel);
+  // One write per line, a short spin apart, so the executor reads each on
+  // its own.
+  let script = "i=0; while [ $i -lt 300 ]; do i=$((i+1)); echo $i; j=0; while [ $j -lt 50 ]; do j=$((j+1)); done; done";
+  let start = ExecStart {
+    argv: vec!["sh".into(), "-c".into(), script.into()],
+    no_stdin: true,
+    ..Default::default()
+  };
+  let mut stream = ExecStream::start(&client, start).await.unwrap();
+  // The client reads nothing until the process is done.
+  tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+  let mut stdout = String::new();
+  let exit = loop {
+    match stream.next().await {
+      Ok(Some(Event::Stdout(bytes))) => stdout.push_str(&String::from_utf8_lossy(&bytes)),
+      Ok(Some(Event::Exited(exit))) => break exit,
+      Ok(Some(_)) => {}
+      Ok(None) => panic!("the stream ended without an exit"),
+      Err(e) => panic!("the stream failed after {} lines: {e}", stdout.lines().count()),
+    }
+  };
+  assert_eq!(exit.code, Some(0));
+  let expected: String = (1..=300).map(|i| format!("{i}\n")).collect();
+  assert_eq!(stdout, expected);
+}

@@ -2,6 +2,7 @@
 //! [`process::Host`](crate::process::Host).
 
 use std::pin::Pin;
+use std::time::Duration;
 
 use futures_util::{Stream, StreamExt as _};
 use needy_api_proto::v1::process_service_server::ProcessService;
@@ -10,6 +11,7 @@ use needy_api_proto::v1::{
   ProcessInfo, TermFallback, exec_request, exec_response,
 };
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
@@ -123,35 +125,146 @@ async fn relay_output(
     payload: Some(exec_response::Payload::Started(started)),
   })
   .await;
+  // The replay is there at once: one batch, or several when it is large.
+  let mut past = Batch::default();
   for event in std::mem::take(&mut subscription.past) {
+    past.push(&event);
+  }
+  for response in past.responses {
     if !alive {
       break;
     }
-    alive = send(to_response(&event)).await;
-    if matches!(event, Output::Exit(_)) {
+    let done = matches!(response.payload, Some(exec_response::Payload::Exited(_)));
+    alive = send(response).await;
+    if done {
       return;
     }
   }
+  // The first output after a quiet `BATCH_INTERVAL` goes at once, so a
+  // keystroke's echo is not delayed; output that follows waits for the rest
+  // of the interval and goes with it.
+  let mut sent_at: Option<Instant> = None;
   while alive {
     let Some(event) = subscription.live.recv().await else {
-      if subscription.fell_behind() {
-        // The client is told why its stream ends without an exit.
-        let lagged = Status::resource_exhausted("the client fell behind the process's output; attach again");
-        if tx.send(Err(lagged)).await.is_err() {
-          tracing::debug!("process {}: the client left as it fell behind", proc.id);
-        }
-      }
+      fell_behind(&proc, &tx, &subscription).await;
       break;
     };
-    let done = matches!(event, Output::Exit(_));
-    alive = send(to_response(&event)).await;
-    if done {
+    let mut batch = Batch::default();
+    batch.push(&event);
+    let deadline = sent_at.map_or_else(Instant::now, |at| at + BATCH_INTERVAL);
+    let mut closed = false;
+    while !batch.exited && batch.bytes < BATCH_BYTES {
+      // Biased: output already queued joins the batch even when the
+      // deadline has passed.
+      tokio::select! {
+        biased;
+        event = subscription.live.recv() => match event {
+          Some(event) => batch.push(&event),
+          None => {
+            closed = true;
+            break;
+          }
+        },
+        () = tokio::time::sleep_until(deadline) => break,
+      }
+    }
+    sent_at = Some(Instant::now());
+    for response in batch.responses {
+      alive = send(response).await;
+      if !alive {
+        break;
+      }
+    }
+    if batch.exited {
       return;
+    }
+    if closed {
+      if alive {
+        fell_behind(&proc, &tx, &subscription).await;
+      }
+      break;
     }
   }
   if !alive && !detach.load(Ordering::SeqCst) && proc.exit().is_none() {
     let sig = if proc.tty { "SIGHUP" } else { "SIGTERM" };
     proc.send(Input::Signal(sig.into()));
+  }
+}
+
+/// Tells a client whose subscription ended without an exit that it fell
+/// behind, when it did.
+async fn fell_behind(proc: &Proc, tx: &mpsc::Sender<Result<ExecResponse, Status>>, subscription: &Subscription) {
+  if subscription.fell_behind() {
+    // The client is told why its stream ends without an exit.
+    let lagged = Status::resource_exhausted("the client fell behind the process's output; attach again");
+    if tx.send(Err(lagged)).await.is_err() {
+      tracing::debug!("process {}: the client left as it fell behind", proc.id);
+    }
+  }
+}
+
+// Source: https://github.com/hyperium/h2/blob/b0e890842ac16d3c76836fd4fcc06421acb15fa7/src/proto/connection.rs#L99-L109
+// (h2 v0.4.20, the budget: half the target connection window, at least
+// 25600), https://github.com/hyperium/h2/blob/b0e890842ac16d3c76836fd4fcc06421acb15fa7/src/proto/streams/counts.rs#L120-L138
+// (a frame under 256 bytes costs 256 minus its length until it is read),
+// https://github.com/hyperium/hyper/blob/7f67699ce32d717081deb7018b4da7d679277ac0/src/proto/h2/server.rs#L36
+// (hyper v1.12.0, a server's 1 MiB connection window).
+// Reference: https://github.com/hyperium/h2/blob/b0e890842ac16d3c76836fd4fcc06421acb15fa7/CHANGELOG.md
+// (0.4.16 "Fix limiting excessive amount of small DATA frames").
+// NOTICE: a process's output goes to its client at most once per
+// `BATCH_INTERVAL`, the chunks of one stream merged. Each message is an
+// HTTP/2 DATA frame, and h2 ends a connection with GOAWAY ENHANCE_YOUR_CALM
+// `too_many_data_frames` when its peer leaves too many frames under 256
+// bytes unread: about 2,000 frames of a few bytes on a control plane's
+// connection. A program that writes in small pieces, such as PowerShell
+// writing each number and its line end on its own, sent tens of thousands
+// of messages a second, and a control plane or a client that read more
+// slowly than that lost the connection with every stream on it. 10 ms keeps
+// a terminal responsive (under a 60 Hz frame) and at most 100 messages a
+// second per stream.
+// TODO(h2-budget): a reader that stops reading (a paused pager) while a
+// program keeps writing small pieces still fills the budget, after about
+// 20 s at the full rate. hyper 1.12 does not expose h2's `data_frame_budget`;
+// raising the connection windows raises the budget too. Revisit when a
+// stalled client is seen to lose its connection.
+const BATCH_INTERVAL: Duration = Duration::from_millis(10);
+
+// NOTICE: a batch is sent once it holds this much without waiting for the
+// interval; one merged chunk stays under it too. The size of one read from
+// a process (`process::pipes`), well under gRPC's 4 MiB default message
+// limit on the receiving side.
+const BATCH_BYTES: usize = 256 * 1024;
+
+/// Responses waiting to be sent: consecutive output of one stream merged
+/// into one chunk.
+#[derive(Default)]
+struct Batch {
+  responses: Vec<ExecResponse>,
+  bytes: usize,
+  exited: bool,
+}
+
+impl Batch {
+  fn push(&mut self, event: &Output) {
+    let (bytes, stderr) = match event {
+      Output::Stdout(bytes) => (bytes, false),
+      Output::Stderr(bytes) => (bytes, true),
+      Output::Exit(_) => {
+        self.exited = true;
+        self.responses.push(to_response(event));
+        return;
+      }
+    };
+    self.bytes += bytes.len();
+    let last = match self.responses.last_mut().and_then(|response| response.payload.as_mut()) {
+      Some(exec_response::Payload::Stdout(last)) if !stderr => Some(last),
+      Some(exec_response::Payload::Stderr(last)) if stderr => Some(last),
+      _ => None,
+    };
+    match last {
+      Some(last) if last.len() + bytes.len() <= BATCH_BYTES => last.extend_from_slice(bytes),
+      _ => self.responses.push(to_response(event)),
+    }
   }
 }
 
