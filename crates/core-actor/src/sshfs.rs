@@ -1,6 +1,11 @@
 //! Workspace mounts: sshfs in passive mode, whose SFTP stream travels over a
 //! needy exec stream (`Origin::ActorMount`) to `sftp-server` on the executor.
 //! The daemon's relay may install the SFTP fault tap on that stream.
+//!
+//! A VM's init mounts inside the actor; a container runtime mounts on the
+//! daemon's machine and bind-mounts the result into the container. Both reach
+//! the daemon through the run's guest channel, so the stream is the actor's
+//! either way.
 
 use std::process::Stdio;
 use std::time::Duration;
@@ -9,11 +14,28 @@ use anyhow::{Context, Result};
 use backon::{ConstantBuilder, Retryable};
 use needy_api_client::Client;
 use needy_api_client::exec::{Event, ExecStream};
-use needy_api_proto::v1::{ExecStart, GuestMount, Origin};
+use needy_api_proto::v1::{ExecStart, Origin};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-/// Mounts an executor directory at `m.target`, owned by the user.
-pub(super) async fn mount(client: &Client, m: &GuestMount, uid: u32, gid: u32) -> Result<()> {
+/// An executor directory to mount.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mount {
+  /// Where it is mounted on this machine.
+  pub target: String,
+  pub executor: String,
+  /// The directory on the executor.
+  pub source: String,
+  pub writable: bool,
+  /// The executor's `sftp-server` command.
+  pub sftp_command: Vec<String>,
+}
+
+/// Mounts an executor directory at `m.target`, owned by the user `uid`:`gid`.
+/// The sshfs process and its bridges run until the mount is detached.
+// NOTICE: the bridge tasks are spawned on the current runtime and end with
+// the mount (sshfs exits once it is detached, which ends the stream); they
+// have no owner of their own.
+pub async fn mount(client: &Client, m: &Mount, uid: u32, gid: u32) -> Result<()> {
   std::fs::create_dir_all(&m.target).with_context(|| format!("cannot create {}", m.target))?;
   let mut options = format!("passive,allow_other,uid={uid},gid={gid},idmap=none,cache=yes,kernel_cache,attr_timeout=1,entry_timeout=1");
   if !m.writable {
@@ -119,5 +141,22 @@ fn mounted(target: &str) -> bool {
       tracing::debug!("cannot read /proc/mounts: {e}");
       false
     }
+  }
+}
+
+/// Detaches the mount at `target`, so the kernel stops asking sshfs and
+/// sshfs exits. Unprivileged, it asks `fusermount3`, which mounted it.
+// Reference: https://man7.org/linux/man-pages/man8/fusermount3.8.html
+// (read 2026-11-11: `-u` unmounts, `-z` lazily, as `MNT_DETACH` does).
+pub fn detach(target: &str) -> Result<()> {
+  let target = target.trim_end_matches('/');
+  match nix::mount::umount2(target, nix::mount::MntFlags::MNT_DETACH) {
+    Ok(()) => Ok(()),
+    Err(nix::errno::Errno::EPERM) => {
+      let status = std::process::Command::new("fusermount3").args(["-u", "-z", target]).status().context("cannot run fusermount3")?;
+      anyhow::ensure!(status.success(), "fusermount3 -u -z {target}: {status}");
+      Ok(())
+    }
+    Err(e) => Err(anyhow::anyhow!("cannot detach {target}: {e}")),
   }
 }

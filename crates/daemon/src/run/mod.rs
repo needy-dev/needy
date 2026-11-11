@@ -547,7 +547,8 @@ impl Daemon {
     // Where everything goes is decided before anything is acquired, so a
     // selector that names no runner fails the create at once.
     let runners = self.candidates().await?;
-    let actor = schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor, &runners).context("actor")?;
+    let actor =
+      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::actor(run.profile.actor.runtime), &runners).context("actor")?;
     if let Some(refusal) = self.actor_refusal(&actor) {
       bail!("actor: {refusal}");
     }
@@ -555,7 +556,7 @@ impl Daemon {
       Placement::Runner(name) => Some(name.clone()),
       Placement::ControlHost => None,
     };
-    actor::check_host(self, run)?;
+    actor::check_host(self, run).await?;
     files::check_host_paths(run)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
@@ -611,7 +612,7 @@ impl Daemon {
     run.tasks.close();
     run.tasks.wait().await;
     self.release_executors(run).await;
-    actor::remove_sockets(self, run.profile.actor.runtime, &run.dir);
+    actor::remove_sockets(self, &run.profile.actor, &run.dir);
     self.runs.end(&run.id);
     let actor_runner = lock(&run.actor_runner).clone();
     self.record_failure(&run.id, request, run.created_ms, &run.trace, error, actor_runner).await;
@@ -670,7 +671,7 @@ impl Daemon {
     self.save_run(run).await;
     files::mirror_out(run).await;
     self.release_executors(run).await;
-    actor::remove_sockets(self, run.profile.actor.runtime, &run.dir);
+    actor::remove_sockets(self, &run.profile.actor, &run.dir);
   }
 
   /// Stops a running or finished run: its tasks, mirror-out, its
@@ -703,7 +704,7 @@ impl Daemon {
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
     run.trace.flush().await;
-    actor::remove_sockets(self, run.profile.actor.runtime, &run.dir);
+    actor::remove_sockets(self, &run.profile.actor, &run.dir);
     self.save_run(run).await;
     self.runs.end(&run.id);
     Ok(())

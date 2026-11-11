@@ -38,7 +38,16 @@ pub(super) async fn run(config: &GetConfigResponse, home: &str) -> Result<ExitSt
   let user = config.user.clone().unwrap_or_default();
   identity::offset_uptime(config.uptime_offset_secs);
   let proxy = format!("http://{GATEWAY_LISTEN}");
-  let mut command = tokio::process::Command::new(&config.command[0]);
+  // In a container the program's file may be a shim; its real file starts
+  // it, so the driving program itself is never routed.
+  let mut command = match crate::guest::shim::resolve(&config.command[0], &format!("{SYSTEM_PATH}:{STUB_DIR}")) {
+    Some(real) => {
+      let mut command = tokio::process::Command::new(real);
+      command.arg0(&config.command[0]);
+      command
+    }
+    None => tokio::process::Command::new(&config.command[0]),
+  };
   command
     .args(&config.command[1..])
     .env_clear()
@@ -105,9 +114,17 @@ fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> 
   env
 }
 
+/// Where init serves the driving program's process service.
+pub(super) enum Terminal {
+  /// A vsock port (a VM's), which the host connects to.
+  Vsock(u32),
+  /// A Unix socket in the bind-mounted channels (a container's).
+  Unix(std::path::PathBuf),
+}
+
 /// Runs the driving program on a terminal of `rows` by `cols` until it
-/// exits, serving `ProcessService` for it on the configured vsock port.
-pub(super) async fn run_on_terminal(config: &GetConfigResponse, home: &str, (rows, cols): (u16, u16)) -> Result<Exit> {
+/// exits, serving `ProcessService` for it on `terminal`.
+pub(super) async fn run_on_terminal(config: &GetConfigResponse, home: &str, (rows, cols): (u16, u16), terminal: Terminal) -> Result<Exit> {
   if config.command.is_empty() {
     bail!("no driving program configured");
   }
@@ -185,20 +202,36 @@ pub(super) async fn run_on_terminal(config: &GetConfigResponse, home: &str, (row
     },
     start,
   };
-  let port = config.process_port;
-  let listener = tokio_vsock::VsockListener::bind(tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, port))
-    .with_context(|| format!("cannot listen on vsock port {port}"))?;
   let stop = CancellationToken::new();
   let shutdown = stop.clone();
-  let mut server = tokio::spawn(async move {
-    let served = tonic::transport::Server::builder()
-      .add_service(ProcessServiceServer::new(service))
-      .serve_with_incoming_shutdown(listener.incoming(), shutdown.cancelled_owned())
-      .await;
-    if let Err(e) = served {
-      tracing::error!("the driving program's process service: {e}");
+  let router = tonic::transport::Server::builder().add_service(ProcessServiceServer::new(service));
+  let mut server = match terminal {
+    Terminal::Vsock(port) => {
+      let listener = tokio_vsock::VsockListener::bind(tokio_vsock::VsockAddr::new(libc::VMADDR_CID_ANY, port))
+        .with_context(|| format!("cannot listen on vsock port {port}"))?;
+      tokio::spawn(async move {
+        if let Err(e) = router.serve_with_incoming_shutdown(listener.incoming(), shutdown.cancelled_owned()).await {
+          tracing::error!("the driving program's process service: {e}");
+        }
+      })
     }
-  });
+    Terminal::Unix(path) => {
+      // A socket left by an earlier start of this container would make
+      // bind fail.
+      if let Err(e) = std::fs::remove_file(&path)
+        && e.kind() != std::io::ErrorKind::NotFound
+      {
+        tracing::warn!("cannot remove {}: {e}", path.display());
+      }
+      let listener = tokio::net::UnixListener::bind(&path).with_context(|| format!("cannot listen on {}", path.display()))?;
+      let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+      tokio::spawn(async move {
+        if let Err(e) = router.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).await {
+          tracing::error!("the driving program's process service: {e}");
+        }
+      })
+    }
+  };
   let mut stdout = tokio::io::stdout();
   let mut events: std::collections::VecDeque<Output> = std::mem::take(&mut console.past).into();
   let exit = loop {
@@ -292,6 +325,14 @@ pub(super) fn as_user(args: &[String]) -> anyhow::Error {
     nix::unistd::setgid(gid).context("setgid")?;
     nix::unistd::setuid(uid).context("setuid")?;
     let argv: Vec<std::ffi::CString> = args[4..].iter().map(|a| std::ffi::CString::new(a.as_str())).collect::<Result<_, _>>()?;
+    // In a container the program's file may be a shim; its real file
+    // starts it, so the driving program itself is never routed.
+    let search = std::env::var("PATH").unwrap_or_default();
+    if let Some(real) = crate::guest::shim::resolve(program, &search) {
+      use std::os::unix::ffi::OsStrExt;
+      let real = std::ffi::CString::new(real.as_os_str().as_bytes())?;
+      return Ok(nix::unistd::execv(&real, &argv)?);
+    }
     let program = std::ffi::CString::new(program.as_str())?;
     Ok(nix::unistd::execvp(&program, &argv)?)
   };

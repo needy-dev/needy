@@ -4,18 +4,24 @@
 //! routing on, runs the driving program, mirrors out, reports its exit and
 //! reboots, which ends the VM.
 //!
-//! Init logs to the console (the VM's serial port), which `needy run
-//! logs` prints.
+//! In a container (see [`super::in_container`]) the runtime made the system
+//! mounts, the home directory, the hostname, the identity files and the
+//! workspace mounts from the host, so init skips them, reaches the gateway
+//! and serves the terminal on the bind-mounted sockets, turns routing on
+//! for the shims, and exits instead of rebooting, which ends the container.
+//!
+//! Init logs to the console (the VM's serial port, the container's stderr),
+//! which `needy run logs` prints.
 //!
 //! NOTICE: the tasks init spawns (the forwarder, sshfs bridges, scheduled
-//! faults) are owned by the VM: they end when init reboots it.
+//! faults) are owned by the actor: they end when init reboots the VM or
+//! exits the container.
 
 mod driver;
 mod files;
 mod identity;
 mod mounts;
 mod network;
-mod sshfs;
 mod stubs;
 
 pub(super) use stubs::STUB_DIR;
@@ -35,8 +41,15 @@ pub(super) fn main() -> ! {
     std::process::exit(127);
   }
   console_logging();
-  if let Err(e) = super::runtime().block_on(boot()) {
+  let container = super::in_container();
+  let booted = super::runtime().block_on(boot(container));
+  if let Err(e) = &booted {
     tracing::error!("{e:#}");
+  }
+  if container {
+    // The container ends with its PID 1; a failed boot says so in the
+    // status the daemon reports.
+    std::process::exit(if booted.is_ok() { 0 } else { 1 });
   }
   nix::unistd::sync();
   // `reboot` returns only when it fails.
@@ -72,32 +85,58 @@ fn write_param(path: &str, value: &str) {
   }
 }
 
-async fn boot() -> Result<()> {
-  mounts::system();
-  if let Err(e) = network::loopback_up() {
-    tracing::warn!("cannot bring the loopback interface up: {e}");
+async fn boot(container: bool) -> Result<()> {
+  // A container's runtime mounted the system and brought `lo` up, and its
+  // `/proc/sys` is read-only.
+  // TODO(container-actor): `vm.memfd_noexec` is not set in a container
+  // actor, so its programs may execute code from a memfd. The setting is
+  // per PID namespace, but init may not write `/proc/sys` there and Docker's
+  // `sysctls` option is limited to the namespaced sysctls Docker validates;
+  // setting it waits for a way the owner accepts (a privileged helper, or
+  // a runtime that allows it), see the container actor runtime design.
+  if !container {
+    mounts::system();
+    if let Err(e) = network::loopback_up() {
+      tracing::warn!("cannot bring the loopback interface up: {e}");
+    }
+    // Programs may not execute code from a memfd.
+    // Source: https://github.com/torvalds/linux/blob/v6.18/include/linux/pid_namespace.h#L21-L23
+    // (2 = MEMFD_NOEXEC_SCOPE_NOEXEC_ENFORCED) and https://github.com/torvalds/linux/blob/v6.18/mm/memfd.c#L345-L366
+    // (a `memfd_create` without flags gets MFD_NOEXEC_SEAL; MFD_EXEC fails with
+    // EACCES).
+    // Reference: https://github.com/torvalds/linux/blob/v6.18/Documentation/userspace-api/mfd_noexec.rst?plain=1#L54-L80
+    write_param("/proc/sys/vm/memfd_noexec", "2");
   }
-  // Programs may not execute code from a memfd.
-  // Source: https://github.com/torvalds/linux/blob/v6.18/include/linux/pid_namespace.h#L21-L23
-  // (2 = MEMFD_NOEXEC_SCOPE_NOEXEC_ENFORCED) and https://github.com/torvalds/linux/blob/v6.18/mm/memfd.c#L345-L366
-  // (a `memfd_create` without flags gets MFD_NOEXEC_SEAL; MFD_EXEC fails with
-  // EACCES).
-  // Reference: https://github.com/torvalds/linux/blob/v6.18/Documentation/userspace-api/mfd_noexec.rst?plain=1#L54-L80
-  write_param("/proc/sys/vm/memfd_noexec", "2");
 
   let client = super::daemon().await?;
   let config = client.guest().get_config(GetConfigRequest {}).await.map_err(needy_api_client::Error::from)?.into_inner();
   let user = config.user.clone().unwrap_or_default();
   let home = format!("/home/{}", user.name);
-  mounts::home(&home, user.uid, user.gid);
+  // A container's home is a tmpfs its runtime mounted; the daemon sends a
+  // container no hostname, sensors or mounts, which its runtime set up.
+  if !container {
+    mounts::home(&home, user.uid, user.gid);
+  }
   identity::apply(&config);
   for m in &config.mounts {
-    if let Err(e) = sshfs::mount(&client, m, user.uid, user.gid).await {
+    let mount = crate::sshfs::Mount {
+      target: m.target.clone(),
+      executor: m.executor.clone(),
+      source: m.source.clone(),
+      writable: m.writable,
+      sftp_command: m.sftp_command.clone(),
+    };
+    if let Err(e) = crate::sshfs::mount(&client, &mount, user.uid, user.gid).await {
       tracing::warn!("mount {}: {e:#}", m.target);
     }
   }
-  tokio::spawn(network::forward_gateway(config.gateway_port));
-  stubs::create(&config.route_names);
+  let gateway = if container {
+    network::Gateway::Unix(super::gateway_socket())
+  } else {
+    network::Gateway::Vsock(config.gateway_port)
+  };
+  tokio::spawn(network::forward_gateway(gateway));
+  stubs::create(&config.route_names, container);
   for copy in &config.copy_in {
     if let Err(e) = files::copy_in(&client, &copy.name, &copy.path, user.uid, user.gid).await {
       tracing::warn!("copy-in {}: {e:#}", copy.name);
@@ -105,13 +144,28 @@ async fn boot() -> Result<()> {
   }
   identity::schedule_faults(&client, &config);
   // Route only after setup so init's own helpers stay local.
-  write_param("/sys/module/binfmt_needy/parameters/route_uid", &user.uid.to_string());
-  write_param("/sys/module/binfmt_needy/parameters/route", &config.route_names.join(","));
+  if container {
+    let route = super::shim::Route {
+      uid: user.uid,
+      names: config.route_names.clone(),
+    };
+    if let Err(e) = super::shim::enable(&route) {
+      tracing::warn!("cannot turn routing on; every command stays in the actor: {e}");
+    }
+  } else {
+    write_param("/sys/module/binfmt_needy/parameters/route_uid", &user.uid.to_string());
+    write_param("/sys/module/binfmt_needy/parameters/route", &config.route_names.join(","));
+  }
 
   let driven = match &config.tty {
     Some(window) => {
       let size = (u16::try_from(window.rows).unwrap_or(u16::MAX), u16::try_from(window.cols).unwrap_or(u16::MAX));
-      driver::run_on_terminal(&config, &home, size).await.map(|exit| (exit.code, exit.signal))
+      let terminal = if container {
+        driver::Terminal::Unix(super::process_socket())
+      } else {
+        driver::Terminal::Vsock(config.process_port)
+      };
+      driver::run_on_terminal(&config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
     }
     None => driver::run(&config, &home).await.map(|status| {
       use std::os::unix::process::ExitStatusExt;
@@ -136,7 +190,8 @@ async fn boot() -> Result<()> {
   if let Err(status) = client.guest().report_exit(ReportExitRequest { code, signal }).await {
     tracing::warn!("cannot report the driving program's exit: {}", status.message());
   }
-  // Detach FUSE mounts before the streams behind them close.
+  // Detach FUSE mounts before the streams behind them close. A container
+  // has none; its runtime detaches its host-side mounts.
   mounts::detach(config.mounts.iter().map(|m| m.target.as_str()));
   Ok(())
 }

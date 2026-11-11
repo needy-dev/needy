@@ -173,7 +173,7 @@ async fn a_vm_that_exits_before_its_driving_program_fails_the_run_with_the_reaso
 
   assert_eq!(info.state, RunState::Failed);
   let failure = info.failure.unwrap_or_default();
-  assert!(failure.starts_with("the actor's VM exited before its driving program did: firecracker exited with code 1"), "{failure}");
+  assert!(failure.starts_with("the actor exited before its driving program did: firecracker exited with code 1"), "{failure}");
   assert!(failure.contains("Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1"), "{failure}");
 
   // A stop keeps the failure and flushes the trace.
@@ -211,7 +211,7 @@ async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
   // A user with only the binary is told what works without KVM, not
   // pointed at a design note in the repository.
   assert!(
-    message.contains("Without KVM, commands outside runs still work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`"),
+    message.contains("Without KVM, use a container actor (`actor: { runtime: container, container: { oci_runtime: runsc } }`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`"),
     "{message}"
   );
   assert!(!message.contains("docs/"), "{message}");

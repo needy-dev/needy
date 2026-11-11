@@ -105,8 +105,22 @@ fn docker_options_on_a_native_executor_are_an_error() {
 }
 
 #[test]
-fn a_container_actor_is_refused_until_it_is_implemented() {
+fn a_container_actor_with_its_oci_runtime_is_valid() {
+  let found = findings("actor: { runtime: container, container: { oci_runtime: runsc } }");
+
+  assert!(found.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_container_actor_must_name_its_oci_runtime() {
   let found = findings("actor: { runtime: container }");
 
-  assert_eq!(found, ["error: actor.runtime: the container runtime is not implemented yet; use `firecracker`, which needs /dev/kvm"]);
+  assert_eq!(found, ["error: actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
+}
+
+#[test]
+fn container_options_on_a_firecracker_actor_are_an_error() {
+  let found = findings("actor: { runtime: firecracker, container: { oci_runtime: runc } }");
+
+  assert_eq!(found, ["error: actor.container is for `runtime: container`; this actor's runtime is firecracker"]);
 }

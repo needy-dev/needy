@@ -1,0 +1,47 @@
+# examples/chaos with a container actor: copy-in and mirror-out on the
+# actor, a file fault on the shared workspace, an exec fault and a scheduled
+# overheat, which rewrites the actor's hwmon files from the host.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  runtime: container
+  container: { oci_runtime: runc }
+  recipe: ../opencode/gce.recipe.yaml
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== copy-in"; ls ~/seed; cat ~/seed/note.txt
+      echo "== file fault"
+      python3 -c "open('ok.txt','w').write('fine')"
+      python3 -c "open('broken.json','w').write('{}')"; echo "python3 exit=$?"
+      cat ~/workspace/ok.txt; echo
+      cat ~/workspace/broken.json; echo "cat exit=$?"
+      echo "== exec fault"; curl -s http://example.invalid; echo "curl exit=$?"
+      echo "== hwmon"; sensors | grep -m1 Package; sleep 3; sensors | grep -m1 Package
+      mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
+executors:
+  build: { provider: docker, key: "{run}" }
+commands:
+  - { match: "{python3,curl} **", to: build }
+files:
+  seed:
+    mode: copy-in
+    from: "host:../chaos/seed/"
+    to: "actor:~/seed/"
+    filter: ["- /secret.txt", "+ **"]
+  workspace:
+    mode: mount
+    from: "executor:build:~/workspace/"
+    to: "actor:~/workspace/"
+    writable: true
+  results:
+    mode: mirror-out
+    from: "actor:~/out/"
+    to: "host:./out/{run}/"
+run_files: [seed, workspace, results]
+chaos:
+  seed: 1
+  faults:
+    - { on: file.open, match: "**/*.json", errno: EIO }
+    - { on: exec, match: "curl **", errno: ECONNREFUSED }
+    - { on: hwmon, set: { temp_c: 101 }, at: 2s }

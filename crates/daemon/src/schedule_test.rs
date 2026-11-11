@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use needy_config::profile::{LabelMatch, Provider, RunnerSelector};
-use needy_core::types::ExecutorProvider;
+use needy_core::types::{ActorRuntime, ExecutorProvider};
 
 use super::{Candidate, Need, pick};
 use crate::testing::capabilities;
@@ -26,7 +26,7 @@ fn name(text: &str) -> RunnerSelector {
   RunnerSelector::Name(text.into())
 }
 
-const ACTOR: Need = Need::Actor;
+const ACTOR: Need = Need::Actor(ActorRuntime::Firecracker);
 const NATIVE_EXECUTOR: Need = Need::Executor(Some(ExecutorProvider::Native));
 const DOCKER_EXECUTOR: Need = Need::Executor(Some(ExecutorProvider::Docker));
 
@@ -72,10 +72,8 @@ fn a_capability_no_runner_has_says_so() {
   assert_eq!(err, "runner mac cannot host executor(docker): it has executor(native); no runner has executor(docker)");
 }
 
-// TODO(container-runtime): a runner with only the container runtime hosts no
-// actor until that runtime is built.
 #[test]
-fn the_container_runtime_hosts_no_actor_yet() {
+fn a_runner_with_only_the_container_runtime_hosts_no_firecracker_actor() {
   let gvisor = [runner(
     "gvisor",
     "actor(container) executor(docker,native)",
@@ -89,6 +87,18 @@ fn the_container_runtime_hosts_no_actor_yet() {
     err,
     "runner gvisor cannot host actor(firecracker): it has actor(container) executor(docker,native); no runner has actor(firecracker)"
   );
+}
+
+#[test]
+fn a_container_actor_is_placed_on_a_runner_with_the_container_runtime() {
+  let fleet = [
+    runner("gvisor", "actor(container) executor(docker,native)", &[("cloud", "")], true),
+    runner("kvm", KVM, &[("cloud", "")], true),
+  ];
+
+  let picked = pick(&labels(&["cloud"]), Need::Actor(ActorRuntime::Container), &fleet).unwrap();
+
+  assert_eq!(picked, "gvisor");
 }
 
 #[test]

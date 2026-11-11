@@ -49,6 +49,16 @@ fn unmapped_actor_cwd(profile: &Profile, executor: &Executor) -> Option<String> 
   (!mapped).then(|| candidates.into_iter().next().unwrap_or(home))
 }
 
+/// What a container actor's routing does not cover.
+const CONTAINER_ROUTING_GAP: &str = "actor: a container actor routes by shims made when its image was built: a program \
+  created at run time (installed with pip or npm, or compiled in the workspace) and run directly stays in the actor \
+  whatever the rules say; programs on the image's PATH, and scripts through their interpreters, are routed";
+
+/// Whether `profile` routes any command away from the actor.
+fn routes_anything(profile: &Profile) -> bool {
+  needy_core::rules::route_names(profile).is_none_or(|names| !names.is_empty())
+}
+
 impl Daemon {
   pub(crate) async fn check_profile(&self, request: ProfileToCheck) -> Result<ProfileCheck, ControlError> {
     let source = Source::text(request.profile_yaml.clone(), PathBuf::new());
@@ -60,16 +70,19 @@ impl Daemon {
     }));
     let runners = self.candidates().await.map_err(failed)?;
 
-    match schedule::placement(profile.actor.runner.as_ref(), Need::Actor, &runners) {
+    match schedule::placement(profile.actor.runner.as_ref(), Need::actor(profile.actor.runtime), &runners) {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
-        } else if let Some(missing) = self.unusable_host(&placement, profile.actor.runtime) {
+        } else if let Some(missing) = self.unusable_host(&placement, &profile).await {
           check.findings.push(error(format!("actor: {missing}")));
         }
         check.actor = Some(placement);
       }
       Err(e) => check.findings.push(error(format!("actor: {e}"))),
+    }
+    if profile.actor.runtime == Runtime::Container && routes_anything(&profile) {
+      check.findings.push(warning(CONTAINER_ROUTING_GAP.into()));
     }
     if let Some(reference) = &profile.actor.recipe {
       let actor = check.actor.clone();
@@ -107,14 +120,14 @@ impl Daemon {
   // TODO(runner-actor): an actor on another runner is refused before this
   // check (`actor_refusal`); once one can run there, check the KVM its
   // heartbeat reports (`RunnerHost::cpu.kvm_cpuid`, unset without one).
-  fn unusable_host(&self, placement: &Placement, kind: Runtime) -> Option<String> {
+  async fn unusable_host(&self, placement: &Placement, profile: &Profile) -> Option<String> {
     let on = match placement {
       Placement::ControlHost => "the control host".to_string(),
       Placement::Runner(name) => format!("runner {name} (the control host)"),
     };
     // A runtime this daemon lacks is already a finding of `validate::profile`.
-    let runtime = crate::actor::runtime(self, kind).ok()?;
-    runtime.check_host().err().map(|e| format!("on {on}: {e}"))
+    let runtime = crate::actor::runtime(self, &profile.actor).ok()?;
+    runtime.check_host().await.err().map(|e| format!("on {on}: {e}"))
   }
 
   /// Compiles the recipe `reference` against the CPU of the host the actor

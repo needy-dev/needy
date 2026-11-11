@@ -1,5 +1,6 @@
-//! `needy build`: builds the actor image and, with `--executor`, the executor
-//! image from `images/Dockerfile`, through the Docker API with BuildKit.
+//! `needy build`: builds the Firecracker actor image and, with `--container`
+//! and `--executor`, the container actor and executor Docker images from
+//! `images/Dockerfile`, through the Docker API with BuildKit.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -31,6 +32,9 @@ pub struct Args {
   /// Also build the `needy-executor` Docker image.
   #[arg(long)]
   executor: bool,
+  /// Also build the `needy-actor` Docker image, the container actor's.
+  #[arg(long)]
+  container: bool,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -76,6 +80,18 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let unpack_from = archive.clone();
   tokio::task::spawn_blocking(move || unpack(&unpack_from, &unpack_to)).await??;
   std::fs::remove_file(&archive).with_context(|| format!("cannot remove {}", archive.display()))?;
+  if args.container {
+    build(
+      &docker,
+      &context,
+      BuildImageOptions {
+        target: "actor-container".into(),
+        t: Some(needy_config::profile::CONTAINER_IMAGE.into()),
+        ..options()
+      },
+    )
+    .await?;
+  }
   if args.executor {
     build(
       &docker,

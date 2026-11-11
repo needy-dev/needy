@@ -14,7 +14,8 @@ fn main() {
   std::process::exit(cli::run());
 }
 
-/// Becomes the actor's init or proxy when started as one; actors are Linux.
+/// Becomes the actor's init, proxy or a shim when started as one; actors are
+/// Linux.
 #[cfg(target_os = "linux")]
 fn guest() {
   use needy_core_actor::guest;
@@ -29,5 +30,10 @@ fn guest() {
       Some("/.needy/init") => guest::init_main(),
       _ => {}
     }
+  }
+  // In a container actor every program on the image's `PATH` is a link to
+  // this binary, started by the program's name.
+  if guest::shim::invoked() {
+    guest::shim::main();
   }
 }

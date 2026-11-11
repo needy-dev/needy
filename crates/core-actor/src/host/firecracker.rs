@@ -15,7 +15,7 @@ use needy_core::recipe::{CompiledRecipe, VmIdentity};
 use serde_json::json;
 
 pub use super::runtime::Error;
-use super::runtime::{ActorRuntime, Channels, Endpoint, RunningActor, Terminal};
+use super::runtime::{ActorRuntime, Channels, Endpoint, RunningActor, Setup, Start, Terminal};
 
 /// Ports the actor reaches on the host over vsock.
 // NOTICE: needy's own choices; the guest's init dials `GUEST_PORT` as
@@ -114,12 +114,13 @@ pub struct Firecracker {
   pub kvm: PathBuf,
 }
 
+#[async_trait::async_trait]
 impl ActorRuntime for Firecracker {
   fn name(&self) -> &'static str {
     "firecracker"
   }
 
-  fn check_host(&self) -> Result<(), Error> {
+  async fn check_host(&self) -> Result<(), Error> {
     check_kvm(&self.kvm)
   }
 
@@ -136,11 +137,17 @@ impl ActorRuntime for Firecracker {
       },
       gateway_port: GATEWAY_PORT,
       process_port: PROCESS_PORT,
+      // vsock has no file modes inside the VM.
+      guest_for_every_user: false,
     }
   }
 
-  fn start(&self, dir: &Path, recipe: Option<&CompiledRecipe>) -> Result<Box<dyn RunningActor>, Error> {
-    let launch = Launch::new(&self.image, dir, recipe);
+  fn setup(&self) -> Setup {
+    Setup::Guest
+  }
+
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error> {
+    let launch = Launch::new(&self.image, start.dir, start.recipe);
     Ok(Box::new(Vm::start(&launch)?))
   }
 }

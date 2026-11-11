@@ -2,6 +2,7 @@
 # Builds everything an actor or executor needs.
 #   docker build -f images/Dockerfile --target actor --output type=local,dest=OUT .
 #   docker build -f images/Dockerfile --target executor -t needy-executor .
+#   docker build -f images/Dockerfile --target actor-container -t needy-actor .
 ARG KERNEL_VERSION=6.18.62
 ARG FIRECRACKER_VERSION=v1.17.0
 ARG OPENCODE_VERSION=v1.19.5
@@ -175,6 +176,37 @@ COPY --from=kernel /linux/vmlinux /vmlinux
 COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=firecracker /firecracker /firecracker
 COPY --from=needy /needy /needy
+
+# Container actor userland: the actor-root's programs without what only a VM
+# needs: no systemd (a container's `systemd-detect-virt` would name the
+# container anyway) and no sshfs (the runtime mounts the workspace on the
+# host). Its last step turns every program on PATH into a shim
+# (images/container/shim.sh).
+FROM ubuntu:24.04 AS container-root
+ARG OPENCODE_VERSION
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      bash git ripgrep ca-certificates curl iproute2 procps less file xz-utils \
+      pciutils dmidecode lm-sensors util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent \
+ && curl -fsSL https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-x64.tar.gz \
+    | tar xz -C /usr/local/bin opencode \
+ && mkdir -p /.needy/channels
+COPY --from=needy /needy /.needy/needy
+COPY images/container/shim.sh /.needy/shim.sh
+# NOTICE: the PATH directories are Docker's default container PATH,
+# https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19 (as `SYSTEM_PATH`
+# in crates/core-actor/src/guest/init/stubs.rs).
+RUN ln /.needy/needy /.needy/init && ln /.needy/needy /.needy/proxy \
+ && /bin/sh /.needy/shim.sh "" /.needy/proxy /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin \
+ && rm /.needy/shim.sh
+
+# The container actor image, `needy-actor`: one layer, so the copies the
+# shim step made of programs from earlier layers are not stored twice.
+FROM scratch AS actor-container
+COPY --from=container-root / /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENTRYPOINT ["/.needy/init"]
 
 # Executor: a container where routed commands run.
 FROM ubuntu:24.04 AS executor

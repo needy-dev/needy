@@ -9,33 +9,23 @@ use needy_config::profile::{FaultKind, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
 use needy_core::types::RunState;
+use needy_core_actor::host::runtime::Setup;
 
 use crate::run::Run;
 use crate::{Daemon, actor, files};
 
-/// The workspace mounts of `run`: executor directories mounted into the
-/// actor over SFTP.
+/// The workspace mounts of `run` as its actor's init is told them.
 fn mounts(run: &Run) -> Vec<GuestMount> {
-  let mut mounts = Vec::new();
-  for (name, mapping) in &run.profile.files.mappings {
-    if !files::selected(run, name) || mapping.mode != FileMode::Mount {
-      continue;
-    }
-    let (Side::Executor { name: exec, path }, Side::Actor(target)) = (&mapping.from, &mapping.to) else {
-      continue;
-    };
-    let Some(instance) = run.executor(exec) else {
-      continue;
-    };
-    mounts.push(GuestMount {
-      target: target.clone(),
-      executor: exec.clone(),
-      source: path.clone(),
-      writable: mapping.writable,
-      sftp_command: instance.handle.sftp.clone(),
-    });
-  }
-  mounts
+  actor::mounts(run)
+    .into_iter()
+    .map(|m| GuestMount {
+      target: m.target,
+      executor: m.executor,
+      source: m.source,
+      writable: m.writable,
+      sftp_command: m.sftp_command,
+    })
+    .collect()
 }
 
 /// The driving program's working directory when the profile sets no
@@ -60,6 +50,7 @@ impl Guest for Daemon {
   async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
     let run = self.runs.find(run)?;
     let channels = actor::channels(self, &run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
+    let setup = actor::setup(self, &run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
     let profile = &run.profile;
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
@@ -101,7 +92,13 @@ impl Guest for Daemon {
     }));
     // `*` asks the kernel to route every exec.
     let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
-    Ok(GuestConfig {
+    // A runtime that sets the actor up from the host made the mounts, the
+    // hostname and the sensors, and applies the hwmon faults itself; init
+    // is told none of them.
+    // TODO(container-actor): a container actor's uptime is the container's
+    // (lxcfs's `/proc/uptime` when it is mounted); the recipe's offset needs
+    // a time namespace init may not create there.
+    let mut config = GuestConfig {
       run: run.id.clone(),
       user: GuestUser {
         name: user.name.clone(),
@@ -133,7 +130,15 @@ impl Guest for Daemon {
       tty: run.tty,
       process_port: channels.process_port,
       wait_for_attach: run.wait_for_attach,
-    })
+    };
+    if setup == Setup::Host {
+      config.mounts.clear();
+      config.hostname.clear();
+      config.sensors.clear();
+      config.hwmon_faults.clear();
+      config.uptime_offset_secs = 0;
+    }
+    Ok(config)
   }
 
   async fn event(&self, run: &str, time_ms: i64, event: Event) -> Result<(), ControlError> {

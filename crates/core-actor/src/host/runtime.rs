@@ -4,8 +4,8 @@
 //! The daemon serves the actor's guest API and gateway on endpoints the
 //! runtime names, and reaches the process service the actor serves for a
 //! driving program on a terminal the way the runtime says. The transport of
-//! each (a vsock device's Unix sockets under Firecracker) is the runtime's
-//! choice, not the daemon's.
+//! each (a vsock device's Unix sockets under Firecracker, Unix sockets
+//! bind-mounted into a container) is the runtime's choice, not the daemon's.
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
+use needy_config::profile::User;
 use needy_core::recipe::CompiledRecipe;
 
 #[derive(Debug, thiserror::Error)]
@@ -28,19 +29,29 @@ pub enum Error {
   #[error("cannot start firecracker")]
   Spawn(#[source] std::io::Error),
   // NOTICE: the OS error is part of the message and not its `source`, so a
-  // caller that prints the error with its causes says it once.
-  // TODO(container-actor): a runtime that needs no KVM is designed in
-  // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`;
-  // the message names it once it ships. The message itself names no
-  // repository path: a user with only the binary cannot follow one.
+  // caller that prints the error with its causes says it once. The message
+  // names no repository path: a user with only the binary cannot follow one.
   #[error(
-    "this host has no usable KVM: cannot open {}: {error}; every run needs it for its Firecracker actor. Without KVM, commands outside runs still work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
+    "this host has no usable KVM: cannot open {}: {error}; a Firecracker actor needs it. Without KVM, use a container actor (`actor: {{ runtime: container, container: {{ oci_runtime: runsc }} }}`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
     path.display()
   )]
   Kvm {
     path: PathBuf,
     error: std::io::Error,
   },
+  /// The container runtime's Docker daemon refused or failed a request.
+  #[error("{0}")]
+  Docker(String),
+  /// A workspace mount on the host side could not be made.
+  #[error("cannot mount {target} on the host")]
+  Mount {
+    target: String,
+    #[source]
+    source: anyhow::Error,
+  },
+  /// The runtime does not do what was asked.
+  #[error("{0}")]
+  Unsupported(String),
 }
 
 /// Where the daemon and one actor meet. Each runtime chooses the transport;
@@ -55,16 +66,25 @@ pub struct Channels {
   /// driving program on a terminal.
   pub terminal: Terminal,
   /// What the actor's init is told to reach its gateway on: a vsock port
-  /// under Firecracker.
-  // TODO(container-runtime): the guest configuration carries ports only; a
-  // runtime whose actor reaches its channels otherwise extends it (proto
-  // first) with that runtime.
+  /// under Firecracker, 0 where init and the runtime agree on a path.
+  // NOTICE: a container actor's init finds its channels at fixed paths
+  // (`/.needy/channels/*.sock`), as a VM's init dials the fixed vsock port
+  // of the guest API; the guest configuration carries ports only.
+  // TODO(container-runtime): loopback TCP with a per-run token (Docker
+  // Desktop, Apple's `container`) needs the address and token in the guest
+  // configuration, proto first, with the first such runtime.
   pub gateway_port: u32,
   /// What the actor's init is told to serve its process service on.
   pub process_port: u32,
-  /// The socket files these channels leave in the actor's directory, which
+  /// The socket files these channels leave on the daemon's machine, which
   /// the daemon removes when the actor ends.
   pub sockets: Vec<PathBuf>,
+  /// Whether every user in the actor connects to the guest endpoint's file
+  /// itself: a socket bind-mounted into a container keeps its file mode
+  /// there, and the driving program's proxy runs as the profile's user. The
+  /// daemon then opens the socket and its directory to all users once it
+  /// bound them; the run's directory around them stays private on the host.
+  pub guest_for_every_user: bool,
 }
 
 /// Where the daemon listens for an actor's connections on one channel.
@@ -72,7 +92,7 @@ pub struct Channels {
 pub enum Endpoint {
   /// A Unix socket on the daemon's machine. Firecracker forwards the guest's
   /// vsock connections to host port `P` to `v.sock_P`; a Linux container
-  /// actor would have the socket bind-mounted.
+  /// actor has the socket's directory bind-mounted.
   Unix(PathBuf),
   // TODO(container-runtime): loopback TCP with a per-run token, for runtimes
   // whose actors live in a VM that cannot reach a host Unix socket (Docker
@@ -87,9 +107,54 @@ pub enum Terminal {
   /// Firecracker's vsock device: connect to its socket `device`, then ask
   /// for guest port `port`.
   FirecrackerVsock { device: PathBuf, port: u32 },
-  // TODO(container-runtime): a Unix socket bind-mounted into a Linux
-  // container actor, and loopback TCP with a per-run token for VM-backed
-  // container runtimes, with the runtimes that need them.
+  /// A Unix socket the actor's init binds in a directory shared with the
+  /// daemon's machine: a container actor's bind-mounted channels.
+  Unix(PathBuf),
+  // TODO(container-runtime): loopback TCP with a per-run token for VM-backed
+  // container runtimes, with the first such runtime.
+}
+
+/// Who sets up what the driving program sees beyond its own files: the
+/// workspace mounts, and the recipe's hostname and sensors with their
+/// faults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setup {
+  /// The actor's init, inside: a VM has its own kernel to mount and fake
+  /// sensors in.
+  Guest,
+  /// The runtime, from the daemon's machine: a container gets its mounts,
+  /// hostname and identity files from the host, since its init may not
+  /// mount anything.
+  Host,
+}
+
+/// An executor directory mounted into the actor over SFTP, as the daemon
+/// tells a runtime that mounts on the host side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostMount {
+  /// The path in the actor.
+  pub target: String,
+  pub executor: String,
+  /// The directory on the executor.
+  pub source: String,
+  pub writable: bool,
+  /// The executor's `sftp-server` command.
+  pub sftp_command: Vec<String>,
+}
+
+/// What a runtime starts an actor with.
+#[derive(Debug, Clone, Copy)]
+pub struct Start<'a> {
+  /// The run's ID, which names a container actor.
+  pub run: &'a str,
+  /// The actor's directory on the daemon's machine.
+  pub dir: &'a Path,
+  /// The recipe's identity, or a plain machine without one.
+  pub recipe: Option<&'a CompiledRecipe>,
+  /// The profile's user, who owns the home directory and the mounts.
+  pub user: &'a User,
+  /// The workspace mounts, for a runtime whose [`Setup`] is `Host`.
+  pub mounts: &'a [HostMount],
 }
 
 /// The actor's log in its directory `dir`: every runtime writes its actor's
@@ -98,11 +163,12 @@ pub fn log(dir: &Path) -> PathBuf {
   dir.join("console.log")
 }
 
-/// What runs actors on this host: Firecracker today.
-// TODO(container-runtime): `container` (the Docker API through `bollard`:
-// `runc` or `runsc` on Linux, Docker Desktop on macOS and Windows) is slice 2
-// of the container actor runtime design; `apple-container`, then `wsl` and
-// `hyper-v`, come later on the owner's word.
+/// What runs actors on this host: Firecracker, or a container through
+/// Docker.
+// TODO(container-runtime): `apple-container`, then `wsl` and `hyper-v`, come
+// later on the owner's word; Docker Desktop on macOS and Windows needs the
+// loopback TCP transport (see `Endpoint`).
+#[async_trait::async_trait]
 pub trait ActorRuntime: Send + Sync {
   /// The runtime's name, as a profile's `actor.runtime` and `state.db`
   /// spell it.
@@ -110,15 +176,27 @@ pub trait ActorRuntime: Send + Sync {
 
   /// Fails unless this host can run the runtime's actors. A create checks
   /// this before it acquires anything.
-  fn check_host(&self) -> Result<(), Error>;
+  async fn check_host(&self) -> Result<(), Error>;
 
   /// The channels of an actor whose directory is `dir`. The daemon serves
   /// them before it starts the actor.
   fn channels(&self, dir: &Path) -> Channels;
 
-  /// Starts an actor in directory `dir` with `recipe`'s identity, or a
-  /// plain one without a recipe.
-  fn start(&self, dir: &Path, recipe: Option<&CompiledRecipe>) -> Result<Box<dyn RunningActor>, Error>;
+  /// Who mounts the workspace and presents the recipe's hostname and
+  /// sensors.
+  fn setup(&self) -> Setup;
+
+  /// Starts an actor as `start` says.
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error>;
+
+  /// Sets the recipe's temperature sensors of the actor in `dir` to
+  /// `temp_mc` millidegrees, as an hwmon fault does, for a runtime whose
+  /// [`Setup`] is `Host`; under `Guest` the actor's init applies the fault
+  /// itself.
+  fn overheat(&self, dir: &Path, temp_mc: i32) -> Result<(), Error> {
+    let _ = (dir, temp_mc);
+    Err(Error::Unsupported("this actor's sensors are set inside it".into()))
+  }
 }
 
 /// A started actor. The handle owns it: the actor ends on its own after its

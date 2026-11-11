@@ -3,8 +3,8 @@
 //! The rule is deterministic and leaves no choice to chance:
 //!
 //! - `runner: NAME` picks that runner. It must have joined, have the
-//!   capability the instance needs (`actor(firecracker)` for an actor,
-//!   `executor(PROVIDER)` for an executor) and be connected (its control
+//!   capability the instance needs (`actor(RUNTIME)` for an actor of that
+//!   runtime, `executor(PROVIDER)` for an executor) and be connected (its control
 //!   stream open).
 //! - `runner: { labels: [...] }` picks the one connected runner that has the
 //!   capability and carries every label. None is an error naming every
@@ -43,12 +43,8 @@ pub struct Candidate {
 /// What an instance needs of the runner it is placed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
-  /// An actor, which runs in a Firecracker microVM.
-  // TODO(container-runtime): an actor on `actor(container)` once the
-  // container actor runtime is built, see
-  // docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md;
-  // until then a runner that reports only that runtime hosts no actor.
-  Actor,
+  /// An actor of this runtime.
+  Actor(ActorRuntime),
   /// An executor of this provider; `None` for a provider no runner reports
   /// (`containerd`, `firecracker`, `k8s`), which needs the executor role
   /// only and is refused when the run is created.
@@ -56,6 +52,14 @@ pub enum Need {
 }
 
 impl Need {
+  /// What an actor of `runtime` needs.
+  pub fn actor(runtime: needy_config::profile::Runtime) -> Self {
+    Self::Actor(match runtime {
+      needy_config::profile::Runtime::Firecracker => ActorRuntime::Firecracker,
+      needy_config::profile::Runtime::Container => ActorRuntime::Container,
+    })
+  }
+
   /// What an executor of `provider` needs.
   pub fn executor(provider: Provider) -> Self {
     Self::Executor(match provider {
@@ -67,7 +71,7 @@ impl Need {
 
   fn role(self) -> RunnerRole {
     match self {
-      Self::Actor => RunnerRole::Actor,
+      Self::Actor(_) => RunnerRole::Actor,
       Self::Executor(_) => RunnerRole::Executor,
     }
   }
@@ -75,7 +79,7 @@ impl Need {
   /// Whether a runner with `capabilities` can host the instance.
   pub fn met_by(self, capabilities: &Capabilities) -> bool {
     match self {
-      Self::Actor => capabilities.actor.contains(&ActorRuntime::Firecracker),
+      Self::Actor(runtime) => capabilities.actor.contains(&runtime),
       Self::Executor(Some(provider)) => capabilities.executor.contains(&provider),
       Self::Executor(None) => !capabilities.executor.is_empty(),
     }
@@ -85,7 +89,7 @@ impl Need {
 impl fmt::Display for Need {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Actor => write!(f, "actor({})", ActorRuntime::Firecracker),
+      Self::Actor(runtime) => write!(f, "actor({runtime})"),
       Self::Executor(Some(provider)) => write!(f, "executor({provider})"),
       Self::Executor(None) => f.write_str("the executor role"),
     }

@@ -184,10 +184,11 @@ pub struct UnknownRole(pub String);
 pub enum ActorRuntime {
   /// A Firecracker microVM: a usable KVM and the actor image.
   Firecracker,
-  /// gVisor's `runsc` registered with Docker.
-  // TODO(container-runtime): reported only; no actor is scheduled on it until
-  // the container actor runtime is built, see
-  // docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md.
+  /// A container through a Docker daemon that answers. Which OCI runtimes
+  /// (`runc`, gVisor's `runsc`) it has is checked when a run is created.
+  // TODO(runner-actor): the capability does not carry the OCI runtimes; it
+  // needs to once actors run on runners other than the control host's own,
+  // which probes its Docker directly.
   Container,
 }
 

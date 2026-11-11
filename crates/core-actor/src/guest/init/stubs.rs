@@ -1,6 +1,7 @@
 //! Route stubs. The kernel can only route a file that exists, so routed
 //! commands the actor does not have get empty placeholder files on the
-//! driving program's `PATH`.
+//! driving program's `PATH`. A container has no such kernel, so its stubs are
+//! links to the proxy, which asks the daemon for every one.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -15,8 +16,12 @@ pub(in crate::guest) const STUB_DIR: &str = "/run/needy/bin";
 // (`DEFAULT_PATH_COMPAT`, the same string).
 pub(super) const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-/// Creates a stub for each plain command name the actor lacks.
-pub(super) fn create(names: &[String]) {
+/// The proxy, which a container's stubs link to.
+const PROXY: &str = "/.needy/proxy";
+
+/// Creates a stub for each plain command name the actor lacks: an empty
+/// file in a VM, a link to the proxy in a container.
+pub(super) fn create(names: &[String], container: bool) {
   let dir = Path::new(STUB_DIR);
   if let Err(e) = std::fs::create_dir_all(dir) {
     tracing::warn!("cannot create {STUB_DIR}; routed commands the actor lacks are not found: {e}");
@@ -30,7 +35,11 @@ pub(super) fn create(names: &[String]) {
       continue;
     }
     let stub = dir.join(name);
-    let created = std::fs::write(&stub, b"").and_then(|()| std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)));
+    let created = if container {
+      std::os::unix::fs::symlink(PROXY, &stub)
+    } else {
+      std::fs::write(&stub, b"").and_then(|()| std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)))
+    };
     if let Err(e) = created {
       tracing::warn!("cannot create the route stub {}: {e}", stub.display());
     }

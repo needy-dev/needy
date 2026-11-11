@@ -10,8 +10,8 @@
 //!
 //! A control plane that starts finds in `state.db` the runs it left open.
 //! It does not adopt their actors (see [`end_leftover_vm`]): each such run
-//! ends `failed` (`stopped` if it was stopping), its actor's Firecracker is
-//! ended, its control-host containers are removed, and its instances on
+//! ends `failed` (`stopped` if it was stopping), its actor's Firecracker or
+//! container is ended, its control-host containers are removed, and its instances on
 //! runners wait for the runners' reports for [`REPORT_WAIT`]; those nobody
 //! reports by then are marked lost.
 
@@ -161,6 +161,10 @@ impl Daemon {
       let instances = self.state.instances_of(&record.id).await.context("cannot read the instances")?;
       for instance in instances.iter().filter(|i| i.state == InstanceState::Running) {
         match (instance.kind, &instance.runner) {
+          (InstanceKind::Actor, _) if instance.runtime == "container" => {
+            let state = end_leftover_container(instance).await;
+            self.write_instance_state(instance, state, now).await;
+          }
           (InstanceKind::Actor, _) => {
             let state = end_leftover_vm(instance).await;
             self.write_instance_state(instance, state, now).await;
@@ -191,7 +195,7 @@ impl Daemon {
       }
       // The run's profile names its actor's runtime, whose sockets these are.
       match needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), PathBuf::new())) {
-        Ok(profile) => actor::remove_sockets(self, profile.actor.runtime, &self.run_dir(&record.id)),
+        Ok(profile) => actor::remove_sockets(self, &profile.actor, &self.run_dir(&record.id)),
         Err(e) => tracing::warn!("run {}: cannot read its profile to remove its actor's sockets: {e:#}", record.id),
       }
       record.state = if before == RunState::Stopping {
@@ -302,9 +306,6 @@ impl Daemon {
 // NOTICE: the PID is checked against the process's command line, which
 // names the run's `vm.json`, so a PID another process took since is left
 // alone.
-// TODO(container-runtime): this ends a `firecracker` actor only; ending a
-// leftover container actor, chosen by the record's `runtime`, comes with
-// slice 2 of the container actor runtime design.
 async fn end_leftover_vm(instance: &InstanceRecord) -> InstanceState {
   use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal, System, UpdateKind};
   let Some(pid) = instance.pid.and_then(|pid| u32::try_from(pid).ok()) else {
@@ -336,6 +337,29 @@ async fn end_leftover_vm(instance: &InstanceRecord) -> InstanceState {
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
   InstanceState::Ended
+}
+
+/// Ends the container of an actor a previous control plane started, and
+/// detaches its host-side workspace mounts, for the reasons
+/// [`end_leftover_vm`] gives. The container is found by its run's name.
+async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
+  // The OCI runtime and image do not matter for ending a container.
+  let runtime = match needy_core_actor::host::container::Container::new(
+    needy_config::profile::OciRuntime::Runc,
+    needy_config::profile::CONTAINER_IMAGE.into(),
+  ) {
+    Ok(runtime) => runtime,
+    Err(e) => {
+      tracing::warn!("run {}: cannot end its actor's container: {e}", instance.run);
+      return InstanceState::Lost;
+    }
+  };
+  tracing::warn!("run {}: ending its actor's container, which a restarted control plane does not adopt", instance.run);
+  if runtime.end_leftover(&instance.run, Path::new(&instance.handle)).await {
+    InstanceState::Ended
+  } else {
+    InstanceState::Lost
+  }
 }
 
 #[cfg(test)]

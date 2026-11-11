@@ -324,14 +324,11 @@ async fn a_profile_without_an_actor_is_refused_for_its_missing_runtime() {
 }
 
 #[tokio::test]
-async fn a_container_actor_is_refused_and_not_checked_for_kvm() {
+async fn a_container_actor_without_its_options_is_refused_and_not_checked_for_kvm() {
   let served = control().await;
   std::fs::remove_file(served.dir().join("kvm")).unwrap();
 
   let check = check(&served, "actor: { runtime: container }").await;
 
-  assert_eq!(
-    messages(&check),
-    ["error: actor.runtime: the container runtime is not implemented yet; use `firecracker`, which needs /dev/kvm"]
-  );
+  assert_eq!(messages(&check), ["error: actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
 }

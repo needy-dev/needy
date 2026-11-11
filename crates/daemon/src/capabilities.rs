@@ -4,9 +4,9 @@
 //! - `actor(firecracker)`: Linux, a KVM device that opens for reading and
 //!   writing (as Firecracker opens it), and a complete actor image (vmlinux,
 //!   rootfs.ext4 and the patched firecracker).
-//! - `actor(container)`: gVisor's `runsc` registered with a Docker daemon
-//!   that answers. Reported, not scheduled (`TODO(container-runtime)` on
-//!   `needy_core::types::ActorRuntime::Container`).
+//! - `actor(container)`: a Docker daemon that answers. Whether it has the
+//!   OCI runtime a profile names (`runc`, gVisor's `runsc`) and the
+//!   container actor image is checked when the run is created.
 //! - `executor(docker)`: a Docker daemon that answers.
 //! - `executor(native)`: always, on every platform a runner runs on.
 //!
@@ -24,12 +24,6 @@ use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole
 // fails at once. 3 s bounds a daemon that hangs without delaying the
 // runner's join much.
 const DOCKER_WAIT: Duration = Duration::from_secs(3);
-
-/// The name a Docker daemon registers gVisor's runtime under.
-// Reference: https://gvisor.dev/docs/user_guide/install/ (`sudo runsc install`,
-// then `docker run --runtime=runsc`); the page has no versioned permalink,
-// retrieved 2026-11-11.
-const RUNSC: &str = "runsc";
 
 /// What [`probe`] read from this machine: for each fact, the value or why
 /// it is missing.
@@ -64,13 +58,11 @@ pub fn detect(facts: &Facts) -> Detected {
     Err(why) => missing.push(format!("actor(firecracker): {why}")),
   }
   match &facts.docker {
-    Ok(runtimes) => {
+    Ok(_runtimes) => {
       capabilities.executor.insert(ExecutorProvider::Docker);
-      if runtimes.contains(RUNSC) {
-        capabilities.actor.insert(ActorRuntime::Container);
-      } else {
-        missing.push(format!("actor(container): Docker has no {RUNSC} runtime"));
-      }
+      // TODO(runner-actor): the runtimes are not reported with the
+      // capability; see `needy_core::types::ActorRuntime::Container`.
+      capabilities.actor.insert(ActorRuntime::Container);
     }
     Err(why) => {
       missing.push(format!("executor(docker): {why}"));

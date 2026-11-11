@@ -36,10 +36,18 @@ pub(super) fn loopback_up() -> nix::Result<()> {
   Ok(())
 }
 
-/// Forwards the in-guest proxy port to the actor gateway, which the host
-/// serves on vsock port `port`.
-pub(super) async fn forward_gateway(port: u32) {
-  if port == 0 {
+/// Where the host serves the actor gateway.
+#[derive(Debug, Clone)]
+pub(super) enum Gateway {
+  /// A vsock port on the host (a VM's).
+  Vsock(u32),
+  /// A Unix socket bind-mounted into the actor (a container's).
+  Unix(std::path::PathBuf),
+}
+
+/// Forwards the in-guest proxy port to the actor gateway.
+pub(super) async fn forward_gateway(gateway: Gateway) {
+  if matches!(gateway, Gateway::Vsock(0)) {
     return;
   }
   let listener = match tokio::net::TcpListener::bind(GATEWAY_LISTEN).await {
@@ -57,16 +65,28 @@ pub(super) async fn forward_gateway(port: u32) {
         return;
       }
     };
+    let gateway = gateway.clone();
     tokio::spawn(async move {
-      // CID 2 is the host, `VMADDR_CID_HOST`: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131
-      let mut outbound = match tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(2, port)).await {
-        Ok(outbound) => outbound,
-        Err(e) => {
-          tracing::warn!("cannot reach the gateway on vsock port {port}: {e}");
-          return;
+      let copied = match &gateway {
+        Gateway::Vsock(port) => {
+          // CID 2 is the host, `VMADDR_CID_HOST`: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131
+          match tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(2, *port)).await {
+            Ok(mut outbound) => tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await,
+            Err(e) => {
+              tracing::warn!("cannot reach the gateway on vsock port {port}: {e}");
+              return;
+            }
+          }
         }
+        Gateway::Unix(path) => match tokio::net::UnixStream::connect(path).await {
+          Ok(mut outbound) => tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await,
+          Err(e) => {
+            tracing::warn!("cannot reach the gateway at {}: {e}", path.display());
+            return;
+          }
+        },
       };
-      if let Err(e) = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await {
+      if let Err(e) = copied {
         tracing::debug!("gateway connection: {e}");
       }
     });

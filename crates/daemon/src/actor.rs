@@ -14,12 +14,13 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
-use needy_config::profile::Runtime;
+use needy_config::profile::{FaultKind, FileMode, Runtime, Side};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
-use needy_core::types::{Network, RunState};
+use needy_core::types::{Effect, Fired, Network, RunState};
+use needy_core_actor::host::container::Container;
 use needy_core_actor::host::firecracker::{self, Firecracker};
 use needy_core_actor::host::gateway;
-use needy_core_actor::host::runtime::{self, ActorRuntime, Channels, Endpoint, RunningActor, Terminal};
+use needy_core_actor::host::runtime::{self, ActorRuntime, Channels, Endpoint, HostMount, RunningActor, Setup, Start, Terminal};
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
@@ -27,42 +28,78 @@ use crate::pool::Instance;
 use crate::run::Run;
 use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 
-// NOTICE: the guest's state is not kept, so Firecracker gets a short time to
+// NOTICE: the guest's state is not kept, so the actor gets a short time to
 // exit on `SIGTERM` before it is killed; a run's stop waits this long at
-// most for its VM.
+// most for its actor.
 const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
-/// The runtime that runs this host's actors of kind `kind`.
-pub fn runtime(daemon: &Daemon, kind: Runtime) -> Result<Box<dyn ActorRuntime>> {
-  match kind {
+/// The runtime that runs this host's actors as `actor` (a profile's
+/// `actor:`) says.
+pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn ActorRuntime>> {
+  match actor.runtime {
     Runtime::Firecracker => Ok(Box::new(Firecracker {
       image: firecracker::Image::new(&daemon.config.actor_image),
       kvm: daemon.config.kvm.clone(),
     })),
-    // TODO(container-runtime): `validate::profile` refuses a container actor
-    // before a create gets here; slice 2 of
-    // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`
-    // adds the runtime.
-    Runtime::Container => bail!("the container actor runtime is not implemented yet"),
+    Runtime::Container => {
+      // `validate::profile` refuses a container actor without its options
+      // before a create gets here.
+      let Some(options) = &actor.container else {
+        bail!("actor.container is missing");
+      };
+      Ok(Box::new(Container::new(options.oci_runtime, options.image.clone())?))
+    }
   }
 }
 
 /// Where the daemon and `run`'s actor meet, as its runtime names them.
 pub fn channels(daemon: &Daemon, run: &Run) -> Result<Channels> {
-  Ok(runtime(daemon, run.profile.actor.runtime)?.channels(&run.dir))
+  Ok(runtime(daemon, &run.profile.actor)?.channels(&run.dir))
+}
+
+/// Who sets up `run`'s mounts and identity: its actor's init or its
+/// runtime.
+pub fn setup(daemon: &Daemon, run: &Run) -> Result<Setup> {
+  Ok(runtime(daemon, &run.profile.actor)?.setup())
 }
 
 /// Fails unless this host can run `run`'s actor. A create checks this
-/// before it acquires anything, so a host without KVM fails at once.
-pub fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
-  runtime(daemon, run.profile.actor.runtime)?.check_host()?;
+/// before it acquires anything, so a host without KVM, or without the
+/// container's OCI runtime or image, fails at once.
+pub async fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
+  runtime(daemon, &run.profile.actor)?.check_host().await?;
   Ok(())
+}
+
+/// The workspace mounts of `run`: executor directories mounted into the
+/// actor over SFTP.
+pub fn mounts(run: &Run) -> Vec<HostMount> {
+  let mut mounts = Vec::new();
+  for (name, mapping) in &run.profile.files.mappings {
+    if !crate::files::selected(run, name) || mapping.mode != FileMode::Mount {
+      continue;
+    }
+    let (Side::Executor { name: exec, path }, Side::Actor(target)) = (&mapping.from, &mapping.to) else {
+      continue;
+    };
+    let Some(instance) = run.executor(exec) else {
+      continue;
+    };
+    mounts.push(HostMount {
+      target: target.clone(),
+      executor: exec.clone(),
+      source: path.clone(),
+      writable: mapping.writable,
+      sftp_command: instance.handle.sftp.clone(),
+    });
+  }
+  mounts
 }
 
 /// Starts the actor of `run`: its guest listener, its gateway, then the
 /// actor itself.
 pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
-  let runtime = runtime(daemon, run.profile.actor.runtime)?;
+  let runtime = runtime(daemon, &run.profile.actor)?;
   let channels = runtime.channels(&run.dir);
   let actor = run.cancel.child_token();
   if let Err(e) = serve_guest(daemon, run, &channels, &actor).await {
@@ -73,7 +110,20 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     actor.cancel();
     return Err(e);
   }
-  let vm = match runtime.start(&run.dir, run.recipe.as_ref()) {
+  // A runtime that sets the actor up from the host mounts the workspace
+  // itself; a VM's init does it inside.
+  let mounts = match runtime.setup() {
+    Setup::Host => mounts(run),
+    Setup::Guest => Vec::new(),
+  };
+  let start = Start {
+    run: &run.id,
+    dir: &run.dir,
+    recipe: run.recipe.as_ref(),
+    user: &run.profile.user,
+    mounts: &mounts,
+  };
+  let vm = match runtime.start(&start).await {
     Ok(vm) => vm,
     Err(e) => {
       actor.cancel();
@@ -102,8 +152,43 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     ended_ms: None,
   };
   daemon.save_instance(&record).await;
-  run.tasks.spawn(watch(daemon.clone(), run.clone(), runtime.name(), vm, actor));
+  let name = runtime.name();
+  if runtime.setup() == Setup::Host {
+    schedule_hwmon_faults(run, Arc::from(runtime), &actor);
+  }
+  run.tasks.spawn(watch(daemon.clone(), run.clone(), name, vm, actor));
   Ok(())
+}
+
+/// Schedules the run's hwmon faults on an actor whose runtime presents its
+/// sensors from the host: each sets the sensors at its time after the
+/// actor started, and is recorded in the run's trace as a VM's init records
+/// it.
+fn schedule_hwmon_faults(run: &Arc<Run>, runtime: Arc<dyn ActorRuntime>, actor: &CancellationToken) {
+  for fault in run.injector.faults().iter().filter(|f| f.on == FaultKind::Hwmon) {
+    let at = Duration::from_millis(fault.at.map(|d| d.as_millis() as u64).unwrap_or(0));
+    let temp_mc = fault.set.temp_c.map(|c| (c * 1000.0) as i32).unwrap_or(100_000);
+    let (task_run, runtime, actor) = (run.clone(), runtime.clone(), actor.clone());
+    run.tasks.spawn(async move {
+      let run = task_run;
+      tokio::select! {
+        () = actor.cancelled() => return,
+        () = tokio::time::sleep(at) => {}
+      }
+      if let Err(e) = runtime.overheat(&run.dir, temp_mc) {
+        tracing::warn!("run {}: cannot apply the hwmon fault: {e}", run.id);
+        return;
+      }
+      run.emit(&Event::FaultInjected(Fired {
+        kind: FaultKind::Hwmon,
+        target: "coretemp".into(),
+        effect: Effect {
+          temp_mc: Some(temp_mc),
+          ..Effect::default()
+        },
+      }));
+    });
+  }
 }
 
 /// How long an attach waits for the actor's process service: the guest
@@ -120,8 +205,14 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
   let channels = channels(daemon, run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
   let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
   loop {
-    let connect = match &channels.terminal {
-      Terminal::FirecrackerVsock { device, port } => needy_api_client::Client::connect_firecracker_vsock(device, *port),
+    type Connecting<'a> =
+      std::pin::Pin<Box<dyn std::future::Future<Output = Result<needy_api_client::Client, needy_api_client::Error>> + Send + 'a>>;
+    let connect: Connecting<'_> = match &channels.terminal {
+      Terminal::FirecrackerVsock { device, port } => Box::pin(needy_api_client::Client::connect_firecracker_vsock(device, *port)),
+      Terminal::Unix(path) => {
+        let endpoint = format!("unix:{}", path.display());
+        Box::pin(async move { needy_api_client::Client::connect(&endpoint).await })
+      }
     };
     // Bound the connection itself, including the Firecracker handshake:
     // a peer that accepts but never answers must not hold `run attach`.
@@ -162,6 +253,9 @@ async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, actor: &Ca
     run: run.id.clone(),
   };
   let listener = Server::new(health, caller).runs(api.clone()).processes(api.clone()).guest(api).bind(&[listen(&channels.guest)]).await?;
+  if channels.guest_for_every_user {
+    open_to_every_user(&channels.guest)?;
+  }
   let id = run.id.clone();
   let stop = actor.clone();
   run.tasks.spawn(async move {
@@ -169,6 +263,24 @@ async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, actor: &Ca
       tracing::error!("run {id}: guest listener: {e:#}");
     }
   });
+  Ok(())
+}
+
+/// Lets every user in the actor connect to the guest socket at `endpoint`:
+/// the socket and its directory, which the server created private. The
+/// directory is bind-mounted into the actor; on the host the run's
+/// directory around it stays private.
+fn open_to_every_user(endpoint: &Endpoint) -> Result<()> {
+  use std::os::unix::fs::PermissionsExt;
+  let Endpoint::Unix(socket) = endpoint;
+  let mut modes = vec![(socket.as_path(), 0o666)];
+  if let Some(dir) = socket.parent() {
+    modes.push((dir, 0o755));
+  }
+  for (path, mode) in modes {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+      .with_context(|| format!("cannot open {} to the actor", path.display()))?;
+  }
   Ok(())
 }
 
@@ -211,8 +323,8 @@ fn serve_gateway(run: &Run, channels: &Channels, actor: &CancellationToken) -> R
 /// Removes the sockets of an actor of kind `kind` from the run's directory
 /// `dir`: those its channels leave there (the vsock device's and the host
 /// ports' the guest connects to, under Firecracker).
-pub fn remove_sockets(daemon: &Daemon, kind: Runtime, dir: &Path) {
-  let runtime = match runtime(daemon, kind) {
+pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir: &Path) {
+  let runtime = match runtime(daemon, actor) {
     Ok(runtime) => runtime,
     // An actor whose runtime this daemon lacks never started and left none.
     Err(e) => {
@@ -292,8 +404,6 @@ const FAILURE_LOG_LINES: usize = 5;
 /// Why a run whose VM exited before its driving program did failed: the
 /// VM's exit and the last lines of the log Firecracker and the guest's
 /// console share, on one line. `name` is the actor's runtime.
-// TODO(container-runtime): the wording says "VM"; a container actor's
-// failure needs its own with slice 2.
 fn vm_failure(name: &str, exit: &ActorVmExit, log: &Path) -> String {
   let status = match exit {
     ActorVmExit {
@@ -308,7 +418,7 @@ fn vm_failure(name: &str, exit: &ActorVmExit, log: &Path) -> String {
     } => format!("{name} was killed by {signal}"),
     ActorVmExit { .. } => format!("{name} exited"),
   };
-  let mut reason = format!("the actor's VM exited before its driving program did: {status}");
+  let mut reason = format!("the actor exited before its driving program did: {status}");
   match std::fs::read(log) {
     Ok(bytes) => {
       let text = String::from_utf8_lossy(&bytes);

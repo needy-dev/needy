@@ -4,7 +4,7 @@
 //! Creating ──► Running ──► Stopping ──► Stopped
 //!    │            │
 //!    ├──► Failed  ├──► Finished (the actor's driving program exited)
-//!    └──► Finished└──► Failed (the actor's VM exited before it did)
+//!    └──► Finished└──► Failed (the actor exited before it did)
 //! ```
 //!
 //! `Stopped`, `Finished` and `Failed` are terminal: the first one reached

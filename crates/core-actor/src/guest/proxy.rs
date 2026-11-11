@@ -29,8 +29,44 @@ const PASS_ENV: &[&str] = &[
   "NO_COLOR",
 ];
 
+/// One exec the proxy decides: what the executor is told, and what runs
+/// when the decision keeps it in the actor.
+pub(super) struct Invocation {
+  /// The program as the executor sees it: the path the original `execve`
+  /// named (see [`command`]).
+  pub path: String,
+  /// The original argv.
+  pub args: Vec<String>,
+  pub local: Local,
+}
+
+/// What runs in the actor when the daemon keeps an exec there.
+pub(super) enum Local {
+  /// This program, with the original argv.
+  Program(String),
+  /// Nothing: a route stub stands for a program the actor does not have.
+  Missing,
+}
+
+/// The proxy as `binfmt_needy` (in a VM) or a route stub (in a container)
+/// starts it, as `/.needy/proxy`.
 pub(super) fn main() -> ! {
-  let code = super::runtime().block_on(proxy()).unwrap_or_else(|e| {
+  let path = exec_path();
+  let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+  // In a VM the kernel runs a stub's empty file only through the proxy; in
+  // a container the stub is a link to the proxy itself. Either way a stub
+  // has no program to run here.
+  let local = if Path::new(&path).starts_with(STUB_DIR) {
+    Local::Missing
+  } else {
+    Local::Program(path.clone())
+  };
+  run(Invocation { path, args, local })
+}
+
+/// Decides `invocation` with the daemon and runs it; exits with its status.
+pub(super) fn run(invocation: Invocation) -> ! {
+  let code = super::runtime().block_on(proxy(invocation)).unwrap_or_else(|e| {
     message(format_args!("{e:#}"));
     126
   });
@@ -45,7 +81,7 @@ fn message(message: impl std::fmt::Display) {
 
 /// The path the original `execve` named. argv[0] is the command's own and
 /// `/proc/self/exe` is the proxy, so only the auxiliary vector has it.
-fn exec_path() -> String {
+pub(super) fn exec_path() -> String {
   // NOTICE: neither std nor nix reads the auxiliary vector; `getauxval` is
   // the libc call for it. `AT_EXECFN` points into this process's stack and
   // lives as long as the process.
@@ -56,9 +92,8 @@ fn exec_path() -> String {
   unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
-async fn proxy() -> Result<i32> {
-  let path = exec_path();
-  let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+async fn proxy(invocation: Invocation) -> Result<i32> {
+  let Invocation { path, args, local } = invocation;
   let argv = command(&path, &args);
   let cwd = std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
   let env: HashMap<String, String> = std::env::vars().collect();
@@ -83,7 +118,13 @@ async fn proxy() -> Result<i32> {
     return Ok(126);
   }
   if decision.target == "actor" || decision.target.is_empty() {
-    exec_local(&path, &args);
+    match local {
+      Local::Program(program) => exec_local(&program, &args),
+      Local::Missing => {
+        message(format_args!("{}: command not found", argv.first().map(String::as_str).unwrap_or_default()));
+        return Ok(127);
+      }
+    }
   }
   let mut pass: HashMap<String, String> = PASS_ENV.iter().filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
   pass.extend(decision.env);
@@ -184,7 +225,7 @@ fn refused(kind: Kind) -> Option<i32> {
 }
 
 /// Runs the real program here. The kernel does not route execs made by the
-/// proxy.
+/// proxy, and in a container `path` is the real program, not its shim.
 fn exec_local(path: &str, args: &[String]) -> ! {
   // NOTICE: a path or argument from `execve` cannot hold a NUL byte.
   let program = CString::new(path).unwrap_or_default();

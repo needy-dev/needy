@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub use actor::{Actor, Limits, Runtime};
+pub use actor::{Actor, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime, Runtime};
 pub use chaos::{Chaos, Fault, FaultKind, Readings};
 pub use executor::{Cpus, Device, Docker, DockerBuild, Executor, Gpus, MemorySwap, Mount, OnFull, Provider, Ulimit};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};

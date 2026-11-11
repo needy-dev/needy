@@ -124,6 +124,111 @@ fn every_kernel_build_variable_of_a_recipe_is_an_arg_of_the_kernel_stage() {
   }
 }
 
+/// A root file system in `dir` for the shim script: the proxy, merged
+/// `/usr` with `/bin` a link to `usr/bin`, and the files `files` (path,
+/// content, mode) and links `links` (path, target) under it. Returns its
+/// physical path.
+fn image_root(dir: &Path, files: &[(&str, &str, u32)], links: &[(&str, &str)]) -> PathBuf {
+  let root = std::fs::canonicalize(dir).unwrap();
+  for (path, content, mode) in [(".needy/proxy", "proxy", 0o755)].iter().chain(files) {
+    let path = root.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, content).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(*mode)).unwrap();
+  }
+  std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+  std::os::unix::fs::symlink("usr/bin", root.join("bin")).unwrap();
+  for (path, target) in links {
+    std::os::unix::fs::symlink(target, root.join(path)).unwrap();
+  }
+  root
+}
+
+/// Runs `images/container/shim.sh` on `root` with the PATH directories
+/// `/usr/local/bin`, `/usr/bin` and `/bin`.
+fn shim(root: &Path) {
+  let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/container/shim.sh");
+  let status =
+    std::process::Command::new("sh").arg(script).arg(root).args(["/.needy/proxy", "/usr/local/bin", "/usr/bin", "/bin"]).status().unwrap();
+  assert!(status.success(), "shim.sh: {status}");
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+  let (a, b) = (std::fs::metadata(a).unwrap(), std::fs::metadata(b).unwrap());
+  (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+#[test]
+fn the_shim_stage_moves_each_program_to_needy_real_and_links_the_proxy_in_its_place() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/bin/tool", "#!/bin/sh\necho tool\n", 0o755)], &[]);
+
+  shim(&root);
+
+  let real = root.join(".needy/real/usr/bin/tool");
+  assert_eq!(std::fs::read_to_string(&real).unwrap(), "#!/bin/sh\necho tool\n");
+  assert_eq!(std::fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o755);
+  assert!(same_file(&root.join("usr/bin/tool"), &root.join(".needy/proxy")), "usr/bin/tool is not the proxy");
+}
+
+#[test]
+fn the_shim_stage_shims_a_directory_reached_through_a_link_once() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/bin/tool", "tool", 0o755)], &[]);
+
+  shim(&root);
+
+  // `/bin` is `usr/bin`: no `/.needy/real/bin`, and the proxy is not copied
+  // as a real program on a second pass.
+  assert!(!root.join(".needy/real/bin").exists());
+  assert_eq!(std::fs::read_to_string(root.join(".needy/real/usr/bin/tool")).unwrap(), "tool");
+}
+
+#[test]
+fn the_shim_stage_leaves_files_that_are_not_programs() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/bin/notes", "data", 0o644)], &[]);
+
+  shim(&root);
+
+  assert_eq!(std::fs::read_to_string(root.join("usr/bin/notes")).unwrap(), "data");
+  assert!(!root.join(".needy/real/usr/bin/notes").exists());
+}
+
+#[test]
+fn a_link_to_a_shimmed_program_stays_a_link() {
+  // `python3` -> `python3.12`: the link ends at a shim, which finds the
+  // real `python3.12` and keeps the name `python3` the caller used.
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/bin/python3.12", "py", 0o755)], &[("usr/bin/python3", "python3.12")]);
+
+  shim(&root);
+
+  assert_eq!(std::fs::read_link(root.join("usr/bin/python3")).unwrap(), Path::new("python3.12"));
+  assert!(!root.join(".needy/real/usr/bin/python3").exists());
+}
+
+#[test]
+fn a_link_to_a_program_elsewhere_becomes_a_shim_whose_real_program_is_that_link() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/lib/tool/bin/tool", "tool", 0o755)], &[("usr/bin/tool", "../lib/tool/bin/tool")]);
+
+  shim(&root);
+
+  assert!(same_file(&root.join("usr/bin/tool"), &root.join(".needy/proxy")), "usr/bin/tool is not the proxy");
+  assert_eq!(std::fs::read_link(root.join(".needy/real/usr/bin/tool")).unwrap(), Path::new("/usr/lib/tool/bin/tool"));
+}
+
+#[test]
+fn a_dangling_link_is_left_alone() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[], &[("usr/bin/gone", "nowhere")]);
+
+  shim(&root);
+
+  assert_eq!(std::fs::read_link(root.join("usr/bin/gone")).unwrap(), Path::new("nowhere"));
+}
+
 /// The `RUN` instructions of `images/Dockerfile`, each with its continued
 /// lines joined.
 fn run_instructions() -> Vec<String> {

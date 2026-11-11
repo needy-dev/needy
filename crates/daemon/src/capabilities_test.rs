@@ -25,11 +25,11 @@ fn mac() -> Facts {
 }
 
 #[test]
-fn a_kvm_host_with_docker_hosts_firecracker_actors_and_docker_and_native_executors() {
+fn a_kvm_host_with_docker_hosts_both_actor_runtimes_and_docker_and_native_executors() {
   let detected = detect(&kvm_host());
 
-  assert_eq!(detected.capabilities.to_string(), "actor(firecracker) executor(docker,native)");
-  assert_eq!(detected.missing, ["actor(container): Docker has no runsc runtime"]);
+  assert_eq!(detected.capabilities.to_string(), "actor(container,firecracker) executor(docker,native)");
+  assert!(detected.missing.is_empty(), "{:?}", detected.missing);
 }
 
 #[test]
@@ -48,10 +48,12 @@ fn a_machine_without_kvm_or_docker_hosts_native_executors_only() {
 }
 
 #[test]
-fn runsc_registered_with_docker_is_the_container_actor_runtime() {
+fn a_docker_daemon_without_kvm_hosts_container_actors() {
+  // `runc` is Docker's default runtime; which OCI runtime a profile names
+  // is checked when its run is created.
   let facts = Facts {
     firecracker: Err("cannot open /dev/kvm: No such file or directory".into()),
-    docker: runtimes(&["runc", "runsc"]),
+    docker: runtimes(&["runc"]),
   };
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(container) executor(docker,native)");
@@ -65,7 +67,7 @@ fn roles_restrict_what_was_detected() {
 
   assert_eq!(capabilities.to_string(), "executor(docker,native)");
   assert!(warnings.is_empty(), "{warnings:?}");
-  assert_eq!(restrict(&detect(&kvm_host()), None).0.to_string(), "actor(firecracker) executor(docker,native)");
+  assert_eq!(restrict(&detect(&kvm_host()), None).0.to_string(), "actor(container,firecracker) executor(docker,native)");
 }
 
 #[test]
