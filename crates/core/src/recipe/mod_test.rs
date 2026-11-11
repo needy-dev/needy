@@ -420,3 +420,63 @@ fn hiding_a_feature_in_a_cpuid_entry_the_hosts_kvm_supports_modifies_it() {
   assert!(modified_entries(&c.cpu_template).contains(&("0x7".into(), "0x1".into())));
   assert!(c.findings.is_empty(), "{:?}", c.findings);
 }
+
+/// The `/proc/cpuinfo` flags of a Cascade Lake host that matter to the
+/// Broadwell check: what Broadwell-EP requires and the Cascade Lake features
+/// Broadwell lacks.
+// Source: LLVM 21.1.0's `cascadelake` features, the Skylake-SP/Cascade Lake
+// list cited at `MODELS` in `cpu.rs`
+// (https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/llvm/lib/Target/X86/X86.td#L991-L1029),
+// named as Linux shows them.
+fn cascade_lake_flags() -> HostInfo {
+  let flags = [
+    "avx2",
+    "bmi2",
+    "adx",
+    "avx512f",
+    "avx512dq",
+    "avx512cd",
+    "avx512bw",
+    "avx512vl",
+    "avx512_vnni",
+    "clflushopt",
+    "clwb",
+    "pku",
+    "ospke",
+  ];
+  HostInfo {
+    flags: flags.iter().map(|f| f.to_string()).collect(),
+    model_name: "Intel(R) Xeon(R) CPU @ 2.80GHz".into(),
+    ..HostInfo::default()
+  }
+}
+
+// ROOT CAUSE:
+//
+// If `examples/opencode/gce.recipe.yaml`, which looks like a Broadwell Xeon,
+// was checked on a Cascade Lake host, `profile check` warned that the host
+// exposes `avx512f`, because the recipe hid the post-Broadwell features
+// except the AVX-512 family.
+//
+// Before the fix, the guest of the Broadwell recipe saw AVX-512.
+// The fix hides the AVX-512 features in the example recipe.
+#[test]
+fn the_broadwell_example_recipe_hides_what_a_cascade_lake_host_adds() {
+  let recipe = load(include_str!("../../../../examples/opencode/gce.recipe.yaml"));
+
+  let c = compile(&recipe, &cascade_lake_flags(), 7);
+
+  let messages: Vec<_> = c.findings.iter().map(|f| f.to_string()).collect();
+  assert!(messages.is_empty(), "{messages:?}");
+  let hidden = &recipe.cpu.features.hide;
+  for feature in [
+    "avx512f",
+    "avx512dq",
+    "avx512cd",
+    "avx512bw",
+    "avx512vl",
+    "avx512_vnni",
+  ] {
+    assert!(hidden.iter().any(|h| h == feature), "{feature} is not hidden: {hidden:?}");
+  }
+}
