@@ -625,7 +625,7 @@ fn profile_check_compiles_a_built_in_recipe() {
   // The host CPU decides whether the recipe has findings, so only the
   // compiled machine is checked here.
   let text = stdout(&output);
-  assert!(text.contains("recipe: 2 vCPU, 4096 MiB"), "{text}{}", stderr(&output));
+  assert!(text.contains("recipe: 2 vCPU, 8192 MiB"), "{text}{}", stderr(&output));
   assert!(text.contains("  smbios: sys_vendor=Google, product_name=Google Compute Engine,"), "{text}");
 }
 
@@ -646,11 +646,11 @@ fn profile_check_says_which_recipe_values_each_run_generates() {
   let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 
   let text = stdout(&output);
-  assert!(text.contains("recipe: 2 vCPU, 4096 MiB, hostname generated per run, uptime offset"), "{text}{}", stderr(&output));
+  assert!(text.contains("recipe: 2 vCPU, 8192 MiB, hostname generated per run, uptime offset"), "{text}{}", stderr(&output));
   assert!(!text.contains("Some("), "{text}");
   assert!(text.contains("serial=generated per run"), "{text}");
   assert!(text.contains("uuid=generated per run"), "{text}");
-  assert!(text.contains("  cpu brand: Intel(R) Xeon(R) CPU @ 2.20GHz\n"), "{text}");
+  assert!(text.contains("  cpu brand: Intel(R) Xeon(R) CPU @ 2.80GHz\n"), "{text}");
 }
 
 #[test]

@@ -51,12 +51,22 @@ devices:
     # revision 02 from public `lspci` output of an i7-12700K,
     # https://web.archive.org/web/20250420225942/https://forum.proxmox.com/threads/proxmox-freezing.156753/
     host_bridge: "8086:4668:02"
-  # TODO(provenance): the idle readings (coretemp 34 C, nvme 33 C, acpitz
-  # 27.8 C), load gain and noise name no capture or public source.
+  # Source: `sensors` on an OptiPlex 7000 running Ubuntu 22.04,
+  # https://github.com/linuxhw/Sensors/blob/2b4210eb2e8686d7841e8919b019c7e34a1bdb6c/Desktop/Dell/OptiPlex/OptiPlex%207000/7241B617E4E3/UBUNTU-22.04/5.17.0-051700-GENERIC/X86_64/6AAE7C23AD
+  # (Package id 0 +38.0 C, cores +32.0 to +37.0 C, Core 4 +34.0 C; nvme
+  # Composite +32.9 C). None of the 4 OptiPlex 7000 sensor logs in
+  # https://github.com/linuxhw/Sensors/tree/2b4210eb2e8686d7841e8919b019c7e34a1bdb6c/Desktop/Dell/OptiPlex/OptiPlex%207000
+  # has an acpitz chip, so the recipe has none.
+  # load_gain_c and noise_c are needy's model, not a measurement: the values
+  # the fake coretemp uses (6 C per unit of load, under 1 C of noise; see
+  # images/kernel/fake_coretemp.c).
+  # TODO(sensor-model): only coretemp's idle_c reaches the guest (`apply` in
+  # crates/core-actor/src/guest/init/identity.rs); load_gain_c, noise_c and
+  # the nvme chip are not sent, until the owner approves fake nvme and
+  # per-recipe load and noise parameters.
   sensors:
-    - { chip: coretemp, per_core: true, idle_c: 34, load_gain_c: 7, noise_c: 1.5 }
-    - { chip: nvme, idle_c: 33 }
-    - { chip: acpitz, idle_c: 27.8 }
+    - { chip: coretemp, per_core: true, idle_c: 34, load_gain_c: 6, noise_c: 1 }
+    - { chip: nvme, idle_c: 32.9 }
 network:
   # Source: https://github.com/systemd/systemd/blob/v257/man/systemd.net-naming-scheme.xml#L596-L602
   # (`enp0s31f6`, the onboard I219 at 00:1f.6); OUI b0:7b:25 is Dell Inc.,

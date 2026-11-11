@@ -300,6 +300,95 @@ fn the_dell_builtin_matches_its_cited_probe_and_kernel_build() {
   assert_eq!(smbios.chassis_type, Some(3), "Desktop");
 }
 
+/// Whether `c`'s CPU template clears `feature`'s CPUID bit.
+fn hides(c: &CompiledRecipe, feature: &str) -> bool {
+  let (leaf, subleaf, register, bit) = feature_bit(feature).unwrap();
+  let modifiers = c.cpu_template["cpuid_modifiers"].as_array().unwrap();
+  let Some(entry) = modifiers.iter().find(|m| m["leaf"] == format!("{leaf:#x}") && m["subleaf"] == format!("{subleaf:#x}")) else {
+    return false;
+  };
+  let Some(bitmap) = entry["modifiers"].as_array().unwrap().iter().find(|m| m["register"] == register) else {
+    return false;
+  };
+  bitmap["bitmap"].as_str().unwrap().as_bytes()[2 + 31 - bit as usize] == b'0'
+}
+
+// ROOT CAUSE:
+//
+// If the GCE built-in was used, it showed a Cascade Lake at 2.20GHz, which
+// GCE offers only on its A2 and G2 GPU machine types, in a 2-vCPU, 4 GiB VM
+// that no GCE machine type is, and it hid none of the features a GCE
+// Cascade Lake VM does not show.
+//
+// Before the fix, the brand said `@ 2.20GHz`, memory was 4096 MiB and a
+// newer host's pku, umip, sha_ni and avx_vnni showed through.
+// The fix makes it the n2-standard-2 of the cited Spare Cores captures:
+// `@ 2.80GHz`, 8 GiB, and every feature its `lscpu` flags lack hidden.
+#[test]
+fn the_gce_builtin_is_the_cited_n2_standard_2() {
+  let c = builtin("gce-ubuntu-22.04", 1);
+
+  assert_eq!(c.identity.cpu_brand.as_deref(), Some("Intel(R) Xeon(R) CPU @ 2.80GHz"));
+  assert_eq!((c.vcpus, c.mem_mib), (2, 8192));
+  assert_eq!(c.identity.smbios.as_ref().unwrap().chassis_type, Some(1), "Other");
+  let modifiers = c.cpu_template["cpuid_modifiers"].as_array().unwrap();
+  let leaf1 = modifiers.iter().find(|m| m["leaf"] == "0x1").unwrap()["modifiers"].as_array().unwrap();
+  let eax = leaf1.iter().find(|m| m["register"] == "eax").unwrap()["bitmap"].as_str().unwrap();
+  assert_eq!(eax, format!("0b{:032b}", 0x0005_0657), "family 6, model 85, stepping 7");
+  for feature in [
+    "pku",
+    "ospke",
+    "umip",
+    "rdpid",
+    "sha_ni",
+    "gfni",
+    "vaes",
+    "avx_vnni",
+    "serialize",
+  ] {
+    assert!(hides(&c, feature), "{feature}");
+  }
+  for feature in ["avx512f", "avx512_vnni", "clwb", "rtm", "avx512_bf16"] {
+    assert!(!hides(&c, feature), "{feature}");
+  }
+}
+
+// The KVM host in `testdata` is a Raptor Lake without AVX-512: the N2
+// identity cannot run there, and the check says why rather than warning
+// about features the recipe already hides.
+#[test]
+fn the_gce_builtin_on_a_raptor_lake_host_needs_avx512_and_hides_the_rest() {
+  let recipe = needy_config::recipe::load(&Source::builtin("gce-ubuntu-22.04")).unwrap();
+
+  let c = compile(&recipe, &raptor_lake(), 1);
+
+  let errors: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Error).map(|f| f.message.clone()).collect();
+  assert!(errors.iter().any(|e| e.starts_with("cpu.features.require needs avx512_vnni")), "{errors:?}");
+  assert!(errors.iter().any(|e| e.starts_with("Skylake-SP/Cascade Lake needs avx512f")), "{errors:?}");
+  let warnings: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Warning).collect();
+  assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+// ROOT CAUSE:
+//
+// If the Dell built-in was compiled, its sensors were an acpitz chip and
+// idle readings no OptiPlex 7000 log shows, and a 7 C load gain the fake
+// coretemp does not use, because the values were typed in.
+//
+// Before the fix, the sensors were coretemp 34 C (gain 7, noise 1.5), nvme
+// 33 C and acpitz 27.8 C.
+// The fix takes coretemp 34 C and nvme 32.9 C from the cited linuxhw
+// `sensors` log, drops acpitz, which no OptiPlex 7000 log has, and states
+// the fake's own gain and noise.
+#[test]
+fn the_dell_builtin_sensors_are_the_cited_optiplex_7000_log() {
+  let c = builtin("dell-optiplex-ubuntu-24.04", 1);
+
+  let chips: Vec<_> = c.sensors.iter().map(|s| (s.chip.as_str(), s.idle_mc)).collect();
+  assert_eq!(chips, [("coretemp", 34000), ("nvme", 32900)]);
+  assert_eq!((c.sensors[0].load_gain_mc, c.sensors[0].noise_mc), (6000, 1000));
+}
+
 // ROOT CAUSE:
 //
 // If a GCE identity carried an AWS MAC such as AWS's own documented example
@@ -326,7 +415,7 @@ fn builtins_compile() {
     assert!(c.findings.is_empty(), "{name}: {:?}", c.findings);
   }
   let dell = compile(&load("extends: builtin:dell-optiplex-ubuntu-24.04"), &HostInfo::default(), 3);
-  assert_eq!(dell.sensors.len(), 3);
+  assert_eq!(dell.sensors.len(), 2);
   assert_eq!(dell.sensors[0].idle_mc, 34000);
   assert_eq!(dell.identity.smbios.as_ref().unwrap().chassis_type, Some(3));
 }

@@ -55,12 +55,12 @@ fn a_recipe_with_pci_bridges_sizes_the_vm_and_enables_pci() {
 
   let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe));
 
-  assert_eq!((launch.vcpus, launch.mem_mib), (2, 4096));
+  assert_eq!((launch.vcpus, launch.mem_mib), (2, 8192));
   assert_eq!(
     launch.config["boot-source"]["boot_args"],
     "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4"
   );
-  assert_eq!(launch.config["machine-config"], json!({"vcpu_count": 2, "mem_size_mib": 4096}));
+  assert_eq!(launch.config["machine-config"], json!({"vcpu_count": 2, "mem_size_mib": 8192}));
   assert_eq!(launch.config["cpu-config"], recipe.cpu_template);
   assert_eq!(
     launch.args,
@@ -79,7 +79,7 @@ fn the_firecracker_environment_carries_the_recipe_identity() {
 
   let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
 
-  assert_eq!(env["NEEDY_BRAND_STRING"], "Intel(R) Xeon(R) CPU @ 2.20GHz");
+  assert_eq!(env["NEEDY_BRAND_STRING"], "Intel(R) Xeon(R) CPU @ 2.80GHz");
   assert_eq!(env["NEEDY_HIDE_HYPERVISOR"], "1");
   assert_eq!(env["NEEDY_PCI_HOST_BRIDGE"], "8086:1237:02");
   assert_eq!(env["NEEDY_PCI_ISA_BRIDGE"], "8086:7110:03");

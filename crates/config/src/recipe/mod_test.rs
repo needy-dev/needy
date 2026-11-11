@@ -35,8 +35,8 @@ fn a_built_in_recipe_has_its_identity() {
   let dmi = r.firmware.dmi.as_ref().unwrap();
   assert_eq!(dmi.chassis_type, Some(ChassisType::Name("desktop".into())));
   assert_eq!(dmi.bios.version.as_deref(), Some("1.7.3"));
-  assert_eq!(r.devices.sensors.len(), 3);
-  assert_eq!(r.devices.sensors[2].idle_c, 27.8);
+  assert_eq!(r.devices.sensors.len(), 2);
+  assert_eq!(r.devices.sensors[1].idle_c, 32.9);
   assert_eq!(r.network.mac.as_ref().map(|t| t.as_str()), Some("b0:7b:25:{seq}:12:34"));
 }
 
@@ -60,7 +60,7 @@ devices:
   )
   .unwrap();
 
-  assert_eq!(r.cpu.brand.as_deref(), Some("Intel(R) Xeon(R) CPU @ 2.20GHz"));
+  assert_eq!(r.cpu.brand.as_deref(), Some("Intel(R) Xeon(R) CPU @ 2.80GHz"));
   assert_eq!(
     r.cpu.signature,
     Some(Signature {

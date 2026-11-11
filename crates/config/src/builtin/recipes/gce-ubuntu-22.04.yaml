@@ -1,26 +1,55 @@
-# A Google Compute Engine VM running Ubuntu 22.04. Cloud VMs show a
-# hypervisor, so the hypervisor bit stays visible.
+# A Google Compute Engine n2-standard-2 VM running Ubuntu 22.04. Cloud VMs
+# show a hypervisor, so the hypervisor bit stays visible.
 #
-# Provenance (checked 2026-11-10; inventory in
+# Provenance (checked 2026-11-11; inventory in
 # docs/ai/references/architecture/2026-11-10-provenance-inventory-evidence.md):
 # - DMI strings: public `dmidecode` output from GCE VMs, e.g.
 #   https://github.com/sosreport/sos/issues/2699#issuecomment-925894041
 #   (an issue page, not pinned); cloud-init's GCE check reads the same values,
 #   https://github.com/canonical/cloud-init/blob/c9b9eef30252f6470e0b132d831ceb4de2521c38/cloudinit/sources/DataSourceGCE.py#L323-L335
 #   Reference: https://web.archive.org/web/20240225130331/https://cloud.google.com/compute/docs/instances/detect-compute-engine
+# - The n2-standard-2 captures cited below are Spare Cores Inspector runs on
+#   a real n2-standard-2 (https://github.com/SpareCores/sc-inspector, the
+#   tool; each `meta.json` next to a `stdout` has the capture date).
 cpu:
-  # Source: https://web.archive.org/web/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms
-  # (Cascade Lake Platinum 8273CL, 2.2 GHz base); CPUID 50657h = family 6,
-  # model 85, stepping 7 in Intel spec update 338848 Rev 028, p. 12,
+  # Source: https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/n2-standard-2/0/lscpu/stdout
+  # (`lscpu -J` on an n2-standard-2, captured 2025-01-10): model name
+  # `Intel(R) Xeon(R) CPU @ 2.80GHz`, family 6, model 85, stepping 7, 1 core
+  # with 2 threads. N2 VMs up to 80 vCPUs default to Cascade Lake, the Xeon
+  # Gold 6268CL at 2.8 GHz base, and the guest reports the base frequency,
+  # https://web.archive.org/web/20241231005450/https://cloud.google.com/compute/docs/general-purpose-machines
+  # and https://web.archive.org/web/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms
+  # CPUID 50657h = family 6, model 85, stepping 7 in Intel spec update 338848
+  # Rev 028, p. 12,
   # https://cdrdv2-public.intel.com/338848/338848_2nd%20Gen%20Intel%C2%AE%20Xeon%C2%AE%20Scalable%20Processors%20Specification%20Update_Rev028US.pdf
-  # REVIEW: the archived page lists that 2.2 GHz Cascade Lake only for the
-  # A2 and G2 GPU machine types; a 2-vCPU, 4 GiB VM without a GPU (N1, N2,
-  # E2) would show Broadwell at 2.20GHz (model 79) or Cascade Lake at 2.80GHz.
-  brand: "Intel(R) Xeon(R) CPU @ 2.20GHz"
+  brand: "Intel(R) Xeon(R) CPU @ 2.80GHz"
   signature: { family: 6, model: 85, stepping: 7 }
   hypervisor: visible
-  topology: { cores: 2, threads_per_core: 1 }
-memory: 4GiB
+  features:
+    # Every FEATURES entry in crates/core/src/recipe/cpu.rs that the
+    # n2-standard-2 `lscpu` flags above do not list. GCE hides pku and ospke
+    # and shows no umip or rdpid, though a Cascade Lake host has them; the
+    # rest are newer than Cascade Lake.
+    # NOTICE: avx512_bf16 (leaf 7, subleaf 1) is not hidden: hosts without
+    # that subleaf, such as Cascade Lake, warn that hiding it has no effect,
+    # and it only shows on Cooper Lake and later.
+    hide: [mpx, avx512ifma, avx512pf, avx512er, sha_ni, avx512vbmi, umip, pku, ospke,
+           waitpkg, avx512_vbmi2, gfni, vaes, vpclmulqdq, avx512_bitalg, avx512_vpopcntdq,
+           la57, rdpid, movdiri, movdir64b, avx512_vp2intersect, serialize, tsxldtrk,
+           pconfig, amx_bf16, avx512_fp16, amx_tile, amx_int8, avx_vnni]
+    # avx512_vnni is what the N2 flags show beyond Skylake-SP's AVX-512 (which
+    # the Cascade Lake model in cpu.rs already requires).
+    # TODO(gce-tsx): the flags also show hle and rtm; they are not required, so
+    # a host with TSX disabled still runs the recipe and its guest lacks them.
+    # Requiring them waits for an owner decision on TSX-less hosts.
+    require: [avx512_vnni]
+  # TODO(actor-smt): the actor does not set Firecracker's `smt`, so the guest
+  # sees these 2 vCPUs as 2 cores of 1 thread, not GCE's 1 core of 2 threads;
+  # see `machine-config` in crates/core-actor/src/host/vm.rs.
+  topology: { cores: 1, threads_per_core: 2 }
+# Source: the archived general-purpose machines page above: n2-standard-2 is
+# 2 vCPUs and 8 GB.
+memory: 8GiB
 os:
   image: ubuntu:22.04
   kernel:
@@ -33,8 +62,15 @@ os:
     release: 6.5.0-1020-gcp
     version: "#20~22.04.1-Ubuntu SMP Wed May  1 02:03:24 UTC 2024"
     build: { user: buildd, host: lcy02-amd64-115 }
-  # TODO(provenance): the `instance-` prefix (the Cloud Console's default VM
-  # name) has no cited source.
+  # Source: Google does not document the Cloud Console's default VM name;
+  # public create commands with the label the Console's "Equivalent code"
+  # adds (`goog-ec-src=vm_add-gcloud`) name the VM `instance-` and the
+  # creation time as `YYYYMMDD-HHMMSS`, e.g.
+  # https://github.com/pradeepgadde/blog/blob/13557403fdef8335afe2833c8150ac7e602ada3c/_posts/2024-05-17-gcp-gce-windows.md?plain=1#L36-L38
+  # TODO(hostname-time): the Console's suffix is `YYYYMMDD-HHMMSS`; recipes
+  # have only `{hash}` and `{seq}` (`fill_placeholders` in
+  # crates/core/src/recipe/identity.rs), so the suffix stays `{hash}` until
+  # the owner approves a time placeholder.
   hostname: "instance-{hash}"
 firmware:
   dmi:
@@ -44,8 +80,9 @@ firmware:
     bios: { vendor: Google, version: Google, date: 01/01/2011 }
     board_vendor: Google
     board_name: Google Compute Engine
-    # TODO(provenance): no public GCE SMBIOS type 3 dump was found for
-    # "Other" (1).
+    # Source: `dmidecode` on an n2-standard-2 (captured 2026-07-31), type 3
+    # "Chassis Information", `Type: Other`,
+    # https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/n2-standard-2/0/dmidecode/stdout
     chassis_type: other
     # Real GCE serials are `GoogleCloud-` and `Board-GoogleCloud-` followed by
     # the 32 upper-case hex digits of the system UUID (the sos issue above:
