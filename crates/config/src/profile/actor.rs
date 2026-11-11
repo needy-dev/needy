@@ -42,12 +42,17 @@ pub struct Actor {
 
 /// What runs an actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Runtime {
   /// A Firecracker microVM; needs `/dev/kvm`.
   Firecracker,
   /// An OCI container through Docker, for hosts without KVM.
   Container,
+  /// Experimental (proof of concept): the driving program as a process on
+  /// this Mac, fenced by a Seatbelt profile, with shims on its `PATH`. No
+  /// VM and no identity. See
+  /// `docs/ai/references/architecture/2026-11-12-macos-native-actor-poc.md`.
+  MacosNative,
 }
 
 /// A container actor's options.
@@ -99,6 +104,7 @@ impl Runtime {
     match self {
       Runtime::Firecracker => "firecracker",
       Runtime::Container => "container",
+      Runtime::MacosNative => "macos-native",
     }
   }
 }

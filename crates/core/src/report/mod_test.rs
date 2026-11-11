@@ -123,6 +123,23 @@ fn the_title_names_the_profile_not_its_directory() {
 }
 
 #[test]
+fn the_fences_denials_are_findings_counted_by_operation_and_target() {
+  let deny = |pid, target: &str| {
+    Event::ActorDeny(ActorDeny {
+      process: "bash".into(),
+      pid,
+      operation: "process-exec*".into(),
+      target: target.into(),
+    })
+  };
+  let mut events = actor_run();
+  events.push(at(4_000, deny(10, "/bin/ls")));
+  events.push(at(4_001, deny(11, "/bin/ls")));
+  let report = render("7f3a", &events, Level::Summary, Format::Markdown);
+  assert!(report.contains("- 🚫 Fence denied: `process-exec*` `/bin/ls` (2x)"), "{report}");
+}
+
+#[test]
 fn commands_a_fault_made_fail_count_as_failed() {
   let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
   // Duration | State | Driving program | Routed | Kept | CLI | Failed | Model calls

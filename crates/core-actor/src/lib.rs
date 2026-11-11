@@ -10,5 +10,9 @@
 #[cfg(target_os = "linux")]
 pub mod guest;
 pub mod host;
+/// The experimental `macos-native` actor's init and shims (see
+/// [`host::macos`]).
+#[cfg(target_os = "macos")]
+pub mod native;
 #[cfg(target_os = "linux")]
 mod sshfs;

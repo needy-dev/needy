@@ -15,8 +15,8 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 /// Version 2 added who caused an event (`by`: `run.create`, `run.stop`,
 /// `exec.start`) and `exec.kill`; version 3 added `files.fail`; version 4
 /// added `actor.start`'s `runtime`; version 5 added `run.create`'s
-/// `recipe_time`.
-pub const SCHEMA_VERSION: u32 = 5;
+/// `recipe_time`; version 6 added `actor.deny`.
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -24,7 +24,8 @@ pub const SCHEMA_VERSION: u32 = 5;
 // without `exec.kill`, and version 2 payloads are version 3 payloads without
 // `files.fail`, and version 3 payloads are version 4 payloads without
 // `actor.start`'s `runtime`, and version 4 payloads are version 5 payloads
-// without `run.create`'s `recipe_time`, so they decode with the same types:
+// without `run.create`'s `recipe_time`, and version 5 payloads are version 6
+// payloads without `actor.deny`, so they decode with the same types:
 // `by`, `runtime` and `recipe_time` read as `None`.
 // Traces written before version 3, and events a guest built before it
 // pushes, stay readable. Version 0 is the flat string-attribute rows written
@@ -110,6 +111,9 @@ events! {
   ActorConfig(ActorConfig) = "actor.config",
   /// The actor's driving program exited.
   ActorExit(ActorExit) = "actor.exit",
+  /// The actor's fence refused an operation: a `macos-native` actor's
+  /// Seatbelt profile, as the kernel logged it.
+  ActorDeny(ActorDeny) = "actor.deny",
   FilesCopyIn(FilesCopyIn) = "files.copy_in",
   FilesMirrorOut(FilesMirrorOut) = "files.mirror_out",
   /// A copy-in or mirror-out failed.
@@ -249,6 +253,20 @@ pub struct ActorConfig {
 pub struct ActorExit {
   pub code: Option<i32>,
   pub signal: Option<String>,
+}
+
+/// An operation the actor's fence refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActorDeny {
+  /// The process that tried it, as the kernel names it (its file name).
+  pub process: String,
+  pub pid: u32,
+  /// The refused operation, in the fence's terms: `process-exec*`,
+  /// `network-outbound`, `file-write-create`, `file-read-data`.
+  pub operation: String,
+  /// What it was refused on: a path, or an address.
+  pub target: String,
 }
 
 /// One side of a file transfer.

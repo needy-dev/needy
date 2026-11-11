@@ -49,6 +49,10 @@ pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<
       };
       Ok(Box::new(Container::new(options.oci_runtime, options.image.clone())))
     }
+    #[cfg(target_os = "macos")]
+    Runtime::MacosNative => Ok(Box::new(needy_core_actor::host::macos::MacosNative)),
+    #[cfg(not(target_os = "macos"))]
+    Runtime::MacosNative => bail!("the macos-native actor runtime runs only on macOS"),
   }
 }
 

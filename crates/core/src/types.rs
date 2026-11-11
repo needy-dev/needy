@@ -190,6 +190,12 @@ pub enum ActorRuntime {
   // needs to once actors run on runners other than the control host's own,
   // which probes its Docker directly.
   Container,
+  /// Experimental (proof of concept): a process on a Mac under a Seatbelt
+  /// profile.
+  // TODO(macos-native): no runner reports it, so a native actor runs on the
+  // control host only (no `runner:` selector) while it is a proof of
+  // concept; reporting it waits for the owner's productize decision.
+  MacosNative,
 }
 
 impl ActorRuntime {
@@ -197,6 +203,7 @@ impl ActorRuntime {
     match self {
       Self::Firecracker => "firecracker",
       Self::Container => "container",
+      Self::MacosNative => "macos-native",
     }
   }
 }

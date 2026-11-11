@@ -541,7 +541,12 @@ fn the_actor_runtime_is_required() {
   assert!(err.contains("actor: missing field `runtime`"), "{err}");
 
   let err = load_text("actor: { runtime: qemu }\n").unwrap_err().to_string();
-  assert!(err.contains("actor.runtime: unknown variant `qemu`, expected `firecracker` or `container`"), "{err}");
+  assert!(err.contains("actor.runtime: unknown variant `qemu`, expected one of `firecracker`, `container`, `macos-native`"), "{err}");
+}
+
+#[test]
+fn the_experimental_macos_native_runtime_is_spelled_with_a_hyphen() {
+  assert_eq!(load_text("actor: { runtime: macos-native }").unwrap().actor.runtime, Runtime::MacosNative);
 }
 
 #[test]

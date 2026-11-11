@@ -8,4 +8,6 @@ pub mod firecracker;
 pub mod gateway;
 #[cfg(unix)]
 pub mod identity;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod runtime;

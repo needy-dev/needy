@@ -1,0 +1,50 @@
+# Probes of the experimental `macos-native` actor's fence: each line tries a
+# way around the shims, the gateway or the writable directories and prints
+# what happened. Every one but the gateway, the shims and the workspace must
+# fail, and each failure shows in the report as a fence denial. See
+# docs/ai/references/architecture/2026-11-12-macos-native-actor-poc.md.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  runtime: macos-native
+  cwd: /private/tmp/needy-macos-native/workspace
+  network:
+    allow: [example.com]
+  command:
+    - /bin/sh
+    - -c
+    - |
+      p() { printf '%-34s ' "$1"; }
+      p "1 ls through PATH (a shim)"; ls -d / && echo "ran"
+      p "2 /bin/ls by absolute path"; /bin/ls -d / ; echo "rc=$?"
+      p "3 a binary copied into the workspace"; cp /bin/echo ./e; ./e ran; echo "rc=$?"
+      printf '#!/bin/sh\necho ran\n' > s.sh; printf '#!/usr/bin/env sh\necho ran\n' > t.sh; chmod +x s.sh t.sh
+      p "4 ./s.sh (#!/bin/sh)"; ./s.sh; echo "rc=$?"
+      p "5 ./t.sh (#!/usr/bin/env sh)"; ./t.sh; echo "rc=$?"
+      p "6 sh s.sh (an allowed interpreter)"; sh s.sh
+      p "7 python3 subprocess /bin/ls"; python3 -c 'import subprocess
+      try: subprocess.run(["/bin/ls", "-d", "/"]); print("ran")
+      except OSError as e: print(e)'
+      p "8 python3 subprocess ls (a shim)"; python3 -c 'import subprocess; subprocess.run(["ls", "-d", "/"])'
+      p "9 TCP 1.1.1.1:443"; python3 -c 'import socket
+      try: socket.create_connection(("1.1.1.1", 443), 3); print("connected")
+      except OSError as e: print(e)'
+      p "10 TCP 127.0.0.1:22"; python3 -c 'import socket
+      try: socket.create_connection(("127.0.0.1", 22), 3); print("connected")
+      except OSError as e: print(e)'
+      p "11 DNS example.com"; python3 -c 'import socket
+      try: socket.getaddrinfo("example.com", 443); print("resolved")
+      except OSError as e: print(e)'
+      p "12 listen on 127.0.0.1:5555"; python3 -c 'import socket
+      try: s = socket.socket(); s.bind(("127.0.0.1", 5555)); s.listen(); print("listening")
+      except OSError as e: print(e)'
+      p "13 write /tmp/needy-escape"; echo x > /tmp/needy-escape; echo "rc=$?"
+      p "14 write the real home"; echo x > "/Users/$USER/needy-escape"; echo "rc=$?"
+      p "15 read the real ~/.ssh"; ls "/Users/$USER/.ssh" >/dev/null; echo "rc=$?"
+      p "16 write the workspace"; echo ok > ws.txt && cat ws.txt
+      p "17 open -a Calculator"; open -a Calculator; echo "rc=$?"
+      p "18 osascript (Apple events)"; osascript -e 'tell application "Finder" to get name of startup disk'; echo "rc=$?"
+      p "19 launchctl submit"; launchctl submit -l needy.escape -- /bin/echo escaped; echo "rc=$?"
+      p "20 curl via the gateway (allowed)"; curl -sS -o /dev/null -w '%{http_code}\n' https://example.com
+      p "21 curl via the gateway (denied)"; curl -sS -o /dev/null -w '%{http_code}\n' https://example.org; echo "rc=$?"
+      p "22 curl without the proxy"; curl -sS --noproxy '*' -o /dev/null https://example.com; echo "rc=$?"
+      rm -f e s.sh t.sh ws.txt

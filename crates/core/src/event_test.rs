@@ -57,6 +57,12 @@ fn every_kind() -> Vec<Event> {
       },
       bytes: 10240,
     }),
+    Event::ActorDeny(ActorDeny {
+      process: "bash".into(),
+      pid: 4242,
+      operation: "process-exec*".into(),
+      target: "/bin/ls".into(),
+    }),
     Event::FilesMirrorOut(FilesMirrorOut {
       name: "out".into(),
       from: FileEnd::Actor,

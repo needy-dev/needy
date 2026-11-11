@@ -11,6 +11,10 @@ fn main() {
   // Inside an actor the same binary is the init process and the exec proxy.
   #[cfg(target_os = "linux")]
   guest();
+  // A `macos-native` actor's init, start gate and shims are this binary
+  // too, started by an argument or from a shims directory.
+  #[cfg(target_os = "macos")]
+  needy_core_actor::native::dispatch();
   std::process::exit(cli::run());
 }
 

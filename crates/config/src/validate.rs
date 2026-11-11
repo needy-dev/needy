@@ -58,8 +58,8 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
     (Runtime::Container, None) => {
       findings.push(Finding::error("actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"))
     }
-    (Runtime::Firecracker, Some(_)) => {
-      findings.push(Finding::error("actor.container is for `runtime: container`; this actor's runtime is firecracker"))
+    (runtime @ (Runtime::Firecracker | Runtime::MacosNative), Some(_)) => {
+      findings.push(Finding::error(format!("actor.container is for `runtime: container`; this actor's runtime is {}", runtime.as_str())))
     }
     _ => {}
   }

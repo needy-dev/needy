@@ -1,0 +1,33 @@
+# The smoke test with the experimental `macos-native` actor (a proof of
+# concept, see docs/ai/references/architecture/2026-11-12-macos-native-actor-poc.md):
+# the driving program is `sh` on this Mac, under a Seatbelt profile, with
+# only shims on its PATH. python3 is routed to an executor; every other
+# command is kept and runs on the Mac under the same fence.
+#
+# A native actor has no workspace mounts (no FUSE), so the actor's working
+# directory and the executor's workspace are one directory on the Mac. The
+# executor is a native one: a Docker executor on OrbStack cannot be reached,
+# since OrbStack does not relay the bind-mounted executor socket. It shows
+# macOS, not a recipe: a native actor has no identity.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  runtime: macos-native
+  cwd: /private/tmp/needy-macos-native/workspace
+  command:
+    - /bin/sh
+    - -c
+    - |
+      echo "== actor"; uname -sm; sw_vers -productName; pwd
+      echo "== routed python3"
+      python3 -c "import os,sys; print(sys.platform, os.getcwd())"
+      echo hello-from-actor > from-actor.txt
+      python3 -c "print(open('from-actor.txt').read().strip())"
+      python3 -c "open('from-executor.txt','w').write('hi-from-executor')"
+      cat from-executor.txt; echo; ls from-*
+      python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
+executors:
+  build:
+    provider: native
+    workspace: /private/tmp/needy-macos-native/workspace
+commands:
+  - { match: "python3 **", to: build }

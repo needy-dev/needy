@@ -50,6 +50,17 @@ tokio-vsock = { workspace = true, features = ["tonic014"] }
 tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
 
+# The experimental `macos-native` actor: its init and shims run on the Mac
+# itself, next to the daemon.
+[target.'cfg(target_os = "macos")'.dependencies]
+needy-api-client.workspace = true
+needy-api-proto.workspace = true
+needy-common.workspace = true
+needy-core-executor.workspace = true
+nix = { workspace = true, features = ["process", "signal"] }
+tonic = { workspace = true, features = ["router", "transport"] }
+tracing-subscriber.workspace = true
+
 [dev-dependencies]
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true

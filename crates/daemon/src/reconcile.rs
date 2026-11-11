@@ -165,6 +165,10 @@ impl Daemon {
             let state = end_leftover_container(instance).await;
             self.write_instance_state(instance, state, now).await;
           }
+          // TODO(macos-native): a leftover native actor (its init and the
+          // driving program's process group) is not found here, since its
+          // command line names no `vm.json`; it is marked lost. Ending it
+          // waits for the owner's productize decision.
           (InstanceKind::Actor, _) => {
             let state = end_leftover_vm(instance).await;
             self.write_instance_state(instance, state, now).await;

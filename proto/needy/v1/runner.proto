@@ -68,6 +68,9 @@ enum ActorRuntime {
   // gVisor's `runsc` registered with Docker. Reported only: no actor is
   // scheduled on it until the container actor runtime is built.
   ACTOR_RUNTIME_CONTAINER = 2;
+  // Experimental (proof of concept): the driving program as a macOS process
+  // under a Seatbelt profile, with shims on PATH. No VM.
+  ACTOR_RUNTIME_MACOS_NATIVE = 3;
 }
 
 // How a runner can create an executor.

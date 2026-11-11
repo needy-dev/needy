@@ -1,0 +1,16 @@
+# An interactive shell in the experimental `macos-native` actor:
+# `needy run create -t -i --profile examples/macos-native/interactive.yaml`,
+# detach with ctrl-], `needy run attach RUN` to come back. Kept commands get
+# the shell's terminal (`tty`, `ls` in columns); python3 is routed to an
+# executor on its own terminal.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  runtime: macos-native
+  cwd: /private/tmp/needy-macos-native/workspace
+  command: [/bin/sh, -i]
+executors:
+  build:
+    provider: native
+    workspace: /private/tmp/needy-macos-native/workspace
+commands:
+  - { match: "python3 **", to: build }

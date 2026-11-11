@@ -145,6 +145,9 @@ struct Tally {
   denials: Vec<(String, String)>,
   /// Denied hosts and their networks.
   net_denials: Vec<(String, Network)>,
+  /// What the actor's fence refused: the operation and its target, with
+  /// how often.
+  fence_denials: BTreeMap<(String, String), usize>,
   /// Copy-ins and mirror-outs that failed: the mapping's transfer, name
   /// and why.
   files_failed: Vec<(Transfer, String, String)>,
@@ -241,6 +244,7 @@ impl Tally {
       }
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
+      Event::ActorDeny(deny) => *self.fence_denials.entry((deny.operation.clone(), deny.target.clone())).or_default() += 1,
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
       Event::ActorStart(start) => self.actor_runtime = start.runtime.clone(),
       Event::ExecKill(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
@@ -402,6 +406,8 @@ pub enum FindingKind {
   Probing,
   DeniedCommand,
   DeniedNetwork,
+  /// Operations the actor's fence refused.
+  FenceDenied,
   /// Faults chaos injected.
   Faults,
 }
@@ -442,6 +448,9 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
   }
   for (host, network) in &t.net_denials {
     find(FindingKind::DeniedNetwork, format!("network denied: {host} ({} network)", network_name(*network)));
+  }
+  for ((operation, target), count) in &t.fence_denials {
+    find(FindingKind::FenceDenied, format!("fence denied: {operation} {target} ({count}x)"));
   }
   if t.faults > 0 {
     find(FindingKind::Faults, format!("injected faults: {} ({})", t.faults, top(&t.fault_kinds, TOP)));
@@ -612,6 +621,10 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   for (host, network) in &t.net_denials {
     any = true;
     writeln!(out, "- 🚫 Network denied: {host} ({} network)", network_name(*network))?;
+  }
+  for ((operation, target), count) in &t.fence_denials {
+    any = true;
+    writeln!(out, "- 🚫 Fence denied: `{operation}` `{target}` ({count}x)")?;
   }
   if t.faults > 0 {
     any = true;
