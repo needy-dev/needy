@@ -1,19 +1,24 @@
 use std::path::{Path, PathBuf};
 
+use needy_config::Source;
 use needy_config::profile::{Docker as DockerConfig, Executor, User};
 
 use super::*;
 
-fn spec(args: &[&str]) -> InstanceSpec {
+/// The `docker:` options of a profile's executor, written as YAML.
+fn docker(yaml: &str) -> DockerConfig {
+  let text = format!("executors: {{ build: {{ provider: docker, docker: {yaml} }} }}");
+  let profile = needy_config::profile::load(&Source::text(text, "/home/user/profile")).unwrap();
+  profile.executors["build"].docker.clone().unwrap()
+}
+
+fn spec(docker: DockerConfig) -> InstanceSpec {
   InstanceSpec {
     name: "build".into(),
     key: "build@s1".into(),
     run: "s1".into(),
     config: Executor {
-      docker: Some(DockerConfig {
-        args: args.iter().map(|a| a.to_string()).collect(),
-        ..Default::default()
-      }),
+      docker: Some(docker),
       ..Default::default()
     },
     base: PathBuf::from("/home/user/profile"),
@@ -35,16 +40,29 @@ fn socket_id(name: &str) -> String {
   uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).simple().to_string()[..12].to_string()
 }
 
-fn refusal(args: &[&str], options: &Options) -> String {
-  match container(&spec(args), options) {
-    Ok(container) => panic!("{args:?} was accepted: {container:?}"),
+/// The container for `docker:` options, as YAML.
+fn body(yaml: &str, options: &Options) -> ContainerCreateBody {
+  container(&spec(docker(yaml)), options).unwrap().body
+}
+
+fn refusal(yaml: &str, options: &Options) -> String {
+  match container(&spec(docker(yaml)), options) {
+    Ok(container) => panic!("{yaml} was accepted: {container:?}"),
     Err(e) => e.to_string(),
+  }
+}
+
+/// Options of an operator who allows `names`.
+fn operator(names: &[&str]) -> Options {
+  Options {
+    allow: names.iter().map(|n| n.to_string()).collect(),
+    ..options()
   }
 }
 
 #[test]
 fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
-  let container = container(&spec(&[]), &options()).unwrap();
+  let container = container(&spec(DockerConfig::default()), &options()).unwrap();
 
   assert_eq!(container.name, "needy-build-s1");
   assert_eq!(container.socket_dir, Path::new("/home/user/state/executors").join(socket_id("needy-build-s1")));
@@ -82,7 +100,7 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
 
 #[test]
 fn a_profile_image_and_workspace_replace_the_defaults() {
-  let mut spec = spec(&[]);
+  let mut spec = spec(DockerConfig::default());
   spec.config.workspace = Some("ws".into());
   spec.config.docker.as_mut().unwrap().image = Some("example.com/toolchain:1".into());
   spec.hostname = None;
@@ -95,149 +113,191 @@ fn a_profile_image_and_workspace_replace_the_defaults() {
 }
 
 #[test]
-fn resource_options_become_limits() {
-  let container = container(
-    &spec(&[
-      "--cpus=1.5",
-      "--memory",
-      "8g",
-      "--pids-limit=512",
-      "--shm-size=64m",
-      "-e",
-      "A=1",
-      "--init",
-    ]),
+fn resource_fields_become_limits() {
+  let body = body(
+    "{ cpus: 1.5, cpu_shares: 512, cpuset_cpus: 0-3, memory: 8GiB, memory_swap: unlimited, shm_size: 64MiB, pids_limit: 512, \
+     ulimits: { nofile: 1024, nproc: { soft: 64, hard: 128 } } }",
     &options(),
-  )
-  .unwrap();
+  );
 
-  let host = container.body.host_config.unwrap();
+  let host = body.host_config.unwrap();
   assert_eq!(host.nano_cpus, Some(1_500_000_000));
+  assert_eq!(host.cpu_shares, Some(512));
+  assert_eq!(host.cpuset_cpus.as_deref(), Some("0-3"));
   assert_eq!(host.memory, Some(8 << 30));
-  assert_eq!(host.pids_limit, Some(512));
+  assert_eq!(host.memory_swap, Some(-1));
   assert_eq!(host.shm_size, Some(64 << 20));
-  assert_eq!(host.init, Some(true));
-  assert_eq!(container.body.env.as_deref().unwrap(), ["A=1"]);
+  assert_eq!(host.pids_limit, Some(512));
+  let ulimits: Vec<_> = host.ulimits.unwrap().into_iter().map(|u| (u.name.unwrap(), u.soft.unwrap(), u.hard.unwrap())).collect();
+  assert_eq!(
+    ulimits,
+    [
+      ("nofile".to_string(), 1024, 1024),
+      ("nproc".to_string(), 64, 128)
+    ]
+  );
+}
+
+#[test]
+fn absent_fields_leave_dockers_defaults() {
+  let body = body("{}", &options());
+
+  let host = body.host_config.unwrap();
+  assert_eq!((host.nano_cpus, host.memory, host.memory_swap, host.init, host.readonly_rootfs), (None, None, None, None, None));
+  assert_eq!((host.mounts, host.device_requests, host.extra_hosts, host.dns, host.sysctls), (None, None, None, None, None));
+  assert_eq!((body.env, body.working_dir), (None, None));
+}
+
+#[test]
+fn process_and_name_fields_become_the_container_and_host_config() {
+  let body = body(
+    "{ env: { RUST_LOG: debug, A: \"1\" }, workdir: /src, read_only: true, init: true, add_host: { db.example.com: 192.0.2.10 }, \
+     dns: [192.0.2.53, \"2001:db8::53\"], sysctls: { net.ipv4.ip_forward: \"1\" }, cap_drop: [NET_RAW], pid: \"container:other\" }",
+    &options(),
+  );
+
+  assert_eq!(body.env.as_deref().unwrap(), ["A=1", "RUST_LOG=debug"]);
+  assert_eq!(body.working_dir.as_deref(), Some("/src"));
+  let host = body.host_config.unwrap();
+  assert_eq!((host.readonly_rootfs, host.init), (Some(true), Some(true)));
+  assert_eq!(host.extra_hosts.unwrap(), ["db.example.com:192.0.2.10"]);
+  assert_eq!(host.dns.unwrap(), ["192.0.2.53", "2001:db8::53"]);
+  assert_eq!(host.sysctls.unwrap()["net.ipv4.ip_forward"], "1");
+  assert_eq!(host.cap_drop.unwrap(), ["NET_RAW"]);
+  assert_eq!(host.pid_mode.as_deref(), Some("container:other"));
+}
+
+/// A GPU request as (count, device IDs, capabilities).
+type GpuRequest = (Option<i64>, Option<Vec<String>>, Option<Vec<Vec<String>>>);
+
+/// The GPU request `gpus` becomes.
+fn gpu_request(gpus: &str) -> GpuRequest {
+  let mut requests = body(&format!("{{ gpus: {gpus} }}"), &options()).host_config.unwrap().device_requests.unwrap();
+  assert_eq!(requests.len(), 1);
+  let request = requests.remove(0);
+  assert_eq!(request.driver, None, "the runtime's default driver");
+  (request.count, request.device_ids, request.capabilities)
+}
+
+#[test]
+fn gpus_become_a_device_request_as_docker_run_makes_it() {
+  let gpu = Some(vec![vec!["gpu".to_string()]]);
+  assert_eq!(gpu_request("all"), (Some(-1), None, gpu.clone()));
+  assert_eq!(gpu_request("2"), (Some(2), None, gpu.clone()));
+  assert_eq!(gpu_request("[\"0\", GPU-example]"), (None, Some(vec!["0".into(), "GPU-example".into()]), gpu));
 }
 
 #[test]
 fn profile_mounts_follow_the_daemon_mounts() {
-  let container = container(
-    &spec(&[
-      "-v",
-      "/cache:/cache:ro",
-      "--mount",
-      "type=bind,source=/data,target=/data,readonly",
-      "--tmpfs",
-      "/tmp:size=64m",
-    ]),
-    &options(),
-  )
-  .unwrap();
+  let mut spec = spec(docker(
+    "{ mounts: [{ type: bind, source: ws/cache, target: /cache, read_only: true }, { type: volume, source: cargo, target: /cargo }, \
+     { type: volume, target: /scratch }, { type: tmpfs, target: /tmp, size: 64MiB }] }",
+  ));
+  spec.config.workspace = Some("ws".into());
 
-  let host = container.body.host_config.unwrap();
-  assert_eq!(host.binds.unwrap()[2], "/cache:/cache:ro");
-  let mount = &host.mounts.unwrap()[0];
-  assert_eq!(mount.typ, Some(MountType::BIND));
-  assert_eq!((mount.source.as_deref(), mount.target.as_deref(), mount.read_only), (Some("/data"), Some("/data"), Some(true)));
-  assert_eq!(host.tmpfs.unwrap()["/tmp"], "size=64m");
-}
+  let host = container(&spec, &options()).unwrap().body.host_config.unwrap();
 
-#[test]
-fn fields_the_daemon_owns_are_refused() {
-  for args in [
-    &["--network", "host"][..],
-    &["--name=x"],
-    &["--label", "a=b"],
-    &["--hostname", "h"],
-    &["--user", "0"],
-    &["--rm"],
-  ] {
-    assert!(refusal(args, &options()).ends_with("is set by the daemon"), "{args:?}");
-  }
+  assert_eq!(host.binds.unwrap().len(), 2, "the workspace and the socket");
+  let mounts: Vec<_> = host
+    .mounts
+    .unwrap()
+    .into_iter()
+    .map(|m| (m.typ.unwrap(), m.source, m.target.unwrap(), m.read_only, m.tmpfs_options.and_then(|t| t.size_bytes)))
+    .collect();
   assert_eq!(
-    refusal(&["-v", "/data:/home/agent/workspace"], &options()),
-    "the workspace mount at /home/agent/workspace is set by the daemon"
-  );
-}
-
-#[test]
-fn privileged_options_need_the_operator() {
-  assert_eq!(refusal(&["--privileged"], &options()), "--privileged is not allowed by the operator");
-  assert_eq!(refusal(&["--cap-add", "SYS_ADMIN"], &options()), "--cap-add is not allowed by the operator");
-  assert_eq!(refusal(&["--pid", "host"], &options()), "--pid host is not allowed by the operator");
-  assert_eq!(
-    refusal(&["--security-opt", "seccomp=unconfined"], &options()),
-    "--security-opt seccomp=unconfined is not allowed by the operator"
-  );
-  assert_eq!(refusal(&["-v", "/:/host"], &options()), "mounting the host root is not allowed by the operator");
-  assert_eq!(refusal(&["--mount", "type=bind,source=/,target=/h"], &options()), "mounting the host root is not allowed by the operator");
-  assert!(container(&spec(&["--pid", "container:x"]), &options()).is_ok());
-
-  let operator = Options {
-    allow: ["--privileged", "--pid", "host-root"].map(String::from).to_vec(),
-    ..options()
-  };
-  let host = container(&spec(&["--privileged", "--pid", "host", "-v", "/:/host"]), &operator).unwrap().body.host_config.unwrap();
-  assert_eq!((host.privileged, host.pid_mode.as_deref()), (Some(true), Some("host")));
-}
-
-/// The device mappings `--device` values become, as (host, container, permissions).
-fn devices(values: &[&str]) -> Vec<(String, String, String)> {
-  let operator = Options {
-    allow: vec!["--device".into()],
-    ..options()
-  };
-  let args: Vec<&str> = values.iter().flat_map(|v| ["--device", v]).collect();
-  let host = container(&spec(&args), &operator).unwrap().body.host_config.unwrap();
-  host.devices.unwrap().into_iter().map(|d| (d.path_on_host.unwrap(), d.path_in_container.unwrap(), d.cgroup_permissions.unwrap())).collect()
-}
-
-// ROOT CAUSE:
-//
-// If a profile passed `--device /dev/x:rw`, the container got a device at
-// the path `rw` with permissions `rwm`, because the second field always
-// became the container path; Docker reads a second field that is a valid
-// mode as the permissions and keeps the host path in the container.
-//
-// Before the fix, `/dev/fuse:rw` mapped to `("/dev/fuse", "rw", "rwm")`.
-// The fix parses `--device` as docker/cli v28.5.1 does.
-#[test]
-fn a_device_parses_as_docker_does() {
-  let own = |h: &str, c: &str, p: &str| (h.to_string(), c.to_string(), p.to_string());
-  assert_eq!(
-    devices(&[
-      "/dev/fuse",
-      "/dev/fuse:rw",
-      "/dev/kvm:/dev/vm",
-      "/dev/kvm:/dev/vm:r"
-    ]),
+    mounts,
     [
-      own("/dev/fuse", "/dev/fuse", "rwm"),
-      own("/dev/fuse", "/dev/fuse", "rw"),
-      own("/dev/kvm", "/dev/vm", "rwm"),
-      own("/dev/kvm", "/dev/vm", "r"),
+      (MountType::BIND, Some("/home/user/profile/ws/cache".into()), "/cache".into(), Some(true), None),
+      (MountType::VOLUME, Some("cargo".into()), "/cargo".into(), Some(false), None),
+      (MountType::VOLUME, None, "/scratch".into(), Some(false), None),
+      (MountType::TMPFS, None, "/tmp".into(), None, Some(64 << 20)),
     ]
   );
-  let operator = Options {
-    allow: vec!["--device".into()],
-    ..options()
-  };
-  assert_eq!(refusal(&["--device", "/dev/kvm:/dev/vm:rx"], &operator), "--device /dev/kvm:/dev/vm:rx: bad mode specified: rx");
-  assert_eq!(refusal(&["--device", "/dev/a:/b:rw:m"], &operator), "--device /dev/a:/b:rw:m: bad format for path");
-  assert_eq!(refusal(&["--device", "/dev/kvm:vm"], &operator), "--device /dev/kvm:vm: vm is not an absolute path");
-  assert_eq!(refusal(&["--device", "/dev/x:r:w"], &operator), "--device /dev/x:r:w: r is not an absolute path");
-  assert_eq!(refusal(&["--device", ":/dev/x"], &operator), "--device :/dev/x: bad format for path");
 }
 
 #[test]
-fn an_unknown_option_is_an_error_not_dropped() {
-  assert_eq!(refusal(&["--gpus", "all"], &options()), "--gpus is not a supported docker run option");
-  assert_eq!(refusal(&["--memory"], &options()), "--memory needs a value");
-  assert_eq!(refusal(&["--memory=lots"], &options()), "--memory lots: expected a size such as 512m or 8g");
+fn mounts_over_the_daemons_or_at_relative_targets_are_refused() {
+  assert_eq!(
+    refusal("{ mounts: [{ type: volume, target: /home/agent/workspace/node_modules }] }", &options()),
+    "the mount at /home/agent/workspace/node_modules is over the workspace, which the daemon mounts"
+  );
+  assert_eq!(
+    refusal("{ mounts: [{ type: tmpfs, target: /run/needy }] }", &options()),
+    "the mount at /run/needy is over the executor's socket directory, which the daemon mounts"
+  );
+  assert_eq!(refusal("{ mounts: [{ type: tmpfs, target: tmp }] }", &options()), "mounts: tmp is not an absolute path");
+  assert_eq!(refusal("{ workdir: src }", &options()), "workdir: src is not an absolute path");
 }
 
-/// Creates an executor container from the executor image and destroys it.
+#[test]
+fn privileged_fields_need_the_operator() {
+  assert_eq!(refusal("{ privileged: true }", &options()), "privileged is not allowed by the operator");
+  assert_eq!(refusal("{ cap_add: [SYS_ADMIN] }", &options()), "cap_add SYS_ADMIN is not allowed by the operator");
+  assert_eq!(refusal("{ devices: [{ host: /dev/fuse }] }", &options()), "devices /dev/fuse is not allowed by the operator");
+  assert_eq!(refusal("{ pid: host }", &options()), "pid host is not allowed by the operator");
+  assert_eq!(refusal("{ userns: host }", &options()), "userns host is not allowed by the operator");
+  assert_eq!(
+    refusal("{ security_opt: [seccomp=unconfined] }", &options()),
+    "security_opt seccomp=unconfined is not allowed by the operator"
+  );
+  assert!(container(&spec(docker("{ security_opt: [no-new-privileges] }")), &options()).is_ok());
+
+  let host =
+    body("{ privileged: true, cap_add: [SYS_ADMIN], pid: host }", &operator(&["privileged", "cap_add", "pid"])).host_config.unwrap();
+  assert_eq!((host.privileged, host.pid_mode.as_deref()), (Some(true), Some("host")));
+  assert_eq!(host.cap_add.unwrap(), ["SYS_ADMIN"]);
+}
+
+#[test]
+fn a_bind_mount_outside_the_workspace_needs_the_operator() {
+  for source in [
+    "/",
+    "/etc",
+    "../elsewhere",
+    "/home/user/state/workspaces/build-s1/../other",
+  ] {
+    let yaml = format!("{{ mounts: [{{ type: bind, source: \"{source}\", target: /host }}] }}");
+    let message = refusal(&yaml, &options());
+    assert!(message.ends_with("is outside the executor's workspace and is not allowed by the operator"), "{source}: {message}");
+  }
+  // The default workspace, under the daemon's state directory.
+  assert!(
+    container(&spec(docker("{ mounts: [{ type: bind, source: /home/user/state/workspaces/build-s1/c, target: /c }] }")), &options()).is_ok()
+  );
+
+  let host = body("{ mounts: [{ type: bind, source: /, target: /host }] }", &operator(&["host_mounts"])).host_config.unwrap();
+  assert_eq!(host.mounts.unwrap()[0].source.as_deref(), Some("/"));
+}
+
+#[test]
+fn a_device_defaults_to_the_hosts_path_and_every_permission() {
+  let devices = |yaml: &str| {
+    body(yaml, &operator(&["devices"]))
+      .host_config
+      .unwrap()
+      .devices
+      .unwrap()
+      .into_iter()
+      .map(|d| (d.path_on_host.unwrap(), d.path_in_container.unwrap(), d.cgroup_permissions.unwrap()))
+      .collect::<Vec<_>>()
+  };
+  let own = |h: &str, c: &str, p: &str| (h.to_string(), c.to_string(), p.to_string());
+  assert_eq!(
+    devices("{ devices: [{ host: /dev/fuse }, { host: /dev/kvm, container: /dev/vm, permissions: rw }] }"),
+    [
+      own("/dev/fuse", "/dev/fuse", "rwm"),
+      own("/dev/kvm", "/dev/vm", "rw")
+    ]
+  );
+  assert_eq!(
+    refusal("{ devices: [{ host: /dev/kvm, permissions: rx }] }", &operator(&["devices"])),
+    "devices /dev/kvm: bad permissions rx: use some of r, w and m"
+  );
+  assert_eq!(refusal("{ devices: [{ host: /dev/kvm, container: vm }] }", &operator(&["devices"])), "devices: vm is not an absolute path");
+}
+
+/// Creates an executor container with typed run options from the executor
+/// image, runs a command in it and destroys it.
 /// Skips without Docker or without the image (`needy build --executor`), and
 /// off Linux, where the host cannot reach a socket inside a container.
 #[cfg(target_os = "linux")]
@@ -246,8 +306,12 @@ async fn create_and_destroy_an_executor_container() {
   use needy_api_proto::v1::{ExecRequest, ExecStart, exec_request, exec_response};
 
   let state = tempfile::tempdir().unwrap();
+  // NOTICE: `NEEDY_TEST_EXECUTOR_IMAGE` names another image, such as one
+  // built for a test matrix, so the test need not touch the operator's
+  // `needy-executor:latest`.
   let options = Options {
     state_dir: state.path().to_path_buf(),
+    image: std::env::var("NEEDY_TEST_EXECUTOR_IMAGE").unwrap_or_else(|_| options().image),
     ..options()
   };
   let provider = Docker::new(options.clone()).unwrap();
@@ -255,7 +319,7 @@ async fn create_and_destroy_an_executor_container() {
     eprintln!("skipped: no Docker or no {} image", options.image);
     return;
   }
-  let mut spec = spec(&["--memory=256m"]);
+  let mut spec = spec(docker("{ memory: 256MiB, cpus: 0.5, env: { NEEDY_TEST: typed } }"));
   spec.key = format!("test-{}", uuid::Uuid::new_v4().simple());
   // The executor runs as the owner of the socket directory, which is the
   // test's user.
@@ -272,7 +336,13 @@ async fn create_and_destroy_an_executor_container() {
   let (tx, rx) = tokio::sync::mpsc::channel(1);
   tx.send(ExecRequest {
     payload: Some(exec_request::Payload::Start(ExecStart {
-      argv: vec!["hostname".into()],
+      argv: [
+        "sh",
+        "-c",
+        "hostname; cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max; printenv NEEDY_TEST",
+      ]
+      .map(String::from)
+      .to_vec(),
       no_stdin: true,
       ..Default::default()
     })),
@@ -288,7 +358,9 @@ async fn create_and_destroy_an_executor_container() {
       _ => {}
     }
   }
-  assert_eq!(String::from_utf8_lossy(&stdout).trim(), "instance-1");
+  // The recipe's hostname, then the typed fields as the container's cgroup
+  // (v2) and environment see them: 256 MiB, half of a 100 ms period.
+  assert_eq!(String::from_utf8_lossy(&stdout).trim(), "instance-1\n268435456\n50000 100000\ntyped");
   assert_eq!(handle.runtime, "docker");
 
   provider.destroy(&handle).await.unwrap();
@@ -319,7 +391,7 @@ async fn create_and_destroy_an_executor_container() {
 // key, and refuses a path that still does not fit, naming it.
 #[test]
 fn the_socket_directory_is_short_whatever_the_key() {
-  let mut long = spec(&[]);
+  let mut long = spec(DockerConfig::default());
   long.key = format!("build@{}", "group-".repeat(20));
 
   let container = container(&long, &options()).unwrap();
@@ -327,7 +399,7 @@ fn the_socket_directory_is_short_whatever_the_key() {
   let name = container.socket_dir.strip_prefix("/home/user/state/executors").unwrap();
   assert_eq!(name.as_os_str().len(), 12, "{}", container.socket_dir.display());
   assert_eq!(container.socket_dir, super::container(&long, &options()).unwrap().socket_dir, "one key, one directory");
-  assert_ne!(container.socket_dir, super::container(&spec(&[]), &options()).unwrap().socket_dir);
+  assert_ne!(container.socket_dir, super::container(&spec(DockerConfig::default()), &options()).unwrap().socket_dir);
 }
 
 #[cfg(unix)]
@@ -338,7 +410,7 @@ fn a_socket_path_over_sun_path_is_refused_with_the_path() {
     ..options()
   };
 
-  let message = refusal(&[], &options);
+  let message = refusal("{}", &options);
 
   assert!(message.contains(&options.state_dir.display().to_string()), "{message}");
   assert!(message.contains("too long"), "{message}");

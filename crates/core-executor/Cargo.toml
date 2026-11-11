@@ -17,7 +17,6 @@ needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
 needy-config.workspace = true
-parse-size.workspace = true
 portable-pty.workspace = true
 vt100.workspace = true
 thiserror.workspace = true

@@ -2,9 +2,10 @@
 //! `needy daemon --mode executor` on a socket in a directory shared with the
 //! host. Containers are created through the Docker API (`bollard`).
 //!
-//! A profile passes `docker run` options in `docker.args`. The daemon owns
-//! some fields and refuses privileged ones unless the operator allows them;
-//! the rest are translated to the Docker API's container body.
+//! A profile sets run options as typed `docker:` fields, which map to the
+//! Docker API's container body one by one. The daemon owns some fields,
+//! which are not profile fields, and refuses privileged ones unless the
+//! operator allows them.
 //!
 //! NOTICE: the socket in a bind-mounted directory only works where the
 //! container and the daemon share a kernel (Linux). Docker Desktop on macOS
@@ -14,9 +15,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use bollard::errors::Error as DockerError;
-use bollard::models::{ContainerCreateBody, DeviceMapping, HostConfig, Mount, MountType, ResourcesUlimits};
+use bollard::models::{
+  ContainerCreateBody, DeviceMapping, DeviceRequest, HostConfig, Mount, MountTmpfsOptions, MountType, ResourcesUlimits,
+};
 use bollard::query_parameters::{CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder};
 use futures_util::TryStreamExt;
+use needy_config::profile::{Device, Docker as DockerConfig, Gpus, MemorySwap, Mount as ProfileMount, Ulimit};
+use needy_config::value::ByteSize;
 
 use super::{Error, InstanceHandle, InstanceSpec, Provider, connect, host_path, sanitize};
 
@@ -31,9 +36,10 @@ pub struct Options {
   /// The daemon's state directory; instance sockets and default workspaces
   /// live under it.
   pub state_dir: PathBuf,
-  /// Privileged options the operator allows: `--privileged`, `--cap-add`,
-  /// `--device`, `--pid`, `--ipc`, `--userns`, `--uts`, `--security-opt`,
-  /// and `host-root` for mounting `/`.
+  /// Privileged profile fields the operator allows: `privileged`,
+  /// `cap_add`, `devices`, `pid`, `ipc`, `userns` and `uts` (their `host`
+  /// mode), `security_opt` (an `unconfined` option), and `host_mounts` (a
+  /// bind mount outside the executor's workspace).
   // TODO(operator): no operator configuration sets this yet, so privileged
   // options are always refused; it needs a daemon configuration file, which
   // has no slice yet.
@@ -86,7 +92,8 @@ fn check_socket(path: &Path) -> Result<(), Error> {
 }
 
 /// The container for one instance of a profile's executor: the daemon's
-/// fields first, then the profile's `docker.args` under the flag policy.
+/// fields first, then the profile's typed `docker:` fields under the
+/// operator's policy.
 pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Error> {
   let docker = spec.config.docker.clone().unwrap_or_default();
   let key = sanitize(&spec.key);
@@ -99,7 +106,7 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
   };
   // Paths inside the container are Linux paths, whatever the host is.
   let workspace = format!("/home/{}/workspace", spec.user.name);
-  let mut body = ContainerCreateBody {
+  let body = ContainerCreateBody {
     image: Some(docker.image.clone().unwrap_or_else(|| options.image.clone())),
     cmd: Some(
       [
@@ -128,234 +135,248 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
     }),
     ..Default::default()
   };
-  apply_run_options(&docker.args, &options.allow, &mut body)?;
-  Ok(Container {
+  let mut container = Container {
     name,
     body,
     socket_dir,
     workspace_dir,
     workspace,
-  })
+  };
+  apply_run_options(&docker, &spec.base, &options.allow, &mut container)?;
+  Ok(container)
 }
 
-/// Options the daemon sets; a profile never overrides them.
-const DAEMON_OWNED: &[&str] = &[
-  "--network",
-  "--net",
-  "--name",
-  "--label",
-  "-l",
-  "--hostname",
-  "-h",
-  "--user",
-  "-u",
-  "--entrypoint",
-  "--rm",
-  "--detach",
-  "-d",
-];
-
-/// Options without a value.
-const SWITCHES: &[&str] = &["--privileged", "--read-only", "--init"];
-
-/// Applies `docker run` options from a profile to `body`.
+/// Sets a profile's typed `docker:` fields on the container's body. The
+/// daemon's own fields are not profile fields, so nothing here overrides
+/// them; privileged fields need the operator.
 ///
-/// NOTICE: no maintained crate translates `docker run` flags to the Docker
-/// API's body (the Docker CLI does it in Go, in `cli/command/container/opts.go`),
-/// so the options profiles use are translated here. An option outside this
-/// list is an error rather than silently dropped.
-// Source: https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L600-L712
-// (flags to `HostConfig`), sizes with go-units' binary `RAMInBytes`,
-// https://github.com/docker/go-units/blob/v0.5.0/size.go#L86-L88.
+/// Each field is the Docker API field that the matching `docker run` flag
+/// sets, with the value `docker run` would send.
+// Source: https://github.com/docker/cli/blob/v29.3.0/cli/command/container/opts.go#L604-L722
+// (`docker run` flags to `Config`, `HostConfig` and its `Resources`), and
+// https://github.com/docker/cli/blob/v29.3.0/opts/gpus.go#L36-L99 (`--gpus`).
 // Reference: https://github.com/moby/moby/blob/v28.5.1/api/swagger.yaml#L917-L1195
-// (Engine API 1.51 `HostConfig`).
-// TODO(docker): `--gpus`, `--add-host`, `--dns`, `--workdir`, `--cpu-shares`
-// and `--sysctl` are not translated yet; add them when a profile needs them.
-fn apply_run_options(args: &[String], allow: &[String], body: &mut ContainerCreateBody) -> Result<(), Error> {
-  let allowed = |name: &str| allow.iter().any(|a| a == name);
-  let refuse = |message: String| Err(Error::Config(message));
-  let mut env = Vec::new();
+// (Engine API 1.51 `HostConfig`); bollard's `HostConfig`, which flattens
+// `Resources` into it, and `ContainerCreateBody`:
+// https://docs.rs/crate/bollard-stubs/1.53.1-rc.29.3.1/source/src/models.rs#3402-3745
+// and #1211-1341.
+fn apply_run_options(docker: &DockerConfig, base: &Path, allow: &[String], container: &mut Container) -> Result<(), Error> {
+  let operator = |name: &str, what: String| {
+    if allow.iter().any(|a| a == name) {
+      Ok(())
+    } else {
+      Err(Error::Config(format!("{what} is not allowed by the operator")))
+    }
+  };
+  let body = &mut container.body;
   let host = body.host_config.get_or_insert_with(HostConfig::default);
-  let mut args = args.iter();
-  while let Some(arg) = args.next() {
-    let (flag, inline) = match arg.split_once('=') {
-      Some((flag, value)) if flag.starts_with('-') => (flag, Some(value.to_string())),
-      _ => (arg.as_str(), None),
-    };
-    if DAEMON_OWNED.contains(&flag) {
-      return refuse(format!("{flag} is set by the daemon"));
-    }
-    if SWITCHES.contains(&flag) {
-      let on = match inline.as_deref() {
-        None | Some("true") => true,
-        Some("false") => false,
-        Some(other) => return refuse(format!("{flag}={other}: expected true or false")),
-      };
-      match flag {
-        "--privileged" if on && !allowed(flag) => return refuse(format!("{flag} is not allowed by the operator")),
-        "--privileged" => host.privileged = Some(on),
-        "--read-only" => host.readonly_rootfs = Some(on),
-        _ => host.init = Some(on),
-      }
-      continue;
-    }
-    let value = match inline {
-      Some(value) => value,
-      None => args.next().cloned().ok_or_else(|| Error::Config(format!("{flag} needs a value")))?,
-    };
-    match flag {
-      "--cpus" => {
-        let cpus: f64 = value.parse().map_err(|_| Error::Config(format!("{flag} {value}: expected a number")))?;
-        host.nano_cpus = Some((cpus * 1e9).round() as i64);
-      }
-      "--memory" | "-m" => host.memory = Some(size(flag, &value)?),
-      "--memory-swap" => {
-        host.memory_swap = Some(if value == "-1" {
-          -1
-        } else {
-          size(flag, &value)?
-        })
-      }
-      "--shm-size" => host.shm_size = Some(size(flag, &value)?),
-      "--pids-limit" => host.pids_limit = Some(value.parse().map_err(|_| Error::Config(format!("{flag} {value}: expected a number")))?),
-      "--cpuset-cpus" => host.cpuset_cpus = Some(value),
-      "--env" | "-e" => {
-        if !value.contains('=') {
-          return refuse(format!("{flag} {value}: expected NAME=VALUE"));
+
+  // Resources.
+  host.nano_cpus = docker.cpus.map(|cpus| cpus.nanos() as i64);
+  host.cpu_shares = docker.cpu_shares;
+  host.cpuset_cpus = docker.cpuset_cpus.clone();
+  host.memory = docker.memory.map(bytes).transpose()?;
+  host.memory_swap = docker
+    .memory_swap
+    .map(|swap| match swap {
+      MemorySwap::Limit(size) => bytes(size),
+      // `docker run --memory-swap -1`.
+      MemorySwap::Unlimited => Ok(-1),
+    })
+    .transpose()?;
+  host.shm_size = docker.shm_size.map(bytes).transpose()?;
+  host.pids_limit = docker.pids_limit;
+  host.ulimits = some(
+    docker
+      .ulimits
+      .iter()
+      .map(|(name, limit)| {
+        let (soft, hard) = match *limit {
+          Ulimit::Same(both) => (both, both),
+          Ulimit::Pair { soft, hard } => (soft, hard),
+        };
+        ResourcesUlimits {
+          name: Some(name.clone()),
+          soft: Some(soft),
+          hard: Some(hard),
         }
-        env.push(value);
-      }
-      "--volume" | "-v" => {
-        let mut parts = value.split(':');
-        let source = parts.next().unwrap_or_default();
-        let target = parts.next().unwrap_or_default();
-        check_mount(source, target, &allowed)?;
-        host.binds.get_or_insert_with(Vec::new).push(value);
-      }
-      "--mount" => {
-        let mount = parse_mount(&value)?;
-        check_mount(mount.source.as_deref().unwrap_or_default(), mount.target.as_deref().unwrap_or_default(), &allowed)?;
-        host.mounts.get_or_insert_with(Vec::new).push(mount);
-      }
-      "--tmpfs" => {
-        let (path, options) = value.split_once(':').unwrap_or((&value, ""));
-        check_mount("", path, &allowed)?;
-        host.tmpfs.get_or_insert_with(HashMap::new).insert(path.to_string(), options.to_string());
-      }
-      "--cap-add" | "--device" if !allowed(flag) => return refuse(format!("{flag} is not allowed by the operator")),
-      "--cap-add" => host.cap_add.get_or_insert_with(Vec::new).push(value),
-      "--cap-drop" => host.cap_drop.get_or_insert_with(Vec::new).push(value),
-      "--device" => {
-        host.devices.get_or_insert_with(Vec::new).push(device(&value).map_err(|e| Error::Config(format!("{flag} {value}: {e}")))?)
-      }
-      "--pid" | "--ipc" | "--userns" | "--uts" if value == "host" && !allowed(flag) => {
-        return refuse(format!("{flag} host is not allowed by the operator"));
-      }
-      "--pid" => host.pid_mode = Some(value),
-      "--ipc" => host.ipc_mode = Some(value),
-      "--userns" => host.userns_mode = Some(value),
-      "--uts" => host.uts_mode = Some(value),
-      "--security-opt" if value.contains("unconfined") && !allowed(flag) => {
-        return refuse(format!("{flag} {value} is not allowed by the operator"));
-      }
-      "--security-opt" => host.security_opt.get_or_insert_with(Vec::new).push(value),
-      "--ulimit" => host.ulimits.get_or_insert_with(Vec::new).push(ulimit(&value)?),
-      _ => return refuse(format!("{flag} is not a supported docker run option")),
+      })
+      .collect(),
+  );
+  // REVIEW: `gpus` is not gated by the operator like `devices`: Docker
+  // grants it without `--privileged`, and the GPU runtime exposes only the
+  // requested GPUs. Gate it if operators need to keep GPUs from profiles.
+  host.device_requests = docker.gpus.as_ref().map(|gpus| vec![gpu_request(gpus)]);
+
+  // The process and its names.
+  body.env = some(docker.env.iter().map(|(name, value)| format!("{name}={value}")).collect());
+  if let Some(workdir) = &docker.workdir {
+    body.working_dir = Some(absolute("workdir", workdir)?.to_string());
+  }
+  host.readonly_rootfs = docker.read_only;
+  host.init = docker.init;
+  // `HostConfig.ExtraHosts` entries are `name:address`.
+  host.extra_hosts = some(docker.add_host.iter().map(|(name, address)| format!("{name}:{address}")).collect());
+  host.dns = some(docker.dns.iter().map(ToString::to_string).collect());
+  host.sysctls = (!docker.sysctls.is_empty()).then(|| docker.sysctls.clone().into_iter().collect());
+  host.cap_drop = some(docker.cap_drop.clone());
+  host.security_opt = some(docker.security_opt.clone());
+  for option in &docker.security_opt {
+    if option.contains("unconfined") {
+      operator("security_opt", format!("security_opt {option}"))?;
     }
   }
-  if !env.is_empty() {
-    body.env.get_or_insert_with(Vec::new).extend(env);
+
+  // Namespaces: another container's is fine, the host's needs the operator.
+  for (name, mode, field) in [
+    ("pid", &docker.pid, &mut host.pid_mode),
+    ("ipc", &docker.ipc, &mut host.ipc_mode),
+    ("userns", &docker.userns, &mut host.userns_mode),
+    ("uts", &docker.uts, &mut host.uts_mode),
+  ] {
+    if mode.as_deref() == Some("host") {
+      operator(name, format!("{name} host"))?;
+    }
+    *field = mode.clone();
   }
+
+  // Privileges.
+  if docker.privileged {
+    operator("privileged", "privileged".into())?;
+    host.privileged = Some(true);
+  }
+  if !docker.cap_add.is_empty() {
+    operator("cap_add", format!("cap_add {}", docker.cap_add.join(", ")))?;
+    host.cap_add = Some(docker.cap_add.clone());
+  }
+  let mut devices = Vec::new();
+  for device in &docker.devices {
+    operator("devices", format!("devices {}", device.host))?;
+    devices.push(device_mapping(device)?);
+  }
+  host.devices = some(devices);
+
+  // Mounts.
+  let mut mounts = Vec::new();
+  for mount in &docker.mounts {
+    let (typ, source, target, read_only, tmpfs_options) = match mount {
+      ProfileMount::Bind {
+        source,
+        target,
+        read_only,
+      } => {
+        let source = host_path(source, base);
+        if !inside(&source, &container.workspace_dir) {
+          operator("host_mounts", format!("the bind mount of {} is outside the executor's workspace and", source.display()))?;
+        }
+        (MountType::BIND, Some(source.display().to_string()), target, Some(*read_only), None)
+      }
+      ProfileMount::Volume {
+        source,
+        target,
+        read_only,
+      } => (MountType::VOLUME, source.clone(), target, Some(*read_only), None),
+      ProfileMount::Tmpfs { target, size } => {
+        let options = match size {
+          Some(size) => Some(MountTmpfsOptions {
+            size_bytes: Some(bytes(*size)?),
+            ..Default::default()
+          }),
+          None => None,
+        };
+        (MountType::TMPFS, None, target, None, options)
+      }
+    };
+    let target = absolute("mounts", target)?;
+    for (daemons, what) in [
+      (container.workspace.as_str(), "the workspace"),
+      (SOCKET_DIR, "the executor's socket directory"),
+    ] {
+      if Path::new(target).starts_with(daemons) {
+        return Err(Error::Config(format!("the mount at {target} is over {what}, which the daemon mounts")));
+      }
+    }
+    mounts.push(Mount {
+      typ: Some(typ),
+      source,
+      target: Some(target.to_string()),
+      read_only,
+      tmpfs_options,
+      ..Default::default()
+    });
+  }
+  host.mounts = some(mounts);
   Ok(())
 }
 
-/// A `--device` value, `host[:container][:mode]`, as `docker run` reads it: a
-/// second field made only of `r`, `w` and `m` is the mode, and the container
-/// path defaults to the host's.
-// Source: https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1092-L1130
-// (`validateLinuxPath`, run first with `validDeviceMode`, #L1053-L1071) and
-// #L999-L1033 (`parseLinuxDevice`).
-// Reference: https://github.com/docker/cli/blob/v28.5.1/docs/reference/commandline/container_run.md#L871-L905
-// NOTICE: docker/cli also runs `path.Clean` on the container path; this keeps
-// it as written, and the daemon receives it unchanged.
-fn device(value: &str) -> Result<DeviceMapping, String> {
-  let mode = |m: &str| !m.is_empty() && m.chars().all(|c| "rwm".contains(c)) && m.chars().collect::<BTreeSet<_>>().len() == m.len();
-  let fields: Vec<&str> = value.split(':').collect();
-  let (on_host, in_container, permissions) = match fields.as_slice() {
-    [""] | ["", ..] => return Err("bad format for path".into()),
-    [on_host] => (*on_host, *on_host, "rwm"),
-    [on_host, permissions] if mode(permissions) => (*on_host, *on_host, *permissions),
-    [on_host, in_container] => (*on_host, *in_container, "rwm"),
-    [on_host, in_container, permissions] if mode(permissions) => (*on_host, *in_container, *permissions),
-    [_, _, permissions] => return Err(format!("bad mode specified: {permissions}")),
-    _ => return Err("bad format for path".into()),
-  };
-  if !in_container.starts_with('/') {
-    return Err(format!("{in_container} is not an absolute path"));
+/// `None` for an empty list, so that an absent field leaves Docker's default.
+fn some<T>(values: Vec<T>) -> Option<Vec<T>> {
+  (!values.is_empty()).then_some(values)
+}
+
+/// A size in the Docker API's signed bytes.
+fn bytes(size: ByteSize) -> Result<i64, Error> {
+  i64::try_from(size.bytes()).map_err(|_| Error::Config(format!("{} bytes is too large for Docker", size.bytes())))
+}
+
+/// A path in the container, which is a Linux path whatever the host is.
+fn absolute<'a>(field: &str, path: &'a str) -> Result<&'a str, Error> {
+  if path.starts_with('/') {
+    Ok(path)
+  } else {
+    Err(Error::Config(format!("{field}: {path} is not an absolute path")))
   }
+}
+
+/// Whether the host path `path` is `dir` or under it, by its components: a
+/// path with `..` is never inside.
+// NOTICE: lexical only; a symbolic link inside the workspace can still point
+// out of it. The workspace is the profile owner's own directory, so a link
+// there reaches nothing its owner cannot reach already.
+fn inside(path: &Path, dir: &Path) -> bool {
+  !path.components().any(|c| c == std::path::Component::ParentDir) && path.starts_with(dir)
+}
+
+/// The device request `docker run --gpus` sends: every GPU (`all`, a count
+/// of -1), a number of GPUs, or the GPUs with these IDs, with the `gpu`
+/// capability and the runtime's default driver.
+// Source: https://github.com/docker/cli/blob/v29.3.0/opts/gpus.go#L18-L31
+// (`all` is a count of -1) and #L87-L95 (one GPU without a count or IDs,
+// the `gpu` capability by default).
+fn gpu_request(gpus: &Gpus) -> DeviceRequest {
+  let (count, device_ids) = match gpus {
+    Gpus::All => (Some(-1), None),
+    Gpus::Count(n) => (Some(i64::from(*n)), None),
+    Gpus::Devices(ids) => (None, Some(ids.clone())),
+  };
+  DeviceRequest {
+    count,
+    device_ids,
+    capabilities: Some(vec![vec!["gpu".to_string()]]),
+    ..Default::default()
+  }
+}
+
+/// A host device in the container: at the host's path and with every
+/// permission (`rwm`) unless the profile says otherwise, as `docker run
+/// --device` does.
+// Source: https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L999-L1033
+// (`parseLinuxDevice`: the container path defaults to the host's, the
+// permissions to `rwm`) and #L1053-L1071 (`validDeviceMode`: some of `r`,
+// `w` and `m`, each at most once).
+fn device_mapping(device: &Device) -> Result<DeviceMapping, Error> {
+  let permissions = device.permissions.as_deref().unwrap_or("rwm");
+  let unique = permissions.chars().collect::<BTreeSet<_>>().len() == permissions.len();
+  if permissions.is_empty() || !unique || !permissions.chars().all(|c| "rwm".contains(c)) {
+    return Err(Error::Config(format!("devices {}: bad permissions {permissions}: use some of r, w and m", device.host)));
+  }
+  let in_container = device.container.as_deref().unwrap_or(&device.host);
+  absolute("devices", in_container)?;
   Ok(DeviceMapping {
-    path_on_host: Some(on_host.to_string()),
+    path_on_host: Some(device.host.clone()),
     path_in_container: Some(in_container.to_string()),
     cgroup_permissions: Some(permissions.to_string()),
   })
-}
-
-/// A size as `docker run` takes it: binary units, `8g` is 8 GiB.
-fn size(flag: &str, value: &str) -> Result<i64, Error> {
-  parse_size::Config::new()
-    .with_binary()
-    .parse_size(value)
-    .ok()
-    .and_then(|bytes| i64::try_from(bytes).ok())
-    .ok_or_else(|| Error::Config(format!("{flag} {value}: expected a size such as 512m or 8g")))
-}
-
-/// `NAME=SOFT[:HARD]`.
-fn ulimit(value: &str) -> Result<ResourcesUlimits, Error> {
-  let invalid = || Error::Config(format!("--ulimit {value}: expected NAME=SOFT[:HARD]"));
-  let (name, limits) = value.split_once('=').ok_or_else(invalid)?;
-  let (soft, hard) = limits.split_once(':').unwrap_or((limits, limits));
-  Ok(ResourcesUlimits {
-    name: Some(name.to_string()),
-    soft: Some(soft.parse().map_err(|_| invalid())?),
-    hard: Some(hard.parse().map_err(|_| invalid())?),
-  })
-}
-
-/// `--mount type=bind,source=/a,target=/b,readonly`.
-fn parse_mount(value: &str) -> Result<Mount, Error> {
-  let mut mount = Mount {
-    typ: Some(MountType::VOLUME),
-    ..Default::default()
-  };
-  for pair in value.split(',') {
-    let (key, field) = pair.split_once('=').unwrap_or((pair, "true"));
-    match key {
-      "type" => {
-        mount.typ = Some(match field {
-          "bind" => MountType::BIND,
-          "volume" => MountType::VOLUME,
-          "tmpfs" => MountType::TMPFS,
-          other => return Err(Error::Config(format!("--mount type={other} is not supported; use bind, volume or tmpfs"))),
-        });
-      }
-      "source" | "src" => mount.source = Some(field.to_string()),
-      "target" | "dst" | "destination" => mount.target = Some(field.to_string()),
-      "readonly" | "ro" => mount.read_only = Some(field == "true" || field == "1"),
-      other => return Err(Error::Config(format!("--mount {other} is not supported"))),
-    }
-  }
-  Ok(mount)
-}
-
-fn check_mount(source: &str, target: &str, allowed: &dyn Fn(&str) -> bool) -> Result<(), Error> {
-  if target.split('/').any(|part| part == "workspace") {
-    return Err(Error::Config(format!("the workspace mount at {target} is set by the daemon")));
-  }
-  if source == "/" && !allowed("host-root") {
-    return Err(Error::Config("mounting the host root is not allowed by the operator".into()));
-  }
-  Ok(())
 }
 
 /// Creates a host directory the container's user writes through a bind

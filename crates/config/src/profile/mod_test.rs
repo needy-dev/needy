@@ -38,7 +38,8 @@ executors:
     provider: docker
     docker:
       build: { context: ./env, dockerfile: Dockerfile.build, target: toolchain, args: { RUST_VERSION: "1.97" } }
-      args: [--cpus=4, --memory=8g]
+      cpus: 4
+      memory: 8GiB
     key: "{run}"
     max_procs: 4
     on_full: wait
@@ -117,7 +118,8 @@ fn loads_every_section() {
   assert_eq!(secs(build.idle_timeout), Some(600));
   assert_eq!(build.max_procs, Some(4));
   let docker = build.docker.as_ref().unwrap();
-  assert_eq!(docker.args, ["--cpus=4", "--memory=8g"]);
+  assert_eq!(docker.cpus.map(|c| c.nanos()), Some(4_000_000_000));
+  assert_eq!(docker.memory.map(|m| m.bytes()), Some(8 << 30));
   assert_eq!(docker.build.as_ref().unwrap().args["RUST_VERSION"], "1.97");
   let mac = &p.executors["mac"];
   assert_eq!(mac.provider, Provider::Native);
@@ -465,7 +467,10 @@ fn a_file_named_profile_takes_its_directory_name() {
 #[test]
 fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   let dir = files(&[
-    ("base.yaml", "executors:\n  here: { provider: native }\n"),
+    (
+      "base.yaml",
+      "executors:\n  here: { provider: native }\n  box: { provider: docker, docker: { mounts: [{ type: bind, source: cache, target: /c }, { type: volume, source: v, target: /v }] } }\n",
+    ),
     (
       "p/profile.yaml",
       "extends: ../base.yaml\nexecutors:\n  here: { workspace: ws/ }\nfiles:\n  seed: { mode: copy-in, from: \"host:./seed/\", to: \"actor:~/seed/\" }\n  out: { mode: mirror-out, from: \"actor:~/out/\", to: \"host:~/out/\" }\n",
@@ -478,6 +483,10 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   assert!(!resolved.yaml.contains("extends"), "{}", resolved.yaml);
   assert_eq!(profile.executors["here"].workspace.as_deref(), Some(format!("{}/p/ws/", dir.path().display()).as_str()));
   assert_eq!(profile.files.mappings["seed"].from, Side::Host(format!("{}/p/seed/", dir.path().display())));
+  // A Docker bind mount's source is a host path; a volume's is a name.
+  let mounts = &profile.executors["box"].docker.as_ref().unwrap().mounts;
+  assert!(matches!(&mounts[0], Mount::Bind { source, .. } if *source == format!("{}/p/cache", dir.path().display())), "{mounts:?}");
+  assert!(matches!(&mounts[1], Mount::Volume { source: Some(v), .. } if v == "v"), "{mounts:?}");
   // `~` is the home of the machine that reads the path.
   assert_eq!(profile.files.mappings["out"].to, Side::Host("~/out/".into()));
   assert_eq!(resolved.recipe_yaml, None);
@@ -576,4 +585,146 @@ fn on_full_new_is_refused_naming_wait_and_reject() {
   let err = load_text("executors: { build: { on_full: new } }").unwrap_err().to_string();
   assert!(err.contains("executors.build.on_full"), "{err}");
   assert!(err.contains("unknown variant `new`, expected `wait` or `reject`"), "{err}");
+}
+
+#[test]
+fn docker_run_options_are_typed_fields() {
+  let p = load_text(
+    r#"
+executors:
+  build:
+    provider: docker
+    docker:
+      cpus: 1.5
+      cpu_shares: 512
+      cpuset_cpus: "0-3"
+      memory: 512MiB
+      memory_swap: unlimited
+      shm_size: 64MiB
+      pids_limit: 512
+      ulimits: { nofile: 1024, nproc: { soft: 64, hard: 128 } }
+      env: { RUST_LOG: debug }
+      workdir: /src
+      read_only: true
+      init: true
+      mounts:
+        - { type: bind, source: cache, target: /cache, read_only: true }
+        - { type: volume, source: cargo, target: /cargo }
+        - { type: tmpfs, target: /tmp, size: 64MiB }
+      add_host: { db.example.com: 192.0.2.10 }
+      dns: [192.0.2.53]
+      sysctls: { net.ipv4.ip_forward: "1" }
+      gpus: all
+      cap_drop: [NET_RAW]
+"#,
+  )
+  .unwrap();
+
+  let docker = p.executors["build"].docker.clone().unwrap();
+  assert_eq!(docker.cpus.unwrap().nanos(), 1_500_000_000);
+  assert_eq!(docker.cpu_shares, Some(512));
+  assert_eq!(docker.cpuset_cpus.as_deref(), Some("0-3"));
+  assert_eq!(docker.memory.unwrap().bytes(), 512 << 20);
+  assert_eq!(docker.memory_swap, Some(MemorySwap::Unlimited));
+  assert_eq!(docker.shm_size.unwrap().bytes(), 64 << 20);
+  assert_eq!(docker.pids_limit, Some(512));
+  assert_eq!(docker.ulimits["nofile"], Ulimit::Same(1024));
+  assert_eq!(
+    docker.ulimits["nproc"],
+    Ulimit::Pair {
+      soft: 64,
+      hard: 128
+    }
+  );
+  assert_eq!(docker.env["RUST_LOG"], "debug");
+  assert_eq!(docker.workdir.as_deref(), Some("/src"));
+  assert_eq!((docker.read_only, docker.init), (Some(true), Some(true)));
+  assert_eq!(
+    docker.mounts,
+    [
+      Mount::Bind {
+        source: "cache".into(),
+        target: "/cache".into(),
+        read_only: true
+      },
+      Mount::Volume {
+        source: Some("cargo".into()),
+        target: "/cargo".into(),
+        read_only: false
+      },
+      Mount::Tmpfs {
+        target: "/tmp".into(),
+        size: Some(crate::value::ByteSize::from_mib(64))
+      },
+    ]
+  );
+  assert_eq!(docker.add_host["db.example.com"], "192.0.2.10");
+  assert_eq!(docker.dns, ["192.0.2.53".parse::<std::net::IpAddr>().unwrap()]);
+  assert_eq!(docker.sysctls["net.ipv4.ip_forward"], "1");
+  assert_eq!(docker.gpus, Some(Gpus::All));
+  assert_eq!(docker.cap_drop, ["NET_RAW"]);
+  assert!(!docker.privileged);
+}
+
+#[test]
+fn gpus_are_all_a_count_or_device_ids() {
+  let gpus = |text: &str| {
+    load_text(&format!("executors: {{ build: {{ provider: docker, docker: {{ gpus: {text} }} }} }}"))
+      .map(|p| p.executors["build"].docker.clone().unwrap().gpus.unwrap())
+      .map_err(|e| e.to_string())
+  };
+  assert_eq!(gpus("all"), Ok(Gpus::All));
+  assert_eq!(gpus("2"), Ok(Gpus::Count(2)));
+  assert_eq!(gpus("[\"0\", GPU-example]"), Ok(Gpus::Devices(vec!["0".into(), "GPU-example".into()])));
+  let err = gpus("some").unwrap_err();
+  assert!(err.contains("executors.build.docker.gpus: "), "{err}");
+  assert!(err.contains("all, a number of GPUs or a list of device IDs"), "{err}");
+}
+
+#[test]
+fn malformed_docker_values_fail_at_load_with_their_path() {
+  let err = |docker: &str| load_text(&format!("executors: {{ build: {{ provider: docker, docker: {docker} }} }}")).unwrap_err().to_string();
+  let e = err("{ memory: 8g }");
+  assert!(e.contains("executors.build.docker.memory: invalid size unit"), "{e}");
+  let e = err("{ cpus: 0 }");
+  assert!(e.contains("executors.build.docker.cpus: "), "{e}");
+  let e = err("{ memory_swap: lots }");
+  assert!(e.contains("executors.build.docker.memory_swap: "), "{e}");
+  let e = err("{ mounts: [{ type: nfs, target: /x }] }");
+  assert!(e.contains("executors.build.docker.mounts[0].type: unknown variant `nfs`"), "{e}");
+  let e = err("{ mounts: [{ type: tmpfs, target: /x, source: /y }] }");
+  assert!(e.contains("unknown field `source`"), "{e}");
+  let e = err("{ ulimits: { nofile: { soft: 1 } } }");
+  assert!(e.contains("executors.build.docker.ulimits.nofile: "), "{e}");
+  let e = err("{ dns: [not-an-address] }");
+  assert!(e.contains("executors.build.docker.dns[0]: "), "{e}");
+}
+
+// The daemon sets these; they are not profile fields at all.
+#[test]
+fn fields_the_daemon_owns_are_not_docker_fields() {
+  for field in [
+    "hostname: h",
+    "user: \"0\"",
+    "entrypoint: sh",
+    "network: host",
+    "name: x",
+    "labels: { a: b }",
+    "rm: true",
+  ] {
+    let err = load_text(&format!("executors: {{ build: {{ provider: docker, docker: {{ {field} }} }} }}")).unwrap_err().to_string();
+    assert!(err.contains("unknown field"), "{field}: {err}");
+  }
+}
+
+// `docker.args` (docker run strings) was replaced by typed fields on
+// 2026-11-11, without compatibility; a profile that still has it is told
+// which fields replace it.
+#[test]
+fn docker_args_is_refused_naming_the_typed_fields() {
+  let err = load_text("executors: { build: { provider: docker, docker: { args: [--cpus=4] } } }").unwrap_err().to_string();
+
+  assert!(err.contains("executors.build.docker.args: `docker.args` was replaced by typed fields"), "{err}");
+  assert!(err.contains("cpus, cpu_shares, cpuset_cpus, memory"), "{err}");
+  assert!(err.contains("gpus"), "{err}");
 }
