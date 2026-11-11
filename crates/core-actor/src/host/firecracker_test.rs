@@ -13,7 +13,7 @@ const DIR: &str = "/home/user/.local/state/needy/runs/0123456789ab";
 fn gce(extra: &str) -> CompiledRecipe {
   let text = format!("extends: builtin:gce-ubuntu-22.04\n{extra}");
   let recipe = needy_config::recipe::load(&Source::text(&text, ".")).unwrap();
-  needy_core::recipe::compile(&recipe, &HostInfo::default(), 7)
+  needy_core::recipe::compile(&recipe, &HostInfo::default(), &needy_core::recipe::PerRun::at(7, 0))
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn the_firecracker_environment_carries_the_recipe_identity() {
   assert_eq!(env["NEEDY_PCI_HOST_BRIDGE"], "8086:1237:02");
   assert_eq!(env["NEEDY_PCI_ISA_BRIDGE"], "8086:7110:03");
   let smbios = &env["NEEDY_SMBIOS"];
-  assert!(smbios.starts_with("bios_date=01/01/2011;bios_vendor=Google;bios_version=Google;"), "{smbios}");
+  assert!(smbios.starts_with("bios_date=07/16/2026;bios_vendor=Google;bios_version=Google;"), "{smbios}");
   assert!(smbios.contains(";product_name=Google Compute Engine;"), "{smbios}");
   assert!(smbios.contains(";product_version=;"), "{smbios}");
   assert!(smbios.contains("chassis_type=1;"), "{smbios}");
@@ -165,7 +165,7 @@ fn the_patchs_default_serials_carry_its_default_uuid_as_gce_does() {
 #[test]
 fn a_dell_identity_sends_no_google_value() {
   let recipe = needy_config::recipe::load(&Source::builtin("dell-optiplex-ubuntu-24.04")).unwrap();
-  let recipe = needy_core::recipe::compile(&recipe, &HostInfo::default(), 7);
+  let recipe = needy_core::recipe::compile(&recipe, &HostInfo::default(), &needy_core::recipe::PerRun::at(7, 0));
 
   let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
   let sent = smbios_keys(&env["NEEDY_SMBIOS"]);

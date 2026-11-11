@@ -67,17 +67,22 @@ os:
   # adds (`goog-ec-src=vm_add-gcloud`) name the VM `instance-` and the
   # creation time as `YYYYMMDD-HHMMSS`, e.g.
   # https://github.com/pradeepgadde/blog/blob/13557403fdef8335afe2833c8150ac7e602ada3c/_posts/2024-05-17-gcp-gce-windows.md?plain=1#L36-L38
-  # TODO(hostname-time): the Console's suffix is `YYYYMMDD-HHMMSS`; recipes
-  # have only `{hash}` and `{seq}` (`fill_placeholders` in
-  # crates/core/src/recipe/identity.rs), so the suffix stays `{hash}` until
-  # the owner approves a time placeholder.
-  hostname: "instance-{hash}"
+  # `{time}` is the run's creation time in UTC as `YYYYMMDD-HHMMSS` (owner
+  # decision, 2026-11-12).
+  hostname: "instance-{time}"
 firmware:
   dmi:
     sys_vendor: Google
     product_name: Google Compute Engine
     product_version: ""
-    bios: { vendor: Google, version: Google, date: 01/01/2011 }
+    # Source: `dmidecode` on an n2-standard-2 (captured 2026-07-31), type 0
+    # "BIOS Information": `Vendor: Google`, `Version: Google`,
+    # `Release Date: 07/16/2026`,
+    # https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp/n2-standard-2/0/dmidecode/stdout#L7-L18
+    # NOTICE: GCE's BIOS date moves with its firmware (the sos issue above
+    # shows 01/01/2011); this is the date of the capture the recipe cites
+    # (owner decision, 2026-11-12).
+    bios: { vendor: Google, version: Google, date: 07/16/2026 }
     board_vendor: Google
     board_name: Google Compute Engine
     # Source: `dmidecode` on an n2-standard-2 (captured 2026-07-31), type 3

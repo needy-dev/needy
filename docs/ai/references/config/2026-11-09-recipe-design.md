@@ -41,14 +41,14 @@ os:
     release: 6.5.0-1020-gcp            # uname -r
     version: "#20~22.04.1-Ubuntu SMP Fri Mar  1 10:04:32 UTC 2024"   # uname -v
     build: { user: buildd, host: lcy02-amd64-033 }                   # /proc/version
-  hostname: "instance-{hash}"
+  hostname: "instance-{time}"
   uptime: 3d4h
 
 firmware:
   dmi:
     sys_vendor: Google
     product_name: Google Compute Engine
-    bios: { vendor: Google, version: Google, date: 01/01/2011 }
+    bios: { vendor: Google, version: Google, date: 07/16/2026 }
     chassis_type: other
     serial: "GoogleCloud-{uuid_hex}"
 
@@ -80,7 +80,12 @@ encodes an address never names a subnet's network or gateway) derive from the
 run seed. In `firmware.dmi.serial` and `board_serial`, `{uuid_hex}` is the
 system UUID's 32 upper-case hex digits, as GCE serials carry it. A replayed
 run gets the same values; different runs get different serial
-numbers and MAC addresses.
+numbers and MAC addresses. `{time}` is the time the run was created, in UTC,
+as `YYYYMMDD-HHMMSS`, the suffix the GCE Console gives a new VM's default
+name (`instance-20261112-010203`); it is filled wherever the others are.
+`run.create` records it as `recipe_time` (trace schema version 5), so a
+replay compiles the same machine from it and the run ID's seed. `profile
+check` shows a value that depends on either as `generated per run`.
 
 Built-in recipes are referenced as `builtin:NAME`: `gce-ubuntu-22.04` and
 `dell-optiplex-ubuntu-24.04`, embedded in `needy-config`. *Preset* stays

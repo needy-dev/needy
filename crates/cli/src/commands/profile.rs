@@ -16,7 +16,7 @@ use needy_config::profile::{Fault, Profile};
 use needy_config::validate::{self, Finding, Severity};
 use needy_core::chaos::{Injector, Subject};
 use needy_core::intercept::ExecContext;
-use needy_core::recipe::{Smbios, VmIdentity};
+use needy_core::recipe::{PerRun, Smbios, VmIdentity};
 use needy_core::rules;
 use needy_core::types::Outcome;
 use serde::Serialize;
@@ -152,10 +152,11 @@ fn print_recipe(profile: &Profile, host: &needy_core::recipe::HostInfo) -> Resul
     return Ok(Vec::new());
   };
   let recipe = needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
-  // A run compiles the recipe with a seed from its ID, which a check does
-  // not have. Compiling with two seeds shows which values the seed decides.
-  let compiled = needy_core::recipe::compile(&recipe, host, 1);
-  let other = needy_core::recipe::compile(&recipe, host, 2);
+  // A run compiles the recipe with a seed from its ID and the time it was
+  // created, which a check does not have. Compiling with two of each shows
+  // which values they decide.
+  let compiled = needy_core::recipe::compile(&recipe, host, &PerRun::at(1, 0));
+  let other = needy_core::recipe::compile(&recipe, host, &PerRun::at(2, 86_400_000 + 3_661_000));
   let hostname = per_run(compiled.hostname.as_deref(), other.hostname.as_deref()).unwrap_or("not set");
   println!(
     "recipe: {} vCPU, {} MiB, hostname {hostname}, uptime offset {} s",

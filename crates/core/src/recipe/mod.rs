@@ -8,6 +8,7 @@ mod identity;
 mod kernel;
 
 use std::collections::BTreeMap;
+use std::time::{Duration, UNIX_EPOCH};
 
 use needy_config::recipe::{Hypervisor, Recipe};
 use needy_config::validate::Finding;
@@ -60,7 +61,38 @@ pub struct CpuView {
   pub threads_per_core: u32,
 }
 
-/// A recipe compiled for one host and run seed.
+/// What a run's own recipe values are generated from, so a replayed run,
+/// given the same, gets the same machine: the seed (from the run's ID)
+/// fills `{hash}`, `{seq}` and the system UUID, and `time` fills `{time}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PerRun {
+  pub seed: u64,
+  /// When the run was created, in UTC, as `YYYYMMDD-HHMMSS`: the suffix of
+  /// the default name the GCE Console gives a VM. The trace records it in
+  /// `run.create` (`recipe_time`).
+  pub time: String,
+}
+
+impl PerRun {
+  /// The values of a run created at `created_ms` (milliseconds since the
+  /// Unix epoch).
+  pub fn at(seed: u64, created_ms: i64) -> Self {
+    Self {
+      seed,
+      time: time(created_ms),
+    }
+  }
+}
+
+/// `created_ms` in UTC as `YYYYMMDD-HHMMSS`: the digits of its RFC 3339
+/// form (`2026-11-12T01:02:03Z`), which `humantime` writes.
+fn time(created_ms: i64) -> String {
+  let at = UNIX_EPOCH + Duration::from_millis(u64::try_from(created_ms).unwrap_or(0));
+  let digits: String = humantime::format_rfc3339_seconds(at).to_string().chars().filter(char::is_ascii_digit).collect();
+  format!("{}-{}", &digits[..8], &digits[8..14])
+}
+
+/// A recipe compiled for one host and run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledRecipe {
   pub vcpus: u32,
@@ -73,6 +105,8 @@ pub struct CompiledRecipe {
   /// `images/Dockerfile` as build arguments of its `kernel` stage.
   pub kernel_build_env: BTreeMap<String, String>,
   pub hostname: Option<String>,
+  /// The `{time}` it was compiled with ([`PerRun::time`]).
+  pub time: String,
   pub uptime_offset_secs: i64,
   pub sensors: Vec<SensorSpec>,
   /// TODO(actor-network): checked against the identity's vendor only; no
@@ -86,11 +120,11 @@ pub struct CompiledRecipe {
   pub findings: Vec<Finding>,
 }
 
-/// Compiles a recipe for `host`; `seed` fills `{hash}` and `{seq}` and every
+/// Compiles a recipe for `host`; `run` fills the placeholders and every
 /// other per-run value, so a replayed run gets the same machine.
-pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
+pub fn compile(recipe: &Recipe, host: &HostInfo, run: &PerRun) -> CompiledRecipe {
   let mut findings = Vec::new();
-  let fill = |text: &str| fill_placeholders(text, seed);
+  let fill = |text: &str| fill_placeholders(text, run);
 
   let topology = recipe.cpu.topology.clone();
   let vcpus = recipe.vcpus.or_else(|| topology.map(|t| t.cores.max(1) * t.threads_per_core.max(1))).unwrap_or(2);
@@ -106,7 +140,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
   let mut vm = VmIdentity {
     cpu_brand: recipe.cpu.brand.as_deref().map(fill),
     hide_hypervisor: hidden,
-    smbios: recipe.firmware.dmi.as_ref().map(|dmi| identity::smbios(dmi, seed, &mut findings)),
+    smbios: recipe.firmware.dmi.as_ref().map(|dmi| identity::smbios(dmi, run, &mut findings)),
     ..VmIdentity::default()
   };
   if let Some(bridge) = &recipe.devices.pci.host_bridge {
@@ -184,6 +218,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, seed: u64) -> CompiledRecipe {
     cpu_template,
     kernel_build_env,
     hostname: recipe.os.hostname.as_ref().map(|t| fill(t.as_str())),
+    time: run.time.clone(),
     uptime_offset_secs,
     sensors,
     network_mac,

@@ -43,7 +43,7 @@ fn signature_encoding() {
 #[test]
 fn compiles_gce_recipe() {
   let recipe = load(GCE);
-  let c = compile(&recipe, &HostInfo::default(), 7);
+  let c = compile(&recipe, &HostInfo::default(), &PerRun::at(7, 0));
   assert_eq!(c.vcpus, 4);
   assert_eq!(c.mem_mib, 16384);
   let identity = &c.identity;
@@ -55,7 +55,7 @@ fn compiles_gce_recipe() {
   assert_eq!(smbios.sys_vendor.as_deref(), Some("Google"));
   assert_eq!(smbios.product_name.as_deref(), Some("Google Compute Engine"));
   assert_eq!(smbios.chassis_type, Some(1));
-  assert_eq!(smbios.bios_date.as_deref(), Some("01/01/2011"));
+  assert_eq!(smbios.bios_date.as_deref(), Some("07/16/2026"));
   assert_eq!(smbios.uuid.len(), 36, "{smbios:?}");
   assert_eq!(c.uptime_offset_secs, 3 * 86400 + 4 * 3600);
   let hostname = c.hostname.clone().unwrap();
@@ -87,10 +87,10 @@ fn compiles_gce_recipe() {
   assert_eq!(reg(&kvm, "ebx"), format!("0b{}", "0".repeat(32)));
 
   // Same seed, same values; different seed, different values.
-  let again = compile(&recipe, &HostInfo::default(), 7);
+  let again = compile(&recipe, &HostInfo::default(), &PerRun::at(7, 0));
   assert_eq!(again.hostname, c.hostname);
   assert_eq!(again.identity, c.identity);
-  let other = compile(&recipe, &HostInfo::default(), 8);
+  let other = compile(&recipe, &HostInfo::default(), &PerRun::at(8, 0));
   assert_ne!(other.hostname, c.hostname);
   assert!(c.findings.is_empty(), "{:?}", c.findings);
 }
@@ -98,7 +98,7 @@ fn compiles_gce_recipe() {
 #[test]
 fn cascade_lake_on_raptor_lake() {
   let recipe = load("cpu: { signature: { family: 6, model: 85, stepping: 7 }, features: { hide: [serialize] } }");
-  let c = compile(&recipe, &raptor_lake(), 1);
+  let c = compile(&recipe, &raptor_lake(), &PerRun::at(1, 0));
   let errors: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Error).collect();
   assert!(errors.iter().any(|f| f.message.contains("avx512f")), "{errors:?}");
   let warnings: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Warning).map(|f| f.message.clone()).collect();
@@ -109,7 +109,7 @@ fn cascade_lake_on_raptor_lake() {
 #[test]
 fn raptor_lake_identity_on_raptor_lake_is_clean() {
   let recipe = load("cpu: { signature: { family: 6, model: 183, stepping: 1 }, features: { require: [avx2] } }");
-  assert!(compile(&recipe, &raptor_lake(), 1).findings.is_empty());
+  assert!(compile(&recipe, &raptor_lake(), &PerRun::at(1, 0)).findings.is_empty());
 }
 
 /// A real host's `/proc/cpuinfo` from `testdata` (see `testdata/SOURCES.md`).
@@ -132,7 +132,7 @@ fn sse3_is_named_pni_as_in_proc_cpuinfo() {
   let host = cpuinfo("cpuinfo-raptor-lake.txt");
   let recipe = load("cpu: { signature: { family: 6, model: 183, stepping: 1 }, features: { require: [pni], hide: [pni] } }");
 
-  let c = compile(&recipe, &host, 1);
+  let c = compile(&recipe, &host, &PerRun::at(1, 0));
 
   assert!(c.findings.is_empty(), "{:?}", c.findings);
   let modifiers = c.cpu_template["cpuid_modifiers"].as_array().unwrap();
@@ -159,7 +159,7 @@ fn hybrid_cpu_is_not_a_recipe_feature() {
   assert!(!host.flags.contains("hybrid_cpu"), "a hybrid host shows no such flag");
   let recipe = load("cpu: { signature: { family: 6, model: 79, stepping: 0 }, features: { hide: [hybrid_cpu] } }");
 
-  let c = compile(&recipe, &host, 1);
+  let c = compile(&recipe, &host, &PerRun::at(1, 0));
 
   let messages: Vec<_> = c.findings.iter().map(|f| f.message.clone()).collect();
   assert!(messages.contains(&"cpu.features.hide: unknown feature \"hybrid_cpu\"".to_string()), "{messages:?}");
@@ -168,12 +168,12 @@ fn hybrid_cpu_is_not_a_recipe_feature() {
 #[test]
 fn vendor_disagreement_warns() {
   let recipe = load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"02:11:22:33:44:55\" }\nos: { kernel: { release: 6.8.0-1-aws } }");
-  let c = compile(&recipe, &HostInfo::default(), 1);
+  let c = compile(&recipe, &HostInfo::default(), &PerRun::at(1, 0));
   assert!(c.findings.iter().any(|f| f.message.contains("machine identity disagrees")), "{:?}", c.findings);
 }
 
 fn builtin(name: &str, seed: u64) -> CompiledRecipe {
-  compile(&needy_config::recipe::load(&Source::builtin(name)).unwrap(), &HostInfo::default(), seed)
+  compile(&needy_config::recipe::load(&Source::builtin(name)).unwrap(), &HostInfo::default(), &PerRun::at(seed, 0))
 }
 
 // ROOT CAUSE:
@@ -222,7 +222,7 @@ fn the_recipe_kernel_release_and_version_are_the_kernels_make_variables() {
 
 #[test]
 fn a_kernel_version_without_a_build_number_and_date_is_a_finding_and_not_applied() {
-  let c = compile(&load("os: { kernel: { version: \"custom\" } }"), &HostInfo::default(), 0);
+  let c = compile(&load("os: { kernel: { version: \"custom\" } }"), &HostInfo::default(), &PerRun::at(0, 0));
 
   assert!(!c.kernel_build_env.contains_key("KBUILD_BUILD_VERSION"), "{:?}", c.kernel_build_env);
   assert_eq!(c.findings.len(), 1, "{:?}", c.findings);
@@ -232,8 +232,8 @@ fn a_kernel_version_without_a_build_number_and_date_is_a_finding_and_not_applied
 #[test]
 fn a_kernel_release_the_kernel_cannot_hold_is_an_error() {
   let long = "6".repeat(65);
-  let c = compile(&load(&format!("os: {{ kernel: {{ release: \"{long}\" }} }}")), &HostInfo::default(), 0);
-  let spaced = compile(&load("os: { kernel: { release: \"6.5 gcp\" } }"), &HostInfo::default(), 0);
+  let c = compile(&load(&format!("os: {{ kernel: {{ release: \"{long}\" }} }}")), &HostInfo::default(), &PerRun::at(0, 0));
+  let spaced = compile(&load("os: { kernel: { release: \"6.5 gcp\" } }"), &HostInfo::default(), &PerRun::at(0, 0));
 
   assert_eq!(c.findings.iter().filter(|f| f.severity == Severity::Error).count(), 1, "{:?}", c.findings);
   assert_eq!(spaced.findings.iter().filter(|f| f.severity == Severity::Error).count(), 1, "{:?}", spaced.findings);
@@ -258,6 +258,41 @@ fn the_gce_builtin_serials_carry_the_system_uuid() {
   assert_eq!(hex.len(), 32);
   assert_eq!(smbios.serial.unwrap(), format!("GoogleCloud-{hex}"));
   assert_eq!(smbios.board_serial.unwrap(), format!("Board-GoogleCloud-{hex}"));
+}
+
+/// 2026-11-12 01:02:03.456 UTC.
+const CREATED_MS: i64 = 1_794_445_323_456;
+
+#[test]
+fn time_is_the_runs_creation_time_in_utc() {
+  let run = PerRun::at(7, CREATED_MS);
+  let c = compile(&load("os: { hostname: \"build-{time}\" }\nfirmware: { dmi: { serial: \"S-{time}\" } }"), &HostInfo::default(), &run);
+
+  assert_eq!(run.time, "20261112-010203");
+  assert_eq!(c.hostname.as_deref(), Some("build-20261112-010203"));
+  assert_eq!(c.identity.smbios.unwrap().serial.as_deref(), Some("S-20261112-010203"));
+  assert_eq!(PerRun::at(7, 0).time, "19700101-000000");
+}
+
+// The GCE Console names a VM `instance-` and its creation time (owner
+// decision D4, 2026-11-12; source in the recipe's comment).
+#[test]
+fn the_gce_builtin_hostname_is_instance_and_the_runs_creation_time() {
+  let recipe = needy_config::recipe::load(&Source::builtin("gce-ubuntu-22.04")).unwrap();
+
+  let c = compile(&recipe, &HostInfo::default(), &PerRun::at(7, CREATED_MS));
+
+  assert_eq!(c.hostname.as_deref(), Some("instance-20261112-010203"));
+}
+
+// The BIOS date of the cited n2-standard-2 `dmidecode` capture (owner
+// decision D4, 2026-11-12), not the sos issue's older 01/01/2011.
+#[test]
+fn the_gce_builtin_bios_date_is_the_cited_n2_standard_2s() {
+  let smbios = builtin("gce-ubuntu-22.04", 1).identity.smbios.unwrap();
+
+  assert_eq!((smbios.bios_vendor.as_deref(), smbios.bios_version.as_deref()), (Some("Google"), Some("Google")));
+  assert_eq!(smbios.bios_date.as_deref(), Some("07/16/2026"));
 }
 
 // ROOT CAUSE:
@@ -360,7 +395,7 @@ fn the_gce_builtin_is_the_cited_n2_standard_2() {
 fn the_gce_builtin_on_a_raptor_lake_host_needs_avx512_and_hides_the_rest() {
   let recipe = needy_config::recipe::load(&Source::builtin("gce-ubuntu-22.04")).unwrap();
 
-  let c = compile(&recipe, &raptor_lake(), 1);
+  let c = compile(&recipe, &raptor_lake(), &PerRun::at(1, 0));
 
   let errors: Vec<_> = c.findings.iter().filter(|f| f.severity == Severity::Error).map(|f| f.message.clone()).collect();
   assert!(errors.iter().any(|e| e.starts_with("cpu.features.require needs avx512_vnni")), "{errors:?}");
@@ -401,7 +436,7 @@ fn the_dell_builtin_sensors_are_the_cited_optiplex_7000_log() {
 fn an_aws_mac_from_awss_documentation_disagrees_with_a_gce_identity() {
   let recipe = load("extends: builtin:gce-ubuntu-22.04\nnetwork: { mac: \"02:29:96:8f:6a:2d\" }");
 
-  let c = compile(&recipe, &HostInfo::default(), 1);
+  let c = compile(&recipe, &HostInfo::default(), &PerRun::at(1, 0));
 
   let messages: Vec<_> = c.findings.iter().map(|f| f.message.clone()).collect();
   assert_eq!(messages, ["machine identity disagrees: DMI vendor=gce, MAC prefix=aws, metadata provider=gce, kernel release=gce"]);
@@ -411,10 +446,10 @@ fn an_aws_mac_from_awss_documentation_disagrees_with_a_gce_identity() {
 fn builtins_compile() {
   for name in needy_config::builtin::recipes() {
     let r = needy_config::recipe::load(&Source::builtin(name)).unwrap();
-    let c = compile(&r, &HostInfo::default(), 3);
+    let c = compile(&r, &HostInfo::default(), &PerRun::at(3, 0));
     assert!(c.findings.is_empty(), "{name}: {:?}", c.findings);
   }
-  let dell = compile(&load("extends: builtin:dell-optiplex-ubuntu-24.04"), &HostInfo::default(), 3);
+  let dell = compile(&load("extends: builtin:dell-optiplex-ubuntu-24.04"), &HostInfo::default(), &PerRun::at(3, 0));
   assert_eq!(dell.sensors.len(), 2);
   assert_eq!(dell.sensors[0].idle_mc, 34000);
   assert_eq!(dell.identity.smbios.as_ref().unwrap().chassis_type, Some(3));
@@ -423,7 +458,7 @@ fn builtins_compile() {
 #[test]
 fn unknown_features_and_bad_pci_ids_are_findings() {
   let r = load("cpu: { features: { hide: [not_a_flag] } }\ndevices: { pci: { host_bridge: zz } }");
-  let c = compile(&r, &HostInfo::default(), 0);
+  let c = compile(&r, &HostInfo::default(), &PerRun::at(0, 0));
   assert_eq!(c.findings.len(), 2, "{:?}", c.findings);
 }
 
@@ -483,7 +518,7 @@ fn hiding_a_feature_in_a_cpuid_entry_the_hosts_kvm_lacks_emits_no_modifier() {
     ..HostInfo::default()
   };
 
-  let c = compile(&recipe, &host, 7);
+  let c = compile(&recipe, &host, &PerRun::at(7, 0));
 
   let entries = modified_entries(&c.cpu_template);
   assert!(!entries.contains(&("0x7".into(), "0x1".into())), "{entries:?}");
@@ -504,7 +539,7 @@ fn hiding_a_feature_in_a_cpuid_entry_the_hosts_kvm_supports_modifies_it() {
     ..HostInfo::default()
   };
 
-  let c = compile(&recipe, &host, 7);
+  let c = compile(&recipe, &host, &PerRun::at(7, 0));
 
   assert!(modified_entries(&c.cpu_template).contains(&("0x7".into(), "0x1".into())));
   assert!(c.findings.is_empty(), "{:?}", c.findings);
@@ -553,7 +588,7 @@ fn cascade_lake_flags() -> HostInfo {
 fn the_broadwell_example_recipe_hides_what_a_cascade_lake_host_adds() {
   let recipe = load(include_str!("../../../../examples/opencode/gce.recipe.yaml"));
 
-  let c = compile(&recipe, &cascade_lake_flags(), 7);
+  let c = compile(&recipe, &cascade_lake_flags(), &PerRun::at(7, 0));
 
   let messages: Vec<_> = c.findings.iter().map(|f| f.to_string()).collect();
   assert!(messages.is_empty(), "{messages:?}");

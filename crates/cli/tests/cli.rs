@@ -679,6 +679,19 @@ fn profile_check_says_which_recipe_values_each_run_generates() {
   assert!(text.contains("  cpu brand: Intel(R) Xeon(R) CPU @ 2.80GHz\n"), "{text}");
 }
 
+// `{time}` is the run's creation time, which a check does not have either.
+#[test]
+fn profile_check_says_a_hostname_from_the_runs_time_is_generated_per_run() {
+  let home = Home::new();
+  home.write("time.recipe.yaml", "os: { hostname: \"ci-{time}\" }\n");
+  let profile = home.write("profile.yaml", "actor: { runtime: firecracker, recipe: time.recipe.yaml }\n");
+
+  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+
+  let text = stdout(&output);
+  assert!(text.contains(", hostname generated per run, "), "{text}{}", stderr(&output));
+}
+
 #[test]
 fn profile_check_asks_the_control_plane_where_the_profile_would_run() {
   let home = Home::new();

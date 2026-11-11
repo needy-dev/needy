@@ -116,7 +116,7 @@ fn every_kernel_build_variable_of_a_recipe_is_an_arg_of_the_kernel_stage() {
   let args = kernel_stage_args();
   for name in needy_config::builtin::recipes() {
     let recipe = needy_config::recipe::load(&Source::builtin(name)).unwrap();
-    let compiled = needy_core::recipe::compile(&recipe, &needy_core::recipe::HostInfo::default(), 0);
+    let compiled = needy_core::recipe::compile(&recipe, &needy_core::recipe::HostInfo::default(), &needy_core::recipe::PerRun::at(0, 0));
     assert!(compiled.kernel_build_env.contains_key("KERNELRELEASE"), "{name}");
     for key in compiled.kernel_build_env.keys() {
       assert!(args.contains(key), "{name}: {key} is not an ARG of the kernel stage: {args:?}");

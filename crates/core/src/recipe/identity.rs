@@ -8,6 +8,8 @@ use needy_common::seed::mix;
 use needy_config::recipe::{ChassisType, Dmi, Recipe};
 use needy_config::validate::Finding;
 
+use super::PerRun;
+
 /// SMBIOS tables of the VM. Every value is already filled from the seed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Smbios {
@@ -45,14 +47,16 @@ impl fmt::Display for PciId {
 }
 
 /// `{hash}` becomes 8 hex digits and `{seq}` 2 hex digits from 02 to ff,
-/// derived from the seed.
+/// derived from the seed, and `{time}` the run's creation time
+/// ([`PerRun::time`]).
 // NOTICE: `{seq}` skips 00 and 01 because it fills the host octet of a MAC
 // that encodes an IPv4 address (GCE's `42:01:` and the address), and a
 // subnet's first two addresses are its network and gateway, which no VM gets:
 // https://web.archive.org/web/20240105143455/https://cloud.google.com/vpc/docs/subnets#reserved_ip_addresses_in_every_subnet
-pub(super) fn fill_placeholders(text: &str, seed: u64) -> String {
+pub(super) fn fill_placeholders(text: &str, run: &PerRun) -> String {
+  let seed = run.seed;
   let seq = 2 + mix(seed, 2) % 254;
-  text.replace("{hash}", &format!("{:08x}", mix(seed, 1) as u32)).replace("{seq}", &format!("{seq:02x}"))
+  text.replace("{hash}", &format!("{:08x}", mix(seed, 1) as u32)).replace("{seq}", &format!("{seq:02x}")).replace("{time}", &run.time)
 }
 
 // Version 4 bits in octet 6 and variant 10 in octet 8: RFC 9562 sections 4.1,
@@ -96,10 +100,10 @@ fn chassis_number(value: &ChassisType) -> Option<u32> {
 
 /// The SMBIOS tables for a recipe's DMI; board fields fall back to the
 /// system's, and the chassis vendor is the system's.
-pub(super) fn smbios(dmi: &Dmi, seed: u64, findings: &mut Vec<Finding>) -> Smbios {
-  let uuid = run_uuid(seed);
+pub(super) fn smbios(dmi: &Dmi, run: &PerRun, findings: &mut Vec<Finding>) -> Smbios {
+  let uuid = run_uuid(run.seed);
   let uuid_hex = uuid.replace('-', "").to_ascii_uppercase();
-  let fill = |value: Option<&str>| value.map(|text| fill_placeholders(text, seed).replace("{uuid_hex}", &uuid_hex));
+  let fill = |value: Option<&str>| value.map(|text| fill_placeholders(text, run).replace("{uuid_hex}", &uuid_hex));
   let chassis_type = dmi.chassis_type.as_ref().and_then(|value| {
     let number = chassis_number(value);
     if number.is_none() {

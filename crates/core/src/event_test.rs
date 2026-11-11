@@ -22,6 +22,7 @@ fn every_kind() -> Vec<Event> {
         instance: "needy-build".into(),
       }],
       by: Some(Principal::Client("laptop".into())),
+      recipe_time: Some("20261112-010203".into()),
     }),
     Event::RunStop(RunStop {
       by: Some(Principal::Operator),

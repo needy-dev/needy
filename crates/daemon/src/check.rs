@@ -182,7 +182,7 @@ impl Daemon {
         }
       },
     };
-    let compiled = needy_core::recipe::compile(&recipe, &host, 1);
+    let compiled = needy_core::recipe::compile(&recipe, &host, &needy_core::recipe::PerRun::at(1, needy_common::time::now_ms()));
     check.actor_cpu = host.model_name;
     check.findings.extend(compiled.findings.iter().map(|f| ProfileFinding {
       error: f.severity == Severity::Error,

@@ -28,7 +28,7 @@ use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
 use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::recipe::CompiledRecipe;
+use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{Principal, RunState};
 use needy_core_actor::host::runtime;
 use needy_core_executor::provider::InstanceSpec;
@@ -491,7 +491,7 @@ impl Daemon {
           Default::default()
         });
         let seed = u64::from_str_radix(&id[..8], 16).unwrap_or(0);
-        let compiled = needy_core::recipe::compile(&recipe, &host, seed);
+        let compiled = needy_core::recipe::compile(&recipe, &host, &PerRun::at(seed, created_ms));
         for finding in &compiled.findings {
           tracing::warn!("run {id}: recipe {finding}");
         }
@@ -594,6 +594,7 @@ impl Daemon {
       profile: run.profile_name.clone(),
       executors: executor_refs(&run.executors()),
       by: run.created_by.clone(),
+      recipe_time: run.recipe.as_ref().map(|recipe| recipe.time.clone()),
     }));
     unwinding(run)?;
     files::copy_in(run).await?;

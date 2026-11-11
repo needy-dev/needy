@@ -76,7 +76,7 @@ fn runtime(fake: Fake, oci: OciRuntime) -> (Container, Arc<Fake>) {
 
 fn gce() -> CompiledRecipe {
   let recipe = needy_config::recipe::load(&Source::builtin("gce-ubuntu-22.04")).unwrap();
-  needy_core::recipe::compile(&recipe, &HostInfo::default(), 7)
+  needy_core::recipe::compile(&recipe, &HostInfo::default(), &needy_core::recipe::PerRun::at(7, 0))
 }
 
 fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) -> Start<'a> {

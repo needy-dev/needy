@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use needy_api_server::control::{ControlError, Runs};
+use needy_core::event::Event;
 use needy_core::intercept::ExecContext;
 use needy_core::types::RunState;
 
@@ -330,6 +331,28 @@ async fn a_run_is_created_from_a_profile_whose_directory_the_daemon_cannot_read(
   let run = started.daemon.runs.find(&created.id).unwrap();
   assert_eq!(run.recipe.as_ref().and_then(|r| r.hostname.as_deref()), Some("from-the-client"));
   assert_eq!(created.executors.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(), ["here"]);
+}
+
+// The GCE built-in's hostname is `instance-` and the run's creation time
+// (owner decision D4, 2026-11-12); `run.create` records the time, so a
+// replay compiles the same machine from it and the seed of the run's ID.
+#[tokio::test]
+async fn a_runs_recipe_time_is_its_creation_time_and_run_create_records_it() {
+  let dir = tempfile::tempdir().unwrap();
+  let yaml = "actor: { runtime: firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { provider: native }\n";
+  let started = testing::daemon().await;
+
+  let created = Runs::create(&started.daemon, new_run(yaml, dir.path())).await.unwrap();
+
+  let time = needy_core::recipe::PerRun::at(0, created.created_ms).time;
+  let run = started.daemon.runs.find(&created.id).unwrap();
+  assert_eq!(run.recipe.as_ref().and_then(|r| r.hostname.clone()), Some(format!("instance-{time}")));
+  let events = Runs::events(&started.daemon, &created.id).await.unwrap().events;
+  let create = events.iter().find(|e| e.kind == "run.create").unwrap();
+  let Event::RunCreate(payload) = Event::decode(&create.kind, create.version, &create.payload).unwrap() else {
+    unreachable!()
+  };
+  assert_eq!(payload.recipe_time, Some(time));
 }
 
 #[tokio::test]

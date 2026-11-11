@@ -69,6 +69,7 @@ fn actor_run() -> Vec<Recorded> {
         profile: "smoke".into(),
         executors: vec![],
         by: None,
+        recipe_time: None,
       }),
     ),
     at(
@@ -206,6 +207,7 @@ fn a_failed_run_shows_its_state_and_reason() {
         profile: "smoke".into(),
         executors: vec![],
         by: None,
+        recipe_time: None,
       }),
     ),
     at(
@@ -253,6 +255,7 @@ fn create(time_ms: i64) -> Recorded {
       profile: "smoke".into(),
       executors: vec![],
       by: None,
+      recipe_time: None,
     }),
   )
 }
@@ -587,6 +590,7 @@ fn attributed_run() -> Vec<Recorded> {
         profile: "smoke".into(),
         executors: vec![],
         by: by(Principal::Client("laptop".into())),
+        recipe_time: None,
       }),
     ),
     at(

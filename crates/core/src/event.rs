@@ -14,16 +14,18 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 ///
 /// Version 2 added who caused an event (`by`: `run.create`, `run.stop`,
 /// `exec.start`) and `exec.kill`; version 3 added `files.fail`; version 4
-/// added `actor.start`'s `runtime`.
-pub const SCHEMA_VERSION: u32 = 4;
+/// added `actor.start`'s `runtime`; version 5 added `run.create`'s
+/// `recipe_time`.
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
 // NOTICE: version 1 payloads are version 2 payloads without `by` and
 // without `exec.kill`, and version 2 payloads are version 3 payloads without
 // `files.fail`, and version 3 payloads are version 4 payloads without
-// `actor.start`'s `runtime`, so they decode with the same types: `by` and
-// `runtime` read as `None`.
+// `actor.start`'s `runtime`, and version 4 payloads are version 5 payloads
+// without `run.create`'s `recipe_time`, so they decode with the same types:
+// `by`, `runtime` and `recipe_time` read as `None`.
 // Traces written before version 3, and events a guest built before it
 // pushes, stay readable. Version 0 is the flat string-attribute rows written
 // before the typed schema; they are not read (module layout redesign,
@@ -177,6 +179,12 @@ pub struct RunCreate {
   /// plane does on its own, such as stopping runs when it shuts down.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub by: Option<Principal>,
+  /// The `{time}` the run's recipe was compiled with (`YYYYMMDD-HHMMSS`,
+  /// UTC, when the run was created), which with the seed from the run's ID
+  /// rebuilds the same machine on replay. `None` for a run without a recipe
+  /// and in traces before version 5.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub recipe_time: Option<String>,
 }
 
 /// An executor instance a run uses.

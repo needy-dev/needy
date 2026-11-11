@@ -68,7 +68,7 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | 4 | `hybrid_cpu` in the Broadwell hide list | `examples/opencode/gce.recipe.yaml:13` | fixed | removed from the hide list, as item 2 |
 | 5 | GCE CPU, Cascade Lake @ 2.20GHz | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:16` | fixed | only A2 and G2 GPU types: `WB/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms`. Now an n2-standard-2 (owner decision 14): `Intel(R) Xeon(R) CPU @ 2.80GHz`, 6/85/7, 1 core of 2 threads, `SC/n2-standard-2/0/lscpu/stdout` (2025-01-10); 2 vCPUs and 8 GB, Cascade Lake the default up to 80 vCPUs, `WB/20241231005450/https://cloud.google.com/compute/docs/general-purpose-machines`; every feature table entry its flags lack is hidden (pku, ospke, umip, rdpid, sha_ni and the post-Cascade-Lake ones) and avx512_vnni is required. TSX (hle, rtm) is not required and the actor has no SMT; both are `TODO` at the recipe. Tests `the_gce_builtin_is_the_cited_n2_standard_2` and `the_gce_builtin_on_a_raptor_lake_host_needs_avx512_and_hides_the_rest` |
 | 6 | GCE kernel date and build host | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:29` | fixed | image says `Wed May  1 02:03:24 UTC 2024`, `lcy02-amd64-115`: <https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/28152459>; the recipe now says the same; test `the_gce_builtin_kernel_is_the_cited_ubuntu_build` |
-| 7 | GCE hostname prefix `instance-` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:36` | cited | Google documents no default; a public Console-labelled (`goog-ec-src=vm_add-gcloud`) create command names the VM `instance-` and its creation time as `YYYYMMDD-HHMMSS`: <https://github.com/pradeepgadde/blog/blob/13557403fdef8335afe2833c8150ac7e602ada3c/_posts/2024-05-17-gcp-gce-windows.md?plain=1#L36-L38>. The timestamp suffix is a `TODO(hostname-time)`: recipes have no time placeholder |
+| 7 | GCE hostname prefix `instance-` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:36` | cited | Google documents no default; a public Console-labelled (`goog-ec-src=vm_add-gcloud`) create command names the VM `instance-` and its creation time as `YYYYMMDD-HHMMSS`: <https://github.com/pradeepgadde/blog/blob/13557403fdef8335afe2833c8150ac7e602ada3c/_posts/2024-05-17-gcp-gce-windows.md?plain=1#L36-L38>. Since 2026-11-12 (owner decision) the hostname is `instance-{time}`, `{time}` the run's creation time in UTC as `YYYYMMDD-HHMMSS`; test `the_gce_builtin_hostname_is_instance_and_the_runs_creation_time` |
 | 8 | GCE chassis type Other | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:47` | cited | `dmidecode` type 3 `Type: Other` on an n2-standard-2: `SC/n2-standard-2/0/dmidecode/stdout` (2026-07-31); test `the_gce_builtin_is_the_cited_n2_standard_2` |
 | 9 | GCE serial `GoogleCloud-{hash}` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:50` | fixed | real serials carry the 32-digit UUID: <https://github.com/sosreport/sos/issues/2699#issuecomment-925894041>; now `GoogleCloud-{uuid_hex}` and `Board-GoogleCloud-{uuid_hex}`; test `the_gce_builtin_serials_carry_the_system_uuid` |
 | 10 | GCE MAC `{seq}` may be 00 or 01 | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:71` | fixed | network and gateway of 10.128.0.0/20: `WB/20240105143455/https://cloud.google.com/vpc/docs/subnets`; `{seq}` is now 02 to ff; test `the_gce_builtin_mac_is_never_the_subnets_network_or_gateway` |
@@ -182,8 +182,11 @@ control daemon with its state in a scratch directory:
 
 - The n2-standard-2 `dmidecode` (`SC`, 2026-07-31) shows a BIOS date of
   07/16/2026 and chassis security status Unknown, where the recipe and patch
-  give 01/01/2011 (the sos issue's date) and None; GCE's BIOS date appears to
-  move with its firmware, so which one to show needs the owner.
+  gave 01/01/2011 (the sos issue's date) and None. Resolved for the date
+  (owner decision, 2026-11-12): the GCE built-in now gives 07/16/2026, cited
+  at `#L7-L18` of that capture; test
+  `the_gce_builtin_bios_date_is_the_cited_n2_standard_2s`. The security
+  status is unchanged.
 - The actor never sets Firecracker's `smt`, so `threads_per_core` changes
   only the vCPU count (`TODO(actor-smt)` in the GCE built-in).
 - The patch's BIOS revision (GCE shows 1.0) and board asset tag (GCE shows

@@ -29,7 +29,7 @@ fn host(dir: &Path, dmi: bool, hwmon: bool, lxcfs: bool) -> Host {
 fn recipe(extra: &str) -> CompiledRecipe {
   let text = format!("extends: builtin:gce-ubuntu-22.04\n{extra}");
   let recipe = needy_config::recipe::load(&Source::text(&text, ".")).unwrap();
-  needy_core::recipe::compile(&recipe, &HostInfo::default(), 7)
+  needy_core::recipe::compile(&recipe, &HostInfo::default(), &needy_core::recipe::PerRun::at(7, 0))
 }
 
 const SENSORS: &str = "devices: { sensors: [{ chip: coretemp, idle_c: 40 }] }\n";
