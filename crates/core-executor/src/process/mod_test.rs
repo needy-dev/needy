@@ -162,6 +162,40 @@ async fn a_missing_program_cannot_start() {
   assert!(host.list().is_empty());
 }
 
+fn exit(code: Option<i32>, signal: &str) -> Exit {
+  Exit {
+    code,
+    signal: signal.into(),
+  }
+}
+
+// ROOT CAUSE:
+//
+// If needy ended a Windows process for a signal (`needy kill`), the process
+// was listed as `exited 1`, because Windows has no signals: `taskkill /F`
+// terminates it with exit code 1, which reads like the program's own
+// failure.
+//
+// Before the fix, `needy ps` showed state `exited`, EXIT `1`.
+// The fix reports the signal needy delivered, as on Unix: state `killed`.
+#[test]
+fn a_process_needy_terminated_where_signals_terminate_reports_the_signal() {
+  assert_eq!(proc::ended(exit(Some(1), ""), Some("SIGTERM"), true), exit(None, "SIGTERM"));
+}
+
+#[test]
+fn a_terminated_exit_is_kept_as_it_is_where_signals_are_delivered() {
+  assert_eq!(proc::ended(exit(None, "SIGTERM"), Some("SIGTERM"), false), exit(None, "SIGTERM"));
+  assert_eq!(proc::ended(exit(Some(1), ""), Some("SIGTERM"), false), exit(Some(1), ""));
+}
+
+#[test]
+fn an_exit_other_than_terminations_is_the_programs_own() {
+  // The program exited on its own before the termination took effect.
+  assert_eq!(proc::ended(exit(Some(0), ""), Some("SIGTERM"), true), exit(Some(0), ""));
+  assert_eq!(proc::ended(exit(Some(1), ""), None, true), exit(Some(1), ""));
+}
+
 // ROOT CAUSE:
 //
 // If the working directory of a command did not exist on the executor, the

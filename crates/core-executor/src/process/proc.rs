@@ -44,6 +44,8 @@ pub struct Proc {
   owner_order: tokio::sync::Mutex<()>,
   exited: watch::Receiver<Option<Exit>>,
   finished_at: OnceLock<Instant>,
+  /// The first signal a client sent the process.
+  signalled: OnceLock<String>,
   /// Who may type and whose window size the terminal has.
   seats: Mutex<Seats>,
 }
@@ -218,6 +220,7 @@ impl Proc {
       owner_order: tokio::sync::Mutex::new(()),
       exited,
       finished_at: OnceLock::new(),
+      signalled: OnceLock::new(),
       seats: Mutex::new(Seats {
         next: 0,
         clock: 0,
@@ -236,6 +239,9 @@ impl Proc {
   /// signal to its process group.
   pub fn send(&self, input: Input) {
     if let Input::Signal(name) = &input {
+      // The first signal is the one that ends the process where signals
+      // terminate; see `ended`.
+      self.signalled.get_or_init(|| name.clone());
       platform::signal_group(self.pid, name);
       return;
     }
@@ -363,6 +369,7 @@ impl Proc {
   /// Publishes the exit to subscribers, then to waiters; from then on the
   /// retention period runs.
   pub(super) async fn finish(&self, ends: &watch::Sender<Option<Exit>>, exit: Exit) {
+    let exit = ended(exit, self.signalled.get().map(String::as_str), cfg!(windows));
     self.emit(Output::Exit(exit.clone())).await;
     self.finished_at.get_or_init(Instant::now);
     // `send_replace` stores the exit even when no waiter is subscribed.
@@ -434,6 +441,25 @@ impl Fanout {
       }
       Output::Exit(exit) => self.finished = Some(exit.clone()),
     }
+  }
+}
+
+/// The exit to report for a process that exited with `exit` after needy sent
+/// it `signalled`. Where signals terminate the process instead of being
+/// delivered (`terminate`, Windows), the termination is reported as the
+/// signal that asked for it, as on Unix, not as the program's own exit code.
+// NOTICE: `taskkill /F` ends a process with `TerminateProcess` and exit code
+// 1 (`platform/windows.rs`, `signal_group`), so only that code is taken for
+// the termination; any other code is the program's, which exited before it
+// took effect.
+// Reference: https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/taskkill
+pub(super) fn ended(exit: Exit, signalled: Option<&str>, terminate: bool) -> Exit {
+  match signalled {
+    Some(signal) if terminate && exit.code == Some(1) && exit.signal.is_empty() => Exit {
+      code: None,
+      signal: signal.to_string(),
+    },
+    _ => exit,
   }
 }
 
