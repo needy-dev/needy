@@ -24,9 +24,11 @@ Status:
   value came from.
 - **REVIEW**: the value disagrees with its source; the evidence is at the
   definition. Nothing was fixed.
-- **fixed**: was REVIEW; the identity fixes of 2026-11-10 made the value
+- **fixed**: was REVIEW or TODO(provenance); a later fix made the value
   match its source, and the definition is cited. The row keeps the original
   finding.
+- **needy's choice**: the value is needy's own; the definition says so and
+  cites what constrains it.
 
 Counts: 46 cited items (the second table), 9 `TODO(provenance)` markers and
 18 `REVIEW` markers (the first table, 26 rows).
@@ -36,6 +38,21 @@ fixed; row 5 is still REVIEW and the 9 `TODO(provenance)` rows are unchanged,
 as they need the owner. The fixes were run in actors; see "Re-verified after
 the identity fixes" in
 [`2026-11-09-closed-loop-results-evidence.md`](2026-11-09-closed-loop-results-evidence.md).
+
+After owner decisions 14 and 15 (2026-11-11): row 5 is fixed (the GCE
+built-in is now an n2-standard-2) and the 9 `TODO(provenance)` rows are
+cited, fixed or marked as needy's choice; no `TODO(provenance)` marker is
+left. Every new permalink was fetched (HTTP 200) on 2026-11-11. The new
+sources are two public data sets pinned to a commit: Spare Cores Inspector
+captures from real GCE VMs (`SC` below,
+`https://github.com/SpareCores/sc-inspector-data/blob/80b48a950aa66a70b8710797dc5763dc28f255d4/data/gcp`;
+each capture's date is in the `meta.json` next to it) and linuxhw `sensors`
+logs of OptiPlex 7000 desktops (`LS` below,
+`https://github.com/linuxhw/Sensors/blob/2b4210eb2e8686d7841e8919b019c7e34a1bdb6c/Desktop/Dell/OptiPlex/OptiPlex%207000`;
+all four logs: `LT`,
+`https://github.com/linuxhw/Sensors/tree/2b4210eb2e8686d7841e8919b019c7e34a1bdb6c/Desktop/Dell/OptiPlex/OptiPlex%207000`).
+The definitions cite these files; no serial, UUID or MAC from them was
+copied.
 
 Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 `https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58`
@@ -49,27 +66,27 @@ Shorthands: `K` = `https://github.com/torvalds/linux/blob/v6.18`, `FC` =
 | 2 | `hybrid_cpu` feature name | `crates/core/src/recipe/cpu.rs:111` | fixed | no quoted name, never in `/proc/cpuinfo`: `K/arch/x86/include/asm/cpufeatures.h#L425`; KVM never passes the bit to a guest, `K/arch/x86/kvm/cpuid.c#L967-L985` (bit 15 clear in `KVM_GET_SUPPORTED_CPUID` on the hybrid host). The entry and its `newer` checks were removed; test `hybrid_cpu_is_not_a_recipe_feature` |
 | 3 | `hybrid_cpu` in the Raptor Lake test flags | `crates/core/src/recipe/mod_test.rs:14` | fixed | the hand-written flags were replaced by the captured `testdata/cpuinfo-raptor-lake.txt` |
 | 4 | `hybrid_cpu` in the Broadwell hide list | `examples/opencode/gce.recipe.yaml:13` | fixed | removed from the hide list, as item 2 |
-| 5 | GCE CPU, Cascade Lake @ 2.20GHz | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:16` | REVIEW | only A2 and G2 GPU types: `WB/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms` |
+| 5 | GCE CPU, Cascade Lake @ 2.20GHz | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:16` | fixed | only A2 and G2 GPU types: `WB/20240216002137/https://cloud.google.com/compute/docs/cpu-platforms`. Now an n2-standard-2 (owner decision 14): `Intel(R) Xeon(R) CPU @ 2.80GHz`, 6/85/7, 1 core of 2 threads, `SC/n2-standard-2/0/lscpu/stdout` (2025-01-10); 2 vCPUs and 8 GB, Cascade Lake the default up to 80 vCPUs, `WB/20241231005450/https://cloud.google.com/compute/docs/general-purpose-machines`; every feature table entry its flags lack is hidden (pku, ospke, umip, rdpid, sha_ni and the post-Cascade-Lake ones) and avx512_vnni is required. TSX (hle, rtm) is not required and the actor has no SMT; both are `TODO` at the recipe. Tests `the_gce_builtin_is_the_cited_n2_standard_2` and `the_gce_builtin_on_a_raptor_lake_host_needs_avx512_and_hides_the_rest` |
 | 6 | GCE kernel date and build host | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:29` | fixed | image says `Wed May  1 02:03:24 UTC 2024`, `lcy02-amd64-115`: <https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/28152459>; the recipe now says the same; test `the_gce_builtin_kernel_is_the_cited_ubuntu_build` |
-| 7 | GCE hostname prefix `instance-` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:36` | TODO(provenance) | none found |
-| 8 | GCE chassis type Other | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:47` | TODO(provenance) | no public type 3 dump |
+| 7 | GCE hostname prefix `instance-` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:36` | cited | Google documents no default; a public Console-labelled (`goog-ec-src=vm_add-gcloud`) create command names the VM `instance-` and its creation time as `YYYYMMDD-HHMMSS`: <https://github.com/pradeepgadde/blog/blob/13557403fdef8335afe2833c8150ac7e602ada3c/_posts/2024-05-17-gcp-gce-windows.md?plain=1#L36-L38>. The timestamp suffix is a `TODO(hostname-time)`: recipes have no time placeholder |
+| 8 | GCE chassis type Other | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:47` | cited | `dmidecode` type 3 `Type: Other` on an n2-standard-2: `SC/n2-standard-2/0/dmidecode/stdout` (2026-07-31); test `the_gce_builtin_is_the_cited_n2_standard_2` |
 | 9 | GCE serial `GoogleCloud-{hash}` | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:50` | fixed | real serials carry the 32-digit UUID: <https://github.com/sosreport/sos/issues/2699#issuecomment-925894041>; now `GoogleCloud-{uuid_hex}` and `Board-GoogleCloud-{uuid_hex}`; test `the_gce_builtin_serials_carry_the_system_uuid` |
 | 10 | GCE MAC `{seq}` may be 00 or 01 | `crates/config/src/builtin/recipes/gce-ubuntu-22.04.yaml:71` | fixed | network and gateway of 10.128.0.0/20: `WB/20240105143455/https://cloud.google.com/vpc/docs/subnets`; `{seq}` is now 02 to ff; test `the_gce_builtin_mac_is_never_the_subnets_network_or_gateway` |
 | 11 | Dell kernel build host | `crates/config/src/builtin/recipes/dell-optiplex-ubuntu-24.04.yaml:24` | fixed | image says `lcy02-amd64-028`: <https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/29233125>; the recipe now says the same; test `the_dell_builtin_matches_its_cited_probe_and_kernel_build` |
 | 12 | Dell BIOS 1.21.0, 06/11/2024 | `crates/config/src/builtin/recipes/dell-optiplex-ubuntu-24.04.yaml:37` | fixed | LVFS has 1.20.0 then 1.22.0: `WB/20250620094041/https://fwupd.org/lvfs/devices/com.dell.uefi896e9574.firmware`; now 1.7.3, 10/27/2022, the cited probe 089EBFAFFD4C, which LVFS also lists; same test |
 | 13 | Dell board `0C8MHW`, chassis tower | `crates/config/src/builtin/recipes/dell-optiplex-ubuntu-24.04.yaml:43` | fixed | 13 probes: boards 0VC8RJ, 0FG47G, 0NNFGG, 0VNM11, ...; all chassis Desktop: <https://github.com/linuxhw/DMI/tree/57b21bc6fdd863380e99c228c22aafcd1509528c/Desktop/Dell/OptiPlex/OptiPlex%207000>; now 0VC8RJ and desktop, the cited probe; same test |
-| 14 | Dell sensor readings | `crates/config/src/builtin/recipes/dell-optiplex-ubuntu-24.04.yaml:56` | TODO(provenance) | none found |
-| 15 | Broadwell stepping 0 | `examples/opencode/gce.recipe.yaml:10` | TODO(provenance) | only an unpinned issue page |
+| 14 | Dell sensor readings | `crates/config/src/builtin/recipes/dell-optiplex-ubuntu-24.04.yaml:56` | fixed | the Ubuntu 22.04 OptiPlex 7000 log `LS/7241B617E4E3/UBUNTU-22.04/5.17.0-051700-GENERIC/X86_64/6AAE7C23AD`: cores 32 to 37 C (Core 4 34 C), nvme 32.9 C; none of the 4 logs has acpitz (`LT` tree). coretemp 34 C kept, nvme now 32.9 C, acpitz removed; load gain 6 and noise 1 are the fake's own model (was 7 and 1.5, which the fake never used). Only coretemp's idle value reaches the guest: `TODO(sensor-model)`. Test `the_dell_builtin_sensors_are_the_cited_optiplex_7000_log` |
+| 15 | Broadwell stepping 0 | `examples/opencode/gce.recipe.yaml:10` | cited | `lscpu` on an e2-medium: `Intel(R) Xeon(R) CPU @ 2.20GHz`, model 79, stepping 0, `SC/e2-medium/0/lscpu/stdout` (2024-06-20). The example now sets `require: []`, as the built-in's avx512_vnni is no Broadwell feature |
 | 16 | AWS MAC prefix `0e:` | `crates/core/src/recipe/identity.rs:155` | fixed | AWS examples use `02:`: <https://github.com/awsdocs/amazon-ec2-user-guide/blob/e3707c431483ec0ffffcabebd36cf799ba682cd0/doc_source/instancedata-data-retrieval.md#L400>; the check now takes `02:`; test `an_aws_mac_from_awss_documentation_disagrees_with_a_gce_identity` |
 | 17 | SMBIOS keys `serial` and `uuid` never reach the guest | `crates/core-actor/src/host/vm.rs:191` and `images/firecracker/needy.patch:63` | fixed | the patch reads `product_serial` and `product_uuid`; needy now sends those, `chassis_vendor` and `board_serial` under the `/sys/class/dmi/id` names, `K/drivers/firmware/dmi-id.c#L41-L59`; test `every_smbios_key_needy_sends_is_one_the_patched_firecracker_reads` |
 | 18 | Patch board serial, SMBIOS 3.0, extension byte 2 | `images/firecracker/needy.patch:57` | fixed | GCE shows 32-digit serials, SMBIOS 2.4 and "targeted content distribution" (bit 2); the patch sets bit 3 (UEFI), DSP0134 3.7.0 Table 9. Now a 32-digit default board serial, a 2.4 `_SM_` entry point (UUID stored in the order written, as 2.4 requires, `K/drivers/firmware/dmi_scan.c#L254-L263`) and bit 2; test `the_patchs_default_serials_carry_its_default_uuid_as_gce_does`, `dmidecode` in an actor. BIOS revision 1.0 and the board asset tag are left as a `TODO` |
-| 19 | Patch default serial and UUID values | `images/firecracker/needy.patch:65` | TODO(provenance) | none found |
-| 20 | fake coretemp idle, load and noise model | `images/kernel/fake_coretemp.c:18` | TODO(provenance) | none found |
-| 21 | fake coretemp max 80 C, crit 100 C | `images/kernel/fake_coretemp.c:48` | TODO(provenance) | the real driver reads TjMax: `K/drivers/hwmon/coretemp.c#L268-L328` |
+| 19 | Patch default serial and UUID values | `images/firecracker/needy.patch:65` | needy's choice | made up so no real VM's identity is copied (Private Data); the format is the dumps' (sos issue, `SC/n2-standard-2/0/dmidecode/stdout`), whose UUIDs carry no RFC 9562 version (nibbles 5 and f), so the default's nibble 9 is as plausible |
+| 20 | fake coretemp idle, load and noise model | `images/kernel/fake_coretemp.c:18` | fixed | the 38 C default is the package reading in `LS/7241B617E4E3/...`; readings are now whole degrees, as the real driver's are (`K/drivers/hwmon/coretemp.c#L408`) and every log shows, with under 1 C of noise (was up to 1.5 C in millidegrees); 6 C per unit of load (at most 50 C) and 0.7 C per core are needy's choice, bounded below crit 100 C for 8 cores |
+| 21 | fake coretemp max 80 C, crit 100 C | `images/kernel/fake_coretemp.c:48` | cited | the real driver reads TjMax: `K/drivers/hwmon/coretemp.c#L268-L328`; all 4 OptiPlex 7000 logs show `high = +80.0 C, crit = +100.0 C` (`LT`) |
 | 22 | fake coretemp file numbering | `images/kernel/fake_coretemp.c:59` | fixed | real Core N is `temp(N+2)`: `K/drivers/hwmon/coretemp.c#L427-L436`; the fake now puts Core N in channel N+1 (`temp(N+2)`) and hides the channels between; checked in an actor with `ls /sys/class/hwmon/*/` and `sensors` |
-| 23 | fake coretemp core IDs step by 4 | `images/kernel/fake_coretemp.c:62` | TODO(provenance) | none found |
+| 23 | fake coretemp core IDs step by 4 | `images/kernel/fake_coretemp.c:62` | cited | the i7-12700's performance cores are Core 0 to Core 28 in steps of 4 in 3 of the 4 logs (`LT`); the fourth, a 6-core CPU, numbers 0 to 5 |
 | 24 | `--device host:mode` | `crates/core-executor/src/provider/docker.rs:248` | fixed | <https://github.com/docker/cli/blob/v28.5.1/cli/command/container/opts.go#L1005-L1016>; `device` follows `validateLinuxPath` (`#L1092-L1130`) and `parseLinuxDevice` (`#L999-L1033`); test `a_device_parses_as_docker_does` |
-| 25 | `ENDED = 255` reserved status | `crates/core-executor/src/signals.rs:53` | TODO(provenance) | only the non-normative Advanced Bash-Scripting Guide |
+| 25 | `ENDED = 255` reserved status | `crates/core-executor/src/signals.rs:53` | needy's choice | not reserved anywhere; constrained by the 8 bits of a wait status (POSIX.1-2024 `exit`, <https://pubs.opengroup.org/onlinepubs/9799919799/functions/exit.html>) and the precedent of ssh(1) exiting 255 on its own failure (<https://github.com/openssh/openssh-portable/blob/V_10_6_P2/ssh.1#L1578-L1581>); the comment no longer claims a shell reserves 255 |
 | 26 | "no exit maps to 255" | `crates/core-executor/src/signals.rs:57` | fixed | `shell_code` passes `exit 255` through; the comment now says so (no behavior change, no test) |
 
 ## Cited items
@@ -135,8 +152,12 @@ the example files were left as they are.
 
 ## Follow-up candidates
 
-- Row 5 (the GCE built-in's Cascade Lake CPU) needs an owner decision on the
-  machine type.
+- The n2-standard-2 `dmidecode` (`SC`, 2026-07-31) shows a BIOS date of
+  07/16/2026 and chassis security status Unknown, where the recipe and patch
+  give 01/01/2011 (the sos issue's date) and None; GCE's BIOS date appears to
+  move with its firmware, so which one to show needs the owner.
+- The actor never sets Firecracker's `smt`, so `threads_per_core` changes
+  only the vCPU count (`TODO(actor-smt)` in the GCE built-in).
 - The patch's BIOS revision (GCE shows 1.0) and board asset tag (GCE shows
   the UUID) are marked `TODO` in `images/firecracker/needy.patch`.
 - `hybrid_cpu` was removed rather than read from CPUID: KVM does not pass
