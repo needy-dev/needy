@@ -179,6 +179,14 @@ fn changed_env(decision: &Decision, asked: &BTreeMap<String, String>) -> HashMap
   decision.env.iter().filter(|(k, v)| asked.get(*k) != Some(*v) || decision.clear_env).map(|(k, v)| (k.clone(), v.clone())).collect()
 }
 
+/// Whether the working directory `cwd` of a command on `instance` lies
+/// outside every path the instance's path map maps to, so that it is the
+/// actor's own path.
+pub(crate) fn unmapped(instance: &Instance, cwd: &str) -> bool {
+  let within = |to: &String| cwd == to || cwd.starts_with(&format!("{}/", to.trim_end_matches('/')));
+  !cwd.is_empty() && !instance.path_map.values().any(within)
+}
+
 /// `value` with the path prefix `from` replaced by `to`; a path is mapped
 /// only at a component boundary.
 fn map_prefix(value: &str, from: &str, to: &str) -> String {

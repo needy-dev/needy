@@ -278,7 +278,7 @@ fn clamp(n: u32) -> u16 {
 fn spawn_status(error: Error) -> Status {
   match error {
     Error::ShuttingDown => Status::unavailable(error.to_string()),
-    Error::EmptyCommand | Error::Start { .. } | Error::StartTerminal { .. } | Error::Terminal(_) => {
+    Error::EmptyCommand | Error::Start { .. } | Error::StartTerminal { .. } | Error::WorkingDirectory { .. } | Error::Terminal(_) => {
       Status::failed_precondition(error.to_string())
     }
   }

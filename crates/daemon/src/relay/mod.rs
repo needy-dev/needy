@@ -263,6 +263,11 @@ impl Processes for Daemon {
       out_tx.send(Ok(ExecOutput::Trace(event))).await.map_err(|_| ControlError::Internal("exec output channel closed".into()))?;
     }
     let executor = &*relay.instance.handle.executor;
+    // A run's command that no path map maps keeps the actor's directory.
+    let unmapped_cwd = match (&run, &upstream) {
+      (Some(_), Upstream::Start(spec)) if routing::unmapped(&relay.instance, &spec.cwd) => Some(spec.cwd.clone()),
+      _ => None,
+    };
     let upstream = match upstream {
       Upstream::Start(spec) => ExecStream::start(executor, domain::proto_exec_start(spec)).await,
       Upstream::Attach {
@@ -281,7 +286,14 @@ impl Processes for Daemon {
         ExecStream::attach(executor, attach).await
       }
     }
-    .map_err(relayed)?;
+    .map_err(relayed)
+    .map_err(|error| match (error, unmapped_cwd) {
+      (ControlError::Failed(message), Some(cwd)) if message.contains(&format!("working directory {cwd} ")) => ControlError::Failed(format!(
+        "{message}; executor {} has no path_map entry for it, so the command kept the actor's directory",
+        relay.instance.name
+      )),
+      (error, _) => error,
+    })?;
     // A run's relays stop with the run; the others when the daemon begins
     // to shut down.
     let (tasks, cancel) = match &run {

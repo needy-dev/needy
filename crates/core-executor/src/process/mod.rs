@@ -49,6 +49,18 @@ pub enum Error {
   /// portable-pty reports its errors as `anyhow` values; they are kept as text.
   #[error("cannot start {program}: {message}")]
   StartTerminal { program: String, message: String },
+  /// The working directory is missing or not a directory. It is checked
+  /// before the spawn, whose `chdir` failure reads like a missing program.
+  // NOTICE: a client reports it like any start that fails (127), since a
+  // distinct exit code needs a status kind of its own through the executor,
+  // the runner link, the daemon and the clients; the message names the
+  // directory instead.
+  #[error("cannot start {program}: working directory {cwd} {problem}")]
+  WorkingDirectory {
+    program: String,
+    cwd: String,
+    problem: String,
+  },
   #[error("cannot open a terminal: {0}")]
   Terminal(String),
   #[error("the host is shutting down")]
@@ -76,6 +88,20 @@ fn path_fallback(program: &str) -> Option<String> {
     return None;
   }
   path.file_name().map(|name| name.to_string_lossy().into_owned())
+}
+
+/// What is wrong with the working directory `cwd`, worded to follow it;
+/// `None` when it is a directory or empty (the host's own).
+fn cwd_problem(cwd: &str) -> Option<String> {
+  if cwd.is_empty() {
+    return None;
+  }
+  match std::fs::metadata(cwd) {
+    Ok(meta) if meta.is_dir() => None,
+    Ok(_) => Some("is not a directory".into()),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some("does not exist".into()),
+    Err(e) => Some(format!("cannot be used: {e}")),
+  }
 }
 
 /// A terminal type the executor replaced: it has no terminfo entry for the
@@ -174,6 +200,13 @@ impl Host {
     };
     if self.inner.cancel.is_cancelled() {
       return Err(Error::ShuttingDown);
+    }
+    if let Some(problem) = cwd_problem(&spec.cwd) {
+      return Err(Error::WorkingDirectory {
+        program: asked,
+        cwd: spec.cwd,
+        problem,
+      });
     }
     if spec.search_path_if_missing
       && let Some(name) = path_fallback(&asked)

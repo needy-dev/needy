@@ -504,3 +504,32 @@ async fn stopping_a_run_interrupts_an_unanswered_terminal_handshake() {
   let result = tokio::time::timeout(Duration::from_secs(2), attaching).await.expect("the stopped run must interrupt its handshake").unwrap();
   assert!(matches!(result, Err(ControlError::Unavailable(_))));
 }
+
+// ROOT CAUSE:
+//
+// If a routed command kept the actor's working directory because the
+// executor had no path map for it, and that directory did not exist on the
+// executor's machine, the executor reported `cannot start /usr/bin/bash`,
+// which reads like a missing program and does not say why.
+//
+// Before the fix, the relay passed the executor's message on unchanged.
+// The fix names the directory and says that no path map maps it.
+#[tokio::test]
+async fn a_routed_command_whose_unmapped_cwd_is_missing_says_so_and_points_at_path_map() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let missing = started.dir.path().join("actor-home").display().to_string();
+  let routed = ExecSpec {
+    cwd: missing.clone(),
+    origin: Origin::ActorProxy,
+    ..spec(&["sh", "-c", "true"], &created.id, "here")
+  };
+
+  let Err(ControlError::Failed(message)) = daemon.exec(ExecOpen::Start(routed), attached()).await else {
+    panic!("a missing working directory cannot start");
+  };
+
+  assert!(message.starts_with(&format!("cannot start sh: working directory {missing} does not exist")), "{message}");
+  assert!(message.contains("executor here has no path_map entry for it"), "{message}");
+}

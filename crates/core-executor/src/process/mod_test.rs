@@ -162,6 +162,42 @@ async fn a_missing_program_cannot_start() {
   assert!(host.list().is_empty());
 }
 
+// ROOT CAUSE:
+//
+// If the working directory of a command did not exist on the executor, the
+// spawn failed with ENOENT, which read like a missing program:
+// `cannot start bash: No such file or directory`.
+//
+// Before the fix, the host reported the `chdir` failure as the program's.
+// The fix checks the directory first and names it in the error.
+#[tokio::test]
+async fn a_missing_working_directory_is_named_instead_of_the_program() {
+  let host = Host::default();
+  let dir = tempfile::tempdir().unwrap();
+  let missing = dir.path().join("needy-missing-dir");
+  let mut command = spec(&["sh", "-c", "true"]);
+  command.cwd = missing.display().to_string();
+
+  let error = host.spawn(command).err().expect("the directory is missing");
+
+  assert!(matches!(error, Error::WorkingDirectory { .. }), "{error:?}");
+  assert_eq!(error.to_string(), format!("cannot start sh: working directory {} does not exist", missing.display()));
+  assert!(host.list().is_empty());
+}
+
+#[tokio::test]
+async fn a_working_directory_that_is_a_file_is_named_on_a_terminal_too() {
+  let host = Host::default();
+  let file = tempfile::NamedTempFile::new().unwrap();
+  let mut command = spec(&["sh", "-c", "true"]);
+  command.cwd = file.path().display().to_string();
+  command.tty = Some((24, 80));
+
+  let error = host.spawn(command).err().expect("the directory is a file");
+
+  assert_eq!(error.to_string(), format!("cannot start sh: working directory {} is not a directory", file.path().display()));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_finished_process_is_listed_until_its_retention_runs_out() {
