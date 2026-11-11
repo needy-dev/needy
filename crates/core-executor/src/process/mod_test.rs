@@ -203,31 +203,44 @@ async fn shutdown_kills_running_processes_and_refuses_new_ones() {
 // output once the idle client's queue was full.
 // The fix lets only the starting client hold the process back and drops a
 // viewer that cannot keep up, saying so.
+//
+// NOTICE: the program writes one line for each line of input, and the
+// owner sends the next line only after it read the last, so each line is
+// one output event. This test used to let the program write 3000 lines
+// freely; under load they were read in fewer chunks than the viewer's
+// queue holds, the viewer never fell behind, and the test failed.
 #[cfg(unix)]
 #[tokio::test]
 async fn a_viewer_that_stops_reading_holds_back_neither_the_process_nor_its_owner() {
+  // NOTICE: more events than a subscriber's queue holds (64,
+  // `SUBSCRIBER_QUEUE` in `proc.rs`).
+  const LINES: usize = 200;
   let host = Host::default();
-  let proc = host
-    .spawn(spec(&[
-      "sh",
-      "-c",
-      "sleep 0.2; i=0; while [ $i -lt 3000 ]; do echo line $i; i=$((i+1)); done",
-    ]))
-    .unwrap();
+  let script = format!("i=0; while [ $i -lt {LINES} ]; do read line || exit 1; echo line $i; i=$((i+1)); done");
+  let proc = host.spawn(spec(&["sh", "-c", &script])).unwrap();
   let mut owner = proc.subscribe(true, Subscriber::Owner);
   let idle = proc.subscribe(true, Subscriber::Viewer);
 
   let drained = async {
+    let mut lines = 0;
+    proc.send(Input::Stdin(b"\n".to_vec()));
     while let Some(event) = owner.live.recv().await {
-      if let Output::Exit(exit) = event {
-        return exit;
+      match event {
+        Output::Stdout(bytes) => {
+          lines += bytes.iter().filter(|&&b| b == b'\n').count();
+          proc.send(Input::Stdin(b"\n".to_vec()));
+        }
+        Output::Stderr(_) => {}
+        Output::Exit(exit) => return (lines, exit),
       }
     }
     panic!("the owner's subscription closed before the exit");
   };
-  let exit = tokio::time::timeout(Duration::from_secs(10), drained).await.expect("a viewer that stopped reading held the process back");
+  let (lines, exit) =
+    tokio::time::timeout(Duration::from_secs(20), drained).await.expect("a viewer that stopped reading held the process back");
 
   assert_eq!(exit.code, Some(0));
+  assert_eq!(lines, LINES);
   assert!(idle.fell_behind());
 }
 
