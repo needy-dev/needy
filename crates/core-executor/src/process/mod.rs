@@ -27,7 +27,7 @@ pub use needy_common::process::Exit;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-pub use proc::{Client, Proc, Subscriber, Subscription};
+pub use proc::{Client, Live, Proc, Subscriber, Subscription};
 
 /// How long a finished process stays in [`Host::list`] and can be attached.
 // NOTICE: long enough to `needy ps` and `needy attach` a command that just

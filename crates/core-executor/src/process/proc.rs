@@ -3,11 +3,12 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
+use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{mpsc, watch};
 
 use bytes::Bytes;
@@ -37,8 +38,9 @@ pub struct Proc {
   input: mpsc::UnboundedSender<Input>,
   /// The replay buffer, the terminal model and the subscribers, under one
   /// lock so a new subscriber's snapshot and its first live event never
-  /// overlap.
-  fanout: Mutex<Fanout>,
+  /// overlap. Shared with each terminal viewer's [`Live`], which takes its
+  /// pending redraw from it.
+  fanout: Arc<Mutex<Fanout>>,
   /// Orders each event's delivery to the owner; held across the owner's
   /// send, never across a viewer's.
   owner_order: tokio::sync::Mutex<()>,
@@ -154,7 +156,7 @@ impl Drop for Client {
       self.proc.send(Input::Resize(rows, cols));
     }
     // The program still waits for the answer this client did not send.
-    if answer && let Some(report) = self.proc.lock_fanout().screen.as_ref().map(Screen::cursor_report) {
+    if answer && let Some(report) = lock(&self.proc.fanout).screen.as_ref().map(Screen::cursor_report) {
       self.proc.send(Input::Stdin(report));
     }
   }
@@ -171,13 +173,17 @@ struct Fanout {
   /// back.
   owner: Option<mpsc::Sender<Output>>,
   viewers: Vec<Viewer>,
+  next_viewer: u64,
 }
 
 struct Viewer {
+  id: u64,
   tx: mpsc::Sender<Output>,
   behind: Arc<AtomicBool>,
-  /// A terminal viewer whose queue filled: it skips output until its queue
-  /// has room, then gets the screen drawn again.
+  /// A terminal viewer whose queue filled: it skips output and has one
+  /// redraw pending, which it gets as soon as it can take it, from
+  /// [`Live`] once it has read its queue or from [`Proc::emit`] at the next
+  /// output that finds room, whichever comes first.
   stale: bool,
 }
 
@@ -189,8 +195,9 @@ pub enum Subscriber {
   Owner,
   /// Any other client, such as one that attached. A viewer never holds back
   /// the process or another client. On a terminal, a viewer that cannot
-  /// keep up skips output and gets the screen drawn again from the model
-  /// once it reads; on pipes it is dropped, [`Subscription::fell_behind`].
+  /// keep up skips output and gets the screen drawn again from the model as
+  /// soon as it has read what was queued, whether or not the program writes
+  /// again; on pipes it is dropped, [`Subscription::fell_behind`].
   Viewer,
 }
 
@@ -198,8 +205,76 @@ pub enum Subscriber {
 /// happens after. The two never overlap.
 pub struct Subscription {
   pub past: Vec<Output>,
-  pub live: mpsc::Receiver<Output>,
+  pub live: Live,
   behind: Arc<AtomicBool>,
+}
+
+/// A subscriber's live output. A terminal viewer that skipped output gets
+/// its pending redraw here once its queue is empty, so it shows the
+/// program's screen again although the program writes nothing more.
+// NOTICE: this follows herdr, which gives each client a render lane of one
+// frame ("Capacity is one so slow clients cannot build lag"), skips a frame
+// a full lane cannot take and marks that client for a full render, and has
+// the client's writer report when it takes a frame from the lane, so the
+// full render follows "even if pane output stops". needy streams the
+// program's bytes, not frames: the queue holds output, a viewer that skips
+// some has one redraw pending, and the redraw is drawn when the viewer has
+// read the queue, not on a timer. herdr also renders at most every 16 ms;
+// needy needs no cadence, since the viewer's own read asks for the redraw.
+// Source: https://github.com/ogulcancelik/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/server/client_transport.rs#L121-L127
+// (the lanes), #L951-L971 (`client_writer_loop`, `ClientWriterDrained`),
+// https://github.com/ogulcancelik/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/server/headless/render.rs#L963-L991
+// (`try_send`; `defer_full_render` when the lane is full), #L561-L569 (an
+// observer waiting for its redraw) and
+// https://github.com/ogulcancelik/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/server/headless.rs#L2651-L2656
+// (the drained lane asks for the pending full render);
+// https://github.com/ogulcancelik/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/app/mod.rs#L39
+// (`MIN_RENDER_INTERVAL`, 16 ms).
+// Reference: the terminal note's "A lagging terminal viewer"
+// (`docs/ai/references/cli/2026-11-10-terminal-attach-design.md`).
+pub struct Live {
+  rx: mpsc::Receiver<Output>,
+  /// For a terminal viewer: the fan-out and the viewer's id in it.
+  catch_up: Option<(Weak<Mutex<Fanout>>, u64)>,
+}
+
+impl Live {
+  /// The next event; `None` once the subscription has ended.
+  // Cancel safe, as `mpsc::Receiver::recv` is: a pending redraw is taken
+  // only in the poll that returns it.
+  pub async fn recv(&mut self) -> Option<Output> {
+    match self.try_recv() {
+      Ok(event) => Some(event),
+      Err(TryRecvError::Disconnected) => None,
+      Err(TryRecvError::Empty) => self.rx.recv().await,
+    }
+  }
+
+  /// The next event if there is one now.
+  pub fn try_recv(&mut self) -> Result<Output, TryRecvError> {
+    match self.rx.try_recv() {
+      Err(TryRecvError::Empty) => self.redraw().ok_or(TryRecvError::Empty),
+      other => other,
+    }
+  }
+
+  /// The pending redraw of a viewer that skipped output and has read its
+  /// queue. Taken under the fan-out's lock, so no output is queued between
+  /// the check and the redraw, and what the program writes next follows it.
+  fn redraw(&self) -> Option<Output> {
+    let (fanout, id) = self.catch_up.as_ref()?;
+    let fanout = fanout.upgrade()?;
+    let mut fanout = lock(&fanout);
+    let Fanout {
+      screen, viewers, ..
+    } = &mut *fanout;
+    let screen = screen.as_ref()?;
+    // A queue that is not empty here filled again since `try_recv` found
+    // it empty: what it holds is older than a redraw, so it is read first.
+    let viewer = viewers.iter_mut().find(|v| v.id == *id && v.stale && v.tx.capacity() == v.tx.max_capacity())?;
+    viewer.stale = false;
+    Some(Output::Stdout(Bytes::from(screen.redraw())))
+  }
 }
 
 impl Subscription {
@@ -229,14 +304,15 @@ impl Proc {
       run_id: spec.run_id.clone(),
       term_fallback,
       input,
-      fanout: Mutex::new(Fanout {
+      fanout: Arc::new(Mutex::new(Fanout {
         events: VecDeque::new(),
         bytes: 0,
         screen,
         finished: None,
         owner: None,
         viewers: Vec::new(),
-      }),
+        next_viewer: 0,
+      })),
       owner_order: tokio::sync::Mutex::new(()),
       exited,
       finished_at: OnceLock::new(),
@@ -296,9 +372,10 @@ impl Proc {
   /// gets whole. A process has one [`Subscriber::Owner`]; a later one
   /// replaces it.
   pub fn subscribe(&self, replay: bool, subscriber: Subscriber) -> Subscription {
-    let (tx, live) = mpsc::channel(SUBSCRIBER_QUEUE);
+    let (tx, rx) = mpsc::channel(SUBSCRIBER_QUEUE);
     let behind = Arc::new(AtomicBool::new(false));
-    let mut fanout = self.lock_fanout();
+    let mut catch_up = None;
+    let mut fanout = lock(&self.fanout);
     let mut past: Vec<Output> = match (&fanout.screen, replay, subscriber) {
       (_, false, _) => Vec::new(),
       (Some(screen), true, Subscriber::Viewer) => vec![Output::Stdout(Bytes::from(screen.redraw()))],
@@ -309,14 +386,26 @@ impl Proc {
     } else {
       match subscriber {
         Subscriber::Owner => fanout.owner = Some(tx),
-        Subscriber::Viewer => fanout.viewers.push(Viewer {
-          tx,
-          behind: behind.clone(),
-          stale: false,
-        }),
+        Subscriber::Viewer => {
+          fanout.next_viewer += 1;
+          let id = fanout.next_viewer;
+          if fanout.screen.is_some() {
+            catch_up = Some((Arc::downgrade(&self.fanout), id));
+          }
+          fanout.viewers.push(Viewer {
+            id,
+            tx,
+            behind: behind.clone(),
+            stale: false,
+          });
+        }
       }
     }
-    Subscription { past, live, behind }
+    Subscription {
+      past,
+      live: Live { rx, catch_up },
+      behind,
+    }
   }
 
   /// Records `event` and fans it out: to each viewer without waiting, and to
@@ -324,7 +413,7 @@ impl Proc {
   pub(super) async fn emit(&self, event: Output) {
     let _order = self.owner_order.lock().await;
     let (owner, answers) = {
-      let mut fanout = self.lock_fanout();
+      let mut fanout = lock(&self.fanout);
       let answers = fanout.record(&event);
       let last = matches!(event, Output::Exit(_));
       let Fanout {
@@ -334,10 +423,10 @@ impl Proc {
       let mut redraw: Option<Bytes> = None;
       viewers.retain_mut(|viewer| {
         if viewer.stale {
-          // NOTICE: a stale viewer is drawn again at the next output after
-          // its queue has room; a program that stays quiet leaves it on the
-          // last screen it received until then. The exit needs room for the
-          // redraw and itself.
+          // A stale viewer whose queue has room again by the next output
+          // gets its pending redraw here, before that output; one whose
+          // queue empties first gets it from `Live`. The exit needs room for
+          // the redraw and itself.
           let room = viewer.tx.capacity();
           if room < if last { 2 } else { 1 } {
             if last {
@@ -359,15 +448,15 @@ impl Proc {
         }
         match viewer.tx.try_send(event.clone()) {
           Ok(()) => !last,
-          Err(mpsc::error::TrySendError::Full(_)) if screen.is_some() && !last => {
+          Err(TrySendError::Full(_)) if screen.is_some() && !last => {
             viewer.stale = true;
             true
           }
-          Err(mpsc::error::TrySendError::Full(_)) => {
+          Err(TrySendError::Full(_)) => {
             viewer.behind.store(true, Ordering::SeqCst);
             false
           }
-          Err(mpsc::error::TrySendError::Closed(_)) => false,
+          Err(TrySendError::Closed(_)) => false,
         }
       });
       let owner = if last {
@@ -384,7 +473,7 @@ impl Proc {
       && owner.send(event).await.is_err()
     {
       // The owner left; the process no longer waits for anyone.
-      let mut fanout = self.lock_fanout();
+      let mut fanout = lock(&self.fanout);
       if fanout.owner.as_ref().is_some_and(|current| current.same_channel(&owner)) {
         fanout.owner = None;
       }
@@ -470,16 +559,16 @@ impl Proc {
 
   /// Follows a window size change in the terminal model.
   pub(super) fn resize_screen(&self, rows: u16, cols: u16) {
-    if let Some(screen) = self.lock_fanout().screen.as_mut() {
+    if let Some(screen) = lock(&self.fanout).screen.as_mut() {
       screen.resize(rows, cols);
     }
   }
+}
 
-  fn lock_fanout(&self) -> std::sync::MutexGuard<'_, Fanout> {
-    // NOTICE: every change under the lock is one push, pop or swap, so a
-    // panic elsewhere leaves the buffer whole.
-    self.fanout.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-  }
+fn lock(fanout: &Mutex<Fanout>) -> std::sync::MutexGuard<'_, Fanout> {
+  // NOTICE: every change under the lock is one push, pop or swap, so a
+  // panic elsewhere leaves the buffer whole.
+  fanout.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Fanout {

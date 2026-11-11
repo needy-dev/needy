@@ -308,7 +308,8 @@ forwarding, stdin half-close, exit with a signal name, detach, attach with a
 256 KiB replay buffer, finished processes listed for 10 minutes, `json` and
 `ndjson` output with the placement events, and backpressure from a slow
 starting client to the process. A terminal viewer that falls behind skips
-output and gets a fresh redraw; a pipe viewer is disconnected instead.
+output and gets a fresh redraw as soon as it can take it, also when the
+program writes nothing more; a pipe viewer is disconnected instead.
 `run create -t/-it` and `run attach` give the driving program the same terminal
 behavior. See the [terminal note](2026-11-10-terminal-attach-design.md) and
 [automated and live-probe evidence](2026-11-11-interactive-actor-evidence.md).

@@ -335,7 +335,7 @@ async fn a_viewer_that_stops_reading_holds_back_neither_the_process_nor_its_owne
 }
 
 /// Reads `live` until its text contains `marker`, and returns all of it.
-async fn read_until(live: &mut tokio::sync::mpsc::Receiver<Output>, marker: &str) -> String {
+async fn read_until(live: &mut Live, marker: &str) -> String {
   let mut text = String::new();
   while !text.contains(marker) {
     match live.recv().await {
@@ -491,7 +491,7 @@ fn terminal(rows: u16, cols: u16) -> vt100::Parser {
 }
 
 /// Feeds `live` into `screen` until its contents include `marker`.
-async fn render_until(live: &mut tokio::sync::mpsc::Receiver<Output>, screen: &mut vt100::Parser, marker: &str) {
+async fn render_until(live: &mut Live, screen: &mut vt100::Parser, marker: &str) {
   while !screen.screen().contents().contains(marker) {
     match live.recv().await {
       Some(Output::Stdout(bytes)) => screen.process(&bytes),
@@ -550,7 +550,14 @@ async fn a_client_attaching_to_a_full_screen_program_sees_the_programs_screen() 
 }
 
 // A terminal viewer that falls behind skips output and is drawn the screen
-// again once it reads, instead of being dropped (G5, then G1).
+// again once it reads, instead of being dropped (G5, then G1). Here the
+// redraw comes with the next output, which finds room in the viewer's queue
+// before the viewer has read it all; the quiet program's case is
+// `a_lagging_viewer_is_redrawn_when_it_catches_up_although_the_program_stays_quiet`.
+//
+// NOTICE: the root cause below describes the fan-out before a viewer got
+// its pending redraw without new output; it is kept as the record of the
+// flaky test.
 //
 // ROOT CAUSE (of this test's flakiness):
 //
@@ -594,14 +601,16 @@ async fn a_terminal_viewer_that_falls_behind_is_redrawn_not_dropped() {
       other => panic!("the owner did not get {text:?}: {other:?}"),
     }
   };
-  // What the viewer's queue holds now, drawn on its terminal.
+  // What the viewer has now, up to `limit` events, drawn on its terminal.
   let mut client = terminal(6, 30);
-  let mut read = |client: &mut vt100::Parser| loop {
-    match viewer.live.try_recv() {
-      Ok(Output::Stdout(bytes)) => client.process(&bytes),
-      Ok(other) => panic!("the viewer got {other:?}"),
-      Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-      Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => panic!("the viewer was dropped"),
+  let mut read = |client: &mut vt100::Parser, limit: usize| {
+    for _ in 0..limit {
+      match viewer.live.try_recv() {
+        Ok(Output::Stdout(bytes)) => client.process(&bytes),
+        Ok(other) => panic!("the viewer got {other:?}"),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+        Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => panic!("the viewer was dropped"),
+      }
     }
   };
 
@@ -609,12 +618,145 @@ async fn a_terminal_viewer_that_falls_behind_is_redrawn_not_dropped() {
     write(&format!("\x1b[2;1Hburst {i}"));
   }
   write("\x1b[3;1Hburst done");
-  read(&mut client);
+  // The viewer reads one event, which makes room in its queue, so the next
+  // output finds room for the pending redraw before the queue is empty.
+  read(&mut client, 1);
   // The viewer skipped output it had no room for.
   assert!(!client.screen().contents().contains("burst done"), "{}", client.screen().contents());
   write("\x1b[4;1Hfinal");
-  read(&mut client);
+  read(&mut client, usize::MAX);
 
   assert!(!viewer.fell_behind());
   assert_eq!(client.screen().contents(), program.screen().contents());
+}
+
+/// A terminal process with no process behind it, whose output a test feeds
+/// to the fan-out itself.
+fn terminal_proc(rows: u16, cols: u16) -> (Arc<Proc>, proc::Ends) {
+  let mut tty = spec(&["writer"]);
+  tty.tty = Some((rows, cols));
+  Proc::new(&tty, -1, true, None)
+}
+
+/// Writes `text` as the program would, through the fan-out, and fails if
+/// anything holds the program back.
+fn emit_now(proc: &Proc, text: &str) {
+  use futures_util::FutureExt;
+  // NOTICE: `unconstrained`, as in the stalled-viewer test: a budgeted
+  // `emit` would yield after 64 events in one poll although nothing holds
+  // it back.
+  tokio::task::coop::unconstrained(proc.emit(Output::Stdout(Bytes::from(text.to_string()))))
+    .now_or_never()
+    .unwrap_or_else(|| panic!("a subscriber held the program back at {text:?}"));
+}
+
+/// The next output of `subscription` that `recv`, as the relay calls it,
+/// gives without waiting; `None` when it would wait.
+fn next_now(subscription: &mut Subscription) -> Option<Bytes> {
+  use futures_util::FutureExt;
+  // NOTICE: `unconstrained`: a `recv` that runs out of tokio's cooperative
+  // budget (128 per poll) is pending although an event is queued.
+  match tokio::task::coop::unconstrained(subscription.live.recv()).now_or_never() {
+    None => None,
+    Some(Some(Output::Stdout(bytes))) => Some(bytes),
+    Some(other) => panic!("the subscriber got {other:?}"),
+  }
+}
+
+// ROOT CAUSE:
+//
+// If a terminal viewer fell behind during a burst and the program then
+// wrote nothing more (a shell back at its prompt), the viewer kept a stale,
+// partial screen after it had read everything queued, because a viewer that
+// skipped output was drawn again only at the program's next output.
+//
+// Before the fix, the viewer's `recv` waited with nothing to give once its
+// queue was empty, and its terminal showed the screen of the last event it
+// had room for.
+// The fix gives a viewer that skipped output one pending redraw, drawn from
+// the model as soon as its queue is empty, whether or not the program writes
+// again, as herdr's client writer asks for a full frame once it takes the
+// frame from its one-slot render lane (the terminal note's G5).
+#[tokio::test]
+async fn a_lagging_viewer_is_redrawn_when_it_catches_up_although_the_program_stays_quiet() {
+  // NOTICE: more events than a subscriber's queue holds (64,
+  // `SUBSCRIBER_QUEUE` in `proc.rs`).
+  const BURST: usize = 200;
+  let (proc, _ends) = terminal_proc(6, 30);
+  let mut owner = proc.subscribe(true, Subscriber::Owner);
+  let mut reading = proc.subscribe(true, Subscriber::Viewer);
+  let mut lagging = proc.subscribe(true, Subscriber::Viewer);
+  let mut program = terminal(6, 30);
+  let mut beside = terminal(6, 30);
+
+  for i in 0..BURST {
+    let text = format!("\x1b[2;1Hburst {i}\x1b[{};1Hrow {i}", 3 + i % 3);
+    emit_now(&proc, &text);
+    // The starting client and a viewer that keeps up get every event, in
+    // order, while the lagging viewer reads nothing.
+    match owner.live.try_recv() {
+      Ok(Output::Stdout(bytes)) => {
+        assert_eq!(bytes, text.as_bytes(), "the owner's event {i}");
+        program.process(&bytes);
+      }
+      other => panic!("the owner did not get event {i}: {other:?}"),
+    }
+    let bytes = next_now(&mut reading).unwrap_or_else(|| panic!("the reading viewer did not get event {i}"));
+    assert_eq!(bytes, text.as_bytes(), "the reading viewer's event {i}");
+    beside.process(&bytes);
+  }
+
+  // The program stays quiet; the lagging viewer reads what it has.
+  let mut client = terminal(6, 30);
+  let mut received = 0;
+  while let Some(bytes) = next_now(&mut lagging) {
+    client.process(&bytes);
+    received += 1;
+    assert!(received <= BURST, "the lagging viewer kept receiving");
+  }
+
+  assert!(received < BURST, "the viewer did not fall behind: it got {received} events");
+  assert!(!lagging.fell_behind());
+  assert_eq!(client.screen().contents(), program.screen().contents());
+  assert_eq!(client.screen().cursor_position(), program.screen().cursor_position());
+  assert_eq!(beside.screen().contents(), program.screen().contents());
+  // One redraw: after it the viewer waits for output again, and gets it.
+  assert!(next_now(&mut lagging).is_none());
+  emit_now(&proc, "\x1b[6;1Hafter");
+  assert_eq!(next_now(&mut lagging).expect("live output follows the redraw"), "\x1b[6;1Hafter".as_bytes());
+}
+
+// A viewer that skipped output is drawn again even when the screen's text
+// is what it already shows: the skipped output may have changed what the
+// text does not show, here a mode. needy keeps no copy of what each viewer
+// shows, so it never leaves out a redraw as identical; herdr, which does,
+// had to force a frame where its buffers compared equal (commits
+// `61f64006`, `c9fca9fb`).
+#[tokio::test]
+async fn a_lagging_viewer_is_redrawn_although_the_skipped_output_left_the_text_unchanged() {
+  // NOTICE: more events than a subscriber's queue holds (64,
+  // `SUBSCRIBER_QUEUE` in `proc.rs`).
+  const BURST: usize = 200;
+  let (proc, _ends) = terminal_proc(6, 30);
+  let mut lagging = proc.subscribe(true, Subscriber::Viewer);
+  let mut program = terminal(6, 30);
+  for _ in 0..BURST {
+    emit_now(&proc, "\x1b[1;1Hsame");
+    program.process(b"\x1b[1;1Hsame");
+  }
+  emit_now(&proc, "\x1b[?2004h");
+  program.process(b"\x1b[?2004h");
+
+  let mut client = terminal(6, 30);
+  loop {
+    match lagging.live.try_recv() {
+      Ok(Output::Stdout(bytes)) => client.process(&bytes),
+      Ok(other) => panic!("the viewer got {other:?}"),
+      Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+      Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => panic!("the viewer was dropped"),
+    }
+  }
+
+  assert_eq!(client.screen().contents(), program.screen().contents());
+  assert!(client.screen().bracketed_paste(), "the viewer missed the mode the skipped output turned on");
 }
