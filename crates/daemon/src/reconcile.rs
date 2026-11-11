@@ -122,18 +122,22 @@ impl Daemon {
   async fn claim(&self, runner: &str, run: &str, executor: &str, processes: &[ProcessInfo]) {
     tracing::info!("runner {runner}: claimed {} processes of run {run}", processes.len());
     for process in processes {
-      match self.state.process(&process.process_id).await {
+      let known = match self.state.process(&process.process_id).await {
         Ok(Some(known)) if known.state == ProcessState::Running => continue,
-        Ok(_) => {}
-        Err(e) => tracing::warn!("state.db: cannot read process {}: {e:#}", process.process_id),
-      }
+        Ok(known) => known,
+        Err(e) => {
+          tracing::warn!("state.db: cannot read process {}: {e:#}", process.process_id);
+          None
+        }
+      };
       let record = ProcessRecord {
         id: process.process_id.clone(),
         run: run.to_string(),
         instance: store::executor_instance(run, executor),
         // NOTICE: a runner does not keep who started a process; a process
-        // this control plane recorded keeps its origin above.
-        origin: None,
+        // this control plane recorded keeps its origin, running (above) or
+        // not.
+        origin: known.and_then(|known| known.origin),
         state: ProcessState::Running,
         exit: None,
         started_ms: process.started_at_ms,

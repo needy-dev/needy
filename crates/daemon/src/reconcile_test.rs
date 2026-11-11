@@ -126,6 +126,38 @@ async fn a_runner_that_cannot_reach_the_control_plane_ends_the_processes_of_runs
   needy_api_server::control::Processes::kill(daemon, &outside_id, "SIGKILL", needy_core::types::Principal::Operator).await.unwrap();
 }
 
+// ROOT CAUSE:
+//
+// If a control plane listed a run's process it had not relayed in this
+// life, such as after a restart, it named the process by the runner that
+// listed it and gave it no origin, because only its memory knew them;
+// `state.db` recorded both but was not read.
+//
+// Before the fix, `needy ps` showed the runner's name and ORIGIN `-`.
+// The fix names the process by the executor and origin `state.db` recorded.
+#[tokio::test]
+async fn a_process_the_control_plane_forgot_is_listed_with_the_executor_and_origin_state_db_recorded() {
+  const NAMED: &str = r#"
+executors:
+  remote: { runner: far }
+commands:
+  - { match: "**", to: remote }
+"#;
+  let far = far(crate::runner::DISCONNECT_GRACE).await;
+  let daemon = far.served.daemon();
+  let run = Runs::create(daemon, new_run(NAMED, far.served.dir())).await.unwrap();
+  let (process, _) = testing::detached_sleep(daemon, &run.id).await;
+  Runs::stop(daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
+  // What a restarted control plane knows of processes: only `state.db`.
+  daemon.processes.lock().unwrap().clear();
+
+  let listed = needy_api_server::control::Processes::list(daemon, "", "").await.unwrap();
+
+  let p = listed.iter().find(|p| p.process == process).expect("the runner keeps the ended process listed");
+  assert_eq!(p.executor, "remote");
+  assert_eq!(p.origin, Some(needy_core::types::Origin::Cli));
+}
+
 // ---------------------------------------------------- control-plane restart
 
 /// A stand-in for an actor's Firecracker a killed control plane left

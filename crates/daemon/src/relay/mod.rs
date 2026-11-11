@@ -51,12 +51,16 @@ fn relayed(e: needy_api_client::Error) -> ControlError {
 
 /// A process the daemon has seen: where it runs, and who started it.
 // NOTICE: executors do not keep a process's origin, so the daemon that
-// relayed the start is the only one that knows it. A process this daemon
-// only listed, such as one on a remote executor another daemon started,
-// has no origin.
+// relayed the start is the only one that knows it, in memory and, for a
+// run's process, in `state.db`. A process this daemon only listed, such as
+// one on a remote executor another daemon started, has no origin.
 #[derive(Clone)]
 pub(crate) struct Known {
   instance: Arc<Instance>,
+  /// The executor it is listed under: the instance's name, or the
+  /// executor `state.db` recorded for a run's process this daemon did not
+  /// relay in this life, which a runner's machine lists.
+  name: String,
   origin: Option<Origin>,
   /// The run whose trace records signals sent to it; `None` outside runs.
   run: Option<String>,
@@ -135,7 +139,7 @@ impl Daemon {
     let Some(process) = listed.processes.into_iter().find(|p| p.tty) else {
       return Err(ControlError::Unavailable(format!("the actor of run {} serves no terminal", run.id)));
     };
-    let known = self.sighted(&process.process_id, &instance, None, Some(run.id.clone()));
+    let known = self.sighted(&process.process_id, &instance, None, Some(run.id.clone())).await;
     Ok((process.process_id, known))
   }
 
@@ -145,17 +149,54 @@ impl Daemon {
   }
 
   /// What the daemon knows of `process`, which `instance` listed: what it
-  /// recorded, or else `instance` and `origin`, which are then recorded.
-  fn sighted(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>, run: Option<String>) -> Known {
+  /// keeps in memory, or else what `state.db` recorded of a run's process
+  /// (its executor and origin) or `instance` and `origin`, which are then
+  /// kept.
+  async fn sighted(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>, run: Option<String>) -> Known {
+    if let Ok(known) = self.process(process) {
+      return known;
+    }
+    // TODO(process-origin): `state.db` records only runs' processes, so one
+    // outside any run is listed without its origin after a restart.
+    // Recording those too waits for the owner to want them in `state.db`.
+    let recorded = match &run {
+      Some(_) => self.recorded(process).await,
+      None => None,
+    };
+    let (name, origin) = match recorded {
+      Some((name, recorded)) => (name, recorded.or(origin)),
+      None => (instance.name.clone(), origin),
+    };
     let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     processes
       .entry(process.to_string())
       .or_insert_with(|| Known {
         instance: instance.clone(),
+        name,
         origin,
         run,
       })
       .clone()
+  }
+
+  /// The executor and origin `state.db` recorded for a run's `process`.
+  async fn recorded(&self, process: &str) -> Option<(String, Option<Origin>)> {
+    let record = match self.state.process(process).await {
+      Ok(record) => record?,
+      Err(e) => {
+        tracing::debug!("state.db: cannot read process {process}: {e:#}");
+        return None;
+      }
+    };
+    let instances = match self.state.instances_of(&record.run).await {
+      Ok(instances) => instances,
+      Err(e) => {
+        tracing::debug!("state.db: cannot read the instances of run {}: {e:#}", record.run);
+        return None;
+      }
+    };
+    let name = instances.into_iter().find(|i| i.id == record.instance)?.name;
+    Some((name, record.origin))
   }
 
   /// Records the instance of `process` and, when this daemon started it, its
@@ -168,6 +209,7 @@ impl Daemon {
       process.to_string(),
       Known {
         instance: instance.clone(),
+        name: instance.name.clone(),
         origin,
         run,
       },
@@ -368,8 +410,8 @@ impl Processes for Daemon {
             let mut p = domain::process_info(p);
             // A process is named by the instance it was started through;
             // one this daemon did not start, by the first that listed it.
-            let known = self.sighted(&p.process, &instance, p.origin, Some(p.run.clone()).filter(|run| !run.is_empty()));
-            p.executor = known.instance.name.clone();
+            let known = self.sighted(&p.process, &instance, p.origin, Some(p.run.clone()).filter(|run| !run.is_empty())).await;
+            p.executor = known.name.clone();
             p.origin = known.origin;
             processes.push(p);
           }
@@ -394,7 +436,7 @@ impl Processes for Daemon {
     if let Some(run) = known.run.as_deref().and_then(|run| self.runs.exact(run)) {
       run.emit(&Event::ExecKill(ExecKill {
         process: process.to_string(),
-        executor: known.instance.name.clone(),
+        executor: known.name.clone(),
         signal: signal.to_string(),
         by: Some(by),
       }));
