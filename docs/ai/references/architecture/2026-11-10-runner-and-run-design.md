@@ -450,7 +450,11 @@ findings: the profile's own, a selector that does not resolve, an actor or
 Docker executor placed where this slice cannot run it, and the recipe
 compiled against the host of the actor: the scheduled runner's reported
 CPU, or the control host's own. A runner that reported no host yet is a
-warning, and the recipe's host checks are skipped. The CLI prints the
+warning, and the recipe's host checks are skipped. Since 2026-11-11 (owner
+decision) an actor whose host has no usable KVM is an error naming the host
+(`on the control host: …`, `on runner NAME (the control host): …`): the
+check probes the KVM device as `run create` does. A profile that writes no
+`actor:` is not checked for KVM. The CLI prints the
 placements, the control plane's findings, the recipe summary (which does
 not depend on the host) and the `--cmd` decisions, and exits 1 on an error.
 `needy profile check --local` checks offline against this machine's CPU and

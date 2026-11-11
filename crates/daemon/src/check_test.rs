@@ -207,3 +207,50 @@ async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
 
   assert_eq!(messages(&check), Vec::<String>::new());
 }
+
+// ROOT CAUSE:
+//
+// If the actor's host had no usable KVM, `profile check` reported nothing,
+// because only `run create` probed the KVM device.
+//
+// Before the fix, a profile checked clean and its run then failed at create.
+// The fix makes a missing KVM on the actor's host an error finding that names
+// the host, as the create's refusal does.
+#[tokio::test]
+async fn a_control_host_without_kvm_is_an_error_finding_naming_it() {
+  let served = control().await;
+  let kvm = served.dir().join("kvm");
+  std::fs::remove_file(&kvm).unwrap();
+
+  let check = check(&served, "actor: { command: [sh] }").await;
+
+  let found = messages(&check);
+  assert_eq!(found.len(), 1, "{found:?}");
+  assert!(
+    found[0].starts_with(&format!("error: actor: on the control host: this host has no usable KVM: cannot open {}", kvm.display())),
+    "{found:?}"
+  );
+}
+
+#[tokio::test]
+async fn the_control_hosts_own_runner_without_kvm_is_an_error_finding_naming_it() {
+  let served = control().await;
+  let _kvm = runner(&served, "kvm", &[Actor], &[]).await;
+  std::fs::remove_file(served.dir().join("kvm")).unwrap();
+
+  let check = check(&served, "actor: { runner: kvm }").await;
+
+  let found = messages(&check);
+  assert_eq!(found.len(), 1, "{found:?}");
+  assert!(found[0].starts_with("error: actor: on runner kvm (the control host): this host has no usable KVM"), "{found:?}");
+}
+
+#[tokio::test]
+async fn a_profile_without_an_actor_is_not_checked_for_kvm() {
+  let served = control().await;
+  std::fs::remove_file(served.dir().join("kvm")).unwrap();
+
+  let check = check(&served, "executors: { here: {} }").await;
+
+  assert_eq!(messages(&check), Vec::<String>::new());
+}

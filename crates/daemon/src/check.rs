@@ -1,13 +1,13 @@
 //! `profile check` through the control plane: where a profile's actor and
-//! executors would run, whether its selectors resolve, and its recipe
-//! checked against the CPU of the host its actor would run on. It creates
-//! nothing.
+//! executors would run, whether its selectors resolve, whether the actor's
+//! host has a usable KVM, and its recipe checked against the CPU of the host
+//! its actor would run on. It creates nothing.
 
 use std::path::{Path, PathBuf};
 
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFinding, ProfileToCheck};
 use needy_config::Source;
-use needy_config::profile::{Executor, Profile};
+use needy_config::profile::{Actor, Executor, Profile};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::HostInfo;
 use needy_core::types::RunnerRole;
@@ -64,6 +64,12 @@ impl Daemon {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
+        } else if profile.actor != Actor::default()
+          // A profile that writes no `actor:` is checked for its routing
+          // and executors only (owner decision, 2026-11-11).
+          && let Some(missing) = self.missing_kvm(&placement)
+        {
+          check.findings.push(error(format!("actor: {missing}")));
         }
         check.actor = Some(placement);
       }
@@ -96,6 +102,21 @@ impl Daemon {
       }
     }
     Ok(check)
+  }
+
+  /// Why the host of an actor placed at `placement` has no usable KVM, or
+  /// `None` when it has one. The actor runs on the control host (directly or
+  /// as its own runner), whose KVM device is probed as `run create` probes
+  /// it.
+  // TODO(runner-actor): an actor on another runner is refused before this
+  // check (`actor_refusal`); once one can run there, check the KVM its
+  // heartbeat reports (`RunnerHost::cpu.kvm_cpuid`, unset without one).
+  fn missing_kvm(&self, placement: &Placement) -> Option<String> {
+    let on = match placement {
+      Placement::ControlHost => "the control host".to_string(),
+      Placement::Runner(name) => format!("runner {name} (the control host)"),
+    };
+    needy_core_actor::host::vm::check_kvm(&self.config.kvm).err().map(|e| format!("on {on}: {e}"))
   }
 
   /// Compiles the recipe `reference` against the CPU of the host the actor
