@@ -4,7 +4,8 @@
 //! executor images from `images/Dockerfile`, through the Docker API
 //! with BuildKit. With `--macos-apple-container` it builds the container actor
 //! image for linux/arm64 instead of the VM's, and loads it into Apple's
-//! `container`.
+//! `container`. With `--from REF` it makes the VM image of an OCI image
+//! `FROM` the container base instead (`from`).
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -20,6 +21,8 @@ use needy_core::recipe::PerRun;
 
 use crate::cli::Context;
 use crate::output;
+
+mod from;
 
 /// Lines of a failed step's output to show with its error.
 const FAILED_STEP_LINES: usize = 30;
@@ -48,9 +51,35 @@ pub struct Args {
   /// silicon, instead of the VM actor image.
   #[arg(long, conflicts_with_all = ["recipe", "out"])]
   macos_apple_container: bool,
+  /// Make the VM image of this host's VM driver (`linux-firecracker`, or
+  /// `macos-vz` on Apple silicon) from an OCI image `FROM` needy's
+  /// container base, which a profile names with `actor.image: REF`. The
+  /// kernel is the base VM image's (`--base`), the root file system the OCI
+  /// image's. It defaults to where the daemon looks for `REF`; `--out`
+  /// writes it elsewhere. Needs no needy checkout.
+  #[arg(long, value_name = "REF", conflicts_with_all = ["recipe", "executor", "linux_container", "macos_apple_container"])]
+  from: Option<String>,
+  /// The base VM image whose kernel `--from` takes. Defaults to the image
+  /// the daemon boots.
+  #[arg(long, value_name = "DIR", requires = "from")]
+  base: Option<PathBuf>,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  if let Some(reference) = &args.from {
+    let paths = ctx.paths()?;
+    let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
+    let base = args.base.unwrap_or_else(|| paths.default_image());
+    let from = from::From {
+      reference,
+      base: &base,
+      images: &paths.images(),
+      out: args.out.as_deref(),
+    };
+    let dir = from::build(&docker, &from).await?;
+    output::message(format_args!("build: {reference} is the VM image {}", dir.display()));
+    return Ok(0);
+  }
   let root = repo_root()?;
   let out = match args.out {
     Some(out) => out,
