@@ -2,12 +2,12 @@
 
 **Status**: design, 2026-11-10; slices 1 to 4 implemented 2026-11-11, see
 [As built: slice 1](#as-built-slice-1) and
-[As built: slices 2 to 4](#as-built-slices-2-to-4); the `apple-container`
+[As built: slices 2 to 4](#as-built-slices-2-to-4); the `macos-apple-container`
 runtime implemented 2026-11-12, see
-[As built: apple-container](#as-built-apple-container). The owner's decisions
+[As built: macos-apple-container](#as-built-macos-apple-container). The owner's decisions
 are under [Decisions](#decisions). Evidence:
 [Closed-loop results, container actors](2026-11-09-closed-loop-results-evidence.md#container-actors)
-and [Apple `container` actor evidence](2026-11-12-apple-container-actor-evidence.md).
+and [Apple `container` actor evidence](2026-11-12-macos-apple-container-actor-evidence.md).
 
 Related notes:
 
@@ -49,8 +49,8 @@ owned by the run like the `Vm` handle today. Implementations:
 | `firecracker` | `host::firecracker` (was `host::vm`) | `/dev/kvm` |
 | `container` | Docker API through `bollard`, `HostConfig.runtime` = `runc` or `runsc` | Linux, Docker, `sshfs` for workspace mounts, lxcfs for resource views (`runc`); gVisor's `runsc` registered as a Docker runtime with `--host-uds=all` for `runsc` |
 | `container` on macOS and Windows | Docker API through `bollard` against Docker Desktop, whose Linux containers run inside a VM (WSL 2 on Windows) | Docker Desktop |
-| `apple-container` | Apple's `container` CLI (each container is a lightweight Linux VM on Apple silicon), see [As built: apple-container](#as-built-apple-container) | macOS on Apple silicon with Apple's `container` installed and its services running; Docker (Docker Desktop or OrbStack) to build the image |
-| `vz` (name provisional) | `host::vz`: needy's arm64 kernel and rootfs in a Virtualization.framework VM, vfkit as the VM process; the Firecracker actor's guest (init as PID 1, `binfmt_needy`, sshfs inside, vsock channels bridged to Unix sockets). Built 2026-11-12, see [vz actor evidence](2026-11-12-vz-actor-evidence.md) | macOS on Apple silicon, vfkit, the `vz` actor image (`needy build`) |
+| `macos-apple-container` | Apple's `container` CLI (each container is a lightweight Linux VM on Apple silicon), see [As built: macos-apple-container](#as-built-macos-apple-container) | macOS on Apple silicon with Apple's `container` installed and its services running; Docker (Docker Desktop or OrbStack) to build the image |
+| `macos-vz` | `host::macos::vz`: needy's arm64 kernel and rootfs in a Virtualization.framework VM, vfkit as the VM process; the Firecracker actor's guest (init as PID 1, `binfmt_needy`, sshfs inside, vsock channels bridged to Unix sockets). Built 2026-11-12, see [macos-vz actor evidence](2026-11-12-macos-vz-actor-evidence.md) | macOS on Apple silicon, vfkit, the `macos-vz` actor image (`needy build`) |
 | `wsl`, `hyper-v` | later: a WSL distribution or a Hyper-V VM as the actor on Windows (`TODO(windows-actor)`) | Windows |
 
 containerd directly (without Docker) is a later provider, like the executor
@@ -60,10 +60,10 @@ Profile:
 
 ```yaml
 actor:
-  runtime: container        # required: firecracker | container | apple-container
-  container:                # required with `container`, optional with `apple-container`, refused with `firecracker`
-    oci_runtime: runsc      # required with `container`: runc | runsc; refused with `apple-container`
-    image: needy-actor:latest   # the default; `needy build --container` (Docker) or `--apple-container` builds it
+  runtime: container        # required: firecracker | container | macos-vz | macos-apple-container
+  container:                # required with `container`, optional with `macos-apple-container`, refused with `firecracker` and `macos-vz`
+    oci_runtime: runsc      # required with `container`: runc | runsc; refused with `macos-apple-container`
+    image: needy-actor:latest   # the default; `needy build --container` (Docker) or `--macos-apple-container` builds it
 ```
 
 ## What changes per mechanism
@@ -90,7 +90,7 @@ the VM's file sharing. So each runtime returns its transport:
 | `firecracker` | vsock (host-side Unix sockets of the VM) |
 | `container` on Linux | host Unix sockets bind-mounted into the container |
 | `container` on Docker Desktop | a TCP port on the host's loopback, reached from the container as `host.docker.internal`, authenticated by a per-run token |
-| `apple-container` | host Unix sockets (settled 2026-11-12): the guest and gateway sockets mounted into the container one file each, which the CLI relays over vsock; the process socket published from the container (`--publish-socket`). No loopback TCP |
+| `macos-apple-container` | host Unix sockets (settled 2026-11-12): the guest and gateway sockets mounted into the container one file each, which the CLI relays over vsock; the process socket published from the container (`--publish-socket`). No loopback TCP |
 
 ### Exec routing with build-time shims
 
@@ -125,11 +125,11 @@ them under `runc`; deferred until a profile needs it.
 
 ### Identity
 
-Filled from the runs of 2026-11-11 and, for `apple-container`, of 2026-11-12
+Filled from the runs of 2026-11-11 and, for `macos-apple-container`, of 2026-11-12
 (see the evidence linked above); a recipe field name in parentheses is what
 `required:` takes.
 
-| Field | Firecracker | `runc` | `runsc` (gVisor) | `apple-container` (default kernel) |
+| Field | Firecracker | `runc` | `runsc` (gVisor) | `macos-apple-container` (default kernel) |
 | --- | --- | --- | --- | --- |
 | Hostname (`hostname`) | yes | yes: Docker's `hostname` (UTS namespace) | yes, the same | yes: init sets it (`CAP_SYS_ADMIN` in the VM) |
 | `/proc/cpuinfo` brand, signature, flags, CPU count (`cpuinfo`) | yes | yes: a file generated from the host's first processor block and the recipe, bind-mounted read-only | yes: gVisor accepts the bind mount over its own `/proc/cpuinfo` (`model name: unknown` without it) | no: the arm64 VM's (Apple implementer `0x61`); a file mount would work, see the gaps |
@@ -155,7 +155,7 @@ error in `profile check` and fails `run create` before anything is acquired.
   hosts dedicated to one run.
 - `runsc`: a user-space kernel between the program and the host. Weaker than a
   microVM and with syscall overhead, but no KVM.
-- `apple-container`: a lightweight VM per actor (Virtualization.framework)
+- `macos-apple-container`: a lightweight VM per actor (Virtualization.framework)
   with Apple's kernel. The container holds `CAP_SYS_ADMIN` inside its VM for
   init's mounts; the driving program runs without capabilities.
 
@@ -335,17 +335,17 @@ Gaps, each marked in the code:
   `guest.rs`); sensor readings do not follow load.
 - Docker Desktop, WSL and Hyper-V need the loopback TCP transport
   (`TODO(container-runtime)` on `Endpoint` and `Terminal`); Apple's
-  `container` does not (see [As built: apple-container](#as-built-apple-container)).
+  `container` does not (see [As built: macos-apple-container](#as-built-macos-apple-container)).
 - The `actor(container)` capability does not carry the OCI runtimes
   (`TODO(runner-actor)` on `ActorRuntime::Container`).
 
-## As built: apple-container
+## As built: macos-apple-container
 
 Implemented 2026-11-12, from an experiment with an actor wired by hand; the
 commands, timings and results are in the
-[Apple `container` actor evidence](2026-11-12-apple-container-actor-evidence.md).
+[Apple `container` actor evidence](2026-11-12-macos-apple-container-actor-evidence.md).
 
-**Runtime** (`core-actor::host::apple_container`). `AppleContainer`
+**Runtime** (`core-actor::host::macos::apple_container`). `AppleContainer`
 implements `ActorRuntime` by driving Apple's `container` CLI through a `Cli`
 trait (the process is the boundary; tests stand in for it). The actor is
 `container run --name needy-actor-<run> --network none --cpus N --memory M
@@ -369,7 +369,7 @@ once the process service answers a request.
 reaches a published socket on the container's root file system, outside its
 mounts, so init's process socket cannot be in a tmpfs. Each container has its
 own copy of the image's file system, which ends with it
-(`TODO(apple-container)` in `launch`).
+(`TODO(macos-apple-container)` in `launch`).
 
 **Setup.** `Setup::GuestMounts`: init mounts the workspace with sshfs inside
 and sets the recipe's hostname, as a VM's init does (the container has
@@ -383,10 +383,10 @@ hostname; no DMI, hwmon or uptime offset; `/proc/cpuinfo` and the kernel are
 the VM's; the VM has one CPU more than asked. `identity_gaps` lists each, and
 a field the recipe requires fails `run create`. The needy-built arm64 kernel
 (`-k`) that would bring `binfmt_needy`, the fake sensors and DMI is a separate
-slice (`TODO(apple-container-kernel)`).
+slice (`TODO(macos-apple-container-kernel)`).
 
 **Capability and build.** A runner on macOS whose `container` services answer
-reports `actor(apple-container)`. `needy build --apple-container` builds
+reports `actor(macos-apple-container)`. `needy build --macos-apple-container` builds
 `needy-actor:latest` for linux/arm64 through Docker and loads it with
 `container image load`; the `needy` and `container-root` stages build for the
 platform's `TARGETARCH`.

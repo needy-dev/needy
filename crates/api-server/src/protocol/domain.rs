@@ -116,8 +116,8 @@ pub fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabili
       Ok(v1::ActorRuntime::Unspecified) => Err(Error::Unspecified("actor runtime")),
       Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
       Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
-      Ok(v1::ActorRuntime::Vz) => Ok(ActorRuntime::Vz),
-      Ok(v1::ActorRuntime::AppleContainer) => Ok(ActorRuntime::AppleContainer),
+      Ok(v1::ActorRuntime::MacosVz) => Ok(ActorRuntime::MacosVz),
+      Ok(v1::ActorRuntime::MacosAppleContainer) => Ok(ActorRuntime::MacosAppleContainer),
       Err(_) => Err(Error::Unknown {
         field: "actor runtime",
         value,
@@ -144,8 +144,8 @@ pub fn proto_capabilities(capabilities: &Capabilities) -> v1::RunnerCapabilities
   let runtime = |runtime: &ActorRuntime| match runtime {
     ActorRuntime::Firecracker => v1::ActorRuntime::Firecracker as i32,
     ActorRuntime::Container => v1::ActorRuntime::Container as i32,
-    ActorRuntime::Vz => v1::ActorRuntime::Vz as i32,
-    ActorRuntime::AppleContainer => v1::ActorRuntime::AppleContainer as i32,
+    ActorRuntime::MacosVz => v1::ActorRuntime::MacosVz as i32,
+    ActorRuntime::MacosAppleContainer => v1::ActorRuntime::MacosAppleContainer as i32,
   };
   let provider = |provider: &ExecutorProvider| match provider {
     ExecutorProvider::Native => v1::ExecutorProvider::Native as i32,

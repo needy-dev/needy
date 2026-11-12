@@ -282,7 +282,7 @@ async fn a_missing_image_names_the_build_that_makes_it() {
   let error = runtime.check_host().await.unwrap_err().to_string();
 
   assert!(error.contains("needy-actor:latest is not in Apple's `container` image store"), "{error}");
-  assert!(error.contains("needy build --apple-container"), "{error}");
+  assert!(error.contains("needy build --macos-apple-container"), "{error}");
   assert_eq!(fake.calls(), ["system status", "image inspect needy-actor:latest"]);
 }
 

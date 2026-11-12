@@ -13,8 +13,8 @@ fn kvm_host() -> Facts {
   Facts {
     firecracker: Ok(()),
     docker: runtimes(&["runc"]),
-    vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
-    apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
+    macos_vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
+    macos_apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
   }
 }
 
@@ -23,8 +23,8 @@ fn mac() -> Facts {
   Facts {
     firecracker: Err("Firecracker runs on Linux only".into()),
     docker: Err("no Docker daemon answers".into()),
-    vz: Err("cannot run vfkit".into()),
-    apple_container: Err("Apple's `container` CLI is not on PATH".into()),
+    macos_vz: Err("cannot run vfkit".into()),
+    macos_apple_container: Err("Apple's `container` CLI is not on PATH".into()),
   }
 }
 
@@ -36,8 +36,8 @@ fn a_kvm_host_with_docker_hosts_both_actor_runtimes_and_docker_and_native_execut
   assert_eq!(
     detected.missing,
     [
-      "actor(vz): Virtualization.framework actors run on macOS on Apple silicon only",
-      "actor(apple-container): Apple's `container` runs on macOS only, on a Mac with Apple silicon"
+      "actor(macos-vz): Virtualization.framework actors run on macOS on Apple silicon only",
+      "actor(macos-apple-container): Apple's `container` runs on macOS only, on a Mac with Apple silicon"
     ]
   );
 }
@@ -53,23 +53,23 @@ fn a_machine_without_kvm_or_docker_hosts_native_executors_only() {
       "actor(firecracker): Firecracker runs on Linux only",
       "executor(docker): no Docker daemon answers",
       "actor(container): no Docker daemon answers",
-      "actor(vz): cannot run vfkit",
-      "actor(apple-container): Apple's `container` CLI is not on PATH",
+      "actor(macos-vz): cannot run vfkit",
+      "actor(macos-apple-container): Apple's `container` CLI is not on PATH",
     ]
   );
 }
 
 #[test]
-fn a_mac_whose_apple_container_services_answer_hosts_apple_container_actors() {
+fn a_mac_whose_apple_container_services_answer_hosts_macos_apple_container_actors() {
   let facts = Facts {
-    apple_container: Ok(()),
+    macos_apple_container: Ok(()),
     ..mac()
   };
 
   let detected = detect(&facts);
 
-  assert_eq!(detected.capabilities.to_string(), "actor(apple-container) executor(native)");
-  assert!(!detected.missing.iter().any(|line| line.starts_with("actor(apple-container)")), "{:?}", detected.missing);
+  assert_eq!(detected.capabilities.to_string(), "actor(macos-apple-container) executor(native)");
+  assert!(!detected.missing.iter().any(|line| line.starts_with("actor(macos-apple-container)")), "{:?}", detected.missing);
 }
 
 #[test]
@@ -79,8 +79,8 @@ fn a_docker_daemon_without_kvm_hosts_container_actors() {
   let facts = Facts {
     firecracker: Err("cannot open /dev/kvm: No such file or directory".into()),
     docker: runtimes(&["runc"]),
-    vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
-    apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
+    macos_vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
+    macos_apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
   };
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(container) executor(docker,native)");
@@ -108,30 +108,30 @@ fn a_role_the_machine_cannot_host_is_warned_about_and_not_added() {
     warnings,
     [
       "--roles names actor, which this machine cannot host (actor(firecracker): Firecracker runs on Linux only; \
-      actor(container): no Docker daemon answers; actor(vz): cannot run vfkit; actor(apple-container): Apple's `container` CLI is \
+      actor(container): no Docker daemon answers; actor(macos-vz): cannot run vfkit; actor(macos-apple-container): Apple's `container` CLI is \
       not on PATH); it is left out"
     ]
   );
 }
 
 #[test]
-fn an_apple_silicon_mac_with_vfkit_and_the_image_hosts_vz_actors() {
+fn an_apple_silicon_mac_with_vfkit_and_the_image_hosts_macos_vz_actors() {
   let facts = Facts {
     firecracker: Err("Firecracker runs on Linux only".into()),
     docker: Err("no Docker daemon answers".into()),
-    vz: Ok(()),
-    apple_container: Err("Apple's `container` CLI is not on PATH".into()),
+    macos_vz: Ok(()),
+    macos_apple_container: Err("Apple's `container` CLI is not on PATH".into()),
   };
 
-  assert_eq!(detect(&facts).capabilities.to_string(), "actor(vz) executor(native)");
+  assert_eq!(detect(&facts).capabilities.to_string(), "actor(macos-vz) executor(native)");
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 #[tokio::test]
-async fn vz_needs_apple_silicon_macos() {
+async fn macos_vz_needs_apple_silicon_macos() {
   let dir = tempfile::tempdir().unwrap();
 
-  assert_eq!(super::vz(dir.path()).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");
+  assert_eq!(super::macos_vz(dir.path()).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");
 }
 
 #[cfg(target_os = "linux")]

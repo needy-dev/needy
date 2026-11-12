@@ -17,12 +17,12 @@ use needy_api_server::{Health, Listen, Server};
 use needy_config::profile::{ContainerActor, FaultKind, FileMode, Runtime, Side};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
 use needy_core::types::{Effect, Fired, Network, RunState};
-use needy_core_actor::host::apple_container::AppleContainer;
 use needy_core_actor::host::container::Container;
 use needy_core_actor::host::firecracker::{self, Firecracker};
 use needy_core_actor::host::gateway;
+use needy_core_actor::host::macos::apple_container::AppleContainer;
+use needy_core_actor::host::macos::vz::{self, Vz};
 use needy_core_actor::host::runtime::{self, ActorRuntime, Channels, Endpoint, HostMount, RunningActor, Setup, Start, Terminal};
-use needy_core_actor::host::vz::{self, Vz};
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
@@ -55,11 +55,11 @@ pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<
       };
       Ok(Box::new(Container::new(*oci_runtime, image.clone())))
     }
-    Runtime::Vz => Ok(Box::new(Vz {
+    Runtime::MacosVz => Ok(Box::new(Vz {
       image: vz::Image::new(&daemon.config.actor_image),
       vfkit: vz::VFKIT.into(),
     })),
-    Runtime::AppleContainer => Ok(Box::new(AppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
+    Runtime::MacosAppleContainer => Ok(Box::new(AppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
   }
 }
 
@@ -278,16 +278,16 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
 /// Connects to an actor's process service on the Unix socket `path`, once
 /// the service itself answers.
 // NOTICE: a relay can accept before the actor serves: vfkit's `connect`
-// socket of a vz actor accepts and only then dials the guest's vsock port,
+// socket of a macos-vz actor accepts and only then dials the guest's vsock port,
 // closing the connection when nothing listens there yet, so the first call
 // failed with "transport error" (seen 2026-11-12 with `run create -it`). A
 // health check waits for the service: the process service has no health
 // service and answers `Unimplemented`; the closed relay fails the call with
 // `Unknown` ("transport error"), not `Unavailable`. A socket Apple's
-// `container` publishes (`--publish-socket`, an apple-container actor's
+// `container` publishes (`--publish-socket`, an macos-apple-container actor's
 // process socket) accepts on the host in the same way, seen the same day
 // with `container` 1.7.1, see
-// `docs/ai/references/architecture/2026-11-12-apple-container-actor-evidence.md`.
+// `docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md`.
 async fn connect_terminal(path: &Path) -> Result<needy_api_client::Client, needy_api_client::Error> {
   let client = needy_api_client::Client::connect(&format!("unix:{}", path.display())).await?;
   match client.health().check(needy_api_client::proto::v1::CheckRequest {}).await {

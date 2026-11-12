@@ -7,9 +7,9 @@
 //! - `actor(container)`: a Docker daemon that answers. Whether it has the
 //!   OCI runtime a profile names (`runc`, gVisor's `runsc`) and the
 //!   container actor image is checked when the run is created.
-//! - `actor(vz)`: macOS on Apple silicon, a `vfkit` that runs, and a
-//!   complete `vz` actor image (Image, rootfs.ext4).
-//! - `actor(apple-container)`: macOS, Apple's `container` CLI on `PATH`, and
+//! - `actor(macos-vz)`: macOS on Apple silicon, a `vfkit` that runs, and a
+//!   complete `macos-vz` actor image (Image, rootfs.ext4).
+//! - `actor(macos-apple-container)`: macOS, Apple's `container` CLI on `PATH`, and
 //!   its services running (`container system status`). Whether its image
 //!   store has the container actor image is checked when the run is
 //!   created.
@@ -40,10 +40,10 @@ pub struct Facts {
   /// The runtimes the Docker daemon registered.
   pub docker: Result<BTreeSet<String>, String>,
   /// A Virtualization.framework VM can start: Apple silicon macOS, vfkit
-  /// and the `vz` actor image.
-  pub vz: Result<(), String>,
+  /// and the `macos-vz` actor image.
+  pub macos_vz: Result<(), String>,
   /// Apple's `container` CLI is there and its services answer.
-  pub apple_container: Result<(), String>,
+  pub macos_apple_container: Result<(), String>,
 }
 
 /// The capabilities found, and why each one that is not is missing.
@@ -80,17 +80,17 @@ pub fn detect(facts: &Facts) -> Detected {
       missing.push(format!("actor(container): {why}"));
     }
   }
-  match &facts.vz {
+  match &facts.macos_vz {
     Ok(()) => {
-      capabilities.actor.insert(ActorRuntime::Vz);
+      capabilities.actor.insert(ActorRuntime::MacosVz);
     }
-    Err(why) => missing.push(format!("actor(vz): {why}")),
+    Err(why) => missing.push(format!("actor(macos-vz): {why}")),
   }
-  match &facts.apple_container {
+  match &facts.macos_apple_container {
     Ok(()) => {
-      capabilities.actor.insert(ActorRuntime::AppleContainer);
+      capabilities.actor.insert(ActorRuntime::MacosAppleContainer);
     }
-    Err(why) => missing.push(format!("actor(apple-container): {why}")),
+    Err(why) => missing.push(format!("actor(macos-apple-container): {why}")),
   }
   Detected {
     capabilities,
@@ -136,10 +136,10 @@ fn kvm_error(error: &needy_core_actor::host::firecracker::Error) -> String {
   }
 }
 
-/// Whether a `vz` actor can start on this machine with the actor image in
+/// Whether a `macos-vz` actor can start on this machine with the actor image in
 /// `image`: Apple silicon macOS, vfkit and the image.
-pub async fn vz(image: &Path) -> Result<(), String> {
-  use needy_core_actor::host::vz;
+pub async fn macos_vz(image: &Path) -> Result<(), String> {
+  use needy_core_actor::host::macos::vz;
   if !vz::supported_host() {
     return Err("Virtualization.framework actors run on macOS on Apple silicon only".into());
   }
@@ -156,17 +156,17 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
   Facts {
     firecracker: firecracker(kvm, image),
     docker,
-    vz: vz(image).await,
-    apple_container: apple_container().await,
+    macos_vz: macos_vz(image).await,
+    macos_apple_container: macos_apple_container().await,
   }
 }
 
 /// Whether Apple's `container` can run actors here: its CLI and services.
-pub async fn apple_container() -> Result<(), String> {
+pub async fn macos_apple_container() -> Result<(), String> {
   #[cfg(unix)]
   {
     // The image does not matter for the services.
-    let runtime = needy_core_actor::host::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+    let runtime = needy_core_actor::host::macos::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
     // NOTICE: `container system status` answers in about 50 ms on an Apple
     // silicon laptop; 3 s bounds services that hang, as `DOCKER_WAIT` does
     // for Docker.

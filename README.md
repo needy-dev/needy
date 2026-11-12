@@ -112,24 +112,25 @@ identity): `needy profile check` says what, and the
 has the table.
 
 On an Apple silicon Mac, the actor can be a Virtualization.framework VM
-(`actor: { runtime: vz }`, name provisional) that
+(`actor: { runtime: macos-vz }`) that
 [vfkit](https://github.com/crc-org/vfkit) runs from needy's own arm64 kernel
 and rootfs: `brew install vfkit`, then `needy build`. Inside it is the
 Firecracker actor's guest, so `binfmt_needy` routes execs by absolute path
 too; the CPU stays an Apple arm64 core, with no DMI or PCI identity.
 Evidence: smoke, chaos, interactive runs and absolute-path routing verified
 end to end on one Mac, ready in about 0.27 s
-([vz actor evidence](docs/ai/references/architecture/2026-11-12-vz-actor-evidence.md));
-[`examples/vz`](examples/vz/profile.yaml) runs the smoke test.
+([macos-vz actor evidence](docs/ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md));
+[`examples/macos-vz`](examples/macos-vz/profile.yaml) runs the smoke test.
 
 On a Mac with Apple silicon, the actor can be a container that Apple's
 [`container`](https://github.com/apple/container) runs in its own lightweight
-VM (`actor: { runtime: apple-container }`); `needy build --apple-container`
-builds its image through Docker and loads it, and
-[`examples/apple-container`](examples/apple-container/profile.yaml) runs the
-smoke and chaos tests in one with this Mac as the executor. Verified end to
+VM (`actor: { runtime: macos-apple-container }`);
+`needy build --macos-apple-container` builds its image through Docker and
+loads it, and
+[`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml)
+runs the smoke and chaos tests in one with this Mac as the executor. Verified end to
 end, including `-it` and `run attach`, on one Apple silicon laptop with
-`container` 1.7.1 ([evidence](docs/ai/references/architecture/2026-11-12-apple-container-actor-evidence.md));
+`container` 1.7.1 ([evidence](docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md));
 with Apple's default kernel it presents the recipe's hostname but no DMI,
 sensors or x86 CPU.
 
@@ -194,8 +195,8 @@ or a scheduled task. Give full paths, and pass the token in a file: the
 process does not get the session's environment or working directory.
 
 A runner detects what it can host: `actor(firecracker)` with a usable KVM and
-the actor image, `actor(vz)` on an Apple silicon Mac with vfkit and the `vz`
-actor image, `executor(docker)` when a Docker daemon answers, and
+the actor image, `actor(macos-vz)` on an Apple silicon Mac with vfkit and the
+`macos-vz` actor image, `executor(docker)` when a Docker daemon answers, and
 `executor(native)` always; `--roles` restricts it to some roles. Profiles
 place executors and the actor on runners by name or labels, with no
 addresses or secrets in the profile, and a runner without the capability an

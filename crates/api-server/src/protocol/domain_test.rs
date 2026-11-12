@@ -102,7 +102,7 @@ fn a_runners_capabilities_survive_the_wire() {
   assert_eq!(capabilities(Some(proto_capabilities(&kvm))).unwrap(), kvm);
   assert_eq!(capabilities(None).unwrap(), Capabilities::default());
   let mac = Capabilities {
-    actor: [ActorRuntime::AppleContainer].into(),
+    actor: [ActorRuntime::MacosAppleContainer].into(),
     executor: [ExecutorProvider::Native].into(),
   };
   assert_eq!(capabilities(Some(proto_capabilities(&mac))).unwrap(), mac);

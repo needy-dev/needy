@@ -24,18 +24,18 @@ What runs an actor next to the daemon, named by the profile's required
 `actor.runtime`: `firecracker` (a microVM; needs `/dev/kvm`), `container`
 (an OCI container through Docker, with the required
 `actor.container.oci_runtime`: `runc`, or gVisor's `runsc`; Linux only),
-`vz` (name provisional: needy's arm64 kernel and rootfs in a
+`macos-vz` (needy's arm64 kernel and rootfs in a
 Virtualization.framework VM that vfkit runs; Apple silicon macOS only) or
-`apple-container` (a container that Apple's `container` runs in its own
+`macos-apple-container` (a container that Apple's `container` runs in its own
 lightweight VM; macOS on Apple silicon). The
 runtime starts, waits for and stops the actor, names the channels the daemon
 serves (guest API, gateway) and dials (terminal), and says who sets the actor
 up: a VM's init inside, the container runtime from the host (workspace
-mounts, hostname, identity files), or both (`apple-container`: init mounts
+mounts, hostname, identity files), or both (`macos-apple-container`: init mounts
 the workspace and sets the hostname). The report names it (`Actor  container
 (runsc)`), since it decides the isolation. See the
 [container actor runtime design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md)
-and the [vz actor evidence](ai/references/architecture/2026-11-12-vz-actor-evidence.md).
+and the [macos-vz actor evidence](ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md).
 
 ### Driving program
 
@@ -109,15 +109,15 @@ and actors on runners with **runner selectors**.
 ### Capabilities
 
 What a runner can host: each **role** it holds (`actor`, `executor`) with its
-actor **runtimes** (`firecracker`, `container`, `vz`, `apple-container`) or executor **providers**
-(`native`, `docker`), written `actor(firecracker) executor(docker,native)`. A
+actor **runtimes** (`firecracker`, `container`, `macos-vz`,
+`macos-apple-container`) or executor **providers** (`native`, `docker`), written `actor(firecracker) executor(docker,native)`. A
 runner detects them when it starts: a KVM device that opens for reading and
 writing and a complete actor image give `actor(firecracker)` (Linux only); a
 Docker daemon that answers gives `executor(docker)` and `actor(container)`
 (whether it has the profile's OCI runtime and the container actor image is
 checked when a run is created); macOS on Apple silicon with vfkit and a
-complete `vz` actor image gives `actor(vz)`; Apple's `container` CLI whose
-services answer gives `actor(apple-container)` (macOS only);
+complete `macos-vz` actor image gives `actor(macos-vz)`; Apple's `container`
+CLI whose services answer gives `actor(macos-apple-container)` (macOS only);
 `executor(native)` is always there. `--roles` restricts a runner to some roles and cannot add one the
 machine lacks. Capabilities travel in the join and every heartbeat, are kept
 in `state.db`, and are what scheduling and `profile check` match: an actor

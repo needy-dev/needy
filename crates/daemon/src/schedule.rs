@@ -57,8 +57,8 @@ impl Need {
     Self::Actor(match runtime {
       needy_config::profile::Runtime::Firecracker => ActorRuntime::Firecracker,
       needy_config::profile::Runtime::Container => ActorRuntime::Container,
-      needy_config::profile::Runtime::Vz => ActorRuntime::Vz,
-      needy_config::profile::Runtime::AppleContainer => ActorRuntime::AppleContainer,
+      needy_config::profile::Runtime::MacosVz => ActorRuntime::MacosVz,
+      needy_config::profile::Runtime::MacosAppleContainer => ActorRuntime::MacosAppleContainer,
     })
   }
 

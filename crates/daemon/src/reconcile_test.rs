@@ -273,18 +273,18 @@ async fn a_restarted_control_plane_fails_a_running_run_ends_its_vm_and_marks_unr
 
 // ROOT CAUSE:
 //
-// If a control plane died while a vz actor ran, its successor looked for the
+// If a control plane died while a macos-vz actor ran, its successor looked for the
 // run's `vm.json` on the leftover's command line, which vfkit does not have,
 // so the VM kept running.
 //
-// The fix finds a vz actor's vfkit by its pidfile in the run's directory.
+// The fix finds a macos-vz actor's vfkit by its pidfile in the run's directory.
 #[tokio::test]
-async fn a_restarted_control_plane_ends_a_leftover_vz_actors_vfkit() {
+async fn a_restarted_control_plane_ends_a_leftover_macos_vz_actors_vfkit() {
   let dir = tempfile::tempdir().unwrap();
   let state_dir = dir.path().join("state");
   let run_dir = state_dir.join("runs/r1");
   std::fs::create_dir_all(&run_dir).unwrap();
-  let pidfile = needy_core_actor::host::vz::pidfile(&run_dir);
+  let pidfile = needy_core_actor::host::macos::vz::pidfile(&run_dir);
   let mut vfkit =
     std::process::Command::new("sh").args(["-c", "while :; do sleep 0.05; done", "vfkit", "--pidfile"]).arg(&pidfile).spawn().unwrap();
   let store = store::Store::open(&state_dir.join("state.db")).await.unwrap();
@@ -302,7 +302,7 @@ async fn a_restarted_control_plane_ends_a_leftover_vz_actors_vfkit() {
     actor_runner: None,
   };
   store.save_run(&run).await.unwrap();
-  let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "vz");
+  let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "macos-vz");
   actor.handle = run_dir.display().to_string();
   actor.pid = Some(i64::from(vfkit.id()));
   store.save_instance(&actor).await.unwrap();

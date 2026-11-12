@@ -1,4 +1,4 @@
-# The smoke test with a vz actor, on an Apple silicon Mac: the driving
+# The smoke test with a macos-vz actor, on an Apple silicon Mac: the driving
 # program is `sh` in a Virtualization.framework VM that vfkit runs from
 # needy's arm64 kernel and rootfs (`brew install vfkit`, then `needy build`).
 # The executor is the Mac itself (a daemon that is not root cannot hand a
@@ -9,7 +9,7 @@
 # machine, so `profile check` lists what an arm64 VM cannot present.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: vz
+  runtime: macos-vz
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -18,7 +18,7 @@ actor:
       echo "== actor"; uname -a; hostname; id; nproc; free -m | head -2
       sensors | grep -m1 Package; systemd-detect-virt; cat /proc/cpuinfo | grep -m1 implementer
       echo "== routed python3"
-      python3 -c "import os,platform; print(platform.system(), os.getcwd() == os.path.realpath('/tmp/needy-vz-ws'))"
+      python3 -c "import os,platform; print(platform.system(), os.getcwd() == os.path.realpath('/tmp/needy-macos-vz-ws'))"
       echo hello-from-actor > ~/workspace/from-actor.txt
       python3 -c "print(open('from-actor.txt').read().strip())"
       python3 -c "open('from-executor.txt','w').write('hi-from-executor')"
@@ -28,10 +28,10 @@ actor:
 executors:
   mac:
     provider: native
-    workspace: /tmp/needy-vz-ws
-    path_map: { /home/agent/workspace: /tmp/needy-vz-ws }
+    workspace: /tmp/needy-macos-vz-ws
+    path_map: { /home/agent/workspace: /tmp/needy-macos-vz-ws }
 commands:
   - { match: "{python3,arch} **", to: mac }
 files:
-  workspace: { mode: mount, from: "executor:mac:/tmp/needy-vz-ws/", to: "actor:~/workspace/", writable: true }
+  workspace: { mode: mount, from: "executor:mac:/tmp/needy-macos-vz-ws/", to: "actor:~/workspace/", writable: true }
 run_files: [workspace]

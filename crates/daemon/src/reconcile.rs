@@ -165,15 +165,15 @@ impl Daemon {
             let state = end_leftover_container(instance).await;
             self.write_instance_state(instance, state, now).await;
           }
-          (InstanceKind::Actor, _) if instance.runtime == "apple-container" => {
-            let state = end_leftover_apple_container(instance).await;
+          (InstanceKind::Actor, _) if instance.runtime == "macos-apple-container" => {
+            let state = end_leftover_macos_apple_container(instance).await;
             self.write_instance_state(instance, state, now).await;
           }
           (InstanceKind::Actor, _) => {
             // A VM's process names a file in the run's directory on its
             // command line: Firecracker its `vm.json`, vfkit its pidfile.
             let marker = match instance.runtime.as_str() {
-              "vz" => needy_core_actor::host::vz::pidfile(Path::new(&instance.handle)),
+              "macos-vz" => needy_core_actor::host::macos::vz::pidfile(Path::new(&instance.handle)),
               _ => Path::new(&instance.handle).join("vm.json"),
             };
             let state = end_leftover_vm(instance, &marker).await;
@@ -369,9 +369,9 @@ async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
 /// Apple's `container`, for the reasons [`end_leftover_vm`] gives. The
 /// container is found by its run's name; its `container run` process ended
 /// with the old daemon or is ended by the deletion.
-async fn end_leftover_apple_container(instance: &InstanceRecord) -> InstanceState {
+async fn end_leftover_macos_apple_container(instance: &InstanceRecord) -> InstanceState {
   // The image does not matter for deleting a container.
-  let runtime = needy_core_actor::host::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+  let runtime = needy_core_actor::host::macos::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
   tracing::warn!("run {}: deleting its actor's container, which a restarted control plane does not adopt", instance.run);
   if runtime.end_leftover(&instance.run).await {
     InstanceState::Ended

@@ -182,7 +182,7 @@ async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   std::fs::set_permissions(&vfkit, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
   let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), None);
   let mut vm = Vm::start(&launch).unwrap();
-  let log = super::super::runtime::log(dir.path());
+  let log = crate::host::runtime::log(dir.path());
   for _ in 0..100 {
     if std::fs::read_to_string(&log).unwrap_or_default().contains("vfkit started") {
       break;

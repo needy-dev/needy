@@ -1,12 +1,10 @@
-# examples/chaos with an Apple `container` actor: copy-in and mirror-out on
-# the actor, a file fault on the shared workspace and an exec fault, with
-# this Mac as a native executor. The hwmon fault has no effect here: Apple's
-# default kernel has no sensors (`needy profile check` says so). Create the
-# executor's directory and the results' first: `mkdir -p
-# /tmp/needy-apple-chaos-ws examples/apple-container/out`.
+# examples/chaos with a macos-vz actor: copy-in and mirror-out on the actor, a file
+# fault on the shared workspace, an exec fault and a scheduled overheat, which
+# the guest's init applies to the guest kernel's fake coretemp, as in a
+# Firecracker actor.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: apple-container
+  runtime: macos-vz
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -19,14 +17,15 @@ actor:
       cat ~/workspace/ok.txt; echo
       cat ~/workspace/broken.json; echo "cat exit=$?"
       echo "== exec fault"; curl -s http://example.invalid; echo "curl exit=$?"
+      echo "== hwmon"; sensors | grep -m1 Package; sleep 3; sensors | grep -m1 Package
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
-  build:
+  mac:
     provider: native
-    workspace: /tmp/needy-apple-chaos-ws
-    path_map: { /home/agent/workspace: /tmp/needy-apple-chaos-ws }
+    workspace: /tmp/needy-macos-vz-ws
+    path_map: { /home/agent/workspace: /tmp/needy-macos-vz-ws }
 commands:
-  - { match: "{python3,curl} **", to: build }
+  - { match: "{python3,curl} **", to: mac }
 files:
   seed:
     mode: copy-in
@@ -35,7 +34,7 @@ files:
     filter: ["- /secret.txt", "+ **"]
   workspace:
     mode: mount
-    from: "executor:build:/tmp/needy-apple-chaos-ws/"
+    from: "executor:mac:/tmp/needy-macos-vz-ws/"
     to: "actor:~/workspace/"
     writable: true
   results:

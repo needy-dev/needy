@@ -3,10 +3,10 @@
 #   docker build -f images/Dockerfile --target actor --output type=local,dest=OUT .
 #   docker build -f images/Dockerfile --target executor -t needy-executor .
 #   docker build -f images/Dockerfile --target actor-container -t needy-actor .
-#   docker build -f images/Dockerfile --platform linux/arm64 --target actor-vz --output type=local,dest=OUT .
+#   docker build -f images/Dockerfile --platform linux/arm64 --target actor-macos-vz --output type=local,dest=OUT .
 # Stages build for the platform they run on: `uname -m` picks the musl
 # target, the kernel configuration and opencode's release. The Firecracker
-# actor (`actor`) is x86_64 only; the `vz` actor (`actor-vz`,
+# actor (`actor`) is x86_64 only; the `macos-vz` actor (`actor-macos-vz`,
 # Virtualization.framework on Apple silicon) is arm64 only.
 ARG KERNEL_VERSION=6.18.62
 ARG FIRECRACKER_VERSION=v1.17.0
@@ -57,7 +57,7 @@ COPY --from=needy-windows /needy.exe /needy.exe
 # Guest kernel: Firecracker CI config, needy fragment, exec routing and fake sensors.
 # Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
 # (v1.17.0; `images/kernel/firecracker-6.18.config` is an unchanged copy).
-# On arm64 (the `vz` actor) the base is Apple Containerization's arm64 config
+# On arm64 (the `macos-vz` actor) the base is Apple Containerization's arm64 config
 # with `needy-arm64.config` on top (provenance in that file), and the result
 # is the uncompressed `arch/arm64/boot/Image` Virtualization.framework boots.
 # Reference: https://www.kernel.org/ (stable 6.18.y; the tarball URL below is
@@ -193,7 +193,7 @@ COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=firecracker /firecracker /firecracker
 COPY --from=needy /needy /needy
 
-# The `vz` actor's files, built with `--platform linux/arm64`: the
+# The `macos-vz` actor's files, built with `--platform linux/arm64`: the
 # uncompressed kernel Virtualization.framework boots, the actor rootfs and the
 # guest's needy. The VM process is vfkit, installed on the Mac, not built here.
 # NOTICE: `initrd` is an empty initramfs (a cpio archive with only its
@@ -202,13 +202,13 @@ COPY --from=needy /needy /needy
 # https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/bootloader.go#L59-L63).
 # Without `/init` in it the kernel mounts `root=` and starts `init=` as it
 # does without an initrd: https://github.com/torvalds/linux/blob/v6.18/init/main.c#L1604-L1611
-FROM ubuntu:24.04 AS vz-initrd
+FROM ubuntu:24.04 AS macos-vz-initrd
 RUN apt-get update && apt-get install -y --no-install-recommends cpio && rm -rf /var/lib/apt/lists/* \
  && cpio -o -H newc < /dev/null > /initrd
 
-FROM scratch AS actor-vz
+FROM scratch AS actor-macos-vz
 COPY --from=kernel /linux/arch/arm64/boot/Image /Image
-COPY --from=vz-initrd /initrd /initrd
+COPY --from=macos-vz-initrd /initrd /initrd
 COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=needy /needy /needy
 

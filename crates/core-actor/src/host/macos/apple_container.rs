@@ -1,4 +1,4 @@
-//! The `apple-container` actor runtime: the actor in a container that
+//! The `macos-apple-container` actor runtime: the actor in a container that
 //! Apple's `container` CLI runs on a Mac with Apple silicon, each container
 //! in its own lightweight VM (Virtualization.framework, Apple's default
 //! Linux kernel, `vminitd` as the VM's init).
@@ -22,7 +22,7 @@
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`
 //! and the evidence in
-//! `docs/ai/references/architecture/2026-11-12-apple-container-actor-evidence.md`.
+//! `docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md`.
 
 use std::path::Path;
 use std::process::ExitStatus;
@@ -32,8 +32,8 @@ use std::time::Duration;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
-use super::container::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir, name};
-use super::runtime::{ActorRuntime, Channels, Endpoint, Error, Gap, RunningActor, Setup, Start, Terminal};
+use crate::host::container::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir, name};
+use crate::host::runtime::{ActorRuntime, Channels, Endpoint, Error, Gap, RunningActor, Setup, Start, Terminal};
 
 /// The CLI's program name, found on `PATH`.
 pub const PROGRAM: &str = "container";
@@ -66,7 +66,7 @@ pub trait Process: Send {
   fn kill(&mut self) -> std::io::Result<()>;
 }
 
-/// The `apple-container` runtime: actors in containers of `image`, which
+/// The `macos-apple-container` runtime: actors in containers of `image`, which
 /// must be in Apple's `container` image store.
 pub struct AppleContainer {
   pub image: String,
@@ -99,7 +99,7 @@ impl AppleContainer {
   }
 
   /// Fails unless the CLI is there and its services answer, as `container
-  /// system status` says; a runner reports `actor(apple-container)` only
+  /// system status` says; a runner reports `actor(macos-apple-container)` only
   /// then.
   pub async fn services(&self) -> Result<(), Error> {
     let status = self.run(&["system", "status"]).await?;
@@ -114,7 +114,7 @@ impl AppleContainer {
 
   /// Loads the image archive at `archive` (an OCI or `docker save` tar)
   /// into Apple's `container` image store, as `needy build
-  /// --apple-container` does.
+  /// --macos-apple-container` does.
   pub async fn load(&self, archive: &Path) -> Result<(), Error> {
     let archive = archive.display().to_string();
     let loaded = self.run(&["image", "load", "--input", &archive]).await?;
@@ -181,11 +181,11 @@ impl AppleContainer {
     // hides it. Observed with `container` 1.7.1: under `--read-only` with a
     // tmpfs there, the host's connections closed at once. Each container
     // has its own copy of the image's file system, which ends with it.
-    // TODO(apple-container): a read-only root file system, once Apple's
+    // TODO(macos-apple-container): a read-only root file system, once Apple's
     // `container` can publish a socket from a container's own mount.
     args.push("--entrypoint".into());
     args.push("/.needy/init".into());
-    // TODO(apple-container-kernel): a needy-built arm64 kernel (`-k`) with
+    // TODO(macos-apple-container-kernel): a needy-built arm64 kernel (`-k`) with
     // `binfmt_needy`, the fake sensors and DMI is a separate approved slice;
     // until it lands the actor runs Apple's default kernel.
     args.push(self.image.clone());
@@ -233,7 +233,7 @@ fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
 
 /// What of `recipe` (or of a plain machine) an actor under Apple's
 /// `container` with its default kernel does not present.
-// TODO(apple-container-kernel): DMI, the sensors and the uptime offset need
+// TODO(macos-apple-container-kernel): DMI, the sensors and the uptime offset need
 // a kernel with `CONFIG_DMI`, the fake coretemp and `CONFIG_TIME_NS`, which
 // the needy-built arm64 kernel slice (`-k`) brings; the gaps below for them
 // go with it.
@@ -254,7 +254,7 @@ fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
   };
   let cpu = &recipe.cpu;
   if cpu.brand.is_some() || cpu.signature.is_some() || !cpu.hide.is_empty() || cpu.hypervisor.is_some() {
-    // TODO(apple-container): a recipe's /proc/cpuinfo could be mounted as a
+    // TODO(macos-apple-container): a recipe's /proc/cpuinfo could be mounted as a
     // file (that works), but its text is made from the host's first
     // processor block, which a Mac has none of, and an x86 text on an arm64
     // kernel would contradict `uname -m`; deferred until arm64 recipes or
@@ -280,7 +280,7 @@ fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
 #[async_trait::async_trait]
 impl ActorRuntime for AppleContainer {
   fn name(&self) -> &'static str {
-    "apple-container"
+    "macos-apple-container"
   }
 
   async fn check_host(&self) -> Result<(), Error> {
@@ -288,7 +288,7 @@ impl ActorRuntime for AppleContainer {
     let image = self.run(&["image", "inspect", &self.image]).await?;
     if !image.success {
       return Err(Error::AppleContainer(format!(
-        "the container actor image {} is not in Apple's `container` image store; run `needy build --apple-container`",
+        "the container actor image {} is not in Apple's `container` image store; run `needy build --macos-apple-container`",
         self.image
       )));
     }
@@ -323,7 +323,7 @@ impl ActorRuntime for AppleContainer {
     let launch = self.launch(start);
     // A container left by an earlier daemon would block the name.
     self.end_leftover(start.run).await;
-    let log = super::runtime::log(start.dir);
+    let log = crate::host::runtime::log(start.dir);
     let file = std::fs::File::create(&log).map_err(|source| Error::Write { path: log, source })?;
     let process = self.cli.spawn(&launch.args, file)?;
     Ok(Box::new(Running {

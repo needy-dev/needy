@@ -1,7 +1,13 @@
-# `vz` actor runtime: evidence
+# `macos-vz` actor runtime: evidence
 
 **Status**: implemented and verified end to end on one Mac, 2026-11-12. The
-runtime name `vz` is **provisional** (see [Name](#name)).
+runtime is named `macos-vz` (see [Name](#name)).
+
+NOTICE: the checks below ran under the runtime's first name, `vz` (profile
+value, `actor(vz)`, the `actor-vz` image target, `examples/vz`). The owner
+renamed it to `macos-vz` the same day, and this note uses the new name
+throughout, also in recorded commands and output; nothing else in them
+changed.
 
 Related notes:
 
@@ -21,9 +27,9 @@ counterpart: needy's own arm64 guest kernel and rootfs in a
 Virtualization.framework VM, with vfkit as the VM process, as Firecracker is
 on Linux.
 
-- `actor: { runtime: vz }` in a profile (`crates/config`), `actor(vz)` as a
-  runner capability (`ACTOR_RUNTIME_VZ` in `proto/needy/v1/runner.proto`).
-- `needy_core_actor::host::vz`: `Vz` implements `ActorRuntime`; `Launch`
+- `actor: { runtime: macos-vz }` in a profile (`crates/config`), `actor(macos-vz)` as a
+  runner capability (`ACTOR_RUNTIME_MACOS_VZ` in `proto/needy/v1/runner.proto`).
+- `needy_core_actor::host::macos::vz`: `Vz` implements `ActorRuntime`; `Launch`
   builds vfkit's arguments from a compiled recipe; `Vm` owns the vfkit
   process.
 - The guest is the Firecracker actor's in all that needy does inside it:
@@ -37,8 +43,8 @@ on Linux.
   guest's port (`Terminal::Unix`). The guest's init needed no change for
   them: it dials the same vsock ports as under Firecracker.
 - No network device: everything goes through the gateway
-  (`TODO(actor-network)` at `vz::Launch::new`, as at `firecracker::Launch`).
-- `needy build` on an Apple silicon Mac builds the `actor-vz` target of
+  (`TODO(actor-network)` at `macos::vz::Launch::new`, as at `firecracker::Launch`).
+- `needy build` on an Apple silicon Mac builds the `actor-macos-vz` target of
   `images/Dockerfile` for `linux/arm64`: `Image` (the uncompressed arm64
   kernel), `initrd` (an empty initramfs), `rootfs.ext4` and the guest's
   `needy`.
@@ -65,12 +71,12 @@ needy's own would:
 What vfkit costs, each marked in the code:
 
 - It always hands the Linux boot loader an initrd path, so the image carries
-  an empty initramfs (`NOTICE` in `images/Dockerfile`, stage `vz-initrd`).
+  an empty initramfs (`NOTICE` in `images/Dockerfile`, stage `macos-vz-initrd`).
 - It opens a serial log file without appending, which would write over its
   own messages in the same file, so the console goes to `/dev/stdout`, which
-  is `console.log` opened for appending (`NOTICE` in `vz::Launch::new`).
+  is `console.log` opened for appending (`NOTICE` in `macos::vz::Launch::new`).
 - It splits `--device` values at commas, so a run directory with a comma in
-  its path cannot be given (`NOTICE` in `vz::Launch::new`).
+  its path cannot be given (`NOTICE` in `macos::vz::Launch::new`).
 
 A helper of needy's own (Swift, or `objc2-virtualization` inside `needy`,
 which would then need the entitlement) is worth it only for something vfkit
@@ -90,7 +96,7 @@ in the same `kernel` stage, which picks its base by `uname -m`:
   not Virtualization.framework's **[I]**.
 - `needy.config` on top (the same fragment as x86: `HWMON`, `THERMAL_HWMON`,
   `FUSE_FS`, `TIME_NS`, `VIRTIO_VSOCKETS`), then `needy-arm64.config`, which
-  pins what the `vz` runtime depends on (virtio-blk root, `hvc0` console).
+  pins what the `macos-vz` runtime depends on (virtio-blk root, `hvc0` console).
 - `binfmt_needy.c` and `fake_coretemp.c` are built in unchanged; neither has
   x86-only code. Provenance for both config files is in
   `images/kernel/needy-arm64.config`.
@@ -98,7 +104,7 @@ in the same `kernel` stage, which picks its base by `uname -m`:
 ### Where it is built
 
 On the Mac, in Docker (OrbStack 7.2.12, arm64 builder), natively: the first
-`actor-vz` build took about 9 minutes (the kernel step 357 s on 18 cores), a
+`actor-macos-vz` build took about 9 minutes (the kernel step 357 s on 18 cores), a
 rebuild with the kernel cached about 4 minutes, most of it the guest `needy`.
 Cross-compiling on the x86_64 Linux KVM host was not tried: it would need an
 arm64 cross toolchain for the kernel, a cross musl target for `needy`, and an
@@ -113,16 +119,16 @@ now powers off on arm64 (PSCI `SYSTEM_OFF`), which stops the VM and ends vfkit
 (exit 0 within 0.3 s of the driving program's end) **[V-test]**. For the same
 reason the kernel command line has no `panic=`: a panicked guest that rebooted
 would boot init again and could run the driving program twice, so it hangs
-until the run is stopped (`NOTICE` and `TODO(vz-panic)` at `vz::BOOT_ARGS`).
+until the run is stopped (`NOTICE` and `TODO(macos-vz-panic)` at `macos::vz::BOOT_ARGS`).
 
 ## Name
 
-`vz` is proposed as the final name: it is what the macOS virtualization
-ecosystem calls this backend (Lima's `vmType: vz`, the Go binding
-`Code-Hex/vz` that vfkit uses), it is short like `firecracker` and
-`container`, and it names the hypervisor framework, not the VM process, so a
-helper of needy's own could replace vfkit without renaming profiles. It stays
-provisional until the owner accepts it.
+`macos-vz`, chosen by the owner on 2026-11-12. `vz` is what the macOS
+virtualization ecosystem calls this backend (Lima's `vmType: vz`, the Go
+binding `Code-Hex/vz` that vfkit uses); the `macos-` prefix groups it with the
+other macOS runtimes (`macos-apple-container`, and the experimental
+`macos-native`). It names the hypervisor framework, not the VM process, so a
+helper of needy's own could replace vfkit without renaming profiles.
 
 ## Checks
 
@@ -157,8 +163,8 @@ init writes them without one.
 
 ### End to end through `needy run create`
 
-Profiles: [`examples/vz/profile.yaml`](../../../../examples/vz/profile.yaml)
-(smoke) and [`examples/vz/chaos.yaml`](../../../../examples/vz/chaos.yaml),
+Profiles: [`examples/macos-vz/profile.yaml`](../../../../examples/macos-vz/profile.yaml)
+(smoke) and [`examples/macos-vz/chaos.yaml`](../../../../examples/macos-vz/chaos.yaml),
 both with the GCE recipe of `examples/opencode`. All **[V-test]**:
 
 | Check | Result |
@@ -173,9 +179,9 @@ both with the GCE recipe of `examples/opencode`. All **[V-test]**:
 | `run create -it` bash: input, `stty size`, exit | `inside-42`, `30 100`, `aarch64`, exit 3; prompt 0.53 s after the command started |
 | `run create -t`, `run attach` at 41x101, `stty size`, detach (`ctrl-]`), attach again, exit | `41 101`; first attach exits 0 detached, run `running`; second attach exit 5, run `finished` with 5 |
 | `run stop` of a `-t` run | vfkit gone, sockets removed |
-| Control daemon killed with `SIGKILL` during a run, then started again | `ending its actor's VM (vz PID)`, the run `failed` (`the control plane restarted; the actor was lost`), vfkit gone |
-| `profile check examples/vz/profile.yaml` | warnings: x86 recipe on arm64, `cpuid`, `cpuinfo`, `dmi`, `pci` (see [Identity](#identity)) |
-| Report | `Actor  vz`, 5 routed to `mac` (1 failed: the exit 7) |
+| Control daemon killed with `SIGKILL` during a run, then started again | `ending its actor's VM (macos-vz PID)`, the run `failed` (`the control plane restarted; the actor was lost`), vfkit gone |
+| `profile check examples/macos-vz/profile.yaml` | warnings: x86 recipe on arm64, `cpuid`, `cpuinfo`, `dmi`, `pci` (see [Identity](#identity)) |
+| Report | `Actor  macos-vz`, 5 routed to `mac` (1 failed: the exit 7) |
 | `needy build --out DIR` | `Image`, `initrd`, `rootfs.ext4`, `needy` |
 
 ### Time to ready
@@ -198,15 +204,15 @@ Firecracker's ready time on the Linux KVM host is 160 to 190 ms, and an Apple
 
 **[V-unit]**:
 
-- `core-actor` `host::vz`: vfkit's arguments for a plain VM (read-only rootfs,
+- `core-actor` `host::macos::vz`: vfkit's arguments for a plain VM (read-only rootfs,
   the three vsock bridges, the process socket in `connect` mode, no
   `virtio-net`), sizing from a recipe, the channels and ports, a missing
   kernel, the identity gaps of an x86 recipe, a host without vfkit, and the
   stop of a VM that ignores `SIGTERM`.
-- `daemon`: `actor(vz)` detection, a leftover vfkit ended on restart by its
+- `daemon`: `actor(macos-vz)` detection, a leftover vfkit ended on restart by its
   pidfile, and a terminal that a relay accepted and closed is not taken as
   served (the regression of `run create -it` failing with `transport error`).
-- `config`: `runtime: vz` loads and refuses `container:` options.
+- `config`: `runtime: macos-vz` loads and refuses `container:` options.
 
 `make check` and `make test` pass on the Mac (713 tests) and on the Linux
 KVM host (732 tests; the tree shipped with `git archive`). One earlier Linux
@@ -217,9 +223,9 @@ load, not fixed here.
 
 ## Identity
 
-What a `vz` actor presents of a recipe, next to Firecracker:
+What a `macos-vz` actor presents of a recipe, next to Firecracker:
 
-| Field | Firecracker | `vz` |
+| Field | Firecracker | `macos-vz` |
 | --- | --- | --- |
 | Hostname (`hostname`) | yes | yes (init) **[V-test]** |
 | `/proc/cpuinfo` (`cpuinfo`) | yes | no: arm64's format, Apple implementer `0x61` **[V-test]** |
@@ -239,19 +245,19 @@ create. x86 programs through Rosetta are not part of this slice.
 
 Each is marked in the code:
 
-- `TODO(vz-identity)` at `vz::gaps`: no arm64 recipes and no recipe
+- `TODO(macos-vz-identity)` at `macos::vz::gaps`: no arm64 recipes and no recipe
   architecture; a generated arm64 `/proc/cpuinfo` and a fake DMI module are
   possible in the guest but not approved.
-- `TODO(vz-panic)` at `vz::BOOT_ARGS`: a panicked guest hangs until the run
+- `TODO(macos-vz-panic)` at `macos::vz::BOOT_ARGS`: a panicked guest hangs until the run
   is stopped; Virtualization.framework has no pvpanic device.
-- `TODO(actor-network)` at `vz::Launch::new`: no NIC, as for Firecracker.
-- `NOTICE` at `vz::VFKIT`: vfkit is found on the daemon's `PATH`; there is no
+- `TODO(actor-network)` at `macos::vz::Launch::new`: no NIC, as for Firecracker.
+- `NOTICE` at `macos::vz::VFKIT`: vfkit is found on the daemon's `PATH`; there is no
   flag for another path.
 - A control daemon that is not root cannot use a Docker executor: the Docker
   provider gives the executor's socket directory to the profile's user and
   refuses otherwise (`share_with_container` in
   `crates/core-executor/src/provider/docker.rs`). This is not specific to
-  `vz`; the checks used the Mac as a native executor instead. Not changed here.
+  `macos-vz`; the checks used the Mac as a native executor instead. Not changed here.
 - The kernel recipe identity and the uptime offset were not run on arm64.
 
 ## Found on the way
@@ -270,11 +276,11 @@ All fixed in this slice:
 - **`KVM_GET_SUPPORTED_CPUID` is x86-only** in `kvm-ioctls`, which broke the
   arm64 build of `needy`; the KVM CPUID probe is now x86_64-only.
 - **A restarted daemon looked for `vm.json`** on a leftover VM's command line;
-  for `vz` it looks for vfkit's pidfile.
+  for `macos-vz` it looks for vfkit's pidfile.
 
 ## Follow-up candidates
 
-- An arm64 recipe (an Ampere or Graviton cloud VM), so a `vz` actor can be
+- An arm64 recipe (an Ampere or Graviton cloud VM), so a `macos-vz` actor can be
   faithful instead of warning on every recipe.
 - A generated `/proc/cpuinfo` bind-mounted by init (CPU count, model name
   text where arm64 shows one), as the container runtime does.
@@ -290,5 +296,5 @@ All fixed in this slice:
 Every run's vfkit ended (`pgrep vfkit` empty); the `container -k` probes ran
 with `--rm`. The experiment daemon was stopped by its recorded PID; its state,
 the built images and the `needy-executor:vz` image stay under `.tmp/vz-actor`
-and in OrbStack for the next run. `/tmp/needy-vz-ws`, the examples' native
+and in OrbStack for the next run. `/tmp/needy-macos-vz-ws`, the examples' native
 workspace, was removed. vfkit stays installed from Homebrew.

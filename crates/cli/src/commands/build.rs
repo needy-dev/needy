@@ -1,8 +1,8 @@
 //! `needy build`: builds the actor image this host's VM runtime boots (the
-//! Firecracker actor's on Linux, the `vz` actor's on Apple silicon macOS)
+//! Firecracker actor's on Linux, the `macos-vz` actor's on Apple silicon macOS)
 //! and, with `--container` and `--executor`, the container actor and
 //! executor Docker images from `images/Dockerfile`, through the Docker API
-//! with BuildKit. With `--apple-container` it builds the container actor
+//! with BuildKit. With `--macos-apple-container` it builds the container actor
 //! image for linux/arm64 instead of the VM's, and loads it into Apple's
 //! `container`.
 
@@ -32,7 +32,7 @@ pub struct Args {
   recipe: Option<String>,
   /// Output directory for the actor image: vmlinux, rootfs.ext4 and
   /// firecracker, or on Apple silicon macOS Image, initrd and rootfs.ext4
-  /// for `vz` actors. Defaults to the image the daemon boots.
+  /// for `macos-vz` actors. Defaults to the image the daemon boots.
   #[arg(long)]
   out: Option<PathBuf>,
   /// Also build the `needy-executor` Docker image.
@@ -42,10 +42,10 @@ pub struct Args {
   #[arg(long)]
   container: bool,
   /// Build the `needy-actor` image for linux/arm64 and load it into Apple's
-  /// `container`, for `actor.runtime: apple-container` on a Mac with Apple
+  /// `container`, for `actor.runtime: macos-apple-container` on a Mac with Apple
   /// silicon, instead of the VM actor image.
   #[arg(long, conflicts_with_all = ["recipe", "out"])]
-  apple_container: bool,
+  macos_apple_container: bool,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -70,8 +70,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   }
   let context = tokio::task::spawn_blocking(move || pack_context(&root)).await??;
   let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
-  if args.apple_container {
-    build_for_apple_container(&docker, &context, &ctx.paths()?.state).await?;
+  if args.macos_apple_container {
+    build_for_macos_apple_container(&docker, &context, &ctx.paths()?.state).await?;
   } else {
     build_vm_image(&docker, &context, &out, build_args).await?;
   }
@@ -105,11 +105,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 /// The Dockerfile target of the actor image this host boots, and the
 /// platform to build it for (empty for the builder's own).
 // NOTICE: a Mac's Docker (Docker Desktop, OrbStack) builds in an arm64 Linux
-// VM, so the `vz` image builds natively there; `linux/arm64` is named so an
+// VM, so the `macos-vz` image builds natively there; `linux/arm64` is named so an
 // x86 builder would fail instead of making an image the Mac cannot boot.
 fn actor_target() -> (&'static str, &'static str) {
-  if needy_core_actor::host::vz::supported_host() {
-    ("actor-vz", "linux/arm64")
+  if needy_core_actor::host::macos::vz::supported_host() {
+    ("actor-macos-vz", "linux/arm64")
   } else {
     ("actor", "")
   }
@@ -153,9 +153,9 @@ async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args:
 // builder is arm64 natively); Apple's `container build` could build the
 // Dockerfile without Docker, but needy's build drives BuildKit through the
 // Docker API only.
-// TODO(apple-container): build with `container build` when there is no
+// TODO(macos-apple-container): build with `container build` when there is no
 // Docker, if the owner wants Macs without Docker to build the image.
-async fn build_for_apple_container(docker: &Docker, context: &[u8], scratch: &Path) -> Result<()> {
+async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratch: &Path) -> Result<()> {
   let image = needy_config::profile::CONTAINER_IMAGE;
   build(
     docker,
@@ -187,7 +187,7 @@ async fn build_for_apple_container(docker: &Docker, context: &[u8], scratch: &Pa
 
 #[cfg(unix)]
 async fn load_into_apple_container(image: &str, archive: &Path) -> Result<()> {
-  let runtime = needy_core_actor::host::apple_container::AppleContainer::new(image.into());
+  let runtime = needy_core_actor::host::macos::apple_container::AppleContainer::new(image.into());
   Ok(runtime.load(archive).await?)
 }
 

@@ -1,9 +1,15 @@
 # Apple `container` actor: evidence
 
 **Status**: evidence, 2026-11-12. Step 1 is an experiment with an actor wired
-by hand; step 2 is the `apple-container` actor runtime built from it
-(`core-actor::host::apple_container`), run end to end. The design is in the
-[container actor runtime design](2026-11-10-container-actor-runtime-design.md#as-built-apple-container).
+by hand; step 2 is the `macos-apple-container` actor runtime built from it
+(`core-actor::host::macos::apple_container`), run end to end. The design is in the
+[container actor runtime design](2026-11-10-container-actor-runtime-design.md#as-built-macos-apple-container).
+
+NOTICE: the runs below used the runtime's first name, `apple-container`
+(profile value, `actor(apple-container)`, `needy build --apple-container`,
+`examples/apple-container`). The owner renamed it to `macos-apple-container`
+the same day, and this note uses the new name throughout, also in recorded
+commands and output; nothing else in them changed.
 
 Machine: an Apple silicon laptop (M5 Max, 18 cores), macOS 27.2, Apple's
 `container` CLI 1.7.1 from Homebrew (services running), and OrbStack as the
@@ -20,7 +26,7 @@ Pinned upstream sources (cloned for reading, not built):
 ## Summary
 
 - **It works.** `examples/smoke` and `examples/chaos`, as
-  [`examples/apple-container`](../../../../examples/apple-container/profile.yaml)
+  [`examples/macos-apple-container`](../../../../examples/macos-apple-container/profile.yaml)
   has them, close the loop through `needy run create` in an actor that Apple's
   `container` runs in its own VM: routed commands reach the executor, the
   workspace is mounted, the gateway's allowlist holds, copy-in, mirror-out,
@@ -138,25 +144,25 @@ provider's rule, not the actor's.
 
 ## Step 2: the runtime
 
-`actor: { runtime: apple-container }` (optional `container: { image }`;
-`oci_runtime` is refused). `needy build --apple-container` builds the image
+`actor: { runtime: macos-apple-container }` (optional `container: { image }`;
+`oci_runtime` is refused). `needy build --macos-apple-container` builds the image
 for linux/arm64 through Docker and loads it with `container image load`
 (140 s here, warm cache). The daemon (from this branch, with `DOCKER_HOST`
 pointing at OrbStack for the build only) ran:
 
 ```sh
-needy profile check examples/apple-container/profile.yaml
-needy run create --profile examples/apple-container/profile.yaml
-needy run create --profile examples/apple-container/chaos.yaml
-needy run create -it --profile examples/apple-container/profile.yaml /bin/bash --norc -i
+needy profile check examples/macos-apple-container/profile.yaml
+needy run create --profile examples/macos-apple-container/profile.yaml
+needy run create --profile examples/macos-apple-container/chaos.yaml
+needy run create -it --profile examples/macos-apple-container/profile.yaml /bin/bash --norc -i
 needy run attach RUN
 needy run stop RUN
 ```
 
 | Check | Result |
 | --- | --- |
-| Capability | a runner on this Mac reported `actor(apple-container,container) executor(docker,native)` |
-| `profile check` | warnings for the shims, the extra CPU, hwmon, cpuinfo, cpuid, dmi, pci and kernel; with a missing image, `error: actor: on the control host: the container actor image needy-actor:missing is not in Apple's container image store; run needy build --apple-container`; `oci_runtime` is an error. On Linux, `Apple's container runs on macOS only` (`check_test.rs`) |
+| Capability | a runner on this Mac reported `actor(macos-apple-container,container) executor(docker,native)` |
+| `profile check` | warnings for the shims, the extra CPU, hwmon, cpuinfo, cpuid, dmi, pci and kernel; with a missing image, `error: actor: on the control host: the container actor image needy-actor:missing is not in Apple's container image store; run needy build --macos-apple-container`; `oci_runtime` is an error. On Linux, `Apple's container runs on macOS only` (`check_test.rs`) |
 | Smoke | finished, exit 0; recipe hostname; 3 processors and `nproc` 3 for 2 vCPUs; 4047 MiB for the recipe's 4096; routed `python3` printed `Darwin /private/tmp/needy-apple-ws`; workspace files both ways; `routed exit=7`; `example.com 200`, `example.org` 403 |
 | Chaos | finished, exit 0: copy-in, EIO on `broken.json`, `ECONNREFUSED` for `curl`, mirror-out `out/<run>/result.txt`; the hwmon fault is not recorded (no sensors), as `profile check` warned |
 | `-it`, detach, attach | the shell's `tty` `/dev/pts/0`; routed `python3` saw a terminal on the Mac (`Darwin True`); `ctrl-]` detached; `run attach` and `exit 5` gave 5 |
@@ -170,15 +176,15 @@ needy run stop RUN
 Each is marked in the code.
 
 - **Identity under Apple's default kernel**: no DMI, hwmon, uptime offset or
-  recipe kernel (`TODO(apple-container-kernel)`, the separate approved slice
+  recipe kernel (`TODO(macos-apple-container-kernel)`, the separate approved slice
   that boots a needy-built arm64 kernel with `-k`); `/proc/cpuinfo` is the
-  arm64 VM's (`TODO(apple-container)`: a file mount works, but needy's
+  arm64 VM's (`TODO(macos-apple-container)`: a file mount works, but needy's
   generator needs a host processor block and an x86 text contradicts `uname
   -m`); the VM has one CPU more than asked (`cpus + cpuOverhead`,
   [`RuntimeService.swift#L268-L270`](https://github.com/apple/container/blob/a15b46097aa4c2325da13c1fb5192b9274aab083/Sources/Services/RuntimeLinux/Server/RuntimeService.swift#L268-L270)).
-- **Writable root file system** (`TODO(apple-container)` in `launch`): see
+- **Writable root file system** (`TODO(macos-apple-container)` in `launch`): see
   the first `-it` failure.
-- **Image build needs Docker** (`TODO(apple-container)` in `needy build`):
+- **Image build needs Docker** (`TODO(macos-apple-container)` in `needy build`):
   Apple's `container build` could build the Dockerfile without it.
 - **Docker executors on a Mac control host**: refused by the Docker
   provider's ownership rule; the examples use a `native` executor.

@@ -2,11 +2,11 @@
 # silicon: the driving program is `sh` in a container that Apple's
 # `container` runs in its own lightweight VM; only python3 is routed, to this
 # Mac (a native executor), and the executor's directory is the actor's
-# workspace. Build the image with `needy build --apple-container`, and
+# workspace. Build the image with `needy build --macos-apple-container`, and
 # create the executor's directory first: `mkdir -p /tmp/needy-apple-ws`.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: apple-container
+  runtime: macos-apple-container
   recipe: ../opencode/gce.recipe.yaml
   network:
     allow: [example.com]

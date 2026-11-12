@@ -191,13 +191,14 @@ pub enum ActorRuntime {
   // which probes its Docker directly.
   Container,
   /// A Virtualization.framework VM through vfkit: Apple silicon macOS,
-  /// vfkit on `PATH` and the `vz` actor image (`Image`, `rootfs.ext4`).
-  Vz,
+  /// vfkit on `PATH` and the `macos-vz` actor image (`Image`, `rootfs.ext4`).
+  #[serde(rename = "macos-vz")]
+  MacosVz,
   /// Apple's `container` CLI on a Mac, whose services answer. Whether the
   /// container actor image is in its image store is checked when a run is
   /// created.
-  #[serde(rename = "apple-container")]
-  AppleContainer,
+  #[serde(rename = "macos-apple-container")]
+  MacosAppleContainer,
 }
 
 impl ActorRuntime {
@@ -205,8 +206,8 @@ impl ActorRuntime {
     match self {
       Self::Firecracker => "firecracker",
       Self::Container => "container",
-      Self::Vz => "vz",
-      Self::AppleContainer => "apple-container",
+      Self::MacosVz => "macos-vz",
+      Self::MacosAppleContainer => "macos-apple-container",
     }
   }
 }

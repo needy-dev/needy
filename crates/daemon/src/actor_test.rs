@@ -260,7 +260,7 @@ commands:
 
 // ROOT CAUSE:
 //
-// If `run attach` reached a vz actor before its guest served the process
+// If `run attach` reached a macos-vz actor before its guest served the process
 // service, vfkit accepted the connection on `process.sock` and closed it once
 // it could not reach the guest's vsock port, and the attach failed with
 // "transport error" instead of waiting, because a Unix connection that was

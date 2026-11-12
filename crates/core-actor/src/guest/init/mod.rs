@@ -57,7 +57,7 @@ pub(super) fn main() -> ! {
   // https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/FAQ.md#L181-L204)
   // and has no ACPI power-off. On arm64 a reboot is PSCI SYSTEM_RESET, which
   // Virtualization.framework answers by restarting the guest (init then
-  // booted again and again in a vz actor, seen 2026-11-12 with vfkit 0.6.4),
+  // booted again and again in a macos-vz actor, seen 2026-11-12 with vfkit 0.6.4),
   // and a power-off is PSCI SYSTEM_OFF, which stops the VM and ends vfkit:
   // https://github.com/torvalds/linux/blob/v6.18/drivers/firmware/psci/psci.c#L309-L335
   let mode = if cfg!(target_arch = "aarch64") {

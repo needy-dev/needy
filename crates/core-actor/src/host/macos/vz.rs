@@ -1,4 +1,4 @@
-//! The `vz` actor runtime: needy's arm64 guest kernel and rootfs in a
+//! The `macos-vz` actor runtime: needy's arm64 guest kernel and rootfs in a
 //! Virtualization.framework VM on Apple silicon macOS, with vfkit as the VM
 //! process, as Firecracker is on Linux.
 //!
@@ -21,7 +21,7 @@
 //! A helper of needy's own (Swift, or `objc2-virtualization` in the needy
 //! binary, which would then need the entitlement) is worth it only for what
 //! vfkit cannot do; see
-//! `docs/ai/references/architecture/2026-11-12-vz-actor-evidence.md`.
+//! `docs/ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md`.
 // Reference: https://github.com/crc-org/vfkit/blob/v0.6.4/doc/usage.md
 
 use std::path::{Path, PathBuf};
@@ -31,9 +31,9 @@ use std::time::Duration;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
-pub use super::firecracker::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
-pub use super::runtime::Error;
-use super::runtime::{ActorRuntime, Channels, Endpoint, Gap, RunningActor, Setup, Start, Terminal};
+pub use crate::host::firecracker::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
+pub use crate::host::runtime::Error;
+use crate::host::runtime::{ActorRuntime, Channels, Endpoint, Gap, RunningActor, Setup, Start, Terminal};
 
 /// The VM process, looked up on `PATH`.
 // NOTICE: Homebrew installs vfkit as `vfkit` (`brew install vfkit`,
@@ -53,11 +53,11 @@ pub const VFKIT: &str = "vfkit";
 // `images/kernel/containerization-arm64.config`), with the panic on the
 // console, until the run is stopped. Init ends the VM by powering off; see
 // `crates/core-actor/src/guest/init/mod.rs`.
-// TODO(vz-panic): a pvpanic device would let the host see a panic and end
+// TODO(macos-vz-panic): a pvpanic device would let the host see a panic and end
 // the VM; Virtualization.framework has none, and vfkit cannot add one.
 const BOOT_ARGS: &str = "console=hvc0 root=/dev/vda ro init=/.needy/init quiet loglevel=4";
 
-/// The files `needy build` writes for `vz` actors.
+/// The files `needy build` writes for `macos-vz` actors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Image {
   /// The uncompressed arm64 kernel (`arch/arm64/boot/Image`):
@@ -118,7 +118,7 @@ pub fn supported_host() -> bool {
 pub async fn check_vfkit(vfkit: &Path) -> Result<(), Error> {
   let output = tokio::process::Command::new(vfkit).arg("--version").stdin(Stdio::null()).output().await.map_err(|e| {
     Error::Unsupported(format!(
-      "cannot run {}: {e}; a vz actor needs vfkit (`brew install vfkit`, https://github.com/crc-org/vfkit)",
+      "cannot run {}: {e}; a macos-vz actor needs vfkit (`brew install vfkit`, https://github.com/crc-org/vfkit)",
       vfkit.display()
     ))
   })?;
@@ -133,7 +133,7 @@ pub async fn check_vfkit(vfkit: &Path) -> Result<(), Error> {
   Ok(())
 }
 
-/// The `vz` runtime: actors in Virtualization.framework VMs booted from
+/// The `macos-vz` runtime: actors in Virtualization.framework VMs booted from
 /// `image` by `vfkit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Vz {
@@ -145,13 +145,13 @@ pub struct Vz {
 #[async_trait::async_trait]
 impl ActorRuntime for Vz {
   fn name(&self) -> &'static str {
-    "vz"
+    "macos-vz"
   }
 
   async fn check_host(&self) -> Result<(), Error> {
     if !supported_host() {
       return Err(Error::Unsupported(
-        "a vz actor runs on macOS on Apple silicon only; on Linux use `runtime: firecracker` or `runtime: container`".into(),
+        "a macos-vz actor runs on macOS on Apple silicon only; on Linux use `runtime: firecracker` or `runtime: container`".into(),
       ));
     }
     check_vfkit(&self.vfkit).await?;
@@ -186,7 +186,7 @@ impl ActorRuntime for Vz {
   }
 }
 
-/// What of `recipe` a `vz` actor does not present. The guest kernel, init
+/// What of `recipe` a `macos-vz` actor does not present. The guest kernel, init
 /// and rootfs are the Firecracker actor's, so the hostname, the sensors and
 /// their faults, the kernel identity and the uptime offset are there; what
 /// the VM itself would have to fake is not.
@@ -197,11 +197,11 @@ pub fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
   // NOTICE: needy's recipes describe x86_64 machines (a CPU brand, a family,
   // model and stepping, x86 flag names, SMBIOS, Intel PCI bridges); no recipe
   // field names an architecture, so every recipe is x86 here.
-  // TODO(vz-identity): arm64 recipes, or a recipe `arch`, would let a vz
+  // TODO(macos-vz-identity): arm64 recipes, or a recipe `arch`, would let a macos-vz
   // actor be faithful; deferred until the owner asks for arm64 machines.
   let mut gaps = vec![Gap {
     field: None,
-    message: "the recipe describes an x86_64 machine and a vz actor is arm64 (Apple silicon): uname -m is aarch64 and \
+    message: "the recipe describes an x86_64 machine and a macos-vz actor is arm64 (Apple silicon): uname -m is aarch64 and \
               programs are arm64 ELF"
       .into(),
   }];
@@ -211,7 +211,7 @@ pub fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
     // ID registers: `VZGenericPlatformConfiguration` has only a machine
     // identifier and nested virtualization (macOS 27.2 SDK,
     // `Virtualization.framework/Headers/VZGenericPlatformConfiguration.h`).
-    // TODO(vz-identity): a generated arm64 `/proc/cpuinfo` mounted over the
+    // TODO(macos-vz-identity): a generated arm64 `/proc/cpuinfo` mounted over the
     // kernel's by init, as the container runtime mounts its x86 one, could
     // carry the recipe's CPU count; it could not carry an x86 brand.
     gaps.push(Gap::of(
@@ -228,7 +228,7 @@ pub fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
     // SMBIOS, serial or product-name API (`grep -ri smbios` finds nothing),
     // and its Linux boot loader starts the kernel with a device tree, not
     // firmware tables.
-    // TODO(vz-identity): a fake DMI module in the guest kernel, like
+    // TODO(macos-vz-identity): a fake DMI module in the guest kernel, like
     // fake_coretemp, could make `/sys/class/dmi/id`; not approved yet.
     gaps.push(Gap::of(IdentityField::Dmi, "Virtualization.framework gives the guest no SMBIOS, so it has no /sys/class/dmi/id"));
   }
@@ -323,7 +323,7 @@ impl Vm {
   /// Starts vfkit with its output and the guest's console in `console.log`.
   pub fn start(launch: &Launch) -> Result<Vm, Error> {
     launch.image.check()?;
-    let console_path = super::runtime::log(&launch.dir);
+    let console_path = crate::host::runtime::log(&launch.dir);
     let write_error = |source| Error::Write {
       path: console_path.clone(),
       source,
@@ -375,7 +375,7 @@ impl RunningActor for Vm {
   /// Stops vfkit and waits until it is gone: `SIGTERM` (vfkit asks the
   /// guest to stop, then stops the VM) first, then `SIGKILL` after `grace`.
   async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-    super::runtime::stop_process(&mut self.child, "vfkit", grace).await
+    crate::host::runtime::stop_process(&mut self.child, "vfkit", grace).await
   }
 }
 

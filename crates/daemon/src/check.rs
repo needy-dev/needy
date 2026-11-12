@@ -82,7 +82,7 @@ impl Daemon {
       }
       Err(e) => check.findings.push(error(format!("actor: {e}"))),
     }
-    if matches!(profile.actor.runtime, Runtime::Container | Runtime::AppleContainer) && routes_anything(&profile) {
+    if matches!(profile.actor.runtime, Runtime::Container | Runtime::MacosAppleContainer) && routes_anything(&profile) {
       check.findings.push(warning(CONTAINER_ROUTING_GAP.into()));
     }
     let recipe = match &profile.actor.recipe {

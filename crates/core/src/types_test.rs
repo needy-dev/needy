@@ -68,14 +68,14 @@ fn capabilities_are_written_role_by_role_with_their_runtimes_and_providers() {
 }
 
 #[test]
-fn apple_container_is_spelled_as_a_profile_names_it() {
+fn macos_apple_container_is_spelled_as_a_profile_names_it() {
   let mac = Capabilities {
-    actor: [ActorRuntime::AppleContainer].into(),
+    actor: [ActorRuntime::MacosAppleContainer].into(),
     executor: [ExecutorProvider::Native].into(),
   };
 
-  assert_eq!(mac.to_string(), "actor(apple-container) executor(native)");
-  assert_eq!(serde_json::to_string(&ActorRuntime::AppleContainer).unwrap(), "\"apple-container\"");
+  assert_eq!(mac.to_string(), "actor(macos-apple-container) executor(native)");
+  assert_eq!(serde_json::to_string(&ActorRuntime::MacosAppleContainer).unwrap(), "\"macos-apple-container\"");
 }
 
 #[test]

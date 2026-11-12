@@ -1230,14 +1230,14 @@ pub enum ActorRuntime {
     Unspecified = 0,
     /// A usable KVM and the actor image (vmlinux, rootfs.ext4, firecracker).
     Firecracker = 1,
-    /// gVisor's `runsc` registered with Docker. Reported only: no actor is
-    /// scheduled on it until the container actor runtime is built.
+    /// A Docker daemon that answers. Whether it has the OCI runtime a profile
+    /// names (`runc`, gVisor's `runsc`) is checked when a run is created.
     Container = 2,
-    /// Apple silicon macOS with vfkit and the `vz` actor image (Image,
+    /// Apple silicon macOS with vfkit and the `macos-vz` actor image (Image,
     /// rootfs.ext4): a Virtualization.framework VM.
-    Vz = 3,
+    MacosVz = 3,
     /// Apple's `container` CLI on a Mac, whose services answer.
-    AppleContainer = 4,
+    MacosAppleContainer = 4,
 }
 impl ActorRuntime {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -1249,8 +1249,8 @@ impl ActorRuntime {
             Self::Unspecified => "ACTOR_RUNTIME_UNSPECIFIED",
             Self::Firecracker => "ACTOR_RUNTIME_FIRECRACKER",
             Self::Container => "ACTOR_RUNTIME_CONTAINER",
-            Self::Vz => "ACTOR_RUNTIME_VZ",
-            Self::AppleContainer => "ACTOR_RUNTIME_APPLE_CONTAINER",
+            Self::MacosVz => "ACTOR_RUNTIME_MACOS_VZ",
+            Self::MacosAppleContainer => "ACTOR_RUNTIME_MACOS_APPLE_CONTAINER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -1259,8 +1259,8 @@ impl ActorRuntime {
             "ACTOR_RUNTIME_UNSPECIFIED" => Some(Self::Unspecified),
             "ACTOR_RUNTIME_FIRECRACKER" => Some(Self::Firecracker),
             "ACTOR_RUNTIME_CONTAINER" => Some(Self::Container),
-            "ACTOR_RUNTIME_VZ" => Some(Self::Vz),
-            "ACTOR_RUNTIME_APPLE_CONTAINER" => Some(Self::AppleContainer),
+            "ACTOR_RUNTIME_MACOS_VZ" => Some(Self::MacosVz),
+            "ACTOR_RUNTIME_MACOS_APPLE_CONTAINER" => Some(Self::MacosAppleContainer),
             _ => None,
         }
     }

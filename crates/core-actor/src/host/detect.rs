@@ -35,7 +35,7 @@ pub fn cpuinfo(path: &Path) -> std::io::Result<HostInfo> {
 // `get_supported_cpuid` under `#[cfg(target_arch = "x86_64")]`
 // (`src/ioctls/system.rs` L419-L420) and kvm-bindings 0.14.2 defines
 // `KVM_MAX_CPUID_ENTRIES` in `src/x86_64/fam_wrappers.rs` (L11), so an arm64
-// build (the `vz` actor's guest) reports none, as other systems do.
+// build (the `macos-vz` actor's guest) reports none, as other systems do.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 fn kvm_cpuid() -> Option<std::collections::BTreeSet<(u32, u32)>> {
   let kvm = match kvm_ioctls::Kvm::new() {

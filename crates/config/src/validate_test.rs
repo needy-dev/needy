@@ -126,15 +126,15 @@ fn a_container_actor_whose_options_name_no_oci_runtime_is_an_error() {
 }
 
 #[test]
-fn an_apple_container_actor_needs_no_options() {
-  let found = findings("actor: { runtime: apple-container }");
+fn an_macos_apple_container_actor_needs_no_options() {
+  let found = findings("actor: { runtime: macos-apple-container }");
 
   assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
-fn an_apple_container_actor_takes_the_image_option() {
-  let found = findings("actor: { runtime: apple-container, container: { image: needy-actor:dev } }");
+fn an_macos_apple_container_actor_takes_the_image_option() {
+  let found = findings("actor: { runtime: macos-apple-container, container: { image: needy-actor:dev } }");
 
   assert!(found.is_empty(), "{found:?}");
 }
@@ -142,8 +142,8 @@ fn an_apple_container_actor_takes_the_image_option() {
 // Apple's `container` runs each container in its own VM with its own
 // runtime; there is no OCI runtime to choose.
 #[test]
-fn an_oci_runtime_on_an_apple_container_actor_is_an_error() {
-  let found = findings("actor: { runtime: apple-container, container: { oci_runtime: runsc } }");
+fn an_oci_runtime_on_an_macos_apple_container_actor_is_an_error() {
+  let found = findings("actor: { runtime: macos-apple-container, container: { oci_runtime: runsc } }");
 
   assert_eq!(
     found,
@@ -157,12 +157,12 @@ fn an_oci_runtime_on_an_apple_container_actor_is_an_error() {
 fn container_options_on_a_firecracker_actor_are_an_error() {
   let found = findings("actor: { runtime: firecracker, container: { oci_runtime: runc } }");
 
-  assert_eq!(found, ["error: actor.container is for `runtime: container` or `apple-container`; this actor's runtime is firecracker"]);
+  assert_eq!(found, ["error: actor.container is for `runtime: container` or `macos-apple-container`; this actor's runtime is firecracker"]);
 }
 
 #[test]
-fn container_options_on_a_vz_actor_are_an_error() {
-  let found = findings("actor: { runtime: vz, container: { oci_runtime: runc } }");
+fn container_options_on_a_macos_vz_actor_are_an_error() {
+  let found = findings("actor: { runtime: macos-vz, container: { oci_runtime: runc } }");
 
-  assert_eq!(found, ["error: actor.container is for `runtime: container` or `apple-container`; this actor's runtime is vz"]);
+  assert_eq!(found, ["error: actor.container is for `runtime: container` or `macos-apple-container`; this actor's runtime is macos-vz"]);
 }

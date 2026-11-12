@@ -34,8 +34,8 @@ pub struct Actor {
   pub env: BTreeMap<String, String>,
   #[serde(default)]
   pub cwd: Option<String>,
-  /// How a `container` or `apple-container` actor runs; required with
-  /// `container`, optional with `apple-container`, refused with
+  /// How a `container` or `macos-apple-container` actor runs; required with
+  /// `container`, optional with `macos-apple-container`, refused with
   /// `firecracker`.
   #[serde(default)]
   pub container: Option<ContainerActor>,
@@ -51,18 +51,19 @@ pub enum Runtime {
   Container,
   /// A Virtualization.framework VM through vfkit, on Apple silicon macOS:
   /// needy's arm64 kernel and rootfs, as Firecracker boots them on Linux.
-  Vz,
+  #[serde(rename = "macos-vz")]
+  MacosVz,
   /// A container under Apple's `container` on a Mac with Apple silicon,
   /// which runs each container in its own lightweight VM.
-  #[serde(rename = "apple-container")]
-  AppleContainer,
+  #[serde(rename = "macos-apple-container")]
+  MacosAppleContainer,
 }
 
 /// A container actor's options. `validate::profile` checks which apply to
 /// the actor's runtime.
 // NOTICE: `oci_runtime` has no default, for the reason `runtime` has none:
 // `runc` and `runsc` isolate differently, and needy never chooses that for
-// the profile. It is optional here only because `apple-container` refuses
+// the profile. It is optional here only because `macos-apple-container` refuses
 // it; `container` requires it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,7 +72,7 @@ pub struct ContainerActor {
   #[serde(default)]
   pub oci_runtime: Option<OciRuntime>,
   /// The container actor image: `needy build --container` builds it for
-  /// Docker, `needy build --apple-container` for Apple's `container`.
+  /// Docker, `needy build --macos-apple-container` for Apple's `container`.
   #[serde(default = "default_container_image")]
   pub image: String,
 }
@@ -118,8 +119,8 @@ impl Runtime {
     match self {
       Runtime::Firecracker => "firecracker",
       Runtime::Container => "container",
-      Runtime::Vz => "vz",
-      Runtime::AppleContainer => "apple-container",
+      Runtime::MacosVz => "macos-vz",
+      Runtime::MacosAppleContainer => "macos-apple-container",
     }
   }
 }

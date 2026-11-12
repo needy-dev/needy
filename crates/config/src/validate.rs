@@ -58,11 +58,11 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
     (Runtime::Container, None | Some(ContainerActor { oci_runtime: None, .. })) => {
       findings.push(Finding::error("actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"))
     }
-    (Runtime::AppleContainer, Some(ContainerActor { oci_runtime: Some(_), .. })) => findings.push(Finding::error(
+    (Runtime::MacosAppleContainer, Some(ContainerActor { oci_runtime: Some(_), .. })) => findings.push(Finding::error(
       "actor.container.oci_runtime is for `runtime: container`; Apple's `container` runs each actor in its own VM and has no OCI runtime to choose",
     )),
-    (runtime @ (Runtime::Firecracker | Runtime::Vz), Some(_)) => findings.push(Finding::error(format!(
-      "actor.container is for `runtime: container` or `apple-container`; this actor's runtime is {}",
+    (runtime @ (Runtime::Firecracker | Runtime::MacosVz), Some(_)) => findings.push(Finding::error(format!(
+      "actor.container is for `runtime: container` or `macos-apple-container`; this actor's runtime is {}",
       runtime.as_str()
     ))),
     _ => {}

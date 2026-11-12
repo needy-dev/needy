@@ -110,8 +110,8 @@ fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabilities
       Ok(v1::ActorRuntime::Unspecified) => bail!("the actor runtime is unspecified"),
       Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
       Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
-      Ok(v1::ActorRuntime::Vz) => Ok(ActorRuntime::Vz),
-      Ok(v1::ActorRuntime::AppleContainer) => Ok(ActorRuntime::AppleContainer),
+      Ok(v1::ActorRuntime::MacosVz) => Ok(ActorRuntime::MacosVz),
+      Ok(v1::ActorRuntime::MacosAppleContainer) => Ok(ActorRuntime::MacosAppleContainer),
       Err(_) => bail!("unknown actor runtime {value}"),
     })
     .collect::<Result<_>>()?;
