@@ -1,5 +1,11 @@
 # Drivers and extension points
 
+> **Migration notice (2026-11-13)**: `needy build` is now `needy image
+> build`, with the same flags, and a VM image records its base ABI in
+> `manifest.json` instead of a `base-abi` file (step 4 of the
+> [actor images design](2026-11-12-actor-images-design.md)). This note keeps the command it was
+> written with.
+
 Status: accepted by the owner (2026-11-12); slices 1 to 6 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3), [Slice 4](#slice-4-one-engine), [Slice 5](#slice-5-policy-and-capture) and [Slice 6: lifecycles](#slice-6-lifecycles)). Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
 
 > **NOTICE (2026-11-12, migration):** the

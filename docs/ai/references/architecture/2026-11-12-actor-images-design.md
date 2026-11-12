@@ -3,10 +3,17 @@
 **Status**: accepted by the owner (2026-11-12) as four steps. Step 1 (inject
 the guest `needy` at start) is implemented and verified on 2026-11-12 (see
 [Verification](#verification)); step 2 (custom actor images) on 2026-11-13
-(see [Step 2 checks](#step-2-checks)); steps 3 and 4 are designed here and
-wait for their own slice. Breaking API, config and image changes
+(see [Step 2 checks](#step-2-checks)); step 4 (`needy image`) on
+2026-11-13 (see [Step 4 checks](#step-4-checks)); step 3 is designed here
+and waits for its own slice. Breaking API, config and image changes
 are allowed; implementers record refinements under
 [Decisions during implementation](#decisions-during-implementation).
+
+> **Migration notice (2026-11-13)**: step 4 moved `needy build` to `needy
+> image build` (same flags), the base VM image from `images/default` to
+> `images/<driver>/base`, and replaced each VM image's `base-abi` and
+> `origin.json` files with `manifest.json`. The sections on steps 1 and 2,
+> and their checks, keep the names they were written with.
 
 ## Why
 
@@ -40,9 +47,10 @@ can run any agent in an actor.
 | **boot stub** | `/.needy/init`, the actor's PID 1. In a VM it mounts the guest disk and binds the guest needy at `/.needy/needy`; everywhere it then runs `/.needy/needy init`. |
 | **shim stub** | `/.needy/proxy`. The kernel's `binfmt_needy` hands a routed exec to it in a VM; in a container every program on the image's `PATH` is a hard link to it. It runs `/.needy/needy` with its own path and the exec's path passed on. |
 | **guest disk** | The read-only disk the VM drivers attach as the second virtio-blk device: a SquashFS image with the guest needy, built once per guest binary and cached in needy's data directory. |
-| **actor image** | What `actor.image` names, for every driver: an OCI reference; without it, the base `needy-actor:latest` (container drivers) or the base VM image (VM drivers). |
-| **custom actor image** | An OCI image `FROM` a base image that adds programs; its last step, `/.needy/shim-image`, makes them shims. The container drivers run it; `needy build --from` makes a VM image of it. |
-| **base ABI** | The interface between a base image and the guest needy plus the daemon: the paths under `/.needy`, the stubs' hand-off, the guest disk, `binfmt_needy`'s parameters and its never-route rule, and the image's records. It has a version; the image records it and the daemon refuses an image whose version it does not speak. |
+| **actor image** | What `actor.image` names, for every driver: an OCI reference; without it, the release's base `ghcr.io/needy-dev/needy-actor:v<version>` (container drivers, pulled when missing) or the base VM image `images/<driver>/base` (VM drivers, `needy image pull`). |
+| **custom actor image** | An OCI image `FROM` a base image that adds programs; its last step, `/.needy/shim-image`, makes them shims. The container drivers run it; `needy image build --from` makes a VM image of it. |
+| **base ABI** | The interface between a base image and the guest needy plus the daemon: the paths under `/.needy`, the stubs' hand-off, the guest disk, `binfmt_needy`'s parameters and its never-route rule, and the image's records. It has a version; the image records it (a VM image in its `manifest.json`, a container image in its label) and the daemon refuses an image whose version it does not speak. |
+| **manifest** | `manifest.json` in a VM image's directory: version, driver, architecture, base ABI, source and the archive's SHA-256 (see [`manifest.json`](#manifestjson)). |
 
 ## Step 1: inject the guest needy at start
 
@@ -315,16 +323,145 @@ the key. Built with step 2's `needy image build`.
 
 ## Step 4: `needy image pull/ls/build/rm`
 
-- Per-driver directories `images/<driver>/` in the data directory, each with
-  `manifest.json`: `version`, `driver`, `arch`, `base_abi`, `source`,
-  `sha256`. Step 1's `base-abi` file becomes the manifest's `base_abi`; the
-  daemon reads the manifest instead.
-- `pull` fetches only the base (no guest needy in it since step 1). VM images
-  are not downloaded automatically: a missing one is an error with the exact
-  `needy image pull` command. Container images are pulled automatically.
-- Integrity: the release's `.sha256` plus `actions/attest-build-provenance`.
-- `needy build` becomes `needy image build`, without an alias.
-- Remote runners pull by hand (`TODO(runner-actor)`).
+Implemented on 2026-11-13 (see [Step 4 checks](#step-4-checks)). The owner's
+step 4 decisions: VM images are never downloaded automatically, a missing
+one names the exact command, and container images are pulled automatically
+(D1); integrity is the SHA-256 plus `actions/attest-build-provenance`, with
+built-in Sigstore verification deferred (D2); `needy build` moves to `needy
+image build` with all its flags and no alias (D3); remote runners pull by
+hand (D4).
+
+### Commands
+
+| Command | What it does |
+| --- | --- |
+| `needy image pull [--driver D]... [--version V]` | The base images of release `V` (default: this needy's version) for the drivers this host has (`driver::detect_host`: detection without the image) or those named. A VM driver's: the release asset `needy-actor-<driver>-<arch>.tar.gz`. A container driver's: `ghcr.io/needy-dev/needy-actor:v<V>` through the engine (with `ghcr.io/needy-dev/needy-executor:v<V>`) or `container image pull`. Exit 1 when any driver failed; each failure is one line. |
+| `needy image pull --file ARCHIVE [--driver D]` | Imports a VM image archive on this machine (a host without a network); the driver comes from the archive's manifest, and `--driver` must agree. A `ARCHIVE.sha256` next to it is checked when there is one. |
+| `needy image ls [-o json]` | The VM images, one row per `images/<driver>/<name>/` (driver, `base` or the OCI reference, version, base ABI, source, size on disk, path), then the needy container images the engine has (a `needy.base-abi` label, and the executor images) and those in Apple's store with the label. |
+| `needy image build [...]` | `needy build`, moved whole: `--recipe`, `--out`, `--executor`, `--linux-container`, `--macos-apple-container`, `--from REF`, `--base DIR`. It writes the manifest; the container images it builds are tagged `needy-actor:latest` and `needy-executor:latest`. |
+| `needy image rm [--driver D] IMAGE... [--container] [--guest-disks]` | Removes VM images by `base`, OCI reference or directory name (default driver: this host's). `--container` also removes an IMAGE that is an OCI reference from the engine and Apple's store; nothing else touches container images. `--guest-disks` removes every guest disk but the one of the guest needy this needy finds next to itself (`TODO(guest-disk)` of step 1). |
+
+### Where VM images live
+
+`<data>/images/<driver>/` holds one directory per image: `base`
+(`image::vm::base_dir`), which `pull` and `build` write and a VM driver
+boots without `actor.image`, and `<name>-<hash>` (`image::vm::dir_of`) for
+each image `build --from REF` made. The base moved from `images/default`;
+`Paths::base_image` picks this host's VM driver's (`image::vm::host_driver`:
+`macos-vz` on Apple silicon, else `linux-firecracker`), and the daemon's
+`--actor-image` still overrides it.
+
+### `manifest.json`
+
+Each image directory has one (`image::manifest`), and it replaces the
+`base-abi` and `origin.json` files, without compatibility:
+
+```json
+{
+  "version": "0.0.1",
+  "driver": "macos-vz",
+  "arch": "aarch64",
+  "base_abi": 1,
+  "source": { "kind": "release", "tag": "v0.0.1", "url": "https://github.com/needy-dev/needy/releases/download/v0.0.1/needy-actor-macos-vz-aarch64.tar.gz" },
+  "sha256": "<the archive's SHA-256>"
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `version` | the needy version whose release (or `needy image build`) made the image; not the version that boots it, which the base ABI decides |
+| `driver`, `arch` | `linux-firecracker` and `x86_64`, or `macos-vz` and `aarch64` |
+| `base_abi` | the base ABI the image was built for; what the VM drivers check (`image::vm` checks, before every boot and in `profile check`) |
+| `source` | `{"kind": "release", "tag", "url"}`, `{"kind": "file", "path"}`, `{"kind": "build", "recipe"?}`, or `{"kind": "oci", "reference", "id", "platform"}` |
+| `sha256` | the SHA-256 of the archive the image was unpacked from; absent for an image built here |
+
+Unknown fields are refused. A release archive carries the manifest without
+`source` and `sha256`; `pull` adds both. `images/Dockerfile`'s VM targets
+still export `base-abi`: `needy image build` and the release workflow fold
+it into the manifest and drop the file. The container images keep their
+`needy.base-abi` label. `/.needy/base-abi` in the root file system is
+unchanged (the guest init's check).
+
+A VM image directory without a manifest (written before this step) is
+missing it: `actor image is missing <dir>/manifest.json; run 'needy image
+pull --driver macos-vz', or 'needy image build' in a needy checkout`.
+
+### What `pull` verifies
+
+For a VM image, in this order, and nothing is in place until all pass:
+
+1. The `.sha256` asset is downloaded first; a 404 there means the release
+   has no such image, which for this needy's own version means a
+   development build: the error names `needy image build` and `--version V`.
+2. The archive is downloaded (HTTPS, redirects and `HTTPS_PROXY` through
+   `reqwest` with rustls) into a hidden file in `images/`, hashed as it is
+   written, and compared with the `.sha256` before anything is unpacked.
+3. It is unpacked into a staging directory in `images/` (gzip, then tar;
+   GNU sparse entries and runs of zeros are written as holes, as
+   `needy image build` writes them).
+4. Its manifest must exist and name the expected driver (when named), the
+   driver's architecture, and this needy's base ABI; the driver's own file
+   check must pass.
+5. The manifest gets `source` and `sha256`, and the directory is renamed
+   into `images/<driver>/base`; an older image is moved aside first and
+   removed after.
+
+For a container image: the engine (or Apple's `container`) pulls it, and its
+`needy.base-abi` label must be this needy's base ABI.
+
+What it does not verify: the release's build provenance attestation
+(`TODO(release-attestation)` in `pull.rs`, owner decision D2). `gh
+attestation verify ARCHIVE -R needy-dev/needy` checks it by hand.
+
+**Test hook.** `NEEDY_DOWNLOAD_BASE` replaces the release download URL with
+any URL that serves the assets directly, as `install/install.sh`'s does; it
+is how `pull` was checked before a release had assets.
+
+### Defaults, and building without a release
+
+| What | Default | Built from a checkout |
+| --- | --- | --- |
+| A container actor without `actor.image` | `ghcr.io/needy-dev/needy-actor:v<version>` (`profile::CONTAINER_IMAGE`), pulled by the driver when missing | `needy image build --linux-container` (or `--macos-apple-container`) tags `needy-actor:latest` (`BUILT_CONTAINER_IMAGE`); a profile names it with `actor.image: needy-actor:latest` |
+| A `linux-container` executor without `image` | `ghcr.io/needy-dev/needy-executor:v<version>` (`linux_container::IMAGE`), pulled when missing (as before) | `needy image build --executor` tags `needy-executor:latest`; the daemon names it with `--executor-image needy-executor:latest` |
+| A VM actor without `actor.image` | `images/<driver>/base`, which `needy image pull` writes | `needy image build` writes the same directory |
+
+The container drivers pull in `check_host`, which a create and `profile
+check` run before anything is acquired. A pull that fails names the build
+for the release's base: `the container actor image
+ghcr.io/needy-dev/needy-actor:v0.0.1 is not here and cannot be pulled
+(...); a needy without a release (a development build) has none to pull:
+build the base with 'needy image build --linux-container' and set
+'actor.image: needy-actor:latest'`.
+
+### Messages
+
+| Situation | Message names |
+| --- | --- |
+| Base VM image missing (daemon, `run create`, `profile check`, runner detection) | `run 'needy image pull --driver D', or 'needy image build' in a needy checkout` |
+| Base VM image of another base ABI | `pull this needy's base with 'needy image pull --driver D', or rebuild it with 'needy image build' in a needy checkout` |
+| VM image made from `REF` missing | `run 'needy image build --from REF'` |
+| VM image of another driver in the directory | the driver it is, and the command above |
+| Container base missing and not pullable | the build and `actor.image: needy-actor:latest` (above) |
+| Custom container image of another base ABI | the bases to rebuild it from: `needy-actor:latest` after `needy image build --linux-container`, or `ghcr.io/needy-dev/needy-actor:v<version>` |
+
+### Release
+
+- Each VM image job writes `manifest.json` (`jq`, from `Cargo.toml`'s
+  version, the matrix's driver and architecture, and the exported
+  `base-abi`) and archives it in place of `base-abi`. On a publishing run it
+  warns when the tag is not `v<version>`, since `needy image pull` of that
+  build looks for `v<version>`.
+- A new `attest` job runs after every build job (and `notarize-macos` when
+  that runs): it picks the release's archives (the notarized macOS ones
+  over the signed ones, as `publish` did), checks every `.sha256`, attests
+  the build provenance of every `.tar.gz` and `.zip` with
+  `actions/attest-build-provenance@v4`, and uploads them as one artifact,
+  `release-assets`, which `publish` uploads unchanged. It attests on a
+  publishing run, and on a dispatch only with the new `attest` input:
+  attestations go to Sigstore's public log and the repository's
+  attestations, so a plain dispatch still publishes nothing.
+- Remote runners pull by hand: `TODO(runner-actor)` in
+  `crates/daemon/src/capabilities.rs` (D4).
 
 ## Decisions during implementation
 
@@ -478,6 +615,75 @@ the key. Built with step 2's `needy image build`.
 - **`Engine::image_labels` became `inspect_image`**, which returns the
   image's ID, OS, architecture and labels.
 
+### Step 4
+
+- **The base VM image moved to `images/<driver>/base`**, from
+  `images/default`, so every VM image sits in the per-driver layout D4
+  names, and `ls` and `rm` treat the base as one image among the others. A
+  `base` directory never collides with a `dir_of` name, which ends in a
+  12-digit hash. An `images/default` from before is left alone (no
+  compatibility); the new layout's missing manifest names the commands.
+- **The release archive carries the manifest**, without `source` and
+  `sha256`, written by the release workflow from the exported `base-abi`.
+  So `--file` needs no driver flag or file-name parsing (the manifest says
+  which driver), and an archive of another driver, architecture or base ABI
+  is refused before it is put in place. `needy image build` folds the
+  exported `base-abi` the same way.
+- **`sha256` is absent for a locally built image**: it came from no
+  archive, and hashing a 600 MB root file system on every build would only
+  describe the build itself.
+- **`reqwest` for the download** (0.12, rustls with webpki roots and ring,
+  as the workspace already builds): GitHub's release downloads redirect to
+  another host, and users may need `HTTPS_PROXY`; the existing `hyper`
+  client in the gateway does neither. `flate2` reads the gzip stream; the
+  sparse unpacking is `needy image build`'s, which now also writes GNU sparse
+  tar entries (the release's `tar --sparse`) as holes.
+- **A VM image's driver is checked against its manifest**: a directory
+  named by `--actor-image` that holds another driver's image is refused with
+  what it holds.
+- **The container drivers pull in `check_host`**, so a create pulls before
+  it acquires anything, and `profile check` pulls too (it checks the label
+  and platform of the image a run would use). A pull that fails names the
+  build of the base and `actor.image: needy-actor:latest` for the release's
+  base, and `needy image build --linux-container` (or
+  `--macos-apple-container`) for `needy-actor:latest`.
+- **The executor image's default is the release's too**
+  (`ghcr.io/needy-dev/needy-executor:v<version>`): `pull` fetches it, so the
+  daemon has to use it; the executor driver already pulled a missing image.
+  A development build passes `--executor-image needy-executor:latest`.
+- **`pull` for `linux-container` also pulls the executor image**: the
+  executor image goes through the same engine, and a host with that engine
+  runs `linux-container` executors.
+- **`pull` with no `--driver` pulls for every driver `detect_host` finds**:
+  a runner's detection without the image check (`linux-firecracker`: Linux
+  and `/dev/kvm`; `macos-vz`: Apple silicon and vfkit; the container drivers:
+  their engine or Apple's services). Each driver's failure is reported and
+  the others still run; the exit code is 1 if any failed.
+- **A version without a release is found by the `.sha256` asset's 404**, not
+  by guessing from the version string: a development build whose version
+  has a release would pull that release's base, which is the right image for
+  it when the base ABI matches, and refused when it does not.
+- **`rm --guest-disks` keeps the disk of the guest this needy finds**
+  (`guest::find` next to its executable, as the daemon looks) and removes
+  every other `*.squashfs`; a daemon started with `--guest-needy` elsewhere
+  makes its disk again at the next start. `guest::disk_name` was split out
+  of `guest::disk` for this.
+- **`rm --container`** removes an OCI reference from the engine and Apple's
+  store only when asked; plain `rm` never touches container images.
+- **Attestations on dispatch only on request** (the `attest` input): an
+  attestation is a public record in Sigstore's log and the repository's
+  attestation store, which a plain dispatch should not write; the input let
+  this step's dispatch check the job without publishing.
+- **The checksum check drops `\r`** (`NOTICE(crlf-sha256)`): the Windows
+  archive's `.sha256` ends with CRLF, which `sha256sum -c` refused; the check
+  had only run on publishing runs before, so this would have failed the
+  first release. The `.sha256` itself is unchanged (install.sh and `pull`
+  already read the first word).
+- **`image ls` lists container images by label**: every engine image with
+  `needy.base-abi` (bases, custom images) and the executor images by
+  reference, untagged ones left out; in Apple's store, those with the label
+  on their arm64 variant.
+
 ## Verification
 
 Step 1, on 2026-11-12, on an Apple silicon Mac (macOS, OrbStack, vfkit
@@ -605,6 +811,66 @@ the tree:
 | `macos-vz` | Mac | the custom image (`macos-vz.yaml`) | Pass, as above |
 | `macos-apple-container` | Mac | the custom image (`macos-apple-container.yaml`) | Pass, as above |
 
+### Step 4 checks
+
+On 2026-11-13, on the same two machines: an Apple silicon Mac (macOS,
+OrbStack's Docker through `DOCKER_HOST`, vfkit, Apple's `container` 1.7.1)
+and a Linux KVM host (x86_64, Docker Engine 29.7, `runc`). No release has
+assets yet, so `pull` ran against the VM image archives of the dispatched
+`release.yml` run https://github.com/needy-dev/needy/actions/runs/43281065443
+(`gh run download`), served by `python3 -m http.server` on loopback through
+`NEEDY_DOWNLOAD_BASE`, and through `--file`. Each control daemon ran with
+scratch data, state and runtime directories (a short state directory on the
+Mac), the guest from `make guest`, and on Linux `--executor-image
+needy-executor:latest`.
+
+| Piece | Host | Command | Result |
+| --- | --- | --- | --- |
+| Unit tests | both | `cargo test` (`image::manifest`, `image::vm`, the drivers, `commands::image::{pull,ls,rm}`) | pass: the manifest round-trips and refuses unknown fields; a missing base names `needy image pull --driver D` then `needy image build`; a directory without a manifest is missing it; `pull` from a loopback HTTP server installs and records release, tag, URL and SHA-256, refuses a wrong `.sha256` and a base of another ABI leaving nothing behind, names `needy image build` and `--version V` for a release without the asset; `--file` takes the driver from the manifest; the linux-container driver pulls a missing image and refuses a pulled one of another ABI |
+| Archive | Mac | `tar -tzvf` and `tar -xzOf ... manifest.json` of the run's `needy-actor-macos-vz-aarch64.tar.gz` | `Image`, `initrd`, `rootfs.ext4`, `manifest.json` (`{"version":"0.0.1","driver":"macos-vz","arch":"aarch64","base_abi":1}`); no `base-abi` |
+| Missing VM image | both | `needy image rm base`, then `needy profile check examples/macos-vz` (`examples/smoke` on Linux) | `actor image is missing <data>/images/macos-vz/base/Image; run needy image pull --driver macos-vz, or needy image build in a needy checkout` (`linux-firecracker` and `vmlinux` on Linux) |
+| Release without the asset | Mac | `needy image pull --driver macos-vz` (no test hook) | exit 1: `release v0.0.1 has no needy-actor-macos-vz-aarch64.tar.gz (https://github.com/.../v0.0.1/...sha256: 404 Not Found). A needy without a release (a development build) has no base to pull: build it ... with needy image build, or pull another release's with --version V` |
+| `pull` | Mac | `NEEDY_DOWNLOAD_BASE=http://127.0.0.1:PORT needy image pull --driver macos-vz` | 147 MiB downloaded with a progress line every 32 MiB, `verified ... (sha256 34a9829e...)`, in place in 25 s; manifest with `source.kind release`, tag `v0.0.1`, the URL and the SHA-256; `rootfs.ext4` 549 MiB long, 432 MiB allocated, byte for byte GNU tar's extraction; no staging left in `images/` |
+| `pull` | Linux KVM host | the same for `linux-firecracker` | 152 MiB in 8 s; `firecracker` and `vmlinux` keep mode 0755; manifest as above |
+| `pull --file` | both | `needy image pull --file needy-actor-<driver>-<arch>.tar.gz` (its `.sha256` beside it) | `verified`, imported into `images/<driver>/base`, `source.kind file`; with `--driver linux-firecracker` on the `macos-vz` archive: `the archive holds a macos-vz image, not a linux-firecracker one` |
+| Container base from GHCR | Mac | `needy image pull --driver linux-container`, and `--driver macos-apple-container` | GHCR has no needy images yet: exit 1 with `... ghcr.io/needy-dev/needy-actor:v0.0.1 is not here and cannot be pulled (docker: ... 403 ... denied); a needy without a release (a development build) has none to pull: build the base with needy image build --linux-container and set actor.image: needy-actor:latest`, and for the executor `... start the daemon with --executor-image needy-executor:latest`; Apple's: `(Error: HTTP request to https://ghcr.io/v2/needy-dev/needy-actor/manifests/v0.0.1 failed with response: 401 Unauthorized ...)` with `--macos-apple-container` |
+| Driver pull | Linux KVM host | a base pushed to a `registry:2` on loopback and removed from the engine; `profile check` of `examples/linux-container` with `actor.image: 127.0.0.1:PORT/needy-actor:step4` | the driver pulled it (the engine has it afterwards) and printed `actor image: 127.0.0.1:PORT/needy-actor:step4 (base ABI 1)`; a tag the registry lacks: `... is not here and cannot be pulled (docker: ... 404: manifest for ... not found: manifest unknown ...); build it, or check its reference`; the example without `actor.image`: the GHCR message above |
+| `needy image build` | Mac | `needy image build` | the `macos-vz` base in `images/macos-vz/base` with `manifest.json` (`source.kind build`), `base-abi` gone |
+| `needy image build` | Linux KVM host | `needy image build --linux-container --executor` | the `linux-firecracker` base the same way; `needy-actor:latest`, `needy-executor:latest` |
+| `needy image build --from` | both | `docker build --build-arg BASE=needy-actor:latest -t needy-custom-jq:step4 examples/custom-image`, then `needy image build --from needy-custom-jq:step4` | `images/<driver>/needy-custom-jq_step4-63e2e411efe1` with `source.kind oci`, the image ID and platform; `profile check` shows it `made from sha256:... (linux/amd64) (base ABI 1)`; on Linux a run of `examples/custom-image` with it: `jq` local, `python3` routed, `routed exit=7` |
+| `ls` | both | `needy image ls`, `-o json` | the VM images with version, base ABI, source, size on disk and path; the engine's labelled images and executor images (untagged ones left out); Apple's store lists none here, its `needy-actor:latest` predates the label |
+| `rm` | both | `needy image rm needy-custom-jq:step4` (Mac), `--container` too (both), `needy image rm needy-never-built`, `--guest-disks` with a stand-in `00000000deadbeef.squashfs` next to the daemon's disk | the directory removed; with `--container` also the engine's tag; an unknown image: `no macos-vz VM image needy-never-built`, exit 1; `--guest-disks` removed only the stand-in |
+| `make check`, `make test` | both | | pass (Linux also runs the stub tests) |
+
+End to end, with the pulled images:
+
+| Driver | Host | Profile | Result |
+| --- | --- | --- | --- |
+| `macos-vz` | Mac | `examples/macos-vz` | Pass: the CI-built kernel (`6.18.62 ... Thu Nov 12 18:41:29 UTC 2026 aarch64`), sensors, `python3` and `/usr/bin/arch` routed to the Mac (`arm64`), workspace both ways, `routed exit=7`, exit 0 |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` | Pass: GCE identity (`systemd-detect-virt` says `google`), `python3` routed to the `linux-container` executor, workspace both ways, `routed exit=7`, exit 0 |
+| `linux-firecracker` | Linux KVM host | `examples/custom-image` with `actor.image: needy-custom-jq:step4` (`--from`, on the pulled base) | Pass, as in the table above |
+
+**CI.** `check.yml` passed on Linux, macOS and Windows for the step's
+commits: https://github.com/needy-dev/needy/actions/runs/43281050957.
+`release.yml`, dispatched with `attest` and without publishing: the first run
+(https://github.com/needy-dev/needy/actions/runs/43281065443) built every
+archive with its manifest, and its `attest` job failed at the checksum check
+on the Windows `.sha256`, which PowerShell ends with CRLF
+(`NOTICE(crlf-sha256)`): the check `publish` had always run, but only on a
+publishing run, so no release had reached it. With the check fixed, the second run passed:
+https://github.com/needy-dev/needy/actions/runs/43285128375. Its `attest`
+job checked every `.sha256` and attested the 7 archives in one attestation
+(https://github.com/needy-dev/needy/attestations/66851482, signed through
+Sigstore's public-good instance and logged in Rekor). After `gh run download
+-n release-assets`, `gh attestation verify
+needy-actor-macos-vz-aarch64.tar.gz -R needy-dev/needy` passed (subjects: the
+7 archives; signer `.github/workflows/release.yml@refs/heads/main`), a
+tampered file was refused (`HTTP 404` for its digest), and `needy image pull`
+through the test hook installed that archive. What a dispatch cannot show:
+the `publish` job's upload of `release-assets`, the GHCR pushes, and
+attestation of notarized archives, which only a publishing run makes; the
+first release exercises them.
+
 ## Candidate next slices
 
 - **Guest disk cleanup** (`TODO(guest-disk)`): every guest binary leaves a
@@ -653,6 +919,25 @@ Found in step 2:
   directory of about 500 MB to 600 MB; `needy image rm` (step 4) removes
   them.
 
+Found in step 4:
+
+- **Verify the attestation in `pull`** (`TODO(release-attestation)`, D2):
+  `pull` checks the SHA-256 the same release serves; checking the Sigstore
+  bundle against `release.yml`'s identity would also catch a replaced
+  release asset.
+- **`linux-container` on a Mac**: detection takes any answering engine, so
+  `needy image pull` on a Mac with OrbStack also pulls the container base
+  into Docker, which a container actor cannot use there (`TODO(container-runtime)`).
+- **A broken pipe panics the CLI**: `needy run ls | grep -q ...` ended with
+  `failed printing to stdout: Broken pipe` (Rust's `println!`); output
+  commands could stop quietly on `EPIPE`.
+- **Apple's `container` and a plain-HTTP registry**: the driver's `container
+  image pull` passes no `--scheme`, so a local registry was tested through
+  the engine only.
+- **Tag and version**: a release whose tag is not `v<Cargo version>` only
+  warns, and its binaries pull from `v<Cargo version>`; making it fail would
+  need the owner's word.
+
 ### For steps 2 to 4
 
 - **Step 2 (custom images), done.** What follows was the note to it; see
@@ -677,7 +962,9 @@ Found in step 2:
   sets `actor.image` to it and works on all four drivers, with `needy build
   --from` once per VM host. `ENV` and `USER` of the image do not reach the
   actor: put what the agent needs in `actor.env` and `user`.
-- **Step 4 (`needy image`).** `manifest.json`'s `base_abi` replaces the
+- **Step 4 (`needy image`), done**; see
+  [Step 4](#step-4-needy-image-pulllsbuildrm). The note to it was:
+  `manifest.json`'s `base_abi` replaces the
   `base-abi` file; `image::base::check_dir` is where the daemon reads it.
   The container images keep the `needy.base-abi` label, which the
   manifest's value must equal. `pull` downloads the release's base archives

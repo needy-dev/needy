@@ -1,5 +1,11 @@
 # Container actor runtime
 
+> **Migration notice (2026-11-13)**: `needy build` is now `needy image
+> build`, with the same flags, and a VM image records its base ABI in
+> `manifest.json` instead of a `base-abi` file (step 4 of the
+> [actor images design](2026-11-12-actor-images-design.md)). This note keeps the command it was
+> written with.
+
 > **NOTICE (2026-11-12, migration):** the
 > [drivers design](2026-11-12-drivers-and-extension-points-design.md) renamed what this note describes, without
 > compatibility: `actor.runtime` is `actor.driver` (`firecracker` is

@@ -37,7 +37,8 @@ work takes effect.
 
 The flow is always the same:
 
-1. Install `needy` on every machine that takes part.
+1. Install `needy` on every machine that takes part, and pull its images
+   with `needy image pull`.
 2. Start a **control daemon** on the machine that runs actors.
 3. Write a **profile**: which actor driver, which executors, which commands go
    where.
@@ -48,8 +49,8 @@ The flow is always the same:
 
 No release has assets yet. Prebuilt binaries and images come with the next
 release, and the channels below work from then on; until then, build from a
-checkout. `needy build` needs the checkout too (it builds the actor and
-executor images from `images/`).
+checkout. `needy image build` needs the checkout too (it builds the actor
+and executor images from `images/`).
 
 #### From source
 
@@ -112,7 +113,20 @@ proto install needy latest --config-mode global --pin global
 needy --version
 ```
 
-After installing, build the images with `needy build` (see the table below).
+After installing, pull the base images of your needy's release for the
+drivers this machine has (see the table below):
+
+```sh
+needy image pull                 # or one driver: needy image pull --driver macos-vz
+needy image ls
+```
+
+For a VM driver (`linux-firecracker`, `macos-vz`) it downloads the release's
+VM image, checks it against its `.sha256` and unpacks it into needy's data
+directory; for a container driver it pulls the base image (and the executor
+image) through the engine or Apple's `container`. needy never downloads a VM
+image by itself: a run without one fails and names `needy image pull`. The
+container drivers pull a missing container image themselves.
 
 From the next release on, each
 [GitHub release](https://github.com/needy-dev/needy/releases) carries these
@@ -123,42 +137,42 @@ assets, each with a `.sha256` file:
 | `needy-x86_64-unknown-linux-musl.tar.gz`, `needy-aarch64-unknown-linux-musl.tar.gz` | `needy` for Linux, statically linked |
 | `needy-aarch64-apple-darwin.tar.gz`, `needy-x86_64-apple-darwin.tar.gz` | `needy` for macOS, signed with a Developer ID and notarized; the arm64 one also holds `needy-linux-aarch64`, the guest needy (not signed: a Linux binary) |
 | `needy-x86_64-pc-windows-msvc.zip` | `needy.exe` for Windows (executor only), not Authenticode-signed |
-| `needy-actor-linux-firecracker-x86_64.tar.gz` | the `linux-firecracker` base image: `vmlinux`, `rootfs.ext4`, `firecracker`, `base-abi` |
-| `needy-actor-macos-vz-aarch64.tar.gz` | the `macos-vz` base image: `Image`, `initrd`, `rootfs.ext4`, `base-abi` |
+| `needy-actor-linux-firecracker-x86_64.tar.gz` | the `linux-firecracker` base image: `vmlinux`, `rootfs.ext4`, `firecracker`, `manifest.json` |
+| `needy-actor-macos-vz-aarch64.tar.gz` | the `macos-vz` base image: `Image`, `initrd`, `rootfs.ext4`, `manifest.json` |
 
-The container images are on GHCR for amd64 and arm64, tagged with the release
-and `latest`: `ghcr.io/needy-dev/needy-actor` and
-`ghcr.io/needy-dev/needy-executor`.
+Each archive has a build provenance attestation:
+`gh attestation verify needy-actor-macos-vz-aarch64.tar.gz -R needy-dev/needy`
+checks that this repository's release workflow built it. The container images
+are on GHCR for amd64 and arm64, tagged with the release (`v<version>`) and
+`latest`: `ghcr.io/needy-dev/needy-actor` and
+`ghcr.io/needy-dev/needy-executor`. A profile without `actor.image`, and a
+daemon without `--executor-image`, use those of its own version.
 
-`needy build` cannot fetch these yet; using them is a manual step that
-replaces the matching `needy build`:
+A needy built from a checkout has no release to pull from, and `needy image
+pull` says so. Build the images instead, and name the container images it
+builds, `needy-actor:latest` and `needy-executor:latest`:
 
 ```sh
-# A VM actor image, unpacked where `needy build` writes it: `images/default`
-# in needy's data directory (NEEDY_DATA_DIR if set).
-DATA="${NEEDY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/needy}"
-mkdir -p "$DATA/images/default"
-tar -xzf needy-actor-linux-firecracker-x86_64.tar.gz -C "$DATA/images/default"
-
-# The container images, under the names profiles use by default.
-docker pull ghcr.io/needy-dev/needy-executor:latest
-docker tag ghcr.io/needy-dev/needy-executor:latest needy-executor:latest
-docker pull ghcr.io/needy-dev/needy-actor:latest
-docker tag ghcr.io/needy-dev/needy-actor:latest needy-actor:latest
+needy image build                                  # the base VM image of this host's VM driver
+needy image build --linux-container --executor     # or --macos-apple-container on a Mac
+needy daemon --mode control --executor-image needy-executor:latest &
+# and in a container actor's profile: actor: { image: needy-actor:latest, ... }
 ```
 
-The prebuilt kernels have no recipe's identity; `needy build --recipe` builds
-one that does. Apple's `container` loads `needy-actor` with `needy build
---macos-apple-container`, which still builds it. An image works with every
-needy that speaks its base ABI; needy names the rebuild when it does not.
+`needy image pull --file ARCHIVE` imports a VM image archive on a machine
+without a network, and `needy image rm IMAGE` removes a VM image
+(`--guest-disks` also the guest disks of older needy versions). The prebuilt
+kernels have no recipe's identity; `needy image build --recipe` builds one
+that does. An image works with every needy that speaks its base ABI; needy
+names the command when it does not.
 
 What each machine needs besides `needy`:
 
 | Machine | Needs | Then |
 | --- | --- | --- |
-| Linux with KVM (actor host) | Docker or another Docker-compatible engine | `needy build --executor` |
-| Linux without KVM (actor host) | a Docker-compatible engine; `sshfs` and `user_allow_other` in `/etc/fuse.conf` for workspace mounts; `lxcfs` for resource views | `needy build --linux-container --executor` |
-| Apple silicon Mac (actor host) | `brew install vfkit`, or Apple's [`container`](https://github.com/apple/container) | `needy build` (for `macos-vz`) or `needy build --macos-apple-container` |
+| Linux with KVM (actor host) | Docker or another Docker-compatible engine | `needy image pull` (the `linux-firecracker` base, and the container images) |
+| Linux without KVM (actor host) | a Docker-compatible engine; `sshfs` and `user_allow_other` in `/etc/fuse.conf` for workspace mounts; `lxcfs` for resource views | `needy image pull` (the container images) |
+| Apple silicon Mac (actor host) | `brew install vfkit`, or Apple's [`container`](https://github.com/apple/container) | `needy image pull` (the `macos-vz` base, or the base in Apple's `container`) |
 | Any Linux, macOS or Windows machine (executor only) | nothing | join as a runner, see [Add machines](#add-machines) |
 
 #### Uninstall
@@ -537,10 +551,10 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
 A [recipe](docs/ai/references/config/2026-11-09-recipe-design.md) sets the
 machine: CPU model and count, memory, kernel, firmware strings, devices,
 hostname (`instance-{time}`), and which identity fields are `required:`.
-`needy build --recipe RECIPE` builds the actor kernel with a recipe's kernel
-options. `linux-container` takes `actor.container.oci_runtime`.
+`needy image build --recipe RECIPE` builds the actor kernel with a recipe's
+kernel options. `linux-container` takes `actor.container.oci_runtime`.
 `actor.image: REF` runs your own image `FROM` needy's base on every driver
-(`needy build --from REF` for the VM drivers); see
+(`needy image build --from REF` for the VM drivers); see
 [`examples/custom-image`](examples/custom-image/Dockerfile).
 
 ### Environment and data
@@ -551,10 +565,10 @@ options. `linux-container` takes `actor.container.oci_runtime`.
 | `NEEDY_TOKEN` | a bearer token that overrides the paired one |
 | `NEEDY_RUN` | the run that `--run` defaults to |
 | `NEEDY_STATE_DIR` | traces, `state.db`, run directories, the socket on macOS (`$XDG_STATE_HOME/needy`) |
-| `NEEDY_DATA_DIR` | images (`$XDG_DATA_HOME/needy`) |
+| `NEEDY_DATA_DIR` | VM images in `images/<driver>/` and guest disks (`$XDG_DATA_HOME/needy`) |
 | `NEEDY_CONFIG_DIR` | client tokens and `profiles/` (`$XDG_CONFIG_HOME/needy`) |
 | `NEEDY_RUNTIME_DIR` | the daemon's socket (`$XDG_RUNTIME_DIR/needy`) |
-| `NEEDY_REPO` | the checkout `needy build` builds from, when not run inside it |
+| `NEEDY_REPO` | the checkout `needy image build` builds from, when not run inside it |
 | `DOCKER_HOST` | the Docker-compatible engine (Docker Engine, OrbStack, Podman) |
 
 `--token-env NAME` and `--join-token-env NAME` name the variables that hold the

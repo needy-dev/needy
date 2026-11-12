@@ -71,17 +71,21 @@ hand. `NOTICE(release-trigger)`: only `published` is listed: publishing a
 prerelease also fires `prereleased`, so listing both would start two runs.
 
 A plain `workflow_dispatch` builds and verifies everything and publishes
-nothing. Publishing (release assets and GHCR pushes) happens only on a
-release event, or on a dispatch with `upload_to_release` and a `tag_name`.
+nothing. Publishing (release assets, GHCR pushes and build provenance
+attestations) happens only on a release event, or on a dispatch with
+`upload_to_release` and a `tag_name`; a dispatch with `attest` also attests
+without publishing (since step 4 of the
+[actor images design](2026-11-12-actor-images-design.md#release)).
 
 | Job | Runner | Produces |
 | --- | --- | --- |
 | `binary` (5 targets) | `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `macos-15-intel`, `windows-2025` | `needy-<target>.tar.gz` (`.zip` on Windows) and `.sha256` |
 | `macos-guest` | `ubuntu-24.04` | `needy-aarch64-apple-darwin.tar.gz` again, with `needy-linux-aarch64` (the run's static `aarch64-unknown-linux-musl` needy, not code-signed: `NOTICE(guest-signing)`) next to `needy`; see the [actor images design](2026-11-12-actor-images-design.md) |
-| `images amd64` | `ubuntu-24.04` | `needy-actor-linux-firecracker-x86_64.tar.gz` (`vmlinux`, `rootfs.ext4`, `firecracker`, `base-abi`; no needy since the actor images design); `needy-actor` and `needy-executor` for amd64 |
-| `images arm64` | `ubuntu-24.04-arm` | `needy-actor-macos-vz-aarch64.tar.gz` (`Image`, `initrd`, `rootfs.ext4`, `base-abi`); `needy-actor` and `needy-executor` for arm64 |
+| `images amd64` | `ubuntu-24.04` | `needy-actor-linux-firecracker-x86_64.tar.gz` (`vmlinux`, `rootfs.ext4`, `firecracker`, `manifest.json`; no needy since the actor images design); `needy-actor` and `needy-executor` for amd64 |
+| `images arm64` | `ubuntu-24.04-arm` | `needy-actor-macos-vz-aarch64.tar.gz` (`Image`, `initrd`, `rootfs.ext4`, `manifest.json`); `needy-actor` and `needy-executor` for arm64 |
 | `container manifests` | `ubuntu-24.04` | publishing only: the multi-architecture `ghcr.io/needy-dev/needy-actor` and `needy-executor`, tagged with the release tag and `latest` |
-| `publish` | `ubuntu-24.04` | publishing only: checks every `.sha256` and uploads the archives to the release |
+| `attest` | `ubuntu-24.04` | every run: picks the release's archives (notarized macOS ones over signed ones), checks every `.sha256`, attests each archive's build provenance (`actions/attest-build-provenance@v4`; on a publishing run, or a dispatch with `attest`), and uploads them as `release-assets` |
+| `publish` | `ubuntu-24.04` | publishing only: uploads `release-assets` to the release |
 
 Binaries:
 
@@ -124,9 +128,11 @@ Images:
   runner. The kernels are built without a recipe; `needy build --recipe`
   still builds one with a recipe's `uname` identity.
 - The job checks every file is there, prints its `base-abi`, runs
-  `firecracker --version`, and runs `e2fsck -fn` on `rootfs.ext4`. The
-  archive is written with `tar --sparse`, so `rootfs.ext4`'s free blocks are
-  holes again when GNU tar unpacks it.
+  `firecracker --version`, and runs `e2fsck -fn` on `rootfs.ext4`. It then
+  writes the image's `manifest.json` (the tree's version, the driver, the
+  architecture and the base ABI, as `needy image pull` reads it) in place of
+  `base-abi`. The archive is written with `tar --sparse`, so `rootfs.ext4`'s
+  free blocks are holes again when GNU tar or `needy image pull` unpacks it.
 - The container images are loaded and started (`needy --version` in the
   executor; in `needy-actor`, a shim runs its real program without the
   guest needy, as an image `FROM` the base needs while it builds, the proxy
@@ -326,13 +332,19 @@ Not verified, because it publishes: the GHCR pushes and manifests,
 notarization and the upload to a release. The first release exercises
 them.
 
+On 2026-11-13 (step 4 of the actor images design), a dispatch with `attest`
+ran the new `attest` job:
+https://github.com/needy-dev/needy/actions/runs/43285128375. It attested the
+7 archives, and `gh attestation verify` passed on the downloaded
+`release-assets`. Its first run failed on the Windows `.sha256`'s CRLF
+(`NOTICE(crlf-sha256)`), a check that had only run on publishing runs; see the
+[step 4 checks](2026-11-12-actor-images-design.md#step-4-checks).
+
 ## Candidate next slices
 
-- **`needy image pull`** (or `needy build --prebuilt`): download the release's
-  actor image and verify its `.sha256` into the directory `needy build`
-  writes. Today that is a manual `tar -xzf` (README, Install), and a machine
-  that only wants to run actors still needs Docker and a 20-minute kernel
-  build without it.
+- **`needy image pull`**: done in step 4 of the
+  [actor images design](2026-11-12-actor-images-design.md#step-4-needy-image-pulllsbuildrm),
+  with build provenance attestations in the `attest` job.
 - **Authenticode signing** of `needy.exe` once the owner has a certificate
   (`TODO(release-signing)`), so Windows SmartScreen does not warn on it.
 - **The skipped Windows tests** (`TODO(windows-tests)`): a TCP listener in

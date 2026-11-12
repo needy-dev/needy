@@ -356,7 +356,8 @@ A named, reusable block of rule actions inside a profile, applied with `use:`.
 ### Recipe
 
 A declarative YAML description of one machine: image, kernel, CPU, memory,
-firmware, devices and network identity. Built by `needy build`. Built-in
+firmware, devices and network identity. `needy image build --recipe` builds
+an actor kernel with its kernel options. Built-in
 recipes are referenced as `builtin:NAME`.
 
 *Avoid*: persona.
@@ -370,9 +371,12 @@ See the [actor images design](ai/references/architecture/2026-11-12-actor-images
 An actor image without needy's own program in it: the kernel with
 `binfmt_needy` (VM drivers), the root file system, the boot stub and the
 shim stub. One base image serves every needy version that speaks its base
-ABI: `needy build` writes one (a VM image directory, or the `needy-actor`
-container image), and the daemon brings the guest needy when each actor
-starts.
+ABI. Each release has one per driver: a VM image archive, which `needy
+image pull` downloads into `images/<driver>/base` in needy's data directory,
+and `ghcr.io/needy-dev/needy-actor:v<version>`, which the container drivers
+pull. `needy image build` builds one from a needy checkout (a VM image
+directory, or `needy-actor:latest`). The daemon brings the guest needy when
+each actor starts.
 
 *Avoid*: actor image with needy, versioned image.
 
@@ -380,16 +384,18 @@ starts.
 
 What a profile's `actor.image` names for every driver: an OCI image
 reference. The container drivers run that image; the VM drivers boot the VM
-image `needy build --from REF` made of it, found by the same reference.
-Without `actor.image`, the container drivers run the base image
-`needy-actor:latest` and the VM drivers the base VM image (`needy build`).
+image `needy image build --from REF` made of it, found by the same
+reference. Without `actor.image`, the container drivers run the release's
+base image `ghcr.io/needy-dev/needy-actor:v<version>` (pulled when missing)
+and the VM drivers the base VM image (`needy image pull`; never downloaded
+by the daemon itself).
 
 ### Custom actor image
 
 An OCI image `FROM` a base image that adds programs (an agent CLI, node,
 jq). Its last step is `RUN ["/.needy/shim-image"]`, which makes the
 programs it added shims, so a container actor can route them; it inherits
-the base's `needy.base-abi` label. For the VM drivers, `needy build --from`
+the base's `needy.base-abi` label. For the VM drivers, `needy image build --from`
 turns it into a VM image: its root file system with the real programs put
 back over the shims, and the base's kernel.
 
@@ -425,9 +431,19 @@ shim runs its real program instead, unrouted.
 The interface between a base image and the guest needy and daemon: the
 paths under `/.needy`, the stubs' hand-off, the guest disk, and
 `binfmt_needy`'s parameters and never-route rule. It has a version: a VM
-image records it in its `base-abi` file, a container image in its
+image records it in its manifest, a container image in its
 `needy.base-abi` label, and a driver refuses an image whose version this
 needy does not speak before the actor starts.
+
+### VM image manifest
+
+`manifest.json` in a VM image's directory (`images/<driver>/<name>/` in
+needy's data directory): the needy version that made it, its driver,
+architecture and base ABI, where it came from (a release, an imported
+archive, a build from a checkout, or `--from` an OCI image with its image
+ID) and the SHA-256 of the archive it was unpacked from. The VM drivers read
+its base ABI; `needy image ls` shows the rest. A directory without one is
+not an image: `needy image pull` or `needy image build` writes one.
 
 ## Routing
 

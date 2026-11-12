@@ -108,4 +108,5 @@ case ":$PATH:" in
   *":$install_dir:"*) ;;
   *) printf 'Add %s to PATH to run needy from any terminal.\n' "$install_dir" >&2 ;;
 esac
-printf 'Next: start a control daemon and pick a profile, see https://github.com/needy-dev/needy#getting-started\n' >&2
+printf 'Next: pull the actor images for the drivers this machine has with "needy image pull",\n' >&2
+printf 'then start a control daemon and pick a profile, see https://github.com/needy-dev/needy#getting-started\n' >&2
