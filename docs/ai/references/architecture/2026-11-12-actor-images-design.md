@@ -582,7 +582,14 @@ Each piece, as it was written:
 | `profile check` | both | every profile above | prints `actor image: needy-custom-jq:step2 (base ABI 1)` (containers), or the VM image's directory, its image ID and platform `(base ABI 1)`; the identity gaps as before |
 
 `make check` and `make test` pass on both hosts (the Linux host also runs
-the stub tests).
+the stub tests). `check.yml` passed on Linux, macOS and Windows:
+https://github.com/needy-dev/needy/actions/runs/43268125985. `release.yml`,
+dispatched without publishing, built both architectures' base images and
+checked the new image steps (a shim runs `/usr/bin/true` without the guest,
+the proxy fails with the stub's message, `/.needy/shim-image` is there):
+https://github.com/needy-dev/needy/actions/runs/43268159121 (its
+`aarch64-apple-darwin` job was first not picked up by a hosted runner and
+passed when re-run).
 
 End to end, from the commits that were pushed, with the base built from
 the tree:
