@@ -1,3 +1,7 @@
+// Most tests here run Unix programs and are `cfg(unix)`; on Windows the
+// helpers only they use are left unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::collections::{BTreeSet, VecDeque};
 use std::time::Duration;
 

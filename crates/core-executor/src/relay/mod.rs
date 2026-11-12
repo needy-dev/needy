@@ -255,6 +255,7 @@ async fn leave(input: &Input, detached: &mpsc::Sender<()>) {
   }
 }
 
-#[cfg(test)]
+// The tests serve the executor on a Unix socket.
+#[cfg(all(test, unix))]
 #[path = "mod_test.rs"]
 mod tests;

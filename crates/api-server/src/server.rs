@@ -2,7 +2,9 @@
 //! before any of them serves, so a listener that cannot bind fails at once
 //! with its address.
 
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -344,9 +346,11 @@ impl Listener {
   /// reach it. The bound address decides, so a host name is judged by what
   /// it resolved to.
   fn check_unauthenticated(&self, listen: &Listen) -> Result<(), Error> {
-    let Self::Tcp(listener) = self else {
+    let listener = match self {
+      Self::Tcp(listener) => listener,
       // A Unix socket is guarded by its file permissions.
-      return Ok(());
+      #[cfg(unix)]
+      Self::Unix(_) => return Ok(()),
     };
     let loopback = listener.local_addr().is_ok_and(|address| address.ip().to_canonical().is_loopback());
     if !loopback {

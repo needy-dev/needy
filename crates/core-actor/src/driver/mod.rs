@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use needy_config::profile::{Actor, ActorDriver, User};
+#[cfg(unix)]
+use needy_config::profile::Actor;
+use needy_config::profile::{ActorDriver, User};
 use needy_core::recipe::CompiledRecipe;
 use needy_core::types::Capture;
 
@@ -403,6 +405,7 @@ pub trait Driver: Send + Sync {
 
 // NOTICE: how long a reconcile waits for a leftover VM process to exit after
 // `SIGKILL`; it is reaped by its new parent at once.
+#[cfg(unix)]
 const VM_END_WAIT: Duration = Duration::from_secs(5);
 
 /// Ends the VM process (Firecracker, vfkit) of a leftover actor, if it still

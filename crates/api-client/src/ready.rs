@@ -35,6 +35,7 @@ pub async fn wait(endpoint: &str, within: Duration) -> Result<Client> {
   })
 }
 
-#[cfg(test)]
+// The tests serve and dial Unix sockets.
+#[cfg(all(test, unix))]
 #[path = "ready_test.rs"]
 mod tests;

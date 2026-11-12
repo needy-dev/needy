@@ -1,3 +1,7 @@
+// The tests that use these helpers are `cfg(unix)`; on Windows they are
+// left unused.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use std::path::{Path, PathBuf};
 
 use needy_config::Source;

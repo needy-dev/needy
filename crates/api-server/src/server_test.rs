@@ -1,3 +1,6 @@
+// Only the `cfg(unix)` socket tests wait with a timeout.
+#![cfg_attr(not(unix), allow(unused_imports))]
+
 use std::time::Duration;
 
 use needy_api_proto::v1::{CheckRequest, ListRunsRequest};
@@ -13,6 +16,7 @@ fn health() -> Health {
   }
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn an_over_long_socket_path_fails_to_bind_with_the_path() {
   let dir = tempfile::tempdir().unwrap();
@@ -24,6 +28,7 @@ async fn an_over_long_socket_path_fails_to_bind_with_the_path() {
   assert!(error.to_string().contains(&socket.display().to_string()), "{error}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_stale_socket_is_replaced() {
   let dir = tempfile::tempdir().unwrap();
@@ -36,6 +41,7 @@ async fn a_stale_socket_is_replaced() {
   assert!(bound.is_ok(), "{:?}", bound.err());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_socket_where_a_server_answers_is_in_use_and_kept() {
   let dir = tempfile::tempdir().unwrap();
@@ -48,6 +54,7 @@ async fn a_socket_where_a_server_answers_is_in_use_and_kept() {
   assert!(std::os::unix::net::UnixStream::connect(&socket).is_ok(), "the live socket was removed");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn a_socket_file_another_server_bound_since_is_not_removed() {
   let dir = tempfile::tempdir().unwrap();
@@ -75,6 +82,7 @@ async fn health_needs_no_token_and_everything_else_does() {
   assert!(listed.is_ok(), "{:?}", listed.err());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn serving_ends_when_cancelled() {
   let dir = tempfile::tempdir().unwrap();

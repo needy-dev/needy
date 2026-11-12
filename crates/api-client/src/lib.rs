@@ -34,7 +34,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::metadata::{AsciiMetadataValue, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
-use tonic::transport::{Channel, ClientTlsConfig, Endpoint, Uri};
+#[cfg(unix)]
+use tonic::transport::Uri;
+use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tonic::{Request, Status};
 
 pub use error::{Error, Kind, Result};

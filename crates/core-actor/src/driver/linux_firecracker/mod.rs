@@ -21,7 +21,9 @@ pub use crate::driver::Error;
 use needy_config::profile::ActorDriver;
 use needy_core::types::Capture;
 
-use crate::driver::{Channels, Driver, Endpoint, Facets, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
+#[cfg(unix)]
+use crate::driver::Leftover;
+use crate::driver::{Channels, Driver, Endpoint, Facets, Host, Identity, Running, Side, Start, Terminal, Transport};
 pub use crate::image::vm::LinuxFirecracker as Image;
 
 /// The vsock device's socket in a VM's directory.

@@ -1,3 +1,6 @@
+// The tests that use these helpers run Unix programs and are `cfg(unix)`.
+#![cfg_attr(not(unix), allow(dead_code))]
+
 use super::*;
 
 fn exited(code: i32) -> Result<relay::Ended, relay::Error> {
