@@ -20,6 +20,13 @@ use crate::value::Words;
 pub struct Actor {
   /// What runs the actor.
   pub driver: ActorDriver,
+  /// The actor image, an OCI image reference, for every driver: the
+  /// container drivers run it, the VM drivers boot the VM image `needy
+  /// build --from` made of it. Without it the container drivers run
+  /// [`CONTAINER_IMAGE`] and the VM drivers boot the daemon's base VM image
+  /// (`needy build`).
+  #[serde(default)]
+  pub image: Option<String>,
   /// The runner the actor runs on; the control host itself when absent.
   #[serde(default)]
   pub runner: Option<RunnerSelector>,
@@ -104,26 +111,22 @@ pub struct ContainerActor {
   /// only.
   #[serde(default)]
   pub oci_runtime: Option<OciRuntime>,
-  /// The container actor image: `needy build --linux-container` builds it
-  /// for the engine, `needy build --macos-apple-container` for Apple's
-  /// `container`.
-  #[serde(default = "default_container_image")]
-  pub image: String,
 }
 
-impl ContainerActor {
-  /// The image of an actor whose profile has no `container:` options.
-  pub fn image_of(options: Option<&ContainerActor>) -> String {
-    options.map_or_else(default_container_image, |o| o.image.clone())
+impl Actor {
+  /// The image a container driver runs: `image`, else [`CONTAINER_IMAGE`].
+  pub fn container_image(&self) -> String {
+    self.image.clone().unwrap_or_else(|| CONTAINER_IMAGE.into())
   }
 }
 
-/// The image of a container actor whose profile names none.
+/// The image of a container actor whose profile names none: the base image
+/// `needy build --linux-container` builds for the engine and `needy build
+/// --macos-apple-container` for Apple's `container`.
+// TODO(actor-images): `ghcr.io/needy-dev/needy-actor` of this needy's
+// version becomes the default with `needy image pull` (step 4 of
+// docs/ai/references/architecture/2026-11-12-actor-images-design.md).
 pub const CONTAINER_IMAGE: &str = "needy-actor:latest";
-
-fn default_container_image() -> String {
-  CONTAINER_IMAGE.into()
-}
 
 /// The OCI runtime of a container actor, by the name Docker registers it
 /// under.

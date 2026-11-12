@@ -258,6 +258,14 @@ message CheckProfileResponse {
   // actor's host did not report one.
   string actor_cpu = 3;
   repeated ProfileFinding findings = 4;
+  // The image the actor would start from, as its driver names it: a
+  // container image's reference, or a VM image's directory and the OCI image
+  // it was made from. Empty when the actor's driver is not this control
+  // host's.
+  string actor_image = 5;
+  // The base ABI the actor image records, when it is the one this control
+  // plane speaks; empty when it is not, which a finding explains.
+  string actor_base_abi = 6;
 }
 
 // The host an actor or executor would run on.

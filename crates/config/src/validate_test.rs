@@ -121,7 +121,7 @@ fn a_container_actor_must_name_its_oci_runtime() {
 
 #[test]
 fn a_container_actor_whose_options_name_no_oci_runtime_is_an_error() {
-  let found = findings("actor: { driver: linux-container, container: { image: needy-actor:dev } }");
+  let found = findings("actor: { driver: linux-container, image: needy-actor:dev, container: {} }");
 
   assert_eq!(found, ["error: actor.container: a linux-container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
 }
@@ -134,8 +134,8 @@ fn an_macos_apple_container_actor_needs_no_options() {
 }
 
 #[test]
-fn an_macos_apple_container_actor_takes_the_image_option() {
-  let found = findings("actor: { driver: macos-apple-container, container: { image: needy-actor:dev } }");
+fn every_driver_takes_the_actor_image() {
+  let found = findings("actor: { driver: macos-vz, image: needy-actor:dev }");
 
   assert!(found.is_empty(), "{found:?}");
 }

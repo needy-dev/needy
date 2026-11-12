@@ -511,7 +511,7 @@ impl Engine for Fake {
     Ok(Default::default())
   }
 
-  async fn image_labels(&self, _image: &str) -> Result<Option<std::collections::HashMap<String, String>>, engine::Error> {
+  async fn inspect_image(&self, _image: &str) -> Result<Option<engine::Image>, engine::Error> {
     Ok(self.pulled().then(Default::default))
   }
 

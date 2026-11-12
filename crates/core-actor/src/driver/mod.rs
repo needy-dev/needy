@@ -45,6 +45,8 @@ use needy_config::profile::{ActorDriver, User};
 use needy_core::recipe::CompiledRecipe;
 use needy_core::types::Capture;
 
+use crate::image::vm;
+
 #[cfg(unix)]
 pub mod linux_container;
 pub mod linux_firecracker;
@@ -60,8 +62,10 @@ pub mod macos_vz;
 /// tool or engine refused is [`Error::Driver`], with its message.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  #[error("actor image is missing {}; run `needy build`", .0.display())]
-  Missing(PathBuf),
+  /// A file of a VM image is missing; `build` is the command that writes
+  /// it.
+  #[error("actor image is missing {}; run `{build}`", path.display())]
+  Missing { path: PathBuf, build: String },
   #[error("cannot write {}", path.display())]
   Write {
     path: PathBuf,
@@ -232,11 +236,16 @@ pub fn facets(driver: ActorDriver) -> Facets {
 }
 
 /// What the daemon's machine gives every driver: where needy's VM actor
-/// image is (`needy build`), the KVM device, and where the VM drivers keep
-/// guest disks.
+/// images are, the KVM device, and where the VM drivers keep guest disks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
+  /// The base VM image (`needy build`), which a VM driver boots for a
+  /// profile without `actor.image`.
   pub image: PathBuf,
+  /// Where `needy build --from` writes the VM images a profile names by
+  /// their OCI reference (`crate::image::vm::dir_of`): needy's data
+  /// directory's `images`.
+  pub images: PathBuf,
   /// `linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,
   /// The guest disks the VM drivers make from guest needy binaries
@@ -248,9 +257,9 @@ pub struct Host {
 #[cfg(unix)]
 pub fn new(host: &Host, actor: &Actor) -> Result<Box<dyn Driver>, Error> {
   Ok(match actor.driver {
-    ActorDriver::LinuxFirecracker => Box::new(linux_firecracker::LinuxFirecracker::on(host)),
+    ActorDriver::LinuxFirecracker => Box::new(linux_firecracker::LinuxFirecracker::on(host, actor.image.as_deref())),
     ActorDriver::LinuxContainer => Box::new(linux_container::LinuxContainer::of(actor)?),
-    ActorDriver::MacosVz => Box::new(macos_vz::MacosVz::on(host)),
+    ActorDriver::MacosVz => Box::new(macos_vz::MacosVz::on(host, actor.image.as_deref())),
     ActorDriver::MacosAppleContainer => Box::new(macos_apple_container::MacosAppleContainer::of(actor)),
   })
 }
@@ -384,6 +393,28 @@ pub(crate) async fn guest_disk(binary: &Path, cache: &Path) -> Result<PathBuf, E
   }
 }
 
+/// The VM image a VM driver of `driver` boots on `host`: the one `needy
+/// build --from` made of the OCI image `reference` (a profile's
+/// `actor.image`), else the base VM image. `of` makes the driver's image
+/// type from its directory.
+pub(crate) fn vm_image<T>(host: &Host, driver: ActorDriver, reference: Option<&str>, of: fn(&Path, vm::Source) -> T) -> T {
+  match reference {
+    Some(reference) => of(&vm::dir_of(&host.images, driver, reference), vm::Source::Reference(reference.to_string())),
+    None => of(&host.image, vm::Source::Base),
+  }
+}
+
+/// A VM image as [`Driver::image`] shows it.
+pub(crate) fn describe_vm_image(dir: &Path, source: &vm::Source) -> String {
+  match (source, vm::origin(dir)) {
+    (vm::Source::Base, _) => format!("the base VM image {}", dir.display()),
+    (vm::Source::Reference(reference), Some(origin)) => {
+      format!("{reference}, as the VM image {} made from {} ({})", dir.display(), origin.id, origin.platform)
+    }
+    (vm::Source::Reference(reference), None) => format!("{reference}, as the VM image {}", dir.display()),
+  }
+}
+
 /// The actor's log in its directory `dir`: every driver writes its actor's
 /// console there, and `run logs` reads it.
 pub fn log(dir: &Path) -> PathBuf {
@@ -412,8 +443,14 @@ pub trait Driver: Send + Sync {
     self.name().to_string()
   }
 
-  /// Fails unless this host can run the driver's actors. A create checks
-  /// this before it acquires anything.
+  /// The image the driver starts actors from, as `profile check` shows it:
+  /// a container image's reference, or a VM image's directory and what it
+  /// was made from.
+  fn image(&self) -> String;
+
+  /// Fails unless this host can run the driver's actors from the image:
+  /// it is there, records this needy's base ABI and is of the actors'
+  /// architecture. A create checks this before it acquires anything.
   async fn check_host(&self) -> Result<(), Error>;
 
   /// The channels of an actor whose directory is `dir`. The daemon serves

@@ -25,7 +25,7 @@ impl Engine for Fake {
     Ok(BTreeMap::new())
   }
 
-  async fn image_labels(&self, _image: &str) -> Result<Option<HashMap<String, String>>, Error> {
+  async fn inspect_image(&self, _image: &str) -> Result<Option<crate::engine::Image>, Error> {
     Ok(None)
   }
 

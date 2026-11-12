@@ -41,6 +41,7 @@ const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 pub fn host(daemon: &Daemon) -> driver::Host {
   driver::Host {
     image: daemon.config.actor_image.clone(),
+    images: daemon.config.vm_images.clone(),
     kvm: daemon.config.kvm.clone(),
     guest_disks: daemon.config.guest_disks.clone(),
   }

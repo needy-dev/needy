@@ -15,8 +15,8 @@ struct Fake {
   calls: Mutex<Vec<String>>,
   bodies: Mutex<Vec<ContainerCreateBody>>,
   runtimes: Vec<(&'static str, &'static [&'static str])>,
-  /// The images it has, with their labels.
-  images: Vec<(String, HashMap<String, String>)>,
+  /// The images it has, by name.
+  images: Vec<(String, engine::Image)>,
   code: i64,
   log: &'static str,
 }
@@ -37,8 +37,8 @@ impl Engine for Fake {
     Ok(self.runtimes.iter().map(|(name, args)| (name.to_string(), args.iter().map(|a| a.to_string()).collect())).collect())
   }
 
-  async fn image_labels(&self, image: &str) -> Result<Option<HashMap<String, String>>, EngineError> {
-    Ok(self.images.iter().find(|(name, _)| name == image).map(|(_, labels)| labels.clone()))
+  async fn inspect_image(&self, image: &str) -> Result<Option<engine::Image>, EngineError> {
+    Ok(self.images.iter().find(|(name, _)| name == image).map(|(_, found)| found.clone()))
   }
 
   async fn pull(&self, image: &str) -> Result<(), EngineError> {
@@ -99,10 +99,63 @@ const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\nagent:x:1000:1000::/home/
 /// The guest needy a test's actor gets.
 const GUEST_NEEDY: &str = "/home/user/.local/bin/needy";
 
-/// `needy-actor:latest` with the base ABI label `abi`, or none.
-fn image(abi: Option<&str>) -> (String, HashMap<String, String>) {
+/// `needy-actor:latest` for this host's actors, with the base ABI label
+/// `abi`, or none.
+fn image(abi: Option<&str>) -> (String, engine::Image) {
+  image_of("needy-actor:latest", abi, container::oci_arch(crate::image::guest::arch()))
+}
+
+/// `name` for `linux/architecture`, with the base ABI label `abi`, or none.
+fn image_of(name: &str, abi: Option<&str>, architecture: &str) -> (String, engine::Image) {
   let labels = abi.map(|abi| HashMap::from([(base::LABEL.to_string(), abi.to_string())])).unwrap_or_default();
-  ("needy-actor:latest".into(), labels)
+  let image = engine::Image {
+    id: "sha256:0123".into(),
+    os: "linux".into(),
+    architecture: architecture.into(),
+    labels,
+  };
+  (name.into(), image)
+}
+
+#[tokio::test]
+async fn a_custom_image_without_a_base_abi_names_the_base_to_rebuild_from() {
+  let fake = Arc::new(Fake {
+    runtimes: vec![("runc", &[])],
+    images: vec![image_of(
+      "needy-custom-jq",
+      None,
+      container::oci_arch(crate::image::guest::arch()),
+    )],
+    ..Default::default()
+  });
+  let container = LinuxContainer::with_engine(OciRuntime::Runc, "needy-custom-jq".into(), fake);
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert!(error.starts_with("the actor image needy-custom-jq records no base ABI"), "{error}");
+  assert!(
+    error.contains("rebuild it FROM a base image of base ABI 1: `needy-actor:latest` after `needy build --linux-container`"),
+    "{error}"
+  );
+}
+
+#[tokio::test]
+async fn an_image_of_another_architecture_is_refused_before_the_actor_starts() {
+  let other = if crate::image::guest::arch() == "x86_64" {
+    "arm64"
+  } else {
+    "amd64"
+  };
+  let fake = Arc::new(Fake {
+    runtimes: vec![("runc", &[])],
+    images: vec![image_of("needy-custom-jq", Some("1"), other)],
+    ..Default::default()
+  });
+  let container = LinuxContainer::with_engine(OciRuntime::Runc, "needy-custom-jq".into(), fake);
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert!(error.starts_with(&format!("the actor image needy-custom-jq is linux/{other}, and actors here run linux/")), "{error}");
 }
 
 fn runtime(fake: Fake, oci: OciRuntime) -> (LinuxContainer, Arc<Fake>) {

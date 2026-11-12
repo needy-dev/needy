@@ -99,6 +99,12 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
   let host = needy_core_actor::driver::Host {
     image: image.to_path_buf(),
     kvm: kvm.to_path_buf(),
+    // Detection reads the base image only: a profile's `actor.image` is
+    // checked when a run is created.
+    // TODO(runner-actor): a runner that holds VM images made with `needy
+    // build --from` does not report them; it needs to once actors run on
+    // runners other than the control host's own.
+    images: std::path::PathBuf::new(),
     // Detection starts no actor, so it makes no guest disk.
     guest_disks: std::path::PathBuf::new(),
   };

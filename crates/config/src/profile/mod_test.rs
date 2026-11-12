@@ -188,6 +188,25 @@ fn a_profile_that_names_only_its_actor_driver_has_the_defaults() {
 }
 
 #[test]
+fn the_actor_image_is_one_field_for_every_driver_with_the_container_base_by_default() {
+  let named = load_text("actor: { driver: macos-vz, image: example.com/agent:1 }\n").unwrap();
+  let unnamed = load_text("actor: { driver: linux-container, container: { oci_runtime: runc } }\n").unwrap();
+
+  assert_eq!(named.actor.image.as_deref(), Some("example.com/agent:1"));
+  assert_eq!(named.actor.container_image(), "example.com/agent:1");
+  assert_eq!(unnamed.actor.image, None);
+  assert_eq!(unnamed.actor.container_image(), CONTAINER_IMAGE);
+}
+
+#[test]
+fn the_container_options_no_longer_name_the_image() {
+  let err =
+    load_text("actor: { driver: linux-container, container: { oci_runtime: runc, image: needy-actor:dev } }\n").unwrap_err().to_string();
+
+  assert!(err.contains("actor.container.image: unknown field `image`"), "{err}");
+}
+
+#[test]
 fn executor_defaults() {
   let p = load_text("actor: { driver: linux-firecracker }\nexecutors: { build: {} }").unwrap();
 

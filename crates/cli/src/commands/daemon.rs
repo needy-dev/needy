@@ -178,6 +178,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
       let image = args.actor_image.unwrap_or_else(|| paths.default_image());
       let config = needy_daemon::Config {
         guest_disks: paths.guest_disks(),
+        vm_images: paths.images(),
         state_dir: paths.state,
         runtime_dir: paths.runtime,
         actor_image: image,

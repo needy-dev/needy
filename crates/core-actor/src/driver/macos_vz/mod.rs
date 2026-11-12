@@ -116,11 +116,12 @@ pub struct MacosVz {
 }
 
 impl MacosVz {
-  /// The driver on `host`: its actor image and guest disks, and vfkit on
-  /// `PATH`.
-  pub fn on(host: &Host) -> Self {
+  /// The driver on `host`: its guest disks, vfkit on `PATH`, and the VM
+  /// image made from the OCI image `image` names (`actor.image`), or the
+  /// base VM image without one.
+  pub fn on(host: &Host, image: Option<&str>) -> Self {
     Self {
-      image: Image::new(&host.image),
+      image: crate::driver::vm_image(host, ActorDriver::MacosVz, image, Image::of),
       vfkit: VFKIT.into(),
       guest_disks: host.guest_disks.clone(),
     }
@@ -131,6 +132,10 @@ impl MacosVz {
 impl Driver for MacosVz {
   fn kind(&self) -> ActorDriver {
     ActorDriver::MacosVz
+  }
+
+  fn image(&self) -> String {
+    crate::driver::describe_vm_image(&self.image.dir, &self.image.source)
   }
 
   async fn check_host(&self) -> Result<(), Error> {

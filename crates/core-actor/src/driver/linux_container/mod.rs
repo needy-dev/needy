@@ -41,7 +41,7 @@ use crate::driver::{
 };
 use crate::identity;
 use crate::image::base;
-use crate::image::container::name;
+use crate::image::container::{self, name};
 
 /// What builds a container actor image of this needy's version.
 const REBUILD: &str = "needy build --linux-container";
@@ -120,12 +120,11 @@ impl LinuxContainer {
   pub fn of(actor: &Actor) -> Result<Self, Error> {
     let Some(ContainerActor {
       oci_runtime: Some(oci_runtime),
-      image,
     }) = &actor.container
     else {
       return Err(Error::Unsupported("actor.container.oci_runtime is missing".into()));
     };
-    Ok(Self::new(*oci_runtime, image.clone()))
+    Ok(Self::new(*oci_runtime, actor.container_image()))
   }
 
   pub fn with_engine(oci_runtime: OciRuntime, image: String, engine: Arc<dyn Engine>) -> Self {
@@ -341,10 +340,23 @@ impl Driver for LinuxContainer {
         args.join(" ")
       )));
     }
-    let Some(labels) = self.engine.image_labels(&self.image).await.map_err(engine_error)? else {
-      return Err(refused(format!("the container actor image {} is missing; run `{REBUILD}`", self.image)));
+    // TODO(actor-images): a missing image is pulled automatically with step
+    // 4 (`needy image`), see
+    // docs/ai/references/architecture/2026-11-12-actor-images-design.md.
+    let Some(image) = self.engine.inspect_image(&self.image).await.map_err(engine_error)? else {
+      let how = if self.image == CONTAINER_IMAGE {
+        format!("run `{REBUILD}`")
+      } else {
+        "build it, or pull it with `docker pull`".into()
+      };
+      return Err(refused(format!("the container actor image {} is missing; {how}", self.image)));
     };
-    Ok(base::check(&self.image, labels.get(base::LABEL).map(String::as_str), REBUILD)?)
+    base::check(&self.image, image.labels.get(base::LABEL).map(String::as_str), &container::advice(&self.image, REBUILD))?;
+    container::check_platform(&self.image, &image.os, &image.architecture, crate::image::guest::arch()).map_err(refused)
+  }
+
+  fn image(&self) -> String {
+    self.image.clone()
   }
 
   fn channels(&self, dir: &Path) -> Channels {

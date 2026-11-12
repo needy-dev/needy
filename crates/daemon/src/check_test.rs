@@ -3,6 +3,7 @@
 
 use needy_api_client::Client;
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileToCheck, RunnerHost, RunnerReport, Runners, Runs};
+use needy_config::profile::ActorDriver;
 
 use crate::testing::{self, JoinedRunner, Served};
 
@@ -330,6 +331,35 @@ async fn a_control_host_without_kvm_is_an_error_finding_naming_it() {
   assert!(
     found[0].starts_with(&format!("error: actor: on the control host: this host has no usable KVM: cannot open {}", kvm.display())),
     "{found:?}"
+  );
+}
+
+#[tokio::test]
+async fn the_check_names_the_actor_image_and_the_base_abi_it_records() {
+  let served = control().await;
+
+  let check = check(&served, "actor: { driver: linux-firecracker, command: [sh] }").await;
+
+  assert_eq!(messages(&check), Vec::<String>::new());
+  assert_eq!(check.actor_image, format!("the base VM image {}", served.dir().join("image").display()));
+  assert_eq!(check.actor_base_abi, Some(needy_core_actor::image::base::ABI));
+}
+
+#[tokio::test]
+async fn a_vm_image_not_yet_made_from_the_profiles_oci_image_names_the_build_that_makes_it() {
+  let served = control().await;
+
+  let check = check(&served, "actor: { driver: linux-firecracker, image: needy-custom-jq, command: [sh] }").await;
+
+  let dir = needy_core_actor::image::vm::dir_of(&served.dir().join("images"), ActorDriver::LinuxFirecracker, "needy-custom-jq");
+  assert_eq!(check.actor_image, format!("needy-custom-jq, as the VM image {}", dir.display()));
+  assert_eq!(check.actor_base_abi, None);
+  assert_eq!(
+    messages(&check),
+    [format!(
+      "error: actor: on the control host: actor image is missing {}; run `needy build --from needy-custom-jq`",
+      dir.join("vmlinux").display()
+    )]
   );
 }
 

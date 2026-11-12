@@ -90,8 +90,15 @@ impl Daemon {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
-        } else if let Some(missing) = self.unusable_host(&placement, &profile).await {
-          check.findings.push(error(format!("actor: {missing}")));
+        } else if let Ok(driver) = crate::actor::driver_for(self, &profile.actor) {
+          // A driver this daemon lacks is already a finding of
+          // `validate::profile`.
+          check.actor_image = driver.image();
+          match self.unusable_host(&placement, driver.as_ref()).await {
+            Some(missing) => check.findings.push(error(format!("actor: {missing}"))),
+            // The image is there and records this needy's base ABI.
+            None => check.actor_base_abi = Some(needy_core_actor::image::base::ABI),
+          }
         }
         check.actor = Some(placement);
       }
@@ -153,20 +160,19 @@ impl Daemon {
     Ok(check)
   }
 
-  /// Why the host of `profile`'s actor placed at `placement` cannot
-  /// run it (no usable KVM, for Firecracker), or `None` when it can. The
-  /// actor runs on the control host (directly or as its own runner), which
-  /// is probed as `run create` probes it.
+  /// Why the host of an actor of `driver` placed at `placement` cannot run
+  /// it (no usable KVM for Firecracker, an image that is missing or of
+  /// another base ABI or architecture), or `None` when it can. The actor
+  /// runs on the control host (directly or as its own runner), which is
+  /// probed as `run create` probes it.
   // TODO(runner-actor): an actor on another runner is refused before this
   // check (`actor_refusal`); once one can run there, check the KVM its
   // heartbeat reports (`RunnerHost::cpu.kvm_cpuid`, unset without one).
-  async fn unusable_host(&self, placement: &Placement, profile: &Profile) -> Option<String> {
+  async fn unusable_host(&self, placement: &Placement, driver: &dyn needy_core_actor::driver::Driver) -> Option<String> {
     let on = match placement {
       Placement::ControlHost => "the control host".to_string(),
       Placement::Runner(name) => format!("runner {name} (the control host)"),
     };
-    // A driver this daemon lacks is already a finding of `validate::profile`.
-    let driver = crate::actor::driver_for(self, &profile.actor).ok()?;
     driver.check_host().await.err().map(|e| format!("on {on}: {e}"))
   }
 

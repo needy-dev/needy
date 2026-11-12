@@ -28,8 +28,9 @@ pub struct Mismatch {
   pub image: String,
   /// The version it records, as written; `None` when it records none.
   pub found: Option<String>,
-  /// The command that builds an image of this needy's version.
-  pub rebuild: &'static str,
+  /// What makes an image of this needy's version: [`rebuild_with`] or
+  /// [`rebuild_from`].
+  pub advice: String,
 }
 
 impl Mismatch {
@@ -37,38 +38,56 @@ impl Mismatch {
     let Mismatch {
       image,
       found,
-      rebuild,
+      advice,
     } = self;
     match found {
       None => format!(
-        "the actor image {image} records no base ABI: it was built before needy injected its guest at start, with a needy of its own \
-         inside; rebuild it with `{rebuild}`"
+        "the actor image {image} records no base ABI: it is not built FROM a needy base image, or was built \
+         before needy injected its guest at start; {advice}"
       ),
       Some(found) => format!(
-        "the actor image {image} has base ABI {found}, and this needy speaks base ABI {ABI}; rebuild it with `{rebuild}` from this \
-         needy's version, or use a needy that speaks base ABI {found}"
+        "the actor image {image} has base ABI {found}, and this needy speaks base ABI {ABI}; {advice}, or use a needy that \
+         speaks base ABI {found}"
       ),
     }
   }
 }
 
+/// The advice for a base image, which `command` builds.
+pub fn rebuild_with(command: &str) -> String {
+  format!("rebuild it with `{command}` from this needy's version")
+}
+
+/// The advice for a custom image, an OCI image `FROM` a base: rebuild it
+/// from a base of this needy's base ABI, the local one `build_base` builds
+/// or the release's, and then run `then`, if any.
+pub fn rebuild_from(build_base: &str, then: Option<&str>) -> String {
+  let version = env!("CARGO_PKG_VERSION");
+  let then = then.map(|then| format!(", then run `{then}`")).unwrap_or_default();
+  format!(
+    "rebuild it FROM a base image of base ABI {ABI}: `{local}` after `{build_base}`, or `ghcr.io/needy-dev/needy-actor:v{version}`{then}",
+    local = needy_config::profile::CONTAINER_IMAGE
+  )
+}
+
 /// Fails unless `found`, the version image `image` records (`None` when it
-/// records none), is [`ABI`].
-pub fn check(image: &str, found: Option<&str>, rebuild: &'static str) -> Result<(), Mismatch> {
+/// records none), is [`ABI`]; `advice` says how to make one that does.
+pub fn check(image: &str, found: Option<&str>, advice: &str) -> Result<(), Mismatch> {
   match found.map(str::trim) {
     Some(version) if version.parse() == Ok(ABI) => Ok(()),
     found => Err(Mismatch {
       image: image.to_string(),
       found: found.map(String::from),
-      rebuild,
+      advice: advice.to_string(),
     }),
   }
 }
 
-/// Fails unless the VM image in `dir` records [`ABI`] in its [`FILE`].
-pub fn check_dir(dir: &Path, rebuild: &'static str) -> Result<(), Mismatch> {
+/// Fails unless the VM image in `dir` records [`ABI`] in its [`FILE`];
+/// `image` names it in the message.
+pub fn check_dir(dir: &Path, image: &str, advice: &str) -> Result<(), Mismatch> {
   let found = std::fs::read_to_string(dir.join(FILE)).ok();
-  check(&dir.display().to_string(), found.as_deref(), rebuild)
+  check(image, found.as_deref(), advice)
 }
 
 #[cfg(test)]

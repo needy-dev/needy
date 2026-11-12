@@ -155,6 +155,8 @@ impl Runs for Fake {
       ]
       .into(),
       actor_cpu: "Fake CPU".into(),
+      actor_image: "needy-custom-jq".into(),
+      actor_base_abi: Some(1),
       findings: vec![ProfileFinding {
         error: true,
         message: "recipe: avx512f is missing".into(),

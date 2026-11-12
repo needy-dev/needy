@@ -29,7 +29,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
-use needy_config::profile::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor};
+use needy_config::profile::{Actor, ActorDriver, CONTAINER_IMAGE};
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 use needy_core::types::Capture;
@@ -41,7 +41,7 @@ pub use cli::{Cli, Output, PROGRAM, Process};
 use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST, GUEST_SOCKET, INIT, PROCESS_SOCKET, channels_dir};
 use crate::driver::{Channels, Driver, Endpoint, Error, Facets, Gap, Identity, Leftover, Running, Side, Start, Terminal, Transport};
 use crate::image::base;
-use crate::image::container::name;
+use crate::image::container::{self, name};
 
 /// What builds the container actor image of this needy's version into
 /// Apple's `container`.
@@ -119,9 +119,9 @@ impl MacosAppleContainer {
     Self::with_cli(image, Arc::new(cli::Command))
   }
 
-  /// The driver of `actor`, whose `container:` options may name the image.
+  /// The driver of `actor`, whose `image` may name the image.
   pub fn of(actor: &Actor) -> Self {
-    Self::new(ContainerActor::image_of(actor.container.as_ref()))
+    Self::new(actor.container_image())
   }
 
   pub fn with_cli(image: String, cli: Arc<dyn Cli>) -> Self {
@@ -181,6 +181,11 @@ impl MacosAppleContainer {
       vcpus.min(host_cpus).to_string(),
       "--memory".into(),
       format!("{mem_mib}M"),
+      // Init sets the actor up as root and runs the driving program as the
+      // profile's user, whatever `USER` a custom image names, as the
+      // `linux-container` driver does.
+      "--user".into(),
+      "0:0".into(),
       // Init mounts the workspace with FUSE and sets the hostname; the
       // driving program runs as the profile's user without capabilities.
       // The container is alone in its VM, so the VM is the boundary.
@@ -254,21 +259,32 @@ impl MacosAppleContainer {
   }
 }
 
+/// The platform Apple's `container` runs: arm64 Linux on Apple silicon.
+const ARCH: &str = "aarch64";
+
 /// The base ABI label of the linux/arm64 variant of an image, from what
-/// `container image inspect` printed: `None` when it has no such label.
+/// `container image inspect` printed: `None` when it has no such label. An
+/// image without a linux/arm64 variant is refused with the platforms it has.
 // NOTICE: the CLI prints a JSON array with one object per image, whose
 // `variants` hold each platform's OCI image configuration as
 // `config.config.Labels` (the OCI image config's `config.Labels`). Observed
 // with `container` 1.7.1; the CLI documents no output format.
 // Reference: https://github.com/opencontainers/image-spec/blob/v1.1.1/config.md#properties
-fn base_abi(inspected: &str) -> Result<Option<String>, String> {
-  let value: serde_json::Value = serde_json::from_str(inspected).map_err(|e| e.to_string())?;
-  let variants = value.pointer("/0/variants").and_then(|v| v.as_array()).ok_or("it lists no image variants")?;
-  let linux_arm64 = |variant: &&serde_json::Value| {
-    variant.pointer("/config/os").and_then(|v| v.as_str()) == Some("linux")
-      && variant.pointer("/config/architecture").and_then(|v| v.as_str()) == Some("arm64")
+fn base_abi(image: &str, inspected: &str) -> Result<Option<String>, Error> {
+  let unreadable = |e: &str| refused(format!("cannot read `container image inspect {image}`: {e}"));
+  let value: serde_json::Value = serde_json::from_str(inspected).map_err(|e| unreadable(&e.to_string()))?;
+  let variants = value.pointer("/0/variants").and_then(|v| v.as_array()).ok_or_else(|| unreadable("it lists no image variants"))?;
+  let platform = |variant: &serde_json::Value| {
+    let field = |name: &str| variant.pointer(&format!("/config/{name}")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    (field("os"), field("architecture"))
   };
-  let variant = variants.iter().find(linux_arm64).or(variants.first()).ok_or("it lists no image variants")?;
+  let Some(variant) = variants.iter().find(|variant| {
+    let (os, architecture) = platform(variant);
+    container::check_platform(image, &os, &architecture, ARCH).is_ok()
+  }) else {
+    let (os, architecture) = variants.first().map(platform).ok_or_else(|| unreadable("it lists no image variants"))?;
+    return Err(refused(container::check_platform(image, &os, &architecture, ARCH).err().unwrap_or_default()));
+  };
   let label = variant.pointer("/config/config/Labels").and_then(|labels| labels.get(base::LABEL));
   Ok(label.and_then(|v| v.as_str()).map(String::from))
 }
@@ -335,14 +351,23 @@ impl Driver for MacosAppleContainer {
     ActorDriver::MacosAppleContainer
   }
 
+  fn image(&self) -> String {
+    self.image.clone()
+  }
+
   async fn check_host(&self) -> Result<(), Error> {
     self.services().await?;
     let image = self.run(&["image", "inspect", &self.image]).await?;
     if !image.success {
-      return Err(refused(format!("the container actor image {} is not in Apple's `container` image store; run `{REBUILD}`", self.image)));
+      let how = if self.image == CONTAINER_IMAGE {
+        format!("run `{REBUILD}`")
+      } else {
+        "build it with `container build`, or pull it with `container image pull`".into()
+      };
+      return Err(refused(format!("the container actor image {} is not in Apple's `container` image store; {how}", self.image)));
     }
-    let abi = base_abi(&image.stdout).map_err(|e| refused(format!("cannot read `container image inspect {}`: {e}", self.image)))?;
-    Ok(base::check(&self.image, abi.as_deref(), REBUILD)?)
+    let abi = base_abi(&self.image, &image.stdout)?;
+    Ok(base::check(&self.image, abi.as_deref(), &container::advice(&self.image, REBUILD))?)
   }
 
   fn channels(&self, dir: &Path) -> Channels {

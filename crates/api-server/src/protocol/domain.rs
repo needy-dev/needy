@@ -366,6 +366,8 @@ pub fn proto_profile_check(check: ProfileCheck) -> v1::CheckProfileResponse {
     actor: check.actor.map(placement),
     executors: check.executors.into_iter().map(|(name, p)| (name, placement(p))).collect(),
     actor_cpu: check.actor_cpu,
+    actor_image: check.actor_image,
+    actor_base_abi: check.actor_base_abi.map(|abi| abi.to_string()).unwrap_or_default(),
     findings: check
       .findings
       .into_iter()

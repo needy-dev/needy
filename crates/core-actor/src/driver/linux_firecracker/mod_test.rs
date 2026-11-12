@@ -318,6 +318,7 @@ fn detection_needs_a_kvm_device_that_opens_and_a_complete_image() {
   let host = Host {
     kvm: dir.path().join("kvm"),
     image: dir.path().join("image"),
+    images: dir.path().join("images"),
     guest_disks: dir.path().join("guest"),
   };
   std::fs::create_dir(&host.image).unwrap();
@@ -344,6 +345,7 @@ fn detection_needs_linux() {
   let host = Host {
     kvm: dir.path().to_path_buf(),
     image: dir.path().to_path_buf(),
+    images: dir.path().to_path_buf(),
     guest_disks: dir.path().to_path_buf(),
   };
 

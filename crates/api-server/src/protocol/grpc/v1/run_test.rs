@@ -201,6 +201,7 @@ async fn the_cli_checks_a_profile_and_reads_placements_and_findings() {
   // The control host is an empty runner name.
   assert_eq!(check.executors["build"].runner, "");
   assert_eq!(check.actor_cpu, "Fake CPU");
+  assert_eq!((check.actor_image.as_str(), check.actor_base_abi.as_str()), ("needy-custom-jq", "1"));
   assert_eq!(check.findings.len(), 1);
   assert_eq!(check.findings[0].severity(), FindingSeverity::Error);
   assert_eq!(check.findings[0].message, "recipe: avx512f is missing");

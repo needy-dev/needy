@@ -110,6 +110,11 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
   } else {
     println!("actor: {actor} ({})", check.actor_cpu);
   }
+  match (check.actor_image.as_str(), check.actor_base_abi.as_str()) {
+    ("", _) => {}
+    (image, "") => println!("actor image: {image}"),
+    (image, abi) => println!("actor image: {image} (base ABI {abi})"),
+  }
   let executors: Vec<String> = profile.executors.keys().map(|name| format!("{name} ({})", host(check.executors.get(name)))).collect();
   println!("executors: {}", executors.join(", "));
   print_route_names(&profile);

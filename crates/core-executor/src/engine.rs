@@ -50,6 +50,18 @@ pub fn labels(run: &str, role: &str) -> HashMap<String, String> {
   ])
 }
 
+/// What an image the engine has records, as far as needy reads it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Image {
+  /// The image's ID: the digest of its configuration.
+  pub id: String,
+  /// Its platform, as the OCI image configuration names it (`linux`;
+  /// `amd64`, `arm64`).
+  pub os: String,
+  pub architecture: String,
+  pub labels: HashMap<String, String>,
+}
+
 /// What the engine did not do. The messages say it whole, for a driver to
 /// wrap in its own error.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -91,8 +103,8 @@ pub trait Engine: Send + Sync {
   /// that runtime (`runtimeArgs`). It answers only if the engine does, so
   /// it is also the probe of whether one does.
   async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error>;
-  /// The labels of `image`, or `None` when the engine does not have it.
-  async fn image_labels(&self, image: &str) -> Result<Option<HashMap<String, String>>, Error>;
+  /// What `image` records, or `None` when the engine does not have it.
+  async fn inspect_image(&self, image: &str) -> Result<Option<Image>, Error>;
   /// Pulls `image`; a bare name means its `latest` tag.
   async fn pull(&self, image: &str) -> Result<(), Error>;
   /// Creates the container `name`; [`Error::NotFound`] when its image is
@@ -174,7 +186,7 @@ impl Engine for Unreachable {
     Err(self.error())
   }
 
-  async fn image_labels(&self, _image: &str) -> Result<Option<HashMap<String, String>>, Error> {
+  async fn inspect_image(&self, _image: &str) -> Result<Option<Image>, Error> {
     Err(self.error())
   }
 
@@ -223,9 +235,14 @@ impl Engine for Docker {
     Ok(info.runtimes.unwrap_or_default().into_iter().map(|(name, runtime)| (name, runtime.runtime_args.unwrap_or_default())).collect())
   }
 
-  async fn image_labels(&self, image: &str) -> Result<Option<HashMap<String, String>>, Error> {
+  async fn inspect_image(&self, image: &str) -> Result<Option<Image>, Error> {
     match self.0.inspect_image(image).await.map_err(Error::from) {
-      Ok(inspected) => Ok(Some(inspected.config.and_then(|config| config.labels).unwrap_or_default())),
+      Ok(inspected) => Ok(Some(Image {
+        id: inspected.id.unwrap_or_default(),
+        os: inspected.os.unwrap_or_default(),
+        architecture: inspected.architecture.unwrap_or_default(),
+        labels: inspected.config.and_then(|config| config.labels).unwrap_or_default(),
+      })),
       Err(e) if e.is_not_found() => Ok(None),
       Err(e) => Err(e),
     }
@@ -307,8 +324,10 @@ fn ignore(result: Result<(), BollardError>, fine: &[u16]) -> Result<(), Error> {
   }
 }
 
-/// An image reference with its tag: the API pulls every tag of a bare name.
-fn with_tag(image: &str) -> String {
+/// An image reference with its tag, `latest` for a bare name: the API pulls
+/// every tag of a bare name, and the VM images `needy build --from` makes
+/// are named by the tagged reference.
+pub fn with_tag(image: &str) -> String {
   let last = image.rsplit('/').next().unwrap_or(image);
   if last.contains(':') || last.contains('@') {
     image.to_string()

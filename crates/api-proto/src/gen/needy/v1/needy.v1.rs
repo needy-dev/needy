@@ -791,6 +791,16 @@ pub struct CheckProfileResponse {
     pub actor_cpu: ::prost::alloc::string::String,
     #[prost(message, repeated, tag="4")]
     pub findings: ::prost::alloc::vec::Vec<ProfileFinding>,
+    /// The image the actor would start from, as its driver names it: a
+    /// container image's reference, or a VM image's directory and the OCI image
+    /// it was made from. Empty when the actor's driver is not this control
+    /// host's.
+    #[prost(string, tag="5")]
+    pub actor_image: ::prost::alloc::string::String,
+    /// The base ABI the actor image records, when it is the one this control
+    /// plane speaks; empty when it is not, which a finding explains.
+    #[prost(string, tag="6")]
+    pub actor_base_abi: ::prost::alloc::string::String,
 }
 /// The host an actor or executor would run on.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

@@ -345,6 +345,35 @@ async fn an_image_built_with_its_own_needy_inside_is_refused() {
   assert!(error.starts_with("the actor image needy-actor:latest records no base ABI"), "{error}");
 }
 
+#[tokio::test]
+async fn an_image_without_an_arm64_variant_is_refused_with_the_platform_to_build() {
+  // An image built on an x86 machine, without `--platform linux/arm64`.
+  let amd64 = r#"[{"variants": [{"config": {"architecture": "amd64", "os": "linux", "config": {"Labels": {"needy.base-abi": "1"}}}}]}]"#;
+  let (runtime, _) = runtime(Fake {
+    inspected: Some(amd64.into()),
+    ..Default::default()
+  });
+
+  let error = runtime.check_host().await.unwrap_err().to_string();
+
+  assert_eq!(
+    error,
+    "the actor image needy-actor:latest is linux/amd64, and actors here run linux/arm64, the guest needy's platform; build it for \
+     linux/arm64 (`docker build --platform linux/arm64`)"
+  );
+}
+
+#[test]
+fn the_actor_starts_as_root_whatever_user_the_image_names() {
+  // A custom image may end with `USER`; init needs root to set the actor up.
+  let (runtime, _) = runtime(Fake::default());
+  let user = User::default();
+
+  let launch = runtime.launch(&start(Path::new("/r"), &user, None));
+
+  assert_eq!(values(&launch.args, "--user"), ["0:0"]);
+}
+
 #[test]
 fn the_guest_needy_is_mounted_read_only_over_the_base_images_placeholder() {
   let (runtime, _) = runtime(Fake::default());

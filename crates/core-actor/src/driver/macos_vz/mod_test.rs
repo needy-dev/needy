@@ -105,7 +105,7 @@ fn an_image_without_its_kernel_is_missing_the_kernel() {
 
   let error = Image::new(dir.path()).check().unwrap_err();
 
-  assert!(matches!(&error, Error::Missing(path) if path == &dir.path().join("Image")), "{error:?}");
+  assert!(matches!(&error, Error::Missing { path, build } if path == &dir.path().join("Image") && build == "needy build"), "{error:?}");
 }
 
 #[test]
@@ -213,6 +213,7 @@ async fn detection_needs_apple_silicon_macos() {
   let host = Host {
     kvm: dir.path().to_path_buf(),
     image: dir.path().to_path_buf(),
+    images: dir.path().to_path_buf(),
     guest_disks: dir.path().to_path_buf(),
   };
 

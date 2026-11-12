@@ -241,6 +241,12 @@ pub struct ProfileCheck {
   /// unknown.
   pub actor_cpu: String,
   pub findings: Vec<ProfileFinding>,
+  /// The image the actor would start from, as its driver names it; empty
+  /// when unknown.
+  pub actor_image: String,
+  /// The base ABI the actor image records, when it is this control plane's;
+  /// `None` when it is not, which a finding explains.
+  pub actor_base_abi: Option<u32>,
 }
 
 /// The host an actor or executor would run on.

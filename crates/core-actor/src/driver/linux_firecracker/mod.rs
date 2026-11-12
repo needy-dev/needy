@@ -93,10 +93,12 @@ pub struct LinuxFirecracker {
 }
 
 impl LinuxFirecracker {
-  /// The driver on `host`: its actor image, KVM device and guest disks.
-  pub fn on(host: &Host) -> Self {
+  /// The driver on `host`: its KVM device and guest disks, and the VM image
+  /// made from the OCI image `image` names (`actor.image`), or the base VM
+  /// image without one.
+  pub fn on(host: &Host, image: Option<&str>) -> Self {
     Self {
-      image: Image::new(&host.image),
+      image: crate::driver::vm_image(host, ActorDriver::LinuxFirecracker, image, Image::of),
       kvm: host.kvm.clone(),
       guest_disks: host.guest_disks.clone(),
     }
@@ -107,6 +109,10 @@ impl LinuxFirecracker {
 impl Driver for LinuxFirecracker {
   fn kind(&self) -> ActorDriver {
     ActorDriver::LinuxFirecracker
+  }
+
+  fn image(&self) -> String {
+    crate::driver::describe_vm_image(&self.image.dir, &self.image.source)
   }
 
   async fn check_host(&self) -> Result<(), Error> {

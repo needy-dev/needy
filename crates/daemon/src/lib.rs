@@ -116,8 +116,13 @@ pub struct Config {
   pub state_dir: PathBuf,
   /// The local executor's socket.
   pub runtime_dir: PathBuf,
-  /// The actor's `vmlinux`, `rootfs.ext4` and `firecracker`.
+  /// The base VM image a VM driver boots for a profile without
+  /// `actor.image`: `vmlinux`, `rootfs.ext4` and `firecracker`, or the
+  /// `macos-vz` files.
   pub actor_image: PathBuf,
+  /// Where `needy build --from` writes the VM images a profile names by
+  /// their OCI reference: needy's data directory's `images`.
+  pub vm_images: PathBuf,
   /// The KVM device an actor's Firecracker opens:
   /// `needy_core_actor::driver::linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,

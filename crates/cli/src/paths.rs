@@ -60,7 +60,14 @@ impl Paths {
 
   /// The image `needy build` writes and the daemon boots by default.
   pub fn default_image(&self) -> PathBuf {
-    self.data.join("images").join("default")
+    self.images().join("default")
+  }
+
+  /// needy's VM images: the base in `default`, and those `needy build
+  /// --from` makes in a directory per driver
+  /// (`needy_core_actor::image::vm::dir_of`).
+  pub fn images(&self) -> PathBuf {
+    self.data.join("images")
   }
 
   /// The guest disks the VM drivers make from the guest needy (the control
