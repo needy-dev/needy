@@ -47,8 +47,11 @@ The flow is always the same:
 ### Install
 
 No release has assets yet. Prebuilt binaries and images come with the next
-release; until then, build from a checkout. `needy build` needs the checkout
-too (it builds the actor and executor images from `images/`).
+release, and the channels below work from then on; until then, build from a
+checkout. `needy build` needs the checkout too (it builds the actor and
+executor images from `images/`).
+
+#### From source
 
 ```sh
 git clone https://github.com/needy-dev/needy && cd needy
@@ -61,6 +64,55 @@ Actor images hold no needy: the control daemon brings its own **guest
 needy** into every actor it starts, a static Linux build of its own version.
 It looks for `needy-linux-<arch>` next to its executable (or takes
 `--guest-needy PATH`); a static Linux release `needy` is its own guest.
+
+#### macOS
+
+```sh
+brew install needy-dev/tap/needy
+needy --version
+```
+
+Alternatively, without [Homebrew](https://brew.sh/):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
+```
+
+Both install the guest needy next to `needy` on Apple silicon.
+
+#### Linux
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
+needy --version
+```
+
+> [!NOTE]
+> The script checks the archive's `.sha256` before it installs anything. Set
+> `NEEDY_VERSION` to a release tag or `NEEDY_INSTALL_DIR` to change the
+> release or the install directory (default: `~/.local/bin`). `latest` is the
+> newest release that is not a prerelease. The Linux build is static, so it
+> runs on any distribution.
+
+#### Windows
+
+Download
+[needy-x86_64-pc-windows-msvc.zip](https://github.com/needy-dev/needy/releases/latest/download/needy-x86_64-pc-windows-msvc.zip),
+extract `needy.exe` to a permanent directory and add that directory to your
+user `PATH`. A Windows machine is an executor only.
+
+#### Install with proto
+
+Install and configure [proto](https://moonrepo.dev/docs/proto) first. Then add
+the needy plugin and install the latest release:
+
+```sh
+proto plugin add needy "https://raw.githubusercontent.com/needy-dev/needy/main/toolchain/proto/needy.toml" --to global
+proto install needy latest --config-mode global --pin global
+needy --version
+```
+
+After installing, build the images with `needy build` (see the table below).
 
 From the next release on, each
 [GitHub release](https://github.com/needy-dev/needy/releases) carries these
@@ -108,6 +160,21 @@ What each machine needs besides `needy`:
 | Linux without KVM (actor host) | a Docker-compatible engine; `sshfs` and `user_allow_other` in `/etc/fuse.conf` for workspace mounts; `lxcfs` for resource views | `needy build --linux-container --executor` |
 | Apple silicon Mac (actor host) | `brew install vfkit`, or Apple's [`container`](https://github.com/apple/container) | `needy build` (for `macos-vz`) or `needy build --macos-apple-container` |
 | Any Linux, macOS or Windows machine (executor only) | nothing | join as a runner, see [Add machines](#add-machines) |
+
+#### Uninstall
+
+Use the commands that match how you installed needy. They keep needy's
+state and data directories.
+
+```sh
+brew uninstall needy                                      # Homebrew
+rm -f ~/.local/bin/needy ~/.local/bin/needy-linux-*       # install script
+proto uninstall needy && proto plugin remove needy --from global   # proto
+cargo uninstall needy-cli                                 # from source; also remove the copied needy-linux-*
+```
+
+On Windows, delete the directory you extracted `needy.exe` to and remove it
+from `PATH`.
 
 ### Start the control daemon
 

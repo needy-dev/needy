@@ -24,6 +24,7 @@ request cancels the older run; runs on `main` are never cancelled.
 | `rust macos-15` | macOS arm64 | the same without `fmt` (it does not depend on the platform) |
 | `rust windows-2025` | Windows x86_64 | the same without `fmt` |
 | `proto` | Linux | `buf lint`, `buf format --diff --exit-code`, `buf generate`, then fails if `crates/api-proto/src/gen` differs from the commit |
+| `release tooling` | Linux | ShellCheck on `install/install.sh` and the Homebrew scripts, then `scripts/tests/render-homebrew-formula` (see [Install channels](#install-channels)) |
 
 - The toolchain is the one `rust-toolchain.toml` pins, installed with the
   runner's own `rustup toolchain install`
@@ -145,6 +146,151 @@ Images:
 - `NOTICE(artifact-retention)`: workflow artifacts are kept 7 days; the
   release keeps the published copy.
 
+## Install channels
+
+Three channels install the release binaries, each modelled on moeru-ai/auv's
+(`install/install.sh`, `toolchain/proto/auv.toml`,
+`scripts/render-homebrew-formula` and `update-homebrew.yml`). None works
+before a release has assets; the README keeps the from-source path first
+until then.
+
+| Channel | Platforms | What it installs |
+| --- | --- | --- |
+| `install/install.sh` | macOS (arm64, x86_64), Linux (x86_64, aarch64) | `needy`, and `needy-linux-aarch64` next to it when the archive carries one |
+| proto plugin `toolchain/proto/needy.toml` | macOS, Linux, Windows x86_64 | the archive into proto's tool directory; `needy` and, where present, `needy-linux-aarch64` linked into `~/.proto/bin` |
+| Homebrew formula in `needy-dev/homebrew-tap` | macOS (arm64, x86_64) | `needy`, and `needy-linux-aarch64` on arm64 |
+
+Windows has no script; the README links the `.zip` under
+`releases/latest/download/`.
+
+### Install script
+
+- POSIX `sh`. `NEEDY_VERSION` (a tag, with or without `v`; default
+  `latest`) and `NEEDY_INSTALL_DIR` (default `~/.local/bin`; a relative path
+  is taken from the current directory).
+- Picks `needy-<arch>-apple-darwin.tar.gz` or
+  `needy-<arch>-unknown-linux-musl.tar.gz` from `uname`. A shell under
+  Rosetta 2 on Apple silicon (`sysctl.proc_translated` is 1) gets the arm64
+  archive, the one with the guest needy (`NOTICE(rosetta)`).
+- Downloads the archive and its `.sha256` with `curl`, compares the digest
+  (`sha256sum`, else `shasum -a 256`) and refuses on a mismatch before it
+  unpacks anything. It then runs the unpacked `needy --version` and installs
+  `needy` and any `needy-linux-*` with mode 0755.
+- Ends with the `PATH` hint and a pointer to the README's Getting started.
+- `NOTICE(install-url)`: there is no domain yet, so the script is served
+  from `https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh`.
+- `NOTICE(release-latest)`: `latest` uses GitHub's `releases/latest`, which
+  skips prereleases (as do the README's Windows links). While releases are
+  published as prereleases, `latest` finds nothing and users must set
+  `NEEDY_VERSION`.
+- Test hook: `NEEDY_DOWNLOAD_BASE` replaces the release URL with any URL
+  that serves the assets directly, such as a local HTTP server over a
+  workflow run's artifacts. It is how the script was verified without a
+  release.
+
+### proto plugin
+
+A TOML plugin: each platform's `download-file` and `checksum-file` name a
+release archive and its `.sha256`, which proto checks; versions come from the
+repository's `v*` tags (`[resolve] git-url`). Linux always maps to the musl
+archive, so `{libc}` is not used. Windows lists x86_64 only
+(`TODO(windows-arm64)`).
+
+`needy-linux-aarch64` is a second exe with `no-shim`: on macOS
+`std::env::current_exe` returns the path a program was started by without
+resolving symlinks, so a daemon started as `~/.proto/bin/needy` looks for the
+guest in `~/.proto/bin`. proto skips the link where the archive has no such
+file.
+
+### Homebrew
+
+- `scripts/render-homebrew-formula <vX.Y.Z> <arm64.sha256> <x86_64.sha256>
+  <output>` writes `Formula/needy.rb`. It accepts only a plain `vX.Y.Z` tag
+  and 64 lowercase hex digits per checksum, and writes the file with mode
+  0644 (`brew style` rejects mktemp's 0600).
+- The formula selects the archive by CPU, `depends_on :macos`
+  (`TODO(homebrew-linux)`: Linux bottles deferred, as in auv), installs
+  `needy` and, when present, `needy-linux-aarch64` into `bin`, and tests
+  `needy --version`. `skip_clean "bin/needy-linux-aarch64"`: Homebrew's
+  cleaner makes a file it does not take for an executable (a Linux ELF on
+  macOS) 0444, which would leave the guest unexecutable.
+- `REVIEW(license)`: the formula says `AGPL-3.0-only`. The repository's
+  LICENSE has no version notice and GitHub reports the deprecated SPDX id
+  `AGPL-3.0`, which Homebrew does not accept; the owner should confirm
+  `-only` over `-or-later`.
+- `scripts/tests/render-homebrew-formula` compares the output with an
+  expected formula and checks the refusals (split checksum, invalid checksum,
+  prerelease tag, no output left behind, readable mode). `check.yml`'s
+  `release tooling` job runs it.
+- `.github/workflows/update-homebrew.yml` runs on `release: released` and on
+  `workflow_dispatch` with `tag_name`. It fails first, with an error
+  annotation, when `HOMEBREW_TAP_GITHUB_TOKEN` is not set; then it downloads
+  the two Darwin `.sha256` files of the release, clones
+  `needy-dev/homebrew-tap`, renders the formula, and commits and pushes it
+  when it changed. `NOTICE(homebrew-stable)`: `released` does not fire for
+  prereleases, so a prerelease reaches the tap only by dispatch.
+
+### Owner setup
+
+The tap repository and the secret do not exist yet; `update-homebrew.yml`
+fails at its first step until both do. To set them up:
+
+1. Create the public repository `needy-dev/homebrew-tap` (Homebrew maps
+   `needy-dev/tap` to it) with a README, so it has a default branch to push
+   to. A `Formula/` directory is created by the first run.
+2. Create a fine-grained personal access token (or a GitHub App token)
+   whose resource owner is `needy-dev`, with access to `needy-dev/homebrew-tap`
+   only and the repository permission Contents: Read and write.
+3. Add it to `needy-dev/needy` as the Actions secret
+   `HOMEBREW_TAP_GITHUB_TOKEN`
+   (`gh secret set HOMEBREW_TAP_GITHUB_TOKEN -R needy-dev/needy`).
+4. After the first release with assets, publish it as a full release (not a
+   prerelease) so `update-homebrew.yml` runs, or run it by hand:
+   `gh workflow run update-homebrew.yml -R needy-dev/needy -f tag_name=vX.Y.Z`.
+   Then check `brew install needy-dev/tap/needy` on a Mac.
+
+Publishing releases as full releases also makes `latest` work for the
+install script and the README's Windows links; proto resolves `latest` from
+the tags and does not depend on it.
+
+### Verification of the install channels
+
+On 2026-11-12, with the binary artifacts of the non-publishing release run
+https://github.com/needy-dev/needy/actions/runs/43213270575 served by a local
+HTTP server (`python3 -m http.server`). Its arm64 macOS archive predates the
+`macos-guest` job, so a copy was repacked with the run's
+`aarch64-unknown-linux-musl` needy as `needy-linux-aarch64` to stand in for
+it.
+
+- `install.sh`, through `NEEDY_DOWNLOAD_BASE`: on an Apple silicon Mac
+  (native and under `arch -x86_64`, which picked the arm64 archive), on a
+  Linux KVM host (x86_64, Debian 13), and in clean `debian:12` and
+  `ubuntu:24.04` containers (arm64, plus `ubuntu:24.04` amd64). Each
+  verified the checksum, installed, and `needy --version` printed
+  `needy 0.0.1`; the Mac installed `needy-linux-aarch64` (a static aarch64
+  ELF, 0755) next to `needy`. With a wrong `.sha256` every one refused with
+  `Checksum mismatch` and installed nothing.
+- proto 0.63.1 with an isolated `PROTO_HOME`: `proto plugin add` from a copy
+  of `needy.toml` whose two URLs point at the local server, then `proto
+  install needy latest` resolved 0.0.1 from the tags, verified the checksum
+  and installed; `needy --version` worked through `~/.proto/bin` and the
+  shim, and `needy-linux-aarch64` was linked; an archive without it
+  installed without the link. A wrong `.sha256` failed with
+  `proto::install::invalid_checksum`. `proto uninstall needy` and `proto
+  plugin remove needy --from global` removed it.
+- Homebrew 7.0.13: the formula rendered from the artifacts' checksums passed
+  `brew style` and `brew audit --strict --formula` in a throwaway tap
+  (`brew tap-new --no-git`). With its URLs pointed at the local server
+  (same `/v0.0.1/` path, so Homebrew infers 0.0.1), `brew install --formula`
+  installed both files, `brew test` passed, and `needy-linux-aarch64` kept
+  0755 (it was 0444 before `skip_clean`).
+- `actionlint` passed on the workflows; `check.yml`'s `release tooling` job
+  passed on `main`.
+
+Not verified: the real release URLs, the `.zip` through proto on Windows,
+proto on Linux, `brew audit --online`, and `update-homebrew.yml` itself,
+which needs the tap and the secret.
+
 ## Verification
 
 On 2026-11-12, on GitHub-hosted runners:
@@ -191,3 +337,9 @@ them.
   product or the test is wrong.
 - **`buf breaking` in `check.yml`** once a release promises wire
   compatibility (`NOTICE(proto-breaking)`).
+- **Guest lookup through symlinks**: the daemon looks for
+  `needy-linux-<arch>` next to `current_exe()`, which on macOS is the
+  symlink a program was started by. Also looking next to the resolved path
+  would make any symlinked install find the guest, not only the channels
+  that link it beside `needy` (Homebrew, proto).
+- **A short install URL** (`NOTICE(install-url)`) once needy has a domain.
