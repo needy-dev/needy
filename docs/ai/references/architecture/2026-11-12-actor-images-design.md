@@ -342,6 +342,17 @@ hosts (results in the commit that records this section); a stand-in
 Firecracker test failed once on the Linux host with `Text file busy` and
 passed in six reruns (candidates).
 
+**CI.** `check.yml` passed on Linux, macOS and Windows:
+https://github.com/needy-dev/needy/actions/runs/43250448634 (the first
+two runs failed on Windows only, where `clippy` found the daemon's type
+split from its `cfg(unix)` and a larger `daemon::Args`; both were fixed).
+`release.yml`, dispatched without publishing, built every binary and both
+architectures' base images, checked `base-abi` 1, the container image's
+label, a shim's message without the guest and a shim and the guest with
+it bind-mounted, and packed `needy-linux-aarch64` (static, AArch64) next to
+`needy` in `needy-aarch64-apple-darwin.tar.gz`:
+https://github.com/needy-dev/needy/actions/runs/43252994149.
+
 ## Candidate next slices
 
 - **Guest disk cleanup** (`TODO(guest-disk)`): every guest binary leaves a
