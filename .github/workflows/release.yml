@@ -1,0 +1,414 @@
+# Builds the `needy` binaries, the prebuilt actor images and the container
+# images for a release, and on a real release publishes them.
+# The structure (build matrix, archives with a `.sha256`, a "binary starts"
+# check, `workflow_dispatch` with an optional upload to an existing release, a
+# `publish` job on `softprops/action-gh-release`) follows moeru-ai/auv's
+# `.github/workflows/release.yml`, whose action versions it also uses
+# (checkout@v6, upload-artifact@v7, download-artifact@v8,
+# action-gh-release@v2). The `docker/*` actions are their current majors
+# (setup-buildx v4, build-push v7, login v4) and the per-architecture digest
+# merge is Docker's documented multi-platform pattern:
+# https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
+#
+# A plain `workflow_dispatch` builds and verifies everything and publishes
+# nothing: no release assets, no GHCR push.
+name: Release
+
+on:
+  # NOTICE(release-trigger): `published` fires for releases and prereleases
+  # alike. Publishing a prerelease also fires `prereleased`, so listing both
+  # (auv lists only `prereleased`) would start two runs that build and upload
+  # the same assets.
+  # Reference: https://docs.github.com/en/webhooks/webhook-events-and-payloads#release
+  release:
+    types:
+      - published
+  workflow_dispatch:
+    inputs:
+      upload_to_release:
+        description: Upload artifacts to an existing GitHub release and push the container images
+        required: false
+        default: false
+        type: boolean
+      tag_name:
+        description: Existing release tag to upload to when upload_to_release is enabled
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # True on a release event, or on a dispatch that asks to upload to a named
+  # release. Everything that publishes (GHCR pushes, release assets) checks it.
+  PUBLISH: ${{ github.event_name == 'release' || (inputs.upload_to_release && inputs.tag_name != '') }}
+  TAG_NAME: ${{ github.event.release.tag_name || inputs.tag_name }}
+  REGISTRY: ghcr.io/needy-dev
+
+jobs:
+  binary:
+    name: needy ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # NOTICE(linux-musl): the Linux binaries are static musl builds, as
+          # the `needy` stage of images/Dockerfile already builds the guest
+          # and executor binary, so they run on any Linux whatever its glibc
+          # and need no old-glibc build container. `musl-tools` gives the C
+          # dependencies (`ring`, bundled SQLite) a musl C compiler.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            archive: needy-x86_64-unknown-linux-musl.tar.gz
+            executable: needy
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            archive: needy-aarch64-unknown-linux-musl.tar.gz
+            executable: needy
+          - os: macos-15
+            target: aarch64-apple-darwin
+            archive: needy-aarch64-apple-darwin.tar.gz
+            executable: needy
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: needy-x86_64-apple-darwin.tar.gz
+            executable: needy
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            archive: needy-x86_64-pc-windows-msvc.zip
+            executable: needy.exe
+    steps:
+      - uses: actions/checkout@v6
+
+      # NOTICE(rust-toolchain): rustup installs the toolchain
+      # `rust-toolchain.toml` pins; see check.yml.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+
+      # NOTICE(windows-static-crt): MSVC targets link the C runtime dynamically
+      # by default, so needy.exe would import VCRUNTIME140.dll, which a fresh
+      # Windows install lacks (it comes only with the Visual C++
+      # Redistributable; the UCRT api-ms-win-crt-* DLLs ship with Windows 10
+      # and later). Copied from moeru-ai/auv's release workflow. It is set for
+      # the release build only; the build passes --target, so build scripts
+      # keep the default.
+      - name: Link the MSVC C runtime statically
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"RUSTFLAGS=-C target-feature=+crt-static" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
+
+      # TODO(release-signing): needy has no Apple Developer ID or Authenticode
+      # certificate, so the macOS binaries are neither signed nor notarized
+      # (Gatekeeper quarantines a downloaded one; `xattr -d
+      # com.apple.quarantine needy` clears it) and needy.exe is unsigned. Add
+      # signing and notarization as moeru-ai/auv does once the owner has
+      # certificates and a provenance policy.
+      - name: Build release binary
+        run: cargo build --locked --release --package needy-cli --bin needy --target ${{ matrix.target }}
+
+      - name: Verify binary starts
+        run: target/${{ matrix.target }}/release/${{ matrix.executable }} --version
+
+      - name: Verify the Linux binary is static
+        if: runner.os == 'Linux'
+        run: |
+          binary=target/${{ matrix.target }}/release/needy
+          file "$binary"
+          if readelf -lW "$binary" | grep -q INTERP || readelf -dW "$binary" | grep -q '(NEEDED)'; then
+            echo "needy is not statically linked" >&2
+            exit 1
+          fi
+
+      # Regression guard for NOTICE(windows-static-crt).
+      - name: Verify the Windows binary needs no Visual C++ runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\*\bin\Host*\*\dumpbin.exe' | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin.exe not found" }
+          $binary = "target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          $imports = & $dumpbin /nologo /dependents $binary | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed for $binary" }
+          $runtime = [regex]::Matches($imports, '(?im)^\s*((vcruntime|msvcp)\S*\.dll)\s*$') | ForEach-Object { $_.Groups[1].Value }
+          if ($runtime) { throw "$binary imports the Visual C++ runtime: $($runtime -join ', ')" }
+          Write-Host "$binary imports no Visual C++ runtime DLL"
+
+      - name: Create archive
+        if: runner.os != 'Windows'
+        run: tar -czf ${{ matrix.archive }} -C target/${{ matrix.target }}/release ${{ matrix.executable }}
+
+      - name: Create archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "target/${{ matrix.target }}/release/${{ matrix.executable }}" -DestinationPath "${{ matrix.archive }}"
+
+      - name: Calculate hash
+        if: runner.os != 'Windows'
+        run: shasum -a 256 ${{ matrix.archive }} | awk '{ print $1 }' > ${{ matrix.archive }}.sha256
+
+      - name: Calculate hash
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-Content -Path "${{ matrix.archive }}.sha256" -Value (Get-FileHash -Algorithm SHA256 "${{ matrix.archive }}").Hash.ToLower()
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.archive }}
+          # NOTICE(artifact-retention): workflow artifacts only carry files
+          # to the publish job and to whoever checks a dispatch run; the
+          # release keeps the published copy. A week keeps the actor images
+          # (hundreds of MB each) from piling up in the storage quota.
+          retention-days: 7
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+
+  # One job per architecture builds that architecture's VM actor files and both
+  # container images on one BuildKit builder, so the `needy` stage of
+  # images/Dockerfile (a full musl build of needy-cli) is built once and reused.
+  # Native runners for each architecture; QEMU would emulate the kernel and
+  # Rust builds and take hours.
+  images:
+    name: images ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The Firecracker actor is x86_64 only (images/Dockerfile).
+          - os: ubuntu-24.04
+            arch: amd64
+            vm_target: actor
+            vm_archive: needy-actor-linux-firecracker-x86_64.tar.gz
+            vm_files: vmlinux rootfs.ext4 firecracker needy
+          # The `macos-vz` actor is arm64 only: Virtualization.framework on
+          # Apple silicon boots it.
+          - os: ubuntu-24.04-arm
+            arch: arm64
+            vm_target: actor-macos-vz
+            vm_archive: needy-actor-macos-vz-aarch64.tar.gz
+            vm_files: Image initrd rootfs.ext4 needy
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6
+
+      # NOTICE(ci-disk): the kernel tree, the Firecracker and needy target
+      # directories, two ext4 root file systems and two images all live in
+      # the BuildKit builder at once; the hosted image's unused toolchains
+      # are removed to make room (about 20 GB).
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - uses: docker/setup-buildx-action@v4
+
+      # The VM actor's files, exported as images/Dockerfile's header shows
+      # (`--output type=local`). `needy build --out` builds the same target
+      # through the Docker API, but picks it from the host it runs on (the
+      # Firecracker target on any Linux), so it cannot build the `macos-vz`
+      # files on a Linux runner. The kernel is built without a recipe, so it
+      # keeps its own `uname` identity; `needy build --recipe` rebuilds it
+      # with a recipe's.
+      - name: Build the ${{ matrix.vm_target }} actor files
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: ${{ matrix.vm_target }}
+          outputs: type=local,dest=vm
+
+      - name: Verify the actor files
+        run: |
+          ls -lsh vm
+          for file in ${{ matrix.vm_files }}; do test -s "vm/$file"; done
+          vm/needy --version
+          if [ -e vm/firecracker ]; then vm/firecracker --version; fi
+          sudo e2fsck -fn vm/rootfs.ext4
+
+      # `--sparse` keeps the free blocks of rootfs.ext4 out of the archive;
+      # GNU tar recreates them as holes on extraction.
+      - name: Archive the actor files
+        run: |
+          tar --sparse -czf ${{ matrix.vm_archive }} -C vm ${{ matrix.vm_files }}
+          sha256sum ${{ matrix.vm_archive }} | awk '{ print $1 }' > ${{ matrix.vm_archive }}.sha256
+          ls -lh ${{ matrix.vm_archive }}
+          sudo rm -rf vm
+
+      - name: Upload the actor files
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.vm_archive }}
+          # See NOTICE(artifact-retention) above. The archive is already
+          # gzip-compressed.
+          retention-days: 7
+          compression-level: 0
+          path: |
+            ${{ matrix.vm_archive }}
+            ${{ matrix.vm_archive }}.sha256
+
+      - name: Build needy-actor
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: actor-container
+          load: true
+          tags: needy-actor:ci
+
+      - name: Build needy-executor
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: executor
+          load: true
+          tags: needy-executor:ci
+
+      # The actor's entrypoint is the guest init, which needs a run; its
+      # needy binary is called directly.
+      - name: Verify the container images start
+        run: |
+          docker run --rm --entrypoint /.needy/needy needy-actor:ci --version
+          docker run --rm needy-executor:ci needy --version
+          docker image ls
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Each architecture pushes its image by digest only; the `manifests`
+      # job tags the multi-architecture list. These builds hit the cache of
+      # the builds above, so they only push.
+      - name: Push needy-actor by digest
+        id: push-actor
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: actor-container
+          platforms: linux/${{ matrix.arch }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=image,name=${{ env.REGISTRY }}/needy-actor,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Push needy-executor by digest
+        id: push-executor
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: executor
+          platforms: linux/${{ matrix.arch }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=image,name=${{ env.REGISTRY }}/needy-executor,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Record the digests
+        if: env.PUBLISH == 'true'
+        env:
+          ACTOR_DIGEST: ${{ steps.push-actor.outputs.digest }}
+          EXECUTOR_DIGEST: ${{ steps.push-executor.outputs.digest }}
+        run: |
+          mkdir -p digests/needy-actor digests/needy-executor
+          touch "digests/needy-actor/${ACTOR_DIGEST#sha256:}" "digests/needy-executor/${EXECUTOR_DIGEST#sha256:}"
+
+      - name: Upload the digests
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          retention-days: 1
+          path: digests
+
+  manifests:
+    name: container manifests
+    needs: images
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: digests
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Tags each image with the release tag and `latest`. needy publishes
+      # every release as a prerelease while it is 0.0.x, so `latest` follows
+      # the newest release of either kind.
+      - name: Create the multi-architecture manifests
+        run: |
+          for image in needy-actor needy-executor; do
+            sources=()
+            for digest in digests/"$image"/*; do
+              sources+=("$REGISTRY/$image@sha256:$(basename "$digest")")
+            done
+            docker buildx imagetools create \
+              -t "$REGISTRY/$image:$TAG_NAME" \
+              -t "$REGISTRY/$image:latest" \
+              "${sources[@]}"
+            docker buildx imagetools inspect "$REGISTRY/$image:$TAG_NAME"
+          done
+
+  publish:
+    name: Publish release artifacts
+    needs:
+      - binary
+      - images
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: needy-*
+          merge-multiple: true
+          path: release
+
+      - name: Verify checksums
+        working-directory: release
+        run: |
+          ls -lh
+          for sum in *.sha256; do
+            echo "$(cat "$sum")  ${sum%.sha256}" | sha256sum -c -
+          done
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          fail_on_unmatched_files: true
+          files: release/*
