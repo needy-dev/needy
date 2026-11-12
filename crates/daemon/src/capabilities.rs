@@ -124,14 +124,14 @@ pub fn firecracker(kvm: &Path, image: &Path) -> Result<(), String> {
   if !cfg!(target_os = "linux") {
     return Err("Firecracker runs on Linux only".into());
   }
-  needy_core_actor::host::firecracker::check_kvm(kvm).map_err(|e| format!("cannot open {}: {}", kvm.display(), kvm_error(&e)))?;
-  needy_core_actor::host::firecracker::Image::new(image).check().map_err(|e| e.to_string())
+  needy_core_actor::driver::linux_firecracker::check_kvm(kvm).map_err(|e| format!("cannot open {}: {}", kvm.display(), kvm_error(&e)))?;
+  needy_core_actor::driver::linux_firecracker::Image::new(image).check().map_err(|e| e.to_string())
 }
 
 /// The OS error of a KVM check, without the check's advice.
-fn kvm_error(error: &needy_core_actor::host::firecracker::Error) -> String {
+fn kvm_error(error: &needy_core_actor::driver::linux_firecracker::Error) -> String {
   match error {
-    needy_core_actor::host::firecracker::Error::Kvm { error, .. } => error.to_string(),
+    needy_core_actor::driver::linux_firecracker::Error::Kvm { error, .. } => error.to_string(),
     other => other.to_string(),
   }
 }
@@ -139,7 +139,7 @@ fn kvm_error(error: &needy_core_actor::host::firecracker::Error) -> String {
 /// Whether a `macos-vz` actor can start on this machine with the actor image in
 /// `image`: Apple silicon macOS, vfkit and the image.
 pub async fn macos_vz(image: &Path) -> Result<(), String> {
-  use needy_core_actor::host::macos::vz;
+  use needy_core_actor::driver::macos_vz as vz;
   if !vz::supported_host() {
     return Err("Virtualization.framework actors run on macOS on Apple silicon only".into());
   }
@@ -150,7 +150,7 @@ pub async fn macos_vz(image: &Path) -> Result<(), String> {
 /// Reads this machine: KVM at `kvm`, the actor image in `image`, the
 /// Docker daemon, vfkit and Apple's `container`.
 pub async fn probe(kvm: &Path, image: &Path) -> Facts {
-  let docker = needy_core_executor::driver::docker::runtimes(DOCKER_WAIT)
+  let docker = needy_core_executor::driver::linux_container::runtimes(DOCKER_WAIT)
     .await
     .map_err(|e| format!("no Docker daemon answers: {:#}", anyhow::Error::from(e)));
   Facts {
@@ -166,7 +166,7 @@ pub async fn macos_apple_container() -> Result<(), String> {
   #[cfg(unix)]
   {
     // The image does not matter for the services.
-    let driver = needy_core_actor::host::macos::apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+    let driver = needy_core_actor::driver::macos_apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
     // NOTICE: `container system status` answers in about 50 ms on an Apple
     // silicon laptop; 3 s bounds services that hang, as `DOCKER_WAIT` does
     // for Docker.

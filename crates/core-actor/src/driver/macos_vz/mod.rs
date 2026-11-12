@@ -28,64 +28,17 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+pub mod vfkit;
+
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
-pub use crate::host::driver::Error;
-use crate::host::driver::{Channels, Driver, Endpoint, Gap, Running, Setup, Start, Terminal};
-pub use crate::host::firecracker::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
+pub use vfkit::{Launch, VFKIT, check_vfkit};
 
-/// The VM process, looked up on `PATH`.
-// NOTICE: Homebrew installs vfkit as `vfkit` (`brew install vfkit`,
-// https://github.com/Homebrew/homebrew-core/blob/HEAD/Formula/v/vfkit.rb);
-// a daemon started from a shell has Homebrew's directory on its `PATH`.
-pub const VFKIT: &str = "vfkit";
-
-/// The guest kernel's command line. `init=` starts needy's guest init.
-// Reference: https://docs.kernel.org/6.18/admin-guide/kernel-parameters.html
-// NOTICE: `console=hvc0` is the virtio console vfkit's `virtio-serial`
-// device gives the guest (`VZVirtioConsoleDeviceSerialPortConfiguration`),
-// https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/virtio.go#L273-L290.
-// NOTICE: there is no `panic=`. Virtualization.framework restarts a guest
-// that reboots (PSCI SYSTEM_RESET) instead of stopping the VM, so a panicked
-// guest that rebooted would boot init again and could run the driving program
-// twice. A panicked guest hangs instead (`CONFIG_PANIC_TIMEOUT=0` in
-// `images/kernel/containerization-arm64.config`), with the panic on the
-// console, until the run is stopped. Init ends the VM by powering off; see
-// `crates/core-actor/src/guest/init/mod.rs`.
-// TODO(macos-vz-panic): a pvpanic device would let the host see a panic and end
-// the VM; Virtualization.framework has none, and vfkit cannot add one.
-const BOOT_ARGS: &str = "console=hvc0 root=/dev/vda ro init=/.needy/init quiet loglevel=4";
-
-/// The files `needy build` writes for `macos-vz` actors.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image {
-  /// The uncompressed arm64 kernel (`arch/arm64/boot/Image`):
-  /// Virtualization.framework's Linux boot loader takes no compressed one.
-  pub kernel: PathBuf,
-  /// An empty initramfs: vfkit needs one (see `images/Dockerfile`).
-  pub initrd: PathBuf,
-  pub rootfs: PathBuf,
-}
-
-impl Image {
-  /// The image in directory `dir`.
-  pub fn new(dir: &Path) -> Self {
-    Self {
-      kernel: dir.join("Image"),
-      initrd: dir.join("initrd"),
-      rootfs: dir.join("rootfs.ext4"),
-    }
-  }
-
-  /// Fails with the first file the image lacks.
-  pub fn check(&self) -> Result<(), Error> {
-    match [&self.kernel, &self.initrd, &self.rootfs].into_iter().find(|path| !path.exists()) {
-      Some(missing) => Err(Error::Missing(missing.clone())),
-      None => Ok(()),
-    }
-  }
-}
+use crate::contract::{GATEWAY_PORT, PROCESS_PORT};
+pub use crate::driver::Error;
+use crate::driver::{Channels, Driver, Endpoint, Gap, Running, Setup, Start, Terminal};
+pub use crate::image::vm::MacosVz as Image;
 
 /// Where the daemon serves the guest API in a VM's directory.
 pub fn guest_socket(dir: &Path) -> PathBuf {
@@ -112,25 +65,6 @@ pub fn pidfile(dir: &Path) -> PathBuf {
 /// macOS on Apple silicon.
 pub fn supported_host() -> bool {
   cfg!(all(target_os = "macos", target_arch = "aarch64"))
-}
-
-/// Fails unless `vfkit` runs.
-pub async fn check_vfkit(vfkit: &Path) -> Result<(), Error> {
-  let output = tokio::process::Command::new(vfkit).arg("--version").stdin(Stdio::null()).output().await.map_err(|e| {
-    Error::Unsupported(format!(
-      "cannot run {}: {e}; a macos-vz actor needs vfkit (`brew install vfkit`, https://github.com/crc-org/vfkit)",
-      vfkit.display()
-    ))
-  })?;
-  if !output.status.success() {
-    return Err(Error::Unsupported(format!(
-      "{} --version failed ({}): {}",
-      vfkit.display(),
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(())
 }
 
 /// The `macos-vz` driver: actors in Virtualization.framework VMs booted from
@@ -238,75 +172,6 @@ pub fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
   gaps
 }
 
-/// How one VM starts: vfkit's arguments.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Launch {
-  pub image: Image,
-  /// The VM's directory.
-  pub dir: PathBuf,
-  pub vfkit: PathBuf,
-  pub vcpus: u32,
-  pub mem_mib: u32,
-  pub args: Vec<String>,
-}
-
-impl Launch {
-  /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one.
-  // NOTICE: vfkit splits a `--device` value at every comma, so a path with a
-  // comma cannot be given; vfkit reports the option it cannot parse,
-  // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/config/virtio.go#L181-L183.
-  pub fn new(image: &Image, vfkit: &Path, dir: &Path, recipe: Option<&CompiledRecipe>) -> Self {
-    let (vcpus, mem_mib) = recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048));
-    let path = |p: &Path| p.to_string_lossy().into_owned();
-    let mut args = vec![
-      "--cpus".to_string(),
-      vcpus.to_string(),
-      "--memory".into(),
-      mem_mib.to_string(),
-      // The command line is one CSV field, quoted, since it has spaces.
-      "--bootloader".into(),
-      format!("linux,kernel={},initrd={},\"cmdline={BOOT_ARGS}\"", path(&image.kernel), path(&image.initrd)),
-      "--device".into(),
-      format!("virtio-blk,path={},readonly", path(&image.rootfs)),
-      // NOTICE: vfkit opens a log file without appending (`append: false`,
-      // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/virtio.go#L283),
-      // which would write over its own messages in the same file; through
-      // `/dev/stdout` the console shares vfkit's standard output, the
-      // console.log the daemon opened for appending.
-      "--device".into(),
-      "virtio-serial,logFilePath=/dev/stdout".into(),
-      "--device".into(),
-      "virtio-rng".into(),
-    ];
-    // The guest dials the daemon's sockets on these ports; vfkit listens on
-    // the process socket for the daemon and connects to the guest's port.
-    for (port, socket, mode) in [
-      (GUEST_PORT, guest_socket(dir), ""),
-      (GATEWAY_PORT, gateway_socket(dir), ""),
-      (PROCESS_PORT, process_socket(dir), ",connect"),
-    ] {
-      args.push("--device".into());
-      args.push(format!("virtio-vsock,port={port},socketURL={}{mode}", path(&socket)));
-    }
-    // TODO(actor-network): no `virtio-net` device, as a Firecracker actor
-    // has no network interface; see `firecracker::Launch`.
-    args.extend([
-      "--pidfile".into(),
-      path(&pidfile(dir)),
-      "--restful-uri".into(),
-      "none://".into(),
-    ]);
-    Self {
-      image: image.clone(),
-      dir: dir.to_path_buf(),
-      vfkit: vfkit.to_path_buf(),
-      vcpus,
-      mem_mib,
-      args,
-    }
-  }
-}
-
 /// A running VM. The handle owns the vfkit process; vfkit exits when the
 /// guest reboots after its driving program, or when the handle stops it.
 // NOTICE: as with Firecracker's `Vm`, the process is not killed when the
@@ -323,7 +188,7 @@ impl Vm {
   /// Starts vfkit with its output and the guest's console in `console.log`.
   pub fn start(launch: &Launch) -> Result<Vm, Error> {
     launch.image.check()?;
-    let console_path = crate::host::driver::log(&launch.dir);
+    let console_path = crate::driver::log(&launch.dir);
     let write_error = |source| Error::Write {
       path: console_path.clone(),
       source,
@@ -375,10 +240,10 @@ impl Running for Vm {
   /// Stops vfkit and waits until it is gone: `SIGTERM` (vfkit asks the
   /// guest to stop, then stops the VM) first, then `SIGKILL` after `grace`.
   async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-    crate::host::driver::stop_process(&mut self.child, "vfkit", grace).await
+    crate::driver::stop_process(&mut self.child, "vfkit", grace).await
   }
 }
 
 #[cfg(all(test, unix))]
-#[path = "vz_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;

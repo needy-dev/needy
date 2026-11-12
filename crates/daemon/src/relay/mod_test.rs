@@ -385,7 +385,7 @@ async fn terminal_guest(started: &testing::Started, command: &str) -> (String, n
   request.tty = Some(WindowSize { rows: 24, cols: 80 });
   let info = Runs::create(&started.daemon, request).await.unwrap();
   let run = started.daemon.runs.find(&info.id).unwrap();
-  let path = needy_core_actor::host::firecracker::vsock(&run.dir);
+  let path = needy_core_actor::driver::linux_firecracker::vsock(&run.dir);
   // The stand-in VM creates a file here to report it started.
   let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
   while !path.exists() {
@@ -413,7 +413,7 @@ async fn terminal_guest(started: &testing::Started, command: &str) -> (String, n
         break;
       }
     }
-    assert_eq!(request, format!("CONNECT {}\n", needy_core_actor::host::firecracker::PROCESS_PORT).as_bytes());
+    assert_eq!(request, format!("CONNECT {}\n", needy_core_actor::contract::PROCESS_PORT).as_bytes());
     stream.write_all(b"OK 1234\n").await?;
     Ok::<_, std::io::Error>(stream)
   });
@@ -473,7 +473,7 @@ async fn an_interactive_create_tells_the_guest_to_wait_for_its_client() {
   let config = Guest::config(&started.daemon, &run.id).await.unwrap();
   assert_eq!(config.tty, Some(size));
   assert!(config.wait_for_attach);
-  assert_eq!(config.process_port, needy_core_actor::host::firecracker::PROCESS_PORT);
+  assert_eq!(config.process_port, needy_core_actor::contract::PROCESS_PORT);
   Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
 }
 
@@ -503,7 +503,7 @@ async fn stopping_a_run_interrupts_an_unanswered_terminal_handshake() {
   request.tty = Some(WindowSize { rows: 24, cols: 80 });
   let info = Runs::create(&started.daemon, request).await.unwrap();
   let run = started.daemon.runs.find(&info.id).unwrap();
-  let path = needy_core_actor::host::firecracker::vsock(&run.dir);
+  let path = needy_core_actor::driver::linux_firecracker::vsock(&run.dir);
   let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
   while !path.exists() {
     assert!(tokio::time::Instant::now() < deadline);

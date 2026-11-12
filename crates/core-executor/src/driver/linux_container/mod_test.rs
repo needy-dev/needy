@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use needy_config::Source;
 use needy_config::profile::{ContainerExecutor as ContainerConfig, Executor, User};
 
+use bollard::models::{ContainerCreateBody, MountType};
+
 use super::*;
 
 /// The `container:` options of a profile's executor, written as YAML.

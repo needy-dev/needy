@@ -27,25 +27,27 @@ Dependencies point downward; a crate never depends on one above it.
   or a run's `TaskTracker`. Mechanisms live below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
   is the in-guest init and exec-routing proxy, on `nix`, logging to the
-  console. `host` runs next to the actor: `detect` reads this machine's CPU,
-  `driver` is the actor `Driver` trait (start, wait, stop, and the guest,
-  gateway and terminal channels the daemon serves or dials) with its
-  `Running` actor, `firecracker` implements it as `linux-firecracker`: it
-  builds the Firecracker configuration from a compiled recipe and owns the
-  Firecracker process; `container` implements it as `linux-container`
-  through a Docker-compatible engine (`identity` writes the recipe's files),
-  and `macos` holds the Mac's drivers: `vz` (`macos-vz`) for
-  Virtualization.framework VMs on Apple silicon (vfkit's arguments from a
-  compiled recipe, the vfkit process) and `apple_container`
-  (`macos-apple-container`) over Apple's `container` CLI; and `gateway` is
-  the actor gateway on the `net.*` interceptors.
+  console; everything else is the host side, next to the actor. `driver` is
+  the actor `Driver` trait (start, wait, stop, and the guest, gateway and
+  terminal channels the daemon serves or dials) with its `Running` actor and
+  the table of drivers: `linux_firecracker` (the Firecracker configuration
+  from a compiled recipe in `config`, the KVM check and host CPU probe in
+  `kvm`, the Firecracker process), `linux_container` (a container through a
+  Docker-compatible engine), `macos_vz` (Virtualization.framework VMs on
+  Apple silicon, vfkit's command line in `vfkit`) and `macos_apple_container`
+  (Apple's `container` CLI in `cli`). What drivers share is a component:
+  `contract` (vsock ports and channel sockets the guest and host agree on),
+  `image` (`vm`: needy's kernel and rootfs; `container`: the container actor
+  image), `identity` (a recipe's identity files presented from the host) and
+  `sshfs`. `sidecar` holds the services a run has next to its actor, with
+  their table: `gateway`, the actor gateway on the `net.*` interceptors.
 - `crates/core-executor` (`needy-core-executor`): where commands run.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is
   the process service one machine serves; `driver` is the executor `Driver`
-  trait that creates and destroys executor instances (`native`, and
-  `linux-container` through `bollard` in `docker`) and owns the container
-  run-option policy; `relay` connects an exec stream to the local
+  trait that creates and destroys executor instances, with the table of
+  drivers: `native` and `linux_container` (through `bollard`; its `options`
+  is the container run-option policy); `relay` connects an exec stream to the local
   terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a

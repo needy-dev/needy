@@ -1,10 +1,12 @@
 //! Executor drivers: what creates and destroys executor instances. A
-//! profile's `executors.NAME.driver` names one. An instance is a machine that serves `ProcessService`; the
-//! daemon's pool decides when to create one and when to destroy it.
+//! profile's `executors.NAME.driver` names one. An instance is a machine that
+//! serves `ProcessService`; the daemon's pool decides when to create one and
+//! when to destroy it.
 //!
-//! - [`native`]: this machine, through the daemon's in-process executor.
-//! - [`docker`] (`linux-container`): a container running `needy daemon
-//!   --mode executor`, through a Docker-compatible engine.
+//! | `executors.NAME.driver` | Module | What an instance is |
+//! | --- | --- | --- |
+//! | `native` | [`native`] | this machine, through the daemon's in-process executor; no OS facility, no prefix |
+//! | `linux-container` | [`linux_container`] | a container running `needy daemon --mode executor`, through a Docker-compatible engine |
 //!
 //! A runner's own machine needs no driver: the daemon reaches it over the
 //! runner's streams. The `remote` provider, which dialed another machine's
@@ -16,7 +18,7 @@
 //! slice, see
 //! `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`.
 
-pub mod docker;
+pub mod linux_container;
 pub mod native;
 
 use std::path::{Path, PathBuf};
@@ -27,7 +29,7 @@ use std::sync::Arc;
 use needy_api_client::Client;
 use needy_config::profile::{Executor, User};
 
-pub use docker::LinuxContainer;
+pub use linux_container::LinuxContainer;
 pub use native::Native;
 
 #[derive(Debug, thiserror::Error)]

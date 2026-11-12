@@ -9,7 +9,10 @@
 > the executor `Provider` is the executor `Driver`; capabilities read
 > `actor(linux-firecracker) executor(linux-container,native)`. The text below
 > keeps the names of its time, and its links to `examples/container` point to
-> what is now `examples/linux-container`.
+> what is now `examples/linux-container`. `crates/core-actor/src/host/` is
+> gone: its files are in `driver/` (one directory per driver), `contract.rs`,
+> `image/`, `identity.rs` and `sidecar/gateway/`; `core-executor`'s
+> `provider/` is `driver/` (`docker.rs` is `linux_container/`).
 
 **Status**: design, 2026-11-10; slices 1 to 4 implemented 2026-11-11, see
 [As built: slice 1](#as-built-slice-1) and

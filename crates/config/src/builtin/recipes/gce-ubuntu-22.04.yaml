@@ -45,7 +45,7 @@ cpu:
     require: [avx512_vnni]
   # TODO(actor-smt): the actor does not set Firecracker's `smt`, so the guest
   # sees these 2 vCPUs as 2 cores of 1 thread, not GCE's 1 core of 2 threads;
-  # see `machine-config` in crates/core-actor/src/host/vm.rs.
+  # see `machine-config` in crates/core-actor/src/driver/linux_firecracker/config.rs.
   topology: { cores: 1, threads_per_core: 2 }
 # Source: the archived general-purpose machines page above: n2-standard-2 is
 # 2 vCPUs and 8 GB.

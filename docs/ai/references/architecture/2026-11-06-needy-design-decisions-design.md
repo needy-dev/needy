@@ -9,7 +9,10 @@
 > the executor `Provider` is the executor `Driver`; capabilities read
 > `actor(linux-firecracker) executor(linux-container,native)`. The text below
 > keeps the names of its time, and its links to `examples/container` point to
-> what is now `examples/linux-container`.
+> what is now `examples/linux-container`. `crates/core-actor/src/host/` is
+> gone: its files are in `driver/` (one directory per driver), `contract.rs`,
+> `image/`, `identity.rs` and `sidecar/gateway/`; `core-executor`'s
+> `provider/` is `driver/` (`docker.rs` is `linux_container/`).
 
 > **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
 > API, the CLI and the trace (slice 2 of

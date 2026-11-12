@@ -1,10 +1,30 @@
-//! What this machine offers, for checking a recipe against the host it runs
-//! on. Parsing lives in `needy_core::recipe::HostInfo`; this module reads the
-//! machine.
+//! KVM on this machine: whether Firecracker can open it, and what this
+//! machine's CPU and KVM offer, for checking a recipe against the host it
+//! runs on. Parsing lives in `needy_core::recipe::HostInfo`; this module reads
+//! the machine.
 
 use std::path::Path;
 
 use needy_core::recipe::HostInfo;
+
+use crate::driver::Error;
+
+/// The KVM device Firecracker opens.
+// Source: https://github.com/rust-vmm/kvm/blob/b4c9ed8df95a9e10a68f50f5ef5e7d04108759ba/kvm-ioctls/src/ioctls/system.rs#L97-L128
+// (kvm-ioctls v0.25.0, which Firecracker v1.17.0 uses: `Kvm::new` opens
+// `/dev/kvm` with `O_RDWR`).
+// Reference: https://www.kernel.org/doc/html/v6.12/virt/kvm/api.html#general-description
+pub const KVM: &str = "/dev/kvm";
+
+/// Fails unless `path`, the KVM device, opens for reading and writing, as
+/// Firecracker opens it. A host without KVM, or whose KVM the daemon's user
+/// may not use, fails here instead of in a VM that exits at once.
+pub fn check_kvm(path: &Path) -> Result<(), Error> {
+  std::fs::OpenOptions::new().read(true).write(true).open(path).map(drop).map_err(|error| Error::Kvm {
+    path: path.to_path_buf(),
+    error,
+  })
+}
 
 /// This machine's CPU, and the CPUID entries its KVM supports. Other systems
 /// than Linux report no flags, which skips the recipe's host checks.
@@ -60,5 +80,5 @@ fn kvm_cpuid() -> Option<std::collections::BTreeSet<(u32, u32)>> {
 }
 
 #[cfg(test)]
-#[path = "detect_test.rs"]
+#[path = "kvm_test.rs"]
 mod tests;

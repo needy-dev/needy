@@ -5,6 +5,7 @@ use needy_config::recipe::IdentityField;
 use needy_core::recipe::{CompiledRecipe, HostInfo};
 
 use super::*;
+use crate::contract::GUEST_PORT;
 
 const IMAGE: &str = "/Users/user/.local/share/needy/actor";
 const DIR: &str = "/Users/user/.local/state/needy/runs/0123456789ab";
@@ -182,7 +183,7 @@ async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   std::fs::set_permissions(&vfkit, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
   let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), None);
   let mut vm = Vm::start(&launch).unwrap();
-  let log = crate::host::driver::log(dir.path());
+  let log = crate::driver::log(dir.path());
   for _ in 0..100 {
     if std::fs::read_to_string(&log).unwrap_or_default().contains("vfkit started") {
       break;

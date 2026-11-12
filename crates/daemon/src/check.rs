@@ -171,7 +171,7 @@ impl Daemon {
       // An actor whose selector does not resolve has no host to check
       // against; the selector's finding says why.
       None => HostInfo::default(),
-      Some(Placement::ControlHost) => needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
+      Some(Placement::ControlHost) => needy_core_actor::driver::linux_firecracker::kvm::detect().unwrap_or_else(|e| {
         check.findings.push(warning(format!("cannot read the control host's CPU; the recipe's host checks are skipped: {e}")));
         HostInfo::default()
       }),

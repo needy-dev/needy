@@ -30,7 +30,7 @@ use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{Principal, RunState};
-use needy_core_actor::host::driver;
+use needy_core_actor::driver;
 use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
@@ -486,7 +486,7 @@ impl Daemon {
           _ => Source::text(request.recipe_yaml.clone(), PathBuf::new()),
         };
         let recipe = needy_config::recipe::load(&source)?;
-        let host = needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
+        let host = needy_core_actor::driver::linux_firecracker::kvm::detect().unwrap_or_else(|e| {
           tracing::warn!("run {id}: cannot read this machine's CPU; the recipe skips host checks: {e}");
           Default::default()
         });

@@ -4,7 +4,7 @@ use super::*;
 
 #[test]
 fn a_cpuinfo_file_reports_the_first_processor() {
-  let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/host/testdata/cpuinfo-two-cores.txt");
+  let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/driver/linux_firecracker/testdata/cpuinfo-two-cores.txt");
 
   let info = cpuinfo(&path).unwrap();
 

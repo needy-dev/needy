@@ -17,12 +17,12 @@ use needy_api_server::{Health, Listen, Server};
 use needy_config::profile::{ActorDriver, ContainerActor, FaultKind, FileMode, Side};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
 use needy_core::types::{Effect, Fired, Network, RunState};
-use needy_core_actor::host::container::LinuxContainer;
-use needy_core_actor::host::driver::{self, Channels, Driver, Endpoint, HostMount, Running, Setup, Start, Terminal};
-use needy_core_actor::host::firecracker::{self, LinuxFirecracker};
-use needy_core_actor::host::gateway;
-use needy_core_actor::host::macos::apple_container::MacosAppleContainer;
-use needy_core_actor::host::macos::vz::{self, MacosVz};
+use needy_core_actor::driver::linux_container::LinuxContainer;
+use needy_core_actor::driver::linux_firecracker::{self, LinuxFirecracker};
+use needy_core_actor::driver::macos_apple_container::MacosAppleContainer;
+use needy_core_actor::driver::macos_vz::{self, MacosVz};
+use needy_core_actor::driver::{self, Channels, Driver, Endpoint, HostMount, Running, Setup, Start, Terminal};
+use needy_core_actor::sidecar::gateway;
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
@@ -40,7 +40,7 @@ const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 pub fn driver(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn Driver>> {
   match actor.driver {
     ActorDriver::LinuxFirecracker => Ok(Box::new(LinuxFirecracker {
-      image: firecracker::Image::new(&daemon.config.actor_image),
+      image: linux_firecracker::Image::new(&daemon.config.actor_image),
       kvm: daemon.config.kvm.clone(),
     })),
     ActorDriver::LinuxContainer => {
@@ -56,8 +56,8 @@ pub fn driver(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<B
       Ok(Box::new(LinuxContainer::new(*oci_runtime, image.clone())))
     }
     ActorDriver::MacosVz => Ok(Box::new(MacosVz {
-      image: vz::Image::new(&daemon.config.actor_image),
-      vfkit: vz::VFKIT.into(),
+      image: macos_vz::Image::new(&daemon.config.actor_image),
+      vfkit: macos_vz::VFKIT.into(),
     })),
     ActorDriver::MacosAppleContainer => Ok(Box::new(MacosAppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
   }

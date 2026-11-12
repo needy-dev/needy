@@ -117,7 +117,7 @@ pub struct Config {
   /// The actor's `vmlinux`, `rootfs.ext4` and `firecracker`.
   pub actor_image: PathBuf,
   /// The KVM device an actor's Firecracker opens:
-  /// `needy_core_actor::host::firecracker::KVM` outside tests.
+  /// `needy_core_actor::driver::linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,
   /// The image of `linux-container` executors that name none.
   pub executor_image: String,
@@ -232,7 +232,7 @@ impl Daemon {
     });
     let local_client = driver::connect(&format!("unix:{}", local_sock.display())).await?;
     let native = Arc::new(Native::new(local_client));
-    let container = match LinuxContainer::new(driver::docker::Options {
+    let container = match LinuxContainer::new(driver::linux_container::Options {
       image: config.executor_image.clone(),
       state_dir: config.state_dir.clone(),
       allow: Vec::new(),

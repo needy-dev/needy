@@ -32,39 +32,13 @@ use std::time::Duration;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
-use crate::host::container::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir, name};
-use crate::host::driver::{Channels, Driver, Endpoint, Error, Gap, Running, Setup, Start, Terminal};
+mod cli;
 
-/// The CLI's program name, found on `PATH`.
-pub const PROGRAM: &str = "container";
+pub use cli::{Cli, Output, PROGRAM, Process};
 
-/// What a finished CLI command said.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Output {
-  pub success: bool,
-  pub stdout: String,
-  pub stderr: String,
-}
-
-/// Apple's `container` CLI, as far as the driver uses it. A real boundary
-/// (a container runtime), so tests stand in for it.
-#[async_trait::async_trait]
-pub trait Cli: Send + Sync {
-  /// Runs `container ARGS` to its end.
-  async fn output(&self, args: &[String]) -> Result<Output, Error>;
-  /// Starts `container ARGS` without input, its stdout and stderr written to
-  /// `log`.
-  fn spawn(&self, args: &[String], log: std::fs::File) -> Result<Box<dyn Process>, Error>;
-}
-
-/// A started CLI process.
-#[async_trait::async_trait]
-pub trait Process: Send {
-  fn id(&self) -> u32;
-  async fn wait(&mut self) -> std::io::Result<ExitStatus>;
-  /// Kills the CLI process itself (not the container).
-  fn kill(&mut self) -> std::io::Result<()>;
-}
+use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
+use crate::driver::{Channels, Driver, Endpoint, Error, Gap, Running, Setup, Start, Terminal};
+use crate::image::container::name;
 
 /// The `macos-apple-container` driver: actors in containers of `image`, which
 /// must be in Apple's `container` image store.
@@ -86,7 +60,7 @@ impl MacosAppleContainer {
   /// The driver on this machine's `container` CLI. Nothing runs until it
   /// is used; a CLI that is missing fails each use, `check_host` first.
   pub fn new(image: String) -> Self {
-    Self::with_cli(image, Arc::new(Command))
+    Self::with_cli(image, Arc::new(cli::Command))
   }
 
   pub fn with_cli(image: String, cli: Arc<dyn Cli>) -> Self {
@@ -126,7 +100,7 @@ impl MacosAppleContainer {
 
   /// The CLI arguments that run the actor for `start`.
   pub fn launch(&self, start: &Start<'_>) -> Launch {
-    let (vcpus, mem_mib) = size(start.recipe);
+    let (vcpus, mem_mib) = crate::driver::size(start.recipe);
     let user = start.user;
     let channels = channels_dir(start.dir);
     let name = name(start.run);
@@ -225,12 +199,6 @@ fn first_line(output: &Output) -> String {
   text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("no output").to_string()
 }
 
-/// The vCPUs and memory of an actor of `recipe`, or of a plain 2 vCPU,
-/// 2 GiB machine without one, as a Firecracker actor's.
-fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
-  recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048))
-}
-
 /// What of `recipe` (or of a plain machine) an actor under Apple's
 /// `container` with its default kernel does not present.
 // TODO(macos-apple-container-kernel): DMI, the sensors and the uptime offset need
@@ -323,7 +291,7 @@ impl Driver for MacosAppleContainer {
     let launch = self.launch(start);
     // A container left by an earlier daemon would block the name.
     self.end_leftover(start.run).await;
-    let log = crate::host::driver::log(start.dir);
+    let log = crate::driver::log(start.dir);
     let file = std::fs::File::create(&log).map_err(|source| Error::Write { path: log, source })?;
     let process = self.cli.spawn(&launch.args, file)?;
     Ok(Box::new(Started {
@@ -417,67 +385,6 @@ impl Running for Started {
   }
 }
 
-/// The CLI as a child process of the daemon.
-struct Command;
-
-impl Command {
-  fn command(args: &[String]) -> Result<tokio::process::Command, Error> {
-    if !cfg!(target_os = "macos") {
-      return Err(Error::Unsupported("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()));
-    }
-    let mut command = tokio::process::Command::new(PROGRAM);
-    command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(false);
-    Ok(command)
-  }
-}
-
-/// Why the CLI could not be started.
-fn not_started(e: std::io::Error) -> Error {
-  if e.kind() == std::io::ErrorKind::NotFound {
-    Error::AppleContainer(
-      "Apple's `container` CLI is not on PATH; install it from https://github.com/apple/container/releases and run `container system start`"
-        .into(),
-    )
-  } else {
-    Error::AppleContainer(format!("cannot run `container`: {e}"))
-  }
-}
-
-#[async_trait::async_trait]
-impl Cli for Command {
-  async fn output(&self, args: &[String]) -> Result<Output, Error> {
-    let output = Self::command(args)?.output().await.map_err(not_started)?;
-    Ok(Output {
-      success: output.status.success(),
-      stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-      stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-  }
-
-  fn spawn(&self, args: &[String], log: std::fs::File) -> Result<Box<dyn Process>, Error> {
-    let stderr = log.try_clone().map_err(|e| Error::AppleContainer(format!("cannot open the actor's log: {e}")))?;
-    let child = Self::command(args)?.stdout(log).stderr(stderr).spawn().map_err(not_started)?;
-    Ok(Box::new(Child(child)))
-  }
-}
-
-struct Child(tokio::process::Child);
-
-#[async_trait::async_trait]
-impl Process for Child {
-  fn id(&self) -> u32 {
-    self.0.id().unwrap_or(0)
-  }
-
-  async fn wait(&mut self) -> std::io::Result<ExitStatus> {
-    self.0.wait().await
-  }
-
-  fn kill(&mut self) -> std::io::Result<()> {
-    self.0.start_kill()
-  }
-}
-
 #[cfg(test)]
-#[path = "apple_container_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;

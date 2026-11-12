@@ -232,7 +232,7 @@ impl Runner {
 /// This machine: its platform, and its CPU and KVM for the control plane's
 /// recipe checks.
 fn host() -> RunnerHost {
-  let cpu = needy_core_actor::host::detect::detect().unwrap_or_else(|e| {
+  let cpu = needy_core_actor::driver::linux_firecracker::kvm::detect().unwrap_or_else(|e| {
     tracing::warn!("cannot read this machine's CPU; the control plane skips recipe checks against it: {e}");
     Default::default()
   });

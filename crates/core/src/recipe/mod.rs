@@ -110,7 +110,7 @@ pub struct CompiledRecipe {
   pub uptime_offset_secs: i64,
   pub sensors: Vec<SensorSpec>,
   /// TODO(actor-network): checked against the identity's vendor only; no
-  /// actor has a NIC to carry it (see `needy_core_actor::host::firecracker::Launch`).
+  /// actor has a NIC to carry it (see `needy_core_actor::driver::linux_firecracker::Launch`).
   pub network_mac: Option<String>,
   pub interface: Option<String>,
   pub metadata: Option<serde_json::Value>,
@@ -199,7 +199,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, run: &PerRun) -> CompiledRecipe
   });
 
   // TODO(actor-network): the MAC is only checked against the vendor here;
-  // actors have no NIC to apply it to (see `needy_core_actor::host::firecracker`).
+  // actors have no NIC to apply it to (see `needy_core_actor::driver::linux_firecracker`).
   let network_mac = recipe.network.mac.as_ref().map(|t| fill(t.as_str()));
   cpu::check_cpu(&recipe.cpu, host, &mut findings);
   findings.extend(identity::check_vendor(recipe, network_mac.as_deref()));

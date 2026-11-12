@@ -30,31 +30,14 @@ use needy_config::profile::OciRuntime;
 
 use needy_core::recipe::CompiledRecipe;
 
-use super::driver::{Channels, Driver, Endpoint, Error, Gap, HostMount, Running, Setup, Start, Terminal};
-use super::identity;
-
-/// Where the actor's channels are in the container.
-pub const CHANNELS: &str = "/.needy/channels";
-/// The daemon's guest API, in the channels directory.
-pub const GUEST_SOCKET: &str = "guest.sock";
-/// The actor gateway, in the channels directory.
-pub const GATEWAY_SOCKET: &str = "gateway.sock";
-/// The driving program's process service, which init serves.
-pub const PROCESS_SOCKET: &str = "process.sock";
-
-/// The channels directory in the actor's directory `dir`.
-pub fn channels_dir(dir: &Path) -> PathBuf {
-  dir.join("channels")
-}
+use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
+use crate::driver::{Channels, Driver, Endpoint, Error, Gap, HostMount, Running, Setup, Start, Terminal};
+use crate::identity;
+use crate::image::container::name;
 
 /// Where the host-side workspace mounts of the actor in `dir` are.
 fn mounts_dir(dir: &Path) -> PathBuf {
   dir.join("mounts")
-}
-
-/// The container of run `run`'s actor.
-pub fn name(run: &str) -> String {
-  format!("needy-actor-{run}")
 }
 
 /// The Docker daemon, as far as the driver uses it. A real boundary (a
@@ -132,7 +115,7 @@ impl LinuxContainer {
   /// The container for `start`, with the host-side mounts and identity
   /// files at `binds`.
   pub fn launch(&self, start: &Start<'_>, binds: Vec<String>) -> Launch {
-    let (vcpus, mem_mib) = size(start.recipe);
+    let (vcpus, mem_mib) = crate::driver::size(start.recipe);
     let user = start.user;
     let home = user.home();
     // NOTICE: the options are spelled out: Docker's tmpfs mounts default to
@@ -272,12 +255,6 @@ pub struct Launch {
   pub mem_mib: u32,
 }
 
-/// The vCPUs and memory of an actor of `recipe`, or of a plain 2 vCPU,
-/// 2 GiB machine without one, as a Firecracker actor's.
-fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
-  recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048))
-}
-
 #[async_trait::async_trait]
 impl Driver for LinuxContainer {
   fn name(&self) -> &'static str {
@@ -353,7 +330,7 @@ impl Driver for LinuxContainer {
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
     let user = start.user;
     let host = identity::Host::read(Path::new("/"));
-    let mut binds = identity::prepare(start.dir, start.recipe, size(start.recipe).0, &host, self.oci_runtime)?;
+    let mut binds = identity::prepare(start.dir, start.recipe, crate::driver::size(start.recipe).0, &host, self.oci_runtime)?;
     let mounts = Self::mount(start.dir, start.mounts, user.uid, user.gid).await?;
     binds.extend(mounts.iter().map(|(_, bind)| bind.clone()));
     let launch = self.launch(start, binds);
@@ -364,7 +341,7 @@ impl Driver for LinuxContainer {
       self.engine.create(&launch.name, launch.body.clone()).await?;
       // The log follows from the container's creation, so its first line
       // is kept even when it exits at once.
-      let log = super::driver::log(start.dir);
+      let log = crate::driver::log(start.dir);
       let file = tokio::fs::File::create(&log).await.map_err(|source| Error::Write { path: log, source })?;
       let pid = self.engine.start(&launch.name).await?;
       Ok::<_, Error>((pid, file))
@@ -630,5 +607,5 @@ impl Engine for Docker {
 }
 
 #[cfg(test)]
-#[path = "container_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;

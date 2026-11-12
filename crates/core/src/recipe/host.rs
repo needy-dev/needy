@@ -22,7 +22,7 @@ impl HostInfo {
   // (`vendor_id\t: %s`, `model name\t: %s`) and #L104-L107 (`flags\t\t:` then
   // ` %s` per flag), Linux v6.18 `show_cpuinfo`.
   // Reference: https://man7.org/linux/man-pages/man5/proc_cpuinfo.5.html
-  /// `needy_core_actor::host::detect` reads the machine.
+  /// `needy_core_actor::driver::linux_firecracker::kvm` reads the machine.
   pub fn from_cpuinfo(text: &str) -> HostInfo {
     let mut info = HostInfo::default();
     for line in text.lines() {

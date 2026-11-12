@@ -59,7 +59,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     let recipe = needy_config::recipe::load(&Source::reference(reference, Path::new("")))?;
     // Only the kernel's make variables are used, which no per-run value
     // changes.
-    let compiled = needy_core::recipe::compile(&recipe, &needy_core_actor::host::detect::detect()?, &PerRun::at(0, 0));
+    let compiled = needy_core::recipe::compile(&recipe, &needy_core_actor::driver::linux_firecracker::kvm::detect()?, &PerRun::at(0, 0));
     for finding in &compiled.findings {
       output::message(format_args!("recipe {finding}"));
     }
@@ -108,7 +108,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 // VM, so the `macos-vz` image builds natively there; `linux/arm64` is named so an
 // x86 builder would fail instead of making an image the Mac cannot boot.
 fn actor_target() -> (&'static str, &'static str) {
-  if needy_core_actor::host::macos::vz::supported_host() {
+  if needy_core_actor::driver::macos_vz::supported_host() {
     ("actor-macos-vz", "linux/arm64")
   } else {
     ("actor", "")
@@ -187,7 +187,7 @@ async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratc
 
 #[cfg(unix)]
 async fn load_into_apple_container(image: &str, archive: &Path) -> Result<()> {
-  let driver = needy_core_actor::host::macos::apple_container::MacosAppleContainer::new(image.into());
+  let driver = needy_core_actor::driver::macos_apple_container::MacosAppleContainer::new(image.into());
   Ok(driver.load(archive).await?)
 }
 

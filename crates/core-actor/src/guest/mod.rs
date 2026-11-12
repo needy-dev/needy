@@ -26,13 +26,13 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use needy_api_client::Client;
 
-pub use crate::host::container::CHANNELS;
-use crate::host::container::{GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET};
+pub use crate::contract::CHANNELS;
+use crate::contract::{GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET};
 
 /// The daemon's guest listener, as a VM's actor reaches it.
 // Source: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131
 // (`VMADDR_CID_HOST` is 2). Port 7000 is needy's own choice,
-// `GUEST_PORT` in `crates/core-actor/src/host/firecracker.rs`.
+// `GUEST_PORT` in `crates/core-actor/src/contract.rs`.
 const DAEMON: &str = "vsock://2:7000";
 
 /// The actor's init: sets the machine up, runs the driving program, and

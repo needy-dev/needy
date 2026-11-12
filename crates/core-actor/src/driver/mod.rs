@@ -1,5 +1,18 @@
 //! Actor drivers: what starts an actor next to the daemon, waits for it and
-//! stops it, and where the daemon meets it.
+//! stops it, and where the daemon meets it. A profile's `actor.driver` names
+//! one; each is named after the operating system whose isolation it relies
+//! on.
+//!
+//! | `actor.driver` | Module | Isolation it relies on |
+//! | --- | --- | --- |
+//! | `linux-firecracker` | [`linux_firecracker`] | Linux KVM, through Firecracker |
+//! | `linux-container` | [`linux_container`] | Linux namespaces and cgroups (`runc`) or gVisor (`runsc`), through a Docker-compatible engine |
+//! | `macos-vz` | [`macos_vz`] | macOS Virtualization.framework, through vfkit |
+//! | `macos-apple-container` | [`macos_apple_container`] | macOS Virtualization.framework, through Apple's `container` |
+//!
+//! Drivers never depend on each other: what two of them share lives in
+//! `crate::contract` (ports and channel paths), `crate::image` (what they
+//! boot or run) and `crate::identity` (identity files from the host), or here.
 //!
 //! The daemon serves the actor's guest API and gateway on endpoints the
 //! driver names, and reaches the process service the actor serves for a
@@ -15,6 +28,17 @@ use std::time::Duration;
 
 use needy_config::profile::User;
 use needy_core::recipe::CompiledRecipe;
+
+#[cfg(unix)]
+pub mod linux_container;
+pub mod linux_firecracker;
+#[cfg(unix)]
+pub mod macos_apple_container;
+pub mod macos_vz;
+// TODO(macos-native): the `macos-native` driver (Seatbelt, `sandbox-exec`)
+// lives on the paused `poc/macos-native-actor` branch; it becomes
+// `macos_native/` here only if the owner productizes it, see
+// `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`.
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -199,6 +223,12 @@ impl Gap {
       message: message.into(),
     }
   }
+}
+
+/// The vCPUs and memory of an actor of `recipe`, or of a plain 2 vCPU,
+/// 2 GiB machine without one: the same for every driver.
+pub(crate) fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
+  recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048))
 }
 
 /// The actor's log in its directory `dir`: every driver writes its actor's

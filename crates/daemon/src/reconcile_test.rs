@@ -283,7 +283,7 @@ async fn a_restarted_control_plane_ends_a_leftover_macos_vz_actors_vfkit() {
   let state_dir = dir.path().join("state");
   let run_dir = state_dir.join("runs/r1");
   std::fs::create_dir_all(&run_dir).unwrap();
-  let pidfile = needy_core_actor::host::macos::vz::pidfile(&run_dir);
+  let pidfile = needy_core_actor::driver::macos_vz::pidfile(&run_dir);
   let mut vfkit =
     std::process::Command::new("sh").args(["-c", "while :; do sleep 0.05; done", "vfkit", "--pidfile"]).arg(&pidfile).spawn().unwrap();
   let store = store::Store::open(&state_dir.join("state.db")).await.unwrap();

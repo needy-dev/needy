@@ -140,7 +140,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
       };
       let paths = ctx.paths()?;
       let image = args.actor_image.unwrap_or_else(|| paths.default_image());
-      let kvm = args.kvm.unwrap_or_else(|| needy_core_actor::host::firecracker::KVM.into());
+      let kvm = args.kvm.unwrap_or_else(|| needy_core_actor::driver::linux_firecracker::KVM.into());
       let roles: Option<std::collections::BTreeSet<_>> = args.roles.map(|roles| roles.into_iter().collect());
       let (capabilities, warnings) = needy_daemon::capabilities::of_this_machine(&kvm, &image, roles.as_ref()).await;
       for warning in &warnings {
@@ -170,7 +170,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         state_dir: paths.state,
         runtime_dir: paths.runtime,
         actor_image: image,
-        kvm: args.kvm.unwrap_or_else(|| needy_core_actor::host::firecracker::KVM.into()),
+        kvm: args.kvm.unwrap_or_else(|| needy_core_actor::driver::linux_firecracker::KVM.into()),
         executor_image: args.executor_image,
         heartbeat_interval: args.heartbeat_interval,
         local_runner: args.local_runner,

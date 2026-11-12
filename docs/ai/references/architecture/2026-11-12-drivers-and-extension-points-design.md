@@ -351,7 +351,37 @@ Slices 4 to 6 are independent of each other once 1 to 3 have landed.
   `linux-container` actors, as it did for `container`; `macos-apple-container`
   routes by shims too but never had the note (candidate below).
 
+### Slice 2: layout
+
+- The `core-actor` tree is the design's, with `guest/capture/` left to slice
+  5. `driver/mod.rs` and `sidecar/mod.rs` carry the tables; `lib.rs` lists
+  the components.
+- `contract.rs` holds the vsock ports and the container channel paths
+  (`CHANNELS`, the three socket names, `channels_dir`), which `macos-vz` took
+  from Firecracker and `macos-apple-container` from the container driver.
+- `image::vm` holds both VM images as `vm::LinuxFirecracker` and
+  `vm::MacosVz` (each driver re-exports its own as `Image`);
+  `image::container` holds the container's name for a run, the one thing
+  both container drivers share beyond the contract.
+- The four copies of the actor's size from a recipe (2 vCPUs and 2 GiB
+  without one) are one `driver::size`: it is part of what every driver
+  presents, so it lives with the trait, not in a component.
+- `linux_firecracker::kvm` is the old `host::detect` plus `KVM` and
+  `check_kvm`; the CLI and the daemon read the control host's CPU through it
+  (`kvm::detect`), as the design's layout says. The cpuinfo fixture moved with
+  it (`linux_firecracker/testdata`).
+- `core-executor`'s `linux_container` keeps the instance lifecycle in
+  `mod.rs` and the container body and run-option policy (`container`,
+  `apply_run_options`, socket paths) in `options.rs`; its tests stay in one
+  `mod_test.rs`, which shares its helpers between both halves.
+- `examples/`, `images/Dockerfile`, `needy.patch` and the GCE recipe named
+  `host/vm.rs`, which no longer existed; they name
+  `driver/linux_firecracker/config.rs` now.
+
 ## Candidate next slices
 
+- The guest dials the guest API at a literal `vsock://2:7000`
+  (`guest/mod.rs`); it could build the address from `contract::GUEST_PORT`,
+  which slice 5 (captures and the guest) may do in passing.
 - The report's shim-routing note for `macos-apple-container` actors: they have
   the same gap as `linux-container` (`profile check` already warns for both).

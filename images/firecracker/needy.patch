@@ -1,6 +1,6 @@
 needy's Firecracker patch: the CPU brand string, the CPUID hypervisor bit,
 SMBIOS tables and PCI bridge IDs, read from the NEEDY_* environment that
-`identity_env` in `crates/core-actor/src/host/vm.rs` sets.
+`identity_env` in `crates/core-actor/src/driver/linux_firecracker/config.rs` sets.
 
 Applies to: Firecracker v1.17.0, commit 95f868c8e345b1cc8faccd1a3c910b4989dc3f58
 (`git ls-remote` of tag v1.17.0 peels to it); `patch -p1 --dry-run` on that

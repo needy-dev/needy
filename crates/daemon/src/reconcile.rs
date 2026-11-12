@@ -173,7 +173,7 @@ impl Daemon {
             // A VM's process names a file in the run's directory on its
             // command line: Firecracker its `vm.json`, vfkit its pidfile.
             let marker = match instance.driver.as_str() {
-              "macos-vz" => needy_core_actor::host::macos::vz::pidfile(Path::new(&instance.handle)),
+              "macos-vz" => needy_core_actor::driver::macos_vz::pidfile(Path::new(&instance.handle)),
               _ => Path::new(&instance.handle).join("vm.json"),
             };
             let state = end_leftover_vm(instance, &marker).await;
@@ -353,7 +353,7 @@ async fn end_leftover_vm(instance: &InstanceRecord, marker: &Path) -> InstanceSt
 /// [`end_leftover_vm`] gives. The container is found by its run's name.
 async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
   // The OCI runtime and image do not matter for ending a container.
-  let driver = needy_core_actor::host::container::LinuxContainer::new(
+  let driver = needy_core_actor::driver::linux_container::LinuxContainer::new(
     needy_config::profile::OciRuntime::Runc,
     needy_config::profile::CONTAINER_IMAGE.into(),
   );
@@ -371,7 +371,7 @@ async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
 /// with the old daemon or is ended by the deletion.
 async fn end_leftover_macos_apple_container(instance: &InstanceRecord) -> InstanceState {
   // The image does not matter for deleting a container.
-  let driver = needy_core_actor::host::macos::apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+  let driver = needy_core_actor::driver::macos_apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
   tracing::warn!("run {}: deleting its actor's container, which a restarted control plane does not adopt", instance.run);
   if driver.end_leftover(&instance.run).await {
     InstanceState::Ended

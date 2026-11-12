@@ -175,7 +175,7 @@ COPY --from=actor-root / /r
 # and 64 MiB for ext4's journal, inode tables, bitmaps, directories and extent
 # trees, and the inodes in use plus 10%. There is no room to grow on purpose:
 # Firecracker attaches the rootfs read-only (`is_read_only` in
-# `crates/core-actor/src/host/vm.rs`) and the guest's writable places are
+# `crates/core-actor/src/driver/linux_firecracker/config.rs`) and the guest's writable places are
 # tmpfs. If the rootfs ever becomes writable, give it headroom here. A margin
 # too small fails the build in `mke2fs -d` ("Could not allocate block");
 # `e2fsck -fn` checks the result.

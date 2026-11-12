@@ -137,7 +137,7 @@ fn check_local(path: &Path, commands: &[String]) -> Result<i32> {
   println!("executors: {}", profile.executors.keys().cloned().collect::<Vec<_>>().join(", "));
   print_route_names(&profile);
   if profile.actor.recipe.is_some() {
-    findings.extend(print_recipe(&profile, &needy_core_actor::host::detect::detect()?)?);
+    findings.extend(print_recipe(&profile, &needy_core_actor::driver::linux_firecracker::kvm::detect()?)?);
   }
   finish(&profile, findings, commands)
 }
