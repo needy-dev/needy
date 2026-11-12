@@ -221,7 +221,10 @@ async fn an_actor_cannot_manage_clients() {
 // Join tokens and clients are listed only on the control host itself
 // (owner decision, 2026-11-12): by the operator on the control daemon's
 // Unix socket, not over TCP even with the control token, and never by a
-// paired client. Runners stay listed for clients.
+// paired client. Runners stay listed for clients. Unix only: Windows binds
+// no Unix socket, so the harness serves TCP there and the operator's side
+// does not exist (nor does a control daemon on Windows).
+#[cfg(unix)]
 #[tokio::test]
 async fn join_tokens_and_clients_are_listed_only_by_the_operator_on_the_unix_socket() {
   let local = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
