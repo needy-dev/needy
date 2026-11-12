@@ -284,8 +284,9 @@ it.
   (same `/v0.0.1/` path, so Homebrew infers 0.0.1), `brew install --formula`
   installed both files, `brew test` passed, and `needy-linux-aarch64` kept
   0755 (it was 0444 before `skip_clean`).
-- `actionlint` passed on the workflows; `check.yml`'s `release tooling` job
-  passed on `main`.
+- `actionlint` passed on the workflows; `check.yml`, with the new
+  `release tooling` job, passed on `main`:
+  https://github.com/needy-dev/needy/actions/runs/43252806891
 
 Not verified: the real release URLs, the `.zip` through proto on Windows,
 proto on Linux, `brew audit --online`, and `update-homebrew.yml` itself,
