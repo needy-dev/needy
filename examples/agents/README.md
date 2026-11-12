@@ -103,8 +103,8 @@ the agent exits, needy mirrors the directory back to the host:
 | --- | --- | --- |
 | Claude Code | `~/needy-state/claude/` | `~/.claude/` (`CLAUDE_CONFIG_DIR`, so `.claude.json` is there too) |
 | Codex | `~/needy-state/codex/` | `~/.codex/` |
-| pi | `~/needy-state/pi/` | `~/.pi/` (pi's directory is `agent/`) |
-| opencode | `~/needy-state/opencode/` | `~/.local/` (opencode's data is `share/opencode/`) |
+| pi | `~/needy-state/pi/` | `~/.pi/agent/` |
+| opencode | `~/needy-state/opencode/` | `~/.local/share/opencode/` |
 
 Read these points before you log in:
 

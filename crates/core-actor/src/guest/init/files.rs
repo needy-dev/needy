@@ -8,26 +8,41 @@ use needy_api_client::Client;
 use needy_api_proto::v1::{FetchFilesRequest, PushFilesRequest};
 
 /// Fetches a copy-in mapping from the host and unpacks it at `path`, owned
-/// by the user.
-pub(super) async fn copy_in(client: &Client, name: &str, path: &str, uid: u32, gid: u32) -> Result<()> {
+/// by the user, as are the directories above it that it creates under the
+/// user's `home`.
+pub(super) async fn copy_in(client: &Client, name: &str, path: &str, home: &str, uid: u32, gid: u32) -> Result<()> {
   let mut stream =
     client.guest().fetch_files(FetchFilesRequest { name: name.into() }).await.map_err(needy_api_client::Error::from)?.into_inner();
   let mut archive = Vec::new();
   while let Some(chunk) = stream.message().await.map_err(needy_api_client::Error::from)? {
     archive.extend(chunk.data);
   }
-  let root = PathBuf::from(path);
-  needy_common::archive::unpack(&archive, &root)?;
-  chown_tree(&root, uid, gid);
+  place(&archive, Path::new(path), home, uid, gid)
+}
+
+/// Unpacks a copy-in `archive` at `root` and gives its tree to the user.
+/// The missing directories from the user's `home` down to `root` are
+/// created first, as the user's; the unpack creates those of a `root`
+/// outside the home, as before.
+fn place(archive: &[u8], root: &Path, home: &str, uid: u32, gid: u32) -> Result<()> {
+  create_user_dirs(root, home, uid, gid);
+  needy_common::archive::unpack(archive, root)?;
+  chown_tree(root, uid, gid);
   Ok(())
 }
 
 /// Creates the driving program's working directory `cwd` when it is under
 /// the user's `home` and missing: an `actor.workspace` without `from`.
-/// Each directory it creates belongs to the user; one outside the home is
-/// left alone, since the root file system is read-only.
 pub(super) fn working_directory(cwd: &str, home: &str, uid: u32, gid: u32) {
-  let Ok(relative) = Path::new(cwd).strip_prefix(home) else {
+  create_user_dirs(Path::new(cwd), home, uid, gid);
+}
+
+/// Creates `path` and each missing directory between the user's `home` and
+/// it. Each directory it creates belongs to the user; one that exists keeps
+/// its owner, and a path outside the home is left alone, since the root
+/// file system is read-only.
+fn create_user_dirs(path: &Path, home: &str, uid: u32, gid: u32) {
+  let Ok(relative) = path.strip_prefix(home) else {
     return;
   };
   let mut dir = PathBuf::from(home);
@@ -37,7 +52,7 @@ pub(super) fn working_directory(cwd: &str, home: &str, uid: u32, gid: u32) {
       continue;
     }
     if let Err(e) = std::fs::create_dir(&dir) {
-      tracing::warn!("cannot create the working directory {}: {e}", dir.display());
+      tracing::warn!("cannot create {}: {e}", dir.display());
       return;
     }
     if let Err(e) = std::os::unix::fs::lchown(&dir, Some(uid), Some(gid)) {
@@ -94,3 +109,7 @@ pub(super) async fn mirror_out(client: &Client, name: &str, path: &str) -> Resul
   client.guest().push_files(tokio_stream::iter(messages)).await.map_err(needy_api_client::Error::from)?;
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "files_test.rs"]
+mod tests;

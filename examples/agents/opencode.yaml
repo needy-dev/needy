@@ -14,7 +14,7 @@
 # provider: an API key is pasted in; GitHub Copilot signs in with a device
 # code; a browser sign-in that calls back to the actor's localhost cannot
 # finish from a browser elsewhere. The login (auth.json) is mirrored back to
-# ~/needy-state/opencode/share/opencode when the run ends.
+# ~/needy-state/opencode when the run ends.
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
@@ -57,13 +57,8 @@ commands:
 # in at the start (without the language servers and logs opencode writes
 # there), mirrored back at the end. Credentials then live in the actor, where
 # the agent can read them (see README.md).
-# NOTICE: the mappings name ~/.local, not ~/.local/share/opencode: copy-in
-# gives the user only the directory it names and what it unpacks, so the
-# parents it creates on the way (~/.local, ~/.local/share) would stay root's,
-# and opencode, which also writes ~/.local/state, could not start (`EACCES:
-# permission denied, mkdir '/home/agent/.local/state'`). The host directory
-# therefore holds share/opencode/. Remove the indirection once copy-in gives
-# the user the parents it creates under the home.
+# ~/.local/state/opencode (the TUI's recent models and prompt history) is not
+# kept.
 # NOTICE: the filters are on copy-in, which the control host packs with
 # them. An actor's mirror-out sends its whole directory: the guest packs it
 # without the mapping's filter (`mirror_out` in
@@ -73,10 +68,10 @@ files:
   opencode-in:
     mode: copy-in
     from: "host:~/needy-state/opencode/"
-    to: "actor:~/.local/"
-    filter: ["- /share/opencode/bin/**", "- /share/opencode/log/**", "+ /share/opencode/**", "+ /state/opencode/**", "- **"]
+    to: "actor:~/.local/share/opencode/"
+    filter: ["- /bin/**", "- /log/**", "+ **"]
   opencode-out:
     mode: mirror-out
-    from: "actor:~/.local/"
+    from: "actor:~/.local/share/opencode/"
     to: "host:~/needy-state/opencode/"
 run_files: [opencode-in, opencode-out]

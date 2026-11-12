@@ -12,7 +12,7 @@
 # On the first start, run /login and pick a provider. A subscription's
 # browser sign-in cannot call back to the actor's localhost: when pi asks,
 # paste the final redirect URL or the code the page shows. GitHub Copilot
-# signs in with a device code. The login (agent/auth.json) is mirrored back
+# signs in with a device code. The login (auth.json) is mirrored back
 # to ~/needy-state/pi when the run ends.
 user: { name: agent, uid: 1000, gid: 1000 }
 
@@ -64,11 +64,6 @@ commands:
 # The agent directory (auth.json, settings, sessions) survives stateless
 # actors: copied in at the start, mirrored back at the end. Credentials then
 # live in the actor, where the agent can read them (see README.md).
-# NOTICE: the mappings name ~/.pi, not ~/.pi/agent: copy-in gives the user
-# only the directory it names and what it unpacks, so a parent it creates on
-# the way (~/.pi) would stay root's. The host directory therefore holds
-# agent/. Remove the indirection once copy-in gives the user the parents it
-# creates under the home.
 # NOTICE: the filters are on copy-in, which the control host packs with
 # them. An actor's mirror-out sends its whole directory: the guest packs it
 # without the mapping's filter (`mirror_out` in
@@ -78,11 +73,11 @@ files:
   pi-in:
     mode: copy-in
     from: "host:~/needy-state/pi/"
-    to: "actor:~/.pi/"
-    # agent/bin/ holds tools pi downloads when the image lacks them.
-    filter: ["- /agent/bin/**", "+ **"]
+    to: "actor:~/.pi/agent/"
+    # bin/ holds tools pi downloads when the image lacks them.
+    filter: ["- /bin/**", "+ **"]
   pi-out:
     mode: mirror-out
-    from: "actor:~/.pi/"
+    from: "actor:~/.pi/agent/"
     to: "host:~/needy-state/pi/"
 run_files: [pi-in, pi-out]

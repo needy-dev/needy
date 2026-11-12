@@ -170,7 +170,7 @@ async fn boot(container: bool) -> Result<()> {
   tokio::spawn(network::forward_gateway(gateway));
   stubs::create(&config.route_names, container);
   for copy in &config.copy_in {
-    if let Err(e) = files::copy_in(&client, &copy.name, &copy.path, user.uid, user.gid).await {
+    if let Err(e) = files::copy_in(&client, &copy.name, &copy.path, &home, user.uid, user.gid).await {
       tracing::warn!("copy-in {}: {e:#}", copy.name);
     }
   }

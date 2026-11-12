@@ -65,7 +65,7 @@ commands:
     to: actor
 
 # The four agent profiles' mappings; their NOTICEs say why the filters are on
-# copy-in and why pi and opencode map ~/.pi and ~/.local.
+# copy-in.
 files:
   claude-in:
     mode: copy-in
@@ -79,12 +79,12 @@ files:
     to: "actor:~/.codex/"
     filter: ["- /tmp/**", "- /.tmp/**", "- /log/**", "+ **"]
   codex-out: { mode: mirror-out, from: "actor:~/.codex/", to: "host:~/needy-state/codex/" }
-  pi-in: { mode: copy-in, from: "host:~/needy-state/pi/", to: "actor:~/.pi/", filter: ["- /agent/bin/**", "+ **"] }
-  pi-out: { mode: mirror-out, from: "actor:~/.pi/", to: "host:~/needy-state/pi/" }
+  pi-in: { mode: copy-in, from: "host:~/needy-state/pi/", to: "actor:~/.pi/agent/", filter: ["- /bin/**", "+ **"] }
+  pi-out: { mode: mirror-out, from: "actor:~/.pi/agent/", to: "host:~/needy-state/pi/" }
   opencode-in:
     mode: copy-in
     from: "host:~/needy-state/opencode/"
-    to: "actor:~/.local/"
-    filter: ["- /share/opencode/bin/**", "- /share/opencode/log/**", "+ /share/opencode/**", "+ /state/opencode/**", "- **"]
-  opencode-out: { mode: mirror-out, from: "actor:~/.local/", to: "host:~/needy-state/opencode/" }
+    to: "actor:~/.local/share/opencode/"
+    filter: ["- /bin/**", "- /log/**", "+ **"]
+  opencode-out: { mode: mirror-out, from: "actor:~/.local/share/opencode/", to: "host:~/needy-state/opencode/" }
 run_files: [claude-in, claude-out, codex-in, codex-out, pi-in, pi-out, opencode-in, opencode-out]
