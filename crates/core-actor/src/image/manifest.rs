@@ -91,7 +91,12 @@ impl std::fmt::Display for Source {
       Source::Build {
         recipe: Some(recipe),
       } => write!(f, "built with recipe {recipe}"),
-      Source::Oci { reference, id, .. } => write!(f, "built from {reference} ({id})"),
+      // The first 12 hex digits name an image as `docker image ls` does;
+      // the manifest keeps the whole ID.
+      Source::Oci { reference, id, .. } => {
+        let short: String = id.trim_start_matches("sha256:").chars().take(12).collect();
+        write!(f, "built from {reference} ({short})")
+      }
     }
   }
 }

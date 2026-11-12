@@ -45,7 +45,7 @@ fn each_vm_image_is_listed_with_what_its_manifest_says() {
         "needy-custom-jq:latest",
         env!("CARGO_PKG_VERSION"),
         "1",
-        "built from needy-custom-jq:latest (sha256:0123)"
+        "built from needy-custom-jq:latest (0123)"
       ],
     ]
   );
