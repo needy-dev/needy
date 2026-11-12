@@ -700,19 +700,19 @@ build the base with 'needy image build --linux-container' and set
   side of each exec. Approvals stay at Codex's default.
 - **`CLAUDE_CONFIG_DIR=/home/agent/.claude`**, so `.claude.json` (onboarding,
   account and the approval of an API key) is in the one mapped directory.
-- **Filters are on copy-in.** The actor's mirror-out packs its directory
+- **Filters are on copy-in** (superseded on 2026-11-13: the daemon now filters mirror-outs, and the filters are back on them). The actor's mirror-out packs its directory
   without the mapping's filter (`mirror_out` in
   `crates/core-actor/src/guest/init/files.rs`: `pack(&root, &[])`). The
   daemon's copy-in applies the filter. So caches and logs reach the host
   but are not copied back in. Each profile says so in a `NOTICE`.
-- **pi and opencode map one directory up** (`~/.pi`, `~/.local`). Copy-in
+- **pi and opencode map one directory up** (`~/.pi`, `~/.local`; superseded on 2026-11-13: copy-in gives the user the parents it creates). Copy-in
   unpacks with `create_dir_all` and gives the user only the mapping's root
   (`chown_tree`), so `~/.local` and `~/.local/share` stayed root's, and
   opencode stopped at `EACCES: permission denied, mkdir
   '/home/agent/.local/state'`. A `NOTICE` in each profile names the
   removal condition. Both gaps are in the candidates below, and this slice
   does not change Rust.
-- **The run must end by the agent's exit to save the login.** An actor's
+- **The run must end by the agent's exit to save the login** (superseded on 2026-11-13: `run stop` is graceful). An actor's
   mirror-out runs when the driving program exits. `needy run stop` ends
   the actor first (`stop_run`, whose daemon-side `mirror_out` covers only
   executor sides), so a stopped run's actor files never reach the host.
@@ -787,6 +787,69 @@ build the base with 'needy image build --linux-container' and set
   `needy.base-abi` (bases, custom images) and the executor images by
   reference, untagged ones left out; in Apple's store, those with the label
   on their arm64 variant.
+
+### Fixes to the gaps found in step 3 (2026-11-13)
+
+The owner approved four fixes from the step 3 candidates. Each one has a
+regression test that failed first (or, for the new stop API, a daemon test
+with a stand-in Firecracker and a test-played guest).
+
+- **Copy-in gives the user every directory it creates.** `files::place`
+  (`crates/core-actor/src/guest/init/files.rs`) first creates each missing
+  directory from the user's home down to the mapping (`create_user_dirs`,
+  which `working_directory` now uses too), each owned by the user, then
+  unpacks. A mapping outside the home is unchanged. `examples/agents` maps
+  `~/.pi/agent` and `~/.local/share/opencode` directly. Decision:
+  opencode's `~/.local/state/opencode` (recent models, prompt history) is
+  no longer kept; a second mapping pair would need a second host
+  directory for little value.
+- **A mirror-out's filter applies on the control host.**
+  `needy_common::archive::unpack` takes the filter and skips an entry that
+  a rule excludes, or whose directory a rule excludes, as `pack`'s walk
+  does; a leading `./` (`tar -C DIR .`) is not part of the path. The daemon
+  passes the mapping's filter for an actor's `PushFiles` and, found while
+  reproducing, for an executor's mirror-out too: the brief said executor
+  mirror-outs honored it, but `files::mirror_out` unpacked the executor's
+  `tar` output whole (the test failed first for both). The guest still
+  sends the whole directory; it cannot bypass the filter. The agent
+  profiles' filters are back on their mirror-outs.
+- **A container actor's process socket belongs to the daemon.**
+  `GetConfigResponse` carries `daemon_uid` and `daemon_gid` (the daemon's
+  effective IDs); init chowns `process.sock` to them and sets mode 0600
+  right after it binds (`bind_for_daemon` in `program.rs`). The chown is an
+  error if it fails. A `NOTICE` says the IDs are the host's while the
+  engine maps no user namespace. Apple's `container` publishes the socket
+  through its relay from inside the VM; the relay still connects (checked).
+- **`needy run stop` is graceful.** `Guest.WaitStop` is held by init once
+  the driving program started (`init/stop.rs`); `run stop` answers it with
+  the grace period (`StopRunRequest.grace_ms`, default 10 s,
+  `--grace DURATION`), init sends SIGTERM to the program's process group
+  (through the process host on a terminal, so its exit records the
+  signal), SIGKILL after the grace period, then mirrors out and reports the
+  exit as usual. The daemon waits for the actor's state to become `Exited`
+  (the state is a `watch` now), bounded by the grace period plus
+  `MIRROR_OUT_WAIT` (60 s, `Config::mirror_out_wait` for tests), then goes
+  on with today's stop, which kills an actor still running. While a stop is
+  under way the VM watch leaves mirror-out, release and the end record to
+  the stop. `--now` (`StopRunRequest.now`) kills at once. Decisions:
+  - **A guest that does not wait is killed at once**, with the reason in
+    the trace and on the CLI's stderr: one that has not finished starting,
+    or a guest needy older than this change (checked with a guest built
+    from the tree before it). The stop never waits for a guest that never
+    asks.
+  - **`run.stop` records `actor`**: `{"how":"graceful"}` or
+    `{"how":"forced","reason":...}`, absent when the stop ended no running
+    actor. Schema version 10. The report says `stopped` for such a run
+    (the actor's exit, which the stop caused, is recorded first and used to
+    make it `finished`), adds a `Stop` line (human), the reason after
+    "stopped by" (markdown) and `actor_stop` (JSON).
+  - **`StopRunResponse` says how the actor ended** (`graceful`, `reason`),
+    so the CLI warns when a stop it did not ask to be `--now` lost the
+    mirror-out.
+  - **A control plane that shuts down still kills its actors at once**
+    (`TODO(graceful-shutdown)` in `Daemon::shutdown`): stopping each
+    gracefully would hold a termination signal for up to the grace period
+    and the mirror-out wait per run.
 
 ## Verification
 
@@ -968,7 +1031,7 @@ prompt `say hello`, and the agent's exit.
 
 **Not as hoped**:
 
-- **`linux-container` with `-it` does not start on the Linux host**, for any
+- **`linux-container` with `-it` does not start on the Linux host** (fixed on 2026-11-13), for any
   profile and also for a plain `bash` actor of the base image. The
   container's init creates `channels/process.sock` as root with mode
   0755, and a daemon that is not root cannot connect to it (`the actor is
@@ -984,6 +1047,30 @@ prompt `say hello`, and the agent's exit.
   logged-in session needs and the profiles leave out are unknown.
 - `opencode`'s `/connect` flow, pi's subscription sign-ins and GitHub
   Copilot's device code were not tried.
+
+### Checks of the step 3 fixes
+
+On 2026-11-13, needy built from the fixes' tree on each host natively
+(`make build`, `make guest`; the arm64 guest through OrbStack on the Mac),
+base VM images from `needy image build` into scratch data directories, and
+a scratch control daemon on each host, run as the logged-in user (not
+root). The `linux-container` actors used the host's `needy-actor:latest`
+(base ABI 1); the `macos-apple-container` actor a copy of the Mac's Docker
+`needy-actor:latest` loaded into Apple's store under a scratch tag. The
+scratch profile copied a seed directory into `~/.a/b/c`, printed the owner
+of each level, wrote `~/out/{keep.txt,cache/blob,debug.log}` with a
+mirror-out filter `["- /cache/", "- *.log", "+ **"]`, printed `ready` and
+looped with a `TERM` trap; a script waited for `ready` and ran `needy run
+stop`. A pseudo-terminal driver typed into `run create -it` of `/bin/sh`.
+
+| Check | `linux-firecracker` (Linux KVM host) | `linux-container` (Linux KVM host) | `macos-vz` (Mac) | `macos-apple-container` (Mac) |
+| --- | --- | --- | --- | --- |
+| Copy-in to `~/.a/b/c` | `.a`, `.a/b`, `.a/b/c` and the file `agent`'s | the same | the same | the same |
+| Mirror-out filter | only `keep.txt` on the host | the same | the same | the same |
+| `run stop` (graceful) | `got-TERM` in the console, `keep.txt` on the host, report `stopped, driving program exit 143`, `Stop graceful` | the same, with `-t` | the same, also with `-t --grace 3s` | the same, with `-t` |
+| `run stop --now` | nothing on the host, `forced: asked to stop at once` | the same | the same | not run |
+| `run create -it` of `/bin/sh` | not run | Pass from a daemon that is not root: prompt, `it-42 agent`, exit 0 (without a workspace mount: `sshfs` is not installed on the host) | Pass | Pass (`actor.ready` in the trace) |
+| Guest built from the tree before the fixes (`--guest-needy`) | `run stop` returns at once, stderr and report `forced: the actor's guest was not waiting for a stop: ...`; the console shows `.a` and `.a/b` owned by `root`, the bug 1 reproduction | not run | not run | not run |
 
 ### Step 4 checks
 
@@ -1101,26 +1188,22 @@ Found in step 2:
   directory of about 500 MB to 600 MB; `needy image rm` (step 4) removes
   them.
 
-Found in step 3:
+Found in step 3 (the first four were fixed on 2026-11-13, see
+[Fixes to the gaps found in step 3](#fixes-to-the-gaps-found-in-step-3-2026-11-13)):
 
-- **A `linux-container` actor's terminal with a daemon that is not root**:
-  init creates `channels/process.sock` as root, mode 0755, so `run create
-  -t` and `-it` cannot connect. Giving the socket to the daemon's user (or
-  mode 0666 in a directory only that user can enter, as `guest.sock` is)
-  would fix it. A test in the `linux-container` driver should reproduce it
-  first.
-- **Copy-in gives the user the parents it creates**: `copy_in` unpacks
-  with `create_dir_all` and chowns only the mapping's root, so a mapping
-  to `~/.local/share/opencode` leaves `~/.local` root's. Creating each
-  missing directory under the home as the user, as `working_directory`
-  does, would let the agent profiles map the agents' own directories.
-- **A mapping's filter on the actor's mirror-out**: the guest packs the
-  whole directory (`pack(&root, &[])`), so logs and caches reach the host.
-  The guest would need the filter from `GetConfig`.
-- **Mirror-out when a run is stopped**: `needy run stop` ends the actor
-  before its files are mirrored out, so a login made in a run that is
-  stopped instead of exited is lost. The daemon could ask the guest to
-  mirror out before it stops the actor.
+- ~~A `linux-container` actor's terminal with a daemon that is not
+  root~~: fixed, the socket belongs to the daemon's user, mode 0600.
+- ~~Copy-in gives the user the parents it creates~~: fixed.
+- ~~A mapping's filter on the actor's mirror-out~~: fixed on the daemon's
+  side, for executor mirror-outs too.
+- ~~Mirror-out when a run is stopped~~: fixed, `run stop` is graceful.
+- **A graceful shutdown of the control plane**
+  (`TODO(graceful-shutdown)`): a shutdown still kills its actors at once,
+  so their mirror-outs are lost; a bounded graceful stop per run would keep
+  them.
+- **Filter in the guest too**: the guest still packs and sends the whole
+  directory, which the daemon then filters; sending the filter in
+  `GetConfig` would also save the transfer of large caches.
 - **Credentials outside the actor** (`TODO(mitm)`): every profile here
   puts a login or a key in the actor, where the agent can read it.
 - **A real login per agent**: each profile's authenticated path, with an
