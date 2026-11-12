@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# Renders Formula/needy.rb for the needy-dev/homebrew-tap tap from a release
+# tag and the `.sha256` files of the two macOS archives. Follows
+# moeru-ai/auv's scripts/render-homebrew-formula; .github/workflows/update-homebrew.yml
+# runs it, and scripts/tests/render-homebrew-formula checks its output.
+#
+# REVIEW(license): the repository's LICENSE is the AGPL 3.0 text without a
+# version notice, which GitHub reports as the deprecated SPDX id `AGPL-3.0`.
+# Homebrew needs a current id, so the formula says `AGPL-3.0-only`; the owner
+# should confirm it is not `AGPL-3.0-or-later`.
+
+set -euo pipefail
+
+if [[ $# -ne 4 ]]; then
+  echo "usage: $0 <vX.Y.Z> <arm64-sha256-file> <x86_64-sha256-file> <output>" >&2
+  exit 2
+fi
+
+tag=$1
+arm_sha_file=$2
+intel_sha_file=$3
+output=$4
+
+if [[ ! $tag =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Homebrew formula updates require a stable v-prefixed semantic version tag: $tag" >&2
+  exit 1
+fi
+
+read_sha() {
+  local architecture=$1
+  local source=$2
+  local checksum
+
+  # The release writes the bare hex digest and a newline; `$(<file)` drops
+  # the newline and anything else must fail the format check below.
+  checksum=$(<"$source")
+  if [[ ! $checksum =~ ^[0-9a-f]{64}$ ]]; then
+    echo "$architecture archive checksum must be 64 lowercase hexadecimal characters" >&2
+    exit 1
+  fi
+  printf '%s' "$checksum"
+}
+
+arm_sha=$(read_sha arm64 "$arm_sha_file")
+intel_sha=$(read_sha x86_64 "$intel_sha_file")
+version=${tag#v}
+temporary=$(mktemp "${output}.XXXXXX")
+trap 'rm -f "$temporary"' EXIT
+
+cat > "$temporary" <<RUBY
+class Needy < Formula
+  desc "Separate the program that drives work from the environments where it runs"
+  homepage "https://github.com/needy-dev/needy"
+  license "AGPL-3.0-only"
+
+  # TODO(homebrew-linux): Linuxbrew is deferred until both Linux artifacts have
+  # tap-side installation evidence and an owner-approved support slice.
+  depends_on :macos
+
+  # NOTICE: Homebrew loads tap formulae under Linux architecture contexts
+  # during validation. Select the archive by CPU here; the macOS requirement
+  # rejects Linux installation before it can use this URL.
+  if Hardware::CPU.arm?
+    url "https://github.com/needy-dev/needy/releases/download/$tag/needy-aarch64-apple-darwin.tar.gz"
+    sha256 "$arm_sha"
+  elsif Hardware::CPU.intel?
+    url "https://github.com/needy-dev/needy/releases/download/$tag/needy-x86_64-apple-darwin.tar.gz"
+    sha256 "$intel_sha"
+  end
+
+  # NOTICE: Homebrew's cleaner makes every file it does not recognise as an
+  # executable (a Linux ELF on macOS) read-only, 0444; actors must be able to
+  # execute the guest needy, so keep the mode the archive gives it.
+  skip_clean "bin/needy-linux-aarch64"
+
+  def install
+    bin.install "needy"
+    # The arm64 archive also carries the guest needy, a static Linux binary
+    # that actors on this Mac run; needy looks for it next to itself.
+    bin.install "needy-linux-aarch64" if File.exist?("needy-linux-aarch64")
+  end
+
+  test do
+    assert_equal "needy $version", shell_output("#{bin}/needy --version").strip
+  end
+end
+RUBY
+
+# mktemp creates the file 0600; `brew style` rejects a formula others cannot
+# read (FormulaAudit/Files).
+chmod 0644 "$temporary"
+mv "$temporary" "$output"
+trap - EXIT

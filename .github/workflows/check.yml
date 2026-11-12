@@ -98,6 +98,17 @@ jobs:
       - run: cargo run --locked --quiet --bin needy -- --version
       - run: git diff --check
 
+  # The install channels' scripts, as auv's `release-tooling` job. ShellCheck
+  # is preinstalled on the hosted Ubuntu image.
+  release-tooling:
+    name: release tooling
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - run: shellcheck --shell=sh install/install.sh
+      - run: shellcheck scripts/render-homebrew-formula scripts/tests/render-homebrew-formula
+      - run: scripts/tests/render-homebrew-formula
+
   proto:
     name: proto
     runs-on: ubuntu-24.04

@@ -1,0 +1,84 @@
+# Updates Formula/needy.rb in the needy-dev/homebrew-tap tap when a stable
+# release is published, or by hand for an existing release tag. Follows
+# moeru-ai/auv's `.github/workflows/update-homebrew.yml`.
+#
+# Needs the repository secret HOMEBREW_TAP_GITHUB_TOKEN: a token with
+# Contents write access to needy-dev/homebrew-tap (see the release and CI
+# design note, "Install channels").
+name: Update Homebrew
+
+on:
+  # NOTICE(homebrew-stable): `released` fires only for a release that is not
+  # a prerelease (and when a prerelease is promoted to one), so the tap never
+  # points at a prerelease. A release published as a prerelease reaches the
+  # tap only through `workflow_dispatch`, and render-homebrew-formula still
+  # requires a plain vX.Y.Z tag.
+  # Reference: https://docs.github.com/en/webhooks/webhook-events-and-payloads#release
+  release:
+    types:
+      - released
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Stable release tag to publish to Homebrew
+        required: true
+        type: string
+
+concurrency:
+  group: homebrew-tap
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Update Homebrew tap
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Require the Homebrew tap token
+        env:
+          HOMEBREW_TAP_GITHUB_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+        run: |
+          if [[ -z "${HOMEBREW_TAP_GITHUB_TOKEN}" ]]; then
+            echo "::error::HOMEBREW_TAP_GITHUB_TOKEN is not set. Add a repository secret with a token that has Contents write access to needy-dev/homebrew-tap." >&2
+            exit 1
+          fi
+
+      - name: Download release checksums
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
+        run: |
+          mkdir artifacts
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'needy-aarch64-apple-darwin.tar.gz.sha256' \
+            --pattern 'needy-x86_64-apple-darwin.tar.gz.sha256' \
+            --dir artifacts
+
+      - name: Update the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          git clone https://github.com/needy-dev/homebrew-tap.git homebrew-tap
+          mkdir -p homebrew-tap/Formula
+          scripts/render-homebrew-formula \
+            "$RELEASE_TAG" \
+            artifacts/needy-aarch64-apple-darwin.tar.gz.sha256 \
+            artifacts/needy-x86_64-apple-darwin.tar.gz.sha256 \
+            homebrew-tap/Formula/needy.rb
+          git -C homebrew-tap config user.name "needy release bot"
+          git -C homebrew-tap config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C homebrew-tap add Formula/needy.rb
+          if git -C homebrew-tap diff --cached --quiet; then
+            echo "Formula/needy.rb is already at $RELEASE_TAG"
+            exit 0
+          fi
+          git -C homebrew-tap commit -m "needy ${RELEASE_TAG}"
+          git -C homebrew-tap push origin HEAD

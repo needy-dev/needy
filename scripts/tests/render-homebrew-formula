@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Checks scripts/render-homebrew-formula: the rendered formula for a stable
+# tag, and that it refuses malformed checksums and prerelease tags. Follows
+# moeru-ai/auv's scripts/tests/render-homebrew-formula. The checksums are
+# made-up values, not those of a real release.
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+arm_sha=1111111111111111111111111111111111111111111111111111111111111111
+intel_sha=abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+printf '%s\n' "$arm_sha" > "$work/arm.sha256"
+printf '%s\n' "$intel_sha" > "$work/intel.sha256"
+
+"$repo_root/scripts/render-homebrew-formula" \
+  v0.0.2 \
+  "$work/arm.sha256" \
+  "$work/intel.sha256" \
+  "$work/needy.rb"
+
+cat > "$work/expected.rb" <<'RUBY'
+class Needy < Formula
+  desc "Separate the program that drives work from the environments where it runs"
+  homepage "https://github.com/needy-dev/needy"
+  license "AGPL-3.0-only"
+
+  # TODO(homebrew-linux): Linuxbrew is deferred until both Linux artifacts have
+  # tap-side installation evidence and an owner-approved support slice.
+  depends_on :macos
+
+  # NOTICE: Homebrew loads tap formulae under Linux architecture contexts
+  # during validation. Select the archive by CPU here; the macOS requirement
+  # rejects Linux installation before it can use this URL.
+  if Hardware::CPU.arm?
+    url "https://github.com/needy-dev/needy/releases/download/v0.0.2/needy-aarch64-apple-darwin.tar.gz"
+    sha256 "1111111111111111111111111111111111111111111111111111111111111111"
+  elsif Hardware::CPU.intel?
+    url "https://github.com/needy-dev/needy/releases/download/v0.0.2/needy-x86_64-apple-darwin.tar.gz"
+    sha256 "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+  end
+
+  # NOTICE: Homebrew's cleaner makes every file it does not recognise as an
+  # executable (a Linux ELF on macOS) read-only, 0444; actors must be able to
+  # execute the guest needy, so keep the mode the archive gives it.
+  skip_clean "bin/needy-linux-aarch64"
+
+  def install
+    bin.install "needy"
+    # The arm64 archive also carries the guest needy, a static Linux binary
+    # that actors on this Mac run; needy looks for it next to itself.
+    bin.install "needy-linux-aarch64" if File.exist?("needy-linux-aarch64")
+  end
+
+  test do
+    assert_equal "needy 0.0.2", shell_output("#{bin}/needy --version").strip
+  end
+end
+RUBY
+
+diff -u "$work/expected.rb" "$work/needy.rb"
+
+if [[ -z $(find "$work/needy.rb" -perm -0044) ]]; then
+  echo "rendered formula is not readable by group and others" >&2
+  exit 1
+fi
+
+printf '%s %s\n' "${arm_sha:0:32}" "${arm_sha:32}" > "$work/arm.sha256"
+if "$repo_root/scripts/render-homebrew-formula" v0.0.2 "$work/arm.sha256" "$work/intel.sha256" "$work/rejected.rb"; then
+  echo "renderer accepted a checksum containing embedded whitespace" >&2
+  exit 1
+fi
+
+printf 'not-a-sha\n' > "$work/arm.sha256"
+if "$repo_root/scripts/render-homebrew-formula" v0.0.2 "$work/arm.sha256" "$work/intel.sha256" "$work/rejected.rb"; then
+  echo "renderer accepted an invalid arm64 checksum" >&2
+  exit 1
+fi
+
+if "$repo_root/scripts/render-homebrew-formula" v0.0.2-rc.1 "$work/intel.sha256" "$work/intel.sha256" "$work/rejected.rb"; then
+  echo "renderer accepted a prerelease tag" >&2
+  exit 1
+fi
+
+if [[ -e "$work/rejected.rb" ]]; then
+  echo "renderer left an output file behind after refusing" >&2
+  exit 1
+fi
+
+echo "render-homebrew-formula: ok"
