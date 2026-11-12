@@ -176,9 +176,49 @@ pub enum Target {
   /// The actor runs the command itself.
   Actor,
   Executor(String),
-  /// A rule or a fault refused the command; the message is what the proxy
-  /// prints.
+  /// A rule refused the command; the message is what the proxy prints.
   Refused(String),
+  /// A chaos fault ends the command in place of running it.
+  Fault(ExecFault),
+}
+
+/// How a chaos fault ends a command in place of running it: by `exit`,
+/// `signal` or `hang`, after writing `stderr`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecFault {
+  pub name: String,
+  pub exit: Option<i32>,
+  pub signal: Option<String>,
+  pub hang: bool,
+  pub stderr: String,
+}
+
+/// A fault `needy chaos add` added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultAdded {
+  /// The full run ID.
+  pub run: String,
+  /// What the fault cannot reach.
+  pub warnings: Vec<String>,
+}
+
+/// A run's chaos faults.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFaults {
+  pub run: String,
+  pub faults: Vec<FaultInfo>,
+}
+
+/// One chaos fault of a run, with its counts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultInfo {
+  pub name: String,
+  pub domain: String,
+  /// The fault as YAML, as a profile's `chaos.faults` entry.
+  pub fault_yaml: String,
+  pub source: needy_core::chaos::FaultSource,
+  pub matched: u64,
+  pub fired: u64,
 }
 
 /// A profile to check against the runners it would run on.
@@ -255,6 +295,13 @@ pub trait Runs: Send + Sync + 'static {
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route>;
   /// Checks a profile against the runners it would run on; creates nothing.
   async fn check(&self, profile: ProfileToCheck) -> Result<ProfileCheck>;
+  /// Adds the fault `fault_yaml` (a `chaos.faults` entry) named `name` to
+  /// live run `run`: an ID, an ID prefix, a name or `latest`.
+  async fn add_fault(&self, run: &str, name: &str, fault_yaml: &str, by: Principal) -> Result<FaultAdded>;
+  /// The chaos faults of run `run`.
+  async fn faults(&self, run: &str) -> Result<RunFaults>;
+  /// Removes the fault `name` from live run `run`; returns the full run ID.
+  async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String>;
 }
 
 // ------------------------------------------------------------ processes
@@ -391,7 +438,7 @@ pub struct GuestConfig {
   pub sensors: Vec<GuestSensor>,
   pub copy_in: Vec<GuestCopy>,
   pub mirror_out: Vec<GuestCopy>,
-  pub hwmon_faults: Vec<GuestFault>,
+  pub sensor_faults: Vec<GuestFault>,
   /// The driving program's terminal; `None` for none.
   pub tty: Option<WindowSize>,
   /// The vsock port the guest serves `ProcessService` on when the driving
@@ -431,6 +478,8 @@ pub struct GuestCopy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestFault {
+  /// The fault's name.
+  pub name: String,
   pub at_ms: i64,
   pub temp_mc: i32,
 }

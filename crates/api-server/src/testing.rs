@@ -161,6 +161,34 @@ impl Runs for Fake {
       }],
     })
   }
+
+  async fn add_fault(&self, run: &str, name: &str, fault_yaml: &str, by: Principal) -> Result<FaultAdded> {
+    self.call(format!("add fault {name} to {run} by {by}: {fault_yaml}"));
+    Ok(FaultAdded {
+      run: "s1".into(),
+      warnings: vec!["a warning".into()],
+    })
+  }
+
+  async fn faults(&self, run: &str) -> Result<RunFaults> {
+    self.call(format!("faults {run}"));
+    Ok(RunFaults {
+      run: "s1".into(),
+      faults: vec![FaultInfo {
+        name: "curl-down".into(),
+        domain: "exec".into(),
+        fault_yaml: "exec: curl **\nexit: 7\n".into(),
+        source: needy_core::chaos::FaultSource::Added,
+        matched: 2,
+        fired: 1,
+      }],
+    })
+  }
+
+  async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String> {
+    self.call(format!("remove fault {name} from {run} by {by}"));
+    Ok("s1".into())
+  }
 }
 
 #[async_trait::async_trait]

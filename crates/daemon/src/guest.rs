@@ -5,7 +5,7 @@
 
 use needy_api_server::control::{ControlError, Guest, GuestConfig, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser};
 use needy_common::process::Exit;
-use needy_config::profile::{FaultKind, FileMode, Side};
+use needy_config::profile::{FaultDomain, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
 use needy_core::types::{ActorState, RunState};
@@ -74,14 +74,14 @@ impl Guest for Daemon {
         _ => {}
       }
     }
-    let hwmon_faults = run
+    let sensor_faults = run
       .injector
-      .faults()
-      .iter()
-      .filter(|f| f.on == FaultKind::Hwmon)
-      .map(|f| GuestFault {
+      .faults(FaultDomain::Sensor)
+      .into_iter()
+      .map(|(name, f)| GuestFault {
         at_ms: f.at.map(|d| d.as_millis() as i64).unwrap_or(0),
-        temp_mc: f.set.temp_c.map(|c| (c * 1000.0) as i32).unwrap_or(100_000),
+        temp_mc: needy_core::chaos::sensor_temp_mc(&f),
+        name,
       })
       .collect();
     let recipe = run.recipe.as_ref();
@@ -127,7 +127,7 @@ impl Guest for Daemon {
         .unwrap_or_default(),
       copy_in,
       mirror_out,
-      hwmon_faults,
+      sensor_faults,
       tty: run.tty,
       process_port: channels.process_port,
       wait_for_attach: run.wait_for_attach,
@@ -141,7 +141,7 @@ impl Guest for Daemon {
     }
     if facets.identity.hwmon != in_guest {
       config.sensors.clear();
-      config.hwmon_faults.clear();
+      config.sensor_faults.clear();
     }
     if facets.identity.uptime != in_guest {
       config.uptime_offset_secs = 0;

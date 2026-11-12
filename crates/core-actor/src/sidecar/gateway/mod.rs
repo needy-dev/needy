@@ -4,16 +4,22 @@
 //!
 //! The gateway is mechanism only: each request ([`http`]) and tunnel
 //! ([`connect`]) runs the net domain's chain
-//! ([`needy_core::intercept::net::Chain`]: the allowlist, chaos and header
-//! injection, which live in `needy_core::network` and `needy_core::chaos`),
-//! applies the decision and records typed `net.*` and `fault.injected`
-//! events in the run's trace.
+//! ([`needy_core::intercept::net::Chain`]: the allowlist, then chaos, which
+//! live in `needy_core::network` and `needy_core::chaos`), applies the
+//! decision and records typed `net.*` and `fault.injected` events in the
+//! run's trace. A plain-HTTP request to a service's host (`NAME.needy`) goes
+//! to the service's URL, which this machine resolves: the gateway runs next
+//! to the daemon, on the control host.
+//!
+//! A fault's effect is delivered as a real upstream would deliver it through
+//! a proxy: `refuse` answers 502 as when the upstream refuses the
+//! connection, `reset` closes the actor's connection without an answer,
+//! `hang` holds it until the actor gives up or the run ends, `delay` waits
+//! first, and `status` answers a plain-HTTP request with that status.
 
 mod connect;
 mod http;
 
-use std::collections::BTreeMap;
-use std::convert::Infallible;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -29,6 +35,7 @@ use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetDeny};
 use needy_core::intercept::net::{Chain, NetContext, NetDecision, NetOutcome};
 use needy_core::network::Policy;
+use needy_core::types::Fired;
 use needy_core::types::Network;
 use needy_trace::Dispatch;
 use tokio_stream::{Stream, StreamExt};
@@ -49,8 +56,8 @@ pub struct Gateway {
   /// The run's trace.
   trace: Dispatch,
   network: Network,
-  /// Host to the base URL its plain-HTTP requests are forwarded to.
-  upstream: BTreeMap<String, String>,
+  /// The allowlist and the services' URLs.
+  policy: Policy,
   chain: Chain,
   client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Incoming>,
   cancel: CancellationToken,
@@ -68,7 +75,7 @@ impl Gateway {
       trace,
       network,
       chain: Chain::new(&policy, injector),
-      upstream: policy.upstream,
+      policy,
       client,
       cancel,
       tasks: TaskTracker::new(),
@@ -109,9 +116,11 @@ impl Gateway {
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
   {
     let gateway = self.clone();
+    // A service error makes hyper close the connection without writing a
+    // response, which is how a `reset` fault is delivered.
     let service = service_fn(move |request| {
       let gateway = gateway.clone();
-      async move { Ok::<_, Infallible>(gateway.handle(request).await) }
+      async move { gateway.handle(request).await }
     });
     let connection = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(stream), service).with_upgrades();
     tokio::select! {
@@ -125,7 +134,7 @@ impl Gateway {
     }
   }
 
-  async fn handle(&self, request: Request<Incoming>) -> Response<Body> {
+  async fn handle(&self, request: Request<Incoming>) -> Result<Response<Body>, Reset> {
     if request.method() == Method::CONNECT {
       self.connect(request).await
     } else {
@@ -135,7 +144,7 @@ impl Gateway {
 
   /// Runs the net chain for `host` and records its outcome.
   /// `path` is the request's path, or `None` for a tunnel. A fault's delay
-  /// is waited out here.
+  /// is waited out here, and a `hang` until the owner cancels.
   async fn decide(&self, host: &str, path: Option<&str>) -> NetDecision {
     let ctx = NetContext {
       network: self.network,
@@ -144,10 +153,14 @@ impl Gateway {
     };
     let decision = self.chain.decide(&ctx);
     for fired in &decision.fired {
+      self.record(Event::FaultInjected(fired.clone()));
       if let Some(delay) = fired.effect.delay {
         tokio::time::sleep(delay).await;
       }
-      self.record(Event::FaultInjected(fired.clone()));
+    }
+    if decision.fault().is_some_and(|fired| fired.effect.hang) {
+      // The connection is dropped when its actor is gone.
+      self.cancel.cancelled().await;
     }
     if decision.outcome == NetOutcome::Deny {
       self.record(Event::NetDeny(NetDeny {
@@ -159,12 +172,13 @@ impl Gateway {
     decision
   }
 
-  /// The response for a request or tunnel the decision refused.
-  fn refusal(decision: &NetDecision, host: &str) -> Option<Response<Body>> {
+  /// The response for a request or tunnel the decision refused, or the
+  /// [`Reset`] that closes the connection without one.
+  fn refusal(decision: &NetDecision, host: &str) -> Option<Result<Response<Body>, Reset>> {
     match &decision.outcome {
       NetOutcome::Allow => None,
-      NetOutcome::Deny => Some(text(StatusCode::FORBIDDEN, &format!("needy: {host} is not allowed"))),
-      NetOutcome::Fault(errno) => Some(text(StatusCode::BAD_GATEWAY, &format!("needy chaos: {errno} for {host}"))),
+      NetOutcome::Deny => Some(Ok(text(StatusCode::FORBIDDEN, &format!("needy: {host} is not allowed")))),
+      NetOutcome::Fault(_) => decision.fault().map(|fired| fault_response(fired, host)),
     }
   }
 
@@ -172,6 +186,35 @@ impl Gateway {
     self.trace.emit(event.kind().as_str(), event.raw());
   }
 }
+
+/// What a fault that fails a request or tunnel answers.
+fn fault_response(fired: &Fired, host: &str) -> Result<Response<Body>, Reset> {
+  let effect = &fired.effect;
+  if effect.reset {
+    return Err(Reset(fired.name.clone()));
+  }
+  if let Some(status) = effect.status
+    && let Ok(status) = StatusCode::from_u16(status)
+  {
+    return Ok(text(status, &format!("needy chaos: {}", fired.name)));
+  }
+  // `refuse`, and a `hang` the owner cancelled: worded as the gateway words
+  // a real upstream's refusal (`needy: Connection refused ...`).
+  Ok(text(StatusCode::BAD_GATEWAY, &format!("needy: {host}: connection refused (needy chaos: {})", fired.name)))
+}
+
+/// A `reset` fault: the service fails, and hyper closes the connection
+/// without a response.
+#[derive(Debug)]
+pub(crate) struct Reset(String);
+
+impl std::fmt::Display for Reset {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(f, "needy chaos: {} resets the connection", self.0)
+  }
+}
+
+impl std::error::Error for Reset {}
 
 #[cfg(all(test, unix))]
 #[path = "mod_test.rs"]

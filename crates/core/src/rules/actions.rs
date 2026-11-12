@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use needy_config::profile::{Actions, EnvOps, Fault, Profile};
+use needy_config::profile::{Actions, EnvOps, Profile};
 
 use crate::pattern::Match;
 
@@ -38,7 +38,6 @@ pub(super) fn combine(profile: &Profile, own: &Actions) -> Actions {
     out.args.append.extend(part.args.append.iter().cloned());
     out.wrap.extend(part.wrap.iter().cloned());
     out.files.extend(part.files.iter().cloned());
-    out.faults.extend(part.faults.iter().cloned());
     out.env.clear |= part.env.clear;
     out.env.pass.extend(part.env.pass.iter().cloned());
     out.env.unset.extend(part.env.unset.iter().cloned());
@@ -87,7 +86,6 @@ pub(super) struct Accumulated {
   pass: Vec<String>,
   env_ops: Vec<EnvOps>,
   pub files: Vec<String>,
-  pub faults: Vec<Fault>,
 }
 
 impl Accumulated {
@@ -109,7 +107,6 @@ impl Accumulated {
         self.files.push(file.clone());
       }
     }
-    self.faults.extend(a.faults.iter().cloned());
     self.clear_env |= a.env.clear;
     self.pass.extend(a.env.pass.iter().cloned());
     self.env_ops.push(a.env.clone());

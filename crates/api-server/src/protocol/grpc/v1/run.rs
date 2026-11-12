@@ -5,9 +5,10 @@ use std::sync::Arc;
 use futures_util::StreamExt as _;
 use needy_api_proto::v1::run_service_server::RunService;
 use needy_api_proto::v1::{
-  CheckProfileRequest, CheckProfileResponse, CreateRunRequest, CreateRunResponse, DecideRequest, DecideResponse, GetRunEventsRequest,
-  GetRunEventsResponse, GetRunLogsRequest, GetRunLogsResponse, GetRunRequest, GetRunResponse, ListRunsRequest, ListRunsResponse,
-  StopRunRequest, StopRunResponse,
+  AddFaultRequest, AddFaultResponse, CheckProfileRequest, CheckProfileResponse, CreateRunRequest, CreateRunResponse, DecideRequest,
+  DecideResponse, GetRunEventsRequest, GetRunEventsResponse, GetRunLogsRequest, GetRunLogsResponse, GetRunRequest, GetRunResponse,
+  ListFaultsRequest, ListFaultsResponse, ListRunsRequest, ListRunsResponse, RemoveFaultRequest, RemoveFaultResponse, StopRunRequest,
+  StopRunResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -129,6 +130,29 @@ impl<S: Runs> RunService for Adapter<S> {
     self.operator(&request, "actors cannot check profiles")?;
     let check = self.runs.check(domain::profile_to_check(request.into_inner())).await?;
     Ok(Response::new(domain::proto_profile_check(check)))
+  }
+
+  async fn add_fault(&self, request: Request<AddFaultRequest>) -> Result<Response<AddFaultResponse>, Status> {
+    let caller = self.operator(&request, "actors cannot change a run's chaos")?;
+    let request = request.into_inner();
+    let added = self.runs.add_fault(&request.run_id, &request.name, &request.fault_yaml, caller.principal()).await?;
+    Ok(Response::new(AddFaultResponse {
+      run_id: added.run,
+      warnings: added.warnings,
+    }))
+  }
+
+  async fn list_faults(&self, request: Request<ListFaultsRequest>) -> Result<Response<ListFaultsResponse>, Status> {
+    self.operator(&request, "actors cannot read a run's chaos")?;
+    let faults = self.runs.faults(&request.into_inner().run_id).await?;
+    Ok(Response::new(domain::proto_faults(faults)))
+  }
+
+  async fn remove_fault(&self, request: Request<RemoveFaultRequest>) -> Result<Response<RemoveFaultResponse>, Status> {
+    let caller = self.operator(&request, "actors cannot change a run's chaos")?;
+    let request = request.into_inner();
+    let run_id = self.runs.remove_fault(&request.run_id, &request.name, caller.principal()).await?;
+    Ok(Response::new(RemoveFaultResponse { run_id }))
   }
 }
 

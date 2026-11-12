@@ -6,29 +6,49 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use needy_api_server::control::{ControlError, ExecSpec, Route, Target};
+use needy_api_server::control::{ControlError, ExecFault, ExecSpec, Route, Target};
 use needy_core::event::{Event, ExecDecide};
 use needy_core::intercept::exec::{Chain, Decision, ExecContext};
-use needy_core::types::{Origin, Outcome, Placement};
+use needy_core::types::{Fired, Origin, Outcome, Placement};
 
 use crate::pool::Instance;
 use crate::run::Run;
 
 /// Runs the `exec.decide` chain for one command of `run`: rules, then
-/// chaos. A command placed on `executor` explicitly skips the rules. The
-/// delays of injected faults are applied here, and each fault is recorded.
-/// The chain's latency, without the delays, is the `exec.decide` timing.
+/// chaos. A command placed on `executor` explicitly skips the rules. Each
+/// injected fault is recorded, and its delay waited out here, before the
+/// command runs or the fault's exit, signal or hang ends it. The chain's
+/// latency, without the delays, is the `exec.decide` timing.
 async fn decide(run: &Run, ctx: &ExecContext, executor: Option<&str>) -> Decision {
   let started = std::time::Instant::now();
   let decision = Chain::new(&run.profile, &run.injector, executor).decide(ctx);
   run.trace.time("exec.decide", started.elapsed());
   for fired in &decision.fired {
+    run.emit(&Event::FaultInjected(fired.clone()));
     if let Some(delay) = fired.effect.delay {
       tokio::time::sleep(delay).await;
     }
-    run.emit(&Event::FaultInjected(fired.clone()));
   }
   decision
+}
+
+/// How the fault `fired` ends a command in place of running it.
+pub fn exec_fault(fired: &Fired) -> ExecFault {
+  ExecFault {
+    name: fired.name.clone(),
+    exit: fired.effect.exit,
+    signal: fired.effect.signal.clone(),
+    hang: fired.effect.hang,
+    stderr: fired.effect.stderr.clone().unwrap_or_default(),
+  }
+}
+
+/// Where [`place`] puts a command of a run.
+pub enum Placed {
+  /// It runs on this instance.
+  Run(Arc<Instance>),
+  /// A chaos fault ends it in place of running it.
+  Fault(ExecFault),
 }
 
 /// Records an `exec.decide` event and returns it; `outcome` is where the
@@ -55,7 +75,10 @@ pub async fn route(run: &Run, ctx: ExecContext) -> Route {
     Outcome::Run(Placement::Actor) => (Target::Actor, None),
     Outcome::Run(Placement::Executor(name)) => (Target::Executor(name.clone()), run.executor(name)),
     Outcome::Deny(message) => (Target::Refused(format!("denied: {message}")), None),
-    Outcome::Fault(errno) => (Target::Refused(format!("fault injected: {errno}")), None),
+    Outcome::Fault(name) => match decision.fault() {
+      Some(fired) => (Target::Fault(exec_fault(fired)), None),
+      None => (Target::Refused(format!("fault {name} has no effect")), None),
+    },
   };
   let command = executor_command(instance.as_deref(), &decision);
   Route {
@@ -70,9 +93,10 @@ pub async fn route(run: &Run, ctx: ExecContext) -> Route {
 
 /// Places an exec of `run`: runs the `exec.decide` chain unless the
 /// command comes from the actor (the proxy decided already; a mount is not
-/// a command), rewrites `spec` and returns the instance it runs on with
-/// the events of the decision. A refusal carries those events.
-pub async fn place(run: &Run, spec: &mut ExecSpec) -> Result<(Arc<Instance>, Vec<Event>), ControlError> {
+/// a command), rewrites `spec` and returns the instance it runs on, or the
+/// fault that ends it, with the events of the decision. A refusal carries
+/// those events.
+pub async fn place(run: &Run, spec: &mut ExecSpec) -> Result<(Placed, Vec<Event>), ControlError> {
   let origin = spec.origin;
   let explicit = (!spec.executor.is_empty()).then(|| spec.executor.clone());
   let decision = match origin {
@@ -84,9 +108,15 @@ pub async fn place(run: &Run, spec: &mut ExecSpec) -> Result<(Arc<Instance>, Vec
   };
   let mut events: Vec<Event> = decision.iter().flat_map(|(d, _)| d.fired.iter().cloned().map(Event::FaultInjected)).collect();
   if let Some((decision, ctx)) = &decision {
+    if let Some(fired) = decision.fault() {
+      if explicit.is_none() {
+        events.push(record(run, ctx, decision, origin, decision.outcome.clone()));
+      }
+      return Ok((Placed::Fault(exec_fault(fired)), events));
+    }
     let refusal = match &decision.outcome {
       Outcome::Deny(message) => Some(format!("denied: {message}")),
-      Outcome::Fault(errno) => Some(format!("fault injected: {errno}")),
+      Outcome::Fault(name) => Some(format!("fault {name} has no effect")),
       Outcome::Run(_) => None,
     };
     if let Some(message) = refusal {
@@ -119,7 +149,7 @@ pub async fn place(run: &Run, spec: &mut ExecSpec) -> Result<(Arc<Instance>, Vec
     // The decision records where the command really runs.
     events.push(record(run, ctx, decision, origin, Outcome::Run(Placement::Executor(instance.name.clone()))));
   }
-  Ok((instance, events))
+  Ok((Placed::Run(instance), events))
 }
 
 fn context(spec: &ExecSpec) -> ExecContext {

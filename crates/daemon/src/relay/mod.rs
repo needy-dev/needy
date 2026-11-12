@@ -12,16 +12,18 @@ use std::time::Instant;
 
 use needy_api_client::exec::{self as client_exec, ExecStream};
 use needy_api_client::proto::v1::{ExecAttach, KillProcessRequest, ListProcessesRequest};
-use needy_api_server::control::{ControlError, ExecInput, ExecOpen, ExecOutput, Inputs, Outputs, ProcessInfo, Processes};
+use needy_api_server::control::{ControlError, ExecFault, ExecInput, ExecOpen, ExecOutput, Inputs, Outputs, ProcessInfo, Processes};
 use needy_api_server::protocol::domain;
 use needy_common::time::now_ms;
 use needy_core::event::{Event, ExecExit, ExecKill, ExecStart, TermFallback};
-use needy_core::intercept::file::StreamFilter;
+use needy_core::intercept::file::{Later, StreamFilter};
 use needy_core::types::{Origin, Principal};
 use needy_trace::Dispatch;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt as _;
 use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::pool::{Instance, Slot};
 use crate::run::{self, Run};
@@ -29,6 +31,33 @@ use crate::{Daemon, actor};
 use crate::{routing, store};
 
 type Sender = mpsc::Sender<Result<ExecOutput, ControlError>>;
+
+/// Where a filtered stream's held bytes wait: tasks of the run, which end
+/// with it.
+#[derive(Clone)]
+struct Timers {
+  tasks: TaskTracker,
+  cancel: CancellationToken,
+}
+
+impl Timers {
+  /// Sends `later`'s bytes to the caller after its delay; at once, in
+  /// order, when it has none.
+  async fn send(&self, out_tx: &Sender, later: Later) -> bool {
+    if later.after.is_zero() {
+      return out_tx.send(Ok(ExecOutput::Stdout(later.bytes))).await.is_ok();
+    }
+    let out_tx = out_tx.clone();
+    self.tasks.spawn(self.cancel.clone().run_until_cancelled_owned(async move {
+      tokio::time::sleep(later.after).await;
+      // A caller that left waits for nothing.
+      if out_tx.send(Ok(ExecOutput::Stdout(later.bytes))).await.is_err() {
+        tracing::debug!("exec relay: the client left before a delayed reply");
+      }
+    }));
+    true
+  }
+}
 
 /// An executor's error, relayed with the same meaning.
 fn relayed(e: needy_api_client::Error) -> ControlError {
@@ -96,6 +125,8 @@ struct Relay {
   /// or the caller sent `detach`.
   detach: Arc<AtomicBool>,
   filter: Option<Arc<dyn StreamFilter>>,
+  /// Where the filter's held bytes wait; set with `filter`.
+  timers: Option<Timers>,
   requested: Instant,
 }
 
@@ -234,7 +265,10 @@ impl Processes for Daemon {
           id => Some(self.runs.find_open(id).await?),
         };
         let (instance, decided) = match &run {
-          Some(run) => routing::place(run, &mut spec).await?,
+          Some(run) => match routing::place(run, &mut spec).await? {
+            (routing::Placed::Run(instance), decided) => (instance, decided),
+            (routing::Placed::Fault(fault), decided) => return Ok(faulted(run, fault, decided)),
+          },
           None => (self.outside_run(&spec.executor, &spec.runner).await?, Vec::new()),
         };
         if spec.cwd.is_empty() && !instance.handle.workspace.is_empty() {
@@ -250,6 +284,10 @@ impl Processes for Daemon {
           argv: spec.argv.clone(),
           detach: Arc::new(AtomicBool::new(spec.detach)),
           filter: run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
+          timers: run.as_ref().map(|run| Timers {
+            tasks: run.tasks.clone(),
+            cancel: run.cancel.clone(),
+          }),
           requested,
         };
         (run, relay, decided, Upstream::Start(spec))
@@ -284,6 +322,7 @@ impl Processes for Daemon {
           argv: Vec::new(),
           detach: Arc::new(AtomicBool::new(false)),
           filter: None,
+          timers: None,
           requested,
         };
         (
@@ -346,6 +385,7 @@ impl Processes for Daemon {
       input,
       upstream.input(),
       relay.filter.clone(),
+      relay.timers.clone(),
       relay.trace.clone(),
       relay.detach.clone(),
       out_tx.clone(),
@@ -445,11 +485,55 @@ impl Processes for Daemon {
   }
 }
 
+/// The stream of a command a chaos fault ends in place of running it, as
+/// the caller would see a process that did so: the decision's events, the
+/// fault's stderr, then its exit or death by its signal, or nothing until
+/// the caller leaves or the run ends, for a hang.
+fn faulted(run: &Arc<Run>, fault: ExecFault, decided: Vec<needy_core::event::Event>) -> Outputs {
+  let (out_tx, out_rx) = mpsc::channel(decided.len() + 2);
+  let cancel = run.cancel.clone();
+  run.tasks.spawn(async move {
+    let mut outputs: Vec<ExecOutput> = decided.into_iter().map(ExecOutput::Trace).collect();
+    if !fault.stderr.is_empty() {
+      outputs.push(ExecOutput::Stderr(fault.stderr.into_bytes()));
+    }
+    for output in outputs {
+      if out_tx.send(Ok(output)).await.is_err() {
+        return;
+      }
+    }
+    let exit = if fault.hang {
+      tokio::select! {
+        () = out_tx.closed() => return,
+        () = cancel.cancelled() => {
+          // NOTICE: as for a relay the run ends, `try_send`, so the stop
+          // does not wait for a caller that reads nothing.
+          let ended = out_tx.try_send(Ok(ExecOutput::Ended("the run stopped".into())));
+          if let Err(e) = ended {
+            tracing::debug!("exec relay: cannot say why the stream ends: {e}");
+          }
+          return;
+        }
+      }
+    } else {
+      needy_common::process::Exit {
+        code: fault.exit,
+        signal: fault.signal.unwrap_or_default(),
+      }
+    };
+    if out_tx.send(Ok(ExecOutput::Exited(exit))).await.is_err() {
+      tracing::debug!("exec relay: the client left before a fault's exit");
+    }
+  });
+  Box::pin(ReceiverStream::new(out_rx))
+}
+
 /// Relays the caller's input to the process, through the stream's filter.
 async fn forward_input(
   mut input: Inputs,
   upstream: client_exec::Input,
   filter: Option<Arc<dyn StreamFilter>>,
+  timers: Option<Timers>,
   trace: Option<Dispatch>,
   detach: Arc<AtomicBool>,
   out_tx: Sender,
@@ -472,8 +556,12 @@ async fn forward_input(
         }
       }
       for reply in filtered.replies {
+        let sent = match &timers {
+          Some(timers) => timers.send(&out_tx, reply).await,
+          None => out_tx.send(Ok(ExecOutput::Stdout(reply.bytes))).await.is_ok(),
+        };
         // The client is gone; the input loop ends on its next read.
-        if out_tx.send(Ok(ExecOutput::Stdout(reply))).await.is_err() {
+        if !sent {
           break;
         }
       }
@@ -609,7 +697,13 @@ impl Relay {
         }
         client_exec::Event::Stdout(mut bytes) => {
           if let Some(filter) = &self.filter {
-            bytes = filter.outbound(&bytes);
+            let outbound = filter.outbound(&bytes);
+            if let Some(timers) = &self.timers {
+              for later in outbound.later {
+                timers.send(&out_tx, later).await;
+              }
+            }
+            bytes = outbound.now;
             if bytes.is_empty() {
               continue;
             }

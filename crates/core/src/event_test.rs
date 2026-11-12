@@ -1,8 +1,9 @@
 use std::time::Duration;
 
-use needy_config::profile::FaultKind;
+use needy_config::profile::FaultDomain;
 
 use super::*;
+use crate::event::{ChaosAdd, ChaosRemove};
 use crate::types::{Capture, Effect, Fired, Network, Origin, Outcome, Placement, Principal};
 
 fn argv(s: &str) -> Vec<String> {
@@ -104,13 +105,24 @@ fn every_kind() -> Vec<Event> {
       ms: 12,
     }),
     Event::FaultInjected(Fired {
-      kind: FaultKind::Exec,
+      name: "curl-down".into(),
+      domain: FaultDomain::Exec,
       target: "curl https://example.com".into(),
       effect: Effect {
-        errno: Some("ECONNREFUSED".into()),
+        exit: Some(7),
+        stderr: Some("curl: (7) Failed to connect".into()),
         delay: Some(Duration::from_millis(500)),
-        temp_mc: None,
+        ..Effect::default()
       },
+    }),
+    Event::ChaosAdd(ChaosAdd {
+      name: "slow-npm".into(),
+      fault: serde_yaml::from_str("{ net: { connect: registry.npmjs.org }, delay: 2s, times: 3 }").unwrap(),
+      by: Some(Principal::Client("laptop".into())),
+    }),
+    Event::ChaosRemove(ChaosRemove {
+      name: "slow-npm".into(),
+      by: Some(Principal::Operator),
     }),
     Event::NetRequest(NetRequest {
       network: Network::Actor,
@@ -170,13 +182,13 @@ fn payloads_are_plain_json_objects() {
     argv: argv("curl https://example.com"),
     effective: argv("curl https://example.com"),
     origin: Origin::Cli,
-    outcome: Outcome::Fault("ECONNREFUSED".into()),
+    outcome: Outcome::Fault("curl-down".into()),
     rules: vec![],
   });
   assert_eq!(event.kind().as_str(), "exec.decide");
   let json: serde_json::Value = serde_json::from_str(&event.payload()).unwrap();
   assert_eq!(json["origin"], "cli");
-  assert_eq!(json["outcome"]["fault"], "ECONNREFUSED");
+  assert_eq!(json["outcome"]["fault"], "curl-down");
   assert_eq!(json["argv"][0], "curl");
 }
 

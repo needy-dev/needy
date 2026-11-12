@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -8,7 +7,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Empty, Full};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use needy_config::value::Glob;
+use needy_config::profile::FaultDomain;
 use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetConnect, NetDeny, NetRequest};
 use needy_core::network::Policy;
@@ -71,14 +70,11 @@ impl Running {
   }
 }
 
-/// A gateway that allows `127.0.0.1`, maps `model.needy` to `upstream` and
-/// injects a header for it, with the faults in `chaos`.
+/// A gateway that allows `127.0.0.1` and has the service `model`
+/// (`model.needy`) at `upstream`, with the faults in `chaos`.
 fn start(upstream: SocketAddr, chaos: &str) -> Running {
-  let policy = Policy {
-    allow: vec![Glob::new("127.0.0.1")],
-    upstream: BTreeMap::from([("model.needy".to_string(), format!("http://{upstream}"))]),
-    inject: BTreeMap::from([("model.needy".to_string(), ("authorization".to_string(), "Bearer test-secret".to_string()))]),
-  };
+  let network = serde_yaml::from_str(&format!("{{ allow: [127.0.0.1], services: {{ model: {{ url: \"http://{upstream}\" }} }} }}")).unwrap();
+  let policy = Policy::actor(&network);
   let memory = Memory::new();
   let trace = Dispatch::new(
     "s1",
@@ -134,18 +130,19 @@ async fn connect(socket: &Path, authority: &str) -> (u16, UnixStream) {
 }
 
 #[tokio::test]
-async fn a_mapped_host_is_forwarded_to_its_upstream_with_the_injected_header() {
+async fn a_service_s_host_is_forwarded_to_its_url_as_sent() {
   let (address, seen) = upstream().await;
   let gateway = start(address, "");
 
   let (status, body) = get(&gateway.socket, "http://model.needy/v1/models").await;
 
   assert_eq!((status, body.as_str()), (StatusCode::OK, "upstream"));
+  // TODO(mitm): no header is added; header injection was removed.
   assert_eq!(
     *seen.lock().unwrap(),
     [Seen {
       path: "/v1/models".into(),
-      authorization: Some("Bearer test-secret".into()),
+      authorization: None,
     }]
   );
   let events = gateway.events().await;
@@ -165,7 +162,7 @@ async fn a_mapped_host_is_forwarded_to_its_upstream_with_the_injected_header() {
 }
 
 #[tokio::test]
-async fn an_allowed_host_gets_no_header_injected_for_another_host() {
+async fn an_allowed_host_is_forwarded_to_itself() {
   let (address, seen) = upstream().await;
   let gateway = start(address, "");
 
@@ -201,21 +198,22 @@ async fn a_host_off_the_allowlist_is_denied() {
 }
 
 #[tokio::test]
-async fn a_net_fault_fails_an_allowed_request_before_its_upstream() {
+async fn a_refuse_fault_answers_as_a_refused_upstream_before_reaching_it() {
   let (address, seen) = upstream().await;
-  let gateway = start(address, "faults: [{on: net.connect, match: model.needy, errno: ECONNRESET}]");
+  let gateway = start(address, "faults: { down: {net: {connect: model.needy}, refuse: true} }");
 
   let (status, body) = get(&gateway.socket, "http://model.needy/v1/models").await;
 
-  assert_eq!((status, body.as_str()), (StatusCode::BAD_GATEWAY, "needy chaos: ECONNRESET for model.needy\n"));
+  assert_eq!((status, body.as_str()), (StatusCode::BAD_GATEWAY, "needy: model.needy: connection refused (needy chaos: down)\n"));
   assert!(seen.lock().unwrap().is_empty());
   assert_eq!(
     gateway.events().await,
     [Event::FaultInjected(Fired {
-      kind: needy_config::profile::FaultKind::NetConnect,
+      name: "down".into(),
+      domain: FaultDomain::Net,
       target: "model.needy".into(),
       effect: Effect {
-        errno: Some("ECONNRESET".into()),
+        refuse: true,
         ..Effect::default()
       },
     })]
@@ -223,9 +221,67 @@ async fn a_net_fault_fails_an_allowed_request_before_its_upstream() {
 }
 
 #[tokio::test]
+async fn a_status_fault_answers_a_service_request_with_its_status() {
+  let (address, seen) = upstream().await;
+  let gateway = start(address, "faults: { busy: {net: {request: model.needy}, status: 503} }");
+
+  let (status, body) = get(&gateway.socket, "http://model.needy/v1/models").await;
+
+  assert_eq!((status, body.as_str()), (StatusCode::SERVICE_UNAVAILABLE, "needy chaos: busy\n"));
+  assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_delay_fault_holds_the_request_then_lets_it_through() {
+  let (address, seen) = upstream().await;
+  let gateway = start(address, "faults: { slow: {net: {connect: model.needy}, delay: 300ms} }");
+
+  let started = std::time::Instant::now();
+  let (status, _) = get(&gateway.socket, "http://model.needy/").await;
+
+  assert_eq!(status, StatusCode::OK);
+  assert!(started.elapsed() >= Duration::from_millis(300), "{:?}", started.elapsed());
+  assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_reset_fault_closes_the_connection_without_an_answer() {
+  let (address, _) = upstream().await;
+  let gateway = start(address, "faults: { cut: {net: {connect: '*'}, reset: true} }");
+
+  for request in [
+    "GET http://model.needy/ HTTP/1.1\r\nHost: model.needy\r\n\r\n",
+    "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n",
+  ] {
+    let mut stream = UnixStream::connect(&gateway.socket).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer)).await.expect("the gateway closes");
+    assert!(answer.is_empty(), "{request}: {:?}", String::from_utf8_lossy(&answer));
+    // End of file, or a reset.
+    assert!(!matches!(read, Ok(n) if n > 0));
+  }
+}
+
+#[tokio::test]
+async fn a_hang_fault_holds_the_tunnel_until_the_owner_cancels() {
+  let (address, _) = upstream().await;
+  let gateway = start(address, "faults: { stuck: {net: {connect: '127.0.0.1'}, hang: true} }");
+  let mut stream = UnixStream::connect(&gateway.socket).await.unwrap();
+  stream.write_all(format!("CONNECT {address} HTTP/1.1\r\nHost: {address}\r\n\r\n").as_bytes()).await.unwrap();
+
+  let mut byte = [0u8; 1];
+  let waited = tokio::time::timeout(Duration::from_millis(300), stream.read(&mut byte)).await;
+  assert!(waited.is_err(), "the gateway answered a hanging CONNECT");
+
+  gateway.cancel.cancel();
+  tokio::time::timeout(Duration::from_secs(5), gateway.task).await.expect("the gateway ends").unwrap();
+}
+
+#[tokio::test]
 async fn chaos_does_not_count_a_host_the_allowlist_denied() {
   let (address, _) = upstream().await;
-  let gateway = start(address, "faults: [{on: net.connect, nth: 1, errno: ECONNRESET}]");
+  let gateway = start(address, "faults: { first: {net: {connect: '*'}, nth: 1, refuse: true} }");
 
   let (denied, _) = get(&gateway.socket, "http://denied.example.com/").await;
   let (faulted, _) = get(&gateway.socket, "http://model.needy/").await;

@@ -1,4 +1,4 @@
-use needy_config::profile::FaultKind;
+use needy_config::profile::FaultDomain;
 
 use super::*;
 use crate::event::*;
@@ -45,12 +45,15 @@ fn start(origin: Origin, command: &str) -> Event {
   })
 }
 
-fn exec_fault(command: &str, errno: Option<&str>) -> Event {
+/// An exec fault named `exec-fault` that exits with `exit`, or only delays.
+fn exec_fault(command: &str, exit: Option<i32>) -> Event {
   Event::FaultInjected(Fired {
-    kind: FaultKind::Exec,
+    name: "exec-fault".into(),
+    domain: FaultDomain::Exec,
     target: command.into(),
     effect: Effect {
-      errno: errno.map(Into::into),
+      exit,
+      delay: exit.is_none().then(|| std::time::Duration::from_secs(1)),
       ..Effect::default()
     },
   })
@@ -84,7 +87,7 @@ fn actor_run() -> Vec<Recorded> {
     at(1_240, exit(Origin::ActorProxy, "git status", 7)),
     at(1_300, decide(Origin::ActorProxy, "bash -c uname", Outcome::Run(Placement::Actor))),
     at(1_400, decide(Origin::ActorProxy, "git push --force", Outcome::Deny("no force".into()))),
-    at(1_500, exec_fault("curl https://example.com", Some("ECONNREFUSED"))),
+    at(1_500, exec_fault("curl https://example.com", Some(7))),
     at(1_500, decide(Origin::ActorProxy, "curl https://example.com", Outcome::Fault("ECONNREFUSED".into()))),
     at(1_600, exec_fault("git fetch", None)),
     at(1_700, start(Origin::Cli, "git log")),
@@ -167,7 +170,7 @@ fn empty_activity_lines_are_omitted() {
 fn findings_list_denials_and_faults() {
   let report = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
   assert!(report.contains("- 🚫 Denied command: `git push --force`: no force\n"), "{report}");
-  assert!(report.contains("- ℹ️ Injected faults: 2 (exec (2))\n"), "{report}");
+  assert!(report.contains("- ℹ️ Injected faults: 2 (exec-fault (exec) (2))\n"), "{report}");
 }
 
 #[test]
@@ -429,7 +432,7 @@ fn the_human_report_counts_commands_per_executor_in_aligned_lines() {
   assert!(report.contains("\nTop commands\n  git on build  2  slowest 30 ms\n"), "{report}");
   assert!(report.contains("\nNetwork\n  actor  api.example.com  1\n"), "{report}");
   assert!(report.contains("  denied command: git push --force: no force\n"), "{report}");
-  assert!(report.contains("  injected faults: 2 (exec (2))\n"), "{report}");
+  assert!(report.contains("  injected faults: 2 (exec-fault (exec) (2))\n"), "{report}");
 }
 
 // ROOT CAUSE:
@@ -481,7 +484,7 @@ fn the_human_report_colors_failures_and_faults_only_when_asked() {
   let colored = render("7f3a", &actor_run(), Level::Summary, Format::Human { color: true });
 
   assert!(colored.contains("\u{1b}[31m(1 failed)\u{1b}[0m"), "{colored}");
-  assert!(colored.contains("\u{1b}[33minjected faults: 2 (exec (2))\u{1b}[0m"), "{colored}");
+  assert!(colored.contains("\u{1b}[33minjected faults: 2 (exec-fault (exec) (2))\u{1b}[0m"), "{colored}");
   assert!(!human(&actor_run()).contains('\u{1b}'));
 }
 

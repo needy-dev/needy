@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
-use needy_config::profile::{ActorDriver, ExecutorDriver, FaultKind};
+use needy_config::profile::{ActorDriver, ExecutorDriver, FaultDomain};
 use serde::{Deserialize, Serialize};
 
 /// Where a command runs.
@@ -34,7 +34,8 @@ pub enum Outcome {
   Run(Placement),
   /// A rule refused it, with the rule's message.
   Deny(String),
-  /// An injected fault failed it with this errno.
+  /// The chaos fault of this name ended it without running; its effect is
+  /// in the decision's `fault.injected`.
   Fault(String),
 }
 
@@ -349,9 +350,11 @@ pub enum Network {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fired {
-  pub kind: FaultKind,
-  /// What it hit: the command as typed, the host, the path under the mount,
-  /// or the sensor chip.
+  /// The fault's name in the profile, or as `needy chaos add` named it.
+  pub name: String,
+  pub domain: FaultDomain,
+  /// What it hit: the command as typed, the path in the actor, the host, or
+  /// the sensor chip.
   pub target: String,
   pub effect: Effect,
 }
@@ -360,13 +363,44 @@ pub struct Fired {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Effect {
-  /// The operation failed with this errno.
-  pub errno: Option<String>,
   /// The operation was held this long first.
-  #[serde(with = "millis")]
+  #[serde(with = "millis", skip_serializing_if = "Option::is_none")]
   pub delay: Option<Duration>,
-  /// A sensor read this temperature, in millidegrees Celsius.
+  /// exec: the command exited with this code without running.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub exit: Option<i32>,
+  /// exec: the command died of this signal without running.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub signal: Option<String>,
+  /// exec: written to the command's stderr.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub stderr: Option<String>,
+  /// exec and net: the operation never completed.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub hang: bool,
+  /// file: the open failed with this errno.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub errno: Option<String>,
+  /// net: the connection was refused.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub refuse: bool,
+  /// net: the connection was closed without an answer.
+  #[serde(skip_serializing_if = "std::ops::Not::not")]
+  pub reset: bool,
+  /// net: the request was answered with this HTTP status.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub status: Option<u16>,
+  /// sensor: the sensors read this temperature, in millidegrees Celsius.
+  #[serde(skip_serializing_if = "Option::is_none")]
   pub temp_mc: Option<i32>,
+}
+
+impl Effect {
+  /// Whether the operation does not go on after this effect: everything
+  /// but a delay alone ends it.
+  pub fn ends(&self) -> bool {
+    self.exit.is_some() || self.signal.is_some() || self.hang || self.errno.is_some() || self.refuse || self.reset || self.status.is_some()
+  }
 }
 
 /// Durations as whole milliseconds on the wire.

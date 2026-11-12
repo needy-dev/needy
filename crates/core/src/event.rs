@@ -6,6 +6,7 @@
 //! Payloads are plain JSON objects with `deny_unknown_fields`, so a field
 //! that one side renames fails to decode instead of reading as empty.
 
+use needy_config::profile::Fault;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
@@ -18,8 +19,11 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// `recipe_time`; version 6 renamed `actor.start`'s `runtime` and
 /// `run.create`'s executors' `runtime` to `driver`, with the drivers' names
 /// (`linux-firecracker`, `linux-container (runc)`, `linux-container`);
-/// version 7 added `actor.ready`; version 8 added `actor.start`'s `capture`.
-pub const SCHEMA_VERSION: u32 = 8;
+/// version 7 added `actor.ready`; version 8 added `actor.start`'s `capture`;
+/// version 9 gave `fault.injected` the fault's `name` and `domain` and its
+/// effects their own fields (`exit`, `signal`, `refuse`, `status`, ...), and
+/// added `chaos.add` and `chaos.remove`.
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -31,7 +35,9 @@ pub const SCHEMA_VERSION: u32 = 8;
 // Version 7 only added a kind, but a reader of 6 would refuse it, so traces
 // of 6 are refused here too: one version is read (no compatibility).
 // Version 8 only added an optional field (`actor.start`'s `capture`); traces
-// of 7 are refused all the same, by the same rule.
+// of 7 are refused all the same, by the same rule. Version 9 renamed
+// `fault.injected`'s `kind` to `domain` with new values, so traces of 8 are
+// refused as well.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
 pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = SCHEMA_VERSION..=SCHEMA_VERSION;
@@ -126,7 +132,12 @@ events! {
   ExecExit(ExecExit) = "exec.exit",
   /// A signal sent to a run's process through the control plane.
   ExecKill(ExecKill) = "exec.kill",
+  /// A chaos fault fired; it carries the fault's name.
   FaultInjected(Fired) = "fault.injected",
+  /// `needy chaos add` added a fault to the running run.
+  ChaosAdd(ChaosAdd) = "chaos.add",
+  /// `needy chaos rm` removed a fault from the running run.
+  ChaosRemove(ChaosRemove) = "chaos.remove",
   NetRequest(NetRequest) = "net.request",
   NetConnect(NetConnect) = "net.connect",
   NetDeny(NetDeny) = "net.deny",
@@ -392,6 +403,27 @@ pub struct ExecKill {
   pub signal: String,
   /// Who caused it; absent in version 1 traces and for what the control
   /// plane does on its own, such as stopping runs when it shuts down.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub by: Option<Principal>,
+}
+
+/// A fault added to a running run. A replay applies it at the same place
+/// in the event sequence; its counts start at zero there.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChaosAdd {
+  pub name: String,
+  pub fault: Box<Fault>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub by: Option<Principal>,
+}
+
+/// A fault removed from a running run, whether the profile or
+/// `needy chaos add` had added it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChaosRemove {
+  pub name: String,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub by: Option<Principal>,
 }

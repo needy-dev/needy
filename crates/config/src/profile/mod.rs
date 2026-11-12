@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 pub use actor::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime};
-pub use chaos::{Chaos, Fault, FaultKind, Readings};
+pub use chaos::{Chaos, FILE_ERRNOS, Fault, FaultDomain, FileMatch, NetMatch, Readings, SIGNALS, valid_name as valid_fault_name};
 pub use executor::{ContainerBuild, ContainerExecutor, Cpus, Device, Executor, ExecutorDriver, Gpus, MemorySwap, Mount, OnFull, Ulimit};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
-pub use network::{Injection, NetworkPolicy};
+pub use network::{ActorNetwork, NetworkPolicy, SERVICE_DOMAIN, Service, service_host};
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
 pub use runner::{LabelMatch, RunnerSelector};
 pub use trace::{Trace, TraceSink};

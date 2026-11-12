@@ -6,8 +6,8 @@ use std::fmt;
 use std::ops::Deref;
 use std::str::FromStr;
 
-use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize, Serializer};
 
 /// A value that does not have the form its type needs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -51,6 +51,13 @@ impl FromStr for Duration {
       return Self::from_secs_f64(secs);
     }
     humantime::parse_duration(text).map(Self).map_err(|err| ValueError(format!("invalid duration {text:?}: {err}")))
+  }
+}
+
+/// Written back as users write it: `500ms`, `2s`, `1m 30s`.
+impl Serialize for Duration {
+  fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&humantime::format_duration(self.0).to_string())
   }
 }
 
@@ -249,7 +256,7 @@ impl<'de> Deserialize<'de> for Words {
 }
 
 /// A glob pattern in `glob-match` syntax: `*`, `**`, `?`, `{a,b}`, `[ab]`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Glob(String);
 

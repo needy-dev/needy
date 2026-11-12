@@ -23,6 +23,15 @@ service RunService {
   // selectors resolve, and its recipe fits the CPU of the host its actor
   // would run on. Creates nothing.
   rpc CheckProfile(CheckProfileRequest) returns (CheckProfileResponse);
+  // Add a chaos fault to a live run. The run's trace records it
+  // (`chaos.add`), so a replay applies it at the same point.
+  rpc AddFault(AddFaultRequest) returns (AddFaultResponse);
+  // List a run's chaos faults: its profile's and those added since, with
+  // how often each matched and fired.
+  rpc ListFaults(ListFaultsRequest) returns (ListFaultsResponse);
+  // Remove a chaos fault from a live run, whether its profile or AddFault
+  // added it. The run's trace records it (`chaos.remove`).
+  rpc RemoveFault(RemoveFaultRequest) returns (RemoveFaultResponse);
 }
 
 message CreateRunRequest {
@@ -208,11 +217,28 @@ message DecideResponse {
   map<string, string> env = 3;
   bool clear_env = 4;
   string cwd = 5;
-  // Set when the command must not run: the message to show, either
-  // "denied: <rule message>" or "fault injected: <errno>".
+  // Set when a rule refuses the command: the message to show,
+  // "denied: <rule message>".
   string deny = 6;
   // The value of `ExecStart.search_path_if_missing` for the routed exec.
   bool search_path_if_missing = 7;
+  // Set when a chaos fault ends the command instead of running it.
+  ExecFault fault = 8;
+}
+
+// How a chaos fault ends a command in place of running it: exactly one of
+// `exit_code`, `signal` and `hang`.
+message ExecFault {
+  // The fault's name.
+  string name = 1;
+  // Exit with this code.
+  optional int32 exit_code = 2;
+  // Die of this signal, by name, such as `SIGSEGV`.
+  string signal = 3;
+  // Never finish, until the caller gives up or the run ends.
+  bool hang = 4;
+  // Written to stderr first.
+  string stderr = 5;
 }
 
 message CheckProfileRequest {
@@ -243,6 +269,63 @@ message Placement {
 message ProfileFinding {
   FindingSeverity severity = 1;
   string message = 2;
+}
+
+message AddFaultRequest {
+  // A run ID, an ID prefix, a name or `latest`.
+  string run_id = 1;
+  // The fault's name: letters, digits, `-`, `_` and `.`.
+  string name = 2;
+  // The fault as YAML, written as an entry of a profile's `chaos.faults`,
+  // for example `{ exec: "curl **", exit: 7 }`.
+  string fault_yaml = 3;
+}
+
+message AddFaultResponse {
+  // The full run ID.
+  string run_id = 1;
+  // What the fault cannot reach, such as commands the actor does not route.
+  repeated string warnings = 2;
+}
+
+message ListFaultsRequest {
+  string run_id = 1;
+}
+
+message ListFaultsResponse {
+  string run_id = 1;
+  // In name order.
+  repeated FaultInfo faults = 2;
+}
+
+message FaultInfo {
+  string name = 1;
+  // `exec`, `file`, `net` or `sensor`.
+  string domain = 2;
+  // The fault as YAML, as `AddFaultRequest.fault_yaml` takes it.
+  string fault_yaml = 3;
+  FaultSource source = 4;
+  // Operations it matched within its time window.
+  uint64 matched = 5;
+  // Times it fired.
+  uint64 fired = 6;
+}
+
+enum FaultSource {
+  FAULT_SOURCE_UNSPECIFIED = 0;
+  // The run's profile.
+  FAULT_SOURCE_PROFILE = 1;
+  // AddFault, while the run ran.
+  FAULT_SOURCE_ADDED = 2;
+}
+
+message RemoveFaultRequest {
+  string run_id = 1;
+  string name = 2;
+}
+
+message RemoveFaultResponse {
+  string run_id = 1;
 }
 
 enum FindingSeverity {

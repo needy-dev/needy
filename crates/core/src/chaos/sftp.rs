@@ -1,14 +1,16 @@
-//! SFTP packet framing for `file.open` faults. File faults act on SFTP
-//! traffic between an actor's sshfs mount and `sftp-server` on the executor:
-//! a matching `open` never reaches the executor and gets an error reply
-//! instead. Pure bytes; the relay feeds both directions through
-//! [`FileFaults`], the `file.open` interceptor.
+//! SFTP packet framing for file faults. File faults act on SFTP traffic
+//! between an actor's sshfs mount and `sftp-server` on the executor: a
+//! matching `open` that fails never reaches the executor and gets an error
+//! reply instead, and the reply to one that is delayed is held. Pure bytes;
+//! the relay feeds both directions through [`FileFaults`], the `file.open`
+//! interceptor, and sends what it holds when its time comes.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use super::{Injector, Subject};
-use crate::intercept::file::{Filtered, StreamFilter};
+use crate::intercept::file::{Filtered, Later, Outbound, StreamFilter};
 use crate::types::Fired;
 
 // Source: https://github.com/openssh/openssh-portable/blob/V_10_6_P2/sftp.h#L36
@@ -25,14 +27,17 @@ const SSH_FXP_STATUS: u8 = 101;
 // (`sftp_error_to_errno`: 2 ENOENT, 3 EACCES, 4 EPERM, 8 EOPNOTSUPP, any
 // other EIO), the inverse of this table; codes from
 // https://github.com/openssh/openssh-portable/blob/V_10_6_P2/sftp.h#L89-L95.
+// `needy_config::profile::FILE_ERRNOS` refuses every other errno when the
+// profile loads.
 // NOTICE: sshfs turns SSH_FX_FAILURE on a `rmdir` into ENOTEMPTY
-// (sshfs.c#L2027-L2031); only `open` is faulted here.
+// (sshfs.c#L2027-L2031); only `open` is faulted here. 255 is no SFTP code,
+// which sshfs reads as EIO.
 fn sftp_code(errno: &str) -> u32 {
   match errno {
     "ENOENT" => 2,
     "EACCES" => 3,
     "EPERM" => 4,
-    "EOPNOTSUPP" | "ENOTSUP" => 8,
+    "EOPNOTSUPP" => 8,
     _ => 255,
   }
 }
@@ -71,25 +76,43 @@ fn status_reply(id: u32, code: u32, message: &str) -> Vec<u8> {
 pub struct SftpTap {
   to_server: Mutex<Vec<u8>>,
   to_client: Mutex<Vec<u8>>,
-  /// Paths relative to the mount root are matched against faults.
+  /// The mount's source on the executor, which the paths sshfs sends start
+  /// with.
   root: String,
+  /// Where the mount is in the actor: faults match the path there.
+  target: String,
+  /// The requests whose reply is held, by request ID, until this time.
+  held: Mutex<HashMap<u32, Instant>>,
 }
 
 pub struct Tapped {
   /// Bytes to forward to `sftp-server`.
   pub forward: Vec<u8>,
-  /// Replies to send straight back to sshfs.
-  pub replies: VecDeque<Vec<u8>>,
+  /// Replies to send straight back to sshfs, each after its delay.
+  pub replies: VecDeque<Later>,
   /// The faults injected into `open` requests.
   pub injected: Vec<Fired>,
 }
 
 impl SftpTap {
-  pub fn new(root: &str) -> Self {
+  /// The tap of a mount of the executor's `root` at `target` in the actor.
+  pub fn new(root: &str, target: &str) -> Self {
     Self {
       to_server: Mutex::new(Vec::new()),
       to_client: Mutex::new(Vec::new()),
       root: root.trim_end_matches('/').to_string(),
+      target: target.trim_end_matches('/').to_string(),
+      held: Mutex::new(HashMap::new()),
+    }
+  }
+
+  /// The path in the actor of a path sshfs sends.
+  fn actor_path(&self, path: &str) -> String {
+    let relative = path.strip_prefix(&self.root).unwrap_or(path).trim_start_matches('/');
+    if relative.is_empty() {
+      self.target.clone()
+    } else {
+      format!("{}/{relative}", self.target)
     }
   }
 
@@ -107,15 +130,25 @@ impl SftpTap {
         && let (Some(id), Some(name_len)) = (read_u32(&packet[5..]), read_u32(&packet[9..]))
         && let Some(name) = packet.get(13..13 + name_len as usize)
       {
-        let path = String::from_utf8_lossy(name).to_string();
-        let relative = path.strip_prefix(&self.root).unwrap_or(&path).trim_start_matches('/').to_string();
-        if let Some(mut fired) = injector.check(Subject::FileOpen(&relative)) {
-          // NOTICE: a delay-only fault still fails the open; the tap cannot
-          // hold one request without holding the stream behind it.
-          let errno = fired.effect.errno.get_or_insert_with(|| "EIO".into()).clone();
-          tapped.replies.push_back(status_reply(id, sftp_code(&errno), &format!("needy chaos: {errno}")));
-          tapped.injected.push(fired);
-          continue;
+        let path = self.actor_path(&String::from_utf8_lossy(name));
+        if let Some(fired) = injector.check(Subject::FileOpen(&path)) {
+          let delay = fired.effect.delay.unwrap_or(Duration::ZERO);
+          match &fired.effect.errno {
+            Some(errno) => {
+              tapped.replies.push_back(Later {
+                after: delay,
+                bytes: status_reply(id, sftp_code(errno), &format!("needy chaos: {errno}")),
+              });
+              tapped.injected.push(fired);
+              continue;
+            }
+            // A delay alone holds the open's reply, not the stream: the
+            // open goes on, and its reply waits.
+            None => {
+              self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(id, Instant::now() + delay);
+              tapped.injected.push(fired);
+            }
+          }
         }
       }
       tapped.forward.extend(packet);
@@ -124,26 +157,40 @@ impl SftpTap {
   }
 
   /// Feeds bytes from `sftp-server`; returns only complete packets, so
-  /// injected replies never land in the middle of one.
-  pub fn server_bytes(&self, bytes: &[u8]) -> Vec<u8> {
+  /// injected replies never land in the middle of one, and holds the reply
+  /// to a delayed open until its time.
+  pub fn server_bytes(&self, bytes: &[u8]) -> Outbound {
     let mut buf = self.to_client.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     buf.extend_from_slice(bytes);
-    take_packets(&mut buf).concat()
+    let mut out = Outbound::default();
+    let mut held = self.held.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for packet in take_packets(&mut buf) {
+      // Every reply carries its request's ID after its type.
+      match read_u32(packet.get(5..).unwrap_or_default()).and_then(|id| held.remove(&id)) {
+        Some(until) => out.later.push(Later {
+          after: until.saturating_duration_since(Instant::now()),
+          bytes: packet,
+        }),
+        None => out.now.extend(packet),
+      }
+    }
+    out
   }
 }
 
-/// `file.open` faults on one SFTP stream, rooted at the mount's source: the
-/// `file.open` interceptor, which [`crate::intercept::file::chain`]
-/// installs.
+/// File faults on one SFTP stream: the `file.open` interceptor, which
+/// [`crate::intercept::file::chain`] installs.
 pub struct FileFaults {
   tap: SftpTap,
   injector: Arc<Injector>,
 }
 
 impl FileFaults {
-  pub fn new(root: &str, injector: Arc<Injector>) -> Self {
+  /// File faults on a mount of the executor's `root` at `target` in the
+  /// actor.
+  pub fn new(root: &str, target: &str, injector: Arc<Injector>) -> Self {
     Self {
-      tap: SftpTap::new(root),
+      tap: SftpTap::new(root, target),
       injector,
     }
   }
@@ -159,7 +206,7 @@ impl StreamFilter for FileFaults {
     }
   }
 
-  fn outbound(&self, bytes: &[u8]) -> Vec<u8> {
+  fn outbound(&self, bytes: &[u8]) -> Outbound {
     self.tap.server_bytes(bytes)
   }
 }

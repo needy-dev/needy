@@ -8,7 +8,7 @@ mod human;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
-use needy_config::profile::FaultKind;
+use needy_config::profile::FaultDomain;
 use serde::Serialize;
 
 use crate::event::{ActorExit, Event, Recorded, Transfer};
@@ -132,7 +132,8 @@ struct Tally {
   failed: usize,
   model_calls: usize,
   probes: BTreeMap<String, usize>,
-  fault_kinds: BTreeMap<String, usize>,
+  /// Injected faults by `NAME (DOMAIN)`.
+  fault_names: BTreeMap<String, usize>,
   executor_cmds: BTreeMap<String, usize>,
   actor_net: BTreeMap<String, usize>,
   executor_net: BTreeMap<String, usize>,
@@ -149,6 +150,9 @@ struct Tally {
   /// Copy-ins and mirror-outs that failed: the mapping's transfer, name
   /// and why.
   files_failed: Vec<(Transfer, String, String)>,
+  /// Faults added or removed while the run ran, in order: `+NAME` or
+  /// `-NAME`.
+  chaos_changes: Vec<String>,
   slowest: Vec<(u64, String)>,
 }
 
@@ -227,10 +231,10 @@ impl Tally {
       }
       Event::FaultInjected(fired) => {
         self.faults += 1;
-        *self.fault_kinds.entry(fired.kind.to_string()).or_default() += 1;
-        // An exec fault with an errno fails the command before it starts,
-        // so no `exec.exit` counts it.
-        if fired.kind == FaultKind::Exec && fired.effect.errno.is_some() {
+        *self.fault_names.entry(format!("{} ({})", fired.name, fired.domain)).or_default() += 1;
+        // An exec fault that exits non-zero or by a signal fails the
+        // command without running it, so no `exec.exit` counts it.
+        if fired.domain == FaultDomain::Exec && (fired.effect.exit.is_some_and(|code| code != 0) || fired.effect.signal.is_some()) {
           self.failed += 1;
         }
       }
@@ -243,6 +247,8 @@ impl Tally {
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
+      Event::ChaosAdd(add) => self.chaos_changes.push(format!("+{} ({})", add.name, add.fault.domain())),
+      Event::ChaosRemove(remove) => self.chaos_changes.push(format!("-{}", remove.name)),
       Event::ActorStart(start) => {
         self.actor_driver = start.driver.clone();
         self.actor_capture = start.capture;
@@ -364,7 +370,7 @@ pub struct Commands {
   /// Faults chaos injected.
   pub faults: usize,
   /// Commands that exited non-zero or by a signal, or that an injected
-  /// errno failed before they started.
+  /// exit or signal ended without running.
   pub failed: usize,
   /// Requests to a model API through the actor gateway.
   pub model_calls: usize,
@@ -418,6 +424,8 @@ pub enum FindingKind {
   DeniedNetwork,
   /// Faults chaos injected.
   Faults,
+  /// Faults `needy chaos` added or removed while the run ran.
+  ChaosChanged,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -458,7 +466,10 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     find(FindingKind::DeniedNetwork, format!("network denied: {host} ({} network)", network_name(*network)));
   }
   if t.faults > 0 {
-    find(FindingKind::Faults, format!("injected faults: {} ({})", t.faults, top(&t.fault_kinds, TOP)));
+    find(FindingKind::Faults, format!("injected faults: {} ({})", t.faults, top(&t.fault_names, TOP)));
+  }
+  if !t.chaos_changes.is_empty() {
+    find(FindingKind::ChaosChanged, format!("chaos changed while running: {}", t.chaos_changes.join(", ")));
   }
   let mut top_commands: Vec<TopCommand> = t
     .commands_by
@@ -630,7 +641,11 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   }
   if t.faults > 0 {
     any = true;
-    writeln!(out, "- ℹ️ Injected faults: {} ({})", t.faults, top(&t.fault_kinds, TOP))?;
+    writeln!(out, "- ℹ️ Injected faults: {} ({})", t.faults, top(&t.fault_names, TOP))?;
+  }
+  if !t.chaos_changes.is_empty() {
+    any = true;
+    writeln!(out, "- ℹ️ Chaos changed while running: {}", t.chaos_changes.join(", "))?;
   }
   if !any {
     writeln!(out, "- No findings.")?;

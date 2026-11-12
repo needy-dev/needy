@@ -11,7 +11,7 @@ mod launcher;
 mod shell;
 mod when;
 
-use needy_config::profile::{FaultKind, Profile, UnknownPolicy};
+use needy_config::profile::{Profile, UnknownPolicy};
 
 use crate::intercept::exec::{Decision, ExecContext, ExecDecide};
 use crate::pattern::Pattern;
@@ -87,7 +87,6 @@ impl<'p> Rules<'p> {
       clear_env: state.clear_env,
       cwd: state.cwd.map(|c| profile.user.expand_home(&c)).unwrap_or_else(|| ctx.cwd.clone()),
       files: state.files,
-      faults: state.faults,
       timeout: state.timeout,
       matched,
       effective,
@@ -165,13 +164,18 @@ fn unknown_placement(profile: &Profile) -> Placement {
 
 /// Executable names the actor hands to the proxy (the `binfmt_needy` route
 /// parameter in a VM, the shims' route list in a container): the literal
-/// command names of every rule, whatever its actions, and of every
-/// `chaos.faults` entry with `on: exec`. A rule that only
-/// denies, or only changes the environment, arguments, working directory,
-/// timeout or faults, must reach the daemon as much as one that places the
-/// command on an executor; a program missing here runs in the actor
-/// untouched. `None` when a wildcard rule or exec fault (or one without a
-/// pattern), or a default executor, means every exec must be asked about.
+/// command names of every rule, whatever its actions, and of every exec
+/// fault in `chaos.faults`. A rule that only denies, or only changes the
+/// environment, arguments, working directory or timeout, must reach the
+/// daemon as much as one that places the command on an executor; a program
+/// missing here runs in the actor untouched. `None` when a wildcard rule or
+/// exec fault, or a default executor, means every exec must be asked about.
+// NOTICE: the actor reads the list once, when it boots, so an exec fault
+// that `needy chaos add` adds later reaches only commands already on it;
+// the daemon warns when it adds one that names others.
+// TODO(chaos-routes): pushing a longer route list to a running actor needs
+// a guest call to rewrite `binfmt_needy`'s parameter or the shims' list;
+// deferred until the owner approves it.
 pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
   if profile.default_executor.is_some() {
     return None;
@@ -183,9 +187,8 @@ pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
   for rule in &profile.commands {
     names.extend(Pattern::compile(&rule.matcher).command_names()?);
   }
-  // An exec fault without a pattern matches every command.
-  for fault in profile.chaos.faults.iter().filter(|f| f.on == FaultKind::Exec) {
-    names.extend(Pattern::compile(fault.matcher.as_deref()?).command_names()?);
+  for pattern in profile.chaos.faults.values().filter_map(|fault| fault.exec.as_deref()) {
+    names.extend(Pattern::compile(pattern).command_names()?);
   }
   if !names.is_empty() {
     names.extend(shell::SHELLS.iter().map(|s| s.to_string()));

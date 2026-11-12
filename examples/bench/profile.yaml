@@ -20,7 +20,8 @@ actor:
         "fs --label actor-sshfs-docker --mib 256 --files 1000 /home/agent/workspace/fsbench" \
         "spawn -n 100 --label actor-gateway-http -- curl -s -o /dev/null http://model.needy/api/version"
   network:
-    upstream: { model.needy: "http://127.0.0.1:11434" }
+    # In the actor, http://model.needy goes to this URL on the control host.
+    services: { model: { url: "http://127.0.0.1:11434" } }
 executors:
   build: { driver: linux-container, key: "{run}" }
 commands:

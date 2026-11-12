@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::network::NetworkPolicy;
+use super::network::ActorNetwork;
 use super::runner::RunnerSelector;
 use crate::value::Words;
 
@@ -28,7 +28,7 @@ pub struct Actor {
   #[serde(default)]
   pub limits: Limits,
   #[serde(default)]
-  pub network: NetworkPolicy,
+  pub network: ActorNetwork,
   /// The driving program.
   #[serde(default)]
   pub command: Words,

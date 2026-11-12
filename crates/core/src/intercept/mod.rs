@@ -7,7 +7,7 @@
 //! | Domain | Hook points | Context and decision | Trait | Chain, assembled by | Interceptors, in order | Adapter |
 //! | --- | --- | --- | --- | --- | --- | --- |
 //! | [`exec`] | `exec.decide` | [`exec::ExecContext`], [`exec::Decision`] | [`exec::ExecDecide`] | [`exec::Chain::new`] | [`crate::rules::Rules`], [`crate::chaos::Injector`] | `needy-daemon`'s `routing`, for the actor's proxy and `needy exec` |
-//! | [`net`] | `net.request`, `net.connect` | [`net::NetContext`], [`net::NetDecision`] | [`net::NetDecide`] | [`net::Chain::new`] | [`crate::network::Allowlist`], [`crate::chaos::Injector`], [`crate::network::Inject`] | `needy-core-actor`'s `sidecar::gateway` |
+//! | [`net`] | `net.request`, `net.connect` | [`net::NetContext`], [`net::NetDecision`] | [`net::NetDecide`] | [`net::Chain::new`] | [`crate::network::Allowlist`], [`crate::chaos::Injector`] | `needy-core-actor`'s `sidecar::gateway` |
 //! | [`file`] | `file.open` | an exec stream's bytes, [`file::Filtered`] | [`file::StreamFilter`] | [`file::chain`] | [`crate::chaos::sftp::FileFaults`] | `needy-daemon`'s `relay`, on a workspace mount's SFTP stream |
 //!
 //! What differs per actor driver is only how a domain's events are caught
@@ -16,7 +16,7 @@
 //! `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`.
 //!
 //! NOTICE: interceptors are synchronous and return decisions only. Effects
-//! such as a fault's delay are carried in the decision and applied by the
+//! such as a fault's delay or exit are carried in the decision and applied by the
 //! flow, so a chain is deterministic for a profile, a seed and a context, and
 //! `core` needs no async runtime.
 

@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use needy_api_client::Client;
 use needy_api_proto::v1::{GetConfigResponse, PushEventsRequest, TraceEvent};
-use needy_config::profile::FaultKind;
+use needy_config::profile::FaultDomain;
 use needy_core::event::{self, Event};
 use needy_core::types::{Effect, Fired};
 use nix::sched::CloneFlags;
@@ -33,16 +33,17 @@ pub(super) fn apply(config: &GetConfigResponse) {
   }
 }
 
-/// Schedules the profile's hwmon faults, each at its time after boot, and
+/// Schedules the profile's sensor faults, each at its time after boot, and
 /// records each in the run's trace when it fires.
 pub(super) fn schedule_faults(client: &Client, config: &GetConfigResponse) {
-  for fault in config.hwmon_faults.clone() {
+  for fault in config.sensor_faults.clone() {
     let client = client.clone();
     tokio::spawn(async move {
       tokio::time::sleep(Duration::from_millis(fault.at_ms.max(0) as u64)).await;
       write_param(&format!("{CORETEMP}/override_mc"), &fault.temp_mc.to_string());
       let fired = Event::FaultInjected(Fired {
-        kind: FaultKind::Hwmon,
+        name: fault.name.clone(),
+        domain: FaultDomain::Sensor,
         target: "coretemp".into(),
         effect: Effect {
           temp_mc: Some(fault.temp_mc),
@@ -56,7 +57,7 @@ pub(super) fn schedule_faults(client: &Client, config: &GetConfigResponse) {
         version: event::SCHEMA_VERSION,
       };
       if let Err(status) = client.guest().push_events(tokio_stream::iter(vec![PushEventsRequest { event: Some(event) }])).await {
-        tracing::warn!("cannot record the hwmon fault: {}", status.message());
+        tracing::warn!("cannot record the sensor fault {}: {}", fault.name, status.message());
       }
     });
   }

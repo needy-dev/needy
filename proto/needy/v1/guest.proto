@@ -24,11 +24,14 @@ message GuestCopy {
   string path = 2;
 }
 
+// A sensor fault the guest applies itself.
 message GuestFault {
   // Milliseconds after the driving program starts.
   int64 at_ms = 1;
   // Sensor reading to force, in millidegrees Celsius.
   int32 temp_mc = 2;
+  // The fault's name in the profile, for its `fault.injected` event.
+  string name = 3;
 }
 
 message FetchFilesRequest {
@@ -86,7 +89,7 @@ message GetConfigResponse {
   repeated GuestSensor sensors = 11;
   repeated GuestCopy copy_in = 12;
   repeated GuestCopy mirror_out = 13;
-  repeated GuestFault hwmon_faults = 14;
+  repeated GuestFault sensor_faults = 14;
   // Run the driving program on a terminal of this size and serve
   // `ProcessService` for it on vsock port `process_port`; unset for none.
   WindowSize tty = 15;

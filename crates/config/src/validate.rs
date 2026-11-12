@@ -84,6 +84,17 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
       )));
     }
   }
+  for (name, service) in &profile.actor.network.services {
+    if let Some(problem) = service_problem(name, &service.url) {
+      findings.push(Finding::error(format!("actor.network.services.{name}: {problem}")));
+    }
+  }
+  for name in profile.chaos.faults.keys() {
+    if !crate::profile::valid_fault_name(name) {
+      findings
+        .push(Finding::error(format!("chaos.faults.{name}: a fault's name is a word of letters, digits, `-`, `_` and `.`, at most 64")));
+    }
+  }
   for name in &profile.run_files {
     if !profile.files.mappings.contains_key(name) {
       findings.push(Finding::error(format!("run_files names unknown file mapping {name:?}")));
@@ -105,6 +116,28 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
     }
   }
   findings
+}
+
+/// What is wrong with a service named `name` that forwards to `url`, if
+/// anything: its name becomes the host `NAME.needy`, so it is a DNS label,
+/// and its URL is an absolute `http://` or `https://` URL.
+fn service_problem(name: &str, url: &str) -> Option<String> {
+  let label = !name.is_empty()
+    && name.len() <= 63
+    && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    && !name.starts_with('-')
+    && !name.ends_with('-');
+  if !label {
+    return Some("a service name is a DNS label: lowercase letters, digits and `-`, at most 63".into());
+  }
+  let parsed = match url.parse::<http::Uri>() {
+    Ok(parsed) => parsed,
+    Err(e) => return Some(format!("url {url:?} is not a URL: {e}")),
+  };
+  match (parsed.scheme_str(), parsed.authority()) {
+    (Some("http" | "https"), Some(_)) => None,
+    _ => Some(format!("url {url:?} must be an absolute http:// or https:// URL")),
+  }
 }
 
 /// The presets, placement and file mappings that a rule or preset names.

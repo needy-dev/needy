@@ -12,7 +12,7 @@ use anyhow::{Context as _, Result};
 use clap::Subcommand;
 use needy_api_client::proto::v1::{self, CheckProfileRequest};
 use needy_config::Source;
-use needy_config::profile::{Fault, Profile};
+use needy_config::profile::{Fault, Profile, service_host};
 use needy_config::validate::{self, Finding, Severity};
 use needy_core::chaos::{Injector, Subject};
 use needy_core::intercept::exec::ExecContext;
@@ -144,8 +144,19 @@ fn check_local(path: &Path, commands: &[String]) -> Result<i32> {
   finish(&profile, findings, commands)
 }
 
+/// The actor's route names, its services and the run's faults.
 fn print_route_names(profile: &Profile) {
   println!("route names: {}", rules::route_names(profile).map(|n| n.join(",")).unwrap_or_else(|| "* (every exec)".into()));
+  let services: Vec<String> =
+    profile.actor.network.services.iter().map(|(name, service)| format!("http://{} -> {}", service_host(name), service.url)).collect();
+  if !services.is_empty() {
+    println!("services: {}", services.join(", "));
+  }
+  let faults: Vec<String> =
+    profile.chaos.faults.iter().map(|(name, fault)| format!("{name} ({}: {})", fault.domain(), describe(fault))).collect();
+  if !faults.is_empty() {
+    println!("faults: {}", faults.join("; "));
+  }
 }
 
 /// Prints the recipe compiled against `host` and returns its findings.
@@ -208,11 +219,11 @@ fn finish(profile: &Profile, findings: Vec<Finding>, commands: &[String]) -> Res
     let target = match &decision.outcome {
       Outcome::Run(placement) => placement.to_string(),
       Outcome::Deny(message) => format!("deny ({message})"),
-      Outcome::Fault(errno) => format!("fault ({errno})"),
+      Outcome::Fault(name) => format!("fault ({name})"),
     };
     // The daemon checks exec faults against the command as typed. Nothing
     // fires here, so a fault that would fire later is still listed.
-    let faults = injector.matching(Subject::Exec(&argv)).into_iter().map(describe).collect();
+    let faults = injector.matching(Subject::Exec(&argv)).into_iter().map(|(name, fault)| format!("{name}: {}", describe(&fault))).collect();
     rows.push(Decision {
       command: command.clone(),
       target,
@@ -278,20 +289,32 @@ fn print_identity(identity: &VmIdentity, other: &VmIdentity) {
   }
 }
 
-/// A fault's effect and when it fires, for example `ECONNREFUSED` or
-/// `delay 500ms, nth=2`.
+/// A fault's effect and when it fires, for example `exit 7, times=3` or
+/// `delay 500ms, nth=2`; with no trigger it fires on every match.
 fn describe(fault: &Fault) -> String {
+  let duration = |d: needy_config::value::Duration| humantime::format_duration(*d).to_string();
   let mut parts = Vec::new();
-  if let Some(errno) = &fault.errno {
-    parts.push(errno.clone());
-  }
-  if let Some(delay) = fault.delay {
-    parts.push(format!("delay {}", humantime::format_duration(*delay)));
-  }
-  match (fault.nth, fault.probability) {
-    (Some(nth), _) => parts.push(format!("nth={nth}")),
-    (None, Some(p)) => parts.push(format!("p={p}")),
-    (None, None) => {}
-  }
+  let effects = [
+    fault.exit.map(|code| format!("exit {code}")),
+    fault.signal.clone(),
+    fault.stderr.as_ref().map(|_| "stderr".to_string()),
+    fault.hang.then(|| "hang".to_string()),
+    fault.errno.clone(),
+    fault.refuse.then(|| "refuse".to_string()),
+    fault.reset.then(|| "reset".to_string()),
+    fault.status.map(|status| format!("status {status}")),
+    fault.delay.map(|d| format!("delay {}", duration(d))),
+    fault.sensor.as_ref().and_then(|r| r.temp_c).map(|c| format!("temp {c} C")),
+  ];
+  parts.extend(effects.into_iter().flatten());
+  let triggers = [
+    fault.probability.map(|p| format!("p={p}")),
+    fault.nth.map(|n| format!("nth={n}")),
+    fault.times.map(|n| format!("times={n}")),
+    fault.after.map(|d| format!("after {}", duration(d))),
+    fault.until.map(|d| format!("until {}", duration(d))),
+    fault.at.map(|d| format!("at {}", duration(d))),
+  ];
+  parts.extend(triggers.into_iter().flatten());
   parts.join(", ")
 }

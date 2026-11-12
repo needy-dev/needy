@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use needy_config::profile::{Fault, Profile};
+use needy_config::profile::Profile;
 
 use crate::chaos::Injector;
 use crate::rules::Rules;
@@ -35,19 +35,25 @@ pub struct Decision {
   pub clear_env: bool,
   pub cwd: String,
   pub files: Vec<String>,
-  /// Faults the matching rules name.
-  pub faults: Vec<Fault>,
   pub timeout: Option<Duration>,
   /// Indices of the rules that matched, in order.
   pub matched: Vec<usize>,
   /// The command after launcher resolution; rules match against this.
   pub effective: Vec<String>,
   /// Faults that chaos injected into this command. The flow applies their
-  /// delays; an errno is already in `outcome`.
+  /// delays and the effect of the one in `outcome`.
   pub fired: Vec<Fired>,
 }
 
 impl Decision {
+  /// The fault that ends the command instead of running it, if one does.
+  pub fn fault(&self) -> Option<&Fired> {
+    match &self.outcome {
+      Outcome::Fault(name) => self.fired.iter().find(|fired| &fired.name == name),
+      _ => None,
+    }
+  }
+
   /// The command as given, placed at `placement`, before any interceptor.
   pub fn unchanged(ctx: &ExecContext, placement: Placement) -> Decision {
     Decision {
@@ -57,7 +63,6 @@ impl Decision {
       clear_env: false,
       cwd: ctx.cwd.clone(),
       files: Vec::new(),
-      faults: Vec::new(),
       timeout: None,
       matched: Vec::new(),
       effective: ctx.argv.clone(),

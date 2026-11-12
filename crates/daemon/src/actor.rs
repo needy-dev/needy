@@ -11,7 +11,6 @@
 
 pub mod state;
 
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +18,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
-use needy_config::profile::{FaultKind, FileMode, Side as FileSide};
+use needy_config::profile::{FaultDomain, FileMode, Side as FileSide};
 use needy_core::event::{ActorReady, ActorStart, ActorVmExit, Event};
 use needy_core::types::{ActorState, Effect, Fired, Network, RunState};
 use needy_core_actor::driver::{self, Channels, Driver, Endpoint, Facets, HostMount, Running, Side, Start, Terminal, Transport};
@@ -213,7 +212,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   // Where the actor has no sensors (Apple's `container`), `profile check`
   // says so, and the faults are not recorded as fired.
   if facets.identity.hwmon == Some(Side::Host) {
-    schedule_hwmon_faults(run, Arc::from(driver), &actor);
+    schedule_sensor_faults(run, Arc::from(driver), &actor);
   }
   // Only a driving program on a terminal has a process service to answer.
   if run.tty.is_some() {
@@ -253,14 +252,18 @@ async fn await_ready(daemon: Daemon, run: Arc<Run>, actor: CancellationToken) {
   }
 }
 
-/// Schedules the run's hwmon faults on an actor whose driver presents its
+/// Schedules the run's sensor faults on an actor whose driver presents its
 /// sensors from the host: each sets the sensors at its time after the
 /// actor started, and is recorded in the run's trace as a VM's init records
 /// it.
-fn schedule_hwmon_faults(run: &Arc<Run>, driver: Arc<dyn Driver>, actor: &CancellationToken) {
-  for fault in run.injector.faults().iter().filter(|f| f.on == FaultKind::Hwmon) {
-    let at = Duration::from_millis(fault.at.map(|d| d.as_millis() as u64).unwrap_or(0));
-    let temp_mc = fault.set.temp_c.map(|c| (c * 1000.0) as i32).unwrap_or(100_000);
+// TODO(chaos-sensor): a sensor fault `needy chaos add` adds later is
+// refused (its `at` counts from the actor's start, which has passed, and a
+// VM's init schedules sensor faults once, at boot); applying one at once
+// waits for the owner to approve a guest call for it.
+fn schedule_sensor_faults(run: &Arc<Run>, driver: Arc<dyn Driver>, actor: &CancellationToken) {
+  for (name, fault) in run.injector.faults(FaultDomain::Sensor) {
+    let at = fault.at.map(Duration::from).unwrap_or_default();
+    let temp_mc = needy_core::chaos::sensor_temp_mc(&fault);
     let (task_run, driver, actor) = (run.clone(), driver.clone(), actor.clone());
     run.tasks.spawn(async move {
       let run = task_run;
@@ -269,11 +272,12 @@ fn schedule_hwmon_faults(run: &Arc<Run>, driver: Arc<dyn Driver>, actor: &Cancel
         () = tokio::time::sleep(at) => {}
       }
       if let Err(e) = driver.overheat(&run.dir, temp_mc) {
-        tracing::warn!("run {}: cannot apply the hwmon fault: {e}", run.id);
+        tracing::warn!("run {}: cannot apply the sensor fault {name}: {e}", run.id);
         return;
       }
       run.emit(&Event::FaultInjected(Fired {
-        kind: FaultKind::Hwmon,
+        name,
+        domain: FaultDomain::Sensor,
         target: "coretemp".into(),
         effect: Effect {
           temp_mc: Some(temp_mc),
@@ -416,22 +420,11 @@ fn open_to_every_user(endpoint: &Endpoint) -> Result<()> {
 /// cancelled.
 fn serve_gateway(run: &Run, channels: &Channels, actor: &CancellationToken) -> Result<()> {
   let Endpoint::Unix(path) = &channels.gateway;
-  let network = &run.profile.actor.network;
-  let mut inject = BTreeMap::new();
-  for (host, injection) in &network.inject {
-    // The daemon holds the credential; the actor never sees it.
-    match std::env::var(&injection.secret) {
-      Ok(value) => {
-        inject.insert(host.clone(), (injection.header.clone(), value));
-      }
-      Err(e) => tracing::warn!("run {}: no {} header for {host}: {}: {e}", run.id, injection.header, injection.secret),
-    }
-  }
-  let policy = needy_core::network::Policy {
-    allow: network.allow.clone(),
-    upstream: network.upstream.clone(),
-    inject,
-  };
+  // TODO(mitm): the gateway adds no headers (header injection was removed
+  // on 2026-11-12); on HTTPS it needs a separate MITM infrastructure (its
+  // own CA, opt-in, per host), deferred until that exists and the owner
+  // approves it.
+  let policy = needy_core::network::Policy::actor(&run.profile.actor.network);
   let gateway = Arc::new(gateway::Gateway::new(policy, run.trace.clone(), Network::Actor, Some(run.injector.clone()), actor.clone()));
   // A socket left by an earlier daemon would make bind fail.
   if let Err(e) = std::fs::remove_file(path)

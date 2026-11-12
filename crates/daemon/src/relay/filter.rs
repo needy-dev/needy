@@ -10,11 +10,19 @@ use crate::run::Run;
 
 /// The filter for a stream of `run` that runs at `cwd`: the `file.open`
 /// chain on an actor's workspace mount (its SFTP stream, rooted at the
-/// mount's source), so a fault can answer `open` itself. Other streams are
-/// not filtered.
+/// mount's source, `cwd`), so a fault can answer `open` itself or hold its
+/// reply. File faults match the path in the actor, under the mount's
+/// target. Other streams are not filtered.
 pub fn install(run: &Run, origin: Origin, cwd: &str) -> Option<Arc<dyn StreamFilter>> {
   if origin != Origin::ActorMount {
     return None;
   }
-  file::chain(&run.injector, cwd)
+  let source = cwd.trim_end_matches('/');
+  // NOTICE: a mount whose source the profile does not list (none today)
+  // matches file faults by its path on the executor.
+  let target = crate::actor::mounts(run)
+    .into_iter()
+    .find(|mount| mount.source.trim_end_matches('/') == source)
+    .map_or_else(|| cwd.to_string(), |mount| mount.target);
+  Some(file::chain(&run.injector, cwd, &target))
 }

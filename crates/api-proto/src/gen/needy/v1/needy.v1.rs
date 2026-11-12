@@ -376,7 +376,8 @@ pub struct GuestCopy {
     #[prost(string, tag="2")]
     pub path: ::prost::alloc::string::String,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+/// A sensor fault the guest applies itself.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GuestFault {
     /// Milliseconds after the driving program starts.
     #[prost(int64, tag="1")]
@@ -384,6 +385,9 @@ pub struct GuestFault {
     /// Sensor reading to force, in millidegrees Celsius.
     #[prost(int32, tag="2")]
     pub temp_mc: i32,
+    /// The fault's name in the profile, for its `fault.injected` event.
+    #[prost(string, tag="3")]
+    pub name: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FetchFilesRequest {
@@ -471,7 +475,7 @@ pub struct GetConfigResponse {
     #[prost(message, repeated, tag="13")]
     pub mirror_out: ::prost::alloc::vec::Vec<GuestCopy>,
     #[prost(message, repeated, tag="14")]
-    pub hwmon_faults: ::prost::alloc::vec::Vec<GuestFault>,
+    pub sensor_faults: ::prost::alloc::vec::Vec<GuestFault>,
     /// Run the driving program on a terminal of this size and serve
     /// `ProcessService` for it on vsock port `process_port`; unset for none.
     #[prost(message, optional, tag="15")]
@@ -732,13 +736,36 @@ pub struct DecideResponse {
     pub clear_env: bool,
     #[prost(string, tag="5")]
     pub cwd: ::prost::alloc::string::String,
-    /// Set when the command must not run: the message to show, either
-    /// "denied: <rule message>" or "fault injected: <errno>".
+    /// Set when a rule refuses the command: the message to show,
+    /// "denied: <rule message>".
     #[prost(string, tag="6")]
     pub deny: ::prost::alloc::string::String,
     /// The value of `ExecStart.search_path_if_missing` for the routed exec.
     #[prost(bool, tag="7")]
     pub search_path_if_missing: bool,
+    /// Set when a chaos fault ends the command instead of running it.
+    #[prost(message, optional, tag="8")]
+    pub fault: ::core::option::Option<ExecFault>,
+}
+/// How a chaos fault ends a command in place of running it: exactly one of
+/// `exit_code`, `signal` and `hang`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecFault {
+    /// The fault's name.
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Exit with this code.
+    #[prost(int32, optional, tag="2")]
+    pub exit_code: ::core::option::Option<i32>,
+    /// Die of this signal, by name, such as `SIGSEGV`.
+    #[prost(string, tag="3")]
+    pub signal: ::prost::alloc::string::String,
+    /// Never finish, until the caller gives up or the run ends.
+    #[prost(bool, tag="4")]
+    pub hang: bool,
+    /// Written to stderr first.
+    #[prost(string, tag="5")]
+    pub stderr: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CheckProfileRequest {
@@ -778,6 +805,72 @@ pub struct ProfileFinding {
     pub severity: i32,
     #[prost(string, tag="2")]
     pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddFaultRequest {
+    /// A run ID, an ID prefix, a name or `latest`.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// The fault's name: letters, digits, `-`, `_` and `.`.
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    /// The fault as YAML, written as an entry of a profile's `chaos.faults`,
+    /// for example `{ exec: "curl **", exit: 7 }`.
+    #[prost(string, tag="3")]
+    pub fault_yaml: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddFaultResponse {
+    /// The full run ID.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// What the fault cannot reach, such as commands the actor does not route.
+    #[prost(string, repeated, tag="2")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListFaultsRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListFaultsResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// In name order.
+    #[prost(message, repeated, tag="2")]
+    pub faults: ::prost::alloc::vec::Vec<FaultInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FaultInfo {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// `exec`, `file`, `net` or `sensor`.
+    #[prost(string, tag="2")]
+    pub domain: ::prost::alloc::string::String,
+    /// The fault as YAML, as `AddFaultRequest.fault_yaml` takes it.
+    #[prost(string, tag="3")]
+    pub fault_yaml: ::prost::alloc::string::String,
+    #[prost(enumeration="FaultSource", tag="4")]
+    pub source: i32,
+    /// Operations it matched within its time window.
+    #[prost(uint64, tag="5")]
+    pub matched: u64,
+    /// Times it fired.
+    #[prost(uint64, tag="6")]
+    pub fired: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveFaultRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveFaultResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
 }
 /// A run's life cycle. The first terminal state (stopped, finished or
 /// failed) wins.
@@ -861,6 +954,37 @@ impl ActorState {
             "ACTOR_STATE_CONFIGURED" => Some(Self::Configured),
             "ACTOR_STATE_READY" => Some(Self::Ready),
             "ACTOR_STATE_EXITED" => Some(Self::Exited),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FaultSource {
+    Unspecified = 0,
+    /// The run's profile.
+    Profile = 1,
+    /// AddFault, while the run ran.
+    Added = 2,
+}
+impl FaultSource {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FAULT_SOURCE_UNSPECIFIED",
+            Self::Profile => "FAULT_SOURCE_PROFILE",
+            Self::Added => "FAULT_SOURCE_ADDED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FAULT_SOURCE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FAULT_SOURCE_PROFILE" => Some(Self::Profile),
+            "FAULT_SOURCE_ADDED" => Some(Self::Added),
             _ => None,
         }
     }

@@ -27,5 +27,5 @@ run_files: [seed, results]
 chaos:
   seed: 7
   faults:
-    - { on: exec, match: "curl **", errno: ECONNREFUSED }
-    - { on: exec, match: "sleep *", delay: 500ms }
+    curl-down: { exec: "curl **", exit: 7, stderr: "curl: (7) Failed to connect: Connection refused\n" }
+    slow-sleep: { exec: "sleep *", delay: 500ms }

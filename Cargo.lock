@@ -2164,6 +2164,7 @@ dependencies = [
  "portable-pty",
  "serde",
  "serde_json",
+ "serde_yaml",
  "shell-words",
  "tar",
  "tempfile",
@@ -2192,6 +2193,7 @@ name = "needy-config"
 version = "0.0.1"
 dependencies = [
  "glob-match",
+ "http",
  "humantime",
  "serde",
  "serde_path_to_error",
@@ -2293,6 +2295,7 @@ dependencies = [
  "async-trait",
  "backon",
  "futures-util",
+ "http",
  "libc",
  "needy-api-client",
  "needy-api-server",
@@ -2307,6 +2310,7 @@ dependencies = [
  "sea-orm-migration",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2 0.10.9",
  "subtle",
  "sysinfo",

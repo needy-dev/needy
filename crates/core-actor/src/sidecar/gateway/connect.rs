@@ -1,5 +1,5 @@
-//! `CONNECT host:port` tunnels. The tunnel is opaque, so it gets no upstream
-//! mapping or header injection.
+//! `CONNECT host:port` tunnels. The tunnel is opaque: a service is not
+//! reached this way, and a fault cannot answer with a status.
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
@@ -8,14 +8,14 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use needy_core::event::{Event, NetConnect, NetError};
 
-use super::{Body, Gateway, text};
+use super::{Body, Gateway, Reset, text};
 
 impl Gateway {
   /// Opens a tunnel to the request's authority. The tunnel is a task the
   /// gateway owns; it ends with either side or the owner.
-  pub(super) async fn connect(&self, request: Request<Incoming>) -> Response<Body> {
+  pub(super) async fn connect(&self, request: Request<Incoming>) -> Result<Response<Body>, Reset> {
     let Some(authority) = request.uri().authority().map(|a| a.to_string()) else {
-      return text(StatusCode::BAD_REQUEST, "CONNECT needs host:port");
+      return Ok(text(StatusCode::BAD_REQUEST, "CONNECT needs host:port"));
     };
     let host = authority.split(':').next().unwrap_or_default().to_string();
     let decision = self.decide(&host, None).await;
@@ -35,7 +35,7 @@ impl Gateway {
           path: None,
           error: e.to_string(),
         }));
-        return text(StatusCode::BAD_GATEWAY, &message);
+        return Ok(text(StatusCode::BAD_GATEWAY, &message));
       }
     };
     self.record(Event::NetConnect(NetConnect {
@@ -62,6 +62,6 @@ impl Gateway {
         () = cancel.cancelled() => {}
       }
     });
-    Response::new(Full::new(Bytes::new()).map_err(|never| match never {}).boxed())
+    Ok(Response::new(Full::new(Bytes::new()).map_err(|never| match never {}).boxed()))
   }
 }

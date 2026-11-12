@@ -19,7 +19,9 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
 use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
-use needy_api_server::control::{ControlError, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunInfo, Runs, StoredEvent};
+use needy_api_server::control::{
+  ControlError, FaultAdded, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunFaults, RunInfo, Runs, StoredEvent,
+};
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::Source;
@@ -944,6 +946,18 @@ impl Runs for Daemon {
 
   async fn check(&self, profile: ProfileToCheck) -> Result<ProfileCheck, ControlError> {
     self.check_profile(profile).await
+  }
+
+  async fn add_fault(&self, run: &str, name: &str, fault_yaml: &str, by: Principal) -> Result<FaultAdded, ControlError> {
+    Daemon::add_fault(self, run, name, fault_yaml, by).await
+  }
+
+  async fn faults(&self, run: &str) -> Result<RunFaults, ControlError> {
+    Daemon::faults(self, run).await
+  }
+
+  async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String, ControlError> {
+    Daemon::remove_fault(self, run, name, by).await
   }
 }
 

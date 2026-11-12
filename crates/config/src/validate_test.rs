@@ -170,3 +170,24 @@ fn container_options_on_a_macos_vz_actor_are_an_error() {
 
   assert_eq!(found, ["error: actor.container is for `driver: linux-container` or `macos-apple-container`; this actor's driver is macos-vz"]);
 }
+
+#[test]
+fn a_service_is_a_dns_label_with_an_http_url() {
+  let found = findings(
+    "actor:\n  driver: linux-firecracker\n  network:\n    services:\n      ollama: { url: \"http://127.0.0.1:11434\" }\n      Bad_Name: { url: \"http://127.0.0.1:1\" }\n      ftp: { url: \"ftp://example.com\" }\n      bare: { url: \"example.com\" }\n",
+  );
+  assert_eq!(
+    found,
+    [
+      "error: actor.network.services.Bad_Name: a service name is a DNS label: lowercase letters, digits and `-`, at most 63",
+      "error: actor.network.services.bare: url \"example.com\" must be an absolute http:// or https:// URL",
+      "error: actor.network.services.ftp: url \"ftp://example.com\" must be an absolute http:// or https:// URL",
+    ]
+  );
+}
+
+#[test]
+fn a_fault_name_is_a_word() {
+  let found = findings("actor: { driver: linux-firecracker }\nchaos: { faults: { \"two words\": { exec: \"curl **\", exit: 7 } } }");
+  assert_eq!(found, ["error: chaos.faults.two words: a fault's name is a word of letters, digits, `-`, `_` and `.`, at most 64"]);
+}

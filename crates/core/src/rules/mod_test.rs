@@ -292,7 +292,7 @@ fn route_names_include_rules_without_a_placement() {
 }
 
 #[test]
-fn files_and_faults_accumulate() {
+fn files_accumulate() {
   let p = profile(
     r#"
 actor: { driver: linux-firecracker }
@@ -300,49 +300,46 @@ commands:
   - { match: "**", files: [a] }
   - match: "xcodebuild **"
     files: [b, a]
-    faults: [{ on: exec, errno: EIO }]
 "#,
   );
   let d = decide(&p, &ctx("xcodebuild"));
   assert_eq!(d.files, vec!["a".to_string(), "b".to_string()]);
-  assert_eq!(d.faults.len(), 1);
 }
 
 // ROOT CAUSE:
 //
-// If a program was named only by a `chaos.faults` entry with `on: exec`, its
+// If a program was named only by an exec fault in `chaos.faults`, its
 // execs never reached the daemon from an actor, so the fault never fired
 // there, because the route list held only the names of `commands` rules.
 //
-// Before the fix, `{ on: exec, match: "curl **", errno: ECONNREFUSED }` with
+// Before the fix, an exec fault on `curl **` with
 // no rule naming `curl` left `curl` off the list.
 // The fix puts the command names of exec faults' patterns on the list too.
 #[test]
 fn route_names_include_exec_fault_commands() {
   let p = profile(
-    "actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"curl **\", errno: ECONNREFUSED }, { on: net.connect, match: \"example.com\", errno: ECONNREFUSED }] }\n",
+    "actor: { driver: linux-firecracker }\nchaos: { faults: { a: { exec: \"curl **\", exit: 7 }, b: { net: { connect: example.com }, refuse: true } } }\n",
   );
   let names = route_names(&p).unwrap();
   assert!(names.contains(&"curl".to_string()), "{names:?}");
   assert!(names.contains(&"sh".to_string()), "a shell may run the faulted command: {names:?}");
   assert!(!names.contains(&"example.com".to_string()), "{names:?}");
 
-  let alternatives =
-    profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"{wget,git} **\", delay: 1s }] }\n");
+  let alternatives = profile("actor: { driver: linux-firecracker }\nchaos: { faults: { a: { exec: \"{wget,git} **\", delay: 1s } } }\n");
   let names = route_names(&alternatives).unwrap();
   assert!(names.contains(&"wget".to_string()) && names.contains(&"git".to_string()), "{names:?}");
 
-  // An exec fault without a pattern, or with one that may match any program,
-  // applies to every exec.
-  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, errno: EIO }] }\n")), None);
+  // An exec fault whose pattern may match any program applies to every
+  // exec.
+  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: { a: { exec: \"**\", exit: 1 } } }\n")), None);
   assert_eq!(
-    route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"** --force\", errno: EIO }] }\n")),
+    route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: { a: { exec: \"** --force\", exit: 1 } } }\n")),
     None
   );
 
   // Faults on other hook points do not route execs.
   assert_eq!(
-    route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: file.open, errno: EIO }] }\n")),
+    route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: { a: { file: { open: \"**\" }, errno: EIO } } }\n")),
     Some(vec![])
   );
 }

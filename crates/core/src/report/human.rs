@@ -162,7 +162,7 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     for finding in &s.findings {
       let message = match finding.kind {
         FindingKind::RunFailed | FindingKind::FilesFailed => paint(&finding.message, FAILURE, color),
-        FindingKind::Faults => paint(&finding.message, FAULT, color),
+        FindingKind::Faults | FindingKind::ChaosChanged => paint(&finding.message, FAULT, color),
         FindingKind::Probing | FindingKind::DeniedCommand | FindingKind::DeniedNetwork => finding.message.clone(),
       };
       writeln!(out, "  {message}")?;

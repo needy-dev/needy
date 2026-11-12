@@ -13,7 +13,7 @@ use std::path::Path;
 use anyhow::Result;
 use needy_api_client::Kind;
 use needy_api_client::exec::ExecStream;
-use needy_api_proto::v1::{Ancestor, DecideRequest, ExecStart, Origin};
+use needy_api_proto::v1::{Ancestor, DecideRequest, ExecFault, ExecStart, Origin};
 use needy_core_executor::{relay, signals};
 use nix::sys::signal::{SigHandler, Signal};
 
@@ -111,6 +111,9 @@ async fn proxy(invocation: Invocation) -> Result<i32> {
     message(&decision.deny);
     return Ok(126);
   }
+  if let Some(fault) = decision.fault {
+    return Ok(fault_exit(fault).await);
+  }
   if decision.target == "actor" || decision.target.is_empty() {
     match local {
       Local::Program(program) => exec_local(&program, &args),
@@ -188,6 +191,34 @@ async fn proxy(invocation: Invocation) -> Result<i32> {
     let _ = nix::sys::signal::raise(signal);
   }
   Ok(signals::shell_code(&exit))
+}
+
+/// Ends the command as the chaos fault `fault` says, in place of running
+/// it: its `stderr` first, then the exit code, death by the signal, or a
+/// hang that lasts until the caller kills the proxy. A signal the proxy
+/// cannot die of exits with the shell's status for it instead.
+async fn fault_exit(fault: ExecFault) -> i32 {
+  if !fault.stderr.is_empty() {
+    use std::io::Write;
+    let mut stderr = std::io::stderr();
+    // The command's own stderr; a closed one leaves nothing to tell.
+    let _ = stderr.write_all(fault.stderr.as_bytes()).and_then(|()| stderr.flush());
+  }
+  if fault.hang {
+    std::future::pending::<()>().await;
+  }
+  if let Some(code) = fault.exit_code {
+    return code;
+  }
+  let number = signals::number(&fault.signal);
+  if let Some(signal) = number.and_then(|n| Signal::try_from(n).ok()) {
+    // When either call fails the process lives on, and the shell's exit
+    // code for the signal below stands in for the death.
+    // SAFETY: the default disposition installs no handler.
+    let _ = unsafe { nix::sys::signal::signal(signal, SigHandler::SigDfl) };
+    let _ = nix::sys::signal::raise(signal);
+  }
+  128 + number.unwrap_or(1)
 }
 
 /// The command the actor asked for: `args` with argv[0] replaced by the path

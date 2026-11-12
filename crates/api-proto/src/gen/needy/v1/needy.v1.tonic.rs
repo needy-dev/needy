@@ -2155,6 +2155,78 @@ pub mod run_service_client {
                 .insert(GrpcMethod::new("needy.v1.RunService", "CheckProfile"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn add_fault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::AddFaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddFaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.RunService/AddFault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.RunService", "AddFault"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn list_faults(
+            &mut self,
+            request: impl tonic::IntoRequest<super::ListFaultsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListFaultsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.RunService/ListFaults",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.RunService", "ListFaults"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn remove_fault(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RemoveFaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveFaultResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.RunService/RemoveFault",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.RunService", "RemoveFault"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -2224,6 +2296,27 @@ pub mod run_service_server {
             request: tonic::Request<super::CheckProfileRequest>,
         ) -> std::result::Result<
             tonic::Response<super::CheckProfileResponse>,
+            tonic::Status,
+        >;
+        async fn add_fault(
+            &self,
+            request: tonic::Request<super::AddFaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::AddFaultResponse>,
+            tonic::Status,
+        >;
+        async fn list_faults(
+            &self,
+            request: tonic::Request<super::ListFaultsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::ListFaultsResponse>,
+            tonic::Status,
+        >;
+        async fn remove_fault(
+            &self,
+            request: tonic::Request<super::RemoveFaultRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RemoveFaultResponse>,
             tonic::Status,
         >;
     }
@@ -2646,6 +2739,141 @@ pub mod run_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = CheckProfileSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.RunService/AddFault" => {
+                    #[allow(non_camel_case_types)]
+                    struct AddFaultSvc<T: RunService>(pub Arc<T>);
+                    impl<
+                        T: RunService,
+                    > tonic::server::UnaryService<super::AddFaultRequest>
+                    for AddFaultSvc<T> {
+                        type Response = super::AddFaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::AddFaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunService>::add_fault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = AddFaultSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.RunService/ListFaults" => {
+                    #[allow(non_camel_case_types)]
+                    struct ListFaultsSvc<T: RunService>(pub Arc<T>);
+                    impl<
+                        T: RunService,
+                    > tonic::server::UnaryService<super::ListFaultsRequest>
+                    for ListFaultsSvc<T> {
+                        type Response = super::ListFaultsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::ListFaultsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunService>::list_faults(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = ListFaultsSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.RunService/RemoveFault" => {
+                    #[allow(non_camel_case_types)]
+                    struct RemoveFaultSvc<T: RunService>(pub Arc<T>);
+                    impl<
+                        T: RunService,
+                    > tonic::server::UnaryService<super::RemoveFaultRequest>
+                    for RemoveFaultSvc<T> {
+                        type Response = super::RemoveFaultResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RemoveFaultRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunService>::remove_fault(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RemoveFaultSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

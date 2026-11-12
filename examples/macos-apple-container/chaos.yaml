@@ -1,6 +1,6 @@
 # examples/chaos with an Apple `container` actor: copy-in and mirror-out on
 # the actor, a file fault on the shared workspace and an exec fault, with
-# this Mac as a native executor. The hwmon fault has no effect here: Apple's
+# this Mac as a native executor. The sensor fault has no effect here: Apple's
 # default kernel has no sensors (`needy profile check` says so). Create the
 # executor's directory and the results' first: `mkdir -p
 # /tmp/needy-apple-chaos-ws examples/macos-apple-container/out`.
@@ -45,7 +45,11 @@ files:
 run_files: [seed, workspace, results]
 chaos:
   seed: 1
+  # No trigger: each fault fires on every match.
   faults:
-    - { on: file.open, match: "**/*.json", errno: EIO }
-    - { on: exec, match: "curl **", errno: ECONNREFUSED }
-    - { on: hwmon, set: { temp_c: 101 }, at: 2s }
+    broken-json: { file: { open: "**/*.json" }, errno: EIO }
+    curl-down:
+      exec: "curl **"
+      exit: 7
+      stderr: "curl: (7) Failed to connect to example.invalid port 80: Connection refused\n"
+    overheat: { sensor: { temp_c: 101 }, at: 2s }

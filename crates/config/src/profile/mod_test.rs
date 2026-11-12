@@ -31,8 +31,8 @@ actor:
   command: opencode run hello
   network:
     allow: [openrouter.ai, "*.models.dev"]
-    inject:
-      openrouter.ai: { header: Authorization, secret: OPENROUTER_KEY }
+    services:
+      ollama: { url: "http://127.0.0.1:11434" }
 executors:
   build:
     runner: { labels: [kvm, os=linux] }
@@ -83,9 +83,10 @@ run_files: [skills, workspace]
 chaos:
   seed: 42
   faults:
-    - { on: file.open, match: "/workspace/**/*.json", errno: EIO, probability: 0.01 }
-    - { on: net.connect, match: registry.npmjs.org, delay: 2s, nth: 3 }
-    - { on: hwmon, set: { temp_c: 101 }, at: 5m }
+    flaky-json: { file: { open: "~/workspace/**/*.json" }, errno: EIO, probability: 0.01 }
+    slow-npm: { net: { connect: registry.npmjs.org }, delay: 2s, nth: 3 }
+    overheat: { sensor: { temp_c: 101 }, at: 5m }
+    curl-down: { exec: "curl **", exit: 7, stderr: "curl: (7) refused", times: 3, after: 1m, until: 1h }
 "#;
 
 #[test]
@@ -102,7 +103,7 @@ fn loads_every_section() {
   assert!(!p.actor.network.allows("example.com"));
   assert!(p.actor.network.allows("API.Models.Dev"));
   assert!(p.actor.network.allows("models.dev"));
-  assert_eq!(p.actor.network.inject["openrouter.ai"].secret, "OPENROUTER_KEY");
+  assert_eq!(p.actor.network.services["ollama"].url, "http://127.0.0.1:11434");
 
   let build = &p.executors["build"];
   assert_eq!(build.driver, ExecutorDriver::LinuxContainer);
@@ -161,13 +162,17 @@ fn loads_every_section() {
 
   assert_eq!(p.chaos.seed, 42);
   let faults = &p.chaos.faults;
-  assert_eq!(faults[0].on, FaultKind::FileOpen);
-  assert_eq!(faults[0].matcher.as_deref(), Some("/workspace/**/*.json"));
-  assert_eq!(faults[1].on, FaultKind::NetConnect);
-  assert_eq!(faults[1].delay.map(|d| d.as_millis()), Some(2000));
-  assert_eq!(faults[2].on, FaultKind::Hwmon);
-  assert_eq!(faults[2].set.temp_c, Some(101.0));
-  assert_eq!(secs(faults[2].at), Some(300));
+  assert_eq!(faults.keys().collect::<Vec<_>>(), ["curl-down", "flaky-json", "overheat", "slow-npm"]);
+  assert_eq!(faults["flaky-json"].domain(), FaultDomain::File);
+  assert_eq!(faults["flaky-json"].file.as_ref().map(|f| f.open.as_str()), Some("~/workspace/**/*.json"));
+  assert_eq!(faults["slow-npm"].domain(), FaultDomain::Net);
+  assert_eq!(faults["slow-npm"].delay.map(|d| d.as_millis()), Some(2000));
+  assert_eq!(faults["overheat"].domain(), FaultDomain::Sensor);
+  assert_eq!(faults["overheat"].sensor.as_ref().and_then(|r| r.temp_c), Some(101.0));
+  assert_eq!(secs(faults["overheat"].at), Some(300));
+  let curl = &faults["curl-down"];
+  assert_eq!((curl.domain(), curl.exit, curl.times), (FaultDomain::Exec, Some(7), Some(3)));
+  assert_eq!((secs(curl.after), secs(curl.until)), (Some(60), Some(3600)));
 }
 
 #[test]
@@ -221,7 +226,7 @@ default_executor: build
 actor:
   driver: linux-firecracker
   command: [sh, -c, "echo base"]
-  network: { allow: [a.example.com], upstream: { model.needy: "http://127.0.0.1:1" } }
+  network: { allow: [a.example.com], services: { model: { url: "http://127.0.0.1:1" } } }
 executors:
   build: { driver: linux-container, max_procs: 4, key: "{profile}" }
   mac: { runner: mac }
@@ -259,7 +264,7 @@ files:
 
   // Maps merge recursively.
   assert_eq!(&*p.actor.command, ["sh", "-c", "echo base"]);
-  assert_eq!(p.actor.network.upstream["model.needy"], "http://127.0.0.1:1");
+  assert_eq!(p.actor.network.services["model"].url, "http://127.0.0.1:1");
   let build = &p.executors["build"];
   assert_eq!(build.max_procs, Some(8));
   assert_eq!(build.key.as_str(), "{profile}");
@@ -395,11 +400,91 @@ fn bad_values_are_rejected() {
   let err = load_text("executors: { build: { driver: podman } }").unwrap_err().to_string();
   assert!(err.contains("unknown variant `podman`"), "{err}");
 
-  let err = load_text("chaos: { faults: [{ on: file.read }] }").unwrap_err().to_string();
-  assert!(err.contains("chaos.faults[0].on: unknown variant `file.read`"), "{err}");
-
-  let err = load_text("chaos: { faults: [{ on: hwmon, set: { temp: 90 } }] }").unwrap_err().to_string();
+  let err = load_text("chaos: { faults: { a: { sensor: { temp: 90 } } } }").unwrap_err().to_string();
   assert!(err.contains("unknown field `temp`"), "{err}");
+}
+
+/// Loads a profile whose only fault is `fault`, and returns the error.
+fn fault_error(fault: &str) -> String {
+  load_text(&format!(
+    "actor: {{ driver: linux-firecracker }}
+chaos: {{ faults: {{ f: {fault} }} }}
+"
+  ))
+  .unwrap_err()
+  .to_string()
+}
+
+#[test]
+fn a_fault_names_exactly_one_domain() {
+  let err = fault_error("{ exit: 7 }");
+  assert!(err.contains("chaos.faults.f: a fault names one domain: `exec`, `file`, `net` or `sensor`"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", net: { connect: example.com }, exit: 7 }");
+  assert!(err.contains("a fault names one domain, not exec and net"), "{err}");
+  // The removed `on:` form is an unknown field.
+  let err = fault_error("{ on: exec, match: \"curl **\", errno: EIO }");
+  assert!(err.contains("unknown field `on`"), "{err}");
+}
+
+#[test]
+fn each_domain_takes_only_its_own_effects() {
+  let err = fault_error("{ exec: \"curl **\", errno: ECONNREFUSED }");
+  assert!(err.contains("errno is not for exec faults; an exec fault takes exit, signal, hang or delay"), "{err}");
+  let err = fault_error("{ file: { open: \"**\" }, exit: 1 }");
+  assert!(err.contains("exit is not for file faults; a file fault takes errno or delay"), "{err}");
+  let err = fault_error("{ net: { connect: example.com }, errno: EIO }");
+  assert!(err.contains("errno is not for net faults"), "{err}");
+  let err = fault_error("{ sensor: { temp_c: 90 }, probability: 0.5 }");
+  assert!(err.contains("probability is not for sensor faults; a sensor fault takes only `at`"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", exit: 7, at: 1s }");
+  assert!(err.contains("at is not for exec faults"), "{err}");
+}
+
+#[test]
+fn a_fault_needs_an_effect_it_can_deliver() {
+  let err = fault_error("{ exec: \"curl **\" }");
+  assert!(err.contains("an exec fault needs an effect"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", exit: 7, signal: SIGSEGV }");
+  assert!(err.contains("ends the command one way"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", stderr: oops }");
+  assert!(err.contains("stderr is written before exit, signal or hang"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", signal: SIGCHLD }");
+  assert!(err.contains("signal SIGCHLD does not end a process"), "{err}");
+  // Only the errnos sshfs passes on.
+  let err = fault_error("{ file: { open: \"**\" }, errno: ECONNRESET }");
+  assert!(err.contains("errno ECONNRESET cannot reach the program"), "{err}");
+  let err = fault_error("{ net: { connect: example.com }, status: 503 }");
+  assert!(err.contains("status answers a plain-HTTP request"), "{err}");
+  let err = fault_error("{ net: { connect: example.com }, refuse: true, reset: true }");
+  assert!(err.contains("fails the connection one way"), "{err}");
+  let err = fault_error("{ net: { connect: a, request: b }, refuse: true }");
+  assert!(err.contains("net matches `connect` or `request`, not both"), "{err}");
+}
+
+#[test]
+fn fault_triggers_are_checked() {
+  let err = fault_error("{ exec: \"curl **\", exit: 7, probability: 1.5 }");
+  assert!(err.contains("probability 1.5 is not between 0 and 1"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", exit: 7, nth: 2, times: 3 }");
+  assert!(err.contains("nth fires on one match"), "{err}");
+  let err = fault_error("{ exec: \"curl **\", exit: 7, after: 1m, until: 30s }");
+  assert!(err.contains("until must be later than after"), "{err}");
+}
+
+#[test]
+fn a_signal_is_spelled_with_its_sig_prefix() {
+  let p = load_text("actor: { driver: linux-firecracker }\nchaos: { faults: { crash: { exec: \"make **\", signal: SEGV } } }\n").unwrap();
+  assert_eq!(p.chaos.faults["crash"].signal.as_deref(), Some("SIGSEGV"));
+}
+
+#[test]
+fn a_fault_written_back_loads_the_same() {
+  let p = load_text(PROFILE).unwrap();
+  for (name, fault) in &p.chaos.faults {
+    let text = serde_yaml::to_string(fault).unwrap();
+    let again: Fault = serde_yaml::from_str(&text).unwrap();
+    assert_eq!(&again, fault, "{name}: {text}");
+  }
 }
 
 #[test]

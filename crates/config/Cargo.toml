@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 glob-match.workspace = true
+http.workspace = true
 humantime.workspace = true
 serde.workspace = true
 serde_path_to_error.workspace = true

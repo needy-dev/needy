@@ -23,8 +23,10 @@ actor:
          "models":{"qwen3:14b":{"name":"Qwen3 14B","tool_call":true}}}}}
   network:
     allow: [models.dev, "*.models.dev", registry.npmjs.org, "*.npmjs.org", opencode.ai, "*.opencode.ai"]
-    upstream:
-      model.needy: http://127.0.0.1:11434
+    # HTTPS to the allowed hosts is tunnelled as is. In the actor,
+    # http://model.needy goes to this URL, resolved on the control host.
+    services:
+      model: { url: "http://127.0.0.1:11434" }
 
 executors:
   build:

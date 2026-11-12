@@ -40,6 +40,8 @@ pub mod runner;
 #[cfg(unix)]
 mod actor;
 #[cfg(unix)]
+mod chaos;
+#[cfg(unix)]
 mod check;
 #[cfg(unix)]
 mod clients;

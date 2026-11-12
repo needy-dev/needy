@@ -1,5 +1,6 @@
 # Guest-side files and faults: copy-in and mirror-out on the actor, a file
-# fault on the shared workspace, an exec fault and a scheduled overheat.
+# fault on the shared workspace, an exec fault that exits as a refused curl does,
+# and a scheduled overheat.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
@@ -39,7 +40,11 @@ files:
 run_files: [seed, workspace, results]
 chaos:
   seed: 1
+  # No trigger: each fault fires on every match.
   faults:
-    - { on: file.open, match: "**/*.json", errno: EIO }
-    - { on: exec, match: "curl **", errno: ECONNREFUSED }
-    - { on: hwmon, set: { temp_c: 101 }, at: 2s }
+    broken-json: { file: { open: "**/*.json" }, errno: EIO }
+    curl-down:
+      exec: "curl **"
+      exit: 7
+      stderr: "curl: (7) Failed to connect to example.invalid port 80: Connection refused\n"
+    overheat: { sensor: { temp_c: 101 }, at: 2s }

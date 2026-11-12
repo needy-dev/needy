@@ -165,7 +165,8 @@ fn stderr(output: &Output) -> String {
   String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// Runs every command on this machine, refuses `rm` and fails `curl`.
+/// Runs every command on this machine, refuses `rm`, and ends `curl` as a
+/// refused connection would.
 const NATIVE_PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 actor: { driver: linux-firecracker }
@@ -176,8 +177,8 @@ commands:
   - { match: "**", to: here }
 chaos:
   faults:
-    - { on: exec, match: "curl **", errno: ECONNREFUSED }
-    - { on: exec, match: "sleep *", delay: 1ms }
+    curl-down: { exec: "curl **", exit: 7, stderr: "curl: (7) Failed to connect to example.com port 80\n" }
+    slow-sleep: { exec: "sleep *", delay: 1ms }
 "#;
 
 /// A profile the daemon refuses when it creates the run: its default
@@ -192,18 +193,82 @@ fn create_run(home: &Home, profile: &str) -> String {
   stdout(&output).trim().to_string()
 }
 
-// The QA pass on 2026-11-09 found that an injected errno on the CLI path
-// exited 1 with "needy: needy chaos: ECONNREFUSED"; the actor path exits 126.
+// ROOT CAUSE:
+//
+// If an exec fault named an errno, the command never ran and `needy exec`
+// exited 126 with "needy: fault injected: ERRNO", because the errno was only
+// a label.
+//
+// Since 2026-11-12 an exec fault's effect is real: the command exits with
+// the fault's code and writes its stderr, as the program would.
 #[test]
-fn exec_fault_exits_126_and_says_fault_injected() {
+fn exec_fault_exits_with_its_code_and_writes_its_stderr() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
 
   let output = home.run(&["exec", "--run", &run, "--", "curl", "http://example.com"]);
 
-  assert_eq!(output.status.code(), Some(126));
-  assert_eq!(stderr(&output), "needy: fault injected: ECONNREFUSED\n");
+  assert_eq!(output.status.code(), Some(7));
+  assert_eq!(stderr(&output), "curl: (7) Failed to connect to example.com port 80\n");
+}
+
+#[test]
+fn chaos_add_ls_and_rm_change_a_live_run_s_faults() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let run = create_run(&home, NATIVE_PROFILE);
+
+  let added = home.run(&[
+    "chaos", "add", "crash", "--run", &run, "--exec", "true **", "--signal", "SEGV", "--times", "1",
+  ]);
+  assert!(added.status.success(), "{}", stderr(&added));
+  let crashed = home.run(&["exec", "--run", &run, "--", "true"]);
+  assert_eq!(crashed.status.code(), Some(128 + 11), "{}", stderr(&crashed));
+  // `times: 1`: the next one runs.
+  assert_eq!(home.run(&["exec", "--run", &run, "--", "true"]).status.code(), Some(0));
+
+  let listed = home.run(&["chaos", "ls", "--run", &run, "-o", "json"]);
+  assert!(listed.status.success(), "{}", stderr(&listed));
+  let faults: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
+  let rows: Vec<(String, String, u64, u64)> = faults
+    .as_array()
+    .unwrap()
+    .iter()
+    .map(|f| {
+      (
+        f["name"].as_str().unwrap().into(),
+        f["source"].as_str().unwrap().into(),
+        f["matched"].as_u64().unwrap(),
+        f["fired"].as_u64().unwrap(),
+      )
+    })
+    .collect();
+  assert_eq!(
+    rows,
+    [
+      ("crash".to_string(), "added".to_string(), 2, 1),
+      ("curl-down".to_string(), "profile".to_string(), 0, 0),
+      ("slow-sleep".to_string(), "profile".to_string(), 0, 0),
+    ]
+  );
+
+  // A profile's fault can be removed too, and a removed one is gone.
+  assert!(home.run(&["chaos", "rm", "curl-down", "--run", &run]).status.success());
+  assert_eq!(home.run(&["exec", "--run", &run, "--", "curl", "--version"]).status.code(), Some(0));
+  let again = home.run(&["chaos", "rm", "curl-down", "--run", &run]);
+  assert!(stderr(&again).contains("has no fault named \"curl-down\""), "{}", stderr(&again));
+
+  // A fault the schema refuses is refused before it reaches the run.
+  let refused = home.run(&[
+    "chaos", "add", "bad", "--run", &run, "--exec", "curl **", "--errno", "EIO",
+  ]);
+  assert!(!refused.status.success());
+  assert!(stderr(&refused).contains("errno is not for exec faults"), "{}", stderr(&refused));
+
+  // Both changes are in the trace, with who made them.
+  let report = home.run(&["report", &run, "-o", "markdown"]);
+  assert!(stdout(&report).contains("Chaos changed while running: +crash (exec), -curl-down"), "{}", stdout(&report));
 }
 
 #[test]
@@ -235,10 +300,9 @@ fn exec_fault_in_json_output_reports_the_exit_code() {
     "http://example.com",
   ]);
 
-  assert_eq!(output.status.code(), Some(126));
+  assert_eq!(output.status.code(), Some(7));
   let value: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
-  assert_eq!(value["exit_code"], 126);
-  assert_eq!(value["error"], "fault injected: ECONNREFUSED");
+  assert_eq!(value["exit_code"], 7);
 }
 
 /// The lines of `ndjson` output, parsed.
@@ -265,7 +329,7 @@ fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
   assert_eq!(delayed.status.code(), Some(0), "{}", stderr(&delayed));
   let lines = ndjson(&delayed);
   assert_eq!(types(&lines), ["fault.injected", "exec.decide", "started", "exit"]);
-  assert_eq!(lines[0]["kind"], "exec");
+  assert_eq!((&lines[0]["name"], &lines[0]["domain"]), (&serde_json::json!("slow-sleep"), &serde_json::json!("exec")));
   assert_eq!(lines[0]["target"], "sleep 0");
   assert_eq!(lines[0]["effect"]["delay"], 1);
   assert_eq!(lines[1]["argv"], serde_json::json!(["sleep", "0"]));
@@ -283,12 +347,12 @@ fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
     "http://example.com",
   ]);
 
-  assert_eq!(refused.status.code(), Some(126));
+  assert_eq!(refused.status.code(), Some(7));
   let lines = ndjson(&refused);
-  assert_eq!(types(&lines), ["fault.injected", "exec.decide", "error", "exit"]);
-  assert_eq!(lines[0]["effect"]["errno"], "ECONNREFUSED");
-  assert_eq!(lines[1]["outcome"], serde_json::json!({"fault": "ECONNREFUSED"}));
-  assert_eq!(lines[3]["code"], 126);
+  assert_eq!(types(&lines), ["fault.injected", "exec.decide", "stderr", "exit"]);
+  assert_eq!(lines[0]["effect"]["exit"], 7);
+  assert_eq!(lines[1]["outcome"], serde_json::json!({"fault": "curl-down"}));
+  assert_eq!(lines[3]["code"], 7);
 }
 
 #[test]
@@ -592,9 +656,9 @@ fn profile_check_splits_quoted_commands_and_shows_matching_faults() {
   let curl = text.lines().find(|l| l.starts_with("curl ")).unwrap();
   assert!(curl.contains("executor here"), "{curl}");
   assert!(curl.contains("curl 'http://example.com/a b'  "), "argv is one word per argument: {curl}");
-  assert!(curl.trim_end().ends_with("ECONNREFUSED"), "{curl}");
+  assert!(curl.trim_end().ends_with("curl-down: exit 7, stderr"), "{curl}");
   let ls = text.lines().find(|l| l.starts_with("ls ")).unwrap();
-  assert!(!ls.contains("ECONNREFUSED"), "{ls}");
+  assert!(!ls.contains("curl-down"), "{ls}");
 }
 
 /// Every example profile in the repository.
@@ -667,10 +731,8 @@ fn profile_check_lists_route_names_of_rules_without_a_placement() {
 #[test]
 fn profile_check_lists_route_names_of_exec_faults() {
   let home = Home::new();
-  let profile = home.write(
-    "profile.yaml",
-    "actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"curl **\", errno: ECONNREFUSED }] }\n",
-  );
+  let profile =
+    home.write("profile.yaml", "actor: { driver: linux-firecracker }\nchaos: { faults: { curl-down: { exec: \"curl **\", exit: 7 } } }\n");
 
   let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
 

@@ -7,7 +7,6 @@ use serde::Deserialize;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde_yaml::{Mapping, Value};
 
-use super::chaos::Fault;
 use crate::value::{Duration, Glob, Words};
 
 /// A command rule: a pattern, conditions and actions.
@@ -102,7 +101,6 @@ pub struct Actions {
   pub env: EnvOps,
   /// File mappings added to the run's for this command.
   pub files: Vec<String>,
-  pub faults: Vec<Fault>,
   /// Presets whose actions apply as if written here.
   #[serde(rename = "use")]
   pub uses: Vec<String>,

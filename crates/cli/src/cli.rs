@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, build, daemon, exec, fs, kill, pair, profile, ps, report, run, runner};
+use crate::commands::{attach, build, chaos, daemon, exec, fs, kill, pair, profile, ps, report, run, runner};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -61,6 +61,8 @@ enum Command {
   Profile(profile::Args),
   /// Report on a run from its trace: who started it, what ran where.
   Report(report::Args),
+  /// Add, list and remove a live run's chaos faults.
+  Chaos(chaos::Args),
 }
 
 /// What every command may need. Paths are resolved on first use, so a command
@@ -190,6 +192,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Build(args) => build::run(args, &ctx).await,
       Command::Profile(args) => profile::run(args, &ctx).await,
       Command::Report(args) => report::run(args, &ctx).await,
+      Command::Chaos(args) => chaos::run(args, &ctx).await,
     }
   });
   // NOTICE: a task may still block on reading stdin, which a runtime drop

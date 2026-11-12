@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::schedule::Need;
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFinding, ProfileToCheck};
 use needy_config::Source;
-use needy_config::profile::{Executor, Profile};
+use needy_config::profile::{Executor, Profile, service_host};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::{CompiledRecipe, HostInfo};
 use needy_core::types::Capture;
@@ -50,6 +50,26 @@ fn unmapped_actor_cwd(profile: &Profile, executor: &Executor) -> Option<String> 
   (!mapped).then(|| candidates.into_iter().next().unwrap_or(home))
 }
 
+/// Why a service's `url` cannot be reached from this machine, where the
+/// gateway that forwards to it runs, or `None` when a TCP connection to it
+/// opens. A URL `validate` refused already has its own finding.
+async fn unreachable(url: &str) -> Option<String> {
+  let uri: http::Uri = url.parse().ok()?;
+  let host = uri.host()?.trim_start_matches('[').trim_end_matches(']').to_string();
+  let port = uri.port_u16().unwrap_or(if uri.scheme_str() == Some("https") {
+    443
+  } else {
+    80
+  });
+  // NOTICE: 2 s is a check's patience for a service on this machine or its
+  // network, not a bound on how slowly a service may answer requests.
+  match tokio::time::timeout(std::time::Duration::from_secs(2), tokio::net::TcpStream::connect((host.as_str(), port))).await {
+    Ok(Ok(_)) => None,
+    Ok(Err(e)) => Some(format!("does not accept a connection ({e})")),
+    Err(_) => Some("does not answer within 2 s".into()),
+  }
+}
+
 /// What an actor whose driver catches execs with shims does not route.
 const CONTAINER_ROUTING_GAP: &str = "actor: a container actor routes by shims made when its image was built: a program \
   created at run time (installed with pip or npm, or compiled in the workspace) and run directly stays in the actor \
@@ -82,6 +102,15 @@ impl Daemon {
         check.actor = Some(placement);
       }
       Err(e) => check.findings.push(error(format!("actor: {e}"))),
+    }
+    for (name, service) in &profile.actor.network.services {
+      if let Some(problem) = unreachable(&service.url).await {
+        check.findings.push(warning(format!(
+          "actor.network.services.{name}: http://{} goes to {}, which {problem} from this control host, where the gateway runs",
+          service_host(name),
+          service.url
+        )));
+      }
     }
     if needy_core_actor::driver::facets(profile.actor.driver).capture == Capture::Shims && routes_anything(&profile) {
       check.findings.push(warning(CONTAINER_ROUTING_GAP.into()));

@@ -21,8 +21,8 @@ use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
 
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
-  ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started, StoredEvent,
-  Target, WindowSize,
+  ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunFaults, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started,
+  StoredEvent, Target, WindowSize,
 };
 
 /// A request field with no domain meaning.
@@ -330,6 +330,29 @@ pub fn profile_to_check(request: v1::CheckProfileRequest) -> ProfileToCheck {
   }
 }
 
+pub fn proto_faults(faults: RunFaults) -> v1::ListFaultsResponse {
+  use needy_core::chaos::FaultSource;
+  v1::ListFaultsResponse {
+    run_id: faults.run,
+    faults: faults
+      .faults
+      .into_iter()
+      .map(|f| v1::FaultInfo {
+        name: f.name,
+        domain: f.domain,
+        fault_yaml: f.fault_yaml,
+        source: match f.source {
+          FaultSource::Profile => v1::FaultSource::Profile,
+          FaultSource::Added => v1::FaultSource::Added,
+        }
+        .into(),
+        matched: f.matched,
+        fired: f.fired,
+      })
+      .collect(),
+  }
+}
+
 pub fn proto_profile_check(check: ProfileCheck) -> v1::CheckProfileResponse {
   let placement = |placement: Placement| v1::Placement {
     runner: match placement {
@@ -397,10 +420,21 @@ pub fn exec_context(request: v1::DecideRequest) -> ExecContext {
 }
 
 pub fn proto_route(route: Route) -> v1::DecideResponse {
-  let (target, deny) = match route.target {
-    Target::Actor => ("actor".to_string(), String::new()),
-    Target::Executor(name) => (name, String::new()),
-    Target::Refused(message) => (String::new(), message),
+  let (target, deny, fault) = match route.target {
+    Target::Actor => ("actor".to_string(), String::new(), None),
+    Target::Executor(name) => (name, String::new(), None),
+    Target::Refused(message) => (String::new(), message, None),
+    Target::Fault(fault) => (
+      String::new(),
+      String::new(),
+      Some(v1::ExecFault {
+        name: fault.name,
+        exit_code: fault.exit,
+        signal: fault.signal.unwrap_or_default(),
+        hang: fault.hang,
+        stderr: fault.stderr,
+      }),
+    ),
   };
   v1::DecideResponse {
     target,
@@ -410,6 +444,7 @@ pub fn proto_route(route: Route) -> v1::DecideResponse {
     cwd: route.cwd,
     search_path_if_missing: route.search_path_if_missing,
     deny,
+    fault,
   }
 }
 
@@ -623,12 +658,13 @@ pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
         path: c.path,
       })
       .collect(),
-    hwmon_faults: config
-      .hwmon_faults
+    sensor_faults: config
+      .sensor_faults
       .into_iter()
       .map(|f| v1::GuestFault {
         at_ms: f.at_ms,
         temp_mc: f.temp_mc,
+        name: f.name,
       })
       .collect(),
   }
