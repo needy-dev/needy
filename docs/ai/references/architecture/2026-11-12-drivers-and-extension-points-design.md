@@ -557,6 +557,19 @@ directory, on 2026-11-12:
   a `watch` of an optional exit plus an expiry time: one writer, two states,
   no table needed. Unchanged.
 
+Verification, 2026-11-12: `make check` and `make test` pass on an Apple
+silicon Mac and on the Linux KVM host (775 tests there). End to end, with
+images built from the slice's tree and each control daemon in a scratch
+state directory:
+
+| Driver | Host | What | Result |
+| --- | --- | --- | --- |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` to its end | Pass: `run ls` showed `running starting`, then `finished exited`; the trace has `actor.start`, `actor.config`, `actor.exit`, `actor.vm.exit` and no `actor.ready` (no terminal); routed `exit=7`, workspace both ways |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` with `-t` and a long program, then `run stop` | Pass: `running ready` in `run ls`, `actor.ready` 167 ms after `actor.config`; after the stop `stopped`, `-`, executor released |
+| `linux-firecracker` | Linux KVM host | a running run whose daemon was killed with `SIGKILL`, then a restarted daemon | Pass: the run `failed` ("the control plane restarted; the actor was lost"), its Firecracker and executor container ended, `state.db` has both instances `ended` and both processes `ended` |
+| `macos-vz` | Apple silicon Mac | `examples/macos-vz` with `run create -it` | Pass: the program's output on the terminal, exit code 3 returned; trace `actor.config` then `actor.ready` 345 ms later, then `actor.exit` |
+| `macos-vz` | Apple silicon Mac | `examples/macos-vz` with `-t`, then `run stop` | Pass: `running starting`, then `running ready` in `run ls`; `stopped` after the stop |
+
 ## Candidate next slices
 
 - The guest dials the guest API at a literal `vsock://2:7000`
