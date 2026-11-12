@@ -146,7 +146,6 @@ pub struct Config {
 #[cfg(unix)]
 pub use reconcile::REPORT_WAIT;
 
-#[cfg(unix)]
 /// The guest needy a control daemon of `config` brings into its actors, or
 /// why it has none: the one `config` names, else `needy-linux-<arch>` next
 /// to this executable, else on Linux this executable when it is a static
@@ -157,6 +156,7 @@ pub fn guest_needy(config: &Config) -> anyhow::Result<PathBuf> {
   actor::guest_needy(config)
 }
 
+#[cfg(unix)]
 /// The control daemon. Clones share it.
 #[derive(Clone)]
 pub struct Daemon {
