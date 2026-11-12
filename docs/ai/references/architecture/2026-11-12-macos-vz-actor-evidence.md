@@ -239,7 +239,11 @@ KVM host (732 tests; the tree shipped with `git archive`). One earlier Linux
 run failed `a_daemon_starts_over_stale_sockets_nobody_listens_on` (`ps`
 against the new daemon); it passed three times alone and in the next full
 run, and touches nothing of this slice, so it is recorded as flaky under
-load, not fixed here.
+load, not fixed here. Followed up on 2026-11-13 on the same host: the test
+ran 2,000 times, 8 at a time beside up to four concurrent full suites, and
+48 full suites ran 4 at a time, without a failure; reading the daemon's
+start, the stale-socket check and `ps`'s path found no race. The cause is
+still unknown, so the test now prints `ps`'s stderr when it fails.
 
 ## Identity
 

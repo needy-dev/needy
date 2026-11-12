@@ -1447,7 +1447,12 @@ fn a_daemon_starts_over_stale_sockets_nobody_listens_on() {
 
   let _daemon = Daemon::start(&home);
 
-  assert!(home.run(&["ps"]).status.success());
+  // NOTICE: this test failed once under a full-suite load on the Linux KVM
+  // host (2026-11-12) with no output to say why; 2,000 runs under load and
+  // 48 full suites did not fail again (2026-11-13). `ps`'s stderr names the
+  // cause if it does.
+  let ps = home.run(&["ps"]);
+  assert!(ps.status.success(), "ps: {}", stderr(&ps));
 }
 
 // ROOT CAUSE:
