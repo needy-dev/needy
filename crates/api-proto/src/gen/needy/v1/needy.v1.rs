@@ -367,6 +367,15 @@ impl Origin {
         }
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WaitStopRequest {
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct WaitStopResponse {
+    /// How long the driving program has after SIGTERM before SIGKILL.
+    #[prost(int64, tag="1")]
+    pub grace_ms: i64,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GuestCopy {
     /// Mapping name in the profile.
@@ -654,9 +663,24 @@ pub struct ListRunsResponse {
 pub struct StopRunRequest {
     #[prost(string, tag="1")]
     pub run_id: ::prost::alloc::string::String,
+    /// End the actor at once: no grace period and no actor mirror-out.
+    #[prost(bool, tag="2")]
+    pub now: bool,
+    /// How long the driving program has after SIGTERM before SIGKILL; unset
+    /// for the control plane's default.
+    #[prost(int64, optional, tag="3")]
+    pub grace_ms: ::core::option::Option<i64>,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct StopRunResponse {
+    /// How the run's running actor ended: unset when the run had no running
+    /// actor, true when it ended after its mirror-out, false when it was
+    /// killed.
+    #[prost(bool, optional, tag="1")]
+    pub graceful: ::core::option::Option<bool>,
+    /// Why a running actor was killed.
+    #[prost(string, tag="2")]
+    pub reason: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GetRunLogsRequest {

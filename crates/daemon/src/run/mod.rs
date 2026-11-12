@@ -12,6 +12,7 @@
 //! control plane reconciles the runs it finds open (`crate::reconcile`).
 
 pub mod state;
+pub mod stop;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{Context, Result, bail};
 use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
 use needy_api_server::control::{
-  ControlError, FaultAdded, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunFaults, RunInfo, Runs, StoredEvent,
+  ControlError, FaultAdded, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunFaults, RunInfo, Runs, StopMode, StoredEvent,
 };
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
@@ -28,10 +29,10 @@ use needy_config::Source;
 use needy_config::profile::{Profile, TraceSink};
 use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
-use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
+use needy_core::event::{self, ActorStop, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
-use needy_core::types::{Principal, RunState};
+use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_actor::driver;
 use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
@@ -51,6 +52,13 @@ use state::{Refused, State};
 // `trace.gap`; 4096 envelopes are a few MiB at most.
 const TRACE_QUEUE: usize = 4096;
 
+/// How long a graceful stop waits, after the driving program's grace
+/// period, for the actor to mirror out, report the program's exit and end.
+// NOTICE: a mirror-out is packed in the guest and unpacked on the control
+// host; a minute covers an agent's state directory of hundreds of MiB, and
+// an actor still running then is killed without it.
+pub const MIRROR_OUT_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// A live run: being created, running, finished or stopping.
 pub struct Run {
   pub id: String,
@@ -65,6 +73,8 @@ pub struct Run {
   pub state: State,
   /// Its actor's lifecycle; `None` until the actor starts.
   pub actor: actor::state::State,
+  /// A graceful stop its actor's guest waits for.
+  pub stop_request: stop::StopRequest,
   /// The actor's driving program.
   pub actor_command: Vec<String>,
   /// The driving program's terminal size at the start; `None` runs it
@@ -528,6 +538,7 @@ impl Daemon {
       wait_for_attach: request.wait_for_attach,
       terminal: tokio::sync::OnceCell::new(),
       actor: Default::default(),
+      stop_request: Default::default(),
       recipe,
       trace,
       executors: Mutex::new(BTreeMap::new()),
@@ -683,10 +694,11 @@ impl Daemon {
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
   }
 
-  /// Stops a running or finished run: its tasks, mirror-out, its
-  /// executors, its trace. `by` is who asked; `None` when the control plane
-  /// stops it on its own, as at shutdown.
-  pub(crate) async fn stop_run(&self, run: &Arc<Run>, by: Option<Principal>) -> Result<(), ControlError> {
+  /// Stops a running or finished run: its actor as `mode` says, then its
+  /// tasks, mirror-out, its executors, its trace. `by` is who asked; `None`
+  /// when the control plane stops it on its own, as at shutdown. Returns how
+  /// the stop ended a running actor.
+  pub(crate) async fn stop_run(&self, run: &Arc<Run>, by: Option<Principal>, mode: StopMode) -> Result<Option<ActorStop>, ControlError> {
     let stopping = match run.state.advance(RunState::Stopping) {
       Ok(_) => true,
       // The actor finished or failed first and that state stays; ending
@@ -700,7 +712,13 @@ impl Daemon {
     if stopping {
       self.save_run(run).await;
     }
-    // The relays of the run's commands and its actor's tasks stop.
+    let actor = if stopping {
+      self.end_actor(run, mode).await
+    } else {
+      None
+    };
+    // The relays of the run's commands and its actor's tasks stop, and an
+    // actor still running is killed.
     run.cancel.cancel();
     run.tasks.close();
     run.tasks.wait().await;
@@ -709,14 +727,59 @@ impl Daemon {
       tracing::warn!("run {}: {refused}", run.id);
     }
     self.release_executors(run).await;
-    run.emit(&Event::RunStop(RunStop { by }));
+    run.emit(&Event::RunStop(RunStop {
+      by,
+      actor: actor.clone(),
+    }));
     // `needy report` right after the stop must see it, and the timing
     // summary is written now.
     run.trace.flush().await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
     self.save_run(run).await;
     self.runs.end(&run.id);
-    Ok(())
+    Ok(actor)
+  }
+
+  /// Ends the running actor of a run being stopped, as `mode` says, and
+  /// returns how; `None` when it had none or it had exited already.
+  /// Gracefully, the guest that waits for it (`Guest.WaitStop`) signals the
+  /// driving program, mirrors out and ends, which the stop waits for up to
+  /// the grace period and [`Config::mirror_out_wait`](crate::Config). An
+  /// actor that does not end by then, or whose guest does not wait, is left
+  /// to the stop's kill.
+  async fn end_actor(&self, run: &Run, mode: StopMode) -> Option<ActorStop> {
+    if matches!(run.actor.get(), None | Some(ActorState::Exited)) {
+      return None;
+    }
+    let grace = match mode {
+      StopMode::Now => {
+        return Some(ActorStop::Forced {
+          reason: "asked to stop at once".into(),
+        });
+      }
+      StopMode::Graceful { grace } => grace,
+    };
+    if !run.stop_request.ask(grace) {
+      let reason =
+        "the actor's guest was not waiting for a stop: it had not finished starting, or its guest needy is older than graceful stops";
+      tracing::warn!("run {}: {reason}; killing the actor", run.id);
+      return Some(ActorStop::Forced {
+        reason: reason.into(),
+      });
+    }
+    let bound = grace + self.config.mirror_out_wait;
+    match tokio::time::timeout(bound, run.actor.exited()).await {
+      Ok(()) => Some(ActorStop::Graceful),
+      Err(_) => {
+        let reason = format!(
+          "the actor did not end within {:.1} s (the grace period and {:.1} s for its mirror-out)",
+          bound.as_secs_f64(),
+          self.config.mirror_out_wait.as_secs_f64()
+        );
+        tracing::warn!("run {}: {reason}; killing the actor", run.id);
+        Some(ActorStop::Forced { reason })
+      }
+    }
   }
 
   /// Ends the processes the run started on its executors, such as
@@ -892,9 +955,9 @@ impl Runs for Daemon {
     self.runs.list().await
   }
 
-  async fn stop(&self, id: &str, by: Principal) -> Result<(), ControlError> {
+  async fn stop(&self, id: &str, by: Principal, mode: StopMode) -> Result<Option<ActorStop>, ControlError> {
     let run = self.runs.find(id)?;
-    self.stop_run(&run, Some(by)).await
+    self.stop_run(&run, Some(by), mode).await
   }
 
   async fn logs(&self, id: &str, follow: bool) -> Result<Logs, ControlError> {

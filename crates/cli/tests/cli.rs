@@ -519,8 +519,25 @@ fn run_stop_is_traced_with_who_stopped_the_run() {
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
   let stop = report.lines().find(|l| l.contains("| run.stop |")).unwrap_or_else(|| panic!("{report}"));
-  assert!(stop.ends_with(r#"| run.stop | `{"by":"operator"}` |"#), "{stop}");
+  // The stand-in actor's guest never waits for a stop, so it is killed.
+  assert!(stop.contains(r#"| run.stop | `{"by":"operator","actor":{"how":"forced","reason":"#), "{stop}");
   assert!(report.lines().nth(2).is_some_and(|l| !l.contains("incomplete")), "{report}");
+}
+
+#[test]
+fn run_stop_now_kills_the_actor_and_the_report_says_so() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let run = create_run(&home, NATIVE_PROFILE);
+  let both = home.run(&["run", "stop", "--now", "--grace", "1s", &run]);
+  assert!(!both.status.success(), "--now and --grace together must be refused");
+
+  let stopped = home.run(&["run", "stop", "--now", &run]);
+
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  assert!(stderr(&stopped).is_empty(), "a stop asked to be at once warns of nothing: {}", stderr(&stopped));
+  let report = stdout(&home.run(&["report", &run]));
+  assert!(report.contains("forced: asked to stop at once"), "{report}");
 }
 
 #[test]

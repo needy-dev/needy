@@ -307,6 +307,11 @@ needy fs cp ./src build:/home/agent/workspace
 needy run stop
 ```
 
+`run stop` ends a running driving program gracefully: SIGTERM, then SIGKILL
+after `--grace` (default 10s); the actor then mirrors out and ends, and the
+stop goes on. `--now` kills the actor at once, without its mirror-out. The
+report says which it was.
+
 Without `--run` or `NEEDY_RUN`, `needy exec` runs on this machine outside any
 run, so starting a run never changes what a plain `needy exec` does.
 Arguments after `--` in `run create` are appended to the profile's
@@ -451,7 +456,7 @@ files:
     from: "host:~/needy-state/opencode/"
     to: "actor:~/.local/share/opencode/"
     filter: ["- /cache/**", "+ **"]
-  login-out:                       # copied back when the run ends
+  login-out:                       # copied back when the run ends (not on `run stop --now`)
     mode: mirror-out
     from: "actor:~/.local/share/opencode/"
     to: "host:~/needy-state/opencode/"

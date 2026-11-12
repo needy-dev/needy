@@ -6,7 +6,7 @@ use std::sync::Arc;
 use needy_api_proto::v1::guest_service_server::GuestService;
 use needy_api_proto::v1::{
   FetchFilesRequest, FetchFilesResponse, GetConfigRequest, GetConfigResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest,
-  PushFilesResponse, ReportExitRequest, ReportExitResponse,
+  PushFilesResponse, ReportExitRequest, ReportExitResponse, WaitStopRequest, WaitStopResponse,
 };
 use needy_common::process::Exit;
 use needy_core::event::Event;
@@ -85,6 +85,13 @@ impl<G: Guest> GuestService for Adapter<G> {
     }
     self.guest.push_files(run, &name, archive).await?;
     Ok(Response::new(PushFilesResponse {}))
+  }
+
+  async fn wait_stop(&self, _: Request<WaitStopRequest>) -> Result<Response<WaitStopResponse>, Status> {
+    let grace = self.guest.wait_stop(self.run()?).await?;
+    Ok(Response::new(WaitStopResponse {
+      grace_ms: i64::try_from(grace.as_millis()).unwrap_or(i64::MAX),
+    }))
   }
 }
 

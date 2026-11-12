@@ -59,6 +59,7 @@ async fn an_actor_cannot_create_stop_or_read_the_logs_of_runs() {
     .clone()
     .stop_run(StopRunRequest {
       run_id: "s-actor".into(),
+      ..Default::default()
     })
     .await
     .unwrap_err();
@@ -110,12 +111,57 @@ async fn runs_are_listed_and_stopped() {
     .runs()
     .stop_run(StopRunRequest {
       run_id: "s2".into(),
+      ..Default::default()
     })
     .await
     .unwrap();
 
   assert_eq!(list.iter().map(|s| s.run_id.as_str()).collect::<Vec<_>>(), ["s1", "s2"]);
   assert_eq!(served.fake.calls(), ["stop s2 by operator"]);
+}
+
+#[tokio::test]
+async fn a_stop_carries_its_grace_period_or_now_and_says_how_the_actor_ended() {
+  let served = serve(Caller::Operator).await;
+  let mut runs = served.client.runs();
+
+  let graceful = runs
+    .stop_run(StopRunRequest {
+      run_id: "s1".into(),
+      grace_ms: Some(2500),
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  let now = runs
+    .stop_run(StopRunRequest {
+      run_id: "s1".into(),
+      now: true,
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  let both = runs
+    .stop_run(StopRunRequest {
+      run_id: "s1".into(),
+      now: true,
+      grace_ms: Some(1),
+    })
+    .await
+    .unwrap_err();
+
+  assert_eq!((graceful.graceful, graceful.reason.as_str()), (Some(true), ""));
+  assert_eq!((now.graceful, now.reason.as_str()), (Some(false), "asked to stop at once"));
+  assert_eq!(both.code(), Code::InvalidArgument);
+  assert_eq!(
+    served.fake.calls(),
+    [
+      "stop s1 by operator Graceful { grace: 2.5s }",
+      "stop s1 by operator Now"
+    ]
+  );
 }
 
 #[tokio::test]

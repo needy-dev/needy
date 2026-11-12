@@ -66,10 +66,13 @@ async fn stopping_a_run_stops_its_vm() {
   let pid = firecracker_pid(&run_dir(&started, &created.id)).await;
   assert!(running(pid));
 
-  tokio::time::timeout(Duration::from_secs(20), Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator))
-    .await
-    .unwrap()
-    .unwrap();
+  tokio::time::timeout(
+    Duration::from_secs(20),
+    Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()),
+  )
+  .await
+  .unwrap()
+  .unwrap();
 
   assert!(!running(pid), "firecracker {pid} outlived its run");
 }
@@ -95,10 +98,13 @@ async fn stopping_a_run_stops_its_guest_listener_and_removes_its_sockets() {
   firecracker_pid(&dir).await;
   assert_eq!(sockets(&dir), ["v.sock", "v.sock_7000", "v.sock_7001"]);
 
-  tokio::time::timeout(Duration::from_secs(20), Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator))
-    .await
-    .unwrap()
-    .unwrap();
+  tokio::time::timeout(
+    Duration::from_secs(20),
+    Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()),
+  )
+  .await
+  .unwrap()
+  .unwrap();
 
   assert_eq!(sockets(&dir), Vec::<String>::new());
   assert_eq!(started.daemon.tasks.len(), daemon_tasks, "the run's tasks are not the daemon's");
@@ -133,7 +139,7 @@ async fn an_actor_that_exits_releases_its_executors_and_sockets() {
 
   let listed = Runs::list(daemon).await.unwrap();
   assert_eq!(listed[0].state, RunState::Finished);
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   assert_eq!(Runs::get(daemon, &created.id).await.unwrap().state, RunState::Finished);
 }
 
@@ -177,7 +183,7 @@ async fn a_vm_that_exits_before_its_driving_program_fails_the_run_with_the_reaso
   assert!(failure.contains("Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1"), "{failure}");
 
   // A stop keeps the failure and flushes the trace.
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   assert_eq!(Runs::get(daemon, &created.id).await.unwrap().state, RunState::Failed);
   let trace = std::fs::read_to_string(run_dir(&started, &created.id).join("trace.jsonl")).unwrap();
   assert!(trace.contains("\"run.fail\""), "{trace}");
@@ -400,7 +406,7 @@ async fn an_actor_whose_transport_accepts_before_its_guest_serves_is_not_ready_u
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   assert_eq!(actor_state(daemon, &created.id).await, None, "a stopped run is listed from state.db");
   device.abort();
   stop.cancel();
@@ -418,7 +424,7 @@ async fn an_actor_is_starting_until_configured_and_exits_with_its_run() {
   assert_eq!(actor_state(daemon, &created.id).await, Some(ActorState::Configured));
   let run = daemon.runs.find(&created.id).unwrap();
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   assert_eq!(run.actor.get(), Some(ActorState::Exited));
 }
@@ -439,7 +445,9 @@ async fn a_vm_actor_gets_the_guest_needy_on_a_second_read_only_disk() {
   let disk = PathBuf::from(drives[1]["path_on_host"].as_str().unwrap());
   assert_eq!(disk.parent(), Some(started.dir.path().join("guest").as_path()), "made in the daemon's guest disks");
   assert_eq!(&std::fs::read(&disk).unwrap()[..4], b"hsqs");
-  Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default())
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

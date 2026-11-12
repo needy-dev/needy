@@ -149,10 +149,16 @@ pub struct Config {
   /// How long a restarted control plane waits for runners to report the
   /// instances of the runs it left open: [`REPORT_WAIT`] outside tests.
   pub report_wait: Duration,
+  /// How long a graceful stop waits, after the driving program's grace
+  /// period, for the actor to mirror out and end before it is killed:
+  /// [`MIRROR_OUT_WAIT`] outside tests.
+  pub mirror_out_wait: Duration,
 }
 
 #[cfg(unix)]
 pub use reconcile::REPORT_WAIT;
+#[cfg(unix)]
+pub use run::MIRROR_OUT_WAIT;
 
 /// The guest needy a control daemon of `config` brings into its actors, or
 /// why it has none: the one `config` names, else `needy-linux-<arch>` next
@@ -400,7 +406,12 @@ impl Daemon {
     self.creates.close();
     self.creates.wait().await;
     for run in self.runs.live() {
-      if let Err(e) = self.stop_run(&run, None).await {
+      // TODO(graceful-shutdown): a shutting-down control plane kills its
+      // actors at once, as before graceful stops, so their mirror-outs are
+      // lost; stopping them gracefully would hold a termination signal for
+      // up to the grace period and the mirror-out wait per run, which waits
+      // for the owner's word on how long a shutdown may take.
+      if let Err(e) = self.stop_run(&run, None, needy_api_server::control::StopMode::Now).await {
         tracing::warn!("run {}: {e}", run.id);
       }
     }

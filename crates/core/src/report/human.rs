@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use anstyle::{AnsiColor, Style};
 
-use super::{FindingKind, Summary, duration, network_name, truncate};
+use super::{FindingKind, Summary, actor_stop, duration, network_name, truncate};
 use crate::event::ActorExit;
 use crate::types::{Capture, RunState};
 
@@ -83,6 +83,9 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
   }
   if let Some(by) = &s.stopped_by {
     head.push(("Stopped by".into(), by.clone()));
+  }
+  if let Some(how) = &s.actor_stop {
+    head.push(("Stop".into(), actor_stop(how)));
   }
   if s.dropped_events > 0 {
     head.push(("Warning".into(), format!("the trace is incomplete: {} events were dropped, so the counts may be low", s.dropped_events)));

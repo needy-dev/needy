@@ -174,7 +174,10 @@ mod run {
     // Stopping the run writes its timing summary to the trace.
     client
       .runs()
-      .stop_run(StopRunRequest { run_id: id.clone() })
+      .stop_run(StopRunRequest {
+        run_id: id.clone(),
+        ..Default::default()
+      })
       .await
       .map_err(|s| anyhow::anyhow!("cannot stop run {id}: {}", s.message()))?;
     match &args.state_dir {

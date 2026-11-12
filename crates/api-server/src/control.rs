@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::pin::Pin;
 
 use needy_common::process::Exit;
-use needy_core::event::{Event, ExecutorRef};
+use needy_core::event::{ActorStop, Event, ExecutorRef};
 use needy_core::intercept::exec::ExecContext;
 use needy_core::types::{ActorState, Capabilities, Origin, Principal, RunState, RunnerRole};
 use tokio_stream::Stream;
@@ -285,13 +285,35 @@ pub struct RunEvents {
   pub events: Vec<StoredEvent>,
 }
 
+/// How `run stop` ends a running actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopMode {
+  /// The driving program gets SIGTERM, then SIGKILL after `grace`; the
+  /// actor mirrors out and ends by itself before the stop goes on.
+  Graceful { grace: std::time::Duration },
+  /// The actor is killed at once, without its mirror-out.
+  Now,
+}
+
+/// The grace period a stop gives a driving program when the caller names
+/// none.
+pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl Default for StopMode {
+  fn default() -> Self {
+    Self::Graceful { grace: STOP_GRACE }
+  }
+}
+
 #[async_trait::async_trait]
 pub trait Runs: Send + Sync + 'static {
   async fn create(&self, request: NewRun) -> Result<RunInfo>;
   /// A running, finished, stopped or failed run by ID.
   async fn get(&self, id: &str) -> Result<RunInfo>;
   async fn list(&self) -> Result<Vec<RunInfo>>;
-  async fn stop(&self, id: &str, by: Principal) -> Result<()>;
+  /// Stops a run; returns how it ended its running actor, `None` when the
+  /// run had none.
+  async fn stop(&self, id: &str, by: Principal, mode: StopMode) -> Result<Option<ActorStop>>;
   /// The actor's console output so far, and with `follow` what it writes
   /// next, until the run ends.
   async fn logs(&self, id: &str, follow: bool) -> Result<Logs>;
@@ -507,6 +529,10 @@ pub trait Guest: Send + Sync + 'static {
   async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>>;
   /// A mirror-out mapping's archive.
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()>;
+  /// Returns, with the driving program's grace period, once `run stop`
+  /// asks the actor to end gracefully. Init holds it while the driving
+  /// program runs.
+  async fn wait_stop(&self, run: &str) -> Result<std::time::Duration>;
 }
 
 // -------------------------------------------------------------- runners

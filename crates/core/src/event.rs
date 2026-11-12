@@ -22,8 +22,9 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// version 7 added `actor.ready`; version 8 added `actor.start`'s `capture`;
 /// version 9 gave `fault.injected` the fault's `name` and `domain` and its
 /// effects their own fields (`exit`, `signal`, `refuse`, `status`, ...), and
-/// added `chaos.add` and `chaos.remove`.
-pub const SCHEMA_VERSION: u32 = 9;
+/// added `chaos.add` and `chaos.remove`; version 10 added `run.stop`'s
+/// `actor`, how a stop ended a running actor.
+pub const SCHEMA_VERSION: u32 = 10;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -37,7 +38,8 @@ pub const SCHEMA_VERSION: u32 = 9;
 // Version 8 only added an optional field (`actor.start`'s `capture`); traces
 // of 7 are refused all the same, by the same rule. Version 9 renamed
 // `fault.injected`'s `kind` to `domain` with new values, so traces of 8 are
-// refused as well.
+// refused as well. Version 10 only added an optional field (`run.stop`'s
+// `actor`); traces of 9 are refused by the same rule.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
 pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = SCHEMA_VERSION..=SCHEMA_VERSION;
@@ -223,6 +225,21 @@ pub struct RunStop {
   /// plane does on its own, such as stopping runs when it shuts down.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub by: Option<Principal>,
+  /// How the stop ended the run's running actor; absent when the actor had
+  /// ended already, or the run had none.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub actor: Option<ActorStop>,
+}
+
+/// How `run stop` ended a running actor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "how", deny_unknown_fields)]
+pub enum ActorStop {
+  /// Its driving program was signalled, the actor mirrored out and ended by
+  /// itself.
+  Graceful,
+  /// The actor was killed, without its mirror-out; `reason` says why.
+  Forced { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

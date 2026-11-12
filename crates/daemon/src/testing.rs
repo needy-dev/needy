@@ -93,6 +93,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
     report_wait: crate::REPORT_WAIT,
+    mirror_out_wait: crate::MIRROR_OUT_WAIT,
   };
   adjust(&mut config);
   let daemon = Daemon::start(config).await.unwrap();

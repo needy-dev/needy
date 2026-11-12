@@ -15,6 +15,18 @@ service GuestService {
   rpc FetchFiles(FetchFilesRequest) returns (stream FetchFilesResponse);
   // A tar archive for a mirror-out mapping; the first message names it.
   rpc PushFiles(stream PushFilesRequest) returns (PushFilesResponse);
+  // Held by init while the driving program runs; answered when `run stop`
+  // asks the actor to end gracefully. Init then sends SIGTERM to the
+  // driving program's process group, SIGKILL after `grace_ms`, and once the
+  // program exited mirrors out and reports its exit as usual.
+  rpc WaitStop(WaitStopRequest) returns (WaitStopResponse);
+}
+
+message WaitStopRequest {}
+
+message WaitStopResponse {
+  // How long the driving program has after SIGTERM before SIGKILL.
+  int64 grace_ms = 1;
 }
 
 message GuestCopy {

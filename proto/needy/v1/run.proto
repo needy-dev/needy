@@ -10,6 +10,9 @@ service RunService {
   rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
   rpc GetRun(GetRunRequest) returns (GetRunResponse);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
+  // Stop a run. A running actor is stopped gracefully unless `now` is set:
+  // its driving program gets SIGTERM, then SIGKILL after the grace period,
+  // and its mirror-out runs before the actor ends.
   rpc StopRun(StopRunRequest) returns (StopRunResponse);
   // Stream the actor's console output: the guest's boot messages and the
   // driving program's terminal. NOT_FOUND when the run has no actor.
@@ -152,9 +155,21 @@ message ListRunsResponse {
 
 message StopRunRequest {
   string run_id = 1;
+  // End the actor at once: no grace period and no actor mirror-out.
+  bool now = 2;
+  // How long the driving program has after SIGTERM before SIGKILL; unset
+  // for the control plane's default.
+  optional int64 grace_ms = 3;
 }
 
-message StopRunResponse {}
+message StopRunResponse {
+  // How the run's running actor ended: unset when the run had no running
+  // actor, true when it ended after its mirror-out, false when it was
+  // killed.
+  optional bool graceful = 1;
+  // Why a running actor was killed.
+  string reason = 2;
+}
 
 message GetRunLogsRequest {
   string run_id = 1;

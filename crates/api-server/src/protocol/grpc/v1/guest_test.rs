@@ -22,6 +22,15 @@ async fn the_control_socket_serves_no_guest() {
 }
 
 #[tokio::test]
+async fn the_actor_waits_for_a_stop_and_gets_its_grace_period() {
+  let served = serve(actor()).await;
+
+  let stop = served.client.guest().wait_stop(needy_api_proto::v1::WaitStopRequest {}).await.unwrap().into_inner();
+
+  assert_eq!(stop.grace_ms, 1500);
+}
+
+#[tokio::test]
 async fn the_actor_gets_its_run_s_configuration() {
   let served = serve(actor()).await;
 

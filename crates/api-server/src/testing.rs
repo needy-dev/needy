@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use needy_api_client::Client;
 use needy_common::process::Exit;
 use needy_config::profile::ExecutorDriver;
-use needy_core::event::{Event, RunStop};
+use needy_core::event::{ActorStop, Event, RunStop};
 use needy_core::intercept::exec::ExecContext;
 use needy_core::types::{Capabilities, Origin, Principal, RunState};
 use tokio_stream::StreamExt as _;
@@ -83,9 +83,17 @@ impl Runs for Fake {
     Ok(vec![info("s1", "one"), info("s2", "two")])
   }
 
-  async fn stop(&self, id: &str, by: Principal) -> Result<()> {
-    self.call(format!("stop {id} by {by}"));
-    Ok(())
+  async fn stop(&self, id: &str, by: Principal, mode: StopMode) -> Result<Option<ActorStop>> {
+    match mode {
+      StopMode::Graceful { grace: STOP_GRACE } => self.call(format!("stop {id} by {by}")),
+      mode => self.call(format!("stop {id} by {by} {mode:?}")),
+    }
+    Ok(match mode {
+      StopMode::Graceful { .. } => Some(ActorStop::Graceful),
+      StopMode::Now => Some(ActorStop::Forced {
+        reason: "asked to stop at once".into(),
+      }),
+    })
   }
 
   /// Without `follow`, more than one message, so the adapter must chunk
@@ -338,6 +346,10 @@ impl Guest for Fake {
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()> {
     self.pushed.lock().unwrap().push((run.into(), name.into(), archive));
     Ok(())
+  }
+
+  async fn wait_stop(&self, _run: &str) -> Result<std::time::Duration> {
+    Ok(std::time::Duration::from_millis(1500))
   }
 }
 

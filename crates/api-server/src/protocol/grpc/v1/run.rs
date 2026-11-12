@@ -62,8 +62,10 @@ impl<S: Runs> RunService for Adapter<S> {
 
   async fn stop_run(&self, request: Request<StopRunRequest>) -> Result<Response<StopRunResponse>, Status> {
     let caller = self.operator(&request, "actors cannot stop runs")?;
-    self.runs.stop(&request.into_inner().run_id, caller.principal()).await?;
-    Ok(Response::new(StopRunResponse {}))
+    let request = request.into_inner();
+    let mode = domain::stop_mode(request.now, request.grace_ms).map_err(ControlError::from)?;
+    let stopped = self.runs.stop(&request.run_id, caller.principal(), mode).await?;
+    Ok(Response::new(domain::proto_stopped(stopped)))
   }
 
   type GetRunLogsStream = Streamed<GetRunLogsResponse>;

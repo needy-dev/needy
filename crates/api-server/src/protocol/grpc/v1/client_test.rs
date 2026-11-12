@@ -98,6 +98,7 @@ async fn a_client_token_reaches_operator_methods_and_is_named_as_the_principal()
     .runs()
     .stop_run(StopRunRequest {
       run_id: "s1".into(),
+      ..Default::default()
     })
     .await
     .unwrap();
@@ -139,6 +140,7 @@ async fn a_client_token_is_named_even_on_a_listener_without_a_control_token() {
     .runs()
     .stop_run(StopRunRequest {
       run_id: "s1".into(),
+      ..Default::default()
     })
     .await
     .unwrap();
@@ -147,6 +149,7 @@ async fn a_client_token_is_named_even_on_a_listener_without_a_control_token() {
     .runs()
     .stop_run(StopRunRequest {
       run_id: "s1".into(),
+      ..Default::default()
     })
     .await
     .unwrap();

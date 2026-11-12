@@ -126,6 +126,7 @@ async fn the_trace_names_the_client_that_created_and_the_operator_that_stopped_a
     .runs()
     .stop_run(StopRunRequest {
       run_id: run.clone(),
+      ..Default::default()
     })
     .await
     .unwrap();
@@ -187,7 +188,14 @@ async fn followed_logs_carry_what_the_actor_writes_until_the_run_stops() {
     let chunk = tokio::time::timeout_at(deadline, stream.message()).await.expect("the second line arrives").unwrap().unwrap();
     console.push_str(&String::from_utf8_lossy(&chunk.data));
   }
-  operator(&served).runs().stop_run(StopRunRequest { run_id: run }).await.unwrap();
+  operator(&served)
+    .runs()
+    .stop_run(StopRunRequest {
+      run_id: run,
+      ..Default::default()
+    })
+    .await
+    .unwrap();
   let end = tokio::time::timeout(Duration::from_secs(5), async { while stream.message().await.unwrap().is_some() {} }).await;
 
   assert!(console.contains("first\n"), "{console}");

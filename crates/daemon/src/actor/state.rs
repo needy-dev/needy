@@ -23,13 +23,19 @@
 //! A run has no actor state until its actor starts: while its executors
 //! are acquired, or when its create failed before.
 
-use std::sync::Mutex;
-
 use needy_core::types::ActorState;
+use tokio::sync::watch;
 
-/// A run's actor's current state; `None` before it starts.
-#[derive(Debug, Default)]
-pub struct State(Mutex<Option<ActorState>>);
+/// A run's actor's current state; `None` before it starts. A watch, so a
+/// graceful stop can wait for the actor to exit.
+#[derive(Debug)]
+pub struct State(watch::Sender<Option<ActorState>>);
+
+impl Default for State {
+  fn default() -> Self {
+    Self(watch::channel(None).0)
+  }
+}
 
 /// A transition the current state does not allow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,23 +55,32 @@ impl std::fmt::Display for Refused {
 
 impl State {
   pub fn get(&self) -> Option<ActorState> {
-    *self.lock()
+    *self.0.borrow()
   }
 
   /// Moves to `to` and returns the state before, or refuses.
   pub fn advance(&self, to: ActorState) -> Result<Option<ActorState>, Refused> {
-    let mut state = self.lock();
-    let from = *state;
-    if !allowed(from, to) {
-      return Err(Refused { from, to });
-    }
-    *state = Some(to);
-    Ok(from)
+    let mut result = Ok(None);
+    self.0.send_if_modified(|state| {
+      let from = *state;
+      if !allowed(from, to) {
+        result = Err(Refused { from, to });
+        return false;
+      }
+      *state = Some(to);
+      result = Ok(from);
+      true
+    });
+    result
   }
 
-  fn lock(&self) -> std::sync::MutexGuard<'_, Option<ActorState>> {
-    // A panic elsewhere cannot leave the state half-written; it is one value.
-    self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  /// Returns once the actor exited.
+  pub async fn exited(&self) {
+    let mut state = self.0.subscribe();
+    // The sender lives as long as `self`, so the wait ends only on `Exited`.
+    if state.wait_for(|s| *s == Some(ActorState::Exited)).await.is_err() {
+      tracing::debug!("the actor's state went away before it exited");
+    }
   }
 }
 

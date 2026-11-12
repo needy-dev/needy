@@ -171,6 +171,17 @@ impl Guest for Daemon {
     let run = self.runs.find(run)?;
     files::push(&run, name, archive).await
   }
+
+  async fn wait_stop(&self, run: &str) -> Result<std::time::Duration, ControlError> {
+    let run = self.runs.find(run)?;
+    // An actor that exits, or a run whose stop kills it, ends the wait: the
+    // guest listener's shutdown waits for its calls.
+    tokio::select! {
+      grace = run.stop_request.wait() => Ok(grace),
+      () = run.actor.exited() => Err(ControlError::Unavailable(format!("the actor of run {} exited", run.id))),
+      () = run.cancel.cancelled() => Err(ControlError::Unavailable(format!("run {} is stopping", run.id))),
+    }
+  }
 }
 
 #[cfg(test)]

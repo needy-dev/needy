@@ -115,6 +115,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
     report_wait: crate::REPORT_WAIT,
+    mirror_out_wait: crate::MIRROR_OUT_WAIT,
   };
 
   let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");

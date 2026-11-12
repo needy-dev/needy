@@ -98,7 +98,7 @@ async fn a_mirror_out_from_an_executor_the_run_files_do_not_name_does_not_run() 
   yaml.push_str("run_files: [chosen]\n");
   let created = Runs::create(&started.daemon, new_run(&yaml, started.dir.path())).await.unwrap();
 
-  Runs::stop(&started.daemon, &created.id, Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &created.id, Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   assert_eq!(std::fs::read_to_string(chosen.join("result.txt")).unwrap(), "done");
   assert!(!other.exists(), "a mirror-out run_files does not name wrote the host");
@@ -125,7 +125,7 @@ async fn a_mirror_out_that_fails_at_the_stop_is_recorded_for_the_report() {
   // The directory the destination would go under is gone by the stop.
   std::fs::remove_dir_all(&anchor).unwrap();
 
-  Runs::stop(&started.daemon, &created.id, Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &created.id, Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   assert!(!anchor.exists(), "the mirror-out created a tree the control host did not have");
   let trace = needy_trace::sink::sqlite::load(&started.dir.path().join("state/trace.db"), &created.id).await.unwrap();
@@ -202,7 +202,7 @@ async fn an_executor_mirror_out_applies_the_mappings_filter_on_the_host() {
   ));
   let created = Runs::create(&started.daemon, new_run(&yaml, started.dir.path())).await.unwrap();
 
-  Runs::stop(&started.daemon, &created.id, Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &created.id, Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   assert_filtered(&out);
 }

@@ -27,6 +27,17 @@ fn every_kind() -> Vec<Event> {
     }),
     Event::RunStop(RunStop {
       by: Some(Principal::Operator),
+      actor: None,
+    }),
+    Event::RunStop(RunStop {
+      by: None,
+      actor: Some(ActorStop::Graceful),
+    }),
+    Event::RunStop(RunStop {
+      by: None,
+      actor: Some(ActorStop::Forced {
+        reason: "asked to stop at once".into(),
+      }),
     }),
     Event::RunFail(RunFail {
       reason: "executor build: no such image".into(),
@@ -245,7 +256,13 @@ fn an_exec_start_without_a_term_fallback_has_no_such_key() {
 // the version instead of a payload error about a field.
 #[test]
 fn a_payload_of_another_version_is_refused() {
-  assert_eq!(Event::decode("run.stop", SCHEMA_VERSION, "{}").unwrap(), Event::RunStop(RunStop { by: None }));
+  assert_eq!(
+    Event::decode("run.stop", SCHEMA_VERSION, "{}").unwrap(),
+    Event::RunStop(RunStop {
+      by: None,
+      actor: None
+    })
+  );
   for version in [1, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
     assert!(matches!(Event::decode("run.stop", version, "{}"), Err(DecodeError::Version { .. })), "{version}");
   }
@@ -255,6 +272,7 @@ fn a_payload_of_another_version_is_refused() {
 fn a_principal_is_one_string_in_the_payload() {
   let stop = Event::RunStop(RunStop {
     by: Some(Principal::Client("laptop".into())),
+    actor: None,
   });
   assert_eq!(stop.payload(), r#"{"by":"client:laptop"}"#);
   assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION, r#"{"by":"someone"}"#), Err(DecodeError::Payload { .. })));

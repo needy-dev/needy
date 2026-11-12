@@ -23,6 +23,7 @@ mod identity;
 mod mounts;
 mod network;
 mod program;
+mod stop;
 mod stubs;
 #[cfg(test)]
 mod testing;
@@ -194,9 +195,9 @@ async fn boot(container: bool) -> Result<()> {
       } else {
         program::Terminal::Vsock(config.process_port)
       };
-      program::run_on_terminal(&config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
+      program::run_on_terminal(&client, &config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
     }
-    None => program::run(&config, &home).await.map(|status| {
+    None => program::run(&client, &config, &home).await.map(|status| {
       use std::os::unix::process::ExitStatusExt;
       (status.code(), status.signal().map(needy_core_executor::signals::name).unwrap_or_default())
     }),

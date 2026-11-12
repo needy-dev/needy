@@ -11,7 +11,7 @@ use std::fmt::Write;
 use needy_config::profile::FaultDomain;
 use serde::Serialize;
 
-use crate::event::{ActorExit, Event, Recorded, Transfer};
+use crate::event::{ActorExit, ActorStop, Event, Recorded, Transfer};
 use crate::pattern::basename;
 use crate::types::{Capture, Network, Origin, Outcome, Placement, Principal, RunState};
 
@@ -88,6 +88,14 @@ fn duration(ms: i64) -> String {
   }
 }
 
+/// How a stop ended the running actor, in a few words.
+fn actor_stop(how: &ActorStop) -> String {
+  match how {
+    ActorStop::Graceful => "graceful: the actor mirrored out and ended".into(),
+    ActorStop::Forced { reason } => format!("forced: {reason}"),
+  }
+}
+
 fn truncate(s: &str, n: usize) -> String {
   if s.chars().count() <= n {
     return s.to_string();
@@ -107,9 +115,11 @@ struct Tally {
   /// `Running` once created, then the first terminal state, which stays as
   /// it does in the daemon's run state machine, so the report agrees
   /// with `run ls`.
-  // NOTICE: an actor exit that lands while a stop is under way is recorded
-  // before `run.stop`, so the report says `finished` where the daemon
-  // says `stopped`; the events cannot tell it from an exit before the stop.
+  // NOTICE: an actor exit that lands while a stop is under way, as a
+  // graceful stop's does, is recorded before `run.stop`; a `run.stop` with
+  // `actor` says the stop ended the running actor, so it makes the run
+  // `stopped` as the daemon says. Without `actor` (an actor that ended
+  // first) the first end stays.
   state: Option<RunState>,
   actor_exit: Option<ActorExit>,
   /// Why the run failed.
@@ -117,6 +127,8 @@ struct Tally {
   /// Who created the run, and who stopped it.
   started_by: Option<Principal>,
   stopped_by: Option<Principal>,
+  /// How the stop ended the running actor.
+  actor_stop: Option<ActorStop>,
   /// Events the trace dropped.
   dropped: u64,
   /// The actor's route names; `Some(None)` routes every exec.
@@ -166,8 +178,16 @@ impl Tally {
         self.state.get_or_insert(RunState::Running);
       }
       Event::RunStop(stop) => {
-        self.end(time_ms, RunState::Stopped);
+        if stop.actor.is_some() {
+          // The stop ended the running actor: its exit, recorded first, was
+          // the stop's doing.
+          self.ended = Some(time_ms);
+          self.state = Some(RunState::Stopped);
+        } else {
+          self.end(time_ms, RunState::Stopped);
+        }
         self.stopped_by = stop.by.clone();
+        self.actor_stop = stop.actor.clone();
       }
       Event::RunFail(fail) => {
         self.end(time_ms, RunState::Failed);
@@ -332,6 +352,9 @@ pub struct Summary {
   /// Who stopped the run; `None` when it was not stopped, or the control
   /// plane stopped it on its own.
   pub stopped_by: Option<String>,
+  /// How the stop ended the running actor: `graceful` (mirrored out) or
+  /// `forced` with the reason; `None` when no stop ended one.
+  pub actor_stop: Option<ActorStop>,
   /// Events the trace dropped; the counts are low by about as many.
   pub dropped_events: u64,
   /// The command names the actor routes, `["*"]` for every exec; `None`
@@ -509,6 +532,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     failure: t.failure.clone(),
     started_by: t.started_by.as_ref().map(Principal::to_string),
     stopped_by: t.stopped_by.as_ref().map(Principal::to_string),
+    actor_stop: t.actor_stop.clone(),
     dropped_events: t.dropped,
     route_names: t.route_names.clone().map(|names| names.unwrap_or_else(|| vec!["*".to_string()])),
     actor_driver: t.actor_driver.clone(),
@@ -570,7 +594,11 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   writeln!(out, "## Overview\n")?;
   let by = |principal: &Option<Principal>| principal.as_ref().map_or("-".to_string(), Principal::to_string);
   if t.started_by.is_some() || t.stopped_by.is_some() {
-    writeln!(out, "Started by `{}`, stopped by `{}`.\n", by(&t.started_by), by(&t.stopped_by))?;
+    write!(out, "Started by `{}`, stopped by `{}`", by(&t.started_by), by(&t.stopped_by))?;
+    if let Some(how) = &t.actor_stop {
+      write!(out, " ({})", actor_stop(how))?;
+    }
+    writeln!(out, ".\n")?;
   }
   writeln!(
     out,

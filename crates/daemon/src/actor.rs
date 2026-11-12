@@ -502,6 +502,11 @@ async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dy
   };
   actor.cancel();
   run.emit(&Event::ActorVmExit(exit.clone()));
+  if run.state.get() == RunState::Stopping {
+    // A graceful stop asked the actor to end and waits for this exit; the
+    // stop mirrors out the executors, releases them and records the end.
+    return;
+  }
   if run.actor_exit().is_some() {
     if let Err(refused) = run.state.advance(RunState::Finished) {
       tracing::debug!("run {}: {refused}", run.id);

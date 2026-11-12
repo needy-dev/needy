@@ -296,8 +296,12 @@ starts its actor, then `running`. It ends `stopped` (after `stopping`, by
 `failed` (its create failed, its actor's VM exited before the driving
 program did, or the control plane restarted and lost its actor, with the
 reason). The first of these end states stays: stopping a
-finished or failed run releases its executors but keeps its state. The
-control plane writes every change of a run's state, and of the instances
+finished or failed run releases its executors but keeps its state. A
+**graceful stop** (the default of `needy run stop`) ends a running driving
+program with SIGTERM, then SIGKILL after a grace period, and waits for the
+actor to mirror out and end; `--now`, an actor whose guest does not wait
+for a stop, or one that does not end in time is killed without its
+mirror-out (**forced**). `run.stop` records which. The control plane writes every change of a run's state, and of the instances
 and processes it holds, to `state.db`.
 
 A command names a run by its ID, an ID prefix, its name or `latest` (the

@@ -12,7 +12,7 @@
 
 use needy_api_proto::v1;
 use needy_common::process::Exit;
-use needy_core::event::Event;
+use needy_core::event::{ActorStop, Event};
 use needy_core::intercept::exec::ExecContext;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -22,7 +22,7 @@ use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
   ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunFaults, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started,
-  StoredEvent, Target, WindowSize,
+  StopMode, StoredEvent, Target, WindowSize,
 };
 
 /// A request field with no domain meaning.
@@ -34,6 +34,8 @@ pub enum Error {
   Unknown { field: &'static str, value: i32 },
   #[error("the request names no {0}")]
   Missing(&'static str),
+  #[error("{0}")]
+  Contradicts(&'static str),
 }
 
 /// The origin an `ExecStart` names.
@@ -300,6 +302,36 @@ pub fn proto_runner(runner: RunnerInfo) -> v1::Runner {
 }
 
 // ------------------------------------------------------------- runs
+
+/// How a `StopRunRequest` asks to end the run's actor.
+pub fn stop_mode(now: bool, grace_ms: Option<i64>) -> Result<StopMode, Error> {
+  match (now, grace_ms) {
+    (true, Some(_)) => Err(Error::Contradicts("a stop `now` has no grace period")),
+    (true, None) => Ok(StopMode::Now),
+    (false, None) => Ok(StopMode::default()),
+    (false, Some(ms)) => match u64::try_from(ms) {
+      Ok(ms) => Ok(StopMode::Graceful {
+        grace: std::time::Duration::from_millis(ms),
+      }),
+      Err(_) => Err(Error::Contradicts("a grace period cannot be negative")),
+    },
+  }
+}
+
+/// How a stop ended the run's actor, for the caller.
+pub fn proto_stopped(stopped: Option<ActorStop>) -> v1::StopRunResponse {
+  match stopped {
+    None => v1::StopRunResponse::default(),
+    Some(ActorStop::Graceful) => v1::StopRunResponse {
+      graceful: Some(true),
+      reason: String::new(),
+    },
+    Some(ActorStop::Forced { reason }) => v1::StopRunResponse {
+      graceful: Some(false),
+      reason,
+    },
+  }
+}
 
 pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
   if request.wait_for_attach && request.tty.is_none() {

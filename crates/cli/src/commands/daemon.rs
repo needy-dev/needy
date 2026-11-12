@@ -192,6 +192,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         heartbeat_interval: args.heartbeat_interval,
         local_runner: args.local_runner,
         report_wait: needy_daemon::REPORT_WAIT,
+        mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
       };
       // A guest needy the operator named must be usable; without one, a
       // daemon that finds none still serves executors, and each actor start

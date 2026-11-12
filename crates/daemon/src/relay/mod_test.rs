@@ -91,10 +91,13 @@ async fn stopping_a_run_ends_its_commands_streams() {
       break;
     }
   }
-  tokio::time::timeout(Duration::from_secs(10), Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator))
-    .await
-    .expect("the stop waits for no command")
-    .unwrap();
+  tokio::time::timeout(
+    Duration::from_secs(10),
+    Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()),
+  )
+  .await
+  .expect("the stop waits for no command")
+  .unwrap();
   let (_, exit) = tokio::time::timeout(Duration::from_secs(10), finish(outputs)).await.unwrap();
   assert_eq!(exit, None, "the relay ended with the run, before the command exited");
 }
@@ -115,7 +118,7 @@ async fn a_stream_its_run_stop_ends_says_run_stopped() {
   let mut outputs = daemon.exec(ExecOpen::Start(spec(&["sleep", "30"], &created.id, "")), attached()).await.unwrap();
   while !matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)) {}
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   let rest: Vec<_> = tokio::time::timeout(Duration::from_secs(10), outputs.collect::<Vec<_>>()).await.unwrap();
 
   assert!(matches!(rest.as_slice(), [Ok(ExecOutput::Ended(reason))] if reason == "run stopped"), "{rest:?}");
@@ -158,7 +161,7 @@ async fn attaching_to_a_workspace_mount_is_refused() {
     panic!("attaching to a workspace mount must be refused");
   };
   assert_eq!(message, format!("process {process} is needy's own (origin actor-mount); it cannot be attached"));
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 }
 
 #[tokio::test]
@@ -224,7 +227,7 @@ async fn processes_on_an_executor_two_instances_share_are_listed_once() {
   let listed: Vec<(String, String)> = Processes::list(daemon, "", "").await.unwrap().into_iter().map(|p| (p.process, p.executor)).collect();
 
   assert_eq!(listed, [(in_run, "here".to_string()), (outside, "local".to_string())]);
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   daemon.shutdown().await;
 }
 
@@ -252,7 +255,7 @@ async fn an_exec_in_an_ended_run_says_it_ended_and_how() {
   let finished = Runs::create(daemon, testing::new_run(PROFILE, started.dir.path())).await.unwrap();
   testing::exit_actor(&started.daemon, started.dir.path(), &finished.id).await;
   let stopped = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
-  Runs::stop(daemon, &stopped.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &stopped.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   let released = async {
     while !daemon.pool.instances().await.is_empty() {
       tokio::time::sleep(Duration::from_millis(20)).await;
@@ -317,7 +320,12 @@ async fn attaching_through_the_daemon_resizes_the_terminal() {
   let (stdout, _) = within("the attached command's exit", finish(attached)).await;
 
   assert!(stdout.contains("40 100"), "{stdout:?}");
-  within("the stop", Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator)).await.unwrap();
+  within(
+    "the stop",
+    Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()),
+  )
+  .await
+  .unwrap();
 }
 
 // The terminal note's G9: the executor's fallback for an unknown `TERM` is
@@ -334,7 +342,7 @@ async fn a_terminal_type_the_executor_replaced_is_recorded_in_exec_start() {
     ..spec(&["true"], &created.id, "")
   };
   finish(daemon.exec(ExecOpen::Start(on_a_terminal), attached()).await.unwrap()).await;
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   let trace = std::fs::read_to_string(started.dir.path().join("state/runs").join(&created.id).join("trace.jsonl")).unwrap();
   let start = trace.lines().find(|l| l.contains("\"exec.start\"")).unwrap_or_else(|| panic!("{trace}"));
@@ -370,7 +378,7 @@ async fn a_starting_client_that_detaches_through_the_daemon_leaves_the_process_r
 
   let listed = Processes::list(daemon, &created.id, "").await.unwrap();
   assert!(listed.iter().any(|p| p.process == process && p.running), "{listed:?}");
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 }
 
 /// A guest process service behind Firecracker's host-initiated vsock
@@ -457,7 +465,7 @@ async fn attaching_to_a_runs_driving_program_forwards_input_and_its_exit() {
   let (output, exit) = tokio::time::timeout(Duration::from_secs(5), finish(outputs)).await.unwrap();
   assert!(output.contains("received:hello"), "{output:?}");
   assert_eq!(exit.unwrap().code, Some(7));
-  Runs::stop(&started.daemon, &run, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &run, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   host.shutdown().await;
 }
 
@@ -474,7 +482,9 @@ async fn an_interactive_create_tells_the_guest_to_wait_for_its_client() {
   assert_eq!(config.tty, Some(size));
   assert!(config.wait_for_attach);
   assert_eq!(config.process_port, needy_core_actor::contract::PROCESS_PORT);
-  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default())
+    .await
+    .unwrap();
 }
 
 // ROOT CAUSE:
@@ -486,7 +496,7 @@ async fn stopping_a_run_ends_its_driving_programs_attach() {
   let (run, host) = terminal_guest(&started, "read -r line").await;
   let mut outputs = started.daemon.exec(attach_run(&run), attached()).await.unwrap();
   assert!(matches!(outputs.next().await.unwrap().unwrap(), ExecOutput::Started(_)));
-  Runs::stop(&started.daemon, &run, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &run, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   let rest = tokio::time::timeout(Duration::from_secs(2), outputs.collect::<Vec<_>>()).await.expect("attach must stop with its run");
   assert!(matches!(rest.last(), Some(Ok(ExecOutput::Ended(reason))) if reason == "run stopped"), "{rest:?}");
   assert!(!rest.iter().any(|event| matches!(event, Ok(ExecOutput::Exited(_)))), "{rest:?}");
@@ -515,7 +525,9 @@ async fn stopping_a_run_interrupts_an_unanswered_terminal_handshake() {
   let id = info.id.clone();
   let attaching = tokio::spawn(async move { daemon.exec(attach_run(&id), attached()).await });
   let (_unanswered, _) = listener.accept().await.unwrap();
-  Runs::stop(&started.daemon, &info.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &info.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default())
+    .await
+    .unwrap();
   let result = tokio::time::timeout(Duration::from_secs(2), attaching).await.expect("the stopped run must interrupt its handshake").unwrap();
   assert!(matches!(result, Err(ControlError::Unavailable(_))));
 }
@@ -580,5 +592,5 @@ async fn a_silent_process_ends_when_its_client_leaves_the_daemon_without_detachi
     assert!(tokio::time::Instant::now() < deadline, "a silent process outlived its client: {listed:?}");
     tokio::time::sleep(Duration::from_millis(50)).await;
   }
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 }

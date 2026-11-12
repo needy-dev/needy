@@ -526,7 +526,13 @@ fn a_failed_file_transfer_is_a_finding() {
         reason: "host path /Users/user/out is not on the control host".into(),
       }),
     ),
-    at(3_000, Event::RunStop(RunStop { by: None })),
+    at(
+      3_000,
+      Event::RunStop(RunStop {
+        by: None,
+        actor: None,
+      }),
+    ),
   ];
 
   let human = human(&events);
@@ -600,6 +606,7 @@ fn attributed_run() -> Vec<Recorded> {
       2_000,
       Event::RunStop(RunStop {
         by: by(Principal::Operator),
+        actor: None,
       }),
     ),
   ]
@@ -620,6 +627,49 @@ fn the_human_report_says_who_started_and_stopped_the_run() {
       "Stopped by  operator",
     ]
   );
+}
+
+/// A run whose driving program was still running when the operator stopped
+/// it: its exit, which the stop caused, is recorded before `run.stop`.
+fn stopped_while_running(how: ActorStop) -> Vec<Recorded> {
+  vec![
+    create(1_000),
+    at(
+      2_000,
+      Event::ActorExit(ActorExit {
+        code: None,
+        signal: Some("SIGTERM".into()),
+      }),
+    ),
+    at(
+      2_500,
+      Event::RunStop(RunStop {
+        by: by(Principal::Operator),
+        actor: Some(how),
+      }),
+    ),
+  ]
+}
+
+#[test]
+fn a_stop_that_ended_the_running_actor_says_stopped_and_how() {
+  let graceful = human(&stopped_while_running(ActorStop::Graceful));
+  let forced = render(
+    "7f3a",
+    &stopped_while_running(ActorStop::Forced {
+      reason: "asked to stop at once".into(),
+    }),
+    Level::Summary,
+    Format::Json,
+  );
+  let json: serde_json::Value = serde_json::from_str(&forced).unwrap();
+
+  assert!(graceful.contains("State       stopped"), "{graceful}");
+  assert!(graceful.contains("Duration    1.5s"), "{graceful}");
+  assert!(graceful.contains("Stop        graceful: the actor mirrored out and ended"), "{graceful}");
+  assert_eq!(json["state"], "stopped");
+  assert_eq!(json["actor_stop"]["how"], "forced");
+  assert_eq!(json["actor_stop"]["reason"], "asked to stop at once");
 }
 
 #[test]

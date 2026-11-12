@@ -28,14 +28,17 @@ async fn a_created_run_runs_on_its_executor_until_stopped() {
   assert_eq!(executors, [("here", "native")]);
   assert!(started.dir.path().join("state/runs").join(&created.id).join("profile.yaml").is_file());
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   let stopped = Runs::get(daemon, &created.id).await.unwrap();
   assert_eq!(stopped.state, RunState::Stopped);
   let listed = Runs::list(daemon).await.unwrap();
   assert_eq!(listed.len(), 1);
   assert_eq!(listed[0].state, RunState::Stopped);
   assert!(
-    matches!(Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await, Err(ControlError::NotFound(_))),
+    matches!(
+      Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await,
+      Err(ControlError::NotFound(_))
+    ),
     "a stopped run is not stopped again"
   );
 }
@@ -109,7 +112,10 @@ async fn an_empty_id_names_no_run() {
   let daemon = &started.daemon;
   let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   assert!(matches!(Runs::get(daemon, "").await, Err(ControlError::NotFound(_))));
-  assert!(matches!(Runs::stop(daemon, "", needy_core::types::Principal::Operator).await, Err(ControlError::NotFound(_))));
+  assert!(matches!(
+    Runs::stop(daemon, "", needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await,
+    Err(ControlError::NotFound(_))
+  ));
   let ctx = ExecContext {
     argv: vec!["true".into()],
     ..ExecContext::default()
@@ -129,7 +135,9 @@ async fn a_prefix_of_several_runs_is_ambiguous() {
     by_first.entry(created.id.chars().next().unwrap()).or_default().push(created.id);
   }
   let (first, ids) = by_first.iter().find(|(_, ids)| ids.len() > 1).unwrap();
-  let Err(ControlError::Invalid(message)) = Runs::stop(daemon, &first.to_string(), needy_core::types::Principal::Operator).await else {
+  let Err(ControlError::Invalid(message)) =
+    Runs::stop(daemon, &first.to_string(), needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await
+  else {
     panic!("an ambiguous prefix must be refused");
   };
   assert!(message.contains("ambiguous"), "{message}");
@@ -211,7 +219,7 @@ async fn a_stopped_run_lists_the_executors_it_released() {
   let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   assert!(created.released.is_empty());
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   let stopped = Runs::get(daemon, &created.id).await.unwrap();
   assert!(stopped.executors.is_empty(), "{:?}", stopped.executors);
@@ -287,7 +295,7 @@ async fn stopping_a_run_ends_its_processes_on_a_runner() {
   let created = Runs::create(daemon, new_run(RUNNER_PROFILE, served.dir())).await.unwrap();
   let pid = detached_sleep(daemon, &created.id).await;
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 
   assert!(ended(pid).await, "process {pid} outlived its run");
 }
@@ -303,7 +311,7 @@ async fn a_finished_run_ends_its_processes_on_a_runner() {
 
   assert!(ended(pid).await, "process {pid} outlived its finished run");
   assert_eq!(Runs::get(daemon, &created.id).await.unwrap().state, RunState::Finished);
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 }
 
 // ROOT CAUSE:
@@ -416,7 +424,9 @@ commands:
   assert_eq!(created.state, RunState::Running);
   let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.driver.as_str(), e.instance.as_str())).collect();
   assert_eq!(executors, [("build", "runner", "kvm")]);
-  Runs::stop(served.daemon(), &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(served.daemon(), &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default())
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -429,7 +439,7 @@ async fn a_runs_life_is_written_to_state_db_and_listed_after_a_restart() {
   let running = daemon.state.run(&created.id).await.unwrap().unwrap();
   let held = daemon.state.instances_of(&created.id).await.unwrap();
 
-  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
   let restarted = testing::restart(started).await;
   let daemon = &restarted.daemon;
 

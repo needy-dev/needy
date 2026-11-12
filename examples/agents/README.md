@@ -97,7 +97,8 @@ a private profile that extends the example, not in a shared file.
 ## Where credentials go
 
 When the run starts, needy copies the host directory into the actor. When
-the agent exits, needy mirrors the directory back to the host:
+the agent exits, or `needy run stop` ends it, needy mirrors the directory
+back to the host:
 
 | Agent | Host | Actor |
 | --- | --- | --- |
@@ -108,9 +109,8 @@ the agent exits, needy mirrors the directory back to the host:
 
 Read these points before you log in:
 
-- **Exit the agent to save the login** (`/exit`, `/quit`, ctrl-d). The
-  mirror-out runs when the driving program exits. `needy run stop` ends
-  the actor first, and the actor's files do not reach the host.
+- `needy run stop --now` kills the actor without its mirror-out, so a
+  login made in that run is lost.
 - **The credentials are in the actor.** The agent, and any program it
   runs in the actor, can read them. needy cannot inject a credential into
   HTTPS requests yet (`TODO(mitm)`). An API key in `actor.env` is in the

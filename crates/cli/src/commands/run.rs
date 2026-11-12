@@ -69,10 +69,19 @@ enum Command {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Stop a run and release its executors.
+  /// Stop a run and release its executors. A running driving program gets
+  /// SIGTERM, then SIGKILL after the grace period, and the actor's
+  /// mirror-out runs before the actor ends.
   Stop {
     #[arg(help = RUN_HELP)]
     run: Option<String>,
+    /// How long the driving program has after SIGTERM before SIGKILL
+    /// (default 10s).
+    #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration, conflicts_with = "now")]
+    grace: Option<std::time::Duration>,
+    /// Kill the actor at once, without its mirror-out.
+    #[arg(long)]
+    now: bool,
   },
   /// Attach to the driving program's terminal until it exits or you detach.
   Attach {
@@ -306,10 +315,20 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let rows = list.runs.into_iter().map(RunRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
-    Command::Stop { run } => {
+    Command::Stop { run, grace, now } => {
       let connection = crate::cli::connect(&endpoint).await?;
       let run = crate::runs::select(&connection, run).await?;
-      connection.runs().stop_run(StopRunRequest { run_id: run }).await.map_err(fail)?;
+      let request = StopRunRequest {
+        run_id: run.clone(),
+        now,
+        grace_ms: grace.map(|g| i64::try_from(g.as_millis()).unwrap_or(i64::MAX)),
+      };
+      let stopped = connection.runs().stop_run(request).await.map_err(fail)?.into_inner();
+      // An actor killed without being asked to (`--now`) lost its
+      // mirror-out; say so where the user looks.
+      if stopped.graceful == Some(false) && !now {
+        eprintln!("run {run}: the actor was killed without its mirror-out: {}", stopped.reason);
+      }
     }
     Command::Attach {
       run,
