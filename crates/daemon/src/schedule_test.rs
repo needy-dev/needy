@@ -1,12 +1,12 @@
 use std::collections::BTreeMap;
 
-use needy_config::profile::{LabelMatch, Provider, RunnerSelector};
-use needy_core::types::{ActorRuntime, ExecutorProvider};
+use needy_config::profile::{ExecutorDriver as ProfileExecutorDriver, LabelMatch, RunnerSelector};
+use needy_core::types::{ActorDriver, ExecutorDriver};
 
 use super::{Candidate, Need, pick};
 use crate::testing::capabilities;
 
-const KVM: &str = "actor(firecracker) executor(docker,native)";
+const KVM: &str = "actor(linux-firecracker) executor(linux-container,native)";
 const NATIVE: &str = "executor(native)";
 
 fn runner(name: &str, has: &str, labels: &[(&str, &str)], connected: bool) -> Candidate {
@@ -26,16 +26,16 @@ fn name(text: &str) -> RunnerSelector {
   RunnerSelector::Name(text.into())
 }
 
-const ACTOR: Need = Need::Actor(ActorRuntime::Firecracker);
-const NATIVE_EXECUTOR: Need = Need::Executor(Some(ExecutorProvider::Native));
-const DOCKER_EXECUTOR: Need = Need::Executor(Some(ExecutorProvider::Docker));
+const ACTOR: Need = Need::Actor(ActorDriver::LinuxFirecracker);
+const NATIVE_EXECUTOR: Need = Need::Executor(ExecutorDriver::Native);
+const CONTAINER_EXECUTOR: Need = Need::Executor(ExecutorDriver::LinuxContainer);
 
 fn fleet() -> Vec<Candidate> {
   vec![
     runner("kvm-1", KVM, &[("kvm", ""), ("os", "linux")], true),
     runner("kvm-2", KVM, &[("kvm", ""), ("os", "linux")], false),
     runner("mac", NATIVE, &[("os", "darwin")], true),
-    runner("gpu", "executor(docker,native)", &[("os", "linux"), ("gpu", "a100")], true),
+    runner("gpu", "executor(linux-container,native)", &[("os", "linux"), ("gpu", "a100")], true),
   ]
 }
 
@@ -55,28 +55,34 @@ fn a_name_nobody_joined_as_is_an_error_naming_the_runners() {
 fn a_named_runner_without_the_role_is_an_error_naming_the_runners_that_have_it() {
   let err = pick(&name("mac"), ACTOR, &fleet()).unwrap_err().to_string();
 
-  assert_eq!(err, "runner mac cannot host actor(firecracker): it has executor(native); runners with actor(firecracker): kvm-1, kvm-2");
+  assert_eq!(
+    err,
+    "runner mac cannot host actor(linux-firecracker): it has executor(native); runners with actor(linux-firecracker): kvm-1, kvm-2"
+  );
 }
 
 #[test]
 fn a_docker_executor_on_a_runner_without_docker_is_an_error_naming_the_runners_with_docker() {
-  let err = pick(&name("mac"), DOCKER_EXECUTOR, &fleet()).unwrap_err().to_string();
+  let err = pick(&name("mac"), CONTAINER_EXECUTOR, &fleet()).unwrap_err().to_string();
 
-  assert_eq!(err, "runner mac cannot host executor(docker): it has executor(native); runners with executor(docker): gpu, kvm-1, kvm-2");
+  assert_eq!(
+    err,
+    "runner mac cannot host executor(linux-container): it has executor(native); runners with executor(linux-container): gpu, kvm-1, kvm-2"
+  );
 }
 
 #[test]
 fn a_capability_no_runner_has_says_so() {
-  let err = pick(&name("mac"), DOCKER_EXECUTOR, &[runner("mac", NATIVE, &[], true)]).unwrap_err().to_string();
+  let err = pick(&name("mac"), CONTAINER_EXECUTOR, &[runner("mac", NATIVE, &[], true)]).unwrap_err().to_string();
 
-  assert_eq!(err, "runner mac cannot host executor(docker): it has executor(native); no runner has executor(docker)");
+  assert_eq!(err, "runner mac cannot host executor(linux-container): it has executor(native); no runner has executor(linux-container)");
 }
 
 #[test]
 fn a_runner_with_only_the_container_runtime_hosts_no_firecracker_actor() {
   let gvisor = [runner(
     "gvisor",
-    "actor(container) executor(docker,native)",
+    "actor(linux-container) executor(linux-container,native)",
     &[],
     true,
   )];
@@ -85,18 +91,18 @@ fn a_runner_with_only_the_container_runtime_hosts_no_firecracker_actor() {
 
   assert_eq!(
     err,
-    "runner gvisor cannot host actor(firecracker): it has actor(container) executor(docker,native); no runner has actor(firecracker)"
+    "runner gvisor cannot host actor(linux-firecracker): it has actor(linux-container) executor(linux-container,native); no runner has actor(linux-firecracker)"
   );
 }
 
 #[test]
 fn a_container_actor_is_placed_on_a_runner_with_the_container_runtime() {
   let fleet = [
-    runner("gvisor", "actor(container) executor(docker,native)", &[("cloud", "")], true),
+    runner("gvisor", "actor(linux-container) executor(linux-container,native)", &[("cloud", "")], true),
     runner("kvm", KVM, &[("cloud", "")], true),
   ];
 
-  let picked = pick(&labels(&["cloud"]), Need::Actor(ActorRuntime::Container), &fleet).unwrap();
+  let picked = pick(&labels(&["cloud"]), Need::Actor(ActorDriver::LinuxContainer), &fleet).unwrap();
 
   assert_eq!(picked, "gvisor");
 }
@@ -145,11 +151,11 @@ fn labels_no_connected_runner_fits_are_an_error_naming_the_candidates() {
 
 #[test]
 fn labels_name_the_capabilities_of_runners_without_the_provider() {
-  let err = pick(&labels(&["os=darwin"]), DOCKER_EXECUTOR, &fleet()).unwrap_err().to_string();
+  let err = pick(&labels(&["os=darwin"]), CONTAINER_EXECUTOR, &fleet()).unwrap_err().to_string();
 
   assert_eq!(
     err,
-    "no connected runner with executor(docker) has labels os=darwin; candidates: gpu (no label os=darwin), \
+    "no connected runner with executor(linux-container) has labels os=darwin; candidates: gpu (no label os=darwin), \
      kvm-1 (no label os=darwin), kvm-2 (no label os=darwin), mac (has executor(native))"
   );
 }
@@ -158,7 +164,7 @@ fn labels_name_the_capabilities_of_runners_without_the_provider() {
 fn labels_without_any_runner_say_none_joined() {
   let err = pick(&labels(&["kvm"]), ACTOR, &[]).unwrap_err().to_string();
 
-  assert_eq!(err, "no connected runner with actor(firecracker) has labels kvm; no runner has joined");
+  assert_eq!(err, "no connected runner with actor(linux-firecracker) has labels kvm; no runner has joined");
 }
 
 #[test]
@@ -179,8 +185,7 @@ fn the_choice_does_not_depend_on_the_order_of_the_runners() {
 }
 
 #[test]
-fn a_provider_no_runner_reports_needs_the_executor_role_only() {
-  assert_eq!(Need::executor(Provider::K8s), Need::Executor(None));
-  assert_eq!(Need::executor(Provider::Docker), DOCKER_EXECUTOR);
-  assert_eq!(pick(&name("mac"), Need::executor(Provider::Containerd), &fleet()).unwrap(), "mac");
+fn a_profiles_executor_driver_needs_that_capability() {
+  assert_eq!(Need::executor(ProfileExecutorDriver::LinuxContainer), CONTAINER_EXECUTOR);
+  assert_eq!(Need::executor(ProfileExecutorDriver::Native), NATIVE_EXECUTOR);
 }

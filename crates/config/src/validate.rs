@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::profile::{Actions, ContainerActor, Profile, Provider, Runtime, Side, UnknownPolicy};
+use crate::profile::{Actions, ActorDriver, ContainerActor, ExecutorDriver, Profile, Side, UnknownPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -54,16 +54,14 @@ impl fmt::Display for Finding {
 /// mappings it defines.
 pub fn profile(profile: &Profile) -> Vec<Finding> {
   let mut findings = Vec::new();
-  match (profile.actor.runtime, &profile.actor.container) {
-    (Runtime::Container, None | Some(ContainerActor { oci_runtime: None, .. })) => {
-      findings.push(Finding::error("actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"))
-    }
-    (Runtime::MacosAppleContainer, Some(ContainerActor { oci_runtime: Some(_), .. })) => findings.push(Finding::error(
-      "actor.container.oci_runtime is for `runtime: container`; Apple's `container` runs each actor in its own VM and has no OCI runtime to choose",
+  match (profile.actor.driver, &profile.actor.container) {
+    (ActorDriver::LinuxContainer, None | Some(ContainerActor { oci_runtime: None, .. })) => findings
+      .push(Finding::error("actor.container: a linux-container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)")),
+    (ActorDriver::MacosAppleContainer, Some(ContainerActor { oci_runtime: Some(_), .. })) => findings.push(Finding::error(
+      "actor.container.oci_runtime is for `driver: linux-container`; Apple's `container` runs each actor in its own VM and has no OCI runtime to choose",
     )),
-    (runtime @ (Runtime::Firecracker | Runtime::MacosVz), Some(_)) => findings.push(Finding::error(format!(
-      "actor.container is for `runtime: container` or `macos-apple-container`; this actor's runtime is {}",
-      runtime.as_str()
+    (driver @ (ActorDriver::LinuxFirecracker | ActorDriver::MacosVz), Some(_)) => findings.push(Finding::error(format!(
+      "actor.container is for `driver: linux-container` or `macos-apple-container`; this actor's driver is {driver}"
     ))),
     _ => {}
   }
@@ -79,10 +77,11 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
     findings.push(Finding::error(format!("unknown names unknown executor {name:?}")));
   }
   for (name, executor) in &profile.executors {
-    if executor.docker.is_some() && executor.provider != Provider::Docker {
-      let provider = format!("{:?}", executor.provider).to_lowercase();
-      findings
-        .push(Finding::error(format!("executors.{name} has `docker:` options but its provider is {provider}; add `provider: docker`")));
+    if executor.container.is_some() && executor.driver != ExecutorDriver::LinuxContainer {
+      findings.push(Finding::error(format!(
+        "executors.{name} has `container:` options but its driver is {}; add `driver: linux-container`",
+        executor.driver
+      )));
     }
   }
   for name in &profile.run_files {

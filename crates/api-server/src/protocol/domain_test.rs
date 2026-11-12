@@ -93,27 +93,27 @@ fn a_heartbeat_without_a_host_reports_none() {
 
 #[test]
 fn a_runners_capabilities_survive_the_wire() {
-  use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider};
+  use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver};
   let kvm = Capabilities {
-    actor: [ActorRuntime::Firecracker, ActorRuntime::Container].into(),
-    executor: [ExecutorProvider::Native, ExecutorProvider::Docker].into(),
+    actor: [ActorDriver::LinuxFirecracker, ActorDriver::LinuxContainer].into(),
+    executor: [ExecutorDriver::Native, ExecutorDriver::LinuxContainer].into(),
   };
 
   assert_eq!(capabilities(Some(proto_capabilities(&kvm))).unwrap(), kvm);
   assert_eq!(capabilities(None).unwrap(), Capabilities::default());
   let mac = Capabilities {
-    actor: [ActorRuntime::MacosAppleContainer].into(),
-    executor: [ExecutorProvider::Native].into(),
+    actor: [ActorDriver::MacosAppleContainer].into(),
+    executor: [ExecutorDriver::Native].into(),
   };
   assert_eq!(capabilities(Some(proto_capabilities(&mac))).unwrap(), mac);
 }
 
 #[test]
-fn an_unknown_actor_runtime_is_refused() {
+fn an_unknown_actor_driver_is_refused() {
   let reported = v1::RunnerCapabilities {
     actor: vec![42],
     ..Default::default()
   };
 
-  assert_eq!(capabilities(Some(reported)).unwrap_err().to_string(), "unknown actor runtime 42");
+  assert_eq!(capabilities(Some(reported)).unwrap_err().to_string(), "unknown actor driver 42");
 }

@@ -568,8 +568,10 @@ pub struct CreateRunRequest {
 pub struct ExecutorRef {
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
+    /// The executor driver that created the instance (`native`,
+    /// `linux-container`), or `runner` for a runner's own process space.
     #[prost(string, tag="2")]
-    pub runtime: ::prost::alloc::string::String,
+    pub driver: ::prost::alloc::string::String,
     #[prost(string, tag="3")]
     pub instance: ::prost::alloc::string::String,
     /// The run gave the executor back: it stopped, finished or failed.
@@ -845,13 +847,13 @@ impl FindingSeverity {
         }
     }
 }
-/// What a runner can host: each role with its runtimes or providers. A role
-/// with none is a role it does not hold.
+/// What a runner can host: each role with its drivers. A role with none is a
+/// role it does not hold.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RunnerCapabilities {
-    #[prost(enumeration="ActorRuntime", repeated, tag="1")]
+    #[prost(enumeration="ActorDriver", repeated, tag="1")]
     pub actor: ::prost::alloc::vec::Vec<i32>,
-    #[prost(enumeration="ExecutorProvider", repeated, tag="2")]
+    #[prost(enumeration="ExecutorDriver", repeated, tag="2")]
     pub executor: ::prost::alloc::vec::Vec<i32>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1193,7 +1195,7 @@ pub struct TaskResponse {
 }
 /// What a runner can host. A join token's scope names roles; a runner
 /// reports its `RunnerCapabilities`, whose roles are those with at least one
-/// runtime or provider.
+/// driver.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum RunnerRole {
@@ -1223,76 +1225,81 @@ impl RunnerRole {
         }
     }
 }
-/// How a runner can run an actor.
+/// How a runner can run an actor: an actor driver, as a profile's
+/// `actor.driver` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum ActorRuntime {
+pub enum ActorDriver {
     Unspecified = 0,
-    /// A usable KVM and the actor image (vmlinux, rootfs.ext4, firecracker).
-    Firecracker = 1,
-    /// A Docker daemon that answers. Whether it has the OCI runtime a profile
-    /// names (`runc`, gVisor's `runsc`) is checked when a run is created.
-    Container = 2,
-    /// Apple silicon macOS with vfkit and the `macos-vz` actor image (Image,
-    /// rootfs.ext4): a Virtualization.framework VM.
+    /// `linux-firecracker`: a usable KVM and the actor image (vmlinux,
+    /// rootfs.ext4, firecracker).
+    LinuxFirecracker = 1,
+    /// `linux-container`: a Docker-compatible engine that answers. Whether it
+    /// has the OCI runtime a profile names (`runc`, gVisor's `runsc`) is
+    /// checked when a run is created.
+    LinuxContainer = 2,
+    /// `macos-vz`: Apple silicon macOS with vfkit and the `macos-vz` actor
+    /// image (Image, rootfs.ext4): a Virtualization.framework VM.
     MacosVz = 3,
-    /// Apple's `container` CLI on a Mac, whose services answer.
+    /// `macos-apple-container`: Apple's `container` CLI on a Mac, whose
+    /// services answer.
     MacosAppleContainer = 4,
 }
-impl ActorRuntime {
+impl ActorDriver {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "ACTOR_RUNTIME_UNSPECIFIED",
-            Self::Firecracker => "ACTOR_RUNTIME_FIRECRACKER",
-            Self::Container => "ACTOR_RUNTIME_CONTAINER",
-            Self::MacosVz => "ACTOR_RUNTIME_MACOS_VZ",
-            Self::MacosAppleContainer => "ACTOR_RUNTIME_MACOS_APPLE_CONTAINER",
+            Self::Unspecified => "ACTOR_DRIVER_UNSPECIFIED",
+            Self::LinuxFirecracker => "ACTOR_DRIVER_LINUX_FIRECRACKER",
+            Self::LinuxContainer => "ACTOR_DRIVER_LINUX_CONTAINER",
+            Self::MacosVz => "ACTOR_DRIVER_MACOS_VZ",
+            Self::MacosAppleContainer => "ACTOR_DRIVER_MACOS_APPLE_CONTAINER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "ACTOR_RUNTIME_UNSPECIFIED" => Some(Self::Unspecified),
-            "ACTOR_RUNTIME_FIRECRACKER" => Some(Self::Firecracker),
-            "ACTOR_RUNTIME_CONTAINER" => Some(Self::Container),
-            "ACTOR_RUNTIME_MACOS_VZ" => Some(Self::MacosVz),
-            "ACTOR_RUNTIME_MACOS_APPLE_CONTAINER" => Some(Self::MacosAppleContainer),
+            "ACTOR_DRIVER_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTOR_DRIVER_LINUX_FIRECRACKER" => Some(Self::LinuxFirecracker),
+            "ACTOR_DRIVER_LINUX_CONTAINER" => Some(Self::LinuxContainer),
+            "ACTOR_DRIVER_MACOS_VZ" => Some(Self::MacosVz),
+            "ACTOR_DRIVER_MACOS_APPLE_CONTAINER" => Some(Self::MacosAppleContainer),
             _ => None,
         }
     }
 }
-/// How a runner can create an executor.
+/// How a runner can create an executor: an executor driver, as a profile's
+/// `executors.NAME.driver` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
-pub enum ExecutorProvider {
+pub enum ExecutorDriver {
     Unspecified = 0,
-    /// The runner's own process space; every runner has it.
+    /// `native`: the runner's own process space; every runner has it.
     Native = 1,
-    /// A Docker daemon the runner reaches.
-    Docker = 2,
+    /// `linux-container`: a Docker-compatible engine the runner reaches.
+    LinuxContainer = 2,
 }
-impl ExecutorProvider {
+impl ExecutorDriver {
     /// String value of the enum field names used in the ProtoBuf definition.
     ///
     /// The values are not transformed in any way and thus are considered stable
     /// (if the ProtoBuf definition does not change) and safe for programmatic use.
     pub fn as_str_name(&self) -> &'static str {
         match self {
-            Self::Unspecified => "EXECUTOR_PROVIDER_UNSPECIFIED",
-            Self::Native => "EXECUTOR_PROVIDER_NATIVE",
-            Self::Docker => "EXECUTOR_PROVIDER_DOCKER",
+            Self::Unspecified => "EXECUTOR_DRIVER_UNSPECIFIED",
+            Self::Native => "EXECUTOR_DRIVER_NATIVE",
+            Self::LinuxContainer => "EXECUTOR_DRIVER_LINUX_CONTAINER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
     pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
         match value {
-            "EXECUTOR_PROVIDER_UNSPECIFIED" => Some(Self::Unspecified),
-            "EXECUTOR_PROVIDER_NATIVE" => Some(Self::Native),
-            "EXECUTOR_PROVIDER_DOCKER" => Some(Self::Docker),
+            "EXECUTOR_DRIVER_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTOR_DRIVER_NATIVE" => Some(Self::Native),
+            "EXECUTOR_DRIVER_LINUX_CONTAINER" => Some(Self::LinuxContainer),
             _ => None,
         }
     }

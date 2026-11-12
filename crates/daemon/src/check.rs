@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crate::schedule::Need;
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFinding, ProfileToCheck};
 use needy_config::Source;
-use needy_config::profile::{Executor, Profile, Runtime};
+use needy_config::profile::{ActorDriver, Executor, Profile};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::{CompiledRecipe, HostInfo};
 
@@ -71,7 +71,7 @@ impl Daemon {
     }));
     let runners = self.candidates().await.map_err(failed)?;
 
-    match schedule::placement(profile.actor.runner.as_ref(), Need::actor(profile.actor.runtime), &runners) {
+    match schedule::placement(profile.actor.runner.as_ref(), Need::actor(profile.actor.driver), &runners) {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
@@ -82,7 +82,7 @@ impl Daemon {
       }
       Err(e) => check.findings.push(error(format!("actor: {e}"))),
     }
-    if matches!(profile.actor.runtime, Runtime::Container | Runtime::MacosAppleContainer) && routes_anything(&profile) {
+    if matches!(profile.actor.driver, ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer) && routes_anything(&profile) {
       check.findings.push(warning(CONTAINER_ROUTING_GAP.into()));
     }
     let recipe = match &profile.actor.recipe {
@@ -92,12 +92,12 @@ impl Daemon {
       }
       None => None,
     };
-    // What of the identity the runtime does not present, where the actor
+    // What of the identity the driver does not present, where the actor
     // would run: this host (see `unusable_host`).
     if check.actor.is_some()
-      && let Ok(runtime) = crate::actor::runtime(self, &profile.actor)
+      && let Ok(driver) = crate::actor::driver(self, &profile.actor)
     {
-      for (is_error, message) in crate::actor::identity_findings(runtime.as_ref(), recipe.as_ref()) {
+      for (is_error, message) in crate::actor::identity_findings(driver.as_ref(), recipe.as_ref()) {
         check.findings.push(ProfileFinding {
           error: is_error,
           message: format!("actor: {message}"),
@@ -105,9 +105,9 @@ impl Daemon {
       }
     }
     for (name, executor) in &profile.executors {
-      match schedule::placement(executor.runner.as_ref(), Need::executor(executor.provider), &runners) {
+      match schedule::placement(executor.runner.as_ref(), Need::executor(executor.driver), &runners) {
         Ok(placement) => {
-          match self.site(&placement, executor.provider) {
+          match self.site(&placement, executor.driver) {
             Err(refusal) => check.findings.push(error(format!("executors.{name}: {refusal}"))),
             // The control host's own runner is the actor's machine.
             Ok(Site::Runner { name: runner, .. }) if !self.is_local(&runner) => {
@@ -129,7 +129,7 @@ impl Daemon {
     Ok(check)
   }
 
-  /// Why the host of an actor of runtime `kind` placed at `placement` cannot
+  /// Why the host of `profile`'s actor placed at `placement` cannot
   /// run it (no usable KVM, for Firecracker), or `None` when it can. The
   /// actor runs on the control host (directly or as its own runner), which
   /// is probed as `run create` probes it.
@@ -141,9 +141,9 @@ impl Daemon {
       Placement::ControlHost => "the control host".to_string(),
       Placement::Runner(name) => format!("runner {name} (the control host)"),
     };
-    // A runtime this daemon lacks is already a finding of `validate::profile`.
-    let runtime = crate::actor::runtime(self, &profile.actor).ok()?;
-    runtime.check_host().await.err().map(|e| format!("on {on}: {e}"))
+    // A driver this daemon lacks is already a finding of `validate::profile`.
+    let driver = crate::actor::driver(self, &profile.actor).ok()?;
+    driver.check_host().await.err().map(|e| format!("on {on}: {e}"))
   }
 
   /// Compiles the recipe `reference` against the CPU of the host the actor

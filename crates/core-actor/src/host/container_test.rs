@@ -69,9 +69,9 @@ impl Engine for Fake {
   }
 }
 
-fn runtime(fake: Fake, oci: OciRuntime) -> (Container, Arc<Fake>) {
+fn runtime(fake: Fake, oci: OciRuntime) -> (LinuxContainer, Arc<Fake>) {
   let fake = Arc::new(fake);
-  (Container::with_engine(oci, "needy-actor:latest".into(), fake.clone()), fake)
+  (LinuxContainer::with_engine(oci, "needy-actor:latest".into(), fake.clone()), fake)
 }
 
 fn gce() -> CompiledRecipe {
@@ -186,7 +186,7 @@ async fn a_host_without_the_image_names_the_build_that_makes_it() {
 
   let error = container.check_host().await.unwrap_err().to_string();
 
-  assert!(error.contains("needy build --container"), "{error}");
+  assert!(error.contains("needy build --linux-container"), "{error}");
 }
 
 #[tokio::test]
@@ -258,7 +258,7 @@ async fn stopping_an_actor_stops_its_container_within_the_grace_and_removes_it()
 // The fix makes an unreachable Docker fail each use, `check_host` first.
 #[tokio::test]
 async fn a_docker_that_cannot_be_reached_fails_the_host_check_with_the_reason() {
-  let container = Container::with_engine(
+  let container = LinuxContainer::with_engine(
     OciRuntime::Runc,
     "needy-actor:latest".into(),
     Arc::new(Unreachable("no Docker daemon answers: socket missing".into())),

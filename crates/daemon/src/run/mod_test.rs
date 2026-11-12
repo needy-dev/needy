@@ -8,10 +8,10 @@ use needy_core::types::RunState;
 use crate::testing::{self, fake_image, new_run};
 
 const PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -24,7 +24,7 @@ async fn a_created_run_runs_on_its_executor_until_stopped() {
   assert_eq!(created.state, RunState::Running);
   assert_eq!(created.name, created.id, "an unnamed run is named after its ID");
   assert_eq!(created.profile, "test");
-  let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.runtime.as_str())).collect();
+  let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.driver.as_str())).collect();
   assert_eq!(executors, [("here", "native")]);
   assert!(started.dir.path().join("state/runs").join(&created.id).join("profile.yaml").is_file());
 
@@ -72,7 +72,7 @@ async fn a_created_run_has_its_create_in_the_trace_when_create_returns() {
 async fn a_run_whose_profile_is_invalid_is_listed_as_failed() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  let profile = "actor: { runtime: firecracker }\ncommands:\n  - { match: \"**\", to: nowhere }\n";
+  let profile = "actor: { driver: linux-firecracker }\ncommands:\n  - { match: \"**\", to: nowhere }\n";
   let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, started.dir.path())).await else {
     panic!("an invalid profile must fail the create");
   };
@@ -152,14 +152,15 @@ async fn a_prefix_of_several_runs_is_ambiguous() {
 async fn a_failed_create_releases_the_executors_it_acquired() {
   let started = testing::daemon().await;
   let daemon = &started.daemon;
-  // `b` is acquired after `a` and fails: no provider creates Firecracker
-  // executors.
+  // `b` is acquired after `a` and fails: the operator allows no privileged
+  // container, which the `linux-container` driver refuses before it reaches
+  // the engine.
   let profile = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  a: { provider: native }
-  b: { provider: firecracker }
+  a: { driver: native }
+  b: { driver: linux-container, container: { privileged: true } }
 commands:
   - { match: "**", to: a }
 "#;
@@ -214,7 +215,7 @@ async fn a_stopped_run_lists_the_executors_it_released() {
 
   let stopped = Runs::get(daemon, &created.id).await.unwrap();
   assert!(stopped.executors.is_empty(), "{:?}", stopped.executors);
-  let released: Vec<_> = stopped.released.iter().map(|e| (e.name.as_str(), e.runtime.as_str())).collect();
+  let released: Vec<_> = stopped.released.iter().map(|e| (e.name.as_str(), e.driver.as_str())).collect();
   assert_eq!(released, [("here", "native")]);
 }
 
@@ -242,7 +243,7 @@ async fn a_finished_run_keeps_its_driving_programs_exit() {
 /// A profile whose every command runs on executor `far`, a native
 /// executor on runner `far`.
 const RUNNER_PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   far: { runner: far }
@@ -318,10 +319,10 @@ async fn a_finished_run_ends_its_processes_on_a_runner() {
 #[tokio::test]
 async fn a_run_is_created_from_a_profile_whose_directory_the_daemon_cannot_read() {
   let client = tempfile::tempdir().unwrap();
-  std::fs::write(client.path().join("base.yaml"), "user: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { provider: native }\n")
+  std::fs::write(client.path().join("base.yaml"), "user: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n")
     .unwrap();
   std::fs::write(client.path().join("r.recipe.yaml"), "extends: builtin:gce-ubuntu-22.04\nos: { hostname: from-the-client }\n").unwrap();
-  let yaml = "extends: base.yaml\nactor: { runtime: firecracker, recipe: r.recipe.yaml }\ncommands:\n  - { match: \"**\", to: here }\n";
+  let yaml = "extends: base.yaml\nactor: { driver: linux-firecracker, recipe: r.recipe.yaml }\ncommands:\n  - { match: \"**\", to: here }\n";
   let request = new_run(yaml, client.path());
   drop(client);
   let started = testing::daemon().await;
@@ -339,7 +340,7 @@ async fn a_run_is_created_from_a_profile_whose_directory_the_daemon_cannot_read(
 #[tokio::test]
 async fn a_runs_recipe_time_is_its_creation_time_and_run_create_records_it() {
   let dir = tempfile::tempdir().unwrap();
-  let yaml = "actor: { runtime: firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { provider: native }\n";
+  let yaml = "actor: { driver: linux-firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
   let started = testing::daemon().await;
 
   let created = Runs::create(&started.daemon, new_run(yaml, dir.path())).await.unwrap();
@@ -360,10 +361,10 @@ async fn a_create_whose_selector_names_no_connected_runner_fails_before_it_acqui
   let (served, _far) = with_runner_far().await;
   let daemon = served.daemon();
   let profile = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  a: { provider: native }
+  a: { driver: native }
   mac: { runner: { labels: [os=darwin] } }
 "#;
 
@@ -384,8 +385,8 @@ executors:
 async fn an_actor_on_a_runner_other_than_the_control_hosts_own_fails_the_create() {
   let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
-  let _far = testing::join_runner(&served, &operator, "far", "actor(firecracker)", &[]).await;
-  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { runtime: firecracker, runner: far }\n";
+  let _far = testing::join_runner(&served, &operator, "far", "actor(linux-firecracker)", &[]).await;
+  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker, runner: far }\n";
 
   let Err(ControlError::Failed(message)) = Runs::create(served.daemon(), new_run(profile, served.dir())).await else {
     panic!("an actor on another runner must fail the create");
@@ -399,10 +400,11 @@ async fn an_actor_on_the_control_hosts_own_runner_starts_here() {
   let started = testing::daemon_with(|config| config.local_runner = Some("kvm".into())).await;
   let served = testing::serve(started, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
-  let _kvm = testing::join_runner(&served, &operator, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
+  let _kvm =
+    testing::join_runner(&served, &operator, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[("kvm", "")]).await;
   let profile = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
-actor: { runtime: firecracker, runner: { labels: [kvm] } }
+actor: { driver: linux-firecracker, runner: { labels: [kvm] } }
 executors:
   build: { runner: kvm }
 commands:
@@ -412,7 +414,7 @@ commands:
   let created = Runs::create(served.daemon(), new_run(profile, served.dir())).await.unwrap();
 
   assert_eq!(created.state, RunState::Running);
-  let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.runtime.as_str(), e.instance.as_str())).collect();
+  let executors: Vec<_> = created.executors.iter().map(|e| (e.name.as_str(), e.driver.as_str(), e.instance.as_str())).collect();
   assert_eq!(executors, [("build", "runner", "kvm")]);
   Runs::stop(served.daemon(), &created.id, needy_core::types::Principal::Operator).await.unwrap();
 }

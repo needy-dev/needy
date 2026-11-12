@@ -9,7 +9,7 @@ use needy_api_client::Client;
 use needy_common::process::Exit;
 use needy_core::event::{Event, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Capabilities, ExecutorProvider, Origin, Principal, RunState};
+use needy_core::types::{Capabilities, ExecutorDriver, Origin, Principal, RunState};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 
@@ -313,7 +313,7 @@ fn fake_runner(name: &str) -> RunnerInfo {
   RunnerInfo {
     name: name.into(),
     capabilities: Capabilities {
-      executor: [ExecutorProvider::Native].into(),
+      executor: [ExecutorDriver::Native].into(),
       ..Default::default()
     },
     labels: [("os".to_string(), "darwin".to_string())].into(),

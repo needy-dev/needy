@@ -18,7 +18,7 @@ fn every_kind() -> Vec<Event> {
       profile: "smoke".into(),
       executors: vec![ExecutorRef {
         name: "build".into(),
-        runtime: "docker".into(),
+        driver: "linux-container".into(),
         instance: "needy-build".into(),
       }],
       by: Some(Principal::Client("laptop".into())),
@@ -34,7 +34,7 @@ fn every_kind() -> Vec<Event> {
       pid: 42,
       vcpus: 4,
       mem_mib: 16384,
-      runtime: Some("container (runsc)".into()),
+      driver: Some("linux-container (runsc)".into()),
     }),
     Event::ActorVmExit(ActorVmExit {
       code: Some(0),
@@ -226,17 +226,15 @@ fn an_exec_start_without_a_term_fallback_has_no_such_key() {
   assert_eq!(Event::decode("exec.start", SCHEMA_VERSION, &payload).unwrap(), start);
 }
 
-// Version 2 added `by`; version 1 rows, from traces written before it and
-// from guests built before it, read with no principal.
+// Version 6 renamed `runtime` to `driver` without compatibility (the drivers
+// design): rows of an earlier version, or of a later one, are refused with
+// the version instead of a payload error about a field.
 #[test]
-fn a_version_1_payload_reads_without_a_principal() {
-  let create = r#"{"name":"demo","group":"g","profile":"smoke","executors":[]}"#;
-  let Event::RunCreate(create) = Event::decode("run.create", 1, create).unwrap() else {
-    panic!("not a run.create")
-  };
-  assert_eq!(create.by, None);
-  assert_eq!(Event::decode("run.stop", 1, "{}").unwrap(), Event::RunStop(RunStop { by: None }));
-  assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION + 1, "{}"), Err(DecodeError::Version { .. })));
+fn a_payload_of_another_version_is_refused() {
+  assert_eq!(Event::decode("run.stop", SCHEMA_VERSION, "{}").unwrap(), Event::RunStop(RunStop { by: None }));
+  for version in [1, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+    assert!(matches!(Event::decode("run.stop", version, "{}"), Err(DecodeError::Version { .. })), "{version}");
+  }
 }
 
 #[test]

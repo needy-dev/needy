@@ -1,4 +1,4 @@
-//! The `container` actor runtime: the actor in an OCI container that
+//! The `linux-container` actor driver: the actor in an OCI container that
 //! Docker runs with `runc` or gVisor's `runsc`, created through the Docker
 //! API (`bollard`).
 //!
@@ -13,7 +13,7 @@
 //! NOTICE: bind-mounted Unix sockets work only where the container and the
 //! daemon share a kernel, or where the OCI runtime passes host sockets
 //! through (gVisor's `--host-uds`); Docker Desktop runs containers in a VM
-//! (`TODO(container-runtime)` on `runtime::Endpoint`).
+//! (`TODO(container-runtime)` on `driver::Endpoint`).
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 
@@ -30,8 +30,8 @@ use needy_config::profile::OciRuntime;
 
 use needy_core::recipe::CompiledRecipe;
 
+use super::driver::{Channels, Driver, Endpoint, Error, Gap, HostMount, Running, Setup, Start, Terminal};
 use super::identity;
-use super::runtime::{ActorRuntime, Channels, Endpoint, Error, Gap, HostMount, RunningActor, Setup, Start, Terminal};
 
 /// Where the actor's channels are in the container.
 pub const CHANNELS: &str = "/.needy/channels";
@@ -57,7 +57,7 @@ pub fn name(run: &str) -> String {
   format!("needy-actor-{run}")
 }
 
-/// The Docker daemon, as far as the runtime uses it. A real boundary (a
+/// The Docker daemon, as far as the driver uses it. A real boundary (a
 /// container runtime), so tests stand in for it.
 #[async_trait::async_trait]
 pub trait Engine: Send + Sync {
@@ -78,16 +78,16 @@ pub trait Engine: Send + Sync {
   async fn remove(&self, name: &str) -> Result<(), Error>;
 }
 
-/// The `container` runtime: actors in containers of `image`, run with
+/// The `linux-container` driver: actors in containers of `image`, run with
 /// `oci_runtime`.
-pub struct Container {
+pub struct LinuxContainer {
   pub oci_runtime: OciRuntime,
   pub image: String,
   engine: Arc<dyn Engine>,
 }
 
-impl Container {
-  /// The runtime on this machine's Docker daemon (`DOCKER_HOST`, else its
+impl LinuxContainer {
+  /// The driver on this machine's Docker daemon (`DOCKER_HOST`, else its
   /// default socket). Nothing is contacted until it is used; a Docker that
   /// cannot be reached fails each use, `check_host` first, with the reason.
   pub fn new(oci_runtime: OciRuntime, image: String) -> Self {
@@ -279,13 +279,13 @@ fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
 }
 
 #[async_trait::async_trait]
-impl ActorRuntime for Container {
+impl Driver for LinuxContainer {
   fn name(&self) -> &'static str {
-    "container"
+    "linux-container"
   }
 
   fn label(&self) -> String {
-    format!("container ({})", self.oci_runtime.as_str())
+    format!("linux-container ({})", self.oci_runtime.as_str())
   }
 
   async fn check_host(&self) -> Result<(), Error> {
@@ -317,7 +317,7 @@ impl ActorRuntime for Container {
       )));
     }
     if !self.engine.has_image(&self.image).await? {
-      return Err(Error::Docker(format!("the container actor image {} is missing; run `needy build --container`", self.image)));
+      return Err(Error::Docker(format!("the container actor image {} is missing; run `needy build --linux-container`", self.image)));
     }
     Ok(())
   }
@@ -350,7 +350,7 @@ impl ActorRuntime for Container {
     identity::gaps(recipe, self.oci_runtime, &identity::Host::read(Path::new("/")))
   }
 
-  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error> {
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
     let user = start.user;
     let host = identity::Host::read(Path::new("/"));
     let mut binds = identity::prepare(start.dir, start.recipe, size(start.recipe).0, &host, self.oci_runtime)?;
@@ -364,7 +364,7 @@ impl ActorRuntime for Container {
       self.engine.create(&launch.name, launch.body.clone()).await?;
       // The log follows from the container's creation, so its first line
       // is kept even when it exits at once.
-      let log = super::runtime::log(start.dir);
+      let log = super::driver::log(start.dir);
       let file = tokio::fs::File::create(&log).await.map_err(|source| Error::Write { path: log, source })?;
       let pid = self.engine.start(&launch.name).await?;
       Ok::<_, Error>((pid, file))
@@ -380,7 +380,7 @@ impl ActorRuntime for Container {
       }
     };
     let log = tokio::spawn(copy_log(self.engine.logs(&launch.name), file));
-    Ok(Box::new(Running {
+    Ok(Box::new(Started {
       name: launch.name,
       engine: self.engine.clone(),
       pid,
@@ -416,7 +416,7 @@ async fn copy_log(mut logs: BoxStream<'static, Result<bytes::Bytes, Error>>, mut
 }
 
 /// A running container actor. Its end detaches its mounts and removes it.
-struct Running {
+struct Started {
   name: String,
   engine: Arc<dyn Engine>,
   pid: u32,
@@ -429,7 +429,7 @@ struct Running {
   ended: Option<ExitStatus>,
 }
 
-impl Running {
+impl Started {
   /// Cleans up after the container exited with `code`: its log, its mounts
   /// and the container itself.
   async fn finish(&mut self, code: i64) -> ExitStatus {
@@ -461,7 +461,7 @@ fn exit_status(code: i64) -> ExitStatus {
 }
 
 #[async_trait::async_trait]
-impl RunningActor for Running {
+impl Running for Started {
   /// The host PID of the container's first process (init, or gVisor's
   /// sandbox).
   fn pid(&self) -> u32 {

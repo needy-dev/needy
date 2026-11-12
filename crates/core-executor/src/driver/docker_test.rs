@@ -1,24 +1,24 @@
 use std::path::{Path, PathBuf};
 
 use needy_config::Source;
-use needy_config::profile::{Docker as DockerConfig, Executor, User};
+use needy_config::profile::{ContainerExecutor as ContainerConfig, Executor, User};
 
 use super::*;
 
-/// The `docker:` options of a profile's executor, written as YAML.
-fn docker(yaml: &str) -> DockerConfig {
-  let text = format!("actor: {{ runtime: firecracker }}\nexecutors: {{ build: {{ provider: docker, docker: {yaml} }} }}");
+/// The `container:` options of a profile's executor, written as YAML.
+fn docker(yaml: &str) -> ContainerConfig {
+  let text = format!("actor: {{ driver: linux-firecracker }}\nexecutors: {{ build: {{ driver: linux-container, container: {yaml} }} }}");
   let profile = needy_config::profile::load(&Source::text(text, "/home/user/profile")).unwrap();
-  profile.executors["build"].docker.clone().unwrap()
+  profile.executors["build"].container.clone().unwrap()
 }
 
-fn spec(docker: DockerConfig) -> InstanceSpec {
-  InstanceSpec {
+fn spec(docker: ContainerConfig) -> Spec {
+  Spec {
     name: "build".into(),
     key: "build@s1".into(),
     run: "s1".into(),
     config: Executor {
-      docker: Some(docker),
+      container: Some(docker),
       ..Default::default()
     },
     base: PathBuf::from("/home/user/profile"),
@@ -40,7 +40,7 @@ fn socket_id(name: &str) -> String {
   uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, name.as_bytes()).simple().to_string()[..12].to_string()
 }
 
-/// The container for `docker:` options, as YAML.
+/// The container for `container:` options, as YAML.
 fn body(yaml: &str, options: &Options) -> ContainerCreateBody {
   container(&spec(docker(yaml)), options).unwrap().body
 }
@@ -62,7 +62,7 @@ fn operator(names: &[&str]) -> Options {
 
 #[test]
 fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
-  let container = container(&spec(DockerConfig::default()), &options()).unwrap();
+  let container = container(&spec(ContainerConfig::default()), &options()).unwrap();
 
   assert_eq!(container.name, "needy-build-s1");
   assert_eq!(container.socket_dir, Path::new("/home/user/state/executors").join(socket_id("needy-build-s1")));
@@ -100,9 +100,9 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
 
 #[test]
 fn a_profile_image_and_workspace_replace_the_defaults() {
-  let mut spec = spec(DockerConfig::default());
+  let mut spec = spec(ContainerConfig::default());
   spec.config.workspace = Some("ws".into());
-  spec.config.docker.as_mut().unwrap().image = Some("example.com/toolchain:1".into());
+  spec.config.container.as_mut().unwrap().image = Some("example.com/toolchain:1".into());
   spec.hostname = None;
 
   let container = container(&spec, &options()).unwrap();
@@ -316,8 +316,8 @@ async fn create_and_destroy_an_executor_container() {
     image: std::env::var("NEEDY_TEST_EXECUTOR_IMAGE").unwrap_or_else(|_| options().image),
     ..options()
   };
-  let provider = Docker::new(options.clone()).unwrap();
-  if provider.docker.ping().await.is_err() || provider.docker.inspect_image(&options.image).await.is_err() {
+  let driver = LinuxContainer::new(options.clone()).unwrap();
+  if driver.docker.ping().await.is_err() || driver.docker.inspect_image(&options.image).await.is_err() {
     eprintln!("skipped: no Docker or no {} image", options.image);
     return;
   }
@@ -333,7 +333,7 @@ async fn create_and_destroy_an_executor_container() {
     gid: owner.gid(),
   };
 
-  let handle = provider.create(&spec).await.unwrap();
+  let handle = driver.create(&spec).await.unwrap();
 
   let (tx, rx) = tokio::sync::mpsc::channel(1);
   tx.send(ExecRequest {
@@ -363,10 +363,10 @@ async fn create_and_destroy_an_executor_container() {
   // The recipe's hostname, then the typed fields as the container's cgroup
   // (v2) and environment see them: 256 MiB, half of a 100 ms period.
   assert_eq!(String::from_utf8_lossy(&stdout).trim(), "instance-1\n268435456\n50000 100000\ntyped");
-  assert_eq!(handle.runtime, "docker");
+  assert_eq!(handle.driver, "docker");
 
-  provider.destroy(&handle).await.unwrap();
-  let gone = provider.docker.inspect_container(&handle.id, None).await;
+  driver.destroy(&handle).await.unwrap();
+  let gone = driver.docker.inspect_container(&handle.id, None).await;
   assert!(
     matches!(
       gone,
@@ -393,7 +393,7 @@ async fn create_and_destroy_an_executor_container() {
 // key, and refuses a path that still does not fit, naming it.
 #[test]
 fn the_socket_directory_is_short_whatever_the_key() {
-  let mut long = spec(DockerConfig::default());
+  let mut long = spec(ContainerConfig::default());
   long.key = format!("build@{}", "group-".repeat(20));
 
   let container = container(&long, &options()).unwrap();
@@ -401,7 +401,7 @@ fn the_socket_directory_is_short_whatever_the_key() {
   let name = container.socket_dir.strip_prefix("/home/user/state/executors").unwrap();
   assert_eq!(name.as_os_str().len(), 12, "{}", container.socket_dir.display());
   assert_eq!(container.socket_dir, super::container(&long, &options()).unwrap().socket_dir, "one key, one directory");
-  assert_ne!(container.socket_dir, super::container(&spec(DockerConfig::default()), &options()).unwrap().socket_dir);
+  assert_ne!(container.socket_dir, super::container(&spec(ContainerConfig::default()), &options()).unwrap().socket_dir);
 }
 
 #[cfg(unix)]

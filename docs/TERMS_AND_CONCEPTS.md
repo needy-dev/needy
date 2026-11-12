@@ -18,24 +18,46 @@ layer.
 
 *Avoid*: harness layer, caller, shallow layer.
 
-### Actor runtime
+### Actor driver
 
 What runs an actor next to the daemon, named by the profile's required
-`actor.runtime`: `firecracker` (a microVM; needs `/dev/kvm`), `container`
-(an OCI container through Docker, with the required
-`actor.container.oci_runtime`: `runc`, or gVisor's `runsc`; Linux only),
-`macos-vz` (needy's arm64 kernel and rootfs in a
+`actor.driver`. A driver is named after the operating system whose isolation
+it relies on: `linux-firecracker` (a microVM; needs `/dev/kvm`),
+`linux-container` (an OCI container through a Docker-compatible **engine**,
+with the required `actor.container.oci_runtime`: `runc`, or gVisor's
+`runsc`), `macos-vz` (needy's arm64 kernel and rootfs in a
 Virtualization.framework VM that vfkit runs; Apple silicon macOS only) or
 `macos-apple-container` (a container that Apple's `container` runs in its own
-lightweight VM; macOS on Apple silicon). The
-runtime starts, waits for and stops the actor, names the channels the daemon
-serves (guest API, gateway) and dials (terminal), and says who sets the actor
-up: a VM's init inside, the container runtime from the host (workspace
-mounts, hostname, identity files), or both (`macos-apple-container`: init mounts
-the workspace and sets the hostname). The report names it (`Actor  container
-(runsc)`), since it decides the isolation. See the
-[container actor runtime design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md)
+lightweight VM; macOS on Apple silicon). The driver starts, waits for and
+stops the actor, names the channels the daemon serves (guest API, gateway)
+and dials (terminal), and says who sets the actor up: a VM's init inside, the
+`linux-container` driver from the host (workspace mounts, hostname, identity
+files), or both (`macos-apple-container`: init mounts the workspace and sets
+the hostname). The report names it (`Actor  linux-container (runsc)`), since
+it decides the isolation. See the
+[drivers design](ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md),
+the [container actor design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md)
 and the [macos-vz actor evidence](ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md).
+
+*Avoid*: actor runtime (the name before 2026-11-12); "driver" alone for the
+driving program.
+
+### Executor driver
+
+What creates and destroys executor instances, named by a profile's
+`executors.NAME.driver`: `native` (the runner's own process space; no OS
+facility, no prefix) or `linux-container` (a container through the same
+Docker-compatible engine as the actor driver of that name, configured by the
+executor's `container:` options).
+
+*Avoid*: executor provider (the name before 2026-11-12).
+
+### Engine
+
+The Docker-compatible container engine a `linux-container` driver talks to,
+wherever `DOCKER_HOST` points: Docker Engine, OrbStack, Podman or containerd
+through its Docker-compatible tooling, treated alike. needy has no
+per-engine code.
 
 ### Driving program
 
@@ -64,8 +86,8 @@ runs on, not the executor (see Runner).
 ### Executor instance
 
 One running executor, created from a profile's executor entry by its
-**provider** on the runner its selector names: `native` (the runner's own
-process space) or `docker` (a container). Commands whose instance key is
+**executor driver** on the runner its selector names: `native` (the runner's
+own process space) or `linux-container` (a container). Commands whose instance key is
 equal share one instance.
 
 ### Instance key
@@ -79,7 +101,7 @@ inputs, so a run can be replayed.
 A `needy daemon` process. In **control** mode it is the control plane:
 lifecycle of actors and executor instances, routing, the actor gateway, the
 trace and the runner registry. In **executor** mode it only runs processes on
-its own machine, as inside a Docker executor's container. In **runner** mode it joins a control plane as a runner,
+its own machine, as inside a `linux-container` executor's container. In **runner** mode it joins a control plane as a runner,
 sends it heartbeats, and runs the processes the control plane asks for over
 the connection it dialed; it listens nowhere.
 
@@ -109,11 +131,14 @@ and actors on runners with **runner selectors**.
 ### Capabilities
 
 What a runner can host: each **role** it holds (`actor`, `executor`) with its
-actor **runtimes** (`firecracker`, `container`, `macos-vz`,
-`macos-apple-container`) or executor **providers** (`native`, `docker`), written `actor(firecracker) executor(docker,native)`. A
-runner detects them when it starts: a KVM device that opens for reading and
-writing and a complete actor image give `actor(firecracker)` (Linux only); a
-Docker daemon that answers gives `executor(docker)` and `actor(container)`
+**actor drivers** (`linux-firecracker`, `linux-container`, `macos-vz`,
+`macos-apple-container`) or **executor drivers** (`native`,
+`linux-container`), written
+`actor(linux-firecracker) executor(linux-container,native)`. A runner detects
+them when it starts: a KVM device that opens for reading and writing and a
+complete actor image give `actor(linux-firecracker)` (Linux only); a
+Docker-compatible engine that answers gives `executor(linux-container)` and
+`actor(linux-container)`
 (whether it has the profile's OCI runtime and the container actor image is
 checked when a run is created); macOS on Apple silicon with vfkit and a
 complete `macos-vz` actor image gives `actor(macos-vz)`; Apple's `container`
@@ -121,7 +146,7 @@ CLI whose services answer gives `actor(macos-apple-container)` (macOS only);
 `executor(native)` is always there. `--roles` restricts a runner to some roles and cannot add one the
 machine lacks. Capabilities travel in the join and every heartbeat, are kept
 in `state.db`, and are what scheduling and `profile check` match: an actor
-needs `actor(RUNTIME)` of its runtime, an executor `executor(PROVIDER)`. A join token's
+needs `actor(DRIVER)` of its driver, an executor `executor(DRIVER)`. A join token's
 scope still names roles.
 
 ### Ownership and grace period
@@ -166,9 +191,9 @@ fit several, is an error naming the candidates.
 ### Local runner
 
 The runner that runs on the control host, named by `needy daemon --mode
-control --local-runner NAME`. Actors and Docker executors placed on it are
-created by the control plane itself; as built, actors and Docker executors
-run nowhere else.
+control --local-runner NAME`. Actors and `linux-container` executors placed
+on it are created by the control plane itself; as built, actors and
+`linux-container` executors run nowhere else.
 
 ### Control stream and task stream
 
@@ -333,6 +358,28 @@ Programs created after the build and run directly are not routed.
 decision, and either runs the real program locally or streams it from an
 executor. The parent sees an ordinary child process and exit status.
 
+### Capture
+
+The mechanism that catches an exec inside an actor and hands it to the
+proxy: the kernel's `binfmt_needy` (VM drivers) or shims (container
+drivers). A capture never decides; what it cannot see (a program created at
+run time under shims) is a coverage gap its driver declares. **Provisional**:
+see the [drivers design](ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md).
+
+### Interception domains
+
+Interception has three domains, each with its own hook points, context,
+decision and chain of **interceptors** (policy): **exec** (`exec.decide`:
+rules, chaos), **net** (`net.request`, `net.connect`: allowlist, chaos, header
+injection) and **file** (`file.open`: chaos's file faults). One interceptor
+may serve several domains. Policy never knows the driver. **Provisional**.
+
+### Adapter
+
+The code that turns what a capture caught into a domain's context, runs the
+domain's chain and applies the decision: the proxy's decide call for exec,
+the gateway for net, the relay's stream filter for file. **Provisional**.
+
 ### Path map
 
 A prefix mapping from actor paths to executor paths, for executors whose
@@ -349,6 +396,15 @@ actor at the same path, `/home/<user>/workspace` by default.
 
 A named profile entry that moves files: **copy-in** at run start,
 **mount** for a live view, **mirror-out** back to the host.
+
+### Sidecar
+
+A service needy runs for one run, next to the actor and outside it, that the
+actor reaches through one of its channels, and that ends with the run: the
+**actor gateway** (the net sidecar) and the **guest API** (configuration,
+events, exit, files, and the exec decision the proxy asks for). Not the VM
+or container process (the actor driver owns that) and not init (inside the
+actor). **Provisional**.
 
 ### Actor network and executor network
 
@@ -380,8 +436,8 @@ firmware, devices, network identity. A recipe defines it.
 
 Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide`, a payload and the
-payload's schema version (4 since `actor.start` names its runtime; versions 1 to 3
-still read).
+payload's schema version (6 since `actor.start` and `run.create` name
+drivers; traces of earlier versions are refused).
 The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
 the run directory. Terminal output is not part of the trace.
 

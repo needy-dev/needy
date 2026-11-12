@@ -1,11 +1,11 @@
-//! Actor runtimes: what starts an actor next to the daemon, waits for it and
+//! Actor drivers: what starts an actor next to the daemon, waits for it and
 //! stops it, and where the daemon meets it.
 //!
 //! The daemon serves the actor's guest API and gateway on endpoints the
-//! runtime names, and reaches the process service the actor serves for a
-//! driving program on a terminal the way the runtime says. The transport of
+//! driver names, and reaches the process service the actor serves for a
+//! driving program on a terminal the way the driver says. The transport of
 //! each (a vsock device's Unix sockets under Firecracker, Unix sockets
-//! bind-mounted into a container) is the runtime's choice, not the daemon's.
+//! bind-mounted into a container) is the driver's choice, not the daemon's.
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 
@@ -32,14 +32,14 @@ pub enum Error {
   // caller that prints the error with its causes says it once. The message
   // names no repository path: a user with only the binary cannot follow one.
   #[error(
-    "this host has no usable KVM: cannot open {}: {error}; a Firecracker actor needs it. Without KVM, use a container actor (`actor: {{ runtime: container, container: {{ oci_runtime: runsc }} }}`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
+    "this host has no usable KVM: cannot open {}: {error}; a linux-firecracker actor needs it. Without KVM, use a linux-container actor (`actor: {{ driver: linux-container, container: {{ oci_runtime: runsc }} }}`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
     path.display()
   )]
   Kvm {
     path: PathBuf,
     error: std::io::Error,
   },
-  /// The container runtime's Docker daemon refused or failed a request.
+  /// The `linux-container` driver's engine refused or failed a request.
   #[error("{0}")]
   Docker(String),
   /// Apple's `container` CLI is missing, or refused or failed a command.
@@ -52,12 +52,12 @@ pub enum Error {
     #[source]
     source: anyhow::Error,
   },
-  /// The runtime does not do what was asked.
+  /// The driver does not do what was asked.
   #[error("{0}")]
   Unsupported(String),
 }
 
-/// Where the daemon and one actor meet. Each runtime chooses the transport;
+/// Where the daemon and one actor meet. Each driver chooses the transport;
 /// the daemon serves or dials whatever it is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Channels {
@@ -69,13 +69,13 @@ pub struct Channels {
   /// driving program on a terminal.
   pub terminal: Terminal,
   /// What the actor's init is told to reach its gateway on: a vsock port
-  /// under Firecracker, 0 where init and the runtime agree on a path.
+  /// under Firecracker, 0 where init and the driver agree on a path.
   // NOTICE: a container actor's init finds its channels at fixed paths
   // (`/.needy/channels/*.sock`), as a VM's init dials the fixed vsock port
   // of the guest API; the guest configuration carries ports only.
   // TODO(container-runtime): loopback TCP with a per-run token (Docker
   // Desktop) needs the address and token in the guest configuration, proto
-  // first, with the first such runtime.
+  // first, with the first such driver.
   pub gateway_port: u32,
   /// What the actor's init is told to serve its process service on.
   pub process_port: u32,
@@ -101,7 +101,7 @@ pub enum Endpoint {
   // TODO(container-runtime): loopback TCP with a per-run token, for runtimes
   // whose actors live in a VM that cannot reach a host Unix socket (Docker
   // Desktop on macOS and Windows, WSL, Hyper-V); added
-  // with the first such runtime, see
+  // with the first such driver, see
   // `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 }
 
@@ -127,12 +127,12 @@ pub enum Setup {
   /// The actor's init, inside: a VM has its own kernel to mount and fake
   /// sensors in.
   Guest,
-  /// The runtime, from the daemon's machine: a container gets its mounts,
+  /// The driver, from the daemon's machine: a container gets its mounts,
   /// hostname and identity files from the host, since its init may not
   /// mount anything.
   Host,
   /// Both: the actor's init mounts the workspace and sets the hostname, as
-  /// in a VM, and the runtime presents the rest of the identity from the
+  /// in a VM, and the driver presents the rest of the identity from the
   /// host, as for a container. Apple's `container`: its container is in a VM
   /// with FUSE, where init may mount, but whose default kernel has no fake
   /// sensors; and the Mac has no FUSE to mount on.
@@ -154,7 +154,7 @@ impl Setup {
 }
 
 /// An executor directory mounted into the actor over SFTP, as the daemon
-/// tells a runtime that mounts on the host side.
+/// tells a driver that mounts on the host side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostMount {
   /// The path in the actor.
@@ -167,7 +167,7 @@ pub struct HostMount {
   pub sftp_command: Vec<String>,
 }
 
-/// What a runtime starts an actor with.
+/// What a driver starts an actor with.
 #[derive(Debug, Clone, Copy)]
 pub struct Start<'a> {
   /// The run's ID, which names a container actor.
@@ -178,12 +178,12 @@ pub struct Start<'a> {
   pub recipe: Option<&'a CompiledRecipe>,
   /// The profile's user, who owns the home directory and the mounts.
   pub user: &'a User,
-  /// The workspace mounts, for a runtime whose [`Setup`] is `Host`.
+  /// The workspace mounts, for a driver whose [`Setup`] is `Host`.
   pub mounts: &'a [HostMount],
 }
 
 /// Something of a recipe's identity, or of the machine an actor presents,
-/// that a runtime does not provide.
+/// that a driver does not provide.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gap {
   /// The identity field, or `None` for what is no recipe field (such as
@@ -201,20 +201,20 @@ impl Gap {
   }
 }
 
-/// The actor's log in its directory `dir`: every runtime writes its actor's
+/// The actor's log in its directory `dir`: every driver writes its actor's
 /// console there, and `run logs` reads it.
 pub fn log(dir: &Path) -> PathBuf {
   dir.join("console.log")
 }
 
-/// What runs actors on this host: Firecracker, a container through Docker,
-/// or a container under Apple's `container`.
+/// An actor driver: what runs actors on this host (`linux-firecracker`,
+/// `linux-container`, `macos-vz`, `macos-apple-container`).
 // TODO(container-runtime): `wsl` and `hyper-v` come later on the owner's
 // word; Docker Desktop on macOS and Windows needs the loopback TCP transport
 // (see `Endpoint`).
 #[async_trait::async_trait]
-pub trait ActorRuntime: Send + Sync {
-  /// The runtime's name, as a profile's `actor.runtime` and `state.db`
+pub trait Driver: Send + Sync {
+  /// The driver's name, as a profile's `actor.driver` and `state.db`
   /// spell it.
   fn name(&self) -> &'static str;
 
@@ -224,7 +224,7 @@ pub trait ActorRuntime: Send + Sync {
     self.name().to_string()
   }
 
-  /// Fails unless this host can run the runtime's actors. A create checks
+  /// Fails unless this host can run the driver's actors. A create checks
   /// this before it acquires anything.
   async fn check_host(&self) -> Result<(), Error>;
 
@@ -237,10 +237,10 @@ pub trait ActorRuntime: Send + Sync {
   fn setup(&self) -> Setup;
 
   /// Starts an actor as `start` says.
-  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error>;
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error>;
 
   /// Sets the recipe's temperature sensors of the actor in `dir` to
-  /// `temp_mc` millidegrees, as an hwmon fault does, for a runtime whose
+  /// `temp_mc` millidegrees, as an hwmon fault does, for a driver whose
   /// [`Setup`] is `Host`; under `Guest` the actor's init applies the fault
   /// itself.
   fn overheat(&self, dir: &Path, temp_mc: i32) -> Result<(), Error> {
@@ -248,7 +248,7 @@ pub trait ActorRuntime: Send + Sync {
     Err(Error::Unsupported("this actor's sensors are set inside it".into()))
   }
 
-  /// What of `recipe` (or of a plain machine) this runtime's actors on this
+  /// What of `recipe` (or of a plain machine) this driver's actors on this
   /// host do not present. A Firecracker actor presents all of it.
   fn identity_gaps(&self, recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
     let _ = recipe;
@@ -290,7 +290,7 @@ pub(crate) async fn stop_process(child: &mut tokio::process::Child, name: &str, 
 /// A started actor. The handle owns it: the actor ends on its own after its
 /// driving program, or when the handle stops it.
 #[async_trait::async_trait]
-pub trait RunningActor: Send {
+pub trait Running: Send {
   /// The ID of the host process that runs the actor.
   fn pid(&self) -> u32;
   fn vcpus(&self) -> u32;

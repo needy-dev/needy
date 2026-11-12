@@ -67,7 +67,7 @@ fn a_recipe_sizes_the_vm() {
 
 #[test]
 fn the_channels_are_the_vsock_bridges_and_the_ports_init_dials_under_firecracker() {
-  let vz = Vz {
+  let vz = MacosVz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: VFKIT.into(),
   };
@@ -147,7 +147,7 @@ async fn a_missing_vfkit_fails_its_check_naming_how_to_install_it() {
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #[tokio::test]
 async fn an_apple_silicon_mac_without_vfkit_fails_the_host_check() {
-  let vz = Vz {
+  let vz = MacosVz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: "/nonexistent/vfkit".into(),
   };
@@ -160,14 +160,14 @@ async fn an_apple_silicon_mac_without_vfkit_fails_the_host_check() {
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 #[tokio::test]
 async fn another_host_fails_the_check_naming_the_runtimes_it_has() {
-  let vz = Vz {
+  let vz = MacosVz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: VFKIT.into(),
   };
 
   let error = vz.check_host().await.unwrap_err().to_string();
 
-  assert!(error.contains("macOS on Apple silicon only") && error.contains("runtime: firecracker"), "{error}");
+  assert!(error.contains("macOS on Apple silicon only") && error.contains("driver: linux-firecracker"), "{error}");
 }
 
 #[tokio::test]
@@ -182,7 +182,7 @@ async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   std::fs::set_permissions(&vfkit, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
   let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), None);
   let mut vm = Vm::start(&launch).unwrap();
-  let log = crate::host::runtime::log(dir.path());
+  let log = crate::host::driver::log(dir.path());
   for _ in 0..100 {
     if std::fs::read_to_string(&log).unwrap_or_default().contains("vfkit started") {
       break;

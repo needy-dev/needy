@@ -1,4 +1,4 @@
-use super::{ActorRuntime, Capabilities, ExecutorProvider, Origin, Principal, RunnerRole};
+use super::{ActorDriver, Capabilities, ExecutorDriver, Origin, Principal, RunnerRole};
 
 #[test]
 fn an_origins_listed_name_is_its_trace_name() {
@@ -51,16 +51,16 @@ fn a_principal_of_an_unknown_kind_or_without_a_name_is_refused() {
 
 fn kvm_host() -> Capabilities {
   Capabilities {
-    actor: [ActorRuntime::Firecracker].into(),
-    executor: [ExecutorProvider::Native, ExecutorProvider::Docker].into(),
+    actor: [ActorDriver::LinuxFirecracker].into(),
+    executor: [ExecutorDriver::Native, ExecutorDriver::LinuxContainer].into(),
   }
 }
 
 #[test]
-fn capabilities_are_written_role_by_role_with_their_runtimes_and_providers() {
-  assert_eq!(kvm_host().to_string(), "actor(firecracker) executor(docker,native)");
+fn capabilities_are_written_role_by_role_with_their_drivers() {
+  assert_eq!(kvm_host().to_string(), "actor(linux-firecracker) executor(linux-container,native)");
   let mac = Capabilities {
-    executor: [ExecutorProvider::Native].into(),
+    executor: [ExecutorDriver::Native].into(),
     ..Default::default()
   };
   assert_eq!(mac.to_string(), "executor(native)");
@@ -70,12 +70,12 @@ fn capabilities_are_written_role_by_role_with_their_runtimes_and_providers() {
 #[test]
 fn macos_apple_container_is_spelled_as_a_profile_names_it() {
   let mac = Capabilities {
-    actor: [ActorRuntime::MacosAppleContainer].into(),
-    executor: [ExecutorProvider::Native].into(),
+    actor: [ActorDriver::MacosAppleContainer].into(),
+    executor: [ExecutorDriver::Native].into(),
   };
 
   assert_eq!(mac.to_string(), "actor(macos-apple-container) executor(native)");
-  assert_eq!(serde_json::to_string(&ActorRuntime::MacosAppleContainer).unwrap(), "\"macos-apple-container\"");
+  assert_eq!(serde_json::to_string(&ActorDriver::MacosAppleContainer).unwrap(), "\"macos-apple-container\"");
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn capabilities_hold_the_roles_they_name_and_restrict_to_some() {
 
   let executor = kvm_host().within(&[RunnerRole::Executor].into());
 
-  assert_eq!(executor.to_string(), "executor(docker,native)");
+  assert_eq!(executor.to_string(), "executor(linux-container,native)");
   assert_eq!(executor.roles(), [RunnerRole::Executor].into());
   assert!(kvm_host().within(&Default::default()).is_empty());
 }
@@ -93,6 +93,6 @@ fn capabilities_hold_the_roles_they_name_and_restrict_to_some() {
 fn capabilities_are_stored_as_json_by_role() {
   let json = serde_json::to_value(kvm_host()).unwrap();
 
-  assert_eq!(json, serde_json::json!({"actor": ["firecracker"], "executor": ["native", "docker"]}));
+  assert_eq!(json, serde_json::json!({"actor": ["linux-firecracker"], "executor": ["native", "linux-container"]}));
   assert_eq!(serde_json::from_value::<Capabilities>(json).unwrap(), kvm_host());
 }

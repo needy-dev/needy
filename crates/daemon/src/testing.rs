@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use needy_api_server::control::{Caller, NewRun};
 use needy_api_server::{Health, Listen, Server};
+use needy_core_executor::driver::{self, Native};
 use needy_core_executor::process::Host;
-use needy_core_executor::provider::{self, Native};
 use needy_core_executor::service::ExecutorService;
 use tempfile::TempDir;
 use tokio_util::sync::{CancellationToken, DropGuard};
@@ -17,7 +17,7 @@ use tokio_util::sync::{CancellationToken, DropGuard};
 use crate::{Config, Daemon};
 
 /// An executor on a socket in a temporary directory, and the `native`
-/// provider over it. It stops when dropped.
+/// driver over it. It stops when dropped.
 pub struct Executor {
   pub native: Arc<Native>,
   _dir: TempDir,
@@ -40,7 +40,7 @@ impl Executor {
     let cancel = CancellationToken::new();
     tokio::spawn(bound.serve(cancel.clone()));
     let endpoint = format!("unix:{}", socket.display());
-    let client = provider::connect(&endpoint).await.unwrap();
+    let client = driver::connect(&endpoint).await.unwrap();
     Self {
       native: Arc::new(Native::new(client)),
       _dir: dir,
@@ -84,7 +84,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
     runtime_dir: dir.path().join("run"),
     actor_image: dir.path().join("image"),
     kvm,
-    docker_image: "needy-executor:latest".into(),
+    executor_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
     report_wait: crate::REPORT_WAIT,
@@ -209,21 +209,21 @@ pub struct JoinedRunner {
   _stop: DropGuard,
 }
 
-/// Capabilities as `runner ls` writes them: `actor(firecracker)
-/// executor(docker,native)`.
+/// Capabilities as `runner ls` writes them: `actor(linux-firecracker)
+/// executor(linux-container,native)`.
 pub fn capabilities(text: &str) -> needy_core::types::Capabilities {
-  use needy_core::types::{ActorRuntime, ExecutorProvider};
+  use needy_core::types::{ActorDriver, ExecutorDriver};
   let mut capabilities = needy_core::types::Capabilities::default();
   for role in text.split_whitespace() {
     let (role, kinds) = role.trim_end_matches(')').split_once('(').expect("ROLE(KIND,...)");
     for kind in kinds.split(',') {
       match (role, kind) {
-        ("actor", "firecracker") => capabilities.actor.insert(ActorRuntime::Firecracker),
-        ("actor", "container") => capabilities.actor.insert(ActorRuntime::Container),
-        ("actor", "macos-vz") => capabilities.actor.insert(ActorRuntime::MacosVz),
-        ("actor", "macos-apple-container") => capabilities.actor.insert(ActorRuntime::MacosAppleContainer),
-        ("executor", "native") => capabilities.executor.insert(ExecutorProvider::Native),
-        ("executor", "docker") => capabilities.executor.insert(ExecutorProvider::Docker),
+        ("actor", "linux-firecracker") => capabilities.actor.insert(ActorDriver::LinuxFirecracker),
+        ("actor", "linux-container") => capabilities.actor.insert(ActorDriver::LinuxContainer),
+        ("actor", "macos-vz") => capabilities.actor.insert(ActorDriver::MacosVz),
+        ("actor", "macos-apple-container") => capabilities.actor.insert(ActorDriver::MacosAppleContainer),
+        ("executor", "native") => capabilities.executor.insert(ExecutorDriver::Native),
+        ("executor", "linux-container") => capabilities.executor.insert(ExecutorDriver::LinuxContainer),
         other => panic!("unknown capability {other:?}"),
       };
     }

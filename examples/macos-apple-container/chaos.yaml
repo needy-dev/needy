@@ -6,7 +6,7 @@
 # /tmp/needy-apple-chaos-ws examples/macos-apple-container/out`.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: macos-apple-container
+  driver: macos-apple-container
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -22,7 +22,7 @@ actor:
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
   build:
-    provider: native
+    driver: native
     workspace: /tmp/needy-apple-chaos-ws
     path_map: { /home/agent/workspace: /tmp/needy-apple-chaos-ws }
 commands:

@@ -3,8 +3,8 @@
 //! The rule is deterministic and leaves no choice to chance:
 //!
 //! - `runner: NAME` picks that runner. It must have joined, have the
-//!   capability the instance needs (`actor(RUNTIME)` for an actor of that
-//!   runtime, `executor(PROVIDER)` for an executor) and be connected (its control
+//!   capability the instance needs (`actor(DRIVER)` for an actor of that
+//!   driver, `executor(DRIVER)` for an executor) and be connected (its control
 //!   stream open).
 //! - `runner: { labels: [...] }` picks the one connected runner that has the
 //!   capability and carries every label. None is an error naming every
@@ -23,8 +23,8 @@ use std::fmt;
 
 use anyhow::Context as _;
 use needy_api_server::control::Placement;
-use needy_config::profile::{LabelMatch, Provider, RunnerSelector};
-use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
+use needy_config::profile::{ExecutorDriver as ProfileExecutorDriver, LabelMatch, RunnerSelector};
+use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
 
 use crate::Daemon;
 use crate::pool::Site;
@@ -43,31 +43,28 @@ pub struct Candidate {
 /// What an instance needs of the runner it is placed on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Need {
-  /// An actor of this runtime.
-  Actor(ActorRuntime),
-  /// An executor of this provider; `None` for a provider no runner reports
-  /// (`containerd`, `firecracker`, `k8s`), which needs the executor role
-  /// only and is refused when the run is created.
-  Executor(Option<ExecutorProvider>),
+  /// An actor of this driver.
+  Actor(ActorDriver),
+  /// An executor of this driver.
+  Executor(ExecutorDriver),
 }
 
 impl Need {
-  /// What an actor of `runtime` needs.
-  pub fn actor(runtime: needy_config::profile::Runtime) -> Self {
-    Self::Actor(match runtime {
-      needy_config::profile::Runtime::Firecracker => ActorRuntime::Firecracker,
-      needy_config::profile::Runtime::Container => ActorRuntime::Container,
-      needy_config::profile::Runtime::MacosVz => ActorRuntime::MacosVz,
-      needy_config::profile::Runtime::MacosAppleContainer => ActorRuntime::MacosAppleContainer,
+  /// What an actor of `driver` needs.
+  pub fn actor(driver: needy_config::profile::ActorDriver) -> Self {
+    Self::Actor(match driver {
+      needy_config::profile::ActorDriver::LinuxFirecracker => ActorDriver::LinuxFirecracker,
+      needy_config::profile::ActorDriver::LinuxContainer => ActorDriver::LinuxContainer,
+      needy_config::profile::ActorDriver::MacosVz => ActorDriver::MacosVz,
+      needy_config::profile::ActorDriver::MacosAppleContainer => ActorDriver::MacosAppleContainer,
     })
   }
 
-  /// What an executor of `provider` needs.
-  pub fn executor(provider: Provider) -> Self {
-    Self::Executor(match provider {
-      Provider::Native => Some(ExecutorProvider::Native),
-      Provider::Docker => Some(ExecutorProvider::Docker),
-      Provider::Containerd | Provider::Firecracker | Provider::K8s => None,
+  /// What an executor of `driver` needs.
+  pub fn executor(driver: ProfileExecutorDriver) -> Self {
+    Self::Executor(match driver {
+      ProfileExecutorDriver::Native => ExecutorDriver::Native,
+      ProfileExecutorDriver::LinuxContainer => ExecutorDriver::LinuxContainer,
     })
   }
 
@@ -81,9 +78,8 @@ impl Need {
   /// Whether a runner with `capabilities` can host the instance.
   pub fn met_by(self, capabilities: &Capabilities) -> bool {
     match self {
-      Self::Actor(runtime) => capabilities.actor.contains(&runtime),
-      Self::Executor(Some(provider)) => capabilities.executor.contains(&provider),
-      Self::Executor(None) => !capabilities.executor.is_empty(),
+      Self::Actor(driver) => capabilities.actor.contains(&driver),
+      Self::Executor(driver) => capabilities.executor.contains(&driver),
     }
   }
 }
@@ -91,9 +87,8 @@ impl Need {
 impl fmt::Display for Need {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::Actor(runtime) => write!(f, "actor({runtime})"),
-      Self::Executor(Some(provider)) => write!(f, "executor({provider})"),
-      Self::Executor(None) => f.write_str("the executor role"),
+      Self::Actor(driver) => write!(f, "actor({driver})"),
+      Self::Executor(driver) => write!(f, "executor({driver})"),
     }
   }
 }
@@ -284,18 +279,18 @@ impl Daemon {
     }
   }
 
-  /// Where the pool creates an executor whose provider is `provider` at
+  /// Where the pool creates an executor whose driver is `driver` at
   /// `placement`.
-  pub(crate) fn site(&self, placement: &Placement, provider: Provider) -> Result<Site, String> {
-    match (placement, provider) {
+  pub(crate) fn site(&self, placement: &Placement, driver: ProfileExecutorDriver) -> Result<Site, String> {
+    match (placement, driver) {
       (Placement::ControlHost, _) => Ok(Site::ControlHost),
       // The control plane creates the containers of its own runner.
-      (Placement::Runner(name), Provider::Docker) if self.is_local(name) => Ok(Site::ControlHost),
+      (Placement::Runner(name), ProfileExecutorDriver::LinuxContainer) if self.is_local(name) => Ok(Site::ControlHost),
       // TODO(runner-docker): a runner that creates containers itself; see
       // `pool::Pool::create`.
-      (Placement::Runner(name), Provider::Docker) => Err(format!(
-        "runner {name} cannot create Docker executors yet: only the control host's own runner can \
-         (`needy daemon --mode control --local-runner NAME`); use `provider: native` there"
+      (Placement::Runner(name), ProfileExecutorDriver::LinuxContainer) => Err(format!(
+        "runner {name} cannot create linux-container executors yet: only the control host's own runner can \
+         (`needy daemon --mode control --local-runner NAME`); use `driver: native` there"
       )),
       (Placement::Runner(name), _) => Ok(Site::Runner {
         name: name.clone(),

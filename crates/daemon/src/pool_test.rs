@@ -2,19 +2,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use needy_api_server::control::ControlError;
-use needy_config::profile::{Executor, OnFull, Provider};
-use needy_core_executor::provider::InstanceSpec;
+use needy_config::profile::{Executor, ExecutorDriver, OnFull};
+use needy_core_executor::driver::Spec;
 
 use super::*;
 use crate::testing;
 
-fn spec(name: &str, key: &str, max_procs: Option<u32>, on_full: OnFull) -> InstanceSpec {
-  InstanceSpec {
+fn spec(name: &str, key: &str, max_procs: Option<u32>, on_full: OnFull) -> Spec {
+  Spec {
     name: name.into(),
     key: format!("{name}@{key}"),
     run: key.into(),
     config: Executor {
-      provider: Provider::Native,
+      driver: ExecutorDriver::Native,
       max_procs,
       on_full,
       ..Executor::default()
@@ -108,12 +108,12 @@ async fn a_failed_creation_leaves_its_key_free_for_the_next_acquire() {
   // No Docker on this pool, so a Docker executor fails to create.
   let pool = Pool::new(executor.native.clone(), None, Arc::default());
   let mut failing = spec("here", "k", None, OnFull::Wait);
-  failing.config.provider = Provider::Docker;
+  failing.config.driver = ExecutorDriver::LinuxContainer;
   assert!(pool.acquire(failing, &Site::ControlHost).await.is_err());
   assert!(pool.instances().await.is_empty());
 
   let instance = pool.acquire(spec("here", "k", None, OnFull::Wait), &Site::ControlHost).await.unwrap();
-  assert_eq!(instance.handle.runtime, "native");
+  assert_eq!(instance.handle.driver, "native");
   assert_eq!(pool.instances().await.len(), 1);
 }
 
@@ -130,18 +130,18 @@ async fn a_native_executor_on_a_runner_reaches_its_machine_with_its_platforms_sf
 
   let instance = pool.acquire(native, &site).await.unwrap();
 
-  assert_eq!((instance.handle.runtime, instance.handle.id.as_str()), ("runner", "mac"));
+  assert_eq!((instance.handle.driver, instance.handle.id.as_str()), ("runner", "mac"));
   assert_eq!(instance.handle.sftp, ["/usr/libexec/sftp-server"]);
   // A path on the runner's machine, as written.
   assert_eq!(instance.handle.workspace, "/Users/user/ws");
 }
 
 #[tokio::test]
-async fn a_docker_executor_is_never_created_on_a_runner_site() {
+async fn a_linux_container_executor_is_never_created_on_a_runner_site() {
   let executor = testing::Executor::start().await;
   let pool = Pool::new(executor.native.clone(), None, Arc::default());
   let mut docker = spec("build", "k", None, OnFull::Wait);
-  docker.config.provider = Provider::Docker;
+  docker.config.driver = ExecutorDriver::LinuxContainer;
   let site = Site::Runner {
     name: "mac".into(),
     os: "macos".into(),
@@ -149,5 +149,5 @@ async fn a_docker_executor_is_never_created_on_a_runner_site() {
 
   let error = pool.acquire(docker, &site).await.err().unwrap().to_string();
 
-  assert_eq!(error, "runner mac cannot create Docker executors yet");
+  assert_eq!(error, "runner mac cannot create linux-container executors yet");
 }

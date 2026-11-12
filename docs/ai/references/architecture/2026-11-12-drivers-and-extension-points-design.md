@@ -315,4 +315,43 @@ Slices 4 to 6 are independent of each other once 1 to 3 have landed.
 
 ## Decisions during implementation
 
-None yet.
+### Slice 1: names
+
+- The config enums are `profile::ActorDriver` and `profile::ExecutorDriver`:
+  both are re-exported from `profile`, where one name `Driver` would collide.
+  The executor's `container:` options type is `ContainerExecutor` (beside the
+  actor's `ContainerActor`), its build options `ContainerBuild`.
+- The executor values `containerd`, `firecracker` and `k8s`, which every
+  create refused, are gone (a `TODO(executor-driver)` marks the enum), so
+  `schedule::Need::Executor` holds a driver, not an `Option`.
+- The profile hints for `executors.NAME.runtime` ("is now `provider`") and
+  `docker.args` are gone: they named keys that no longer exist. The old keys
+  (`actor.runtime`, `provider`, `docker`) get serde's unknown-field error,
+  which lists `driver` and `container`. The `remote` hint stays.
+- Trace schema 6: `actor.start`'s and `run.create`'s executors' `runtime`
+  are `driver`. Traces of versions 1 to 5 are refused with a version error,
+  not read through a translation (no compatibility).
+- `state.db`: migration `m20261112_000090_drivers` copies `runtime` into a
+  new `driver` column with the old names mapped and drops `provider` and
+  `runtime`; it clears the runners' stored capabilities, which every
+  connected runner reports again with its next heartbeat. A migration, not a
+  reset, since runs, runners and clients would otherwise be lost.
+- `driver::Instance::driver` (was `InstanceHandle::runtime`) keeps `runner`
+  for a runner's own process space and `actor` for an actor's terminal, which
+  no driver creates; `run ls` and `state.db` show the same value.
+- `needy build --container` is `--linux-container`; the daemon's
+  `--docker-image` is `--executor-image`; `examples/container` is
+  `examples/linux-container`; proto `ExecutorRef.runtime` is `driver` (same
+  field number).
+- The modules are renamed with the traits (`host::runtime` is `host::driver`,
+  `core_executor::provider` is `core_executor::driver`); the files move in
+  slice 2. The `Docker`/`AppleContainer` error variants and
+  `Terminal::FirecrackerVsock` keep their names until slice 3.
+- The report's note on what shim routing leaves out fires for
+  `linux-container` actors, as it did for `container`; `macos-apple-container`
+  routes by shims too but never had the note (candidate below).
+
+## Candidate next slices
+
+- The report's shim-routing note for `macos-apple-container` actors: they have
+  the same gap as `linux-container` (`profile check` already warns for both).

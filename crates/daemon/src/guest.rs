@@ -91,7 +91,7 @@ impl Guest for Daemon {
     }));
     // `*` asks the kernel to route every exec.
     let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
-    // A runtime that sets the actor up from the host made the mounts, the
+    // A driver that sets the actor up from the host made the mounts, the
     // hostname and the sensors, and applies the hwmon faults itself; init
     // is told none of them. Under `GuestMounts` (Apple's `container`) init
     // makes the mounts and sets the hostname, and is told no sensors,

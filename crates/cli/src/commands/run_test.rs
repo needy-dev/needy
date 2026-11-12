@@ -43,14 +43,14 @@ fn run_ls_marks_a_lost_executor_and_a_released_one() {
     executors: vec![
       v1::ExecutorRef {
         name: "mac".into(),
-        runtime: "runner".into(),
+        driver: "runner".into(),
         instance: "mac".into(),
         released: true,
         lost: true,
       },
       v1::ExecutorRef {
         name: "build".into(),
-        runtime: "docker".into(),
+        driver: "linux-container".into(),
         instance: "c1".into(),
         released: true,
         lost: false,
@@ -64,6 +64,6 @@ fn run_ls_marks_a_lost_executor_and_a_released_one() {
 
   let cells = row.cells();
   assert_eq!(cells[2], "failed");
-  assert_eq!(cells[4], "mac=runner (lost), build=docker (released)");
+  assert_eq!(cells[4], "mac=runner (lost), build=linux-container (released)");
   assert_eq!(cells[5], "the control plane restarted; the actor was lost");
 }

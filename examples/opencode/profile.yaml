@@ -1,8 +1,8 @@
-# opencode runs in the actor; every shell it starts runs in a Docker executor.
+# opencode runs in the actor; every shell it starts runs in a linux-container executor.
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   recipe: gce.recipe.yaml
   command:
     - opencode
@@ -28,7 +28,7 @@ actor:
 
 executors:
   build:
-    provider: docker
+    driver: linux-container
     key: "{run}"
     max_procs: 8
 

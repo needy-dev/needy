@@ -7,9 +7,9 @@ fn profile(files: &str) -> String {
   format!(
     r#"
 user: {{ name: agent, uid: 1000, gid: 1000 }}
-actor: {{ runtime: firecracker }}
+actor: {{ driver: linux-firecracker }}
 executors:
-  here: {{ provider: native }}
+  here: {{ driver: native }}
 commands:
   - {{ match: "**", to: here }}
 files:

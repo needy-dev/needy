@@ -1,10 +1,10 @@
 //! What this machine can host as a runner, found at start: its
-//! capabilities, each role with its runtimes or providers.
+//! capabilities, each role with its drivers.
 //!
-//! - `actor(firecracker)`: Linux, a KVM device that opens for reading and
+//! - `actor(linux-firecracker)`: Linux, a KVM device that opens for reading and
 //!   writing (as Firecracker opens it), and a complete actor image (vmlinux,
 //!   rootfs.ext4 and the patched firecracker).
-//! - `actor(container)`: a Docker daemon that answers. Whether it has the
+//! - `actor(linux-container)`: a Docker-compatible engine that answers. Whether it has the
 //!   OCI runtime a profile names (`runc`, gVisor's `runsc`) and the
 //!   container actor image is checked when the run is created.
 //! - `actor(macos-vz)`: macOS on Apple silicon, a `vfkit` that runs, and a
@@ -13,7 +13,7 @@
 //!   its services running (`container system status`). Whether its image
 //!   store has the container actor image is checked when the run is
 //!   created.
-//! - `executor(docker)`: a Docker daemon that answers.
+//! - `executor(linux-container)`: a Docker-compatible engine that answers.
 //! - `executor(native)`: always, on every platform a runner runs on.
 //!
 //! [`probe`] reads the machine; [`detect`] and [`restrict`] decide from what
@@ -23,7 +23,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
+use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
 
 // NOTICE: how long a runner waits for the Docker daemon at start. A local
 // socket answers in milliseconds; a Docker Desktop that is not running
@@ -50,7 +50,7 @@ pub struct Facts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detected {
   pub capabilities: Capabilities,
-  /// One line per missing runtime or provider, such as `actor(firecracker):
+  /// One line per missing driver, such as `actor(linux-firecracker):
   /// cannot open /dev/kvm`.
   pub missing: Vec<String>,
 }
@@ -58,37 +58,37 @@ pub struct Detected {
 /// The capabilities `facts` give, by the rules in the module documentation.
 pub fn detect(facts: &Facts) -> Detected {
   let mut capabilities = Capabilities {
-    executor: [ExecutorProvider::Native].into(),
+    executor: [ExecutorDriver::Native].into(),
     ..Default::default()
   };
   let mut missing = Vec::new();
   match &facts.firecracker {
     Ok(()) => {
-      capabilities.actor.insert(ActorRuntime::Firecracker);
+      capabilities.actor.insert(ActorDriver::LinuxFirecracker);
     }
-    Err(why) => missing.push(format!("actor(firecracker): {why}")),
+    Err(why) => missing.push(format!("actor(linux-firecracker): {why}")),
   }
   match &facts.docker {
     Ok(_runtimes) => {
-      capabilities.executor.insert(ExecutorProvider::Docker);
+      capabilities.executor.insert(ExecutorDriver::LinuxContainer);
       // TODO(runner-actor): the runtimes are not reported with the
-      // capability; see `needy_core::types::ActorRuntime::Container`.
-      capabilities.actor.insert(ActorRuntime::Container);
+      // capability; see `needy_core::types::ActorDriver::LinuxContainer`.
+      capabilities.actor.insert(ActorDriver::LinuxContainer);
     }
     Err(why) => {
-      missing.push(format!("executor(docker): {why}"));
-      missing.push(format!("actor(container): {why}"));
+      missing.push(format!("executor(linux-container): {why}"));
+      missing.push(format!("actor(linux-container): {why}"));
     }
   }
   match &facts.macos_vz {
     Ok(()) => {
-      capabilities.actor.insert(ActorRuntime::MacosVz);
+      capabilities.actor.insert(ActorDriver::MacosVz);
     }
     Err(why) => missing.push(format!("actor(macos-vz): {why}")),
   }
   match &facts.macos_apple_container {
     Ok(()) => {
-      capabilities.actor.insert(ActorRuntime::MacosAppleContainer);
+      capabilities.actor.insert(ActorDriver::MacosAppleContainer);
     }
     Err(why) => missing.push(format!("actor(macos-apple-container): {why}")),
   }
@@ -150,7 +150,7 @@ pub async fn macos_vz(image: &Path) -> Result<(), String> {
 /// Reads this machine: KVM at `kvm`, the actor image in `image`, the
 /// Docker daemon, vfkit and Apple's `container`.
 pub async fn probe(kvm: &Path, image: &Path) -> Facts {
-  let docker = needy_core_executor::provider::docker::runtimes(DOCKER_WAIT)
+  let docker = needy_core_executor::driver::docker::runtimes(DOCKER_WAIT)
     .await
     .map_err(|e| format!("no Docker daemon answers: {:#}", anyhow::Error::from(e)));
   Facts {
@@ -166,11 +166,11 @@ pub async fn macos_apple_container() -> Result<(), String> {
   #[cfg(unix)]
   {
     // The image does not matter for the services.
-    let runtime = needy_core_actor::host::macos::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+    let driver = needy_core_actor::host::macos::apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
     // NOTICE: `container system status` answers in about 50 ms on an Apple
     // silicon laptop; 3 s bounds services that hang, as `DOCKER_WAIT` does
     // for Docker.
-    match tokio::time::timeout(DOCKER_WAIT, runtime.services()).await {
+    match tokio::time::timeout(DOCKER_WAIT, driver.services()).await {
       Ok(services) => services.map_err(|e| e.to_string()),
       Err(_) => Err(format!("`container system status` did not answer within {DOCKER_WAIT:?}")),
     }

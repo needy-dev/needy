@@ -1,5 +1,16 @@
 # Container actor runtime
 
+> **NOTICE (2026-11-12, migration):** the
+> [drivers design](2026-11-12-drivers-and-extension-points-design.md) renamed what this note describes, without
+> compatibility: `actor.runtime` is `actor.driver` (`firecracker` is
+> `linux-firecracker`, `container` is `linux-container`); an executor's
+> `provider` is its `driver` (`docker` is `linux-container`) and its `docker:`
+> options are `container:`; the `ActorRuntime` trait is the actor `Driver`,
+> the executor `Provider` is the executor `Driver`; capabilities read
+> `actor(linux-firecracker) executor(linux-container,native)`. The text below
+> keeps the names of its time, and its links to `examples/container` point to
+> what is now `examples/linux-container`.
+
 **Status**: design, 2026-11-10; slices 1 to 4 implemented 2026-11-11, see
 [As built: slice 1](#as-built-slice-1) and
 [As built: slices 2 to 4](#as-built-slices-2-to-4); the `macos-apple-container`

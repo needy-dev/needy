@@ -5,7 +5,7 @@
 # /.needy are never routed.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -22,7 +22,7 @@ actor:
   network:
     upstream: { model.needy: "http://127.0.0.1:11434" }
 executors:
-  build: { provider: docker, key: "{run}" }
+  build: { driver: linux-container, key: "{run}" }
 commands:
   - { match: "{true,head} **", to: build }
 files:

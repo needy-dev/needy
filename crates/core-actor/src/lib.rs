@@ -2,8 +2,8 @@
 //! host side that runs next to it.
 //!
 //! - [`guest`] (Linux only): the in-guest init and the exec-routing proxy.
-//! - [`host`]: what this machine offers, the actor runtimes (Firecracker, a
-//!   container through Docker), and the actor gateway.
+//! - [`host`]: what this machine offers, the actor drivers (`linux-firecracker`,
+//!   `linux-container`, `macos-*`), and the actor gateway.
 //! - `sshfs` (Linux only): workspace mounts over a needy exec stream, made
 //!   by a VM's init or, for a container, on the daemon's machine.
 

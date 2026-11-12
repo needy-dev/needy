@@ -2,7 +2,7 @@
 # fault on the shared workspace, an exec fault and a scheduled overheat.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -18,7 +18,7 @@ actor:
       echo "== hwmon"; sensors | grep -m1 Package; sleep 3; sensors | grep -m1 Package
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
-  build: { provider: docker, key: "{run}" }
+  build: { driver: linux-container, key: "{run}" }
 commands:
   - { match: "{python3,curl} **", to: build }
 files:

@@ -30,10 +30,10 @@ fn kvm_runner() -> v1::Runner {
     name: "kvm".into(),
     status: v1::RunnerStatus::Online as i32,
     capabilities: Some(v1::RunnerCapabilities {
-      actor: vec![v1::ActorRuntime::Firecracker as i32],
+      actor: vec![v1::ActorDriver::LinuxFirecracker as i32],
       executor: vec![
-        v1::ExecutorProvider::Native as i32,
-        v1::ExecutorProvider::Docker as i32,
+        v1::ExecutorDriver::Native as i32,
+        v1::ExecutorDriver::LinuxContainer as i32,
       ],
     }),
     host: Some(v1::RunnerHost {
@@ -61,7 +61,7 @@ fn runner_ls_shows_capabilities_and_the_host_in_the_table() {
     [
       "kvm",
       "online",
-      "actor(firecracker) executor(docker,native)",
+      "actor(linux-firecracker) executor(linux-container,native)",
       "linux/x86_64",
       "Example CPU"
     ]
@@ -74,7 +74,7 @@ fn runner_ls_shows_capabilities_by_role_and_the_host_in_json() {
 
   let json = serde_json::to_value(&row).unwrap();
 
-  assert_eq!(json["capabilities"], serde_json::json!({"actor": ["firecracker"], "executor": ["native", "docker"]}));
+  assert_eq!(json["capabilities"], serde_json::json!({"actor": ["linux-firecracker"], "executor": ["native", "linux-container"]}));
   assert_eq!(
     json["host"],
     serde_json::json!({"os": "linux", "arch": "x86_64", "cpu_vendor": "GenuineIntel", "cpu_model": "Example CPU", "kvm": true})
@@ -86,7 +86,7 @@ fn a_runner_without_a_host_report_shows_dashes() {
   let runner = v1::Runner {
     host: None,
     capabilities: Some(v1::RunnerCapabilities {
-      executor: vec![v1::ExecutorProvider::Native as i32],
+      executor: vec![v1::ExecutorDriver::Native as i32],
       ..Default::default()
     }),
     ..kvm_runner()
@@ -104,5 +104,5 @@ fn an_unknown_provider_from_the_wire_is_refused() {
     ..Default::default()
   };
 
-  assert_eq!(capabilities(Some(reported)).unwrap_err().to_string(), "unknown executor provider 42");
+  assert_eq!(capabilities(Some(reported)).unwrap_err().to_string(), "unknown executor driver 42");
 }

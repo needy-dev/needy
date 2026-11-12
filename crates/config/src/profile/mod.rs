@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub use actor::{Actor, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime, Runtime};
+pub use actor::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime};
 pub use chaos::{Chaos, Fault, FaultKind, Readings};
-pub use executor::{Cpus, Device, Docker, DockerBuild, Executor, Gpus, MemorySwap, Mount, OnFull, Provider, Ulimit};
+pub use executor::{ContainerBuild, ContainerExecutor, Cpus, Device, Executor, ExecutorDriver, Gpus, MemorySwap, Mount, OnFull, Ulimit};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
 pub use network::{Injection, NetworkPolicy};
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
@@ -28,7 +28,7 @@ use crate::{Error, Kind, Source, merge, source};
 
 /// One run: machines, routing rules, networks, files and chaos.
 // NOTICE: no container-level `#[serde(default)]`: `actor` is required, since
-// its `runtime` is (see `Actor`).
+// its `driver` is (see `Actor`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
@@ -169,9 +169,8 @@ pub fn resolve(source: &Source) -> Result<Resolved, Error> {
   })
 }
 
-/// Refuses the keys that runners and typed Docker fields replaced, naming
-/// what replaces them, instead of the bare "unknown field" a removed key
-/// would get.
+/// Refuses the keys that runners replaced, naming what replaces them,
+/// instead of the bare "unknown field" a removed key would get.
 // NOTICE: no compatibility (principle 7 of the module layout redesign):
 // these keys are refused, not translated.
 fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), Error> {
@@ -193,17 +192,6 @@ fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), E
          and select it with `runner: NAME`"
           .to_string(),
       ))
-    } else if let Some(runtime) = executor.get("runtime") {
-      let runtime = runtime.as_str().unwrap_or("…");
-      Some(("runtime", format!("`runtime` is now `provider` (`provider: {runtime}`); select the machine with `runner:`")))
-    } else if executor.get("docker").and_then(|docker| docker.get("args")).is_some() {
-      Some((
-        "docker.args",
-        "`docker.args` was replaced by typed fields under `docker:`: cpus, cpu_shares, cpuset_cpus, memory, memory_swap, \
-         shm_size, pids_limit, ulimits, env, workdir, read_only, init, mounts, add_host, dns, sysctls, cap_drop, and, \
-         where the operator allows them, privileged, cap_add, devices, gpus, pid, ipc, userns, uts and security_opt"
-          .to_string(),
-      ))
     } else {
       None
     };
@@ -221,9 +209,9 @@ fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), E
 
 /// Makes the relative host paths of a merged profile absolute against
 /// `base`: `host:` sides of file mappings, executors' workspaces and the
-/// sources of their Docker bind mounts.
-// NOTICE: `executors.*.docker.build.context` is a host path too, but no
-// provider builds images yet; it is left as written.
+/// sources of their container bind mounts.
+// NOTICE: `executors.*.container.build.context` is a host path too, but no
+// driver builds images yet; it is left as written.
 fn absolute_host_paths(document: &mut serde_yaml::Value, base: &Path) {
   use serde_yaml::Value;
   if let Some(Value::Mapping(executors)) = document.get_mut("executors") {
@@ -231,7 +219,7 @@ fn absolute_host_paths(document: &mut serde_yaml::Value, base: &Path) {
       if let Some(Value::String(workspace)) = executor.get_mut("workspace") {
         *workspace = source::absolute(workspace, base);
       }
-      if let Some(Value::Sequence(mounts)) = executor.get_mut("docker").and_then(|docker| docker.get_mut("mounts")) {
+      if let Some(Value::Sequence(mounts)) = executor.get_mut("container").and_then(|container| container.get_mut("mounts")) {
         for mount in mounts.iter_mut().filter(|mount| mount.get("type").and_then(Value::as_str) == Some("bind")) {
           if let Some(Value::String(source)) = mount.get_mut("source") {
             *source = source::absolute(source, base);

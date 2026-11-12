@@ -13,10 +13,10 @@ use crate::testing::{self, Served};
 const CONTROL_TOKEN: &str = "control-secret";
 
 const PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 commands:
   - { match: "**", to: here }
 "#;

@@ -1,4 +1,4 @@
-//! The `macos-vz` actor runtime: needy's arm64 guest kernel and rootfs in a
+//! The `macos-vz` actor driver: needy's arm64 guest kernel and rootfs in a
 //! Virtualization.framework VM on Apple silicon macOS, with vfkit as the VM
 //! process, as Firecracker is on Linux.
 //!
@@ -31,9 +31,9 @@ use std::time::Duration;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
+pub use crate::host::driver::Error;
+use crate::host::driver::{Channels, Driver, Endpoint, Gap, Running, Setup, Start, Terminal};
 pub use crate::host::firecracker::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
-pub use crate::host::runtime::Error;
-use crate::host::runtime::{ActorRuntime, Channels, Endpoint, Gap, RunningActor, Setup, Start, Terminal};
 
 /// The VM process, looked up on `PATH`.
 // NOTICE: Homebrew installs vfkit as `vfkit` (`brew install vfkit`,
@@ -133,17 +133,17 @@ pub async fn check_vfkit(vfkit: &Path) -> Result<(), Error> {
   Ok(())
 }
 
-/// The `macos-vz` runtime: actors in Virtualization.framework VMs booted from
+/// The `macos-vz` driver: actors in Virtualization.framework VMs booted from
 /// `image` by `vfkit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Vz {
+pub struct MacosVz {
   pub image: Image,
   /// [`VFKIT`] outside tests.
   pub vfkit: PathBuf,
 }
 
 #[async_trait::async_trait]
-impl ActorRuntime for Vz {
+impl Driver for MacosVz {
   fn name(&self) -> &'static str {
     "macos-vz"
   }
@@ -151,7 +151,7 @@ impl ActorRuntime for Vz {
   async fn check_host(&self) -> Result<(), Error> {
     if !supported_host() {
       return Err(Error::Unsupported(
-        "a macos-vz actor runs on macOS on Apple silicon only; on Linux use `runtime: firecracker` or `runtime: container`".into(),
+        "a macos-vz actor runs on macOS on Apple silicon only; on Linux use `driver: linux-firecracker` or `driver: linux-container`".into(),
       ));
     }
     check_vfkit(&self.vfkit).await?;
@@ -176,7 +176,7 @@ impl ActorRuntime for Vz {
     Setup::Guest
   }
 
-  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error> {
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
     let launch = Launch::new(&self.image, &self.vfkit, start.dir, start.recipe);
     Ok(Box::new(Vm::start(&launch)?))
   }
@@ -212,7 +212,7 @@ pub fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
     // identifier and nested virtualization (macOS 27.2 SDK,
     // `Virtualization.framework/Headers/VZGenericPlatformConfiguration.h`).
     // TODO(macos-vz-identity): a generated arm64 `/proc/cpuinfo` mounted over the
-    // kernel's by init, as the container runtime mounts its x86 one, could
+    // kernel's by init, as the `linux-container` driver mounts its x86 one, could
     // carry the recipe's CPU count; it could not carry an x86 brand.
     gaps.push(Gap::of(
       IdentityField::Cpuid,
@@ -323,7 +323,7 @@ impl Vm {
   /// Starts vfkit with its output and the guest's console in `console.log`.
   pub fn start(launch: &Launch) -> Result<Vm, Error> {
     launch.image.check()?;
-    let console_path = crate::host::runtime::log(&launch.dir);
+    let console_path = crate::host::driver::log(&launch.dir);
     let write_error = |source| Error::Write {
       path: console_path.clone(),
       source,
@@ -353,7 +353,7 @@ impl Vm {
 }
 
 #[async_trait::async_trait]
-impl RunningActor for Vm {
+impl Running for Vm {
   /// The vfkit process's ID.
   fn pid(&self) -> u32 {
     self.pid
@@ -375,7 +375,7 @@ impl RunningActor for Vm {
   /// Stops vfkit and waits until it is gone: `SIGTERM` (vfkit asks the
   /// guest to stop, then stops the VM) first, then `SIGKILL` after `grace`.
   async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-    crate::host::runtime::stop_process(&mut self.child, "vfkit", grace).await
+    crate::host::driver::stop_process(&mut self.child, "vfkit", grace).await
   }
 }
 

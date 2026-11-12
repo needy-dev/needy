@@ -8,10 +8,10 @@ use tokio_stream::StreamExt as _;
 use crate::testing::{self, new_run, running};
 
 const PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -108,7 +108,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     runtime_dir: runtime_dir.clone(),
     actor_image: dir.path().join("image"),
     kvm: dir.path().join("kvm"),
-    docker_image: "needy-executor:latest".into(),
+    executor_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
     report_wait: crate::REPORT_WAIT,
@@ -174,9 +174,9 @@ async fn shutdown_unwinds_a_run_being_created() {
   let profile = format!(
     r#"
 user: {{ name: agent, uid: 1000, gid: 1000 }}
-actor: {{ runtime: firecracker }}
+actor: {{ driver: linux-firecracker }}
 executors:
-  a: {{ provider: native }}
+  a: {{ driver: native }}
   b: {{ runner: b }}
 commands:
   - {{ match: "**", to: a }}
@@ -271,7 +271,7 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
   while daemon.links.get("far").is_none() {
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
-  let profile = "actor: { runtime: firecracker }\nexecutors:\n  far: { runner: far }\ncommands:\n  - { match: \"**\", to: far }\n";
+  let profile = "actor: { driver: linux-firecracker }\nexecutors:\n  far: { runner: far }\ncommands:\n  - { match: \"**\", to: far }\n";
   let created = Runs::create(&daemon, new_run(profile, started.dir.path())).await.unwrap();
   let (_, pid) = testing::detached_sleep(&daemon, &created.id).await;
 

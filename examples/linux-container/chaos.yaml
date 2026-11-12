@@ -3,7 +3,7 @@
 # overheat, which rewrites the actor's hwmon files from the host.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: container
+  driver: linux-container
   container: { oci_runtime: runc }
   recipe: ../opencode/gce.recipe.yaml
   command:
@@ -20,7 +20,7 @@ actor:
       echo "== hwmon"; sensors | grep -m1 Package; sleep 3; sensors | grep -m1 Package
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
-  build: { provider: docker, key: "{run}" }
+  build: { driver: linux-container, key: "{run}" }
 commands:
   - { match: "{python3,curl} **", to: build }
 files:

@@ -30,8 +30,8 @@ use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
 use needy_core::intercept::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{Principal, RunState};
-use needy_core_actor::host::runtime;
-use needy_core_executor::provider::InstanceSpec;
+use needy_core_actor::host::driver;
+use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
 use needy_trace::sink::jsonl::Jsonl;
@@ -255,7 +255,7 @@ fn executor_refs(executors: &BTreeMap<String, Arc<Instance>>) -> Vec<ExecutorRef
     .iter()
     .map(|(name, instance)| ExecutorRef {
       name: name.clone(),
-      runtime: instance.handle.runtime.into(),
+      driver: instance.handle.driver.into(),
       instance: instance.handle.id.clone(),
     })
     .collect()
@@ -344,7 +344,7 @@ impl Registry {
     for instance in instances.into_iter().filter(|i| i.kind == InstanceKind::Executor) {
       let reference = ExecutorRef {
         name: instance.name,
-        runtime: instance.runtime,
+        driver: instance.driver,
         instance: instance.handle,
       };
       match instance.state {
@@ -536,11 +536,11 @@ impl Daemon {
   /// Places the run's actor and executors on their hosts, acquires the
   /// executors, copies files in and starts the actor.
   /// A cancelled run token ends it before its next step.
-  // NOTICE: a step in progress, such as a provider creating a container or
-  // pulling its image, runs to its end: the providers are not safe to drop
+  // NOTICE: a step in progress, such as a driver creating a container or
+  // pulling its image, runs to its end: the drivers are not safe to drop
   // midway (a container created before the drop would be left behind).
-  // TODO(shutdown): pass the run's token into `Provider::create` once
-  // the providers can unwind a create themselves, so shutdown need not wait
+  // TODO(shutdown): pass the run's token into `Driver::create` once
+  // the drivers can unwind a create themselves, so shutdown need not wait
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
   async fn provision(&self, run: &Arc<Run>) -> Result<()> {
@@ -548,7 +548,7 @@ impl Daemon {
     // selector that names no runner fails the create at once.
     let runners = self.candidates().await?;
     let actor =
-      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::actor(run.profile.actor.runtime), &runners).context("actor")?;
+      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::actor(run.profile.actor.driver), &runners).context("actor")?;
     if let Some(refusal) = self.actor_refusal(&actor) {
       bail!("actor: {refusal}");
     }
@@ -560,9 +560,9 @@ impl Daemon {
     files::check_host_paths(run)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
-      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::executor(config.provider), &runners)
+      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::executor(config.driver), &runners)
         .with_context(|| format!("executor {exec_name}"))?;
-      let site = self.site(&placement, config.provider).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
+      let site = self.site(&placement, config.driver).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
       sites.push(site);
     }
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
@@ -574,7 +574,7 @@ impl Daemon {
         ("profile", &run.profile_name),
         ("rule", exec_name),
       ]);
-      let spec = InstanceSpec {
+      let spec = Spec {
         name: exec_name.clone(),
         key: format!("{exec_name}@{key}"),
         run: run.id.clone(),
@@ -585,7 +585,7 @@ impl Daemon {
       };
       unwinding(run)?;
       let instance = self.pool.acquire(spec, &site).await.with_context(|| format!("executor {exec_name}"))?;
-      self.save_instance(&executor_record(run, &instance, &site, config.provider)).await;
+      self.save_instance(&executor_record(run, &instance, &site)).await;
       run.lock_executors().insert(exec_name.clone(), instance);
     }
     run.emit(&Event::RunCreate(RunCreate {
@@ -721,7 +721,7 @@ impl Daemon {
     // Instances that share an executor run the same processes.
     let mut asked: Vec<(&'static str, &str)> = Vec::new();
     for instance in instances.values() {
-      let executor = (instance.handle.runtime, instance.handle.id.as_str());
+      let executor = (instance.handle.driver, instance.handle.id.as_str());
       if asked.contains(&executor) {
         continue;
       }
@@ -823,7 +823,7 @@ impl Daemon {
 }
 
 /// The row of `run`'s hold on the executor `instance` created at `site`.
-fn executor_record(run: &Run, instance: &Instance, site: &Site, provider: needy_config::profile::Provider) -> InstanceRecord {
+fn executor_record(run: &Run, instance: &Instance, site: &Site) -> InstanceRecord {
   InstanceRecord {
     id: store::executor_instance(&run.id, &instance.name),
     run: run.id.clone(),
@@ -833,8 +833,7 @@ fn executor_record(run: &Run, instance: &Instance, site: &Site, provider: needy_
       Site::Runner { name, .. } => Some(name.clone()),
       Site::ControlHost => None,
     },
-    provider: format!("{provider:?}").to_lowercase(),
-    runtime: instance.handle.runtime.to_string(),
+    driver: instance.handle.driver.to_string(),
     handle: instance.handle.id.clone(),
     pid: None,
     state: InstanceState::Running,
@@ -895,9 +894,9 @@ impl Runs for Daemon {
 
   async fn logs(&self, id: &str, follow: bool) -> Result<Logs, ControlError> {
     let info = self.runs.find_info(id).await?;
-    // The actor's runtime writes its console here (Firecracker: the guest's
+    // The actor's driver writes its console here (Firecracker: the guest's
     // serial console).
-    let path = runtime::log(&self.run_dir(&info.id));
+    let path = driver::log(&self.run_dir(&info.id));
     let live = self.runs.exact(&info.id).filter(|run| follow && run.state.get() == RunState::Running);
     let Some(run) = live else {
       // The output so far: a run that ended writes nothing more.

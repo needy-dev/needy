@@ -101,18 +101,25 @@ needy run logs -f RUN    # the actor's console, followed
 needy report latest
 ```
 
-On a Linux host without KVM, the actor can be a container that Docker runs
-with `runc` or gVisor's `runsc` (`actor: { runtime: container, container: {
-oci_runtime: runsc } }`); `needy build --container` builds its image, and
-[`examples/container`](examples/container/profile.yaml) runs the smoke test
-in one. It needs `sshfs` for workspace mounts and lxcfs for resource views
+Where the actor runs is its **driver**, named after the operating system
+whose isolation it relies on: `linux-firecracker`, `linux-container`,
+`macos-vz` or `macos-apple-container`; executors have the drivers `native`
+and `linux-container`
+([drivers design](docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md)).
+
+On a Linux host without KVM, the actor can be a container that a
+Docker-compatible engine (Docker, OrbStack, Podman) runs with `runc` or
+gVisor's `runsc` (`actor: { driver: linux-container, container: {
+oci_runtime: runsc } }`); `needy build --linux-container` builds its image,
+and [`examples/linux-container`](examples/linux-container/profile.yaml) runs
+the smoke test in one. It needs `sshfs` for workspace mounts and lxcfs for resource views
 under `runc`, and presents less of a recipe than a VM (no CPUID or PCI
 identity): `needy profile check` says what, and the
 [container actor runtime design](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity)
 has the table.
 
 On an Apple silicon Mac, the actor can be a Virtualization.framework VM
-(`actor: { runtime: macos-vz }`) that
+(`actor: { driver: macos-vz }`) that
 [vfkit](https://github.com/crc-org/vfkit) runs from needy's own arm64 kernel
 and rootfs: `brew install vfkit`, then `needy build`. Inside it is the
 Firecracker actor's guest, so `binfmt_needy` routes execs by absolute path
@@ -124,7 +131,7 @@ end to end on one Mac, ready in about 0.27 s
 
 On a Mac with Apple silicon, the actor can be a container that Apple's
 [`container`](https://github.com/apple/container) runs in its own lightweight
-VM (`actor: { runtime: macos-apple-container }`);
+VM (`actor: { driver: macos-apple-container }`);
 `needy build --macos-apple-container` builds its image through Docker and
 loads it, and
 [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml)
@@ -181,9 +188,9 @@ Transport encryption comes from the tunnel:
 needy runner token create --ttl 1h --roles executor     # on the control host
 JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
 needy runner ls
-#   NAME  STATUS  CAPABILITIES                                HOST          CPU  ...
-#   kvm   online  actor(firecracker) executor(docker,native)  linux/x86_64  ...
-#   mac   online  executor(native)                            macos/aarch64 -
+#   NAME  STATUS  CAPABILITIES                                                HOST          CPU  ...
+#   kvm   online  actor(linux-firecracker) executor(linux-container,native)  linux/x86_64  ...
+#   mac   online  executor(native)                                            macos/aarch64 -
 needy exec --runner mac -- uname -a                     # on the control host
 needy ps --runner mac
 ```
@@ -194,22 +201,23 @@ it outside the session, for example with
 or a scheduled task. Give full paths, and pass the token in a file: the
 process does not get the session's environment or working directory.
 
-A runner detects what it can host: `actor(firecracker)` with a usable KVM and
-the actor image, `actor(macos-vz)` on an Apple silicon Mac with vfkit and the
-`macos-vz` actor image, `executor(docker)` when a Docker daemon answers, and
+A runner detects what it can host: `actor(linux-firecracker)` with a usable
+KVM and the actor image, `actor(macos-vz)` on an Apple silicon Mac with vfkit
+and the `macos-vz` actor image, `executor(linux-container)` and
+`actor(linux-container)` when a Docker-compatible engine answers, and
 `executor(native)` always; `--roles` restricts it to some roles. Profiles
 place executors and the actor on runners by name or labels, with no
 addresses or secrets in the profile, and a runner without the capability an
 instance needs is an error naming the runners that have it:
 
 ```yaml
-actor: { runtime: firecracker, runner: kvm } # the control host's own runner
+actor: { driver: linux-firecracker, runner: kvm } # the control host's own runner
 executors:
   mac: { runner: mac }                       # the Mac's own process space
-  build: { runner: { labels: [kvm] }, provider: docker }
+  build: { runner: { labels: [kvm] }, driver: linux-container }
 ```
 
-Actors and Docker executors run on the control host for now: on it directly
+Actors and `linux-container` executors run on the control host for now: on it directly
 (no `runner:`), or on the runner the control daemon names as its own with
 `needy daemon --mode control --local-runner kvm`. See
 [runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md#as-built-slice-5).
@@ -224,7 +232,7 @@ Examples:
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
 | [`examples/local`](examples/local/profile.yaml) | This machine as a native executor for `needy exec --run`: copy-in, mirror-out, chaos and the trace |
 | [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out on the actor, a file fault on the workspace, an exec fault and an overheating sensor |
-| [`examples/cli`](examples/cli/profile.yaml) | A Docker executor for `needy exec --run`, with an actor that only waits |
+| [`examples/cli`](examples/cli/profile.yaml) | A `linux-container` executor for `needy exec --run`, with an actor that only waits |
 
 `needy profile check PROFILE --cmd "git status"` asks the control plane where
 the actor and executors would run, checks the recipe against the CPU of the

@@ -5,11 +5,11 @@
 # rules, chaos or a trace.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   command: [sleep, infinity]
 executors:
   here:
-    provider: native
+    driver: native
     workspace: /tmp/needy-native-ws
 commands:
   - { match: "**", to: here }

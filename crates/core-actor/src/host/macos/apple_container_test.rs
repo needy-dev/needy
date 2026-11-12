@@ -63,9 +63,9 @@ impl Process for Exits {
   }
 }
 
-fn runtime(fake: Fake) -> (AppleContainer, Arc<Fake>) {
+fn runtime(fake: Fake) -> (MacosAppleContainer, Arc<Fake>) {
   let fake = Arc::new(fake);
-  (AppleContainer::with_cli("needy-actor:latest".into(), fake.clone()), fake)
+  (MacosAppleContainer::with_cli("needy-actor:latest".into(), fake.clone()), fake)
 }
 
 fn gce() -> CompiledRecipe {
@@ -258,7 +258,7 @@ async fn a_leftover_container_is_deleted_by_its_run_name() {
   assert!(!runtime.end_leftover("0123456789ab").await, "no container was there");
 }
 
-fn runtime_failing(failing: &[(&'static str, &'static str)]) -> (AppleContainer, Arc<Fake>) {
+fn runtime_failing(failing: &[(&'static str, &'static str)]) -> (MacosAppleContainer, Arc<Fake>) {
   runtime(Fake {
     failing: failing.to_vec(),
     ..Default::default()

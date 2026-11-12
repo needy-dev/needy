@@ -1,10 +1,10 @@
 # The smoke test with a container actor, for a host without KVM: the driving
-# program is `sh` in a container that Docker runs with `runc` (or `runsc`,
+# program is `sh` in a container that the engine (Docker) runs with `runc` (or `runsc`,
 # gVisor); only python3 is routed. Build its image with
-# `needy build --container`.
+# `needy build --linux-container`.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: container
+  driver: linux-container
   container: { oci_runtime: runc }
   recipe: ../opencode/gce.recipe.yaml
   command:
@@ -22,7 +22,7 @@ actor:
       cat ~/workspace/from-executor.txt; echo; ls -la ~/workspace
       python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
 executors:
-  build: { provider: docker, key: "{run}", max_procs: 4 }
+  build: { driver: linux-container, key: "{run}", max_procs: 4 }
 commands:
   - { match: "python3 **", to: build }
 files:

@@ -3,7 +3,7 @@
 # Compute Engine VM.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -19,7 +19,7 @@ actor:
       cat ~/workspace/from-executor.txt; echo; ls -la ~/workspace
       python3 -c "import sys; sys.exit(7)"; echo "routed exit=$?"
 executors:
-  build: { provider: docker, key: "{run}", max_procs: 4 }
+  build: { driver: linux-container, key: "{run}", max_procs: 4 }
 commands:
   - { match: "python3 **", to: build }
 files:

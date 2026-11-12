@@ -122,7 +122,7 @@ struct Tally {
   /// The actor's route names; `Some(None)` routes every exec.
   route_names: Option<Option<Vec<String>>>,
   /// What ran the actor.
-  actor_runtime: Option<String>,
+  actor_driver: Option<String>,
   routed: usize,
   kept: usize,
   denied: usize,
@@ -242,7 +242,7 @@ impl Tally {
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
-      Event::ActorStart(start) => self.actor_runtime = start.runtime.clone(),
+      Event::ActorStart(start) => self.actor_driver = start.driver.clone(),
       Event::ExecKill(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
     }
   }
@@ -324,7 +324,7 @@ pub struct Summary {
   pub route_names: Option<Vec<String>>,
   /// What ran the actor (`firecracker`, `container (runc)`, `container
   /// (runsc)`); `None` when no actor ran or the trace predates it.
-  pub actor_runtime: Option<String>,
+  pub actor_driver: Option<String>,
   pub commands: Commands,
   /// Commands by name and executor, most frequent first.
   pub top_commands: Vec<TopCommand>,
@@ -486,7 +486,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     stopped_by: t.stopped_by.as_ref().map(Principal::to_string),
     dropped_events: t.dropped,
     route_names: t.route_names.clone().map(|names| names.unwrap_or_else(|| vec!["*".to_string()])),
-    actor_runtime: t.actor_runtime.clone(),
+    actor_driver: t.actor_driver.clone(),
     commands: Commands {
       routed: t
         .routed_by
@@ -580,9 +580,9 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
       )?;
     }
   }
-  if let Some(runtime) = &t.actor_runtime {
-    writeln!(out, "The actor ran in `{runtime}`.\n")?;
-    if runtime.starts_with("container") {
+  if let Some(driver) = &t.actor_driver {
+    writeln!(out, "The actor ran in `{driver}`.\n")?;
+    if driver.starts_with("linux-container") {
       writeln!(out, "{CONTAINER_ROUTING}\n")?;
     }
   }

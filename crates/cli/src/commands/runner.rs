@@ -9,7 +9,7 @@ use clap::Subcommand;
 use needy_api_client::proto::v1::{
   self, CreateJoinTokenRequest, ListJoinTokensRequest, ListRunnersRequest, RemoveRunnerRequest, RevokeJoinTokenRequest, RotateRunnerRequest,
 };
-use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
+use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
 use serde::Serialize;
 
 use crate::cli::Context;
@@ -106,23 +106,23 @@ fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabilities
   let actor = reported
     .actor
     .iter()
-    .map(|&value| match v1::ActorRuntime::try_from(value) {
-      Ok(v1::ActorRuntime::Unspecified) => bail!("the actor runtime is unspecified"),
-      Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
-      Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
-      Ok(v1::ActorRuntime::MacosVz) => Ok(ActorRuntime::MacosVz),
-      Ok(v1::ActorRuntime::MacosAppleContainer) => Ok(ActorRuntime::MacosAppleContainer),
-      Err(_) => bail!("unknown actor runtime {value}"),
+    .map(|&value| match v1::ActorDriver::try_from(value) {
+      Ok(v1::ActorDriver::Unspecified) => bail!("the actor driver is unspecified"),
+      Ok(v1::ActorDriver::LinuxFirecracker) => Ok(ActorDriver::LinuxFirecracker),
+      Ok(v1::ActorDriver::LinuxContainer) => Ok(ActorDriver::LinuxContainer),
+      Ok(v1::ActorDriver::MacosVz) => Ok(ActorDriver::MacosVz),
+      Ok(v1::ActorDriver::MacosAppleContainer) => Ok(ActorDriver::MacosAppleContainer),
+      Err(_) => bail!("unknown actor driver {value}"),
     })
     .collect::<Result<_>>()?;
   let executor = reported
     .executor
     .iter()
-    .map(|&value| match v1::ExecutorProvider::try_from(value) {
-      Ok(v1::ExecutorProvider::Unspecified) => bail!("the executor provider is unspecified"),
-      Ok(v1::ExecutorProvider::Native) => Ok(ExecutorProvider::Native),
-      Ok(v1::ExecutorProvider::Docker) => Ok(ExecutorProvider::Docker),
-      Err(_) => bail!("unknown executor provider {value}"),
+    .map(|&value| match v1::ExecutorDriver::try_from(value) {
+      Ok(v1::ExecutorDriver::Unspecified) => bail!("the executor driver is unspecified"),
+      Ok(v1::ExecutorDriver::Native) => Ok(ExecutorDriver::Native),
+      Ok(v1::ExecutorDriver::LinuxContainer) => Ok(ExecutorDriver::LinuxContainer),
+      Err(_) => bail!("unknown executor driver {value}"),
     })
     .collect::<Result<_>>()?;
   Ok(Capabilities { actor, executor })

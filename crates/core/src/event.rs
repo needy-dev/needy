@@ -15,22 +15,21 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 /// Version 2 added who caused an event (`by`: `run.create`, `run.stop`,
 /// `exec.start`) and `exec.kill`; version 3 added `files.fail`; version 4
 /// added `actor.start`'s `runtime`; version 5 added `run.create`'s
-/// `recipe_time`.
-pub const SCHEMA_VERSION: u32 = 5;
+/// `recipe_time`; version 6 renamed `actor.start`'s `runtime` and
+/// `run.create`'s executors' `runtime` to `driver`, with the drivers' names
+/// (`linux-firecracker`, `linux-container (runc)`, `linux-container`).
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
-// NOTICE: version 1 payloads are version 2 payloads without `by` and
-// without `exec.kill`, and version 2 payloads are version 3 payloads without
-// `files.fail`, and version 3 payloads are version 4 payloads without
-// `actor.start`'s `runtime`, and version 4 payloads are version 5 payloads
-// without `run.create`'s `recipe_time`, so they decode with the same types:
-// `by`, `runtime` and `recipe_time` read as `None`.
-// Traces written before version 3, and events a guest built before it
-// pushes, stay readable. Version 0 is the flat string-attribute rows written
-// before the typed schema; they are not read (module layout redesign,
-// principle 7).
-pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = 1..=SCHEMA_VERSION;
+// NOTICE: version 6 renamed two fields (`runtime` to `driver`) without
+// compatibility (the drivers design,
+// `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`,
+// allows breaking wire changes), so traces written before it are rejected
+// with a version error instead of decoding a renamed field as unknown.
+// Version 0 is the flat string-attribute rows written before the typed
+// schema; they are not read either (module layout redesign, principle 7).
+pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = SCHEMA_VERSION..=SCHEMA_VERSION;
 
 /// Declares the kinds, their names on the wire and their payload types.
 macro_rules! events {
@@ -192,7 +191,9 @@ pub struct RunCreate {
 #[serde(deny_unknown_fields)]
 pub struct ExecutorRef {
   pub name: String,
-  pub runtime: String,
+  /// The executor driver that created the instance, or `runner` for a
+  /// runner's own process space.
+  pub driver: String,
   pub instance: String,
 }
 
@@ -218,11 +219,11 @@ pub struct ActorStart {
   pub pid: u32,
   pub vcpus: u32,
   pub mem_mib: u32,
-  /// What ran the actor, which says how it was isolated: `firecracker`,
-  /// `container (runc)` or `container (runsc)`. `None` in traces before
-  /// version 4.
+  /// The actor driver that ran the actor, with what says how it was
+  /// isolated where its name does not: `linux-firecracker`,
+  /// `linux-container (runc)` or `linux-container (runsc)`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub runtime: Option<String>,
+  pub driver: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

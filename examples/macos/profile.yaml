@@ -5,7 +5,7 @@
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   command:
     - /bin/sh
     - -c

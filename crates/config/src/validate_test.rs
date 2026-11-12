@@ -9,11 +9,11 @@ fn findings(yaml: &str) -> Vec<String> {
 fn a_consistent_profile_has_no_findings() {
   let found = findings(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 default_executor: build
 unknown: build
 executors:
-  build: { provider: docker }
+  build: { driver: linux-container }
 presets:
   mac: { to: build, use: [env] }
   env: { env: { set: { CI: "1" } } }
@@ -33,7 +33,8 @@ run_files: [workspace]
 
 #[test]
 fn unknown_presets_are_errors() {
-  let found = findings("actor: { runtime: firecracker }\npresets: { a: { use: [b] } }\ncommands: [{ match: \"git **\", use: [a, nope] }]");
+  let found =
+    findings("actor: { driver: linux-firecracker }\npresets: { a: { use: [b] } }\ncommands: [{ match: \"git **\", use: [a, nope] }]");
 
   assert_eq!(
     found,
@@ -48,7 +49,7 @@ fn unknown_presets_are_errors() {
 fn unknown_executors_are_errors() {
   let found = findings(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 default_executor: gone
 unknown: lost
 executors: { build: {} }
@@ -76,14 +77,14 @@ files:
 
 #[test]
 fn to_executor_without_a_default_is_an_error() {
-  let found = findings("actor: { runtime: firecracker }\nexecutors: { build: {} }\ncommands: [{ match: \"git **\", to: executor }]");
+  let found = findings("actor: { driver: linux-firecracker }\nexecutors: { build: {} }\ncommands: [{ match: \"git **\", to: executor }]");
 
   assert_eq!(found, ["error: commands[0] (git **) sends to `executor`, but there is no default_executor"]);
 }
 
 #[test]
 fn unknown_file_mappings_are_errors() {
-  let found = findings("actor: { runtime: firecracker }\nrun_files: [workspace]\ncommands: [{ match: \"git **\", files: [cache] }]");
+  let found = findings("actor: { driver: linux-firecracker }\nrun_files: [workspace]\ncommands: [{ match: \"git **\", files: [cache] }]");
 
   assert_eq!(
     found,
@@ -94,47 +95,47 @@ fn unknown_file_mappings_are_errors() {
   );
 }
 
-// Before providers had to be named, an executor with `docker:` options was a
+// Before drivers had to be named, an executor with `docker:` (now `container:`) options was a
 // Docker one by default; now the default is `native`, which would ignore
 // them silently.
 #[test]
-fn docker_options_on_a_native_executor_are_an_error() {
-  let found = findings("actor: { runtime: firecracker }\nexecutors: { build: { docker: { image: debian } } }");
+fn container_options_on_a_native_executor_are_an_error() {
+  let found = findings("actor: { driver: linux-firecracker }\nexecutors: { build: { container: { image: debian } } }");
 
-  assert_eq!(found, ["error: executors.build has `docker:` options but its provider is native; add `provider: docker`"]);
+  assert_eq!(found, ["error: executors.build has `container:` options but its driver is native; add `driver: linux-container`"]);
 }
 
 #[test]
 fn a_container_actor_with_its_oci_runtime_is_valid() {
-  let found = findings("actor: { runtime: container, container: { oci_runtime: runsc } }");
+  let found = findings("actor: { driver: linux-container, container: { oci_runtime: runsc } }");
 
   assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
 fn a_container_actor_must_name_its_oci_runtime() {
-  let found = findings("actor: { runtime: container }");
+  let found = findings("actor: { driver: linux-container }");
 
-  assert_eq!(found, ["error: actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
+  assert_eq!(found, ["error: actor.container: a linux-container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
 }
 
 #[test]
 fn a_container_actor_whose_options_name_no_oci_runtime_is_an_error() {
-  let found = findings("actor: { runtime: container, container: { image: needy-actor:dev } }");
+  let found = findings("actor: { driver: linux-container, container: { image: needy-actor:dev } }");
 
-  assert_eq!(found, ["error: actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
+  assert_eq!(found, ["error: actor.container: a linux-container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
 }
 
 #[test]
 fn an_macos_apple_container_actor_needs_no_options() {
-  let found = findings("actor: { runtime: macos-apple-container }");
+  let found = findings("actor: { driver: macos-apple-container }");
 
   assert!(found.is_empty(), "{found:?}");
 }
 
 #[test]
 fn an_macos_apple_container_actor_takes_the_image_option() {
-  let found = findings("actor: { runtime: macos-apple-container, container: { image: needy-actor:dev } }");
+  let found = findings("actor: { driver: macos-apple-container, container: { image: needy-actor:dev } }");
 
   assert!(found.is_empty(), "{found:?}");
 }
@@ -143,26 +144,29 @@ fn an_macos_apple_container_actor_takes_the_image_option() {
 // runtime; there is no OCI runtime to choose.
 #[test]
 fn an_oci_runtime_on_an_macos_apple_container_actor_is_an_error() {
-  let found = findings("actor: { runtime: macos-apple-container, container: { oci_runtime: runsc } }");
+  let found = findings("actor: { driver: macos-apple-container, container: { oci_runtime: runsc } }");
 
   assert_eq!(
     found,
     [
-      "error: actor.container.oci_runtime is for `runtime: container`; Apple's `container` runs each actor in its own VM and has no OCI runtime to choose"
+      "error: actor.container.oci_runtime is for `driver: linux-container`; Apple's `container` runs each actor in its own VM and has no OCI runtime to choose"
     ]
   );
 }
 
 #[test]
 fn container_options_on_a_firecracker_actor_are_an_error() {
-  let found = findings("actor: { runtime: firecracker, container: { oci_runtime: runc } }");
+  let found = findings("actor: { driver: linux-firecracker, container: { oci_runtime: runc } }");
 
-  assert_eq!(found, ["error: actor.container is for `runtime: container` or `macos-apple-container`; this actor's runtime is firecracker"]);
+  assert_eq!(
+    found,
+    ["error: actor.container is for `driver: linux-container` or `macos-apple-container`; this actor's driver is linux-firecracker"]
+  );
 }
 
 #[test]
 fn container_options_on_a_macos_vz_actor_are_an_error() {
-  let found = findings("actor: { runtime: macos-vz, container: { oci_runtime: runc } }");
+  let found = findings("actor: { driver: macos-vz, container: { oci_runtime: runc } }");
 
-  assert_eq!(found, ["error: actor.container is for `runtime: container` or `macos-apple-container`; this actor's runtime is macos-vz"]);
+  assert_eq!(found, ["error: actor.container is for `driver: linux-container` or `macos-apple-container`; this actor's driver is macos-vz"]);
 }

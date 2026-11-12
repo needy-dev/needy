@@ -18,7 +18,7 @@ use crate::testing::{self, JoinedRunner, Proxy, Served, new_run};
 const CONTROL_TOKEN: &str = "control-secret";
 
 const PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 executors:
   far: { runner: far }
 commands:
@@ -139,7 +139,7 @@ async fn a_runner_that_cannot_reach_the_control_plane_ends_the_processes_of_runs
 #[tokio::test]
 async fn a_process_the_control_plane_forgot_is_listed_with_the_executor_and_origin_state_db_recorded() {
   const NAMED: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 executors:
   remote: { runner: far }
 commands:
@@ -180,15 +180,14 @@ fn leftover_vm(run_dir: &std::path::Path) -> std::process::Child {
     .unwrap()
 }
 
-fn instance(run: &str, id: String, name: &str, kind: InstanceKind, runner: Option<&str>, provider: &str) -> InstanceRecord {
+fn instance(run: &str, id: String, name: &str, kind: InstanceKind, runner: Option<&str>, driver: &str) -> InstanceRecord {
   InstanceRecord {
     id,
     run: run.into(),
     name: name.into(),
     kind,
     runner: runner.map(str::to_string),
-    provider: provider.into(),
-    runtime: if runner.is_some() { "runner" } else { provider }.into(),
+    driver: if runner.is_some() { "runner" } else { driver }.into(),
     handle: runner.unwrap_or("local").into(),
     pid: None,
     state: InstanceState::Running,

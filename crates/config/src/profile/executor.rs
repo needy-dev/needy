@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
 
-use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 
 use super::runner::RunnerSelector;
 use crate::value::{ByteSize, Duration, Template};
@@ -17,10 +17,11 @@ pub struct Executor {
   /// The runner the executor runs on; the control host itself when absent.
   pub runner: Option<RunnerSelector>,
   /// What the runner creates for it: its own process space (`native`, the
-  /// default) or a container (`docker`).
-  pub provider: Provider,
-  pub docker: Option<Docker>,
-  /// A recipe reference, for providers that build a machine.
+  /// default) or a container (`linux-container`).
+  pub driver: ExecutorDriver,
+  /// The container's image and run options, for `linux-container`.
+  pub container: Option<ContainerExecutor>,
+  /// A recipe reference, for drivers that build a machine.
   pub recipe: Option<String>,
   /// The working directory of a command that names none: a path on the
   /// executor's machine.
@@ -41,8 +42,8 @@ impl Default for Executor {
   fn default() -> Self {
     Self {
       runner: None,
-      provider: Provider::Native,
-      docker: None,
+      driver: ExecutorDriver::Native,
+      container: None,
       recipe: None,
       workspace: None,
       path_map: BTreeMap::new(),
@@ -55,20 +56,40 @@ impl Default for Executor {
   }
 }
 
-/// What creates an executor's instance on its runner.
+/// What creates an executor's instance on its runner: its driver.
 // NOTICE: `remote` (another machine's `needy daemon --mode executor`) was
 // removed with slice 5 of the runners-and-runs design: runners dial the
 // control plane and profiles select them with `runner:`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Provider {
+// TODO(executor-driver): the reserved `containerd`, `firecracker` and `k8s`
+// values, which every create refused, were removed with the drivers design
+// (`docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`);
+// each later driver (`linux-firecracker`, `linux-native`, ...) is a variant
+// here once the owner approves its slice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutorDriver {
   /// The runner's own process space.
   Native,
-  /// A container the runner's machine creates.
-  Docker,
-  Containerd,
-  Firecracker,
-  K8s,
+  /// A container the runner's Docker-compatible engine creates.
+  LinuxContainer,
+}
+
+impl ExecutorDriver {
+  pub const ALL: [Self; 2] = [Self::Native, Self::LinuxContainer];
+
+  /// The name a profile gives it.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Native => "native",
+      Self::LinuxContainer => "linux-container",
+    }
+  }
+}
+
+impl fmt::Display for ExecutorDriver {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
 }
 
 /// What a command does when its instance has no free slot.
@@ -84,9 +105,9 @@ pub enum OnFull {
   Reject,
 }
 
-/// A Docker executor's image and the run options of its container, as typed
-/// fields that the `docker` provider sets on the Docker API's container body
-/// one by one.
+/// A `linux-container` executor's image and the run options of its
+/// container, as typed fields that the `linux-container` driver sets on the
+/// engine API's container body one by one.
 ///
 /// Fields the daemon sets (hostname, user, entrypoint, command, network,
 /// name, labels, auto-removal, the workspace and socket mounts) are not
@@ -96,8 +117,8 @@ pub enum OnFull {
 /// the executor is created unless the operator allows them.
 // NOTICE: `docker.args` (`docker run` strings translated through an
 // allowlist) was replaced by these fields on 2026-11-11 without
-// compatibility; `refuse_removed` in `profile/mod.rs` names them when a
-// profile still has it.
+// compatibility, and the block `docker:` became `container:` with the
+// drivers design (2026-11-12).
 // TODO(docker): `docker run` options without a field (ports,
 // `--device-cgroup-rule`, `--cpu-period`/`--cpu-quota`,
 // `--memory-reservation`, `--oom-*`, blkio, `--runtime`, `--storage-opt`,
@@ -106,9 +127,9 @@ pub enum OnFull {
 // `HostConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Docker {
+pub struct ContainerExecutor {
   pub image: Option<String>,
-  pub build: Option<DockerBuild>,
+  pub build: Option<ContainerBuild>,
   /// CPUs the container may use, as `docker run --cpus`: `1.5`.
   pub cpus: Option<Cpus>,
   /// The relative CPU weight (1024 is Docker's default).
@@ -348,7 +369,7 @@ pub struct Device {
 /// `docker build` options.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct DockerBuild {
+pub struct ContainerBuild {
   pub context: String,
   pub dockerfile: Option<String>,
   pub target: Option<String>,

@@ -77,8 +77,8 @@ fn a_fired_fault_names_its_kind_target_and_effect() {
 fn exec_decide_chain_runs_rules_then_chaos() {
   let p = profile(
     r#"
-actor: { runtime: firecracker }
-executors: { build: { provider: docker } }
+actor: { driver: linux-firecracker }
+executors: { build: { driver: linux-container } }
 commands:
   - { match: "curl **", when: { has: [-k] }, deny: insecure }
   - { match: "**", to: build }

@@ -4,7 +4,7 @@
 # Firecracker actor.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: macos-vz
+  driver: macos-vz
   recipe: ../opencode/gce.recipe.yaml
   command:
     - /bin/sh
@@ -21,7 +21,7 @@ actor:
       mkdir -p ~/out && echo "written in the actor" > ~/out/result.txt
 executors:
   mac:
-    provider: native
+    driver: native
     workspace: /tmp/needy-macos-vz-ws
     path_map: { /home/agent/workspace: /tmp/needy-macos-vz-ws }
 commands:

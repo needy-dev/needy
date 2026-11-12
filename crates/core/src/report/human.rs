@@ -75,8 +75,8 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     ("State".into(), state),
     ("Duration".into(), duration(s.duration_ms)),
   ];
-  if let Some(runtime) = &s.actor_runtime {
-    head.push(("Actor".into(), runtime.clone()));
+  if let Some(driver) = &s.actor_driver {
+    head.push(("Actor".into(), driver.clone()));
   }
   if let Some(by) = &s.started_by {
     head.push(("Started by".into(), by.clone()));
@@ -128,7 +128,7 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
       Some(names) => writeln!(out, "  (kept on actor counts only the names the actor routes: {})", names.join(", "))?,
       None => {}
     }
-    if s.actor_runtime.as_deref().is_some_and(|runtime| runtime.starts_with("container")) {
+    if s.actor_driver.as_deref().is_some_and(|driver| driver.starts_with("linux-container")) {
       writeln!(out, "  ({})", super::CONTAINER_ROUTING)?;
     }
   }

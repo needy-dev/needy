@@ -43,7 +43,7 @@ pub struct Args {
   token_env: Option<String>,
   /// Directory with the actor's vmlinux, rootfs.ext4 and firecracker.
   /// Defaults to the image `needy build` writes. A runner holds the actor
-  /// role with the firecracker runtime only when it is complete.
+  /// role with the linux-firecracker driver only when it is complete.
   #[arg(long)]
   actor_image: Option<PathBuf>,
   /// The runner that runs on this host (control mode). The control plane
@@ -52,15 +52,15 @@ pub struct Args {
   #[arg(long, value_name = "NAME")]
   local_runner: Option<String>,
   /// The KVM device checked before an actor starts (control mode), and to
-  /// detect the firecracker runtime (runner mode).
+  /// detect the linux-firecracker driver (runner mode).
   // NOTICE: Firecracker opens /dev/kvm itself; another path only makes sense
   // with a stand-in Firecracker from --actor-image, as the CLI's tests use on
   // hosts without KVM. Hidden for that reason.
   #[arg(long, value_name = "PATH", hide = true)]
   kvm: Option<PathBuf>,
-  /// Docker image for docker executors without their own image.
+  /// The image of linux-container executors without their own image.
   #[arg(long, default_value = "needy-executor:latest")]
-  docker_image: String,
+  executor_image: String,
   /// How often runners send a heartbeat (control mode). A runner is
   /// offline after three intervals without one.
   #[arg(long, default_value = "15s", value_parser = humantime::parse_duration)]
@@ -171,7 +171,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         runtime_dir: paths.runtime,
         actor_image: image,
         kvm: args.kvm.unwrap_or_else(|| needy_core_actor::host::firecracker::KVM.into()),
-        docker_image: args.docker_image,
+        executor_image: args.executor_image,
         heartbeat_interval: args.heartbeat_interval,
         local_runner: args.local_runner,
         report_wait: needy_daemon::REPORT_WAIT,

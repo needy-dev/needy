@@ -2,21 +2,23 @@
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::network::NetworkPolicy;
 use super::runner::RunnerSelector;
 use crate::value::Words;
 
-// NOTICE: `runtime` is required and has no default, so `Actor` has no
+// NOTICE: `driver` is required and has no default, so `Actor` has no
 // container-level `#[serde(default)]`: needy never chooses an actor's
 // isolation for the profile (the explicit-runtime decision in
-// `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`).
+// `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`,
+// whose runtimes are drivers since
+// `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Actor {
   /// What runs the actor.
-  pub runtime: Runtime,
+  pub driver: ActorDriver,
   /// The runner the actor runs on; the control host itself when absent.
   #[serde(default)]
   pub runner: Option<RunnerSelector>,
@@ -34,45 +36,51 @@ pub struct Actor {
   pub env: BTreeMap<String, String>,
   #[serde(default)]
   pub cwd: Option<String>,
-  /// How a `container` or `macos-apple-container` actor runs; required with
-  /// `container`, optional with `macos-apple-container`, refused with
-  /// `firecracker`.
+  /// How a `linux-container` or `macos-apple-container` actor runs; required
+  /// with `linux-container`, optional with `macos-apple-container`, refused
+  /// with the VM drivers.
   #[serde(default)]
   pub container: Option<ContainerActor>,
 }
 
-/// What runs an actor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Runtime {
+/// What runs an actor: its driver, named after the operating system whose
+/// isolation it relies on (see the drivers design,
+/// `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`).
+// TODO(macos-native): the `macos-native` driver (Seatbelt) lives on the
+// paused `poc/macos-native-actor` branch; it becomes a variant here only if
+// the owner productizes it (see the drivers design's Driver names).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ActorDriver {
   /// A Firecracker microVM; needs `/dev/kvm`.
-  Firecracker,
-  /// An OCI container through Docker, for hosts without KVM.
-  Container,
+  LinuxFirecracker,
+  /// An OCI container through a Docker-compatible engine, for hosts without
+  /// KVM.
+  LinuxContainer,
   /// A Virtualization.framework VM through vfkit, on Apple silicon macOS:
   /// needy's arm64 kernel and rootfs, as Firecracker boots them on Linux.
-  #[serde(rename = "macos-vz")]
   MacosVz,
   /// A container under Apple's `container` on a Mac with Apple silicon,
   /// which runs each container in its own lightweight VM.
-  #[serde(rename = "macos-apple-container")]
   MacosAppleContainer,
 }
 
 /// A container actor's options. `validate::profile` checks which apply to
-/// the actor's runtime.
-// NOTICE: `oci_runtime` has no default, for the reason `runtime` has none:
+/// the actor's driver.
+// NOTICE: `oci_runtime` has no default, for the reason `driver` has none:
 // `runc` and `runsc` isolate differently, and needy never chooses that for
-// the profile. It is optional here only because `macos-apple-container` refuses
-// it; `container` requires it.
+// the profile. It is optional here only because `macos-apple-container`
+// refuses it; `linux-container` requires it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContainerActor {
-  /// The OCI runtime Docker runs the container with: `container` only.
+  /// The OCI runtime the engine runs the container with: `linux-container`
+  /// only.
   #[serde(default)]
   pub oci_runtime: Option<OciRuntime>,
-  /// The container actor image: `needy build --container` builds it for
-  /// Docker, `needy build --macos-apple-container` for Apple's `container`.
+  /// The container actor image: `needy build --linux-container` builds it
+  /// for the engine, `needy build --macos-apple-container` for Apple's
+  /// `container`.
   #[serde(default = "default_container_image")]
   pub image: String,
 }
@@ -113,15 +121,28 @@ impl OciRuntime {
   }
 }
 
-impl Runtime {
+impl ActorDriver {
+  pub const ALL: [Self; 4] = [
+    Self::LinuxFirecracker,
+    Self::LinuxContainer,
+    Self::MacosVz,
+    Self::MacosAppleContainer,
+  ];
+
   /// The name a profile gives it.
   pub fn as_str(self) -> &'static str {
     match self {
-      Runtime::Firecracker => "firecracker",
-      Runtime::Container => "container",
-      Runtime::MacosVz => "macos-vz",
-      Runtime::MacosAppleContainer => "macos-apple-container",
+      Self::LinuxFirecracker => "linux-firecracker",
+      Self::LinuxContainer => "linux-container",
+      Self::MacosVz => "macos-vz",
+      Self::MacosAppleContainer => "macos-apple-container",
     }
+  }
+}
+
+impl std::fmt::Display for ActorDriver {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
   }
 }
 

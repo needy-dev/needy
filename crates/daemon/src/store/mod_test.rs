@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, RunnerRole};
+use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
 
 use super::*;
 
@@ -19,22 +19,22 @@ fn roles(roles: &[RunnerRole]) -> BTreeSet<RunnerRole> {
 
 fn native() -> Capabilities {
   Capabilities {
-    executor: [ExecutorProvider::Native].into(),
+    executor: [ExecutorDriver::Native].into(),
     ..Default::default()
   }
 }
 
 fn firecracker() -> Capabilities {
   Capabilities {
-    actor: [ActorRuntime::Firecracker].into(),
+    actor: [ActorDriver::LinuxFirecracker].into(),
     ..Default::default()
   }
 }
 
 fn kvm() -> Capabilities {
   Capabilities {
-    actor: [ActorRuntime::Firecracker].into(),
-    executor: [ExecutorProvider::Native, ExecutorProvider::Docker].into(),
+    actor: [ActorDriver::LinuxFirecracker].into(),
+    executor: [ExecutorDriver::Native, ExecutorDriver::LinuxContainer].into(),
   }
 }
 
@@ -220,7 +220,7 @@ async fn a_heartbeat_updates_last_seen_capabilities_and_labels_within_the_scope(
   let runner = &store.runners().await.unwrap()[0];
   assert_eq!(runner.last_seen_ms, NOW + 15_000);
   assert_eq!(runner.labels, labels(&[("gpu", "none"), ("os", "darwin")]));
-  assert_eq!(runner.capabilities.to_string(), "executor(docker,native)");
+  assert_eq!(runner.capabilities.to_string(), "executor(linux-container,native)");
 }
 
 #[tokio::test]

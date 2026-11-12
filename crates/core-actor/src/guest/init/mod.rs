@@ -17,11 +17,11 @@
 //! faults) are owned by the actor: they end when init reboots the VM or
 //! exits the container.
 
-mod driver;
 mod files;
 mod identity;
 mod mounts;
 mod network;
+mod program;
 mod stubs;
 
 pub(super) use stubs::STUB_DIR;
@@ -35,8 +35,8 @@ pub(super) fn main() -> ! {
   // Init started again by itself as a plain process (not PID 1) only
   // switches to the user and runs the driving program on its terminal.
   let args: Vec<String> = std::env::args().skip(1).collect();
-  if std::process::id() != 1 && args.first().map(String::as_str) == Some(driver::AS_USER) {
-    let error = driver::as_user(&args[1..]);
+  if std::process::id() != 1 && args.first().map(String::as_str) == Some(program::AS_USER) {
+    let error = program::as_user(&args[1..]);
     eprintln!("needy init: cannot run the driving program: {error:#}");
     std::process::exit(127);
   }
@@ -174,13 +174,13 @@ async fn boot(container: bool) -> Result<()> {
     Some(window) => {
       let size = (u16::try_from(window.rows).unwrap_or(u16::MAX), u16::try_from(window.cols).unwrap_or(u16::MAX));
       let terminal = if container {
-        driver::Terminal::Unix(super::process_socket())
+        program::Terminal::Unix(super::process_socket())
       } else {
-        driver::Terminal::Vsock(config.process_port)
+        program::Terminal::Vsock(config.process_port)
       };
-      driver::run_on_terminal(&config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
+      program::run_on_terminal(&config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
     }
-    None => driver::run(&config, &home).await.map(|status| {
+    None => program::run(&config, &home).await.map(|status| {
       use std::os::unix::process::ExitStatusExt;
       (status.code(), status.signal().map(needy_core_executor::signals::name).unwrap_or_default())
     }),

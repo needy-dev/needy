@@ -3,17 +3,17 @@ use needy_api_server::control::{Guest, Runs};
 use crate::testing::{self, new_run};
 
 const NO_MOUNT: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 "#;
 
 const WORKSPACE_MOUNT: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 files:
   workspace: { mode: mount, from: "executor:here:/srv/ws/", to: "actor:~/workspace/", writable: true }
 run_files: [workspace]
@@ -46,6 +46,6 @@ async fn an_actor_with_a_workspace_mount_starts_in_the_workspace() {
 
 #[tokio::test]
 async fn an_actor_cwd_wins_over_the_default() {
-  let profile = NO_MOUNT.replace("actor: { runtime: firecracker }", "actor: { runtime: firecracker, cwd: /tmp }");
+  let profile = NO_MOUNT.replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, cwd: /tmp }");
   assert_eq!(cwd(&profile).await, "/tmp");
 }

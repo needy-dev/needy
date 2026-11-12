@@ -25,7 +25,7 @@ fn secs(d: Option<crate::value::Duration>) -> Option<u64> {
 const PROFILE: &str = r#"
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   recipe: gce-e2-standard-4
   limits: { single_process: true, self_replace: true }
   command: opencode run hello
@@ -36,8 +36,8 @@ actor:
 executors:
   build:
     runner: { labels: [kvm, os=linux] }
-    provider: docker
-    docker:
+    driver: linux-container
+    container:
       build: { context: ./env, dockerfile: Dockerfile.build, target: toolchain, args: { RUST_VERSION: "1.97" } }
       cpus: 4
       memory: 8GiB
@@ -94,7 +94,7 @@ fn loads_every_section() {
 
   assert_eq!(p.user.home(), "/home/agent");
   assert_eq!(p.base_dir, Path::new("/base"));
-  assert_eq!(p.actor.runtime, Runtime::Firecracker);
+  assert_eq!(p.actor.driver, ActorDriver::LinuxFirecracker);
   assert_eq!(p.actor.recipe.as_deref(), Some("gce-e2-standard-4"));
   assert!(p.actor.limits.single_process);
   assert_eq!(&*p.actor.command, ["opencode", "run", "hello"]);
@@ -105,7 +105,7 @@ fn loads_every_section() {
   assert_eq!(p.actor.network.inject["openrouter.ai"].secret, "OPENROUTER_KEY");
 
   let build = &p.executors["build"];
-  assert_eq!(build.provider, Provider::Docker);
+  assert_eq!(build.driver, ExecutorDriver::LinuxContainer);
   let labels = vec![
     LabelMatch {
       key: "kvm".into(),
@@ -119,12 +119,12 @@ fn loads_every_section() {
   assert_eq!(build.runner, Some(RunnerSelector::Labels(labels)));
   assert_eq!(secs(build.idle_timeout), Some(600));
   assert_eq!(build.max_procs, Some(4));
-  let docker = build.docker.as_ref().unwrap();
+  let docker = build.container.as_ref().unwrap();
   assert_eq!(docker.cpus.map(|c| c.nanos()), Some(4_000_000_000));
   assert_eq!(docker.memory.map(|m| m.bytes()), Some(8 << 30));
   assert_eq!(docker.build.as_ref().unwrap().args["RUST_VERSION"], "1.97");
   let mac = &p.executors["mac"];
-  assert_eq!(mac.provider, Provider::Native);
+  assert_eq!(mac.driver, ExecutorDriver::Native);
   assert_eq!(mac.runner, Some(RunnerSelector::Name("mac".into())));
   assert_eq!(mac.key.as_str(), "{rule}");
   assert_eq!(mac.on_full, OnFull::Wait);
@@ -171,8 +171,8 @@ fn loads_every_section() {
 }
 
 #[test]
-fn a_profile_that_names_only_its_actor_runtime_has_the_defaults() {
-  let p = load_text("actor: { runtime: firecracker }\n").unwrap();
+fn a_profile_that_names_only_its_actor_driver_has_the_defaults() {
+  let p = load_text("actor: { driver: linux-firecracker }\n").unwrap();
 
   assert_eq!(p.user.name, "agent");
   assert_eq!((p.user.uid, p.user.gid), (1000, 1000));
@@ -183,18 +183,18 @@ fn a_profile_that_names_only_its_actor_runtime_has_the_defaults() {
 
 #[test]
 fn executor_defaults() {
-  let p = load_text("actor: { runtime: firecracker }\nexecutors: { build: {} }").unwrap();
+  let p = load_text("actor: { driver: linux-firecracker }\nexecutors: { build: {} }").unwrap();
 
   let build = &p.executors["build"];
   assert_eq!(build.runner, None);
-  assert_eq!(build.provider, Provider::Native);
+  assert_eq!(build.driver, ExecutorDriver::Native);
   assert_eq!(build.key.as_str(), "{run}");
   assert_eq!(build.on_full, OnFull::Wait);
 }
 
 #[test]
 fn a_file_profile_resolves_against_its_directory() {
-  let dir = files(&[("team/profile.yaml", "user: { name: dev }\nactor: { runtime: firecracker }")]);
+  let dir = files(&[("team/profile.yaml", "user: { name: dev }\nactor: { driver: linux-firecracker }")]);
 
   let p = load(&Source::file(dir.path().join("team/profile.yaml"))).unwrap();
 
@@ -219,11 +219,11 @@ fn extends_merges_maps_and_replaces_scalars_and_lists() {
       r#"
 default_executor: build
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   command: [sh, -c, "echo base"]
   network: { allow: [a.example.com], upstream: { model.needy: "http://127.0.0.1:1" } }
 executors:
-  build: { provider: docker, max_procs: 4, key: "{profile}" }
+  build: { driver: linux-container, max_procs: 4, key: "{profile}" }
   mac: { runner: mac }
 presets:
   quiet: { env: { set: { QUIET: "1" } } }
@@ -264,7 +264,7 @@ files:
   assert_eq!(build.max_procs, Some(8));
   assert_eq!(build.key.as_str(), "{profile}");
   assert_eq!(p.executors["mac"].runner, Some(RunnerSelector::Name("mac".into())));
-  assert_eq!(build.provider, Provider::Docker);
+  assert_eq!(build.driver, ExecutorDriver::LinuxContainer);
   assert!(p.presets.contains_key("quiet"));
   assert!(!p.files.mappings["workspace"].writable);
   assert_eq!(p.files.mappings["workspace"].mode, FileMode::Mount);
@@ -282,7 +282,7 @@ files:
 #[test]
 fn a_null_in_the_child_removes_the_parent_value() {
   let dir = files(&[
-    ("base.yaml", "actor: { runtime: firecracker }\ndefault_executor: build\n"),
+    ("base.yaml", "actor: { driver: linux-firecracker }\ndefault_executor: build\n"),
     ("child.yaml", "extends: base.yaml\ndefault_executor: ~\n"),
   ]);
 
@@ -296,7 +296,7 @@ fn extends_resolves_against_the_extending_file() {
   let dir = files(&[
     ("a/child.yaml", "extends: ../b/middle.yaml\n"),
     ("b/middle.yaml", "extends: base.yaml\nuser: { uid: 1001 }\n"),
-    ("b/base.yaml", "user: { name: dev, uid: 1, gid: 7 }\nactor: { runtime: firecracker }\n"),
+    ("b/base.yaml", "user: { name: dev, uid: 1, gid: 7 }\nactor: { driver: linux-firecracker }\n"),
   ]);
 
   let p = load(&Source::file(dir.path().join("a/child.yaml"))).unwrap();
@@ -307,7 +307,7 @@ fn extends_resolves_against_the_extending_file() {
 
 #[test]
 fn text_extends_resolves_against_its_base_dir() {
-  let dir = files(&[("base.yaml", "user: { name: dev }\nactor: { runtime: firecracker }\n")]);
+  let dir = files(&[("base.yaml", "user: { name: dev }\nactor: { driver: linux-firecracker }\n")]);
 
   let p = load(&Source::text("extends: base.yaml\n", dir.path())).unwrap();
 
@@ -357,7 +357,7 @@ fn a_missing_parent_names_its_path() {
 
 #[test]
 fn unknown_keys_are_rejected_with_their_path() {
-  let err = load_text("executors: { build: { runtme: docker } }").unwrap_err().to_string();
+  let err = load_text("executors: { build: { runtme: native } }").unwrap_err().to_string();
 
   assert!(err.starts_with("invalid profile "), "{err}");
   assert!(err.contains("executors.build.runtme: unknown field `runtme`, expected one of"), "{err}");
@@ -392,7 +392,7 @@ fn bad_values_are_rejected() {
   let err = load_text("executors: { build: { idle_timeout: soon } }").unwrap_err().to_string();
   assert!(err.contains("executors.build.idle_timeout: invalid duration \"soon\""), "{err}");
 
-  let err = load_text("executors: { build: { provider: podman } }").unwrap_err().to_string();
+  let err = load_text("executors: { build: { driver: podman } }").unwrap_err().to_string();
   assert!(err.contains("unknown variant `podman`"), "{err}");
 
   let err = load_text("chaos: { faults: [{ on: file.read }] }").unwrap_err().to_string();
@@ -423,7 +423,7 @@ fn yaml_syntax_errors_name_the_line() {
 #[test]
 fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
   let p = load_text(
-    "user: { name: dev }\nactor: { runtime: firecracker }\nfiles: { out: { mode: mirror-out, from: \"executor:b:~\", to: \"host:~/out\" } }",
+    "user: { name: dev }\nactor: { driver: linux-firecracker }\nfiles: { out: { mode: mirror-out, from: \"executor:b:~\", to: \"host:~/out\" } }",
   )
   .unwrap();
 
@@ -441,7 +441,7 @@ fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
 
 #[test]
 fn trace_defaults_to_sqlite_and_jsonl_without_timing() {
-  let p = load_text("actor: { runtime: firecracker }\n").unwrap();
+  let p = load_text("actor: { driver: linux-firecracker }\n").unwrap();
 
   assert_eq!(p.trace.sinks, [TraceSink::Sqlite, TraceSink::Jsonl]);
   assert!(!p.trace.timing);
@@ -449,11 +449,11 @@ fn trace_defaults_to_sqlite_and_jsonl_without_timing() {
 
 #[test]
 fn trace_selects_sinks_and_timing() {
-  let p = load_text("actor: { runtime: firecracker }\ntrace: { sinks: [jsonl], timing: true }\n").unwrap();
+  let p = load_text("actor: { driver: linux-firecracker }\ntrace: { sinks: [jsonl], timing: true }\n").unwrap();
 
   assert_eq!(p.trace.sinks, [TraceSink::Jsonl]);
   assert!(p.trace.timing);
-  assert!(load_text("actor: { runtime: firecracker }\ntrace: { sinks: [] }\n").unwrap().trace.sinks.is_empty());
+  assert!(load_text("actor: { driver: linux-firecracker }\ntrace: { sinks: [] }\n").unwrap().trace.sinks.is_empty());
   let err = load_text("trace: { sinks: [otel] }\n").unwrap_err().to_string();
   assert!(err.contains("trace.sinks[0]: unknown variant `otel`, expected `sqlite` or `jsonl`"), "{err}");
 }
@@ -475,7 +475,7 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   let dir = files(&[
     (
       "base.yaml",
-      "actor: { runtime: firecracker }\nexecutors:\n  here: { provider: native }\n  box: { provider: docker, docker: { mounts: [{ type: bind, source: cache, target: /c }, { type: volume, source: v, target: /v }] } }\n",
+      "actor: { driver: linux-firecracker }\nexecutors:\n  here: { driver: native }\n  box: { driver: linux-container, container: { mounts: [{ type: bind, source: cache, target: /c }, { type: volume, source: v, target: /v }] } }\n",
     ),
     (
       "p/profile.yaml",
@@ -489,8 +489,8 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   assert!(!resolved.yaml.contains("extends"), "{}", resolved.yaml);
   assert_eq!(profile.executors["here"].workspace.as_deref(), Some(format!("{}/p/ws/", dir.path().display()).as_str()));
   assert_eq!(profile.files.mappings["seed"].from, Side::Host(format!("{}/p/seed/", dir.path().display())));
-  // A Docker bind mount's source is a host path; a volume's is a name.
-  let mounts = &profile.executors["box"].docker.as_ref().unwrap().mounts;
+  // A container bind mount's source is a host path; a volume's is a name.
+  let mounts = &profile.executors["box"].container.as_ref().unwrap().mounts;
   assert!(matches!(&mounts[0], Mount::Bind { source, .. } if *source == format!("{}/p/cache", dir.path().display())), "{mounts:?}");
   assert!(matches!(&mounts[1], Mount::Volume { source: Some(v), .. } if v == "v"), "{mounts:?}");
   // `~` is the home of the machine that reads the path.
@@ -502,8 +502,8 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
 fn a_resolved_profile_carries_its_recipe_file_but_not_a_built_in_one() {
   let dir = files(&[
     ("r.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\nos: { hostname: h1 }\nnetwork: { metadata: { file: meta.yaml } }\n"),
-    ("file.yaml", "actor: { runtime: firecracker, recipe: r.recipe.yaml }\n"),
-    ("builtin.yaml", "actor: { runtime: firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n"),
+    ("file.yaml", "actor: { driver: linux-firecracker, recipe: r.recipe.yaml }\n"),
+    ("builtin.yaml", "actor: { driver: linux-firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n"),
   ]);
 
   let from_file = resolve(&Source::file(dir.path().join("file.yaml"))).unwrap();
@@ -517,42 +517,44 @@ fn a_resolved_profile_carries_its_recipe_file_but_not_a_built_in_one() {
 
 #[test]
 fn the_actor_selects_a_runner_by_name_or_labels() {
-  let p = load_text("actor: { runtime: firecracker, runner: kvm }").unwrap();
+  let p = load_text("actor: { driver: linux-firecracker, runner: kvm }").unwrap();
   assert_eq!(p.actor.runner, Some(RunnerSelector::Name("kvm".into())));
 
-  let p = load_text("actor: { runtime: firecracker, runner: { labels: [kvm] } }").unwrap();
+  let p = load_text("actor: { driver: linux-firecracker, runner: { labels: [kvm] } }").unwrap();
   let kvm = LabelMatch {
     key: "kvm".into(),
     value: None,
   };
   assert_eq!(p.actor.runner, Some(RunnerSelector::Labels(vec![kvm])));
 
-  assert_eq!(load_text("actor: { runtime: firecracker }").unwrap().actor.runner, None);
+  assert_eq!(load_text("actor: { driver: linux-firecracker }").unwrap().actor.runner, None);
 }
 
 // needy never chooses an actor's isolation for the profile: there is no
-// default runtime, and a profile without one does not load.
+// default driver, and a profile without one does not load.
 #[test]
-fn the_actor_runtime_is_required() {
+fn the_actor_driver_is_required() {
   let err = load_text("user: { name: dev }\n").unwrap_err().to_string();
   assert!(err.contains("missing field `actor`"), "{err}");
 
   let err = load_text("actor: { command: [sh] }\n").unwrap_err().to_string();
-  assert!(err.contains("actor: missing field `runtime`"), "{err}");
+  assert!(err.contains("actor: missing field `driver`"), "{err}");
 
-  let err = load_text("actor: { runtime: qemu }\n").unwrap_err().to_string();
+  let err = load_text("actor: { driver: qemu }\n").unwrap_err().to_string();
   assert!(
-    err.contains("actor.runtime: unknown variant `qemu`, expected one of `firecracker`, `container`, `macos-vz`, `macos-apple-container`"),
+    err.contains(
+      "actor.driver: unknown variant `qemu`, expected one of `linux-firecracker`, `linux-container`, `macos-vz`, `macos-apple-container`"
+    ),
     "{err}"
   );
 }
 
 #[test]
-fn macos_apple_container_is_an_actor_runtime() {
-  let p = load_text("actor: { runtime: macos-apple-container }").unwrap();
+fn macos_apple_container_is_an_actor_driver() {
+  let p = load_text("actor: { driver: macos-apple-container }").unwrap();
 
-  assert_eq!(p.actor.runtime, Runtime::MacosAppleContainer);
-  assert_eq!(p.actor.runtime.as_str(), "macos-apple-container");
+  assert_eq!(p.actor.driver, ActorDriver::MacosAppleContainer);
+  assert_eq!(p.actor.driver.as_str(), "macos-apple-container");
 }
 
 #[test]
@@ -599,14 +601,22 @@ fn a_remote_executor_is_refused_naming_runners_instead() {
   assert!(err.contains("executors.mac.runtime: remote executors were removed"), "{err}");
 }
 
+// The drivers design renamed `actor.runtime`, `executors.NAME.provider` and
+// `docker:` without compatibility: the old keys are unknown fields, and
+// serde's message lists the new ones.
 #[test]
-fn runtime_is_refused_naming_provider() {
-  let err = load_text("executors: { build: { runtime: docker } }").unwrap_err().to_string();
-  assert!(err.contains("executors.build.runtime: `runtime` is now `provider` (`provider: docker`)"), "{err}");
+fn the_names_before_drivers_are_unknown_fields() {
+  let err = load_text("actor: { runtime: linux-firecracker }").unwrap_err().to_string();
+  assert!(err.contains("actor.runtime: unknown field `runtime`, expected one of `driver`"), "{err}");
 
-  // A client resolving the profile for the daemon refuses it the same way.
-  let err = resolve(&Source::text("executors: { build: { runtime: native } }", "/base")).unwrap_err().to_string();
-  assert!(err.contains("`provider: native`"), "{err}");
+  let err = load_text("executors: { build: { provider: native } }").unwrap_err().to_string();
+  assert!(err.contains("executors.build.provider: unknown field `provider`"), "{err}");
+
+  let err = load_text("executors: { build: { driver: linux-container, docker: { cpus: 1 } } }").unwrap_err().to_string();
+  assert!(err.contains("executors.build.docker: unknown field `docker`"), "{err}");
+
+  let err = load_text("executors: { build: { driver: docker } }").unwrap_err().to_string();
+  assert!(err.contains("unknown variant `docker`, expected `native` or `linux-container`"), "{err}");
 }
 
 // `on_full: new` was removed (owner decision, 2026-11-11): it waited like
@@ -619,14 +629,14 @@ fn on_full_new_is_refused_naming_wait_and_reject() {
 }
 
 #[test]
-fn docker_run_options_are_typed_fields() {
+fn container_run_options_are_typed_fields() {
   let p = load_text(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 executors:
   build:
-    provider: docker
-    docker:
+    driver: linux-container
+    container:
       cpus: 1.5
       cpu_shares: 512
       cpuset_cpus: "0-3"
@@ -652,7 +662,7 @@ executors:
   )
   .unwrap();
 
-  let docker = p.executors["build"].docker.clone().unwrap();
+  let docker = p.executors["build"].container.clone().unwrap();
   assert_eq!(docker.cpus.unwrap().nanos(), 1_500_000_000);
   assert_eq!(docker.cpu_shares, Some(512));
   assert_eq!(docker.cpuset_cpus.as_deref(), Some("0-3"));
@@ -701,35 +711,39 @@ executors:
 #[test]
 fn gpus_are_all_a_count_or_device_ids() {
   let gpus = |text: &str| {
-    load_text(&format!("actor: {{ runtime: firecracker }}\nexecutors: {{ build: {{ provider: docker, docker: {{ gpus: {text} }} }} }}"))
-      .map(|p| p.executors["build"].docker.clone().unwrap().gpus.unwrap())
-      .map_err(|e| e.to_string())
+    load_text(&format!(
+      "actor: {{ driver: linux-firecracker }}\nexecutors: {{ build: {{ driver: linux-container, container: {{ gpus: {text} }} }} }}"
+    ))
+    .map(|p| p.executors["build"].container.clone().unwrap().gpus.unwrap())
+    .map_err(|e| e.to_string())
   };
   assert_eq!(gpus("all"), Ok(Gpus::All));
   assert_eq!(gpus("2"), Ok(Gpus::Count(2)));
   assert_eq!(gpus("[\"0\", GPU-example]"), Ok(Gpus::Devices(vec!["0".into(), "GPU-example".into()])));
   let err = gpus("some").unwrap_err();
-  assert!(err.contains("executors.build.docker.gpus: "), "{err}");
+  assert!(err.contains("executors.build.container.gpus: "), "{err}");
   assert!(err.contains("all, a number of GPUs or a list of device IDs"), "{err}");
 }
 
 #[test]
-fn malformed_docker_values_fail_at_load_with_their_path() {
-  let err = |docker: &str| load_text(&format!("executors: {{ build: {{ provider: docker, docker: {docker} }} }}")).unwrap_err().to_string();
+fn malformed_container_values_fail_at_load_with_their_path() {
+  let err = |container: &str| {
+    load_text(&format!("executors: {{ build: {{ driver: linux-container, container: {container} }} }}")).unwrap_err().to_string()
+  };
   let e = err("{ memory: 8g }");
-  assert!(e.contains("executors.build.docker.memory: invalid size unit"), "{e}");
+  assert!(e.contains("executors.build.container.memory: invalid size unit"), "{e}");
   let e = err("{ cpus: 0 }");
-  assert!(e.contains("executors.build.docker.cpus: "), "{e}");
+  assert!(e.contains("executors.build.container.cpus: "), "{e}");
   let e = err("{ memory_swap: lots }");
-  assert!(e.contains("executors.build.docker.memory_swap: "), "{e}");
+  assert!(e.contains("executors.build.container.memory_swap: "), "{e}");
   let e = err("{ mounts: [{ type: nfs, target: /x }] }");
-  assert!(e.contains("executors.build.docker.mounts[0].type: unknown variant `nfs`"), "{e}");
+  assert!(e.contains("executors.build.container.mounts[0].type: unknown variant `nfs`"), "{e}");
   let e = err("{ mounts: [{ type: tmpfs, target: /x, source: /y }] }");
   assert!(e.contains("unknown field `source`"), "{e}");
   let e = err("{ ulimits: { nofile: { soft: 1 } } }");
-  assert!(e.contains("executors.build.docker.ulimits.nofile: "), "{e}");
+  assert!(e.contains("executors.build.container.ulimits.nofile: "), "{e}");
   let e = err("{ dns: [not-an-address] }");
-  assert!(e.contains("executors.build.docker.dns[0]: "), "{e}");
+  assert!(e.contains("executors.build.container.dns[0]: "), "{e}");
 }
 
 // The daemon sets these; they are not profile fields at all.
@@ -744,19 +758,17 @@ fn fields_the_daemon_owns_are_not_docker_fields() {
     "labels: { a: b }",
     "rm: true",
   ] {
-    let err = load_text(&format!("executors: {{ build: {{ provider: docker, docker: {{ {field} }} }} }}")).unwrap_err().to_string();
+    let err =
+      load_text(&format!("executors: {{ build: {{ driver: linux-container, container: {{ {field} }} }} }}")).unwrap_err().to_string();
     assert!(err.contains("unknown field"), "{field}: {err}");
   }
 }
 
 // `docker.args` (docker run strings) was replaced by typed fields on
-// 2026-11-11, without compatibility; a profile that still has it is told
-// which fields replace it.
+// 2026-11-11, without compatibility; `container:` has no `args`.
 #[test]
-fn docker_args_is_refused_naming_the_typed_fields() {
-  let err = load_text("executors: { build: { provider: docker, docker: { args: [--cpus=4] } } }").unwrap_err().to_string();
+fn container_args_is_an_unknown_field() {
+  let err = load_text("executors: { build: { driver: linux-container, container: { args: [--cpus=4] } } }").unwrap_err().to_string();
 
-  assert!(err.contains("executors.build.docker.args: `docker.args` was replaced by typed fields"), "{err}");
-  assert!(err.contains("cpus, cpu_shares, cpuset_cpus, memory"), "{err}");
-  assert!(err.contains("gpus"), "{err}");
+  assert!(err.contains("unknown field `args`"), "{err}");
 }

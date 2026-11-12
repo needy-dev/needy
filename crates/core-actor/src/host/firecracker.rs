@@ -1,4 +1,4 @@
-//! The `firecracker` actor runtime: the actor's Firecracker VM, its
+//! The `linux-firecracker` actor driver: the actor's Firecracker VM, its
 //! configuration from a compiled recipe, and a handle that owns the
 //! Firecracker process.
 //!
@@ -14,8 +14,8 @@ use std::time::Duration;
 use needy_core::recipe::{CompiledRecipe, VmIdentity};
 use serde_json::json;
 
-pub use super::runtime::Error;
-use super::runtime::{ActorRuntime, Channels, Endpoint, RunningActor, Setup, Start, Terminal};
+pub use super::driver::Error;
+use super::driver::{Channels, Driver, Endpoint, Running, Setup, Start, Terminal};
 
 /// Ports the actor reaches on the host over vsock.
 // NOTICE: needy's own choices; the guest's init dials `GUEST_PORT` as
@@ -102,22 +102,22 @@ pub fn host_port(dir: &Path, port: u32) -> PathBuf {
 
 /// The guest's serial console, as Firecracker writes it: the actor's log.
 pub fn console(dir: &Path) -> PathBuf {
-  super::runtime::log(dir)
+  super::driver::log(dir)
 }
 
-/// The `firecracker` runtime: actors in microVMs booted from `image`, on
+/// The `linux-firecracker` driver: actors in microVMs booted from `image`, on
 /// the KVM device `kvm`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Firecracker {
+pub struct LinuxFirecracker {
   pub image: Image,
   /// [`KVM`] outside tests.
   pub kvm: PathBuf,
 }
 
 #[async_trait::async_trait]
-impl ActorRuntime for Firecracker {
+impl Driver for LinuxFirecracker {
   fn name(&self) -> &'static str {
-    "firecracker"
+    "linux-firecracker"
   }
 
   async fn check_host(&self) -> Result<(), Error> {
@@ -146,7 +146,7 @@ impl ActorRuntime for Firecracker {
     Setup::Guest
   }
 
-  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error> {
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
     let launch = Launch::new(&self.image, start.dir, start.recipe);
     Ok(Box::new(Vm::start(&launch)?))
   }
@@ -316,7 +316,7 @@ impl Vm {
 }
 
 #[async_trait::async_trait]
-impl RunningActor for Vm {
+impl Running for Vm {
   /// The Firecracker process's ID.
   fn pid(&self) -> u32 {
     self.pid
@@ -338,7 +338,7 @@ impl RunningActor for Vm {
   /// Stops Firecracker and waits until it is gone: `SIGTERM` first, then
   /// `SIGKILL` if it is still running after `grace`.
   async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
-    super::runtime::stop_process(&mut self.child, "firecracker", grace).await
+    super::driver::stop_process(&mut self.child, "firecracker", grace).await
   }
 }
 

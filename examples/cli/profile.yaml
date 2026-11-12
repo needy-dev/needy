@@ -1,17 +1,17 @@
-# A Docker executor for `needy exec --run`. The actor only waits: the
+# A `linux-container` executor for `needy exec --run`. The actor only waits: the
 # commands come from `needy exec`, which the rules send to `build`.
 # `needy exec --runner NAME` reaches a runner's machine without a run.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: firecracker
+  driver: linux-firecracker
   command: [sleep, infinity]
 executors:
   build:
-    provider: docker
+    driver: linux-container
     key: "{run}"
     # Run options are typed fields, each a Docker API field (see the
     # profile design note's "Run options").
-    docker:
+    container:
       cpus: 2
       memory: 2GiB
       pids_limit: 1024

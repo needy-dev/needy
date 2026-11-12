@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  CreateJoinTokenRequest, ExecutorProvider, HeartbeatRequest, JoinRequest, JoinTokenState, ListJoinTokensRequest, ListRunnersRequest,
+  CreateJoinTokenRequest, ExecutorDriver, HeartbeatRequest, JoinRequest, JoinTokenState, ListJoinTokensRequest, ListRunnersRequest,
   RemoveRunnerRequest, RevokeJoinTokenRequest, RotateRunnerRequest, RunnerCapabilities, RunnerStatus,
 };
 use tonic::Code;
@@ -43,7 +43,7 @@ fn join(token: &str, name: &str) -> JoinRequest {
 
 fn native() -> Option<RunnerCapabilities> {
   Some(RunnerCapabilities {
-    executor: vec![ExecutorProvider::Native as i32],
+    executor: vec![ExecutorDriver::Native as i32],
     ..Default::default()
   })
 }

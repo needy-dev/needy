@@ -1,18 +1,20 @@
-//! Executor providers: the runtimes that create and destroy executor
-//! instances. An instance is a machine that serves `ProcessService`; the
+//! Executor drivers: what creates and destroys executor instances. A
+//! profile's `executors.NAME.driver` names one. An instance is a machine that serves `ProcessService`; the
 //! daemon's pool decides when to create one and when to destroy it.
 //!
 //! - [`native`]: this machine, through the daemon's in-process executor.
-//! - [`docker`]: a container running `needy daemon --mode executor`.
+//! - [`docker`] (`linux-container`): a container running `needy daemon
+//!   --mode executor`, through a Docker-compatible engine.
 //!
-//! A runner's own machine needs no provider: the daemon reaches it over the
+//! A runner's own machine needs no driver: the daemon reaches it over the
 //! runner's streams. The `remote` provider, which dialed another machine's
 //! `needy daemon --mode executor`, was removed when profiles began to select
 //! runners (slice 5 of the runners-and-runs design).
 //!
-//! TODO(provider): `containerd`, `firecracker` and `k8s` runtimes are new
-//! files here; each needs owner approval of its slice. Until then the daemon
-//! refuses those runtimes.
+//! TODO(executor-driver): later drivers (`linux-firecracker`, `linux-native`,
+//! a Kubernetes one) are new files here; each needs owner approval of its
+//! slice, see
+//! `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`.
 
 pub mod docker;
 pub mod native;
@@ -25,7 +27,7 @@ use std::sync::Arc;
 use needy_api_client::Client;
 use needy_config::profile::{Executor, User};
 
-pub use docker::Docker;
+pub use docker::LinuxContainer;
 pub use native::Native;
 
 #[derive(Debug, thiserror::Error)]
@@ -55,9 +57,9 @@ pub enum Error {
   Docker(#[from] bollard::errors::Error),
 }
 
-/// What the pool asks a provider for: one instance of a profile's executor.
+/// What the pool asks a driver for: one instance of a profile's executor.
 #[derive(Debug, Clone)]
-pub struct InstanceSpec {
+pub struct Spec {
   /// The executor's name in the profile.
   pub name: String,
   /// The pool key the instance serves; names its container and directories.
@@ -75,9 +77,10 @@ pub struct InstanceSpec {
 /// A created instance: how to reach it and what the daemon needs to know
 /// about it.
 #[derive(Clone)]
-pub struct InstanceHandle {
-  /// `native`, `docker`, or `runner` for a runner's own machine.
-  pub runtime: &'static str,
+pub struct Instance {
+  /// The driver that created it (`native`, `linux-container`), or `runner`
+  /// for a runner's own machine, which no driver creates.
+  pub driver: &'static str,
   /// The machine (`local`), the container name or the runner's name.
   pub id: String,
   pub executor: Arc<dyn needy_api_client::Executor>,
@@ -89,13 +92,13 @@ pub struct InstanceHandle {
 }
 
 #[async_trait::async_trait]
-pub trait Provider: Send + Sync {
+pub trait Driver: Send + Sync {
   /// Creates an instance and returns once it answers.
-  async fn create(&self, spec: &InstanceSpec) -> Result<InstanceHandle, Error>;
+  async fn create(&self, spec: &Spec) -> Result<Instance, Error>;
 
-  /// Destroys an instance this provider created. Instances that the
-  /// provider does not own (this machine) are left alone.
-  async fn destroy(&self, handle: &InstanceHandle) -> Result<(), Error>;
+  /// Destroys an instance this driver created. Instances that the driver
+  /// does not own (this machine) are left alone.
+  async fn destroy(&self, handle: &Instance) -> Result<(), Error>;
 }
 
 /// Connects to an executor and waits until it answers its health check.

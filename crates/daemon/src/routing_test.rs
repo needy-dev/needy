@@ -4,11 +4,11 @@ use needy_core::intercept::ExecContext;
 use crate::testing::{self, new_run};
 
 const PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here:
-    provider: native
+    driver: native
     path_map: { /home/agent/workspace: /srv/ws }
 commands:
   - { match: "rm **", deny: no deleting here }
@@ -97,10 +97,10 @@ async fn a_denied_command_is_refused_with_the_rules_message() {
 #[tokio::test]
 async fn an_under_rule_matches_the_ancestry_decide_carries() {
   const UNDER: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 commands:
   - { match: "python3 **", to: here }
   - { match: "python3 **", when: { under: "bash **" }, deny: under bash }
@@ -130,10 +130,10 @@ commands:
 #[tokio::test]
 async fn a_path_map_key_under_the_users_home_maps_the_actors_home() {
   const TILDE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: dev, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native, path_map: { "~/workspace": /srv/ws } }
+  here: { driver: native, path_map: { "~/workspace": /srv/ws } }
 commands:
   - { match: "python3 **", to: here }
 "#;

@@ -12,7 +12,7 @@ pub mod runner {
     #[sea_orm(primary_key, auto_increment = false)]
     pub name: String,
     /// The capabilities the runner last reported, a JSON object of each
-    /// role's runtimes or providers (`needy_core::types::Capabilities`).
+    /// role's drivers (`needy_core::types::Capabilities`).
     pub capabilities: String,
     /// The labels the runner last reported with those of its join token,
     /// a JSON object.
@@ -122,11 +122,10 @@ pub mod instance {
     pub kind: String,
     /// The runner that owns it; `None` for the control host.
     pub runner: Option<String>,
-    /// `firecracker`, `native` or `docker`.
-    pub provider: String,
-    /// The executor's runtime as `run ls` shows it: `native`, `docker`,
-    /// `runner`; `firecracker` for an actor.
-    pub runtime: String,
+    /// The driver that made it, as a profile names it (`native`,
+    /// `linux-container`, `linux-firecracker`, ...), or `runner` for a
+    /// runner's own process space, as `run ls` shows it.
+    pub driver: String,
     /// The container's name, the runner's name, `local`, or the VM's
     /// directory.
     pub handle: String,

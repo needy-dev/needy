@@ -4,9 +4,9 @@
 #[cfg(unix)]
 pub mod container;
 pub mod detect;
+pub mod driver;
 pub mod firecracker;
 pub mod gateway;
 #[cfg(unix)]
 pub mod identity;
 pub mod macos;
-pub mod runtime;

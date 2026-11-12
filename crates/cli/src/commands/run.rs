@@ -104,7 +104,7 @@ struct RunRow {
 #[derive(Serialize)]
 struct ExecutorCell {
   name: String,
-  runtime: String,
+  driver: String,
   /// The run gave it back when it stopped, finished or failed.
   released: bool,
   /// The control plane restarted and no runner reported it: whether it
@@ -134,7 +134,7 @@ impl Row for RunRow {
         (false, true) => " (released)",
         (false, false) => "",
       };
-      format!("{}={}{suffix}", e.name, e.runtime)
+      format!("{}={}{suffix}", e.name, e.driver)
     });
     // Empty while the driving program runs.
     let exit = match (&self.exit_code, &self.signal, &self.failure) {
@@ -179,7 +179,7 @@ impl TryFrom<Run> for RunRow {
         .into_iter()
         .map(|e| ExecutorCell {
           name: e.name,
-          runtime: e.runtime,
+          driver: e.driver,
           released: e.released,
           lost: e.lost,
         })

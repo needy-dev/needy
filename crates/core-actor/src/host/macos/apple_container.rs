@@ -1,10 +1,10 @@
-//! The `macos-apple-container` actor runtime: the actor in a container that
+//! The `macos-apple-container` actor driver: the actor in a container that
 //! Apple's `container` CLI runs on a Mac with Apple silicon, each container
 //! in its own lightweight VM (Virtualization.framework, Apple's default
 //! Linux kernel, `vminitd` as the VM's init).
 //!
-//! The runtime drives the CLI; the process is the boundary tests stand in
-//! for ([`Cli`]). It uses the container runtime's image, shims and channel
+//! The driver drives the CLI; the process is the boundary tests stand in
+//! for ([`Cli`]). It uses the `linux-container` driver's image, shims and channel
 //! protocol, with the transport Apple's `container` offers:
 //!
 //! - the daemon's guest and gateway sockets are mounted into the container
@@ -33,7 +33,7 @@ use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
 use crate::host::container::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir, name};
-use crate::host::runtime::{ActorRuntime, Channels, Endpoint, Error, Gap, RunningActor, Setup, Start, Terminal};
+use crate::host::driver::{Channels, Driver, Endpoint, Error, Gap, Running, Setup, Start, Terminal};
 
 /// The CLI's program name, found on `PATH`.
 pub const PROGRAM: &str = "container";
@@ -46,7 +46,7 @@ pub struct Output {
   pub stderr: String,
 }
 
-/// Apple's `container` CLI, as far as the runtime uses it. A real boundary
+/// Apple's `container` CLI, as far as the driver uses it. A real boundary
 /// (a container runtime), so tests stand in for it.
 #[async_trait::async_trait]
 pub trait Cli: Send + Sync {
@@ -66,9 +66,9 @@ pub trait Process: Send {
   fn kill(&mut self) -> std::io::Result<()>;
 }
 
-/// The `macos-apple-container` runtime: actors in containers of `image`, which
+/// The `macos-apple-container` driver: actors in containers of `image`, which
 /// must be in Apple's `container` image store.
-pub struct AppleContainer {
+pub struct MacosAppleContainer {
   pub image: String,
   cli: Arc<dyn Cli>,
 }
@@ -82,8 +82,8 @@ pub struct Launch {
   pub mem_mib: u32,
 }
 
-impl AppleContainer {
-  /// The runtime on this machine's `container` CLI. Nothing runs until it
+impl MacosAppleContainer {
+  /// The driver on this machine's `container` CLI. Nothing runs until it
   /// is used; a CLI that is missing fails each use, `check_host` first.
   pub fn new(image: String) -> Self {
     Self::with_cli(image, Arc::new(Command))
@@ -278,7 +278,7 @@ fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
 }
 
 #[async_trait::async_trait]
-impl ActorRuntime for AppleContainer {
+impl Driver for MacosAppleContainer {
   fn name(&self) -> &'static str {
     "macos-apple-container"
   }
@@ -319,15 +319,15 @@ impl ActorRuntime for AppleContainer {
     gaps(recipe)
   }
 
-  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn RunningActor>, Error> {
+  async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
     let launch = self.launch(start);
     // A container left by an earlier daemon would block the name.
     self.end_leftover(start.run).await;
-    let log = crate::host::runtime::log(start.dir);
+    let log = crate::host::driver::log(start.dir);
     let file = std::fs::File::create(&log).map_err(|source| Error::Write { path: log, source })?;
     let process = self.cli.spawn(&launch.args, file)?;
-    Ok(Box::new(Running {
-      container: AppleContainer {
+    Ok(Box::new(Started {
+      container: MacosAppleContainer {
         image: self.image.clone(),
         cli: self.cli.clone(),
       },
@@ -343,8 +343,8 @@ impl ActorRuntime for AppleContainer {
 
 /// A running actor: the `container run` process, which ends when the
 /// container does, with its exit code.
-struct Running {
-  container: AppleContainer,
+struct Started {
+  container: MacosAppleContainer,
   run: String,
   name: String,
   process: Box<dyn Process>,
@@ -354,7 +354,7 @@ struct Running {
   ended: Option<ExitStatus>,
 }
 
-impl Running {
+impl Started {
   /// Deletes the container once its process ended with `status`.
   async fn finish(&mut self, status: ExitStatus) -> ExitStatus {
     if let Some(status) = self.ended {
@@ -373,7 +373,7 @@ impl Running {
 const RUN_EXIT_WAIT: Duration = Duration::from_secs(10);
 
 #[async_trait::async_trait]
-impl RunningActor for Running {
+impl Running for Started {
   /// The host PID of the `container run` process.
   fn pid(&self) -> u32 {
     self.process.id()

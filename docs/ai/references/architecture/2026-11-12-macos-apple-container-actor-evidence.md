@@ -1,5 +1,16 @@
 # Apple `container` actor: evidence
 
+> **NOTICE (2026-11-12, migration):** the
+> [drivers design](2026-11-12-drivers-and-extension-points-design.md) renamed what this note describes, without
+> compatibility: `actor.runtime` is `actor.driver` (`firecracker` is
+> `linux-firecracker`, `container` is `linux-container`); an executor's
+> `provider` is its `driver` (`docker` is `linux-container`) and its `docker:`
+> options are `container:`; the `ActorRuntime` trait is the actor `Driver`,
+> the executor `Provider` is the executor `Driver`; capabilities read
+> `actor(linux-firecracker) executor(linux-container,native)`. The text below
+> keeps the names of its time, and its links to `examples/container` point to
+> what is now `examples/linux-container`.
+
 **Status**: evidence, 2026-11-12. Step 1 is an experiment with an actor wired
 by hand; step 2 is the `macos-apple-container` actor runtime built from it
 (`core-actor::host::macos::apple_container`), run end to end. The design is in the

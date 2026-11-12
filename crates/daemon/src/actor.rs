@@ -1,6 +1,6 @@
 //! Wires a run to its actor: the guest listener the actor's init and
 //! proxy call, the gateway its network goes through, and the actor its
-//! profile's runtime starts.
+//! profile's actor driver starts.
 //!
 //! The actor's tasks belong to its run and run under a child of the
 //! run's token, which the actor's exit also cancels: the guest listener and
@@ -14,15 +14,15 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
-use needy_config::profile::{ContainerActor, FaultKind, FileMode, Runtime, Side};
+use needy_config::profile::{ActorDriver, ContainerActor, FaultKind, FileMode, Side};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
 use needy_core::types::{Effect, Fired, Network, RunState};
-use needy_core_actor::host::container::Container;
-use needy_core_actor::host::firecracker::{self, Firecracker};
+use needy_core_actor::host::container::LinuxContainer;
+use needy_core_actor::host::driver::{self, Channels, Driver, Endpoint, HostMount, Running, Setup, Start, Terminal};
+use needy_core_actor::host::firecracker::{self, LinuxFirecracker};
 use needy_core_actor::host::gateway;
-use needy_core_actor::host::macos::apple_container::AppleContainer;
-use needy_core_actor::host::macos::vz::{self, Vz};
-use needy_core_actor::host::runtime::{self, ActorRuntime, Channels, Endpoint, HostMount, RunningActor, Setup, Start, Terminal};
+use needy_core_actor::host::macos::apple_container::MacosAppleContainer;
+use needy_core_actor::host::macos::vz::{self, MacosVz};
 use tokio_util::sync::CancellationToken;
 
 use crate::Daemon;
@@ -35,15 +35,15 @@ use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 // most for its actor.
 const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
-/// The runtime that runs this host's actors as `actor` (a profile's
+/// The driver that runs this host's actors as `actor` (a profile's
 /// `actor:`) says.
-pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn ActorRuntime>> {
-  match actor.runtime {
-    Runtime::Firecracker => Ok(Box::new(Firecracker {
+pub fn driver(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn Driver>> {
+  match actor.driver {
+    ActorDriver::LinuxFirecracker => Ok(Box::new(LinuxFirecracker {
       image: firecracker::Image::new(&daemon.config.actor_image),
       kvm: daemon.config.kvm.clone(),
     })),
-    Runtime::Container => {
+    ActorDriver::LinuxContainer => {
       // `validate::profile` refuses a container actor without its options
       // before a create gets here.
       let Some(ContainerActor {
@@ -53,35 +53,35 @@ pub fn runtime(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<
       else {
         bail!("actor.container.oci_runtime is missing");
       };
-      Ok(Box::new(Container::new(*oci_runtime, image.clone())))
+      Ok(Box::new(LinuxContainer::new(*oci_runtime, image.clone())))
     }
-    Runtime::MacosVz => Ok(Box::new(Vz {
+    ActorDriver::MacosVz => Ok(Box::new(MacosVz {
       image: vz::Image::new(&daemon.config.actor_image),
       vfkit: vz::VFKIT.into(),
     })),
-    Runtime::MacosAppleContainer => Ok(Box::new(AppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
+    ActorDriver::MacosAppleContainer => Ok(Box::new(MacosAppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
   }
 }
 
-/// Where the daemon and `run`'s actor meet, as its runtime names them.
+/// Where the daemon and `run`'s actor meet, as its driver names them.
 pub fn channels(daemon: &Daemon, run: &Run) -> Result<Channels> {
-  Ok(runtime(daemon, &run.profile.actor)?.channels(&run.dir))
+  Ok(driver(daemon, &run.profile.actor)?.channels(&run.dir))
 }
 
 /// Who sets up `run`'s mounts and identity: its actor's init or its
-/// runtime.
+/// driver.
 pub fn setup(daemon: &Daemon, run: &Run) -> Result<Setup> {
-  Ok(runtime(daemon, &run.profile.actor)?.setup())
+  Ok(driver(daemon, &run.profile.actor)?.setup())
 }
 
 /// Fails unless this host can run `run`'s actor. A create checks this
 /// before it acquires anything, so a host without KVM, or without the
 /// container's OCI runtime or image, fails at once.
 pub async fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
-  let runtime = runtime(daemon, &run.profile.actor)?;
-  runtime.check_host().await?;
+  let driver = driver(daemon, &run.profile.actor)?;
+  driver.check_host().await?;
   let mut required = Vec::new();
-  for (is_error, message) in identity_findings(runtime.as_ref(), run.recipe.as_ref()) {
+  for (is_error, message) in identity_findings(driver.as_ref(), run.recipe.as_ref()) {
     if is_error {
       required.push(message);
     } else {
@@ -94,19 +94,19 @@ pub async fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
   Ok(())
 }
 
-/// What of `recipe` (or of a plain machine) `runtime` does not present, as
+/// What of `recipe` (or of a plain machine) `driver` does not present, as
 /// findings: an error, `true`, for a field the recipe requires, a warning
 /// otherwise.
-pub fn identity_findings(runtime: &dyn ActorRuntime, recipe: Option<&needy_core::recipe::CompiledRecipe>) -> Vec<(bool, String)> {
-  runtime
+pub fn identity_findings(driver: &dyn Driver, recipe: Option<&needy_core::recipe::CompiledRecipe>) -> Vec<(bool, String)> {
+  driver
     .identity_gaps(recipe)
     .into_iter()
     .map(|gap| match gap.field {
       Some(field) if recipe.is_some_and(|r| r.required.contains(&field)) => {
-        (true, format!("the recipe requires {}, which a {} actor does not present: {}", field.as_str(), runtime.name(), gap.message))
+        (true, format!("the recipe requires {}, which a {} actor does not present: {}", field.as_str(), driver.name(), gap.message))
       }
-      Some(field) => (false, format!("{} ({}): {}", field.as_str(), runtime.name(), gap.message)),
-      None => (false, format!("{}: {}", runtime.name(), gap.message)),
+      Some(field) => (false, format!("{} ({}): {}", field.as_str(), driver.name(), gap.message)),
+      None => (false, format!("{}: {}", driver.name(), gap.message)),
     })
     .collect()
 }
@@ -139,8 +139,8 @@ pub fn mounts(run: &Run) -> Vec<HostMount> {
 /// Starts the actor of `run`: its guest listener, its gateway, then the
 /// actor itself.
 pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
-  let runtime = runtime(daemon, &run.profile.actor)?;
-  let channels = runtime.channels(&run.dir);
+  let driver = driver(daemon, &run.profile.actor)?;
+  let channels = driver.channels(&run.dir);
   let actor = run.cancel.child_token();
   if let Err(e) = serve_guest(daemon, run, &channels, &actor).await {
     actor.cancel();
@@ -150,9 +150,9 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     actor.cancel();
     return Err(e);
   }
-  // A runtime that sets the actor up from the host mounts the workspace
+  // A driver that sets the actor up from the host mounts the workspace
   // itself; a VM's init, or an Apple `container` actor's, does it inside.
-  let mounts = if runtime.setup().mounts_in_guest() {
+  let mounts = if driver.setup().mounts_in_guest() {
     Vec::new()
   } else {
     mounts(run)
@@ -164,7 +164,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     user: &run.profile.user,
     mounts: &mounts,
   };
-  let vm = match runtime.start(&start).await {
+  let vm = match driver.start(&start).await {
     Ok(vm) => vm,
     Err(e) => {
       actor.cancel();
@@ -175,7 +175,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     pid: vm.pid(),
     vcpus: vm.vcpus(),
     mem_mib: vm.mem_mib(),
-    runtime: Some(runtime.label()),
+    driver: Some(driver.label()),
   }));
   // A restarted control plane finds the VM by its PID and directory.
   let record = InstanceRecord {
@@ -185,8 +185,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     kind: InstanceKind::Actor,
     // The control plane runs it, also when placed on its own runner.
     runner: None,
-    provider: runtime.name().into(),
-    runtime: runtime.name().into(),
+    driver: driver.name().into(),
     handle: run.dir.display().to_string(),
     pid: Some(i64::from(vm.pid())),
     state: InstanceState::Running,
@@ -194,32 +193,32 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     ended_ms: None,
   };
   daemon.save_instance(&record).await;
-  let name = runtime.name();
+  let name = driver.name();
   // Under `GuestMounts` (Apple's `container`) the actor has no sensors to
   // set; `profile check` says so, and the faults are not recorded as fired.
-  if runtime.setup() == Setup::Host {
-    schedule_hwmon_faults(run, Arc::from(runtime), &actor);
+  if driver.setup() == Setup::Host {
+    schedule_hwmon_faults(run, Arc::from(driver), &actor);
   }
   run.tasks.spawn(watch(daemon.clone(), run.clone(), name, vm, actor));
   Ok(())
 }
 
-/// Schedules the run's hwmon faults on an actor whose runtime presents its
+/// Schedules the run's hwmon faults on an actor whose driver presents its
 /// sensors from the host: each sets the sensors at its time after the
 /// actor started, and is recorded in the run's trace as a VM's init records
 /// it.
-fn schedule_hwmon_faults(run: &Arc<Run>, runtime: Arc<dyn ActorRuntime>, actor: &CancellationToken) {
+fn schedule_hwmon_faults(run: &Arc<Run>, driver: Arc<dyn Driver>, actor: &CancellationToken) {
   for fault in run.injector.faults().iter().filter(|f| f.on == FaultKind::Hwmon) {
     let at = Duration::from_millis(fault.at.map(|d| d.as_millis() as u64).unwrap_or(0));
     let temp_mc = fault.set.temp_c.map(|c| (c * 1000.0) as i32).unwrap_or(100_000);
-    let (task_run, runtime, actor) = (run.clone(), runtime.clone(), actor.clone());
+    let (task_run, driver, actor) = (run.clone(), driver.clone(), actor.clone());
     run.tasks.spawn(async move {
       let run = task_run;
       tokio::select! {
         () = actor.cancelled() => return,
         () = tokio::time::sleep(at) => {}
       }
-      if let Err(e) = runtime.overheat(&run.dir, temp_mc) {
+      if let Err(e) = driver.overheat(&run.dir, temp_mc) {
         tracing::warn!("run {}: cannot apply the hwmon fault: {e}", run.id);
         return;
       }
@@ -243,7 +242,7 @@ fn schedule_hwmon_faults(run: &Arc<Run>, runtime: Arc<dyn ActorRuntime>, actor: 
 const TERMINAL_WAIT: Duration = Duration::from_secs(60);
 
 /// The process service of `run`'s actor for its driving program on a
-/// terminal, reached the way its runtime says (the VM's vsock device under
+/// terminal, reached the way its driver says (the VM's vsock device under
 /// Firecracker). Waits for the actor to serve it while the run runs.
 pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, ControlError> {
   let channels = channels(daemon, run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
@@ -387,15 +386,15 @@ fn serve_gateway(run: &Run, channels: &Channels, actor: &CancellationToken) -> R
 /// `dir`: those its channels leave there (the vsock device's and the host
 /// ports' the guest connects to, under Firecracker).
 pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir: &Path) {
-  let runtime = match runtime(daemon, actor) {
-    Ok(runtime) => runtime,
-    // An actor whose runtime this daemon lacks never started and left none.
+  let driver = match driver(daemon, actor) {
+    Ok(driver) => driver,
+    // An actor whose driver this daemon lacks never started and left none.
     Err(e) => {
       tracing::debug!("no actor sockets to remove from {}: {e:#}", dir.display());
       return;
     }
   };
-  for path in runtime.channels(dir).sockets {
+  for path in driver.channels(dir).sockets {
     if let Err(e) = std::fs::remove_file(&path)
       && e.kind() != std::io::ErrorKind::NotFound
     {
@@ -408,8 +407,8 @@ pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir
 /// the driving program, then stops the actor's tasks and finishes the run.
 /// An actor that exits before the driving program reported its exit fails
 /// the run instead, with the actor's exit and the end of its log as the
-/// reason. `name` is the actor's runtime.
-async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dyn RunningActor>, actor: CancellationToken) {
+/// reason. `name` is the actor's driver.
+async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dyn Running>, actor: CancellationToken) {
   let waited = tokio::select! {
     waited = vm.wait() => waited,
     () = actor.cancelled() => {
@@ -444,7 +443,7 @@ async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dy
       tracing::debug!("run {}: {refused}", run.id);
     }
   } else {
-    let reason = vm_failure(name, &exit, &runtime::log(&run.dir));
+    let reason = vm_failure(name, &exit, &driver::log(&run.dir));
     tracing::warn!("run {} failed: {reason}", run.id);
     run.fail(reason);
   }
@@ -466,7 +465,7 @@ const FAILURE_LOG_LINES: usize = 5;
 
 /// Why a run whose VM exited before its driving program did failed: the
 /// VM's exit and the last lines of the log Firecracker and the guest's
-/// console share, on one line. `name` is the actor's runtime.
+/// console share, on one line. `name` is the actor's driver.
 fn vm_failure(name: &str, exit: &ActorVmExit, log: &Path) -> String {
   let status = match exit {
     ActorVmExit {

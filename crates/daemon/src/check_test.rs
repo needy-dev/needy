@@ -59,7 +59,7 @@ fn messages(check: &ProfileCheck) -> Vec<String> {
   check.findings.iter().map(|f| format!("{}: {}", if f.error { "error" } else { "warning" }, f.message)).collect()
 }
 
-const CONTAINER_ACTOR: &str = "actor: { runtime: container, container: { oci_runtime: runc }, recipe: ./machine.yaml }\n\
+const CONTAINER_ACTOR: &str = "actor: { driver: linux-container, container: { oci_runtime: runc }, recipe: ./machine.yaml }\n\
   executors: { here: {} }\ncommands: [{ match: \"python3 **\", to: here }]";
 
 async fn check_container(served: &Served, recipe: &str) -> ProfileCheck {
@@ -71,14 +71,14 @@ async fn check_container(served: &Served, recipe: &str) -> ProfileCheck {
 }
 
 #[tokio::test]
-async fn a_container_actor_is_warned_about_what_its_runtime_does_not_present() {
+async fn a_container_actor_is_warned_about_what_its_driver_does_not_present() {
   let served = control().await;
 
   let check = check_container(&served, "extends: builtin:gce-ubuntu-22.04").await;
 
   let messages = messages(&check);
   assert!(
-    messages.iter().any(|m| m.starts_with("warning: actor: cpuid (container): the CPUID instruction shows the host's CPU")),
+    messages.iter().any(|m| m.starts_with("warning: actor: cpuid (linux-container): the CPUID instruction shows the host's CPU")),
     "{messages:?}"
   );
   assert!(messages.iter().any(|m| m.starts_with("warning: actor: a container actor routes by shims")), "{messages:?}");
@@ -92,7 +92,7 @@ async fn a_field_the_recipe_requires_and_a_container_cannot_present_is_an_error(
 
   let messages = messages(&check);
   assert!(
-    messages.iter().any(|m| m.starts_with("error: actor: the recipe requires cpuid, which a container actor does not present")),
+    messages.iter().any(|m| m.starts_with("error: actor: the recipe requires cpuid, which a linux-container actor does not present")),
     "{messages:?}"
   );
 }
@@ -100,10 +100,10 @@ async fn a_field_the_recipe_requires_and_a_container_cannot_present_is_an_error(
 #[tokio::test]
 async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_scheduled_on() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
-  report_host(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")], host_without_avx512()).await;
+  let _kvm = runner(&served, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[("kvm", "")]).await;
+  report_host(&served, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[("kvm", "")], host_without_avx512()).await;
 
-  let check = check(&served, "actor: { runtime: firecracker, runner: { labels: [kvm] }, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker, runner: { labels: [kvm] }, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
 
   assert_eq!(check.actor, Some(Placement::Runner("kvm".into())));
   assert_eq!(check.actor_cpu, "Example CPU without AVX-512");
@@ -119,16 +119,16 @@ async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_schedu
 #[tokio::test]
 async fn executor_selectors_resolve_to_runners_or_the_control_host() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[("kvm", "")]).await;
+  let _kvm = runner(&served, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[("kvm", "")]).await;
   let _mac = runner(&served, "mac", "executor(native)", &[("os", "darwin")]).await;
 
   let check = check(
     &served,
     r#"
-actor: { runtime: firecracker, runner: kvm }
+actor: { driver: linux-firecracker, runner: kvm }
 executors:
   mac: { runner: { labels: [os=darwin] }, path_map: { /home/agent: /Users/user/work } }
-  build: { runner: kvm, provider: docker }
+  build: { runner: kvm, driver: linux-container }
   here: {}
 "#,
   )
@@ -148,7 +148,7 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
 
   let check = check(
     &served,
-    "actor: { runtime: firecracker }\nexecutors:\n  linux: { runner: { labels: [os=linux] } }\n  gone: { runner: windows }\n",
+    "actor: { driver: linux-firecracker }\nexecutors:\n  linux: { runner: { labels: [os=linux] } }\n  gone: { runner: windows }\n",
   )
   .await;
 
@@ -165,9 +165,9 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
 #[tokio::test]
 async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding() {
   let served = control().await;
-  let _far = runner(&served, "far", "actor(firecracker)", &[]).await;
+  let _far = runner(&served, "far", "actor(linux-firecracker)", &[]).await;
 
-  let check = check(&served, "actor: { runtime: firecracker, runner: far }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker, runner: far }").await;
 
   assert_eq!(check.actor, Some(Placement::Runner("far".into())));
   let found = messages(&check);
@@ -176,40 +176,42 @@ async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_findi
 }
 
 #[tokio::test]
-async fn docker_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding() {
+async fn linux_container_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding() {
   let served = control().await;
-  let _mac = runner(&served, "mac", "executor(docker,native)", &[]).await;
+  let _mac = runner(&served, "mac", "executor(linux-container,native)", &[]).await;
 
-  let check = check(&served, "actor: { runtime: firecracker }\nexecutors: { build: { runner: mac, provider: docker } }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker }\nexecutors: { build: { runner: mac, driver: linux-container } }").await;
 
   let found = messages(&check);
   assert_eq!(found.len(), 1, "{found:?}");
-  assert!(found[0].starts_with("error: executors.build: runner mac cannot create Docker executors yet"), "{found:?}");
+  assert!(found[0].starts_with("error: executors.build: runner mac cannot create linux-container executors yet"), "{found:?}");
 }
 
 #[tokio::test]
-async fn docker_on_a_runner_without_docker_is_an_error_finding_naming_the_runners_with_docker() {
+async fn linux_container_on_a_runner_without_it_is_an_error_finding_naming_the_runners_with_it() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[]).await;
   let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
-  let check = check(&served, "actor: { runtime: firecracker }\nexecutors: { build: { runner: mac, provider: docker } }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker }\nexecutors: { build: { runner: mac, driver: linux-container } }").await;
 
   assert!(!check.executors.contains_key("build"));
   assert_eq!(
     messages(&check),
-    ["error: executors.build: runner mac cannot host executor(docker): it has executor(native); runners with executor(docker): kvm"]
+    [
+      "error: executors.build: runner mac cannot host executor(linux-container): it has executor(native); runners with executor(linux-container): kvm"
+    ]
   );
 }
 
 #[tokio::test]
 async fn a_runner_that_reported_no_host_skips_the_recipe_checks_with_a_warning() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", "actor(firecracker)", &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(linux-firecracker)", &[]).await;
   // As after a restart of the control plane, before the next heartbeat.
   served.daemon().runner_hosts.lock().unwrap().clear();
 
-  let check = check(&served, "actor: { runtime: firecracker, runner: kvm, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker, runner: kvm, recipe: \"builtin:gce-ubuntu-22.04\" }").await;
 
   assert_eq!(check.actor_cpu, "");
   assert_eq!(messages(&check), ["warning: runner kvm has not reported its host yet; the recipe's host checks are skipped"]);
@@ -229,13 +231,13 @@ async fn a_runner_that_reported_no_host_skips_the_recipe_checks_with_a_warning()
 #[tokio::test]
 async fn a_native_executor_on_another_runner_without_a_path_map_for_the_actors_directory_is_a_warning() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", "actor(firecracker) executor(docker,native)", &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[]).await;
   let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
   let check = check(
     &served,
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 executors:
   mac: { runner: mac, workspace: /Users/user/work }
   mapped: { runner: mac, path_map: { /home/agent: /Users/user/work } }
@@ -261,7 +263,7 @@ async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
 
   let check = check(
     &served,
-    "actor: { runtime: firecracker, cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n",
+    "actor: { driver: linux-firecracker, cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n",
   )
   .await;
 
@@ -286,7 +288,7 @@ async fn a_path_map_key_under_the_users_home_covers_the_actors_cwd() {
   let check = check(
     &served,
     r#"
-actor: { runtime: firecracker, cwd: ~/workspace/project }
+actor: { driver: linux-firecracker, cwd: ~/workspace/project }
 user: { name: dev, uid: 1000, gid: 1000 }
 executors:
   workspace: { runner: mac, path_map: { "~/workspace": /Users/user/work } }
@@ -320,7 +322,7 @@ async fn a_control_host_without_kvm_is_an_error_finding_naming_it() {
   let kvm = served.dir().join("kvm");
   std::fs::remove_file(&kvm).unwrap();
 
-  let check = check(&served, "actor: { runtime: firecracker, command: [sh] }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker, command: [sh] }").await;
 
   let found = messages(&check);
   assert_eq!(found.len(), 1, "{found:?}");
@@ -333,10 +335,10 @@ async fn a_control_host_without_kvm_is_an_error_finding_naming_it() {
 #[tokio::test]
 async fn the_control_hosts_own_runner_without_kvm_is_an_error_finding_naming_it() {
   let served = control().await;
-  let _kvm = runner(&served, "kvm", "actor(firecracker)", &[]).await;
+  let _kvm = runner(&served, "kvm", "actor(linux-firecracker)", &[]).await;
   std::fs::remove_file(served.dir().join("kvm")).unwrap();
 
-  let check = check(&served, "actor: { runtime: firecracker, runner: kvm }").await;
+  let check = check(&served, "actor: { driver: linux-firecracker, runner: kvm }").await;
 
   let found = messages(&check);
   assert_eq!(found.len(), 1, "{found:?}");
@@ -366,9 +368,12 @@ async fn a_container_actor_without_its_options_is_refused_and_not_checked_for_kv
   let served = control().await;
   std::fs::remove_file(served.dir().join("kvm")).unwrap();
 
-  let check = check(&served, "actor: { runtime: container }").await;
+  let check = check(&served, "actor: { driver: linux-container }").await;
 
-  assert_eq!(messages(&check), ["error: actor.container: a container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]);
+  assert_eq!(
+    messages(&check),
+    ["error: actor.container: a linux-container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)"]
+  );
 }
 
 // Apple's `container` exists on macOS only; `profile check` elsewhere says
@@ -379,7 +384,7 @@ async fn a_container_actor_without_its_options_is_refused_and_not_checked_for_kv
 async fn an_macos_apple_container_actor_off_a_mac_is_an_error_that_says_why() {
   let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
 
-  let check = check(&served, "actor: { runtime: macos-apple-container }").await;
+  let check = check(&served, "actor: { driver: macos-apple-container }").await;
 
   let messages = messages(&check);
   assert!(
@@ -392,8 +397,8 @@ async fn an_macos_apple_container_actor_off_a_mac_is_an_error_that_says_why() {
 async fn an_oci_runtime_on_an_macos_apple_container_actor_is_refused() {
   let served = control().await;
 
-  let check = check(&served, "actor: { runtime: macos-apple-container, container: { oci_runtime: runc } }").await;
+  let check = check(&served, "actor: { driver: macos-apple-container, container: { oci_runtime: runc } }").await;
 
   let messages = messages(&check);
-  assert!(messages.iter().any(|m| m.starts_with("error: actor.container.oci_runtime is for `runtime: container`")), "{messages:?}");
+  assert!(messages.iter().any(|m| m.starts_with("error: actor.container.oci_runtime is for `driver: linux-container`")), "{messages:?}");
 }

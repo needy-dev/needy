@@ -397,7 +397,7 @@ impl Processes for Daemon {
     // asked once.
     let mut asked: Vec<(&'static str, String)> = Vec::new();
     for instance in instances {
-      let executor = (instance.handle.runtime, instance.handle.id.clone());
+      let executor = (instance.handle.driver, instance.handle.id.clone());
       if asked.contains(&executor) {
         continue;
       }

@@ -1,7 +1,7 @@
-//! `needy build`: builds the actor image this host's VM runtime boots (the
+//! `needy build`: builds the actor image this host's VM driver boots (the
 //! Firecracker actor's on Linux, the `macos-vz` actor's on Apple silicon macOS)
-//! and, with `--container` and `--executor`, the container actor and
-//! executor Docker images from `images/Dockerfile`, through the Docker API
+//! and, with `--linux-container` and `--executor`, the container actor and
+//! executor images from `images/Dockerfile`, through the Docker API
 //! with BuildKit. With `--macos-apple-container` it builds the container actor
 //! image for linux/arm64 instead of the VM's, and loads it into Apple's
 //! `container`.
@@ -38,11 +38,11 @@ pub struct Args {
   /// Also build the `needy-executor` Docker image.
   #[arg(long)]
   executor: bool,
-  /// Also build the `needy-actor` Docker image, the container actor's.
+  /// Also build the `needy-actor` image, the `linux-container` actor's.
   #[arg(long)]
-  container: bool,
+  linux_container: bool,
   /// Build the `needy-actor` image for linux/arm64 and load it into Apple's
-  /// `container`, for `actor.runtime: macos-apple-container` on a Mac with Apple
+  /// `container`, for `actor.driver: macos-apple-container` on a Mac with Apple
   /// silicon, instead of the VM actor image.
   #[arg(long, conflicts_with_all = ["recipe", "out"])]
   macos_apple_container: bool,
@@ -75,7 +75,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   } else {
     build_vm_image(&docker, &context, &out, build_args).await?;
   }
-  if args.container {
+  if args.linux_container {
     build(
       &docker,
       &context,
@@ -115,7 +115,7 @@ fn actor_target() -> (&'static str, &'static str) {
   }
 }
 
-/// Builds the actor image this host's VM runtime boots, with the recipe's
+/// Builds the actor image this host's VM driver boots, with the recipe's
 /// kernel `build_args`, into `out`.
 async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args: HashMap<String, String>) -> Result<()> {
   std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
@@ -187,8 +187,8 @@ async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratc
 
 #[cfg(unix)]
 async fn load_into_apple_container(image: &str, archive: &Path) -> Result<()> {
-  let runtime = needy_core_actor::host::macos::apple_container::AppleContainer::new(image.into());
-  Ok(runtime.load(archive).await?)
+  let driver = needy_core_actor::host::macos::apple_container::MacosAppleContainer::new(image.into());
+  Ok(driver.load(archive).await?)
 }
 
 #[cfg(not(unix))]

@@ -7,10 +7,10 @@ use needy_core::types::RunState;
 use crate::testing::{self, fake_image, new_run, running};
 
 const PROFILE: &str = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  here: { provider: native }
+  here: { driver: native }
 commands:
   - { match: "**", to: here }
 "#;
@@ -173,7 +173,7 @@ async fn a_vm_that_exits_before_its_driving_program_fails_the_run_with_the_reaso
 
   assert_eq!(info.state, RunState::Failed);
   let failure = info.failure.unwrap_or_default();
-  assert!(failure.starts_with("the actor exited before its driving program did: firecracker exited with code 1"), "{failure}");
+  assert!(failure.starts_with("the actor exited before its driving program did: linux-firecracker exited with code 1"), "{failure}");
   assert!(failure.contains("Template changes a CPUID entry not supported by KVM: Leaf: 7, Subleaf: 1"), "{failure}");
 
   // A stop keeps the failure and flushes the trace.
@@ -211,7 +211,7 @@ async fn an_actor_on_a_host_without_kvm_fails_the_create_at_once() {
   // A user with only the binary is told what works without KVM, not
   // pointed at a design note in the repository.
   assert!(
-    message.contains("Without KVM, use a container actor (`actor: { runtime: container, container: { oci_runtime: runsc } }`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`"),
+    message.contains("Without KVM, use a linux-container actor (`actor: { driver: linux-container, container: { oci_runtime: runsc } }`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`"),
     "{message}"
   );
   assert!(!message.contains("docs/"), "{message}");
@@ -240,12 +240,12 @@ async fn a_create_without_kvm_fails_before_it_acquires_executors() {
   let daemon = &started.daemon;
   fake_image(&started.dir.path().join("image"), LONG_RUNNING);
   std::fs::remove_file(started.dir.path().join("kvm")).unwrap();
-  // Acquiring `far` fails: no provider creates Firecracker executors.
+  // Acquiring `far` fails: the operator allows no privileged container.
   let profile = r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
-  far: { provider: firecracker }
+  far: { driver: linux-container, container: { privileged: true } }
 commands:
   - { match: "**", to: far }
 "#;

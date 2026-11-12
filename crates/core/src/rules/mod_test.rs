@@ -43,8 +43,8 @@ fn profile(yaml: &str) -> Profile {
 fn composition_example_from_the_doc() {
   let p = profile(
     r#"
-actor: { runtime: firecracker }
-executors: { build: { provider: docker }, mac: { runner: mac } }
+actor: { driver: linux-firecracker }
+executors: { build: { driver: linux-container }, mac: { runner: mac } }
 presets:
   clean-env: { env: { clear: true, pass: [PATH, HOME, LANG, TERM] } }
   mac:       { to: mac }
@@ -102,7 +102,7 @@ commands:
 fn env_args_wrap_exec_and_cwd() {
   let p = profile(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 commands:
   - match: "pytest **"
     args: { append: [-p, no:cacheprovider] }
@@ -138,7 +138,7 @@ commands:
 fn when_conditions() {
   let p = profile(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 default_executor: build
 commands:
   - { match: "node **", when: { cwd: "/home/agent/workspace/**" }, to: a }
@@ -168,7 +168,7 @@ commands:
 
 #[test]
 fn builtin_launchers() {
-  let p = profile("actor: { runtime: firecracker }\ncommands: [{ match: \"git **\", to: build }]");
+  let p = profile("actor: { driver: linux-firecracker }\ncommands: [{ match: \"git **\", to: build }]");
   for cmd in [
     "env -i FOO=1 git status",
     "sudo -u root git status",
@@ -197,7 +197,7 @@ fn builtin_launchers() {
 fn user_resolvers() {
   let p = profile(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 resolvers:
   - { match: "mytool run {script} **", effective: "{script} **" }
   - { match: "make **", sticky: true }
@@ -217,7 +217,7 @@ fn shell_scripts() {
   let mut c = ctx("x");
   let p = profile(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 unknown: actor
 commands:
   - { match: "{git,make} **", to: build }
@@ -242,7 +242,7 @@ commands:
   c.argv = vec!["bash".into(), "-c".into(), "CI=1 'git' \"log\" -1".into()];
   assert_eq!(decide(&p, &c).outcome, on("build"));
 
-  let sticky = profile("actor: { runtime: firecracker }\nunknown: build\ncommands: [{ match: \"git **\", to: build }]");
+  let sticky = profile("actor: { driver: linux-firecracker }\nunknown: build\ncommands: [{ match: \"git **\", to: build }]");
   c.argv = vec!["sh".into(), "-c".into(), "git log > out".into()];
   assert_eq!(decide(&sticky, &c).outcome, on("build"));
 }
@@ -250,16 +250,16 @@ commands:
 #[test]
 fn route_names_from_rules() {
   let p = profile(
-    "actor: { runtime: firecracker }\ncommands:\n  - { match: \"{git,make} **\", to: build }\n  - { match: uname, to: actor }\n  - { match: \"cargo **\", executor: build }\n",
+    "actor: { driver: linux-firecracker }\ncommands:\n  - { match: \"{git,make} **\", to: build }\n  - { match: uname, to: actor }\n  - { match: \"cargo **\", executor: build }\n",
   );
   let names = route_names(&p).unwrap();
   assert!(names.contains(&"git".to_string()));
   assert!(names.contains(&"cargo".to_string()));
   assert!(names.contains(&"bash".to_string()));
   assert!(names.contains(&"uname".to_string()), "a rule placing on the actor is still asked about");
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: \"**\", to: build }]")), None);
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ndefault_executor: build")), None);
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }")), Some(vec![]));
+  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }\ncommands: [{ match: \"**\", to: build }]")), None);
+  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }\ndefault_executor: build")), None);
+  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }")), Some(vec![]));
 }
 
 // ROOT CAUSE:
@@ -273,28 +273,29 @@ fn route_names_from_rules() {
 // The fix keeps the name of every rule's command on the list.
 #[test]
 fn route_names_include_rules_without_a_placement() {
-  let deny = profile("actor: { runtime: firecracker }\ncommands: [{ match: \"rm -rf **\", deny: \"not here\" }]");
+  let deny = profile("actor: { driver: linux-firecracker }\ncommands: [{ match: \"rm -rf **\", deny: \"not here\" }]");
   let names = route_names(&deny).unwrap();
   assert!(names.contains(&"rm".to_string()), "{names:?}");
   assert!(names.contains(&"sh".to_string()), "a shell may run the denied command: {names:?}");
 
-  let env = profile("actor: { runtime: firecracker }\ncommands: [{ match: \"npm **\", env: { set: { CI: \"1\" } } }]");
+  let env = profile("actor: { driver: linux-firecracker }\ncommands: [{ match: \"npm **\", env: { set: { CI: \"1\" } } }]");
   assert!(route_names(&env).unwrap().contains(&"npm".to_string()));
 
-  let preset =
-    profile("actor: { runtime: firecracker }\npresets: { quiet: { timeout: 5s } }\ncommands: [{ match: \"{curl,wget} **\", use: [quiet] }]");
+  let preset = profile(
+    "actor: { driver: linux-firecracker }\npresets: { quiet: { timeout: 5s } }\ncommands: [{ match: \"{curl,wget} **\", use: [quiet] }]",
+  );
   let names = route_names(&preset).unwrap();
   assert!(names.contains(&"curl".to_string()) && names.contains(&"wget".to_string()), "{names:?}");
 
   // A pattern that may match any program still asks about every exec.
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\ncommands: [{ match: \"** --force\", deny: no }]")), None);
+  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }\ncommands: [{ match: \"** --force\", deny: no }]")), None);
 }
 
 #[test]
 fn files_and_faults_accumulate() {
   let p = profile(
     r#"
-actor: { runtime: firecracker }
+actor: { driver: linux-firecracker }
 commands:
   - { match: "**", files: [a] }
   - match: "xcodebuild **"
@@ -319,25 +320,29 @@ commands:
 #[test]
 fn route_names_include_exec_fault_commands() {
   let p = profile(
-    "actor: { runtime: firecracker }\nchaos: { faults: [{ on: exec, match: \"curl **\", errno: ECONNREFUSED }, { on: net.connect, match: \"example.com\", errno: ECONNREFUSED }] }\n",
+    "actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"curl **\", errno: ECONNREFUSED }, { on: net.connect, match: \"example.com\", errno: ECONNREFUSED }] }\n",
   );
   let names = route_names(&p).unwrap();
   assert!(names.contains(&"curl".to_string()), "{names:?}");
   assert!(names.contains(&"sh".to_string()), "a shell may run the faulted command: {names:?}");
   assert!(!names.contains(&"example.com".to_string()), "{names:?}");
 
-  let alternatives = profile("actor: { runtime: firecracker }\nchaos: { faults: [{ on: exec, match: \"{wget,git} **\", delay: 1s }] }\n");
+  let alternatives =
+    profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"{wget,git} **\", delay: 1s }] }\n");
   let names = route_names(&alternatives).unwrap();
   assert!(names.contains(&"wget".to_string()) && names.contains(&"git".to_string()), "{names:?}");
 
   // An exec fault without a pattern, or with one that may match any program,
   // applies to every exec.
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\nchaos: { faults: [{ on: exec, errno: EIO }] }\n")), None);
+  assert_eq!(route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, errno: EIO }] }\n")), None);
   assert_eq!(
-    route_names(&profile("actor: { runtime: firecracker }\nchaos: { faults: [{ on: exec, match: \"** --force\", errno: EIO }] }\n")),
+    route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: exec, match: \"** --force\", errno: EIO }] }\n")),
     None
   );
 
   // Faults on other hook points do not route execs.
-  assert_eq!(route_names(&profile("actor: { runtime: firecracker }\nchaos: { faults: [{ on: file.open, errno: EIO }] }\n")), Some(vec![]));
+  assert_eq!(
+    route_names(&profile("actor: { driver: linux-firecracker }\nchaos: { faults: [{ on: file.open, errno: EIO }] }\n")),
+    Some(vec![])
+  );
 }

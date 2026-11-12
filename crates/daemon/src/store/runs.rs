@@ -67,10 +67,10 @@ pub struct InstanceRecord {
   pub kind: InstanceKind,
   /// The runner that owns it; `None` for the control host.
   pub runner: Option<String>,
-  /// `firecracker`, `native` or `docker`.
-  pub provider: String,
-  /// As `run ls` shows it: `native`, `docker`, `runner`, `firecracker`.
-  pub runtime: String,
+  /// The driver that made it, as a profile names it (`linux-firecracker`,
+  /// `native`, `linux-container`, ...), or `runner` for a runner's own
+  /// process space; `run ls` shows it.
+  pub driver: String,
   /// The container's name, the runner's name or `local`; the VM's
   /// directory for an actor.
   pub handle: String,
@@ -175,8 +175,7 @@ impl Store {
       name: record.name.clone(),
       kind: word(&record.kind)?,
       runner: record.runner.clone(),
-      provider: record.provider.clone(),
-      runtime: record.runtime.clone(),
+      driver: record.driver.clone(),
       handle: record.handle.clone(),
       pid: record.pid,
       state: word(&record.state)?,
@@ -309,8 +308,7 @@ fn instance_of(row: instance::Model) -> Result<InstanceRecord> {
     run: row.run,
     name: row.name,
     runner: row.runner,
-    provider: row.provider,
-    runtime: row.runtime,
+    driver: row.driver,
     handle: row.handle,
     pid: row.pid,
     created_ms: row.created_ms,

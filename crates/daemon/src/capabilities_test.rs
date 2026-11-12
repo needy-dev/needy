@@ -29,10 +29,10 @@ fn mac() -> Facts {
 }
 
 #[test]
-fn a_kvm_host_with_docker_hosts_both_actor_runtimes_and_docker_and_native_executors() {
+fn a_kvm_host_with_docker_hosts_both_actor_drivers_and_both_executor_drivers() {
   let detected = detect(&kvm_host());
 
-  assert_eq!(detected.capabilities.to_string(), "actor(container,firecracker) executor(docker,native)");
+  assert_eq!(detected.capabilities.to_string(), "actor(linux-container,linux-firecracker) executor(linux-container,native)");
   assert_eq!(
     detected.missing,
     [
@@ -50,9 +50,9 @@ fn a_machine_without_kvm_or_docker_hosts_native_executors_only() {
   assert_eq!(
     detected.missing,
     [
-      "actor(firecracker): Firecracker runs on Linux only",
-      "executor(docker): no Docker daemon answers",
-      "actor(container): no Docker daemon answers",
+      "actor(linux-firecracker): Firecracker runs on Linux only",
+      "executor(linux-container): no Docker daemon answers",
+      "actor(linux-container): no Docker daemon answers",
       "actor(macos-vz): cannot run vfkit",
       "actor(macos-apple-container): Apple's `container` CLI is not on PATH",
     ]
@@ -83,7 +83,7 @@ fn a_docker_daemon_without_kvm_hosts_container_actors() {
     macos_apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
   };
 
-  assert_eq!(detect(&facts).capabilities.to_string(), "actor(container) executor(docker,native)");
+  assert_eq!(detect(&facts).capabilities.to_string(), "actor(linux-container) executor(linux-container,native)");
 }
 
 #[test]
@@ -92,9 +92,12 @@ fn roles_restrict_what_was_detected() {
 
   let (capabilities, warnings) = restrict(&detect(&kvm_host()), Some(&roles));
 
-  assert_eq!(capabilities.to_string(), "executor(docker,native)");
+  assert_eq!(capabilities.to_string(), "executor(linux-container,native)");
   assert!(warnings.is_empty(), "{warnings:?}");
-  assert_eq!(restrict(&detect(&kvm_host()), None).0.to_string(), "actor(container,firecracker) executor(docker,native)");
+  assert_eq!(
+    restrict(&detect(&kvm_host()), None).0.to_string(),
+    "actor(linux-container,linux-firecracker) executor(linux-container,native)"
+  );
 }
 
 #[test]
@@ -107,8 +110,8 @@ fn a_role_the_machine_cannot_host_is_warned_about_and_not_added() {
   assert_eq!(
     warnings,
     [
-      "--roles names actor, which this machine cannot host (actor(firecracker): Firecracker runs on Linux only; \
-      actor(container): no Docker daemon answers; actor(macos-vz): cannot run vfkit; actor(macos-apple-container): Apple's `container` CLI is \
+      "--roles names actor, which this machine cannot host (actor(linux-firecracker): Firecracker runs on Linux only; \
+      actor(linux-container): no Docker daemon answers; actor(macos-vz): cannot run vfkit; actor(macos-apple-container): Apple's `container` CLI is \
       not on PATH); it is left out"
     ]
   );

@@ -178,81 +178,79 @@ impl std::str::FromStr for RunnerRole {
 #[error("unknown runner role {0:?}; known roles are actor and executor")]
 pub struct UnknownRole(pub String);
 
-/// How a runner can run an actor.
+/// How a runner can run an actor: an actor driver it has.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ActorRuntime {
+#[serde(rename_all = "kebab-case")]
+pub enum ActorDriver {
   /// A Firecracker microVM: a usable KVM and the actor image.
-  Firecracker,
-  /// A container through a Docker daemon that answers. Which OCI runtimes
-  /// (`runc`, gVisor's `runsc`) it has is checked when a run is created.
+  LinuxFirecracker,
+  /// A container through a Docker-compatible engine that answers. Which OCI
+  /// runtimes (`runc`, gVisor's `runsc`) it has is checked when a run is
+  /// created.
   // TODO(runner-actor): the capability does not carry the OCI runtimes; it
   // needs to once actors run on runners other than the control host's own,
-  // which probes its Docker directly.
-  Container,
+  // which probes its engine directly.
+  LinuxContainer,
   /// A Virtualization.framework VM through vfkit: Apple silicon macOS,
   /// vfkit on `PATH` and the `macos-vz` actor image (`Image`, `rootfs.ext4`).
-  #[serde(rename = "macos-vz")]
   MacosVz,
   /// Apple's `container` CLI on a Mac, whose services answer. Whether the
   /// container actor image is in its image store is checked when a run is
   /// created.
-  #[serde(rename = "macos-apple-container")]
   MacosAppleContainer,
 }
 
-impl ActorRuntime {
+impl ActorDriver {
   pub fn as_str(self) -> &'static str {
     match self {
-      Self::Firecracker => "firecracker",
-      Self::Container => "container",
+      Self::LinuxFirecracker => "linux-firecracker",
+      Self::LinuxContainer => "linux-container",
       Self::MacosVz => "macos-vz",
       Self::MacosAppleContainer => "macos-apple-container",
     }
   }
 }
 
-impl fmt::Display for ActorRuntime {
+impl fmt::Display for ActorDriver {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
   }
 }
 
-/// How a runner can create an executor. A profile's `provider:` names one;
-/// the providers no runner reports (`containerd`, `firecracker`, `k8s`) are
-/// refused when a run is created.
+/// How a runner can create an executor: an executor driver it has. A
+/// profile's `driver:` names one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExecutorProvider {
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutorDriver {
   /// The runner's own process space; every runner has it.
   Native,
-  /// A container the runner's Docker daemon creates.
-  Docker,
+  /// A container the runner's Docker-compatible engine creates.
+  LinuxContainer,
 }
 
-impl ExecutorProvider {
+impl ExecutorDriver {
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Native => "native",
-      Self::Docker => "docker",
+      Self::LinuxContainer => "linux-container",
     }
   }
 }
 
-impl fmt::Display for ExecutorProvider {
+impl fmt::Display for ExecutorDriver {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
   }
 }
 
-/// What a runner can host: each role with its runtimes or providers. It
-/// holds a role when that role has at least one. Written as
-/// `actor(firecracker) executor(docker,native)`.
+/// What a runner can host: each role with its drivers. It holds a role when
+/// that role has at least one. Written as
+/// `actor(linux-firecracker) executor(linux-container,native)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Capabilities {
-  pub actor: BTreeSet<ActorRuntime>,
-  pub executor: BTreeSet<ExecutorProvider>,
+  pub actor: BTreeSet<ActorDriver>,
+  pub executor: BTreeSet<ExecutorDriver>,
 }
 
 impl Capabilities {
@@ -292,7 +290,7 @@ impl Capabilities {
 
 impl fmt::Display for Capabilities {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    // Each role's runtimes or providers by name, as the CLI lists them.
+    // Each role's drivers by name, as the CLI lists them.
     fn role<T: fmt::Display>(role: RunnerRole, kinds: &BTreeSet<T>) -> Option<String> {
       let mut names: Vec<String> = kinds.iter().map(T::to_string).collect();
       names.sort();

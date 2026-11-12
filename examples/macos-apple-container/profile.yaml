@@ -6,7 +6,7 @@
 # create the executor's directory first: `mkdir -p /tmp/needy-apple-ws`.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
-  runtime: macos-apple-container
+  driver: macos-apple-container
   recipe: ../opencode/gce.recipe.yaml
   network:
     allow: [example.com]
@@ -28,7 +28,7 @@ actor:
       curl -sS -o /dev/null https://example.org/; echo "example.org exit=$?"
 executors:
   build:
-    provider: native
+    driver: native
     workspace: /tmp/needy-apple-ws
     path_map: { /home/agent/workspace: /tmp/needy-apple-ws }
 commands:

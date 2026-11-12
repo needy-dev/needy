@@ -2,7 +2,7 @@
 //! their slots.
 //!
 //! Runs whose executor key renders equal share one instance. The pool
-//! creates an instance through its provider on the first
+//! creates an instance through its executor driver on the first
 //! [`Pool::acquire`] and destroys it when the last holder releases it. An
 //! instance with `max_procs` has that many slots; a command takes one for as
 //! long as it runs, and `on_full` decides what a command does when none is
@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::ControlError;
 use needy_config::profile::{self, OnFull};
-use needy_core_executor::provider::{Docker, InstanceHandle, InstanceSpec, Native, Provider, sftp_command};
+use needy_core_executor::driver::{self, Driver, LinuxContainer, Native, Spec, sftp_command};
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
 use crate::link::{Links, RunnerExecutor};
@@ -26,10 +26,10 @@ pub struct Instance {
   pub name: String,
   /// The pool key; empty for this machine's own instance.
   pub key: String,
-  pub handle: InstanceHandle,
-  /// The provider that created the instance and destroys it; `None` for a
+  pub handle: driver::Instance,
+  /// The driver that created the instance and destroys it; `None` for a
   /// runner's machine, which nothing creates.
-  provider: Option<Arc<dyn Provider>>,
+  driver: Option<Arc<dyn Driver>>,
   /// Actor path prefix to executor path prefix.
   pub path_map: BTreeMap<String, String>,
   slots: Option<Arc<Semaphore>>,
@@ -48,7 +48,7 @@ impl Instance {
       name: "local".into(),
       key: String::new(),
       handle: native.machine(),
-      provider: Some(native.clone()),
+      driver: Some(native.clone()),
       path_map: BTreeMap::new(),
       slots: None,
       on_full: OnFull::Wait,
@@ -64,7 +64,7 @@ impl Instance {
       key: String::new(),
       // No run mounts a workspace from it.
       handle: runner_handle(runner, links, Vec::new(), String::new()),
-      provider: None,
+      driver: None,
       path_map: BTreeMap::new(),
       slots: None,
       on_full: OnFull::Wait,
@@ -78,14 +78,14 @@ impl Instance {
     Arc::new(Self {
       name: "actor".into(),
       key: String::new(),
-      handle: InstanceHandle {
-        runtime: "actor",
+      handle: driver::Instance {
+        driver: "actor",
         id: run.to_string(),
         executor,
         sftp: Vec::new(),
         workspace: String::new(),
       },
-      provider: None,
+      driver: None,
       path_map: BTreeMap::new(),
       slots: None,
       on_full: OnFull::Wait,
@@ -96,7 +96,7 @@ impl Instance {
   /// The runner whose own process space the instance is, which owns its
   /// processes; `None` on the control host.
   pub fn on_runner(&self) -> Option<&str> {
-    (self.handle.runtime == RUNNER).then_some(self.handle.id.as_str())
+    (self.handle.driver == RUNNER).then_some(self.handle.id.as_str())
   }
 
   /// Takes a slot for one command. A full instance refuses the command with
@@ -113,17 +113,17 @@ impl Instance {
   }
 }
 
-/// The runtime of a runner's own process space.
+/// What a runner's own process space has for its driver: no driver creates it.
 const RUNNER: &str = "runner";
 
 /// A runner's own process space, reached over its streams.
-fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace: String) -> InstanceHandle {
+fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace: String) -> driver::Instance {
   let executor = RunnerExecutor {
     runner: runner.to_string(),
     links: links.clone(),
   };
-  InstanceHandle {
-    runtime: RUNNER,
+  driver::Instance {
+    driver: RUNNER,
     id: runner.to_string(),
     executor: Arc::new(executor),
     sftp,
@@ -134,7 +134,7 @@ fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace:
 /// Where the pool creates an instance, as the scheduler placed it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Site {
-  /// This host: the daemon's own process space or its Docker. A Docker
+  /// This host: the daemon's own process space or its engine. A container
   /// executor on the control host's own runner is created here too.
   ControlHost,
   /// A runner's own process space, reached over its streams; `os` is its
@@ -147,7 +147,7 @@ pub enum Site {
 /// of that key wait for.
 type KeyCell = Arc<OnceCell<Arc<Instance>>>;
 
-/// The instances of every run, by key, and the providers that create
+/// The instances of every run, by key, and the drivers that create
 /// them.
 pub struct Pool {
   /// The lock covers only the map and the reference counts; instances are
@@ -155,17 +155,17 @@ pub struct Pool {
   instances: Mutex<HashMap<String, KeyCell>>,
   native: Arc<Native>,
   /// `None` when the Docker client could not be set up (a bad `DOCKER_HOST`).
-  docker: Option<Arc<Docker>>,
+  container: Option<Arc<LinuxContainer>>,
   /// The runners whose control streams are open, for instances on them.
   links: Arc<Links>,
 }
 
 impl Pool {
-  pub fn new(native: Arc<Native>, docker: Option<Docker>, links: Arc<Links>) -> Self {
+  pub fn new(native: Arc<Native>, container: Option<LinuxContainer>, links: Arc<Links>) -> Self {
     Self {
       instances: Mutex::new(HashMap::new()),
       native,
-      docker: docker.map(Arc::new),
+      container: container.map(Arc::new),
       links,
     }
   }
@@ -177,10 +177,10 @@ impl Pool {
   }
 
   /// The instance for the spec's key at `site`, created through the
-  /// executor's provider when no run holds one yet. Acquires of one key
+  /// executor's driver when no run holds one yet. Acquires of one key
   /// share one creation; a failed creation leaves the key free for the next
   /// acquire.
-  pub async fn acquire(&self, spec: InstanceSpec, site: &Site) -> Result<Arc<Instance>> {
+  pub async fn acquire(&self, spec: Spec, site: &Site) -> Result<Arc<Instance>> {
     loop {
       let cell = self.lock().entry(spec.key.clone()).or_default().clone();
       let created = cell.get_or_try_init(|| self.create(&spec, site)).await;
@@ -204,35 +204,34 @@ impl Pool {
     }
   }
 
-  /// Creates the instance of `spec` at `site` through its provider.
-  async fn create(&self, spec: &InstanceSpec, site: &Site) -> Result<Arc<Instance>> {
-    let (handle, provider): (InstanceHandle, Option<Arc<dyn Provider>>) = match (spec.config.provider, site) {
-      (profile::Provider::Native, Site::ControlHost) => (self.native.create(spec).await?, Some(self.native.clone())),
-      (profile::Provider::Docker, Site::ControlHost) => {
-        let docker = self.docker.clone().context("Docker is not available on this machine")?;
-        (docker.create(spec).await?, Some(docker))
+  /// Creates the instance of `spec` at `site` through its driver.
+  async fn create(&self, spec: &Spec, site: &Site) -> Result<Arc<Instance>> {
+    let (handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match (spec.config.driver, site) {
+      (profile::ExecutorDriver::Native, Site::ControlHost) => (self.native.create(spec).await?, Some(self.native.clone())),
+      (profile::ExecutorDriver::LinuxContainer, Site::ControlHost) => {
+        let container = self.container.clone().context("no Docker-compatible engine is available on this machine")?;
+        (container.create(spec).await?, Some(container))
       }
       // The runner's machine outlives its runs; nothing creates or
       // destroys it. Its workspace is a path on that machine, as written.
-      (profile::Provider::Native, Site::Runner { name, os }) => {
+      (profile::ExecutorDriver::Native, Site::Runner { name, os }) => {
         let workspace = spec.config.workspace.clone().unwrap_or_default();
         (runner_handle(name, &self.links, sftp_command(os), workspace), None)
       }
       // TODO(runner-docker): a runner creating containers itself (create and
       // destroy tasks on its control stream, execs relayed to the
-      // container) is deferred; the scheduler places Docker executors on
+      // container) is deferred; the scheduler places linux-container executors on
       // the control host, including those on its own runner, and refuses
       // other runners before this point.
-      (profile::Provider::Docker, Site::Runner { name, .. }) => bail!("runner {name} cannot create Docker executors yet"),
-      // TODO(provider): containerd, firecracker and k8s providers are
-      // deferred; see `needy_core_executor::provider`.
-      (other, _) => bail!("provider {other:?} is not supported yet"),
+      (profile::ExecutorDriver::LinuxContainer, Site::Runner { name, .. }) => {
+        bail!("runner {name} cannot create linux-container executors yet")
+      }
     };
     Ok(Arc::new(Instance {
       name: spec.name.clone(),
       key: spec.key.clone(),
       handle,
-      provider,
+      driver,
       path_map: spec.config.path_map.clone(),
       slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
       on_full: spec.config.on_full,
@@ -250,16 +249,16 @@ impl Pool {
       }
       instances.retain(|_, cell| !cell.get().is_some_and(|v| Arc::ptr_eq(v, instance)));
     }
-    if let Some(provider) = &instance.provider
-      && let Err(e) = provider.destroy(&instance.handle).await
+    if let Some(driver) = &instance.driver
+      && let Err(e) = driver.destroy(&instance.handle).await
     {
       tracing::warn!("executor {}: cannot destroy {}: {e}", instance.name, instance.handle.id);
     }
   }
 
-  /// The control host's Docker provider, when it could be set up.
-  pub fn docker(&self) -> Option<&Arc<Docker>> {
-    self.docker.as_ref()
+  /// The control host's `linux-container` driver, when it could be set up.
+  pub fn container(&self) -> Option<&Arc<LinuxContainer>> {
+    self.container.as_ref()
   }
 
   /// Every pooled instance.

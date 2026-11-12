@@ -1,8 +1,9 @@
-//! The `docker` provider: one container per instance, running
+//! The `linux-container` driver: one container per instance, running
 //! `needy daemon --mode executor` on a socket in a directory shared with the
-//! host. Containers are created through the Docker API (`bollard`).
+//! host. Containers are created through the Docker-compatible engine API
+//! (`bollard`), wherever `DOCKER_HOST` points.
 //!
-//! A profile sets run options as typed `docker:` fields, which map to the
+//! A profile sets run options as typed `container:` fields, which map to the
 //! Docker API's container body one by one. The daemon owns some fields,
 //! which are not profile fields, and refuses privileged ones unless the
 //! operator allows them.
@@ -20,15 +21,15 @@ use bollard::models::{
 };
 use bollard::query_parameters::{CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder};
 use futures_util::TryStreamExt;
-use needy_config::profile::{Device, Docker as DockerConfig, Gpus, MemorySwap, Mount as ProfileMount, Ulimit};
+use needy_config::profile::{ContainerExecutor as ContainerConfig, Device, Gpus, MemorySwap, Mount as ProfileMount, Ulimit};
 use needy_config::value::ByteSize;
 
-use super::{Error, InstanceHandle, InstanceSpec, Provider, connect, host_path, sanitize};
+use super::{Driver, Error, Instance, Spec, connect, host_path, sanitize};
 
 /// Where the instance's socket directory is mounted in the container.
 const SOCKET_DIR: &str = "/run/needy";
 
-/// What the operator decides for every Docker executor.
+/// What the operator decides for every `linux-container` executor.
 #[derive(Debug, Clone)]
 pub struct Options {
   /// The image of an executor whose profile names none.
@@ -46,7 +47,7 @@ pub struct Options {
   pub allow: Vec<String>,
 }
 
-/// A container the provider is about to create.
+/// A container the driver is about to create.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Container {
   pub name: String,
@@ -92,10 +93,10 @@ fn check_socket(path: &Path) -> Result<(), Error> {
 }
 
 /// The container for one instance of a profile's executor: the daemon's
-/// fields first, then the profile's typed `docker:` fields under the
+/// fields first, then the profile's typed `container:` fields under the
 /// operator's policy.
-pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Error> {
-  let docker = spec.config.docker.clone().unwrap_or_default();
+pub fn container(spec: &Spec, options: &Options) -> Result<Container, Error> {
+  let docker = spec.config.container.clone().unwrap_or_default();
   let key = sanitize(&spec.key);
   let name = format!("needy-{key}");
   let socket_dir = socket_dir(options, &name);
@@ -146,7 +147,7 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
   Ok(container)
 }
 
-/// Sets a profile's typed `docker:` fields on the container's body. The
+/// Sets a profile's typed `container:` fields on the container's body. The
 /// daemon's own fields are not profile fields, so nothing here overrides
 /// them; privileged fields need the operator.
 ///
@@ -160,7 +161,7 @@ pub fn container(spec: &InstanceSpec, options: &Options) -> Result<Container, Er
 // `Resources` into it, and `ContainerCreateBody`:
 // https://docs.rs/crate/bollard-stubs/1.53.1-rc.29.3.1/source/src/models.rs#3402-3745
 // and #1211-1341.
-fn apply_run_options(docker: &DockerConfig, base: &Path, allow: &[String], container: &mut Container) -> Result<(), Error> {
+fn apply_run_options(docker: &ContainerConfig, base: &Path, allow: &[String], container: &mut Container) -> Result<(), Error> {
   let operator = |name: &str, what: String| {
     if allow.iter().any(|a| a == name) {
       Ok(())
@@ -430,13 +431,13 @@ pub async fn runtimes(wait: std::time::Duration) -> Result<BTreeSet<String>, Err
   Ok(info.runtimes.unwrap_or_default().into_keys().collect())
 }
 
-/// The Docker runtime on this machine's Docker daemon.
-pub struct Docker {
+/// The `linux-container` driver on this machine's Docker-compatible engine.
+pub struct LinuxContainer {
   docker: bollard::Docker,
   options: Options,
 }
 
-impl Docker {
+impl LinuxContainer {
   /// Uses the local Docker daemon (`DOCKER_HOST`, else its default socket).
   /// Nothing is contacted until an instance is created.
   pub fn new(options: Options) -> Result<Self, Error> {
@@ -507,8 +508,8 @@ fn with_tag(image: &str) -> String {
 }
 
 #[async_trait::async_trait]
-impl Provider for Docker {
-  async fn create(&self, spec: &InstanceSpec) -> Result<InstanceHandle, Error> {
+impl Driver for LinuxContainer {
+  async fn create(&self, spec: &Spec) -> Result<Instance, Error> {
     let container = container(spec, &self.options)?;
     share_with_container(&container.socket_dir, &spec.user)?;
     // A workspace the profile names is the user's; the default one is the
@@ -537,8 +538,8 @@ impl Provider for Docker {
         return Err(error);
       }
     };
-    Ok(InstanceHandle {
-      runtime: "docker",
+    Ok(Instance {
+      driver: "linux-container",
       id: container.name,
       executor: std::sync::Arc::new(client),
       sftp: vec!["/usr/lib/openssh/sftp-server".into()],
@@ -546,7 +547,7 @@ impl Provider for Docker {
     })
   }
 
-  async fn destroy(&self, handle: &InstanceHandle) -> Result<(), Error> {
+  async fn destroy(&self, handle: &Instance) -> Result<(), Error> {
     self.remove_instance(&handle.id).await
   }
 }

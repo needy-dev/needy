@@ -28,22 +28,24 @@ Dependencies point downward; a crate never depends on one above it.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
   is the in-guest init and exec-routing proxy, on `nix`, logging to the
   console. `host` runs next to the actor: `detect` reads this machine's CPU,
-  `runtime` is the `ActorRuntime` trait (start, wait, stop, and the guest,
-  gateway and terminal channels the daemon serves or dials), `firecracker`
-  implements it: it builds the Firecracker configuration from a compiled
-  recipe and owns the Firecracker process; `container` implements it for
-  Docker containers (`identity` writes the recipe's files), and `macos`
-  holds the Mac's runtimes: `vz` (`macos-vz`) for Virtualization.framework
-  VMs on Apple silicon (vfkit's arguments from a compiled recipe, the vfkit
-  process) and `apple_container` (`macos-apple-container`) over Apple's
-  `container` CLI; and `gateway` is the actor gateway on the `net.*`
-  interceptors.
+  `driver` is the actor `Driver` trait (start, wait, stop, and the guest,
+  gateway and terminal channels the daemon serves or dials) with its
+  `Running` actor, `firecracker` implements it as `linux-firecracker`: it
+  builds the Firecracker configuration from a compiled recipe and owns the
+  Firecracker process; `container` implements it as `linux-container`
+  through a Docker-compatible engine (`identity` writes the recipe's files),
+  and `macos` holds the Mac's drivers: `vz` (`macos-vz`) for
+  Virtualization.framework VMs on Apple silicon (vfkit's arguments from a
+  compiled recipe, the vfkit process) and `apple_container`
+  (`macos-apple-container`) over Apple's `container` CLI; and `gateway` is
+  the actor gateway on the `net.*` interceptors.
 - `crates/core-executor` (`needy-core-executor`): where commands run.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is
-  the process service one machine serves; `provider` creates and destroys
-  executor instances (`native`, `docker` through `bollard`) and owns the
-  Docker run-option policy; `relay` connects an exec stream to the local
+  the process service one machine serves; `driver` is the executor `Driver`
+  trait that creates and destroys executor instances (`native`, and
+  `linux-container` through `bollard` in `docker`) and owns the container
+  run-option policy; `relay` connects an exec stream to the local
   terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a
@@ -74,7 +76,7 @@ Dependencies point downward; a crate never depends on one above it.
   connects over Unix sockets, HTTP(S) and vsock with a token the caller
   gives; `ready` waits until a server answers; `exec` is an exec stream (start,
   attach, input, events, run to completion); `files` moves tar archives over
-  exec; `Error` maps a status to a `Kind`. The CLI, the proxy, the providers,
+  exec; `Error` maps a status to a `Kind`. The CLI, the proxy, the drivers,
   the daemon's relay and xtask use it instead of raw streams.
 - `crates/api-server` (`needy-api-server`): the inbound side. `control` holds
   the domain traits (`Runs`, `Processes`, `Guest`, `Runners`), `Caller` (the
@@ -89,6 +91,20 @@ Dependencies point downward; a crate never depends on one above it.
 - `images/`: actor kernel sources and configurations (x86_64 for
   Firecracker, arm64 for `macos-vz`), the Firecracker patch and image builds.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
+
+### Extension points
+
+Where needy is meant to be extended sideways (actor drivers, executor
+drivers, sidecars, and later captures and interceptors), one layout rule
+holds, from the
+[drivers design](docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md):
+
+1. An extension point is a directory. Its `mod.rs` holds the trait and a
+   table of every implementation.
+2. Each implementation is one file or one directory, named after its config
+   value with `-` written `_` (`linux-container` is `linux_container`).
+3. Implementations never depend on each other. What two of them share moves
+   into a component module named after what it is.
 
 ## Shared Vocabulary
 
@@ -295,7 +311,7 @@ one, add its provenance or a `TODO(provenance):` naming what is missing.
   process through `needy-api-server`'s traits with a native executor
   (runs, pool, routing, relay, shutdown, the runner registry, the
   runner role, scheduling and profile checks, with runners joined in
-  process and a stand-in Firecracker); real actors and Docker executors are
+  process and a stand-in Firecracker); real actors and linux-container executors are
   verified end to end on hosts (see the closed-loop results).
 - Add regression tests for behavior changes and keep them narrow.
 - Use `cargo test` for the full suite and include regression tests for bug

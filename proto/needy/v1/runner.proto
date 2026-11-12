@@ -53,42 +53,47 @@ service RunnerService {
 
 // What a runner can host. A join token's scope names roles; a runner
 // reports its `RunnerCapabilities`, whose roles are those with at least one
-// runtime or provider.
+// driver.
 enum RunnerRole {
   RUNNER_ROLE_UNSPECIFIED = 0;
   RUNNER_ROLE_ACTOR = 1;
   RUNNER_ROLE_EXECUTOR = 2;
 }
 
-// How a runner can run an actor.
-enum ActorRuntime {
-  ACTOR_RUNTIME_UNSPECIFIED = 0;
-  // A usable KVM and the actor image (vmlinux, rootfs.ext4, firecracker).
-  ACTOR_RUNTIME_FIRECRACKER = 1;
-  // A Docker daemon that answers. Whether it has the OCI runtime a profile
-  // names (`runc`, gVisor's `runsc`) is checked when a run is created.
-  ACTOR_RUNTIME_CONTAINER = 2;
-  // Apple silicon macOS with vfkit and the `macos-vz` actor image (Image,
-  // rootfs.ext4): a Virtualization.framework VM.
-  ACTOR_RUNTIME_MACOS_VZ = 3;
-  // Apple's `container` CLI on a Mac, whose services answer.
-  ACTOR_RUNTIME_MACOS_APPLE_CONTAINER = 4;
+// How a runner can run an actor: an actor driver, as a profile's
+// `actor.driver` names it.
+enum ActorDriver {
+  ACTOR_DRIVER_UNSPECIFIED = 0;
+  // `linux-firecracker`: a usable KVM and the actor image (vmlinux,
+  // rootfs.ext4, firecracker).
+  ACTOR_DRIVER_LINUX_FIRECRACKER = 1;
+  // `linux-container`: a Docker-compatible engine that answers. Whether it
+  // has the OCI runtime a profile names (`runc`, gVisor's `runsc`) is
+  // checked when a run is created.
+  ACTOR_DRIVER_LINUX_CONTAINER = 2;
+  // `macos-vz`: Apple silicon macOS with vfkit and the `macos-vz` actor
+  // image (Image, rootfs.ext4): a Virtualization.framework VM.
+  ACTOR_DRIVER_MACOS_VZ = 3;
+  // `macos-apple-container`: Apple's `container` CLI on a Mac, whose
+  // services answer.
+  ACTOR_DRIVER_MACOS_APPLE_CONTAINER = 4;
 }
 
-// How a runner can create an executor.
-enum ExecutorProvider {
-  EXECUTOR_PROVIDER_UNSPECIFIED = 0;
-  // The runner's own process space; every runner has it.
-  EXECUTOR_PROVIDER_NATIVE = 1;
-  // A Docker daemon the runner reaches.
-  EXECUTOR_PROVIDER_DOCKER = 2;
+// How a runner can create an executor: an executor driver, as a profile's
+// `executors.NAME.driver` names it.
+enum ExecutorDriver {
+  EXECUTOR_DRIVER_UNSPECIFIED = 0;
+  // `native`: the runner's own process space; every runner has it.
+  EXECUTOR_DRIVER_NATIVE = 1;
+  // `linux-container`: a Docker-compatible engine the runner reaches.
+  EXECUTOR_DRIVER_LINUX_CONTAINER = 2;
 }
 
-// What a runner can host: each role with its runtimes or providers. A role
-// with none is a role it does not hold.
+// What a runner can host: each role with its drivers. A role with none is a
+// role it does not hold.
 message RunnerCapabilities {
-  repeated ActorRuntime actor = 1;
-  repeated ExecutorProvider executor = 2;
+  repeated ActorDriver actor = 1;
+  repeated ExecutorDriver executor = 2;
 }
 
 enum JoinTokenState {

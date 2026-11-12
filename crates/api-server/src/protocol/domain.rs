@@ -16,7 +16,7 @@ use needy_core::event::Event;
 use needy_core::intercept::ExecContext;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use needy_core::types::{ActorRuntime, Capabilities, ExecutorProvider, Origin, RunState, RunnerRole};
+use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, Origin, RunState, RunnerRole};
 
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
@@ -105,21 +105,21 @@ fn proto_runner_roles(roles: &BTreeSet<RunnerRole>) -> Vec<i32> {
   roles.iter().map(|&role| proto_runner_role(role) as i32).collect()
 }
 
-/// The capabilities a runner reports; every runtime and provider must be
+/// The capabilities a runner reports; every actor and executor driver must be
 /// known and specified. None reported is none at all.
 pub fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabilities, Error> {
   let reported = reported.unwrap_or_default();
   let actor = reported
     .actor
     .iter()
-    .map(|&value| match v1::ActorRuntime::try_from(value) {
-      Ok(v1::ActorRuntime::Unspecified) => Err(Error::Unspecified("actor runtime")),
-      Ok(v1::ActorRuntime::Firecracker) => Ok(ActorRuntime::Firecracker),
-      Ok(v1::ActorRuntime::Container) => Ok(ActorRuntime::Container),
-      Ok(v1::ActorRuntime::MacosVz) => Ok(ActorRuntime::MacosVz),
-      Ok(v1::ActorRuntime::MacosAppleContainer) => Ok(ActorRuntime::MacosAppleContainer),
+    .map(|&value| match v1::ActorDriver::try_from(value) {
+      Ok(v1::ActorDriver::Unspecified) => Err(Error::Unspecified("actor driver")),
+      Ok(v1::ActorDriver::LinuxFirecracker) => Ok(ActorDriver::LinuxFirecracker),
+      Ok(v1::ActorDriver::LinuxContainer) => Ok(ActorDriver::LinuxContainer),
+      Ok(v1::ActorDriver::MacosVz) => Ok(ActorDriver::MacosVz),
+      Ok(v1::ActorDriver::MacosAppleContainer) => Ok(ActorDriver::MacosAppleContainer),
       Err(_) => Err(Error::Unknown {
-        field: "actor runtime",
+        field: "actor driver",
         value,
       }),
     })
@@ -127,12 +127,12 @@ pub fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabili
   let executor = reported
     .executor
     .iter()
-    .map(|&value| match v1::ExecutorProvider::try_from(value) {
-      Ok(v1::ExecutorProvider::Unspecified) => Err(Error::Unspecified("executor provider")),
-      Ok(v1::ExecutorProvider::Native) => Ok(ExecutorProvider::Native),
-      Ok(v1::ExecutorProvider::Docker) => Ok(ExecutorProvider::Docker),
+    .map(|&value| match v1::ExecutorDriver::try_from(value) {
+      Ok(v1::ExecutorDriver::Unspecified) => Err(Error::Unspecified("executor driver")),
+      Ok(v1::ExecutorDriver::Native) => Ok(ExecutorDriver::Native),
+      Ok(v1::ExecutorDriver::LinuxContainer) => Ok(ExecutorDriver::LinuxContainer),
       Err(_) => Err(Error::Unknown {
-        field: "executor provider",
+        field: "executor driver",
         value,
       }),
     })
@@ -141,19 +141,19 @@ pub fn capabilities(reported: Option<v1::RunnerCapabilities>) -> Result<Capabili
 }
 
 pub fn proto_capabilities(capabilities: &Capabilities) -> v1::RunnerCapabilities {
-  let runtime = |runtime: &ActorRuntime| match runtime {
-    ActorRuntime::Firecracker => v1::ActorRuntime::Firecracker as i32,
-    ActorRuntime::Container => v1::ActorRuntime::Container as i32,
-    ActorRuntime::MacosVz => v1::ActorRuntime::MacosVz as i32,
-    ActorRuntime::MacosAppleContainer => v1::ActorRuntime::MacosAppleContainer as i32,
+  let actor = |driver: &ActorDriver| match driver {
+    ActorDriver::LinuxFirecracker => v1::ActorDriver::LinuxFirecracker as i32,
+    ActorDriver::LinuxContainer => v1::ActorDriver::LinuxContainer as i32,
+    ActorDriver::MacosVz => v1::ActorDriver::MacosVz as i32,
+    ActorDriver::MacosAppleContainer => v1::ActorDriver::MacosAppleContainer as i32,
   };
-  let provider = |provider: &ExecutorProvider| match provider {
-    ExecutorProvider::Native => v1::ExecutorProvider::Native as i32,
-    ExecutorProvider::Docker => v1::ExecutorProvider::Docker as i32,
+  let executor = |driver: &ExecutorDriver| match driver {
+    ExecutorDriver::Native => v1::ExecutorDriver::Native as i32,
+    ExecutorDriver::LinuxContainer => v1::ExecutorDriver::LinuxContainer as i32,
   };
   v1::RunnerCapabilities {
-    actor: capabilities.actor.iter().map(runtime).collect(),
-    executor: capabilities.executor.iter().map(provider).collect(),
+    actor: capabilities.actor.iter().map(actor).collect(),
+    executor: capabilities.executor.iter().map(executor).collect(),
   }
 }
 
@@ -359,7 +359,7 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
       .chain(run.lost.into_iter().map(|e| (e, true, true)))
       .map(|(e, released, lost)| v1::ExecutorRef {
         name: e.name,
-        runtime: e.runtime,
+        driver: e.driver,
         instance: e.instance,
         released,
         lost,

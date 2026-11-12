@@ -161,18 +161,18 @@ impl Daemon {
       let instances = self.state.instances_of(&record.id).await.context("cannot read the instances")?;
       for instance in instances.iter().filter(|i| i.state == InstanceState::Running) {
         match (instance.kind, &instance.runner) {
-          (InstanceKind::Actor, _) if instance.runtime == "container" => {
+          (InstanceKind::Actor, _) if instance.driver == "linux-container" => {
             let state = end_leftover_container(instance).await;
             self.write_instance_state(instance, state, now).await;
           }
-          (InstanceKind::Actor, _) if instance.runtime == "macos-apple-container" => {
+          (InstanceKind::Actor, _) if instance.driver == "macos-apple-container" => {
             let state = end_leftover_macos_apple_container(instance).await;
             self.write_instance_state(instance, state, now).await;
           }
           (InstanceKind::Actor, _) => {
             // A VM's process names a file in the run's directory on its
             // command line: Firecracker its `vm.json`, vfkit its pidfile.
-            let marker = match instance.runtime.as_str() {
+            let marker = match instance.driver.as_str() {
               "macos-vz" => needy_core_actor::host::macos::vz::pidfile(Path::new(&instance.handle)),
               _ => Path::new(&instance.handle).join("vm.json"),
             };
@@ -181,7 +181,7 @@ impl Daemon {
           }
           // The runner reports it when it connects; see `reconcile_runner`.
           (InstanceKind::Executor, Some(_)) => on_runners = true,
-          (InstanceKind::Executor, None) if instance.provider == "docker" => {
+          (InstanceKind::Executor, None) if instance.driver == "linux-container" => {
             let state = self.remove_leftover_container(instance).await;
             self.write_instance_state(instance, state, now).await;
             let ended = if state == InstanceState::Ended {
@@ -203,7 +203,7 @@ impl Daemon {
           }
         }
       }
-      // The run's profile names its actor's runtime, whose sockets these are.
+      // The run's profile names its actor's driver, whose sockets these are.
       match needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), PathBuf::new())) {
         Ok(profile) => actor::remove_sockets(self, &profile.actor, &self.run_dir(&record.id)),
         Err(e) => tracing::warn!("run {}: cannot read its profile to remove its actor's sockets: {e:#}", record.id),
@@ -264,11 +264,11 @@ impl Daemon {
 
   /// Removes a leftover container of a run on the control host.
   async fn remove_leftover_container(&self, instance: &InstanceRecord) -> InstanceState {
-    let Some(docker) = self.pool.docker() else {
-      tracing::warn!("run {}: Docker is not available to remove container {}", instance.run, instance.handle);
+    let Some(container) = self.pool.container() else {
+      tracing::warn!("run {}: no Docker-compatible engine is available to remove container {}", instance.run, instance.handle);
       return InstanceState::Lost;
     };
-    match docker.remove_instance(&instance.handle).await {
+    match container.remove_instance(&instance.handle).await {
       Ok(()) => InstanceState::Ended,
       Err(e) => {
         tracing::warn!("run {}: cannot remove container {}: {e}", instance.run, instance.handle);
@@ -333,7 +333,7 @@ async fn end_leftover_vm(instance: &InstanceRecord, marker: &Path) -> InstanceSt
   if !alive(&mut system) {
     return InstanceState::Lost;
   }
-  tracing::warn!("run {}: ending its actor's VM ({} {pid}), which a restarted control plane does not adopt", instance.run, instance.runtime);
+  tracing::warn!("run {}: ending its actor's VM ({} {pid}), which a restarted control plane does not adopt", instance.run, instance.driver);
   if !system.process(pid).and_then(|p| p.kill_with(Signal::Kill)).unwrap_or(false) {
     tracing::warn!("run {}: cannot kill the VM process {pid}", instance.run);
   }
@@ -353,12 +353,12 @@ async fn end_leftover_vm(instance: &InstanceRecord, marker: &Path) -> InstanceSt
 /// [`end_leftover_vm`] gives. The container is found by its run's name.
 async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
   // The OCI runtime and image do not matter for ending a container.
-  let runtime = needy_core_actor::host::container::Container::new(
+  let driver = needy_core_actor::host::container::LinuxContainer::new(
     needy_config::profile::OciRuntime::Runc,
     needy_config::profile::CONTAINER_IMAGE.into(),
   );
   tracing::warn!("run {}: ending its actor's container, which a restarted control plane does not adopt", instance.run);
-  if runtime.end_leftover(&instance.run, Path::new(&instance.handle)).await {
+  if driver.end_leftover(&instance.run, Path::new(&instance.handle)).await {
     InstanceState::Ended
   } else {
     InstanceState::Lost
@@ -371,9 +371,9 @@ async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
 /// with the old daemon or is ended by the deletion.
 async fn end_leftover_macos_apple_container(instance: &InstanceRecord) -> InstanceState {
   // The image does not matter for deleting a container.
-  let runtime = needy_core_actor::host::macos::apple_container::AppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
+  let driver = needy_core_actor::host::macos::apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
   tracing::warn!("run {}: deleting its actor's container, which a restarted control plane does not adopt", instance.run);
-  if runtime.end_leftover(&instance.run).await {
+  if driver.end_leftover(&instance.run).await {
     InstanceState::Ended
   } else {
     InstanceState::Lost

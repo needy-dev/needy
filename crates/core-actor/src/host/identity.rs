@@ -24,7 +24,7 @@ use needy_config::profile::OciRuntime;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::{CompiledRecipe, files};
 
-use super::runtime::{Error, Gap};
+use super::driver::{Error, Gap};
 
 /// Where lxcfs mounts its file system, as its systemd unit starts it.
 // Source: https://github.com/lxc/lxcfs/blob/v6.0.4/config/init/systemd/lxcfs.service.in#L10

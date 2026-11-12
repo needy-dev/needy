@@ -89,9 +89,9 @@ use needy_api_server::{Health, Listen, Server, create_private_dir};
 #[cfg(unix)]
 use needy_core::types::RunState;
 #[cfg(unix)]
-use needy_core_executor::process::Host;
+use needy_core_executor::driver::{self, LinuxContainer, Native};
 #[cfg(unix)]
-use needy_core_executor::provider::{self, Docker, Native};
+use needy_core_executor::process::Host;
 #[cfg(unix)]
 use needy_core_executor::service::ExecutorService;
 #[cfg(unix)]
@@ -119,13 +119,13 @@ pub struct Config {
   /// The KVM device an actor's Firecracker opens:
   /// `needy_core_actor::host::firecracker::KVM` outside tests.
   pub kvm: PathBuf,
-  /// The image of Docker executors that name none.
-  pub docker_image: String,
+  /// The image of `linux-container` executors that name none.
+  pub executor_image: String,
   /// How often runners send a heartbeat; told to them in every join and
   /// heartbeat response.
   pub heartbeat_interval: Duration,
   /// The runner that runs on this host, as the operator says
-  /// (`--local-runner`). An actor placed on it, and its Docker executors,
+  /// (`--local-runner`). An actor placed on it, and its linux-container executors,
   /// are created by the control plane itself; `None` when no runner runs
   /// here.
   // TODO(runner-actor): actors on other runners need the actor role over
@@ -230,23 +230,23 @@ impl Daemon {
         tracing::error!("local executor: {e:#}");
       }
     });
-    let local_client = provider::connect(&format!("unix:{}", local_sock.display())).await?;
+    let local_client = driver::connect(&format!("unix:{}", local_sock.display())).await?;
     let native = Arc::new(Native::new(local_client));
-    let docker = match Docker::new(provider::docker::Options {
-      image: config.docker_image.clone(),
+    let container = match LinuxContainer::new(driver::docker::Options {
+      image: config.executor_image.clone(),
       state_dir: config.state_dir.clone(),
       allow: Vec::new(),
     }) {
-      Ok(docker) => Some(docker),
+      Ok(container) => Some(container),
       Err(e) => {
-        tracing::warn!("docker executors are unavailable: {e}");
+        tracing::warn!("linux-container executors are unavailable: {e}");
         None
       }
     };
     let links: Arc<link::Links> = Arc::default();
     let daemon = Self {
       local: Instance::machine(&native),
-      pool: Arc::new(Pool::new(native, docker, links.clone())),
+      pool: Arc::new(Pool::new(native, container, links.clone())),
       config: Arc::new(config),
       traces,
       runs: Arc::new(Registry::new(state.clone())),

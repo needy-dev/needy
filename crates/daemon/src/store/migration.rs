@@ -13,6 +13,7 @@ impl MigratorTrait for Migrator {
       Box::new(CreateRuns),
       Box::new(CreateClients),
       Box::new(RunnerCapabilities),
+      Box::new(Drivers),
     ]
   }
 }
@@ -140,6 +141,7 @@ enum Instances {
   Runner,
   Provider,
   Runtime,
+  Driver,
   Handle,
   Pid,
   State,
@@ -301,7 +303,7 @@ impl MigrationTrait for CreateClients {
 }
 
 /// A runner's reported roles become its capabilities: each role with its
-/// runtimes or providers.
+/// runtimes or providers (drivers since `m20261112_000090_drivers`).
 struct RunnerCapabilities;
 
 impl MigrationName for RunnerCapabilities {
@@ -334,5 +336,57 @@ impl MigrationTrait for RunnerCapabilities {
       )
       .await?;
     manager.alter_table(Table::alter().table(Runners::Table).drop_column(Runners::Capabilities).to_owned()).await
+  }
+}
+
+/// The drivers design (2026-11-12): an instance's `provider` and `runtime`
+/// become one `driver` with the drivers' names, and the capabilities runners
+/// reported under the old names are cleared.
+struct Drivers;
+
+impl MigrationName for Drivers {
+  fn name(&self) -> &str {
+    "m20261112_000090_drivers"
+  }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for Drivers {
+  // NOTICE: `runtime` held what `driver` holds (the executor's driver or
+  // `runner`, the actor's runtime), so it is copied with the old names
+  // mapped and `provider`, which `runtime` covered, is dropped. A runner's
+  // capabilities are cleared rather than rewritten: they are read whole as
+  // `Capabilities`, whose old names no longer parse, and every connected
+  // runner reports them again with its next heartbeat, as after
+  // `m20261111_000080_runner_capabilities`.
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .alter_table(
+        Table::alter().table(Instances::Table).add_column(ColumnDef::new(Instances::Driver).text().not_null().default("")).to_owned(),
+      )
+      .await?;
+    let db = manager.get_connection();
+    db.execute_unprepared(
+      "UPDATE instances SET driver = CASE runtime \
+         WHEN 'firecracker' THEN 'linux-firecracker' \
+         WHEN 'container' THEN 'linux-container' \
+         WHEN 'docker' THEN 'linux-container' \
+         ELSE runtime END",
+    )
+    .await?;
+    db.execute_unprepared("UPDATE runners SET capabilities = '{}'").await?;
+    manager.alter_table(Table::alter().table(Instances::Table).drop_column(Instances::Provider).to_owned()).await?;
+    manager.alter_table(Table::alter().table(Instances::Table).drop_column(Instances::Runtime).to_owned()).await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    for column in [Instances::Provider, Instances::Runtime] {
+      manager
+        .alter_table(Table::alter().table(Instances::Table).add_column(ColumnDef::new(column).text().not_null().default("")).to_owned())
+        .await?;
+    }
+    let db = manager.get_connection();
+    db.execute_unprepared("UPDATE instances SET provider = driver, runtime = driver").await?;
+    manager.alter_table(Table::alter().table(Instances::Table).drop_column(Instances::Driver).to_owned()).await
   }
 }
