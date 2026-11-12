@@ -173,6 +173,28 @@ fn write_restore(out: &mut impl Write, alternate: bool) -> std::io::Result<()> {
     out.write_all(KEYBOARD.as_bytes())?;
   }
   out.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1004l")?;
+  // NOTICE: what TUIs also turn on and undo only when they exit themselves,
+  // so a detach or a killed client left it on in the shell (the TUI
+  // matrix's `detach` path: Claude Code's modifyOtherKeys and color scheme
+  // reports, opencode's cursor shape and color, pi's autowrap off): SGR
+  // pixel and X10 mouse (1016, 9), color scheme reports (2031), autowrap
+  // (7, on), modifyOtherKeys (`CSI > 4 m` resets it to the terminal's
+  // initial value), the cursor shape (`CSI 0 SP q`) and the cursor color
+  // (OSC 112). This follows herdr's restore of its own terminal.
+  // Source: https://github.com/ThomasDickey/xterm-snapshots/blob/xterm-412/ctlseqs.txt#L1076-L1078
+  // (DECAWM; 9), #L1136 (1016), #L1328-L1340 (XTMODKEYS, "If the second
+  // parameter is omitted, the resource is reset to its initial value"),
+  // #L1545-L1556 (DECSCUSR) and #L2258 (OSC 112), xterm patch 412.
+  // Source: https://github.com/herdrdev/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/terminal_modes.rs#L3-L4
+  // (mouse off, with 1016 and 9),
+  // https://github.com/herdrdev/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/client/terminal_setup.rs#L683-L727
+  // (`restore_terminal_state`: modifyOtherKeys off, line wrap on) and
+  // #L403-L415 (color scheme reports off, `CSI 0 SP q`); 2031 is the color
+  // scheme report mode of herdr's terminal model,
+  // https://github.com/herdrdev/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/vendor/libghostty-vt/src/terminal/modes.zig#L329.
+  // Reference: https://contour-terminal.org/vt-extensions/color-palette-update-notifications/
+  // (mode 2031; retrieved 2026-11-13, the page has no versions).
+  out.write_all(b"\x1b[?1016l\x1b[?9l\x1b[?2031l\x1b[?7h\x1b[>4m\x1b[0 q\x1b]112\x07")?;
   crossterm::queue!(out, crossterm::cursor::Show)?;
   out.flush()
 }
