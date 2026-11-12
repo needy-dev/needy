@@ -637,7 +637,9 @@ fn a_report_of_a_trace_without_principals_leaves_them_out() {
   assert!(json["started_by"].is_null());
 }
 
-fn container_run() -> Vec<Recorded> {
+/// `actor_run` with an `actor.start` from `driver`, which catches an exec
+/// by `capture`.
+fn started_run(driver: &str, capture: Option<Capture>) -> Vec<Recorded> {
   let mut events = actor_run();
   events.insert(
     1,
@@ -647,11 +649,16 @@ fn container_run() -> Vec<Recorded> {
         pid: 7,
         vcpus: 2,
         mem_mib: 4096,
-        driver: Some("linux-container (runsc)".into()),
+        driver: Some(driver.into()),
+        capture,
       }),
     ),
   );
   events
+}
+
+fn container_run() -> Vec<Recorded> {
+  started_run("linux-container (runsc)", Some(Capture::Shims))
 }
 
 #[test]
@@ -673,4 +680,27 @@ fn a_container_actors_report_says_what_its_routing_leaves_out() {
   assert!(report.contains("A container actor routes only the programs its image had when it was built"), "{report}");
 
   assert!(!human(&actor_run()).contains("container actor"), "a run without the driver says nothing of it");
+}
+
+// The note followed the driver's label (`linux-container`), so a
+// `macos-apple-container` actor, which routes by shims too, never had it;
+// it follows the capture its driver's facets name now.
+#[test]
+fn an_apple_container_actors_report_says_what_its_shim_routing_leaves_out() {
+  let run = started_run("macos-apple-container", Some(Capture::Shims));
+
+  assert!(human(&run).contains("programs created at run time and run directly stayed in the actor"), "{}", human(&run));
+  let report = render("7f3a", &run, Level::Summary, Format::Markdown);
+  assert!(report.contains("The actor ran in `macos-apple-container`."), "{report}");
+  assert!(report.contains("A container actor routes only the programs its image had when it was built"), "{report}");
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &run, Level::Summary, Format::Json)).unwrap();
+  assert_eq!(json["actor_capture"], "shims");
+}
+
+#[test]
+fn a_kernel_routed_actors_report_has_no_shim_note() {
+  let run = started_run("macos-vz", Some(Capture::Kernel));
+
+  assert!(!human(&run).contains("container actor"), "{}", human(&run));
+  assert!(!render("7f3a", &run, Level::Summary, Format::Markdown).contains("container actor"));
 }

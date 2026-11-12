@@ -1,7 +1,7 @@
 //! Captures: how an exec inside the actor is caught and handed to the
 //! proxy (`super::proxy`, the exec domain's adapter, the same for every
 //! capture). A capture is mechanism: it never decides. Which one an actor
-//! has is its driver's `Facets::capture` (`crate::driver::Capture`).
+//! has is its driver's `Facets::capture` (`needy_core::types::Capture`).
 //!
 //! | Capture | `Capture` | Drivers | Turned on by |
 //! | --- | --- | --- | --- |

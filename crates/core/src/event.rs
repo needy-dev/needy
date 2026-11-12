@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::{Fired, Network, Origin, Outcome, Principal};
+use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 
 /// The version of the payload schema that producers write.
 ///
@@ -18,8 +18,8 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 /// `recipe_time`; version 6 renamed `actor.start`'s `runtime` and
 /// `run.create`'s executors' `runtime` to `driver`, with the drivers' names
 /// (`linux-firecracker`, `linux-container (runc)`, `linux-container`);
-/// version 7 added `actor.ready`.
-pub const SCHEMA_VERSION: u32 = 7;
+/// version 7 added `actor.ready`; version 8 added `actor.start`'s `capture`.
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -30,6 +30,8 @@ pub const SCHEMA_VERSION: u32 = 7;
 // with a version error instead of decoding a renamed field as unknown.
 // Version 7 only added a kind, but a reader of 6 would refuse it, so traces
 // of 6 are refused here too: one version is read (no compatibility).
+// Version 8 only added an optional field (`actor.start`'s `capture`); traces
+// of 7 are refused all the same, by the same rule.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
 pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = SCHEMA_VERSION..=SCHEMA_VERSION;
@@ -230,6 +232,10 @@ pub struct ActorStart {
   /// `linux-container (runc)` or `linux-container (runsc)`.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub driver: Option<String>,
+  /// How the actor catches an exec, from its driver's facets; `None` in a
+  /// trace from before schema version 7.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub capture: Option<Capture>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

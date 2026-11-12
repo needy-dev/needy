@@ -19,8 +19,9 @@ pub use kvm::{KVM, check_kvm};
 use crate::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
 pub use crate::driver::Error;
 use needy_config::profile::ActorDriver;
+use needy_core::types::Capture;
 
-use crate::driver::{Capture, Channels, Driver, Endpoint, Facets, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
+use crate::driver::{Channels, Driver, Endpoint, Facets, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
 pub use crate::image::vm::LinuxFirecracker as Image;
 
 /// The vsock device's socket in a VM's directory.

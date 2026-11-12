@@ -31,10 +31,11 @@ use needy_core_executor::engine::models::{ContainerCreateBody, HostConfig};
 use needy_core_executor::engine::{self, Engine};
 
 use needy_core::recipe::CompiledRecipe;
+use needy_core::types::Capture;
 
 use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
 use crate::driver::{
-  Capture, Channels, Driver, Endpoint, Error, Facets, Gap, HostMount, Identity, Leftover, Running, Side, Start, Terminal, Transport,
+  Channels, Driver, Endpoint, Error, Facets, Gap, HostMount, Identity, Leftover, Running, Side, Start, Terminal, Transport,
 };
 use crate::identity;
 use crate::image::container::name;

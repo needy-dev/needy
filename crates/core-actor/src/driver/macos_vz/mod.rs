@@ -33,12 +33,13 @@ pub mod vfkit;
 use needy_config::profile::ActorDriver;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
+use needy_core::types::Capture;
 
 pub use vfkit::{Launch, VFKIT, check_vfkit};
 
 use crate::contract::{GATEWAY_PORT, PROCESS_PORT};
 pub use crate::driver::Error;
-use crate::driver::{Capture, Channels, Driver, Endpoint, Facets, Gap, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
+use crate::driver::{Channels, Driver, Endpoint, Facets, Gap, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
 pub use crate::image::vm::MacosVz as Image;
 
 /// Where the daemon serves the guest API in a VM's directory.

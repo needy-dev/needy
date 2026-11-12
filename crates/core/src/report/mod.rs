@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::event::{ActorExit, Event, Recorded, Transfer};
 use crate::pattern::basename;
-use crate::types::{Network, Origin, Outcome, Placement, Principal, RunState};
+use crate::types::{Capture, Network, Origin, Outcome, Placement, Principal, RunState};
 
 /// How much the report shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,8 +121,9 @@ struct Tally {
   dropped: u64,
   /// The actor's route names; `Some(None)` routes every exec.
   route_names: Option<Option<Vec<String>>>,
-  /// What ran the actor.
+  /// What ran the actor, and how it caught an exec.
   actor_driver: Option<String>,
+  actor_capture: Option<Capture>,
   routed: usize,
   kept: usize,
   denied: usize,
@@ -242,7 +243,10 @@ impl Tally {
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
-      Event::ActorStart(start) => self.actor_driver = start.driver.clone(),
+      Event::ActorStart(start) => {
+        self.actor_driver = start.driver.clone();
+        self.actor_capture = start.capture;
+      }
       Event::ActorReady(_)
       | Event::ExecKill(_)
       | Event::FilesCopyIn(_)
@@ -296,9 +300,9 @@ pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> St
   }
 }
 
-/// What a container actor's routing leaves out: its shims are made when its
-/// image is built.
-pub(crate) const CONTAINER_ROUTING: &str = "A container actor routes only the programs its image had when it was built; \
+/// What shim routing ([`Capture::Shims`], a container actor's) leaves out:
+/// its shims are made when its image is built.
+pub(crate) const SHIM_ROUTING: &str = "A container actor routes only the programs its image had when it was built; \
   programs created at run time and run directly stayed in the actor without a trace event.";
 
 /// What the human and JSON reports show: one run's outcome and counts.
@@ -327,9 +331,14 @@ pub struct Summary {
   /// The command names the actor routes, `["*"]` for every exec; `None`
   /// when no actor ran.
   pub route_names: Option<Vec<String>>,
-  /// What ran the actor (`firecracker`, `container (runc)`, `container
-  /// (runsc)`); `None` when no actor ran or the trace predates it.
+  /// What ran the actor (`linux-firecracker`, `linux-container (runc)`,
+  /// `macos-apple-container`, …); `None` when no actor ran or the trace
+  /// predates it.
   pub actor_driver: Option<String>,
+  /// How the actor caught an exec (`kernel`, `shims`), from its driver's
+  /// facets; `None` when no actor ran. Under `shims` the report says what
+  /// shim routing leaves out.
+  pub actor_capture: Option<Capture>,
   pub commands: Commands,
   /// Commands by name and executor, most frequent first.
   pub top_commands: Vec<TopCommand>,
@@ -492,6 +501,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     dropped_events: t.dropped,
     route_names: t.route_names.clone().map(|names| names.unwrap_or_else(|| vec!["*".to_string()])),
     actor_driver: t.actor_driver.clone(),
+    actor_capture: t.actor_capture,
     commands: Commands {
       routed: t
         .routed_by
@@ -587,9 +597,9 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   }
   if let Some(driver) = &t.actor_driver {
     writeln!(out, "The actor ran in `{driver}`.\n")?;
-    if driver.starts_with("linux-container") {
-      writeln!(out, "{CONTAINER_ROUTING}\n")?;
-    }
+  }
+  if t.actor_capture == Some(Capture::Shims) {
+    writeln!(out, "{SHIM_ROUTING}\n")?;
   }
 
   writeln!(out, "## Findings\n")?;

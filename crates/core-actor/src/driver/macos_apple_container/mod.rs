@@ -32,15 +32,14 @@ use std::time::Duration;
 use needy_config::profile::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor};
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
+use needy_core::types::Capture;
 
 mod cli;
 
 pub use cli::{Cli, Output, PROGRAM, Process};
 
 use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
-use crate::driver::{
-  Capture, Channels, Driver, Endpoint, Error, Facets, Gap, Identity, Leftover, Running, Side, Start, Terminal, Transport,
-};
+use crate::driver::{Channels, Driver, Endpoint, Error, Facets, Gap, Identity, Leftover, Running, Side, Start, Terminal, Transport};
 use crate::image::container::name;
 
 /// What a `macos-apple-container` actor presents: the container image's

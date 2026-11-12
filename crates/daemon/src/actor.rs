@@ -168,6 +168,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     vcpus: vm.vcpus(),
     mem_mib: vm.mem_mib(),
     driver: Some(driver.label()),
+    capture: Some(facets.capture),
   }));
   // A restarted control plane finds the VM by its PID and directory.
   let record = InstanceRecord {

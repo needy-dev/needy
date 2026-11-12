@@ -1,5 +1,6 @@
 //! Values the system produces and that producers and consumers share:
-//! placements and outcomes, run states, exec origins and injected faults. Values users write live in `needy-config`; the decisions of each
+//! placements and outcomes, run states, exec origins, captures and injected
+//! faults. Values users write live in `needy-config`; the decisions of each
 //! interception domain live with the domain in [`crate::intercept`].
 
 use std::collections::BTreeSet;
@@ -35,6 +36,21 @@ pub enum Outcome {
   Deny(String),
   /// An injected fault failed it with this errno.
   Fault(String),
+}
+
+/// How an exec inside an actor is caught and handed to its proxy: an actor
+/// driver's `Facets::capture` (`needy_core_actor::driver`), recorded in
+/// `actor.start` so the report can say what the capture leaves out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capture {
+  /// The guest kernel's `binfmt_needy`: every exec, by any path.
+  Kernel,
+  /// Shims made when the container image was built: a program created at
+  /// run time and run directly is not caught (`profile check` warns).
+  Shims,
+  // TODO(macos-native): `FencedShims` (shims in a Seatbelt fence) comes with
+  // the `macos-native` driver, if the owner productizes it.
 }
 
 /// A run's life cycle. The first terminal state wins. The daemon's

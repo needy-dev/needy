@@ -3,7 +3,7 @@ use std::time::Duration;
 use needy_config::profile::FaultKind;
 
 use super::*;
-use crate::types::{Effect, Fired, Network, Origin, Outcome, Placement, Principal};
+use crate::types::{Capture, Effect, Fired, Network, Origin, Outcome, Placement, Principal};
 
 fn argv(s: &str) -> Vec<String> {
   s.split_whitespace().map(str::to_string).collect()
@@ -35,6 +35,7 @@ fn every_kind() -> Vec<Event> {
       vcpus: 4,
       mem_mib: 16384,
       driver: Some("linux-container (runsc)".into()),
+      capture: Some(Capture::Shims),
     }),
     Event::ActorVmExit(ActorVmExit {
       code: Some(0),

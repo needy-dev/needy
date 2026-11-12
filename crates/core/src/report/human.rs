@@ -8,7 +8,7 @@ use anstyle::{AnsiColor, Style};
 
 use super::{FindingKind, Summary, duration, network_name, truncate};
 use crate::event::ActorExit;
-use crate::types::RunState;
+use crate::types::{Capture, RunState};
 
 const FAILURE: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Red)));
 const FAULT: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColor::Yellow)));
@@ -128,8 +128,8 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
       Some(names) => writeln!(out, "  (kept on actor counts only the names the actor routes: {})", names.join(", "))?,
       None => {}
     }
-    if s.actor_driver.as_deref().is_some_and(|driver| driver.starts_with("linux-container")) {
-      writeln!(out, "  ({})", super::CONTAINER_ROUTING)?;
+    if s.actor_capture == Some(Capture::Shims) {
+      writeln!(out, "  ({})", super::SHIM_ROUTING)?;
     }
   }
 

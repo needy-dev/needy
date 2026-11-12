@@ -11,7 +11,7 @@ use needy_config::Source;
 use needy_config::profile::{Executor, Profile};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::{CompiledRecipe, HostInfo};
-use needy_core_actor::driver::Capture;
+use needy_core::types::Capture;
 
 use crate::pool::Site;
 use crate::{Daemon, failed, schedule};

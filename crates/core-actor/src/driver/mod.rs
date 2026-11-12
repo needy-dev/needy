@@ -41,6 +41,7 @@ use std::time::Duration;
 
 use needy_config::profile::{Actor, ActorDriver, User};
 use needy_core::recipe::CompiledRecipe;
+use needy_core::types::Capture;
 
 #[cfg(unix)]
 pub mod linux_container;
@@ -156,23 +157,13 @@ pub enum Terminal {
 /// drivers design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Facets {
+  /// How an exec inside the actor is caught and handed to the proxy
+  /// (`guest::capture`); the daemon records it in `actor.start`.
   pub capture: Capture,
   /// Who mounts the workspace into the actor.
   pub workspace: Side,
   pub identity: Identity,
   pub transport: Transport,
-}
-
-/// How an exec inside the actor is caught and handed to the proxy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Capture {
-  /// The guest kernel's `binfmt_needy`: every exec, by any path.
-  Kernel,
-  /// Shims made when the container image was built: a program created at
-  /// run time and run directly is not caught (`profile check` warns).
-  Shims,
-  // TODO(macos-native): `FencedShims` (shims in a Seatbelt fence) comes with
-  // the `macos-native` driver, if the owner productizes it.
 }
 
 /// Where something the actor presents is made.
