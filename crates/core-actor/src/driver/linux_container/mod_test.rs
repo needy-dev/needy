@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 
 use needy_config::Source;
@@ -15,7 +15,8 @@ struct Fake {
   calls: Mutex<Vec<String>>,
   bodies: Mutex<Vec<ContainerCreateBody>>,
   runtimes: Vec<(&'static str, &'static [&'static str])>,
-  images: Vec<String>,
+  /// The images it has, with their labels.
+  images: Vec<(String, HashMap<String, String>)>,
   code: i64,
   log: &'static str,
 }
@@ -36,8 +37,8 @@ impl Engine for Fake {
     Ok(self.runtimes.iter().map(|(name, args)| (name.to_string(), args.iter().map(|a| a.to_string()).collect())).collect())
   }
 
-  async fn has_image(&self, image: &str) -> Result<bool, EngineError> {
-    Ok(self.images.iter().any(|i| i == image))
+  async fn image_labels(&self, image: &str) -> Result<Option<HashMap<String, String>>, EngineError> {
+    Ok(self.images.iter().find(|(name, _)| name == image).map(|(_, labels)| labels.clone()))
   }
 
   async fn pull(&self, image: &str) -> Result<(), EngineError> {
@@ -76,6 +77,15 @@ impl Engine for Fake {
   }
 }
 
+/// The guest needy a test's actor gets.
+const GUEST_NEEDY: &str = "/home/user/.local/bin/needy";
+
+/// `needy-actor:latest` with the base ABI label `abi`, or none.
+fn image(abi: Option<&str>) -> (String, HashMap<String, String>) {
+  let labels = abi.map(|abi| HashMap::from([(base::LABEL.to_string(), abi.to_string())])).unwrap_or_default();
+  ("needy-actor:latest".into(), labels)
+}
+
 fn runtime(fake: Fake, oci: OciRuntime) -> (LinuxContainer, Arc<Fake>) {
   let fake = Arc::new(fake);
   (LinuxContainer::with_engine(oci, "needy-actor:latest".into(), fake.clone()), fake)
@@ -93,6 +103,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     recipe,
     user,
     mounts: &[],
+    guest: Path::new(GUEST_NEEDY),
   }
 }
 
@@ -110,13 +121,63 @@ fn the_channels_are_sockets_in_the_directory_bind_mounted_into_the_container() {
   let user = User::default();
   let launch = container.launch(&start(dir, &user, None), Vec::new());
   let binds = launch.body.host_config.unwrap().binds.unwrap();
+  assert_eq!(binds[0], format!("{}:/.needy/channels", dir.join("channels").display()));
+}
+
+#[test]
+fn the_guest_needy_is_bind_mounted_read_only_over_the_base_images_placeholder() {
+  let (container, _) = runtime(Fake::default(), OciRuntime::Runc);
+  let user = User::default();
+
+  let launch = container.launch(&start(Path::new("/r"), &user, None), vec!["/r/cpuinfo:/proc/cpuinfo:ro".into()]);
+
+  let binds = launch.body.host_config.unwrap().binds.unwrap();
   assert_eq!(
     binds,
-    [format!(
-      "{}:/.needy/channels",
-      dir.join("channels").display()
-    )]
+    [
+      "/r/channels:/.needy/channels",
+      "/home/user/.local/bin/needy:/.needy/needy:ro",
+      "/r/cpuinfo:/proc/cpuinfo:ro"
+    ]
   );
+  // The base image's boot stub starts it.
+  assert_eq!(launch.body.entrypoint, Some(vec!["/.needy/init".to_string()]));
+}
+
+#[tokio::test]
+async fn an_image_of_another_base_abi_is_refused_before_the_actor_starts() {
+  let (container, _) = runtime(
+    Fake {
+      runtimes: vec![("runc", &[])],
+      images: vec![image(Some("2"))],
+      ..Default::default()
+    },
+    OciRuntime::Runc,
+  );
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert_eq!(
+    error,
+    "the actor image needy-actor:latest has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy build \
+     --linux-container` from this needy's version, or use a needy that speaks base ABI 2"
+  );
+}
+
+#[tokio::test]
+async fn an_image_built_with_its_own_needy_inside_is_refused() {
+  let (container, _) = runtime(
+    Fake {
+      runtimes: vec![("runc", &[])],
+      images: vec![image(None)],
+      ..Default::default()
+    },
+    OciRuntime::Runc,
+  );
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert!(error.starts_with("the actor image needy-actor:latest records no base ABI"), "{error}");
 }
 
 #[test]
@@ -169,7 +230,7 @@ async fn a_host_without_the_oci_runtime_names_how_to_install_gvisor() {
   let (container, _) = runtime(
     Fake {
       runtimes: vec![("runc", &[])],
-      images: vec!["needy-actor:latest".into()],
+      images: vec![image(Some("1"))],
       ..Default::default()
     },
     OciRuntime::Runsc,
@@ -286,7 +347,7 @@ async fn gvisor_without_host_sockets_is_refused_with_the_registration_that_works
   let (container, _) = runtime(
     Fake {
       runtimes: vec![("runc", &[]), ("runsc", &[])],
-      images: vec!["needy-actor:latest".into()],
+      images: vec![image(Some("1"))],
       ..Default::default()
     },
     OciRuntime::Runsc,
@@ -302,7 +363,7 @@ async fn gvisor_with_host_sockets_and_the_image_passes_the_host_check() {
   let (container, _) = runtime(
     Fake {
       runtimes: vec![("runsc", &["--host-uds=all"])],
-      images: vec!["needy-actor:latest".into()],
+      images: vec![image(Some("1"))],
       ..Default::default()
     },
     OciRuntime::Runsc,

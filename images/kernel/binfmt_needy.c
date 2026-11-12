@@ -7,10 +7,11 @@
  * binfmt_script swaps a script for its interpreter, but argv is left
  * untouched. The proxy finds the original path in AT_EXECFN.
  *
- * Only execs by `route_uid` are routed. Execs made by needy's own programs in
- * /.needy (init and the proxy) are never routed: init starts the driving
- * program locally, and the proxy can run the real binary when a rule keeps a
- * command on the actor.
+ * Only execs by `route_uid` are routed. Execs made by needy's own programs
+ * under /.needy (the base image's stubs and the guest needy, which runs init
+ * and the proxy) are never routed: init starts the driving program locally,
+ * and the proxy can run the real binary when a rule keeps a command on the
+ * actor. The proxy is the shim stub, which hands the exec to the guest needy.
  *
  * Source: the interpreter swap copies `load_script`'s `bprm_change_interp`,
  * `open_exec` and `bprm->interpreter` steps,
@@ -36,25 +37,43 @@
 #include <linux/string.h>
 #include <linux/uidgid.h>
 
+/* needy's directory in an actor (base ABI 1, crates/core-actor/src/contract.rs). */
+#define NEEDY_DIR "/.needy"
+
 static char route[512];
-static char proxy[256] = "/.needy/proxy";
+static char proxy[256] = NEEDY_DIR "/proxy";
 module_param_string(route, route, sizeof(route), 0600);
 static int route_uid = -1;
 module_param_string(proxy, proxy, sizeof(proxy), 0600);
 module_param(route_uid, int, 0600);
 
+/*
+ * Whether the calling process runs a program under /.needy/: the stubs of
+ * the base image, or the guest needy the daemon injects at /.needy/needy.
+ * The path, not the parent directory's name: the guest needy is a file
+ * bind-mounted from the guest disk (a VM) or the host (a container), whose
+ * dentry's parent is that file system's root, not /.needy. `d_path` gives
+ * the path as the calling process sees it, through the bind mount.
+ * Reference: https://github.com/torvalds/linux/blob/v6.18/fs/d_path.c#L263-L292
+ * (`d_path`) and https://github.com/torvalds/linux/blob/v6.18/include/linux/fs.h
+ * (`__getname`, a PATH_MAX buffer from `names_cachep`).
+ */
 static bool caller_is_needy(void)
 {
+	static const char dir[] = NEEDY_DIR "/";
 	struct file *exe = get_mm_exe_file(current->mm);
 	bool needy = false;
+	char *buf, *path;
 
-	if (exe) {
-		struct dentry *parent = dget_parent(exe->f_path.dentry);
-
-		needy = !strcmp(parent->d_name.name, ".needy");
-		dput(parent);
-		fput(exe);
+	if (!exe)
+		return false;
+	buf = __getname();
+	if (buf) {
+		path = d_path(&exe->f_path, buf, PATH_MAX);
+		needy = !IS_ERR(path) && !strncmp(path, dir, sizeof(dir) - 1);
+		__putname(buf);
 	}
+	fput(exe);
 	return needy;
 }
 

@@ -79,11 +79,15 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
   let kvm = dir.path().join("kvm");
   std::fs::write(&kvm, "").unwrap();
   fake_image(&dir.path().join("image"), PARKED);
+  let guest = dir.path().join("needy-linux");
+  fake_guest(&guest);
   let mut config = Config {
     state_dir: dir.path().join("state"),
     runtime_dir: dir.path().join("run"),
     actor_image: dir.path().join("image"),
     kvm,
+    guest_needy: Some(guest),
+    guest_disks: dir.path().join("guest"),
     executor_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,
@@ -304,9 +308,47 @@ pub fn fake_image(dir: &Path, script: &str) {
   std::fs::create_dir_all(dir).unwrap();
   std::fs::write(dir.join("vmlinux"), "").unwrap();
   std::fs::write(dir.join("rootfs.ext4"), "").unwrap();
+  std::fs::write(dir.join("base-abi"), format!("{}\n", needy_core_actor::image::base::ABI)).unwrap();
   let firecracker = dir.join("firecracker");
   std::fs::write(&firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
   std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Writes a stand-in guest needy at `path`: what the daemon checks of one,
+/// an ELF file header and one loadable segment of a static Linux executable
+/// for this machine's architecture. It never runs: the stand-in Firecracker
+/// boots nothing.
+// Source: the ELF-64 Object File Format, version 1.5 draft 2 (1998),
+// "ELF Header" and "Program header table", https://uclibc.org/docs/elf-64-gen.pdf;
+// `EM_X86_64` (62) and `EM_AARCH64` (183) from the System V gABI's machine
+// table, https://www.sco.com/developers/gabi/latest/ch4.eheader.html
+pub fn fake_guest(path: &Path) {
+  let machine: u16 = if cfg!(target_arch = "aarch64") {
+    183
+  } else {
+    62
+  };
+  let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  // e_type ET_EXEC, e_machine, e_version.
+  elf.extend(2u16.to_le_bytes());
+  elf.extend(machine.to_le_bytes());
+  elf.extend(1u32.to_le_bytes());
+  // e_entry, e_phoff, e_shoff, e_flags.
+  for word in [0x40_1000u64, 64, 0] {
+    elf.extend(word.to_le_bytes());
+  }
+  elf.extend(0u32.to_le_bytes());
+  // e_ehsize, e_phentsize, e_phnum, e_shentsize, e_shnum, e_shstrndx.
+  for half in [64u16, 56, 1, 64, 0, 0] {
+    elf.extend(half.to_le_bytes());
+  }
+  // One PT_LOAD (1), readable and executable (5), of the whole file.
+  elf.extend(1u32.to_le_bytes());
+  elf.extend(5u32.to_le_bytes());
+  for word in [0u64, 0x40_0000, 0x40_0000, 120, 120, 0x1000] {
+    elf.extend(word.to_le_bytes());
+  }
+  std::fs::write(path, elf).unwrap();
 }
 
 /// A stand-in Firecracker that runs until its run's actor exits through

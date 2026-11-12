@@ -146,6 +146,7 @@ pub(super) async fn run_on_terminal(config: &GetConfigResponse, home: &str, (row
   // itself, and the terminal must be the program's controlling terminal.
   let mut argv = vec![
     init.display().to_string(),
+    crate::contract::INIT_ARG.into(),
     AS_USER.into(),
     user.uid.to_string(),
     user.gid.to_string(),

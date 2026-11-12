@@ -3,7 +3,9 @@
 //! process, as Firecracker is on Linux.
 //!
 //! The guest is the Firecracker actor's in all that needy does inside it:
-//! init is PID 1, `binfmt_needy` routes execs, the workspace is mounted with
+//! the boot stub is PID 1 and starts the guest needy from the second disk
+//! (`crate::image::guest::disk`) as init, `binfmt_needy` routes execs, the
+//! workspace is mounted with
 //! sshfs in the guest, and the guest API, gateway and process service are
 //! vsock ports. macOS has no host `AF_VSOCK`, so vfkit bridges each port to a
 //! Unix socket in the VM's directory: `guest.sock` and `gateway.sock`, which
@@ -109,14 +111,18 @@ pub struct MacosVz {
   pub image: Image,
   /// [`VFKIT`] outside tests.
   pub vfkit: PathBuf,
+  /// Where the guest disks are made ([`Host::guest_disks`]).
+  pub guest_disks: PathBuf,
 }
 
 impl MacosVz {
-  /// The driver on `host`: its actor image, and vfkit on `PATH`.
+  /// The driver on `host`: its actor image and guest disks, and vfkit on
+  /// `PATH`.
   pub fn on(host: &Host) -> Self {
     Self {
       image: Image::new(&host.image),
       vfkit: VFKIT.into(),
+      guest_disks: host.guest_disks.clone(),
     }
   }
 }
@@ -150,7 +156,8 @@ impl Driver for MacosVz {
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
-    let launch = Launch::new(&self.image, &self.vfkit, start.dir, start.recipe);
+    let disk = crate::driver::guest_disk(start.guest, &self.guest_disks).await?;
+    let launch = Launch::new(&self.image, &self.vfkit, start.dir, &disk, start.recipe);
     Ok(Box::new(Vm::start(&launch)?))
   }
 

@@ -70,18 +70,55 @@ fn stand_in_actor(home: &Home) -> Vec<String> {
   std::fs::create_dir_all(&image).unwrap();
   std::fs::write(image.join("vmlinux"), "").unwrap();
   std::fs::write(image.join("rootfs.ext4"), "").unwrap();
+  std::fs::write(image.join("base-abi"), "1\n").unwrap();
   let firecracker = image.join("firecracker");
   let script = "#!/bin/sh\necho boot\necho hello from the actor\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n";
   std::fs::write(&firecracker, script).unwrap();
   std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
   let kvm = home.path().join("kvm");
   std::fs::write(&kvm, "").unwrap();
+  let guest = home.path().join("needy-linux");
+  std::fs::write(&guest, static_elf()).unwrap();
   vec![
     "--actor-image".into(),
     image.display().to_string(),
     "--kvm".into(),
     kvm.display().to_string(),
+    "--guest-needy".into(),
+    guest.display().to_string(),
   ]
+}
+
+/// What the daemon checks of a guest needy: an ELF file header and one
+/// loadable segment of a static Linux executable for this machine's
+/// architecture. The stand-in actor never runs it.
+// Source: the ELF-64 Object File Format, version 1.5 draft 2 (1998),
+// "ELF Header" and "Program header table", https://uclibc.org/docs/elf-64-gen.pdf;
+// `EM_X86_64` (62) and `EM_AARCH64` (183) from the System V gABI's machine
+// table, https://www.sco.com/developers/gabi/latest/ch4.eheader.html
+fn static_elf() -> Vec<u8> {
+  let machine: u16 = if cfg!(target_arch = "aarch64") {
+    183
+  } else {
+    62
+  };
+  let mut elf = vec![0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+  elf.extend(2u16.to_le_bytes());
+  elf.extend(machine.to_le_bytes());
+  elf.extend(1u32.to_le_bytes());
+  for word in [0x40_1000u64, 64, 0] {
+    elf.extend(word.to_le_bytes());
+  }
+  elf.extend(0u32.to_le_bytes());
+  for half in [64u16, 56, 1, 64, 0, 0] {
+    elf.extend(half.to_le_bytes());
+  }
+  elf.extend(1u32.to_le_bytes());
+  elf.extend(5u32.to_le_bytes());
+  for word in [0u64, 0x40_0000, 0x40_0000, 120, 120, 0x1000] {
+    elf.extend(word.to_le_bytes());
+  }
+  elf
 }
 
 /// A control daemon on the home's default socket, stopped on drop.
@@ -825,14 +862,17 @@ fn run_create_interactive_requires_a_terminal() {
 // the program and drains its output and exit before rebooting the guest.
 #[cfg(target_os = "linux")]
 #[test]
-#[ignore = "requires usable KVM and NEEDY_TEST_ACTOR_IMAGE built from this tree"]
+#[ignore = "requires usable KVM, NEEDY_TEST_ACTOR_IMAGE built from this tree and NEEDY_TEST_GUEST_NEEDY (`make guest`)"]
 fn an_immediately_exiting_interactive_actor_returns_its_output_and_exit() {
   let image = std::env::var_os("NEEDY_TEST_ACTOR_IMAGE").expect("set NEEDY_TEST_ACTOR_IMAGE to a freshly built actor image");
+  let guest = std::env::var_os("NEEDY_TEST_GUEST_NEEDY").expect("set NEEDY_TEST_GUEST_NEEDY to the guest needy `make guest` builds");
   let home = Home::new();
   let child = home
     .needy()
     .args(["daemon", "--mode", "control", "--actor-image"])
     .arg(image)
+    .arg("--guest-needy")
+    .arg(guest)
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .spawn()
@@ -2340,7 +2380,9 @@ fn a_runner_with_kvm_and_the_actor_image_detects_the_linux_firecracker_driver() 
   let _daemon = Daemon::start(&control);
   let machine = Home::new();
 
-  let runner = RunnerDaemon(runner_with(&machine, &control, &stand_in_actor(&machine)));
+  // A runner detects the image and KVM; the guest needy is the control
+  // daemon's.
+  let runner = RunnerDaemon(runner_with(&machine, &control, &stand_in_actor(&machine)[..4]));
   let joined = runner_when(&control, "mac", |r| r["status"] == "online" && !r["host"].is_null());
   let table = control.run(&["runner", "ls"]);
   drop(runner);
@@ -2470,6 +2512,49 @@ fn exec_on_a_runner_that_is_not_connected_fails_at_once() {
   assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
   assert_eq!((exec.status.code(), stderr(&exec).as_str()), (Some(1), "needy: runner ghost is not connected\n"));
   assert_eq!((ps.status.code(), stderr(&ps).as_str()), (Some(1), "needy: runner ghost is not connected\n"));
+}
+
+#[test]
+fn a_control_daemon_refuses_a_guest_needy_that_is_not_a_static_linux_build() {
+  let home = Home::new();
+  let guest = home.write("needy-linux", "#!/bin/sh\n");
+
+  let (exited, output) = daemon_within(
+    &home,
+    &[
+      "--mode",
+      "control",
+      "--guest-needy",
+      &guest.display().to_string(),
+    ],
+    Duration::from_secs(20),
+  );
+
+  assert!(exited, "the daemon started with a guest needy it cannot use");
+  assert_eq!(output.status.code(), Some(1));
+  assert_eq!(
+    stderr(&output),
+    format!(
+      "needy: the guest needy {}: is not a 64-bit ELF executable; the guest needy is a static Linux build of needy\n",
+      guest.display()
+    )
+  );
+}
+
+#[test]
+fn only_a_control_daemon_takes_a_guest_needy() {
+  let home = Home::new();
+
+  let output = home.run(&[
+    "daemon",
+    "--mode",
+    "executor",
+    "--guest-needy",
+    "/nonexistent",
+  ]);
+
+  assert_eq!(output.status.code(), Some(1));
+  assert_eq!(stderr(&output), "needy: --guest-needy is for the control mode, which starts actors\n");
 }
 
 #[test]

@@ -9,6 +9,7 @@ use crate::contract::GUEST_PORT;
 
 const IMAGE: &str = "/Users/user/.local/share/needy/actor";
 const DIR: &str = "/Users/user/.local/state/needy/runs/0123456789ab";
+const DISK: &str = "/Users/user/.local/share/needy/guest/0123456789abcdef.squashfs";
 
 fn gce(extra: &str) -> CompiledRecipe {
   let text = format!("extends: builtin:gce-ubuntu-22.04\n{extra}");
@@ -17,7 +18,7 @@ fn gce(extra: &str) -> CompiledRecipe {
 }
 
 fn launch(recipe: Option<&CompiledRecipe>) -> Launch {
-  Launch::new(&Image::new(Path::new(IMAGE)), Path::new(VFKIT), Path::new(DIR), recipe)
+  Launch::new(&Image::new(Path::new(IMAGE)), Path::new(VFKIT), Path::new(DIR), Path::new(DISK), recipe)
 }
 
 #[test]
@@ -37,6 +38,8 @@ fn a_vm_without_a_recipe_boots_the_image_read_only_with_vsock_bridges_and_no_net
       "linux,kernel=/Users/user/.local/share/needy/actor/Image,initrd=/Users/user/.local/share/needy/actor/initrd,\"cmdline=console=hvc0 root=/dev/vda ro init=/.needy/init quiet loglevel=4\"",
       "--device",
       "virtio-blk,path=/Users/user/.local/share/needy/actor/rootfs.ext4,readonly",
+      "--device",
+      "virtio-blk,path=/Users/user/.local/share/needy/guest/0123456789abcdef.squashfs,readonly",
       "--device",
       "virtio-serial,logFilePath=/dev/stdout",
       "--device",
@@ -71,6 +74,7 @@ fn the_channels_are_the_vsock_bridges_and_the_ports_init_dials_under_firecracker
   let vz = MacosVz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: VFKIT.into(),
+    guest_disks: Path::new(DISK).parent().unwrap().into(),
   };
   let dir = Path::new(DIR);
 
@@ -151,6 +155,7 @@ async fn an_apple_silicon_mac_without_vfkit_fails_the_host_check() {
   let vz = MacosVz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: "/nonexistent/vfkit".into(),
+    guest_disks: Path::new(DISK).parent().unwrap().into(),
   };
 
   let error = vz.check_host().await.unwrap_err().to_string();
@@ -164,6 +169,7 @@ async fn another_host_fails_the_check_naming_the_runtimes_it_has() {
   let vz = MacosVz {
     image: Image::new(Path::new(IMAGE)),
     vfkit: VFKIT.into(),
+    guest_disks: Path::new(DISK).parent().unwrap().into(),
   };
 
   let error = vz.check_host().await.unwrap_err().to_string();
@@ -174,6 +180,7 @@ async fn another_host_fails_the_check_naming_the_runtimes_it_has() {
 #[tokio::test]
 async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   let dir = tempfile::tempdir().unwrap();
+  std::fs::write(dir.path().join("base-abi"), "1\n").unwrap();
   for file in ["Image", "initrd", "rootfs.ext4"] {
     std::fs::write(dir.path().join(file), "").unwrap();
   }
@@ -181,7 +188,7 @@ async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   let vfkit = dir.path().join("vfkit");
   std::fs::write(&vfkit, "#!/bin/sh\ntrap '' TERM\necho vfkit started\nwhile :; do sleep 1; done\n").unwrap();
   std::fs::set_permissions(&vfkit, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
-  let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), None);
+  let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), &dir.path().join("needy.squashfs"), None);
   let mut vm = Vm::start(&launch).unwrap();
   let log = crate::driver::log(dir.path());
   for _ in 0..100 {
@@ -206,6 +213,7 @@ async fn detection_needs_apple_silicon_macos() {
   let host = Host {
     kvm: dir.path().to_path_buf(),
     image: dir.path().to_path_buf(),
+    guest_disks: dir.path().to_path_buf(),
   };
 
   assert_eq!(detect(&host).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");

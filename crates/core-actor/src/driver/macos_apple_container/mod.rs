@@ -38,9 +38,14 @@ mod cli;
 
 pub use cli::{Cli, Output, PROGRAM, Process};
 
-use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
+use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST, GUEST_SOCKET, INIT, PROCESS_SOCKET, channels_dir};
 use crate::driver::{Channels, Driver, Endpoint, Error, Facets, Gap, Identity, Leftover, Running, Side, Start, Terminal, Transport};
+use crate::image::base;
 use crate::image::container::name;
+
+/// What builds the container actor image of this needy's version into
+/// Apple's `container`.
+const REBUILD: &str = "needy build --macos-apple-container";
 
 /// What a `macos-apple-container` actor presents: the container image's
 /// shims catch execs; init mounts the workspace and sets the hostname
@@ -199,6 +204,10 @@ impl MacosAppleContainer {
       args.push("--volume".into());
       args.push(format!("{}:{CHANNELS}/{socket}", channels.join(socket).display()));
     }
+    // The guest needy goes in read-only over the base image's placeholder,
+    // one file through virtiofs, as the sockets above.
+    args.push("--volume".into());
+    args.push(format!("{}:{GUEST}:ro", start.guest.display()));
     args.push("--publish-socket".into());
     args.push(format!("{}:{CHANNELS}/{PROCESS_SOCKET}", channels.join(PROCESS_SOCKET).display()));
     // NOTICE: the root file system stays writable (no `--read-only`, unlike
@@ -214,7 +223,7 @@ impl MacosAppleContainer {
     // TODO(macos-apple-container): a read-only root file system, once Apple's
     // `container` can publish a socket from a container's own mount.
     args.push("--entrypoint".into());
-    args.push("/.needy/init".into());
+    args.push(INIT.into());
     // TODO(macos-apple-container-kernel): a needy-built arm64 kernel (`-k`) with
     // `binfmt_needy`, the fake sensors and DMI is a separate approved slice;
     // until it lands the actor runs Apple's default kernel.
@@ -243,6 +252,25 @@ impl MacosAppleContainer {
       }
     }
   }
+}
+
+/// The base ABI label of the linux/arm64 variant of an image, from what
+/// `container image inspect` printed: `None` when it has no such label.
+// NOTICE: the CLI prints a JSON array with one object per image, whose
+// `variants` hold each platform's OCI image configuration as
+// `config.config.Labels` (the OCI image config's `config.Labels`). Observed
+// with `container` 1.7.1; the CLI documents no output format.
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.1/config.md#properties
+fn base_abi(inspected: &str) -> Result<Option<String>, String> {
+  let value: serde_json::Value = serde_json::from_str(inspected).map_err(|e| e.to_string())?;
+  let variants = value.pointer("/0/variants").and_then(|v| v.as_array()).ok_or("it lists no image variants")?;
+  let linux_arm64 = |variant: &&serde_json::Value| {
+    variant.pointer("/config/os").and_then(|v| v.as_str()) == Some("linux")
+      && variant.pointer("/config/architecture").and_then(|v| v.as_str()) == Some("arm64")
+  };
+  let variant = variants.iter().find(linux_arm64).or(variants.first()).ok_or("it lists no image variants")?;
+  let label = variant.pointer("/config/config/Labels").and_then(|labels| labels.get(base::LABEL));
+  Ok(label.and_then(|v| v.as_str()).map(String::from))
 }
 
 /// The first line of what a failed command said, for an error message.
@@ -311,12 +339,10 @@ impl Driver for MacosAppleContainer {
     self.services().await?;
     let image = self.run(&["image", "inspect", &self.image]).await?;
     if !image.success {
-      return Err(refused(format!(
-        "the container actor image {} is not in Apple's `container` image store; run `needy build --macos-apple-container`",
-        self.image
-      )));
+      return Err(refused(format!("the container actor image {} is not in Apple's `container` image store; run `{REBUILD}`", self.image)));
     }
-    Ok(())
+    let abi = base_abi(&image.stdout).map_err(|e| refused(format!("cannot read `container image inspect {}`: {e}", self.image)))?;
+    Ok(base::check(&self.image, abi.as_deref(), REBUILD)?)
   }
 
   fn channels(&self, dir: &Path) -> Channels {

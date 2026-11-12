@@ -45,7 +45,7 @@ pub struct Launch {
 
 impl Launch {
   /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one.
-  pub fn new(image: &Image, dir: &Path, recipe: Option<&CompiledRecipe>) -> Self {
+  pub fn new(image: &Image, dir: &Path, guest_disk: &Path, recipe: Option<&CompiledRecipe>) -> Self {
     let (vcpus, mem_mib) = crate::driver::size(recipe);
     let pci = recipe.is_some_and(|r| r.identity.has_pci());
     let mut boot_args = BOOT_ARGS.to_string();
@@ -58,7 +58,16 @@ impl Launch {
     let path = |p: &Path| p.to_string_lossy().into_owned();
     let mut config = json!({
       "boot-source": {"kernel_image_path": path(&image.kernel), "boot_args": boot_args},
-      "drives": [{"drive_id": "rootfs", "path_on_host": path(&image.rootfs), "is_root_device": true, "is_read_only": true}],
+      // The root file system is `/dev/vda`, the guest disk `/dev/vdb` (base
+      // ABI): Firecracker keeps the root device first and the others in their
+      // order here, and attaches them in that order.
+      // Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/vmm_config/drive.rs#L96-L131
+      // (`BlockBuilder`: "at most one root block device and it would be the
+      // first in the list", `push_front`).
+      "drives": [
+        {"drive_id": "rootfs", "path_on_host": path(&image.rootfs), "is_root_device": true, "is_read_only": true},
+        {"drive_id": "needy", "path_on_host": path(guest_disk), "is_root_device": false, "is_read_only": true},
+      ],
       "machine-config": {"vcpu_count": vcpus, "mem_size_mib": mem_mib},
       "vsock": {"guest_cid": GUEST_CID, "uds_path": path(&vsock(dir))},
     });

@@ -9,33 +9,28 @@ mod paths;
 mod runs;
 
 fn main() {
-  // Inside an actor the same binary is the init process and the exec proxy.
+  // Inside an actor the same binary, injected as the guest needy, is the
+  // init process, the exec proxy and the shims.
   #[cfg(target_os = "linux")]
   guest();
   std::process::exit(cli::run());
 }
 
-/// Becomes the actor's init, proxy or a shim when started as one; actors are
-/// Linux.
+/// Becomes the actor's init, proxy or a shim when one of the base image's
+/// stubs started it (the base ABI, `needy_core_actor::image::base`); actors
+/// are Linux.
 #[cfg(target_os = "linux")]
 fn guest() {
-  use needy_core_actor::contract::{INIT, PROXY};
+  use needy_core_actor::contract::{GUEST, INIT_ARG};
   use needy_core_actor::guest;
-  // The kernel starts init before /proc is mounted, so check argv[0]; a
-  // container's PID 1 is not an actor's init.
-  if std::env::args_os().next().as_deref() == Some(std::ffi::OsStr::new(INIT)) {
+  // The boot stub starts `/.needy/needy init` before /proc is mounted, so
+  // argv says it; init started again as the user's program says so too.
+  let mut args = std::env::args_os();
+  if args.next().as_deref() == Some(std::ffi::OsStr::new(GUEST)) && args.next().as_deref() == Some(std::ffi::OsStr::new(INIT_ARG)) {
     guest::init_main();
   }
-  if let Ok(exe) = std::env::current_exe() {
-    match exe.to_str() {
-      Some(PROXY) => guest::proxy_main(),
-      Some(INIT) => guest::init_main(),
-      _ => {}
-    }
-  }
-  // In a container actor every program on the image's `PATH` is a link to
-  // this binary, started by the program's name.
-  if guest::capture::shim::invoked() {
-    guest::capture::shim::main();
+  // SAFETY: first thing in `main`, before any thread exists.
+  if let Some(stub) = unsafe { guest::Stub::take() } {
+    guest::stub_main(stub);
   }
 }

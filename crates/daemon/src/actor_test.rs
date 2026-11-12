@@ -422,3 +422,43 @@ async fn an_actor_is_starting_until_configured_and_exits_with_its_run() {
 
   assert_eq!(run.actor.get(), Some(ActorState::Exited));
 }
+
+#[tokio::test]
+async fn a_vm_actor_gets_the_guest_needy_on_a_second_read_only_disk() {
+  let started = testing::daemon().await;
+  fake_image(&started.dir.path().join("image"), LONG_RUNNING);
+
+  let created = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  firecracker_pid(&run_dir(&started, &created.id)).await;
+
+  let config: serde_json::Value = serde_json::from_slice(&std::fs::read(run_dir(&started, &created.id).join("vm.json")).unwrap()).unwrap();
+  let drives = config["drives"].as_array().unwrap();
+  assert_eq!(drives.len(), 2, "{drives:?}");
+  assert_eq!(drives[1]["drive_id"], "needy");
+  assert_eq!(drives[1]["is_read_only"], true);
+  let disk = PathBuf::from(drives[1]["path_on_host"].as_str().unwrap());
+  assert_eq!(disk.parent(), Some(started.dir.path().join("guest").as_path()), "made in the daemon's guest disks");
+  assert_eq!(&std::fs::read(&disk).unwrap()[..4], b"hsqs");
+  Runs::stop(&started.daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_actor_without_a_usable_guest_needy_fails_the_create_at_once() {
+  let dir = tempfile::tempdir().unwrap();
+  let guest = dir.path().join("needy-linux-script");
+  std::fs::write(&guest, "#!/bin/sh\n").unwrap();
+  let started = testing::daemon_in(dir, |config| config.guest_needy = Some(guest.clone())).await;
+
+  let created = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await;
+
+  let Err(needy_api_server::control::ControlError::Failed(message)) = created else {
+    panic!("a create without a usable guest needy must fail");
+  };
+  assert_eq!(
+    message,
+    format!("the guest needy {}: is not a 64-bit ELF executable; the guest needy is a static Linux build of needy", guest.display())
+  );
+  let listed = Runs::list(&started.daemon).await.unwrap();
+  assert_eq!(listed[0].state, RunState::Failed);
+  assert!(!run_dir(&started, &listed[0].id).join("vm.json").exists(), "the VM was configured");
+}

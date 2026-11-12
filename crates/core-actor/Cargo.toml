@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+backhand.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
@@ -22,7 +23,10 @@ needy-core.workspace = true
 # the executor's (`engine`); the dependency points this way only.
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
+object.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -56,4 +60,3 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true
-tempfile.workspace = true

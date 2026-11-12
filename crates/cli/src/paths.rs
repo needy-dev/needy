@@ -62,6 +62,11 @@ impl Paths {
   pub fn default_image(&self) -> PathBuf {
     self.data.join("images").join("default")
   }
+
+  /// The guest disks the VM drivers make from the guest needy.
+  pub fn guest_disks(&self) -> PathBuf {
+    self.data.join("guest")
+  }
 }
 
 /// An override from the environment; an empty value counts as unset.

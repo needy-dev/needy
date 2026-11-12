@@ -2,6 +2,9 @@
 //! configuration from a compiled recipe ([`config`]), the KVM check and the
 //! host CPU probe ([`kvm`]), and a handle that owns the Firecracker process.
 //!
+//! The image is a base image: the VM gets the guest needy on a second,
+//! read-only disk (`crate::image::guest::disk`), which the boot stub mounts.
+//!
 //! A VM keeps its files in one directory: `vm.json` (the configuration),
 //! `console.log` (the guest's serial console) and `v.sock` (the vsock device,
 //! where guest-initiated connections to host port `P` land on `v.sock_P`).
@@ -85,14 +88,17 @@ pub struct LinuxFirecracker {
   pub image: Image,
   /// [`KVM`] outside tests.
   pub kvm: PathBuf,
+  /// Where the guest disks are made ([`Host::guest_disks`]).
+  pub guest_disks: PathBuf,
 }
 
 impl LinuxFirecracker {
-  /// The driver on `host`: its actor image and KVM device.
+  /// The driver on `host`: its actor image, KVM device and guest disks.
   pub fn on(host: &Host) -> Self {
     Self {
       image: Image::new(&host.image),
       kvm: host.kvm.clone(),
+      guest_disks: host.guest_disks.clone(),
     }
   }
 }
@@ -104,7 +110,8 @@ impl Driver for LinuxFirecracker {
   }
 
   async fn check_host(&self) -> Result<(), Error> {
-    check_kvm(&self.kvm)
+    check_kvm(&self.kvm)?;
+    self.image.check()
   }
 
   fn channels(&self, dir: &Path) -> Channels {
@@ -124,7 +131,8 @@ impl Driver for LinuxFirecracker {
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
-    let launch = Launch::new(&self.image, start.dir, start.recipe);
+    let disk = crate::driver::guest_disk(start.guest, &self.guest_disks).await?;
+    let launch = Launch::new(&self.image, start.dir, &disk, start.recipe);
     Ok(Box::new(Vm::start(&launch)?))
   }
 }

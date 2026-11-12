@@ -28,13 +28,32 @@ pub const PROCESS_SOCKET: &str = "process.sock";
 /// needy's own programs in an actor: the kernel never routes an exec they
 /// make (`binfmt_needy`'s `caller_is_needy`, `images/kernel/binfmt_needy.c`),
 /// and a shim never stands for one.
+///
+/// These paths, the stubs' hand-off and the guest disk are the base ABI
+/// (`crate::image::base`), which a base image and the guest needy share:
+/// see `docs/ai/references/architecture/2026-11-12-actor-images-design.md`.
 pub const NEEDY_DIR: &str = "/.needy";
-/// The actor's init, which the kernel or the container runtime starts as
-/// PID 1.
+/// The boot stub (`images/stub/boot.c`), which the kernel or the container
+/// runtime starts as PID 1. It starts the guest needy as init.
 pub const INIT: &str = "/.needy/init";
-/// The proxy a caught exec is handed to. `binfmt_needy`'s `proxy`
-/// parameter has the same default (`images/kernel/binfmt_needy.c`).
+/// The shim stub (`images/stub/shim.c`), which a caught exec is handed to.
+/// `binfmt_needy`'s `proxy` parameter has the same default
+/// (`images/kernel/binfmt_needy.c`); in a container image every program on
+/// `PATH` is a hard link to it.
 pub const PROXY: &str = "/.needy/proxy";
+/// The guest needy, which the daemon injects when an actor starts: an empty
+/// placeholder in the base image.
+pub const GUEST: &str = "/.needy/needy";
+/// The argument the boot stub starts the guest needy with: `/.needy/needy
+/// init`.
+pub const INIT_ARG: &str = "init";
+/// What the shim stub passes on to the guest needy: the path it was started
+/// through (`/proc/self/exe`), and the path the original `execve` named
+/// (`AT_EXECFN`).
+pub const STUB_EXE: &str = "NEEDY_STUB_EXE";
+pub const STUB_EXECFN: &str = "NEEDY_STUB_EXECFN";
+/// The base ABI version of the image, as text, in its root file system.
+pub const BASE_ABI: &str = "/.needy/base-abi";
 /// Where a container actor image's shim stage (`images/container/shim.sh`)
 /// keeps the real programs, by their original paths.
 pub const REAL: &str = "/.needy/real";

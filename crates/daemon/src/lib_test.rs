@@ -108,6 +108,8 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     runtime_dir: runtime_dir.clone(),
     actor_image: dir.path().join("image"),
     kvm: dir.path().join("kvm"),
+    guest_needy: None,
+    guest_disks: dir.path().join("guest"),
     executor_image: "needy-executor:latest".into(),
     heartbeat_interval: Duration::from_secs(15),
     local_runner: None,

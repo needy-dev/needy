@@ -58,6 +58,13 @@ pub struct Args {
   // hosts without KVM. Hidden for that reason.
   #[arg(long, value_name = "PATH", hide = true)]
   kvm: Option<PathBuf>,
+  /// The guest needy every actor gets at /.needy/needy (control mode): a
+  /// static Linux needy of this version for the actors' architecture.
+  /// Without it the daemon uses needy-linux-ARCH next to its own executable
+  /// (the macOS release archive, `make guest`), else on Linux its own
+  /// executable when that is static (the release binaries).
+  #[arg(long, value_name = "PATH")]
+  guest_needy: Option<PathBuf>,
   /// The image of linux-container executors without their own image.
   #[arg(long, default_value = "needy-executor:latest")]
   executor_image: String,
@@ -103,6 +110,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 async fn serve(args: Args, ctx: &Context) -> Result<i32> {
   if !matches!(args.mode, Mode::Control) && args.local_runner.is_some() {
     bail!("--local-runner is for the control mode");
+  }
+  if !matches!(args.mode, Mode::Control) && args.guest_needy.is_some() {
+    bail!("--guest-needy is for the control mode, which starts actors");
   }
   if matches!(args.mode, Mode::Executor) && args.kvm.is_some() {
     bail!("--kvm is for the control and runner modes");
@@ -166,17 +176,27 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
     Mode::Control => {
       let paths = ctx.paths()?;
       let image = args.actor_image.unwrap_or_else(|| paths.default_image());
-      let daemon = needy_daemon::Daemon::start(needy_daemon::Config {
+      let config = needy_daemon::Config {
+        guest_disks: paths.guest_disks(),
         state_dir: paths.state,
         runtime_dir: paths.runtime,
         actor_image: image,
         kvm: args.kvm.unwrap_or_else(|| needy_core_actor::driver::linux_firecracker::KVM.into()),
+        guest_needy: args.guest_needy,
         executor_image: args.executor_image,
         heartbeat_interval: args.heartbeat_interval,
         local_runner: args.local_runner,
         report_wait: needy_daemon::REPORT_WAIT,
-      })
-      .await?;
+      };
+      // A guest needy the operator named must be usable; without one, a
+      // daemon that finds none still serves executors, and each actor start
+      // fails with the same message.
+      match needy_daemon::guest_needy(&config) {
+        Ok(guest) => tracing::info!("actors get the guest needy {}", guest.display()),
+        Err(e) if config.guest_needy.is_some() => return Err(e),
+        Err(e) => crate::output::message(format_args!("warning: {e:#}; actors cannot start until there is one")),
+      }
+      let daemon = needy_daemon::Daemon::start(config).await?;
       // Runs are stopped even when serving failed.
       daemon.serve(&listen, token).await?;
     }

@@ -33,8 +33,9 @@ use needy_api_proto::v1::{GetConfigRequest, ReportExitRequest};
 
 pub(super) fn main() -> ! {
   // Init started again by itself as a plain process (not PID 1) only
-  // switches to the user and runs the driving program on its terminal.
-  let args: Vec<String> = std::env::args().skip(1).collect();
+  // switches to the user and runs the driving program on its terminal. Its
+  // arguments follow `/.needy/needy init`.
+  let args: Vec<String> = std::env::args().skip(2).collect();
   if std::process::id() != 1 && args.first().map(String::as_str) == Some(program::AS_USER) {
     let error = program::as_user(&args[1..]);
     eprintln!("needy init: cannot run the driving program: {error:#}");
@@ -98,7 +99,18 @@ fn write_param(path: &str, value: &str) {
   }
 }
 
+/// Fails unless the image records the base ABI this guest needy speaks. The
+/// daemon refuses an image of another version before it starts the actor,
+/// so this fails only for a guest needy of another version than the daemon
+/// (`--guest-needy`).
+fn check_base_abi() -> Result<()> {
+  let found = std::fs::read_to_string(crate::contract::BASE_ABI).ok();
+  crate::image::base::check(crate::contract::BASE_ABI, found.as_deref(), "needy build")
+    .map_err(|e| anyhow::anyhow!("{e}; this guest needy is not of the daemon's needy version (see --guest-needy)"))
+}
+
 async fn boot(container: bool) -> Result<()> {
+  check_base_abi()?;
   // A container's runtime mounted the system and brought `lo` up, and its
   // `/proc/sys` is read-only.
   // TODO(container-actor): `vm.memfd_noexec` is not set in a container

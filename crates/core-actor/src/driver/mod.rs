@@ -86,6 +86,12 @@ pub enum Error {
     driver: ActorDriver,
     message: String,
   },
+  /// The image's base ABI is not the one this needy speaks.
+  #[error(transparent)]
+  BaseAbi(#[from] crate::image::base::Mismatch),
+  /// The guest needy, or the guest disk made from it.
+  #[error(transparent)]
+  Guest(#[from] crate::image::guest::Error),
 }
 
 impl Error {
@@ -226,12 +232,16 @@ pub fn facets(driver: ActorDriver) -> Facets {
 }
 
 /// What the daemon's machine gives every driver: where needy's VM actor
-/// image is (`needy build`), and the KVM device.
+/// image is (`needy build`), the KVM device, and where the VM drivers keep
+/// guest disks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
   pub image: PathBuf,
   /// `linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,
+  /// The guest disks the VM drivers make from guest needy binaries
+  /// (`crate::image::guest::disk`), in needy's data directory.
+  pub guest_disks: PathBuf,
 }
 
 /// The driver of `actor` (a profile's `actor:`) on `host`.
@@ -320,6 +330,10 @@ pub struct Start<'a> {
   /// The workspace mounts, for a driver whose [`Facets::workspace`] is
   /// [`Side::Host`].
   pub mounts: &'a [HostMount],
+  /// The guest needy the driver brings into the actor at
+  /// `crate::contract::GUEST`, already checked
+  /// (`crate::image::guest::check`).
+  pub guest: &'a Path,
 }
 
 /// Something of a recipe's identity, or of the machine an actor presents,
@@ -345,6 +359,29 @@ impl Gap {
 /// 2 GiB machine without one: the same for every driver.
 pub(crate) fn size(recipe: Option<&CompiledRecipe>) -> (u32, u32) {
   recipe.map(|r| (r.vcpus.max(1), r.mem_mib.max(256))).unwrap_or((2, 2048))
+}
+
+/// The guest disk of the guest needy `binary` in `cache`, which a VM driver
+/// attaches as the actor's second disk ([`crate::image::guest::disk`]),
+/// made on a blocking thread: the first start of a binary reads and
+/// compresses all of it.
+pub(crate) async fn guest_disk(binary: &Path, cache: &Path) -> Result<PathBuf, Error> {
+  let (binary, cache) = (binary.to_path_buf(), cache.to_path_buf());
+  let made = tokio::task::spawn_blocking({
+    let cache = cache.clone();
+    move || crate::image::guest::disk(&binary, &cache)
+  })
+  .await;
+  match made {
+    Ok(disk) => Ok(disk?),
+    Err(e) => Err(
+      crate::image::guest::Error::Disk {
+        path: cache,
+        message: e.to_string(),
+      }
+      .into(),
+    ),
+  }
 }
 
 /// The actor's log in its directory `dir`: every driver writes its actor's

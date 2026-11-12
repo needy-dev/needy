@@ -99,6 +99,8 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
   let host = needy_core_actor::driver::Host {
     image: image.to_path_buf(),
     kvm: kvm.to_path_buf(),
+    // Detection starts no actor, so it makes no guest disk.
+    guest_disks: std::path::PathBuf::new(),
   };
   let mut facts = Facts {
     actor: BTreeMap::new(),

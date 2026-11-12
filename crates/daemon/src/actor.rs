@@ -23,6 +23,7 @@ use needy_config::profile::{FaultKind, FileMode, Side as FileSide};
 use needy_core::event::{ActorReady, ActorStart, ActorVmExit, Event};
 use needy_core::types::{ActorState, Effect, Fired, Network, RunState};
 use needy_core_actor::driver::{self, Channels, Driver, Endpoint, Facets, HostMount, Running, Side, Start, Terminal, Transport};
+use needy_core_actor::image::guest;
 use needy_core_actor::sidecar::gateway;
 use tokio_util::sync::CancellationToken;
 
@@ -36,13 +37,23 @@ use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 // most for its actor.
 const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
-/// What this host gives every actor driver: the actor image and the KVM
-/// device the daemon was configured with.
+/// What this host gives every actor driver: the actor image, the KVM
+/// device and where guest disks go, as the daemon was configured.
 pub fn host(daemon: &Daemon) -> driver::Host {
   driver::Host {
     image: daemon.config.actor_image.clone(),
     kvm: daemon.config.kvm.clone(),
+    guest_disks: daemon.config.guest_disks.clone(),
   }
+}
+
+/// The guest needy this daemon brings into its actors: the one the
+/// operator named, else one next to this daemon's executable, else on
+/// Linux this executable itself; checked to be a static Linux build for the
+/// actors' architecture.
+pub fn guest_needy(config: &crate::Config) -> Result<std::path::PathBuf> {
+  let exe = std::env::current_exe().context("cannot find this daemon's own executable")?;
+  Ok(guest::find(config.guest_needy.as_deref(), &exe, guest::arch())?)
 }
 
 /// The driver that runs this host's actors as `actor` (a profile's
@@ -68,6 +79,7 @@ pub fn facets(run: &Run) -> Facets {
 pub async fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
   let driver = driver_for(daemon, &run.profile.actor)?;
   driver.check_host().await?;
+  guest_needy(&daemon.config)?;
   let mut required = Vec::new();
   for (is_error, message) in identity_findings(driver.as_ref(), run.recipe.as_ref()) {
     if is_error {
@@ -142,6 +154,16 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     advance(run, ActorState::Exited);
     return Err(e);
   }
+  // Looked up again, not kept from the create's check: an operator may
+  // have put a rebuilt one in place since.
+  let guest = match guest_needy(&daemon.config) {
+    Ok(guest) => guest,
+    Err(e) => {
+      actor.cancel();
+      advance(run, ActorState::Exited);
+      return Err(e);
+    }
+  };
   // A driver that sets the actor up from the host mounts the workspace
   // itself; a VM's init, or an Apple `container` actor's, does it inside.
   let mounts = match facets.workspace {
@@ -154,6 +176,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     recipe: run.recipe.as_ref(),
     user: &run.profile.user,
     mounts: &mounts,
+    guest: &guest,
   };
   let vm = match driver.start(&start).await {
     Ok(vm) => vm,

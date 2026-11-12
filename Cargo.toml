@@ -27,6 +27,9 @@ anyhow = "1"
 async-trait = "0.1"
 backon = { version = "1", default-features = false, features = ["tokio-sleep"] }
 base64 = "0.22"
+# SquashFS writing only, zlib only: the guest disk the VM drivers attach,
+# which both actor kernels read (`CONFIG_SQUASHFS_ZLIB`).
+backhand = { version = "0.25", default-features = false, features = ["gzip"] }
 comfy-table = "7"
 crossterm = { version = "0.29", default-features = false, features = ["windows"] }
 etcetera = "0.11"
@@ -49,6 +52,9 @@ kvm-ioctls = "0.25"
 ignore = "0.4"
 libc = "0.2"
 nix = { version = "0.30", features = ["signal"] }
+# ELF headers only: the daemon checks that a guest needy is a static Linux
+# executable for the actors' architecture.
+object = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"] }
 portable-pty = "0.9"
 vt100 = "0.18"
 # Parsing only: the guest reads `/proc` itself and needs no `chrono`.

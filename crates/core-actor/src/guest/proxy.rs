@@ -6,7 +6,7 @@
 //! so the proxy installs no log subscriber.
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::io::IsTerminal;
 use std::path::Path;
 
@@ -49,10 +49,17 @@ pub(super) enum Local {
 }
 
 /// The proxy as `binfmt_needy` (in a VM) or a route stub (in a container)
-/// starts it, as `/.needy/proxy`.
-pub(super) fn main() -> ! {
-  let path = exec_path();
+/// starts it, through the shim stub at `/.needy/proxy`. `path` is the path
+/// the original `execve` named, which the stub passed on: argv[0] is the
+/// command's own and this process is the guest needy, so only the stub's
+/// auxiliary vector had it (`AT_EXECFN`).
+pub(super) fn main(path: String) -> ! {
   let args: Vec<String> = std::env::args_os().map(|a| a.to_string_lossy().into_owned()).collect();
+  let path = if path.is_empty() {
+    args.first().cloned().unwrap_or_default()
+  } else {
+    path
+  };
   // In a VM the kernel runs a stub's empty file only through the proxy; in
   // a container the stub is a link to the proxy itself. Either way a stub
   // has no program to run here.
@@ -77,19 +84,6 @@ pub(super) fn run(invocation: Invocation) -> ! {
 /// `needy exec`'s.
 fn message(message: impl std::fmt::Display) {
   eprintln!("needy: {message}");
-}
-
-/// The path the original `execve` named. argv[0] is the command's own and
-/// `/proc/self/exe` is the proxy, so only the auxiliary vector has it.
-pub(super) fn exec_path() -> String {
-  // NOTICE: neither std nor nix reads the auxiliary vector; `getauxval` is
-  // the libc call for it. `AT_EXECFN` points into this process's stack and
-  // lives as long as the process.
-  let p = unsafe { libc::getauxval(libc::AT_EXECFN) } as *const libc::c_char;
-  if p.is_null() {
-    return std::env::args().next().unwrap_or_default();
-  }
-  unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
 
 async fn proxy(invocation: Invocation) -> Result<i32> {

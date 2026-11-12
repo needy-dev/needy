@@ -91,7 +91,8 @@ pub trait Engine: Send + Sync {
   /// that runtime (`runtimeArgs`). It answers only if the engine does, so
   /// it is also the probe of whether one does.
   async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error>;
-  async fn has_image(&self, image: &str) -> Result<bool, Error>;
+  /// The labels of `image`, or `None` when the engine does not have it.
+  async fn image_labels(&self, image: &str) -> Result<Option<HashMap<String, String>>, Error>;
   /// Pulls `image`; a bare name means its `latest` tag.
   async fn pull(&self, image: &str) -> Result<(), Error>;
   /// Creates the container `name`; [`Error::NotFound`] when its image is
@@ -170,7 +171,7 @@ impl Engine for Unreachable {
     Err(self.error())
   }
 
-  async fn has_image(&self, _image: &str) -> Result<bool, Error> {
+  async fn image_labels(&self, _image: &str) -> Result<Option<HashMap<String, String>>, Error> {
     Err(self.error())
   }
 
@@ -215,10 +216,10 @@ impl Engine for Docker {
     Ok(info.runtimes.unwrap_or_default().into_iter().map(|(name, runtime)| (name, runtime.runtime_args.unwrap_or_default())).collect())
   }
 
-  async fn has_image(&self, image: &str) -> Result<bool, Error> {
+  async fn image_labels(&self, image: &str) -> Result<Option<HashMap<String, String>>, Error> {
     match self.0.inspect_image(image).await.map_err(Error::from) {
-      Ok(_) => Ok(true),
-      Err(e) if e.is_not_found() => Ok(false),
+      Ok(inspected) => Ok(Some(inspected.config.and_then(|config| config.labels).unwrap_or_default())),
+      Err(e) if e.is_not_found() => Ok(None),
       Err(e) => Err(e),
     }
   }

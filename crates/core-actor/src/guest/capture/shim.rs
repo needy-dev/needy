@@ -1,20 +1,22 @@
 //! Build-time shims, the capture of a container actor (`linux-container`,
 //! `macos-apple-container`).
 //!
-//! The container actor image's last stage (`images/container/shim.sh`)
+//! The container actor image's shim stage (`images/container/shim.sh`)
 //! copies every executable on the image's `PATH` to `/.needy/real/<path>`
-//! and replaces it with a hard link to this binary. A shim finds the program
-//! it stands for from `/proc/self/exe`, which names the link it was started
-//! through, and runs the real one with the caller's argv, `argv[0]`
-//! included, so programs that behave by their name (busybox, `python3`)
-//! see the name they were called by. Only a name on the run's route list,
-//! for the route's user, goes to the proxy, which asks the daemon.
+//! and replaces it with a hard link to the shim stub (`/.needy/proxy`,
+//! `images/stub/shim.c`). The stub hands the exec to the guest needy with
+//! the path it was started through (its `/proc/self/exe`, the link), from
+//! which a shim finds the program it stands for, and runs the real one with
+//! the caller's argv, `argv[0]` included, so programs that behave by their
+//! name (busybox, `python3`) see the name they were called by. Only a name
+//! on the run's route list, for the route's user, goes to the proxy, which
+//! asks the daemon.
 //!
 //! Init turns routing on by writing [`ROUTE_FILE`] after its setup, as it
-//! sets the kernel module's parameters in a VM ([`super::binfmt`]); until then, and in the
-//! image build, every shim runs its real program. Init and the proxy start
-//! programs through their real paths, so needy's own helpers are never
-//! routed, as the kernel guarantees in a VM.
+//! sets the kernel module's parameters in a VM ([`super::binfmt`]); until
+//! then every shim runs its real program. Init and the proxy start programs
+//! through their real paths, so needy's own helpers are never routed, as
+//! the kernel guarantees in a VM.
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 
@@ -24,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use super::Route;
 use crate::contract::{NEEDY_DIR, REAL};
-use crate::guest::proxy;
+use crate::guest::{Stub, proxy};
 
 /// Turns routing on: the route's user and names, which init writes once it
 /// set the actor up.
@@ -38,11 +40,6 @@ pub fn real(exe: &Path) -> Option<PathBuf> {
   }
   let real = Path::new(REAL).join(exe.strip_prefix("/").ok()?);
   (real.is_symlink() || real.exists()).then_some(real)
-}
-
-/// Whether this process was started through a shim.
-pub fn invoked() -> bool {
-  std::env::current_exe().ok().and_then(|exe| real(&exe)).is_some()
 }
 
 // The route file's format; what a route routes is the capture's (`super`).
@@ -108,16 +105,16 @@ pub fn enable(route: &Route) -> std::io::Result<()> {
   std::fs::rename(&staged, path)
 }
 
-/// A shim's entry: runs the real program, or hands a routed exec to the
-/// proxy.
-pub fn main() -> ! {
-  let Some((exe, real)) = std::env::current_exe().ok().and_then(|exe| real(&exe).map(|real| (exe, real))) else {
-    eprintln!("needy: this program is a shim, but its real program is missing");
+/// A shim's entry, as the shim stub hands it over: runs the real program,
+/// or hands a routed exec to the proxy.
+pub fn main(stub: Stub) -> ! {
+  let Stub { exe, execfn } = stub;
+  let Some(real) = real(&exe) else {
+    eprintln!("needy: {} is a shim, but its real program is missing", exe.display());
     std::process::exit(127);
   };
   let args: Vec<OsString> = std::env::args_os().collect();
   let route = std::fs::read_to_string(ROUTE_FILE).ok().and_then(|text| Route::parse(&text));
-  let execfn = proxy::exec_path();
   let argv0 = args.first().map(|a| a.to_string_lossy().into_owned()).unwrap_or_default();
   let uid = nix::unistd::getuid().as_raw();
   let routed = route.is_some_and(|route| route.routes(uid, &names(&execfn, &exe, &argv0)));

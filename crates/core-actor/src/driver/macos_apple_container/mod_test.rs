@@ -13,6 +13,9 @@ use super::*;
 struct Fake {
   calls: Mutex<Vec<String>>,
   failing: Vec<(&'static str, &'static str)>,
+  /// What `image inspect` prints; an image with this needy's base ABI when
+  /// `None`.
+  inspected: Option<String>,
   code: i32,
 }
 
@@ -29,7 +32,10 @@ impl Cli for Fake {
     let failed = self.failing.iter().any(|(a, b)| args.first().map(String::as_str) == Some(a) && args.get(1).map(String::as_str) == Some(b));
     Ok(Output {
       success: !failed,
-      stdout: String::new(),
+      stdout: match args.first().map(String::as_str) {
+        Some("image") if !failed => self.inspected.clone().unwrap_or_else(|| inspected(Some("1"))),
+        _ => String::new(),
+      },
       stderr: if failed {
         "Error: not found\n".into()
       } else {
@@ -42,6 +48,21 @@ impl Cli for Fake {
     self.calls.lock().unwrap().push(args[..3].join(" "));
     Ok(Box::new(Exits(self.code)))
   }
+}
+
+/// What `container image inspect needy-actor:latest` prints for an image
+/// with base ABI label `abi`, or none, beside an amd64 variant without one.
+// Source: the shape of `container image inspect alpine:3.22` with
+// `container` 1.7.1 on an Apple silicon Mac (2026-11-12), cut to the fields
+// read here; the label is needy's.
+fn inspected(abi: Option<&str>) -> String {
+  let labels = abi.map(|abi| format!(r#", "Labels": {{"needy.base-abi": "{abi}"}}"#)).unwrap_or_default();
+  format!(
+    r#"[{{"configuration": {{"name": "needy-actor:latest"}}, "id": "61dd3504fadd", "variants": [
+      {{"config": {{"architecture": "amd64", "os": "linux", "config": {{"Env": []}}}}}},
+      {{"config": {{"architecture": "arm64", "os": "linux", "config": {{"Env": []{labels}}}}}}}
+    ]}}]"#
+  )
 }
 
 /// A `container run` process that exits with its code when waited for.
@@ -80,6 +101,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     recipe,
     user,
     mounts: &[],
+    guest: Path::new("/Users/user/.local/bin/needy-linux-aarch64"),
   }
 }
 
@@ -101,6 +123,7 @@ fn the_guest_and_gateway_sockets_are_mounted_one_file_each_and_the_process_socke
     [
       "/Users/user/.local/state/needy/runs/0123456789ab/channels/guest.sock:/.needy/channels/guest.sock",
       "/Users/user/.local/state/needy/runs/0123456789ab/channels/gateway.sock:/.needy/channels/gateway.sock",
+      "/Users/user/.local/bin/needy-linux-aarch64:/.needy/needy:ro",
     ]
   );
   assert_eq!(
@@ -292,6 +315,45 @@ async fn running_services_and_the_image_pass_the_host_check() {
   let (runtime, _) = runtime(Fake::default());
 
   runtime.check_host().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_image_of_another_base_abi_is_refused_before_the_actor_starts() {
+  let (runtime, _) = runtime(Fake {
+    inspected: Some(inspected(Some("2"))),
+    ..Default::default()
+  });
+
+  let error = runtime.check_host().await.unwrap_err().to_string();
+
+  assert_eq!(
+    error,
+    "the actor image needy-actor:latest has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy build \
+     --macos-apple-container` from this needy's version, or use a needy that speaks base ABI 2"
+  );
+}
+
+#[tokio::test]
+async fn an_image_built_with_its_own_needy_inside_is_refused() {
+  let (runtime, _) = runtime(Fake {
+    inspected: Some(inspected(None)),
+    ..Default::default()
+  });
+
+  let error = runtime.check_host().await.unwrap_err().to_string();
+
+  assert!(error.starts_with("the actor image needy-actor:latest records no base ABI"), "{error}");
+}
+
+#[test]
+fn the_guest_needy_is_mounted_read_only_over_the_base_images_placeholder() {
+  let (runtime, _) = runtime(Fake::default());
+  let user = User::default();
+
+  let launch = runtime.launch(&start(Path::new("/r"), &user, None));
+
+  assert_eq!(values(&launch.args, "--volume")[2], "/Users/user/.local/bin/needy-linux-aarch64:/.needy/needy:ro");
+  assert_eq!(values(&launch.args, "--entrypoint"), ["/.needy/init"], "the base image's boot stub starts it");
 }
 
 #[test]

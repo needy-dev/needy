@@ -4,13 +4,22 @@
 #   docker build -f images/Dockerfile --target executor -t needy-executor .
 #   docker build -f images/Dockerfile --target actor-container -t needy-actor .
 #   docker build -f images/Dockerfile --platform linux/arm64 --target actor-macos-vz --output type=local,dest=OUT .
+#   docker build -f images/Dockerfile --target guest --output type=local,dest=OUT .
 # Stages build for the platform they run on: `uname -m` picks the musl
 # target, the kernel configuration and opencode's release. The Firecracker
 # actor (`actor`) is x86_64 only; the `macos-vz` actor (`actor-macos-vz`,
 # Virtualization.framework on Apple silicon) is arm64 only.
+#
+# The actor images are base images: they hold no needy of their own, only
+# the boot stub and the shim stub (`images/stub/`). The daemon injects its
+# own guest needy (the `guest` target's) when an actor starts. BASE_ABI is
+# the base ABI the images record (`needy_core_actor::image::base::ABI`, which
+# a test keeps equal); see
+# docs/ai/references/architecture/2026-11-12-actor-images-design.md.
 ARG KERNEL_VERSION=6.18.62
 ARG FIRECRACKER_VERSION=v1.17.0
 ARG OPENCODE_VERSION=v1.19.5
+ARG BASE_ABI=1
 
 # Static needy binary for guests and executors.
 # NOTICE: the cache mount on /src/target is shared by every build on this
@@ -53,6 +62,34 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,targe
 
 FROM scratch AS windows
 COPY --from=needy-windows /needy.exe /needy.exe
+
+# The guest needy the daemon injects into actors, for this platform: what
+# `make guest` writes as bin/needy-linux-<arch>.
+FROM scratch AS guest
+COPY --from=needy /needy /needy
+
+# The base image's `/.needy` (base ABI): the boot stub (`init`) and the shim
+# stub (`proxy`), static musl C programs with no needy code, so an image
+# works with every needy of its base ABI; an empty placeholder where the
+# guest needy goes (`needy`); the directory a VM's boot stub mounts the
+# guest disk at (`disk`); and the base ABI it was built for (`base-abi`).
+# The build fails unless the stubs are static.
+FROM ubuntu:24.04 AS stubs
+ARG BASE_ABI
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev musl-tools binutils \
+ && rm -rf /var/lib/apt/lists/*
+COPY images/stub/ /src/
+RUN mkdir -p /out/.needy/disk \
+ && musl-gcc -static -Os -s -Wall -Werror -o /out/.needy/init /src/boot.c \
+ && musl-gcc -static -Os -s -Wall -Werror -o /out/.needy/proxy /src/shim.c \
+ && for stub in /out/.needy/init /out/.needy/proxy; do \
+      if readelf -lW "$stub" | grep -q INTERP || readelf -dW "$stub" | grep -q '(NEEDED)'; then \
+        echo "$stub is not statically linked" >&2; exit 1; \
+      fi; \
+    done \
+ && : > /out/.needy/needy && chmod 755 /out/.needy/needy \
+ && echo "$BASE_ABI" > /out/.needy/base-abi \
+ && echo "$BASE_ABI" > /out/base-abi
 
 # Guest kernel: Firecracker CI config, needy fragment, exec routing and fake sensors.
 # Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/resources/guest_configs/microvm-kernel-ci-x86_64-6.18.config
@@ -164,9 +201,8 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  && arch="$(case "$(uname -m)" in aarch64) echo arm64;; *) echo x64;; esac)" \
  && curl -fsSL "https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-${arch}.tar.gz" \
     | tar xz -C /usr/local/bin opencode \
- && mkdir -p /.needy /home/agent/workspace && chown agent:agent /home/agent/workspace
-COPY --from=needy /needy /.needy/needy
-RUN ln /.needy/needy /.needy/init && ln /.needy/needy /.needy/proxy
+ && mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
+COPY --from=stubs /out/.needy/ /.needy/
 
 FROM ubuntu:24.04 AS actor-image
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*
@@ -191,11 +227,11 @@ FROM scratch AS actor
 COPY --from=kernel /linux/vmlinux /vmlinux
 COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=firecracker /firecracker /firecracker
-COPY --from=needy /needy /needy
+COPY --from=stubs /out/base-abi /base-abi
 
 # The `macos-vz` actor's files, built with `--platform linux/arm64`: the
-# uncompressed kernel Virtualization.framework boots, the actor rootfs and the
-# guest's needy. The VM process is vfkit, installed on the Mac, not built here.
+# uncompressed kernel Virtualization.framework boots and the actor rootfs.
+# The VM process is vfkit, installed on the Mac, not built here.
 # NOTICE: `initrd` is an empty initramfs (a cpio archive with only its
 # trailer). vfkit always hands its Linux boot loader an initrd path, and an
 # empty one fails (`invalid initial RAM disk path`, vfkit 0.6.4,
@@ -210,7 +246,7 @@ FROM scratch AS actor-macos-vz
 COPY --from=kernel /linux/arch/arm64/boot/Image /Image
 COPY --from=macos-vz-initrd /initrd /initrd
 COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
-COPY --from=needy /needy /needy
+COPY --from=stubs /out/base-abi /base-abi
 
 # Container actor userland: the actor-root's programs without what only a VM
 # needs: no systemd (a container's `systemd-detect-virt` would name the
@@ -232,20 +268,22 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  && curl -fsSL "https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-${arch}.tar.gz" \
     | tar xz -C /usr/local/bin opencode \
  && mkdir -p /.needy/channels
-COPY --from=needy /needy /.needy/needy
-COPY images/container/shim.sh /.needy/shim.sh
+COPY --from=stubs /out/.needy/ /.needy/
 # NOTICE: the PATH directories are Docker's default container PATH,
 # https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19 (as `SYSTEM_PATH`
-# in crates/core-actor/src/guest/init/stubs.rs).
-RUN ln /.needy/needy /.needy/init && ln /.needy/needy /.needy/proxy \
- && /bin/sh /.needy/shim.sh "" /.needy/proxy /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin \
- && rm /.needy/shim.sh
+# in crates/core-actor/src/guest/init/stubs.rs). The script is mounted for
+# this step only, so it does not stay in the image.
+RUN --mount=type=bind,source=images/container/shim.sh,target=/tmp/shim.sh \
+    /bin/sh /tmp/shim.sh "" /.needy/proxy /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin
 
 # The container actor image, `needy-actor`: one layer, so the copies the
-# shim step made of programs from earlier layers are not stored twice.
+# shim step made of programs from earlier layers are not stored twice. The
+# label records its base ABI, which the container drivers check.
 FROM scratch AS actor-container
+ARG BASE_ABI
 COPY --from=container-root / /
 ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+LABEL needy.base-abi=$BASE_ABI
 ENTRYPOINT ["/.needy/init"]
 
 # Executor: a container where routed commands run.

@@ -119,6 +119,12 @@ pub struct Config {
   /// The KVM device an actor's Firecracker opens:
   /// `needy_core_actor::driver::linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,
+  /// The guest needy the operator named (`--guest-needy`), which every
+  /// actor gets; `None` looks for one next to this daemon's executable
+  /// (`needy_core_actor::image::guest::find`).
+  pub guest_needy: Option<PathBuf>,
+  /// Where the VM drivers keep the guest disks they make from it.
+  pub guest_disks: PathBuf,
   /// The image of `linux-container` executors that name none.
   pub executor_image: String,
   /// How often runners send a heartbeat; told to them in every join and
@@ -141,6 +147,16 @@ pub struct Config {
 pub use reconcile::REPORT_WAIT;
 
 #[cfg(unix)]
+/// The guest needy a control daemon of `config` brings into its actors, or
+/// why it has none: the one `config` names, else `needy-linux-<arch>` next
+/// to this executable, else on Linux this executable when it is a static
+/// build (`needy_core_actor::image::guest::find`). Every actor start looks
+/// it up again.
+#[cfg(unix)]
+pub fn guest_needy(config: &Config) -> anyhow::Result<PathBuf> {
+  actor::guest_needy(config)
+}
+
 /// The control daemon. Clones share it.
 #[derive(Clone)]
 pub struct Daemon {

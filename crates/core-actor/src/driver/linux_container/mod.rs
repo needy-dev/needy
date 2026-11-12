@@ -8,8 +8,10 @@
 //! [`CHANNELS`]: the daemon serves the guest API and the gateway there, and
 //! init serves the driving program's process service there. Workspace mounts
 //! are sshfs on this machine, over the run's guest channel like a VM's, and
-//! bind-mounted into the container. The container's stdout and stderr are
-//! the actor's log.
+//! bind-mounted into the container. The image is a base image: the guest
+//! needy is bind-mounted read-only at [`GUEST`], and the image's
+//! `needy.base-abi` label must be this needy's. The container's stdout and
+//! stderr are the actor's log.
 //!
 //! NOTICE: bind-mounted Unix sockets work only where the container and the
 //! daemon share a kernel, or where the OCI runtime passes host sockets
@@ -33,12 +35,16 @@ use needy_core_executor::engine::{self, Engine};
 use needy_core::recipe::CompiledRecipe;
 use needy_core::types::Capture;
 
-use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
+use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST, GUEST_SOCKET, INIT, PROCESS_SOCKET, channels_dir};
 use crate::driver::{
   Channels, Driver, Endpoint, Error, Facets, Gap, HostMount, Identity, Leftover, Running, Side, Start, Terminal, Transport,
 };
 use crate::identity;
+use crate::image::base;
 use crate::image::container::name;
+
+/// What builds a container actor image of this needy's version.
+const REBUILD: &str = "needy build --linux-container";
 
 /// Where the host-side workspace mounts of the actor in `dir` are.
 fn mounts_dir(dir: &Path) -> PathBuf {
@@ -171,14 +177,18 @@ impl LinuxContainer {
       ("/run".to_string(), "rw,exec,nosuid,nodev,mode=755".to_string()),
       (home, format!("rw,exec,nosuid,nodev,mode=755,uid={},gid={}", user.uid, user.gid)),
     ]);
-    let mut all_binds = vec![format!("{}:{CHANNELS}", channels_dir(start.dir).display())];
+    // The guest needy goes in read-only over the base image's placeholder.
+    let mut all_binds = vec![
+      format!("{}:{CHANNELS}", channels_dir(start.dir).display()),
+      format!("{}:{GUEST}:ro", start.guest.display()),
+    ];
     all_binds.extend(binds);
     // Docker refuses more CPUs than the host has; the recipe's count still
     // shows where the identity files present it.
     let host_cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
     let body = ContainerCreateBody {
       image: Some(self.image.clone()),
-      entrypoint: Some(vec!["/.needy/init".into()]),
+      entrypoint: Some(vec![INIT.into()]),
       cmd: Some(Vec::new()),
       // Init sets the actor up as root and runs the driving program as the
       // profile's user.
@@ -331,10 +341,10 @@ impl Driver for LinuxContainer {
         args.join(" ")
       )));
     }
-    if !self.engine.has_image(&self.image).await.map_err(engine_error)? {
-      return Err(refused(format!("the container actor image {} is missing; run `needy build --linux-container`", self.image)));
-    }
-    Ok(())
+    let Some(labels) = self.engine.image_labels(&self.image).await.map_err(engine_error)? else {
+      return Err(refused(format!("the container actor image {} is missing; run `{REBUILD}`", self.image)));
+    };
+    Ok(base::check(&self.image, labels.get(base::LABEL).map(String::as_str), REBUILD)?)
   }
 
   fn channels(&self, dir: &Path) -> Channels {

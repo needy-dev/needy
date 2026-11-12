@@ -68,7 +68,7 @@ impl Launch {
   // NOTICE: vfkit splits a `--device` value at every comma, so a path with a
   // comma cannot be given; vfkit reports the option it cannot parse,
   // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/config/virtio.go#L181-L183.
-  pub fn new(image: &Image, vfkit: &Path, dir: &Path, recipe: Option<&CompiledRecipe>) -> Self {
+  pub fn new(image: &Image, vfkit: &Path, dir: &Path, guest_disk: &Path, recipe: Option<&CompiledRecipe>) -> Self {
     let (vcpus, mem_mib) = crate::driver::size(recipe);
     let path = |p: &Path| p.to_string_lossy().into_owned();
     let mut args = vec![
@@ -81,6 +81,11 @@ impl Launch {
       format!("linux,kernel={},initrd={},\"cmdline={BOOT_ARGS}\"", path(&image.kernel), path(&image.initrd)),
       "--device".into(),
       format!("virtio-blk,path={},readonly", path(&image.rootfs)),
+      // The guest disk (base ABI): `/dev/vdb`, after the root file system.
+      // Virtualization.framework attaches storage devices in the order vfkit
+      // gives them, and vfkit keeps the order of its `--device` options.
+      "--device".into(),
+      format!("virtio-blk,path={},readonly", path(guest_disk)),
       // NOTICE: vfkit opens a log file without appending (`append: false`,
       // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/virtio.go#L283),
       // which would write over its own messages in the same file; through

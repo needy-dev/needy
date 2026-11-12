@@ -10,6 +10,7 @@ use super::*;
 
 const IMAGE: &str = "/home/user/.local/share/needy/actor";
 const DIR: &str = "/home/user/.local/state/needy/runs/0123456789ab";
+const DISK: &str = "/home/user/.local/share/needy/guest/0123456789abcdef.squashfs";
 
 fn gce(extra: &str) -> CompiledRecipe {
   let text = format!("extends: builtin:gce-ubuntu-22.04\n{extra}");
@@ -19,7 +20,7 @@ fn gce(extra: &str) -> CompiledRecipe {
 
 #[test]
 fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
-  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), None);
+  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), None);
 
   assert_eq!((launch.vcpus, launch.mem_mib), (2, 2048));
   assert_eq!(
@@ -33,6 +34,12 @@ fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
         "drive_id": "rootfs",
         "path_on_host": "/home/user/.local/share/needy/actor/rootfs.ext4",
         "is_root_device": true,
+        "is_read_only": true,
+      }, {
+        // The guest disk, `/dev/vdb`, which the boot stub mounts.
+        "drive_id": "needy",
+        "path_on_host": "/home/user/.local/share/needy/guest/0123456789abcdef.squashfs",
+        "is_root_device": false,
         "is_read_only": true,
       }],
       "machine-config": {"vcpu_count": 2, "mem_size_mib": 2048},
@@ -54,7 +61,7 @@ fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
 fn a_recipe_with_pci_bridges_sizes_the_vm_and_enables_pci() {
   let recipe = gce("");
 
-  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe));
+  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe));
 
   assert_eq!((launch.vcpus, launch.mem_mib), (2, 8192));
   assert_eq!(
@@ -78,7 +85,7 @@ fn a_recipe_with_pci_bridges_sizes_the_vm_and_enables_pci() {
 fn the_firecracker_environment_carries_the_recipe_identity() {
   let recipe = gce("cpu: { hypervisor: hidden }");
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
 
   assert_eq!(env["NEEDY_BRAND_STRING"], "Intel(R) Xeon(R) CPU @ 2.80GHz");
   assert_eq!(env["NEEDY_HIDE_HYPERVISOR"], "1");
@@ -132,7 +139,7 @@ fn every_smbios_key_needy_sends_is_one_the_patched_firecracker_reads() {
   let defaults = patch_smbios_defaults();
   assert!(defaults.contains_key("product_serial"), "{defaults:?}");
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
   let sent = smbios_keys(&env["NEEDY_SMBIOS"]);
 
   let unread: Vec<_> = sent.keys().filter(|key| !defaults.contains_key(*key)).collect();
@@ -200,7 +207,7 @@ fn the_gce_identity_sends_the_system_uuid_as_board_asset_tag() {
   let recipe = gce("");
   let uuid = recipe.identity.smbios.as_ref().unwrap().uuid.clone();
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
 
   assert_eq!(smbios_keys(&env["NEEDY_SMBIOS"])["board_asset_tag"], uuid.to_ascii_uppercase());
 }
@@ -210,7 +217,7 @@ fn a_dell_identity_sends_no_google_value() {
   let recipe = needy_config::recipe::load(&Source::builtin("dell-optiplex-ubuntu-24.04")).unwrap();
   let recipe = needy_core::recipe::compile(&recipe, &HostInfo::default(), &needy_core::recipe::PerRun::at(7, 0));
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
   let sent = smbios_keys(&env["NEEDY_SMBIOS"]);
 
   assert!(sent.values().all(|v| !v.contains("Google")), "{sent:?}");
@@ -222,7 +229,7 @@ fn a_dell_identity_sends_no_google_value() {
 fn a_visible_hypervisor_sets_no_hide_variable() {
   let recipe = gce("");
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
 
   assert!(!env.contains_key("NEEDY_HIDE_HYPERVISOR"), "{env:?}");
 }
@@ -241,7 +248,7 @@ fn smbios_values_cannot_end_a_field_early() {
     ..gce("")
   };
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
 
   assert_eq!(
     env["NEEDY_SMBIOS"],
@@ -252,7 +259,7 @@ fn smbios_values_cannot_end_a_field_early() {
 #[test]
 fn a_missing_image_file_is_named_in_the_error() {
   let dir = tempfile::tempdir().unwrap();
-  let launch = Launch::new(&Image::new(dir.path()), dir.path(), None);
+  let launch = Launch::new(&Image::new(dir.path()), dir.path(), &dir.path().join("needy.squashfs"), None);
 
   let Err(error) = Vm::start(&launch) else {
     panic!("a VM started without an image");
@@ -267,6 +274,7 @@ fn fake_image(dir: &Path, script: &str) -> Image {
   let image = Image::new(dir);
   std::fs::write(&image.kernel, "").unwrap();
   std::fs::write(&image.rootfs, "").unwrap();
+  std::fs::write(dir.join("base-abi"), "1\n").unwrap();
   std::fs::write(&image.firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
   std::fs::set_permissions(&image.firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
   image
@@ -277,7 +285,7 @@ async fn stop_terminates_firecracker() {
   use std::os::unix::process::ExitStatusExt;
   let dir = tempfile::tempdir().unwrap();
   let image = fake_image(dir.path(), "exec sleep 300");
-  let mut vm = Vm::start(&Launch::new(&image, dir.path(), None)).unwrap();
+  let mut vm = Vm::start(&Launch::new(&image, dir.path(), &dir.path().join("needy.squashfs"), None)).unwrap();
 
   let status = vm.stop(std::time::Duration::from_secs(10)).await.unwrap();
 
@@ -291,7 +299,7 @@ async fn stop_kills_a_firecracker_that_ignores_sigterm() {
   let dir = tempfile::tempdir().unwrap();
   let ready = dir.path().join("ready");
   let image = fake_image(dir.path(), &format!("trap '' TERM; touch {}; while :; do sleep 0.1; done", ready.display()));
-  let mut vm = Vm::start(&Launch::new(&image, dir.path(), None)).unwrap();
+  let mut vm = Vm::start(&Launch::new(&image, dir.path(), &dir.path().join("needy.squashfs"), None)).unwrap();
   // The trap must be in place before the signal.
   while !ready.exists() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -310,6 +318,7 @@ fn detection_needs_a_kvm_device_that_opens_and_a_complete_image() {
   let host = Host {
     kvm: dir.path().join("kvm"),
     image: dir.path().join("image"),
+    guest_disks: dir.path().join("guest"),
   };
   std::fs::create_dir(&host.image).unwrap();
 
@@ -319,9 +328,12 @@ fn detection_needs_a_kvm_device_that_opens_and_a_complete_image() {
   for file in ["vmlinux", "rootfs.ext4", "firecracker"] {
     std::fs::write(host.image.join(file), b"").unwrap();
   }
+  let no_base_abi = detect(&host).unwrap_err();
+  std::fs::write(host.image.join("base-abi"), b"1\n").unwrap();
 
   assert!(no_kvm.starts_with(&format!("cannot open {}: ", host.kvm.display())), "{no_kvm}");
   assert_eq!(no_image, format!("actor image is missing {}; run `needy build`", host.image.join("vmlinux").display()));
+  assert!(no_base_abi.contains("records no base ABI"), "{no_base_abi}");
   assert_eq!(detect(&host), Ok(()));
 }
 
@@ -332,6 +344,7 @@ fn detection_needs_linux() {
   let host = Host {
     kvm: dir.path().to_path_buf(),
     image: dir.path().to_path_buf(),
+    guest_disks: dir.path().to_path_buf(),
   };
 
   assert_eq!(detect(&host).unwrap_err(), "Firecracker runs on Linux only");

@@ -30,9 +30,11 @@ pub struct Args {
   /// `builtin:NAME`.
   #[arg(long)]
   recipe: Option<String>,
-  /// Output directory for the actor image: vmlinux, rootfs.ext4 and
-  /// firecracker, or on Apple silicon macOS Image, initrd and rootfs.ext4
-  /// for `macos-vz` actors. Defaults to the image the daemon boots.
+  /// Output directory for the actor image: vmlinux, rootfs.ext4,
+  /// firecracker and base-abi, or on Apple silicon macOS Image, initrd,
+  /// rootfs.ext4 and base-abi for `macos-vz` actors. It is a base image
+  /// without needy, which the daemon injects when an actor starts. Defaults
+  /// to the image the daemon boots.
   #[arg(long)]
   out: Option<PathBuf>,
   /// Also build the `needy-executor` Docker image.
