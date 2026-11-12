@@ -1,0 +1,88 @@
+# pi in an actor, from the agents image (Dockerfile here). Every shell it
+# starts, and so every command its bash tool runs, goes to the `build`
+# executor, which holds the workspace.
+#
+# Build the image once per host (README.md has every driver):
+#   docker build -t needy-agents examples/agents       # container drivers: that is all
+#   needy image build --from needy-agents               # VM drivers too, again after each rebuild
+# Then, once, the directory the login is kept in:
+#   mkdir -p ~/needy-state/pi
+#   needy run create -it --profile examples/agents/pi.yaml
+#
+# On the first start, run /login and pick a provider. A subscription's
+# browser sign-in cannot call back to the actor's localhost: when pi asks,
+# paste the final redirect URL or the code the page shows. GitHub Copilot
+# signs in with a device code. The login (agent/auth.json) is mirrored back
+# to ~/needy-state/pi when the run ends.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image: needy-agents
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command: [pi]
+  env:
+    # No pi.dev version check and no install telemetry, so only the model
+    # providers below are needed.
+    # Reference: https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/docs/environment-variables.md
+    PI_SKIP_VERSION_CHECK: "1"
+    PI_TELEMETRY: "0"
+    # Without a subscription login: a provider's API key (pi reads
+    # ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, ...; see pi's
+    # docs/providers.md). It then lives in the actor (needy has no header
+    # injection yet, `TODO(mitm)`) and in the run's stored profile, so set
+    # it in a private profile that `extends:` this one, never in a shared
+    # file:
+    # ANTHROPIC_API_KEY: sk-ant-...
+  network:
+    # The providers pi signs in to, from the endpoints in pi 1.5.2's bundle
+    # (dist/bundle in the npm package): Anthropic (api.anthropic.com, and
+    # claude.ai and platform.claude.com for a Claude subscription), OpenAI
+    # (api.openai.com, and auth.openai.com and chatgpt.com for a ChatGPT
+    # plan), GitHub Copilot (github.com, api.github.com and
+    # api.individual.githubcopilot.com), OpenRouter and OpenCode Zen; and
+    # pi.dev, which pi asks at start even with the version check off, and
+    # whose /oauth documents some sign-ins use. Add another provider's host
+    # here; `needy report` lists denied hosts.
+    allow: [pi.dev, api.anthropic.com, claude.ai, platform.claude.com,
+            api.openai.com, auth.openai.com, chatgpt.com,
+            github.com, api.github.com, api.individual.githubcopilot.com,
+            openrouter.ai, opencode.ai]
+
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 8 }
+
+commands:
+  # The bash tool runs `bash -c ...`. pi itself is a Node.js script, and
+  # node is not routed, so pi stays in the actor.
+  - match: "{bash,sh,dash,zsh} **"
+    to: build
+  # Identity probes stay on the actor's recipe.
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor
+
+# The agent directory (auth.json, settings, sessions) survives stateless
+# actors: copied in at the start, mirrored back at the end. Credentials then
+# live in the actor, where the agent can read them (see README.md).
+# NOTICE: the mappings name ~/.pi, not ~/.pi/agent: copy-in gives the user
+# only the directory it names and what it unpacks, so a parent it creates on
+# the way (~/.pi) would stay root's. The host directory therefore holds
+# agent/. Remove the indirection once copy-in gives the user the parents it
+# creates under the home.
+# NOTICE: the filters are on copy-in, which the control host packs with
+# them. An actor's mirror-out sends its whole directory: the guest packs it
+# without the mapping's filter (`mirror_out` in
+# crates/core-actor/src/guest/init/files.rs), so what a filter leaves out
+# still reaches the host, and is only left out of the next copy-in.
+files:
+  pi-in:
+    mode: copy-in
+    from: "host:~/needy-state/pi/"
+    to: "actor:~/.pi/"
+    # agent/bin/ holds tools pi downloads when the image lacks them.
+    filter: ["- /agent/bin/**", "+ **"]
+  pi-out:
+    mode: mirror-out
+    from: "actor:~/.pi/"
+    to: "host:~/needy-state/pi/"
+run_files: [pi-in, pi-out]

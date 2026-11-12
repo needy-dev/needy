@@ -586,6 +586,7 @@ control token and a join token; `-v` turns on logs.
 | [`examples/macos-vz`](examples/macos-vz/profile.yaml) | The smoke test in a `macos-vz` actor, routing by absolute path |
 | [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml) | The smoke and chaos tests in Apple's `container` |
 | [`examples/custom-image`](examples/custom-image/profile.yaml) | An actor image `FROM` needy's base with jq added, on every driver |
+| [`examples/agents`](examples/agents/README.md) | pi, Claude Code, Codex, opencode and herdr in an actor: one image, a profile each, their logins kept across runs |
 | [`examples/local`](examples/local/profile.yaml) | This machine as a native executor: copy-in, mirror-out, chaos and the trace |
 | [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy exec`, with an actor that only waits |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |

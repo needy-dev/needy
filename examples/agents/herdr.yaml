@@ -1,0 +1,90 @@
+# herdr in an actor, from the agents image (Dockerfile here): a terminal
+# workspace whose panes run the other agents (claude, codex, pi, opencode).
+# The panes' own shells stay in the actor, where the agents are; the shells
+# an agent starts, and so every command it runs, go to the `build`
+# executor, which holds the workspace.
+#
+# Build the image once per host (README.md has every driver):
+#   docker build -t needy-agents examples/agents       # container drivers: that is all
+#   needy image build --from needy-agents               # VM drivers too, again after each rebuild
+# Then, once, the directories the logins are kept in:
+#   mkdir -p ~/needy-state/{claude,codex,pi,opencode}
+#   needy run create -it --profile examples/agents/herdr.yaml
+#
+# Log in to each agent in a pane as its own profile says. Detaching herdr
+# (ctrl+b q) ends its client, the driving program, and so the run; use
+# needy's own detach (ctrl-]) to leave the run going.
+#
+# NOTICE: this profile repeats what the four agent profiles set instead of
+# extending them: `extends` takes one parent, and a child's list (such as
+# `actor.network.allow` or `run_files`) replaces its parent's, so the union
+# of four profiles cannot be built from them.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-firecracker
+  image: needy-agents
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
+  command: [herdr]
+  env:
+    # As claude.yaml, codex.yaml (which passes its settings on the command
+    # line, so a pane runs `codex --sandbox danger-full-access`), pi.yaml
+    # and opencode.yaml.
+    CLAUDE_CONFIG_DIR: /home/agent/.claude
+    DISABLE_UPDATES: "1"
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1"
+    PI_SKIP_VERSION_CHECK: "1"
+    PI_TELEMETRY: "0"
+    OPENCODE_DISABLE_AUTOUPDATE: "1"
+  network:
+    # The union of the four agent profiles' hosts. herdr's own version and
+    # agent-manifest checks go to herdr.dev, which is left out: they are
+    # refused, and herdr goes on with the manifests it bundles.
+    allow: [pi.dev, api.anthropic.com, claude.ai, claude.com, platform.claude.com,
+            api.openai.com, auth.openai.com, chatgpt.com,
+            github.com, api.github.com, api.individual.githubcopilot.com,
+            openrouter.ai, opencode.ai, "*.opencode.ai", models.dev, "*.models.dev",
+            registry.npmjs.org]
+
+executors:
+  build: { driver: linux-container, key: "{run}", max_procs: 8 }
+
+commands:
+  # A shell an agent starts (its tool calls) goes to the executor. pi sets
+  # its process title to `pi`, so it is matched by that name too.
+  - match: "{bash,sh,dash,zsh} **"
+    when: { under: "{claude,codex,pi,opencode} **" }
+    to: build
+  # herdr's panes, and any other shell, stay in the actor, where the agents
+  # are installed.
+  - match: "{bash,sh,dash,zsh} **"
+    to: actor
+  # Identity probes stay on the actor's recipe.
+  - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
+    to: actor
+
+# The four agent profiles' mappings; their NOTICEs say why the filters are on
+# copy-in and why pi and opencode map ~/.pi and ~/.local.
+files:
+  claude-in:
+    mode: copy-in
+    from: "host:~/needy-state/claude/"
+    to: "actor:~/.claude/"
+    filter: ["- /shell-snapshots/**", "- /downloads/**", "+ **"]
+  claude-out: { mode: mirror-out, from: "actor:~/.claude/", to: "host:~/needy-state/claude/" }
+  codex-in:
+    mode: copy-in
+    from: "host:~/needy-state/codex/"
+    to: "actor:~/.codex/"
+    filter: ["- /tmp/**", "- /.tmp/**", "- /log/**", "+ **"]
+  codex-out: { mode: mirror-out, from: "actor:~/.codex/", to: "host:~/needy-state/codex/" }
+  pi-in: { mode: copy-in, from: "host:~/needy-state/pi/", to: "actor:~/.pi/", filter: ["- /agent/bin/**", "+ **"] }
+  pi-out: { mode: mirror-out, from: "actor:~/.pi/", to: "host:~/needy-state/pi/" }
+  opencode-in:
+    mode: copy-in
+    from: "host:~/needy-state/opencode/"
+    to: "actor:~/.local/"
+    filter: ["- /share/opencode/bin/**", "- /share/opencode/log/**", "+ /share/opencode/**", "+ /state/opencode/**", "- **"]
+  opencode-out: { mode: mirror-out, from: "actor:~/.local/", to: "host:~/needy-state/opencode/" }
+run_files: [claude-in, claude-out, codex-in, codex-out, pi-in, pi-out, opencode-in, opencode-out]
