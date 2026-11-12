@@ -550,6 +550,11 @@ impl Engine for Fake {
     self.record(format!("remove {name}"));
     Ok(())
   }
+
+  async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, engine::Error> {
+    self.record(format!("download {name} {path}"));
+    Ok(None)
+  }
 }
 
 #[cfg(unix)]
@@ -569,12 +574,19 @@ async fn a_missing_image_is_pulled_as_docker_run_does_and_a_failed_start_removes
 
   assert_eq!(error.to_string(), "docker: cannot start");
   let name = "needy-build-s1";
+  let scratch = format!("{name}-account");
   assert_eq!(
     *fake.calls.lock().unwrap(),
     [
-      format!("remove {name}"),
-      format!("create {name}"),
+      format!("remove {scratch}"),
+      format!("create {scratch}"),
       "pull needy-executor:latest".to_string(),
+      format!("create {scratch}"),
+      format!("download {scratch} /etc/passwd"),
+      format!("download {scratch} /etc/group"),
+      format!("download {scratch} /etc/shadow"),
+      format!("remove {scratch}"),
+      format!("remove {name}"),
       format!("create {name}"),
       format!("start {name}"),
       format!("remove {name}"),

@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{
-  CreateContainerOptionsBuilder, CreateImageOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder, StopContainerOptionsBuilder,
-  WaitContainerOptionsBuilder,
+  CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder, LogsOptionsBuilder,
+  RemoveContainerOptionsBuilder, StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -110,6 +110,9 @@ pub trait Engine: Send + Sync {
   /// Removes the container, running or not; one that is gone already, or
   /// whose removal is in progress, is fine.
   async fn remove(&self, name: &str) -> Result<(), Error>;
+  /// The tar archive of `path` in the container `name`, which need not have
+  /// started; `None` when the container has no such path.
+  async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, Error>;
 }
 
 /// This machine's engine (`DOCKER_HOST`, else the default socket), or the
@@ -202,6 +205,10 @@ impl Engine for Unreachable {
   async fn remove(&self, _name: &str) -> Result<(), Error> {
     Err(self.error())
   }
+
+  async fn download(&self, _name: &str, _path: &str) -> Result<Option<Vec<u8>>, Error> {
+    Err(self.error())
+  }
 }
 
 /// The engine through `bollard`.
@@ -261,6 +268,19 @@ impl Engine for Docker {
   async fn remove(&self, name: &str) -> Result<(), Error> {
     let options = RemoveContainerOptionsBuilder::default().force(true).build();
     ignore(self.0.remove_container(name, Some(options)).await, &[404, 409])
+  }
+
+  async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, Error> {
+    let options = DownloadFromContainerOptionsBuilder::default().path(path).build();
+    let chunks: Result<Vec<bytes::Bytes>, Error> =
+      self.0.download_from_container(name, Some(options)).map_err(Error::from).try_collect().await;
+    match chunks {
+      Ok(chunks) => Ok(Some(chunks.concat())),
+      // The engine answers 404 for a missing path as for a missing
+      // container; the caller created the container, so it is the path.
+      Err(e) if e.is_not_found() => Ok(None),
+      Err(e) => Err(e),
+    }
   }
 }
 

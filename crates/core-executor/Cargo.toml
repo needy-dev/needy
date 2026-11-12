@@ -18,6 +18,7 @@ needy-api-proto.workspace = true
 needy-common.workspace = true
 needy-config.workspace = true
 portable-pty.workspace = true
+tar.workspace = true
 vt100.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

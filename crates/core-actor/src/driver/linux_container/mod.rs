@@ -374,6 +374,19 @@ impl Driver for LinuxContainer {
     let user = start.user;
     let host = identity::Host::read(Path::new("/"));
     let mut binds = identity::prepare(start.dir, start.recipe, crate::driver::size(start.recipe).0, &host, self.oci_runtime)?;
+    // The profile's user in the account files: init may not mount here, and
+    // the root is read-only, so they are bound from the host and init finds
+    // them right.
+    let account = needy_common::account::Account {
+      name: &user.name,
+      uid: user.uid,
+      gid: user.gid,
+    };
+    let scratch = format!("{}-account", name(start.run));
+    let accounts = needy_core_executor::account::binds(self.engine.as_ref(), &self.image, &scratch, &start.dir.join("account"), &account)
+      .await
+      .map_err(engine_error)?;
+    binds.extend(accounts);
     let mounts = Self::mount(start.dir, start.mounts, user.uid, user.gid).await?;
     binds.extend(mounts.iter().map(|(_, bind)| bind.clone()));
     let launch = self.launch(start, binds);

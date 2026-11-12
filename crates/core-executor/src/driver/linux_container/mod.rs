@@ -77,6 +77,12 @@ fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Resu
   Ok(())
 }
 
+/// The host directory with the account files of the container `name`
+/// (see [`crate::account`]), next to its socket's.
+fn account_dir(options: &Options, name: &str) -> PathBuf {
+  socket_dir(options, name).with_extension("account")
+}
+
 /// Whether this machine's Docker-compatible engine answers, as `engine`
 /// found.
 pub async fn detect(engine: &engine::Probe) -> Result<(), String> {
@@ -122,11 +128,15 @@ impl LinuxContainer {
   pub async fn remove_instance(&self, name: &str) -> Result<(), Error> {
     self.engine.remove(name).await?;
     // The socket stays behind its container; the workspace is the user's.
-    let dir = socket_dir(&self.options, name);
-    if let Err(e) = std::fs::remove_dir_all(&dir)
-      && e.kind() != std::io::ErrorKind::NotFound
-    {
-      tracing::warn!("cannot remove {}: {e}", dir.display());
+    for dir in [
+      socket_dir(&self.options, name),
+      account_dir(&self.options, name),
+    ] {
+      if let Err(e) = std::fs::remove_dir_all(&dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+      {
+        tracing::warn!("cannot remove {}: {e}", dir.display());
+      }
     }
     Ok(())
   }
@@ -150,6 +160,20 @@ impl Driver for LinuxContainer {
       })?;
     } else {
       share_with_container(&container.workspace_dir, &spec.user)?;
+    }
+    // The profile's user in the container's account files, which the
+    // container's user cannot write.
+    let mut container = container;
+    let image = container.body.image.clone().unwrap_or_default();
+    let user = needy_common::account::Account {
+      name: &spec.user.name,
+      uid: spec.user.uid,
+      gid: spec.user.gid,
+    };
+    let account_dir = account_dir(&self.options, &container.name);
+    let binds = crate::account::binds(self.engine.as_ref(), &image, &format!("{}-account", container.name), &account_dir, &user).await?;
+    if let Some(host) = container.body.host_config.as_mut() {
+      host.binds.get_or_insert_default().extend(binds);
     }
     // A container left by an earlier daemon would block the name.
     self.engine.remove(&container.name).await?;

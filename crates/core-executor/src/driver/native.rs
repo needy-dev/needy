@@ -34,6 +34,10 @@ impl Driver for Native {
     ExecutorDriver::Native
   }
 
+  // NOTICE: a native executor's commands run as the user the runner (or the
+  // control daemon) runs as, with that user's account files: the profile's
+  // `user` applies to actors and container executors only, since needy does
+  // not own this machine's accounts.
   async fn create(&self, spec: &Spec) -> Result<Instance, Error> {
     let mut handle = self.machine();
     if let Some(workspace) = &spec.config.workspace {

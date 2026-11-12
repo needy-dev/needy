@@ -1,6 +1,6 @@
 //! The actor's init: the boot sequence, in order. It mounts the system, asks
-//! the daemon for the run's configuration, sets up the identity, the
-//! workspace mounts, the gateway forwarder, route stubs and copy-in, turns
+//! the daemon for the run's configuration, gives the account files the
+//! profile's user (`account`), sets up the identity, the workspace mounts, the gateway forwarder, route stubs and copy-in, turns
 //! routing on (`super::capture`), runs the driving program, mirrors out, reports its exit and
 //! reboots, which ends the VM.
 //!
@@ -17,6 +17,7 @@
 //! faults) are owned by the actor: they end when init reboots the VM or
 //! exits the container.
 
+mod account;
 mod files;
 mod identity;
 mod mounts;
@@ -142,6 +143,12 @@ async fn boot(container: bool) -> Result<()> {
   if !container {
     mounts::home(&home, user.uid, user.gid);
   }
+  // Before anything runs as the user, so every program sees the same name.
+  account::apply(&needy_common::account::Account {
+    name: &user.name,
+    uid: user.uid,
+    gid: user.gid,
+  });
   identity::apply(&config);
   for m in &config.mounts {
     let mount = crate::sshfs::Mount {

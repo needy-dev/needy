@@ -75,7 +75,26 @@ impl Engine for Fake {
     self.record(format!("remove {name}"));
     Ok(())
   }
+
+  /// The image has an account file only at `/etc/passwd`: `agent` at 1000.
+  async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, EngineError> {
+    self.record(format!("download {name} {path}"));
+    if path != "/etc/passwd" {
+      return Ok(None);
+    }
+    let text = PASSWD.as_bytes();
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(text.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append_data(&mut header, "passwd", text).unwrap();
+    Ok(Some(archive.into_inner().unwrap()))
+  }
 }
+
+/// The image's `/etc/passwd` in [`Fake`].
+const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\nagent:x:1000:1000::/home/agent:/bin/bash\n";
 
 /// The guest needy a test's actor gets.
 const GUEST_NEEDY: &str = "/home/user/.local/bin/needy";
@@ -277,9 +296,16 @@ async fn a_started_actor_logs_its_output_and_is_removed_when_it_exits() {
   assert_eq!(actor.pid(), 4242);
   assert_eq!(std::fs::read_to_string(dir.path().join("console.log")).unwrap(), "init: booted\n");
   let name = "needy-actor-0123456789ab";
+  let scratch = format!("{name}-account");
   assert_eq!(
     fake.calls(),
     [
+      format!("remove {scratch}"),
+      format!("create {scratch}"),
+      format!("download {scratch} /etc/passwd"),
+      format!("download {scratch} /etc/group"),
+      format!("download {scratch} /etc/shadow"),
+      format!("remove {scratch}"),
       format!("remove {name}"),
       format!("create {name}"),
       format!("start {name}"),
@@ -307,7 +333,7 @@ async fn stopping_an_actor_stops_its_container_within_the_grace_and_removes_it()
   assert_eq!(status.code(), Some(137));
   let calls = fake.calls();
   assert_eq!(
-    calls[3..],
+    calls[calls.len() - 3..],
     [
       "stop needy-actor-0123456789ab 3s",
       "wait needy-actor-0123456789ab",
@@ -370,4 +396,32 @@ async fn gvisor_with_host_sockets_and_the_image_passes_the_host_check() {
   );
 
   container.check_host().await.unwrap();
+}
+
+// ROOT CAUSE:
+//
+// If a profile renamed its user (`bob`, uid 1001), the actor image's
+// `/etc/passwd` still had only `agent`, so the driving program got
+// `HOME=/home/bob` while `whoami` said `agent` or nothing.
+//
+// Before the fix, a container actor kept the image's account files.
+// The fix binds account files rewritten for the profile's user, read-only.
+#[tokio::test]
+async fn a_renamed_user_gets_its_passwd_entry_bound_into_the_container() {
+  let dir = tempfile::tempdir().unwrap();
+  let (container, fake) = runtime(Fake::default(), OciRuntime::Runc);
+  let user = User {
+    name: "bob".into(),
+    uid: 1001,
+    gid: 1001,
+  };
+
+  container.start(&start(dir.path(), &user, None)).await.unwrap();
+
+  let passwd = dir.path().join("account").join("passwd");
+  assert_eq!(std::fs::read_to_string(&passwd).unwrap(), format!("{PASSWD}bob:x:1001:1001::/home/bob:/bin/bash\n"));
+  let bodies = fake.bodies.lock().unwrap();
+  let binds = bodies.last().unwrap().host_config.as_ref().unwrap().binds.clone().unwrap();
+  assert!(binds.contains(&format!("{}:/etc/passwd:ro", passwd.display())), "{binds:?}");
+  assert!(!binds.iter().any(|bind| bind.ends_with(":/etc/group:ro")), "{binds:?}");
 }

@@ -1,5 +1,7 @@
 //! Where commands run.
 //!
+//! - [`account`]: the profile's user in a container's account files, for
+//!   both `linux-container` drivers.
 //! - [`process`]: the process host that owns processes and terminals on this
 //!   machine, independent of the clients streaming them.
 //! - [`service`]: `ExecutorService`, the process service one machine serves.
@@ -11,6 +13,7 @@
 //!   terminal or pipes.
 //! - [`signals`]: signal names, this platform's numbers and shell exit codes.
 
+pub mod account;
 pub mod driver;
 pub mod engine;
 pub mod process;
