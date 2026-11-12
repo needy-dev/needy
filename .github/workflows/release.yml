@@ -630,12 +630,17 @@ jobs:
             test "$(find artifacts -path 'artifacts/notarized-*' -type f | wc -l)" -eq 4
           fi
 
+      # NOTICE(crlf-sha256): the Windows job's `.sha256` comes from
+      # PowerShell's `Set-Content`, which ends it with CRLF; `sha256sum -c`
+      # takes the CR as part of the digest and finds no checksum line. Seen
+      # in the first run of this job on a dispatch; before step 4 the check
+      # ran only on publishing runs, so no release had hit it yet.
       - name: Verify checksums
         working-directory: release
         run: |
           ls -lh
           for sum in *.sha256; do
-            echo "$(cat "$sum")  ${sum%.sha256}" | sha256sum -c -
+            echo "$(tr -d '\r\n' < "$sum")  ${sum%.sha256}" | sha256sum -c -
           done
 
       - name: Attest build provenance
