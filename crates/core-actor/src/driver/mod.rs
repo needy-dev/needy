@@ -254,17 +254,22 @@ pub fn new(host: &Host, actor: &Actor) -> Result<Box<dyn Driver>, Error> {
 
 /// Whether this host has `driver`, or why not: a runner reports
 /// `actor(DRIVER)` for each that it has. What depends on a profile (an OCI
-/// runtime, an image in a store) is checked when a run is created.
-pub async fn detect(driver: ActorDriver, host: &Host) -> Result<(), String> {
+/// runtime, an image in a store) is checked when a run is created. A driver
+/// on the Docker-compatible engine reads the answer `engine` shares with the
+/// executor drivers.
+pub async fn detect(driver: ActorDriver, host: &Host, engine: &needy_core_executor::engine::Probe) -> Result<(), String> {
   match driver {
     ActorDriver::LinuxFirecracker => linux_firecracker::detect(host),
     #[cfg(unix)]
-    ActorDriver::LinuxContainer => linux_container::detect().await,
+    ActorDriver::LinuxContainer => linux_container::detect(engine).await,
     ActorDriver::MacosVz => macos_vz::detect(host).await,
     #[cfg(unix)]
     ActorDriver::MacosAppleContainer => macos_apple_container::detect().await,
     #[cfg(not(unix))]
-    ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer => Err(format!("{driver} actors run on Linux and macOS only")),
+    ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer => {
+      let _ = engine;
+      Err(format!("{driver} actors run on Linux and macOS only"))
+    }
   }
 }
 

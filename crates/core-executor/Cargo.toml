@@ -1,6 +1,6 @@
 [package]
 name = "needy-core-executor"
-description = "Needy executors: processes, executor providers and the terminal relay"
+description = "Needy executors: processes, executor drivers, the Docker-compatible engine client and the terminal relay"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

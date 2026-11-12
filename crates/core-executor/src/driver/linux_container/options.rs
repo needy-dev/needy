@@ -3,10 +3,10 @@
 //! profile's typed `container:` fields under the operator's policy, each one
 //! engine API field.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use bollard::models::{
+use crate::engine::models::{
   ContainerCreateBody, DeviceMapping, DeviceRequest, HostConfig, Mount, MountTmpfsOptions, MountType, ResourcesUlimits,
 };
 use needy_config::profile::{ContainerExecutor as ContainerConfig, Device, Gpus, MemorySwap, Mount as ProfileMount, Ulimit};
@@ -96,7 +96,7 @@ pub fn container(spec: &Spec, options: &Options) -> Result<Container, Error> {
     ),
     user: Some(format!("{}:{}", spec.user.uid, spec.user.gid)),
     hostname: spec.hostname.clone(),
-    labels: Some(HashMap::from([("needy.run".to_string(), spec.run.clone())])),
+    labels: Some(crate::engine::labels(&spec.run, "executor")),
     host_config: Some(HostConfig {
       auto_remove: Some(true),
       binds: Some(vec![

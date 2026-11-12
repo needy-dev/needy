@@ -10,7 +10,6 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-bollard.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
@@ -19,6 +18,9 @@ hyper-rustls.workspace = true
 hyper-util.workspace = true
 needy-config.workspace = true
 needy-core.workspace = true
+# The Docker-compatible engine client the `linux-container` driver shares with
+# the executor's (`engine`); the dependency points this way only.
+needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -43,7 +45,6 @@ libc.workspace = true
 needy-api-client.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
-needy-core-executor.workspace = true
 nix = { workspace = true, features = ["fs", "hostname", "ioctl", "mount", "net", "process", "reboot", "sched", "signal", "socket"] }
 procfs-core.workspace = true
 # `tonic014`: the process service for a driving program on a terminal is

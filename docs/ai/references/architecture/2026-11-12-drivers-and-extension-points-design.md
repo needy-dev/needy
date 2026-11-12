@@ -1,6 +1,6 @@
 # Drivers and extension points
 
-Status: accepted by the owner (2026-11-12); slices 1 to 3 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3)), slices 4 to 6 pending. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
+Status: accepted by the owner (2026-11-12); slices 1 to 4 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3) and [Slice 4](#slice-4-one-engine)), slices 5 and 6 pending. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
 
 ## Why
 
@@ -423,6 +423,56 @@ Slices 4 to 6 are independent of each other once 1 to 3 have landed.
   `schedule::Need` holds them too, so `Need::actor` and `Need::executor`, the
   conversions, are gone.
 
+### Slice 4: one engine
+
+- `core_executor::engine` is the one client: the `Engine` trait (runtimes,
+  image presence, pull, create, start, logs, wait, stop, remove), the
+  `bollard` implementation, and `Unreachable`, the stand-in for an engine
+  that cannot be reached, which stays the injection boundary both drivers'
+  tests use (`with_engine` on each). `connect` reaches `DOCKER_HOST` (else
+  the default socket); `local` turns a failed connect into `Unreachable`.
+  The engine's types come through `engine::models` (bollard's), so
+  `core-actor` no longer depends on `bollard`; it depends on
+  `core-executor` on every platform, since the actor `detect` that every
+  platform builds takes the engine's probe.
+- `engine::Error` is neutral: `Unreachable`, `NotFound` (the engine's 404)
+  and `Refused`. The executor's `Error::Docker(bollard)` is
+  `Error::Engine(engine::Error)`; the actor maps an engine error to
+  `Error::Driver` as before. Messages keep `docker: ...` for what the
+  engine refused; an engine that does not answer says `no Docker-compatible
+  engine answers: ...` for both drivers (the actor said `no Docker daemon
+  answers`).
+- The status codes the drivers treat as success live in the engine: 304 to
+  a stop (not running), 404 and 409 to a removal (gone, or `--rm` already
+  removing it). Not-found is an error kind (`Error::is_not_found`), so the
+  executor's pull of a missing image on create (as `docker run` does) is
+  the driver's policy over `Engine::pull`, which adds `latest` to a bare
+  name. The executor's start now also inspects the container for its PID,
+  which it ignores; one call, so the trait has one `start`.
+- Detection shares one answer: `engine::Probe` asks the engine once (3 s)
+  and both `linux-container` `detect`s read it; `core_actor::driver::detect`
+  and `core_executor::driver::detect` take the probe, and the daemon's
+  `capabilities::probe` makes one per probe. An explicit value rather than a
+  process-wide cache, so a later probe asks again.
+- Labels are the engine's: `engine::labels(run, role)` sets `needy.run` and
+  `needy.role`, and executor containers now carry `needy.role: executor`
+  beside the actor's `actor`. Nothing lists containers by label yet
+  (`TODO(engine)` on `labels`): reconcile still finds leftovers by the
+  names `state.db` has, and listing by label would change what it ends.
+- Verified on 2026-11-12: `make check` and `make test` pass on an Apple
+  silicon Mac and on the Linux KVM host (the executor's container test runs
+  there against the engine). End to end, with images built from the slice's
+  tree and each control daemon in a scratch state directory:
+  `examples/smoke` (`linux-firecracker` actor, `linux-container` executor:
+  routed `python3`, the sshfs workspace both ways, `routed exit=7`, the
+  executor's container labelled `needy.role=executor` and gone after the
+  run); `examples/linux-container` with `runc` and without its workspace
+  mount (no `user_allow_other` on that host), as in slices 1 to 3: recipe
+  identity, routed `python3`, report `Actor linux-container (runc)`, no
+  container left; and `examples/macos-apple-container` on the Mac (unchanged
+  driver): workspace both ways, routed `python3`, gateway allows
+  `example.com` and denies `example.org`.
+
 ### Verification of slices 1 to 3
 
 `make check` and `make test` pass after each slice on an Apple silicon Mac
@@ -445,7 +495,7 @@ directory, on 2026-11-12:
   `Engine` trait and `bollard` client, with `refused()` mapping engine errors
   to `Error::Driver`; the executor's `linux_container` has its own
   `detect` and `Error::Docker(bollard)` (not yet neutral). Both `detect`s ask
-  the engine for `info` within 3 s.
+  the engine for `info` within 3 s. (Done: see [Slice 4](#slice-4-one-engine).)
 - Slice 5 (policy and capture): `Facets::capture` (`Kernel`, `Shims`, with a
   `TODO(macos-native)` for fenced shims) is where a driver declares its
   capture, and `check.rs` already reads it for the shim warning; the gateway
@@ -465,3 +515,10 @@ directory, on 2026-11-12:
   `actor.start` as a typed value, not the label.
 - The report's shim-routing note for `macos-apple-container` actors: they have
   the same gap as `linux-container` (`profile check` already warns for both).
+- `needy build` (`cli/commands/build.rs`) builds the container images through
+  its own `bollard` client; connecting through `engine::connect` would give
+  it the same `DOCKER_HOST` handling and errors (the build itself, BuildKit's
+  session, stays the CLI's).
+- Reconcile by label: `engine::labels` makes every needy container findable
+  by run and role, so a restarted daemon could end containers whose
+  `state.db` rows are gone, which today stay running.

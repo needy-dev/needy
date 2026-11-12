@@ -1,7 +1,7 @@
 //! The `linux-container` driver: one container per instance, running
 //! `needy daemon --mode executor` on a socket in a directory shared with the
-//! host. Containers are created through the Docker-compatible engine API
-//! (`bollard`), wherever `DOCKER_HOST` points.
+//! host. Containers are created through the Docker-compatible engine
+//! ([`crate::engine`]), wherever `DOCKER_HOST` points.
 //!
 //! A profile sets run options as typed `container:` fields, which map to the
 //! Docker API's container body one by one. The daemon owns some fields,
@@ -15,10 +15,7 @@
 mod options;
 
 use std::path::{Path, PathBuf};
-
-use bollard::errors::Error as DockerError;
-use bollard::query_parameters::{CreateContainerOptionsBuilder, CreateImageOptionsBuilder, RemoveContainerOptionsBuilder};
-use futures_util::TryStreamExt;
+use std::sync::Arc;
 
 use options::socket_dir;
 pub use options::{Container, container};
@@ -26,6 +23,7 @@ pub use options::{Container, container};
 use needy_config::profile::ExecutorDriver;
 
 use super::{Driver, Error, Instance, Spec, connect};
+use crate::engine::{self, Engine};
 
 /// What the operator decides for every `linux-container` executor.
 #[derive(Debug, Clone)]
@@ -79,63 +77,50 @@ fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Resu
   Ok(())
 }
 
-// NOTICE: how long detection waits for the engine. A local socket answers in
-// milliseconds; a Docker Desktop that is not running fails at once. 3 s
-// bounds an engine that hangs without delaying a runner's join much.
-const DETECT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
-
-/// Whether this machine's Docker-compatible engine (`DOCKER_HOST`, else its
-/// default socket) answers within [`DETECT_WAIT`].
-pub async fn detect() -> Result<(), String> {
-  let answered = async {
-    let docker = bollard::Docker::connect_with_defaults()?.with_timeout(DETECT_WAIT);
-    docker.info().await.map(drop)
-  };
-  answered.await.map_err(|e| format!("no Docker-compatible engine answers: {e}"))
+/// Whether this machine's Docker-compatible engine answers, as `engine`
+/// found.
+pub async fn detect(engine: &engine::Probe) -> Result<(), String> {
+  engine.answer().await
 }
 
 /// The `linux-container` driver on this machine's Docker-compatible engine.
 pub struct LinuxContainer {
-  docker: bollard::Docker,
+  engine: Arc<dyn Engine>,
   options: Options,
 }
 
 impl LinuxContainer {
-  /// Uses the local Docker daemon (`DOCKER_HOST`, else its default socket).
-  /// Nothing is contacted until an instance is created.
+  /// Uses this machine's engine (`DOCKER_HOST`, else its default socket).
+  /// Nothing is contacted until an instance is created; a `DOCKER_HOST`
+  /// that names no engine fails here.
   pub fn new(options: Options) -> Result<Self, Error> {
-    Ok(Self {
-      docker: bollard::Docker::connect_with_defaults()?,
-      options,
-    })
+    Ok(Self::with_engine(options, engine::connect()?))
+  }
+
+  pub fn with_engine(options: Options, engine: Arc<dyn Engine>) -> Self {
+    Self { engine, options }
   }
 
   async fn create_container(&self, container: &Container) -> Result<(), Error> {
-    let options = CreateContainerOptionsBuilder::default().name(&container.name).build();
-    match self.docker.create_container(Some(options.clone()), container.body.clone()).await {
-      Ok(_) => Ok(()),
+    match self.engine.create(&container.name, container.body.clone()).await {
       // Like `docker run`, pull an image that is not here yet.
-      Err(DockerError::DockerResponseServerError {
-        status_code: 404, ..
-      }) => {
+      Err(e) if e.is_not_found() => {
         let image = container.body.image.clone().unwrap_or_default();
         tracing::info!("pulling {image}");
-        let pull = CreateImageOptionsBuilder::default().from_image(&with_tag(&image)).build();
-        self.docker.create_image(Some(pull), None, None).try_collect::<Vec<_>>().await?;
-        self.docker.create_container(Some(options), container.body.clone()).await?;
+        self.engine.pull(&image).await?;
+        self.engine.create(&container.name, container.body.clone()).await?;
         Ok(())
       }
-      Err(e) => Err(e.into()),
+      created => Ok(created?),
     }
   }
 
-  /// Removes a container by name; one that is gone already is fine.
   /// Removes the container `name` and its socket's directory, as
   /// `destroy` does, without a handle: for a container a control daemon
   /// that restarted finds in its records. A container that is gone already
   /// is not an error.
   pub async fn remove_instance(&self, name: &str) -> Result<(), Error> {
-    self.remove(name).await?;
+    self.engine.remove(name).await?;
     // The socket stays behind its container; the workspace is the user's.
     let dir = socket_dir(&self.options, name);
     if let Err(e) = std::fs::remove_dir_all(&dir)
@@ -144,29 +129,6 @@ impl LinuxContainer {
       tracing::warn!("cannot remove {}: {e}", dir.display());
     }
     Ok(())
-  }
-
-  async fn remove(&self, name: &str) -> Result<(), Error> {
-    let options = RemoveContainerOptionsBuilder::default().force(true).build();
-    match self.docker.remove_container(name, Some(options)).await {
-      // 404: no such container; 409: its removal is in progress (`--rm`).
-      Ok(())
-      | Err(DockerError::DockerResponseServerError {
-        status_code: 404 | 409,
-        ..
-      }) => Ok(()),
-      Err(e) => Err(e.into()),
-    }
-  }
-}
-
-/// An image reference with its tag: the API pulls every tag of a bare name.
-fn with_tag(image: &str) -> String {
-  let last = image.rsplit('/').next().unwrap_or(image);
-  if last.contains(':') || last.contains('@') {
-    image.to_string()
-  } else {
-    format!("{image}:latest")
   }
 }
 
@@ -190,16 +152,16 @@ impl Driver for LinuxContainer {
       share_with_container(&container.workspace_dir, &spec.user)?;
     }
     // A container left by an earlier daemon would block the name.
-    self.remove(&container.name).await?;
+    self.engine.remove(&container.name).await?;
     self.create_container(&container).await?;
     let ready = async {
-      self.docker.start_container(&container.name, None).await?;
+      self.engine.start(&container.name).await?;
       connect(&format!("unix:{}", container.socket().display())).await
     };
     let client = match ready.await {
       Ok(client) => client,
       Err(error) => {
-        if let Err(e) = self.remove(&container.name).await {
+        if let Err(e) = self.engine.remove(&container.name).await {
           tracing::warn!("cannot remove {} after a failed start: {e}", container.name);
         }
         return Err(error);

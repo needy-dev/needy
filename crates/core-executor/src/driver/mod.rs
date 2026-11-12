@@ -55,8 +55,9 @@ pub enum Error {
   },
   #[error(transparent)]
   Client(#[from] needy_api_client::Error),
-  #[error("docker")]
-  Docker(#[from] bollard::errors::Error),
+  /// What the Docker-compatible engine did not do.
+  #[error(transparent)]
+  Engine(#[from] crate::engine::Error),
 }
 
 /// What the pool asks a driver for: one instance of a profile's executor.
@@ -115,11 +116,12 @@ pub trait Driver: Send + Sync {
 }
 
 /// Whether this machine has `driver`, or why not: a runner reports
-/// `executor(DRIVER)` for each that it has.
-pub async fn detect(driver: ExecutorDriver) -> Result<(), String> {
+/// `executor(DRIVER)` for each that it has. A driver on the engine reads
+/// the answer `engine` shares with the actor drivers.
+pub async fn detect(driver: ExecutorDriver, engine: &crate::engine::Probe) -> Result<(), String> {
   match driver {
     ExecutorDriver::Native => Ok(()),
-    ExecutorDriver::LinuxContainer => linux_container::detect().await,
+    ExecutorDriver::LinuxContainer => linux_container::detect(engine).await,
   }
 }
 

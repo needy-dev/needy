@@ -63,7 +63,8 @@ executor's `container:` options).
 The Docker-compatible container engine a `linux-container` driver talks to,
 wherever `DOCKER_HOST` points: Docker Engine, OrbStack, Podman or containerd
 through its Docker-compatible tooling, treated alike. needy has no
-per-engine code.
+per-engine code, and one client (`core_executor::engine`) that both
+`linux-container` drivers use.
 
 ### Driving program
 

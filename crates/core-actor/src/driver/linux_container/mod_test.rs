@@ -1,12 +1,14 @@
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use needy_config::Source;
 use needy_config::profile::User;
 use needy_core::recipe::{CompiledRecipe, HostInfo};
+use needy_core_executor::engine::{Error as EngineError, Unreachable};
 
 use super::*;
 
-/// A Docker daemon that records what it is asked and whose containers exit
+/// An engine that records what it is asked and whose containers exit
 /// with `code` once waited for, after printing `log`.
 #[derive(Default)]
 struct Fake {
@@ -30,40 +32,45 @@ impl Fake {
 
 #[async_trait::async_trait]
 impl Engine for Fake {
-  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
+  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, EngineError> {
     Ok(self.runtimes.iter().map(|(name, args)| (name.to_string(), args.iter().map(|a| a.to_string()).collect())).collect())
   }
 
-  async fn has_image(&self, image: &str) -> Result<bool, Error> {
+  async fn has_image(&self, image: &str) -> Result<bool, EngineError> {
     Ok(self.images.iter().any(|i| i == image))
   }
 
-  async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), Error> {
+  async fn pull(&self, image: &str) -> Result<(), EngineError> {
+    self.record(format!("pull {image}"));
+    Ok(())
+  }
+
+  async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), EngineError> {
     self.record(format!("create {name}"));
     self.bodies.lock().unwrap().push(body);
     Ok(())
   }
 
-  async fn start(&self, name: &str) -> Result<u32, Error> {
+  async fn start(&self, name: &str) -> Result<u32, EngineError> {
     self.record(format!("start {name}"));
     Ok(4242)
   }
 
-  fn logs(&self, _name: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
+  fn logs(&self, _name: &str) -> BoxStream<'static, Result<bytes::Bytes, EngineError>> {
     futures_util::stream::iter([Ok(bytes::Bytes::from_static(self.log.as_bytes()))]).boxed()
   }
 
-  async fn wait(&self, name: &str) -> Result<i64, Error> {
+  async fn wait(&self, name: &str) -> Result<i64, EngineError> {
     self.record(format!("wait {name}"));
     Ok(self.code)
   }
 
-  async fn stop(&self, name: &str, grace: Duration) -> Result<(), Error> {
+  async fn stop(&self, name: &str, grace: Duration) -> Result<(), EngineError> {
     self.record(format!("stop {name} {}s", grace.as_secs()));
     Ok(())
   }
 
-  async fn remove(&self, name: &str) -> Result<(), Error> {
+  async fn remove(&self, name: &str) -> Result<(), EngineError> {
     self.record(format!("remove {name}"));
     Ok(())
   }
@@ -250,23 +257,19 @@ async fn stopping_an_actor_stops_its_container_within_the_grace_and_removes_it()
 
 // ROOT CAUSE:
 //
-// If the Docker socket could not be found, `profile check` reported nothing
+// If the engine's socket could not be found, `profile check` reported nothing
 // about the container actor, because the runtime failed to construct and
 // the check skips a runtime it cannot construct as a profile error.
 //
-// Before the fix, a host without Docker passed the actor's host check.
-// The fix makes an unreachable Docker fail each use, `check_host` first.
+// Before the fix, a host without an engine passed the actor's host check.
+// The fix makes an unreachable engine fail each use, `check_host` first.
 #[tokio::test]
-async fn a_docker_that_cannot_be_reached_fails_the_host_check_with_the_reason() {
-  let container = LinuxContainer::with_engine(
-    OciRuntime::Runc,
-    "needy-actor:latest".into(),
-    Arc::new(Unreachable("no Docker daemon answers: socket missing".into())),
-  );
+async fn an_engine_that_cannot_be_reached_fails_the_host_check_with_the_reason() {
+  let container = LinuxContainer::with_engine(OciRuntime::Runc, "needy-actor:latest".into(), Arc::new(Unreachable("socket missing".into())));
 
   let error = container.check_host().await.unwrap_err().to_string();
 
-  assert_eq!(error, "no Docker daemon answers: socket missing");
+  assert_eq!(error, "no Docker-compatible engine answers: socket missing");
 }
 
 // ROOT CAUSE:

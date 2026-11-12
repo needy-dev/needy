@@ -2123,7 +2123,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "backon",
- "bollard",
  "bytes",
  "futures-util",
  "http-body-util",

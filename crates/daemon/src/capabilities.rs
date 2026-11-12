@@ -104,11 +104,13 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
     actor: BTreeMap::new(),
     executor: BTreeMap::new(),
   };
+  // Both `linux-container` drivers ask the one engine, once.
+  let engine = needy_core_executor::engine::Probe::default();
   for driver in ActorDriver::ALL {
-    facts.actor.insert(driver, needy_core_actor::driver::detect(driver, &host).await);
+    facts.actor.insert(driver, needy_core_actor::driver::detect(driver, &host, &engine).await);
   }
   for driver in ExecutorDriver::ALL {
-    facts.executor.insert(driver, needy_core_executor::driver::detect(driver).await);
+    facts.executor.insert(driver, needy_core_executor::driver::detect(driver, &engine).await);
   }
   facts
 }

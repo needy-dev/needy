@@ -33,8 +33,8 @@ Dependencies point downward; a crate never depends on one above it.
   the table of drivers, the one place that picks a driver by name (`new`,
   `detect`, `reconcile`, `facets`): `linux_firecracker` (the Firecracker configuration
   from a compiled recipe in `config`, the KVM check and host CPU probe in
-  `kvm`, the Firecracker process), `linux_container` (a container through a
-  Docker-compatible engine), `macos_vz` (Virtualization.framework VMs on
+  `kvm`, the Firecracker process), `linux_container` (a container through
+  `needy-core-executor`'s `engine`), `macos_vz` (Virtualization.framework VMs on
   Apple silicon, vfkit's command line in `vfkit`) and `macos_apple_container`
   (Apple's `container` CLI in `cli`). What drivers share is a component:
   `contract` (vsock ports and channel sockets the guest and host agree on),
@@ -47,8 +47,10 @@ Dependencies point downward; a crate never depends on one above it.
   finished processes) with platform code in `process/platform`; `service` is
   the process service one machine serves; `driver` is the executor `Driver`
   trait that creates and destroys executor instances, with the table of
-  drivers: `native` and `linux_container` (through `bollard`; its `options`
-  is the container run-option policy); `relay` connects an exec stream to the local
+  drivers: `native` and `linux_container` (its `options` is the container
+  run-option policy); `engine` is the one Docker-compatible engine client
+  (`bollard`, wherever `DOCKER_HOST` points) both `linux-container` drivers
+  use, this crate's and the actor's; `relay` connects an exec stream to the local
   terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a

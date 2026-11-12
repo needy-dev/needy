@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use needy_config::Source;
 use needy_config::profile::{ContainerExecutor as ContainerConfig, Executor, User};
 
-use bollard::models::{ContainerCreateBody, MountType};
+use crate::engine::models::{ContainerCreateBody, MountType};
 
 use super::*;
 
@@ -76,6 +76,7 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
   // The recipe's hostname, so the actor and its executors agree on it.
   assert_eq!(body.hostname.as_deref(), Some("instance-1"));
   assert_eq!(body.labels.as_ref().unwrap()["needy.run"], "s1");
+  assert_eq!(body.labels.as_ref().unwrap()["needy.role"], "executor");
   assert_eq!(
     body.cmd.as_deref().unwrap(),
     [
@@ -319,7 +320,10 @@ async fn create_and_destroy_an_executor_container() {
     ..options()
   };
   let driver = LinuxContainer::new(options.clone()).unwrap();
-  if driver.docker.ping().await.is_err() || driver.docker.inspect_image(&options.image).await.is_err() {
+  // The test asks the engine itself, not through the driver, whether the
+  // container is gone.
+  let engine = bollard::Docker::connect_with_defaults().unwrap();
+  if engine.ping().await.is_err() || engine.inspect_image(&options.image).await.is_err() {
     eprintln!("skipped: no Docker or no {} image", options.image);
     return;
   }
@@ -368,11 +372,11 @@ async fn create_and_destroy_an_executor_container() {
   assert_eq!(handle.driver, "linux-container");
 
   driver.destroy(&handle).await.unwrap();
-  let gone = driver.docker.inspect_container(&handle.id, None).await;
+  let gone = engine.inspect_container(&handle.id, None).await;
   assert!(
     matches!(
       gone,
-      Err(DockerError::DockerResponseServerError {
+      Err(bollard::errors::Error::DockerResponseServerError {
         status_code: 404,
         ..
       })
@@ -478,4 +482,98 @@ fn anyhow_like(error: Error) -> String {
     source = cause.source();
   }
   text
+}
+
+/// An engine without the executor's image until it is pulled, whose
+/// containers do not start.
+#[derive(Default)]
+struct Fake {
+  calls: std::sync::Mutex<Vec<String>>,
+}
+
+impl Fake {
+  fn record(&self, call: String) {
+    self.calls.lock().unwrap().push(call);
+  }
+
+  fn pulled(&self) -> bool {
+    self.calls.lock().unwrap().iter().any(|call| call.starts_with("pull"))
+  }
+}
+
+#[async_trait::async_trait]
+impl Engine for Fake {
+  async fn runtimes(&self) -> Result<std::collections::BTreeMap<String, Vec<String>>, engine::Error> {
+    Ok(Default::default())
+  }
+
+  async fn has_image(&self, _image: &str) -> Result<bool, engine::Error> {
+    Ok(self.pulled())
+  }
+
+  async fn pull(&self, image: &str) -> Result<(), engine::Error> {
+    self.record(format!("pull {image}"));
+    Ok(())
+  }
+
+  async fn create(&self, name: &str, _body: ContainerCreateBody) -> Result<(), engine::Error> {
+    self.record(format!("create {name}"));
+    if self.pulled() {
+      Ok(())
+    } else {
+      Err(engine::Error::NotFound("No such image".into()))
+    }
+  }
+
+  async fn start(&self, name: &str) -> Result<u32, engine::Error> {
+    self.record(format!("start {name}"));
+    Err(engine::Error::Refused("cannot start".into()))
+  }
+
+  fn logs(&self, _name: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
+    Box::pin(futures_util::stream::empty())
+  }
+
+  async fn wait(&self, _name: &str) -> Result<i64, engine::Error> {
+    Ok(0)
+  }
+
+  async fn stop(&self, _name: &str, _grace: std::time::Duration) -> Result<(), engine::Error> {
+    Ok(())
+  }
+
+  async fn remove(&self, name: &str) -> Result<(), engine::Error> {
+    self.record(format!("remove {name}"));
+    Ok(())
+  }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_image_is_pulled_as_docker_run_does_and_a_failed_start_removes_the_container() {
+  let state = tempfile::tempdir().unwrap();
+  let options = Options {
+    state_dir: state.path().to_path_buf(),
+    ..options()
+  };
+  let fake = Arc::new(Fake::default());
+  let driver = LinuxContainer::with_engine(options, fake.clone());
+  let mut spec = spec(ContainerConfig::default());
+  spec.user = user(nix::unistd::geteuid().as_raw());
+
+  let error = driver.create(&spec).await.err().unwrap();
+
+  assert_eq!(error.to_string(), "docker: cannot start");
+  let name = "needy-build-s1";
+  assert_eq!(
+    *fake.calls.lock().unwrap(),
+    [
+      format!("remove {name}"),
+      format!("create {name}"),
+      "pull needy-executor:latest".to_string(),
+      format!("create {name}"),
+      format!("start {name}"),
+      format!("remove {name}"),
+    ]
+  );
 }
