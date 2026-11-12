@@ -58,6 +58,7 @@ nix = { version = "0.30", features = ["signal"] }
 object = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"] }
 portable-pty = "0.9"
 vt100 = "0.18"
+vte = "0.15"
 # Parsing only: the guest reads `/proc` itself and needs no `chrono`.
 procfs-core = { version = "0.18", default-features = false }
 prost = "0.14"

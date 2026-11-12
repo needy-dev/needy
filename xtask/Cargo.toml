@@ -8,10 +8,12 @@ repository.workspace = true
 publish = false
 
 [features]
-default = ["run"]
+default = ["run", "tui"]
 # `bench run` talks to a control daemon. The probes alone build without it, so
 # the static binary shipped into an actor needs no TLS or gRPC stack.
 run = ["dep:needy-api-client", "dep:needy-config", "dep:needy-trace", "dep:tokio"]
+# `tui`: the terminal fidelity harness, a pseudo-terminal and a terminal model.
+tui = ["dep:portable-pty", "dep:vt100", "dep:vte"]
 
 [dependencies]
 anyhow.workspace = true
@@ -19,6 +21,9 @@ clap.workspace = true
 needy-api-client = { workspace = true, optional = true }
 needy-config = { workspace = true, optional = true }
 needy-trace = { workspace = true, optional = true, features = ["sqlite"] }
+portable-pty = { workspace = true, optional = true }
 serde_json.workspace = true
 shell-words.workspace = true
 tokio = { workspace = true, optional = true }
+vt100 = { workspace = true, optional = true }
+vte = { workspace = true, optional = true }

@@ -1,0 +1,28 @@
+# Claude Code 2.1.311 before a login: the first start's theme picker, then
+# the sign-in method picker.
+wait "Choose the text style" 90
+quiet 1000
+snap start
+key down down
+quiet 500
+snap keys
+key up
+quiet 300
+paste "first line\nsecond line\nthird line"
+quiet 500
+snap pasted
+resize 40 120
+quiet 1000
+snap grown
+resize 20 70
+quiet 1000
+snap shrunk
+resize 30 100
+quiet 1000
+key enter
+quiet 1500
+snap next
+key esc
+quiet 500
+key ctrl-c ctrl-c
+exit 20

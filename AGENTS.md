@@ -105,7 +105,8 @@ Dependencies point downward; a crate never depends on one above it.
   table; `middleware` is bearer authentication, which decides each request's
   caller; `termination` turns signals into cancellation.
 - `xtask` (`cargo xtask`): developer tasks that are not product commands,
-  today the `bench` latency and throughput probes.
+  today the `bench` latency and throughput probes and the `tui` terminal
+  fidelity harness (its scenarios and matrix in `xtask/tui/`).
 - `proto/`: canonical API schemas, linted and generated with Buf.
 - `images/`: actor kernel sources and configurations (x86_64 for
   Firecracker, arm64 for `macos-vz`), the base image's boot and shim stubs

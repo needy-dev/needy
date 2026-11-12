@@ -1,0 +1,34 @@
+# opencode 1.19.5 before a provider is connected: the home screen's prompt.
+wait "Ask anything" 120
+quiet 1000
+snap start
+type "hello wide 中文 and emoji 🙂"
+quiet 500
+snap typed
+key left left home end alt-b esc
+quiet 500
+snap keys
+key ctrl-c
+quiet 500
+snap cleared
+paste "first line\nsecond line\nthird line"
+quiet 800
+snap pasted
+key ctrl-c
+quiet 500
+mouse scroll-up 10 10
+mouse click 10 10
+quiet 500
+snap mouse
+resize 40 120
+quiet 1000
+snap grown
+resize 20 70
+quiet 1000
+snap shrunk
+resize 30 100
+quiet 1000
+key ctrl-c
+quiet 500
+key ctrl-c
+exit 20

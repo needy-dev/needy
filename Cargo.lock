@@ -4948,9 +4948,12 @@ dependencies = [
  "needy-api-client",
  "needy-config",
  "needy-trace",
+ "portable-pty",
  "serde_json",
  "shell-words",
  "tokio",
+ "vt100",
+ "vte",
 ]
 
 [[package]]

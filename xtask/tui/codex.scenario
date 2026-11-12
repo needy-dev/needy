@@ -1,0 +1,24 @@
+# Codex 0.167.2 before a login: the sign-in picker.
+wait "Choose how you want to use Codex" 90
+quiet 1000
+snap start
+key down down
+quiet 500
+snap keys
+key up up
+quiet 300
+paste "first line\nsecond line\nthird line"
+quiet 500
+snap pasted
+resize 40 120
+quiet 1000
+snap grown
+resize 20 70
+quiet 1000
+snap shrunk
+resize 30 100
+quiet 1000
+key ctrl-c
+quiet 500
+key ctrl-c
+exit 20

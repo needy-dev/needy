@@ -1,0 +1,36 @@
+# herdr 0.9.5 on its first start: the welcome dialog, then a pane with a
+# shell. ctrl+b q quits.
+wait "terminal workspace manager" 90
+quiet 1000
+snap start
+key enter
+wait "agent integrations" 30
+quiet 500
+key esc
+quiet 1500
+snap continued
+type "echo hello wide 中文 and emoji 🙂\r"
+wait "hello wide" 20
+quiet 1000
+snap typed
+paste "echo first line\necho second line\n"
+wait "second line" 20
+quiet 1000
+snap pasted
+mouse click 3 40
+quiet 500
+snap mouse
+resize 40 120
+quiet 1500
+snap grown
+resize 20 70
+quiet 1500
+snap shrunk
+resize 30 100
+quiet 1500
+key ctrl-b
+type q
+quiet 1000
+snap quitting
+key enter
+exit 20

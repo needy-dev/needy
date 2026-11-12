@@ -1,0 +1,34 @@
+# pi 1.5.2 before a login: the editor at the bottom of its screen.
+wait "/login" 60
+quiet 800
+snap start
+type "hello wide 中文 and emoji 🙂"
+quiet 300
+snap typed
+key left left home end
+key alt-b
+key esc
+quiet 300
+snap keys
+key ctrl-c
+quiet 300
+snap cleared
+paste "first line\nsecond line\nthird line"
+quiet 500
+snap pasted
+key ctrl-c
+quiet 300
+mouse scroll-up 10 10
+mouse click 10 10
+resize 40 120
+quiet 800
+snap grown
+resize 20 70
+quiet 800
+snap shrunk
+resize 30 100
+quiet 800
+key ctrl-c
+quiet 300
+key ctrl-d
+exit 15
