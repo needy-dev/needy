@@ -1,0 +1,55 @@
+# proto TOML plugin for needy, following moeru-ai/auv's toolchain/proto/auv.toml.
+#
+#   proto plugin add needy "https://raw.githubusercontent.com/needy-dev/needy/main/toolchain/proto/needy.toml" --to global
+#   proto install needy latest --config-mode global --pin global
+#
+# Reference: https://moonrepo.dev/docs/proto/non-wasm-plugin
+#
+# Each platform maps to a release archive of .github/workflows/release.yml,
+# and proto checks the archive against its `.sha256`.
+name = "needy"
+type = "cli"
+
+# The Linux binaries are static musl builds; one archive runs whatever the
+# distribution's libc, so `{libc}` is not part of the name.
+[platform.linux]
+archs = [
+  "x86_64",
+  "aarch64"
+]
+download-file = "needy-{arch}-unknown-linux-musl.tar.gz"
+checksum-file = "needy-{arch}-unknown-linux-musl.tar.gz.sha256"
+exe-path = "needy"
+
+[platform.macos]
+archs = [
+  "x86_64",
+  "aarch64"
+]
+download-file = "needy-{arch}-apple-darwin.tar.gz"
+checksum-file = "needy-{arch}-apple-darwin.tar.gz.sha256"
+exe-path = "needy"
+
+# TODO(windows-arm64): release.yml builds Windows for x86_64 only; add
+# aarch64 here when the release builds `aarch64-pc-windows-msvc`.
+[platform.windows]
+archs = [
+  "x86_64"
+]
+download-file = "needy-{arch}-pc-windows-msvc.zip"
+checksum-file = "needy-{arch}-pc-windows-msvc.zip.sha256"
+exe-path = "needy.exe"
+
+[install]
+download-url = "https://github.com/needy-dev/needy/releases/download/v{version}/{download_file}"
+checksum-url = "https://github.com/needy-dev/needy/releases/download/v{version}/{checksum_file}"
+
+[install.exes.needy]
+exe-path = "needy"
+primary = true
+
+# proto lists the repository's `v`-prefixed tags to resolve `latest` and
+# version ranges.
+[resolve]
+git-url = "https://github.com/needy-dev/needy"
+version-pattern = "^v(?<major>\\d+)\\.(?<minor>\\d+)\\.(?<patch>\\d+)(?<pre>-[0-9A-Za-z.-]+)?$"
