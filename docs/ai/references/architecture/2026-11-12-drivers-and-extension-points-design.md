@@ -627,6 +627,25 @@ state directory:
 | `macos-vz` | Apple silicon Mac | `examples/macos-vz` with `run create -it` | Pass: the program's output on the terminal, exit code 3 returned; trace `actor.config` then `actor.ready` 345 ms later, then `actor.exit` |
 | `macos-vz` | Apple silicon Mac | `examples/macos-vz` with `-t`, then `run stop` | Pass: `running starting`, then `running ready` in `run ls`; `stopped` after the stop |
 
+Verification: `make check` and `make test` pass on an Apple silicon Mac and
+on the Linux KVM host (where the guest code compiles). End to end on
+2026-11-12, with the VM and container actor images built from the slice 5
+tree and each control daemon in a scratch state directory:
+
+| Driver | Host | Profile | Result |
+| --- | --- | --- | --- |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` | Pass: GCE identity, `python3` routed through `binfmt_needy` to a `linux-container` executor, the workspace both ways, `routed exit=7`; report `actor_capture: kernel`, no shim note |
+| `linux-firecracker` | Linux KVM host | `examples/chaos` | Pass: copy-in without the filtered file, `cat broken.json` fails with EIO (the `file.open` chain on the SFTP stream), `curl` refused with ECONNREFUSED (126), the hwmon fault at 101 °C, mirror-out written |
+| `linux-firecracker` | Linux KVM host | a small profile: `allow: [example.com]`, `upstream` and `inject` for `model.needy` to a local echo server | Pass: `example.com` 200, `example.org` 403 with `needy: example.org is not allowed` and a `network denied` finding, the echo server saw the injected `authorization` header |
+| `linux-container` (`runc`) | Linux KVM host | `examples/linux-container` without its workspace mount (as in slices 1 to 3) | Pass: shims route `python3`, `ls` stays local; report `actor_capture: shims` with the shim note, no container left |
+| `macos-vz` | Apple silicon Mac | `examples/macos-vz` | Pass: the guest reached the guest API on vsock port 7000 from the contract, `python3` and `/usr/bin/arch` routed to the Mac, workspace both ways; report `actor_capture: kernel` |
+
+The table is from the slice 5 tree on slices 1 to 4. After rebasing onto
+slice 6, `make check` and `make test` pass again on both hosts, and
+`examples/smoke` and the gateway profile pass again on the Linux KVM host
+with a rebuilt VM image. `macos-apple-container` was not run end to end;
+its report note is covered by the unit test above.
+
 ## Candidate next slices
 
 - `needy build` (`cli/commands/build.rs`) builds the container images through
