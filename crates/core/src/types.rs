@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::Duration;
 
-use needy_config::profile::{Fault, FaultKind};
+use needy_config::profile::{ActorDriver, ExecutorDriver, Fault, FaultKind};
 use serde::{Deserialize, Serialize};
 
 /// Where a command runs.
@@ -178,73 +178,9 @@ impl std::str::FromStr for RunnerRole {
 #[error("unknown runner role {0:?}; known roles are actor and executor")]
 pub struct UnknownRole(pub String);
 
-/// How a runner can run an actor: an actor driver it has.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ActorDriver {
-  /// A Firecracker microVM: a usable KVM and the actor image.
-  LinuxFirecracker,
-  /// A container through a Docker-compatible engine that answers. Which OCI
-  /// runtimes (`runc`, gVisor's `runsc`) it has is checked when a run is
-  /// created.
-  // TODO(runner-actor): the capability does not carry the OCI runtimes; it
-  // needs to once actors run on runners other than the control host's own,
-  // which probes its engine directly.
-  LinuxContainer,
-  /// A Virtualization.framework VM through vfkit: Apple silicon macOS,
-  /// vfkit on `PATH` and the `macos-vz` actor image (`Image`, `rootfs.ext4`).
-  MacosVz,
-  /// Apple's `container` CLI on a Mac, whose services answer. Whether the
-  /// container actor image is in its image store is checked when a run is
-  /// created.
-  MacosAppleContainer,
-}
-
-impl ActorDriver {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::LinuxFirecracker => "linux-firecracker",
-      Self::LinuxContainer => "linux-container",
-      Self::MacosVz => "macos-vz",
-      Self::MacosAppleContainer => "macos-apple-container",
-    }
-  }
-}
-
-impl fmt::Display for ActorDriver {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str(self.as_str())
-  }
-}
-
-/// How a runner can create an executor: an executor driver it has. A
-/// profile's `driver:` names one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ExecutorDriver {
-  /// The runner's own process space; every runner has it.
-  Native,
-  /// A container the runner's Docker-compatible engine creates.
-  LinuxContainer,
-}
-
-impl ExecutorDriver {
-  pub fn as_str(self) -> &'static str {
-    match self {
-      Self::Native => "native",
-      Self::LinuxContainer => "linux-container",
-    }
-  }
-}
-
-impl fmt::Display for ExecutorDriver {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str(self.as_str())
-  }
-}
-
-/// What a runner can host: each role with its drivers. It holds a role when
-/// that role has at least one. Written as
+/// What a runner can host: each role with its drivers, as a profile names
+/// them (`needy_config::profile::ActorDriver`, `ExecutorDriver`). It holds a
+/// role when that role has at least one. Written as
 /// `actor(linux-firecracker) executor(linux-container,native)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]

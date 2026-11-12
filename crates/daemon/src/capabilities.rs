@@ -1,49 +1,40 @@
 //! What this machine can host as a runner, found at start: its
 //! capabilities, each role with its drivers.
 //!
-//! - `actor(linux-firecracker)`: Linux, a KVM device that opens for reading and
-//!   writing (as Firecracker opens it), and a complete actor image (vmlinux,
-//!   rootfs.ext4 and the patched firecracker).
-//! - `actor(linux-container)`: a Docker-compatible engine that answers. Whether it has the
-//!   OCI runtime a profile names (`runc`, gVisor's `runsc`) and the
-//!   container actor image is checked when the run is created.
+//! Each driver says whether this machine has it, in its own module
+//! (`needy_core_actor::driver::detect`, `needy_core_executor::driver::detect`):
+//!
+//! - `actor(linux-firecracker)`: Linux, a KVM device that opens for reading
+//!   and writing (as Firecracker opens it), and a complete actor image
+//!   (vmlinux, rootfs.ext4 and the patched firecracker).
+//! - `actor(linux-container)`: a Docker-compatible engine that answers.
+//!   Whether it has the OCI runtime a profile names (`runc`, gVisor's
+//!   `runsc`) and the container actor image is checked when the run is
+//!   created.
 //! - `actor(macos-vz)`: macOS on Apple silicon, a `vfkit` that runs, and a
 //!   complete `macos-vz` actor image (Image, rootfs.ext4).
-//! - `actor(macos-apple-container)`: macOS, Apple's `container` CLI on `PATH`, and
-//!   its services running (`container system status`). Whether its image
-//!   store has the container actor image is checked when the run is
-//!   created.
+//! - `actor(macos-apple-container)`: macOS, Apple's `container` CLI on
+//!   `PATH`, and its services running (`container system status`). Whether
+//!   its image store has the container actor image is checked when the run
+//!   is created.
 //! - `executor(linux-container)`: a Docker-compatible engine that answers.
 //! - `executor(native)`: always, on every platform a runner runs on.
 //!
 //! [`probe`] reads the machine; [`detect`] and [`restrict`] decide from what
 //! it read, so the rules are tested without the machine.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::time::Duration;
 
-use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
+use needy_config::profile::{ActorDriver, ExecutorDriver};
+use needy_core::types::{Capabilities, RunnerRole};
 
-// NOTICE: how long a runner waits for the Docker daemon at start. A local
-// socket answers in milliseconds; a Docker Desktop that is not running
-// fails at once. 3 s bounds a daemon that hangs without delaying the
-// runner's join much.
-const DOCKER_WAIT: Duration = Duration::from_secs(3);
-
-/// What [`probe`] read from this machine: for each fact, the value or why
-/// it is missing.
+/// What [`probe`] read from this machine: for each driver, whether it has
+/// it or why not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Facts {
-  /// A Firecracker microVM can start: KVM and the actor image.
-  pub firecracker: Result<(), String>,
-  /// The runtimes the Docker daemon registered.
-  pub docker: Result<BTreeSet<String>, String>,
-  /// A Virtualization.framework VM can start: Apple silicon macOS, vfkit
-  /// and the `macos-vz` actor image.
-  pub macos_vz: Result<(), String>,
-  /// Apple's `container` CLI is there and its services answer.
-  pub macos_apple_container: Result<(), String>,
+  pub actor: BTreeMap<ActorDriver, Result<(), String>>,
+  pub executor: BTreeMap<ExecutorDriver, Result<(), String>>,
 }
 
 /// The capabilities found, and why each one that is not is missing.
@@ -55,42 +46,25 @@ pub struct Detected {
   pub missing: Vec<String>,
 }
 
-/// The capabilities `facts` give, by the rules in the module documentation.
+/// The capabilities `facts` give: each driver this machine has.
 pub fn detect(facts: &Facts) -> Detected {
-  let mut capabilities = Capabilities {
-    executor: [ExecutorDriver::Native].into(),
-    ..Default::default()
-  };
+  let mut capabilities = Capabilities::default();
   let mut missing = Vec::new();
-  match &facts.firecracker {
-    Ok(()) => {
-      capabilities.actor.insert(ActorDriver::LinuxFirecracker);
-    }
-    Err(why) => missing.push(format!("actor(linux-firecracker): {why}")),
-  }
-  match &facts.docker {
-    Ok(_runtimes) => {
-      capabilities.executor.insert(ExecutorDriver::LinuxContainer);
-      // TODO(runner-actor): the runtimes are not reported with the
-      // capability; see `needy_core::types::ActorDriver::LinuxContainer`.
-      capabilities.actor.insert(ActorDriver::LinuxContainer);
-    }
-    Err(why) => {
-      missing.push(format!("executor(linux-container): {why}"));
-      missing.push(format!("actor(linux-container): {why}"));
+  for (driver, found) in &facts.actor {
+    match found {
+      Ok(()) => {
+        capabilities.actor.insert(*driver);
+      }
+      Err(why) => missing.push(format!("{}({driver}): {why}", RunnerRole::Actor)),
     }
   }
-  match &facts.macos_vz {
-    Ok(()) => {
-      capabilities.actor.insert(ActorDriver::MacosVz);
+  for (driver, found) in &facts.executor {
+    match found {
+      Ok(()) => {
+        capabilities.executor.insert(*driver);
+      }
+      Err(why) => missing.push(format!("{}({driver}): {why}", RunnerRole::Executor)),
     }
-    Err(why) => missing.push(format!("actor(macos-vz): {why}")),
-  }
-  match &facts.macos_apple_container {
-    Ok(()) => {
-      capabilities.actor.insert(ActorDriver::MacosAppleContainer);
-    }
-    Err(why) => missing.push(format!("actor(macos-apple-container): {why}")),
   }
   Detected {
     capabilities,
@@ -118,67 +92,25 @@ pub fn restrict(detected: &Detected, roles: Option<&BTreeSet<RunnerRole>>) -> (C
   (detected.capabilities.within(roles), warnings)
 }
 
-/// Whether a Firecracker actor can start on this machine with the KVM
-/// device `kvm` and the actor image in `image`.
-pub fn firecracker(kvm: &Path, image: &Path) -> Result<(), String> {
-  if !cfg!(target_os = "linux") {
-    return Err("Firecracker runs on Linux only".into());
-  }
-  needy_core_actor::driver::linux_firecracker::check_kvm(kvm).map_err(|e| format!("cannot open {}: {}", kvm.display(), kvm_error(&e)))?;
-  needy_core_actor::driver::linux_firecracker::Image::new(image).check().map_err(|e| e.to_string())
-}
-
-/// The OS error of a KVM check, without the check's advice.
-fn kvm_error(error: &needy_core_actor::driver::linux_firecracker::Error) -> String {
-  match error {
-    needy_core_actor::driver::linux_firecracker::Error::Kvm { error, .. } => error.to_string(),
-    other => other.to_string(),
-  }
-}
-
-/// Whether a `macos-vz` actor can start on this machine with the actor image in
-/// `image`: Apple silicon macOS, vfkit and the image.
-pub async fn macos_vz(image: &Path) -> Result<(), String> {
-  use needy_core_actor::driver::macos_vz as vz;
-  if !vz::supported_host() {
-    return Err("Virtualization.framework actors run on macOS on Apple silicon only".into());
-  }
-  vz::check_vfkit(Path::new(vz::VFKIT)).await.map_err(|e| e.to_string())?;
-  vz::Image::new(image).check().map_err(|e| e.to_string())
-}
-
-/// Reads this machine: KVM at `kvm`, the actor image in `image`, the
-/// Docker daemon, vfkit and Apple's `container`.
+/// Reads this machine: asks every actor driver, with the KVM device `kvm`
+/// and the actor image in `image`, and every executor driver whether this
+/// machine has it.
 pub async fn probe(kvm: &Path, image: &Path) -> Facts {
-  let docker = needy_core_executor::driver::linux_container::runtimes(DOCKER_WAIT)
-    .await
-    .map_err(|e| format!("no Docker daemon answers: {:#}", anyhow::Error::from(e)));
-  Facts {
-    firecracker: firecracker(kvm, image),
-    docker,
-    macos_vz: macos_vz(image).await,
-    macos_apple_container: macos_apple_container().await,
+  let host = needy_core_actor::driver::Host {
+    image: image.to_path_buf(),
+    kvm: kvm.to_path_buf(),
+  };
+  let mut facts = Facts {
+    actor: BTreeMap::new(),
+    executor: BTreeMap::new(),
+  };
+  for driver in ActorDriver::ALL {
+    facts.actor.insert(driver, needy_core_actor::driver::detect(driver, &host).await);
   }
-}
-
-/// Whether Apple's `container` can run actors here: its CLI and services.
-pub async fn macos_apple_container() -> Result<(), String> {
-  #[cfg(unix)]
-  {
-    // The image does not matter for the services.
-    let driver = needy_core_actor::driver::macos_apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
-    // NOTICE: `container system status` answers in about 50 ms on an Apple
-    // silicon laptop; 3 s bounds services that hang, as `DOCKER_WAIT` does
-    // for Docker.
-    match tokio::time::timeout(DOCKER_WAIT, driver.services()).await {
-      Ok(services) => services.map_err(|e| e.to_string()),
-      Err(_) => Err(format!("`container system status` did not answer within {DOCKER_WAIT:?}")),
-    }
+  for driver in ExecutorDriver::ALL {
+    facts.executor.insert(driver, needy_core_executor::driver::detect(driver).await);
   }
-  #[cfg(not(unix))]
-  {
-    Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into())
-  }
+  facts
 }
 
 /// What this machine reports as a runner: probed, detected and restricted

@@ -378,10 +378,74 @@ Slices 4 to 6 are independent of each other once 1 to 3 have landed.
   `host/vm.rs`, which no longer existed; they name
   `driver/linux_firecracker/config.rs` now.
 
+### Slice 3: registry
+
+- The registry is the extension point's own `mod.rs`: `core_actor::driver`
+  has `new` (the factory, for a profile's `actor:`), `detect`, `reconcile`
+  and `facets`, each a match over `ActorDriver` that calls the driver's
+  module; `core_executor::driver` has `detect`. These are the only matches
+  on a driver outside the config and proto boundaries (`api-server`'s and
+  the CLI's proto conversions). The daemon's `actor::driver_for` wraps `new`
+  with the daemon's image and KVM paths (`driver::Host`).
+- `detect` and `reconcile` are free functions in each driver's module, not
+  trait methods: a runner detects with no profile, and a restarted daemon
+  reconciles with only a `state.db` row (`driver::Leftover`), so neither has
+  the options a `Driver` is built from. `end_leftover_vm` moved from the
+  daemon into `driver::end_vm`, which both VM drivers call (core-actor now
+  depends on `sysinfo` on Unix).
+- An executor driver's leftover is its own: `Driver::reconcile(id)` (the
+  `linux-container` driver removes the container; `native` ends nothing and
+  carries the `TODO(runner-ownership)` that was in the daemon). The pool
+  hands a driver out by kind (`Pool::driver`).
+- Facets are per driver, not per instance: each module has a `FACETS`
+  constant and `driver::facets(kind)` returns it, so `profile check` reads
+  them without building a driver (a profile whose `container:` options are
+  missing still gets the shim warning, as before). Identity is per field
+  only for the fields the daemon acts on (`hostname`, `hwmon`, `uptime`;
+  `None` is a gap); the CPU, DMI, PCI and kernel fields have no consumer and
+  stay in `identity_gaps` (a `NOTICE` says so). `Transport::Socket` replaces
+  `Channels::guest_for_every_user`.
+- `detect` builds on every platform, since a runner on Windows detects too
+  (the container drivers report themselves missing there); `new`, `facets`
+  and `reconcile` are Unix only, as the container drivers and the daemon's
+  actor role are.
+- A runner now probes the engine twice, once for `actor(linux-container)` and
+  once for `executor(linux-container)`, each bounded by its own 3 s; slice 4's
+  one engine client can share the answer. Missing lines list the actor
+  drivers, then the executor drivers, in the enums' order.
+- `Error::Driver { driver, message }` replaces `Spawn`, `Kvm`, `Docker` and
+  `AppleContainer`; the messages are unchanged (the KVM advice is built in
+  `kvm::check_kvm`). `Terminal::FirecrackerVsock` is `Terminal::HybridVsock`,
+  after the transport Firecracker documents. `config/validate.rs` keeps the
+  `container:` option checks, since `needy-config` cannot depend on drivers.
+- `core::types::{ActorDriver, ExecutorDriver}` are gone; `Capabilities` holds
+  the config enums, and `api-server` depends on `needy-config` for them.
+  `schedule::Need` holds them too, so `Need::actor` and `Need::executor`, the
+  conversions, are gone.
+
+### For slices 4 to 6
+
+- Slice 4 (one engine): the actor's `linux_container` keeps its own
+  `Engine` trait and `bollard` client, with `refused()` mapping engine errors
+  to `Error::Driver`; the executor's `linux_container` has its own
+  `detect` and `Error::Docker(bollard)` (not yet neutral). Both `detect`s ask
+  the engine for `info` within 3 s.
+- Slice 5 (policy and capture): `Facets::capture` (`Kernel`, `Shims`, with a
+  `TODO(macos-native)` for fenced shims) is where a driver declares its
+  capture, and `check.rs` already reads it for the shim warning; the gateway
+  is `sidecar::gateway`, with the guest API listed in `sidecar/mod.rs`.
+- Slice 6 (lifecycles): the actor's start and end are in `daemon/actor.rs`
+  (`start`, `watch`, `release_actor`); instance states are written by
+  `reconcile.rs` through `end_leftover_actor` and `end_leftover_executor`,
+  which return the state to write.
+
 ## Candidate next slices
 
 - The guest dials the guest API at a literal `vsock://2:7000`
   (`guest/mod.rs`); it could build the address from `contract::GUEST_PORT`,
   which slice 5 (captures and the guest) may do in passing.
+- The report could name its shim-routing note from the trace's driver
+  through the facets instead of the label's prefix; it needs the driver in
+  `actor.start` as a typed value, not the label.
 - The report's shim-routing note for `macos-apple-container` actors: they have
   the same gap as `linux-container` (`profile check` already warns for both).

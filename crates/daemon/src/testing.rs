@@ -212,18 +212,16 @@ pub struct JoinedRunner {
 /// Capabilities as `runner ls` writes them: `actor(linux-firecracker)
 /// executor(linux-container,native)`.
 pub fn capabilities(text: &str) -> needy_core::types::Capabilities {
-  use needy_core::types::{ActorDriver, ExecutorDriver};
+  use needy_config::profile::{ActorDriver, ExecutorDriver};
   let mut capabilities = needy_core::types::Capabilities::default();
   for role in text.split_whitespace() {
     let (role, kinds) = role.trim_end_matches(')').split_once('(').expect("ROLE(KIND,...)");
     for kind in kinds.split(',') {
-      match (role, kind) {
-        ("actor", "linux-firecracker") => capabilities.actor.insert(ActorDriver::LinuxFirecracker),
-        ("actor", "linux-container") => capabilities.actor.insert(ActorDriver::LinuxContainer),
-        ("actor", "macos-vz") => capabilities.actor.insert(ActorDriver::MacosVz),
-        ("actor", "macos-apple-container") => capabilities.actor.insert(ActorDriver::MacosAppleContainer),
-        ("executor", "native") => capabilities.executor.insert(ExecutorDriver::Native),
-        ("executor", "linux-container") => capabilities.executor.insert(ExecutorDriver::LinuxContainer),
+      let actor = ActorDriver::ALL.into_iter().find(|d| d.as_str() == kind);
+      let executor = ExecutorDriver::ALL.into_iter().find(|d| d.as_str() == kind);
+      match (role, actor, executor) {
+        ("actor", Some(driver), _) => capabilities.actor.insert(driver),
+        ("executor", _, Some(driver)) => capabilities.executor.insert(driver),
         other => panic!("unknown capability {other:?}"),
       };
     }

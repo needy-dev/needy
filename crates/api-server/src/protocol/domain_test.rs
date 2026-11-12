@@ -93,7 +93,8 @@ fn a_heartbeat_without_a_host_reports_none() {
 
 #[test]
 fn a_runners_capabilities_survive_the_wire() {
-  use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver};
+  use needy_config::profile::{ActorDriver, ExecutorDriver};
+  use needy_core::types::Capabilities;
   let kvm = Capabilities {
     actor: [ActorDriver::LinuxFirecracker, ActorDriver::LinuxContainer].into(),
     executor: [ExecutorDriver::Native, ExecutorDriver::LinuxContainer].into(),

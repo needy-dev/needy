@@ -1,31 +1,44 @@
 use std::collections::BTreeSet;
 
+use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core::types::RunnerRole;
 
-use super::{Facts, detect, firecracker, restrict};
+use super::{Facts, detect, restrict};
 
-fn runtimes(names: &[&str]) -> Result<BTreeSet<String>, String> {
-  Ok(names.iter().map(|n| n.to_string()).collect())
+/// Facts with each actor driver's and executor driver's answer, in the
+/// order of `ActorDriver::ALL` and `ExecutorDriver::ALL`.
+fn facts(actor: [Result<(), &str>; 4], executor: [Result<(), &str>; 2]) -> Facts {
+  let answer = |found: Result<(), &str>| found.map_err(str::to_string);
+  Facts {
+    actor: ActorDriver::ALL.into_iter().zip(actor.map(answer)).collect(),
+    executor: ExecutorDriver::ALL.into_iter().zip(executor.map(answer)).collect(),
+  }
 }
 
 /// A Linux KVM host with Docker and the actor image.
 fn kvm_host() -> Facts {
-  Facts {
-    firecracker: Ok(()),
-    docker: runtimes(&["runc"]),
-    macos_vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
-    macos_apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
-  }
+  facts(
+    [
+      Ok(()),
+      Ok(()),
+      Err("Virtualization.framework actors run on macOS on Apple silicon only"),
+      Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon"),
+    ],
+    [Ok(()), Ok(())],
+  )
 }
 
 /// A Mac without Docker running.
 fn mac() -> Facts {
-  Facts {
-    firecracker: Err("Firecracker runs on Linux only".into()),
-    docker: Err("no Docker daemon answers".into()),
-    macos_vz: Err("cannot run vfkit".into()),
-    macos_apple_container: Err("Apple's `container` CLI is not on PATH".into()),
-  }
+  facts(
+    [
+      Err("Firecracker runs on Linux only"),
+      Err("no Docker-compatible engine answers"),
+      Err("cannot run vfkit"),
+      Err("Apple's `container` CLI is not on PATH"),
+    ],
+    [Ok(()), Err("no Docker-compatible engine answers")],
+  )
 }
 
 #[test]
@@ -51,20 +64,18 @@ fn a_machine_without_kvm_or_docker_hosts_native_executors_only() {
     detected.missing,
     [
       "actor(linux-firecracker): Firecracker runs on Linux only",
-      "executor(linux-container): no Docker daemon answers",
-      "actor(linux-container): no Docker daemon answers",
+      "actor(linux-container): no Docker-compatible engine answers",
       "actor(macos-vz): cannot run vfkit",
       "actor(macos-apple-container): Apple's `container` CLI is not on PATH",
+      "executor(linux-container): no Docker-compatible engine answers",
     ]
   );
 }
 
 #[test]
 fn a_mac_whose_apple_container_services_answer_hosts_macos_apple_container_actors() {
-  let facts = Facts {
-    macos_apple_container: Ok(()),
-    ..mac()
-  };
+  let mut facts = mac();
+  facts.actor.insert(ActorDriver::MacosAppleContainer, Ok(()));
 
   let detected = detect(&facts);
 
@@ -76,12 +87,8 @@ fn a_mac_whose_apple_container_services_answer_hosts_macos_apple_container_actor
 fn a_docker_daemon_without_kvm_hosts_container_actors() {
   // `runc` is Docker's default runtime; which OCI runtime a profile names
   // is checked when its run is created.
-  let facts = Facts {
-    firecracker: Err("cannot open /dev/kvm: No such file or directory".into()),
-    docker: runtimes(&["runc"]),
-    macos_vz: Err("Virtualization.framework actors run on macOS on Apple silicon only".into()),
-    macos_apple_container: Err("Apple's `container` runs on macOS only, on a Mac with Apple silicon".into()),
-  };
+  let mut facts = kvm_host();
+  facts.actor.insert(ActorDriver::LinuxFirecracker, Err("cannot open /dev/kvm: No such file or directory".into()));
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(linux-container) executor(linux-container,native)");
 }
@@ -111,56 +118,16 @@ fn a_role_the_machine_cannot_host_is_warned_about_and_not_added() {
     warnings,
     [
       "--roles names actor, which this machine cannot host (actor(linux-firecracker): Firecracker runs on Linux only; \
-      actor(linux-container): no Docker daemon answers; actor(macos-vz): cannot run vfkit; actor(macos-apple-container): Apple's `container` CLI is \
-      not on PATH); it is left out"
+      actor(linux-container): no Docker-compatible engine answers; actor(macos-vz): cannot run vfkit; actor(macos-apple-container): \
+      Apple's `container` CLI is not on PATH); it is left out"
     ]
   );
 }
 
 #[test]
 fn an_apple_silicon_mac_with_vfkit_and_the_image_hosts_macos_vz_actors() {
-  let facts = Facts {
-    firecracker: Err("Firecracker runs on Linux only".into()),
-    docker: Err("no Docker daemon answers".into()),
-    macos_vz: Ok(()),
-    macos_apple_container: Err("Apple's `container` CLI is not on PATH".into()),
-  };
+  let mut facts = mac();
+  facts.actor.insert(ActorDriver::MacosVz, Ok(()));
 
   assert_eq!(detect(&facts).capabilities.to_string(), "actor(macos-vz) executor(native)");
-}
-
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-#[tokio::test]
-async fn macos_vz_needs_apple_silicon_macos() {
-  let dir = tempfile::tempdir().unwrap();
-
-  assert_eq!(super::macos_vz(dir.path()).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn firecracker_needs_a_kvm_device_that_opens_and_a_complete_image() {
-  let dir = tempfile::tempdir().unwrap();
-  let kvm = dir.path().join("kvm");
-  let image = dir.path().join("image");
-  std::fs::create_dir(&image).unwrap();
-
-  let no_kvm = firecracker(&kvm, &image).unwrap_err();
-  std::fs::write(&kvm, b"").unwrap();
-  let no_image = firecracker(&kvm, &image).unwrap_err();
-  for file in ["vmlinux", "rootfs.ext4", "firecracker"] {
-    std::fs::write(image.join(file), b"").unwrap();
-  }
-
-  assert!(no_kvm.starts_with(&format!("cannot open {}: ", kvm.display())), "{no_kvm}");
-  assert_eq!(no_image, format!("actor image is missing {}; run `needy build`", image.join("vmlinux").display()));
-  assert_eq!(firecracker(&kvm, &image), Ok(()));
-}
-
-#[cfg(not(target_os = "linux"))]
-#[test]
-fn firecracker_needs_linux() {
-  let dir = tempfile::tempdir().unwrap();
-
-  assert_eq!(firecracker(dir.path(), dir.path()).unwrap_err(), "Firecracker runs on Linux only");
 }

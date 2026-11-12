@@ -18,7 +18,9 @@ pub use kvm::{KVM, check_kvm};
 
 use crate::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
 pub use crate::driver::Error;
-use crate::driver::{Channels, Driver, Endpoint, Running, Setup, Start, Terminal};
+use needy_config::profile::ActorDriver;
+
+use crate::driver::{Capture, Channels, Driver, Endpoint, Facets, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
 pub use crate::image::vm::LinuxFirecracker as Image;
 
 /// The vsock device's socket in a VM's directory.
@@ -38,6 +40,41 @@ pub fn console(dir: &Path) -> PathBuf {
   crate::driver::log(dir)
 }
 
+/// What a `linux-firecracker` actor presents: needy's guest kernel catches
+/// every exec, and init mounts the workspace and presents the recipe's
+/// identity inside the VM, reached over vsock.
+pub const FACETS: Facets = Facets {
+  capture: Capture::Kernel,
+  workspace: Side::Guest,
+  identity: Identity {
+    hostname: Some(Side::Guest),
+    hwmon: Some(Side::Guest),
+    uptime: Some(Side::Guest),
+  },
+  transport: Transport::Vsock,
+};
+
+/// Whether this host can run `linux-firecracker` actors: Linux, a KVM device
+/// that opens for reading and writing (as Firecracker opens it), and a
+/// complete actor image.
+pub fn detect(host: &Host) -> Result<(), String> {
+  if !cfg!(target_os = "linux") {
+    return Err("Firecracker runs on Linux only".into());
+  }
+  // The OS error alone, without the advice `check_kvm`'s error gives a run.
+  if let Err(e) = std::fs::OpenOptions::new().read(true).write(true).open(&host.kvm) {
+    return Err(format!("cannot open {}: {e}", host.kvm.display()));
+  }
+  Image::new(&host.image).check().map_err(|e| e.to_string())
+}
+
+/// Ends the Firecracker process a daemon that died left, found by its
+/// `vm.json` on its command line.
+#[cfg(unix)]
+pub async fn reconcile(leftover: &Leftover<'_>) -> bool {
+  crate::driver::end_vm(leftover, &leftover.dir.join("vm.json"), "firecracker").await
+}
+
 /// The `linux-firecracker` driver: actors in microVMs booted from `image`, on
 /// the KVM device `kvm`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,10 +84,20 @@ pub struct LinuxFirecracker {
   pub kvm: PathBuf,
 }
 
+impl LinuxFirecracker {
+  /// The driver on `host`: its actor image and KVM device.
+  pub fn on(host: &Host) -> Self {
+    Self {
+      image: Image::new(&host.image),
+      kvm: host.kvm.clone(),
+    }
+  }
+}
+
 #[async_trait::async_trait]
 impl Driver for LinuxFirecracker {
-  fn name(&self) -> &'static str {
-    "linux-firecracker"
+  fn kind(&self) -> ActorDriver {
+    ActorDriver::LinuxFirecracker
   }
 
   async fn check_host(&self) -> Result<(), Error> {
@@ -64,19 +111,13 @@ impl Driver for LinuxFirecracker {
       sockets: vec![vsock(dir), guest.clone(), gateway.clone()],
       guest: Endpoint::Unix(guest),
       gateway: Endpoint::Unix(gateway),
-      terminal: Terminal::FirecrackerVsock {
+      terminal: Terminal::HybridVsock {
         device: vsock(dir),
         port: PROCESS_PORT,
       },
       gateway_port: GATEWAY_PORT,
       process_port: PROCESS_PORT,
-      // vsock has no file modes inside the VM.
-      guest_for_every_user: false,
     }
-  }
-
-  fn setup(&self) -> Setup {
-    Setup::Guest
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
@@ -124,7 +165,7 @@ impl Vm {
       .stdout(console)
       .stderr(stderr)
       .spawn()
-      .map_err(Error::Spawn)?;
+      .map_err(|e| Error::driver(ActorDriver::LinuxFirecracker, format!("cannot start firecracker: {e}")))?;
     // NOTICE: `id` is `None` only after the child was waited for.
     let pid = child.id().unwrap_or(0);
     Ok(Vm {

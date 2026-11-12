@@ -8,9 +8,10 @@ use std::path::{Path, PathBuf};
 use crate::schedule::Need;
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileFinding, ProfileToCheck};
 use needy_config::Source;
-use needy_config::profile::{ActorDriver, Executor, Profile};
+use needy_config::profile::{Executor, Profile};
 use needy_config::validate::{self, Severity};
 use needy_core::recipe::{CompiledRecipe, HostInfo};
+use needy_core_actor::driver::Capture;
 
 use crate::pool::Site;
 use crate::{Daemon, failed, schedule};
@@ -49,7 +50,7 @@ fn unmapped_actor_cwd(profile: &Profile, executor: &Executor) -> Option<String> 
   (!mapped).then(|| candidates.into_iter().next().unwrap_or(home))
 }
 
-/// What a container actor's routing does not cover.
+/// What an actor whose driver catches execs with shims does not route.
 const CONTAINER_ROUTING_GAP: &str = "actor: a container actor routes by shims made when its image was built: a program \
   created at run time (installed with pip or npm, or compiled in the workspace) and run directly stays in the actor \
   whatever the rules say; programs on the image's PATH, and scripts through their interpreters, are routed";
@@ -71,7 +72,7 @@ impl Daemon {
     }));
     let runners = self.candidates().await.map_err(failed)?;
 
-    match schedule::placement(profile.actor.runner.as_ref(), Need::actor(profile.actor.driver), &runners) {
+    match schedule::placement(profile.actor.runner.as_ref(), Need::Actor(profile.actor.driver), &runners) {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
@@ -82,7 +83,7 @@ impl Daemon {
       }
       Err(e) => check.findings.push(error(format!("actor: {e}"))),
     }
-    if matches!(profile.actor.driver, ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer) && routes_anything(&profile) {
+    if needy_core_actor::driver::facets(profile.actor.driver).capture == Capture::Shims && routes_anything(&profile) {
       check.findings.push(warning(CONTAINER_ROUTING_GAP.into()));
     }
     let recipe = match &profile.actor.recipe {
@@ -95,7 +96,7 @@ impl Daemon {
     // What of the identity the driver does not present, where the actor
     // would run: this host (see `unusable_host`).
     if check.actor.is_some()
-      && let Ok(driver) = crate::actor::driver(self, &profile.actor)
+      && let Ok(driver) = crate::actor::driver_for(self, &profile.actor)
     {
       for (is_error, message) in crate::actor::identity_findings(driver.as_ref(), recipe.as_ref()) {
         check.findings.push(ProfileFinding {
@@ -105,7 +106,7 @@ impl Daemon {
       }
     }
     for (name, executor) in &profile.executors {
-      match schedule::placement(executor.runner.as_ref(), Need::executor(executor.driver), &runners) {
+      match schedule::placement(executor.runner.as_ref(), Need::Executor(executor.driver), &runners) {
         Ok(placement) => {
           match self.site(&placement, executor.driver) {
             Err(refusal) => check.findings.push(error(format!("executors.{name}: {refusal}"))),
@@ -142,7 +143,7 @@ impl Daemon {
       Placement::Runner(name) => format!("runner {name} (the control host)"),
     };
     // A driver this daemon lacks is already a finding of `validate::profile`.
-    let driver = crate::actor::driver(self, &profile.actor).ok()?;
+    let driver = crate::actor::driver_for(self, &profile.actor).ok()?;
     driver.check_host().await.err().map(|e| format!("on {on}: {e}"))
   }
 

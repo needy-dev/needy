@@ -216,7 +216,7 @@ async fn left_by_a_killed_control_plane(state_dir: &std::path::Path, vm: &std::p
     actor_runner: None,
   };
   store.save_run(&run).await.unwrap();
-  let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "firecracker");
+  let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "linux-firecracker");
   actor.handle = state_dir.join("runs/r1").display().to_string();
   actor.pid = Some(i64::from(vm.id()));
   store.save_instance(&actor).await.unwrap();

@@ -30,6 +30,7 @@ use std::time::Duration;
 
 pub mod vfkit;
 
+use needy_config::profile::ActorDriver;
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
@@ -37,7 +38,7 @@ pub use vfkit::{Launch, VFKIT, check_vfkit};
 
 use crate::contract::{GATEWAY_PORT, PROCESS_PORT};
 pub use crate::driver::Error;
-use crate::driver::{Channels, Driver, Endpoint, Gap, Running, Setup, Start, Terminal};
+use crate::driver::{Capture, Channels, Driver, Endpoint, Facets, Gap, Host, Identity, Leftover, Running, Side, Start, Terminal, Transport};
 pub use crate::image::vm::MacosVz as Image;
 
 /// Where the daemon serves the guest API in a VM's directory.
@@ -67,6 +68,37 @@ pub fn supported_host() -> bool {
   cfg!(all(target_os = "macos", target_arch = "aarch64"))
 }
 
+/// What a `macos-vz` actor presents: the Firecracker actor's guest, so the
+/// kernel catches every exec and init mounts and presents the identity
+/// inside, reached over vsock that vfkit bridges to Unix sockets.
+pub const FACETS: Facets = Facets {
+  capture: Capture::Kernel,
+  workspace: Side::Guest,
+  identity: Identity {
+    hostname: Some(Side::Guest),
+    hwmon: Some(Side::Guest),
+    uptime: Some(Side::Guest),
+  },
+  transport: Transport::Vsock,
+};
+
+/// Whether this host can run `macos-vz` actors: macOS on Apple silicon, a
+/// `vfkit` that runs, and a complete `macos-vz` actor image.
+pub async fn detect(host: &Host) -> Result<(), String> {
+  if !supported_host() {
+    return Err("Virtualization.framework actors run on macOS on Apple silicon only".into());
+  }
+  check_vfkit(Path::new(VFKIT)).await.map_err(|e| e.to_string())?;
+  Image::new(&host.image).check().map_err(|e| e.to_string())
+}
+
+/// Ends the vfkit process a daemon that died left, found by its pidfile on
+/// its command line.
+#[cfg(unix)]
+pub async fn reconcile(leftover: &Leftover<'_>) -> bool {
+  crate::driver::end_vm(leftover, &pidfile(leftover.dir), "vfkit").await
+}
+
 /// The `macos-vz` driver: actors in Virtualization.framework VMs booted from
 /// `image` by `vfkit`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,10 +108,20 @@ pub struct MacosVz {
   pub vfkit: PathBuf,
 }
 
+impl MacosVz {
+  /// The driver on `host`: its actor image, and vfkit on `PATH`.
+  pub fn on(host: &Host) -> Self {
+    Self {
+      image: Image::new(&host.image),
+      vfkit: VFKIT.into(),
+    }
+  }
+}
+
 #[async_trait::async_trait]
 impl Driver for MacosVz {
-  fn name(&self) -> &'static str {
-    "macos-vz"
+  fn kind(&self) -> ActorDriver {
+    ActorDriver::MacosVz
   }
 
   async fn check_host(&self) -> Result<(), Error> {
@@ -101,13 +143,7 @@ impl Driver for MacosVz {
       terminal: Terminal::Unix(process),
       gateway_port: GATEWAY_PORT,
       process_port: PROCESS_PORT,
-      // vsock has no file modes inside the VM.
-      guest_for_every_user: false,
     }
-  }
-
-  fn setup(&self) -> Setup {
-    Setup::Guest
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {

@@ -10,6 +10,19 @@
 //! | `macos-vz` | [`macos_vz`] | macOS Virtualization.framework, through vfkit |
 //! | `macos-apple-container` | [`macos_apple_container`] | macOS Virtualization.framework, through Apple's `container` |
 //!
+//! Each driver answers in its own module, and this module is the one place
+//! that picks a driver by its name:
+//!
+//! - [`detect`]: whether this host has the driver, for the runner's
+//!   capabilities;
+//! - [`Driver::check_host`] and [`Driver::identity_gaps`]: whether a
+//!   profile's actor can run here and what of its recipe it presents
+//!   (`profile check` and a create);
+//! - [`reconcile`]: ending what a daemon that died left of an actor;
+//! - [`new`]: the factory, for a profile's actor;
+//! - [`facets`]: what the driver presents and how it is reached, and
+//!   [`Driver::channels`]: where the daemon meets one actor.
+//!
 //! Drivers never depend on each other: what two of them share lives in
 //! `crate::contract` (ports and channel paths), `crate::image` (what they
 //! boot or run) and `crate::identity` (identity files from the host), or here.
@@ -26,7 +39,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use needy_config::profile::User;
+use needy_config::profile::{Actor, ActorDriver, User};
 use needy_core::recipe::CompiledRecipe;
 
 #[cfg(unix)]
@@ -40,6 +53,8 @@ pub mod macos_vz;
 // `macos_native/` here only if the owner productizes it, see
 // `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`.
 
+/// What a driver could not do. The variants are neutral; what a driver's
+/// tool or engine refused is [`Error::Driver`], with its message.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   #[error("actor image is missing {}; run `needy build`", .0.display())]
@@ -50,25 +65,6 @@ pub enum Error {
     #[source]
     source: std::io::Error,
   },
-  #[error("cannot start firecracker")]
-  Spawn(#[source] std::io::Error),
-  // NOTICE: the OS error is part of the message and not its `source`, so a
-  // caller that prints the error with its causes says it once. The message
-  // names no repository path: a user with only the binary cannot follow one.
-  #[error(
-    "this host has no usable KVM: cannot open {}: {error}; a linux-firecracker actor needs it. Without KVM, use a linux-container actor (`actor: {{ driver: linux-container, container: {{ oci_runtime: runsc }} }}`); commands outside runs also work: `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
-    path.display()
-  )]
-  Kvm {
-    path: PathBuf,
-    error: std::io::Error,
-  },
-  /// The `linux-container` driver's engine refused or failed a request.
-  #[error("{0}")]
-  Docker(String),
-  /// Apple's `container` CLI is missing, or refused or failed a command.
-  #[error("{0}")]
-  AppleContainer(String),
   /// A workspace mount on the host side could not be made.
   #[error("cannot mount {target} on the host")]
   Mount {
@@ -79,6 +75,24 @@ pub enum Error {
   /// The driver does not do what was asked.
   #[error("{0}")]
   Unsupported(String),
+  /// What `driver`'s tool, engine or host refused or failed: Firecracker
+  /// that does not start, a KVM that does not open, the engine, Apple's
+  /// `container`. The message says it whole, causes included.
+  #[error("{message}")]
+  Driver {
+    driver: ActorDriver,
+    message: String,
+  },
+}
+
+impl Error {
+  /// What `driver` refused, as [`Error::Driver`].
+  pub fn driver(driver: ActorDriver, message: impl Into<String>) -> Self {
+    Self::Driver {
+      driver,
+      message: message.into(),
+    }
+  }
 }
 
 /// Where the daemon and one actor meet. Each driver chooses the transport;
@@ -106,12 +120,6 @@ pub struct Channels {
   /// The socket files these channels leave on the daemon's machine, which
   /// the daemon removes when the actor ends.
   pub sockets: Vec<PathBuf>,
-  /// Whether every user in the actor connects to the guest endpoint's file
-  /// itself: a socket bind-mounted into a container keeps its file mode
-  /// there, and the driving program's proxy runs as the profile's user. The
-  /// daemon then opens the socket and its directory to all users once it
-  /// bound them; the run's directory around them stays private on the host.
-  pub guest_for_every_user: bool,
 }
 
 /// Where the daemon listens for an actor's connections on one channel.
@@ -132,9 +140,9 @@ pub enum Endpoint {
 /// How the daemon connects to an actor's process service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Terminal {
-  /// Firecracker's vsock device: connect to its socket `device`, then ask
-  /// for guest port `port`.
-  FirecrackerVsock { device: PathBuf, port: u32 },
+  /// A hybrid vsock device (Firecracker's): connect to its Unix socket
+  /// `device`, then ask for guest port `port` (`CONNECT port`).
+  HybridVsock { device: PathBuf, port: u32 },
   /// A Unix socket on the daemon's machine that reaches the one the actor's
   /// init binds: a Linux container actor's bind-mounted channels, or the
   /// socket Apple's `container` publishes from its VM.
@@ -143,37 +151,146 @@ pub enum Terminal {
   // container runtimes, with the first such runtime.
 }
 
-/// Who sets up what the driving program sees beyond its own files: the
-/// workspace mounts, and the recipe's hostname and sensors with their
-/// faults.
+/// What a driver presents and how it is reached: independent answers that
+/// one `Setup` (guest, host, or guest mounts) packed together before the
+/// drivers design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Setup {
-  /// The actor's init, inside: a VM has its own kernel to mount and fake
-  /// sensors in.
-  Guest,
-  /// The driver, from the daemon's machine: a container gets its mounts,
-  /// hostname and identity files from the host, since its init may not
-  /// mount anything.
-  Host,
-  /// Both: the actor's init mounts the workspace and sets the hostname, as
-  /// in a VM, and the driver presents the rest of the identity from the
-  /// host, as for a container. Apple's `container`: its container is in a VM
-  /// with FUSE, where init may mount, but whose default kernel has no fake
-  /// sensors; and the Mac has no FUSE to mount on.
-  GuestMounts,
+pub struct Facets {
+  pub capture: Capture,
+  /// Who mounts the workspace into the actor.
+  pub workspace: Side,
+  pub identity: Identity,
+  pub transport: Transport,
 }
 
-impl Setup {
-  /// Whether the actor's init mounts the workspace and sets the recipe's
-  /// hostname.
-  pub fn mounts_in_guest(self) -> bool {
-    matches!(self, Self::Guest | Self::GuestMounts)
-  }
+/// How an exec inside the actor is caught and handed to the proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capture {
+  /// The guest kernel's `binfmt_needy`: every exec, by any path.
+  Kernel,
+  /// Shims made when the container image was built: a program created at
+  /// run time and run directly is not caught (`profile check` warns).
+  Shims,
+  // TODO(macos-native): `FencedShims` (shims in a Seatbelt fence) comes with
+  // the `macos-native` driver, if the owner productizes it.
+}
 
-  /// Whether the actor's init presents the recipe's sensors, applies hwmon
-  /// faults and offsets the uptime.
-  pub fn identity_in_guest(self) -> bool {
-    self == Self::Guest
+/// Where something the actor presents is made.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+  /// By the actor's init, inside.
+  Guest,
+  /// By the driver, from the daemon's machine.
+  Host,
+}
+
+/// Who presents the identity fields the daemon configures: an actor's init
+/// is told only those its driver presents in the guest, and the daemon
+/// applies the hwmon faults itself where the driver presents the sensors
+/// from the host. `None` is a gap the driver declares in its
+/// [`Driver::identity_gaps`].
+// NOTICE: the other recipe fields (CPU, DMI, PCI, kernel) need no daemon
+// configuration: the VMM or the identity files present them, or a gap says
+// they are missing; they get a field here when something has to act on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Identity {
+  pub hostname: Option<Side>,
+  /// The hwmon sensors and the hwmon faults.
+  pub hwmon: Option<Side>,
+  /// The recipe's uptime offset.
+  pub uptime: Option<Side>,
+}
+
+/// How the actor reaches its channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transport {
+  /// vsock ports, which the VMM bridges to Unix sockets on the daemon's
+  /// machine. vsock has no file modes inside the VM.
+  Vsock,
+  /// Unix sockets mounted into the actor (a directory of them, or one file
+  /// each), and for the terminal one the driver publishes. A mounted socket
+  /// keeps its file mode there, and the driving program's proxy runs as the
+  /// profile's user, so the daemon opens the guest socket and its directory
+  /// to every user once it bound them; the run's directory around them stays
+  /// private on the host.
+  Socket,
+  // TODO(container-runtime): loopback TCP with a per-run token, see
+  // `Endpoint`.
+}
+
+/// The facets of `driver`.
+// NOTICE: the table functions but `detect` are Unix only, as the container
+// drivers and the daemon's actor role are; a runner on Windows detects that
+// it has none of the drivers.
+#[cfg(unix)]
+pub fn facets(driver: ActorDriver) -> Facets {
+  match driver {
+    ActorDriver::LinuxFirecracker => linux_firecracker::FACETS,
+    ActorDriver::LinuxContainer => linux_container::FACETS,
+    ActorDriver::MacosVz => macos_vz::FACETS,
+    ActorDriver::MacosAppleContainer => macos_apple_container::FACETS,
+  }
+}
+
+/// What the daemon's machine gives every driver: where needy's VM actor
+/// image is (`needy build`), and the KVM device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Host {
+  pub image: PathBuf,
+  /// `linux_firecracker::KVM` outside tests.
+  pub kvm: PathBuf,
+}
+
+/// The driver of `actor` (a profile's `actor:`) on `host`.
+#[cfg(unix)]
+pub fn new(host: &Host, actor: &Actor) -> Result<Box<dyn Driver>, Error> {
+  Ok(match actor.driver {
+    ActorDriver::LinuxFirecracker => Box::new(linux_firecracker::LinuxFirecracker::on(host)),
+    ActorDriver::LinuxContainer => Box::new(linux_container::LinuxContainer::of(actor)?),
+    ActorDriver::MacosVz => Box::new(macos_vz::MacosVz::on(host)),
+    ActorDriver::MacosAppleContainer => Box::new(macos_apple_container::MacosAppleContainer::of(actor)),
+  })
+}
+
+/// Whether this host has `driver`, or why not: a runner reports
+/// `actor(DRIVER)` for each that it has. What depends on a profile (an OCI
+/// runtime, an image in a store) is checked when a run is created.
+pub async fn detect(driver: ActorDriver, host: &Host) -> Result<(), String> {
+  match driver {
+    ActorDriver::LinuxFirecracker => linux_firecracker::detect(host),
+    #[cfg(unix)]
+    ActorDriver::LinuxContainer => linux_container::detect().await,
+    ActorDriver::MacosVz => macos_vz::detect(host).await,
+    #[cfg(unix)]
+    ActorDriver::MacosAppleContainer => macos_apple_container::detect().await,
+    #[cfg(not(unix))]
+    ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer => Err(format!("{driver} actors run on Linux and macOS only")),
+  }
+}
+
+/// What a daemon that died left of one actor, as `state.db` has it.
+#[derive(Debug, Clone, Copy)]
+pub struct Leftover<'a> {
+  pub run: &'a str,
+  /// The actor's directory.
+  pub dir: &'a Path,
+  /// The host process that ran it.
+  pub pid: Option<u32>,
+}
+
+/// Ends what a daemon that died left of an actor of `driver`, and says
+/// whether it found anything to end. A restarted daemon does not adopt an
+/// actor: it is no longer the actor's parent, so it cannot collect its exit;
+/// the guest's connections to the old daemon broke; and the run's chaos
+/// counters and trace sequence lived in the old daemon's memory, so an
+/// adopted run would no longer replay deterministically.
+#[cfg(unix)]
+pub async fn reconcile(driver: ActorDriver, leftover: &Leftover<'_>) -> bool {
+  match driver {
+    ActorDriver::LinuxFirecracker => linux_firecracker::reconcile(leftover).await,
+    ActorDriver::LinuxContainer => linux_container::reconcile(leftover).await,
+    ActorDriver::MacosVz => macos_vz::reconcile(leftover).await,
+    ActorDriver::MacosAppleContainer => macos_apple_container::reconcile(leftover).await,
   }
 }
 
@@ -202,7 +319,8 @@ pub struct Start<'a> {
   pub recipe: Option<&'a CompiledRecipe>,
   /// The profile's user, who owns the home directory and the mounts.
   pub user: &'a User,
-  /// The workspace mounts, for a driver whose [`Setup`] is `Host`.
+  /// The workspace mounts, for a driver whose [`Facets::workspace`] is
+  /// [`Side::Host`].
   pub mounts: &'a [HostMount],
 }
 
@@ -244,9 +362,14 @@ pub fn log(dir: &Path) -> PathBuf {
 // (see `Endpoint`).
 #[async_trait::async_trait]
 pub trait Driver: Send + Sync {
+  /// Which driver it is.
+  fn kind(&self) -> ActorDriver;
+
   /// The driver's name, as a profile's `actor.driver` and `state.db`
   /// spell it.
-  fn name(&self) -> &'static str;
+  fn name(&self) -> &'static str {
+    self.kind().as_str()
+  }
 
   /// What runs the actor, as the trace and the report name it: the name,
   /// with what decides the isolation where the name does not.
@@ -262,17 +385,13 @@ pub trait Driver: Send + Sync {
   /// them before it starts the actor.
   fn channels(&self, dir: &Path) -> Channels;
 
-  /// Who mounts the workspace and presents the recipe's hostname and
-  /// sensors.
-  fn setup(&self) -> Setup;
-
   /// Starts an actor as `start` says.
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error>;
 
   /// Sets the recipe's temperature sensors of the actor in `dir` to
-  /// `temp_mc` millidegrees, as an hwmon fault does, for a driver whose
-  /// [`Setup`] is `Host`; under `Guest` the actor's init applies the fault
-  /// itself.
+  /// `temp_mc` millidegrees, as an hwmon fault does, for a driver that
+  /// presents the sensors from the host ([`Identity::hwmon`]); in the guest
+  /// the actor's init applies the fault itself.
   fn overheat(&self, dir: &Path, temp_mc: i32) -> Result<(), Error> {
     let _ = (dir, temp_mc);
     Err(Error::Unsupported("this actor's sensors are set inside it".into()))
@@ -284,6 +403,49 @@ pub trait Driver: Send + Sync {
     let _ = recipe;
     Vec::new()
   }
+}
+
+// NOTICE: how long a reconcile waits for a leftover VM process to exit after
+// `SIGKILL`; it is reaped by its new parent at once.
+const VM_END_WAIT: Duration = Duration::from_secs(5);
+
+/// Ends the VM process (Firecracker, vfkit) of a leftover actor, if it still
+/// runs, and says whether it did.
+// NOTICE: the PID is checked against the process's command line, which
+// names `marker`, a file in the run's directory (Firecracker's `vm.json`,
+// vfkit's pidfile), so a PID another process took since is left alone.
+#[cfg(unix)]
+pub(crate) async fn end_vm(leftover: &Leftover<'_>, marker: &Path, name: &str) -> bool {
+  use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal, System, UpdateKind};
+  let run = leftover.run;
+  let Some(pid) = leftover.pid else {
+    return false;
+  };
+  let pid = sysinfo::Pid::from_u32(pid);
+  let Ok(mut system) = System::new() else {
+    tracing::warn!("run {run}: cannot read this machine's processes to find its actor's VM");
+    return false;
+  };
+  let alive = |system: &mut System| {
+    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always));
+    system.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie && p.cmd().iter().any(|arg| Path::new(arg) == marker))
+  };
+  if !alive(&mut system) {
+    return false;
+  }
+  tracing::warn!("run {run}: ending its actor's VM ({name} {pid}), which a restarted control plane does not adopt");
+  if !system.process(pid).and_then(|p| p.kill_with(Signal::Kill)).unwrap_or(false) {
+    tracing::warn!("run {run}: cannot kill the VM process {pid}");
+  }
+  let deadline = tokio::time::Instant::now() + VM_END_WAIT;
+  while alive(&mut system) {
+    if tokio::time::Instant::now() >= deadline {
+      tracing::warn!("run {run}: the VM process {pid} did not exit within {VM_END_WAIT:?} of SIGKILL");
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  true
 }
 
 /// Stops `child`, the host process `name` that runs a VM, and waits until it

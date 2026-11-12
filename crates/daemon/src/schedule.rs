@@ -23,8 +23,8 @@ use std::fmt;
 
 use anyhow::Context as _;
 use needy_api_server::control::Placement;
-use needy_config::profile::{ExecutorDriver as ProfileExecutorDriver, LabelMatch, RunnerSelector};
-use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
+use needy_config::profile::{ActorDriver, ExecutorDriver, LabelMatch, RunnerSelector};
+use needy_core::types::{Capabilities, RunnerRole};
 
 use crate::Daemon;
 use crate::pool::Site;
@@ -50,24 +50,6 @@ pub enum Need {
 }
 
 impl Need {
-  /// What an actor of `driver` needs.
-  pub fn actor(driver: needy_config::profile::ActorDriver) -> Self {
-    Self::Actor(match driver {
-      needy_config::profile::ActorDriver::LinuxFirecracker => ActorDriver::LinuxFirecracker,
-      needy_config::profile::ActorDriver::LinuxContainer => ActorDriver::LinuxContainer,
-      needy_config::profile::ActorDriver::MacosVz => ActorDriver::MacosVz,
-      needy_config::profile::ActorDriver::MacosAppleContainer => ActorDriver::MacosAppleContainer,
-    })
-  }
-
-  /// What an executor of `driver` needs.
-  pub fn executor(driver: ProfileExecutorDriver) -> Self {
-    Self::Executor(match driver {
-      ProfileExecutorDriver::Native => ExecutorDriver::Native,
-      ProfileExecutorDriver::LinuxContainer => ExecutorDriver::LinuxContainer,
-    })
-  }
-
   fn role(self) -> RunnerRole {
     match self {
       Self::Actor(_) => RunnerRole::Actor,
@@ -281,14 +263,14 @@ impl Daemon {
 
   /// Where the pool creates an executor whose driver is `driver` at
   /// `placement`.
-  pub(crate) fn site(&self, placement: &Placement, driver: ProfileExecutorDriver) -> Result<Site, String> {
+  pub(crate) fn site(&self, placement: &Placement, driver: ExecutorDriver) -> Result<Site, String> {
     match (placement, driver) {
       (Placement::ControlHost, _) => Ok(Site::ControlHost),
       // The control plane creates the containers of its own runner.
-      (Placement::Runner(name), ProfileExecutorDriver::LinuxContainer) if self.is_local(name) => Ok(Site::ControlHost),
+      (Placement::Runner(name), ExecutorDriver::LinuxContainer) if self.is_local(name) => Ok(Site::ControlHost),
       // TODO(runner-docker): a runner that creates containers itself; see
       // `pool::Pool::create`.
-      (Placement::Runner(name), ProfileExecutorDriver::LinuxContainer) => Err(format!(
+      (Placement::Runner(name), ExecutorDriver::LinuxContainer) => Err(format!(
         "runner {name} cannot create linux-container executors yet: only the control host's own runner can \
          (`needy daemon --mode control --local-runner NAME`); use `driver: native` there"
       )),

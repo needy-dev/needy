@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use needy_config::profile::{ExecutorDriver as ProfileExecutorDriver, LabelMatch, RunnerSelector};
-use needy_core::types::{ActorDriver, ExecutorDriver};
+use needy_config::profile::{ActorDriver, ExecutorDriver};
+use needy_config::profile::{LabelMatch, RunnerSelector};
 
 use super::{Candidate, Need, pick};
 use crate::testing::capabilities;
@@ -182,10 +182,4 @@ fn the_choice_does_not_depend_on_the_order_of_the_runners() {
   assert_eq!(pick(&labels(&["kvm"]), ACTOR, &reversed).unwrap(), "kvm-1");
   let err = pick(&labels(&["os=linux"]), NATIVE_EXECUTOR, &reversed).unwrap_err().to_string();
   assert!(err.contains("gpu, kvm-1;"), "{err}");
-}
-
-#[test]
-fn a_profiles_executor_driver_needs_that_capability() {
-  assert_eq!(Need::executor(ProfileExecutorDriver::LinuxContainer), CONTAINER_EXECUTOR);
-  assert_eq!(Need::executor(ProfileExecutorDriver::Native), NATIVE_EXECUTOR);
 }

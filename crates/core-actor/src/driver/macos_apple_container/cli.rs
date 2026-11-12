@@ -53,12 +53,12 @@ impl Command {
 /// Why the CLI could not be started.
 fn not_started(e: std::io::Error) -> Error {
   if e.kind() == std::io::ErrorKind::NotFound {
-    Error::AppleContainer(
+    super::refused(
       "Apple's `container` CLI is not on PATH; install it from https://github.com/apple/container/releases and run `container system start`"
         .into(),
     )
   } else {
-    Error::AppleContainer(format!("cannot run `container`: {e}"))
+    super::refused(format!("cannot run `container`: {e}"))
   }
 }
 
@@ -74,7 +74,7 @@ impl Cli for Command {
   }
 
   fn spawn(&self, args: &[String], log: std::fs::File) -> Result<Box<dyn Process>, Error> {
-    let stderr = log.try_clone().map_err(|e| Error::AppleContainer(format!("cannot open the actor's log: {e}")))?;
+    let stderr = log.try_clone().map_err(|e| super::refused(format!("cannot open the actor's log: {e}")))?;
     let child = Self::command(args)?.stdout(log).stderr(stderr).spawn().map_err(not_started)?;
     Ok(Box::new(Child(child)))
   }

@@ -26,18 +26,72 @@ use std::time::Duration;
 use bollard::models::{ContainerCreateBody, HostConfig};
 use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
-use needy_config::profile::OciRuntime;
+use needy_config::profile::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor, OciRuntime};
 
 use needy_core::recipe::CompiledRecipe;
 
 use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
-use crate::driver::{Channels, Driver, Endpoint, Error, Gap, HostMount, Running, Setup, Start, Terminal};
+use crate::driver::{
+  Capture, Channels, Driver, Endpoint, Error, Facets, Gap, HostMount, Identity, Leftover, Running, Side, Start, Terminal, Transport,
+};
 use crate::identity;
 use crate::image::container::name;
 
 /// Where the host-side workspace mounts of the actor in `dir` are.
 fn mounts_dir(dir: &Path) -> PathBuf {
   dir.join("mounts")
+}
+
+/// What a `linux-container` actor presents: shims made when its image was
+/// built catch execs; the driver mounts the workspace and presents the
+/// hostname and the sensors from the host, and the uptime offset is a gap;
+/// its channels are Unix sockets mounted into the container.
+// TODO(container-actor): a container actor's uptime is the container's
+// (lxcfs's `/proc/uptime` when it is mounted); the recipe's offset needs a
+// time namespace init may not create there.
+pub const FACETS: Facets = Facets {
+  capture: Capture::Shims,
+  workspace: Side::Host,
+  identity: Identity {
+    hostname: Some(Side::Host),
+    hwmon: Some(Side::Host),
+    uptime: None,
+  },
+  transport: Transport::Socket,
+};
+
+// NOTICE: how long detection waits for the engine. A local socket answers in
+// milliseconds; a Docker Desktop that is not running fails at once. 3 s
+// bounds an engine that hangs without delaying a runner's join much.
+const DETECT_WAIT: Duration = Duration::from_secs(3);
+
+/// Whether this host can run `linux-container` actors: a Docker-compatible
+/// engine answers. Whether it has the OCI runtime a profile names and the
+/// container actor image is checked when a run is created.
+// TODO(runner-actor): the capability does not carry the OCI runtimes; it
+// needs to once actors run on runners other than the control host's own,
+// which probes its engine directly.
+pub async fn detect() -> Result<(), String> {
+  // The OCI runtime and image do not matter for whether the engine answers.
+  let driver = LinuxContainer::new(OciRuntime::Runc, CONTAINER_IMAGE.into());
+  match tokio::time::timeout(DETECT_WAIT, driver.engine.runtimes()).await {
+    Ok(runtimes) => runtimes.map(drop).map_err(|e| e.to_string()),
+    Err(_) => Err(format!("no Docker-compatible engine answered within {DETECT_WAIT:?}")),
+  }
+}
+
+/// Ends the container a daemon that died left, found by its run's name, and
+/// detaches its host-side workspace mounts.
+pub async fn reconcile(leftover: &Leftover<'_>) -> bool {
+  // The OCI runtime and image do not matter for ending a container.
+  let driver = LinuxContainer::new(OciRuntime::Runc, CONTAINER_IMAGE.into());
+  tracing::warn!("run {}: ending its actor's container, which a restarted control plane does not adopt", leftover.run);
+  driver.end_leftover(leftover.run, leftover.dir).await
+}
+
+/// What the engine refused or failed, as the driver's error.
+fn refused(message: String) -> Error {
+  Error::driver(ActorDriver::LinuxContainer, message)
 }
 
 /// The Docker daemon, as far as the driver uses it. A real boundary (a
@@ -79,6 +133,19 @@ impl LinuxContainer {
       Err(e) => Arc::new(Unreachable(format!("no Docker daemon answers: {e}"))),
     };
     Self::with_engine(oci_runtime, image, engine)
+  }
+
+  /// The driver of `actor`, whose `container:` options name the OCI runtime
+  /// (`validate::profile` refuses a profile without it first).
+  pub fn of(actor: &Actor) -> Result<Self, Error> {
+    let Some(ContainerActor {
+      oci_runtime: Some(oci_runtime),
+      image,
+    }) = &actor.container
+    else {
+      return Err(Error::Unsupported("actor.container.oci_runtime is missing".into()));
+    };
+    Ok(Self::new(*oci_runtime, image.clone()))
   }
 
   pub fn with_engine(oci_runtime: OciRuntime, image: String, engine: Arc<dyn Engine>) -> Self {
@@ -257,8 +324,8 @@ pub struct Launch {
 
 #[async_trait::async_trait]
 impl Driver for LinuxContainer {
-  fn name(&self) -> &'static str {
-    "linux-container"
+  fn kind(&self) -> ActorDriver {
+    ActorDriver::LinuxContainer
   }
 
   fn label(&self) -> String {
@@ -276,7 +343,7 @@ impl Driver for LinuxContainer {
         OciRuntime::Runc => "",
       };
       let known: Vec<&str> = runtimes.keys().map(String::as_str).collect();
-      return Err(Error::Docker(format!("Docker has no {oci} runtime (it has {}){how}", known.join(", "))));
+      return Err(refused(format!("Docker has no {oci} runtime (it has {}){how}", known.join(", "))));
     };
     // NOTICE: gVisor keeps a container from host Unix sockets unless told
     // otherwise, and the actor's channels are host sockets: init connects
@@ -287,14 +354,14 @@ impl Driver for LinuxContainer {
     // none) and `runsc install --help` (`-- [args...]` become Docker's
     // `runtimeArgs`).
     if self.oci_runtime == OciRuntime::Runsc && !args.iter().any(|arg| arg == "--host-uds=all") {
-      return Err(Error::Docker(format!(
+      return Err(refused(format!(
         "Docker's runsc runtime keeps containers from host Unix sockets, which a container actor's channels are (its runtimeArgs are [{}]); \
          register it with `runsc install -- --host-uds=all` and `systemctl reload docker`",
         args.join(" ")
       )));
     }
     if !self.engine.has_image(&self.image).await? {
-      return Err(Error::Docker(format!("the container actor image {} is missing; run `needy build --linux-container`", self.image)));
+      return Err(refused(format!("the container actor image {} is missing; run `needy build --linux-container`", self.image)));
     }
     Ok(())
   }
@@ -311,12 +378,7 @@ impl Driver for LinuxContainer {
       terminal: Terminal::Unix(process),
       gateway_port: 0,
       process_port: 0,
-      guest_for_every_user: true,
     }
-  }
-
-  fn setup(&self) -> Setup {
-    Setup::Host
   }
 
   fn overheat(&self, dir: &Path, temp_mc: i32) -> Result<(), Error> {
@@ -486,35 +548,35 @@ struct Unreachable(String);
 #[async_trait::async_trait]
 impl Engine for Unreachable {
   async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 
   async fn has_image(&self, _image: &str) -> Result<bool, Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 
   async fn create(&self, _name: &str, _body: ContainerCreateBody) -> Result<(), Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 
   async fn start(&self, _name: &str) -> Result<u32, Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 
   fn logs(&self, _name: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
-    futures_util::stream::iter([Err(Error::Docker(self.0.clone()))]).boxed()
+    futures_util::stream::iter([Err(refused(self.0.clone()))]).boxed()
   }
 
   async fn wait(&self, _name: &str) -> Result<i64, Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 
   async fn stop(&self, _name: &str, _grace: Duration) -> Result<(), Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 
   async fn remove(&self, _name: &str) -> Result<(), Error> {
-    Err(Error::Docker(self.0.clone()))
+    Err(refused(self.0.clone()))
   }
 }
 
@@ -522,7 +584,7 @@ impl Engine for Unreachable {
 struct Docker(bollard::Docker);
 
 fn docker_error(e: bollard::errors::Error) -> Error {
-  Error::Docker(format!("docker: {e}"))
+  refused(format!("docker: {e}"))
 }
 
 /// Whether `e` is Docker's 404, a container or image that does not exist.
@@ -539,7 +601,7 @@ fn not_found(e: &bollard::errors::Error) -> bool {
 #[async_trait::async_trait]
 impl Engine for Docker {
   async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
-    let info = self.0.info().await.map_err(|e| Error::Docker(format!("no Docker daemon answers: {e}")))?;
+    let info = self.0.info().await.map_err(|e| refused(format!("no Docker daemon answers: {e}")))?;
     Ok(info.runtimes.unwrap_or_default().into_iter().map(|(name, runtime)| (name, runtime.runtime_args.unwrap_or_default())).collect())
   }
 
@@ -576,7 +638,7 @@ impl Engine for Docker {
       // code (bollard 0.21.1 `src/container.rs`, `wait_container`).
       Some(Err(bollard::errors::Error::DockerContainerWaitError { code, .. })) => Ok(code),
       Some(Err(e)) => Err(docker_error(e)),
-      None => Err(Error::Docker(format!("docker: the wait for {name} ended without its exit"))),
+      None => Err(refused(format!("docker: the wait for {name} ended without its exit"))),
     }
   }
 

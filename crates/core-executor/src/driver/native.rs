@@ -2,6 +2,7 @@
 //! There is nothing to create; every instance shares the machine.
 
 use needy_api_client::Client;
+use needy_config::profile::ExecutorDriver;
 
 use super::{Driver, Error, Instance, Spec, host_path, sftp_command};
 
@@ -29,6 +30,10 @@ impl Native {
 
 #[async_trait::async_trait]
 impl Driver for Native {
+  fn kind(&self) -> ExecutorDriver {
+    ExecutorDriver::Native
+  }
+
   async fn create(&self, spec: &Spec) -> Result<Instance, Error> {
     let mut handle = self.machine();
     if let Some(workspace) = &spec.config.workspace {
@@ -40,5 +45,16 @@ impl Driver for Native {
   /// This machine outlives its runs.
   async fn destroy(&self, _handle: &Instance) -> Result<(), Error> {
     Ok(())
+  }
+
+  /// Ends nothing: the processes a daemon's own executor ran die with a
+  /// daemon that stops.
+  // TODO(runner-ownership): a daemon killed with SIGKILL leaves the processes
+  // its own executor ran orphaned and unknown to its successor, which does
+  // not record their host PIDs. Native executors on the control host go
+  // through its local runner (`--local-runner`) to be owned like any
+  // runner's.
+  async fn reconcile(&self, _id: &str) -> bool {
+    false
   }
 }

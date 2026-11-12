@@ -7,9 +7,10 @@ use std::sync::Mutex;
 
 use needy_api_client::Client;
 use needy_common::process::Exit;
+use needy_config::profile::ExecutorDriver;
 use needy_core::event::{Event, RunStop};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Capabilities, ExecutorDriver, Origin, Principal, RunState};
+use needy_core::types::{Capabilities, Origin, Principal, RunState};
 use tokio_stream::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 

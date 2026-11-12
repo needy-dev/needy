@@ -548,7 +548,7 @@ impl Daemon {
     // selector that names no runner fails the create at once.
     let runners = self.candidates().await?;
     let actor =
-      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::actor(run.profile.actor.driver), &runners).context("actor")?;
+      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor(run.profile.actor.driver), &runners).context("actor")?;
     if let Some(refusal) = self.actor_refusal(&actor) {
       bail!("actor: {refusal}");
     }
@@ -560,7 +560,7 @@ impl Daemon {
     files::check_host_paths(run)?;
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
-      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::executor(config.driver), &runners)
+      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
         .with_context(|| format!("executor {exec_name}"))?;
       let site = self.site(&placement, config.driver).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
       sites.push(site);

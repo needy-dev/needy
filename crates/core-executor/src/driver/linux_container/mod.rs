@@ -14,7 +14,6 @@
 
 mod options;
 
-use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use bollard::errors::Error as DockerError;
@@ -23,6 +22,8 @@ use futures_util::TryStreamExt;
 
 use options::socket_dir;
 pub use options::{Container, container};
+
+use needy_config::profile::ExecutorDriver;
 
 use super::{Driver, Error, Instance, Spec, connect};
 
@@ -78,13 +79,19 @@ fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Resu
   Ok(())
 }
 
-/// The OCI runtimes this machine's Docker daemon (`DOCKER_HOST`, else its
-/// default socket) has registered, such as `runc` and gVisor's `runsc`; an
-/// error when it does not answer within `wait`.
-pub async fn runtimes(wait: std::time::Duration) -> Result<BTreeSet<String>, Error> {
-  let docker = bollard::Docker::connect_with_defaults()?.with_timeout(wait);
-  let info = docker.info().await?;
-  Ok(info.runtimes.unwrap_or_default().into_keys().collect())
+// NOTICE: how long detection waits for the engine. A local socket answers in
+// milliseconds; a Docker Desktop that is not running fails at once. 3 s
+// bounds an engine that hangs without delaying a runner's join much.
+const DETECT_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether this machine's Docker-compatible engine (`DOCKER_HOST`, else its
+/// default socket) answers within [`DETECT_WAIT`].
+pub async fn detect() -> Result<(), String> {
+  let answered = async {
+    let docker = bollard::Docker::connect_with_defaults()?.with_timeout(DETECT_WAIT);
+    docker.info().await.map(drop)
+  };
+  answered.await.map_err(|e| format!("no Docker-compatible engine answers: {e}"))
 }
 
 /// The `linux-container` driver on this machine's Docker-compatible engine.
@@ -165,6 +172,10 @@ fn with_tag(image: &str) -> String {
 
 #[async_trait::async_trait]
 impl Driver for LinuxContainer {
+  fn kind(&self) -> ExecutorDriver {
+    ExecutorDriver::LinuxContainer
+  }
+
   async fn create(&self, spec: &Spec) -> Result<Instance, Error> {
     let container = container(spec, &self.options)?;
     share_with_container(&container.socket_dir, &spec.user)?;
@@ -205,6 +216,18 @@ impl Driver for LinuxContainer {
 
   async fn destroy(&self, handle: &Instance) -> Result<(), Error> {
     self.remove_instance(&handle.id).await
+  }
+
+  /// Removes the container `id` a daemon that died left, and its socket's
+  /// directory.
+  async fn reconcile(&self, id: &str) -> bool {
+    match self.remove_instance(id).await {
+      Ok(()) => true,
+      Err(e) => {
+        tracing::warn!("cannot remove container {id}: {e}");
+        false
+      }
+    }
   }
 }
 

@@ -301,3 +301,38 @@ async fn stop_kills_a_firecracker_that_ignores_sigterm() {
 
   assert_eq!(status.signal(), Some(Signal::SIGKILL as i32));
 }
+
+// Moved from the daemon's capabilities tests with detection.
+#[cfg(target_os = "linux")]
+#[test]
+fn detection_needs_a_kvm_device_that_opens_and_a_complete_image() {
+  let dir = tempfile::tempdir().unwrap();
+  let host = Host {
+    kvm: dir.path().join("kvm"),
+    image: dir.path().join("image"),
+  };
+  std::fs::create_dir(&host.image).unwrap();
+
+  let no_kvm = detect(&host).unwrap_err();
+  std::fs::write(&host.kvm, b"").unwrap();
+  let no_image = detect(&host).unwrap_err();
+  for file in ["vmlinux", "rootfs.ext4", "firecracker"] {
+    std::fs::write(host.image.join(file), b"").unwrap();
+  }
+
+  assert!(no_kvm.starts_with(&format!("cannot open {}: ", host.kvm.display())), "{no_kvm}");
+  assert_eq!(no_image, format!("actor image is missing {}; run `needy build`", host.image.join("vmlinux").display()));
+  assert_eq!(detect(&host), Ok(()));
+}
+
+#[cfg(not(target_os = "linux"))]
+#[test]
+fn detection_needs_linux() {
+  let dir = tempfile::tempdir().unwrap();
+  let host = Host {
+    kvm: dir.path().to_path_buf(),
+    image: dir.path().to_path_buf(),
+  };
+
+  assert_eq!(detect(&host).unwrap_err(), "Firecracker runs on Linux only");
+}

@@ -9,9 +9,10 @@
 //! live runs and ends the others.
 //!
 //! A control plane that starts finds in `state.db` the runs it left open.
-//! It does not adopt their actors (see [`end_leftover_vm`]): each such run
-//! ends `failed` (`stopped` if it was stopping), its actor's Firecracker or
-//! container is ended, its control-host containers are removed, and its instances on
+//! It does not adopt their actors (see `needy_core_actor::driver::reconcile`):
+//! each such run ends `failed` (`stopped` if it was stopping), its actor is
+//! ended through its driver, its control-host executor instances through
+//! theirs, and its instances on
 //! runners wait for the runners' reports for [`REPORT_WAIT`]; those nobody
 //! reports by then are marked lost.
 
@@ -23,6 +24,7 @@ use anyhow::{Context as _, Result};
 use needy_api_client::proto::v1::ProcessInfo;
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
+use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core::types::RunState;
 
 use crate::store::{self, InstanceKind, InstanceRecord, InstanceState, ProcessRecord, ProcessState};
@@ -37,10 +39,6 @@ use crate::{Daemon, actor};
 // runner that reports in time is told what to end; one that does not ends the
 // processes of runs itself when its grace period passes.
 pub const REPORT_WAIT: Duration = Duration::from_secs(60);
-
-// NOTICE: how long the control plane waits for a leftover Firecracker to
-// exit after `SIGKILL`; it is reaped by its new parent at once.
-const VM_END_WAIT: Duration = Duration::from_secs(5);
 
 impl Daemon {
   /// Tells `runner` that run `run` ended, and records how its processes
@@ -161,28 +159,14 @@ impl Daemon {
       let instances = self.state.instances_of(&record.id).await.context("cannot read the instances")?;
       for instance in instances.iter().filter(|i| i.state == InstanceState::Running) {
         match (instance.kind, &instance.runner) {
-          (InstanceKind::Actor, _) if instance.driver == "linux-container" => {
-            let state = end_leftover_container(instance).await;
-            self.write_instance_state(instance, state, now).await;
-          }
-          (InstanceKind::Actor, _) if instance.driver == "macos-apple-container" => {
-            let state = end_leftover_macos_apple_container(instance).await;
-            self.write_instance_state(instance, state, now).await;
-          }
           (InstanceKind::Actor, _) => {
-            // A VM's process names a file in the run's directory on its
-            // command line: Firecracker its `vm.json`, vfkit its pidfile.
-            let marker = match instance.driver.as_str() {
-              "macos-vz" => needy_core_actor::driver::macos_vz::pidfile(Path::new(&instance.handle)),
-              _ => Path::new(&instance.handle).join("vm.json"),
-            };
-            let state = end_leftover_vm(instance, &marker).await;
+            let state = self.end_leftover_actor(instance).await;
             self.write_instance_state(instance, state, now).await;
           }
           // The runner reports it when it connects; see `reconcile_runner`.
           (InstanceKind::Executor, Some(_)) => on_runners = true,
-          (InstanceKind::Executor, None) if instance.driver == "linux-container" => {
-            let state = self.remove_leftover_container(instance).await;
+          (InstanceKind::Executor, None) => {
+            let state = self.end_leftover_executor(instance).await;
             self.write_instance_state(instance, state, now).await;
             let ended = if state == InstanceState::Ended {
               ProcessState::Ended
@@ -190,16 +174,6 @@ impl Daemon {
               ProcessState::Lost
             };
             self.end_processes_of(instance, ended, &[], now).await;
-          }
-          (InstanceKind::Executor, None) => {
-            // TODO(runner-ownership): the processes the control daemon's own
-            // executor ran for a run die with a daemon that stops, but one
-            // killed with SIGKILL leaves them orphaned and unknown to its
-            // successor, which does not record their host PIDs. Native
-            // executors on the control host go through its local runner
-            // (`--local-runner`) to be owned like any runner's.
-            self.write_instance_state(instance, InstanceState::Lost, now).await;
-            self.end_processes_of(instance, ProcessState::Lost, &[], now).await;
           }
         }
       }
@@ -262,18 +236,38 @@ impl Daemon {
     }
   }
 
-  /// Removes a leftover container of a run on the control host.
-  async fn remove_leftover_container(&self, instance: &InstanceRecord) -> InstanceState {
-    let Some(container) = self.pool.container() else {
-      tracing::warn!("run {}: no Docker-compatible engine is available to remove container {}", instance.run, instance.handle);
+  /// Ends, through its driver, the actor a previous control plane started
+  /// for a run, and says whether it did (`Ended`) or found none (`Lost`).
+  /// See `needy_core_actor::driver::reconcile` for why it is not adopted.
+  async fn end_leftover_actor(&self, instance: &InstanceRecord) -> InstanceState {
+    let Some(driver) = ActorDriver::ALL.into_iter().find(|d| d.as_str() == instance.driver) else {
+      tracing::warn!("run {}: its actor's driver {:?} is unknown to this daemon", instance.run, instance.driver);
       return InstanceState::Lost;
     };
-    match container.remove_instance(&instance.handle).await {
-      Ok(()) => InstanceState::Ended,
-      Err(e) => {
-        tracing::warn!("run {}: cannot remove container {}: {e}", instance.run, instance.handle);
-        InstanceState::Lost
-      }
+    let leftover = needy_core_actor::driver::Leftover {
+      run: &instance.run,
+      dir: Path::new(&instance.handle),
+      pid: instance.pid.and_then(|pid| u32::try_from(pid).ok()),
+    };
+    if needy_core_actor::driver::reconcile(driver, &leftover).await {
+      InstanceState::Ended
+    } else {
+      InstanceState::Lost
+    }
+  }
+
+  /// Ends, through its driver, an executor instance a previous control
+  /// plane created for a run on the control host, and says whether it did.
+  async fn end_leftover_executor(&self, instance: &InstanceRecord) -> InstanceState {
+    let driver = ExecutorDriver::ALL.into_iter().find(|d| d.as_str() == instance.driver).and_then(|d| self.pool.driver(d));
+    let Some(driver) = driver else {
+      tracing::warn!("run {}: executor driver {:?} is not available to end {}", instance.run, instance.driver, instance.handle);
+      return InstanceState::Lost;
+    };
+    if driver.reconcile(&instance.handle).await {
+      InstanceState::Ended
+    } else {
+      InstanceState::Lost
     }
   }
 
@@ -300,83 +294,6 @@ impl Daemon {
         tracing::warn!("run {}: cannot write the end of process {} to state.db: {e:#}", instance.run, process.id);
       }
     }
-  }
-}
-
-/// Ends the VM process (Firecracker, vfkit) of an actor a previous control
-/// plane started, if it still runs, and says whether it did (`Ended`) or
-/// found none (`Lost`).
-///
-/// A restarted control plane does not adopt it. The VM is no longer its
-/// child, so its exit cannot be collected; the guest's connections to the
-/// old daemon (routed commands in flight, the gateway's) broke; and the run's
-/// chaos counters and trace sequence lived in the old daemon's memory, so an
-/// adopted run would no longer replay deterministically. Ending it and
-/// failing the run says what happened.
-// NOTICE: the PID is checked against the process's command line, which
-// names `marker`, a file in the run's directory (Firecracker's `vm.json`,
-// vfkit's pidfile), so a PID another process took since is left alone.
-async fn end_leftover_vm(instance: &InstanceRecord, marker: &Path) -> InstanceState {
-  use sysinfo::{ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, Signal, System, UpdateKind};
-  let Some(pid) = instance.pid.and_then(|pid| u32::try_from(pid).ok()) else {
-    return InstanceState::Lost;
-  };
-  let pid = sysinfo::Pid::from_u32(pid);
-  let Ok(mut system) = System::new() else {
-    tracing::warn!("run {}: cannot read this machine's processes to find its actor's VM", instance.run);
-    return InstanceState::Lost;
-  };
-  let alive = |system: &mut System| {
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always));
-    system.process(pid).is_some_and(|p| p.status() != ProcessStatus::Zombie && p.cmd().iter().any(|arg| Path::new(arg) == marker))
-  };
-  if !alive(&mut system) {
-    return InstanceState::Lost;
-  }
-  tracing::warn!("run {}: ending its actor's VM ({} {pid}), which a restarted control plane does not adopt", instance.run, instance.driver);
-  if !system.process(pid).and_then(|p| p.kill_with(Signal::Kill)).unwrap_or(false) {
-    tracing::warn!("run {}: cannot kill the VM process {pid}", instance.run);
-  }
-  let deadline = tokio::time::Instant::now() + VM_END_WAIT;
-  while alive(&mut system) {
-    if tokio::time::Instant::now() >= deadline {
-      tracing::warn!("run {}: the VM process {pid} did not exit within {VM_END_WAIT:?} of SIGKILL", instance.run);
-      break;
-    }
-    tokio::time::sleep(Duration::from_millis(50)).await;
-  }
-  InstanceState::Ended
-}
-
-/// Ends the container of an actor a previous control plane started, and
-/// detaches its host-side workspace mounts, for the reasons
-/// [`end_leftover_vm`] gives. The container is found by its run's name.
-async fn end_leftover_container(instance: &InstanceRecord) -> InstanceState {
-  // The OCI runtime and image do not matter for ending a container.
-  let driver = needy_core_actor::driver::linux_container::LinuxContainer::new(
-    needy_config::profile::OciRuntime::Runc,
-    needy_config::profile::CONTAINER_IMAGE.into(),
-  );
-  tracing::warn!("run {}: ending its actor's container, which a restarted control plane does not adopt", instance.run);
-  if driver.end_leftover(&instance.run, Path::new(&instance.handle)).await {
-    InstanceState::Ended
-  } else {
-    InstanceState::Lost
-  }
-}
-
-/// Deletes the container of an actor a previous control plane started under
-/// Apple's `container`, for the reasons [`end_leftover_vm`] gives. The
-/// container is found by its run's name; its `container run` process ended
-/// with the old daemon or is ended by the deletion.
-async fn end_leftover_macos_apple_container(instance: &InstanceRecord) -> InstanceState {
-  // The image does not matter for deleting a container.
-  let driver = needy_core_actor::driver::macos_apple_container::MacosAppleContainer::new(needy_config::profile::CONTAINER_IMAGE.into());
-  tracing::warn!("run {}: deleting its actor's container, which a restarted control plane does not adopt", instance.run);
-  if driver.end_leftover(&instance.run).await {
-    InstanceState::Ended
-  } else {
-    InstanceState::Lost
   }
 }
 

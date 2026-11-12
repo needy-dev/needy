@@ -208,9 +208,9 @@ impl Pool {
   async fn create(&self, spec: &Spec, site: &Site) -> Result<Arc<Instance>> {
     let (handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match (spec.config.driver, site) {
       (profile::ExecutorDriver::Native, Site::ControlHost) => (self.native.create(spec).await?, Some(self.native.clone())),
-      (profile::ExecutorDriver::LinuxContainer, Site::ControlHost) => {
-        let container = self.container.clone().context("no Docker-compatible engine is available on this machine")?;
-        (container.create(spec).await?, Some(container))
+      (kind @ profile::ExecutorDriver::LinuxContainer, Site::ControlHost) => {
+        let driver = self.driver(kind).context("no Docker-compatible engine is available on this machine")?;
+        (driver.create(spec).await?, Some(driver))
       }
       // The runner's machine outlives its runs; nothing creates or
       // destroys it. Its workspace is a path on that machine, as written.
@@ -256,9 +256,13 @@ impl Pool {
     }
   }
 
-  /// The control host's `linux-container` driver, when it could be set up.
-  pub fn container(&self) -> Option<&Arc<LinuxContainer>> {
-    self.container.as_ref()
+  /// The control host's executor driver `kind`, when it could be set up
+  /// (a bad `DOCKER_HOST` leaves `linux-container` out).
+  pub fn driver(&self, kind: profile::ExecutorDriver) -> Option<Arc<dyn Driver>> {
+    match kind {
+      profile::ExecutorDriver::Native => Some(self.native.clone()),
+      profile::ExecutorDriver::LinuxContainer => self.container.clone().map(|c| c as Arc<dyn Driver>),
+    }
   }
 
   /// Every pooled instance.

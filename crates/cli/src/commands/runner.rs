@@ -9,7 +9,8 @@ use clap::Subcommand;
 use needy_api_client::proto::v1::{
   self, CreateJoinTokenRequest, ListJoinTokensRequest, ListRunnersRequest, RemoveRunnerRequest, RevokeJoinTokenRequest, RotateRunnerRequest,
 };
-use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
+use needy_config::profile::{ActorDriver, ExecutorDriver};
+use needy_core::types::{Capabilities, RunnerRole};
 use serde::Serialize;
 
 use crate::cli::Context;

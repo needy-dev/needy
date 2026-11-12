@@ -99,7 +99,7 @@ fn the_channels_are_sockets_in_the_directory_bind_mounted_into_the_container() {
   assert_eq!(channels.guest, Endpoint::Unix(dir.join("channels/guest.sock")));
   assert_eq!(channels.gateway, Endpoint::Unix(dir.join("channels/gateway.sock")));
   assert_eq!(channels.terminal, Terminal::Unix(dir.join("channels/process.sock")));
-  assert!(channels.guest_for_every_user, "the driving program's proxy runs as the profile's user");
+  assert_eq!(FACETS.transport, Transport::Socket, "the driving program's proxy runs as the profile's user");
   let user = User::default();
   let launch = container.launch(&start(dir, &user, None), Vec::new());
   let binds = launch.body.host_config.unwrap().binds.unwrap();

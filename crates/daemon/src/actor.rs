@@ -14,14 +14,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
-use needy_config::profile::{ActorDriver, ContainerActor, FaultKind, FileMode, Side};
+use needy_config::profile::{FaultKind, FileMode, Side as FileSide};
 use needy_core::event::{ActorStart, ActorVmExit, Event};
 use needy_core::types::{Effect, Fired, Network, RunState};
-use needy_core_actor::driver::linux_container::LinuxContainer;
-use needy_core_actor::driver::linux_firecracker::{self, LinuxFirecracker};
-use needy_core_actor::driver::macos_apple_container::MacosAppleContainer;
-use needy_core_actor::driver::macos_vz::{self, MacosVz};
-use needy_core_actor::driver::{self, Channels, Driver, Endpoint, HostMount, Running, Setup, Start, Terminal};
+use needy_core_actor::driver::{self, Channels, Driver, Endpoint, Facets, HostMount, Running, Side, Start, Terminal, Transport};
 use needy_core_actor::sidecar::gateway;
 use tokio_util::sync::CancellationToken;
 
@@ -35,50 +31,37 @@ use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 // most for its actor.
 const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
-/// The driver that runs this host's actors as `actor` (a profile's
-/// `actor:`) says.
-pub fn driver(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn Driver>> {
-  match actor.driver {
-    ActorDriver::LinuxFirecracker => Ok(Box::new(LinuxFirecracker {
-      image: linux_firecracker::Image::new(&daemon.config.actor_image),
-      kvm: daemon.config.kvm.clone(),
-    })),
-    ActorDriver::LinuxContainer => {
-      // `validate::profile` refuses a container actor without its options
-      // before a create gets here.
-      let Some(ContainerActor {
-        oci_runtime: Some(oci_runtime),
-        image,
-      }) = &actor.container
-      else {
-        bail!("actor.container.oci_runtime is missing");
-      };
-      Ok(Box::new(LinuxContainer::new(*oci_runtime, image.clone())))
-    }
-    ActorDriver::MacosVz => Ok(Box::new(MacosVz {
-      image: macos_vz::Image::new(&daemon.config.actor_image),
-      vfkit: macos_vz::VFKIT.into(),
-    })),
-    ActorDriver::MacosAppleContainer => Ok(Box::new(MacosAppleContainer::new(ContainerActor::image_of(actor.container.as_ref())))),
+/// What this host gives every actor driver: the actor image and the KVM
+/// device the daemon was configured with.
+pub fn host(daemon: &Daemon) -> driver::Host {
+  driver::Host {
+    image: daemon.config.actor_image.clone(),
+    kvm: daemon.config.kvm.clone(),
   }
+}
+
+/// The driver that runs this host's actors as `actor` (a profile's
+/// `actor:`) says: the only place the daemon picks an actor driver, through
+/// the drivers' table (`needy_core_actor::driver::new`).
+pub fn driver_for(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn Driver>> {
+  Ok(driver::new(&host(daemon), actor)?)
 }
 
 /// Where the daemon and `run`'s actor meet, as its driver names them.
 pub fn channels(daemon: &Daemon, run: &Run) -> Result<Channels> {
-  Ok(driver(daemon, &run.profile.actor)?.channels(&run.dir))
+  Ok(driver_for(daemon, &run.profile.actor)?.channels(&run.dir))
 }
 
-/// Who sets up `run`'s mounts and identity: its actor's init or its
-/// driver.
-pub fn setup(daemon: &Daemon, run: &Run) -> Result<Setup> {
-  Ok(driver(daemon, &run.profile.actor)?.setup())
+/// What `run`'s actor driver presents and how it is reached.
+pub fn facets(run: &Run) -> Facets {
+  driver::facets(run.profile.actor.driver)
 }
 
 /// Fails unless this host can run `run`'s actor. A create checks this
 /// before it acquires anything, so a host without KVM, or without the
 /// container's OCI runtime or image, fails at once.
 pub async fn check_host(daemon: &Daemon, run: &Run) -> Result<()> {
-  let driver = driver(daemon, &run.profile.actor)?;
+  let driver = driver_for(daemon, &run.profile.actor)?;
   driver.check_host().await?;
   let mut required = Vec::new();
   for (is_error, message) in identity_findings(driver.as_ref(), run.recipe.as_ref()) {
@@ -119,7 +102,7 @@ pub fn mounts(run: &Run) -> Vec<HostMount> {
     if !crate::files::selected(run, name) || mapping.mode != FileMode::Mount {
       continue;
     }
-    let (Side::Executor { name: exec, path }, Side::Actor(target)) = (&mapping.from, &mapping.to) else {
+    let (FileSide::Executor { name: exec, path }, FileSide::Actor(target)) = (&mapping.from, &mapping.to) else {
       continue;
     };
     let Some(instance) = run.executor(exec) else {
@@ -139,10 +122,11 @@ pub fn mounts(run: &Run) -> Vec<HostMount> {
 /// Starts the actor of `run`: its guest listener, its gateway, then the
 /// actor itself.
 pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
-  let driver = driver(daemon, &run.profile.actor)?;
+  let driver = driver_for(daemon, &run.profile.actor)?;
+  let facets = facets(run);
   let channels = driver.channels(&run.dir);
   let actor = run.cancel.child_token();
-  if let Err(e) = serve_guest(daemon, run, &channels, &actor).await {
+  if let Err(e) = serve_guest(daemon, run, &channels, facets.transport, &actor).await {
     actor.cancel();
     return Err(e);
   }
@@ -152,10 +136,9 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   }
   // A driver that sets the actor up from the host mounts the workspace
   // itself; a VM's init, or an Apple `container` actor's, does it inside.
-  let mounts = if driver.setup().mounts_in_guest() {
-    Vec::new()
-  } else {
-    mounts(run)
+  let mounts = match facets.workspace {
+    Side::Guest => Vec::new(),
+    Side::Host => mounts(run),
   };
   let start = Start {
     run: &run.id,
@@ -194,9 +177,9 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   };
   daemon.save_instance(&record).await;
   let name = driver.name();
-  // Under `GuestMounts` (Apple's `container`) the actor has no sensors to
-  // set; `profile check` says so, and the faults are not recorded as fired.
-  if driver.setup() == Setup::Host {
+  // Where the actor has no sensors (Apple's `container`), `profile check`
+  // says so, and the faults are not recorded as fired.
+  if facets.identity.hwmon == Some(Side::Host) {
     schedule_hwmon_faults(run, Arc::from(driver), &actor);
   }
   run.tasks.spawn(watch(daemon.clone(), run.clone(), name, vm, actor));
@@ -251,7 +234,7 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
     type Connecting<'a> =
       std::pin::Pin<Box<dyn std::future::Future<Output = Result<needy_api_client::Client, needy_api_client::Error>> + Send + 'a>>;
     let connect: Connecting<'_> = match &channels.terminal {
-      Terminal::FirecrackerVsock { device, port } => Box::pin(needy_api_client::Client::connect_firecracker_vsock(device, *port)),
+      Terminal::HybridVsock { device, port } => Box::pin(needy_api_client::Client::connect_firecracker_vsock(device, *port)),
       Terminal::Unix(path) => Box::pin(connect_terminal(path)),
     };
     // Bound the connection itself, including the Firecracker handshake:
@@ -305,7 +288,7 @@ fn listen(endpoint: &Endpoint) -> Listen {
 
 /// Serves the run's API to the actor on its guest channel, as
 /// `Caller::Actor` bound to the run, until `actor` is cancelled.
-async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, actor: &CancellationToken) -> Result<()> {
+async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, transport: Transport, actor: &CancellationToken) -> Result<()> {
   let api = Arc::new(daemon.clone());
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
@@ -315,7 +298,9 @@ async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, actor: &Ca
     run: run.id.clone(),
   };
   let listener = Server::new(health, caller).runs(api.clone()).processes(api.clone()).guest(api).bind(&[listen(&channels.guest)]).await?;
-  if channels.guest_for_every_user {
+  // A socket mounted into the actor keeps its file mode there, and the
+  // driving program's proxy runs as the profile's user.
+  if transport == Transport::Socket {
     open_to_every_user(&channels.guest)?;
   }
   let id = run.id.clone();
@@ -386,7 +371,7 @@ fn serve_gateway(run: &Run, channels: &Channels, actor: &CancellationToken) -> R
 /// `dir`: those its channels leave there (the vsock device's and the host
 /// ports' the guest connects to, under Firecracker).
 pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir: &Path) {
-  let driver = match driver(daemon, actor) {
+  let driver = match driver_for(daemon, actor) {
     Ok(driver) => driver,
     // An actor whose driver this daemon lacks never started and left none.
     Err(e) => {

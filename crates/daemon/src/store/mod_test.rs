@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, RunnerRole};
+use needy_config::profile::{ActorDriver, ExecutorDriver};
+use needy_core::types::{Capabilities, RunnerRole};
 
 use super::*;
 

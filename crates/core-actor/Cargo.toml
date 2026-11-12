@@ -27,9 +27,11 @@ tokio-stream.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
 
-# Stopping the VM sends Firecracker `SIGTERM`.
+# Stopping the VM sends Firecracker `SIGTERM`; reconciling a leftover VM
+# finds its process by its command line.
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal"] }
+sysinfo.workspace = true
 
 # The guest runs only inside a Linux actor, KVM is Linux's, and a container
 # actor's host-side workspace mounts (sshfs, FUSE) are Linux's too.

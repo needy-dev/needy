@@ -9,6 +9,7 @@ use needy_config::profile::{FaultKind, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
 use needy_core::types::RunState;
+use needy_core_actor::driver::Side as Presenter;
 
 use crate::run::Run;
 use crate::{Daemon, actor, files};
@@ -49,7 +50,7 @@ impl Guest for Daemon {
   async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
     let run = self.runs.find(run)?;
     let channels = actor::channels(self, &run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
-    let setup = actor::setup(self, &run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
+    let facets = actor::facets(&run);
     let profile = &run.profile;
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
@@ -91,14 +92,12 @@ impl Guest for Daemon {
     }));
     // `*` asks the kernel to route every exec.
     let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
-    // A driver that sets the actor up from the host made the mounts, the
-    // hostname and the sensors, and applies the hwmon faults itself; init
-    // is told none of them. Under `GuestMounts` (Apple's `container`) init
-    // makes the mounts and sets the hostname, and is told no sensors,
-    // faults or uptime offset, which the actor's kernel cannot present.
-    // TODO(container-actor): a container actor's uptime is the container's
-    // (lxcfs's `/proc/uptime` when it is mounted); the recipe's offset needs
-    // a time namespace init may not create there.
+    // Init is told only what its driver presents in the guest: a driver
+    // that presents something from the host (the workspace mounts, the
+    // hostname, the sensors and their faults of a linux-container actor)
+    // made it itself, and what a driver does not present at all (Apple's
+    // `container`'s sensors and uptime offset) is a gap `profile check`
+    // reports.
     let mut config = GuestConfig {
       run: run.id.clone(),
       user: GuestUser {
@@ -132,13 +131,18 @@ impl Guest for Daemon {
       process_port: channels.process_port,
       wait_for_attach: run.wait_for_attach,
     };
-    if !setup.mounts_in_guest() {
+    let in_guest = Some(Presenter::Guest);
+    if facets.workspace != Presenter::Guest {
       config.mounts.clear();
+    }
+    if facets.identity.hostname != in_guest {
       config.hostname.clear();
     }
-    if !setup.identity_in_guest() {
+    if facets.identity.hwmon != in_guest {
       config.sensors.clear();
       config.hwmon_faults.clear();
+    }
+    if facets.identity.uptime != in_guest {
       config.uptime_offset_secs = 0;
     }
     Ok(config)

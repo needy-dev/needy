@@ -17,7 +17,7 @@
 //!
 //! The container has no network but loopback (`--network none`). Init
 //! mounts the workspace inside with sshfs, as a VM's does, and sets the
-//! recipe's hostname ([`Setup::GuestMounts`]); it may, since the container
+//! recipe's hostname ([`FACETS`]); it may, since the container
 //! has `CAP_SYS_ADMIN` in its own VM. The CLI's output is the actor's log.
 //!
 //! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`
@@ -29,6 +29,7 @@ use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Duration;
 
+use needy_config::profile::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor};
 use needy_config::recipe::IdentityField;
 use needy_core::recipe::CompiledRecipe;
 
@@ -37,8 +38,59 @@ mod cli;
 pub use cli::{Cli, Output, PROGRAM, Process};
 
 use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST_SOCKET, PROCESS_SOCKET, channels_dir};
-use crate::driver::{Channels, Driver, Endpoint, Error, Gap, Running, Setup, Start, Terminal};
+use crate::driver::{
+  Capture, Channels, Driver, Endpoint, Error, Facets, Gap, Identity, Leftover, Running, Side, Start, Terminal, Transport,
+};
 use crate::image::container::name;
+
+/// What a `macos-apple-container` actor presents: the container image's
+/// shims catch execs; init mounts the workspace and sets the hostname
+/// inside, as a VM's does, but Apple's default kernel has no sensors and no
+/// uptime offset; its guest and gateway sockets are mounted one file each,
+/// and its process socket is published.
+// TODO(macos-apple-container-kernel): the sensors and the uptime offset come
+// with a needy-built arm64 kernel (`-k`), a separate approved slice.
+pub const FACETS: Facets = Facets {
+  capture: Capture::Shims,
+  workspace: Side::Guest,
+  identity: Identity {
+    hostname: Some(Side::Guest),
+    hwmon: None,
+    uptime: None,
+  },
+  transport: Transport::Socket,
+};
+
+// NOTICE: `container system status` answers in about 50 ms on an Apple
+// silicon laptop; 3 s bounds services that hang.
+const DETECT_WAIT: Duration = Duration::from_secs(3);
+
+/// Whether this host can run `macos-apple-container` actors: Apple's
+/// `container` CLI is on `PATH` and its services answer. Whether its image
+/// store has the container actor image is checked when a run is created.
+pub async fn detect() -> Result<(), String> {
+  // The image does not matter for the services.
+  let driver = MacosAppleContainer::new(CONTAINER_IMAGE.into());
+  match tokio::time::timeout(DETECT_WAIT, driver.services()).await {
+    Ok(services) => services.map_err(|e| e.to_string()),
+    Err(_) => Err(format!("`container system status` did not answer within {DETECT_WAIT:?}")),
+  }
+}
+
+/// Deletes the container a daemon that died left, found by its run's name;
+/// its `container run` process ended with the old daemon or ends with the
+/// deletion.
+pub async fn reconcile(leftover: &Leftover<'_>) -> bool {
+  // The image does not matter for deleting a container.
+  let driver = MacosAppleContainer::new(CONTAINER_IMAGE.into());
+  tracing::warn!("run {}: deleting its actor's container, which a restarted control plane does not adopt", leftover.run);
+  driver.end_leftover(leftover.run).await
+}
+
+/// What Apple's `container` refused or failed, as the driver's error.
+pub(crate) fn refused(message: String) -> Error {
+  Error::driver(ActorDriver::MacosAppleContainer, message)
+}
 
 /// The `macos-apple-container` driver: actors in containers of `image`, which
 /// must be in Apple's `container` image store.
@@ -63,6 +115,11 @@ impl MacosAppleContainer {
     Self::with_cli(image, Arc::new(cli::Command))
   }
 
+  /// The driver of `actor`, whose `container:` options may name the image.
+  pub fn of(actor: &Actor) -> Self {
+    Self::new(ContainerActor::image_of(actor.container.as_ref()))
+  }
+
   pub fn with_cli(image: String, cli: Arc<dyn Cli>) -> Self {
     Self { image, cli }
   }
@@ -78,7 +135,7 @@ impl MacosAppleContainer {
   pub async fn services(&self) -> Result<(), Error> {
     let status = self.run(&["system", "status"]).await?;
     if !status.success {
-      return Err(Error::AppleContainer(format!(
+      return Err(refused(format!(
         "Apple's `container` services are not running ({}); start them with `container system start`",
         first_line(&status)
       )));
@@ -93,7 +150,7 @@ impl MacosAppleContainer {
     let archive = archive.display().to_string();
     let loaded = self.run(&["image", "load", "--input", &archive]).await?;
     if !loaded.success {
-      return Err(Error::AppleContainer(format!("`container image load` failed: {}", first_line(&loaded))));
+      return Err(refused(format!("`container image load` failed: {}", first_line(&loaded))));
     }
     Ok(())
   }
@@ -247,15 +304,15 @@ fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
 
 #[async_trait::async_trait]
 impl Driver for MacosAppleContainer {
-  fn name(&self) -> &'static str {
-    "macos-apple-container"
+  fn kind(&self) -> ActorDriver {
+    ActorDriver::MacosAppleContainer
   }
 
   async fn check_host(&self) -> Result<(), Error> {
     self.services().await?;
     let image = self.run(&["image", "inspect", &self.image]).await?;
     if !image.success {
-      return Err(Error::AppleContainer(format!(
+      return Err(refused(format!(
         "the container actor image {} is not in Apple's `container` image store; run `needy build --macos-apple-container`",
         self.image
       )));
@@ -275,12 +332,7 @@ impl Driver for MacosAppleContainer {
       terminal: Terminal::Unix(process),
       gateway_port: 0,
       process_port: 0,
-      guest_for_every_user: true,
     }
-  }
-
-  fn setup(&self) -> Setup {
-    Setup::GuestMounts
   }
 
   fn identity_gaps(&self, recipe: Option<&CompiledRecipe>) -> Vec<Gap> {

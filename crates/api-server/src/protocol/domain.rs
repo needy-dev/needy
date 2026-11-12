@@ -16,7 +16,8 @@ use needy_core::event::Event;
 use needy_core::intercept::ExecContext;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use needy_core::types::{ActorDriver, Capabilities, ExecutorDriver, Origin, RunState, RunnerRole};
+use needy_config::profile::{ActorDriver, ExecutorDriver};
+use needy_core::types::{Capabilities, Origin, RunState, RunnerRole};
 
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,

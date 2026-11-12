@@ -111,7 +111,7 @@ fn the_guest_and_gateway_sockets_are_mounted_one_file_each_and_the_process_socke
   assert_eq!(channels.guest, Endpoint::Unix(dir.join("channels/guest.sock")));
   assert_eq!(channels.gateway, Endpoint::Unix(dir.join("channels/gateway.sock")));
   assert_eq!(channels.terminal, Terminal::Unix(dir.join("channels/process.sock")));
-  assert!(channels.guest_for_every_user, "the driving program's proxy runs as the profile's user");
+  assert_eq!(FACETS.transport, Transport::Socket, "the driving program's proxy runs as the profile's user");
 }
 
 #[test]
@@ -157,8 +157,9 @@ fn init_may_mount_the_workspace_and_set_the_hostname_inside() {
   let launch = runtime.launch(&start(Path::new("/r"), &user, None));
 
   assert_eq!(values(&launch.args, "--cap-add"), ["CAP_SYS_ADMIN"]);
-  assert_eq!(runtime.setup(), Setup::GuestMounts);
-  assert!(runtime.setup().mounts_in_guest() && !runtime.setup().identity_in_guest());
+  assert_eq!(FACETS.workspace, Side::Guest);
+  assert_eq!(FACETS.identity.hostname, Some(Side::Guest));
+  assert_eq!((FACETS.identity.hwmon, FACETS.identity.uptime), (None, None), "Apple's default kernel has no sensors");
 }
 
 #[test]

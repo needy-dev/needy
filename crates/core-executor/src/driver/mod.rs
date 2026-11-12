@@ -27,7 +27,7 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use needy_api_client::Client;
-use needy_config::profile::{Executor, User};
+use needy_config::profile::{Executor, ExecutorDriver, User};
 
 pub use linux_container::LinuxContainer;
 pub use native::Native;
@@ -93,14 +93,34 @@ pub struct Instance {
   pub workspace: String,
 }
 
+/// An executor driver. Each answers in its own module: [`detect`] (whether
+/// this machine has it, for a runner's capabilities), the instance's
+/// lifecycle ([`Driver::create`], [`Driver::destroy`]) and what a daemon
+/// that died left ([`Driver::reconcile`]).
 #[async_trait::async_trait]
 pub trait Driver: Send + Sync {
+  /// Which driver it is.
+  fn kind(&self) -> ExecutorDriver;
+
   /// Creates an instance and returns once it answers.
   async fn create(&self, spec: &Spec) -> Result<Instance, Error>;
 
   /// Destroys an instance this driver created. Instances that the driver
   /// does not own (this machine) are left alone.
   async fn destroy(&self, handle: &Instance) -> Result<(), Error>;
+
+  /// Ends the instance `id` a daemon that died left (`Instance::id`, as
+  /// `state.db` has it), and says whether it did; `false` leaves it lost.
+  async fn reconcile(&self, id: &str) -> bool;
+}
+
+/// Whether this machine has `driver`, or why not: a runner reports
+/// `executor(DRIVER)` for each that it has.
+pub async fn detect(driver: ExecutorDriver) -> Result<(), String> {
+  match driver {
+    ExecutorDriver::Native => Ok(()),
+    ExecutorDriver::LinuxContainer => linux_container::detect().await,
+  }
 }
 
 /// Connects to an executor and waits until it answers its health check.

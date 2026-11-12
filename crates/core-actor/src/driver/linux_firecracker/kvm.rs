@@ -7,6 +7,8 @@ use std::path::Path;
 
 use needy_core::recipe::HostInfo;
 
+use needy_config::profile::ActorDriver;
+
 use crate::driver::Error;
 
 /// The KVM device Firecracker opens.
@@ -20,9 +22,19 @@ pub const KVM: &str = "/dev/kvm";
 /// Firecracker opens it. A host without KVM, or whose KVM the daemon's user
 /// may not use, fails here instead of in a VM that exits at once.
 pub fn check_kvm(path: &Path) -> Result<(), Error> {
-  std::fs::OpenOptions::new().read(true).write(true).open(path).map(drop).map_err(|error| Error::Kvm {
-    path: path.to_path_buf(),
-    error,
+  // NOTICE: the OS error is part of the message and not its `source`, so a
+  // caller that prints the error with its causes says it once. The message
+  // names no repository path: a user with only the binary cannot follow one.
+  std::fs::OpenOptions::new().read(true).write(true).open(path).map(drop).map_err(|error| {
+    Error::driver(
+      ActorDriver::LinuxFirecracker,
+      format!(
+        "this host has no usable KVM: cannot open {}: {error}; a linux-firecracker actor needs it. Without KVM, use a linux-container \
+         actor (`actor: {{ driver: linux-container, container: {{ oci_runtime: runsc }} }}`); commands outside runs also work: \
+         `needy exec --runner`, `ps`, `attach`, `kill` and `fs cp`",
+        path.display()
+      ),
+    )
   })
 }
 

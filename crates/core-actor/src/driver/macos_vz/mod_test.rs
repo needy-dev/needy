@@ -90,8 +90,8 @@ fn the_channels_are_the_vsock_bridges_and_the_ports_init_dials_under_firecracker
       dir.join("process.sock")
     ]
   );
-  assert!(!channels.guest_for_every_user);
-  assert_eq!(vz.setup(), Setup::Guest);
+  assert_eq!(FACETS.transport, Transport::Vsock);
+  assert_eq!((FACETS.workspace, FACETS.identity.hwmon), (Side::Guest, Some(Side::Guest)));
 }
 
 #[test]
@@ -196,4 +196,17 @@ async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   use std::os::unix::process::ExitStatusExt;
   assert_eq!(status.signal(), Some(nix::sys::signal::Signal::SIGKILL as i32));
   assert!(std::fs::read_to_string(&log).unwrap().contains("vfkit started"));
+}
+
+// Moved from the daemon's capabilities tests with detection.
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[tokio::test]
+async fn detection_needs_apple_silicon_macos() {
+  let dir = tempfile::tempdir().unwrap();
+  let host = Host {
+    kvm: dir.path().to_path_buf(),
+    image: dir.path().to_path_buf(),
+  };
+
+  assert_eq!(detect(&host).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");
 }

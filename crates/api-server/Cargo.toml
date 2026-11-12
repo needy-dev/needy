@@ -13,6 +13,7 @@ futures-util.workspace = true
 http.workspace = true
 needy-api-proto.workspace = true
 needy-common.workspace = true
+needy-config.workspace = true
 needy-core.workspace = true
 prost.workspace = true
 thiserror.workspace = true

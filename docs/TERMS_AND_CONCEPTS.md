@@ -39,6 +39,12 @@ it decides the isolation. See the
 the [container actor design](ai/references/architecture/2026-11-10-container-actor-runtime-design.md)
 and the [macos-vz actor evidence](ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md).
 
+What a driver presents and how it is reached are its **facets**: its
+capture (the kernel's `binfmt_needy` or shims), who mounts the workspace
+(the guest or the host), who presents the hostname, the sensors and the
+uptime offset (the guest, the host, or nobody: a gap), and its transport
+(vsock or Unix sockets). **Provisional**.
+
 *Avoid*: actor runtime (the name before 2026-11-12); "driver" alone for the
 driving program.
 
