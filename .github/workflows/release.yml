@@ -5,9 +5,9 @@
 # `publish` job on `softprops/action-gh-release`) follows moeru-ai/auv's
 # `.github/workflows/release.yml`, whose action versions it also uses
 # (checkout@v6, upload-artifact@v7, download-artifact@v8,
-# action-gh-release@v2). The `docker/*` actions are their current majors
-# (setup-buildx v4, build-push v7, login v4) and the per-architecture digest
-# merge is Docker's documented multi-platform pattern:
+# action-gh-release@v2, import-codesign-certs@v7). The `docker/*` actions
+# are their current majors (setup-buildx v4, build-push v7, login v4) and the
+# per-architecture digest merge is Docker's documented multi-platform pattern:
 # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
 #
 # A plain `workflow_dispatch` builds and verifies everything and publishes
@@ -107,14 +107,38 @@ jobs:
         shell: pwsh
         run: '"RUSTFLAGS=-C target-feature=+crt-static" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append'
 
-      # TODO(release-signing): needy has no Apple Developer ID or Authenticode
-      # certificate, so the macOS binaries are neither signed nor notarized
-      # (Gatekeeper quarantines a downloaded one; `xattr -d
-      # com.apple.quarantine needy` clears it) and needy.exe is unsigned. Add
-      # signing and notarization as moeru-ai/auv does once the owner has
-      # certificates and a provenance policy.
+      # TODO(release-signing): needy.exe is not Authenticode-signed: there is
+      # no certificate for it. Sign it once the owner has one; an archive
+      # alone is not a signing claim.
       - name: Build release binary
         run: cargo build --locked --release --package needy-cli --bin needy --target ${{ matrix.target }}
+
+      # macOS signing and notarization as moeru-ai/auv's release workflow
+      # does it, with the same secret names. Every run signs; only a
+      # publishing run notarizes (the `notarize-macos` job).
+      - name: Import macOS signing certificates
+        if: runner.os == 'macOS'
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+
+      # NOTICE(hardened-runtime): notarization requires the hardened runtime
+      # (`--options runtime`). needy needs no entitlement under it: it maps
+      # no writable executable memory, loads no unsigned libraries, and
+      # leaves Virtualization.framework to vfkit and Apple's `container`,
+      # which it only spawns as child processes and which carry their own
+      # entitlements. Add an entitlements plist here if that changes.
+      # Reference: https://developer.apple.com/documentation/security/hardened-runtime
+      - name: Sign macOS executable
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          identity="$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application:.*\)".*/\1/p' | head -n 1)"
+          test -n "$identity"
+          binary="target/${{ matrix.target }}/release/${{ matrix.executable }}"
+          codesign --force --timestamp --options runtime --sign "$identity" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
 
       - name: Verify binary starts
         run: target/${{ matrix.target }}/release/${{ matrix.executable }} --version
@@ -381,11 +405,67 @@ jobs:
             docker buildx imagetools inspect "$REGISTRY/$image:$TAG_NAME"
           done
 
+  # Notarizes the signed macOS binaries, as moeru-ai/auv's `notarize-macos`
+  # job does, on publishing runs only. A bare executable cannot be stapled, so
+  # Gatekeeper checks the ticket online on first launch.
+  notarize-macos:
+    name: Notarize macOS ${{ matrix.archive }}
+    needs: binary
+    runs-on: macos-15
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - archive: needy-aarch64-apple-darwin.tar.gz
+          - archive: needy-x86_64-apple-darwin.tar.gz
+    steps:
+      - name: Download macOS artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.archive }}
+
+      - name: Set up notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          xcrun notarytool store-credentials needy-notary \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD"
+
+      # The x86_64 binary cannot run on this arm64 runner without Rosetta, so
+      # only the arm64 one is started; both were started where they were built.
+      - name: Submit executable for notarization
+        run: |
+          set -euo pipefail
+          tar -xzf ${{ matrix.archive }}
+          codesign --verify --strict --verbose=2 needy
+          zip needy-notary.zip needy
+          xcrun notarytool submit needy-notary.zip --keychain-profile needy-notary --wait
+          if [ "$(lipo -archs needy)" = arm64 ]; then
+            ./needy --version
+          fi
+          tar -czf ${{ matrix.archive }} needy
+          shasum -a 256 ${{ matrix.archive }} | awk '{ print $1 }' > ${{ matrix.archive }}.sha256
+
+      - name: Upload notarized macOS artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: notarized-${{ matrix.archive }}
+          retention-days: 7
+          path: |
+            ${{ matrix.archive }}
+            ${{ matrix.archive }}.sha256
+
   publish:
     name: Publish release artifacts
     needs:
       - binary
       - images
+      - notarize-macos
     runs-on: ubuntu-24.04
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
     permissions:
@@ -397,6 +477,21 @@ jobs:
           pattern: needy-*
           merge-multiple: true
           path: release
+
+      - name: Download notarized macOS artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: notarized-*
+          merge-multiple: true
+          path: notarized
+
+      # The notarized macOS archives replace the signed-only ones of the same
+      # name, with their checksums.
+      - name: Prefer notarized macOS archives
+        run: |
+          set -euo pipefail
+          test -n "$(ls notarized)"
+          cp -f notarized/* release/
 
       - name: Verify checksums
         working-directory: release
