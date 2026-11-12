@@ -27,8 +27,20 @@ pub(super) fn system() {
   mount("tmpfs", "/var/tmp", "tmpfs", nosuid, "mode=1777");
 }
 
-/// The user's home: a tmpfs the user owns.
+/// The user's home: a tmpfs the user owns. The image has only its own
+/// user's home, and the root is read-only, so another user's home gets a
+/// tmpfs at `/home` first to be created in.
+// NOTICE: that tmpfs hides the image's own homes, which are empty in needy's
+// images: every actor's home is a fresh tmpfs anyway.
 pub(super) fn home(home: &str, uid: u32, gid: u32) {
+  let path = std::path::Path::new(home);
+  if !path.is_dir()
+    && let Some(parent) = path.parent()
+    && std::fs::create_dir_all(path).is_err()
+  {
+    let parent = parent.to_string_lossy();
+    mount("tmpfs", &parent, "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV, "mode=755");
+  }
   mount("tmpfs", home, "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV, &format!("mode=755,uid={uid},gid={gid}"));
 }
 
