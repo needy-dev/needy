@@ -544,10 +544,16 @@ pub async fn serve(caller: Caller) -> Served {
   serve_with(caller, None).await
 }
 
+/// As [`serve`], with a bearer token. On Windows, which binds no Unix socket
+/// (`Error::Unsupported`), the server listens on a loopback TCP port, as
+/// [`serve_tcp`]; the services and their callers are the same.
 pub async fn serve_with(caller: Caller, token: Option<&str>) -> Served {
   let dir = tempfile::tempdir().unwrap();
-  let socket = dir.path().join("api.sock");
-  serve_on(caller, token, Listen::Unix(socket), dir).await
+  #[cfg(unix)]
+  let listen = Listen::Unix(dir.path().join("api.sock"));
+  #[cfg(not(unix))]
+  let listen = Listen::Tcp("127.0.0.1:0".into());
+  serve_on(caller, token, listen, dir).await
 }
 
 /// As [`serve_with`], on a loopback TCP port instead of a Unix socket, as a

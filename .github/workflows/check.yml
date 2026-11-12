@@ -77,9 +77,6 @@ jobs:
       # TODO(windows-tests): these tests fail on Windows for reasons in the
       # tests or the product, not in CI; each needs its own slice before it
       # can run here (see the release and CI design note):
-      # - `protocol::grpc::v1::` and `server::tests::health_needs_no_token...`:
-      #   `needy-api-server`'s test harness (`testing::serve_with`) serves on
-      #   a Unix socket, which Windows does not bind (`Unsupported(Unix(..))`).
       # - `profile::tests::a_resolved_profile_merges_its_parents...`: a
       #   relative host path is joined with `\` and the test expects `/`.
       # - `driver::linux_container::tests::`: bind-mount sources are joined
@@ -90,8 +87,6 @@ jobs:
       - if: runner.os == 'Windows'
         run: >-
           cargo test --locked --workspace --no-fail-fast --
-          --skip protocol::grpc::v1::
-          --skip server::tests::health_needs_no_token_and_everything_else_does
           --skip profile::tests::a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute
           --skip driver::linux_container::tests::
           --skip signals::tests::names_and_numbers
