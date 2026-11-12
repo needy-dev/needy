@@ -15,16 +15,34 @@ service GuestService {
   rpc FetchFiles(FetchFilesRequest) returns (stream FetchFilesResponse);
   // A tar archive for a mirror-out mapping; the first message names it.
   rpc PushFiles(stream PushFilesRequest) returns (PushFilesResponse);
-  // Held by init while the driving program runs; answered when `run stop`
-  // asks the actor to end gracefully. Init then sends SIGTERM to the
-  // driving program's process group, SIGKILL after `grace_ms`, and once the
-  // program exited mirrors out and reports its exit as usual.
-  rpc WaitStop(WaitStopRequest) returns (WaitStopResponse);
+  // What the daemon tells a running actor's init as it happens, on the one
+  // stream init holds for the actor's life; it ends with the run. Every
+  // daemon-to-init message is a case of `GuestServiceControlResponse`
+  // rather than another long-lived call.
+  rpc Control(GuestServiceControlRequest) returns (stream GuestServiceControlResponse);
 }
 
-message WaitStopRequest {}
+message GuestServiceControlRequest {}
 
-message WaitStopResponse {
+message GuestServiceControlResponse {
+  oneof message {
+    // The executable names the actor hands to the proxy from now on, as
+    // `GetConfigResponse.route_names`; `*` routes every exec. Sent first
+    // with the list as it is, then each time `needy chaos add` or `rm`
+    // changes it.
+    RouteList routes = 1;
+    // `run stop` asks the actor to end gracefully: init sends SIGTERM to
+    // the driving program's process group, SIGKILL after `grace_ms`, and
+    // once the program exited mirrors out and reports its exit as usual.
+    GracefulStop stop = 2;
+  }
+}
+
+message RouteList {
+  repeated string names = 1;
+}
+
+message GracefulStop {
   // How long the driving program has after SIGTERM before SIGKILL.
   int64 grace_ms = 1;
 }

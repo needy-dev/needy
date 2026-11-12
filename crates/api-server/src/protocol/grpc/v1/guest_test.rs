@@ -1,4 +1,8 @@
-use needy_api_proto::v1::{FetchFilesRequest, GetConfigRequest, PushEventsRequest, PushFilesRequest, ReportExitRequest, TraceEvent};
+use needy_api_proto::v1::guest_service_control_response::Message;
+use needy_api_proto::v1::{
+  FetchFilesRequest, GetConfigRequest, GracefulStop, GuestServiceControlRequest, PushEventsRequest, PushFilesRequest, ReportExitRequest,
+  RouteList, TraceEvent,
+};
 use needy_core::event::{Event, RunStop, SCHEMA_VERSION};
 use tonic::Code;
 
@@ -19,15 +23,6 @@ async fn the_control_socket_serves_no_guest() {
 
   assert_eq!(status.code(), Code::PermissionDenied);
   assert_eq!(status.message(), "not an actor listener");
-}
-
-#[tokio::test]
-async fn the_actor_waits_for_a_stop_and_gets_its_grace_period() {
-  let served = serve(actor()).await;
-
-  let stop = served.client.guest().wait_stop(needy_api_proto::v1::WaitStopRequest {}).await.unwrap().into_inner();
-
-  assert_eq!(stop.grace_ms, 1500);
 }
 
 #[tokio::test]
@@ -136,4 +131,39 @@ async fn mirror_out_chunks_are_joined_under_the_first_name() {
 
   let pushed = served.fake.pushed.lock().unwrap();
   assert_eq!(*pushed, [("s-actor".to_string(), "out".to_string(), b"abcd".to_vec())]);
+}
+
+#[tokio::test]
+async fn the_actor_s_control_stream_carries_its_run_s_route_lists_and_a_stop() {
+  let served = serve(actor()).await;
+
+  let mut stream = served.client.guest().control(GuestServiceControlRequest {}).await.unwrap().into_inner();
+  let mut messages = Vec::new();
+  while let Some(message) = stream.message().await.unwrap() {
+    messages.push(message.message);
+  }
+
+  let routes = |names: &[&str]| {
+    Some(Message::Routes(RouteList {
+      names: names.iter().map(|n| n.to_string()).collect(),
+    }))
+  };
+  let stop = Some(Message::Stop(GracefulStop { grace_ms: 1500 }));
+  assert_eq!(
+    messages,
+    [
+      routes(&["s-actor:git"]),
+      routes(&["s-actor:curl", "s-actor:git"]),
+      stop
+    ]
+  );
+}
+
+#[tokio::test]
+async fn the_control_socket_serves_no_control_stream() {
+  let served = serve(Caller::Operator).await;
+
+  let status = served.client.guest().control(GuestServiceControlRequest {}).await.unwrap_err();
+
+  assert_eq!(status.code(), Code::PermissionDenied);
 }

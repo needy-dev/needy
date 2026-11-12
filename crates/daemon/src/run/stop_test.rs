@@ -1,7 +1,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use needy_api_server::control::{Guest, Runs, StopMode};
+use futures_util::StreamExt as _;
+use needy_api_server::control::{Guest, GuestControl, Runs, StopMode};
 use needy_core::event::ActorStop;
 use needy_core::types::{Principal, RunState};
 
@@ -33,6 +34,19 @@ async fn guest_waits(daemon: &crate::Daemon, id: &str) {
   .expect("the guest did not wait for a stop");
 }
 
+/// What init does with its control stream (`Guest::control`) about a stop:
+/// waits for one and returns its grace period; `Err` when the stream ends
+/// without one.
+async fn wait_stop(daemon: &crate::Daemon, id: &str) -> Result<Duration, ()> {
+  let mut controls = Guest::control(daemon, id).await.map_err(drop)?;
+  while let Some(control) = controls.next().await {
+    if let GuestControl::Stop { grace } = control {
+      return Ok(grace);
+    }
+  }
+  Err(())
+}
+
 /// The `run.stop` payload of run `id`.
 async fn stop_event(dir: &Path, id: &str) -> String {
   let trace = needy_trace::sink::sqlite::load(&dir.join("state/trace.db"), id).await.unwrap();
@@ -48,7 +62,7 @@ async fn stop_event(dir: &Path, id: &str) -> String {
 // program exits.
 //
 // Before the fix, the stop killed the actor at once.
-// The fix asks the guest that waits for it (`Guest.WaitStop`) to end the
+// The fix asks the guest that waits for it (`GuestControl::Stop` on its control stream) to end the
 // driving program, and waits for the actor to mirror out and end before
 // the stop goes on.
 #[tokio::test]
@@ -66,7 +80,7 @@ async fn a_graceful_stop_waits_for_the_actors_mirror_out() {
   let guest = {
     let (daemon, id, dir) = (daemon.clone(), created.id.clone(), started.dir.path().to_path_buf());
     tokio::spawn(async move {
-      let grace = Guest::wait_stop(&daemon, &id).await.unwrap();
+      let grace = wait_stop(&daemon, &id).await.unwrap();
       tokio::time::sleep(Duration::from_millis(300)).await;
       let archive = needy_common::archive::pack(&source, &[]).unwrap();
       Guest::push_files(&daemon, &id, "out", archive).await.unwrap();
@@ -96,7 +110,7 @@ async fn a_stop_now_kills_the_actor_without_its_mirror_out() {
   let created = Runs::create(&daemon, new_run(&profile(&host), started.dir.path())).await.unwrap();
   let guest = {
     let (daemon, id) = (daemon.clone(), created.id.clone());
-    tokio::spawn(async move { Guest::wait_stop(&daemon, &id).await })
+    tokio::spawn(async move { wait_stop(&daemon, &id).await })
   };
   guest_waits(&daemon, &created.id).await;
 
@@ -141,7 +155,7 @@ async fn a_graceful_stop_kills_an_actor_that_does_not_end_in_time() {
   // A guest that is asked and never ends its actor.
   let guest = {
     let (daemon, id) = (daemon.clone(), created.id.clone());
-    tokio::spawn(async move { Guest::wait_stop(&daemon, &id).await })
+    tokio::spawn(async move { wait_stop(&daemon, &id).await })
   };
   guest_waits(&daemon, &created.id).await;
 

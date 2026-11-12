@@ -368,10 +368,37 @@ impl Origin {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WaitStopRequest {
+pub struct GuestServiceControlRequest {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestServiceControlResponse {
+    #[prost(oneof="guest_service_control_response::Message", tags="1, 2")]
+    pub message: ::core::option::Option<guest_service_control_response::Message>,
+}
+/// Nested message and enum types in `GuestServiceControlResponse`.
+pub mod guest_service_control_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Message {
+        /// The executable names the actor hands to the proxy from now on, as
+        /// `GetConfigResponse.route_names`; `*` routes every exec. Sent first
+        /// with the list as it is, then each time `needy chaos add` or `rm`
+        /// changes it.
+        #[prost(message, tag="1")]
+        Routes(super::RouteList),
+        /// `run stop` asks the actor to end gracefully: init sends SIGTERM to
+        /// the driving program's process group, SIGKILL after `grace_ms`, and
+        /// once the program exited mirrors out and reports its exit as usual.
+        #[prost(message, tag="2")]
+        Stop(super::GracefulStop),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RouteList {
+    #[prost(string, repeated, tag="1")]
+    pub names: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct WaitStopResponse {
+pub struct GracefulStop {
     /// How long the driving program has after SIGTERM before SIGKILL.
     #[prost(int64, tag="1")]
     pub grace_ms: i64,
@@ -865,7 +892,9 @@ pub struct AddFaultResponse {
     /// The full run ID.
     #[prost(string, tag="1")]
     pub run_id: ::prost::alloc::string::String,
-    /// What the fault cannot reach, such as commands the actor does not route.
+    /// What the fault cannot reach. Nothing does today: the daemon sends a
+    /// running actor its new route list (`GuestService.Control`), so an exec
+    /// fault reaches every command.
     #[prost(string, repeated, tag="2")]
     pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }

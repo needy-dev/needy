@@ -820,8 +820,11 @@ with a stand-in Firecracker and a test-played guest).
   error if it fails. A `NOTICE` says the IDs are the host's while the
   engine maps no user namespace. Apple's `container` publishes the socket
   through its relay from inside the VM; the relay still connects (checked).
-- **`needy run stop` is graceful.** `Guest.WaitStop` is held by init once
-  the driving program started (`init/stop.rs`); `run stop` answers it with
+- **`needy run stop` is graceful.** `Guest.WaitStop` was held by init once
+  the driving program started (`init/stop.rs`; since 2026-11-13 the stop is
+  a `GracefulStop` message on the guest control stream, `GuestService.Control`,
+  see the [profile and rules design](../config/2026-11-09-profile-and-rules-design.md));
+  `run stop` answers it with
   the grace period (`StopRunRequest.grace_ms`, default 10 s,
   `--grace DURATION`), init sends SIGTERM to the program's process group
   (through the process host on a terminal, so its exit records the

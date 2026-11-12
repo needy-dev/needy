@@ -10,7 +10,11 @@
 //!
 //! Both route the same execs: those of the route's user whose program has
 //! one of the route's names. Init turns routing on once the actor is set
-//! up, so its own helpers stay in the actor.
+//! up, so its own helpers stay in the actor, and turns it on again with each
+//! route list the daemon sends on its control stream (`init::control`).
+//! Either way an exec sees the old list or the new one whole: the shims'
+//! file is renamed into place, and `binfmt_needy` copies its parameters
+//! under the lock their writes take.
 //!
 //! See `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`.
 
@@ -39,9 +43,10 @@ impl Route {
   }
 }
 
-/// Turns routing on for `route` with this actor's capture: shims in a
-/// container, the kernel's `binfmt_needy` in a VM. A capture that cannot be
-/// turned on is logged, and every command stays in the actor.
+/// Turns routing on for `route` with this actor's capture, or changes the
+/// route list it routes: shims in a container, the kernel's `binfmt_needy`
+/// in a VM. A capture that cannot be turned on is logged, and every command
+/// stays in the actor.
 pub(super) fn enable(route: &Route, container: bool) {
   if container {
     if let Err(e) = shim::enable(route) {

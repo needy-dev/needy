@@ -26,7 +26,7 @@ use needy_api_server::control::{
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::Source;
-use needy_config::profile::{Profile, TraceSink};
+use needy_config::profile::{FaultDomain, Profile, TraceSink};
 use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
 use needy_core::event::{self, ActorStop, Event, ExecutorRef, RunCreate, RunFail, RunStop};
@@ -86,6 +86,11 @@ pub struct Run {
   pub wait_for_attach: bool,
   pub recipe: Option<CompiledRecipe>,
   pub injector: Arc<Injector>,
+  /// The actor's route list as init is told it (`*` for every exec): set
+  /// from the profile, and again whenever `needy chaos add` or `rm` changes
+  /// the run's exec faults ([`Run::update_routes`]); `Guest::control`
+  /// streams its changes to the actor.
+  pub routes: tokio::sync::watch::Sender<Vec<String>>,
   pub trace: Dispatch,
   /// The run's executors by name, added as they are acquired.
   executors: Mutex<BTreeMap<String, Arc<Instance>>>,
@@ -127,6 +132,24 @@ impl Run {
     let taken = std::mem::take(&mut *self.lock_executors());
     lock(&self.released).extend(executor_refs(&taken));
     taken
+  }
+
+  /// The executable names the actor routes now: the profile's rules and
+  /// the run's exec faults as they are now; `None` routes every exec.
+  pub fn route_names(&self) -> Option<Vec<String>> {
+    let faults = self.injector.faults(FaultDomain::Exec);
+    needy_core::rules::route_names_for(&self.profile, faults.iter().filter_map(|(_, fault)| fault.exec.as_deref()))
+  }
+
+  /// Sets [`Run::routes`] from the run's exec faults now, after `needy
+  /// chaos add` or `rm`; a running actor's init is told when it changed.
+  pub fn update_routes(&self) {
+    let names = route_list(self.route_names());
+    self.routes.send_if_modified(|routes| {
+      let changed = *routes != names;
+      *routes = names;
+      changed
+    });
   }
 
   /// Records how the actor's driving program ended.
@@ -522,12 +545,14 @@ impl Daemon {
     // another sets a different `actor.command`.
     let actor_command: Vec<String> = profile.actor.command.iter().chain(&request.actor_args).cloned().collect();
     let cancel = self.cancel.child_token();
+    let routes = tokio::sync::watch::Sender::new(route_list(needy_core::rules::route_names(&profile)));
     Ok(Arc::new(Run {
       id: id.to_string(),
       name: or_id(&request.name),
       group: or_id(&request.group),
       profile_name: request.profile_name.clone(),
       injector: Arc::new(Injector::new(&profile.chaos)),
+      routes,
       profile,
       profile_yaml: request.profile_yaml.clone(),
       created_ms,
@@ -742,7 +767,8 @@ impl Daemon {
 
   /// Ends the running actor of a run being stopped, as `mode` says, and
   /// returns how; `None` when it had none or it had exited already.
-  /// Gracefully, the guest that waits for it (`Guest.WaitStop`) signals the
+  /// Gracefully, the guest that waits for it on its control stream
+  /// (`GuestControl::Stop`) signals the
   /// driving program, mirrors out and ends, which the stop waits for up to
   /// the grace period and [`Config::mirror_out_wait`](crate::Config). An
   /// actor that does not end by then, or whose guest does not wait, is left
@@ -1022,6 +1048,11 @@ impl Runs for Daemon {
   async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String, ControlError> {
     Daemon::remove_fault(self, run, name, by).await
   }
+}
+
+/// A route list as init is told it: the names, or `*` for every exec.
+pub fn route_list(names: Option<Vec<String>>) -> Vec<String> {
+  names.unwrap_or_else(|| vec!["*".into()])
 }
 
 #[cfg(test)]

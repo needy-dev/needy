@@ -199,6 +199,9 @@ pub struct FaultAdded {
   /// The full run ID.
   pub run: String,
   /// What the fault cannot reach.
+  // NOTICE: empty since 2026-11-13, when the daemon began to send a running
+  // actor its new route list; it stays for the next fault a run cannot apply
+  // everywhere (such as a sensor fault at run time, `TODO(chaos-sensor)`).
   pub warnings: Vec<String>,
 }
 
@@ -516,6 +519,19 @@ pub struct GuestFault {
   pub temp_mc: i32,
 }
 
+/// What the daemon tells a running actor's init (`GuestService.Control`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestControl {
+  /// The route list from now on, as [`GuestConfig::route_names`].
+  Routes(Vec<String>),
+  /// `run stop` asks the actor to end gracefully: the driving program gets
+  /// SIGTERM, then SIGKILL after `grace`.
+  Stop { grace: std::time::Duration },
+}
+
+/// The messages of [`Guest::control`], until the run ends.
+pub type GuestControls = Pin<Box<dyn Stream<Item = GuestControl> + Send>>;
+
 /// The actor's side of its run. Every call names the run the
 /// actor's listener is bound to.
 #[async_trait::async_trait]
@@ -529,10 +545,10 @@ pub trait Guest: Send + Sync + 'static {
   async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>>;
   /// A mirror-out mapping's archive.
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()>;
-  /// Returns, with the driving program's grace period, once `run stop`
-  /// asks the actor to end gracefully. Init holds it while the driving
-  /// program runs.
-  async fn wait_stop(&self, run: &str) -> Result<std::time::Duration>;
+  /// What init is told while the actor runs: the route list now and at
+  /// each change, and a graceful stop when `run stop` asks for one. Init
+  /// holds it for the actor's life; it ends when the run or the actor does.
+  async fn control(&self, run: &str) -> Result<GuestControls>;
 }
 
 // -------------------------------------------------------------- runners

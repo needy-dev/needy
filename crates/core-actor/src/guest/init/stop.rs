@@ -1,13 +1,14 @@
-//! A graceful stop of the driving program: init holds `Guest.WaitStop`
-//! while the program runs, and when `run stop` answers it, sends SIGTERM to
+//! A graceful stop of the driving program: `run stop` sends one on the
+//! control stream init holds (`super::control`), and init sends SIGTERM to
 //! the program's process group, then SIGKILL after the grace period. The
 //! program's exit then takes init's usual path: mirror-out, the exit report
 //! and the end of the actor.
 
 use std::time::Duration;
 
-use needy_api_client::Client;
-use needy_api_proto::v1::WaitStopRequest;
+/// The grace period of a graceful stop, once the daemon asked for one on the
+/// control stream; `None` until then.
+pub(super) type Stops = tokio::sync::watch::Receiver<Option<Duration>>;
 
 /// The wait for a stop; dropping it, once the driving program exited, ends
 /// the wait and any signal still to come.
@@ -36,15 +37,15 @@ pub(super) fn signal_group(group: u32, name: &str) {
 
 /// Waits for a stop of the driving program, which `signal` sends a signal
 /// by name (`SIGTERM`, `SIGKILL`) to.
-pub(super) fn watch(client: &Client, signal: impl Fn(&str) + Send + 'static) -> Watch {
-  let client = client.clone();
+pub(super) fn watch(stops: &Stops, signal: impl Fn(&str) + Send + 'static) -> Watch {
+  let mut stops = stops.clone();
   Watch(tokio::spawn(async move {
-    let grace = match client.guest().wait_stop(WaitStopRequest {}).await {
-      Ok(response) => Duration::from_millis(u64::try_from(response.into_inner().grace_ms).unwrap_or(0)),
-      // The run ends without a graceful stop (the actor exits, or the
-      // stop kills it): nothing to do.
-      Err(status) => {
-        tracing::debug!("no graceful stop: {}", status.message());
+    let grace = match stops.wait_for(Option::is_some).await {
+      Ok(grace) => grace.unwrap_or_default(),
+      // The control stream ended without a graceful stop (the actor exits,
+      // or the stop kills it): nothing to do.
+      Err(_) => {
+        tracing::debug!("no graceful stop: the control stream ended");
         return;
       }
     };

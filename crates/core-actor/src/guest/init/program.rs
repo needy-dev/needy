@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use needy_api_client::Client;
 use needy_api_proto::v1::GetConfigResponse;
 use needy_api_proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
 use needy_api_proto::v1::{ExecRequest, KillProcessRequest, KillProcessResponse, ListProcessesRequest, ListProcessesResponse};
@@ -32,7 +31,7 @@ use super::network::GATEWAY_LISTEN;
 use super::stubs::{STUB_DIR, SYSTEM_PATH};
 
 /// Runs the driving program until it exits, or a graceful stop ends it.
-pub(super) async fn run(client: &Client, config: &GetConfigResponse, home: &str) -> Result<ExitStatus> {
+pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, home: &str) -> Result<ExitStatus> {
   if config.command.is_empty() {
     bail!("no driving program configured");
   }
@@ -86,7 +85,7 @@ pub(super) async fn run(client: &Client, config: &GetConfigResponse, home: &str)
   let mut child = command.spawn().context("cannot start the driving program")?;
   // `setsid` made the program the leader of its own process group.
   let group = child.id().unwrap_or(0);
-  let _stop = super::stop::watch(client, move |signal| super::stop::signal_group(group, signal));
+  let _stop = super::stop::watch(stops, move |signal| super::stop::signal_group(group, signal));
   Ok(child.wait().await?)
 }
 
@@ -129,7 +128,7 @@ pub(super) enum Terminal {
 /// Runs the driving program on a terminal of `rows` by `cols` until it
 /// exits, serving `ProcessService` for it on `terminal`.
 pub(super) async fn run_on_terminal(
-  client: &Client,
+  stops: &super::stop::Stops,
   config: &GetConfigResponse,
   home: &str,
   (rows, cols): (u16, u16),
@@ -190,7 +189,7 @@ pub(super) async fn run_on_terminal(
   // Through the process host, which records the signal for the exit it
   // reports, as a client's signal is.
   let signalled = proc.clone();
-  let _stop = super::stop::watch(client, move |signal| signalled.send(Input::Signal(signal.into())));
+  let _stop = super::stop::watch(stops, move |signal| signalled.send(Input::Signal(signal.into())));
   let start = Arc::new(Notify::new());
   if let Some((path, listener)) = gate {
     let start = start.clone();

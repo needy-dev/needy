@@ -1186,11 +1186,11 @@ pub mod guest_service_client {
                 .insert(GrpcMethod::new("needy.v1.GuestService", "PushFiles"));
             self.inner.client_streaming(req, path, codec).await
         }
-        pub async fn wait_stop(
+        pub async fn control(
             &mut self,
-            request: impl tonic::IntoRequest<super::WaitStopRequest>,
+            request: impl tonic::IntoRequest<super::GuestServiceControlRequest>,
         ) -> std::result::Result<
-            tonic::Response<super::WaitStopResponse>,
+            tonic::Response<tonic::codec::Streaming<super::GuestServiceControlResponse>>,
             tonic::Status,
         > {
             self.inner
@@ -1203,12 +1203,12 @@ pub mod guest_service_client {
                 })?;
             let codec = tonic_prost::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static(
-                "/needy.v1.GuestService/WaitStop",
+                "/needy.v1.GuestService/Control",
             );
             let mut req = request.into_request();
             req.extensions_mut()
-                .insert(GrpcMethod::new("needy.v1.GuestService", "WaitStop"));
-            self.inner.unary(req, path, codec).await
+                .insert(GrpcMethod::new("needy.v1.GuestService", "Control"));
+            self.inner.server_streaming(req, path, codec).await
         }
     }
 }
@@ -1263,13 +1263,19 @@ pub mod guest_service_server {
             tonic::Response<super::PushFilesResponse>,
             tonic::Status,
         >;
-        async fn wait_stop(
+        /// Server streaming response type for the Control method.
+        type ControlStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<
+                    super::GuestServiceControlResponse,
+                    tonic::Status,
+                >,
+            >
+            + std::marker::Send
+            + 'static;
+        async fn control(
             &self,
-            request: tonic::Request<super::WaitStopRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::WaitStopResponse>,
-            tonic::Status,
-        >;
+            request: tonic::Request<super::GuestServiceControlRequest>,
+        ) -> std::result::Result<tonic::Response<Self::ControlStream>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct GuestServiceServer<T> {
@@ -1577,25 +1583,27 @@ pub mod guest_service_server {
                     };
                     Box::pin(fut)
                 }
-                "/needy.v1.GuestService/WaitStop" => {
+                "/needy.v1.GuestService/Control" => {
                     #[allow(non_camel_case_types)]
-                    struct WaitStopSvc<T: GuestService>(pub Arc<T>);
+                    struct ControlSvc<T: GuestService>(pub Arc<T>);
                     impl<
                         T: GuestService,
-                    > tonic::server::UnaryService<super::WaitStopRequest>
-                    for WaitStopSvc<T> {
-                        type Response = super::WaitStopResponse;
+                    > tonic::server::ServerStreamingService<
+                        super::GuestServiceControlRequest,
+                    > for ControlSvc<T> {
+                        type Response = super::GuestServiceControlResponse;
+                        type ResponseStream = T::ControlStream;
                         type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
+                            tonic::Response<Self::ResponseStream>,
                             tonic::Status,
                         >;
                         fn call(
                             &mut self,
-                            request: tonic::Request<super::WaitStopRequest>,
+                            request: tonic::Request<super::GuestServiceControlRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
                             let fut = async move {
-                                <T as GuestService>::wait_stop(&inner, request).await
+                                <T as GuestService>::control(&inner, request).await
                             };
                             Box::pin(fut)
                         }
@@ -1606,7 +1614,7 @@ pub mod guest_service_server {
                     let max_encoding_message_size = self.max_encoding_message_size;
                     let inner = self.inner.clone();
                     let fut = async move {
-                        let method = WaitStopSvc(inner);
+                        let method = ControlSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -1617,7 +1625,7 @@ pub mod guest_service_server {
                                 max_decoding_message_size,
                                 max_encoding_message_size,
                             );
-                        let res = grpc.unary(method, req).await;
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

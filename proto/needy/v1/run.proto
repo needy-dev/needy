@@ -307,7 +307,9 @@ message AddFaultRequest {
 message AddFaultResponse {
   // The full run ID.
   string run_id = 1;
-  // What the fault cannot reach, such as commands the actor does not route.
+  // What the fault cannot reach. Nothing does today: the daemon sends a
+  // running actor its new route list (`GuestService.Control`), so an exec
+  // fault reaches every command.
   repeated string warnings = 2;
 }
 

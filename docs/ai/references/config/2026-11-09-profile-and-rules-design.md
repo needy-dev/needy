@@ -462,10 +462,43 @@ paired clients may call them, an actor and a runner may not.
   the same sequence of operations after the change fires the same faults;
   `after` and `until` count wall time from the run's creation, so a replay
   that runs faster or slower may see a window differently.
-- The actor reads its route list once, when it boots, so an added exec fault
-  reaches in the actor only commands already on it; `add` warns which
-  commands it does not reach (`TODO(chaos-routes)`). `needy exec` commands
-  always reach it.
+- An added exec fault reaches every command in the actor, as `needy exec`
+  commands: when `add` or `rm` changes the run's route list (the profile's
+  rules and the run's exec faults now, `rules::route_names_for`), the daemon
+  sends it on the control stream the actor's init holds
+  (`GuestService.Control`, server-streaming, the list now and then each
+  change, ending with the run). Init creates the route stubs of new names
+  the actor lacks and applies the list to its capture: the shims' route file
+  is written beside and renamed into place, and `binfmt_needy` copies its
+  parameters under `kernel_param_lock`, the lock their sysfs writes take,
+  so an exec sees the old list or the new one whole. A fault whose pattern
+  may match any program routes every exec (`*`); removing it shrinks the
+  list again. Before 2026-11-13 init read the list once at boot and `add`
+  warned which commands it did not reach.
+- Decision (2026-11-13): one guest control stream for everything the daemon
+  tells a running actor. `GuestServiceControlResponse` is a `oneof`: the
+  route list (`routes`) and a graceful stop (`stop`, `GracefulStop`). The
+  graceful stop landed first as a unary `Guest.WaitStop` held by init; it
+  was folded into this stream when the route list arrived, so init holds
+  one call, not two. The daemon counts its guest as waiting for a stop for
+  as long as the stream is open (`StopRequest::wait`, polled from the
+  stream's start); init passes a stop to the driving program's watch
+  (`init/stop.rs`), which signals it as before. New daemon-to-init messages
+  are new cases of the `oneof`.
+- Checked on 2026-11-13 with a profile that routes only `python3` and runs
+  `date` every second: `chaos add late-date --exec 'date **' --exit 9` at
+  8 s and `chaos rm` 12 s later. On `linux-firecracker` (Linux KVM host, a
+  base VM image rebuilt with the locked `binfmt_needy`), `macos-vz` (Apple
+  silicon Mac, image rebuilt likewise) and `macos-apple-container` (same
+  Mac): init logged each route list as it arrived (`route list:
+  ash,bash,dash,date,python3,sh,zsh`, then without `date`); `date` exited 0
+  before, 9 with the fault's stderr in between (12, 12 and 10 times), and 0
+  after; the report showed the injected faults and `chaos changed while
+  running: +late-date (exec), -late-date`. With the stop folded into the
+  stream, a `needy run stop` 12 s after the `rm` then ended each run
+  gracefully: init logged `stopping the driving program: SIGTERM, then
+  SIGKILL after 10s`, and `run ls` showed the run `stopped` with exit
+  `SIGTERM`.
 - A sensor fault cannot be added at run time; its `at` counts from the
   actor's start (`TODO(chaos-sensor)`).
 - The external decider (`ask`) stays deferred (`TODO(intercept)`).
@@ -898,8 +931,9 @@ one place and one rule for [`~`](#home-directories-). Breaking, without aliases.
 - **The chaos RPCs are on `RunService`**, since a run owns its faults, and
   take the fault as YAML, so the CLI, the profile and the control plane share
   one schema and one check.
-- **`needy chaos add` refuses sensor faults** and **warns about commands the
-  actor does not route** (see above).
+- **`needy chaos add` refuses sensor faults**. Until 2026-11-13 it also
+  warned about commands the actor did not route; the route list is now sent
+  to the running actor (see above).
 - Workspace and `~` (from the workspace slice): conflicts with the derived
   mapping or path map are load errors, not findings; a `linux-container`
   executor's `workspace:` is not defaulted from `from` (it is a host
@@ -965,8 +999,12 @@ wrappers outside the example's directory, its recipe and `host:` paths):
 - **Services without `HTTP_PROXY`**: an in-actor resolver and transparent
   listener for `*.needy`, so programs that ignore `HTTP_PROXY` (Node's
   `fetch`) reach services too.
-- **Pushing the route list to a running actor** (`TODO(chaos-routes)`), so an
-  exec fault added at run time reaches every command in the actor.
+- **Pushing the route list to a running actor**: done 2026-11-13 (see the
+  chaos section).
+- **The report's route names after `chaos add`**: the report's "kept on
+  actor counts only the names the actor routes" note lists the boot list
+  (`actor.config`); a `chaos.add` that widened the list is in the trace but
+  not in that note.
 - **Sensor faults at run time** (`TODO(chaos-sensor)`), applied at once
   through a guest call.
 - **Header injection on HTTPS** (`TODO(mitm)`): an opt-in, per-host MITM with

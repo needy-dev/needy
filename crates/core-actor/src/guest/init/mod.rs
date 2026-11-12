@@ -14,10 +14,11 @@
 //! which `needy run logs` prints.
 //!
 //! NOTICE: the tasks init spawns (the forwarder, sshfs bridges, scheduled
-//! faults) are owned by the actor: they end when init reboots the VM or
+//! faults, the control stream that updates the route list) are owned by the actor: they end when init reboots the VM or
 //! exits the container.
 
 mod account;
+mod control;
 mod files;
 mod identity;
 mod mounts;
@@ -186,6 +187,10 @@ async fn boot(container: bool) -> Result<()> {
     names: config.route_names.clone(),
   };
   super::capture::enable(&route, container);
+  // `needy chaos add` and `rm` may change the route list while the program
+  // runs, and `run stop` may ask for a graceful stop.
+  let (stop, stops) = tokio::sync::watch::channel(None);
+  tokio::spawn(control::follow(client.clone(), user.uid, container, stop));
 
   let driven = match &config.tty {
     Some(window) => {
@@ -195,9 +200,9 @@ async fn boot(container: bool) -> Result<()> {
       } else {
         program::Terminal::Vsock(config.process_port)
       };
-      program::run_on_terminal(&client, &config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
+      program::run_on_terminal(&stops, &config, &home, size, terminal).await.map(|exit| (exit.code, exit.signal))
     }
-    None => program::run(&client, &config, &home).await.map(|status| {
+    None => program::run(&stops, &config, &home).await.map(|status| {
       use std::os::unix::process::ExitStatusExt;
       (status.code(), status.signal().map(needy_core_executor::signals::name).unwrap_or_default())
     }),

@@ -84,7 +84,7 @@ tar = "0.4"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["net"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-vsock = "0.7"
 tonic = { version = "0.14", default-features = false }

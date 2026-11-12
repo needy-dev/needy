@@ -348,8 +348,15 @@ impl Guest for Fake {
     Ok(())
   }
 
-  async fn wait_stop(&self, _run: &str) -> Result<std::time::Duration> {
-    Ok(std::time::Duration::from_millis(1500))
+  /// The route list it was configured with, one with `curl` added, then a
+  /// graceful stop with 1.5 s of grace.
+  async fn control(&self, run: &str) -> Result<crate::control::GuestControls> {
+    use crate::control::GuestControl;
+    let routes = |names: &[&str]| GuestControl::Routes(names.iter().map(|n| format!("{run}:{n}")).collect());
+    let stop = GuestControl::Stop {
+      grace: std::time::Duration::from_millis(1500),
+    };
+    Ok(Box::pin(tokio_stream::iter([routes(&["git"]), routes(&["curl", "git"]), stop])))
   }
 }
 

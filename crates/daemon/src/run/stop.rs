@@ -1,8 +1,8 @@
-//! A graceful stop of a run's actor, which its guest waits for
-//! (`Guest.WaitStop`): `run stop` asks it, with the driving program's grace
-//! period, only while a guest waits, so a guest that never asks (one that has
-//! not finished starting, or a guest needy older than graceful stops) is
-//! killed at once instead of waited for.
+//! A graceful stop of a run's actor, which its guest waits for on its
+//! control stream (`Guest::control`, `GuestControl::Stop`): `run stop` asks
+//! it, with the driving program's grace period, only while a guest waits, so
+//! a guest that never asks (one that has not finished starting, or a guest
+//! needy older than graceful stops) is killed at once instead of waited for.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;

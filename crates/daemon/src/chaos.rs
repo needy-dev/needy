@@ -26,11 +26,12 @@ impl Daemon {
       // TODO(chaos-sensor): see `actor::schedule_sensor_faults`.
       return Err(ControlError::Invalid("sensor faults are scheduled when the actor starts; add them to the profile's chaos.faults".into()));
     }
-    let warnings = unrouted(&run.profile, &fault);
     run
       .injector
       .add(name, fault.clone())
       .map_err(|AddError::Exists(_)| ControlError::Invalid(format!("run {} already has a fault named {name:?}; remove it first", run.id)))?;
+    // A command the actor did not route until now is routed from here on.
+    run.update_routes();
     run.emit(&Event::ChaosAdd(ChaosAdd {
       name: name.to_string(),
       fault: Box::new(fault),
@@ -38,7 +39,7 @@ impl Daemon {
     }));
     Ok(FaultAdded {
       run: run.id.clone(),
-      warnings,
+      warnings: Vec::new(),
     })
   }
 
@@ -69,42 +70,13 @@ impl Daemon {
     if run.injector.remove(name).is_none() {
       return Err(ControlError::NotFound(format!("run {} has no fault named {name:?}", run.id)));
     }
+    run.update_routes();
     run.emit(&Event::ChaosRemove(ChaosRemove {
       name: name.to_string(),
       by: Some(by),
     }));
     Ok(run.id.clone())
   }
-}
-
-/// Why an exec fault added to a running run may not reach some commands:
-/// the actor read its route list when it booted, so a command whose name is
-/// not on it runs in the actor without asking the daemon.
-fn unrouted(profile: &needy_config::profile::Profile, fault: &Fault) -> Vec<String> {
-  let Some(pattern) = fault.exec.as_deref() else {
-    return Vec::new();
-  };
-  // Every exec is routed: the fault reaches every command.
-  let Some(routed) = needy_core::rules::route_names(profile) else {
-    return Vec::new();
-  };
-  let missing: Vec<String> = match needy_core::pattern::Pattern::compile(pattern).command_names() {
-    Some(names) => names.into_iter().filter(|name| !routed.contains(name)).collect(),
-    None => vec!["any command".into()],
-  };
-  if missing.is_empty() {
-    return Vec::new();
-  }
-  vec![format!(
-    "the actor routes only the commands its profile named when it booted ({}); in the actor this fault does not reach {}, \
-     only `needy exec` commands",
-    if routed.is_empty() {
-      "none".to_string()
-    } else {
-      routed.join(", ")
-    },
-    missing.join(", ")
-  )]
 }
 
 #[cfg(test)]

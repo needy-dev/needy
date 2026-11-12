@@ -3,15 +3,18 @@
 //! driving program's exit, and the archives of its copy-in and mirror-out
 //! mappings.
 
-use needy_api_server::control::{ControlError, Guest, GuestConfig, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser};
+use futures_util::StreamExt as _;
+use needy_api_server::control::{
+  ControlError, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser,
+};
 use needy_common::process::Exit;
 use needy_config::profile::{FaultDomain, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
-use needy_core::rules;
 use needy_core::types::{ActorState, RunState};
 use needy_core_actor::driver::Side as Presenter;
+use tokio_stream::wrappers::WatchStream;
 
-use crate::run::Run;
+use crate::run::{Run, route_list};
 use crate::{Daemon, actor, files};
 
 /// The workspace mounts of `run` as its actor's init is told them.
@@ -77,14 +80,16 @@ impl Guest for Daemon {
       })
       .collect();
     let recipe = run.recipe.as_ref();
-    let routed = rules::route_names(profile);
+    // The run's exec faults now, also those `needy chaos add` added
+    // before the actor asked.
+    let routed = run.route_names();
     actor::advance(&run, ActorState::Configured);
     run.emit(&Event::ActorConfig(ActorConfig {
       route_names: routed.clone(),
       mounts: mounts.iter().map(|m| m.target.clone()).collect(),
     }));
     // `*` asks the kernel to route every exec.
-    let route_names = routed.unwrap_or_else(|| vec!["*".into()]);
+    let route_names = route_list(routed);
     // Init is told only what its driver presents in the guest: a driver
     // that presents something from the host (the workspace mounts, the
     // hostname, the sensors and their faults of a linux-container actor)
@@ -172,15 +177,31 @@ impl Guest for Daemon {
     files::push(&run, name, archive).await
   }
 
-  async fn wait_stop(&self, run: &str) -> Result<std::time::Duration, ControlError> {
+  /// The route list now and each change, and a graceful stop once `run
+  /// stop` asks for one, until the run or its actor ends: init holds it for
+  /// the actor's life.
+  // NOTICE: the stream ends when the run is cancelled or the actor exits, so
+  // a stopping guest listener does not wait its grace period for it.
+  async fn control(&self, run: &str) -> Result<GuestControls, ControlError> {
     let run = self.runs.find(run)?;
-    // An actor that exits, or a run whose stop kills it, ends the wait: the
-    // guest listener's shutdown waits for its calls.
-    tokio::select! {
-      grace = run.stop_request.wait() => Ok(grace),
-      () = run.actor.exited() => Err(ControlError::Unavailable(format!("the actor of run {} exited", run.id))),
-      () = run.cancel.cancelled() => Err(ControlError::Unavailable(format!("run {} is stopping", run.id))),
-    }
+    let routes = WatchStream::new(run.routes.subscribe()).map(GuestControl::Routes);
+    // Polled from the start, so the run counts its guest as waiting for a
+    // stop (`StopRequest::wait`) for as long as the stream is open.
+    let stop = {
+      let run = run.clone();
+      futures_util::stream::once(async move {
+        GuestControl::Stop {
+          grace: run.stop_request.wait().await,
+        }
+      })
+    };
+    let ended = async move {
+      tokio::select! {
+        () = run.actor.exited() => {}
+        () = run.cancel.cancelled() => {}
+      }
+    };
+    Ok(Box::pin(futures_util::stream::select(routes, stop).take_until(ended)))
   }
 }
 

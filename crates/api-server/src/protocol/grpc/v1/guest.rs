@@ -3,17 +3,21 @@
 
 use std::sync::Arc;
 
+use needy_api_proto::v1::guest_service_control_response::Message;
 use needy_api_proto::v1::guest_service_server::GuestService;
 use needy_api_proto::v1::{
-  FetchFilesRequest, FetchFilesResponse, GetConfigRequest, GetConfigResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest,
-  PushFilesResponse, ReportExitRequest, ReportExitResponse, WaitStopRequest, WaitStopResponse,
+  FetchFilesRequest, FetchFilesResponse, GetConfigRequest, GetConfigResponse, GracefulStop, GuestServiceControlRequest,
+  GuestServiceControlResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest, PushFilesResponse, ReportExitRequest,
+  ReportExitResponse, RouteList,
 };
 use needy_common::process::Exit;
 use needy_core::event::Event;
 use tonic::{Request, Response, Status, Streaming};
 
 use super::{Streamed, chunked};
-use crate::control::{Caller, ControlError, Guest};
+use tokio_stream::StreamExt as _;
+
+use crate::control::{Caller, ControlError, Guest, GuestControl};
 use crate::protocol::domain;
 
 pub struct Adapter<G> {
@@ -87,11 +91,20 @@ impl<G: Guest> GuestService for Adapter<G> {
     Ok(Response::new(PushFilesResponse {}))
   }
 
-  async fn wait_stop(&self, _: Request<WaitStopRequest>) -> Result<Response<WaitStopResponse>, Status> {
-    let grace = self.guest.wait_stop(self.run()?).await?;
-    Ok(Response::new(WaitStopResponse {
-      grace_ms: i64::try_from(grace.as_millis()).unwrap_or(i64::MAX),
-    }))
+  type ControlStream = Streamed<GuestServiceControlResponse>;
+
+  async fn control(&self, _: Request<GuestServiceControlRequest>) -> Result<Response<Self::ControlStream>, Status> {
+    let controls = self.guest.control(self.run()?).await?;
+    Ok(Response::new(Box::pin(controls.map(|control| {
+      Ok(GuestServiceControlResponse {
+        message: Some(match control {
+          GuestControl::Routes(names) => Message::Routes(RouteList { names }),
+          GuestControl::Stop { grace } => Message::Stop(GracefulStop {
+            grace_ms: i64::try_from(grace.as_millis()).unwrap_or(i64::MAX),
+          }),
+        }),
+      })
+    }))))
   }
 }
 

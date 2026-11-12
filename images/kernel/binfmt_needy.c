@@ -30,6 +30,8 @@
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/slab.h>
 #include <linux/file.h>
 #include <linux/mm.h>
 #include <linux/sched/mm.h>
@@ -77,13 +79,13 @@ static bool caller_is_needy(void)
 	return needy;
 }
 
-static bool listed(const char *name)
+static bool listed(const char *list, const char *name)
 {
 	size_t n = strlen(name);
-	const char *p = route;
+	const char *p = list;
 
 	/* A lone "*" routes every exec. */
-	if (route[0] == '*' && !route[1])
+	if (list[0] == '*' && !list[1])
 		return true;
 	while (n && *p) {
 		const char *end = strchrnul(p, ',');
@@ -95,26 +97,55 @@ static bool listed(const char *name)
 	return false;
 }
 
+/*
+ * Init rewrites `route` while the actor runs (`needy chaos add`), so an exec
+ * reads the parameters under the lock their sysfs writes take, into a copy:
+ * it sees the old list or the new one, never half of each.
+ * Source: https://github.com/torvalds/linux/blob/v6.18/kernel/params.c#L577-L596
+ * and https://github.com/torvalds/linux/blob/v6.18/kernel/params.c#L513-L526
+ * (`param_attr_store` holds `kernel_param_lock` around `ops->set`, and
+ * `param_set_copystring` copies the new value in place).
+ */
+static char *route_snapshot(int *uid)
+{
+	char *list = kmalloc(sizeof(route), GFP_KERNEL);
+
+	if (!list)
+		return NULL;
+	kernel_param_lock(THIS_MODULE);
+	strscpy(list, route, sizeof(route));
+	*uid = route_uid;
+	kernel_param_unlock(THIS_MODULE);
+	return list;
+}
+
 static int load_needy(struct linux_binprm *bprm)
 {
 	struct name_snapshot dname;
 	struct file *file;
+	char *list;
 	bool hit;
+	int uid;
 	int ret;
 
-	if (!route[0] || !strcmp(bprm->interp, proxy))
+	if (!strcmp(bprm->interp, proxy))
 		return -ENOEXEC;
-	if (route_uid >= 0 &&
-	    !uid_eq(current_uid(), make_kuid(&init_user_ns, route_uid)))
+	list = route_snapshot(&uid);
+	if (!list)
 		return -ENOEXEC;
-	if (caller_is_needy())
+	if (!list[0] ||
+	    (uid >= 0 && !uid_eq(current_uid(), make_kuid(&init_user_ns, uid))) ||
+	    caller_is_needy()) {
+		kfree(list);
 		return -ENOEXEC;
+	}
 
 	/* Match the exec path, its basename, or the file name for fd and memfd execs. */
 	take_dentry_name_snapshot(&dname, bprm->file->f_path.dentry);
-	hit = listed(bprm->interp) || listed(kbasename(bprm->interp)) ||
-	      listed(dname.name.name);
+	hit = listed(list, bprm->interp) || listed(list, kbasename(bprm->interp)) ||
+	      listed(list, dname.name.name);
 	release_dentry_name_snapshot(&dname);
+	kfree(list);
 	if (!hit)
 		return -ENOEXEC;
 

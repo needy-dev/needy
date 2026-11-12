@@ -1,8 +1,9 @@
 //! The kernel capture of a VM actor: `binfmt_needy`
 //! (`images/kernel/binfmt_needy.c`) runs ahead of `binfmt_elf` and
 //! `binfmt_script` and hands a routed exec to the proxy, by any path. Init
-//! turns it on by setting the module's parameters; until then `route` is
-//! empty and nothing is routed.
+//! turns it on by setting the module's parameters, and sets `route` again
+//! for each route list the daemon sends; until then `route` is empty and
+//! nothing is routed.
 
 use super::Route;
 

@@ -170,13 +170,15 @@ fn unknown_placement(profile: &Profile) -> Placement {
 /// daemon as much as one that places the command on an executor; a program
 /// missing here runs in the actor untouched. `None` when a wildcard rule or
 /// exec fault, or a default executor, means every exec must be asked about.
-// NOTICE: the actor reads the list once, when it boots, so an exec fault
-// that `needy chaos add` adds later reaches only commands already on it;
-// the daemon warns when it adds one that names others.
-// TODO(chaos-routes): pushing a longer route list to a running actor needs
-// a guest call to rewrite `binfmt_needy`'s parameter or the shims' list;
-// deferred until the owner approves it.
 pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
+  route_names_for(profile, profile.chaos.faults.values().filter_map(|fault| fault.exec.as_deref()))
+}
+
+/// [`route_names`] with a running run's exec faults (`exec_faults`, their
+/// patterns) in place of the profile's: what `needy chaos add` and `rm`
+/// leave the run with. The daemon pushes the list to the actor again when it
+/// changes (`GuestService.Control`).
+pub fn route_names_for<'a>(profile: &Profile, exec_faults: impl IntoIterator<Item = &'a str>) -> Option<Vec<String>> {
   if profile.default_executor.is_some() {
     return None;
   }
@@ -187,7 +189,7 @@ pub fn route_names(profile: &Profile) -> Option<Vec<String>> {
   for rule in &profile.commands {
     names.extend(Pattern::compile(&rule.matcher).command_names()?);
   }
-  for pattern in profile.chaos.faults.values().filter_map(|fault| fault.exec.as_deref()) {
+  for pattern in exec_faults {
     names.extend(Pattern::compile(pattern).command_names()?);
   }
   if !names.is_empty() {
