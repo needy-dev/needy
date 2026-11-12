@@ -2,7 +2,8 @@
 //!
 //! Exit codes: a command's own code (`exec` and `attach` return the process's,
 //! 126 when a rule or an injected fault refuses it and 127 when it cannot
-//! start); 1 for any other error, printed once with a `needy:` prefix.
+//! start); 1 for any other error, printed once with a `needy:` prefix; and
+//! [`CLOSED_STDOUT`], without a message, when stdout's reader went away.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -146,16 +147,43 @@ fn token(endpoint: &str) -> Result<Option<String>> {
   Ok(crate::credentials::find(&paths.credentials(), endpoint)?.map(|credential| credential.token))
 }
 
+/// The exit code of a command whose stdout's reader went away, as with
+/// `needy run ls | grep -q ...`: 128 + SIGPIPE, what a shell reports for a
+/// program SIGPIPE ended, so pipelines see the usual status.
+// NOTICE: Rust ignores SIGPIPE before `main`, so a write to a closed pipe
+// returns `EPIPE` (`BrokenPipe`) instead of ending the process. SIGPIPE is 13
+// on Linux and macOS (`signal(7)`, `sys/signal.h`); Windows has no SIGPIPE
+// and gets the same code.
+pub const CLOSED_STDOUT: i32 = 128 + 13;
+
 /// Parses the command line, runs the command and returns the exit code.
 pub fn run() -> i32 {
   let cli = Cli::parse();
   match dispatch(cli) {
     Ok(code) => code,
+    Err(error) if stdout_closed(&error) => CLOSED_STDOUT,
     Err(error) => {
       crate::output::message(format_args!("{error:#}"));
       1
     }
   }
+}
+
+/// Whether a command failed because stdout's reader went away: a
+/// `BrokenPipe` from a local write (`output::write`, the exec relay, run
+/// logs). One under a daemon call is that connection's, not stdout's.
+fn stdout_closed(error: &anyhow::Error) -> bool {
+  for cause in error.chain() {
+    if cause.is::<needy_api_client::Error>() {
+      return false;
+    }
+    if let Some(io) = cause.downcast_ref::<std::io::Error>()
+      && io.kind() == std::io::ErrorKind::BrokenPipe
+    {
+      return true;
+    }
+  }
+  false
 }
 
 fn dispatch(cli: Cli) -> Result<i32> {

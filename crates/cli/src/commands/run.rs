@@ -11,7 +11,7 @@ use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
 use crate::cli::Context;
-use crate::output::{self, OutputFormat, Row};
+use crate::output::{self, OutputFormat, Row, outln};
 
 /// How a run command's `RUN` reads (`crate::runs`).
 const RUN_HELP: &str = "The run: an ID, an ID prefix, a name or `latest`. Defaults to NEEDY_RUN, else the only live run";
@@ -298,7 +298,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         output::message(format!("run {}", run.run_id));
         return attach(&connection, run.run_id, true, false, &detach_keys).await;
       }
-      println!("{}", run.run_id);
+      outln!("{}", run.run_id)?;
     }
     Command::Ls { output: format } => {
       let connection = crate::cli::connect(&endpoint).await?;

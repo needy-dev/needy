@@ -22,7 +22,7 @@ use needy_core::types::Outcome;
 use serde::Serialize;
 
 use crate::cli::Context;
-use crate::output::{self, Row};
+use crate::output::{self, Row, outln};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -98,7 +98,7 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
     recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
   };
   let check = connection.runs().check_profile(request).await.map_err(needy_api_client::Error::from)?.into_inner();
-  println!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid);
+  outln!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid)?;
   let host = |placement: Option<&v1::Placement>| match placement {
     None => "unresolved".to_string(),
     Some(p) if p.runner.is_empty() => "the control host".to_string(),
@@ -106,18 +106,18 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
   };
   let actor = host(check.actor.as_ref());
   if check.actor_cpu.is_empty() {
-    println!("actor: {actor}");
+    outln!("actor: {actor}")?;
   } else {
-    println!("actor: {actor} ({})", check.actor_cpu);
+    outln!("actor: {actor} ({})", check.actor_cpu)?;
   }
   match (check.actor_image.as_str(), check.actor_base_abi.as_str()) {
     ("", _) => {}
-    (image, "") => println!("actor image: {image}"),
-    (image, abi) => println!("actor image: {image} (base ABI {abi})"),
+    (image, "") => outln!("actor image: {image}")?,
+    (image, abi) => outln!("actor image: {image} (base ABI {abi})")?,
   }
   let executors: Vec<String> = profile.executors.keys().map(|name| format!("{name} ({})", host(check.executors.get(name)))).collect();
-  println!("executors: {}", executors.join(", "));
-  print_route_names(&profile);
+  outln!("executors: {}", executors.join(", "))?;
+  print_route_names(&profile)?;
   if profile.actor.recipe.is_some() {
     // The control plane checked the recipe against the actor's host; the
     // summary does not depend on the host, so it is compiled here.
@@ -140,9 +140,9 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
 fn check_local(path: &Path, commands: &[String]) -> Result<i32> {
   let profile = needy_config::profile::load(&Source::file(path))?;
   let mut findings = validate::profile(&profile);
-  println!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid);
-  println!("executors: {}", profile.executors.keys().cloned().collect::<Vec<_>>().join(", "));
-  print_route_names(&profile);
+  outln!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid)?;
+  outln!("executors: {}", profile.executors.keys().cloned().collect::<Vec<_>>().join(", "))?;
+  print_route_names(&profile)?;
   if profile.actor.recipe.is_some() {
     findings.extend(print_recipe(&profile, &needy_core_actor::driver::linux_firecracker::kvm::detect()?)?);
   }
@@ -150,18 +150,19 @@ fn check_local(path: &Path, commands: &[String]) -> Result<i32> {
 }
 
 /// The actor's route names, its services and the run's faults.
-fn print_route_names(profile: &Profile) {
-  println!("route names: {}", rules::route_names(profile).map(|n| n.join(",")).unwrap_or_else(|| "* (every exec)".into()));
+fn print_route_names(profile: &Profile) -> std::io::Result<()> {
+  outln!("route names: {}", rules::route_names(profile).map(|n| n.join(",")).unwrap_or_else(|| "* (every exec)".into()))?;
   let services: Vec<String> =
     profile.actor.network.services.iter().map(|(name, service)| format!("http://{} -> {}", service_host(name), service.url)).collect();
   if !services.is_empty() {
-    println!("services: {}", services.join(", "));
+    outln!("services: {}", services.join(", "))?;
   }
   let faults: Vec<String> =
     profile.chaos.faults.iter().map(|(name, fault)| format!("{name} ({}: {})", fault.domain(), describe(fault))).collect();
   if !faults.is_empty() {
-    println!("faults: {}", faults.join("; "));
+    outln!("faults: {}", faults.join("; "))?;
   }
+  Ok(())
 }
 
 /// Prints the recipe compiled against `host` and returns its findings.
@@ -176,11 +177,8 @@ fn print_recipe(profile: &Profile, host: &needy_core::recipe::HostInfo) -> Resul
   let compiled = needy_core::recipe::compile(&recipe, host, &PerRun::at(1, 0));
   let other = needy_core::recipe::compile(&recipe, host, &PerRun::at(2, 86_400_000 + 3_661_000));
   let hostname = per_run(compiled.hostname.as_deref(), other.hostname.as_deref()).unwrap_or("not set");
-  println!(
-    "recipe: {} vCPU, {} MiB, hostname {hostname}, uptime offset {} s",
-    compiled.vcpus, compiled.mem_mib, compiled.uptime_offset_secs
-  );
-  print_identity(&compiled.identity, &other.identity);
+  outln!("recipe: {} vCPU, {} MiB, hostname {hostname}, uptime offset {} s", compiled.vcpus, compiled.mem_mib, compiled.uptime_offset_secs)?;
+  print_identity(&compiled.identity, &other.identity)?;
   Ok(
     compiled
       .findings
@@ -197,7 +195,7 @@ fn print_recipe(profile: &Profile, host: &needy_core::recipe::HostInfo) -> Resul
 /// finding is an error.
 fn finish(profile: &Profile, findings: Vec<Finding>, commands: &[String]) -> Result<i32> {
   for finding in &findings {
-    println!("{finding}");
+    outln!("{finding}")?;
   }
   let code = if findings.iter().any(|f| f.severity == Severity::Error) {
     1
@@ -237,8 +235,8 @@ fn finish(profile: &Profile, findings: Vec<Finding>, commands: &[String]) -> Res
       faults,
     });
   }
-  println!();
-  output::print_table(&rows);
+  outln!()?;
+  output::print_table(&rows)?;
   Ok(code)
 }
 
@@ -254,12 +252,12 @@ fn per_run<'a>(value: Option<&'a str>, other: Option<&str>) -> Option<&'a str> {
 
 /// The machine a recipe presents through the hypervisor, one line per part;
 /// `other` is the same recipe compiled with another seed.
-fn print_identity(identity: &VmIdentity, other: &VmIdentity) {
+fn print_identity(identity: &VmIdentity, other: &VmIdentity) -> std::io::Result<()> {
   if let Some(brand) = per_run(identity.cpu_brand.as_deref(), other.cpu_brand.as_deref()) {
-    println!("  cpu brand: {brand}");
+    outln!("  cpu brand: {brand}")?;
   }
   if identity.hide_hypervisor {
-    println!("  hypervisor: hidden");
+    outln!("  hypervisor: hidden")?;
   }
   if let Some(smbios) = &identity.smbios {
     let fields = |smbios: &Smbios| {
@@ -284,14 +282,15 @@ fn print_identity(identity: &VmIdentity, other: &VmIdentity) {
       .filter_map(|((k, v), (_, o))| per_run(v.as_deref(), o.as_deref()).map(|v| format!("{k}={v}")))
       .collect::<Vec<_>>()
       .join(", ");
-    println!("  smbios: {text}");
+    outln!("  smbios: {text}")?;
   }
   if let Some(id) = identity.pci_host_bridge {
-    println!("  pci host bridge: {id}");
+    outln!("  pci host bridge: {id}")?;
   }
   if let Some(id) = identity.pci_isa_bridge {
-    println!("  pci isa bridge: {id}");
+    outln!("  pci isa bridge: {id}")?;
   }
+  Ok(())
 }
 
 /// A fault's effect and when it fires, for example `exit 7, times=3` or

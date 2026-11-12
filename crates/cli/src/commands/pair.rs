@@ -20,7 +20,7 @@ use serde::Serialize;
 use super::runner::{ago, time};
 use crate::cli::Context;
 use crate::credentials::{self, Credential};
-use crate::output::{self, OutputFormat, Row};
+use crate::output::{self, OutputFormat, Row, outln};
 
 /// `needy pair CODE` pairs this machine; `needy pair create|ls|revoke`
 /// manage pairing codes and paired clients.
@@ -129,7 +129,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       if let Some(old) = &created.replaces {
         output::message(format_args!("notice: pairing with this code will replace client {} ({}) and revoke its token", old.name, old.id));
       }
-      println!("{}", created.code);
+      outln!("{}", created.code)?;
     }
     (None, Some(code)) => {
       // The pairing code authenticates the request; a stored or

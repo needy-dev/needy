@@ -3,8 +3,36 @@
 
 mod table;
 
+use std::io::Write as _;
+
 use anyhow::Result;
 use serde::Serialize;
+
+/// As `print!`, but returns the write's error instead of panicking, so a
+/// closed stdout ends the command through [`crate::cli::run`].
+macro_rules! out {
+  ($($arg:tt)*) => {
+    $crate::output::write(format_args!($($arg)*))
+  };
+}
+
+/// As `println!`, but returns the write's error instead of panicking.
+macro_rules! outln {
+  () => {
+    $crate::output::write(format_args!("\n"))
+  };
+  ($($arg:tt)*) => {
+    $crate::output::write(format_args!("{}\n", format_args!($($arg)*)))
+  };
+}
+
+pub(crate) use {out, outln};
+
+/// Writes to stdout. Every command prints through here (`out!`, `outln!`),
+/// never with `print!`, which panics when the reader is gone.
+pub fn write(args: std::fmt::Arguments) -> std::io::Result<()> {
+  std::io::stdout().lock().write_fmt(args)
+}
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum OutputFormat {
@@ -22,15 +50,15 @@ pub trait Row: Serialize {
 /// Prints rows as a table, or as a JSON array of objects.
 pub fn print<R: Row>(format: OutputFormat, rows: &[R]) -> Result<()> {
   match format {
-    OutputFormat::Table => print!("{}", table::render(R::HEADER, rows.iter().map(Row::cells))),
-    OutputFormat::Json => println!("{}", serde_json::to_string_pretty(rows)?),
+    OutputFormat::Table => out!("{}", table::render(R::HEADER, rows.iter().map(Row::cells)))?,
+    OutputFormat::Json => outln!("{}", serde_json::to_string_pretty(rows)?)?,
   }
   Ok(())
 }
 
 /// Prints a table of rows without a JSON form, for sections of a text report.
-pub fn print_table<R: Row>(rows: &[R]) {
-  print!("{}", table::render(R::HEADER, rows.iter().map(Row::cells)));
+pub fn print_table<R: Row>(rows: &[R]) -> std::io::Result<()> {
+  out!("{}", table::render(R::HEADER, rows.iter().map(Row::cells)))
 }
 
 /// Prints a message for people on stderr, such as a failure the command

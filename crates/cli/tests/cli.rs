@@ -543,6 +543,42 @@ fn run_ls_prints_a_table() {
   assert_eq!(row, [run.as_str(), "-", "running", "starting", "-", "here=native"]);
 }
 
+/// Runs `needy` with stdout on a pipe whose reader is already gone, as
+/// `needy ... | grep -q` leaves it once grep has its match.
+fn run_into_a_closed_pipe(home: &Home, args: &[&str]) -> Output {
+  let (reader, writer) = std::io::pipe().unwrap();
+  drop(reader);
+  home.needy().args(args).stdout(writer).stderr(Stdio::piped()).output().unwrap()
+}
+
+// ROOT CAUSE:
+//
+// If stdout's reader went away, as with `needy run ls | grep -q ...`, needy
+// panicked with "failed printing to stdout: Broken pipe" because `print!`
+// panics on a write error and Rust ignores SIGPIPE.
+//
+// Before the fix, the command printed a panic message and exited 101.
+// The fix keeps every command quiet on a closed stdout: it exits 141
+// (128 + SIGPIPE), as a shell reports a program SIGPIPE ended.
+#[test]
+fn a_closed_stdout_ends_a_command_quietly_with_141() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  create_run(&home, NATIVE_PROFILE);
+  let profile = home.write("checked.yaml", NATIVE_PROFILE);
+
+  for args in [
+    &["run", "ls"][..],
+    &["run", "ls", "--output", "json"],
+    &["profile", "check", "--local", profile.to_str().unwrap()],
+  ] {
+    let output = run_into_a_closed_pipe(&home, args);
+
+    assert_eq!(output.status.code(), Some(141), "{args:?}: {}", stderr(&output));
+    assert_eq!(stderr(&output), "", "{args:?}");
+  }
+}
+
 // The owner's 2026-11-10 trial: a run that ended gave its executors
 // back and `run ls` showed an empty EXECUTORS cell, and nothing said
 // how the run ended.

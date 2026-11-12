@@ -1,5 +1,9 @@
 //! The `needy` binary: CLI, daemon, executor, and the actor guest supervisor and proxy.
 
+// Commands print with `output::out!` and `outln!`, whose errors end a command
+// quietly when stdout is closed; `print!` would panic instead.
+#![warn(clippy::print_stdout)]
+
 mod cli;
 mod commands;
 mod credentials;

@@ -17,7 +17,7 @@ use needy_core_executor::{relay, signals};
 use serde_json::{Value, json};
 
 use crate::cli::Context;
-use crate::output;
+use crate::output::{self, outln};
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Output {
@@ -217,7 +217,7 @@ async fn detached(stream: &mut ExecStream, format: Output) -> Result<i32> {
     match event {
       Event::Started(started) => {
         match format {
-          Output::Human => println!("{}", started.process_id),
+          Output::Human => outln!("{}", started.process_id)?,
           Output::Json => line(&json!({"process_id": started.process_id, "executor": started.executor}))?,
           Output::Ndjson => line(&started_event(&started))?,
         }
@@ -325,7 +325,7 @@ fn chunk(kind: &str, bytes: &[u8]) -> Value {
 }
 
 fn line(value: &Value) -> Result<()> {
-  println!("{}", serde_json::to_string(value)?);
+  outln!("{}", serde_json::to_string(value)?)?;
   Ok(())
 }
 

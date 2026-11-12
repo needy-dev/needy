@@ -15,6 +15,7 @@ use needy_core::event::{Event, Recorded};
 use needy_core::report;
 
 use crate::cli::Context;
+use crate::output::out;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Level {
@@ -141,7 +142,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let text = report::render(&run, &events, level, format);
   match args.file {
     Some(path) => std::fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?,
-    None => print!("{text}"),
+    None => out!("{text}")?,
   }
   Ok(0)
 }

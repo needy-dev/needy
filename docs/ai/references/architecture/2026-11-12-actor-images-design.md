@@ -1128,9 +1128,14 @@ Found in step 4:
 - **`linux-container` on a Mac**: detection takes any answering engine, so
   `needy image pull` on a Mac with OrbStack also pulls the container base
   into Docker, which a container actor cannot use there (`TODO(container-runtime)`).
-- **A broken pipe panics the CLI**: `needy run ls | grep -q ...` ended with
-  `failed printing to stdout: Broken pipe` (Rust's `println!`); output
-  commands could stop quietly on `EPIPE`.
+- **A broken pipe panics the CLI**, done (2026-11-13): `needy run ls |
+  grep -q ...` ended with `failed printing to stdout: Broken pipe` (Rust's
+  `println!`). Commands now print through `output::out!` and `outln!`, which
+  return the write's error, and `cli::run` ends a command whose error is a
+  local `BrokenPipe` quietly with 141 (128 + SIGPIPE, what a shell reports
+  for a program SIGPIPE ended). `#![warn(clippy::print_stdout)]` keeps
+  `print!` out of the CLI. Test:
+  `a_closed_stdout_ends_a_command_quietly_with_141`.
 - **Apple's `container` and a plain-HTTP registry**: the driver's `container
   image pull` passes no `--scheme`, so a local registry was tested through
   the engine only.

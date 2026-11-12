@@ -14,7 +14,7 @@ use needy_core::types::{Capabilities, RunnerRole};
 use serde::Serialize;
 
 use crate::cli::Context;
-use crate::output::{self, OutputFormat, Row};
+use crate::output::{self, OutputFormat, Row, outln};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -331,7 +331,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let created = runners.create_join_token(request).await.map_err(fail)?.into_inner();
       let id = created.join_token.map(|t| t.id).unwrap_or_default();
       output::message(format_args!("join token {id}; it is not shown again"));
-      println!("{}", created.token);
+      outln!("{}", created.token)?;
     }
     Command::Token {
       command: TokenCommand::Ls { output: format },

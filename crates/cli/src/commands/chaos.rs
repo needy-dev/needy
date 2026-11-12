@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::cli::Context;
-use crate::output::{self, OutputFormat, Row};
+use crate::output::{self, OutputFormat, Row, outln};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -140,7 +140,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       for warning in &added.warnings {
         output::message(format!("warning: {warning}"));
       }
-      println!("added {} to run {}", args.name, added.run_id);
+      outln!("added {} to run {}", args.name, added.run_id)?;
     }
     Command::Ls(args) => {
       let run = crate::runs::select(&connection, args.run.run).await?;
@@ -160,7 +160,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .await
         .map_err(needy_api_client::Error::from)?
         .into_inner();
-      println!("removed {} from run {}", args.name, removed.run_id);
+      outln!("removed {} from run {}", args.name, removed.run_id)?;
     }
   }
   Ok(0)
