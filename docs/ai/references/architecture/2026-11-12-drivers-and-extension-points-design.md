@@ -1,6 +1,6 @@
 # Drivers and extension points
 
-Status: accepted by the owner (2026-11-12); slices 1 to 4 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3) and [Slice 4](#slice-4-one-engine)), slices 5 and 6 pending. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
+Status: accepted by the owner (2026-11-12); slices 1 to 4 and 6 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3), [Slice 4](#slice-4-one-engine) and [Slice 6: lifecycles](#slice-6-lifecycles)), slice 5 pending. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
 
 ## Why
 
@@ -263,6 +263,8 @@ doc, tests). The others do not yet:
 | Instance (a run's hold on an actor or executor instance) | running; released, ended, lost | written directly by `daemon/reconcile.rs` and the pool | no transition table |
 | Process | running; exited, ended, lost | written directly by `daemon/reconcile.rs` and the relay | no transition table |
 | Runner | online, offline, removed | `daemon/runners.rs` | no transition table |
+
+(The table is the state before slice 6; see [Slice 6: lifecycles](#slice-6-lifecycles) for where each lives now.)
 | Join token | valid, expired, used up, revoked | computed from its row | derived, not stored: correct as is |
 
 Proposal:
@@ -505,6 +507,56 @@ directory, on 2026-11-12:
   `reconcile.rs` through `end_leftover_actor` and `end_leftover_executor`,
   which return the state to write.
 
+### Slice 6: lifecycles
+
+- Instance, process and runner states live in `store::lifecycle`, each with
+  `allowed(from, to)`, the diagrams in its module doc, and tests
+  (`lifecycle_test.rs`). The store writes them only through
+  `start_instance` / `advance_instance`, `start_process` /
+  `advance_process` and `remove`; `save_instance`, `set_instance_state`,
+  `save_process` and `end_process` are gone. A start of a row that exists
+  (an upsert before) is refused too. A refusal is `store::Error::Refused`
+  ("instance R:executor:mac is ended; it cannot become lost"); the daemon's
+  `advance_instance` and `advance_process` (in `reconcile.rs`, the
+  ownership module) log it at debug, as a run's refused transitions are:
+  it is a race of two enders, and the first end stays. Before, the last
+  writer won: a relay's `exited` over a kill's `ended`, or the report
+  wait's `lost` over a runner's `ended`.
+- Every end state is terminal, as a run's is. `lost` is not revisited by a
+  runner that reports later (a `NOTICE` on the variant): the runner is told
+  to end the run's processes, but whether the instance ran meanwhile stays
+  unknown.
+- The runner's stored lifecycle is `joined -> removed`
+  (`RunnerState`); online and offline are derived from the last heartbeat
+  in `runners.rs`, like a join token's states, since storing them would need
+  a writer on a timer. Removing a removed runner is refused
+  ("runner mac is removed; it cannot become removed", `FailedPrecondition`
+  through `ControlError::Failed`) instead of `no runner mac`; heartbeats,
+  connects and rotations of a removed runner still get `no runner`.
+- The actor's lifecycle is `actor::state` (`daemon/actor/state.rs`, beside
+  `actor.rs`, which stays put): `None` until `actor::start`, then
+  `starting -> configured -> ready -> exited`, any started state may exit,
+  `exited` is terminal. `core::types::ActorState` is the enum; `RunInfo`
+  and proto `Run.actor_state` carry it, `run ls` shows an `ACTOR` column.
+  `state.db` does not keep it (a `NOTICE` in `stored_info`): an ended run's
+  actor exited, and a reconciled one's was lost.
+- Ready is defined once, in `actor::answers`: the process service answered
+  a health call (`Unimplemented` counts), on every transport. The hybrid
+  vsock path asks too, though Firecracker's `OK` already means the guest
+  listens. `actor::terminal` advances to `ready` and emits `actor.ready` on
+  its first answer; for a run with a terminal the daemon probes right after
+  start (`await_ready`) and keeps the connection in `run.terminal`, which
+  the first attach reuses. A driving program without a terminal has no
+  process service, so its actor goes from `configured` to `exited`; giving
+  every guest a process service is a candidate below.
+- Trace schema 7 adds `actor.ready` (empty payload). `starting`,
+  `configured` and `exited` are recorded by the existing `actor.start`,
+  `actor.config` and `actor.vm.exit` (not on a stop, which `run.stop`
+  records). Only version 7 is read, as before.
+- The executor process host's own states (`core-executor/src/process`) are
+  a `watch` of an optional exit plus an expiry time: one writer, two states,
+  no table needed. Unchanged.
+
 ## Candidate next slices
 
 - The guest dials the guest API at a literal `vsock://2:7000`
@@ -522,3 +574,11 @@ directory, on 2026-11-12:
 - Reconcile by label: `engine::labels` makes every needy container findable
   by run and role, so a restarted daemon could end containers whose
   `state.db` rows are gone, which today stay running.
+- Every guest could serve its process service, with or without a terminal,
+  so `ready` holds for every actor and `needy exec --run` could reach the
+  actor itself.
+- The report could show how long an actor took to become ready
+  (`actor.start` to `actor.ready`), the boot time a user waits for.
+- `state.db` could keep the actor state of ended runs, if `run ls` should
+  show where an actor stopped (for example a run that failed while
+  `starting`).

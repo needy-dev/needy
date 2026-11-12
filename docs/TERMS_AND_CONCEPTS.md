@@ -305,7 +305,35 @@ run is `creating` or `running`; `run attach`, `run stop` and `run logs`
 without a run take the only live one. `exec`, `ps` and `fs cp` without a
 run stay outside any run.
 
+A live run's **actor state** is `starting` (its driver starts it, its guest
+boots), `configured` (its guest fetched the run's configuration), `ready`
+(its process service answered a request, so `run attach` works) and
+`exited`; `run ls` shows it in the `ACTOR` column, and `-` for a run that
+ended. Ready means the same for every driver: a socket that accepts is not
+enough. Only a driving program on a terminal has a process service, so an
+actor without one goes from `configured` to `exited`. The trace records
+`actor.start`, `actor.config`, `actor.ready` and `actor.vm.exit`.
+
 *Avoid*: session (the earlier name), rollout.
+
+### Lifecycle
+
+Every long-lived object has one: an enum of states, a table of the
+transitions it allows, and one owner that advances it and refuses the rest.
+The first end state reached stays.
+
+| Object | States | Owner |
+| --- | --- | --- |
+| Run | `creating`, `running`, `stopping`; `stopped`, `finished`, `failed` | the daemon's `run::state` |
+| Actor | `starting`, `configured`, `ready`; `exited` | the daemon's `actor::state` |
+| Instance (a run's hold on one) | `running`; `released`, `ended`, `lost` | `state.db` (`store::lifecycle`) |
+| Process | `running`; `exited`, `ended`, `lost` | `state.db` (`store::lifecycle`) |
+| Runner | `joined`; `removed` (shown `online` or `offline` while joined) | `state.db` (`store::lifecycle`) |
+
+A runner's and a join token's shown states (`online`, `offline`; `valid`,
+`expired`, `used up`, `revoked`) are derived from their rows and a clock,
+not stored. See the
+[drivers design](ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md#lifecycles).
 
 ### Group
 
