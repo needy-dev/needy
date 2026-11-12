@@ -35,7 +35,9 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
   /// Run a daemon.
-  Daemon(daemon::Args),
+  // Boxed: its options are the largest by far (clippy::large_enum_variant
+  // on Windows, where paths are larger).
+  Daemon(Box<daemon::Args>),
   /// Run a command through placement.
   Exec(exec::Args),
   /// List processes.
@@ -176,7 +178,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
   let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
   let code = runtime.block_on(async move {
     match cli.command {
-      Command::Daemon(args) => daemon::run(args, &ctx).await,
+      Command::Daemon(args) => daemon::run(*args, &ctx).await,
       Command::Exec(args) => exec::run(args, &ctx).await,
       Command::Ps(args) => ps::run(args, &ctx).await,
       Command::Attach(args) => attach::run(args, &ctx).await,

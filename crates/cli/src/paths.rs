@@ -63,7 +63,9 @@ impl Paths {
     self.data.join("images").join("default")
   }
 
-  /// The guest disks the VM drivers make from the guest needy.
+  /// The guest disks the VM drivers make from the guest needy (the control
+  /// daemon, Unix only).
+  #[cfg(unix)]
   pub fn guest_disks(&self) -> PathBuf {
     self.data.join("guest")
   }
