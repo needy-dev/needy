@@ -30,6 +30,18 @@ Related notes:
 | G9 | The client's `TERM` is forwarded even when the executor lacks the terminfo entry; `COLORTERM` is not forwarded | `relay`, exec start | *fix* | fixed: `xterm-256color` when the executor has no terminfo entry, recorded as `term_fallback` in `exec.start`; `COLORTERM` forwarded |
 | G10 | The actor's driving program runs with stdin `/dev/null` and output to the serial console: it cannot be interactive | `core-actor` `guest/init/driver.rs` | design | implemented: `run create -t/-it`, `run attach`; guest PTY and process service over vsock, independent console reader |
 
+TUI fidelity (2026-11-13; the matrix and its evidence are in
+[TUI fidelity: evidence](2026-11-13-tui-fidelity-evidence.md)):
+
+| ID | Gap | Where | Kind | Status |
+| --- | --- | --- | --- | --- |
+| G11 | The driving program had no `COLORTERM`, so pi, opencode and Claude Code drew in 256 colors | `core-actor` `guest/init/program.rs` | *fix* | fixed: `COLORTERM=truecolor`, as herdr sets for its panes |
+| G12 | Detaching (or a killed client) left modes on in the shell: modifyOtherKeys, color scheme reports (2031), cursor shape and color, autowrap off, SGR pixel and X10 mouse | `relay/terminal.rs` restore | *fix* | fixed: the restore turns them off too, as herdr's does |
+| G13 | A redraw did not carry modifyOtherKeys, color scheme reports, autowrap off or the cursor color | `process/screen.rs` | *fix* | fixed: the model tracks them, the reset clears them and the redraw sets them again |
+| G14 | A TUI started with no client terminal attached waits for its DA1 answer until its own timeout | `process/screen.rs` | *fix* | fixed: the executor answers DA1 and DSR 5 from the model, as it answers DSR 6 |
+| G15 | A TUI started with no client terminal attached (`run create -t`, `exec -d -t`) never learns the client's features (kitty keyboard, colors, synchronized output) | `process/screen.rs` | design | not fixed: needy passes input on as it is, so it cannot claim a terminal's features for a client that attaches later (herdr can, it encodes keys again per pane); `NOTICE` at the answers |
+| G16 | ctrl-z in a TUI that is the terminal's program leaves it suspended: its SIGTSTP to its orphaned process group is discarded and nobody sends SIGCONT | `process/pty.rs` | design | not fixed: needs a job-control parent in the terminal's session; `TODO(job-control)` |
+
 Smaller: window sizes are cast to `u16` without clamping; the PTY input queue is
 unbounded, so a large paste grows the executor's memory.
 
@@ -66,7 +78,13 @@ the title or the cursor shape; a small scanner records those.
   executor from the model (a detached process, or one only read-only viewers
   watch; also a query a departing client left unanswered). ConPTY asks once
   at start and reads no input until answered, so `exec -d -t` on Windows
-  depends on this. Two writable clients still both answer.
+  depends on this. Two writable clients still both answer. The executor
+  answers the status (`CSI 5 n`) and the primary device attributes
+  (`CSI c`, a VT220 with ANSI color) the same way; queries about the
+  client's own terminal (kitty keyboard flags, OSC 10/11, DECRQM,
+  XTVERSION) stay the client's to answer (G14, G15).
+- The program's environment on an actor has `COLORTERM=truecolor` beside
+  `TERM=xterm-256color` (G11).
 
 ### A lagging terminal viewer
 
