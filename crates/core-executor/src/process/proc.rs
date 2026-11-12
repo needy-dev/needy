@@ -65,10 +65,10 @@ struct Seats {
   /// The size the terminal has now; `None` for pipes.
   window: Option<(u16, u16)>,
   clients: Vec<Seat>,
-  /// The program asked for the cursor position while a client terminal
-  /// could answer, and no client typed since. If the last such client
-  /// leaves first, the executor answers.
-  unanswered: bool,
+  /// The answers to queries the program sent while a client terminal could
+  /// answer them, if no client typed since: the executor's own answers,
+  /// which it sends if the last such client leaves first.
+  unanswered: Vec<u8>,
 }
 
 struct Seat {
@@ -128,7 +128,7 @@ impl Client {
       if matches!(input, Input::Stdin(_)) {
         seats.clock = clock;
         // A terminal answers a query at once, before anything typed after.
-        seats.unanswered = false;
+        seats.unanswered.clear();
       }
       seats.resize()
     };
@@ -143,21 +143,22 @@ impl Client {
 
 impl Drop for Client {
   fn drop(&mut self) {
-    let (resize, answer) = {
+    let (resize, answers) = {
       let mut seats = self.proc.lock_seats();
       seats.clients.retain(|c| c.id != self.id);
-      let answer = seats.unanswered && !seats.answering();
-      if answer {
-        seats.unanswered = false;
-      }
-      (seats.resize(), answer)
+      let answers = if seats.answering() {
+        Vec::new()
+      } else {
+        std::mem::take(&mut seats.unanswered)
+      };
+      (seats.resize(), answers)
     };
     if let Some((rows, cols)) = resize {
       self.proc.send(Input::Resize(rows, cols));
     }
-    // The program still waits for the answer this client did not send.
-    if answer && let Some(report) = lock(&self.proc.fanout).screen.as_ref().map(Screen::cursor_report) {
-      self.proc.send(Input::Stdin(report));
+    // The program still waits for the answers this client did not send.
+    if !answers.is_empty() {
+      self.proc.send(Input::Stdin(answers));
     }
   }
 }
@@ -322,7 +323,7 @@ impl Proc {
         clock: 0,
         window: spec.tty.filter(|_| tty),
         clients: Vec::new(),
-        unanswered: false,
+        unanswered: Vec::new(),
       }),
     });
     let ends = Ends {
@@ -480,11 +481,11 @@ impl Proc {
     }
   }
 
-  /// Answers the program's cursor position queries, `answers`, unless a
-  /// client terminal that can type is attached: that terminal shows the
-  /// program and answers them itself. The executor answers only for a
-  /// program nobody watches, or one only read-only viewers watch, whose
-  /// input is dropped.
+  /// Answers the program's terminal queries the model can answer, `answers`
+  /// (see [`Screen::process`]), unless a client terminal that can type is
+  /// attached: that terminal shows the program and answers them itself. The
+  /// executor answers only for a program nobody watches, or one only
+  /// read-only viewers watch, whose input is dropped.
   // NOTICE: the executor never answers alongside a client terminal, and it
   // does not filter the terminal's answer out of the client's input instead:
   // an answer cannot be told from a key (`CSI 1 ; 2 R` is also Shift+F3,
@@ -508,7 +509,7 @@ impl Proc {
     {
       let mut seats = self.lock_seats();
       if seats.answering() {
-        seats.unanswered = true;
+        seats.unanswered.extend_from_slice(&answers);
         return;
       }
     }

@@ -500,6 +500,39 @@ async fn a_detached_program_that_asks_for_the_cursor_position_gets_an_answer() {
   assert_eq!(exit_code(&executor, &process).await, Some(0));
 }
 
+/// Asks for the primary device attributes (DA1), as TUIs do last among their
+/// startup queries, and waits for the answer; exits 0 when it is a VT220's.
+const ASKS_FOR_THE_ATTRIBUTES: &str = r#"stty -icanon -echo min 1 time 0
+printf '\033[c'
+reply=$(dd bs=1 count=9 2>/dev/null)
+if [ "$reply" = "$(printf '\033[?62;22c')" ]; then echo answered; exit 0; fi
+echo "wrong answer"; exit 1"#;
+
+// A TUI that starts with no client terminal attached (`run create -t`) gets
+// its DA1 answered, so it draws without waiting for its own timeout; see
+// `primary_device_attributes_are_answered_and_the_client_terminals_features_are_not`.
+#[tokio::test]
+async fn a_detached_program_that_asks_for_its_terminals_attributes_gets_an_answer() {
+  let executor = executor().await;
+  let process = start_detached_tty(&executor, ASKS_FOR_THE_ATTRIBUTES).await;
+
+  assert_eq!(exit_code(&executor, &process).await, Some(0));
+}
+
+// A query a departing client left unanswered is answered as it was asked,
+// not as a cursor position report.
+#[tokio::test]
+async fn an_attributes_query_a_departing_client_left_unanswered_is_answered() {
+  let executor = executor().await;
+  let process = start_detached_tty(&executor, &format!("read go\n{ASKS_FOR_THE_ATTRIBUTES}")).await;
+  let mut viewer = ExecStream::attach(&executor.client, attach(&process, Some((24, 80)), false)).await.unwrap();
+  viewer.input().stdin(b"go\n".to_vec()).await.unwrap();
+  read_until(&mut viewer, "\x1b[c").await;
+  drop(viewer);
+
+  assert_eq!(exit_code(&executor, &process).await, Some(0));
+}
+
 // A client terminal that is attached answers the query itself; the executor
 // does not answer as well, so the program reads one answer, not two.
 #[tokio::test]

@@ -59,6 +59,19 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   if let Some(fallback) = &term_fallback {
     command.env("TERM", &fallback.used);
   }
+  // TODO(job-control): the child leads its own session, and its parent (this
+  // host) is in another one, so its process group is orphaned and the
+  // kernel discards the SIGTSTP a TUI sends its group to suspend itself on
+  // ctrl-z (pi, opencode, Claude Code, Codex): the TUI leaves its screen and
+  // waits for a SIGCONT nobody sends. With no shell to return to, the
+  // useful behavior is tmux's, which continues a stopped pane process at
+  // once; that needs a job-control parent inside the terminal's session, a
+  // change of the process model left for an owner-approved slice. See the
+  // TUI fidelity evidence (`docs/ai/references/cli/2026-11-13-tui-fidelity-evidence.md`).
+  // Source: https://github.com/torvalds/linux/blob/v6.12/kernel/signal.c#L2847-L2864
+  // ("The job control signals do nothing in an orphaned pgrp") and
+  // https://github.com/tmux/tmux/blob/3.5a/server.c#L460-L524
+  // (`server_child_stopped`: `killpg(pid, SIGCONT)`).
   let mut child = pair.slave.spawn_command(command).map_err(|e| Error::StartTerminal {
     program: program.clone(),
     message: format!("{e:#}"),

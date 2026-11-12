@@ -50,6 +50,43 @@ fn redraw_restores_focus_keyboard_flags_and_title() {
   assert!(redraw.ends_with("\x1b[=3;1u\x1b]2;editor\x07"), "{redraw:?}");
 }
 
+// ROOT CAUSE:
+//
+// If a TUI turned on xterm's modifyOtherKeys or color scheme reports
+// (Claude Code), turned autowrap off (pi, herdr) or set the cursor color
+// (opencode), a client that attached later did not get it, because the
+// model tracked none of them, and a redraw for a program that had undone
+// them left the client's own setting as it was.
+//
+// Before the fix, the redraws of these TUIs' screens carried none of these
+// (the TUI matrix's `attach` and `viewer` paths against `create`).
+// The fix tracks them, resets them first and sets them again when the
+// program has them set.
+#[test]
+fn redraw_restores_the_modes_tuis_set_beyond_input_modes() {
+  let set = [
+    "\x1b[>4;2m",
+    "\x1b[?2031h",
+    "\x1b[?7l",
+    "\x1b]12;#eeeeee\x07",
+  ];
+  let mut screen = Screen::new((5, 20));
+  let off = String::from_utf8(screen.redraw()).unwrap();
+  assert!(off.starts_with(RESET), "{off:?}");
+  for reset in ["\x1b[>4m", "\x1b[?2031l", "\x1b[?7h", "\x1b]112\x07"] {
+    assert!(RESET.contains(reset), "{reset:?}");
+  }
+  assert!(set.iter().all(|s| !off.contains(s)), "{off:?}");
+
+  screen.process(set.concat().as_bytes());
+  let on = String::from_utf8(screen.redraw()).unwrap();
+  assert!(set.iter().all(|s| on.contains(s)), "{on:?}");
+
+  screen.process(b"\x1b[>4m\x1b[?2031l\x1b[?7h\x1b]112\x07");
+  let undone = String::from_utf8(screen.redraw()).unwrap();
+  assert!(set.iter().all(|s| !undone.contains(s)), "{undone:?}");
+}
+
 #[test]
 fn keyboard_flags_belong_to_their_screen() {
   let mut screen = Screen::new((5, 20));
@@ -61,12 +98,31 @@ fn keyboard_flags_belong_to_their_screen() {
 #[test]
 fn a_cursor_position_query_is_answered_with_the_cursor_where_it_was_asked() {
   let mut screen = Screen::new((24, 80));
-  // Two queries in one chunk, the cursor moved between them; other
-  // reports (DSR 5) are not answered.
+  // Two queries in one chunk, the cursor moved between them, and a status
+  // query (DSR 5) between them.
   let answers = screen.process(b"\x1b[3;5H\x1b[6n\x1b[5n\x1b[10;20Hx\x1b[6n");
-  assert_eq!(answers, b"\x1b[3;5R\x1b[10;21R");
+  assert_eq!(answers, b"\x1b[3;5R\x1b[0n\x1b[10;21R");
   assert!(screen.process(b"more").is_empty());
-  assert_eq!(screen.cursor_report(), b"\x1b[10;25R");
+}
+
+// ROOT CAUSE:
+//
+// If a TUI started while no client terminal was attached (`run create -t`),
+// it waited for the answer to its primary device attributes query (DA1)
+// until its own timeout, because the executor answered only the cursor
+// position.
+//
+// Before the fix, Codex drew its first screen later without answers than
+// with them (the TUI matrix's `background` path).
+// The fix answers DA1 as libghostty does by default, and leaves the
+// queries about the client's terminal unanswered.
+#[test]
+fn primary_device_attributes_are_answered_and_the_client_terminals_features_are_not() {
+  let mut screen = Screen::new((24, 80));
+  // Kitty keyboard flags, the background color, synchronized output, the
+  // terminal's version and DA2, then DA1 in both its forms.
+  let answers = screen.process(b"\x1b[?u\x1b]11;?\x07\x1b[?2026$p\x1b[>q\x1b[>c\x1b[c\x1b[0c");
+  assert_eq!(answers, b"\x1b[?62;22c\x1b[?62;22c");
 }
 
 #[test]
