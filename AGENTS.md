@@ -30,7 +30,8 @@ Dependencies point downward; a crate never depends on one above it.
   console; everything else is the host side, next to the actor. `driver` is
   the actor `Driver` trait (start, wait, stop, and the guest, gateway and
   terminal channels the daemon serves or dials) with its `Running` actor and
-  the table of drivers: `linux_firecracker` (the Firecracker configuration
+  the table of drivers, the one place that picks a driver by name (`new`,
+  `detect`, `reconcile`, `facets`): `linux_firecracker` (the Firecracker configuration
   from a compiled recipe in `config`, the KVM check and host CPU probe in
   `kvm`, the Firecracker process), `linux_container` (a container through a
   Docker-compatible engine), `macos_vz` (Virtualization.framework VMs on

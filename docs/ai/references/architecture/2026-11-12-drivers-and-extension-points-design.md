@@ -1,6 +1,6 @@
 # Drivers and extension points
 
-Status: accepted by the owner (2026-11-12); being implemented in the slices below. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
+Status: accepted by the owner (2026-11-12); slices 1 to 3 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3)), slices 4 to 6 pending. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
 
 ## Why
 
@@ -422,6 +422,22 @@ Slices 4 to 6 are independent of each other once 1 to 3 have landed.
   the config enums, and `api-server` depends on `needy-config` for them.
   `schedule::Need` holds them too, so `Need::actor` and `Need::executor`, the
   conversions, are gone.
+
+### Verification of slices 1 to 3
+
+`make check` and `make test` pass after each slice on an Apple silicon Mac
+and on the Linux KVM host. End to end, from `7c20af5`, with the images
+built from that tree (`needy build`, `--linux-container`, `--executor`,
+`--macos-apple-container`) and each control daemon in a scratch state
+directory, on 2026-11-12:
+
+| Driver | Host | Profile | Result |
+| --- | --- | --- | --- |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` | Pass: GCE identity (`systemd-detect-virt` says `google`), `python3` routed to a `linux-container` executor over the sshfs workspace in both directions, `routed exit=7`, report `Actor linux-firecracker` |
+| `linux-container` (`runc`) | Linux KVM host | `examples/linux-container` without its workspace mount | Pass: recipe hostname, CPU brand and DMI, 2 CPUs in `/proc/cpuinfo`, `python3` routed, report `Actor linux-container (runc)` with the shim note, no container left |
+| `linux-container` (`runc`) | Linux KVM host | `examples/linux-container` | Not run to the end: the host-side sshfs mount needs `user_allow_other` in `/etc/fuse.conf` for a daemon that is not root, which this host has off (no sudo); the run failed with `cannot mount /home/agent/workspace/ on the host: sshfs did not mount within 10 s` and released its executor |
+| `macos-vz` | Apple silicon Mac | `examples/macos-vz` | Pass: arm64 guest, sensors, `python3` and `/usr/bin/arch` by absolute path routed to the Mac, workspace both ways |
+| `macos-apple-container` | Apple silicon Mac | `examples/macos-apple-container` | Pass: workspace both ways, `python3` routed, gateway allows `example.com` and denies `example.org` |
 
 ### For slices 4 to 6
 
