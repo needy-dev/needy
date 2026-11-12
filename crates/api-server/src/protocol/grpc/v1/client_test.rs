@@ -1,13 +1,13 @@
 use needy_api_client::Client;
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, CreatePairingCodeRequest, CreateRunRequest, ExecRequest, ExecStart, HeartbeatRequest, KillProcessRequest,
-  ListClientsRequest, ListJoinTokensRequest, ListRunnersRequest, ListRunsRequest, Origin, PairRequest, RemoveRunnerRequest,
-  RevokeClientRequest, RevokeJoinTokenRequest, RotateRunnerRequest, StopRunRequest, exec_request,
+  ListClientsRequest, ListRunsRequest, Origin, PairRequest, RemoveRunnerRequest, RevokeClientRequest, RevokeJoinTokenRequest,
+  RotateRunnerRequest, StopRunRequest, exec_request,
 };
 use tonic::Code;
 
 use crate::control::Caller;
-use crate::testing::{CLIENT_TOKEN, PAIRING_CODE, REVOKED_CLIENT_TOKEN, serve, serve_tcp, serve_with};
+use crate::testing::{CLIENT_TOKEN, PAIRING_CODE, REVOKED_CLIENT_TOKEN, serve, serve_with};
 
 const CONTROL_TOKEN: &str = "control-secret";
 
@@ -227,6 +227,10 @@ async fn an_actor_cannot_manage_clients() {
 #[cfg(unix)]
 #[tokio::test]
 async fn join_tokens_and_clients_are_listed_only_by_the_operator_on_the_unix_socket() {
+  use needy_api_proto::v1::{ListJoinTokensRequest, ListRunnersRequest};
+
+  use crate::testing::serve_tcp;
+
   let local = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let remote = serve_tcp(Caller::Operator, Some(CONTROL_TOKEN)).await;
 
