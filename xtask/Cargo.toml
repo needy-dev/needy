@@ -9,21 +9,46 @@ publish = false
 
 [features]
 default = ["run", "tui"]
-# `bench run` talks to a control daemon. The probes alone build without it, so
-# the static binary shipped into an actor needs no TLS or gRPC stack.
-run = ["dep:needy-api-client", "dep:needy-config", "dep:needy-trace", "dep:tokio"]
+# `bench run` and `e2e` talk to a control daemon. The probes alone build
+# without them, so the static binary shipped into an actor needs no TLS or
+# gRPC stack.
+run = [
+  "dep:base64",
+  "dep:glob-match",
+  "dep:needy-api-client",
+  "dep:needy-config",
+  "dep:needy-core-actor",
+  "dep:needy-core-executor",
+  "dep:needy-daemon",
+  "dep:needy-trace",
+  "dep:nix",
+  "dep:portable-pty",
+  "dep:sha2",
+  "dep:tokio",
+  "dep:vt100",
+]
 # `tui`: the terminal fidelity harness, a pseudo-terminal and a terminal model.
 tui = ["dep:portable-pty", "dep:vt100", "dep:vte"]
 
 [dependencies]
 anyhow.workspace = true
+base64 = { workspace = true, optional = true }
 clap.workspace = true
+glob-match = { workspace = true, optional = true }
 needy-api-client = { workspace = true, optional = true }
 needy-config = { workspace = true, optional = true }
+needy-core-actor = { workspace = true, optional = true }
+needy-core-executor = { workspace = true, optional = true }
+needy-daemon = { workspace = true, optional = true }
 needy-trace = { workspace = true, optional = true, features = ["sqlite"] }
 portable-pty = { workspace = true, optional = true }
 serde_json.workspace = true
+sha2 = { workspace = true, optional = true }
 shell-words.workspace = true
 tokio = { workspace = true, optional = true }
 vt100 = { workspace = true, optional = true }
 vte = { workspace = true, optional = true }
+
+# The e2e harness drives Unix processes: signals and the effective user.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true, optional = true, features = ["signal", "user"] }

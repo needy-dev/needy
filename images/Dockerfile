@@ -68,6 +68,22 @@ COPY --from=needy-windows /needy.exe /needy.exe
 FROM scratch AS guest
 COPY --from=needy /needy /needy
 
+# The e2e harness (`cargo xtask e2e`) as a static binary next to the static
+# needy, for Linux hosts that run cells but build nothing (`--hosts`, role
+# `run`): a build host exports both with the images.
+# NOTICE: built on the `needy` stage with the same cache mounts, and the
+# sources touched again for the reason given there.
+FROM needy AS xtask
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
+    find /src -path /src/target -prune -o -type f -exec touch {} + \
+ && target="$(uname -m)-unknown-linux-musl" \
+ && cargo build --release --locked --target "$target" -p xtask \
+ && cp "target/$target/release/xtask" /xtask
+
+FROM scratch AS e2e
+COPY --from=needy /needy /needy
+COPY --from=xtask /xtask /xtask
+
 # The base image's `/.needy` (base ABI): the boot stub (`init`) and the shim
 # stub (`proxy`), static musl C programs with no needy code, so an image
 # works with every needy of its base ABI; an empty placeholder where the
