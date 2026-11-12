@@ -118,6 +118,10 @@ pub fn load(source: &Source) -> Result<Profile, Error> {
     mapping.from = mapping.from.clone().expand_home(&user);
     mapping.to = mapping.to.clone().expand_home(&user);
   }
+  // A file fault matches the path in the actor.
+  for fault in profile.chaos.faults.values_mut() {
+    fault.expand_home(&user);
+  }
   // A `path_map` key is an actor path, so its `~` is the user's home there,
   // as on a file mapping's actor side; routing and `profile check` both read
   // the expanded key.

@@ -164,7 +164,8 @@ fn loads_every_section() {
   let faults = &p.chaos.faults;
   assert_eq!(faults.keys().collect::<Vec<_>>(), ["curl-down", "flaky-json", "overheat", "slow-npm"]);
   assert_eq!(faults["flaky-json"].domain(), FaultDomain::File);
-  assert_eq!(faults["flaky-json"].file.as_ref().map(|f| f.open.as_str()), Some("~/workspace/**/*.json"));
+  // A file fault's glob matches the path in the actor, `~` expanded.
+  assert_eq!(faults["flaky-json"].file.as_ref().map(|f| f.open.as_str()), Some("/home/agent/workspace/**/*.json"));
   assert_eq!(faults["slow-npm"].domain(), FaultDomain::Net);
   assert_eq!(faults["slow-npm"].delay.map(|d| d.as_millis()), Some(2000));
   assert_eq!(faults["overheat"].domain(), FaultDomain::Sensor);

@@ -20,7 +20,8 @@ impl Daemon {
       )));
     }
     // The same schema and checks as a profile's `chaos.faults` entry.
-    let fault: Fault = serde_yaml::from_str(fault_yaml).map_err(|e| ControlError::Invalid(format!("fault {name}: {e}")))?;
+    let mut fault: Fault = serde_yaml::from_str(fault_yaml).map_err(|e| ControlError::Invalid(format!("fault {name}: {e}")))?;
+    fault.expand_home(&run.profile.user);
     if fault.domain() == FaultDomain::Sensor {
       // TODO(chaos-sensor): see `actor::schedule_sensor_faults`.
       return Err(ControlError::Invalid("sensor faults are scheduled when the actor starts; add them to the profile's chaos.faults".into()));

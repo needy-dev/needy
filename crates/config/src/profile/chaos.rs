@@ -223,6 +223,14 @@ impl Fault {
     }
   }
 
+  /// Expands a leading `~` in a file fault's glob to the profile user's
+  /// home: the glob matches the path in the actor.
+  pub fn expand_home(&mut self, user: &super::User) {
+    if let Some(file) = &mut self.file {
+      file.open = user.expand_home(&file.open);
+    }
+  }
+
   /// Whether the fault has no trigger of its own and so fires on every
   /// match (or, for a sensor, at once).
   pub fn always(&self) -> bool {
