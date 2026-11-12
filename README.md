@@ -671,10 +671,23 @@ make check
 make test
 make proto
 cargo xtask bench --help      # latency and throughput probes
+cargo xtask e2e               # the end-to-end matrix on this host
 ```
 
-GitHub Actions runs the checks and tests on Linux, macOS and Windows, and
-builds the release assets; see
+`cargo xtask e2e` runs every cell of the end-to-end matrix this host can
+run: each actor driver it has, with each terminal mode, way a run ends, file
+mapping, fault domain, network rule and user, each cell against its own
+non-root control daemon, checked for invariants (ownership and modes,
+mirror-out after every ending, placement in the trace, private sockets,
+nothing left behind). It builds the guest needy and the images from the tree
+first. A cell it cannot run here is reported as not covered, with the reason,
+and the exit code says so. `--list` shows the cells, `--only` and `--skip`
+pick some, `--remote HOST` runs on another machine from `git archive HEAD`,
+and `--hosts FILE` runs on several at once, each building natively; see the
+[e2e harness design](docs/ai/references/architecture/2026-11-13-e2e-harness-design.md).
+
+GitHub Actions runs the checks and tests on Linux, macOS and Windows, the e2e
+cells without an actor on Linux and macOS, and builds the release assets; see
 [Release and CI](docs/ai/references/architecture/2026-11-12-release-and-ci-design.md).
 
 ## Acknowledgements

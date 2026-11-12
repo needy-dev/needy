@@ -104,9 +104,10 @@ Dependencies point downward; a crate never depends on one above it.
   has the gRPC adapters, the proto <-> domain conversions and the one status
   table; `middleware` is bearer authentication, which decides each request's
   caller; `termination` turns signals into cancellation.
-- `xtask` (`cargo xtask`): developer tasks that are not product commands,
-  today the `bench` latency and throughput probes and the `tui` terminal
-  fidelity harness (its scenarios and matrix in `xtask/tui/`).
+- `xtask` (`cargo xtask`): developer tasks that are not product commands:
+  the `bench` latency and throughput probes, the `tui` terminal fidelity
+  harness (its scenarios and matrix in `xtask/tui/`), and `e2e`, the
+  end-to-end matrix.
 - `proto/`: canonical API schemas, linted and generated with Buf.
 - `images/`: actor kernel sources and configurations (x86_64 for
   Firecracker, arm64 for `macos-vz`), the base image's boot and shim stubs
@@ -333,7 +334,11 @@ one, add its provenance or a `TODO(provenance):` naming what is missing.
   (runs, pool, routing, relay, shutdown, the runner registry, the
   runner role, scheduling and profile checks, with runners joined in
   process and a stand-in Firecracker); real actors and linux-container executors are
-  verified end to end on hosts (see the closed-loop results).
+  verified end to end on hosts with `cargo xtask e2e` (see the
+  [e2e harness design](docs/ai/references/architecture/2026-11-13-e2e-harness-design.md)).
+- e2e runs use `cargo xtask e2e` with a non-root daemon. A workaround
+  (privileges, dropped features) is a reported failure, not a footnote. Do
+  not hand-write e2e scripts; add a cell or an invariant to the harness.
 - Add regression tests for behavior changes and keep them narrow.
 - Use `cargo test` for the full suite and include regression tests for bug
   fixes.
@@ -380,6 +385,7 @@ make build
 make check
 make test
 cargo xtask bench --help
+cargo xtask e2e --list
 ```
 
 
