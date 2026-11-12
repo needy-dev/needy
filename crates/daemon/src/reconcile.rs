@@ -70,9 +70,7 @@ impl Daemon {
         code: e.code,
         signal: e.signal.clone(),
       });
-      if let Err(e) = self.state.end_process(&process.process_id, state, exit, now).await {
-        tracing::warn!("run {}: cannot write the end of process {} to state.db: {e:#}", process.run_id, process.process_id);
-      }
+      self.advance_process(&process.run_id, &process.process_id, state, exit, now).await;
     }
   }
 
@@ -109,7 +107,7 @@ impl Daemon {
     };
     let now = now_ms();
     for instance in left.into_iter().filter(|i| i.runner.as_deref() == Some(runner) && self.runs.exact(&i.run).is_none()) {
-      self.write_instance_state(&instance, InstanceState::Ended, now).await;
+      self.advance_instance(&instance.run, &instance.id, InstanceState::Ended, now).await;
       let reported: Vec<&str> = by_run.get(&instance.run).into_iter().flatten().map(|p| p.process_id.as_str()).collect();
       self.end_processes_of(&instance, ProcessState::Exited, &reported, now).await;
     }
@@ -120,30 +118,26 @@ impl Daemon {
   async fn claim(&self, runner: &str, run: &str, executor: &str, processes: &[ProcessInfo]) {
     tracing::info!("runner {runner}: claimed {} processes of run {run}", processes.len());
     for process in processes {
-      let known = match self.state.process(&process.process_id).await {
+      // A process `state.db` has running is known; one it has ended cannot
+      // run again, and `start_process` refuses it with the state it ended in.
+      match self.state.process(&process.process_id).await {
         Ok(Some(known)) if known.state == ProcessState::Running => continue,
-        Ok(known) => known,
-        Err(e) => {
-          tracing::warn!("state.db: cannot read process {}: {e:#}", process.process_id);
-          None
-        }
-      };
+        Ok(_) => {}
+        Err(e) => tracing::warn!("state.db: cannot read process {}: {e:#}", process.process_id),
+      }
       let record = ProcessRecord {
         id: process.process_id.clone(),
         run: run.to_string(),
         instance: store::executor_instance(run, executor),
-        // NOTICE: a runner does not keep who started a process; a process
-        // this control plane recorded keeps its origin, running (above) or
-        // not.
-        origin: known.and_then(|known| known.origin),
+        // NOTICE: a runner does not keep who started a process, and one
+        // this control plane recorded is never written again (above).
+        origin: None,
         state: ProcessState::Running,
         exit: None,
         started_ms: process.started_at_ms,
         ended_ms: None,
       };
-      if let Err(e) = self.state.save_process(&record).await {
-        tracing::warn!("run {run}: cannot write process {} to state.db: {e:#}", process.process_id);
-      }
+      self.start_process(&record).await;
     }
   }
 
@@ -161,13 +155,13 @@ impl Daemon {
         match (instance.kind, &instance.runner) {
           (InstanceKind::Actor, _) => {
             let state = self.end_leftover_actor(instance).await;
-            self.write_instance_state(instance, state, now).await;
+            self.advance_instance(&instance.run, &instance.id, state, now).await;
           }
           // The runner reports it when it connects; see `reconcile_runner`.
           (InstanceKind::Executor, Some(_)) => on_runners = true,
           (InstanceKind::Executor, None) => {
             let state = self.end_leftover_executor(instance).await;
-            self.write_instance_state(instance, state, now).await;
+            self.advance_instance(&instance.run, &instance.id, state, now).await;
             let ended = if state == InstanceState::Ended {
               ProcessState::Ended
             } else {
@@ -231,7 +225,7 @@ impl Daemon {
         instance.name,
         self.config.report_wait
       );
-      self.write_instance_state(&instance, InstanceState::Lost, now).await;
+      self.advance_instance(&instance.run, &instance.id, InstanceState::Lost, now).await;
       self.end_processes_of(&instance, ProcessState::Lost, &[], now).await;
     }
   }
@@ -271,9 +265,34 @@ impl Daemon {
     }
   }
 
-  async fn write_instance_state(&self, instance: &InstanceRecord, state: InstanceState, now: i64) {
-    if let Err(e) = self.state.set_instance_state(&instance.id, state, now).await {
-      tracing::warn!("run {}: cannot write instance {} to state.db: {e:#}", instance.run, instance.id);
+  /// Moves run `run`'s hold on instance `id` to `to` in `state.db`. A
+  /// change its lifecycle refuses is logged, as a run's is: it is a race
+  /// of two enders, and the first one's state stays.
+  pub(crate) async fn advance_instance(&self, run: &str, id: &str, to: InstanceState, now: i64) {
+    match self.state.advance_instance(id, to, now).await {
+      Ok(_) => {}
+      Err(store::Error::Refused(refused)) => tracing::debug!("run {run}: {refused}"),
+      Err(e) => tracing::warn!("run {run}: cannot write instance {id} to state.db: {e:#}"),
+    }
+  }
+
+  /// Records in `state.db` that a process of run `run` started.
+  pub(crate) async fn start_process(&self, record: &ProcessRecord) {
+    match self.state.start_process(record).await {
+      Ok(()) => {}
+      Err(store::Error::Refused(refused)) => tracing::warn!("run {}: {refused}", record.run),
+      Err(e) => tracing::warn!("run {}: cannot write process {} to state.db: {e:#}", record.run, record.id),
+    }
+  }
+
+  /// Ends process `id` of run `run` in `to` in `state.db`. A change its
+  /// lifecycle refuses is logged, as a run's is: a process that a relay saw
+  /// exit and that the run's end lists again keeps its first end.
+  pub(crate) async fn advance_process(&self, run: &str, id: &str, to: ProcessState, exit: Option<Exit>, now: i64) {
+    match self.state.advance_process(id, to, exit, now).await {
+      Ok(_) => {}
+      Err(store::Error::Refused(refused)) => tracing::debug!("run {run}: {refused}"),
+      Err(e) => tracing::warn!("run {run}: cannot write the end of process {id} to state.db: {e:#}"),
     }
   }
 
@@ -290,9 +309,7 @@ impl Daemon {
     for process in
       processes.iter().filter(|p| p.instance == instance.id && p.state == ProcessState::Running && !keep.contains(&p.id.as_str()))
     {
-      if let Err(e) = self.state.end_process(&process.id, state, None, now).await {
-        tracing::warn!("run {}: cannot write the end of process {} to state.db: {e:#}", instance.run, process.id);
-      }
+      self.advance_process(&instance.run, &process.id, state, None, now).await;
     }
   }
 }

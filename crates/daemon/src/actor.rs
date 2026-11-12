@@ -5,6 +5,11 @@
 //! The actor's tasks belong to its run and run under a child of the
 //! run's token, which the actor's exit also cancels: the guest listener and
 //! the gateway stop when the actor exits or its run stops.
+//!
+//! The actor's lifecycle is [`state`]: this module and the guest API
+//! advance it, the same way for every driver.
+
+pub mod state;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -15,8 +20,8 @@ use anyhow::{Context, Result, bail};
 use needy_api_server::control::{Caller, ControlError};
 use needy_api_server::{Health, Listen, Server};
 use needy_config::profile::{FaultKind, FileMode, Side as FileSide};
-use needy_core::event::{ActorStart, ActorVmExit, Event};
-use needy_core::types::{Effect, Fired, Network, RunState};
+use needy_core::event::{ActorReady, ActorStart, ActorVmExit, Event};
+use needy_core::types::{ActorState, Effect, Fired, Network, RunState};
 use needy_core_actor::driver::{self, Channels, Driver, Endpoint, Facets, HostMount, Running, Side, Start, Terminal, Transport};
 use needy_core_actor::sidecar::gateway;
 use tokio_util::sync::CancellationToken;
@@ -126,12 +131,15 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   let facets = facets(run);
   let channels = driver.channels(&run.dir);
   let actor = run.cancel.child_token();
+  advance(run, ActorState::Starting);
   if let Err(e) = serve_guest(daemon, run, &channels, facets.transport, &actor).await {
     actor.cancel();
+    advance(run, ActorState::Exited);
     return Err(e);
   }
   if let Err(e) = serve_gateway(run, &channels, &actor) {
     actor.cancel();
+    advance(run, ActorState::Exited);
     return Err(e);
   }
   // A driver that sets the actor up from the host mounts the workspace
@@ -151,6 +159,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     Ok(vm) => vm,
     Err(e) => {
       actor.cancel();
+      advance(run, ActorState::Exited);
       return Err(e.into());
     }
   };
@@ -175,15 +184,49 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     created_ms: needy_common::time::now_ms(),
     ended_ms: None,
   };
-  daemon.save_instance(&record).await;
+  daemon.start_instance(&record).await;
   let name = driver.name();
   // Where the actor has no sensors (Apple's `container`), `profile check`
   // says so, and the faults are not recorded as fired.
   if facets.identity.hwmon == Some(Side::Host) {
     schedule_hwmon_faults(run, Arc::from(driver), &actor);
   }
+  // Only a driving program on a terminal has a process service to answer.
+  if run.tty.is_some() {
+    run.tasks.spawn(await_ready(daemon.clone(), run.clone(), actor.clone()));
+  }
   run.tasks.spawn(watch(daemon.clone(), run.clone(), name, vm, actor));
   Ok(())
+}
+
+/// Moves `run`'s actor to `to`, and says whether it did. A transition its
+/// lifecycle refuses, such as a guest that fetches its configuration twice,
+/// changes nothing.
+pub(crate) fn advance(run: &Run, to: ActorState) -> bool {
+  match run.actor.advance(to) {
+    Ok(_) => {
+      tracing::debug!("run {}: the actor is {to}", run.id);
+      true
+    }
+    Err(refused) => {
+      tracing::debug!("run {}: {refused}", run.id);
+      false
+    }
+  }
+}
+
+/// Connects to the actor's process service as soon as it answers, so the
+/// actor is ready without waiting for a first attach, which then reuses the
+/// connection. Gives up when the actor exits, or as an attach does.
+async fn await_ready(daemon: Daemon, run: Arc<Run>, actor: CancellationToken) {
+  tokio::select! {
+    () = actor.cancelled() => {}
+    connected = run.terminal.get_or_try_init(|| terminal(&daemon, &run)) => {
+      if let Err(e) = connected {
+        tracing::warn!("run {}: the actor is not ready: {e}", run.id);
+      }
+    }
+  }
 }
 
 /// Schedules the run's hwmon faults on an actor whose driver presents its
@@ -226,7 +269,8 @@ const TERMINAL_WAIT: Duration = Duration::from_secs(60);
 
 /// The process service of `run`'s actor for its driving program on a
 /// terminal, reached the way its driver says (the VM's vsock device under
-/// Firecracker). Waits for the actor to serve it while the run runs.
+/// Firecracker), once it answers ([`answers`]). Waits for the actor to serve
+/// it while the run runs. The actor is ready from then on.
 pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, ControlError> {
   let channels = channels(daemon, run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
   let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
@@ -235,10 +279,15 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
       std::pin::Pin<Box<dyn std::future::Future<Output = Result<needy_api_client::Client, needy_api_client::Error>> + Send + 'a>>;
     let connect: Connecting<'_> = match &channels.terminal {
       Terminal::HybridVsock { device, port } => Box::pin(needy_api_client::Client::connect_firecracker_vsock(device, *port)),
-      Terminal::Unix(path) => Box::pin(connect_terminal(path)),
+      Terminal::Unix(path) => {
+        let url = format!("unix:{}", path.display());
+        Box::pin(async move { needy_api_client::Client::connect(&url).await })
+      }
     };
-    // Bound the connection itself, including the Firecracker handshake:
-    // a peer that accepts but never answers must not hold `run attach`.
+    let connect = async move { answers(connect.await?).await };
+    // Bound the connection itself, including the Firecracker handshake and
+    // the first answer: a peer that accepts but never answers must not hold
+    // `run attach`.
     let connected = tokio::select! {
       () = run.cancel.cancelled() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
       connected = tokio::time::timeout_at(deadline, connect) => {
@@ -246,7 +295,12 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
       }
     };
     let error = match connected {
-      Ok(client) => return Ok(Instance::actor(&run.id, Arc::new(client))),
+      Ok(client) => {
+        if advance(run, ActorState::Ready) {
+          run.emit(&Event::ActorReady(ActorReady {}));
+        }
+        return Ok(Instance::actor(&run.id, Arc::new(client)));
+      }
       Err(e) => e,
     };
     if tokio::time::Instant::now() >= deadline || run.cancel.is_cancelled() {
@@ -257,8 +311,9 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
   }
 }
 
-/// Connects to an actor's process service on the Unix socket `path`, once
-/// the service itself answers.
+/// `client` once the actor's process service behind it answers a request:
+/// the one definition of an actor that is ready, for every driver and
+/// transport.
 // NOTICE: a relay can accept before the actor serves: vfkit's `connect`
 // socket of a macos-vz actor accepts and only then dials the guest's vsock port,
 // closing the connection when nothing listens there yet, so the first call
@@ -270,8 +325,10 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
 // process socket) accepts on the host in the same way, seen the same day
 // with `container` 1.7.1, see
 // `docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md`.
-async fn connect_terminal(path: &Path) -> Result<needy_api_client::Client, needy_api_client::Error> {
-  let client = needy_api_client::Client::connect(&format!("unix:{}", path.display())).await?;
+// Firecracker's hybrid vsock answers `OK` to its handshake only when the
+// guest listens, but asking it too keeps one definition (drivers design,
+// "Lifecycles").
+async fn answers(client: needy_api_client::Client) -> Result<needy_api_client::Client, needy_api_client::Error> {
   match client.health().check(needy_api_client::proto::v1::CheckRequest {}).await {
     Ok(_) => Ok(client),
     Err(status) if status.code() == tonic::Code::Unimplemented => Ok(client),
@@ -401,10 +458,12 @@ async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dy
       if let Err(e) = vm.stop(VM_STOP_GRACE).await {
         tracing::warn!("run {}: cannot stop {name} {}: {e}", run.id, vm.pid());
       }
+      advance(&run, ActorState::Exited);
       release_actor(&daemon, &run).await;
       return;
     }
   };
+  advance(&run, ActorState::Exited);
   release_actor(&daemon, &run).await;
   let exit = match waited {
     Ok(status) => {
@@ -439,10 +498,7 @@ async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dy
 
 /// Records in `state.db` that run `run`'s actor ended.
 async fn release_actor(daemon: &Daemon, run: &Run) {
-  let id = store::actor_instance(&run.id);
-  if let Err(e) = daemon.state.set_instance_state(&id, InstanceState::Released, needy_common::time::now_ms()).await {
-    tracing::warn!("run {}: cannot write the end of its actor to state.db: {e:#}", run.id);
-  }
+  daemon.advance_instance(&run.id, &store::actor_instance(&run.id), InstanceState::Released, needy_common::time::now_ms()).await;
 }
 
 /// How many of the last lines of the VM's log a failure quotes.

@@ -611,6 +611,10 @@ pub struct Run {
     /// The driving program runs on a terminal (`CreateRunRequest.tty`).
     #[prost(bool, tag="11")]
     pub tty: bool,
+    /// Where the run's actor stands. Unspecified before it starts, and for a
+    /// run the control plane lists from its database after the run ended.
+    #[prost(enumeration="ActorState", tag="12")]
+    pub actor_state: i32,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRunResponse {
@@ -815,6 +819,48 @@ impl RunState {
             "RUN_STATE_STOPPED" => Some(Self::Stopped),
             "RUN_STATE_FINISHED" => Some(Self::Finished),
             "RUN_STATE_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+/// An actor's life cycle, the same for every actor driver. Exited is
+/// terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ActorState {
+    Unspecified = 0,
+    /// Its driver is starting it, or its guest boots.
+    Starting = 1,
+    /// Its guest fetched the run's configuration.
+    Configured = 2,
+    /// Its process service answered a request: a client can attach. Only a
+    /// driving program on a terminal has one.
+    Ready = 3,
+    /// It exited, or its run stopped it.
+    Exited = 4,
+}
+impl ActorState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACTOR_STATE_UNSPECIFIED",
+            Self::Starting => "ACTOR_STATE_STARTING",
+            Self::Configured => "ACTOR_STATE_CONFIGURED",
+            Self::Ready => "ACTOR_STATE_READY",
+            Self::Exited => "ACTOR_STATE_EXITED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACTOR_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTOR_STATE_STARTING" => Some(Self::Starting),
+            "ACTOR_STATE_CONFIGURED" => Some(Self::Configured),
+            "ACTOR_STATE_READY" => Some(Self::Ready),
+            "ACTOR_STATE_EXITED" => Some(Self::Exited),
             _ => None,
         }
     }

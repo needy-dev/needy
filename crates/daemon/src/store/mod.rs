@@ -11,6 +11,7 @@
 
 mod clients;
 mod entity;
+pub mod lifecycle;
 mod migration;
 mod runs;
 mod secret;
@@ -20,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use needy_core::types::{Capabilities, RunnerRole};
 use sea_orm::{
-  ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, ConnectOptions, ConnectionTrait as _, Database, DatabaseConnection, DbErr,
-  EntityTrait as _, IntoActiveModel as _, QueryFilter as _, QueryOrder as _, TransactionTrait as _,
+  ActiveModelTrait as _, ActiveValue::Set, ConnectOptions, ConnectionTrait as _, Database, DatabaseConnection, DbErr, EntityTrait as _,
+  IntoActiveModel as _, QueryOrder as _, TransactionTrait as _,
 };
 use sea_orm_migration::{MigratorTrait as _, SchemaManager};
 use serde::Serialize;
@@ -29,9 +30,8 @@ use serde::de::DeserializeOwned;
 
 pub use self::clients::{Client, is_client_token};
 use self::entity::{join_token, runner};
-pub use self::runs::{
-  InstanceKind, InstanceRecord, InstanceState, ProcessRecord, ProcessState, RunRecord, actor_instance, executor_instance,
-};
+pub use self::lifecycle::{InstanceState, ProcessState, Refused, RunnerState};
+pub use self::runs::{InstanceKind, InstanceRecord, ProcessRecord, RunRecord, actor_instance, executor_instance};
 pub use self::secret::Secret;
 
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +72,9 @@ pub enum Error {
   /// A malformed name, label or limit.
   #[error("{0}")]
   Invalid(String),
+  /// A change of state its lifecycle does not allow ([`lifecycle`]).
+  #[error(transparent)]
+  Refused(#[from] Refused),
   #[error("a row of state.db cannot be read")]
   Corrupt(#[from] serde_json::Error),
   #[error(transparent)]
@@ -229,7 +232,7 @@ impl Store {
     let scope = join_token_of(row.clone())?.scope;
     let (capabilities, labels) = admit(&scope, report)?;
     let existing = runner::Entity::find_by_id(name).one(&txn).await?;
-    if existing.as_ref().is_some_and(|r| r.removed_ms.is_none()) {
+    if existing.as_ref().is_some_and(|r| runner_state(r) == RunnerState::Joined) {
       return Err(Error::RunnerExists(name.to_string()));
     }
     let mut spent = row.clone().into_active_model();
@@ -327,9 +330,20 @@ impl Store {
     Ok(())
   }
 
-  /// Revokes the runner `name`'s credentials. It stays listed as removed.
+  /// Revokes the runner `name`'s credentials. It stays listed as removed;
+  /// removing it again is refused.
   pub async fn remove(&self, name: &str, now: i64) -> Result<()> {
-    let mut row = self.active(name).await?.into_active_model();
+    let row = runner::Entity::find_by_id(name).one(&self.db).await?.ok_or_else(|| Error::NoRunner(name.to_string()))?;
+    let from = runner_state(&row);
+    if !RunnerState::allowed(from, RunnerState::Removed) {
+      return Err(Error::Refused(Refused {
+        object: "runner",
+        id: name.to_string(),
+        from: from.as_str(),
+        to: RunnerState::Removed.as_str(),
+      }));
+    }
+    let mut row = row.into_active_model();
     row.credential_hash = Set(None);
     row.pending_hash = Set(None);
     row.rotating = Set(false);
@@ -338,10 +352,19 @@ impl Store {
     Ok(())
   }
 
-  /// The runner `name`, unless it does not exist or was removed.
+  /// The runner `name`, unless it does not exist or was removed: a
+  /// removed runner is gone to everything a joined one does.
   async fn active(&self, name: &str) -> Result<runner::Model> {
-    let row = runner::Entity::find_by_id(name).filter(runner::Column::RemovedMs.is_null()).one(&self.db).await?;
-    row.ok_or_else(|| Error::NoRunner(name.to_string()))
+    let row = runner::Entity::find_by_id(name).one(&self.db).await?;
+    row.filter(|row| runner_state(row) == RunnerState::Joined).ok_or_else(|| Error::NoRunner(name.to_string()))
+  }
+}
+
+/// A runner row's state in its lifecycle: `removed_ms` is what stores it.
+fn runner_state(row: &runner::Model) -> RunnerState {
+  match row.removed_ms {
+    Some(_) => RunnerState::Removed,
+    None => RunnerState::Joined,
   }
 }
 

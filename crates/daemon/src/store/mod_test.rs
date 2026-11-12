@@ -265,6 +265,8 @@ async fn a_removed_runner_is_refused_listed_as_removed_and_may_join_again() {
   assert_eq!(store.authenticate(credential.expose()).await.unwrap(), None);
   assert_eq!(store.runners().await.unwrap()[0].removed_ms, Some(NOW + 7));
   assert_eq!(store.rotate("mac").await.unwrap_err().to_string(), "no runner mac");
+  assert_eq!(store.remove("mac", NOW + 8).await.unwrap_err().to_string(), "runner mac is removed; it cannot become removed");
+  assert_eq!(store.runners().await.unwrap()[0].removed_ms, Some(NOW + 7), "the first removal stays");
   let again = joined(&store, "mac").await;
   assert_eq!(store.authenticate(again.expose()).await.unwrap().as_deref(), Some("mac"));
   assert_eq!(store.runners().await.unwrap()[0].removed_ms, None);

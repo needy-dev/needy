@@ -58,6 +58,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     actor_exit: None,
     failure: None,
     tty: false,
+    actor: None,
   }
 }
 

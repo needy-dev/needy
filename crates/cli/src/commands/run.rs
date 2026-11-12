@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use needy_api_client::proto::v1::{self, CreateRunRequest, GetRunLogsRequest, ListRunsRequest, Run, StopRunRequest};
-use needy_core::types::RunState;
+use needy_core::types::{ActorState, RunState};
 use needy_core_executor::relay;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
@@ -103,6 +103,9 @@ struct RunRow {
   id: String,
   name: String,
   state: String,
+  /// Where the run's actor stands: `starting`, `configured`, `ready` or
+  /// `exited`; `None` before it starts and for a run that ended.
+  actor: Option<String>,
   group: String,
   executors: Vec<ExecutorCell>,
   /// The driving program's exit code, when it exited normally.
@@ -130,7 +133,7 @@ struct ExecutorCell {
 const FAILURE_WIDTH: usize = 48;
 
 impl Row for RunRow {
-  const HEADER: &'static [&'static str] = &["ID", "NAME", "STATE", "GROUP", "EXECUTORS", "EXIT"];
+  const HEADER: &'static [&'static str] = &["ID", "NAME", "STATE", "ACTOR", "GROUP", "EXECUTORS", "EXIT"];
 
   fn cells(&self) -> Vec<String> {
     // A name or group that was not given defaults to the ID; repeating
@@ -161,6 +164,7 @@ impl Row for RunRow {
       self.id.clone(),
       given(&self.name),
       self.state.clone(),
+      self.actor.clone().unwrap_or_else(|| "-".into()),
       given(&self.group),
       executors.collect::<Vec<_>>().join(", "),
       exit,
@@ -183,6 +187,7 @@ impl TryFrom<Run> for RunRow {
 
   fn try_from(s: Run) -> Result<Self> {
     let state = state(s.state).with_context(|| format!("run {}", s.run_id))?;
+    let actor = actor_state(s.actor_state).with_context(|| format!("run {}", s.run_id))?;
     let (exit_code, signal) = match s.actor_exit {
       Some(exit) => (exit.code, (!exit.signal.is_empty()).then_some(exit.signal)),
       None => (None, None),
@@ -201,6 +206,7 @@ impl TryFrom<Run> for RunRow {
       id: s.run_id,
       name: s.name,
       state: state.to_string(),
+      actor: actor.map(|a| a.to_string()),
       group: s.group,
       exit_code,
       signal,
@@ -223,6 +229,19 @@ fn state(value: i32) -> Result<RunState> {
     Ok(v1::RunState::Finished) => Ok(RunState::Finished),
     Ok(v1::RunState::Failed) => Ok(RunState::Failed),
     Err(_) => bail!("unknown run state {value}"),
+  }
+}
+
+/// The actor state a `Run` names: none before the actor starts and for a
+/// run that ended; a value this build does not know is an error.
+fn actor_state(value: i32) -> Result<Option<ActorState>> {
+  match v1::ActorState::try_from(value) {
+    Ok(v1::ActorState::Unspecified) => Ok(None),
+    Ok(v1::ActorState::Starting) => Ok(Some(ActorState::Starting)),
+    Ok(v1::ActorState::Configured) => Ok(Some(ActorState::Configured)),
+    Ok(v1::ActorState::Ready) => Ok(Some(ActorState::Ready)),
+    Ok(v1::ActorState::Exited) => Ok(Some(ActorState::Exited)),
+    Err(_) => bail!("unknown actor state {value}"),
   }
 }
 

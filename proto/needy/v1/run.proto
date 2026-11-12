@@ -88,6 +88,9 @@ message Run {
   string failure = 10;
   // The driving program runs on a terminal (`CreateRunRequest.tty`).
   bool tty = 11;
+  // Where the run's actor stands. Unspecified before it starts, and for a
+  // run the control plane lists from its database after the run ended.
+  ActorState actor_state = 12;
 
   reserved 4;
 }
@@ -103,6 +106,21 @@ enum RunState {
   // The actor's driving program exited.
   RUN_STATE_FINISHED = 5;
   RUN_STATE_FAILED = 6;
+}
+
+// An actor's life cycle, the same for every actor driver. Exited is
+// terminal.
+enum ActorState {
+  ACTOR_STATE_UNSPECIFIED = 0;
+  // Its driver is starting it, or its guest boots.
+  ACTOR_STATE_STARTING = 1;
+  // Its guest fetched the run's configuration.
+  ACTOR_STATE_CONFIGURED = 2;
+  // Its process service answered a request: a client can attach. Only a
+  // driving program on a terminal has one.
+  ACTOR_STATE_READY = 3;
+  // It exited, or its run stopped it.
+  ACTOR_STATE_EXITED = 4;
 }
 
 message CreateRunResponse {

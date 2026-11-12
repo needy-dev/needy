@@ -64,8 +64,37 @@ fn run_ls_marks_a_lost_executor_and_a_released_one() {
 
   let cells = row.cells();
   assert_eq!(cells[2], "failed");
-  assert_eq!(cells[4], "mac=runner (lost), build=linux-container (released)");
-  assert_eq!(cells[5], "the control plane restarted; the actor was lost");
+  assert_eq!(cells[3], "-", "an ended run's actor state is not kept");
+  assert_eq!(cells[5], "mac=runner (lost), build=linux-container (released)");
+  assert_eq!(cells[6], "the control plane restarted; the actor was lost");
+}
+
+#[test]
+fn run_ls_shows_where_the_actor_stands() {
+  let wire = [
+    (v1::ActorState::Unspecified, "-"),
+    (v1::ActorState::Starting, "starting"),
+    (v1::ActorState::Configured, "configured"),
+    (v1::ActorState::Ready, "ready"),
+    (v1::ActorState::Exited, "exited"),
+  ];
+
+  for (value, shown) in wire {
+    let run = Run {
+      run_id: "r1".into(),
+      state: v1::RunState::Running as i32,
+      actor_state: value as i32,
+      ..Default::default()
+    };
+    assert_eq!(RunRow::try_from(run).unwrap().cells()[3], shown, "{value:?}");
+  }
+  let newer = Run {
+    run_id: "r1".into(),
+    state: v1::RunState::Running as i32,
+    actor_state: 42,
+    ..Default::default()
+  };
+  assert_eq!(format!("{:#}", RunRow::try_from(newer).err().unwrap()), "run r1: unknown actor state 42");
 }
 
 #[derive(clap::Parser)]

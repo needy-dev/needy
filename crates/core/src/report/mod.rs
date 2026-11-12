@@ -243,7 +243,12 @@ impl Tally {
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
       Event::ActorStart(start) => self.actor_driver = start.driver.clone(),
-      Event::ExecKill(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) | Event::TraceTiming(_) => {}
+      Event::ActorReady(_)
+      | Event::ExecKill(_)
+      | Event::FilesCopyIn(_)
+      | Event::FilesMirrorOut(_)
+      | Event::NetError(_)
+      | Event::TraceTiming(_) => {}
     }
   }
 

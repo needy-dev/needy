@@ -61,6 +61,8 @@ pub struct Run {
   pub created_ms: i64,
   pub dir: PathBuf,
   pub state: State,
+  /// Its actor's lifecycle; `None` until the actor starts.
+  pub actor: actor::state::State,
   /// The actor's driving program.
   pub actor_command: Vec<String>,
   /// The driving program's terminal size at the start; `None` runs it
@@ -172,6 +174,7 @@ impl Run {
       actor_exit: lock(&self.actor_exit).clone(),
       failure: lock(&self.failure).clone(),
       tty: self.tty.is_some(),
+      actor: self.actor.get(),
     }
   }
 
@@ -368,6 +371,9 @@ impl Registry {
       // NOTICE: `state.db` does not keep whether the driving program had a
       // terminal; an ended run cannot be attached anyway.
       tty: false,
+      // NOTICE: `state.db` does not keep the actor's state either: an ended
+      // run's actor exited, and a reconciled run's was lost.
+      actor: None,
     })
   }
 
@@ -519,6 +525,7 @@ impl Daemon {
       tty: request.tty,
       wait_for_attach: request.wait_for_attach,
       terminal: tokio::sync::OnceCell::new(),
+      actor: Default::default(),
       recipe,
       trace,
       executors: Mutex::new(BTreeMap::new()),
@@ -584,7 +591,7 @@ impl Daemon {
       };
       unwinding(run)?;
       let instance = self.pool.acquire(spec, &site).await.with_context(|| format!("executor {exec_name}"))?;
-      self.save_instance(&executor_record(run, &instance, &site)).await;
+      self.start_instance(&executor_record(run, &instance, &site)).await;
       run.lock_executors().insert(exec_name.clone(), instance);
     }
     run.emit(&Event::RunCreate(RunCreate {
@@ -731,10 +738,7 @@ impl Daemon {
       }
     }
     for instance in instances.values() {
-      let row = store::executor_instance(&run.id, &instance.name);
-      if let Err(e) = self.state.set_instance_state(&row, InstanceState::Released, now_ms()).await {
-        tracing::warn!("run {}: cannot write the release of executor {} to state.db: {e:#}", run.id, instance.name);
-      }
+      self.advance_instance(&run.id, &store::executor_instance(&run.id, &instance.name), InstanceState::Released, now_ms()).await;
       self.pool.release(instance).await;
     }
   }
@@ -778,9 +782,9 @@ impl Daemon {
     }
   }
 
-  /// Writes a run's hold on an instance to `state.db`.
-  pub(crate) async fn save_instance(&self, record: &InstanceRecord) {
-    if let Err(e) = self.state.save_instance(record).await {
+  /// Records in `state.db` a run's new hold on an instance.
+  pub(crate) async fn start_instance(&self, record: &InstanceRecord) {
+    if let Err(e) = self.state.start_instance(record).await {
       tracing::warn!("run {}: cannot write instance {} to state.db: {e:#}", record.run, record.id);
     }
   }

@@ -267,6 +267,12 @@ commands:
 // accepted counted as the terminal.
 //
 // The fix counts the terminal only once the service answers a call.
+/// Connects to the Unix socket `path` and asks whether a process service
+/// answers there, as the daemon decides that an actor is ready.
+async fn answer_on(path: &Path) -> Result<needy_api_client::Client, needy_api_client::Error> {
+  super::answers(needy_api_client::Client::connect(&format!("unix:{}", path.display())).await?).await
+}
+
 #[tokio::test]
 async fn a_relay_that_accepts_and_closes_is_no_terminal_yet() {
   let dir = tempfile::tempdir().unwrap();
@@ -280,7 +286,7 @@ async fn a_relay_that_accepts_and_closes_is_no_terminal_yet() {
     }
   });
 
-  let connected = super::connect_terminal(&path).await;
+  let connected = answer_on(&path).await;
   relay.abort();
 
   assert!(connected.is_err(), "a closed relay counted as the terminal");
@@ -301,9 +307,118 @@ async fn a_served_process_service_is_the_terminal() {
   let stop = tokio_util::sync::CancellationToken::new();
   let served = tokio::spawn(listener.serve(stop.clone()));
 
-  let connected = super::connect_terminal(&path).await;
+  let connected = answer_on(&path).await;
   stop.cancel();
   served.await.unwrap().unwrap();
 
   assert!(connected.is_ok(), "{:?}", connected.err());
+}
+
+/// Stands in for Firecracker's hybrid vsock device at `device`: it answers
+/// every `CONNECT` handshake with `OK`, as Firecracker does, then forwards
+/// the connection to the guest's process service at `guest` once `serving`
+/// is set, and closes it before, like a guest that does not listen yet.
+fn hybrid_vsock(device: &Path, guest: PathBuf, serving: std::sync::Arc<std::sync::atomic::AtomicBool>) -> tokio::task::JoinHandle<()> {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  if let Err(e) = std::fs::remove_file(device) {
+    assert_eq!(e.kind(), std::io::ErrorKind::NotFound, "{e}");
+  }
+  let listener = tokio::net::UnixListener::bind(device).unwrap();
+  tokio::spawn(async move {
+    loop {
+      let (mut stream, _) = listener.accept().await.unwrap();
+      let (guest, serving) = (guest.clone(), serving.clone());
+      tokio::spawn(async move {
+        loop {
+          match stream.read_u8().await {
+            Ok(b'\n') => break,
+            Ok(_) => {}
+            Err(_) => return,
+          }
+        }
+        if stream.write_all(b"OK 1073741824\n").await.is_err() || !serving.load(std::sync::atomic::Ordering::SeqCst) {
+          return;
+        }
+        let mut upstream = tokio::net::UnixStream::connect(&guest).await.unwrap();
+        // The connection ends when either side closes it; how is no matter.
+        let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+      });
+    }
+  })
+}
+
+/// The state of run `id`'s actor, as `run ls` shows it.
+async fn actor_state(daemon: &crate::Daemon, id: &str) -> Option<needy_core::types::ActorState> {
+  Runs::get(daemon, id).await.unwrap().actor
+}
+
+// ROOT CAUSE:
+//
+// If an actor's transport accepted a connection before its guest served
+// the process service (vfkit's `connect` socket, a socket Apple's
+// `container` publishes, a hybrid vsock device answering its handshake),
+// whether the actor counted as ready depended on its driver, because each
+// transport's connection defined ready on its own.
+//
+// The fix defines ready once: the process service answered a request,
+// whatever accepted the connection.
+#[tokio::test]
+async fn an_actor_whose_transport_accepts_before_its_guest_serves_is_not_ready_until_it_answers() {
+  use needy_core::types::ActorState;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let mut request = new_run(PROFILE, started.dir.path());
+  request.tty = Some(needy_api_server::control::WindowSize { rows: 24, cols: 80 });
+  let created = Runs::create(daemon, request).await.unwrap();
+  assert_eq!(created.actor, Some(ActorState::Starting));
+  let dir = run_dir(&started, &created.id);
+  let guest = dir.join("guest-process.sock");
+  let serving = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+  let device = hybrid_vsock(&dir.join("v.sock"), guest.clone(), serving.clone());
+  needy_api_server::control::Guest::config(daemon, &created.id).await.unwrap();
+  assert_eq!(actor_state(daemon, &created.id).await, Some(ActorState::Configured));
+
+  // The daemon retries every 200 ms: a second covers several tries that
+  // each pass the handshake and are closed.
+  tokio::time::sleep(Duration::from_secs(1)).await;
+  assert_eq!(actor_state(daemon, &created.id).await, Some(ActorState::Configured), "a handshake alone made the actor ready");
+
+  let health = needy_api_server::Health {
+    instance_id: "guest".into(),
+    role: "actor",
+  };
+  let listener = needy_api_server::Server::new(health, needy_api_server::control::Caller::Operator)
+    .bind(&[needy_api_server::Listen::Unix(guest)])
+    .await
+    .unwrap();
+  let stop = tokio_util::sync::CancellationToken::new();
+  let served = tokio::spawn(listener.serve(stop.clone()));
+  serving.store(true, std::sync::atomic::Ordering::SeqCst);
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+  while actor_state(daemon, &created.id).await != Some(ActorState::Ready) {
+    assert!(tokio::time::Instant::now() < deadline, "the actor did not become ready once its process service answered");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+  assert_eq!(actor_state(daemon, &created.id).await, None, "a stopped run is listed from state.db");
+  device.abort();
+  stop.cancel();
+  served.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn an_actor_is_starting_until_configured_and_exits_with_its_run() {
+  use needy_core::types::ActorState;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  assert_eq!(created.actor, Some(ActorState::Starting));
+  needy_api_server::control::Guest::config(daemon, &created.id).await.unwrap();
+  assert_eq!(actor_state(daemon, &created.id).await, Some(ActorState::Configured));
+  let run = daemon.runs.find(&created.id).unwrap();
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator).await.unwrap();
+
+  assert_eq!(run.actor.get(), Some(ActorState::Exited));
 }

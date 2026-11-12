@@ -94,6 +94,38 @@ impl fmt::Display for RunState {
   }
 }
 
+/// An actor's life cycle, which the daemon's `actor::state` advances the
+/// same way for every actor driver. `Exited` is terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorState {
+  /// Its driver is starting it, or started it and its guest boots.
+  Starting,
+  /// Its guest fetched the run's configuration.
+  Configured,
+  /// Its process service answered a request: a client can attach.
+  Ready,
+  /// It exited, or its run stopped it.
+  Exited,
+}
+
+impl ActorState {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Starting => "starting",
+      Self::Configured => "configured",
+      Self::Ready => "ready",
+      Self::Exited => "exited",
+    }
+  }
+}
+
+impl fmt::Display for ActorState {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
 /// Who started an exec. On the wire it is the `needy.v1.Origin` enum;
 /// `needy_api_server::protocol::domain` maps between the two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

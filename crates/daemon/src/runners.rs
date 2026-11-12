@@ -93,7 +93,7 @@ pub(crate) fn control_error(error: Error) -> ControlError {
     | Error::PairingCodeUsed(_) => ControlError::Unauthenticated(message),
     Error::NoJoinToken(_) | Error::NoRunner(_) | Error::NoClient(_) => ControlError::NotFound(message),
     Error::OutOfScope(_) => ControlError::denied(message),
-    Error::RunnerExists(_) | Error::PairingCodeOpen(_) => ControlError::Failed(message),
+    Error::RunnerExists(_) | Error::PairingCodeOpen(_) | Error::Refused(_) => ControlError::Failed(message),
     Error::Invalid(_) => ControlError::Invalid(message),
     Error::Schema(_) | Error::Corrupt(_) | Error::Database(_) => {
       tracing::error!("state.db: {error:#}");

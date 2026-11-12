@@ -219,9 +219,9 @@ async fn left_by_a_killed_control_plane(state_dir: &std::path::Path, vm: &std::p
   let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "linux-firecracker");
   actor.handle = state_dir.join("runs/r1").display().to_string();
   actor.pid = Some(i64::from(vm.id()));
-  store.save_instance(&actor).await.unwrap();
-  store.save_instance(&instance("r1", executor_instance("r1", "here"), "here", InstanceKind::Executor, None, "native")).await.unwrap();
-  store.save_instance(&instance("r1", executor_instance("r1", "far"), "far", InstanceKind::Executor, Some("far"), "native")).await.unwrap();
+  store.start_instance(&actor).await.unwrap();
+  store.start_instance(&instance("r1", executor_instance("r1", "here"), "here", InstanceKind::Executor, None, "native")).await.unwrap();
+  store.start_instance(&instance("r1", executor_instance("r1", "far"), "far", InstanceKind::Executor, Some("far"), "native")).await.unwrap();
   let process = ProcessRecord {
     id: "p1".into(),
     run: "r1".into(),
@@ -232,7 +232,7 @@ async fn left_by_a_killed_control_plane(state_dir: &std::path::Path, vm: &std::p
     started_ms: 1,
     ended_ms: None,
   };
-  store.save_process(&process).await.unwrap();
+  store.start_process(&process).await.unwrap();
 }
 
 #[tokio::test]
@@ -304,7 +304,7 @@ async fn a_restarted_control_plane_ends_a_leftover_macos_vz_actors_vfkit() {
   let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "macos-vz");
   actor.handle = run_dir.display().to_string();
   actor.pid = Some(i64::from(vfkit.id()));
-  store.save_instance(&actor).await.unwrap();
+  store.start_instance(&actor).await.unwrap();
   drop(store);
 
   let started = testing::daemon_in(dir, |_| {}).await;

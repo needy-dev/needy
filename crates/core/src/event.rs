@@ -17,8 +17,9 @@ use crate::types::{Fired, Network, Origin, Outcome, Principal};
 /// added `actor.start`'s `runtime`; version 5 added `run.create`'s
 /// `recipe_time`; version 6 renamed `actor.start`'s `runtime` and
 /// `run.create`'s executors' `runtime` to `driver`, with the drivers' names
-/// (`linux-firecracker`, `linux-container (runc)`, `linux-container`).
-pub const SCHEMA_VERSION: u32 = 6;
+/// (`linux-firecracker`, `linux-container (runc)`, `linux-container`);
+/// version 7 added `actor.ready`.
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -27,6 +28,8 @@ pub const SCHEMA_VERSION: u32 = 6;
 // `docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md`,
 // allows breaking wire changes), so traces written before it are rejected
 // with a version error instead of decoding a renamed field as unknown.
+// Version 7 only added a kind, but a reader of 6 would refuse it, so traces
+// of 6 are refused here too: one version is read (no compatibility).
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
 pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = SCHEMA_VERSION..=SCHEMA_VERSION;
@@ -107,6 +110,9 @@ events! {
   ActorVmExit(ActorVmExit) = "actor.vm.exit",
   /// The actor's init fetched its configuration.
   ActorConfig(ActorConfig) = "actor.config",
+  /// The actor's process service answered a request: its driving program's
+  /// terminal can be attached.
+  ActorReady(ActorReady) = "actor.ready",
   /// The actor's driving program exited.
   ActorExit(ActorExit) = "actor.exit",
   FilesCopyIn(FilesCopyIn) = "files.copy_in",
@@ -244,6 +250,12 @@ pub struct ActorConfig {
   /// Mount points of the actor's workspace mounts.
   pub mounts: Vec<String>,
 }
+
+/// The daemon reached the actor's process service; see the daemon's
+/// `actor::state` for what counts as ready.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActorReady {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

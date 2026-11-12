@@ -17,7 +17,7 @@ use needy_core::intercept::ExecContext;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use needy_config::profile::{ActorDriver, ExecutorDriver};
-use needy_core::types::{Capabilities, Origin, RunState, RunnerRole};
+use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
 
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
@@ -73,6 +73,16 @@ pub fn proto_run_state(state: RunState) -> v1::RunState {
     RunState::Stopped => v1::RunState::Stopped,
     RunState::Finished => v1::RunState::Finished,
     RunState::Failed => v1::RunState::Failed,
+  }
+}
+
+pub fn proto_actor_state(state: Option<ActorState>) -> v1::ActorState {
+  match state {
+    None => v1::ActorState::Unspecified,
+    Some(ActorState::Starting) => v1::ActorState::Starting,
+    Some(ActorState::Configured) => v1::ActorState::Configured,
+    Some(ActorState::Ready) => v1::ActorState::Ready,
+    Some(ActorState::Exited) => v1::ActorState::Exited,
   }
 }
 
@@ -371,6 +381,7 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
     actor_exit: run.actor_exit.map(proto_exit),
     tty: run.tty,
     failure: run.failure.unwrap_or_default(),
+    actor_state: proto_actor_state(run.actor).into(),
   }
 }
 

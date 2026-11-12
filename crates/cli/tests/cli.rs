@@ -431,11 +431,11 @@ fn run_ls_prints_a_table() {
   let text = stdout(&output);
   let mut lines = text.lines();
   let header: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
-  assert_eq!(header, ["ID", "NAME", "STATE", "GROUP", "EXECUTORS", "EXIT"]);
+  assert_eq!(header, ["ID", "NAME", "STATE", "ACTOR", "GROUP", "EXECUTORS", "EXIT"]);
   // A name and group that default to the ID show as `-`; a running
-  // run has no exit yet.
+  // run has no exit yet, and its stand-in actor's guest never boots.
   let row: Vec<&str> = lines.next().unwrap().split_whitespace().collect();
-  assert_eq!(row, [run.as_str(), "-", "running", "-", "here=native"]);
+  assert_eq!(row, [run.as_str(), "-", "running", "starting", "-", "here=native"]);
 }
 
 // The owner's 2026-11-10 trial: a run that ended gave its executors
@@ -467,6 +467,7 @@ fn run_ls_shows_released_executors_and_why_a_run_failed() {
       stopped.as_str(),
       "-",
       "stopped",
+      "-",
       "-",
       "here=native (released)"
     ]

@@ -13,7 +13,7 @@ use std::pin::Pin;
 use needy_common::process::Exit;
 use needy_core::event::{Event, ExecutorRef};
 use needy_core::intercept::ExecContext;
-use needy_core::types::{Capabilities, Origin, Principal, RunState, RunnerRole};
+use needy_core::types::{ActorState, Capabilities, Origin, Principal, RunState, RunnerRole};
 use tokio_stream::Stream;
 
 /// Who is calling: the listener the call arrived on decides, unless the
@@ -152,6 +152,9 @@ pub struct RunInfo {
   pub tty: bool,
   /// Why the run failed, with its causes.
   pub failure: Option<String>,
+  /// Where its actor stands; `None` before the actor starts, and for a run
+  /// listed from `state.db` after it ended.
+  pub actor: Option<ActorState>,
 }
 
 /// Where a routed command runs and how it is rewritten.

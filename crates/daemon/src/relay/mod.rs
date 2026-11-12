@@ -516,9 +516,7 @@ impl Relay {
       started_ms,
       ended_ms: None,
     };
-    if let Err(e) = daemon.state.save_process(&record).await {
-      tracing::warn!("run {run}: cannot write process {process} to state.db: {e:#}");
-    }
+    daemon.start_process(&record).await;
   }
 
   /// Records in `state.db` how a run's process exited.
@@ -526,9 +524,7 @@ impl Relay {
     let Some(run) = &self.run else {
       return;
     };
-    if let Err(e) = daemon.state.end_process(process, store::ProcessState::Exited, Some(exit.clone()), now_ms()).await {
-      tracing::warn!("run {run}: cannot write the exit of process {process} to state.db: {e:#}");
-    }
+    daemon.advance_process(run, process, store::ProcessState::Exited, Some(exit.clone()), now_ms()).await;
   }
 
   /// Relays the process's output to the caller until it exits. The slot is

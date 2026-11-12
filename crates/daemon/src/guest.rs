@@ -8,7 +8,7 @@ use needy_common::process::Exit;
 use needy_config::profile::{FaultKind, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::rules;
-use needy_core::types::RunState;
+use needy_core::types::{ActorState, RunState};
 use needy_core_actor::driver::Side as Presenter;
 
 use crate::run::Run;
@@ -86,6 +86,7 @@ impl Guest for Daemon {
       .collect();
     let recipe = run.recipe.as_ref();
     let routed = rules::route_names(profile);
+    actor::advance(&run, ActorState::Configured);
     run.emit(&Event::ActorConfig(ActorConfig {
       route_names: routed.clone(),
       mounts: mounts.iter().map(|m| m.target.clone()).collect(),

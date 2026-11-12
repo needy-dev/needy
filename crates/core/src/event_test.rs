@@ -45,6 +45,7 @@ fn every_kind() -> Vec<Event> {
       route_names: Some(argv("bash git")),
       mounts: vec!["/home/agent/workspace".into()],
     }),
+    Event::ActorReady(ActorReady {}),
     Event::ActorExit(ActorExit {
       code: None,
       signal: Some("SIGKILL".into()),

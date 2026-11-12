@@ -7,12 +7,13 @@ use needy_core::types::{Origin, RunState};
 use sea_orm::sea_query::OnConflict;
 use sea_orm::{
   ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, EntityTrait as _, IntoActiveModel as _, Iterable as _, QueryFilter as _,
-  QueryOrder as _,
+  QueryOrder as _, TransactionTrait as _,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::entity::{instance, process, run};
+use super::lifecycle::{InstanceState, ProcessState, Refused};
 use super::{Error, Result, Store};
 
 /// A run as the control plane last wrote it.
@@ -40,22 +41,6 @@ pub enum InstanceKind {
   Executor,
 }
 
-/// Where a run's hold on an instance stands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InstanceState {
-  /// The run holds it.
-  Running,
-  /// The run gave it back when it ended.
-  Released,
-  /// Ended by reconciliation: a restarted control plane, or a runner that
-  /// reported it for a run that is no longer live.
-  Ended,
-  /// The control plane restarted and nobody reported it: whether it still
-  /// runs is unknown.
-  Lost,
-}
-
 /// A run's hold on an actor or an executor instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceRecord {
@@ -79,18 +64,6 @@ pub struct InstanceRecord {
   pub state: InstanceState,
   pub created_ms: i64,
   pub ended_ms: Option<i64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProcessState {
-  Running,
-  /// It exited; its exit is unknown when nobody saw it.
-  Exited,
-  /// Killed because its run ended.
-  Ended,
-  /// The control plane restarted and nobody reported it.
-  Lost,
 }
 
 /// A process one of a run's executors ran.
@@ -167,8 +140,12 @@ impl Store {
     rows.into_iter().map(run_of).collect()
   }
 
-  /// Writes `record` whole, replacing an earlier version.
-  pub async fn save_instance(&self, record: &InstanceRecord) -> Result<()> {
+  /// Records a run's new hold on an instance, which starts running. A row
+  /// with its ID is never replaced: that is refused.
+  pub async fn start_instance(&self, record: &InstanceRecord) -> Result<()> {
+    if record.state != InstanceState::START || record.ended_ms.is_some() {
+      return Err(Error::Invalid(format!("instance {} starts {}", record.id, InstanceState::START.as_str())));
+    }
     let row = instance::Model {
       id: record.id.clone(),
       run: record.run.clone(),
@@ -180,27 +157,36 @@ impl Store {
       pid: record.pid,
       state: word(&record.state)?,
       created_ms: record.created_ms,
-      ended_ms: record.ended_ms,
+      ended_ms: None,
     };
-    let update: Vec<instance::Column> = instance::Column::iter().filter(|c| !matches!(c, instance::Column::Id)).collect();
-    instance::Entity::insert(row.into_active_model())
-      .on_conflict(OnConflict::column(instance::Column::Id).update_columns(update).to_owned())
-      .exec(&self.db)
-      .await?;
+    let txn = self.db.begin().await?;
+    if let Some(existing) = instance::Entity::find_by_id(&record.id).one(&txn).await? {
+      let from: InstanceState = parse_word(&existing.state)?;
+      return Err(refused("instance", &record.id, from.as_str(), InstanceState::START.as_str()));
+    }
+    instance::Entity::insert(row.into_active_model()).exec(&txn).await?;
+    txn.commit().await?;
     Ok(())
   }
 
-  /// Moves instance `id` to `state`; an instance that is no longer
-  /// running records `now` as its end. An unknown ID changes nothing.
-  pub async fn set_instance_state(&self, id: &str, state: InstanceState, now: i64) -> Result<()> {
-    let Some(row) = instance::Entity::find_by_id(id).one(&self.db).await? else {
-      return Ok(());
+  /// Moves instance `id` to `to`, which records `now` as its end, and
+  /// returns the state it left; `None` for an unknown ID, which changes
+  /// nothing. A change its lifecycle does not allow is refused.
+  pub async fn advance_instance(&self, id: &str, to: InstanceState, now: i64) -> Result<Option<InstanceState>> {
+    let txn = self.db.begin().await?;
+    let Some(row) = instance::Entity::find_by_id(id).one(&txn).await? else {
+      return Ok(None);
     };
+    let from: InstanceState = parse_word(&row.state)?;
+    if !InstanceState::allowed(from, to) {
+      return Err(refused("instance", id, from.as_str(), to.as_str()));
+    }
     let mut row = row.into_active_model();
-    row.state = Set(word(&state)?);
-    row.ended_ms = Set((state != InstanceState::Running).then_some(now));
-    row.update(&self.db).await?;
-    Ok(())
+    row.state = Set(word(&to)?);
+    row.ended_ms = Set(Some(now));
+    row.update(&txn).await?;
+    txn.commit().await?;
+    Ok(Some(from))
   }
 
   /// The instances of run `run`, by ID.
@@ -216,8 +202,12 @@ impl Store {
     rows.into_iter().map(instance_of).collect()
   }
 
-  /// Writes `record` whole, replacing an earlier version.
-  pub async fn save_process(&self, record: &ProcessRecord) -> Result<()> {
+  /// Records a process that started, running. A row with its ID is never
+  /// replaced: that is refused.
+  pub async fn start_process(&self, record: &ProcessRecord) -> Result<()> {
+    if record.state != ProcessState::START || record.ended_ms.is_some() {
+      return Err(Error::Invalid(format!("process {} starts {}", record.id, ProcessState::START.as_str())));
+    }
     let row = process::Model {
       id: record.id.clone(),
       run: record.run.clone(),
@@ -227,29 +217,38 @@ impl Store {
       exit_code: record.exit.as_ref().and_then(|e| e.code),
       exit_signal: record.exit.as_ref().map(|e| e.signal.clone()),
       started_ms: record.started_ms,
-      ended_ms: record.ended_ms,
+      ended_ms: None,
     };
-    let update: Vec<process::Column> = process::Column::iter().filter(|c| !matches!(c, process::Column::Id)).collect();
-    process::Entity::insert(row.into_active_model())
-      .on_conflict(OnConflict::column(process::Column::Id).update_columns(update).to_owned())
-      .exec(&self.db)
-      .await?;
+    let txn = self.db.begin().await?;
+    if let Some(existing) = process::Entity::find_by_id(&record.id).one(&txn).await? {
+      let from: ProcessState = parse_word(&existing.state)?;
+      return Err(refused("process", &record.id, from.as_str(), ProcessState::START.as_str()));
+    }
+    process::Entity::insert(row.into_active_model()).exec(&txn).await?;
+    txn.commit().await?;
     Ok(())
   }
 
-  /// Ends process `id` in `state` with `exit`, if known, at `now`. An
-  /// unknown ID changes nothing.
-  pub async fn end_process(&self, id: &str, state: ProcessState, exit: Option<Exit>, now: i64) -> Result<()> {
-    let Some(row) = process::Entity::find_by_id(id).one(&self.db).await? else {
-      return Ok(());
+  /// Ends process `id` in `to` with `exit`, if known, at `now`, and returns
+  /// the state it left; `None` for an unknown ID, which changes nothing. A
+  /// change its lifecycle does not allow is refused.
+  pub async fn advance_process(&self, id: &str, to: ProcessState, exit: Option<Exit>, now: i64) -> Result<Option<ProcessState>> {
+    let txn = self.db.begin().await?;
+    let Some(row) = process::Entity::find_by_id(id).one(&txn).await? else {
+      return Ok(None);
     };
+    let from: ProcessState = parse_word(&row.state)?;
+    if !ProcessState::allowed(from, to) {
+      return Err(refused("process", id, from.as_str(), to.as_str()));
+    }
     let mut row = row.into_active_model();
-    row.state = Set(word(&state)?);
+    row.state = Set(word(&to)?);
     row.exit_code = Set(exit.as_ref().and_then(|e| e.code));
     row.exit_signal = Set(exit.map(|e| e.signal));
     row.ended_ms = Set(Some(now));
-    row.update(&self.db).await?;
-    Ok(())
+    row.update(&txn).await?;
+    txn.commit().await?;
+    Ok(Some(from))
   }
 
   pub async fn process(&self, id: &str) -> Result<Option<ProcessRecord>> {
@@ -266,6 +265,15 @@ impl Store {
       .await?;
     rows.into_iter().map(process_of).collect()
   }
+}
+
+fn refused(object: &'static str, id: &str, from: &'static str, to: &'static str) -> Error {
+  Error::Refused(Refused {
+    object,
+    id: id.to_string(),
+    from,
+    to,
+  })
 }
 
 /// A unit enum's serde name, such as `running`.
