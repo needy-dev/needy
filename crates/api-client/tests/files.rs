@@ -33,7 +33,7 @@ async fn a_pushed_directory_pulls_back_the_same() {
 
   assert_eq!(std::fs::read_to_string(remote.join("sub/b.txt")).unwrap(), "beta");
   let back = executor.dir.path().join("back");
-  needy_common::archive::unpack(&pulled, &back).unwrap();
+  needy_common::archive::unpack(&pulled, &back, &[]).unwrap();
   assert_eq!(std::fs::read_to_string(back.join("a.txt")).unwrap(), "alpha");
   assert_eq!(std::fs::read_to_string(back.join("sub/b.txt")).unwrap(), "beta");
 }
@@ -85,7 +85,7 @@ async fn a_pull_names_one_entry_of_a_directory() {
   let pulled = files::pull(&executor.client, &target(), remote.to_str().unwrap(), "keep").await.unwrap();
 
   let back = executor.dir.path().join("back");
-  needy_common::archive::unpack(&pulled, &back).unwrap();
+  needy_common::archive::unpack(&pulled, &back, &[]).unwrap();
   assert_eq!(std::fs::read_to_string(back.join("keep/k.txt")).unwrap(), "k");
   assert!(!back.join("other.txt").exists());
 }

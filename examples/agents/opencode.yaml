@@ -54,24 +54,19 @@ commands:
     to: actor
 
 # The data directory (auth.json, sessions) survives stateless actors: copied
-# in at the start (without the language servers and logs opencode writes
-# there), mirrored back at the end. Credentials then live in the actor, where
-# the agent can read them (see README.md).
+# in at the start, mirrored back at the end without the language servers and
+# logs opencode writes there. Credentials then live in the actor, where the
+# agent can read them (see README.md).
 # ~/.local/state/opencode (the TUI's recent models and prompt history) is not
 # kept.
-# NOTICE: the filters are on copy-in, which the control host packs with
-# them. An actor's mirror-out sends its whole directory: the guest packs it
-# without the mapping's filter (`mirror_out` in
-# crates/core-actor/src/guest/init/files.rs), so what a filter leaves out
-# still reaches the host, and is only left out of the next copy-in.
 files:
   opencode-in:
     mode: copy-in
     from: "host:~/needy-state/opencode/"
     to: "actor:~/.local/share/opencode/"
-    filter: ["- /bin/**", "- /log/**", "+ **"]
   opencode-out:
     mode: mirror-out
     from: "actor:~/.local/share/opencode/"
     to: "host:~/needy-state/opencode/"
+    filter: ["- /bin/**", "- /log/**", "+ **"]
 run_files: [opencode-in, opencode-out]

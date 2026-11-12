@@ -133,3 +133,76 @@ async fn a_mirror_out_that_fails_at_the_stop_is_recorded_for_the_report() {
   assert!(failed.payload.get().contains(r#""name":"results""#), "{}", failed.payload.get());
   assert!(failed.payload.get().contains("does not exist on the control host"), "{}", failed.payload.get());
 }
+
+/// A directory with `keep.txt`, `cache/blob` and `nested/debug.log`, for
+/// a filter to pick from.
+fn produced(dir: &std::path::Path) -> std::path::PathBuf {
+  let source = dir.join("produced");
+  std::fs::create_dir_all(source.join("cache")).unwrap();
+  std::fs::create_dir_all(source.join("nested")).unwrap();
+  std::fs::write(source.join("keep.txt"), "kept").unwrap();
+  std::fs::write(source.join("cache/blob"), "x").unwrap();
+  std::fs::write(source.join("nested/debug.log"), "x").unwrap();
+  source
+}
+
+const FILTER: &str = r#"["- /cache/", "- *.log", "+ **"]"#;
+
+/// Asserts that `out` has what [`FILTER`] keeps of [`produced`] and none of
+/// what it leaves out.
+fn assert_filtered(out: &std::path::Path) {
+  assert_eq!(std::fs::read_to_string(out.join("keep.txt")).unwrap(), "kept");
+  assert!(!out.join("cache").exists(), "an excluded directory reached the host");
+  assert!(out.join("nested").is_dir());
+  assert!(!out.join("nested/debug.log").exists(), "an excluded file reached the host");
+}
+
+// ROOT CAUSE:
+//
+// If an actor's mirror-out mapping had a `filter`, everything the guest
+// sent still reached the host, because the guest packed the whole directory
+// and the daemon unpacked the archive as it came.
+//
+// Before the fix, `cache/` and `*.log` were written to the host.
+// The fix applies the mapping's filter on the daemon when it unpacks, so a
+// guest cannot bypass it.
+#[tokio::test]
+async fn an_actor_mirror_out_applies_the_mappings_filter_on_the_host() {
+  use needy_api_server::control::Guest;
+  let started = testing::daemon().await;
+  let source = produced(started.dir.path());
+  let out = started.dir.path().join("out");
+  let yaml = profile(&format!(r#"  results: {{ mode: mirror-out, from: "actor:~/out/", to: "host:{}", filter: {FILTER} }}"#, out.display()));
+  let created = Runs::create(&started.daemon, new_run(&yaml, started.dir.path())).await.unwrap();
+  // What a guest sends: the whole directory.
+  let archive = needy_common::archive::pack(&source, &[]).unwrap();
+
+  Guest::push_files(&started.daemon, &created.id, "results", archive).await.unwrap();
+
+  assert_filtered(&out);
+}
+
+// ROOT CAUSE:
+//
+// If an executor's mirror-out mapping had a `filter`, the executor's `tar`
+// packed the whole directory and the daemon unpacked all of it, as for an
+// actor's.
+//
+// Before the fix, `cache/` and `*.log` were written to the host.
+// The fix applies the filter where the daemon unpacks, for both sides.
+#[tokio::test]
+async fn an_executor_mirror_out_applies_the_mappings_filter_on_the_host() {
+  let started = testing::daemon().await;
+  let source = produced(started.dir.path());
+  let out = started.dir.path().join("out");
+  let yaml = profile(&format!(
+    r#"  results: {{ mode: mirror-out, from: "executor:here:{}", to: "host:{}", filter: {FILTER} }}"#,
+    source.display(),
+    out.display()
+  ));
+  let created = Runs::create(&started.daemon, new_run(&yaml, started.dir.path())).await.unwrap();
+
+  Runs::stop(&started.daemon, &created.id, Principal::Operator).await.unwrap();
+
+  assert_filtered(&out);
+}

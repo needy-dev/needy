@@ -64,27 +64,30 @@ commands:
   - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
     to: actor
 
-# The four agent profiles' mappings; their NOTICEs say why the filters are on
-# copy-in.
+# The four agent profiles' mappings.
 files:
-  claude-in:
-    mode: copy-in
-    from: "host:~/needy-state/claude/"
-    to: "actor:~/.claude/"
+  claude-in: { mode: copy-in, from: "host:~/needy-state/claude/", to: "actor:~/.claude/" }
+  claude-out:
+    mode: mirror-out
+    from: "actor:~/.claude/"
+    to: "host:~/needy-state/claude/"
     filter: ["- /shell-snapshots/**", "- /downloads/**", "+ **"]
-  claude-out: { mode: mirror-out, from: "actor:~/.claude/", to: "host:~/needy-state/claude/" }
-  codex-in:
-    mode: copy-in
-    from: "host:~/needy-state/codex/"
-    to: "actor:~/.codex/"
+  codex-in: { mode: copy-in, from: "host:~/needy-state/codex/", to: "actor:~/.codex/" }
+  codex-out:
+    mode: mirror-out
+    from: "actor:~/.codex/"
+    to: "host:~/needy-state/codex/"
     filter: ["- /tmp/**", "- /.tmp/**", "- /log/**", "+ **"]
-  codex-out: { mode: mirror-out, from: "actor:~/.codex/", to: "host:~/needy-state/codex/" }
-  pi-in: { mode: copy-in, from: "host:~/needy-state/pi/", to: "actor:~/.pi/agent/", filter: ["- /bin/**", "+ **"] }
-  pi-out: { mode: mirror-out, from: "actor:~/.pi/agent/", to: "host:~/needy-state/pi/" }
-  opencode-in:
-    mode: copy-in
-    from: "host:~/needy-state/opencode/"
-    to: "actor:~/.local/share/opencode/"
+  pi-in: { mode: copy-in, from: "host:~/needy-state/pi/", to: "actor:~/.pi/agent/" }
+  pi-out:
+    mode: mirror-out
+    from: "actor:~/.pi/agent/"
+    to: "host:~/needy-state/pi/"
+    filter: ["- /bin/**", "+ **"]
+  opencode-in: { mode: copy-in, from: "host:~/needy-state/opencode/", to: "actor:~/.local/share/opencode/" }
+  opencode-out:
+    mode: mirror-out
+    from: "actor:~/.local/share/opencode/"
+    to: "host:~/needy-state/opencode/"
     filter: ["- /bin/**", "- /log/**", "+ **"]
-  opencode-out: { mode: mirror-out, from: "actor:~/.local/share/opencode/", to: "host:~/needy-state/opencode/" }
 run_files: [claude-in, claude-out, codex-in, codex-out, pi-in, pi-out, opencode-in, opencode-out]

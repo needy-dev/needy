@@ -43,18 +43,55 @@ fn relative(root: &Path, path: &Path) -> String {
 }
 
 /// Unpacks into `destination` and returns the number of entries. Entries with
-/// absolute paths or `..` components are skipped by `tar` itself.
-pub fn unpack(archive: &[u8], destination: &Path) -> Result<usize> {
+/// absolute paths or `..` components are skipped by `tar` itself. `filter`
+/// rules apply as [`pack`] applies them, to paths relative to the archive's
+/// root (a leading `./`, as `tar -C DIR .` writes, is not part of them): an
+/// entry is skipped when a rule excludes it or a directory above it.
+pub fn unpack(archive: &[u8], destination: &Path, filter: &[String]) -> Result<usize> {
   std::fs::create_dir_all(destination)?;
   let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
   tar.set_preserve_permissions(true);
   let mut count = 0;
   for entry in tar.entries()? {
-    if entry?.unpack_in(destination)? {
+    let mut entry = entry?;
+    if !filter.is_empty() && !allowed(filter, &entry.path()?, entry.header().entry_type().is_dir()) {
+      continue;
+    }
+    if entry.unpack_in(destination)? {
       count += 1;
     }
   }
   Ok(count)
+}
+
+/// Whether `filter` lets the archive entry at `path` through: neither the
+/// entry nor a directory above it is excluded, as `pack`'s walk skips an
+/// excluded directory with its contents.
+fn allowed(filter: &[String], path: &Path, is_dir: bool) -> bool {
+  let parts: Vec<String> = path
+    .components()
+    .filter_map(|c| match c {
+      std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+      _ => None,
+    })
+    .collect();
+  let mut relative = String::new();
+  for (i, part) in parts.iter().enumerate() {
+    if !relative.is_empty() {
+      relative.push('/');
+    }
+    relative.push_str(part);
+    let last = i + 1 == parts.len();
+    let probe = if !last || is_dir {
+      format!("{relative}/")
+    } else {
+      relative.clone()
+    };
+    if !filter_allows(filter, &probe) {
+      return false;
+    }
+  }
+  true
 }
 
 #[cfg(test)]
@@ -76,7 +113,7 @@ mod tests {
       "+ **".to_string(),
     ];
     let archive = pack(&src, &filter).unwrap();
-    unpack(&archive, &dst).unwrap();
+    unpack(&archive, &dst, &[]).unwrap();
     assert!(dst.join("config.toml").exists());
     assert!(!dst.join("auth.json").exists());
     assert!(!dst.join("sessions/log.jsonl").exists());
@@ -98,8 +135,72 @@ mod tests {
     let archive = builder.into_inner().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let dst = dir.path().join("out");
-    assert_eq!(unpack(&archive, &dst).unwrap(), 1);
+    assert_eq!(unpack(&archive, &dst, &[]).unwrap(), 1);
     assert!(dst.join("ok.txt").exists());
     assert!(!dir.path().join("escape.txt").exists());
+  }
+
+  /// An archive as `tar -c -C DIR .` writes it: every name starts with
+  /// `./`, and directories come before their contents.
+  fn tar_dot(entries: &[(&str, Option<&str>)]) -> Vec<u8> {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (name, data) in entries {
+      let mut header = tar::Header::new_gnu();
+      match data {
+        Some(data) => {
+          header.set_entry_type(tar::EntryType::Regular);
+          header.set_size(data.len() as u64);
+          header.set_mode(0o644);
+          header.set_cksum();
+          builder.append_data(&mut header, name, data.as_bytes()).unwrap();
+        }
+        None => {
+          header.set_entry_type(tar::EntryType::Directory);
+          header.set_size(0);
+          header.set_mode(0o755);
+          header.set_cksum();
+          builder.append_data(&mut header, name, &[][..]).unwrap();
+        }
+      }
+    }
+    builder.into_inner().unwrap()
+  }
+
+  #[test]
+  fn unpack_applies_the_filter_as_pack_does() {
+    let archive = tar_dot(&[
+      ("./", None),
+      ("./keep.txt", Some("k")),
+      ("./auth.json", Some("s")),
+      ("./cache/", None),
+      ("./cache/blob", Some("x")),
+      ("./nested/", None),
+      ("./nested/auth.json", Some("n")),
+      ("./nested/debug.log", Some("x")),
+    ]);
+    let filter: Vec<String> = ["- /auth.json", "- cache/", "- *.log", "+ **"].iter().map(|s| s.to_string()).collect();
+    let dir = tempfile::tempdir().unwrap();
+
+    unpack(&archive, dir.path(), &filter).unwrap();
+
+    assert!(dir.path().join("keep.txt").exists());
+    assert!(!dir.path().join("auth.json").exists(), "an anchored rule matches at the root");
+    assert!(dir.path().join("nested/auth.json").exists(), "an anchored rule matches only at the root");
+    assert!(!dir.path().join("cache").exists(), "an excluded directory is skipped with its contents");
+    assert!(!dir.path().join("nested/debug.log").exists());
+  }
+
+  #[test]
+  fn unpack_skips_what_is_under_an_excluded_directory_without_its_entry() {
+    // `- /cache/**` matches the directory's contents; an archive that has
+    // only the contents, no entry for the directory, is filtered the same.
+    let archive = tar_dot(&[("./cache/deep/blob", Some("x")), ("./keep.txt", Some("k"))]);
+    let filter: Vec<String> = vec!["- /cache/".into(), "+ **".into()];
+    let dir = tempfile::tempdir().unwrap();
+
+    assert_eq!(unpack(&archive, dir.path(), &filter).unwrap(), 1);
+
+    assert!(!dir.path().join("cache").exists());
+    assert!(dir.path().join("keep.txt").exists());
   }
 }

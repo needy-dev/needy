@@ -26,7 +26,7 @@ pub(super) async fn copy_in(client: &Client, name: &str, path: &str, home: &str,
 /// outside the home, as before.
 fn place(archive: &[u8], root: &Path, home: &str, uid: u32, gid: u32) -> Result<()> {
   create_user_dirs(root, home, uid, gid);
-  needy_common::archive::unpack(archive, root)?;
+  needy_common::archive::unpack(archive, root, &[])?;
   chown_tree(root, uid, gid);
   Ok(())
 }

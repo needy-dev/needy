@@ -161,9 +161,9 @@ pub async fn copy_in(run: &Run) -> Result<()> {
   Ok(())
 }
 
-/// Unpacks each executor-to-host mirror-out mapping on the host. A mapping
-/// that fails is recorded (`files.fail`) and logged, and the others still
-/// run.
+/// Unpacks each executor-to-host mirror-out mapping on the host, through its
+/// filter. A mapping that fails is recorded (`files.fail`) and logged, and
+/// the others still run.
 // TODO(run-ls): a failed mirror-out is a report finding but does not show in
 // `run ls`, whose rows carry the driving program's exit or the run's own
 // failure; a column for it changes the `Run` message and waits for the owner.
@@ -183,7 +183,8 @@ pub async fn mirror_out(run: &Run) {
       let destination = destination(run, dst)?;
       let archive = files::pull(&*instance.handle.executor, &target(), path, ".").await?;
       let size = archive.len();
-      tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination)).await??;
+      let filter = mapping.filter.clone();
+      tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination, &filter)).await??;
       anyhow::Ok(size)
     };
     match mirrored.await {
@@ -236,7 +237,8 @@ pub async fn fetch(run: &Run, name: &str) -> Result<Vec<u8>, ControlError> {
   Ok(archive)
 }
 
-/// Unpacks the actor's archive of mirror-out mapping `name` on the host.
+/// Unpacks the actor's archive of mirror-out mapping `name` on the host,
+/// through the mapping's filter.
 pub async fn push(run: &Run, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
   let mapping = run
     .profile
@@ -249,8 +251,11 @@ pub async fn push(run: &Run, name: &str, archive: Vec<u8>) -> Result<(), Control
     return Err(ControlError::Invalid("mirror-out must go to the host".into()));
   };
   let size = archive.len();
+  // The filter applies here, not in the guest, so the guest cannot bypass
+  // it and the rules live where copy-in applies them.
+  let filter = mapping.filter.clone();
   let unpacked = match destination(run, dst) {
-    Ok(destination) => tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination))
+    Ok(destination) => tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination, &filter))
       .await
       .map_err(|e| ControlError::Internal(e.to_string()))?,
     Err(e) => Err(e),

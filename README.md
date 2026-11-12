@@ -459,7 +459,8 @@ run_files: [login-in, login-out]
 ```
 
 A copy-in / mirror-out pair is how state such as a login survives stateless
-actors.
+actors. A `filter` (rclone-style rules, first match wins) applies on the
+control host, where it packs a copy-in and where it unpacks a mirror-out.
 
 ### Network
 

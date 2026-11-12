@@ -64,20 +64,15 @@ commands:
 # The agent directory (auth.json, settings, sessions) survives stateless
 # actors: copied in at the start, mirrored back at the end. Credentials then
 # live in the actor, where the agent can read them (see README.md).
-# NOTICE: the filters are on copy-in, which the control host packs with
-# them. An actor's mirror-out sends its whole directory: the guest packs it
-# without the mapping's filter (`mirror_out` in
-# crates/core-actor/src/guest/init/files.rs), so what a filter leaves out
-# still reaches the host, and is only left out of the next copy-in.
 files:
   pi-in:
     mode: copy-in
     from: "host:~/needy-state/pi/"
     to: "actor:~/.pi/agent/"
-    # bin/ holds tools pi downloads when the image lacks them.
-    filter: ["- /bin/**", "+ **"]
   pi-out:
     mode: mirror-out
     from: "actor:~/.pi/agent/"
     to: "host:~/needy-state/pi/"
+    # bin/ holds tools pi downloads when the image lacks them.
+    filter: ["- /bin/**", "+ **"]
 run_files: [pi-in, pi-out]
