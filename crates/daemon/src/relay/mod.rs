@@ -16,7 +16,7 @@ use needy_api_server::control::{ControlError, ExecInput, ExecOpen, ExecOutput, I
 use needy_api_server::protocol::domain;
 use needy_common::time::now_ms;
 use needy_core::event::{Event, ExecExit, ExecKill, ExecStart, TermFallback};
-use needy_core::intercept::StreamFilter;
+use needy_core::intercept::file::StreamFilter;
 use needy_core::types::{Origin, Principal};
 use needy_trace::Dispatch;
 use tokio::sync::mpsc;

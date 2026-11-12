@@ -2,7 +2,7 @@
 
 use needy_config::profile::When;
 
-use crate::intercept::ExecContext;
+use crate::intercept::exec::ExecContext;
 use crate::pattern::{Match, Pattern};
 
 /// Whether every condition holds for a command whose effective arguments are

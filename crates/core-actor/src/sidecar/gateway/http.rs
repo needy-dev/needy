@@ -1,42 +1,13 @@
 //! Plain-HTTP requests in absolute form (`GET http://host/path`): upstream
-//! mapping, header injection and forwarding.
-
-use std::collections::BTreeMap;
+//! mapping, the headers the decision adds, and forwarding.
 
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
 use hyper::header::{HeaderName, HeaderValue};
 use hyper::{Request, Response, StatusCode};
 use needy_core::event::{Event, NetError, NetRequest};
-use needy_core::intercept::{NetContext, NetDecide};
-use needy_core::types::{NetDecision, NetOutcome};
 
 use super::{Body, Gateway, text};
-
-/// The last `net.request` interceptor: adds the configured header to an
-/// allowed request for its host. Tunnels are opaque and get nothing.
-pub(super) struct Inject {
-  /// Host to header name and value.
-  headers: BTreeMap<String, (String, String)>,
-}
-
-impl Inject {
-  pub(super) fn new(headers: BTreeMap<String, (String, String)>) -> Self {
-    Self { headers }
-  }
-}
-
-impl NetDecide for Inject {
-  fn decide(&self, ctx: &NetContext, mut decision: NetDecision) -> NetDecision {
-    if decision.outcome == NetOutcome::Allow
-      && ctx.path.is_some()
-      && let Some((name, value)) = self.headers.get(&ctx.host)
-    {
-      decision.headers.push((name.clone(), value.clone()));
-    }
-    decision
-  }
-}
 
 impl Gateway {
   /// Forwards an absolute-form request to its host, or to the host's

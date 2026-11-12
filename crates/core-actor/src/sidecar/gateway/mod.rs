@@ -2,11 +2,12 @@
 //! network goes through. The actor reaches it through its in-guest
 //! forwarder.
 //!
-//! Each request ([`http`]) and tunnel ([`connect`]) runs the `net.request`
-//! or `net.connect` interceptors in order: the [`Allowlist`], chaos
-//! ([`needy_core::chaos::Injector`]) and header injection ([`http::Inject`]).
-//! The gateway applies the decision and records typed `net.*` and
-//! `fault.injected` events in the run's trace.
+//! The gateway is mechanism only: each request ([`http`]) and tunnel
+//! ([`connect`]) runs the net domain's chain
+//! ([`needy_core::intercept::net::Chain`]: the allowlist, chaos and header
+//! injection, which live in `needy_core::network` and `needy_core::chaos`),
+//! applies the decision and records typed `net.*` and `fault.injected`
+//! events in the run's trace.
 
 mod connect;
 mod http;
@@ -24,53 +25,15 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
-use needy_config::value::Glob;
 use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetDeny};
-use needy_core::intercept::{self, NetContext, NetDecide};
-use needy_core::types::{NetDecision, NetOutcome, Network};
+use needy_core::intercept::net::{Chain, NetContext, NetDecision, NetOutcome};
+use needy_core::network::Policy;
+use needy_core::types::Network;
 use needy_trace::Dispatch;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-
-/// A network's policy at its gateway.
-// NOTICE: no `Debug`: `inject` holds credentials.
-#[derive(Clone, Default)]
-pub struct Policy {
-  /// Host patterns that may be reached, matched by [`Glob::matches_host`]:
-  /// `*`, `*.example.com` (which also matches `example.com`), or a host, in
-  /// any case.
-  pub allow: Vec<Glob>,
-  /// Host to the base URL its plain-HTTP requests are forwarded to. A mapped
-  /// host is allowed.
-  pub upstream: BTreeMap<String, String>,
-  /// Host to the header and value added to its requests. The value is the
-  /// credential itself, read by the daemon, so the actor never holds it.
-  pub inject: BTreeMap<String, (String, String)>,
-}
-
-/// The first `net.*` interceptor: a host that matches no pattern and has no
-/// upstream is denied.
-struct Allowlist {
-  patterns: Vec<Glob>,
-  upstreams: Vec<String>,
-}
-
-impl Allowlist {
-  fn allows(&self, host: &str) -> bool {
-    self.patterns.iter().any(|pattern| pattern.matches_host(host)) || self.upstreams.iter().any(|upstream| upstream == host)
-  }
-}
-
-impl NetDecide for Allowlist {
-  fn decide(&self, ctx: &NetContext, mut decision: NetDecision) -> NetDecision {
-    if decision.outcome == NetOutcome::Allow && !self.allows(&ctx.host) {
-      decision.outcome = NetOutcome::Deny;
-    }
-    decision
-  }
-}
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -86,31 +49,26 @@ pub struct Gateway {
   /// The run's trace.
   trace: Dispatch,
   network: Network,
+  /// Host to the base URL its plain-HTTP requests are forwarded to.
   upstream: BTreeMap<String, String>,
-  allowlist: Allowlist,
-  injector: Option<Arc<Injector>>,
-  inject: http::Inject,
+  chain: Chain,
   client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Incoming>,
   cancel: CancellationToken,
   tasks: TaskTracker,
 }
 
 impl Gateway {
-  /// A gateway for `network` that records in `trace` and stops when its
-  /// owner cancels `cancel`.
+  /// A gateway for `network` with `policy` and the run's faults in
+  /// `injector`, that records in `trace` and stops when its owner cancels
+  /// `cancel`.
   pub fn new(policy: Policy, trace: Dispatch, network: Network, injector: Option<Arc<Injector>>, cancel: CancellationToken) -> Self {
     let https = hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().build();
     let client = Client::builder(hyper_util::rt::TokioExecutor::new()).build(https);
     Self {
       trace,
       network,
-      allowlist: Allowlist {
-        patterns: policy.allow,
-        upstreams: policy.upstream.keys().cloned().collect(),
-      },
+      chain: Chain::new(&policy, injector),
       upstream: policy.upstream,
-      injector,
-      inject: http::Inject::new(policy.inject),
       client,
       cancel,
       tasks: TaskTracker::new(),
@@ -175,7 +133,7 @@ impl Gateway {
     }
   }
 
-  /// Runs the `net.*` interceptors for `host` and records their outcome.
+  /// Runs the net chain for `host` and records its outcome.
   /// `path` is the request's path, or `None` for a tunnel. A fault's delay
   /// is waited out here.
   async fn decide(&self, host: &str, path: Option<&str>) -> NetDecision {
@@ -184,14 +142,7 @@ impl Gateway {
       host: host.to_string(),
       path: path.map(str::to_string),
     };
-    let decision = {
-      let mut chain: Vec<&dyn NetDecide> = vec![&self.allowlist];
-      if let Some(injector) = &self.injector {
-        chain.push(injector.as_ref());
-      }
-      chain.push(&self.inject);
-      intercept::decide_net(&chain, &ctx, NetDecision::allowed())
-    };
+    let decision = self.chain.decide(&ctx);
     for fired in &decision.fired {
       if let Some(delay) = fired.effect.delay {
         tokio::time::sleep(delay).await;

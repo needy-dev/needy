@@ -2,8 +2,8 @@
 //! many times it has matched, so a replayed run injects the same faults.
 //!
 //! [`Injector`] is the second `exec.decide` interceptor and the second
-//! `net.request` and `net.connect` interceptor; the SFTP tap ([`sftp`]) asks
-//! it directly for `file.open`.
+//! `net.request` and `net.connect` interceptor; the SFTP fault filter
+//! ([`sftp::FileFaults`]), the `file.open` interceptor, asks it directly.
 
 pub mod sftp;
 
@@ -13,9 +13,10 @@ use glob_match::glob_match;
 use needy_common::seed::mix;
 use needy_config::profile::{Chaos, Fault, FaultKind};
 
-use crate::intercept::{ExecContext, ExecDecide, NetContext, NetDecide};
+use crate::intercept::exec::{Decision, ExecContext, ExecDecide};
+use crate::intercept::net::{NetContext, NetDecide, NetDecision, NetOutcome};
 use crate::pattern::Pattern;
-use crate::types::{Decision, Effect, Fired, NetDecision, NetOutcome, Outcome};
+use crate::types::{Effect, Fired, Outcome};
 
 /// What a fault is checked against.
 #[derive(Debug, Clone, Copy)]

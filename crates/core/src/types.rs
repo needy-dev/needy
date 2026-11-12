@@ -1,12 +1,12 @@
 //! Values the system produces and that producers and consumers share:
-//! decisions, placements, run states, exec origins and injected faults.
-//! Values users write live in `needy-config`.
+//! placements and outcomes, run states, exec origins and injected faults. Values users write live in `needy-config`; the decisions of each
+//! interception domain live with the domain in [`crate::intercept`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::time::Duration;
 
-use needy_config::profile::{ActorDriver, ExecutorDriver, Fault, FaultKind};
+use needy_config::profile::{ActorDriver, ExecutorDriver, FaultKind};
 use serde::{Deserialize, Serialize};
 
 /// Where a command runs.
@@ -35,30 +35,6 @@ pub enum Outcome {
   Deny(String),
   /// An injected fault failed it with this errno.
   Fault(String),
-}
-
-/// The `exec.decide` result: where a command runs and how it is rewritten.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Decision {
-  pub outcome: Outcome,
-  /// Arguments to run, after prepend, append, wrap and exec.
-  pub argv: Vec<String>,
-  /// Final environment after the rules' changes to the context's environment.
-  pub env: BTreeMap<String, String>,
-  /// The process should start from `env` alone, not the executor's environment.
-  pub clear_env: bool,
-  pub cwd: String,
-  pub files: Vec<String>,
-  /// Faults the matching rules name.
-  pub faults: Vec<Fault>,
-  pub timeout: Option<Duration>,
-  /// Indices of the rules that matched, in order.
-  pub matched: Vec<usize>,
-  /// The command after launcher resolution; rules match against this.
-  pub effective: Vec<String>,
-  /// Faults that chaos injected into this command. The flow applies their
-  /// delays; an errno is already in `outcome`.
-  pub fired: Vec<Fired>,
 }
 
 /// A run's life cycle. The first terminal state wins. The daemon's
@@ -351,48 +327,6 @@ pub enum Network {
   // reserved for the executor network the CLI note describes and waits for
   // the owner to name that slice. Only the actor gateway exists.
   Executor,
-}
-
-/// The `net.request` or `net.connect` result: whether a gateway lets a
-/// request or tunnel through, and what it adds.
-// NOTICE: `headers` may hold an injected credential; do not log a decision.
-#[derive(Clone, PartialEq, Eq)]
-pub struct NetDecision {
-  pub outcome: NetOutcome,
-  /// Headers set on the upstream request, as name and value. A `net.connect`
-  /// tunnel is opaque, so nothing adds headers to it.
-  pub headers: Vec<(String, String)>,
-  /// Faults that chaos injected. The flow applies their delays; an errno is
-  /// already in `outcome`.
-  pub fired: Vec<Fired>,
-}
-
-impl NetDecision {
-  /// Allowed and unchanged, before any interceptor.
-  pub fn allowed() -> NetDecision {
-    NetDecision {
-      outcome: NetOutcome::Allow,
-      headers: Vec::new(),
-      fired: Vec::new(),
-    }
-  }
-}
-
-impl fmt::Debug for NetDecision {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let names: Vec<&str> = self.headers.iter().map(|(name, _)| name.as_str()).collect();
-    f.debug_struct("NetDecision").field("outcome", &self.outcome).field("headers", &names).field("fired", &self.fired).finish()
-  }
-}
-
-/// What happens to a request or tunnel at a gateway.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum NetOutcome {
-  Allow,
-  /// The network policy does not allow the host.
-  Deny,
-  /// An injected fault failed it with this errno.
-  Fault(String),
 }
 
 /// A fault that chaos injected.

@@ -403,7 +403,7 @@ fn serve_gateway(run: &Run, channels: &Channels, actor: &CancellationToken) -> R
       Err(e) => tracing::warn!("run {}: no {} header for {host}: {}: {e}", run.id, injection.header, injection.secret),
     }
   }
-  let policy = gateway::Policy {
+  let policy = needy_core::network::Policy {
     allow: network.allow.clone(),
     upstream: network.upstream.clone(),
     inject,

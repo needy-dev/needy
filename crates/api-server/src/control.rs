@@ -12,7 +12,7 @@ use std::pin::Pin;
 
 use needy_common::process::Exit;
 use needy_core::event::{Event, ExecutorRef};
-use needy_core::intercept::ExecContext;
+use needy_core::intercept::exec::ExecContext;
 use needy_core::types::{ActorState, Capabilities, Origin, Principal, RunState, RunnerRole};
 use tokio_stream::Stream;
 

@@ -11,6 +11,7 @@ use hyper_util::rt::TokioIo;
 use needy_config::value::Glob;
 use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetConnect, NetDeny, NetRequest};
+use needy_core::network::Policy;
 use needy_core::types::{Effect, Fired, Network};
 use needy_trace::Dispatch;
 use needy_trace::sink::memory::Memory;

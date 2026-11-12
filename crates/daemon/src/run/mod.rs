@@ -27,7 +27,7 @@ use needy_config::profile::{Profile, TraceSink};
 use needy_config::validate::{self, Severity};
 use needy_core::chaos::Injector;
 use needy_core::event::{self, Event, ExecutorRef, RunCreate, RunFail, RunStop};
-use needy_core::intercept::ExecContext;
+use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{Principal, RunState};
 use needy_core_actor::driver;

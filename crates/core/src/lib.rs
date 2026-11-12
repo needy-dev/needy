@@ -7,7 +7,10 @@
 //!   compiles to one machine's identity for a host and seed.
 //! - [`pattern`]: command patterns, shared by rules, resolvers and chaos.
 //! - [`chaos`]: deterministic fault injection.
-//! - [`intercept`]: the interceptor traits of each hook point.
+//! - [`network`]: a network's policy at its gateway (allowlist, header
+//!   injection).
+//! - [`intercept`]: the interception domains (exec, net, file): each one's
+//!   context, decision, interceptor trait and chain.
 //! - [`types`] and [`event`]: the values producers and consumers share, and
 //!   the typed events a run records. `needy-trace` carries and stores
 //!   them as JSON payloads.
@@ -16,6 +19,7 @@
 pub mod chaos;
 pub mod event;
 pub mod intercept;
+pub mod network;
 pub mod pattern;
 pub mod recipe;
 pub mod report;

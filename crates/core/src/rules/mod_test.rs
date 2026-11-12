@@ -4,7 +4,7 @@ use std::time::Duration;
 use needy_config::profile::Profile;
 
 use super::*;
-use crate::intercept::ExecContext;
+use crate::intercept::exec::ExecContext;
 use crate::types::{Outcome, Placement};
 
 fn argv(s: &str) -> Vec<String> {

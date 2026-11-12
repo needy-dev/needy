@@ -13,9 +13,9 @@ mod when;
 
 use needy_config::profile::{FaultKind, Profile, UnknownPolicy};
 
-use crate::intercept::{ExecContext, ExecDecide};
+use crate::intercept::exec::{Decision, ExecContext, ExecDecide};
 use crate::pattern::Pattern;
-use crate::types::{Decision, Outcome, Placement};
+use crate::types::{Outcome, Placement};
 use actions::{Accumulated, combine};
 
 /// A profile's rules with their patterns compiled once, the first

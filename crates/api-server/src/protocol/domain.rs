@@ -13,7 +13,7 @@
 use needy_api_proto::v1;
 use needy_common::process::Exit;
 use needy_core::event::Event;
-use needy_core::intercept::ExecContext;
+use needy_core::intercept::exec::ExecContext;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use needy_config::profile::{ActorDriver, ExecutorDriver};

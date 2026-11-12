@@ -1,12 +1,14 @@
 //! SFTP packet framing for `file.open` faults. File faults act on SFTP
 //! traffic between an actor's sshfs mount and `sftp-server` on the executor:
 //! a matching `open` never reaches the executor and gets an error reply
-//! instead. Pure bytes; the relay feeds both directions through a tap.
+//! instead. Pure bytes; the relay feeds both directions through
+//! [`FileFaults`], the `file.open` interceptor.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use super::{Injector, Subject};
+use crate::intercept::file::{Filtered, StreamFilter};
 use crate::types::Fired;
 
 // Source: https://github.com/openssh/openssh-portable/blob/V_10_6_P2/sftp.h#L36
@@ -127,6 +129,38 @@ impl SftpTap {
     let mut buf = self.to_client.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     buf.extend_from_slice(bytes);
     take_packets(&mut buf).concat()
+  }
+}
+
+/// `file.open` faults on one SFTP stream, rooted at the mount's source: the
+/// `file.open` interceptor, which [`crate::intercept::file::chain`]
+/// installs.
+pub struct FileFaults {
+  tap: SftpTap,
+  injector: Arc<Injector>,
+}
+
+impl FileFaults {
+  pub fn new(root: &str, injector: Arc<Injector>) -> Self {
+    Self {
+      tap: SftpTap::new(root),
+      injector,
+    }
+  }
+}
+
+impl StreamFilter for FileFaults {
+  fn inbound(&self, bytes: &[u8]) -> Filtered {
+    let tapped = self.tap.client_bytes(bytes, &self.injector);
+    Filtered {
+      forward: tapped.forward,
+      replies: tapped.replies.into(),
+      fired: tapped.injected,
+    }
+  }
+
+  fn outbound(&self, bytes: &[u8]) -> Vec<u8> {
+    self.tap.server_bytes(bytes)
   }
 }
 

@@ -3,9 +3,11 @@ use std::time::Duration;
 use needy_config::profile::{Chaos, FaultKind, Profile};
 
 use super::*;
-use crate::intercept::{self, ExecContext, NetContext, NetDecide};
+use crate::intercept::exec::{Decision, ExecContext};
+use crate::intercept::net::{NetContext, NetDecide, NetDecision, NetOutcome};
+use crate::intercept::{exec, net as net_domain};
 use crate::rules::Rules;
-use crate::types::{Decision, Effect, NetDecision, NetOutcome, Network, Outcome, Placement};
+use crate::types::{Effect, Network, Outcome, Placement};
 
 fn chaos(yaml: &str) -> Chaos {
   serde_yaml::from_str(yaml).unwrap()
@@ -95,7 +97,7 @@ chaos:
       argv: argv(command),
       ..Default::default()
     };
-    intercept::decide(&[&rules, &injector], &ctx, Decision::unchanged(&ctx, Placement::Actor))
+    exec::decide(&[&rules, &injector], &ctx, Decision::unchanged(&ctx, Placement::Actor))
   };
 
   // A command the rules deny is not faulted.
@@ -126,7 +128,7 @@ fn chaos_alone_faults_an_explicitly_placed_command() {
     argv: argv("curl https://x"),
     ..Default::default()
   };
-  let d = intercept::decide(&[&injector], &ctx, Decision::unchanged(&ctx, Placement::Executor("mac".into())));
+  let d = exec::decide(&[&injector], &ctx, Decision::unchanged(&ctx, Placement::Executor("mac".into())));
   assert_eq!(d.outcome, Outcome::Fault("EIO".into()));
   assert_eq!(d.argv, argv("curl https://x"));
 }
@@ -167,7 +169,7 @@ fn net(host: &str) -> NetContext {
 fn net_chain_runs_in_order_and_chaos_skips_a_denied_host() {
   let injector = Injector::new(&chaos("faults: [{on: net.connect, nth: 1, errno: ECONNRESET}]"));
   let chain: [&dyn NetDecide; 3] = [&DenyHost("blocked.example.com"), &injector, &AddHeader];
-  let decide = |host: &str| intercept::decide_net(&chain, &net(host), NetDecision::allowed());
+  let decide = |host: &str| net_domain::decide(&chain, &net(host), NetDecision::allowed());
 
   // A denied host is not counted by chaos and gets no header.
   let d = decide("blocked.example.com");
@@ -197,7 +199,7 @@ fn net_chain_runs_in_order_and_chaos_skips_a_denied_host() {
 fn a_net_delay_keeps_the_request_allowed() {
   let injector = Injector::new(&chaos("faults: [{on: net.connect, match: 'api.example.com', delay: 500ms}]"));
 
-  let d = intercept::decide_net(&[&injector], &net("api.example.com"), NetDecision::allowed());
+  let d = net_domain::decide(&[&injector], &net("api.example.com"), NetDecision::allowed());
 
   assert_eq!(d.outcome, NetOutcome::Allow);
   assert_eq!(d.fired[0].effect.delay, Some(Duration::from_millis(500)));

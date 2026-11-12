@@ -15,7 +15,7 @@ use needy_config::Source;
 use needy_config::profile::{Fault, Profile};
 use needy_config::validate::{self, Finding, Severity};
 use needy_core::chaos::{Injector, Subject};
-use needy_core::intercept::ExecContext;
+use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{PerRun, Smbios, VmIdentity};
 use needy_core::rules;
 use needy_core::types::Outcome;

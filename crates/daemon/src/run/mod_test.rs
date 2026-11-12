@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use needy_api_server::control::{ControlError, Runs};
 use needy_core::event::Event;
-use needy_core::intercept::ExecContext;
+use needy_core::intercept::exec::ExecContext;
 use needy_core::types::RunState;
 
 use crate::testing::{self, fake_image, new_run};

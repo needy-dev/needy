@@ -1,15 +1,15 @@
-//! Routing: the `exec.decide` chain for a run's commands (rules, then
-//! chaos), where a command runs, and how the executor's path map rewrites
-//! it.
+//! Routing: the exec domain's adapter. It runs a run's `exec.decide` chain
+//! (`needy_core::intercept::exec::Chain`: rules, then chaos) for a command,
+//! applies the decision (where the command runs) and rewrites it through the
+//! executor's path map.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use needy_api_server::control::{ControlError, ExecSpec, Route, Target};
 use needy_core::event::{Event, ExecDecide};
-use needy_core::intercept::{self, ExecContext};
-use needy_core::rules::Rules;
-use needy_core::types::{Decision, Origin, Outcome, Placement};
+use needy_core::intercept::exec::{Chain, Decision, ExecContext};
+use needy_core::types::{Origin, Outcome, Placement};
 
 use crate::pool::Instance;
 use crate::run::Run;
@@ -20,12 +20,7 @@ use crate::run::Run;
 /// The chain's latency, without the delays, is the `exec.decide` timing.
 async fn decide(run: &Run, ctx: &ExecContext, executor: Option<&str>) -> Decision {
   let started = std::time::Instant::now();
-  let rules = Rules::new(&run.profile);
-  let injector = run.injector.as_ref();
-  let decision = match executor {
-    None => intercept::decide(&[&rules, injector], ctx, Decision::unchanged(ctx, Placement::Actor)),
-    Some(name) => intercept::decide(&[injector], ctx, Decision::unchanged(ctx, Placement::Executor(name.into()))),
-  };
+  let decision = Chain::new(&run.profile, &run.injector, executor).decide(ctx);
   run.trace.time("exec.decide", started.elapsed());
   for fired in &decision.fired {
     if let Some(delay) = fired.effect.delay {
