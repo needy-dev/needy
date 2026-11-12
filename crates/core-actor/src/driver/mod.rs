@@ -185,7 +185,7 @@ pub enum Side {
 
 /// Who presents the identity fields the daemon configures: an actor's init
 /// is told only those its driver presents in the guest, and the daemon
-/// applies the hwmon faults itself where the driver presents the sensors
+/// applies the sensor faults itself where the driver presents the sensors
 /// from the host. `None` is a gap the driver declares in its
 /// [`Driver::identity_gaps`].
 // NOTICE: the other recipe fields (CPU, DMI, PCI, kernel) need no daemon
@@ -194,7 +194,7 @@ pub enum Side {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Identity {
   pub hostname: Option<Side>,
-  /// The hwmon sensors and the hwmon faults.
+  /// The hwmon sensors and the sensor faults.
   pub hwmon: Option<Side>,
   /// The recipe's uptime offset.
   pub uptime: Option<Side>,

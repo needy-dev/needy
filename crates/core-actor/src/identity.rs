@@ -204,7 +204,7 @@ pub fn gaps(recipe: Option<&CompiledRecipe>, oci: OciRuntime, host: &Host) -> Ve
   if !host.hwmon && !gvisor {
     gaps.push(Gap::of(
       IdentityField::Hwmon,
-      "this host has no /sys/class/hwmon to cover, so the actor has no sensors and hwmon faults have no effect",
+      "this host has no /sys/class/hwmon to cover, so the actor has no sensors and sensor faults have no effect",
     ));
   }
   if host.hwmon || gvisor {

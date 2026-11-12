@@ -271,12 +271,28 @@ impl From<v1::FaultInfo> for Listed {
   }
 }
 
+/// A YAML value on one line in flow style, as a profile may write a fault:
+/// `{exec: curl **, exit: 7}`.
+fn flow(value: &Value) -> String {
+  match value {
+    Value::Mapping(map) => {
+      let fields: Vec<String> = map.iter().map(|(key, value)| format!("{}: {}", flow(key), flow(value))).collect();
+      format!("{{{}}}", fields.join(", "))
+    }
+    Value::Sequence(items) => format!("[{}]", items.iter().map(flow).collect::<Vec<_>>().join(", ")),
+    Value::String(text) => text.clone(),
+    Value::Bool(b) => b.to_string(),
+    Value::Number(n) => n.to_string(),
+    Value::Null => "~".into(),
+    Value::Tagged(tagged) => flow(&tagged.value),
+  }
+}
+
 impl Row for Listed {
   const HEADER: &'static [&'static str] = &["NAME", "DOMAIN", "SOURCE", "MATCHED", "FIRED", "FAULT"];
 
   fn cells(&self) -> Vec<String> {
-    // The YAML on one line, as flow-style fields.
-    let fault = self.fault.lines().map(str::trim).filter(|line| !line.is_empty()).collect::<Vec<_>>().join(", ");
+    let fault = serde_yaml::from_str(&self.fault).map_or_else(|_| self.fault.trim().to_string(), |value| flow(&value));
     vec![
       self.name.clone(),
       self.domain.clone(),
@@ -287,3 +303,7 @@ impl Row for Listed {
     ]
   }
 }
+
+#[cfg(test)]
+#[path = "chaos_test.rs"]
+mod tests;

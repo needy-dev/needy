@@ -299,7 +299,7 @@ fn gaps(recipe: Option<&CompiledRecipe>) -> Vec<Gap> {
       field: None,
       message: "the VM has one CPU more than the recipe's (Apple's `container` adds one for its agent), and nproc counts it".into(),
     },
-    Gap::of(IdentityField::Hwmon, "Apple's default kernel has no hwmon, so the actor has no sensors and hwmon faults have no effect"),
+    Gap::of(IdentityField::Hwmon, "Apple's default kernel has no hwmon, so the actor has no sensors and sensor faults have no effect"),
   ];
   let Some(recipe) = recipe else {
     return gaps;

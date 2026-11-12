@@ -188,6 +188,16 @@ impl Gateway {
 }
 
 /// What a fault that fails a request or tunnel answers.
+// NOTICE: a `reset` closes the gateway's side of the actor's connection;
+// the in-actor forwarder then closes the program's. vfkit 0.6.4, which
+// carries a `macos-vz` actor's gateway channel, does not pass that close to
+// the guest (its `tcpproxy` relay keeps the vsock connection open while the
+// guest side is), so there the program waits until its own timeout instead
+// of reading an end of stream (seen 2026-11-13; `linux-firecracker` and
+// `macos-apple-container` deliver it). Source:
+// https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/vsock.go#L77-L120
+// TODO(macos-vz-reset): deliver it there once vfkit passes the close, or
+// through a guest call the owner approves.
 fn fault_response(fired: &Fired, host: &str) -> Result<Response<Body>, Reset> {
   let effect = &fired.effect;
   if effect.reset {
