@@ -404,19 +404,32 @@ commands:
     env: { set: { CI: "1" } }
 ```
 
+### Workspace
+
+The directory the work operates on is one setting. The driving program
+starts in it.
+
+```yaml
+actor:
+  workspace:
+    path: ~/project                      # in the actor
+    from: executor:build:~/project       # live from an executor; or host:PATH (copied in), or omit it
+    writable: true
+```
+
+`from: executor:NAME:PATH` mounts the executor's directory at `path` and maps
+`path` to `PATH` for the commands routed there. `~` is the profile user's home
+in the actor, the control host's home on `host:`, and the executor's own home
+on an executor side.
+
 ### Files
 
-Named mappings move files between the control host (`host:`), the actor
+Named mappings move other files between the control host (`host:`), the actor
 (`actor:`) and an executor (`executor:NAME:`). `run_files` lists the ones every
 run uses; a rule's `files:` adds some for the commands it matches.
 
 ```yaml
 files:
-  workspace:                       # shared live: the executor serves it, the actor mounts it
-    mode: mount
-    from: "executor:build:~/workspace/"
-    to: "actor:~/workspace/"
-    writable: true
   login-in:                        # copied in when the run starts
     mode: copy-in
     from: "host:~/needy-state/opencode/"
@@ -426,7 +439,7 @@ files:
     mode: mirror-out
     from: "actor:~/.local/share/opencode/"
     to: "host:~/needy-state/opencode/"
-run_files: [workspace, login-in, login-out]
+run_files: [login-in, login-out]
 ```
 
 A copy-in / mirror-out pair is how state such as a login survives stateless
@@ -435,30 +448,56 @@ actors.
 ### Network
 
 The actor has no network of its own: everything goes through the gateway on
-the control host. HTTPS is tunnelled as is (no MITM, no injected CA).
+the control host. HTTPS is tunnelled as is (no MITM, no injected CA, and so no
+injected headers).
 
 ```yaml
 actor:
   network:
-    allow: [api.openai.com, "*.opencode.ai"]   # `*.x` also matches `x`
-    inject:                                    # headers the actor never sees
-      api.openai.com: { header: Authorization, secret: OPENAI_AUTH }  # from the daemon's env
-    upstream:                                  # a plain-HTTP name for a real endpoint
-      models.local: http://127.0.0.1:11434
+    allow: [opencode.ai, "*.opencode.ai"]   # `*.x` also matches `x`
+    services:
+      ollama:                               # in the actor: http://ollama.needy
+        url: http://127.0.0.1:11434         # resolved on the control host
 ```
+
+A service is a plain-HTTP name the actor uses; the gateway forwards it to
+`url`, so the actor never learns the real address. `needy profile check`
+lists the services and warns when a URL does not answer from the control
+host.
 
 ### Chaos
 
-Faults fire from a seed, so a replayed run injects the same ones.
+Named faults, each in one domain, with real effects. They fire from a seed,
+so a replayed run injects the same ones; a fault without `probability`,
+`nth`, `times`, `after` or `until` fires on every match.
 
 ```yaml
 chaos:
   seed: 1
   faults:
-    - { on: exec, match: "curl **", errno: ECONNREFUSED }
-    - { on: file.open, match: "**/*.json", errno: EIO, probability: 0.1 }
-    - { on: net.connect, match: "*.example.com", delay: 2s }
-    - { on: hwmon, set: { temp_c: 101 }, at: 30s }
+    curl-down:
+      exec: "curl **"                   # the command exits 7 without running
+      exit: 7                           # or signal: SIGSEGV, hang: true, delay: 2s
+      stderr: "curl: (7) Failed to connect\n"
+      times: 3
+    flaky-json:
+      file: { open: "**/*.json" }
+      errno: EIO                        # ENOENT, EACCES, EPERM, EOPNOTSUPP or EIO
+      probability: 0.1
+    slow-example:
+      net: { connect: "*.example.com" }
+      delay: 2s                         # or refuse, reset, hang; status: 503 with net: { request: ... }
+    overheat:
+      sensor: { temp_c: 101 }
+      at: 30s
+```
+
+Change a live run's faults; the trace records each change:
+
+```sh
+needy chaos add api-down --request ollama.needy --status 503 --after 1m
+needy chaos ls
+needy chaos rm api-down
 ```
 
 ### Executors
@@ -475,7 +514,7 @@ executors:
       cpus: 2
       memory: 4GiB
       env: { LANG: C.UTF-8 }
-  mac: { runner: mac, workspace: ~/work, path_map: { /home/agent/workspace: ~/work } }
+  mac: { runner: mac, path_map: { ~/tools: ~/needy-tools } }   # values: the runner's home
 ```
 
 Privileged options (`privileged`, `cap_add`, `devices`, `gpus`, host mounts
@@ -491,8 +530,8 @@ actor:
   runner: kvm
   recipe: builtin:gce-ubuntu-22.04   # or a path to your own recipe
   command: [opencode]
-  cwd: /home/agent/workspace
   env: { OPENCODE_DISABLE_AUTOUPDATE: "1" }
+user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree in the actor
 ```
 
 A [recipe](docs/ai/references/config/2026-11-09-recipe-design.md) sets the
@@ -523,10 +562,10 @@ control token and a join token; `-v` turns on logs.
 
 | Profile | Shows |
 | --- | --- |
-| [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model through the gateway, shells in a container |
+| [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model as the service `http://model.needy`, shells in a container |
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
-| [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out, a file fault on the workspace, an exec fault and an overheating sensor |
+| [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out, an `EIO` file fault on the workspace, a `curl` that exits 7 and an overheating sensor |
 | [`examples/linux-container`](examples/linux-container/profile.yaml) | The smoke test in a container actor, for hosts without KVM |
 | [`examples/macos-vz`](examples/macos-vz/profile.yaml) | The smoke test in a `macos-vz` actor, routing by absolute path |
 | [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml) | The smoke and chaos tests in Apple's `container` |

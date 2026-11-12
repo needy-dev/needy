@@ -59,12 +59,14 @@ Dependencies point downward; a crate never depends on one above it.
   drivers: `native` and `linux_container` (its `options` is the container
   run-option policy); `engine` is the one Docker-compatible engine client
   (`bollard`, wherever `DOCKER_HOST` points) both `linux-container` drivers
-  use, this crate's and the actor's; `relay` connects an exec stream to the local
+  use, this crate's and the actor's; `account` writes a container's passwd
+  and group files for the profile's user, which both `linux-container`
+  drivers bind; `relay` connects an exec stream to the local
   terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a
-  typed VM identity, `chaos`, and `network`, the allowlist and header
-  injection), and owns command patterns (`pattern`), the interception
+  typed VM identity, `chaos`, and `network`, the allowlist and the actor
+  network's services), and owns command patterns (`pattern`), the interception
   domains (`intercept`: `exec`, `net` and `file`, each with its context,
   decision, interceptor trait and the one assembly of its chain), the values producers
   and consumers share (`types`), the typed event schema (`event`) and report
@@ -85,7 +87,8 @@ Dependencies point downward; a crate never depends on one above it.
   processes, sockets or gRPC.
 - `crates/common` (`needy-common`): shared helpers that depend on neither the
   platform nor an async runtime and know no needy concepts: filters, tar
-  archives, exit status and signal names, seed mixing and wall-clock time.
+  archives, exit status and signal names, account (passwd, group, shadow)
+  files, seed mixing and wall-clock time.
 - `crates/api-proto` (`needy-api-proto`): generated Protobuf and gRPC types.
   Do not edit `api-proto/src/gen`; change `proto/` and run `make proto`.
 - `crates/api-client` (`needy-api-client`): the outbound side. `Client`

@@ -2,6 +2,15 @@
 
 Status: accepted by the owner (2026-11-12); slices 1 to 6 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3), [Slice 4](#slice-4-one-engine), [Slice 5](#slice-5-policy-and-capture) and [Slice 6: lifecycles](#slice-6-lifecycles)). Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
 
+> **NOTICE (2026-11-12, migration):** the
+> [profile schema redesign](../config/2026-11-09-profile-and-rules-design.md#schema-redesign-2026-11-12)
+> removed header injection (`inject`, `core::network::Inject`) from the net
+> chain, which is now the allowlist then chaos (`TODO(mitm)`); `upstream`
+> became `actor.network.services`; chaos faults became a named map split by
+> domain (`exec`, `file`, `net`, `sensor`) and the `file.open` chain is
+> installed on every workspace mount (`file::chain(injector, root, target)`).
+> The text below keeps the names of its time.
+
 ## Why
 
 Several kinds of things in needy are meant to be extended sideways: where an

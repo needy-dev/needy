@@ -471,13 +471,13 @@ from the driver's name. **Provisional**: see the
 
 Interception has three domains, each with its own hook points, context,
 decision and chain of **interceptors** (policy): **exec** (`exec.decide`:
-rules, chaos), **net** (`net.request`, `net.connect`: allowlist, chaos, header
-injection) and **file** (`file.open`: chaos's file faults; the hook point
-was `exec.output` before 2026-11-12). One interceptor may serve several
-domains. Policy never knows the driver. Each domain lives in
-`core::intercept::{exec, net, file}`, which also assembles its chain in one
-place; the allowlist and header injection are `core::network`.
-**Provisional**.
+rules, chaos), **net** (`net.request`, `net.connect`: allowlist, chaos) and
+**file** (`file.open`: chaos's file faults; the hook point was `exec.output`
+before 2026-11-12). One interceptor may serve several domains. Policy never
+knows the driver. Each domain lives in `core::intercept::{exec, net, file}`,
+which also assembles its chain in one place; the allowlist is
+`core::network`. Header injection was removed on 2026-11-12: on HTTPS it
+needs a separate MITM infrastructure (`TODO(mitm)`). **Provisional**.
 
 ### Adapter
 
@@ -488,14 +488,20 @@ the gateway for net, the relay's stream filter for file. **Provisional**.
 ### Path map
 
 A prefix mapping from actor paths to executor paths, for executors whose
-workspace lives elsewhere, such as a Mac.
+workspace lives elsewhere, such as a Mac. `actor.workspace` adds the entry
+for the workspace; `path_map` holds the others. A key is an actor path (`~`
+is the profile user's home there); a value is a path on the executor (`~` is
+that executor's home).
 
 ## Files and networks
 
 ### Workspace
 
-The directory the work operates on. It lives on an executor and appears in the
-actor at the same path, `/home/<user>/workspace` by default.
+The directory the work operates on, set in one place, `actor.workspace`: its
+`path` in the actor (the driving program's working directory), `from` (an
+executor's directory mounted live, a host directory copied in, or nothing for
+a fresh directory in the actor) and `writable`. needy derives the mount and
+the executor's path map from it.
 
 ### File mapping
 
@@ -515,20 +521,41 @@ actor). **Provisional**.
 
 Two separate networks. The actor network sits near the actor's main dependency
 (inference) and reaches the outside only through the **actor gateway**, which
-enforces an allowlist and injects credentials. The executor network sits near
-what the work operates on.
+enforces an allowlist (HTTPS is tunnelled as is) and forwards **services**.
+The executor network sits near what the work operates on.
+
+### Service
+
+A plain-HTTP name the actor uses for an endpoint outside it:
+`actor.network.services.NAME.url`. In the actor it is `http://NAME.needy`;
+the gateway forwards each request to the URL, which the control host (where
+the gateway runs) resolves. The actor never learns the real address.
+
+### User
+
+The profile's `user: { name, uid, gid }`, the same in the actor and in every
+`linux-container` executor: `HOME`, `USER`, `LOGNAME`, `whoami`, `id` and
+`getent passwd` agree, because needy writes the user's passwd and group
+entries before the driving program starts (a VM's init, or the container
+driver from the host). A `native` executor runs as the runner's own user.
 
 ## Shaping
 
 ### Chaos
 
-Deterministic fault injection: a fault fires from the profile's seed, its index
-and how many times it has matched, so a replayed run injects the same
-faults.
+Deterministic fault injection: a fault fires from the seed, its name and how
+many times it has matched, so a replayed run injects the same faults.
+`needy chaos add`, `ls` and `rm` change a live run's faults; the trace
+records each change (`chaos.add`, `chaos.remove`) where it happened.
 
 ### Fault
 
-One chaos rule, by kind: `exec`, `net.connect`, `file.open` or `hwmon`.
+One named chaos rule in `chaos.faults`, in exactly one **domain**: `exec` (a
+command pattern; exit, signal, hang, delay, stderr), `file` (`open` glob;
+errno, delay), `net` (`connect` or `request` host; refuse, reset, hang,
+delay, status) or `sensor` (readings, at a time). Its triggers are
+`probability`, `nth`, `times`, `after` and `until`; without one it fires on
+every match. `fault.injected` and the report name it.
 
 ### Identity
 
@@ -541,9 +568,9 @@ firmware, devices, network identity. A recipe defines it.
 
 Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide`, a payload and the
-payload's schema version (8 since `actor.start` records the actor's
-capture, after 7 added `actor.ready`; traces of other versions are
-refused).
+payload's schema version (9 since `fault.injected` names its fault and
+domain and `chaos.add` and `chaos.remove` exist, after 8 recorded the
+actor's capture in `actor.start`; traces of other versions are refused).
 The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
 the run directory. Terminal output is not part of the trace.
 
