@@ -525,3 +525,21 @@ async fn a_renamed_user_gets_its_passwd_entry_bound_into_the_container() {
   assert!(binds.contains(&format!("{}:/etc/passwd:ro", passwd.display())), "{binds:?}");
   assert!(!binds.iter().any(|bind| bind.ends_with(":/etc/group:ro")), "{binds:?}");
 }
+
+// ROOT CAUSE:
+//
+// If a Mac had a Docker-compatible engine (OrbStack, Docker Desktop), it
+// counted as a host of `linux-container` actors, because detection only asked
+// whether the engine answered; that engine runs containers in a VM, which
+// cannot reach the run's Unix sockets on the Mac.
+//
+// Before the fix, `needy image pull` on such a Mac pulled the container actor
+// base into the engine, and a runner there reported `actor(linux-container)`.
+// The fix keeps `linux-container` actors to Linux hosts.
+#[cfg(not(target_os = "linux"))]
+#[tokio::test]
+async fn a_host_that_is_not_linux_has_no_linux_container_actors_whatever_its_engine() {
+  let refused = detect(&engine::Probe::default()).await.unwrap_err();
+
+  assert!(refused.starts_with("linux-container actors run on Linux hosts only"), "{refused}");
+}

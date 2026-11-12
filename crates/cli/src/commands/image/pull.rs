@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use needy_config::profile::ActorDriver;
+use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core_actor::image::manifest::{self, Manifest};
 use needy_core_actor::image::{base, container, vm};
 use sha2::{Digest as _, Sha256};
@@ -74,10 +74,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Some(version) => version.strip_prefix('v').unwrap_or(version).to_string(),
     None => env!("CARGO_PKG_VERSION").to_string(),
   };
-  let drivers = if args.drivers.is_empty() {
-    detected().await?
+  // A `linux-container` actor's pull brings the executor image too; a host
+  // with `linux-container` executors but no such actors pulls it alone.
+  let (drivers, executor) = if args.drivers.is_empty() {
+    let detected = detected().await?;
+    let executor = detected.executor && !detected.actors.contains(&ActorDriver::LinuxContainer);
+    (detected.actors, executor)
   } else {
-    args.drivers
+    (args.drivers, false)
   };
   let client = reqwest::Client::builder().user_agent(concat!("needy/", env!("CARGO_PKG_VERSION"))).build()?;
   let mut failed = 0;
@@ -94,12 +98,24 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       failed += 1;
     }
   }
+  if executor && let Err(e) = pull_executor(&needy_core_executor::engine::connect()?, &version).await {
+    output::message(format_args!("image pull: linux-container executors: {e:#}"));
+    failed += 1;
+  }
   Ok(if failed == 0 { 0 } else { 1 })
 }
 
-/// The drivers this host has, whatever images it holds, as a runner's
-/// detection finds them.
-async fn detected() -> Result<Vec<ActorDriver>> {
+/// What this host has, as a runner's detection finds it.
+struct Detected {
+  /// The actor drivers, whatever images the host holds.
+  actors: Vec<ActorDriver>,
+  /// Whether it has `linux-container` executors.
+  executor: bool,
+}
+
+/// The actor drivers this host has, whatever images it holds, and whether
+/// it has `linux-container` executors.
+async fn detected() -> Result<Detected> {
   let engine = needy_core_executor::engine::Probe::default();
   let kvm = Path::new(needy_core_actor::driver::linux_firecracker::KVM);
   let (mut found, mut missing) = (Vec::new(), Vec::new());
@@ -109,15 +125,25 @@ async fn detected() -> Result<Vec<ActorDriver>> {
       Err(why) => missing.push(format!("{driver}: {why}")),
     }
   }
+  let executor = needy_core_executor::driver::detect(ExecutorDriver::LinuxContainer, &engine).await;
   for line in &missing {
     tracing::info!("not pulling for {line}");
   }
-  if found.is_empty() {
+  if let Err(why) = &executor {
+    tracing::info!("not pulling the executor image: {why}");
+  }
+  if found.is_empty() && executor.is_err() {
     bail!("this host has none of the actor drivers ({}); name one with --driver", missing.join("; "));
   }
-  let names: Vec<&str> = found.iter().map(|driver| driver.as_str()).collect();
+  let mut names: Vec<&str> = found.iter().map(|driver| driver.as_str()).collect();
+  if executor.is_ok() && !found.contains(&ActorDriver::LinuxContainer) {
+    names.push("linux-container executors");
+  }
   output::message(format_args!("image pull: for {}, the drivers this host has", names.join(", ")));
-  Ok(found)
+  Ok(Detected {
+    actors: found,
+    executor: executor.is_ok(),
+  })
 }
 
 /// The release asset of `driver`'s base VM image.
@@ -358,7 +384,6 @@ fn remove_file(path: &Path) {
 async fn pull_engine(version: &str) -> Result<()> {
   let engine = needy_core_executor::engine::connect()?;
   let actor = release_image("needy-actor", version);
-  let executor = release_image("needy-executor", version);
   let mut failures = Vec::new();
   output::message(format_args!("image pull: pulling {actor}"));
   match engine.pull(&actor).await {
@@ -375,19 +400,30 @@ async fn pull_engine(version: &str) -> Result<()> {
     },
     Err(e) => failures.push(container::unpullable(&actor, &e.to_string(), "needy image build --linux-container")),
   }
-  output::message(format_args!("image pull: pulling {executor}"));
-  match engine.pull(&executor).await {
-    Ok(()) => output::message(format_args!("image pull: linux-container executors: {executor}")),
-    Err(e) => failures.push(format!(
-      "the executor image {executor} cannot be pulled ({e}); a needy without a release (a development build) has none to pull: \
-       build it with `needy image build --executor` and start the daemon with `--executor-image {}`",
-      needy_core_executor::driver::linux_container::BUILT_IMAGE
-    )),
+  if let Err(e) = pull_executor(&engine, version).await {
+    failures.push(e.to_string());
   }
   if failures.is_empty() {
     Ok(())
   } else {
     Err(anyhow!(failures.join("; ")))
+  }
+}
+
+/// Pulls the executor image of release `version` through `engine`.
+async fn pull_executor(engine: &std::sync::Arc<dyn needy_core_executor::engine::Engine>, version: &str) -> Result<()> {
+  let executor = release_image("needy-executor", version);
+  output::message(format_args!("image pull: pulling {executor}"));
+  match engine.pull(&executor).await {
+    Ok(()) => {
+      output::message(format_args!("image pull: linux-container executors: {executor}"));
+      Ok(())
+    }
+    Err(e) => Err(anyhow!(
+      "the executor image {executor} cannot be pulled ({e}); a needy without a release (a development build) has none to pull: \
+       build it with `needy image build --executor` and start the daemon with `--executor-image {}`",
+      needy_core_executor::driver::linux_container::BUILT_IMAGE
+    )),
   }
 }
 

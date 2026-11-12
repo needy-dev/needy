@@ -69,14 +69,26 @@ pub const FACETS: Facets = Facets {
   transport: Transport::Socket,
 };
 
-/// Whether this host can run `linux-container` actors: a Docker-compatible
-/// engine answers, as `engine` found. Whether it has the OCI runtime a
-/// profile names and the container actor image is checked when a run is
-/// created.
+/// Whether this host can run `linux-container` actors: it is Linux, and a
+/// Docker-compatible engine answers, as `engine` found. Whether it has the
+/// OCI runtime a profile names and the container actor image is checked when
+/// a run is created.
 // TODO(runner-actor): the capability does not carry the OCI runtimes; it
 // needs to once actors run on runners other than the control host's own,
 // which probes its engine directly.
+// NOTICE: elsewhere the engine (Docker Desktop, OrbStack) runs containers in
+// a Linux VM, which cannot reach the run's channel sockets on this host (the
+// module's NOTICE). A `linux-container` executor there still works: it is
+// the executor drivers' detection, not this one, that `needy image pull`
+// asks for the executor image.
 pub async fn detect(engine: &engine::Probe) -> Result<(), String> {
+  if !cfg!(target_os = "linux") {
+    return Err(
+      "linux-container actors run on Linux hosts only: elsewhere a Docker-compatible engine runs containers in a VM, \
+       which cannot reach the run's channel sockets on this host"
+        .into(),
+    );
+  }
   engine.answer().await
 }
 

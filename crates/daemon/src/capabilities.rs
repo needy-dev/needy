@@ -7,8 +7,8 @@
 //! - `actor(linux-firecracker)`: Linux, a KVM device that opens for reading
 //!   and writing (as Firecracker opens it), and a complete actor image
 //!   (vmlinux, rootfs.ext4 and the patched firecracker).
-//! - `actor(linux-container)`: a Docker-compatible engine that answers.
-//!   Whether it has the OCI runtime a profile names (`runc`, gVisor's
+//! - `actor(linux-container)`: Linux, and a Docker-compatible engine that
+//!   answers (elsewhere the engine's containers run in a VM). Whether it has the OCI runtime a profile names (`runc`, gVisor's
 //!   `runsc`) and the container actor image is checked when the run is
 //!   created.
 //! - `actor(macos-vz)`: macOS on Apple silicon, a `vfkit` that runs, and a

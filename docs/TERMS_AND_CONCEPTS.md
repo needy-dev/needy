@@ -147,8 +147,9 @@ What a runner can host: each **role** it holds (`actor`, `executor`) with its
 `actor(linux-firecracker) executor(linux-container,native)`. A runner detects
 them when it starts: a KVM device that opens for reading and writing and a
 complete actor image give `actor(linux-firecracker)` (Linux only); a
-Docker-compatible engine that answers gives `executor(linux-container)` and
-`actor(linux-container)`
+Docker-compatible engine that answers gives `executor(linux-container)`, and
+on Linux `actor(linux-container)` (elsewhere the engine runs containers in a
+VM, which cannot reach the run's channel sockets)
 (whether it has the profile's OCI runtime and the container actor image is
 checked when a run is created); macOS on Apple silicon with vfkit and a
 complete `macos-vz` actor image gives `actor(macos-vz)`; Apple's `container`

@@ -124,7 +124,9 @@ needy image ls
 For a VM driver (`linux-firecracker`, `macos-vz`) it downloads the release's
 VM image, checks it against its `.sha256` and unpacks it into needy's data
 directory; for a container driver it pulls the base image (and the executor
-image) through the engine or Apple's `container`. needy never downloads a VM
+image) through the engine or Apple's `container`. A machine whose engine can
+run `linux-container` executors but not actors (a Mac) gets the executor
+image alone. needy never downloads a VM
 image by itself: a run without one fails and names `needy image pull`. The
 container drivers pull a missing container image themselves.
 

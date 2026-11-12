@@ -1133,9 +1133,17 @@ Found in step 4:
   `pull` checks the SHA-256 the same release serves; checking the Sigstore
   bundle against `release.yml`'s identity would also catch a replaced
   release asset.
-- **`linux-container` on a Mac**: detection takes any answering engine, so
-  `needy image pull` on a Mac with OrbStack also pulls the container base
-  into Docker, which a container actor cannot use there (`TODO(container-runtime)`).
+- **`linux-container` on a Mac**, done (2026-11-13): detection took any
+  answering engine, so `needy image pull` on a Mac with OrbStack also pulled
+  the container base into Docker, which a container actor cannot use there
+  (`TODO(container-runtime)`). Decision: `linux-container` actors are
+  detected on Linux only (`linux_container::detect`), so a Mac runner no
+  longer reports `actor(linux-container)` either; `pull` asks the executor
+  drivers' detection separately and pulls the executor image alone where
+  `linux-container` executors are possible. On the Mac with OrbStack, `pull`
+  now names `macos-vz, macos-apple-container, linux-container executors` and
+  pulls `needy-executor` only. Test:
+  `a_host_that_is_not_linux_has_no_linux_container_actors_whatever_its_engine`.
 - **A broken pipe panics the CLI**, done (2026-11-13): `needy run ls |
   grep -q ...` ended with `failed printing to stdout: Broken pipe` (Rust's
   `println!`). Commands now print through `output::out!` and `outln!`, which
