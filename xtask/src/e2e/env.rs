@@ -14,6 +14,7 @@ use nix::sys::signal::Signal;
 
 use super::host::{EXECUTOR_IMAGE, Host};
 use super::proc::{self, Output};
+use super::runs::tail as runs_tail;
 use super::term::Term;
 
 /// Every daemon the harness started and has not seen exit, so an
@@ -225,7 +226,8 @@ impl<'a> CellEnv<'a> {
         && let Some(status) = child.try_wait()?
       {
         self.forget_daemon();
-        bail!("the control daemon exited at start ({status}); its log: {}", self.daemon_log_tail());
+        let log = std::fs::read_to_string(self.dir.join("daemon.log")).unwrap_or_default();
+        bail!("the control daemon exited at start ({status}); its log ends: {}", runs_tail(&log));
       }
       if Instant::now() > deadline {
         bail!("the control daemon did not answer within 30 s: {}", out.brief());

@@ -178,8 +178,16 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, notes: &mu
   // The guest needy: `make guest`, into the harness's own directory.
   let guest_dir = work.join("guest");
   let guest_path = guest_dir.join("needy");
-  let guest = if listing || (fresh("guest", &needy_hash) && guest_path.exists()) {
+  let guest = if fresh("guest", &needy_hash) && guest_path.exists() {
     Ok(guest_path.clone())
+  } else if listing {
+    // Nothing that runs needs it; a daemon is only pointed at one that is
+    // there, since it refuses a `--guest-needy` that does not exist.
+    if guest_path.exists() {
+      Ok(guest_path.clone())
+    } else {
+      Err("not built: no cell that runs needs it".to_string())
+    }
   } else if skip {
     if guest_path.exists() {
       notes.0.push(format!("--no-prepare: the guest needy in {} is not from this tree", guest_dir.display()));
@@ -341,7 +349,8 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, notes: &mu
       .cloned()
       .unwrap_or_else(|| Err("not probed".into()))
       .map_err(|e| format!("actor({}): {e}", profile_driver.as_str()));
-    if found.is_ok() {
+    // A listing judges what it would build as there.
+    if found.is_ok() && !listing {
       found = guest.clone().map(|_| ()).map_err(|e| format!("no guest needy: {e}"));
     }
     if found.is_ok()
