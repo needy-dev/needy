@@ -4,245 +4,480 @@ Needy separates the program that drives work from the environments where that
 work takes effect.
 
 - Run the driving program, such as an agent harness or a test suite, in a small
-  stateless microVM: the **actor**.
+  stateless sandbox: the **actor**.
 - Route its commands, file access and network traffic by declarative rules to
-  **executors**: containers, microVMs, pods or real devices such as a Mac.
+  **executors**: containers, microVMs or real machines such as a Mac.
 - Record every operation, inject faults, and build each machine from a
   **recipe** that fixes its identity: OS, kernel, CPU, firmware and devices.
 
 > [!NOTE]
-> Needy is experimental. The first closed loop works: opencode runs in an actor
-> while its commands run in Docker or on a Mac. See the
+> Needy is experimental (0.0.1). The first closed loop works: opencode runs in
+> an actor while its commands run in Docker or on a Mac. See the
 > [results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md).
 
 ## Table of Contents
 
-- [Use cases](#use-cases)
-- [Concepts](#concepts)
-- [How it works](#how-it-works)
 - [Getting started](#getting-started)
+  - [Install](#install)
+  - [Start the control daemon](#start-the-control-daemon)
+  - [Pick a profile](#pick-a-profile)
+  - [Run it](#run-it)
+  - [One command from your laptop](#one-command-from-your-laptop)
+  - [Add machines](#add-machines)
+- [Actor drivers](#actor-drivers)
+- [Configuration](#configuration)
+- [Examples](#examples)
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
 - [Documentation](#documentation)
 - [Development](#development)
 - [Acknowledgements](#acknowledgements)
 
-## Use cases
+## Getting started
 
-- **Agent RL rollouts and evaluations.** Run many cheap, isolated harnesses
-  near the inference cluster, while their tools run where the workspace,
-  devices and services are. Let an agent replace its own harness, then ask what
-  machine it runs on.
-- **Integration tests.** A test suite drives services and devices on other
-  machines through one routing and recording layer.
-- **Acceptance environments.** Build a machine from a recipe, run the
-  acceptance script against it, and read the report.
+The flow is always the same:
 
-## Concepts
+1. Install `needy` on every machine that takes part.
+2. Start a **control daemon** on the machine that runs actors.
+3. Write a **profile**: which actor driver, which executors, which commands go
+   where.
+4. `needy run create` starts a **run**: one actor and its executors.
+5. Look at it with `needy report`, `needy exec`, `needy ps`.
 
-| Term | Meaning |
+### Install
+
+There are no prebuilt binaries yet; build from a checkout. `needy build` needs
+the checkout too (it builds the actor and executor images from `images/`).
+
+```sh
+git clone https://github.com/needy-dev/needy && cd needy
+cargo install --path crates/cli          # installs `needy`
+```
+
+What each machine needs besides `needy`:
+
+| Machine | Needs | Then |
+| --- | --- | --- |
+| Linux with KVM (actor host) | Docker or another Docker-compatible engine | `needy build --executor` |
+| Linux without KVM (actor host) | a Docker-compatible engine; `sshfs` and `user_allow_other` in `/etc/fuse.conf` for workspace mounts; `lxcfs` for resource views | `needy build --linux-container --executor` |
+| Apple silicon Mac (actor host) | `brew install vfkit`, or Apple's [`container`](https://github.com/apple/container) | `needy build` (for `macos-vz`) or `needy build --macos-apple-container` |
+| Any Linux, macOS or Windows machine (executor only) | nothing | join as a runner, see [Add machines](#add-machines) |
+
+### Start the control daemon
+
+```sh
+needy daemon --mode control &        # listens on a Unix socket in the state directory
+```
+
+Add `--listen 127.0.0.1:7400 --token-env NEEDY_CONTROL_TOKEN` to reach it from
+other machines (through `ssh -L` or another tunnel; needy does not encrypt the
+connection itself).
+
+### Pick a profile
+
+Which actor do you want? Each block is a complete profile: the driving program
+is `bash`, and `python3` is routed to an executor while everything else runs
+in the actor. Save it as `~/.config/needy/profiles/demo.yaml`.
+
+<details>
+<summary><b>Linux with KVM</b>: a Firecracker microVM (<code>linux-firecracker</code>)</summary>
+
+```yaml
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-firecracker
+  recipe: builtin:gce-ubuntu-22.04
+  command: [bash]
+executors:
+  build: { driver: linux-container, key: "{run}" }
+commands:
+  - { match: "python3 **", to: build }
+```
+
+</details>
+
+<details>
+<summary><b>Linux without KVM</b>: a container with runc or gVisor (<code>linux-container</code>)</summary>
+
+```yaml
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }      # or runsc, if gVisor is installed
+  recipe: builtin:gce-ubuntu-22.04
+  command: [bash]
+executors:
+  build: { driver: linux-container, key: "{run}" }
+commands:
+  - { match: "python3 **", to: build }
+```
+
+</details>
+
+<details>
+<summary><b>Apple silicon Mac</b>: a Virtualization.framework VM (<code>macos-vz</code>)</summary>
+
+```yaml
+# mkdir -p /tmp/needy-demo first: the Mac itself is the executor.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: macos-vz
+  command: [bash]
+executors:
+  mac: { driver: native, workspace: /tmp/needy-demo }
+commands:
+  - { match: "python3 **", to: mac }
+```
+
+</details>
+
+<details>
+<summary><b>Apple silicon Mac</b>: Apple's <code>container</code> (<code>macos-apple-container</code>)</summary>
+
+```yaml
+# mkdir -p /tmp/needy-demo first: the Mac itself is the executor.
+user: { name: agent, uid: 1000, gid: 1000 }
+actor:
+  driver: macos-apple-container
+  command: [bash]
+executors:
+  mac: { driver: native, workspace: /tmp/needy-demo }
+commands:
+  - { match: "python3 **", to: mac }
+```
+
+</details>
+
+`needy profile check demo` says where the actor and each executor would run,
+what of the recipe the driver cannot present, and where a command would go:
+`needy profile check demo --cmd "python3 -V"`.
+
+### Run it
+
+```sh
+needy run create -it --profile demo
+#   agent@instance:~$ uname -a                                  # the actor
+#   agent@instance:~$ python3 -c 'import platform; print(platform.node())'   # the executor
+#   agent@instance:~$ exit
+needy report latest                       # what was routed, faults, the actor's identity
+```
+
+`ctrl-]` detaches and leaves the run going. You never copy a run ID:
+`run attach`, `run logs` and `run stop` take the only live run; every `--run`
+takes `latest`, an ID prefix, or `NEEDY_RUN`; `report` defaults to `latest`.
+
+```sh
+needy run ls                                    # ACTOR: starting, configured, ready (attach connects), exited
+needy run attach                                # back to the driving program
+needy exec --run latest -- uname -a             # one command through the run's rules
+export NEEDY_RUN=latest                         # or set it once
+needy exec -d -- python3 -m http.server         # prints a process ID
+needy ps; needy attach PROCESS                  # replays recent output
+needy fs cp ./src build:/home/agent/workspace
+needy run stop
+```
+
+Without `--run` or `NEEDY_RUN`, `needy exec` runs on this machine outside any
+run, so starting a run never changes what a plain `needy exec` does.
+Arguments after `--` in `run create` are appended to the profile's
+`actor.command`.
+
+### One command from your laptop
+
+Pair the laptop once with a code the operator creates on the control host,
+then call the remote program as if it were local:
+
+```sh
+NEEDY_TOKEN=... needy pair create --name laptop       # on the control host, with the control token
+needy --endpoint http://127.0.0.1:7400 pair CODE      # on the laptop, once; the endpoint is remembered
+```
+
+Then save the profile on the laptop as `~/.config/needy/profiles/opencode.yaml`
+(see [`examples/opencode`](examples/opencode/profile.yaml)) and add a script:
+
+```sh
+#!/bin/sh
+# ~/bin/ropencode: opencode in an actor on the control host
+exec needy run create -it --profile opencode -- "$@"
+```
+
+`needy pair ls` and `needy pair revoke ID` manage paired clients; the trace and
+`needy report` name each one as `client:NAME`.
+
+### Add machines
+
+Any other machine, such as a Mac or a Windows box, joins the control plane as
+a **runner**. It dials out and keeps that connection open, so it needs no
+listening port:
+
+```sh
+needy runner token create --ttl 1h --roles executor          # on the control host
+JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
+needy runner ls
+#   NAME  STATUS  CAPABILITIES                                              HOST
+#   kvm   online  actor(linux-firecracker) executor(linux-container,native) linux/x86_64
+#   mac   online  actor(macos-vz) executor(native)                          macos/aarch64
+needy exec --runner mac -- uname -a        # on that machine, outside any run
+```
+
+Profiles place executors (and the actor) on runners by name or label:
+`executors: { mac: { runner: mac } }`. On Windows, start the runner outside
+the SSH session (for example with `Invoke-CimMethod Win32_Process`), with full
+paths and the token in `--join-token-file`.
+
+## Actor drivers
+
+`actor.driver` picks where the actor runs. The prefix is the operating system
+whose isolation the driver relies on.
+
+| | `linux-firecracker` | `linux-container` | `macos-vz` | `macos-apple-container` |
+| --- | --- | --- | --- | --- |
+| Host | Linux x86_64 with KVM | Linux with a Docker-compatible engine | Apple silicon macOS | Apple silicon macOS |
+| Isolation | Firecracker microVM, needy's kernel | `runc` (shared kernel) or `runsc` (gVisor) | Virtualization.framework VM through vfkit, needy's arm64 kernel | Apple `container`: one VM per container, Apple's kernel |
+| How execs are caught | kernel module `binfmt_needy` | shims on every `PATH` program of the image | kernel module `binfmt_needy` | shims |
+| Ready in | ~0.17 s | | ~0.27 s | ~0.86 s |
+| **Routing** | | | | |
+| Route a command by name | ✅ | ✅ | ✅ | ✅ |
+| Route by absolute path (`/usr/bin/git`) | ✅ | ✅ | ✅ | ✅ |
+| Route programs added at run time (`pip`, `npm`, built in the workspace) | ✅ | ❌ | ✅ | ❌ |
+| Network only through the gateway (allowlist, header injection) | ✅ | ✅ | ✅ | ✅ |
+| Workspace mount from an executor | ✅ | ✅ | ✅ | ✅ |
+| Copy-in, mirror-out | ✅ | ✅ | ✅ | ✅ |
+| Exec and file faults | ✅ | ✅ | ✅ | ✅ |
+| Interactive (`-it`, attach, detach) | ✅ | ➖ | ✅ | ✅ |
+| **Identity from the recipe** | | | | |
+| Hostname | ✅ | ✅ | ✅ | ✅ |
+| `/proc/cpuinfo` | ✅ | ✅ | ❌ (arm64) | ❌ |
+| `CPUID` | ✅ | ❌ | ❌ | ❌ |
+| DMI / SMBIOS | ✅ | ✅ (where the host has DMI; any host under `runsc`) | ❌ | ❌ |
+| PCI IDs | ✅ | ❌ | ❌ | ❌ |
+| hwmon sensors and the overheat fault | ✅ | ✅ (where the host has hwmon; any host under `runsc`) | ✅ | ❌ |
+| Kernel version | ✅ | ❌ (host or gVisor) | ➖ | ❌ |
+| Uptime offset | ✅ | ❌ | ➖ | ❌ |
+
+✅ verified end to end, ❌ not possible with this driver, ➖ expected to work but
+not yet recorded. `needy profile check` lists every gap for your recipe and
+host; a recipe's `required:` turns a gap into an error. Evidence:
+[closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md),
+[container actor](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity),
+[`macos-vz`](docs/ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md),
+[`macos-apple-container`](docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md).
+
+Executor drivers: `native` (the machine itself: Linux, macOS, Windows) and
+`linux-container` (a container through the same engine). A `macos-native`
+actor (Seatbelt and shims, no VM) exists as a proof of concept on the
+`poc/macos-native-actor` branch.
+
+## Configuration
+
+A profile is YAML; unknown keys are errors, and `extends:` builds on another
+profile. The full reference is in the
+[profile design](docs/ai/references/config/2026-11-09-profile-and-rules-design.md).
+
+### Commands
+
+Rules decide where each exec runs. The first match wins; a command no rule
+names runs in the actor.
+
+```yaml
+commands:
+  - { match: "{bash,sh,zsh} **", to: build }            # glob over the command line
+  - { match: "git push **", deny: "no pushes from the agent" }
+  - match: "pytest **"
+    when: { cwd: "~/workspace/**", tty: false }
+    to: build
+    timeout: 10m
+    env: { set: { CI: "1" } }
+```
+
+### Files
+
+Named mappings move files between the control host (`host:`), the actor
+(`actor:`) and an executor (`executor:NAME:`). `run_files` lists the ones every
+run uses; a rule's `files:` adds some for the commands it matches.
+
+```yaml
+files:
+  workspace:                       # shared live: the executor serves it, the actor mounts it
+    mode: mount
+    from: "executor:build:~/workspace/"
+    to: "actor:~/workspace/"
+    writable: true
+  login-in:                        # copied in when the run starts
+    mode: copy-in
+    from: "host:~/needy-state/opencode/"
+    to: "actor:~/.local/share/opencode/"
+    filter: ["- /cache/**", "+ **"]
+  login-out:                       # copied back when the run ends
+    mode: mirror-out
+    from: "actor:~/.local/share/opencode/"
+    to: "host:~/needy-state/opencode/"
+run_files: [workspace, login-in, login-out]
+```
+
+A copy-in / mirror-out pair is how state such as a login survives stateless
+actors.
+
+### Network
+
+The actor has no network of its own: everything goes through the gateway on
+the control host. HTTPS is tunnelled as is (no MITM, no injected CA).
+
+```yaml
+actor:
+  network:
+    allow: [api.openai.com, "*.opencode.ai"]   # `*.x` also matches `x`
+    inject:                                    # headers the actor never sees
+      api.openai.com: { header: Authorization, secret: OPENAI_AUTH }  # from the daemon's env
+    upstream:                                  # a plain-HTTP name for a real endpoint
+      models.local: http://127.0.0.1:11434
+```
+
+### Chaos
+
+Faults fire from a seed, so a replayed run injects the same ones.
+
+```yaml
+chaos:
+  seed: 1
+  faults:
+    - { on: exec, match: "curl **", errno: ECONNREFUSED }
+    - { on: file.open, match: "**/*.json", errno: EIO, probability: 0.1 }
+    - { on: net.connect, match: "*.example.com", delay: 2s }
+    - { on: hwmon, set: { temp_c: 101 }, at: 30s }
+```
+
+### Executors
+
+```yaml
+executors:
+  build:
+    driver: linux-container        # or native
+    runner: { labels: [kvm] }      # where; the control host when absent
+    key: "{run}"                   # commands with the same key share an instance
+    max_procs: 8
+    container:                     # typed engine options
+      image: needy-executor:latest
+      cpus: 2
+      memory: 4GiB
+      env: { LANG: C.UTF-8 }
+  mac: { runner: mac, workspace: ~/work, path_map: { /home/agent/workspace: ~/work } }
+```
+
+Privileged options (`privileged`, `cap_add`, `devices`, `gpus`, host mounts
+outside the workspace) need the operator. Containers needy creates carry the
+labels `needy.run` and `needy.role` (`actor` or `executor`):
+`docker ps --filter label=needy.run=RUN` lists a run's containers.
+
+### Customize the actor
+
+```yaml
+actor:
+  driver: linux-firecracker
+  runner: kvm
+  recipe: builtin:gce-ubuntu-22.04   # or a path to your own recipe
+  command: [opencode]
+  cwd: /home/agent/workspace
+  env: { OPENCODE_DISABLE_AUTOUPDATE: "1" }
+```
+
+A [recipe](docs/ai/references/config/2026-11-09-recipe-design.md) sets the
+machine: CPU model and count, memory, kernel, firmware strings, devices,
+hostname (`instance-{time}`), and which identity fields are `required:`.
+`needy build --recipe RECIPE` builds the actor kernel with a recipe's kernel
+options. The container drivers take `actor.container`: `oci_runtime` for
+`linux-container`, `image` for both.
+
+### Environment and data
+
+| Variable | Meaning |
 | --- | --- |
-| **actor** | Runs the driving program. Usually one stateless microVM. |
-| **executor** | Where routed operations take effect: a container, microVM, pod or device. Several actors may share one executor. |
-| **daemon** | The control plane: lifecycle, routing rules, network gateways, the trace and the runner registry. |
-| **runner** | A machine that joined the control plane and reports what it can host. |
-| **recipe** | One machine: image, kernel, CPU, memory, firmware, devices and network identity. |
-| **profile** | One run: which recipes to use, routing rules, network policies, chaos and file mappings. |
-| **run** | One actor and the executors bound to it. |
-| **trace** | Every event recorded during a run. |
+| `NEEDY_ENDPOINT` | the daemon to talk to, as `--endpoint`; both override the endpoint `needy pair` remembered |
+| `NEEDY_TOKEN` | a bearer token that overrides the paired one |
+| `NEEDY_RUN` | the run that `--run` defaults to |
+| `NEEDY_STATE_DIR` | traces, `state.db`, run directories, the socket on macOS (`$XDG_STATE_HOME/needy`) |
+| `NEEDY_DATA_DIR` | images (`$XDG_DATA_HOME/needy`) |
+| `NEEDY_CONFIG_DIR` | client tokens and `profiles/` (`$XDG_CONFIG_HOME/needy`) |
+| `NEEDY_RUNTIME_DIR` | the daemon's socket (`$XDG_RUNTIME_DIR/needy`) |
+| `NEEDY_REPO` | the checkout `needy build` builds from, when not run inside it |
+| `DOCKER_HOST` | the Docker-compatible engine (Docker Engine, OrbStack, Podman) |
+
+`--token-env NAME` and `--join-token-env NAME` name the variables that hold the
+control token and a join token; `-v` turns on logs.
+
+## Examples
+
+| Profile | Shows |
+| --- | --- |
+| [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model through the gateway, shells in a container |
+| [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
+| [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
+| [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out, a file fault on the workspace, an exec fault and an overheating sensor |
+| [`examples/linux-container`](examples/linux-container/profile.yaml) | The smoke test in a container actor, for hosts without KVM |
+| [`examples/macos-vz`](examples/macos-vz/profile.yaml) | The smoke test in a `macos-vz` actor, routing by absolute path |
+| [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml) | The smoke and chaos tests in Apple's `container` |
+| [`examples/local`](examples/local/profile.yaml) | This machine as a native executor: copy-in, mirror-out, chaos and the trace |
+| [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy exec`, with an actor that only waits |
+| [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  subgraph A[actor microVM]
-    P[driving program] --> S[needy supervisor]
+  subgraph A[actor]
+    P[driving program] --> C[capture: binfmt_needy or shims]
   end
-  S -->|commands, files, connections by rule| E1[executor: container]
-  S --> E2[executor: Mac]
-  S --> G1[actor gateway] --> M[model API]
-  E1 --> G2[executor gateway] --> I[internet]
-  D[needy daemon] -. lifecycle, rules, trace .- A
+  C -->|exec, by rule| E1[executor: container]
+  C --> E2[executor: Mac]
+  P -->|all network| G[gateway sidecar] --> M[model API]
+  P -->|workspace| F[sshfs from an executor]
+  D[control daemon] -. guest API sidecar: rules, config, trace .- A
   D -. lifecycle .- E1
 ```
 
-- **Route.** Exec, file and network operations go to the actor or an executor
-  by declarative rules. The program sees ordinary PIDs, pipes, terminals and
-  exit codes.
+- **Capture, decide, apply.** A driver's capture catches each exec, the
+  gateway sidecar every connection, the workspace mount every file open. The
+  daemon runs the domain's interceptors (rules, then chaos; the allowlist,
+  chaos and header injection for the network) and the program sees ordinary
+  PIDs, pipes, terminals and exit codes.
 - **Observe.** Routing decisions, routed execs, file transfers, gateway
-  requests and faults are recorded as typed events; commands the actor's
-  kernel does not route are not. `needy report` writes a summary as plain
-  text, markdown or JSON; the trace is stored in SQLite and JSONL, as each profile's
-  `trace:` selects. Terminal output is not recorded.
-- **Shape.** Inject faults such as `EIO`, delays or overheating sensors, and
-  build machines whose identity comes from a recipe.
+  requests and faults are typed events in the trace (SQLite or JSONL, as the
+  profile's `trace:` says). `needy report` summarizes a run as text, markdown
+  or JSON. Commands that stay in the actor and terminal output are not
+  recorded.
+- **Shape.** Faults (`EIO`, delays, an overheating sensor) and a machine
+  identity built from a recipe.
 
-The actor and the executors use separate networks. The actor's network sits
-near its main dependency, such as inference, and its gateway injects
-credentials so the actor never holds them. The executors' network sits near
-what the work operates on and carries most audit rules.
+The actor's network sits near its main dependency, such as inference, and its
+gateway injects credentials so the actor never holds them. Executors sit near
+what the work operates on.
 
-## Getting started
+## Architecture
 
-An actor host needs Linux with KVM and Docker. Executors need only the `needy`
-binary. Linux and macOS executors are verified end to end with pipes and
-terminals ([evidence](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md#re-verified-after-the-hardening-and-terminal-fixes)).
-A Windows executor is verified end to end with pipes; its terminals (`exec -t`,
-and `exec -d -t`) have worked in live probes only, and a daemon started as a
-Windows service in session 0 is not verified
-([evidence](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md#windows-executor)).
-
-```sh
-# On the actor host: build the actor image and the executor image.
-needy build --executor        # writes $XDG_DATA_HOME/needy/images/default
-needy daemon --mode control &
-
-# Run opencode in an actor; its shells run in a Docker executor.
-needy run create --profile examples/opencode/profile.yaml
-needy run logs -f RUN    # the actor's console, followed
-needy report latest
-```
-
-Where the actor runs is its **driver**, named after the operating system
-whose isolation it relies on: `linux-firecracker`, `linux-container`,
-`macos-vz` or `macos-apple-container`; executors have the drivers `native`
-and `linux-container`
-([drivers design](docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md)).
-
-On a Linux host without KVM, the actor can be a container that a
-Docker-compatible engine (Docker, OrbStack, Podman) runs with `runc` or
-gVisor's `runsc` (`actor: { driver: linux-container, container: {
-oci_runtime: runsc } }`); `needy build --linux-container` builds its image,
-and [`examples/linux-container`](examples/linux-container/profile.yaml) runs
-the smoke test in one. It needs `sshfs` for workspace mounts and lxcfs for resource views
-under `runc`, and presents less of a recipe than a VM (no CPUID or PCI
-identity): `needy profile check` says what, and the
-[container actor runtime design](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity)
-has the table.
-
-On an Apple silicon Mac, the actor can be a Virtualization.framework VM
-(`actor: { driver: macos-vz }`) that
-[vfkit](https://github.com/crc-org/vfkit) runs from needy's own arm64 kernel
-and rootfs: `brew install vfkit`, then `needy build`. Inside it is the
-Firecracker actor's guest, so `binfmt_needy` routes execs by absolute path
-too; the CPU stays an Apple arm64 core, with no DMI or PCI identity.
-Evidence: smoke, chaos, interactive runs and absolute-path routing verified
-end to end on one Mac, ready in about 0.27 s
-([macos-vz actor evidence](docs/ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md));
-[`examples/macos-vz`](examples/macos-vz/profile.yaml) runs the smoke test.
-
-On a Mac with Apple silicon, the actor can be a container that Apple's
-[`container`](https://github.com/apple/container) runs in its own lightweight
-VM (`actor: { driver: macos-apple-container }`);
-`needy build --macos-apple-container` builds its image through Docker and
-loads it, and
-[`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml)
-runs the smoke and chaos tests in one with this Mac as the executor. Verified end to
-end, including `-it` and `run attach`, on one Apple silicon laptop with
-`container` 1.7.1 ([evidence](docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md));
-with Apple's default kernel it presents the recipe's hostname but no DMI,
-sensors or x86 CPU.
-
-For an interactive driving program, use `needy run create -it --profile
-PROFILE`. `ctrl-]` detaches; `needy run attach RUN` returns to its terminal.
-Automated tests and live probes on a Linux KVM host from a Mac are recorded
-in the [interactive actor evidence](docs/ai/references/cli/2026-11-11-interactive-actor-evidence.md).
-Rebuild the actor image when updating to this terminal protocol.
-
-Needy keeps the trace and run directories in `$XDG_STATE_HOME/needy`, images in
-`$XDG_DATA_HOME/needy`, client tokens in `$XDG_CONFIG_HOME/needy` and the
-daemon's socket in `$XDG_RUNTIME_DIR/needy` (the state directory on macOS).
-`NEEDY_STATE_DIR`, `NEEDY_DATA_DIR`, `NEEDY_CONFIG_DIR` and
-`NEEDY_RUNTIME_DIR` override them; `-v` turns on logs.
-
-On another machine, the CLI pairs once with a code an operator creates with
-the control daemon's token (`--token-env`, the bootstrap credential), then
-uses its own token, which can be revoked; the trace and `needy report` name it
-as `client:NAME`. `run logs` and `report` come from the control plane:
-
-```sh
-NEEDY_TOKEN=... needy client pair create --name laptop     # where the control token is
-needy --endpoint http://127.0.0.1:7400 client pair CODE    # on the laptop, once
-needy --endpoint http://127.0.0.1:7400 report latest
-needy client ls; needy client revoke ID
-```
-
-`needy exec` runs one command through the same rules, with a terminal when
-stdin and stdout are terminals:
-
-```sh
-needy run create --profile examples/cli/profile.yaml   # an actor that only waits
-needy exec --run RUN -- uname -a
-needy exec -t --run RUN -- ssh user@host     # interactive
-needy exec -d --run RUN -- pnpm dev          # prints a process ID
-needy attach PROCESS                                 # replays recent output
-needy exec --output ndjson --run RUN -- make test
-needy fs cp ./src build:/home/agent/workspace
-```
-
-Another machine, such as a Mac, joins the control plane as a **runner** with a
-join token.
-A runner dials the control plane and keeps that connection open, so it needs
-no listening port, only a way to reach the control plane (such as `ssh -L`).
-Transport encryption comes from the tunnel:
-
-```sh
-needy runner token create --ttl 1h --roles executor     # on the control host
-JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
-needy runner ls
-#   NAME  STATUS  CAPABILITIES                                                HOST          CPU  ...
-#   kvm   online  actor(linux-firecracker) executor(linux-container,native)  linux/x86_64  ...
-#   mac   online  executor(native)                                            macos/aarch64 -
-needy exec --runner mac -- uname -a                     # on the control host
-needy ps --runner mac
-```
-
-On Windows, a runner started in an SSH session ends with the session. Start
-it outside the session, for example with
-`Invoke-CimMethod Win32_Process -MethodName Create -Arguments @{CommandLine='C:\needy\needy.exe daemon --mode runner --join http://127.0.0.1:7400 --join-token-file C:\needy\join.txt'}`
-or a scheduled task. Give full paths, and pass the token in a file: the
-process does not get the session's environment or working directory.
-
-A runner detects what it can host: `actor(linux-firecracker)` with a usable
-KVM and the actor image, `actor(macos-vz)` on an Apple silicon Mac with vfkit
-and the `macos-vz` actor image, `executor(linux-container)` and
-`actor(linux-container)` when a Docker-compatible engine answers, and
-`executor(native)` always; `--roles` restricts it to some roles. Profiles
-place executors and the actor on runners by name or labels, with no
-addresses or secrets in the profile, and a runner without the capability an
-instance needs is an error naming the runners that have it:
-
-```yaml
-actor: { driver: linux-firecracker, runner: kvm } # the control host's own runner
-executors:
-  mac: { runner: mac }                       # the Mac's own process space
-  build: { runner: { labels: [kvm] }, driver: linux-container }
-```
-
-Actors and `linux-container` executors run on the control host for now: on it directly
-(no `runner:`), or on the runner the control daemon names as its own with
-`needy daemon --mode control --local-runner kvm`. See
-[runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md#as-built-slice-5).
-
-Examples:
-
-| Profile | Shows |
+| Crate | Role |
 | --- | --- |
-| [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model through the gateway, shells in Docker |
-| [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
-| [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
-| [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
-| [`examples/local`](examples/local/profile.yaml) | This machine as a native executor for `needy exec --run`: copy-in, mirror-out, chaos and the trace |
-| [`examples/chaos`](examples/chaos/profile.yaml) | Copy-in and mirror-out on the actor, a file fault on the workspace, an exec fault and an overheating sensor |
-| [`examples/cli`](examples/cli/profile.yaml) | A `linux-container` executor for `needy exec --run`, with an actor that only waits |
+| `cli` | the `needy` binary; inside an actor also its init and exec proxy |
+| `daemon` | the control plane: runs, pool, scheduling, routing, relay, files, runners, `state.db` |
+| `core-actor` | actor drivers, the guest (init, capture, proxy), the gateway sidecar, identity |
+| `core-executor` | executor drivers, the container engine client, the process host |
+| `core` | interceptor domains (exec, net, file) and their chains, rules, chaos, network policy, recipes, events, reports; no IO |
+| `trace` | the event pipeline and its sinks |
+| `config` | profile and recipe schemas, loading and validation |
+| `api-proto`, `api-client`, `api-server` | the gRPC API and its two sides |
 
-`needy profile check PROFILE --cmd "git status"` asks the control plane where
-the actor and executors would run, checks the recipe against the CPU of the
-actor's host, and shows where commands would run and the chaos faults that
-match them; `--local` checks offline against this machine.
+Extension points are directories with one implementation each: actor drivers
+(`core-actor/src/driver/`), executor drivers (`core-executor/src/driver/`),
+interceptor domains (`core/src/intercept/`), sidecars
+(`core-actor/src/sidecar/`) and trace sinks (`trace/src/sink/`). See the
+[drivers and extension points design](docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md)
+and [`AGENTS.md`](AGENTS.md).
 
 ## Documentation
 
+- [Terms and concepts](docs/TERMS_AND_CONCEPTS.md)
 - [Actor and executor separation](docs/ai/references/architecture/2026-11-09-actor-executor-separation-design.md):
   model, terms, network and experiments.
+- [Runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md)
 - [CLI, exec streams and reports](docs/ai/references/cli/2026-11-09-cli-exec-and-report-design.md)
 - [Profiles and rules](docs/ai/references/config/2026-11-09-profile-and-rules-design.md)
 - [Recipes](docs/ai/references/config/2026-11-09-recipe-design.md)
@@ -259,7 +494,6 @@ make proto
 cargo xtask bench --help      # latency and throughput probes
 ```
 
-
 ## Acknowledgements
 
 Needy borrows from, was compared against, or was tested with these projects.
@@ -269,6 +503,8 @@ Thank you to their authors.
 
 - [Firecracker](https://github.com/firecracker-microvm/firecracker): the actor
   microVM; needy carries a patch for CPUID, SMBIOS and PCI identity.
+- [vfkit](https://github.com/crc-org/vfkit) and Apple's
+  [`container`](https://github.com/apple/container): the macOS actors.
 - [sshfs](https://github.com/libfuse/sshfs) and OpenSSH `sftp-server`: file
   routing in passive mode, an idea taken from
   [Lima](https://github.com/lima-vm/lima)'s reverse-sshfs mounts.
@@ -278,6 +514,7 @@ Thank you to their authors.
   [tokio-vsock](https://github.com/rust-vsock/tokio-vsock),
   [portable-pty](https://github.com/wezterm/wezterm/tree/main/pty),
   [hyper](https://github.com/hyperium/hyper),
+  [bollard](https://github.com/fussybeaver/bollard),
   [SeaORM](https://github.com/SeaQL/sea-orm) and
   [brush](https://github.com/reubeno/brush)'s shell parsing approach.
 
@@ -296,6 +533,7 @@ Thank you to their authors.
   against remote resources.
 - [containerd shim v2](https://github.com/containerd/containerd/blob/main/api/runtime/task/v2/shim.proto):
   the process lifecycle API.
+- [herdr](https://github.com/ogulcancelik/herdr): terminal viewers and redraw.
 - [rclone](https://rclone.org/filtering/), [Mutagen](https://mutagen.io/) and
   [Lima mounts](https://lima-vm.io/docs/config/mount/): file mapping and
   filters.
@@ -313,7 +551,6 @@ Thank you to their authors.
   [Kata Containers](https://github.com/kata-containers/kata-containers),
   [Cloud Hypervisor](https://github.com/cloud-hypervisor/cloud-hypervisor),
   [libkrun](https://github.com/containers/libkrun),
-  [apple/container](https://github.com/apple/container) and
   [Containerization](https://github.com/apple/containerization),
   [agentc](https://github.com/laosb/agentc),
   [microvm.nix](https://github.com/astro/microvm.nix),
@@ -340,4 +577,3 @@ Thank you to their authors.
   [Ollama](https://github.com/ollama/ollama) with Qwen3.
 
 Thanks to [Makito](https://github.com/sumimakito) for CLI design ideas.
-
