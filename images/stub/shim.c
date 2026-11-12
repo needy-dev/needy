@@ -18,6 +18,14 @@
  * re-exec would replace. The guest needy removes both before it runs
  * anything. Values already in the environment are replaced.
  *
+ * When the guest needy is not injected, /.needy/needy is the base image's
+ * empty placeholder and execve fails with ENOEXEC. That is an image build
+ * (a `RUN` in an image `FROM` the base, whose /bin/sh is a shim) or the
+ * image run without needy, and nothing routes there: a shim then runs its
+ * real program, /.needy/real/<its path>, with the caller's argv and
+ * environment, as the guest needy does for a name it does not route.
+ * /.needy/proxy itself stands for no program, so it still fails.
+ *
  * On a failure it says what failed and exits 127, as a shell does for a
  * command it cannot run.
  *
@@ -37,6 +45,7 @@
 #define NEEDY_DIR "/.needy"
 #endif
 #define GUEST NEEDY_DIR "/needy"
+#define REAL NEEDY_DIR "/real"
 #define EXE_VAR "NEEDY_STUB_EXE="
 #define EXECFN_VAR "NEEDY_STUB_EXECFN="
 
@@ -88,6 +97,18 @@ int main(int argc, char **argv, char **envp)
 	env[kept] = NULL;
 	execve(GUEST, argv, env);
 	/* ENOEXEC: the base image's empty placeholder is still there. */
+	if (errno == ENOEXEC && strncmp(exe, NEEDY_DIR "/", sizeof(NEEDY_DIR)) != 0) {
+		char real[PATH_MAX];
+
+		if (snprintf(real, sizeof(real), "%s%s", REAL, exe) < (int)sizeof(real)) {
+			execve(real, argv, envp);
+			if (errno != ENOENT) {
+				fprintf(stderr, "needy: cannot run %s: %s: %s\n", name, real, strerror(errno));
+				return 127;
+			}
+		}
+		errno = ENOEXEC;
+	}
 	fprintf(stderr, "needy: cannot run %s: %s: %s%s\n", name, GUEST, strerror(errno),
 		errno == ENOENT || errno == ENOEXEC ? " (the daemon did not inject the guest needy)" : "");
 	return 127;

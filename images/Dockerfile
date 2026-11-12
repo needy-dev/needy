@@ -269,12 +269,12 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     | tar xz -C /usr/local/bin opencode \
  && mkdir -p /.needy/channels
 COPY --from=stubs /out/.needy/ /.needy/
-# NOTICE: the PATH directories are Docker's default container PATH,
-# https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19 (as `SYSTEM_PATH`
-# in crates/core-actor/src/guest/init/stubs.rs). The script is mounted for
-# this step only, so it does not stay in the image.
-RUN --mount=type=bind,source=images/container/shim.sh,target=/tmp/shim.sh \
-    /bin/sh /tmp/shim.sh "" /.needy/proxy /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin
+# The script stays in the image as `/.needy/shim-image`: an image `FROM`
+# this one runs it as its last step, so the programs it adds are shims too
+# (`examples/custom-image/Dockerfile`). Without arguments it shims Docker's
+# default container PATH.
+COPY --chmod=755 images/container/shim.sh /.needy/shim-image
+RUN /.needy/shim-image
 
 # The container actor image, `needy-actor`: one layer, so the copies the
 # shim step made of programs from earlier layers are not stored twice. The

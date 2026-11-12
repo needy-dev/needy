@@ -324,19 +324,23 @@ jobs:
           outputs: type=local,dest=guest
 
       # needy-actor is a base image: its shims (every program on PATH, a
-      # link to the shim stub) run nothing until the guest needy is
-      # injected, as the daemon does with a read-only bind mount. The
-      # actor's entrypoint is the boot stub, which needs a run, so a shim
-      # and the guest needy are started directly.
+      # link to the shim stub) hand an exec to the guest needy, which the
+      # daemon injects with a read-only bind mount. Without it (an image
+      # `FROM` the base being built) a shim runs its real program, and the
+      # proxy itself, which stands for no program, fails with the stub's
+      # message. The actor's entrypoint is the boot stub, which needs a run,
+      # so a shim and the guest needy are started directly.
       - name: Verify the container images start
         run: |
           set -euo pipefail
           test "$(docker image inspect needy-actor:ci --format '{{ index .Config.Labels "needy.base-abi" }}')" = 1
-          if docker run --rm --entrypoint /usr/bin/true needy-actor:ci 2> stub.err; then
-            echo "a shim ran without the guest needy" >&2; exit 1
+          docker run --rm --entrypoint /usr/bin/true needy-actor:ci
+          if docker run --rm --entrypoint /.needy/proxy needy-actor:ci 2> stub.err; then
+            echo "the proxy ran without the guest needy" >&2; exit 1
           fi
           cat stub.err
           grep -q "the daemon did not inject the guest needy" stub.err
+          docker run --rm --entrypoint /bin/sh needy-actor:ci -c 'test -x /.needy/shim-image'
           docker run --rm -v "$PWD/guest/needy:/.needy/needy:ro" --entrypoint /.needy/needy needy-actor:ci --version
           docker run --rm -v "$PWD/guest/needy:/.needy/needy:ro" --entrypoint /usr/bin/true needy-actor:ci
           docker run --rm needy-executor:ci needy --version

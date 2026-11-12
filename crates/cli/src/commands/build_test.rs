@@ -219,6 +219,52 @@ fn a_link_to_a_program_elsewhere_becomes_a_shim_whose_real_program_is_that_link(
   assert_eq!(std::fs::read_link(root.join(".needy/real/usr/bin/tool")).unwrap(), Path::new("/usr/lib/tool/bin/tool"));
 }
 
+// ROOT CAUSE:
+//
+// If an image `FROM` the base ran the shim step again to shim the programs
+// it added, every program that was a shim already was copied to
+// `/.needy/real` as its own real program, because the step took any
+// executable for a real one.
+//
+// Before the fix, a second run replaced the real programs with the proxy.
+// The fix leaves a shim as it is, so the step may run any number of times.
+#[test]
+fn a_second_run_shims_the_added_programs_and_keeps_the_real_ones() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/bin/tool", "tool", 0o755)], &[("usr/bin/tool-link", "tool")]);
+  shim(&root);
+  std::fs::create_dir_all(root.join("usr/local/bin")).unwrap();
+  std::fs::write(root.join("usr/local/bin/jq"), "jq").unwrap();
+  std::fs::set_permissions(root.join("usr/local/bin/jq"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+  shim(&root);
+
+  assert_eq!(std::fs::read_to_string(root.join(".needy/real/usr/bin/tool")).unwrap(), "tool");
+  assert_eq!(std::fs::read_to_string(root.join(".needy/real/usr/local/bin/jq")).unwrap(), "jq");
+  assert!(same_file(&root.join("usr/local/bin/jq"), &root.join(".needy/proxy")), "usr/local/bin/jq is not the proxy");
+  assert_eq!(std::fs::read_link(root.join("usr/bin/tool-link")).unwrap(), Path::new("tool"));
+}
+
+#[test]
+fn a_program_that_replaced_a_shim_becomes_the_real_one() {
+  // A package upgrade in an image `FROM` the base writes a new file over a
+  // shim.
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(dir.path(), &[("usr/lib/tool", "old", 0o755)], &[("usr/bin/tool", "../lib/tool")]);
+  shim(&root);
+  std::fs::remove_file(root.join("usr/bin/tool")).unwrap();
+  std::fs::write(root.join("usr/bin/tool"), "new").unwrap();
+  std::fs::set_permissions(root.join("usr/bin/tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+  shim(&root);
+
+  let real = root.join(".needy/real/usr/bin/tool");
+  assert!(!real.is_symlink(), "the old real program, a link, was written through");
+  assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
+  assert_eq!(std::fs::read_to_string(root.join("usr/lib/tool")).unwrap(), "old");
+  assert!(same_file(&root.join("usr/bin/tool"), &root.join(".needy/proxy")), "usr/bin/tool is not the proxy");
+}
+
 #[test]
 fn a_dangling_link_is_left_alone() {
   let dir = tempfile::tempdir().unwrap();

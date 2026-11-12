@@ -128,8 +128,11 @@ Images:
   archive is written with `tar --sparse`, so `rootfs.ext4`'s free blocks are
   holes again when GNU tar unpacks it.
 - The container images are loaded and started (`needy --version` in the
-  executor; in `needy-actor`, a shim fails without the guest needy and runs
-  with the `guest` target's needy bind-mounted, as the daemon injects it)
+  executor; in `needy-actor`, a shim runs its real program without the
+  guest needy, as an image `FROM` the base needs while it builds, the proxy
+  itself fails with the stub's message, `/.needy/shim-image` is there, and
+  a shim and the guest needy run with the `guest` target's needy
+  bind-mounted, as the daemon injects it)
   before anything is pushed. On a publishing run each architecture pushes by
   digest and `container manifests` creates the tagged multi-architecture
   lists (Docker's documented pattern for builds spread over runners). The

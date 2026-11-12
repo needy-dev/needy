@@ -197,7 +197,8 @@ fn the_boot_stub_mounts_the_guest_disk_over_the_placeholder() {
 #[test]
 fn a_shim_over_the_empty_placeholder_says_the_guest_needy_is_not_injected() {
   // A container started without the bind mount still has the base image's
-  // empty `/.needy/needy`, which `execve` refuses as no executable format.
+  // empty `/.needy/needy`, which `execve` refuses as no executable format;
+  // this shim has no real program to fall back to.
   let layout = layout();
   let placeholder = layout.needy.join("needy");
   std::fs::write(&placeholder, "").unwrap();
@@ -210,5 +211,63 @@ fn a_shim_over_the_empty_placeholder_says_the_guest_needy_is_not_injected() {
   assert_eq!(
     stderr(&output),
     format!("needy: cannot run true: {}: Exec format error (the daemon did not inject the guest needy)\n", placeholder.display())
+  );
+}
+
+impl Layout {
+  /// The base image's empty `/.needy/needy`: no guest needy is injected.
+  fn placeholder(&self) -> PathBuf {
+    let placeholder = self.needy.join("needy");
+    std::fs::write(&placeholder, "").unwrap();
+    std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    placeholder
+  }
+
+  /// The real program the shim stage keeps for the shim at `tool`: one that
+  /// prints its argv and any stub variables, as the stand-in guest does.
+  fn real_of(&self, tool: &Path) {
+    let real = self.needy.join("real").join(tool.strip_prefix("/").unwrap());
+    std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+    let source = self.needy.join("real.c");
+    std::fs::write(&source, FAKE_GUEST).unwrap();
+    compile(&source, &real, &self.needy);
+  }
+}
+
+// ROOT CAUSE:
+//
+// If an image `FROM` the base ran a `RUN` step, it failed, because its
+// `/bin/sh` (and every program on PATH) is a shim, and a shim ran nothing
+// without the guest needy, which only the daemon injects.
+//
+// Before the fix, the shim printed `the daemon did not inject the guest
+// needy` and exited 127.
+// The fix keeps routing to the injected guest, and over the empty
+// placeholder runs the shim's real program, unrouted.
+#[test]
+fn a_shim_over_the_empty_placeholder_runs_its_real_program_unrouted() {
+  let layout = layout();
+  layout.placeholder();
+  let tool = layout.shim_at("usr/bin/python3");
+  layout.real_of(&tool);
+
+  let output = Command::new(&tool).arg0("python3").args(["-c", "pass"]).env("NEEDY_STUB_EXE", "/inherited").output().unwrap();
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  // The caller's argv and environment, without the variables a stub adds.
+  assert_eq!(stdout(&output), "argv[0]=python3\nargv[1]=-c\nargv[2]=pass\nNEEDY_STUB_EXE=/inherited\n");
+}
+
+#[test]
+fn the_proxy_over_the_empty_placeholder_stands_for_no_program_and_fails() {
+  let layout = layout();
+  let placeholder = layout.placeholder();
+
+  let output = Command::new(&layout.shim).arg0("proxy").output().unwrap();
+
+  assert_eq!(output.status.code(), Some(127));
+  assert_eq!(
+    stderr(&output),
+    format!("needy: cannot run proxy: {}: Exec format error (the daemon did not inject the guest needy)\n", placeholder.display())
   );
 }
