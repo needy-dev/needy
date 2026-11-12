@@ -59,6 +59,7 @@ tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+needy-common = { workspace = true, features = ["testing"] }
 tar.workspace = true
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true

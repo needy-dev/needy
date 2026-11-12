@@ -8,4 +8,6 @@ pub mod archive;
 pub mod filter;
 pub mod process;
 pub mod seed;
+#[cfg(all(feature = "testing", unix))]
+pub mod testing;
 pub mod time;

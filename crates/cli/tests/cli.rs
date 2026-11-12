@@ -65,7 +65,6 @@ impl Home {
 /// without KVM. The guest never boots: commands reach a run's executors
 /// through `needy exec --run`.
 fn stand_in_actor(home: &Home) -> Vec<String> {
-  use std::os::unix::fs::PermissionsExt;
   let image = home.path().join("image");
   std::fs::create_dir_all(&image).unwrap();
   std::fs::write(image.join("vmlinux"), "").unwrap();
@@ -77,8 +76,7 @@ fn stand_in_actor(home: &Home) -> Vec<String> {
   .unwrap();
   let firecracker = image.join("firecracker");
   let script = "#!/bin/sh\necho boot\necho hello from the actor\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n";
-  std::fs::write(&firecracker, script).unwrap();
-  std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+  needy_common::testing::write_executable(&firecracker, script).unwrap();
   let kvm = home.path().join("kvm");
   std::fs::write(&kvm, "").unwrap();
   let guest = home.path().join("needy-linux");
@@ -1318,18 +1316,16 @@ fn terminate_twice(mut daemon: Child) -> (Duration, Output) {
 // once, non-zero, naming the runs it did not clean up.
 #[test]
 fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
-  use std::os::unix::fs::PermissionsExt;
   let home = Home::new();
   let daemon = spawn_daemon(&home, "control");
   // An actor whose VM ignores SIGTERM keeps the run's stop, and so the
   // graceful shutdown, busy for the VM's stop grace period.
   let firecracker = home.path().join("image").join("firecracker");
-  std::fs::write(
+  needy_common::testing::write_executable(
     &firecracker,
     "#!/bin/sh\ntrap '' TERM\ntouch \"$(dirname \"$3\")/trapped\"\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n",
   )
   .unwrap();
-  std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
   let run = create_run(&home, NATIVE_PROFILE);
   let (mut attached, sleep) = attach_sleep(&home, &["exec", "--run", &run]);
 

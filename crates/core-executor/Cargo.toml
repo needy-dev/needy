@@ -33,5 +33,6 @@ uuid = { workspace = true, features = ["v5"] }
 nix = { workspace = true, features = ["poll", "socket", "term", "user"] }
 
 [dev-dependencies]
+needy-common = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 tonic = { workspace = true, features = ["router", "transport"] }

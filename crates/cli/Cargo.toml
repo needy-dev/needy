@@ -46,6 +46,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+needy-common = { workspace = true, features = ["testing"] }
 portable-pty.workspace = true
 tempfile.workspace = true
 tokio-stream.workspace = true

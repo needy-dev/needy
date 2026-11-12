@@ -283,13 +283,11 @@ fn write_manifest(dir: &Path) {
 
 /// An image whose `firecracker` runs `script` with `sh`.
 fn fake_image(dir: &Path, script: &str) -> Image {
-  use std::os::unix::fs::PermissionsExt;
   let image = Image::new(dir);
   std::fs::write(&image.kernel, "").unwrap();
   std::fs::write(&image.rootfs, "").unwrap();
   write_manifest(dir);
-  std::fs::write(&image.firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
-  std::fs::set_permissions(&image.firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
+  needy_common::testing::write_executable(&image.firecracker, &format!("#!/bin/sh\n{script}\n")).unwrap();
   image
 }
 

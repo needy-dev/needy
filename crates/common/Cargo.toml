@@ -13,5 +13,10 @@ tar.workspace = true
 glob-match.workspace = true
 walkdir.workspace = true
 
+[features]
+# Helpers for other crates' tests (`testing`), enabled from their
+# dev-dependencies.
+testing = []
+
 [dev-dependencies]
 tempfile.workspace = true

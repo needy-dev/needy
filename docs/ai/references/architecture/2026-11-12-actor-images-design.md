@@ -1061,10 +1061,18 @@ first release exercises them.
 - **Init without channels in a container** loops forever after its reboot
   fails (seen when the base image is run by hand without a daemon); it
   could exit when `reboot` is refused.
-- **`Text file busy` in the stand-in Firecracker tests**: a test writes a
-  script and runs it while another test's thread forks, so the child holds
-  the write descriptor; writing the stand-ins once per test binary, or
-  retrying `ETXTBSY` in the test helper, would remove the flake.
+- **`Text file busy` in the stand-in Firecracker tests**, done
+  (2026-11-13): a test writes a script and runs it while another test's
+  thread forks, so the child holds a copy of the write descriptor until its
+  exec. Renaming a temporary file does not help (the busy file is the same
+  inode), and the forks are in the code under test, so no lock can cover
+  them. `needy_common::testing::write_executable` (feature `testing`) writes
+  a script from a child process, so no fork of the test process can hold
+  it open; every stand-in script that a test then runs is written through it
+  (`NOTICE(etxtbsy)`). `a_script_written_while_another_thread_forks_is_never_busy`
+  reproduced it on the Linux KVM host (12 of 300 scripts busy with
+  `std::fs::write`) and passed 10 times after; the `linux_firecracker`
+  tests then passed 200 times and the daemon's 100 times, run side by side.
 - **The guest's architecture per driver**, once a driver runs another
   architecture than the host's (`guest::arch` has a `NOTICE`).
 

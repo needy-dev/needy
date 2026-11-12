@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use needy_api_client::exec::Event;
@@ -37,8 +36,7 @@ async fn executor() -> Executor {
 /// Writes an executable script at `path` that prints `says`.
 fn script(path: &Path, says: &str) {
   std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-  std::fs::write(path, format!("#!/bin/sh\necho {says}\n")).unwrap();
-  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+  needy_common::testing::write_executable(path, &format!("#!/bin/sh\necho {says}\n")).unwrap();
 }
 
 /// Starts `program` with `PATH` set to the executor's `path` directory, in

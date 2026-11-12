@@ -7,7 +7,6 @@
 //! Linux only: the stubs read `/proc/self/exe` and the auxiliary vector.
 #![cfg(target_os = "linux")]
 
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -180,8 +179,7 @@ fn the_boot_stub_mounts_the_guest_disk_over_the_placeholder() {
   // disk, which fails here (no such device, and no privilege to mount).
   let layout = layout();
   let placeholder = layout.needy.join("needy");
-  std::fs::write(&placeholder, "").unwrap();
-  std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o755)).unwrap();
+  needy_common::testing::write_executable(&placeholder, "").unwrap();
 
   let output = Command::new(&layout.boot).output().unwrap();
 
@@ -201,8 +199,7 @@ fn a_shim_over_the_empty_placeholder_says_the_guest_needy_is_not_injected() {
   // this shim has no real program to fall back to.
   let layout = layout();
   let placeholder = layout.needy.join("needy");
-  std::fs::write(&placeholder, "").unwrap();
-  std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o755)).unwrap();
+  needy_common::testing::write_executable(&placeholder, "").unwrap();
   let tool = layout.shim_at("usr/bin/true");
 
   let output = Command::new(&tool).arg0("true").output().unwrap();
@@ -218,8 +215,7 @@ impl Layout {
   /// The base image's empty `/.needy/needy`: no guest needy is injected.
   fn placeholder(&self) -> PathBuf {
     let placeholder = self.needy.join("needy");
-    std::fs::write(&placeholder, "").unwrap();
-    std::fs::set_permissions(&placeholder, std::fs::Permissions::from_mode(0o755)).unwrap();
+    needy_common::testing::write_executable(&placeholder, "").unwrap();
     placeholder
   }
 

@@ -42,4 +42,5 @@ uuid.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+needy-common = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
