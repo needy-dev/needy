@@ -74,6 +74,13 @@ jobs:
       - run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - run: cargo test --locked --workspace --no-fail-fast
       - run: cargo run --locked --quiet --bin needy -- --version
+      # The e2e matrix's cells without an actor (`none/`): a real non-root
+      # control daemon and its native executor, `needy exec` and `needy fs
+      # cp`, private sockets and nothing left behind. Hosted runners have no
+      # KVM or Apple virtualization, so the actor cells run on hosts (see the
+      # e2e harness design note).
+      - if: runner.os != 'Windows'
+        run: cargo xtask e2e --only none/ --needy target/debug/needy
       - run: git diff --check
 
   # The install channels' scripts, as auv's `release-tooling` job. ShellCheck

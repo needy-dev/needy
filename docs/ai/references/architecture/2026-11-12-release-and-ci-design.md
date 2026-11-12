@@ -26,6 +26,11 @@ request cancels the older run; runs on `main` are never cancelled.
 | `proto` | Linux | `buf lint`, `buf format --diff --exit-code`, `buf generate`, then fails if `crates/api-proto/src/gen` differs from the commit |
 | `release tooling` | Linux | ShellCheck on `install/install.sh` and the Homebrew scripts, then `scripts/tests/render-homebrew-formula` (see [Install channels](#install-channels)) |
 
+- On Linux and macOS the `rust` job also runs `cargo xtask e2e --only none/`:
+  the end-to-end cells without an actor (`needy exec` and `needy fs cp`
+  against a real non-root control daemon), since hosted runners have no KVM
+  or Apple virtualization. See the
+  [e2e harness design](2026-11-13-e2e-harness-design.md).
 - The toolchain is the one `rust-toolchain.toml` pins, installed with the
   runner's own `rustup toolchain install`
   (`NOTICE(rust-toolchain)`): a setup action would install a second
