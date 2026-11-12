@@ -2,8 +2,9 @@
 
 **Status**: accepted by the owner (2026-11-12) as four steps. Step 1 (inject
 the guest `needy` at start) is implemented and verified on 2026-11-12 (see
-[Verification](#verification)); steps 2 to 4 are designed
-here and wait for their own slice. Breaking API, config and image changes
+[Verification](#verification)); step 2 (custom actor images) on 2026-11-13
+(see [Step 2 checks](#step-2-checks)); steps 3 and 4 are designed here and
+wait for their own slice. Breaking API, config and image changes
 are allowed; implementers record refinements under
 [Decisions during implementation](#decisions-during-implementation).
 
@@ -39,6 +40,8 @@ can run any agent in an actor.
 | **boot stub** | `/.needy/init`, the actor's PID 1. In a VM it mounts the guest disk and binds the guest needy at `/.needy/needy`; everywhere it then runs `/.needy/needy init`. |
 | **shim stub** | `/.needy/proxy`. The kernel's `binfmt_needy` hands a routed exec to it in a VM; in a container every program on the image's `PATH` is a hard link to it. It runs `/.needy/needy` with its own path and the exec's path passed on. |
 | **guest disk** | The read-only disk the VM drivers attach as the second virtio-blk device: a SquashFS image with the guest needy, built once per guest binary and cached in needy's data directory. |
+| **actor image** | What `actor.image` names, for every driver: an OCI reference; without it, the base `needy-actor:latest` (container drivers) or the base VM image (VM drivers). |
+| **custom actor image** | An OCI image `FROM` a base image that adds programs; its last step, `/.needy/shim-image`, makes them shims. The container drivers run it; `needy build --from` makes a VM image of it. |
 | **base ABI** | The interface between a base image and the guest needy plus the daemon: the paths under `/.needy`, the stubs' hand-off, the guest disk, `binfmt_needy`'s parameters and its never-route rule, and the image's records. It has a version; the image records it and the daemon refuses an image whose version it does not speak. |
 
 ## Step 1: inject the guest needy at start
@@ -57,7 +60,7 @@ can run any agent in an actor.
 | The guest disk | `/dev/vdb`, the second virtio-blk device: SquashFS (zlib) with one regular file at its root, `needy`, mode 0755, owned by root |
 | Boot stub hand-off | When `/.needy/needy` is empty, mount `/dev/vdb` read-only at `/.needy/disk` and bind `/.needy/disk/needy` over `/.needy/needy`. Then `execve("/.needy/needy", ["/.needy/needy", "init"], <the stub's environment>)` |
 | Shim stub hand-off | `execve("/.needy/needy", <the caller's argv, unchanged>, <the caller's environment> + NEEDY_STUB_EXE=<readlink /proc/self/exe> + NEEDY_STUB_EXECFN=<getauxval(AT_EXECFN)>)`. The guest needy removes both variables before it does anything else, so no program it runs sees them |
-| Stub failure | The stub prints `needy: ...` with the path and the error on stderr and exits 127. The boot stub as a VM's PID 1 first ends the VM (as init does: a reboot on x86_64, a power-off on arm64), so a broken injection fails the run instead of hanging it |
+| Stub failure | When `/.needy/needy` is the empty placeholder (`ENOEXEC`: no guest injected, as in an image build), a shim runs its real program `/.needy/real/<its path>` unrouted, with the caller's argv and environment (since step 2; the guest needy and the daemon see no difference, so the version stays 1). Otherwise the stub prints `needy: ...` with the path and the error on stderr and exits 127. The boot stub as a VM's PID 1 first ends the VM (as init does: a reboot on x86_64, a power-off on arm64), so a broken injection fails the run instead of hanging it |
 | `binfmt_needy` | parameters `route`, `route_uid`, `proxy` (unchanged); it never routes an exec made by a process whose executable's path is under `/.needy/` |
 | Image records | a VM image directory has a `base-abi` file (`1`); a container image has the label `needy.base-abi=1` |
 
@@ -169,16 +172,139 @@ message on the console when it is not the version it speaks, for a
 
 ## Step 2: custom actor images
 
-- An actor image is an OCI image `FROM ghcr.io/needy-dev/needy-actor` that
-  adds tools. Its last step must re-run the shim step for the container
-  drivers, since programs it adds are not shims; the base image ships
-  `/.needy/shim.sh` (or an equivalent `needy image build` step) for that.
-- `needy image build --from <OCI ref>` turns such an image into a VM rootfs
-  (`rootfs.ext4`) next to the base kernel, for `linux-firecracker` and
-  `macos-vz`; the kernel and the stubs stay the base's. The image's
-  `needy.base-abi` label carries over to the VM image's `base-abi`.
-- Open question: whether the VM rootfs drops the container's shims
-  (`/.needy/real`), which a VM does not use since its kernel captures.
+Implemented and verified on 2026-11-13 (see
+[Step 2 checks](#step-2-checks)). A **custom actor image** is an OCI image
+`FROM` a base image (`needy-actor:latest` from `needy build
+--linux-container`, or `ghcr.io/needy-dev/needy-actor:<tag>`) that adds
+programs, and every driver runs it:
+
+```dockerfile
+FROM needy-actor:latest
+RUN apt-get update && apt-get install -y --no-install-recommends jq && rm -rf /var/lib/apt/lists/*
+RUN ["/.needy/shim-image"]
+```
+
+[`examples/custom-image`](../../../../examples/custom-image/Dockerfile) is
+this, with a profile per driver.
+
+### The profile names the image once
+
+`actor.image` is an OCI image reference, the same for every driver; it
+replaces `actor.container.image` (removed, without an alias).
+
+| Driver | Without `actor.image` | With `actor.image: REF` |
+| --- | --- | --- |
+| `linux-container` | `needy-actor:latest` from the engine | `REF` from the engine |
+| `macos-apple-container` | `needy-actor:latest` from Apple's store | `REF` from Apple's store |
+| `linux-firecracker` | the base VM image (`--actor-image`, default `<data>/images/default`, `needy build`) | the VM image `needy build --from REF` made |
+| `macos-vz` | as `linux-firecracker` | as `linux-firecracker` |
+
+A profile names a VM image **by the OCI reference it was made from**: the
+one string works for every driver, and switching a profile from
+`linux-container` to `linux-firecracker` changes only `driver`. The VM image
+lives in `<data>/images/<driver>/<name>-<hash>/`: `<name>` is the reference
+with its tag (`needy-agent` is `needy-agent:latest`) and every character
+outside `[A-Za-z0-9._-]` written `_`, and `<hash>` the first 12 hex digits of
+the tagged reference's SHA-256, so two references never share a directory
+(`image::vm::dir_of`). One directory a driver is the layout step 4's
+`images/<driver>/` has.
+
+A VM image does not follow its tag: after rebuilding the OCI image, run
+`needy build --from REF` again. The directory's `origin.json` records the
+reference, the image ID it was made from and its platform, and `profile
+check` shows them (`TODO(actor-images)`: step 4's `manifest.json` replaces
+`origin.json` and `base-abi`).
+
+### Shims for added programs
+
+The base image keeps the shim step as **`/.needy/shim-image`** (the script
+`images/container/shim.sh`, which was only bind-mounted for its one step
+before), and a custom image runs it as its last step. Without arguments it
+shims Docker's default `PATH`. It may run any number of times: a program
+that is a shim already is left alone, and one that replaced a shim (a
+package upgrade) becomes the new real program.
+
+For that, the **shim stub** gained a fallback: when `/.needy/needy` is the
+base's empty placeholder (`execve` fails with `ENOEXEC`), a shim runs its
+real program `/.needy/real/<its path>` with the caller's argv and
+environment, unrouted. That is what an image build sees: every `RUN` in an
+image `FROM` the base runs `/bin/sh`, a shim, with no guest injected. The
+proxy itself (`/.needy/proxy`) stands for no program and still fails with
+the stub's message, as does a shim without a real program. A running actor
+always has the guest injected, so the fallback never applies there.
+
+Why in the image, not at container start or by `needy build --from`:
+
+- **Immutable and deterministic.** The image that `docker build` (or
+  `container build`, or any OCI builder) makes is the image that runs, on
+  every engine, with nothing rewritten per start; its digest says what runs.
+- **No start cost.** Shimming copies every program on `PATH` (about 500 in
+  the base); doing that at each container start is seconds, and needs a
+  writable root, which a `linux-container` actor does not have.
+- **No second image.** A needy-side step would make a derived image under
+  another name, which the profile then has to name instead of the user's.
+
+The cost: an image that forgets the last step runs, but its added programs
+are not routed in a container actor (they still are in a VM). `profile
+check` keeps its warning that a container actor routes only the programs
+its image had when it was built.
+
+### VM images from OCI images
+
+`needy build --from REF` makes the VM image of this host's VM driver
+(`linux-firecracker` on Linux, `macos-vz` on Apple silicon) and needs no
+needy checkout:
+
+1. The base VM image (`--base DIR`, default `<data>/images/default`) must be
+   complete and of this needy's base ABI: its kernel, and Firecracker or
+   the initramfs, are the new image's.
+2. The engine inspects `REF`, pulling it for the VM's platform when it does
+   not have it; it must carry `needy.base-abi` of this needy's version and
+   be `linux/amd64` (Firecracker) or `linux/arm64` (`macos-vz`).
+3. BuildKit, through the engine's API, builds the Dockerfile embedded in
+   needy (`crates/cli/src/commands/build/from.Dockerfile`) with
+   `FROM=REF`: it copies the image's file system, puts each real program
+   from `/.needy/real` back over its shim (`cp -a --remove-destination`,
+   since writing through a shim would change the proxy every shim links to),
+   removes `/.needy/real`, and runs `mke2fs -d` sized as the base rootfs is.
+   A VM's kernel catches every exec, so it needs no shims.
+4. The rootfs, the base's other files, `base-abi` and `origin.json` are
+   written to a directory next to the target and renamed into place, so a
+   daemon never boots a half-written image.
+
+The kernel and the stubs come from the base: the kernel from the base VM
+image, the stubs through the custom image's own `FROM` the base. The image's
+configuration (`ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`) does not carry over:
+an actor's environment and user are the profile's in every driver, and
+needy's boot stub is PID 1. The container drivers start the actor as root
+whatever `USER` the image names (`linux-container` did; Apple's `container`
+now gets `--user 0:0`).
+
+### Base ABI and architecture checks
+
+| Image | Refused when | Message names |
+| --- | --- | --- |
+| Container image (both container drivers, `needy build --from`) | `needy.base-abi` missing or another version | the base to rebuild from: `needy-actor:latest` after `needy build --linux-container` (or `--macos-apple-container`), or `ghcr.io/needy-dev/needy-actor:v<this needy's version>`; the base image itself names its `needy build` |
+| Container image | its platform is not `linux/` plus the guest's architecture (`amd64` on x86_64, `arm64` on Apple silicon) | the platform to build for (`docker build --platform linux/arm64`); for Apple's store, the image's first variant when it has no `linux/arm64` one |
+| VM image from `REF` | missing | `needy build --from REF` |
+| VM image from `REF` | `base-abi` of another version | the base to rebuild `REF` from, then `needy build --from REF` |
+
+All are checked when a run is created, before anything is acquired, and
+by `profile check`.
+
+### `profile check`
+
+`profile check` prints the actor image as its driver resolves it, with the
+base ABI it records when the image is usable (two new fields of
+`CheckProfileResponse`, `actor_image` and `actor_base_abi`):
+
+```
+actor image: needy-custom-jq:step2 (base ABI 1)
+actor image: needy-custom-jq:step2, as the VM image <data>/images/macos-vz/needy-custom-jq_step2-1dceee4bb9cf made from sha256:7dbc… (linux/arm64) (base ABI 1)
+```
+
+An unusable image is an error finding with the messages above; the identity
+gaps are listed as before.
 
 ## Step 3: `examples/agents/`
 
@@ -286,6 +412,72 @@ the key. Built with step 2's `needy image build`.
   are symbolic links to `/.needy/proxy`, now the shim stub, whose
   `/proc/self/exe` is the proxy and whose `AT_EXECFN` is the route stub.
 
+### Step 2
+
+- **`actor.image`, one field for every driver**, replaces
+  `actor.container.image` without an alias; `actor.container` keeps
+  `oci_runtime` only. A VM driver with `actor.image` boots the VM image made
+  from that reference; without it, the daemon's base VM image as before.
+- **VM images are named by their OCI reference**, not by a digest or a name
+  of their own: the profile is the same for every driver, and no mapping
+  file has to be kept. The directory name is readable (the tagged
+  reference) and unique (a hash of it). A digest-keyed cache was set aside:
+  it needs the engine at every run start to resolve the tag, and a Mac
+  running `macos-vz` may have no engine running. Staleness is the cost:
+  `origin.json` records the image ID, and a later slice could compare it
+  with the tag's (candidates).
+- **The shim step ships in the base** as `/.needy/shim-image`, and a custom
+  image runs it last (reasons under
+  [Shims for added programs](#shims-for-added-programs)).
+- **The shim stub runs the real program when no guest is injected.** Without
+  it, no `RUN` could work in an image `FROM` the base (its `/bin/sh` is a
+  shim). It is `ENOEXEC` on the placeholder only, and the proxy itself never
+  falls back, so the release's check that the stub names a missing guest
+  now runs `/.needy/proxy`, and `/usr/bin/true` must succeed. Base ABI 1 is
+  unchanged: nothing the guest needy or the daemon does differs.
+- **The shim step tells a shim by its content, not only its inode.** In an
+  image `FROM` the base, the first `ln` of the proxy in the new layer copies
+  the proxy up (overlayfs), after which the lower layer's shims no longer
+  share its inode; `-ef` alone then took every later shim for a real
+  program and copied the proxy over `/.needy/real` (seen on the first try:
+  `ls` in the custom image failed). `cmp -s` against the proxy catches both.
+  The step also removes a real program before writing it, so an earlier
+  run's link is never written through.
+- **`needy build --from` embeds its Dockerfile** (`from.Dockerfile`, with
+  `include_str!`) and builds it with BuildKit through the engine API, as
+  `needy build` does, so it needs no checkout and uses the engine's own
+  image store for `FROM` (no export, no unpack, and no `/.dockerenv` or
+  mounted `/etc/hosts` that `docker export` would add). It lives in
+  `crates/cli/src/commands/build/from.rs` so step 4 can move it to `needy
+  image build` whole. Its tool stage is `ubuntu:24.04` with `e2fsprogs`, as
+  the base's `actor-image` stage, so both rootfs come from the same
+  `mke2fs`.
+- **The real programs go back in a VM rootfs** (the open question): the
+  kernel catches every exec there, so shims would only add a re-exec per
+  program. `cp -a --remove-destination` puts each one in place of its shim.
+- **The kernel and Firecracker are copied** into the new VM image's
+  directory, so each image is complete by itself (as step 4's per-image
+  manifests expect) and can be booted or removed alone. On APFS the copy is
+  a clone; on Linux it is about 34 MB per image.
+- **`base-abi` of a VM image made with `--from` is this needy's `ABI`**,
+  written after the label was checked equal to it.
+- **Architecture checks use the guest's architecture**, the same rule as the
+  guest needy's (`guest::arch`), mapped to OCI's `GOARCH` names. Docker on
+  Linux could run an arm64 image through `binfmt_misc` emulation, but the
+  injected guest needy and the shims are of the host's architecture, so it
+  is refused rather than tried.
+- **Apple's `container` gets `--user 0:0`**, as `linux-container` already
+  had `user: 0:0`: a custom image may end with `USER`, and init needs root.
+- **A missing custom image** is not built or pulled by needy: the message
+  says to build it or pull it (`docker pull`, `container image pull`), and
+  `needy build --linux-container` only for the base. Pulling automatically
+  is step 4's (`TODO(actor-images)` in the `linux-container` driver).
+- **`profile check` shows the image** in two new `CheckProfileResponse`
+  fields (`actor_image`, `actor_base_abi`), filled from the driver
+  (`Driver::image`) and its `check_host`, which already checks the image.
+- **`Engine::image_labels` became `inspect_image`**, which returns the
+  image's ID, OS, architecture and labels.
+
 ## Verification
 
 Step 1, on 2026-11-12, on an Apple silicon Mac (macOS, OrbStack, vfkit
@@ -353,6 +545,59 @@ it bind-mounted, and packed `needy-linux-aarch64` (static, AArch64) next to
 `needy` in `needy-aarch64-apple-darwin.tar.gz`:
 https://github.com/needy-dev/needy/actions/runs/43252994149.
 
+### Step 2 checks
+
+On 2026-11-13, on the same two machines: an Apple silicon Mac (macOS,
+OrbStack's Docker 29.8, vfkit 0.6.4, Apple's `container` 1.7.1) and a Linux
+KVM host (x86_64, Docker Engine 29.7, `runc`). The base images were built
+from the step's tree under a scratch tag (`needy-actor:step2`, and
+`needy-executor:step2` on Linux), the VM base images with `needy build`
+into a scratch data directory, and `examples/custom-image/Dockerfile` with
+`--build-arg BASE=needy-actor:step2` as `needy-custom-jq:step2`. Each
+control daemon ran with scratch state and data directories, the guest from
+`make guest`. The scratch profiles extend the example's, with
+`actor.image: needy-custom-jq:step2`.
+
+Each piece, as it was written:
+
+| Piece | Host | Command | Result |
+| --- | --- | --- | --- |
+| Stub fallback | Linux KVM host | `cargo test -p needy-core-actor --test stubs` | 10 pass: over the empty placeholder a shim runs its real program with the caller's argv (`argv[0]=python3`) and environment, without the stub variables; `/.needy/proxy` and a shim without a real program still fail with the stub's message |
+| Stub fallback in the image | Mac | `docker run --entrypoint /usr/bin/true needy-actor:step2`, and `--entrypoint /.needy/proxy` | `true` exits 0; the proxy says `cannot run /.needy/proxy: /.needy/needy: Exec format error (the daemon did not inject the guest needy)`, exit 127; `/.needy/shim-image` is in the image |
+| Custom image | Mac | `docker build --build-arg BASE=needy-actor:step2 -t needy-custom-jq:step2 examples/custom-image` | `apt-get install jq` runs through the shims; label `needy.base-abi=1` inherited, `linux/arm64`; `/usr/bin/jq` is the proxy's inode and `/.needy/real/usr/bin/jq` the real jq |
+| Shim step run twice | Mac | the first build of the custom image | **failed first**: `ls` in the image said `the daemon did not inject the guest needy`, because the second run had copied the proxy over `/.needy/real/usr/bin/ls` (the overlayfs copy-up under [Step 2 decisions](#step-2)); with `cmp -s` it builds and every program runs |
+| Shim step | Mac | `cargo test -p needy-cli shim` | 7 pass, with a second run that shims an added program and keeps the real ones, and a program that replaced a shim becoming the real one |
+| VM rootfs | Mac | the `from.Dockerfile` by hand, then `debugfs -R stat` on the result | `/usr/bin/jq` (67512 bytes) and `/usr/bin/ls` (199464 bytes) are the real programs, `/.needy/proxy` has one link, `/.needy/real` is gone |
+| `needy build --from` | Mac | `needy build --from needy-custom-jq:step2` | `<data>/images/macos-vz/needy-custom-jq_step2-1dceee4bb9cf/` with `Image`, `initrd` (the base's), `rootfs.ext4`, `base-abi` 1 and `origin.json` (`linux/arm64`, the image ID) |
+| `needy build --from` | Linux KVM host | the same | `<data>/images/linux-firecracker/needy-custom-jq_step2-1dceee4bb9cf/` with `vmlinux` and `firecracker` (the base's), `rootfs.ext4`, `base-abi`, `origin.json` (`linux/amd64`) |
+| `macos-vz` | Mac | the custom image's `macos-vz.yaml` | `jq` at `/usr/bin/jq` prints `jq` in the actor; `python3` routed to the Mac (`Darwin`), `routed exit=7` |
+| `macos-apple-container` | Mac | the image loaded with `docker save` and `container image load`; `macos-apple-container.yaml` plus a rule `jq --version` to the Mac | local `jq` in the actor; `jq --version` routed through its shim to the Mac prints `jq-1.7.1-apple`; `python3` routed; report: `jq on mac 1`, `kept on actor 1` |
+| `linux-firecracker` | Linux KVM host | the custom image's `profile.yaml` plus a rule `jq --version` to a native executor | local `jq` in the actor; `jq --version` routed by `binfmt_needy` (report `jq on host 1`); `python3` routed to the `linux-container` executor, `routed exit=7` |
+| `linux-container` | Linux KVM host | `linux-container.yaml` without its workspace mount, plus the `jq` rule | local `jq`; `jq --version` routed through its shim (report `jq on host 1`, `kept on actor 1`); `python3` routed, `routed exit=7` |
+| Wrong base ABI | both | an image `FROM needy-actor:step2` with `LABEL needy.base-abi=2`: `needy build --from` it, and `profile check` with it on `linux-container` (Linux) and `macos-apple-container` (Mac) | refused: `... has base ABI 2, and this needy speaks base ABI 1; rebuild it FROM a base image of base ABI 1: needy-actor:latest after needy build --linux-container (--macos-apple-container), or ghcr.io/needy-dev/needy-actor:v0.0.1, or use a needy that speaks base ABI 2` |
+| No base ABI | both | plain `ubuntu:24.04`, as above | refused: `... records no base ABI: it is not built FROM a needy base image, or was built before needy injected its guest at start; rebuild it FROM ...` |
+| Wrong architecture | both | `FROM --platform=linux/amd64 ubuntu:24.04` with the label on the Mac, `linux/arm64` on Linux, as above | refused: `the actor image needy-bad-arch:step2 is linux/amd64, and actors here run linux/arm64, the guest needy's platform; build it for linux/arm64 (docker build --platform linux/arm64)` (and the reverse on Linux) |
+| VM image of another base ABI | both | the VM image's `base-abi` set to 2, `profile check` on `macos-vz` / `linux-firecracker` | refused, naming the reference, the directory, the base to rebuild from and `then run needy build --from needy-custom-jq:step2` |
+| VM image never built | both | `actor.image: needy-never-built` on a VM driver | `actor image is missing <data>/images/<driver>/needy-never-built_latest-18d11d56fb44/<kernel>; run needy build --from needy-never-built` |
+| `profile check` | both | every profile above | prints `actor image: needy-custom-jq:step2 (base ABI 1)` (containers), or the VM image's directory, its image ID and platform `(base ABI 1)`; the identity gaps as before |
+
+`make check` and `make test` pass on both hosts (the Linux host also runs
+the stub tests).
+
+End to end, from the commits that were pushed, with the base built from
+the tree:
+
+| Driver | Host | Profile | Result |
+| --- | --- | --- | --- |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` (the base VM image) | Pass: GCE identity (`systemd-detect-virt` says `google`), `python3` routed, workspace both ways, `routed exit=7` |
+| `linux-container` (`runc`) | Linux KVM host | `examples/linux-container` with `actor.image: needy-actor:step2`, without its workspace mount (no `user_allow_other` on that host, as in step 1) | Pass: recipe identity, `python3` routed, `routed exit=7`; the workspace lines fail for want of the mount |
+| `macos-vz` | Mac | `examples/macos-vz` (the base VM image) | Pass: `python3` and `/usr/bin/arch` routed to the Mac (`arm64`), workspace both ways, `routed exit=7` |
+| `macos-apple-container` | Mac | `examples/macos-apple-container` with `actor.image: needy-actor:step2` | Pass: workspace both ways, `python3` routed, `example.com 200`, `example.org` refused (403) |
+| `linux-firecracker` | Linux KVM host | the custom image (`profile.yaml`) | Pass, as in the table above |
+| `linux-container` | Linux KVM host | the custom image (`linux-container.yaml`) | Pass, as above |
+| `macos-vz` | Mac | the custom image (`macos-vz.yaml`) | Pass, as above |
+| `macos-apple-container` | Mac | the custom image (`macos-apple-container.yaml`) | Pass, as above |
+
 ## Candidate next slices
 
 - **Guest disk cleanup** (`TODO(guest-disk)`): every guest binary leaves a
@@ -376,9 +621,35 @@ https://github.com/needy-dev/needy/actions/runs/43252994149.
 - **The guest's architecture per driver**, once a driver runs another
   architecture than the host's (`guest::arch` has a `NOTICE`).
 
+Found in step 2:
+
+- **A stale VM image warning**: `origin.json` records the image ID a VM
+  image was made from; `profile check` (with an engine at hand) could say
+  when `REF` now names another image, so a rebuilt OCI image is not booted
+  as its old VM image unnoticed.
+- **A forgotten `/.needy/shim-image`**: an image whose added programs are
+  not shims still runs; `profile check` could compare the image's last
+  history entry, or a label the step sets, and warn for a container actor.
+- **`systemd` in the container base**: the VM base has `systemd` for
+  `systemd-detect-virt`, the container base does not, so a VM image made
+  from a custom image lacks it and `systemd-detect-virt` is missing there
+  (the recipe's DMI is still presented). One userland for both bases would
+  make a VM from a custom image identical to the base VM.
+- **`needy build --from REF --macos-apple-container`**: loading a Docker
+  image into Apple's store is `docker save` plus `container image load` by
+  hand today; `needy build --macos-apple-container` already does both for
+  the base.
+- **`container build` of a custom image**: Apple's builder resolving
+  `FROM needy-actor:latest` from its own store was not tried; if it works,
+  a Mac without Docker can build custom images.
+- **Old VM images**: every `needy build --from` of a new reference leaves a
+  directory of about 500 MB to 600 MB; `needy image rm` (step 4) removes
+  them.
+
 ### For steps 2 to 4
 
-- **Step 2 (custom images).** An image `FROM needy-actor` adds programs that
+- **Step 2 (custom images), done.** What follows was the note to it; see
+  [Step 2](#step-2-custom-actor-images) for what was built. An image `FROM needy-actor` adds programs that
   are not shims. The shim step must run again over them: ship
   `images/container/shim.sh` in the base (it is bind-mounted for the build
   today and does not stay) or let `needy image build` run it. It copies its
@@ -392,9 +663,26 @@ https://github.com/needy-dev/needy/actions/runs/43252994149.
   binaries under `/usr/local/bin` are shimmed by the shim step if they are
   there before it runs; programs they download at run time are not routed
   in container actors (a known gap).
+  After step 2: one Dockerfile `FROM needy-actor:latest` whose last step is
+  `RUN ["/.needy/shim-image"]` (installers that write into `~` or
+  `/opt` and link into `/usr/local/bin` are covered: a link to a program
+  outside the shimmed directories becomes a shim); each agent's profile
+  sets `actor.image` to it and works on all four drivers, with `needy build
+  --from` once per VM host. `ENV` and `USER` of the image do not reach the
+  actor: put what the agent needs in `actor.env` and `user`.
 - **Step 4 (`needy image`).** `manifest.json`'s `base_abi` replaces the
   `base-abi` file; `image::base::check_dir` is where the daemon reads it.
   The container images keep the `needy.base-abi` label, which the
   manifest's value must equal. `pull` downloads the release's base archives
   (no needy inside now) and `needy-linux-aarch64` stays in the macOS
   `needy` archive. `rm` is where old guest disks can go too.
+  After step 2: `needy build --from` (`crates/cli/src/commands/build/from.rs`)
+  moves to `needy image build` whole; its `origin.json` (reference, image
+  ID, platform) and `base-abi` fold into `manifest.json` (`source` is the
+  reference and image ID, `arch` the platform). The directories already
+  follow `images/<driver>/<name>-<hash>/` (`image::vm::dir_of`); the base
+  is still `images/default` and may move under its driver too. `ls` lists
+  `images/*/*`; `rm REF` removes `dir_of(REF)`. A missing container image
+  is the place to pull (`TODO(actor-images)` in the `linux-container`
+  driver), and `CONTAINER_IMAGE` the place to switch the default to
+  `ghcr.io/needy-dev/needy-actor:v<version>`.

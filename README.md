@@ -538,8 +538,10 @@ A [recipe](docs/ai/references/config/2026-11-09-recipe-design.md) sets the
 machine: CPU model and count, memory, kernel, firmware strings, devices,
 hostname (`instance-{time}`), and which identity fields are `required:`.
 `needy build --recipe RECIPE` builds the actor kernel with a recipe's kernel
-options. The container drivers take `actor.container`: `oci_runtime` for
-`linux-container`, `image` for both.
+options. `linux-container` takes `actor.container.oci_runtime`.
+`actor.image: REF` runs your own image `FROM` needy's base on every driver
+(`needy build --from REF` for the VM drivers); see
+[`examples/custom-image`](examples/custom-image/Dockerfile).
 
 ### Environment and data
 
@@ -569,6 +571,7 @@ control token and a join token; `-v` turns on logs.
 | [`examples/linux-container`](examples/linux-container/profile.yaml) | The smoke test in a container actor, for hosts without KVM |
 | [`examples/macos-vz`](examples/macos-vz/profile.yaml) | The smoke test in a `macos-vz` actor, routing by absolute path |
 | [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml) | The smoke and chaos tests in Apple's `container` |
+| [`examples/custom-image`](examples/custom-image/profile.yaml) | An actor image `FROM` needy's base with jq added, on every driver |
 | [`examples/local`](examples/local/profile.yaml) | This machine as a native executor: copy-in, mirror-out, chaos and the trace |
 | [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy exec`, with an actor that only waits |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |

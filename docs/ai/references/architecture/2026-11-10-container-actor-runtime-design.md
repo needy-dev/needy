@@ -14,6 +14,12 @@
 > `image/`, `identity.rs` and `sidecar/gateway/`; `core-executor`'s
 > `provider/` is `driver/` (`docker.rs` is `linux_container/`).
 
+> **NOTICE (2026-11-13, migration):** step 2 of the
+> [actor images design](2026-11-12-actor-images-design.md) moved the
+> actor image out of `actor.container`, without compatibility:
+> `actor.container.image` is `actor.image`, one OCI reference for every
+> driver (the VM drivers boot the VM image `needy build --from` made of it).
+
 **Status**: design, 2026-11-10; slices 1 to 4 implemented 2026-11-11, see
 [As built: slice 1](#as-built-slice-1) and
 [As built: slices 2 to 4](#as-built-slices-2-to-4); the `macos-apple-container`

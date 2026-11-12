@@ -27,6 +27,12 @@
 > The sections below were updated; older examples elsewhere keep the names
 > of their time.
 
+> **NOTICE (2026-11-13, migration):** step 2 of the
+> [actor images design](../architecture/2026-11-12-actor-images-design.md) moved the
+> actor image out of `actor.container`, without compatibility:
+> `actor.container.image` is `actor.image`, one OCI reference for every
+> driver (the VM drivers boot the VM image `needy build --from` made of it).
+
 **Status**: draft, under discussion; implemented as described unless the [closed-loop results](../architecture/2026-11-09-closed-loop-results-evidence.md#not-yet-verified) list it as missing. The matching syntax and composition rules
 below are proposals. Terms follow the
 [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
@@ -94,7 +100,8 @@ user: { name: agent, uid: 1000, gid: 1000 }   # same in the actor and every cont
 
 actor:
   runtime: firecracker           # required: firecracker (a microVM, needs /dev/kvm) | container
-  # container: { oci_runtime: runsc, image: needy-actor:latest }   # required with `container`: runc | runsc
+  # image: needy-custom-jq       # optional, every driver: an OCI image FROM needy's base (VM drivers: `needy build --from` it)
+  # container: { oci_runtime: runsc }   # required with `container`: runc | runsc
   runner: kvm                    # optional; the control host when absent, see Runners
   recipe: gce-e2-standard-4
   limits: { single_process: true, self_replace: true }

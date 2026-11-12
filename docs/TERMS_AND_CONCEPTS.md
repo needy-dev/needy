@@ -376,6 +376,25 @@ starts.
 
 *Avoid*: actor image with needy, versioned image.
 
+### Actor image
+
+What a profile's `actor.image` names for every driver: an OCI image
+reference. The container drivers run that image; the VM drivers boot the VM
+image `needy build --from REF` made of it, found by the same reference.
+Without `actor.image`, the container drivers run the base image
+`needy-actor:latest` and the VM drivers the base VM image (`needy build`).
+
+### Custom actor image
+
+An OCI image `FROM` a base image that adds programs (an agent CLI, node,
+jq). Its last step is `RUN ["/.needy/shim-image"]`, which makes the
+programs it added shims, so a container actor can route them; it inherits
+the base's `needy.base-abi` label. For the VM drivers, `needy build --from`
+turns it into a VM image: its root file system with the real programs put
+back over the shims, and the base's kernel.
+
+*Avoid*: agent image, user image.
+
 ### Guest needy
 
 The `needy` binary that runs inside an actor as its init, proxy and shim
@@ -398,7 +417,8 @@ In a VM it mounts the guest disk and binds the guest needy over
 kernel's `binfmt_needy` hands a routed exec to, and in a container image the
 file every program on `PATH` is a hard link to. It runs `/.needy/needy` with
 the caller's argv, its own path (`NEEDY_STUB_EXE`) and the exec's path
-(`NEEDY_STUB_EXECFN`).
+(`NEEDY_STUB_EXECFN`). While no guest needy is injected (an image build), a
+shim runs its real program instead, unrouted.
 
 ### Base ABI
 
@@ -444,7 +464,8 @@ program, or an exec fault without a pattern, makes it `*`, every exec.
 
 In a container actor, a hard link to `/.needy/proxy` (the shim stub) in
 place of each program that was on the image's `PATH` when the image was
-built; the real program is at `/.needy/real/<path>`. Through the stub the
+built (the base image's shim step, and a custom image's `/.needy/shim-image`
+as its last step); the real program is at `/.needy/real/<path>`. Through the stub the
 guest needy runs the real program with the caller's argv, or hands the exec
 to the proxy when the run routes its name. Programs created after the build
 and run directly are not routed.
