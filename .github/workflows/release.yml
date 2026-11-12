@@ -208,6 +208,12 @@ jobs:
     name: images ${{ matrix.arch }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 150
+    env:
+      # NOTICE(build-record): build-push-action uploads each build's record
+      # as a workflow artifact named `<owner>~<repo>~<id>.dockerbuild`, which
+      # starts with `needy-` here and is noise among the release artifacts.
+      # Reference: https://docs.docker.com/build/ci/github-actions/build-summary/
+      DOCKER_BUILD_RECORD_UPLOAD: false
     strategy:
       fail-fast: false
       matrix:
@@ -474,24 +480,23 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: needy-*
-          merge-multiple: true
-          path: release
+          path: artifacts
 
-      - name: Download notarized macOS artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: notarized-*
-          merge-multiple: true
-          path: notarized
-
-      # The notarized macOS archives replace the signed-only ones of the same
-      # name, with their checksums.
+      # Only archives and their checksums are release assets; the notarized
+      # macOS archives replace the signed-only ones of the same name, as in
+      # moeru-ai/auv's publish job.
       - name: Prefer notarized macOS archives
         run: |
           set -euo pipefail
-          test -n "$(ls notarized)"
-          cp -f notarized/* release/
+          mkdir -p release
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) -print0 | while IFS= read -r -d '' file; do
+            case "$file" in
+              artifacts/notarized-*/*) cp -f "$file" release/ ;;
+              *apple-darwin*) [ -e "release/$(basename "$file")" ] || cp "$file" release/ ;;
+              *) cp "$file" release/ ;;
+            esac
+          done
+          test "$(find artifacts -path 'artifacts/notarized-*' -type f | wc -l)" -eq 4
 
       - name: Verify checksums
         working-directory: release
