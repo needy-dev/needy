@@ -22,99 +22,25 @@ withDefaults(defineProps<{
 </script>
 
 <template>
-  <div class="sieve" :class="{ flow }" :style="{ left: (flow ? undefined : `${x}px`), top: (flow ? undefined : `${y}px`), width: (flow ? undefined : `${w}px`), height: flow ? undefined : `${h}px` }">
-    <span class="title display"><Icon name="mingcute:route-line" />{{ title }}</span>
-    <ol class="slots">
+  <div
+    class="flex flex-col gap-[10px] rounded-[18px] bg-control px-[12px] py-[14px]" :class="flow ? 'relative' : 'absolute'"
+    :style="{ left: (flow ? undefined : `${x}px`), top: (flow ? undefined : `${y}px`), width: (flow ? undefined : `${w}px`), height: flow ? undefined : `${h}px` }"
+  >
+    <span class="display flex items-center gap-[6px] pl-[4px] text-[16px] text-ink-2"><Icon name="mingcute:route-line" />{{ title }}</span>
+    <ol class="slots m-0 flex flex-1 list-none flex-col justify-center gap-[8px] p-0">
+      <!-- The lit slot takes its tint over focus.css's: important, since `.f.focus` is the more specific rule. -->
       <li
-        v-for="(rule, i) in rules" :key="i" class="slot f"
-        :class="[lit === undefined ? 'idle' : lit === i ? (rule.deny !== undefined ? 'bad' : 'focus') : 'dim', { deny: rule.deny !== undefined }]"
+        v-for="(rule, i) in rules" :key="i" class="f flex flex-none flex-col justify-center gap-[2px] rounded-[10px] px-[11px] py-[8px]"
+        :class="[
+          lit === undefined ? 'idle' : lit === i ? (rule.deny !== undefined ? 'bad' : 'focus') : 'dim',
+          lit === i ? '!bg-[color-mix(in_srgb,var(--role)_14%,var(--surface))]' : 'bg-surface',
+          flow ? 'h-auto min-h-[52px]' : 'h-[52px]',
+        ]"
         :style="{ '--role': rule.deny !== undefined ? 'var(--bad)' : 'var(--executor)' }"
       >
-        <code class="match">{{ rule.match }}</code>
-        <span class="action">{{ rule.deny !== undefined ? 'deny' : `→ ${rule.to}` }}</span>
+        <code class="text-[13px] text-ink" :class="flow ? '[overflow-wrap:anywhere] whitespace-normal' : 'whitespace-nowrap'">{{ rule.match }}</code>
+        <span class="font-mono text-[12px]" :class="rule.deny !== undefined ? 'text-bad' : 'text-executor'">{{ rule.deny !== undefined ? 'deny' : `→ ${rule.to}` }}</span>
       </li>
     </ol>
   </div>
 </template>
-
-<style scoped>
-.sieve {
-  position: absolute;
-}
-
-.sieve.flow {
-  position: relative;
-}
-
-.sieve.flow .slot {
-  height: auto;
-  min-height: 52px;
-}
-
-.sieve.flow .match {
-  overflow-wrap: anywhere;
-  white-space: normal;
-}
-
-.sieve {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 12px;
-  border-radius: 18px;
-  background: var(--control);
-}
-
-.title {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding-left: 4px;
-  color: var(--ink-2);
-  font-size: 16px;
-}
-
-.slots {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  justify-content: center;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.slot {
-  display: flex;
-  height: 52px;
-  flex: none;
-  flex-direction: column;
-  justify-content: center;
-  gap: 2px;
-  padding: 8px 11px;
-  border-radius: 10px;
-  background: var(--surface);
-}
-
-.slot.focus,
-.slot.bad {
-  background: color-mix(in srgb, var(--role) 14%, var(--surface));
-}
-
-.match {
-  color: var(--ink);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.action {
-  color: var(--executor);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.deny .action {
-  color: var(--bad);
-}
-</style>

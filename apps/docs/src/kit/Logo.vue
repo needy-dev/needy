@@ -24,22 +24,14 @@ const ICONIFY: Record<Exclude<LogoName, 'firecracker' | 'gvisor'>, IconName> = {
 const FILES = { firecracker, gvisor } as const
 
 defineProps<{ name: LogoName, size?: number }>()
+
+// The Apple and opencode marks are black; on a dark ground they turn light (the invert filter in the template).
+// NOTICE: it is `!important` because a parent's filter on `.logo` (DriverMatrix greys an unpicked driver's logos with
+// `saturate(0)`) is more specific than this one utility; the scoped rule it replaces out-ranked that, so a dark-theme
+// mark stayed light there too.
 </script>
 
 <template>
-  <img v-if="name === 'firecracker' || name === 'gvisor'" class="logo" :class="name" :src="FILES[name]" :width="size ?? 24" :height="size ?? 24" :alt="name">
-  <Icon v-else class="logo" :class="name" :name="ICONIFY[name]" :size="size ?? 24" />
+  <img v-if="name === 'firecracker' || name === 'gvisor'" class="logo flex-none object-contain" :src="FILES[name]" :width="size ?? 24" :height="size ?? 24" :alt="name">
+  <Icon v-else class="logo flex-none object-contain" :class="name === 'apple' || name === 'opencode' ? '[[data-theme=dark]_&]:![filter:invert(1)]' : ''" :name="ICONIFY[name]" :size="size ?? 24" />
 </template>
-
-<style scoped>
-.logo {
-  flex: none;
-  object-fit: contain;
-}
-
-/* The Apple and opencode marks are black; on a dark ground they turn light. */
-:root[data-theme='dark'] .logo.apple,
-:root[data-theme='dark'] .logo.opencode {
-  filter: invert(1);
-}
-</style>

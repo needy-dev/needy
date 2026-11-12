@@ -21,51 +21,11 @@ const IDEAS: Idea[] = [
 </script>
 
 <template>
-  <ul class="ideas">
-    <li v-for="idea in IDEAS" :key="idea.title.en" class="idea">
-      <span class="marks"><Icon v-for="m in idea.marks" :key="m" :name="m" :size="30" /></span>
-      <strong class="display">{{ tr(idea.title) }}</strong>
-      <span class="text">{{ tr(idea.text) }}</span>
+  <ul class="m-0 grid grid-cols-[repeat(auto-fill,minmax(230px,1fr))] list-none gap-[16px] p-0">
+    <li v-for="idea in IDEAS" :key="idea.title.en" class="flex flex-col gap-[8px] rounded-[20px] bg-control p-[22px]">
+      <span class="mb-[8px] h-[36px] flex items-center gap-[10px] text-ink-2"><Icon v-for="m in idea.marks" :key="m" :name="m" :size="30" /></span>
+      <strong class="display text-[19px] font-400">{{ tr(idea.title) }}</strong>
+      <span class="text-[15px] text-ink-2 leading-[1.5]">{{ tr(idea.text) }}</span>
     </li>
   </ul>
 </template>
-
-<style scoped>
-.ideas {
-  display: grid;
-  gap: 16px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
-}
-
-.idea {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 22px;
-  border-radius: 20px;
-  background: var(--control);
-}
-
-.marks {
-  display: flex;
-  gap: 10px;
-  height: 36px;
-  align-items: center;
-  margin-bottom: 8px;
-  color: var(--ink-2);
-}
-
-strong {
-  font-size: 19px;
-  font-weight: 400;
-}
-
-.text {
-  color: var(--ink-2);
-  font-size: 15px;
-  line-height: 1.5;
-}
-</style>

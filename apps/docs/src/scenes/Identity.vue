@@ -102,12 +102,16 @@ const fieldAt = (at: number) => STEPS[at]!.field
 const shown = (at: number) => peeled(at) ? FIELDS.length : (fieldAt(at)! + 1)
 
 const POD = { x: 470, y: 30, w: 556, h: 410 }
+
+// What a row of the costume and of the host share, and a value cut to its cell.
+const LABEL = 'font-display text-[15px] text-ink-2'
+const CELL = 'overflow-hidden text-ellipsis whitespace-nowrap'
 </script>
 
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Identity: a recipe dresses the actor as a Google Compute Engine VM. Hostname, CPU, CPUID, DMI, PCI, kernel and sensors come from the recipe, each presented by the drivers that can; underneath is a Linux KVM host running Firecracker.">
     <template #default="{ at }">
-      <div class="recipe">
+      <div class="absolute top-[30px] left-[32px] w-[404px] [&_.yaml]:text-[12px]">
         <Yaml :code="RECIPE" :lit="fieldAt(at) === undefined ? [] : FIELDS[fieldAt(at)!]!.lines" role="actor" title="Recipe" />
       </div>
 
@@ -116,271 +120,60 @@ const POD = { x: 470, y: 30, w: 556, h: 410 }
         :x="POD.x + 34" :y="POD.y + 40" :w="POD.w" :h="POD.h" role="host" logo="firecracker"
         title="The host" sub="A Linux KVM host running Firecracker" :focus="peeled(at) ? 'focus' : 'idle'"
       >
-        <ul class="host-rows" :class="{ shown: peeled(at) }">
-          <li v-for="f in FIELDS" :key="f.id">
-            <span class="label">{{ f.label }}</span>
-            <span class="host-value">the host's own</span>
+        <ul class="flex flex-col gap-[4px] m-[6px_0_0] p-0 list-none [transition:opacity_0.5s_0.2s]" :class="!peeled(at) && 'opacity-0'">
+          <li v-for="f in FIELDS" :key="f.id" class="grid h-[36px] items-center gap-[12px] p-[0_12px] grid-cols-[70px_1fr]">
+            <span :class="LABEL">{{ f.label }}</span>
+            <span class="text-[13.5px] text-muted">the host's own</span>
           </li>
         </ul>
       </Machine>
 
-      <div class="costume" :class="{ peeled: peeled(at) }" :style="{ left: `${POD.x}px`, top: `${POD.y}px`, width: `${POD.w}px`, height: `${POD.h}px` }">
+      <!-- The costume lifts off its bottom-right corner and shows the host underneath. -->
+      <div
+        class="absolute z-2 [transform-origin:0_0] [transition:transform_0.7s_cubic-bezier(0.2,0,0,1),opacity_0.7s_cubic-bezier(0.2,0,0,1)] [&_.pod]:bg-[color-mix(in_srgb,var(--actor)_10%,var(--paper))] [[data-theme=dark]_&_.pod]:bg-[color-mix(in_srgb,var(--actor)_16%,var(--paper))]"
+        :class="peeled(at) && 'opacity-[0.07] [transform:translate(-30px,-22px)_rotate(-3deg)]'"
+        :style="{ left: `${POD.x}px`, top: `${POD.y}px`, width: `${POD.w}px`, height: `${POD.h}px` }"
+      >
         <Pod :x="0" :y="0" :w="POD.w" :h="POD.h" title="What the program sees" driver="linux-firecracker" logo="firecracker">
-          <ul class="rows">
+          <ul class="flex flex-col gap-[4px] m-[6px_0_0] p-0 list-none">
             <li
-              v-for="(f, i) in FIELDS" :key="f.id" class="row f"
-              :class="[i >= shown(at) ? 'hidden' : fieldAt(at) === i ? 'focus' : fieldAt(at) === undefined ? 'idle' : 'dim']"
+              v-for="(f, i) in FIELDS" :key="f.id" class="f grid h-[36px] items-center gap-[12px] p-[0_12px] rounded-[10px] grid-cols-[70px_150px_1fr]"
+              :class="[i >= shown(at) ? 'opacity-0 [transform:translateY(6px)]' : fieldAt(at) === i ? 'focus !bg-[color-mix(in_srgb,var(--actor)_14%,var(--surface))]' : fieldAt(at) === undefined ? 'idle' : 'dim']"
               style="--role: var(--actor)"
             >
-              <span class="label">{{ f.label }}</span>
-              <code class="probe">{{ f.probe }}</code>
-              <code class="value">{{ f.value }}</code>
+              <span :class="LABEL">{{ f.label }}</span>
+              <code :class="CELL" class="text-[12px] text-muted">{{ f.probe }}</code>
+              <code :class="CELL" class="text-[13.5px] text-ink">{{ f.value }}</code>
             </li>
           </ul>
         </Pod>
-        <span class="fold" aria-hidden="true" />
+        <!-- A turned-up corner: the costume is something put on. -->
+        <span class="absolute right-0 bottom-0 w-[46px] h-[46px] rounded-[0_0_34px] [background:linear-gradient(135deg,transparent_50%,color-mix(in_srgb,var(--actor)_22%,var(--surface))_50%)]" aria-hidden="true" />
       </div>
 
-      <div class="who">
-        <span class="who-title display">Who can present it</span>
-        <span class="who-field">{{ fieldAt(at) === undefined ? 'Underneath' : FIELDS[fieldAt(at)!]!.label }}</span>
-        <span :key="`t${at}`" class="who-tag">{{ fieldAt(at) === undefined ? 'Firecracker on a Linux KVM host' : FIELDS[fieldAt(at)!]!.note }}</span>
-        <ul v-if="fieldAt(at) !== undefined && support(fieldAt(at)!)" :key="at" class="drivers">
-          <li v-for="(d, i) in DRIVERS" :key="d.id" class="driver f" :class="support(fieldAt(at)!)![i]!.level === 'no' ? 'dim' : 'idle'">
-            <span class="logos"><Logo v-for="l in d.logos.slice(0, 1)" :key="l" :name="l" :size="20" /></span>
-            <code class="id">{{ d.id }}</code>
+      <div class="absolute top-[30px] left-[1080px] flex w-[330px] flex-col gap-[8px]">
+        <span class="display text-[15px] text-muted">Who can present it</span>
+        <span class="font-display text-[26px]">{{ fieldAt(at) === undefined ? 'Underneath' : FIELDS[fieldAt(at)!]!.label }}</span>
+        <span :key="`t${at}`" class="self-start p-[4px_11px] rounded-[999px] bg-actor/13 text-[13.5px] text-actor animate-[enter-right-10_0.4s_cubic-bezier(0.2,0,0,1)_both]">{{ fieldAt(at) === undefined ? 'Firecracker on a Linux KVM host' : FIELDS[fieldAt(at)!]!.note }}</span>
+        <ul v-if="fieldAt(at) !== undefined && support(fieldAt(at)!)" :key="at" class="flex flex-col gap-[8px] m-[6px_0_0] p-0 list-none">
+          <li
+            v-for="(d, i) in DRIVERS" :key="d.id"
+            class="f grid items-center gap-x-[10px] gap-y-[4px] p-[10px_12px] rounded-[12px] bg-surface grid-cols-[22px_1fr_18px] animate-[enter-right-10_0.4s_cubic-bezier(0.2,0,0,1)_both] [&:nth-child(2)]:[animation-delay:60ms] [&:nth-child(3)]:[animation-delay:120ms] [&:nth-child(4)]:[animation-delay:180ms]"
+            :class="support(fieldAt(at)!)![i]!.level === 'no' ? 'dim' : 'idle'"
+          >
+            <span class="flex"><Logo v-for="l in d.logos.slice(0, 1)" :key="l" :name="l" :size="20" /></span>
+            <code class="text-[13px]">{{ d.id }}</code>
             <LevelMark :level="support(fieldAt(at)!)![i]!.level" />
-            <span class="level">{{ LEVELS[support(fieldAt(at)!)![i]!.level].label }}<template v-if="support(fieldAt(at)!)![i]!.note"> · {{ support(fieldAt(at)!)![i]!.note }}</template></span>
+            <span class="text-[12.5px] text-muted [grid-column:2/4]">{{ LEVELS[support(fieldAt(at)!)![i]!.level].label }}<template v-if="support(fieldAt(at)!)![i]!.note"> · {{ support(fieldAt(at)!)![i]!.note }}</template></span>
           </li>
         </ul>
-        <p v-else-if="fieldAt(at) !== undefined" class="who-note">
+        <p v-else-if="fieldAt(at) !== undefined" class="m-[6px_0_0] text-[15px] leading-[1.5] text-ink-2 [&_code]:text-[13px]">
           The README's table does not list this field; the closed-loop results record it on <code>linux-firecracker</code>.
         </p>
-        <p v-else class="who-note">
+        <p v-else class="m-[6px_0_0] text-[15px] leading-[1.5] text-ink-2 [&_code]:text-[13px]">
           The program never sees the host. <code>needy profile check</code> lists what of a recipe a driver cannot present, and a recipe's <code>required:</code> turns a gap into an error.
         </p>
       </div>
-
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.recipe {
-  position: absolute;
-  top: 30px;
-  left: 32px;
-  width: 404px;
-}
-
-.recipe :deep(.yaml) {
-  font-size: 12px;
-}
-
-.costume {
-  position: absolute;
-  z-index: 2;
-  transform-origin: 0 0;
-  transition:
-    transform 0.7s cubic-bezier(0.2, 0, 0, 1),
-    opacity 0.7s cubic-bezier(0.2, 0, 0, 1);
-}
-
-/* The costume lifts off its bottom-right corner and shows the host underneath. */
-.costume.peeled {
-  opacity: 0.07;
-  transform: translate(-30px, -22px) rotate(-3deg);
-}
-
-.costume :deep(.pod) {
-  background: color-mix(in srgb, var(--actor) 10%, var(--paper));
-}
-
-:root[data-theme='dark'] .costume :deep(.pod) {
-  background: color-mix(in srgb, var(--actor) 16%, var(--paper));
-}
-
-/* A turned-up corner: the costume is something put on. */
-.fold {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 46px;
-  height: 46px;
-  border-radius: 0 0 34px;
-  background: linear-gradient(135deg, transparent 50%, color-mix(in srgb, var(--actor) 22%, var(--surface)) 50%);
-}
-
-.rows {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.row {
-  display: grid;
-  height: 36px;
-  align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  border-radius: 10px;
-  grid-template-columns: 70px 150px 1fr;
-}
-
-.row.focus {
-  background: color-mix(in srgb, var(--actor) 14%, var(--surface));
-}
-
-.row.hidden {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
-.label {
-  color: var(--ink-2);
-  font-family: var(--font-display);
-  font-size: 15px;
-}
-
-.probe {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.value {
-  overflow: hidden;
-  color: var(--ink);
-  font-size: 13.5px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.host-rows {
-  opacity: 0;
-  transition: opacity 0.5s 0.2s;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.host-rows.shown {
-  opacity: 1;
-}
-
-.host-rows li {
-  display: grid;
-  height: 36px;
-  align-items: center;
-  gap: 12px;
-  padding: 0 12px;
-  grid-template-columns: 70px 1fr;
-}
-
-.host-value {
-  color: var(--muted);
-  font-size: 13.5px;
-}
-
-.who {
-  position: absolute;
-  top: 30px;
-  left: 1080px;
-  display: flex;
-  width: 330px;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.who-title {
-  color: var(--muted);
-  font-size: 15px;
-}
-
-.who-field {
-  font-family: var(--font-display);
-  font-size: 26px;
-}
-
-.drivers {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.driver {
-  display: grid;
-  align-items: center;
-  gap: 4px 10px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: var(--surface);
-  grid-template-columns: 22px 1fr 18px;
-  animation: arrive 0.4s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-.driver:nth-child(2) {
-  animation-delay: 60ms;
-}
-
-.driver:nth-child(3) {
-  animation-delay: 120ms;
-}
-
-.driver:nth-child(4) {
-  animation-delay: 180ms;
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateX(10px);
-  }
-}
-
-.logos {
-  display: flex;
-}
-
-.id {
-  font-size: 13px;
-}
-
-.level {
-  color: var(--muted);
-  font-size: 12.5px;
-  grid-column: 2 / 4;
-}
-
-.who-tag {
-  align-self: flex-start;
-  padding: 4px 11px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--actor) 13%, transparent);
-  color: var(--actor);
-  font-size: 13.5px;
-  animation: arrive 0.4s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-.who-note {
-  margin: 6px 0 0;
-  color: var(--ink-2);
-  font-size: 15px;
-  line-height: 1.5;
-}
-
-.who-note code {
-  font-size: 13px;
-}
-</style>

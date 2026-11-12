@@ -96,16 +96,17 @@ function eventsAt(at: number): { events: TraceEvent[], fresh: number } {
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Chaos: from a seed, a file fault, an exec fault and an overheating sensor fire in a run, and the report counts them.">
     <template #default="{ at }">
-      <div class="code">
+      <div class="absolute top-[24px] left-[36px] w-[540px]">
         <Profile :code="CHAOS_PROFILE" :lit="STEPS[at]!.lit" role="fault" title="examples/chaos/profile.yaml" />
       </div>
 
       <Machine :x="36" :y="262" :w="540" :h="218" role="trace" icon="mingcute:git-branch-line" title="Trace" sub="fault.injected events, in order">
-        <div class="events">
+        <!-- The kit's Trace is a row that fades its oldest events at the left; here it is a column, all shown. -->
+        <div class="mt-[4px] [&_.trace]:(!flex-col !items-start ![mask-image:none])">
           <Trace v-bind="eventsAt(at)" :keep="3" :delay="900" />
         </div>
-        <p class="seed">
-          <span class="dice mono">seed: 1</span> The same seed fires the same faults on every replay.
+        <p class="mx-0 mb-0 mt-auto flex items-center gap-[10px] text-[13.5px] text-ink-2">
+          <span class="mono rounded-[8px] px-[10px] py-[3px] text-[12.5px] text-fault bg-fault/15">seed: 1</span> The same seed fires the same faults on every replay.
         </p>
       </Machine>
 
@@ -116,38 +117,3 @@ function eventsAt(at: number): { events: TraceEvent[], fresh: number } {
   </Frame>
 </template>
 
-<style scoped>
-.code {
-  position: absolute;
-  top: 24px;
-  left: 36px;
-  width: 540px;
-}
-
-.events {
-  margin-top: 4px;
-}
-
-.events :deep(.trace) {
-  flex-direction: column;
-  align-items: flex-start;
-  mask-image: none;
-}
-
-.seed {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: auto 0 0;
-  color: var(--ink-2);
-  font-size: 13.5px;
-}
-
-.dice {
-  padding: 3px 10px;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--fault) 15%, transparent);
-  color: var(--fault);
-  font-size: 12.5px;
-}
-</style>

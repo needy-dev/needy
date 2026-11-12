@@ -42,151 +42,31 @@ onBeforeUnmount(() => clearInterval(timer))
 </script>
 
 <template>
-  <div class="loop">
-    <dl class="who">
-      <div class="row">
-        <dt>{{ tr({ en: 'Harnesses', zh: 'Harness' }) }}</dt>
-        <dd><span v-for="h in HARNESSES" :key="h.name" class="mark"><Icon :name="h.icon" :size="20" />{{ h.name }}</span></dd>
+  <!-- Grouped by space and alignment, not by boxes: the two lists, then the four stages on one track. -->
+  <div class="flex flex-col gap-[32px]">
+    <dl class="m-0 flex flex-col gap-[10px]">
+      <div class="flex items-center gap-[16px]">
+        <dt class="w-[88px] flex-none text-[14px] text-muted">{{ tr({ en: 'Harnesses', zh: 'Harness' }) }}</dt>
+        <dd class="m-0 flex flex-wrap gap-[18px]"><span v-for="h in HARNESSES" :key="h.name" class="inline-flex items-center gap-[7px] text-[15px]"><Icon :name="h.icon" :size="20" />{{ h.name }}</span></dd>
       </div>
-      <div class="row">
-        <dt>{{ tr({ en: 'Models', zh: '模型' }) }}</dt>
-        <dd><span v-for="m in MODELS" :key="m.name" class="mark"><Icon :name="m.icon" :size="20" />{{ m.name }}</span></dd>
+      <div class="flex items-center gap-[16px]">
+        <dt class="w-[88px] flex-none text-[14px] text-muted">{{ tr({ en: 'Models', zh: '模型' }) }}</dt>
+        <dd class="m-0 flex flex-wrap gap-[18px]"><span v-for="m in MODELS" :key="m.name" class="inline-flex items-center gap-[7px] text-[15px]"><Icon :name="m.icon" :size="20" />{{ m.name }}</span></dd>
       </div>
     </dl>
 
-    <ol class="stages">
-      <li v-for="(s, i) in STAGES" :key="s.id" :class="[s.side, { on: active === i }]" @mouseenter="active = i">
-        <span class="track"><i class="dot" /></span>
-        <span class="where">{{ s.side === 'executor' ? tr({ en: 'On the executor', zh: '在 executor 上' }) : s.side === 'model' ? tr({ en: 'At the model', zh: '在模型那里' }) : tr({ en: 'In the actor', zh: '在 actor 里' }) }}</span>
-        <strong class="display">{{ tr(s.title) }}</strong>
-        <span class="text">{{ tr(s.text) }}</span>
+    <ol class="m-0 grid grid-cols-[repeat(4,minmax(0,1fr))] list-none gap-[24px] p-0 max-[860px]:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+      <li
+        v-for="(s, i) in STAGES" :key="s.id" class="flex flex-col cursor-default gap-[6px]"
+        :class="s.side === 'model' ? '[--tone:var(--ink-2)]' : s.side === 'executor' ? '[--tone:var(--executor)]' : '[--tone:var(--actor)]'"
+        @mouseenter="active = i"
+      >
+        <!-- One line through the four stages; the stage that runs now lights its stretch. -->
+        <span class="relative mb-[10px] block h-[4px] rounded-[2px] [transition:background_0.35s]" :class="active === i ? 'bg-tone' : 'bg-control-2'"><i class="absolute left-0 top-[-4px] h-[12px] w-[12px] rounded-[50%] [transition:background_0.35s]" :class="active === i ? 'bg-tone' : 'bg-control-3'" /></span>
+        <span class="text-[13px] text-tone">{{ s.side === 'executor' ? tr({ en: 'On the executor', zh: '在 executor 上' }) : s.side === 'model' ? tr({ en: 'At the model', zh: '在模型那里' }) : tr({ en: 'In the actor', zh: '在 actor 里' }) }}</span>
+        <strong class="display text-[19px] font-400" :class="active === i ? '' : 'opacity-60 [transition:opacity_0.35s]'">{{ tr(s.title) }}</strong>
+        <span class="text-[14.5px] text-ink-2 leading-[1.5]" :class="active === i ? '' : 'opacity-60 [transition:opacity_0.35s]'">{{ tr(s.text) }}</span>
       </li>
     </ol>
   </div>
 </template>
-
-<style scoped>
-/* Grouped by space and alignment, not by boxes: the two lists, then the four stages on one track. */
-.loop {
-  display: flex;
-  flex-direction: column;
-  gap: 32px;
-}
-
-.who {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin: 0;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-dt {
-  width: 88px;
-  flex: none;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-dd {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 18px;
-  margin: 0;
-}
-
-.mark {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 15px;
-}
-
-.stages {
-  display: grid;
-  gap: 24px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-@media (max-width: 860px) {
-  .stages {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  }
-}
-
-.stages li {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  cursor: default;
-  --tone: var(--actor);
-}
-
-.stages li.model {
-  --tone: var(--ink-2);
-}
-
-.stages li.executor {
-  --tone: var(--executor);
-}
-
-/* One line through the four stages; the stage that runs now lights its stretch. */
-.track {
-  position: relative;
-  display: block;
-  height: 4px;
-  margin-bottom: 10px;
-  border-radius: 2px;
-  background: var(--control-2);
-  transition: background 0.35s;
-}
-
-.on .track {
-  background: var(--tone);
-}
-
-.dot {
-  position: absolute;
-  top: -4px;
-  left: 0;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--control-3);
-  transition: background 0.35s;
-}
-
-.on .dot {
-  background: var(--tone);
-}
-
-.where {
-  color: var(--tone);
-  font-size: 13px;
-}
-
-strong {
-  font-size: 19px;
-  font-weight: 400;
-}
-
-.text {
-  color: var(--ink-2);
-  font-size: 14.5px;
-  line-height: 1.5;
-}
-
-.stages li:not(.on) strong,
-.stages li:not(.on) .text {
-  opacity: 0.6;
-  transition: opacity 0.35s;
-}
-</style>

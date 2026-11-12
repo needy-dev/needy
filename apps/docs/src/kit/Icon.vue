@@ -1,23 +1,13 @@
 <script setup lang="ts">
 import type { IconName } from '../icons'
 
-import icons from 'virtual:icons'
-
-/** An icon from src/icons.ts, as inline SVG. Monochrome sets take the text color; logos keep their own colors. */
-const props = defineProps<{ name: IconName, size?: number }>()
-const icon = icons[props.name]!
+/**
+ * An icon from src/icons.ts, as UnoCSS's icon preset draws it (uno.config.ts). Monochrome sets take the text color;
+ * logos keep their own colors.
+ */
+defineProps<{ name: IconName, size?: number }>()
 </script>
 
 <template>
-  <svg
-    class="icon" :width="size ?? '1em'" :height="size ?? '1em'" :viewBox="`0 0 ${icon.width} ${icon.height}`"
-    aria-hidden="true" v-html="icon.body"
-  />
+  <span :class="`i-${name}`" :style="size ? { fontSize: `${size}px` } : undefined" aria-hidden="true" />
 </template>
-
-<style scoped>
-.icon {
-  flex: none;
-  vertical-align: -0.125em;
-}
-</style>

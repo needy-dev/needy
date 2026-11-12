@@ -164,20 +164,20 @@ function machineFocus(at: number, id: MachineId) {
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Rules: the actor catches each exec, the profile's commands rules decide where it runs, and it runs on an executor, is denied, or stays in the actor.">
     <template #default="{ at }">
-      <svg class="wires" :width="W" :height="H" aria-hidden="true">
-        <path :d="curve(OUT.x, OUT.y, CODE.x, OUT.y)" class="wire" />
-        <path v-for="(_, id) in MACHINES" :key="id" :d="curve(CODE.x + CODE.w, ruleY(0), MACHINE_X, machineY(id))" class="wire" />
+      <svg class="pointer-events-none absolute inset-0" :width="W" :height="H" aria-hidden="true">
+        <path :d="curve(OUT.x, OUT.y, CODE.x, OUT.y)" class="fill-none stroke-line [stroke-width:1.6] [stroke-dasharray:1.5_6] [stroke-linecap:round]" />
+        <path v-for="(_, id) in MACHINES" :key="id" :d="curve(CODE.x + CODE.w, ruleY(0), MACHINE_X, machineY(id))" class="fill-none stroke-line [stroke-width:1.6] [stroke-dasharray:1.5_6] [stroke-linecap:round]" />
       </svg>
 
       <Pod v-bind="POD" logo="firecracker" driver="linux-firecracker" :focus="TARGETS[at]!.kind === 'deny' ? 'bad' : TARGETS[at]!.kind === 'actor' ? 'focus' : 'idle'">
         <Terminal v-bind="linesAt(at)" :rows="10" :play="at" />
       </Pod>
 
-      <div class="code" :style="{ left: `${CODE.x}px`, top: `${CODE.y}px`, width: `${CODE.w}px` }">
+      <div class="absolute" :style="{ left: `${CODE.x}px`, top: `${CODE.y}px`, width: `${CODE.w}px` }">
         <Profile :code="YAML" :lit="litAt(at)" :role="TARGETS[at]!.kind === 'deny' ? 'bad' : 'executor'" title="profile.yaml" />
       </div>
 
-      <p :key="at" class="status mono" :style="{ 'left': `${STATUS.x}px`, 'top': `${STATUS.y}px`, 'width': `${STATUS.w}px`, '--role': `var(--${statusOf(TARGETS[at]!).role})`, 'animationDelay': `${sent(at) + 200}ms` }">
+      <p :key="at" class="mono absolute m-0 flex items-center gap-[8px] rounded-[10px] px-[14px] py-[8px] text-[13.5px] text-role bg-role/12 animate-[rise-6_0.4s_cubic-bezier(0.2,0,0,1)_both]" :style="{ 'left': `${STATUS.x}px`, 'top': `${STATUS.y}px`, 'width': `${STATUS.w}px`, '--role': `var(--${statusOf(TARGETS[at]!).role})`, 'animationDelay': `${sent(at) + 200}ms` }">
         <Icon name="mingcute:route-line" /> exec.decide · {{ statusOf(TARGETS[at]!).text }}
       </p>
 
@@ -186,17 +186,17 @@ function machineFocus(at: number, id: MachineId) {
         :title="m.title" :name="id" :sub="m.sub" :icon="m.icon" badge="Stateful" :focus="machineFocus(at, id)"
       />
 
-      <div class="legend" :style="{ left: `${MACHINE_X}px`, top: `${LEGEND_Y}px`, width: `${MACHINE_W}px` }">
-        <span class="legend-title display">Kinds of rules</span>
-        <dl>
+      <div class="absolute flex flex-col gap-[8px] rounded-[14px] px-[14px] py-[12px] bg-ink/4" :style="{ left: `${MACHINE_X}px`, top: `${LEGEND_Y}px`, width: `${MACHINE_W}px` }">
+        <span class="display text-[15px] text-ink-2">Kinds of rules</span>
+        <dl class="m-0 grid grid-cols-[auto_1fr] gap-x-[10px] gap-y-[5px] text-[12.5px]">
           <template v-for="row in LEGEND" :key="row.key">
-            <dt class="mono" :class="{ on: row.key === 'commands:' }">
+            <dt class="mono text-[12px]" :class="row.key === 'commands:' ? 'text-executor' : 'text-muted'">
               {{ row.key }}
             </dt>
-            <dd>{{ row.what }}</dd>
+            <dd class="m-0 text-ink-2">{{ row.what }}</dd>
           </template>
         </dl>
-        <p class="files-kinds">
+        <p class="m-0 text-[12.5px] text-muted leading-[1.4] [&_b]:(text-ink-2 font-medium)">
           A <b>profile</b> sets up one run. A <b>recipe</b> sets one machine's identity.
         </p>
       </div>
@@ -205,98 +205,3 @@ function machineFocus(at: number, id: MachineId) {
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.wires {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.wire {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1.6;
-  stroke-dasharray: 1.5 6;
-  stroke-linecap: round;
-}
-
-.label {
-  fill: var(--muted);
-  font-size: 12px;
-}
-
-.code {
-  position: absolute;
-}
-
-.legend {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--ink) 4%, transparent);
-}
-
-.legend-title {
-  color: var(--ink-2);
-  font-size: 15px;
-}
-
-dl {
-  display: grid;
-  gap: 5px 10px;
-  margin: 0;
-  grid-template-columns: auto 1fr;
-  font-size: 12.5px;
-}
-
-dt {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-dt.on {
-  color: var(--executor);
-}
-
-dd {
-  margin: 0;
-  color: var(--ink-2);
-}
-
-.files-kinds {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.4;
-}
-
-.files-kinds b {
-  color: var(--ink-2);
-  font-weight: 500;
-}
-
-.status {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  padding: 8px 14px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--role) 12%, transparent);
-  color: var(--role);
-  font-size: 13.5px;
-  animation: arrive 0.4s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-}
-</style>

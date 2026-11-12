@@ -55,57 +55,15 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="deck" aria-live="polite">
+  <div ref="root" class="relative mb-[-24px] h-[128px]" aria-live="polite">
     <div
-      v-for="(m, i) in MACHINES" :key="m.name" :ref="el => (cards[i] = el as HTMLElement)" class="card"
+      v-for="(m, i) in MACHINES" :key="m.name" :ref="el => (cards[i] = el as HTMLElement)"
+      class="absolute inset-[0_0_auto] h-[152px] flex flex-col gap-[10px] rounded-[18px_18px_0_0] p-[20px] text-[#fff] [background:linear-gradient(140deg,var(--tone),color-mix(in_srgb,var(--tone)_55%,#000))]"
       :style="{ '--tone': m.tone }" :aria-hidden="front !== i"
     >
-      <span class="head"><Icon :name="m.icon" :size="18" /> {{ m.name }}</span>
-      <span class="cpu mono">{{ m.cpu }}</span>
-      <span class="row mono"><span>{{ m.host }}</span><span>{{ m.id }}</span></span>
+      <span class="flex items-center gap-[8px] whitespace-nowrap text-[18px] font-display"><Icon :name="m.icon" :size="18" /> {{ m.name }}</span>
+      <span class="mono text-[13px] opacity-90">{{ m.cpu }}</span>
+      <span class="mono flex justify-between gap-[12px] text-[12px] opacity-70"><span>{{ m.host }}</span><span>{{ m.id }}</span></span>
     </div>
   </div>
 </template>
-
-<style scoped>
-.deck {
-  position: relative;
-  height: 128px;
-  margin-bottom: -24px;
-}
-
-.card {
-  position: absolute;
-  inset: 0 0 auto;
-  display: flex;
-  height: 152px;
-  flex-direction: column;
-  gap: 10px;
-  padding: 20px;
-  border-radius: 18px 18px 0 0;
-  background: linear-gradient(140deg, var(--tone), color-mix(in srgb, var(--tone) 55%, #000));
-  color: #fff;
-}
-
-.head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-display);
-  font-size: 18px;
-  white-space: nowrap;
-}
-
-.cpu {
-  font-size: 13px;
-  opacity: 0.9;
-}
-
-.row {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12px;
-  opacity: 0.7;
-}
-</style>

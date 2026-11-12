@@ -108,7 +108,7 @@ Dependencies point downward; a crate never depends on one above it.
   today the `bench` latency and throughput probes.
 - `proto/`: canonical API schemas, linted and generated with Buf.
 - `apps/docs` (`@needy/docs`): the explainer page and the README figures in
-  `docs/assets/banners`, Vue and Vite; `pnpm banners` renders them. Its
+  `docs/assets/banners`, Vue, Vite and UnoCSS; `pnpm banners` renders them. Its
   `src/route` ports the command patterns and rules, with their Rust tests.
 - `images/`: actor kernel sources and configurations (x86_64 for
   Firecracker, arm64 for `macos-vz`), the base image's boot and shim stubs

@@ -26,86 +26,23 @@ withDefaults(defineProps<{
 </script>
 
 <template>
+  <!--
+    Rounder than a machine, to read as the capsule, but in the same family as the other surfaces. The focus and bad tints
+    are important: they replace focus.css's `.f.focus` and `.f.bad`, which are the more specific rules.
+  -->
   <div
-    class="pod f" :class="[focus, { flow }]"
+    class="pod f flex flex-col gap-[12px] rounded-[22px] px-[18px] pb-[18px] pt-[16px] [backdrop-filter:blur(10px)]"
+    :class="[focus, flow ? 'relative' : 'absolute', focus === 'focus' ? '!bg-actor/18' : focus === 'bad' ? '!bg-bad/12' : 'bg-actor/11']"
     :style="{ 'left': flow ? undefined : `${x}px`, 'top': flow ? undefined : `${y}px`, 'width': flow ? undefined : `${w}px`, 'height': flow ? undefined : `${h}px`, '--role': 'var(--actor)' }"
   >
-    <header>
+    <header class="flex items-center gap-[9px] whitespace-nowrap" :class="{ 'flex-wrap': flow }">
       <Logo v-if="logo" :name="logo" :size="22" />
-      <span class="title display">{{ title }}</span>
-      <span v-if="driver" class="driver mono">{{ driver }}</span>
-      <span v-if="badge" class="badge"><Icon name="mingcute:refresh-2-line" />{{ badge }}</span>
+      <span class="display text-[21px] text-actor">{{ title }}</span>
+      <span v-if="driver" class="mono text-[12.5px] text-muted">{{ driver }}</span>
+      <span v-if="badge" class="ml-auto inline-flex items-center gap-[5px] rounded-[999px] bg-actor/14 px-[10px] py-[3px] text-[12.5px] text-actor"><Icon name="mingcute:refresh-2-line" />{{ badge }}</span>
     </header>
-    <div class="body">
+    <div class="relative flex min-h-0 flex-1 flex-col gap-[8px]">
       <slot />
     </div>
   </div>
 </template>
-
-<style scoped>
-.pod {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px 18px 18px;
-  /* Rounder than a machine, to read as the capsule, but in the same family as the other surfaces. */
-  border-radius: 22px;
-  background: color-mix(in srgb, var(--actor) 11%, transparent);
-  backdrop-filter: blur(10px);
-}
-
-.pod.flow {
-  position: relative;
-}
-
-.pod.flow header {
-  flex-wrap: wrap;
-}
-
-.pod.focus {
-  background: color-mix(in srgb, var(--actor) 18%, transparent);
-}
-
-.pod.bad {
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
-}
-
-header {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  white-space: nowrap;
-}
-
-.title {
-  color: var(--actor);
-  font-size: 21px;
-}
-
-.driver {
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  margin-left: auto;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--actor) 14%, transparent);
-  color: var(--actor);
-  font-size: 12.5px;
-}
-
-.body {
-  position: relative;
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-}
-</style>

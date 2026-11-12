@@ -7,6 +7,11 @@ and the README figures.
 Its layout and banner pipeline follow the
 [injeca Docs](https://github.com/moeru-ai/injeca/tree/a361694ff67b4f2b2feb4b4cf0bf585e0f328a68/apps/docs).
 
+- Styles are UnoCSS utilities in the templates (`uno.config.ts`): the theme's
+  colors are the custom properties of `src/palette.ts` and `src/style.css`,
+  `bg-actor/12` mixes a color with transparent, icons are `i-<set>:<name>`
+  classes for the names in `src/icons.ts`, and the page's keyframes live in
+  the config. Components have no `<style>` blocks.
 - `src/scenes`: one Vue component per scene, each a list of steps; `sizes.ts`
   lists them with their design sizes, which are the banner sizes (2.5:1, 2:1,
   3:1).

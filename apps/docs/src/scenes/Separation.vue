@@ -112,372 +112,100 @@ function packets(at: number): Packet[] {
     list.push({ id: `w${at}`, d: MOUNT, role: 'executor', text: step.fresh, delay: 400, ms: 1000 })
   return list
 }
+
+// The utilities a run's card, its state and a layer of the actor share.
+const RUN = 'grid items-center gap-x-[10px] gap-y-[2px] p-[12px_14px] rounded-[14px] grid-cols-[1fr_auto] [transition:opacity_0.45s,background_0.45s,transform_0.45s_cubic-bezier(0.2,0,0,1)]'
+const RUN_LIVE = 'bg-[color-mix(in_srgb,var(--actor)_10%,var(--surface))] [transform:translateX(6px)]'
+const STATE = 'p-[2px_9px] rounded-[999px] text-[12px] [grid-column:2] [grid-row:1/span_2]'
+const LAYER = 'flex flex-col gap-[3px] p-[10px_13px] rounded-[14px] [transition:opacity_0.4s]'
 </script>
 
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Separation: the actor is stateless, a read-only image with a throwaway layer; the workspace lives on the executor and the login on the control host. When a run ends the actor is thrown away and the next run mounts the same workspace.">
     <template #default="{ at }">
-      <svg class="wires" :width="W" :height="H" aria-hidden="true">
-        <path :d="UP" class="wire" :class="{ model: STEPS[at]!.near }" />
-        <path :d="MOUNT" class="wire mount" :class="{ live: STEPS[at]!.mount }" />
-        <path v-if="STEPS[at]!.mount" :d="MOUNT" class="flow" />
-        <path v-if="STEPS[at]!.mount" :d="MOUNT" class="flow back" />
-        <path :d="LOGIN" class="wire" :class="{ host: STEPS[at]!.login !== 'idle' }" />
-        <text class="wire-label mono" :x="(POD.x + POD.w + EXEC.x) / 2" y="224" text-anchor="middle">mount</text>
-        <text class="wire-label mono" :x="(POD.x + POD.w + HOST.x) / 2" y="486" text-anchor="middle">{{ STEPS[at]!.login === 'out' ? 'mirror-out' : 'copy-in' }}</text>
+      <svg class="absolute inset-0 pointer-events-none" :width="W" :height="H" aria-hidden="true">
+        <path :d="UP" class="fill-none [stroke-width:1.6] [stroke-linecap:round] [transition:stroke_0.4s]" :class="STEPS[at]!.near ? 'stroke-actor/50' : 'stroke-line [stroke-dasharray:1.5_6]'" />
+        <path :d="MOUNT" class="fill-none [stroke-width:1.6] [stroke-linecap:round] [transition:stroke_0.4s]" :class="STEPS[at]!.mount ? 'stroke-executor/60' : 'stroke-line [stroke-dasharray:1.5_6]'" />
+        <path v-if="STEPS[at]!.mount" :d="MOUNT" class="fill-none stroke-executor [stroke-width:4] [stroke-dasharray:0.1_21.9] [stroke-linecap:round] animate-[dash-flow_0.9s_linear_infinite]" />
+        <path v-if="STEPS[at]!.mount" :d="MOUNT" class="fill-none stroke-executor [stroke-width:4] [stroke-dasharray:0.1_21.9] [stroke-dashoffset:11] [stroke-linecap:round] opacity-60 animate-[dash-flow_0.9s_linear_infinite_reverse]" />
+        <path :d="LOGIN" class="fill-none [stroke-width:1.6] [stroke-linecap:round] [transition:stroke_0.4s]" :class="STEPS[at]!.login !== 'idle' ? 'stroke-ink/40' : 'stroke-line [stroke-dasharray:1.5_6]'" />
+        <text class="mono fill-muted text-[12.5px]" :x="(POD.x + POD.w + EXEC.x) / 2" y="224" text-anchor="middle">mount</text>
+        <text class="mono fill-muted text-[12.5px]" :x="(POD.x + POD.w + HOST.x) / 2" y="486" text-anchor="middle">{{ STEPS[at]!.login === 'out' ? 'mirror-out' : 'copy-in' }}</text>
       </svg>
 
-      <div class="runs">
-        <span class="runs-title display">Runs</span>
-        <div class="run" :class="{ live: STEPS[at]!.run === 'a' && !STEPS[at]!.ended, over: STEPS[at]!.run === 'b' || STEPS[at]!.ended }">
-          <span class="run-name">Run A</span>
-          <code>{{ RUN_A }}</code>
-          <span class="state">{{ STEPS[at]!.run === 'a' && !STEPS[at]!.ended ? 'running' : 'ended' }}</span>
+      <div class="absolute top-[120px] left-[40px] flex w-[290px] flex-col gap-[10px]">
+        <span class="display text-[19px] text-ink-2">Runs</span>
+        <div
+          :class="[RUN, STEPS[at]!.run === 'a' && !STEPS[at]!.ended ? RUN_LIVE : 'bg-surface', (STEPS[at]!.run === 'b' || STEPS[at]!.ended) && 'opacity-55']"
+        >
+          <span class="font-display text-[16px]" :class="(STEPS[at]!.run === 'b' || STEPS[at]!.ended) && 'line-through decoration-line-strong'">Run A</span>
+          <code class="text-[12.5px] text-muted [grid-column:1]" :class="(STEPS[at]!.run === 'b' || STEPS[at]!.ended) && 'line-through decoration-line-strong'">{{ RUN_A }}</code>
+          <span :class="[STATE, STEPS[at]!.run === 'a' && !STEPS[at]!.ended ? 'bg-actor-fill text-white' : 'bg-control text-muted']">{{ STEPS[at]!.run === 'a' && !STEPS[at]!.ended ? 'running' : 'ended' }}</span>
         </div>
-        <div class="run" :class="{ live: STEPS[at]!.run === 'b', ghost: STEPS[at]!.run !== 'b' }">
-          <span class="run-name">Run B</span>
-          <code>{{ RUN_B }}</code>
-          <span class="state">{{ STEPS[at]!.run === 'b' ? 'running' : 'not yet' }}</span>
+        <div :class="[RUN, STEPS[at]!.run === 'b' ? RUN_LIVE : 'bg-surface opacity-30']">
+          <span class="font-display text-[16px]">Run B</span>
+          <code class="text-[12.5px] text-muted [grid-column:1]">{{ RUN_B }}</code>
+          <span :class="[STATE, STEPS[at]!.run === 'b' ? 'bg-actor-fill text-white' : 'bg-control text-muted']">{{ STEPS[at]!.run === 'b' ? 'running' : 'not yet' }}</span>
         </div>
-        <p class="runs-note">
+        <p class="m-[6px_0_0] text-[14px] leading-[1.5] text-muted">
           Each run gets a fresh actor. Nothing in it outlives the run.
         </p>
       </div>
 
       <Machine :x="MODEL.x" :y="MODEL.y" :w="MODEL.w" role="host" icon="mingcute:cloud-line" title="Model API" sub="the actor's main dependency" :focus="STEPS[at]!.near ? 'focus' : 'idle'" />
 
-      <div :key="STEPS[at]!.run" class="form">
+      <!-- A new actor forms when the run changes. -->
+      <div :key="STEPS[at]!.run" class="absolute inset-0 animate-[form-in_0.7s_cubic-bezier(0.2,0,0,1)_both]">
         <Pod v-bind="POD" driver="linux-firecracker" :focus="STEPS[at]!.ended ? 'gone' : STEPS[at]!.near ? 'focus' : 'idle'">
-          <code class="run-id">run {{ STEPS[at]!.run === 'a' ? RUN_A : RUN_B }}</code>
-          <div class="layer mount" :class="{ off: !STEPS[at]!.mount }">
-            <span class="layer-name"><Icon name="mingcute:folder-open-line" />Workspace</span>
-            <code>~/workspace/</code>
-            <span class="layer-note">mounted from build</span>
+          <code class="self-start p-[2px_9px] rounded-[6px] bg-actor/12 text-[12.5px] text-actor">run {{ STEPS[at]!.run === 'a' ? RUN_A : RUN_B }}</code>
+          <div :class="[LAYER, 'bg-[color-mix(in_srgb,var(--executor)_12%,var(--surface))]', !STEPS[at]!.mount && 'opacity-40']">
+            <span class="flex items-center gap-[6px] font-display text-[15px] text-executor"><Icon name="mingcute:folder-open-line" />Workspace</span>
+            <code class="text-[12.5px] text-ink-2">~/workspace/</code>
+            <span class="text-[12.5px] text-muted">mounted from build</span>
           </div>
-          <div class="layer login">
-            <span class="layer-name"><Icon name="mingcute:key-2-line" />Login</span>
-            <code>~/.local/share/opencode/auth.json</code>
-            <span class="layer-note">copied in from the host</span>
+          <div :class="LAYER" class="bg-surface/72">
+            <span class="flex items-center gap-[6px] font-display text-[15px]"><Icon name="mingcute:key-2-line" />Login</span>
+            <code class="text-[12.5px] text-ink-2">~/.local/share/opencode/auth.json</code>
+            <span class="text-[12.5px] text-muted">copied in from the host</span>
           </div>
-          <div class="layer scratch">
-            <span class="layer-name"><Icon name="mingcute:refresh-2-line" />Throwaway layer</span>
-            <span class="files">
-              <code v-for="f in STEPS[at]!.scratch" :key="f" class="file">{{ f }}</code>
-              <span v-if="STEPS[at]!.scratch.length === 0" class="layer-note">empty</span>
+          <div :class="LAYER" class="bg-actor/7">
+            <span class="flex items-center gap-[6px] font-display text-[15px] text-actor"><Icon name="mingcute:refresh-2-line" />Throwaway layer</span>
+            <span class="flex flex-wrap gap-[6px] min-h-[22px]">
+              <code v-for="f in STEPS[at]!.scratch" :key="f" class="p-[1px_8px] rounded-[6px] bg-surface text-[12.5px] text-ink-2 animate-[rise-4_0.4s_0.8s_cubic-bezier(0.2,0,0,1)_both]">{{ f }}</code>
+              <span v-if="STEPS[at]!.scratch.length === 0" class="text-[12.5px] text-muted">empty</span>
             </span>
           </div>
-          <div class="layer root">
-            <span class="layer-name"><Icon name="mingcute:lock-line" />Read-only root</span>
-            <code>ubuntu:22.04</code>
-            <span class="layer-note">the actor image</span>
+          <div :class="LAYER" class="bg-control-3/55">
+            <span class="flex items-center gap-[6px] font-display text-[15px]"><Icon name="mingcute:lock-line" />Read-only root</span>
+            <code class="text-[12.5px] text-ink-2">ubuntu:22.04</code>
+            <span class="text-[12.5px] text-muted">the actor image</span>
           </div>
         </Pod>
       </div>
 
-      <p v-if="STEPS[at]!.ended" class="gone-note">
+      <p v-if="STEPS[at]!.ended" class="absolute top-[320px] left-[380px] w-[470px] m-0 font-display text-[18px] text-center text-muted animate-[rise-4_0.5s_0.6s_both]">
         The actor is gone. A new one comes from the image.
       </p>
 
       <Machine v-bind="EXEC" title="Executor" name="build" icon="mingcute:cube-line" sub="linux-container · keeps the workspace" badge="Stateful" :focus="STEPS[at]!.ended || STEPS[at]!.near ? 'focus' : 'idle'">
-        <ul class="tree mono">
-          <li class="dir">
+        <ul class="mono flex flex-col gap-[5px] m-[8px_0_0] p-0 list-none text-[13.5px]">
+          <li class="p-[6px_11px] rounded-[8px] bg-control text-executor">
             ~/workspace/
           </li>
-          <li v-for="f in STEPS[at]!.workspace" :key="f" :class="{ fresh: f === STEPS[at]!.fresh }">
+          <li
+            v-for="f in STEPS[at]!.workspace" :key="f" class="p-[6px_11px_6px_26px] rounded-[8px]"
+            :class="f === STEPS[at]!.fresh ? 'bg-executor-softer animate-[rise-4_0.45s_1.2s_cubic-bezier(0.2,0,0,1)_both]' : 'bg-control'"
+          >
             {{ f }}
           </li>
         </ul>
       </Machine>
 
       <Machine v-bind="HOST" role="host" icon="mingcute:server-2-line" title="Control Host" sub="keeps what a run copies out" :focus="STEPS[at]!.login === 'out' ? 'focus' : 'idle'">
-        <code class="kept">~/needy-state/opencode/auth.json</code>
+        <code class="mt-[6px] p-[7px_11px] rounded-[8px] bg-control text-[13px] text-ink-2">~/needy-state/opencode/auth.json</code>
       </Machine>
 
       <Packets :packets="packets(at)" />
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.wires {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.wire {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1.6;
-  stroke-dasharray: 1.5 6;
-  stroke-linecap: round;
-  transition: stroke 0.4s;
-}
-
-.wire.model {
-  stroke: color-mix(in srgb, var(--actor) 50%, transparent);
-  stroke-dasharray: none;
-}
-
-.wire.mount.live {
-  stroke: color-mix(in srgb, var(--executor) 60%, transparent);
-  stroke-dasharray: none;
-}
-
-.wire.host {
-  stroke: color-mix(in srgb, var(--ink) 40%, transparent);
-  stroke-dasharray: none;
-}
-
-.flow {
-  fill: none;
-  stroke: var(--executor);
-  stroke-width: 4;
-  stroke-dasharray: 0.1 21.9;
-  stroke-linecap: round;
-  animation: flow 0.9s linear infinite;
-}
-
-.flow.back {
-  stroke-dashoffset: 11;
-  animation-direction: reverse;
-  opacity: 0.6;
-}
-
-@keyframes flow {
-  to {
-    stroke-dashoffset: -22;
-  }
-}
-
-.wire-label {
-  fill: var(--muted);
-  font-size: 12.5px;
-}
-
-.runs {
-  position: absolute;
-  top: 120px;
-  left: 40px;
-  display: flex;
-  width: 290px;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.runs-title {
-  color: var(--ink-2);
-  font-size: 19px;
-}
-
-.run {
-  display: grid;
-  align-items: center;
-  gap: 2px 10px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: var(--surface);
-  grid-template-columns: 1fr auto;
-  transition:
-    opacity 0.45s,
-    background 0.45s,
-    transform 0.45s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.run code {
-  color: var(--muted);
-  font-size: 12.5px;
-  grid-column: 1;
-}
-
-.run-name {
-  font-family: var(--font-display);
-  font-size: 16px;
-}
-
-.state {
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--control);
-  color: var(--muted);
-  font-size: 12px;
-  grid-column: 2;
-  grid-row: 1 / span 2;
-}
-
-.run.live {
-  background: color-mix(in srgb, var(--actor) 10%, var(--surface));
-  transform: translateX(6px);
-}
-
-.run.live .state {
-  background: var(--actor-fill);
-  color: #fff;
-}
-
-.run.over {
-  opacity: 0.55;
-}
-
-.run.over .run-name,
-.run.over code {
-  text-decoration: line-through;
-  text-decoration-color: var(--line-strong);
-}
-
-.run.ghost {
-  opacity: 0.3;
-}
-
-.runs-note {
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-/* A new actor forms when the run changes. */
-.form {
-  position: absolute;
-  inset: 0;
-  animation: form 0.7s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes form {
-  from {
-    opacity: 0;
-    filter: blur(6px);
-    transform: scale(0.97);
-  }
-}
-
-.run-id {
-  align-self: flex-start;
-  padding: 2px 9px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--actor) 12%, transparent);
-  color: var(--actor);
-  font-size: 12.5px;
-}
-
-.layer {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 10px 13px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--surface) 72%, transparent);
-  transition: opacity 0.4s;
-}
-
-.layer-name {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-family: var(--font-display);
-  font-size: 15px;
-}
-
-.layer code {
-  color: var(--ink-2);
-  font-size: 12.5px;
-}
-
-.layer-note {
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.layer.mount {
-  background: color-mix(in srgb, var(--executor) 12%, var(--surface));
-}
-
-.layer.mount .layer-name {
-  color: var(--executor);
-}
-
-.layer.mount.off {
-  opacity: 0.4;
-}
-
-.layer.scratch {
-  background: color-mix(in srgb, var(--actor) 7%, transparent);
-}
-
-.layer.scratch .layer-name {
-  color: var(--actor);
-}
-
-.layer.root {
-  background: color-mix(in srgb, var(--control-3) 55%, transparent);
-}
-
-.files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-height: 22px;
-}
-
-.file {
-  padding: 1px 8px;
-  border-radius: 6px;
-  background: var(--surface);
-  animation: arrive 0.4s 0.8s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-}
-
-.gone-note {
-  position: absolute;
-  top: 320px;
-  left: 380px;
-  width: 470px;
-  margin: 0;
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-size: 18px;
-  text-align: center;
-  animation: arrive 0.5s 0.6s both;
-}
-
-.tree {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 13.5px;
-}
-
-.tree li {
-  padding: 6px 11px 6px 26px;
-  border-radius: 8px;
-  background: var(--control);
-}
-
-.tree li.dir {
-  padding-left: 11px;
-  color: var(--executor);
-}
-
-.tree li.fresh {
-  background: var(--executor-softer);
-  animation: arrive 0.45s 1.2s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-.kept {
-  margin-top: 6px;
-  padding: 7px 11px;
-  border-radius: 8px;
-  background: var(--control);
-  color: var(--ink-2);
-  font-size: 13px;
-}
-</style>

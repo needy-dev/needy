@@ -9,35 +9,8 @@ withDefaults(defineProps<{ x: number, y: number, role?: Role, delay?: number, si
 
 <template>
   <span
-    class="note" :class="side"
+    class="absolute z-[6] whitespace-nowrap px-[12px] py-[6px] [background:var(--fill)] text-[14px] text-[#fff] [box-shadow:0_6px_18px_rgb(0_0_0/16%)] animate-[pop-up_0.45s_cubic-bezier(0.2,0,0,1)_both]"
+    :class="side === 'right' ? 'rounded-[12px_12px_3px_12px] [transform:translate(-100%,-100%)]' : 'rounded-[12px_12px_12px_3px] [transform:translateY(-100%)]'"
     :style="{ 'left': `${x}px`, 'top': `${y}px`, '--fill': color(role, 'fill'), 'animationDelay': `${delay}ms` }"
   ><slot /></span>
 </template>
-
-<style scoped>
-.note {
-  position: absolute;
-  z-index: 6;
-  padding: 6px 12px;
-  border-radius: 12px 12px 12px 3px;
-  background: var(--fill);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 16%);
-  color: #fff;
-  font-size: 14px;
-  white-space: nowrap;
-  transform: translateY(-100%);
-  animation: pop 0.45s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-.note.right {
-  border-radius: 12px 12px 3px 12px;
-  transform: translate(-100%, -100%);
-}
-
-@keyframes pop {
-  from {
-    opacity: 0;
-    translate: 0 8px;
-  }
-}
-</style>

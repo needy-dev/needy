@@ -36,68 +36,22 @@ function tokenize(line: string): Part[] {
 }
 
 const lines = computed(() => props.code.split('\n').map((line, i) => ({ parts: tokenize(line), lit: props.lit.includes(i) })))
+
+const TOKEN: Record<Part['kind'], string> = {
+  key: 'text-code-key',
+  string: 'text-code-string',
+  comment: 'text-code-comment',
+  punct: 'text-code-punct',
+  plain: '',
+}
 </script>
 
 <template>
-  <div class="yaml mono" :style="{ '--role': color(role), '--role-soft': color(role, 'soft') }">
-    <div v-if="title" class="title">
+  <div class="yaml mono overflow-hidden rounded-[14px] bg-surface text-[13.5px] [box-shadow:var(--shadow-card)]" :style="{ '--role': color(role), '--role-soft': color(role, 'soft') }">
+    <div v-if="title" class="px-[16px] pb-0 pt-[10px] text-[12px] text-muted">
       {{ title }}
     </div>
-    <pre><code><span v-for="(line, i) in lines" :key="i" class="line" :class="{ lit: line.lit, faded: lit.length > 0 && !line.lit }"><span v-for="(part, j) in line.parts" :key="j" :class="part.kind">{{ part.text }}</span>
+    <pre class="m-0 px-0 pb-[12px] pt-[8px] leading-[1.62]"><code><span v-for="(line, i) in lines" :key="i" class="block px-[16px] py-0 [transition:background_0.3s,opacity_0.3s]" :class="{ 'bg-role-soft': line.lit, 'opacity-55': lit.length > 0 && !line.lit }"><span v-for="(part, j) in line.parts" :key="j" :class="TOKEN[part.kind]">{{ part.text }}</span>
 </span></code></pre>
   </div>
 </template>
-
-<style scoped>
-.yaml {
-  overflow: hidden;
-  border-radius: 14px;
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
-  font-size: 13.5px;
-}
-
-.title {
-  padding: 10px 16px 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-pre {
-  margin: 0;
-  padding: 8px 0 12px;
-  line-height: 1.62;
-}
-
-.line {
-  display: block;
-  padding: 0 16px;
-  transition:
-    background 0.3s,
-    opacity 0.3s;
-}
-
-.line.lit {
-  background: var(--role-soft);
-}
-
-.line.faded {
-  opacity: 0.55;
-}
-
-.key {
-  color: var(--code-key);
-}
-
-.string {
-  color: var(--code-string);
-}
-
-.comment {
-  color: var(--code-comment);
-}
-
-.punct {
-  color: var(--code-punct);
-}
-</style>

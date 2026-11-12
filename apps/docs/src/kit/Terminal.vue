@@ -27,170 +27,46 @@ const shown = computed(() => {
   const all = props.lines.map((line, i) => ({ line, i, at: at[i]!, typed: typed[i]!, fresh: i >= props.fresh }))
   return all.slice(-props.rows)
 })
+
+/** The color of an output line's text, by its kind. */
+const TONE: Record<Exclude<Line['kind'], 'cmd' | undefined>, string> = {
+  out: 'text-[rgb(255_255_255/78%)]',
+  dim: 'text-[rgb(255_255_255/45%)]',
+  err: 'text-bad-term',
+  fault: 'text-fault-term',
+  ok: 'text-executor-term',
+}
 </script>
 
 <template>
-  <div class="terminal mono" :class="{ fit }">
-    <div class="bar">
-      <i /><i /><i />
-      <span v-if="title" class="title">{{ title }}</span>
+  <div
+    class="terminal mono flex min-h-0 flex-col overflow-hidden rounded-[14px] bg-term text-[14px] text-term-ink leading-[1.6]"
+    :class="fit ? 'h-auto' : 'h-full'"
+  >
+    <div class="flex flex-none items-center gap-[6px] px-[12px] pb-0 pt-[9px]">
+      <i class="h-[9px] w-[9px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[9px] w-[9px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[9px] w-[9px] rounded-[50%] bg-[rgb(255_255_255/16%)]" />
+      <span v-if="title" class="ml-[8px] text-[12px] text-[rgb(255_255_255/45%)]">{{ title }}</span>
     </div>
-    <div :key="play" class="lines">
+    <div :key="play" class="flex min-h-0 flex-1 flex-col px-[14px] pb-[10px] pt-[6px]" :class="fit ? 'justify-start' : 'justify-end'">
       <div
-        v-for="row in shown" :key="row.i" class="line" :class="[row.line.kind ?? 'out', { fresh: row.fresh }]"
+        v-for="row in shown" :key="row.i" class="line flex min-h-[22.4px] items-center whitespace-pre"
+        :class="{ '[animation:appear_0.01s_both]': row.fresh }"
         :style="{ animationDelay: `${row.at}ms` }"
       >
         <template v-if="row.line.kind === 'cmd'">
-          <span class="prompt">{{ row.line.prompt ?? prompt }}&nbsp;</span>
+          <span class="text-actor-term">{{ row.line.prompt ?? prompt }}&nbsp;</span>
           <span
-            class="typed" :class="{ typing: row.fresh }"
+            class="inline-block overflow-hidden" :class="{ 'w-[calc(var(--n)*1ch)] [animation-fill-mode:both] [animation-name:type-in]': row.fresh }"
             :style="row.fresh ? { '--n': row.line.text.length, 'animationDelay': `${row.at}ms`, 'animationDuration': `${row.typed}ms`, 'animationTimingFunction': `steps(${row.line.text.length}, end)` } : {}"
           >{{ row.line.text }}</span>
         </template>
-        <span v-else class="text">{{ row.line.text }}</span>
+        <span v-else :class="TONE[row.line.kind ?? 'out']">{{ row.line.text }}</span>
         <span
-          v-if="row.line.tag" class="tag" :class="{ fresh: row.fresh }"
+          v-if="row.line.tag" class="ml-[12px] rounded-[999px] bg-[var(--fill)] px-[9px] text-[12px] text-[#fff] leading-[20px]"
+          :class="{ '[animation:enter-left-6_0.3s_cubic-bezier(0.2,0,0,1)_both]': row.fresh }"
           :style="{ '--fill': color(row.line.tag.role, 'fill'), 'animationDelay': `${row.at + row.typed + 120}ms` }"
         >{{ row.line.tag.text }}</span>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.terminal {
-  display: flex;
-  height: 100%;
-  min-height: 0;
-  flex-direction: column;
-  overflow: hidden;
-  border-radius: 14px;
-  background: var(--term);
-  color: var(--term-ink);
-  font-size: 14px;
-  line-height: 1.6;
-}
-
-.bar {
-  display: flex;
-  flex: none;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 12px 0;
-}
-
-.bar i {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: rgb(255 255 255 / 16%);
-}
-
-.title {
-  margin-left: 8px;
-  color: rgb(255 255 255 / 45%);
-  font-size: 12px;
-}
-
-.lines {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  justify-content: flex-end;
-  padding: 6px 14px 10px;
-}
-
-.line {
-  display: flex;
-  align-items: center;
-  min-height: 22.4px;
-  white-space: pre;
-}
-
-.line.fresh {
-  animation: appear 0.01s both;
-}
-
-@keyframes appear {
-  from {
-    visibility: hidden;
-  }
-
-  to {
-    visibility: visible;
-  }
-}
-
-.prompt {
-  color: var(--actor-term);
-}
-
-.typed {
-  display: inline-block;
-  overflow: hidden;
-}
-
-.typed.typing {
-  width: calc(var(--n) * 1ch);
-  animation-name: type;
-  animation-fill-mode: both;
-}
-
-@keyframes type {
-  from {
-    width: 0;
-  }
-}
-
-.out .text {
-  color: rgb(255 255 255 / 78%);
-}
-
-.dim .text {
-  color: rgb(255 255 255 / 45%);
-}
-
-.err .text {
-  color: var(--bad-term);
-}
-
-.fault .text {
-  color: var(--fault-term);
-}
-
-.ok .text {
-  color: var(--executor-term);
-}
-
-.tag {
-  margin-left: 12px;
-  padding: 0 9px;
-  border-radius: 999px;
-  background: var(--fill);
-  color: #fff;
-  font-size: 12px;
-  line-height: 20px;
-}
-
-.tag.fresh {
-  animation: tag 0.3s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes tag {
-  from {
-    opacity: 0;
-    transform: translateX(-6px);
-  }
-}
-</style>
-
-<style scoped>
-.terminal.fit {
-  height: auto;
-}
-
-.terminal.fit .lines {
-  justify-content: flex-start;
-}
-</style>

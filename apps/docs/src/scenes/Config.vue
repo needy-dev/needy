@@ -123,314 +123,102 @@ function bracket(s: Section): { x: number, y: number, h: number } {
 }
 
 const ROLE = Object.fromEntries(SECTIONS.flatMap(s => Array.from({ length: s.to - s.from + 1 }, (_, i) => [s.from + i, s.role]))) as Record<number, Role>
+
+// The picture in a card: its text and code; a file mode that is not picked; a trace event.
+const PIC = 'flex min-h-0 flex-1 flex-col justify-between gap-[8px] [&_p]:m-0 [&_p]:text-[13.5px] [&_p]:leading-[1.4] [&_p]:text-ink-2 [&_code]:text-[12.5px]'
+const MODE = 'p-[3px_10px] rounded-[999px] bg-control text-muted'
+const EVENT = 'p-[3px_10px] rounded-[999px] bg-trace-softer text-trace'
 </script>
 
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="The anatomy of a profile: actor, network, executors, commands, files, chaos and trace, each linked to the part of a run it controls.">
     <template #default="{ at }">
-      <svg class="leaders" :width="W" :height="H" aria-hidden="true">
+      <svg class="absolute inset-0 pointer-events-none" :width="W" :height="H" aria-hidden="true">
         <path
-          v-for="s in SECTIONS" :key="s.id" :d="leader(s)" class="leader" :class="{ on: s.id === STEPS[at]!.section }"
+          v-for="s in SECTIONS" :key="s.id" :d="leader(s)" class="fill-none [stroke-linecap:round] [transition:stroke_0.35s]"
+          :class="s.id === STEPS[at]!.section ? 'stroke-role [stroke-width:2]' : 'stroke-line [stroke-width:1.5] [stroke-dasharray:1.5_6]'"
           :style="{ '--role': color(s.role) }"
         />
       </svg>
 
-      <div class="code" :style="{ left: `${CODE.x}px`, top: `${CODE.y}px`, width: `${CODE.w}px`, height: `${CODE_H}px` }">
+      <div class="absolute" :style="{ left: `${CODE.x}px`, top: `${CODE.y}px`, width: `${CODE.w}px`, height: `${CODE_H}px` }">
         <Profile :code="PROFILE" :lit="lit(at)" :role="sectionOf(at).role" :roles="ROLE" title="~/.config/needy/profiles/agent.yaml" />
       </div>
 
       <span
-        v-for="s in SECTIONS" :key="`b${s.id}`" class="bracket" :class="{ on: s.id === STEPS[at]!.section }"
+        v-for="s in SECTIONS" :key="`b${s.id}`" class="absolute w-[4px] rounded-[2px] [transition:background_0.35s]" :class="s.id === STEPS[at]!.section ? 'bg-role' : 'bg-control-3'"
         :style="{ 'left': `${bracket(s).x}px`, 'top': `${bracket(s).y}px`, 'height': `${bracket(s).h}px`, '--role': color(s.role, 'fill') }"
       />
 
       <div
-        v-for="s in SECTIONS" :key="s.id" class="card f" :class="[focus(at, s.id), s.id]"
+        v-for="s in SECTIONS" :key="s.id" class="f absolute flex flex-col gap-[8px] p-[13px_16px] rounded-[14px] bg-surface" :class="focus(at, s.id)"
         :style="{ 'left': `${(s.side === 'left' ? LEFT : RIGHT).x}px`, 'top': `${s.y}px`, 'width': `${(s.side === 'left' ? LEFT : RIGHT).w}px`, 'height': `${s.h}px`, '--role': color(s.role), '--role-fill': color(s.role, 'fill') }"
       >
-        <header>
-          <span class="title display">{{ s.title }}</span>
-          <code class="key">{{ s.id === 'network' ? 'actor.network' : s.id === 'commands' ? 'commands' : s.id }}</code>
+        <header class="flex items-center gap-[10px]">
+          <span class="display text-[19px] text-role">{{ s.title }}</span>
+          <code class="ml-auto text-[12.5px] text-muted">{{ s.id === 'network' ? 'actor.network' : s.id === 'commands' ? 'commands' : s.id }}</code>
         </header>
 
         <!-- Each card is a small picture of what its section controls, in the shapes of the other scenes. -->
-        <div v-if="s.id === 'actor'" class="pic">
-          <div class="capsule">
+        <div v-if="s.id === 'actor'" :class="PIC">
+          <div class="flex whitespace-nowrap items-center gap-[8px] p-[8px_12px] rounded-[999px] bg-actor/10 text-[12.5px]">
             <Logo name="firecracker" :size="20" />
             <span class="mono">linux-firecracker</span>
-            <span class="pill">Compute Engine</span>
+            <span class="ml-auto p-[2px_9px] rounded-[999px] bg-surface text-[12px] text-ink-2">Compute Engine</span>
           </div>
           <p>Runs the harness <code>opencode</code>, near the model. The recipe, a second file, sets the machine it looks like.</p>
         </div>
 
-        <div v-else-if="s.id === 'network'" class="pic">
-          <div class="door-row mono">
-            <span class="host ok"><Icon name="mingcute:check-line" />models.dev</span>
-            <span class="host no"><Icon name="mingcute:forbid-circle-line" />example.com</span>
+        <div v-else-if="s.id === 'network'" :class="PIC">
+          <div class="mono flex items-center gap-[10px]">
+            <span class="inline-flex items-center gap-[5px] p-[3px_10px] rounded-[999px] bg-executor/14 text-[12.5px] text-executor"><Icon name="mingcute:check-line" />models.dev</span>
+            <span class="inline-flex items-center gap-[5px] p-[3px_10px] rounded-[999px] bg-bad/12 text-[12.5px] text-bad"><Icon name="mingcute:forbid-circle-line" />example.com</span>
           </div>
           <p>The actor reaches only the hosts it allows. A service is a name the gateway forwards to a real address.</p>
         </div>
 
-        <div v-else-if="s.id === 'executors'" class="pic">
-          <div class="boxes">
-            <span class="box"><Icon name="mingcute:cube-line" /><code>build</code></span>
+        <div v-else-if="s.id === 'executors'" :class="PIC">
+          <div class="flex gap-[10px]">
+            <span class="inline-flex items-center gap-[8px] p-[7px_12px] rounded-[9px] bg-executor/12 text-executor"><Icon name="mingcute:cube-line" /><code>build</code></span>
           </div>
           <p>The pool for compute and IO, next to the workspace. One by default; <code>runner:</code> puts one on another machine.</p>
         </div>
 
-        <div v-else-if="s.id === 'commands'" class="pic">
-          <ol class="slots mono">
-            <li class="deny">
-              git push ** <span>deny</span>
+        <div v-else-if="s.id === 'commands'" :class="PIC">
+          <ol class="mono flex flex-col gap-[4px] m-0 p-0 list-none text-[12.5px]">
+            <li class="flex justify-between p-[4px_10px] rounded-[7px] bg-control">
+              git push ** <span class="text-bad">deny</span>
             </li>
-            <li>pytest ** <span>→ build</span></li>
-            <li class="rest">
-              anything else <span>→ actor</span>
+            <li class="flex justify-between p-[4px_10px] rounded-[7px] bg-control">
+              pytest ** <span class="text-executor">→ build</span>
+            </li>
+            <li class="flex justify-between p-[4px_10px] rounded-[7px] bg-control text-muted">
+              anything else <span class="text-actor">→ actor</span>
             </li>
           </ol>
           <p>A rule can also set a timeout, the environment, the directory or extra files.</p>
         </div>
 
-        <div v-else-if="s.id === 'files'" class="pic">
-          <div class="modes mono">
-            <span class="on">copy-in</span><span>mount</span><span>mirror-out</span>
+        <div v-else-if="s.id === 'files'" :class="PIC">
+          <div class="mono flex gap-[6px] text-[12.5px]">
+            <span class="p-[3px_10px] rounded-[999px] bg-executor/16 text-executor">copy-in</span><span :class="MODE">mount</span><span :class="MODE">mirror-out</span>
           </div>
           <p>A login copied in from the host when the run starts.</p>
         </div>
 
-        <div v-else-if="s.id === 'chaos'" class="pic">
-          <p class="fault mono">
+        <div v-else-if="s.id === 'chaos'" :class="PIC">
+          <p class="mono flex items-center gap-[6px] !text-[12.5px] !text-fault">
             <Icon name="mingcute:fire-line" /> curl → exit 7, without running
           </p>
           <p>The same seed fires the same faults on a replay.</p>
         </div>
 
-        <div v-else class="pic">
-          <p class="events mono">
-            <span>exec.decide</span><span>net.request</span><span>fault.injected</span>
+        <div v-else :class="PIC">
+          <p class="mono flex flex-wrap gap-[6px] !text-[12px]">
+            <span :class="EVENT">exec.decide</span><span :class="EVENT">net.request</span><span :class="EVENT">fault.injected</span>
           </p>
         </div>
       </div>
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.leaders {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.leader {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1.5;
-  stroke-dasharray: 1.5 6;
-  stroke-linecap: round;
-  transition: stroke 0.35s;
-}
-
-.leader.on {
-  stroke: var(--role);
-  stroke-dasharray: none;
-  stroke-width: 2;
-}
-
-.code {
-  position: absolute;
-}
-
-.bracket {
-  position: absolute;
-  width: 4px;
-  border-radius: 2px;
-  background: var(--control-3);
-  transition: background 0.35s;
-}
-
-.bracket.on {
-  background: var(--role);
-}
-
-.card {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 13px 16px;
-  border-radius: 14px;
-  background: var(--surface);
-}
-
-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.title {
-  color: var(--role);
-  font-size: 19px;
-}
-
-.key {
-  margin-left: auto;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.pic {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.pic p {
-  margin: 0;
-  color: var(--ink-2);
-  font-size: 13.5px;
-  line-height: 1.4;
-}
-
-.pic code {
-  font-size: 12.5px;
-}
-
-.capsule {
-  display: flex;
-  white-space: nowrap;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--actor) 10%, transparent);
-  font-size: 12.5px;
-}
-
-.capsule .pill {
-  margin-left: auto;
-  padding: 2px 9px;
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--ink-2);
-  font-size: 12px;
-}
-
-.door-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.host {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 12.5px;
-}
-
-.host.ok {
-  background: color-mix(in srgb, var(--executor) 14%, transparent);
-  color: var(--executor);
-}
-
-.host.no {
-  background: color-mix(in srgb, var(--bad) 12%, transparent);
-  color: var(--bad);
-}
-
-.boxes {
-  display: flex;
-  gap: 10px;
-}
-
-.box {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 12px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--executor) 12%, transparent);
-  color: var(--executor);
-}
-
-.slots {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  font-size: 12.5px;
-}
-
-.slots li {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 10px;
-  border-radius: 7px;
-  background: var(--control);
-}
-
-.slots li span {
-  color: var(--executor);
-}
-
-.slots li.deny span {
-  color: var(--bad);
-}
-
-.slots li.rest {
-  color: var(--muted);
-}
-
-.slots li.rest span {
-  color: var(--actor);
-}
-
-.modes {
-  display: flex;
-  gap: 6px;
-  font-size: 12.5px;
-}
-
-.modes span {
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--control);
-  color: var(--muted);
-}
-
-.modes span.on {
-  background: color-mix(in srgb, var(--executor) 16%, transparent);
-  color: var(--executor);
-}
-
-.fault {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--fault) !important;
-  font-size: 12.5px !important;
-}
-
-.events {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  font-size: 12px !important;
-}
-
-.events span {
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--trace-softer);
-  color: var(--trace);
-}
-</style>

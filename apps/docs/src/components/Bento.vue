@@ -42,485 +42,106 @@ const STATUS: Record<'partly' | 'vision', Text> = {
 </script>
 
 <template>
-  <div class="bento">
-    <a v-for="t in TILES" :key="t.id" class="tile" :class="`t-${t.id}`" :href="`#${t.more}`">
-      <p class="copy">
-        <strong>{{ tr(t.lead) }}</strong> {{ tr(t.rest) }}
-        <span v-if="t.status" class="status" :class="t.status">{{ tr(STATUS[t.status]) }}</span>
+  <!-- Hero and strip, then two rows of three: rounded tiles on a gap that equals their padding's half.
+       NOTICE: the stylesheet this replaced also had phone sizes for the copy (17px), the number (72px) and the
+       picture's top margin (24px), but later rules of the same weight overrode them, so the page never showed them.
+       They are left out to keep the page as it was. -->
+  <div class="grid grid-cols-[repeat(3,minmax(0,1fr))] gap-[16px] max-[860px]:grid-cols-[minmax(0,1fr)]">
+    <a
+      v-for="t in TILES" :key="t.id"
+      class="relative min-h-[300px] flex flex-col overflow-hidden rounded-[24px] px-[28px] pb-0 pt-[28px] text-ink [text-decoration:none] max-[860px]:(min-h-0 px-[22px] pt-[22px])"
+      :class="[t.id === 'hero' && '[grid-column:span_2] max-[860px]:[grid-column:auto]', t.id === 'stat' ? 'bg-ink' : 'bg-control']"
+      :href="`#${t.more}`"
+    >
+      <p class="m-0 text-[19px] leading-[1.4]" :class="[t.id === 'hero' ? 'max-w-[48ch]' : 'max-w-[34ch]', t.id === 'stat' ? 'text-paper/62' : 'text-muted']">
+        <strong class="font-600" :class="t.id === 'stat' ? 'text-paper' : 'text-ink'">{{ tr(t.lead) }}</strong> {{ tr(t.rest) }}
+        <span
+          v-if="t.status" class="ml-[6px] inline-block rounded-[999px] px-[9px] py-[2px] align-[2px] text-[12.5px]"
+          :class="t.status === 'partly' ? 'bg-fault/16 text-fault' : 'bg-gateway/15 text-gateway'"
+        >{{ tr(STATUS[t.status]) }}</span>
       </p>
 
       <!-- The hero: `needy report`, the one window of the grid, running off the right and the bottom. The format is
-           crates/core/src/report/human.rs; the run ID and the counts are made up for the tile. -->
-      <div v-if="t.id === 'hero'" class="picture window">
-        <div class="bar">
-          <i /><i /><i /><span class="title mono">needy report latest</span>
+           crates/core/src/report/human.rs; the run ID and the counts are made up for the tile. Its window is inset
+           on the copy's gutter, off the right edge and the bottom. -->
+      <div v-if="t.id === 'hero'" class="mt-[28px] w-[calc(100%+60px)] rounded-[14px_0_0] bg-term text-term-ink">
+        <div class="flex items-center gap-[6px] px-[14px] py-[12px]">
+          <i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><span class="mono ml-[10px] text-[12px] text-[rgb(255_255_255/45%)]">needy report latest</span>
         </div>
-        <div class="term mono">
-          <span><span class="k">Run</span>3f9c0e2a71b4  (profile opencode)</span>
-          <span><span class="k">State</span>finished, driving program exit 0</span>
-          <span class="gap" />
-          <span class="dim">Commands</span>
-          <span><span class="k in">routed to build</span><span class="ok">14</span></span>
-          <span><span class="k in">kept on actor</span>3</span>
-          <span><span class="k in">denied</span><span class="err">1</span></span>
-          <span class="gap" />
-          <span class="dim">Findings</span>
-          <span class="in">network denied: example.com (actor network)</span>
-        </div>
-      </div>
-
-      <div v-else-if="t.id === 'stat'" class="picture number">
-        0.17<span class="unit">s</span>
-      </div>
-
-      <div v-else-if="t.id === 'rules'" class="picture rules">
-        <div class="rule">
-          <code>python3 **</code><span class="pill go">build</span>
-        </div>
-        <div class="rule on">
-          <code>git push **</code><span class="pill no">deny</span>
-        </div>
-        <div class="rule">
-          <code>uname **</code><span class="pill stay">actor</span>
+        <div class="mono flex flex-col gap-[4px] px-[18px] pb-[24px] pt-[4px] text-[14px] leading-[1.55]">
+          <span><span class="inline-block w-[9ch] text-[rgb(255_255_255/55%)]">Run</span>3f9c0e2a71b4  (profile opencode)</span>
+          <span><span class="inline-block w-[9ch] text-[rgb(255_255_255/55%)]">State</span>finished, driving program exit 0</span>
+          <span class="h-[6px]" />
+          <span class="text-[rgb(255_255_255/45%)]">Commands</span>
+          <span><span class="inline-block w-[19ch] pl-[2ch] text-[rgb(255_255_255/55%)]">routed to build</span><span class="text-executor-term">14</span></span>
+          <span><span class="inline-block w-[19ch] pl-[2ch] text-[rgb(255_255_255/55%)]">kept on actor</span>3</span>
+          <span><span class="inline-block w-[19ch] pl-[2ch] text-[rgb(255_255_255/55%)]">denied</span><span class="text-bad-term">1</span></span>
+          <span class="h-[6px]" />
+          <span class="text-[rgb(255_255_255/45%)]">Findings</span>
+          <span class="pl-[2ch]">network denied: example.com (actor network)</span>
         </div>
       </div>
 
-      <MachineDeck v-else-if="t.id === 'identity'" class="picture" />
-
-      <div v-else-if="t.id === 'isolation'" class="picture marks">
-        <span class="mark"><Logo name="firecracker" :size="40" /></span>
-        <span class="mark"><Logo name="docker" :size="40" /></span>
-        <span class="mark"><Logo name="gvisor" :size="40" /></span>
-        <span class="mark"><Logo name="apple" :size="40" /></span>
+      <!-- The stat: the inverted tile, one number. -->
+      <div v-else-if="t.id === 'stat'" class="mx-0 mb-[28px] mt-auto whitespace-nowrap text-[96px] text-paper font-display leading-[1]">
+        0.17<span class="ml-[6px] text-[48px]">s</span>
       </div>
 
-      <div v-else-if="t.id === 'chaos'" class="picture faults">
-        <span class="fault mono">EIO</span>
-        <span class="fault mono">exit 7</span>
-        <span class="fault mono">101.0°C</span>
+      <!-- One component: three rules, the middle one acted on. -->
+      <div v-else-if="t.id === 'rules'" class="mb-[-12px] mt-auto flex flex-col gap-[8px] rounded-[16px_16px_0_0] bg-surface p-[12px]">
+        <div class="flex items-center justify-between gap-[12px] rounded-[8px] px-[12px] py-[10px] text-[14px]">
+          <code>python3 **</code><span class="rounded-[999px] bg-executor/15 px-[10px] py-[2px] text-[12.5px] text-executor font-mono">build</span>
+        </div>
+        <div class="flex items-center justify-between gap-[12px] rounded-[8px] bg-[color-mix(in_srgb,var(--bad)_10%,var(--surface))] px-[12px] py-[10px] text-[14px]">
+          <code>git push **</code><span class="rounded-[999px] bg-bad-fill px-[10px] py-[2px] text-[12.5px] text-[#fff] font-mono">deny</span>
+        </div>
+        <div class="flex items-center justify-between gap-[12px] rounded-[8px] px-[12px] py-[10px] text-[14px]">
+          <code>uname **</code><span class="rounded-[999px] bg-actor/14 px-[10px] py-[2px] text-[12.5px] text-actor font-mono">actor</span>
+        </div>
       </div>
 
-      <div v-else-if="t.id === 'laptop'" class="picture devices">
-        <span class="targets">
-          <span class="node"><Icon name="mingcute:laptop-line" :size="16" /> laptop</span>
-          <span class="node"><Icon name="mingcute:chip-line" :size="16" /> board</span>
-          <span class="node"><Icon name="mingcute:terminal-box-line" :size="16" /> CI job</span>
+      <MachineDeck v-else-if="t.id === 'identity'" class="mt-auto" />
+
+      <!-- The collection: the marks, running off the right. -->
+      <div v-else-if="t.id === 'isolation'" class="mb-[28px] mt-auto w-[calc(100%+60px)] flex gap-[12px]">
+        <span class="grid h-[76px] w-[76px] flex-none place-items-center rounded-[18px] bg-surface"><Logo name="firecracker" :size="40" /></span>
+        <span class="grid h-[76px] w-[76px] flex-none place-items-center rounded-[18px] bg-surface"><Logo name="docker" :size="40" /></span>
+        <span class="grid h-[76px] w-[76px] flex-none place-items-center rounded-[18px] bg-surface"><Logo name="gvisor" :size="40" /></span>
+        <span class="grid h-[76px] w-[76px] flex-none place-items-center rounded-[18px] bg-surface"><Logo name="apple" :size="40" /></span>
+      </div>
+
+      <!-- A component: the faults, one row of chips. -->
+      <div v-else-if="t.id === 'chaos'" class="mb-[32px] mt-auto flex flex-wrap gap-[8px]">
+        <span class="mono rounded-[12px] bg-[color-mix(in_srgb,var(--fault)_16%,var(--surface))] px-[14px] py-[8px] text-[15px] text-fault">EIO</span>
+        <span class="mono rounded-[12px] bg-[color-mix(in_srgb,var(--fault)_16%,var(--surface))] px-[14px] py-[8px] text-[15px] text-fault">exit 7</span>
+        <span class="mono rounded-[12px] bg-[color-mix(in_srgb,var(--fault)_16%,var(--surface))] px-[14px] py-[8px] text-[15px] text-fault">101.0°C</span>
+      </div>
+
+      <!-- A diagram: small clients on the left, the control plane they talk to on the right. -->
+      <div v-else-if="t.id === 'laptop'" class="mb-[28px] mt-auto grid grid-cols-[auto_40px_auto] items-center">
+        <span class="flex flex-col gap-[8px]">
+          <span class="inline-flex items-center gap-[6px] rounded-[10px] bg-surface px-[12px] py-[8px] text-[14px]"><Icon name="mingcute:laptop-line" :size="16" /> laptop</span>
+          <span class="inline-flex items-center gap-[6px] rounded-[10px] bg-surface px-[12px] py-[8px] text-[14px]"><Icon name="mingcute:chip-line" :size="16" /> board</span>
+          <span class="inline-flex items-center gap-[6px] rounded-[10px] bg-surface px-[12px] py-[8px] text-[14px]"><Icon name="mingcute:terminal-box-line" :size="16" /> CI job</span>
         </span>
-        <span class="links" aria-hidden="true" />
-        <span class="node plane"><Icon name="mingcute:server-2-line" :size="16" /> Control plane</span>
+        <span class="h-0 [border-top:1.5px_dashed_var(--line-strong)]" aria-hidden="true" />
+        <span class="inline-flex items-center justify-self-start gap-[6px] rounded-[10px] bg-ink px-[12px] py-[8px] text-[14px] text-paper"><Icon name="mingcute:server-2-line" :size="16" /> Control plane</span>
       </div>
 
-      <div v-else-if="t.id === 'teleport'" class="picture pool">
-        <span class="node actor">Actor</span>
-        <span class="links" aria-hidden="true" />
-        <span class="targets">
-          <span class="node"><Icon name="mingcute:apple-line" :size="16" /> macOS</span>
-          <span class="node"><Icon name="mingcute:apple-line" :size="16" /> macOS</span>
-          <span class="node"><Icon name="mingcute:monitor-line" :size="16" /> GPU</span>
+      <!-- A diagram: one actor, a pool of machines it could ask for. -->
+      <div v-else-if="t.id === 'teleport'" class="mb-[28px] mt-auto grid grid-cols-[auto_40px_auto] items-center">
+        <span class="inline-flex items-center justify-self-start gap-[6px] rounded-[10px] bg-[color-mix(in_srgb,var(--actor)_14%,var(--surface))] px-[12px] py-[8px] text-[14px] text-actor">Actor</span>
+        <span class="h-0 [border-top:1.5px_dashed_var(--line-strong)]" aria-hidden="true" />
+        <span class="flex flex-col gap-[8px]">
+          <span class="inline-flex items-center gap-[6px] rounded-[10px] bg-surface px-[12px] py-[8px] text-[14px]"><Icon name="mingcute:apple-line" :size="16" /> macOS</span>
+          <span class="inline-flex items-center gap-[6px] rounded-[10px] bg-surface px-[12px] py-[8px] text-[14px]"><Icon name="mingcute:apple-line" :size="16" /> macOS</span>
+          <span class="inline-flex items-center gap-[6px] rounded-[10px] bg-surface px-[12px] py-[8px] text-[14px]"><Icon name="mingcute:monitor-line" :size="16" /> GPU</span>
         </span>
       </div>
     </a>
   </div>
-  <p class="foot">
+  <p class="mx-0 mb-0 mt-[14px] text-[13.5px] text-muted">
     {{ tr({ en: 'Unmarked tiles are verified end to end in the', zh: '没有标注的都已经端到端跑通过，详见' }) }}
     <a :href="EVIDENCE">{{ tr({ en: 'closed-loop results', zh: '闭环验证记录' }) }}</a>.
   </p>
 </template>
-
-<style scoped>
-/* Hero and strip, then two rows of three: rounded tiles on a gap that equals their padding's half. */
-.bento {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-@media (max-width: 860px) {
-  .bento {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.tile {
-  position: relative;
-  display: flex;
-  min-height: 300px;
-  flex-direction: column;
-  overflow: hidden;
-  padding: 28px 28px 0;
-  border-radius: 24px;
-  background: var(--control);
-  color: var(--ink);
-  text-decoration: none;
-}
-
-.tile.t-hero {
-  grid-column: span 2;
-}
-
-@media (max-width: 860px) {
-  .tile.t-hero {
-    grid-column: auto;
-  }
-
-  .tile {
-    min-height: 0;
-    padding: 22px 22px 0;
-  }
-
-  .picture {
-    margin-top: 24px;
-  }
-
-  .copy {
-    font-size: 17px;
-  }
-
-  .number {
-    font-size: 72px;
-  }
-}
-
-.copy {
-  max-width: 34ch;
-  margin: 0;
-  color: var(--muted);
-  font-size: 19px;
-  line-height: 1.4;
-}
-
-.t-hero .copy {
-  max-width: 48ch;
-}
-
-.copy strong {
-  color: var(--ink);
-  font-weight: 600;
-}
-
-.status {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 12.5px;
-  vertical-align: 2px;
-}
-
-.status.partly {
-  background: color-mix(in srgb, var(--fault) 16%, transparent);
-  color: var(--fault);
-}
-
-.status.vision {
-  background: color-mix(in srgb, var(--gateway) 15%, transparent);
-  color: var(--gateway);
-}
-
-.picture {
-  margin-top: auto;
-}
-
-/* The hero's window: inset on the copy's gutter, off the right edge and the bottom. */
-.window {
-  width: calc(100% + 60px);
-  margin-top: 28px;
-  border-radius: 14px 0 0;
-  background: var(--term);
-  color: var(--term-ink);
-}
-
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 12px 14px;
-}
-
-.bar i {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: rgb(255 255 255 / 16%);
-}
-
-.bar .title {
-  margin-left: 10px;
-  color: rgb(255 255 255 / 45%);
-  font-size: 12px;
-}
-
-.term {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 4px 18px 24px;
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.term b {
-  color: var(--actor-term);
-  font-weight: 400;
-}
-
-.term .dim {
-  color: rgb(255 255 255 / 45%);
-}
-
-.term .ok {
-  color: var(--executor-term);
-}
-
-.term .err {
-  color: var(--bad-term);
-}
-
-.term .k {
-  display: inline-block;
-  width: 9ch;
-  color: rgb(255 255 255 / 55%);
-}
-
-.term .k.in {
-  width: 19ch;
-  padding-left: 2ch;
-}
-
-.term .in {
-  padding-left: 2ch;
-}
-
-.term .gap {
-  height: 6px;
-}
-
-.term em {
-  margin-left: 8px;
-  padding: 1px 8px;
-  border-radius: 999px;
-  color: #fff;
-  font-size: 12px;
-  font-style: normal;
-}
-
-.term .to {
-  background: var(--executor-fill);
-}
-
-.term .deny {
-  background: var(--bad-fill);
-}
-
-/* The stat: the inverted tile, one number. */
-.tile.t-stat {
-  background: var(--ink);
-}
-
-.t-stat .copy {
-  color: color-mix(in srgb, var(--paper) 62%, transparent);
-}
-
-.t-stat .copy strong {
-  color: var(--paper);
-}
-
-.number {
-  margin: auto 0 28px;
-  color: var(--paper);
-  font-family: var(--font-display);
-  font-size: 96px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.unit {
-  margin-left: 6px;
-  font-size: 48px;
-}
-
-/* One component: three rules, the middle one acted on. */
-.rules {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: -12px;
-  padding: 12px;
-  border-radius: 16px 16px 0 0;
-  background: var(--surface);
-}
-
-.rule {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  font-size: 14px;
-}
-
-.rule.on {
-  background: color-mix(in srgb, var(--bad) 10%, var(--surface));
-}
-
-.pill {
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-family: var(--font-mono);
-  font-size: 12.5px;
-}
-
-.pill.go {
-  background: color-mix(in srgb, var(--executor) 15%, transparent);
-  color: var(--executor);
-}
-
-.pill.no {
-  background: var(--bad-fill);
-  color: #fff;
-}
-
-.pill.stay {
-  background: color-mix(in srgb, var(--actor) 14%, transparent);
-  color: var(--actor);
-}
-
-/* The object: a machine's spec card, rising from the bottom. */
-.spec {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-bottom: -24px;
-  padding: 20px 20px 40px;
-  border-radius: 18px 18px 0 0;
-  background: linear-gradient(140deg, var(--actor-fill), color-mix(in srgb, var(--actor-fill) 55%, #000));
-  color: #fff;
-}
-
-.spec-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-display);
-  font-size: 18px;
-}
-
-.spec-cpu {
-  font-size: 13.5px;
-  opacity: 0.9;
-}
-
-.spec-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  opacity: 0.7;
-}
-
-/* The collection: the marks, running off the right. */
-.marks {
-  display: flex;
-  gap: 12px;
-  width: calc(100% + 60px);
-  margin-bottom: 28px;
-}
-
-.mark {
-  display: grid;
-  width: 76px;
-  height: 76px;
-  flex: none;
-  place-items: center;
-  border-radius: 18px;
-  background: var(--surface);
-}
-
-/* A component: the faults, one row of chips. */
-.faults {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 32px;
-}
-
-.fault {
-  padding: 8px 14px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--fault) 16%, var(--surface));
-  color: var(--fault);
-  font-size: 15px;
-}
-
-/* A component: one command, from the laptop. */
-.laptop {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 32px;
-  padding: 16px 18px;
-  border-radius: 14px;
-  background: var(--term);
-  color: var(--term-ink);
-}
-
-.laptop code {
-  font-size: 12.5px;
-  white-space: nowrap;
-}
-
-/* A diagram: small clients on the left, the control plane they talk to on the right. */
-.devices {
-  display: grid;
-  align-items: center;
-  margin-bottom: 28px;
-  grid-template-columns: auto 40px auto;
-}
-
-.node.plane {
-  justify-self: start;
-  background: var(--ink);
-  color: var(--paper);
-}
-
-/* A diagram: one actor, a pool of machines it could ask for. */
-.pool {
-  display: grid;
-  align-items: center;
-  margin-bottom: 28px;
-  grid-template-columns: auto 40px auto;
-}
-
-.node {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  border-radius: 10px;
-  background: var(--surface);
-  font-size: 14px;
-}
-
-.node.actor {
-  justify-self: start;
-  background: color-mix(in srgb, var(--actor) 14%, var(--surface));
-  color: var(--actor);
-}
-
-.links {
-  height: 0;
-  border-top: 1.5px dashed var(--line-strong);
-}
-
-.targets {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.foot {
-  margin: 14px 0 0;
-  color: var(--muted);
-  font-size: 13.5px;
-}
-</style>

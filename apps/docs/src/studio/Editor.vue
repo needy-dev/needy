@@ -40,7 +40,8 @@ class ChoiceWidget extends WidgetType {
 
   override toDOM(): HTMLElement {
     const button = document.createElement('button')
-    button.className = 'cm-choice'
+    // `cm-choice` is the hook the mousedown handler finds the button by; the rest are its looks.
+    button.className = 'cm-choice ml-[4px] inline-grid h-[18px] w-[18px] place-items-center border-0 rounded-[6px] p-0 bg-actor-soft text-[10px] leading-[1] text-actor [vertical-align:1px] cursor-pointer hover:bg-actor-fill hover:text-[#fff]'
     button.type = 'button'
     button.dataset.index = String(this.index)
     button.setAttribute('aria-label', 'Choose a value')
@@ -172,23 +173,25 @@ onBeforeUnmount(() => view?.destroy())
 </script>
 
 <template>
-  <div class="editor">
-    <div ref="host" class="host" />
+  <div class="relative h-full min-h-0">
+    <div ref="host" class="h-full" />
     <PopoverRoot v-model:open="open">
       <PopoverAnchor as-child>
-        <span class="anchor" :style="{ left: `${anchor.left}px`, top: `${anchor.top}px` }" />
+        <span class="absolute h-[1px] w-[1px]" :style="{ left: `${anchor.left}px`, top: `${anchor.top}px` }" />
       </PopoverAnchor>
       <PopoverPortal>
-        <PopoverContent class="nd-choice-menu" side="bottom" align="start" :side-offset="4" @open-auto-focus.prevent>
-          <p class="path mono">
+        <!-- The popover lives in a portal, so its utilities sit on the content reka-ui renders there. -->
+        <PopoverContent class="z-50 flex min-w-[200px] flex-col gap-[2px] rounded-[12px] p-[6px] bg-surface [box-shadow:var(--shadow-card)]" side="bottom" align="start" :side-offset="4" @open-auto-focus.prevent>
+          <p class="mono m-[2px_8px_6px] text-[12px] text-muted">
             {{ active?.path }}
           </p>
           <button
-            v-for="value in active?.values ?? []" :key="value" type="button" class="option mono"
-            :class="{ on: value === active?.value }" @click="choose(value)"
+            v-for="value in active?.values ?? []" :key="value" type="button"
+            class="mono flex items-center gap-[8px] border-0 rounded-[8px] px-[10px] py-[7px] text-left text-[13.5px] text-ink cursor-pointer hover:bg-control"
+            :class="value === active?.value ? 'bg-control' : 'bg-transparent'" @click="choose(value)"
           >
             <Icon v-if="value === active?.value" name="mingcute:check-line" />
-            <span v-else class="space" />
+            <span v-else class="w-[1em]" />
             {{ value }}
           </button>
         </PopoverContent>
@@ -196,87 +199,3 @@ onBeforeUnmount(() => view?.destroy())
     </PopoverRoot>
   </div>
 </template>
-
-<style scoped>
-.editor {
-  position: relative;
-  height: 100%;
-  min-height: 0;
-}
-
-.host {
-  height: 100%;
-}
-
-.anchor {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-}
-
-.host :deep(.cm-choice) {
-  display: inline-grid;
-  width: 18px;
-  height: 18px;
-  margin-left: 4px;
-  padding: 0;
-  place-items: center;
-  border: 0;
-  border-radius: 6px;
-  background: var(--actor-soft);
-  color: var(--actor);
-  cursor: pointer;
-  font-size: 10px;
-  line-height: 1;
-  vertical-align: 1px;
-}
-
-.host :deep(.cm-choice:hover) {
-  background: var(--actor-fill);
-  color: #fff;
-}
-</style>
-
-<style>
-/* The popover lives in a portal, outside this component's scope. */
-.nd-choice-menu {
-  z-index: 50;
-  display: flex;
-  min-width: 200px;
-  flex-direction: column;
-  gap: 2px;
-  padding: 6px;
-  border-radius: 12px;
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
-}
-
-.nd-choice-menu .path {
-  margin: 2px 8px 6px;
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.nd-choice-menu .option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 7px 10px;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 13.5px;
-  text-align: left;
-}
-
-.nd-choice-menu .option:hover,
-.nd-choice-menu .option.on {
-  background: var(--control);
-}
-
-.nd-choice-menu .space {
-  width: 1em;
-}
-</style>

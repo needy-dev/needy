@@ -19,74 +19,18 @@ const shown = computed(() => props.events.map((event, i) => ({ event, i })).slic
 </script>
 
 <template>
-  <TransitionGroup tag="div" name="event" class="trace mono">
+  <!-- The oldest events leave at the left, so they fade there. -->
+  <TransitionGroup
+    tag="div" leave-active-class="absolute" leave-to-class="opacity-0"
+    class="trace mono relative flex items-center justify-end gap-[8px] overflow-hidden text-[12.5px] [mask-image:linear-gradient(to_right,transparent,#000_64px)]"
+  >
     <span
-      v-for="{ event, i } in shown" :key="i" class="event" :class="{ fresh: i >= fresh }"
+      v-for="{ event, i } in shown" :key="i"
+      class="inline-flex flex-none items-center gap-[7px] whitespace-nowrap rounded-[999px] bg-[var(--soft)] px-[11px] py-[5px] [transition:transform_0.4s_cubic-bezier(0.2,0,0,1),opacity_0.4s]"
+      :class="{ '[animation:enter-right-16_0.4s_cubic-bezier(0.2,0,0,1)_both]': i >= fresh }"
       :style="{ '--fill': color(event.role, 'fill'), '--soft': color(event.role, 'softer'), 'animationDelay': `${delay + (i - fresh) * 160}ms` }"
     >
-      <i class="dot" /><b>{{ event.kind }}</b><span v-if="event.text" class="text">{{ event.text }}</span>
+      <i class="h-[7px] w-[7px] rounded-[50%] bg-[var(--fill)]" /><b class="font-medium">{{ event.kind }}</b><span v-if="event.text" class="text-muted">{{ event.text }}</span>
     </span>
   </TransitionGroup>
 </template>
-
-<style scoped>
-.trace {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-  overflow: hidden;
-  font-size: 12.5px;
-  /* The oldest events leave at the left, so they fade there. */
-  mask-image: linear-gradient(to right, transparent, #000 64px);
-}
-
-.event {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 7px;
-  padding: 5px 11px;
-  border-radius: 999px;
-  background: var(--soft);
-  white-space: nowrap;
-  transition:
-    transform 0.4s cubic-bezier(0.2, 0, 0, 1),
-    opacity 0.4s;
-}
-
-.event.fresh {
-  animation: arrive 0.4s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateX(16px);
-  }
-}
-
-.dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--fill);
-}
-
-b {
-  font-weight: 500;
-}
-
-.text {
-  color: var(--muted);
-}
-
-.event-leave-active {
-  position: absolute;
-}
-
-.event-leave-to {
-  opacity: 0;
-}
-</style>

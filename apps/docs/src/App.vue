@@ -75,73 +75,88 @@ const NAV: Section[] = ORDER.map(id => SECTIONS[id]!)
 <template>
   <component :is="captured" v-if="captured" capture />
   <template v-else>
-    <header class="bar">
-      <a class="mark display" :href="`${base}/`" @click="go('guide', $event)">Needy</a>
-      <nav class="pages">
-        <a :href="`${base}/`" :class="{ on: page === 'guide' }" @click="go('guide', $event)">{{ tr({ en: 'Guide', zh: '指南' }) }}</a>
-        <a :href="`${base}/studio`" :class="{ on: page === 'studio' }" @click="go('studio', $event)">{{ tr({ en: 'Profile Studio', zh: 'Profile 工作台' }) }}</a>
+    <header class="sticky top-0 z-20 flex items-center gap-[8px] px-[20px] py-[10px] bg-paper/86 [backdrop-filter:blur(12px)] max-[600px]:(gap-[6px] px-[12px])">
+      <a class="display text-[22px] text-ink [text-decoration:none] max-[600px]:hidden" :href="`${base}/`" @click="go('guide', $event)">Needy</a>
+      <nav class="ml-[16px] flex gap-[4px] max-[600px]:ml-0">
+        <a :href="`${base}/`" class="whitespace-nowrap rounded-[10px] px-[12px] py-[6px] text-[14.5px] [text-decoration:none] max-[600px]:(px-[10px] text-[14px])" :class="page === 'guide' ? 'bg-control text-ink' : 'text-ink-2'" @click="go('guide', $event)">{{ tr({ en: 'Guide', zh: '指南' }) }}</a>
+        <a :href="`${base}/studio`" class="whitespace-nowrap rounded-[10px] px-[12px] py-[6px] text-[14.5px] [text-decoration:none] max-[600px]:(px-[10px] text-[14px])" :class="page === 'studio' ? 'bg-control text-ink' : 'text-ink-2'" @click="go('studio', $event)">{{ tr({ en: 'Profile Studio', zh: 'Profile 工作台' }) }}</a>
       </nav>
-      <span class="spacer" />
-      <ToggleGroupRoot v-model="locale" type="single" class="langs" :aria-label="tr({ en: 'Language', zh: '语言' })">
-        <ToggleGroupItem value="en" class="lang">
+      <span class="flex-1" />
+      <ToggleGroupRoot v-model="locale" type="single" class="flex rounded-[12px] bg-control p-[3px]" :aria-label="tr({ en: 'Language', zh: '语言' })">
+        <ToggleGroupItem value="en" class="cursor-pointer rounded-[9px] bg-transparent px-[10px] py-[5px] text-[13px] text-ink-2 [border:0] data-[state=on]:(bg-surface text-ink)">
           EN
         </ToggleGroupItem>
-        <ToggleGroupItem value="zh-Hans" class="lang">
+        <ToggleGroupItem value="zh-Hans" class="cursor-pointer rounded-[9px] bg-transparent px-[10px] py-[5px] text-[13px] text-ink-2 [border:0] data-[state=on]:(bg-surface text-ink)">
           中文
         </ToggleGroupItem>
       </ToggleGroupRoot>
-      <button type="button" class="icon-button" :aria-label="tr({ en: 'Switch theme', zh: '切换主题' })" @click="toggleTheme">
+      <button type="button" class="grid h-[36px] w-[36px] cursor-pointer place-items-center rounded-[12px] bg-control text-ink [border:0]" :aria-label="tr({ en: 'Switch theme', zh: '切换主题' })" @click="toggleTheme">
         <Icon :name="theme === 'dark' ? 'mingcute:sun-line' : 'mingcute:moon-line'" :size="18" />
       </button>
-      <a class="icon-button github" :href="repo" aria-label="GitHub"><Icon name="mingcute:github-line" :size="18" /></a>
+      <a class="grid h-[36px] w-[36px] cursor-pointer place-items-center rounded-[12px] bg-control text-ink [border:0] max-[600px]:hidden" :href="repo" aria-label="GitHub"><Icon name="mingcute:github-line" :size="18" /></a>
     </header>
 
-    <main v-if="page === 'studio'" class="studio-page">
-      <h2>{{ tr({ en: 'Profile Studio', zh: 'Profile 工作台' }) }}</h2>
-      <p class="prose">
+    <main v-if="page === 'studio'" class="px-[32px] pb-[64px] pt-[24px] max-[760px]:px-[16px]">
+      <h2 class="m-0 max-w-[24ch] text-[46px] leading-[1.1] tracking-[-0.01em] max-[760px]:text-[34px]">{{ tr({ en: 'Profile Studio', zh: 'Profile 工作台' }) }}</h2>
+      <p class="mx-0 mb-[16px] mt-0 max-w-[640px] text-[19px] text-ink-2 leading-[1.7] last-of-type:mb-[44px]">
         {{ tr({ en: 'Paste a profile or start from an example. Pick values from the ▾ menus, add parts, and try where a command goes.', zh: '粘贴一份 profile，或从示例开始。从 ▾ 菜单里选值、添加组成部分，试试一条命令会去哪里。' }) }}
       </p>
       <Studio />
-      <h2 class="second">
+      <h2 class="mx-0 mb-0 mt-[72px] max-w-[24ch] text-[46px] leading-[1.1] tracking-[-0.01em] max-[760px]:text-[34px]">
         {{ tr({ en: 'Rule playground', zh: '规则试验场' }) }}
       </h2>
       <Playground />
     </main>
 
-    <div v-if="page === 'guide'" class="hero">
+    <div v-if="page === 'guide'" class="mx-auto max-w-[1440px] px-[20px] pb-[24px] pt-[8px] max-[600px]:(px-[16px] py-0)">
       <Hero />
     </div>
 
-    <div v-if="page === 'guide'" class="book">
-      <main class="chapters">
-        <section v-for="(s, n) in NAV" :id="s.id" :key="s.id" class="chapter" :class="{ band: n % 2 === 1 }">
-          <div class="inner">
-          <header class="chapter-head">
-            <span class="eyebrow"><span class="num mono">{{ String(n + 1).padStart(2, '0') }}</span>{{ tr(s.nav) }}<span v-if="s.status" class="status" :class="s.status">{{ tr(STATUS_TEXT[s.status]) }}</span></span>
-            <h2>{{ tr(s.title) }}</h2>
+    <div v-if="page === 'guide'" class="pb-[32px]">
+      <main class="min-w-0 flex flex-col">
+        <!-- Each chapter runs the full width; every other one sits on a band of the surface color, so the page reads
+             in sections without lines between them. On the band, cards take the page's color, so they still stand
+             apart from what they sit on. -->
+        <section
+          v-for="(s, n) in NAV" :id="s.id" :key="s.id" class="scroll-mt-[56px] px-[32px] py-[104px] max-[760px]:(px-[16px] py-[72px])"
+          :class="n % 2 === 1 ? '[--surface:var(--paper)] bg-band' : ''"
+        >
+          <div class="mx-auto max-w-[1200px]">
+          <header class="mb-[20px] flex flex-col gap-[14px]">
+            <span class="flex items-center gap-[10px] text-[14.5px] text-actor tracking-[0.01em]"><span class="mono text-[13px] text-muted">{{ String(n + 1).padStart(2, '0') }}</span>{{ tr(s.nav) }}<span
+              v-if="s.status" class="ml-[4px] whitespace-nowrap rounded-[999px] px-[10px] py-[3px] text-[13px]"
+              :class="s.status === 'partly' ? 'bg-fault/15 text-fault' : s.status === 'vision' ? 'bg-gateway/14 text-gateway' : 'bg-executor/14 text-executor'"
+            >{{ tr(STATUS_TEXT[s.status]) }}</span></span>
+            <h2 class="m-0 max-w-[24ch] text-[46px] leading-[1.1] tracking-[-0.01em] max-[760px]:text-[34px]">{{ tr(s.title) }}</h2>
           </header>
-          <p v-for="(p, i) in s.body" :key="i" class="prose">
+          <p v-for="(p, i) in s.body" :key="i" class="mx-0 mb-[16px] mt-0 max-w-[640px] text-[19px] text-ink-2 leading-[1.7] last-of-type:mb-[44px]">
             <template v-for="(part, j) in inline(tr(p))" :key="j">
-              <code v-if="part.code">{{ part.text }}</code><template v-else>{{ part.text }}</template>
+              <code v-if="part.code" class="rounded-[6px] bg-control px-[6px] py-[1px] text-[0.88em]">{{ part.text }}</code><template v-else>{{ part.text }}</template>
             </template>
           </p>
 
           <Bento v-if="s.id === 'why'" />
           <HarnessLoop v-else-if="s.id === 'harness'" />
           <template v-else-if="s.id === 'separation'">
-            <h3 class="first">{{ tr({ en: 'How this differs from the usual agent sandbox', zh: '和常见的 agent 沙箱有什么不同' }) }}</h3>
-            <div class="compare">
-              <span class="compare-head" />
-              <span class="compare-head">{{ tr({ en: 'The usual sandbox', zh: '常见的沙箱' }) }}</span>
-              <span class="compare-head needy">Needy</span>
+            <h3 class="mx-0 mb-[18px] mt-[16px] text-[24px] font-display font-400">{{ tr({ en: 'How this differs from the usual agent sandbox', zh: '和常见的 agent 沙箱有什么不同' }) }}</h3>
+            <div class="grid grid-cols-[200px_minmax(0,1fr)_minmax(0,1fr)] max-w-[920px] items-baseline gap-x-[28px] gap-y-[14px] max-[760px]:(grid-cols-[minmax(0,1fr)] gap-[4px])">
+              <span class="text-[13px] text-muted max-[760px]:hidden" />
+              <span class="text-[13px] text-muted max-[760px]:hidden">{{ tr({ en: 'The usual sandbox', zh: '常见的沙箱' }) }}</span>
+              <span class="text-[13px] text-actor max-[760px]:hidden">Needy</span>
               <template v-for="row in COMPARISON" :key="row.aspect.en">
-                <span class="aspect">{{ tr(row.aspect) }}</span>
-                <span class="usual" :data-label="tr({ en: 'Usual', zh: '常见' })">{{ tr(row.usual) }}</span>
-                <span class="ours" data-label="Needy">{{ tr(row.needy) }}</span>
+                <span class="text-[15px] text-ink max-[760px]:(mt-[16px] text-[17px] font-display)">{{ tr(row.aspect) }}</span>
+                <span
+                  class="text-[15px] text-muted max-[760px]:(grid grid-cols-[3.5em_minmax(0,1fr)] gap-[8px]) max-[760px]:before:(pt-[2px] text-[13px] text-muted content-[attr(data-label)])"
+                  :data-label="tr({ en: 'Usual', zh: '常见' })"
+                >{{ tr(row.usual) }}</span>
+                <span
+                  class="text-[15px] text-ink max-[760px]:(grid grid-cols-[3.5em_minmax(0,1fr)] gap-[8px]) max-[760px]:before:(pt-[2px] text-[13px] text-actor content-[attr(data-label)])"
+                  data-label="Needy"
+                >{{ tr(row.needy) }}</span>
               </template>
             </div>
-            <h3>{{ tr({ en: 'What it does not do yet', zh: '目前的局限' }) }}</h3>
-            <ul class="limits">
+            <h3 class="mx-0 mb-[18px] mt-[56px] text-[24px] font-display font-400">{{ tr({ en: 'What it does not do yet', zh: '目前的局限' }) }}</h3>
+            <ul class="m-0 max-w-[760px] flex flex-col gap-[10px] py-0 pl-[20px] pr-0 text-[15px] text-ink-2 leading-[1.5]">
               <li v-for="l in LIMITS" :key="l.en">
                 {{ tr(l) }}
               </li>
@@ -149,7 +164,7 @@ const NAV: Section[] = ORDER.map(id => SECTIONS[id]!)
           </template>
           <template v-else-if="s.id === 'isolation'">
             <Isolation />
-            <h3>{{ tr({ en: 'What each actor driver can do', zh: '每种 actor driver 能做什么' }) }}</h3>
+            <h3 class="mx-0 mb-[18px] mt-[56px] text-[24px] font-display font-400">{{ tr({ en: 'What each actor driver can do', zh: '每种 actor driver 能做什么' }) }}</h3>
             <DriverMatrix />
           </template>
           <Recipes v-else-if="s.id === 'identity'" />
@@ -158,7 +173,7 @@ const NAV: Section[] = ORDER.map(id => SECTIONS[id]!)
           <Chaos v-else-if="s.id === 'chaos'" />
           <template v-else-if="s.id === 'config'">
             <Config />
-            <a class="to-studio" :href="`${base}/studio`" @click="go('studio', $event)"><Icon name="mingcute:file-code-line" /> {{ tr({ en: 'Open the profile studio: paste a profile and see the run it sets up', zh: '打开 Profile 工作台：粘贴一份 profile，看它搭起怎样的运行' }) }} <Icon name="mingcute:right-line" /></a>
+            <a class="mt-[24px] inline-flex items-center gap-[8px] rounded-[12px] bg-control px-[16px] py-[10px] text-[15px] text-ink [text-decoration:none] hover:bg-control-2" :href="`${base}/studio`" @click="go('studio', $event)"><Icon name="mingcute:file-code-line" /> {{ tr({ en: 'Open the profile studio: paste a profile and see the run it sets up', zh: '打开 Profile 工作台：粘贴一份 profile，看它搭起怎样的运行' }) }} <Icon name="mingcute:right-line" /></a>
           </template>
           <Cluster v-else-if="s.id === 'cluster'" />
           <Future v-else-if="s.id === 'future'" />
@@ -168,413 +183,9 @@ const NAV: Section[] = ORDER.map(id => SECTIONS[id]!)
       </main>
     </div>
 
-    <footer class="footer">
+    <footer class="px-[16px] pb-[48px] pt-[32px] text-center text-[14px] text-muted">
       <a :href="repo">needy-dev/needy</a> · {{ tr({ en: 'The figures here are the README banners, rendered by', zh: '这里的动图就是 README 里的横幅，由此命令渲染：' }) }}
-      <code>pnpm -F @needy/docs banners</code>
+      <code class="rounded-[6px] bg-control px-[6px] py-[1px] text-[0.88em]">pnpm -F @needy/docs banners</code>
     </footer>
   </template>
 </template>
-
-<style scoped>
-.bar {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 20px;
-  background: color-mix(in srgb, var(--paper) 86%, transparent);
-  backdrop-filter: blur(12px);
-}
-
-.mark {
-  color: var(--ink);
-  font-size: 22px;
-  text-decoration: none;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.langs {
-  display: flex;
-  padding: 3px;
-  border-radius: 12px;
-  background: var(--control);
-}
-
-.lang {
-  padding: 5px 10px;
-  border: 0;
-  border-radius: 9px;
-  background: transparent;
-  color: var(--ink-2);
-  cursor: pointer;
-  font-size: 13px;
-}
-
-.lang[data-state='on'] {
-  background: var(--surface);
-  color: var(--ink);
-}
-
-.icon-button {
-  display: grid;
-  width: 36px;
-  height: 36px;
-  place-items: center;
-  border: 0;
-  border-radius: 12px;
-  background: var(--control);
-  color: var(--ink);
-  cursor: pointer;
-}
-
-.pages {
-  display: flex;
-  gap: 4px;
-  margin-left: 16px;
-}
-
-.pages a {
-  white-space: nowrap;
-  padding: 6px 12px;
-  border-radius: 10px;
-  color: var(--ink-2);
-  font-size: 14.5px;
-  text-decoration: none;
-}
-
-.pages a.on {
-  background: var(--control);
-  color: var(--ink);
-}
-
-.studio-page {
-  padding: 24px 32px 64px;
-}
-
-.studio-page .second {
-  margin-top: 72px;
-}
-
-.to-studio {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 24px;
-  padding: 10px 16px;
-  border-radius: 12px;
-  background: var(--control);
-  color: var(--ink);
-  font-size: 15px;
-  text-decoration: none;
-}
-
-.to-studio:hover {
-  background: var(--control-2);
-}
-
-.hero {
-  max-width: 1440px;
-  margin: 0 auto;
-  padding: 8px 20px 24px;
-}
-
-.book {
-  padding-bottom: 32px;
-}
-
-@media (max-width: 600px) {
-  .bar {
-    gap: 6px;
-    padding: 10px 12px;
-  }
-
-  .mark {
-    display: none;
-  }
-
-  .pages {
-    margin-left: 0;
-  }
-
-  .pages a {
-    padding: 6px 10px;
-    font-size: 14px;
-  }
-
-  .icon-button.github {
-    display: none;
-  }
-
-  .hero {
-    padding: 0 16px;
-  }
-}
-
-@media (max-width: 760px) {
-  .studio-page {
-    padding-right: 16px;
-    padding-left: 16px;
-  }
-}
-
-.chapters {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-}
-
-/* Each chapter runs the full width; every other one sits on a band of the surface color, so the page reads in
-   sections without lines between them. */
-.chapter {
-  padding: 104px 32px;
-  scroll-margin-top: 56px;
-}
-
-.chapter.band {
-  /* On the band, cards take the page's color, so they still stand apart from what they sit on. */
-  --surface: var(--paper);
-  background: var(--band);
-}
-
-.inner {
-  max-width: 1200px;
-  margin: 0 auto;
-}
-
-@media (max-width: 760px) {
-  .chapter {
-    padding: 72px 16px;
-  }
-}
-
-.chapter-head {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  margin-bottom: 20px;
-}
-
-.eyebrow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: var(--actor);
-  font-size: 14.5px;
-  letter-spacing: 0.01em;
-}
-
-.eyebrow .num {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.eyebrow .status {
-  margin-left: 4px;
-}
-
-h2 {
-  max-width: 24ch;
-  margin: 0;
-  font-size: 46px;
-  line-height: 1.1;
-  letter-spacing: -0.01em;
-}
-
-@media (max-width: 760px) {
-  h2 {
-    font-size: 34px;
-  }
-}
-
-h3 {
-  margin: 56px 0 18px;
-  font-family: var(--font-display);
-  font-size: 24px;
-  font-weight: 400;
-}
-
-h3.first {
-  margin-top: 16px;
-}
-
-.prose {
-  max-width: 640px;
-  margin: 0 0 16px;
-  color: var(--ink-2);
-  font-size: 19px;
-  line-height: 1.7;
-}
-
-.prose:last-of-type {
-  margin-bottom: 44px;
-}
-
-.status {
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--executor) 14%, transparent);
-  color: var(--executor);
-  font-size: 13px;
-  white-space: nowrap;
-}
-
-.status.partly {
-  background: color-mix(in srgb, var(--fault) 15%, transparent);
-  color: var(--fault);
-}
-
-.status.vision {
-  background: color-mix(in srgb, var(--gateway) 14%, transparent);
-  color: var(--gateway);
-}
-
-.capabilities {
-  display: grid;
-  gap: 36px 32px;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-}
-
-/* No card around each capability: space and alignment group them, and a hover gives a surface to the one under the pointer. */
-.capability {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: -12px;
-  padding: 12px;
-  border-radius: 16px;
-  color: var(--ink);
-  text-decoration: none;
-  transition: background 0.25s;
-}
-
-.capability:hover {
-  background: var(--control);
-}
-
-.compare {
-  display: grid;
-  max-width: 920px;
-  gap: 14px 28px;
-  align-items: baseline;
-  grid-template-columns: 200px minmax(0, 1fr) minmax(0, 1fr);
-}
-
-.compare-head {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.compare-head.needy {
-  color: var(--actor);
-}
-
-.aspect {
-  color: var(--ink);
-  font-size: 15px;
-}
-
-.usual {
-  color: var(--muted);
-  font-size: 15px;
-}
-
-.ours {
-  color: var(--ink);
-  font-size: 15px;
-}
-
-@media (max-width: 760px) {
-  .compare {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 4px;
-  }
-
-  .compare-head {
-    display: none;
-  }
-
-  .aspect {
-    margin-top: 16px;
-    color: var(--ink);
-    font-family: var(--font-display);
-    font-size: 17px;
-  }
-
-  .usual,
-  .ours {
-    display: grid;
-    gap: 8px;
-    grid-template-columns: 3.5em minmax(0, 1fr);
-  }
-
-  .usual::before,
-  .ours::before {
-    padding-top: 2px;
-    color: var(--muted);
-    content: attr(data-label);
-    font-size: 13px;
-  }
-
-  .ours::before {
-    color: var(--actor);
-  }
-}
-
-.limits {
-  display: flex;
-  max-width: 760px;
-  flex-direction: column;
-  gap: 10px;
-  margin: 0;
-  padding: 0 0 0 20px;
-  color: var(--ink-2);
-  font-size: 15px;
-  line-height: 1.5;
-}
-
-.tile {
-  display: grid;
-  width: 40px;
-  height: 40px;
-  place-items: center;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--actor) 13%, transparent);
-  color: var(--actor);
-}
-
-.capability strong {
-  font-size: 18px;
-  font-weight: 400;
-  line-height: 1.25;
-}
-
-.capability .text {
-  flex: 1;
-  color: var(--ink-2);
-  font-size: 14.5px;
-  line-height: 1.5;
-}
-
-.capability .status {
-  align-self: flex-start;
-}
-
-code {
-  padding: 1px 6px;
-  border-radius: 6px;
-  background: var(--control);
-  font-size: 0.88em;
-}
-
-.footer {
-  padding: 32px 16px 48px;
-  color: var(--muted);
-  font-size: 14px;
-  text-align: center;
-}
-</style>

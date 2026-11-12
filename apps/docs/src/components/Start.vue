@@ -219,314 +219,112 @@ async function copy(i: number, text: string): Promise<void> {
   copied.value = i
   setTimeout(() => (copied.value = undefined), 1400)
 }
+
+/** One question: what it asks, the answers as a row of choices, and a muted aside or hint. */
+const Q = 'flex flex-col gap-[10px]'
+const ASK = 'font-display text-[18px]'
+const CHOICES = 'flex flex-wrap gap-[6px]'
+const CHOICE = 'inline-flex cursor-pointer items-center gap-[8px] rounded-[12px] border-0 bg-control px-[14px] py-[9px] text-left text-[14.5px] text-ink-2 [transition:background_0.2s] [&:hover:not([data-state=on])]:bg-control-2 data-[state=on]:(bg-[color-mix(in_srgb,var(--actor)_16%,var(--control))] text-ink)'
+const ASIDE = 'text-[13px] text-muted'
 </script>
 
 <template>
-  <div class="start">
-    <div class="questions">
-      <div class="q">
-        <span class="ask">{{ tr({ en: 'Where should the agent harness run?', zh: 'agent harness 运行在哪里？' }) }}</span>
-        <ToggleGroupRoot v-model="where" type="single" class="choices">
-          <ToggleGroupItem v-for="c in WHERE" :key="c.value" :value="c.value" class="choice">
+  <div class="grid items-start gap-[56px] grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] max-[960px]:grid-cols-[minmax(0,1fr)]">
+    <!-- Beside the steps the questions follow the reader down; stacked above them they must scroll away. -->
+    <div class="top-[88px] flex flex-col gap-[28px] min-[961px]:sticky">
+      <div :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Where should the agent harness run?', zh: 'agent harness 运行在哪里？' }) }}</span>
+        <ToggleGroupRoot v-model="where" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in WHERE" :key="c.value" :value="c.value" :class="CHOICE">
             <Icon v-if="c.icon" :name="c.icon" /> {{ tr(c.label) }}
-            <span v-if="c.hint" class="hint">{{ tr(c.hint) }}</span>
+            <span v-if="c.hint" :class="ASIDE">{{ tr(c.hint) }}</span>
           </ToggleGroupItem>
         </ToggleGroupRoot>
       </div>
-      <div class="q">
-        <span class="ask">{{ tr({ en: `What runs on ${host}?`, zh: `${host}上是什么系统？` }) }}</span>
-        <ToggleGroupRoot v-model="os" type="single" class="choices">
-          <ToggleGroupItem v-for="c in OS" :key="c.value" :value="c.value" class="choice">
+      <div :class="Q">
+        <span :class="ASK">{{ tr({ en: `What runs on ${host}?`, zh: `${host}上是什么系统？` }) }}</span>
+        <ToggleGroupRoot v-model="os" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in OS" :key="c.value" :value="c.value" :class="CHOICE">
             <Icon v-if="c.icon" :name="c.icon" /> {{ tr(c.label) }}
           </ToggleGroupItem>
         </ToggleGroupRoot>
-        <span class="aside">{{ tr({ en: 'Windows can be an executor, not an actor host.', zh: 'Windows 可以作为 executor，但不能运行 actor。' }) }}</span>
+        <span :class="ASIDE">{{ tr({ en: 'Windows can be an executor, not an actor host.', zh: 'Windows 可以作为 executor，但不能运行 actor。' }) }}</span>
       </div>
-      <div v-if="os === 'linux'" class="q">
-        <span class="ask">{{ tr({ en: 'Which package manager?', zh: '用哪个包管理器？' }) }}</span>
-        <ToggleGroupRoot v-model="pm" type="single" class="choices">
-          <ToggleGroupItem v-for="c in PM" :key="c.value" :value="c.value" class="choice">
+      <div v-if="os === 'linux'" :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Which package manager?', zh: '用哪个包管理器？' }) }}</span>
+        <ToggleGroupRoot v-model="pm" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in PM" :key="c.value" :value="c.value" :class="CHOICE">
             {{ tr(c.label) }}
           </ToggleGroupItem>
         </ToggleGroupRoot>
       </div>
-      <div v-else class="q">
-        <span class="ask">{{ tr({ en: 'Package manager', zh: '包管理器' }) }}</span>
-        <span class="aside">{{ tr({ en: 'Homebrew, from brew.sh.', zh: 'Homebrew，见 brew.sh。' }) }}</span>
+      <div v-else :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Package manager', zh: '包管理器' }) }}</span>
+        <span :class="ASIDE">{{ tr({ en: 'Homebrew, from brew.sh.', zh: 'Homebrew，见 brew.sh。' }) }}</span>
       </div>
-      <div v-if="os === 'linux'" class="q">
-        <span class="ask">{{ tr({ en: 'Does it have KVM?', zh: '它有 KVM 吗？' }) }}</span>
-        <div class="check">
-          <Shell code="ls -l /dev/kvm" class="check-code" />
-          <button type="button" class="check-copy" :aria-label="tr({ en: 'Copy', zh: '复制' })" @click="copy(-1, 'ls -l /dev/kvm')">
+      <div v-if="os === 'linux'" :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Does it have KVM?', zh: '它有 KVM 吗？' }) }}</span>
+        <div class="inline-flex items-center self-start gap-[10px] rounded-[10px] bg-term py-[6px] pl-[14px] pr-[6px] text-term-ink">
+          <Shell code="ls -l /dev/kvm" class="m-0 text-[13.5px]" />
+          <button type="button" class="grid h-[28px] w-[28px] cursor-pointer place-items-center rounded-[7px] border-0 bg-[rgb(255_255_255/10%)] text-term-ink" :aria-label="tr({ en: 'Copy', zh: '复制' })" @click="copy(-1, 'ls -l /dev/kvm')">
             <Icon :name="copied === -1 ? 'mingcute:check-line' : 'mingcute:file-code-line'" />
           </button>
         </div>
-        <span class="aside">{{ tr({ en: 'If it lists /dev/kvm, the answer is yes.', zh: '能列出 /dev/kvm 就是"有"。' }) }}</span>
-        <ToggleGroupRoot v-model="kvm" type="single" class="choices">
-          <ToggleGroupItem v-for="c in YES_NO" :key="c.value" :value="c.value" class="choice">
+        <span :class="ASIDE">{{ tr({ en: 'If it lists /dev/kvm, the answer is yes.', zh: '能列出 /dev/kvm 就是"有"。' }) }}</span>
+        <ToggleGroupRoot v-model="kvm" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in YES_NO" :key="c.value" :value="c.value" :class="CHOICE">
             {{ tr(c.label) }}
           </ToggleGroupItem>
         </ToggleGroupRoot>
       </div>
-      <div v-else class="q">
-        <span class="ask">{{ tr({ en: 'Which Mac runtime?', zh: '用哪种 Mac 运行时？' }) }}</span>
-        <ToggleGroupRoot v-model="macRuntime" type="single" class="choices">
-          <ToggleGroupItem v-for="c in MAC" :key="c.value" :value="c.value" class="choice">
-            {{ tr(c.label) }} <span v-if="c.hint" class="hint">{{ tr(c.hint) }}</span>
+      <div v-else :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Which Mac runtime?', zh: '用哪种 Mac 运行时？' }) }}</span>
+        <ToggleGroupRoot v-model="macRuntime" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in MAC" :key="c.value" :value="c.value" :class="CHOICE">
+            {{ tr(c.label) }} <span v-if="c.hint" :class="ASIDE">{{ tr(c.hint) }}</span>
           </ToggleGroupItem>
         </ToggleGroupRoot>
       </div>
-      <div class="q">
-        <span class="ask">{{ tr({ en: 'Where should its commands run?', zh: '它的命令在哪里执行？' }) }}</span>
-        <ToggleGroupRoot v-model="exec" type="single" class="choices">
-          <ToggleGroupItem v-for="c in EXEC" :key="c.value" :value="c.value" class="choice">
+      <div :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Where should its commands run?', zh: '它的命令在哪里执行？' }) }}</span>
+        <ToggleGroupRoot v-model="exec" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in EXEC" :key="c.value" :value="c.value" :class="CHOICE">
             <Icon v-if="c.icon" :name="c.icon" /> {{ tr(c.label) }}
           </ToggleGroupItem>
         </ToggleGroupRoot>
       </div>
-      <div v-if="needsDocker" class="q">
-        <span class="ask">{{ tr({ en: 'Is Docker (or another Docker-compatible engine) installed?', zh: '装了 Docker（或其他兼容 Docker 的引擎）吗？' }) }}</span>
-        <ToggleGroupRoot v-model="docker" type="single" class="choices">
-          <ToggleGroupItem v-for="c in YES_NO" :key="c.value" :value="c.value" class="choice">
+      <div v-if="needsDocker" :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Is Docker (or another Docker-compatible engine) installed?', zh: '装了 Docker（或其他兼容 Docker 的引擎）吗？' }) }}</span>
+        <ToggleGroupRoot v-model="docker" type="single" :class="CHOICES">
+          <ToggleGroupItem v-for="c in YES_NO" :key="c.value" :value="c.value" :class="CHOICE">
             {{ tr(c.label) }}
           </ToggleGroupItem>
         </ToggleGroupRoot>
       </div>
 
-      <p class="picked">
-        {{ tr({ en: 'Your actor driver:', zh: '你的 actor driver：' }) }} <code>{{ driver }}</code>
+      <p class="m-0 text-[15px] text-ink-2">
+        {{ tr({ en: 'Your actor driver:', zh: '你的 actor driver：' }) }} <code class="text-actor">{{ driver }}</code>
       </p>
     </div>
 
-    <ol class="steps">
-      <li v-for="(s, i) in steps" :key="`${i}-${s.title.en}`" class="step" :class="{ todo: s.todo }">
-        <span class="n mono">{{ s.todo ? '—' : i + 1 }}</span>
-        <div class="body">
-          <span class="title display">{{ tr(s.title) }}</span>
-          <span v-if="s.where" class="where">{{ tr(s.where) }}</span>
-          <div v-if="s.code" class="code">
-            <Shell :code="s.code" class="block" />
-            <button type="button" class="copy" :aria-label="tr({ en: 'Copy', zh: '复制' })" @click="copy(i, s.code)">
+    <ol class="m-0 flex list-none flex-col gap-[36px] p-0">
+      <li v-for="(s, i) in steps" :key="`${i}-${s.title.en}`" class="grid gap-[16px] grid-cols-[28px_minmax(0,1fr)]">
+        <span class="mono grid h-[28px] w-[28px] place-items-center rounded-[8px] text-[13px]" :class="s.todo ? 'bg-control text-muted' : 'bg-actor/14 text-actor'">{{ s.todo ? '—' : i + 1 }}</span>
+        <div class="flex min-w-0 flex-col gap-[8px]">
+          <span class="display text-[19px]" :class="{ 'text-muted': s.todo }">{{ tr(s.title) }}</span>
+          <span v-if="s.where" class="text-[13.5px] text-muted">{{ tr(s.where) }}</span>
+          <div v-if="s.code" class="relative">
+            <Shell :code="s.code" class="m-0 overflow-x-auto rounded-[12px] bg-term pb-[14px] pl-[16px] pr-[48px] pt-[14px] text-[13px] leading-[1.6] text-term-ink" />
+            <!-- The button is opaque, so a long line that scrolls under it does not show through. -->
+            <button type="button" class="absolute right-[8px] top-[8px] grid h-[30px] w-[30px] cursor-pointer place-items-center rounded-[8px] border-0 bg-[color-mix(in_srgb,var(--term-ink)_12%,var(--term))] text-term-ink [box-shadow:0_0_0_6px_var(--term)] hover:bg-[color-mix(in_srgb,var(--term-ink)_20%,var(--term))]" :aria-label="tr({ en: 'Copy', zh: '复制' })" @click="copy(i, s.code)">
               <Icon :name="copied === i ? 'mingcute:check-line' : 'mingcute:file-code-line'" />
             </button>
           </div>
           <Yaml v-if="s.yaml" :code="s.yaml" />
-          <span v-if="s.note" class="note">{{ tr(s.note) }}</span>
-          <span v-if="s.todo" class="note">{{ tr(s.todo) }}</span>
+          <span v-if="s.note" class="text-[14px] leading-[1.5] text-ink-2">{{ tr(s.note) }}</span>
+          <span v-if="s.todo" class="text-[14px] leading-[1.5] text-ink-2">{{ tr(s.todo) }}</span>
         </div>
       </li>
     </ol>
   </div>
 </template>
-
-<style scoped>
-.start {
-  display: grid;
-  align-items: start;
-  gap: 56px;
-  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
-}
-
-@media (max-width: 960px) {
-  .start {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-/* Beside the steps the questions follow the reader down; stacked above them they must scroll away. */
-@media (min-width: 961px) {
-  .questions {
-    position: sticky;
-  }
-}
-
-.questions {
-  top: 88px;
-  display: flex;
-  flex-direction: column;
-  gap: 28px;
-}
-
-.q {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.ask {
-  font-family: var(--font-display);
-  font-size: 18px;
-}
-
-.check {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  gap: 10px;
-  padding: 6px 6px 6px 14px;
-  border-radius: 10px;
-  background: var(--term);
-  color: var(--term-ink);
-}
-
-.check-code {
-  margin: 0;
-  font-size: 13.5px;
-}
-
-.check-copy {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border: 0;
-  border-radius: 7px;
-  background: rgb(255 255 255 / 10%);
-  color: var(--term-ink);
-  cursor: pointer;
-}
-
-.choices {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.choice {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 9px 14px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--control);
-  color: var(--ink-2);
-  cursor: pointer;
-  font-size: 14.5px;
-  text-align: left;
-  transition: background 0.2s;
-}
-
-.choice:hover {
-  background: var(--control-2);
-}
-
-.choice[data-state='on'] {
-  background: color-mix(in srgb, var(--actor) 16%, var(--control));
-  color: var(--ink);
-}
-
-.hint {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.aside {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.picked {
-  margin: 0;
-  color: var(--ink-2);
-  font-size: 15px;
-}
-
-.picked code {
-  color: var(--actor);
-}
-
-.steps {
-  display: flex;
-  flex-direction: column;
-  gap: 36px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.step {
-  display: grid;
-  gap: 16px;
-  grid-template-columns: 28px minmax(0, 1fr);
-}
-
-.n {
-  display: grid;
-  width: 28px;
-  height: 28px;
-  place-items: center;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--actor) 14%, transparent);
-  color: var(--actor);
-  font-size: 13px;
-}
-
-.todo .n {
-  background: var(--control);
-  color: var(--muted);
-}
-
-.body {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.title {
-  font-size: 19px;
-}
-
-.todo .title {
-  color: var(--muted);
-}
-
-.where {
-  color: var(--muted);
-  font-size: 13.5px;
-}
-
-.code {
-  position: relative;
-}
-
-.block {
-  overflow-x: auto;
-  margin: 0;
-  padding: 14px 48px 14px 16px;
-  border-radius: 12px;
-  background: var(--term);
-  color: var(--term-ink);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.copy {
-  position: absolute;
-  top: 8px;
-  right: 8px;
-  display: grid;
-  width: 30px;
-  height: 30px;
-  place-items: center;
-  border: 0;
-  border-radius: 8px;
-  /* Opaque, so a long line that scrolls under the button does not show through it. */
-  background: color-mix(in srgb, var(--term-ink) 12%, var(--term));
-  box-shadow: 0 0 0 6px var(--term);
-  color: var(--term-ink);
-  cursor: pointer;
-}
-
-.copy:hover {
-  background: color-mix(in srgb, var(--term-ink) 20%, var(--term));
-}
-
-.note {
-  color: var(--ink-2);
-  font-size: 14px;
-  line-height: 1.5;
-}
-</style>

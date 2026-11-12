@@ -205,37 +205,47 @@ function packets(at: number): Packet[] {
   }
   return list
 }
+
+// A row of the control plane's parts.
+const PART = 'flex flex-wrap items-baseline gap-x-[8px] gap-y-[4px] p-[7px_10px] rounded-[9px] bg-control text-[13.5px]'
 </script>
 
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Cluster: Linux, Mac and Windows machines join one control plane as runners. They dial out and send heartbeats; a profile's runner selectors place the actor on kvm and executors on kvm and mac; a command from the actor runs on the Mac over the connection the Mac dialed.">
     <template #default="{ at }">
-      <svg class="lines" :width="W" :height="H" aria-hidden="true">
+      <svg class="absolute inset-0 pointer-events-none" :width="W" :height="H" aria-hidden="true">
         <defs>
           <marker id="cluster-arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M0 1 L9 5 L0 9 z" class="head" />
+            <path d="M0 1 L9 5 L0 9 z" class="fill-ink/40" />
           </marker>
         </defs>
         <path
-          v-for="r in RUNNERS" :key="r.id" :d="dial(r)" class="dial"
-          :class="{ up: STEPS[at]!.joined, dim: STEPS[at]!.joined && !STEPS[at]!.focus.includes(r.id) }"
+          v-for="r in RUNNERS" :key="r.id" :d="dial(r)" class="fill-none [stroke-width:1.6] [stroke-linecap:round] [transition:stroke_0.4s,opacity_0.4s]"
+          :class="[STEPS[at]!.joined ? 'stroke-ink/40' : 'stroke-line [stroke-dasharray:1.5_6]', STEPS[at]!.joined && !STEPS[at]!.focus.includes(r.id) && 'opacity-35']"
           marker-end="url(#cluster-arrow)"
         />
       </svg>
 
-      <div class="ops">
+      <!-- A narrower type, so `needy runner ls` keeps its columns. -->
+      <div class="absolute top-[24px] left-[24px] w-[600px] h-[214px] [&_.terminal]:text-[11px] [&_.line]:min-h-[17.6px]">
         <Terminal v-bind="screenAt(at)" title="Operator · control host" :rows="8" :play="at" />
       </div>
 
       <Machine v-bind="PLANE" role="host" icon="mingcute:server-2-line" title="Control Plane" sub="needy daemon --mode control" :focus="STEPS[at]!.focus.includes('plane') ? 'focus' : 'idle'">
-        <ul class="parts">
-          <li><b>Control daemon</b><span>schedules runs, routes their work</span></li>
-          <li><b>Runner registry</b><span>names, roles, labels, heartbeats</span></li>
-          <li><b>Trace</b><code>trace.db</code><code>state.db</code></li>
+        <ul class="flex flex-col gap-[8px] m-[6px_0_0] p-0 list-none">
+          <li :class="PART">
+            <b class="font-medium">Control daemon</b><span class="text-[12.5px] text-muted">schedules runs, routes their work</span>
+          </li>
+          <li :class="PART">
+            <b class="font-medium">Runner registry</b><span class="text-[12.5px] text-muted">names, roles, labels, heartbeats</span>
+          </li>
+          <li :class="PART">
+            <b class="font-medium">Trace</b><code class="p-[0_6px] rounded-[5px] bg-trace-softer text-[12px] text-trace">trace.db</code><code class="p-[0_6px] rounded-[5px] bg-trace-softer text-[12px] text-trace">state.db</code>
+          </li>
         </ul>
       </Machine>
 
-      <div class="profile" :class="{ shown: STEPS[at]!.scheduled }">
+      <div class="absolute top-[24px] left-[1016px] w-[400px] [transition:opacity_0.4s] [&_.yaml]:text-[12.5px]" :class="!STEPS[at]!.scheduled && 'opacity-35'">
         <Yaml :code="PROFILE_YAML" :lit="STEPS[at]!.lit" role="actor" title="profiles/cluster.yaml" />
       </div>
 
@@ -243,19 +253,25 @@ function packets(at: number): Packet[] {
         v-for="r in RUNNERS" :key="r.id" :x="r.x" :y="RUNNER_Y" :w="r.w" :h="RUNNER_H" role="host"
         title="Runner" :name="r.id" :sub="r.host" :icon="r.icon" :focus="runnerFocus(at, r.id)"
       >
-        <div class="meta">
-          <span class="status" :class="{ online: STEPS[at]!.joined }"><i />{{ STEPS[at]!.joined ? 'online' : 'not joined' }}</span>
-          <span v-for="label in r.labels" :key="label" class="label mono">{{ label }}</span>
+        <div class="flex flex-wrap items-center gap-[6px] mt-[4px]">
+          <span class="inline-flex items-center gap-[6px] p-[3px_10px] rounded-[999px] text-[12.5px]" :class="STEPS[at]!.joined ? 'bg-executor-softer text-executor' : 'bg-control text-muted'">
+            <i class="w-[7px] h-[7px] rounded-[50%]" :class="STEPS[at]!.joined ? 'bg-executor-fill animate-[beat_1.6s_ease-in-out_infinite]' : 'bg-faint'" />{{ STEPS[at]!.joined ? 'online' : 'not joined' }}
+          </span>
+          <span v-for="label in r.labels" :key="label" class="mono p-[3px_9px] rounded-[999px] bg-control text-[12px] text-ink-2">{{ label }}</span>
         </div>
-        <code class="caps">{{ r.capabilities }}</code>
-        <p v-if="r.id === 'win'" class="empty" :class="{ shown: STEPS[at]!.scheduled }">
+        <code class="text-[12px] leading-[1.5] text-muted">{{ r.capabilities }}</code>
+        <p v-if="r.id === 'win'" class="m-[34px_0_0] text-[14px] text-center text-muted [transition:opacity_0.4s_0.6s]" :class="!STEPS[at]!.scheduled && 'opacity-0'">
           This run places nothing here.
         </p>
       </Machine>
 
-      <div class="land" :class="{ landed: STEPS[at]!.scheduled }">
+      <!-- The run's instances drop onto their runners when it is created. -->
+      <div
+        class="absolute inset-0 pointer-events-none [transition:opacity_0.5s_0.9s,transform_0.6s_0.9s_cubic-bezier(0.2,0,0,1)]"
+        :class="!STEPS[at]!.scheduled && 'opacity-0 [transform:translateY(-36px)]'"
+      >
         <Pod v-bind="ACTOR" driver="linux-firecracker" badge="" :focus="STEPS[at]!.routed ? 'focus' : 'idle'">
-          <code class="inside">opencode</code>
+          <code class="text-[13px] text-actor">opencode</code>
         </Pod>
         <Machine v-bind="BUILD" title="Executor" name="build" icon="mingcute:cube-line" sub="linux-container" />
         <Machine v-bind="MAC_EXEC" title="Executor" name="mac" icon="mingcute:laptop-line" sub="native" :focus="STEPS[at]!.routed ? 'focus' : 'idle'" />
@@ -265,197 +281,3 @@ function packets(at: number): Packet[] {
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.lines {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.dial {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1.6;
-  stroke-dasharray: 1.5 6;
-  stroke-linecap: round;
-  transition:
-    stroke 0.4s,
-    opacity 0.4s;
-}
-
-.dial.up {
-  stroke: color-mix(in srgb, var(--ink) 40%, transparent);
-  stroke-dasharray: none;
-}
-
-.dial.dim {
-  opacity: 0.35;
-}
-
-.head {
-  fill: color-mix(in srgb, var(--ink) 40%, transparent);
-}
-
-.ops {
-  position: absolute;
-  top: 24px;
-  left: 24px;
-  width: 600px;
-  height: 214px;
-}
-
-/* A narrower type, so `needy runner ls` keeps its columns. */
-.ops :deep(.terminal) {
-  font-size: 11px;
-}
-
-.ops :deep(.line) {
-  min-height: 17.6px;
-}
-
-.parts {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 6px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.parts li {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 8px;
-  padding: 7px 10px;
-  border-radius: 9px;
-  background: var(--control);
-  font-size: 13.5px;
-}
-
-.parts b {
-  font-weight: 500;
-}
-
-.parts span {
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.parts code {
-  padding: 0 6px;
-  border-radius: 5px;
-  background: var(--trace-softer);
-  color: var(--trace);
-  font-size: 12px;
-}
-
-.profile {
-  position: absolute;
-  top: 24px;
-  left: 1016px;
-  width: 400px;
-  opacity: 0.35;
-  transition: opacity 0.4s;
-}
-
-.profile.shown {
-  opacity: 1;
-}
-
-.profile :deep(.yaml) {
-  font-size: 12.5px;
-}
-
-.meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: var(--control);
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-.status i {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--faint);
-}
-
-.status.online {
-  background: var(--executor-softer);
-  color: var(--executor);
-}
-
-.status.online i {
-  background: var(--executor-fill);
-  animation: beat 1.6s ease-in-out infinite;
-}
-
-@keyframes beat {
-  50% {
-    opacity: 0.3;
-  }
-}
-
-.label {
-  padding: 3px 9px;
-  border-radius: 999px;
-  background: var(--control);
-  color: var(--ink-2);
-  font-size: 12px;
-}
-
-.caps {
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.empty {
-  margin: 34px 0 0;
-  color: var(--muted);
-  font-size: 14px;
-  text-align: center;
-  opacity: 0;
-  transition: opacity 0.4s 0.6s;
-}
-
-.empty.shown {
-  opacity: 1;
-}
-
-/* The run's instances drop onto their runners when it is created. */
-.land {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  pointer-events: none;
-  transform: translateY(-36px);
-  transition:
-    opacity 0.5s 0.9s,
-    transform 0.6s 0.9s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.land.landed {
-  opacity: 1;
-  transform: none;
-}
-
-.inside {
-  color: var(--actor);
-  font-size: 13px;
-}
-</style>

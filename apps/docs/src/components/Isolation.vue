@@ -27,63 +27,14 @@ const LINE: Record<string, Text> = {
 </script>
 
 <template>
-  <ul class="options">
-    <li v-for="d in DRIVERS" :key="d.id" class="option">
-      <span class="logos"><Logo v-for="l in d.logos" :key="l" :name="l" :size="28" /></span>
-      <span class="kind">{{ tr(KIND[d.id]) }}</span>
-      <strong class="display">{{ d.title }}</strong>
-      <code class="id">{{ d.id }}</code>
-      <span class="line">{{ tr(LINE[d.id]) }}</span>
-      <span class="host">{{ d.host }}</span>
+  <ul class="m-0 grid list-none gap-[32px] p-0 grid-cols-[repeat(auto-fill,minmax(220px,1fr))]">
+    <li v-for="d in DRIVERS" :key="d.id" class="flex flex-col gap-[6px]">
+      <span class="mb-[6px] flex gap-[6px]"><Logo v-for="l in d.logos" :key="l" :name="l" :size="28" /></span>
+      <span class="text-[13px] text-muted">{{ tr(KIND[d.id]) }}</span>
+      <strong class="display text-[20px] font-normal">{{ d.title }}</strong>
+      <code class="text-[13px] text-actor">{{ d.id }}</code>
+      <span class="text-[15px] text-ink-2 leading-[1.45]">{{ tr(LINE[d.id]) }}</span>
+      <span class="text-[13.5px] text-muted">{{ d.host }}</span>
     </li>
   </ul>
 </template>
-
-<style scoped>
-.options {
-  display: grid;
-  gap: 32px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-}
-
-.option {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.logos {
-  display: flex;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.kind {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-strong {
-  font-size: 20px;
-  font-weight: 400;
-}
-
-.id {
-  color: var(--actor);
-  font-size: 13px;
-}
-
-.line {
-  color: var(--ink-2);
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.host {
-  color: var(--muted);
-  font-size: 13.5px;
-}
-</style>

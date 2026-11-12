@@ -44,101 +44,30 @@ const lines = computed(() => props.code.split('\n').map((line, i) => ({
   lit: props.lit.includes(i),
   role: props.roles[i] ?? props.role,
 })))
+
+const TOKEN: Record<Part['kind'], string> = {
+  key: 'text-code-key',
+  string: 'text-code-string',
+  comment: 'text-code-comment',
+  punct: 'text-code-punct',
+  plain: '',
+}
 </script>
 
 <template>
-  <div class="profile mono" :class="{ titled: title }">
-    <div v-if="title" class="title">
+  <!-- Keep in step with profileLineY in profile.ts: 10px above the lines, 30px with a title, 20px a line. -->
+  <div class="mono overflow-hidden rounded-[14px] bg-surface text-[13px]">
+    <div v-if="title" class="h-[24px] px-[18px] pb-0 pt-[8px] font-sans text-[12.5px] text-muted leading-[16px]">
       {{ title }}
     </div>
-    <pre><code><span
-      v-for="(line, i) in lines" :key="i" class="line" :class="{ lit: line.lit, faded: lit.length > 0 && !line.lit }"
+    <pre class="m-0 px-0 pb-[12px] leading-[20px]" :class="title ? 'pt-[6px]' : 'pt-[10px]'"><code><span
+      v-for="(line, i) in lines" :key="i" class="relative block h-[20px] py-0 pl-[22px] pr-[16px] whitespace-pre [transition:background_0.35s,opacity_0.35s]"
+      :class="{ 'bg-role/11': line.lit, 'opacity-45': lit.length > 0 && !line.lit }"
       :style="{ '--role': color(line.role), '--role-fill': color(line.role, 'fill') }"
-    ><i class="pill" /><span v-for="(part, j) in line.parts" :key="j" :class="part.kind">{{ part.text }}</span>
+    ><i
+      class="absolute left-[8px] top-[6px] h-[8px] w-[6px] rounded-[3px] bg-role-fill [transition:opacity_0.35s,transform_0.35s_cubic-bezier(0.2,0,0,1)]"
+      :class="line.lit ? 'opacity-100 [transform:none]' : 'opacity-0 [transform:scale(0.4)]'"
+    /><span v-for="(part, j) in line.parts" :key="j" :class="TOKEN[part.kind]">{{ part.text }}</span>
 </span></code></pre>
   </div>
 </template>
-
-<style scoped>
-/* Keep in step with profileLineY in profile.ts: 10px above the lines, 30px with a title, 20px a line. */
-.profile {
-  overflow: hidden;
-  border-radius: 14px;
-  background: var(--surface);
-  font-size: 13px;
-}
-
-.title {
-  height: 24px;
-  padding: 8px 18px 0;
-  color: var(--muted);
-  font-family: var(--font-sans);
-  font-size: 12.5px;
-  line-height: 16px;
-}
-
-pre {
-  margin: 0;
-  padding: 10px 0 12px;
-  line-height: 20px;
-}
-
-.titled pre {
-  padding-top: 6px;
-}
-
-.line {
-  position: relative;
-  display: block;
-  height: 20px;
-  padding: 0 16px 0 22px;
-  white-space: pre;
-  transition:
-    background 0.35s,
-    opacity 0.35s;
-}
-
-.pill {
-  position: absolute;
-  top: 6px;
-  left: 8px;
-  width: 6px;
-  height: 8px;
-  border-radius: 3px;
-  background: var(--role-fill);
-  opacity: 0;
-  transform: scale(0.4);
-  transition:
-    opacity 0.35s,
-    transform 0.35s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.line.lit {
-  background: color-mix(in srgb, var(--role) 11%, transparent);
-}
-
-.line.lit .pill {
-  opacity: 1;
-  transform: none;
-}
-
-.line.faded {
-  opacity: 0.45;
-}
-
-.key {
-  color: var(--code-key);
-}
-
-.string {
-  color: var(--code-string);
-}
-
-.comment {
-  color: var(--code-comment);
-}
-
-.punct {
-  color: var(--code-punct);
-}
-</style>

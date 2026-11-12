@@ -166,19 +166,23 @@ function screenHeight(at: number): number {
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Getting started: install needy, start the control daemon, check a profile, run it, and read the report.">
     <template #default="{ at }">
-      <ol class="phases">
-        <li v-for="(phase, i) in PHASES" :key="phase" :class="{ on: STEPS[at]!.phase === i, done: STEPS[at]!.phase > i }">
-          <span class="n mono">{{ i + 1 }}</span>{{ phase }}
+      <ol class="absolute top-[26px] left-[50%] m-0 flex list-none gap-[6px] rounded-[18px] p-[5px] bg-control [transform:translateX(-50%)]">
+        <li
+          v-for="(phase, i) in PHASES" :key="phase"
+          class="flex items-center gap-[9px] rounded-[13px] px-[16px] py-[8px] text-[16px] [transition:background_0.3s,color_0.3s]"
+          :class="STEPS[at]!.phase === i ? 'text-ink bg-surface' : STEPS[at]!.phase > i ? 'text-ink-2' : 'text-muted'"
+        >
+          <span class="mono grid h-[22px] w-[22px] place-items-center rounded-[50%] text-[12px]" :class="STEPS[at]!.phase === i ? 'text-[#fff] bg-actor-fill' : 'bg-control-2'">{{ i + 1 }}</span>{{ phase }}
         </li>
       </ol>
 
-      <div class="code">
+      <div class="absolute top-[96px] left-[48px] w-[560px]">
         <Profile :code="DEMO_PROFILE" :lit="STEPS[at]!.lit" :role="STEPS[at]!.on === 'build' ? 'executor' : 'actor'" title="~/.config/needy/profiles/demo.yaml" />
       </div>
 
-      <div class="host">
-        <span class="host-label">On the control host</span>
-        <div class="parts">
+      <div class="absolute top-[348px] left-[48px] w-[560px]">
+        <span class="font-display text-[15px] text-muted">On the control host</span>
+        <div class="mt-[10px] grid grid-cols-[1fr_1fr] gap-[12px] [&>*]:min-h-[112px]">
           <Machine flow role="host" icon="mingcute:server-2-line" title="Control Daemon" sub="needy daemon --mode control" :focus="partFocus(at, 'daemon')" />
           <Pod flow logo="firecracker" driver="linux-firecracker" badge="" :focus="partFocus(at, 'actor')" />
           <Machine flow icon="mingcute:cube-line" title="Container" name="build" sub="linux-container" :focus="partFocus(at, 'build')" />
@@ -186,101 +190,10 @@ function screenHeight(at: number): number {
         </div>
       </div>
 
-      <div class="screen" :style="{ height: `${screenHeight(at)}px` }">
+      <div class="absolute top-[96px] left-[648px] w-[744px] [transition:height_0.45s_cubic-bezier(0.2,0,0,1)]" :style="{ height: `${screenHeight(at)}px` }">
         <Terminal v-bind="screenAt(at)" title="a shell on the control host" :rows="ROWS" :play="at" />
       </div>
     </template>
   </Frame>
 </template>
 
-<style scoped>
-.phases {
-  position: absolute;
-  top: 26px;
-  left: 50%;
-  display: flex;
-  gap: 6px;
-  margin: 0;
-  padding: 5px;
-  border-radius: 18px;
-  background: var(--control);
-  list-style: none;
-  transform: translateX(-50%);
-}
-
-.phases li {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 8px 16px;
-  border-radius: 13px;
-  color: var(--muted);
-  font-size: 16px;
-  transition:
-    background 0.3s,
-    color 0.3s;
-}
-
-.phases li.done {
-  color: var(--ink-2);
-}
-
-.phases li.on {
-  background: var(--surface);
-  color: var(--ink);
-}
-
-.n {
-  display: grid;
-  width: 22px;
-  height: 22px;
-  place-items: center;
-  border-radius: 50%;
-  background: var(--control-2);
-  font-size: 12px;
-}
-
-.on .n {
-  background: var(--actor-fill);
-  color: #fff;
-}
-
-.code {
-  position: absolute;
-  top: 96px;
-  left: 48px;
-  width: 560px;
-}
-
-.host {
-  position: absolute;
-  top: 348px;
-  left: 48px;
-  width: 560px;
-}
-
-.host-label {
-  color: var(--muted);
-  font-family: var(--font-display);
-  font-size: 15px;
-}
-
-.parts {
-  display: grid;
-  gap: 12px;
-  margin-top: 10px;
-  grid-template-columns: 1fr 1fr;
-}
-
-.parts > * {
-  min-height: 112px;
-}
-
-.screen {
-  position: absolute;
-  top: 96px;
-  left: 648px;
-  width: 744px;
-  transition: height 0.45s cubic-bezier(0.2, 0, 0, 1);
-}
-</style>

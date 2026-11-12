@@ -54,229 +54,75 @@ const captioned = computed(() => props.steps.some(step => step.caption))
 </script>
 
 <template>
-  <figure ref="outer" class="figure" :class="{ capture, bare }" :aria-label="label">
-    <div class="box" :class="{ scrolls }" :style="{ height: `${height * scale}px` }">
-      <div class="track" :style="{ width: `${width * scale}px`, height: `${height * scale}px` }">
-      <div class="card" :style="{ width: `${width}px`, height: `${height}px`, transform: `scale(${scale})` }">
-        <div class="stage">
+  <!--
+    On the page a scene sits on the page itself: no card and no grid around it. Only the banners keep their card. Without
+    a card, the margin the design keeps inside it would indent the picture from the text around it, so the figure reaches
+    out by that margin on both sides (about 40 of 1440 design pixels).
+  -->
+  <figure ref="outer" class="figure my-0" :class="capture ? 'mx-0 w-auto' : 'mx-[-2.8%] w-[calc(100%+5.6%)]'" :aria-label="label">
+    <div
+      class="relative" :class="[scrolls ? 'overflow-x-auto overflow-y-hidden [-webkit-overflow-scrolling:touch]' : 'overflow-hidden', capture ? 'rounded-[32px]' : 'rounded-[28px]']"
+      :style="{ height: `${height * scale}px` }"
+    >
+      <div class="relative" :style="{ width: `${width * scale}px`, height: `${height * scale}px` }">
+      <!--
+        --ground is the ground of the scene: paper in a banner, a step off the page on the page. Wires.vue cuts its labels
+        out of it.
+        NOTICE: the old CSS made it transparent on the page and in a bare frame with `.figure > .box > .card`, which never
+        matched once the track sat between box and card, so the card has always been paper. Kept as rendered: paper on
+        the paper page looks the same, and a bare banner (the hero) keeps its paper ground.
+      -->
+      <div
+        class="absolute left-0 top-0 flex flex-col rounded-[32px] bg-[var(--ground)] [--ground:var(--paper)] [transform-origin:0_0]"
+        :style="{ width: `${width}px`, height: `${height}px`, transform: `scale(${scale})` }"
+      >
+        <!-- A faint grid, so the actor's glass reads as glass. -->
+        <div
+          class="relative flex-1 rounded-[32px_32px_0_0]"
+          :class="{ '[background-image:radial-gradient(color-mix(in_srgb,var(--ink)_10%,transparent)_1px,transparent_1.3px)] [background-position:11px_11px] [background-size:22px_22px]': capture && !bare }"
+        >
           <slot :at="index" />
         </div>
-        <p v-if="captioned" class="caption">
-          <span class="dots" aria-hidden="true">
-            <i v-for="(_, s) in steps" :key="s" :class="{ done: s < index, on: s === index }" />
+        <p v-if="captioned" class="m-0 flex h-[64px] items-center justify-center gap-[16px] px-[40px] pb-[18px] pt-0 text-[19px] leading-[1.4]">
+          <span class="flex flex-none gap-[5px]" aria-hidden="true">
+            <i
+              v-for="(_, s) in steps" :key="s" class="h-[4px] w-[18px] rounded-[2px] [transition:background_0.3s]"
+              :class="s < index ? 'bg-ink-2' : s === index ? 'bg-actor-fill' : 'bg-control-3'"
+            />
           </span>
-          <Transition name="caption" mode="out-in">
-            <span :key="index" class="text" aria-live="polite">{{ caption }}</span>
+          <Transition
+            mode="out-in"
+            enter-active-class="[transition:opacity_0.25s,transform_0.25s_cubic-bezier(0.2,0,0,1)]"
+            leave-active-class="[transition:opacity_0.25s,transform_0.25s_cubic-bezier(0.2,0,0,1)]"
+            enter-from-class="opacity-0 [transform:translateY(6px)]"
+            leave-to-class="opacity-0 [transform:translateY(-6px)]"
+          >
+            <span :key="index" class="text-ink" aria-live="polite">{{ caption }}</span>
           </Transition>
         </p>
       </div>
       </div>
     </div>
-    <p v-if="scrolls" class="swipe">
+    <p v-if="scrolls" class="mx-0 mb-0 mt-[8px] text-center text-[13px] text-muted">
       ← {{ tr({ en: 'swipe to see the whole picture', zh: '左右滑动查看完整画面' }) }} →
     </p>
-    <div v-if="!capture && !bare" class="controls">
-      <button type="button" aria-label="Previous step" @click="prev">
+    <div v-if="!capture && !bare" class="mt-[12px] flex items-center gap-[6px]">
+      <button type="button" class="grid h-[34px] w-[34px] cursor-pointer place-items-center rounded-[999px] border-0 bg-control text-[14px] hover:bg-control-2" aria-label="Previous step" @click="prev">
         <Icon name="mingcute:left-line" />
       </button>
-      <button type="button" :aria-label="paused ? 'Play' : 'Pause'" @click="toggle">
+      <button type="button" class="grid h-[34px] w-[34px] cursor-pointer place-items-center rounded-[999px] border-0 bg-control text-[14px] hover:bg-control-2" :aria-label="paused ? 'Play' : 'Pause'" @click="toggle">
         <Icon :name="paused ? 'mingcute:play-fill' : 'mingcute:pause-fill'" />
       </button>
-      <button type="button" aria-label="Next step" @click="next">
+      <button type="button" class="grid h-[34px] w-[34px] cursor-pointer place-items-center rounded-[999px] border-0 bg-control text-[14px] hover:bg-control-2" aria-label="Next step" @click="next">
         <Icon name="mingcute:right-line" />
       </button>
-      <span class="steps">
+      <span class="ml-[8px] flex flex-wrap gap-[4px]">
         <button
-          v-for="(_, s) in steps" :key="s" type="button" class="step" :class="{ on: s === index }"
+          v-for="(_, s) in steps" :key="s" type="button" class="h-[8px] w-[22px] cursor-pointer rounded-[4px] border-0 p-0"
+          :class="s === index ? 'bg-actor-fill' : 'bg-control-2'"
           :aria-label="`Step ${s + 1}`" @click="go(s)"
         />
       </span>
     </div>
   </figure>
 </template>
-
-<style scoped>
-.figure {
-  margin: 0;
-  width: 100%;
-}
-
-.figure.capture {
-  width: auto;
-}
-
-.box {
-  position: relative;
-  overflow: hidden;
-  border-radius: 28px;
-}
-
-.box.scrolls {
-  overflow-x: auto;
-  overflow-y: hidden;
-  -webkit-overflow-scrolling: touch;
-}
-
-.track {
-  position: relative;
-}
-
-.swipe {
-  margin: 8px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-  text-align: center;
-}
-
-.capture .box {
-  border-radius: 32px;
-}
-
-.card {
-  position: absolute;
-  top: 0;
-  left: 0;
-  display: flex;
-  flex-direction: column;
-  border-radius: 32px;
-  /* The ground of the scene: paper in a banner, a step off the page on the page. Wires.vue cuts its labels out of it. */
-  --ground: var(--paper);
-  background: var(--ground);
-  transform-origin: 0 0;
-}
-
-/* On the page a scene sits on the page itself: no card and no grid around it. Only the banners keep their card. */
-.figure:not(.capture) > .box > .card {
-  --ground: transparent;
-}
-
-.figure:not(.capture) .stage {
-  background-image: none;
-}
-
-/* Without a card, the margin the design keeps inside it would indent the picture from the text around it, so the
-   figure reaches out by that margin on both sides (about 40 of 1440 design pixels). */
-.figure:not(.capture) {
-  width: calc(100% + 5.6%);
-  margin-inline: -2.8%;
-}
-
-.figure.bare > .box,
-.figure.bare > .box > .card {
-  --ground: transparent;
-  background: transparent;
-}
-
-.figure.bare .stage {
-  background-image: none;
-}
-
-.stage {
-  position: relative;
-  flex: 1;
-  /* A faint grid, so the actor's glass reads as glass. */
-  background-image: radial-gradient(color-mix(in srgb, var(--ink) 10%, transparent) 1px, transparent 1.3px);
-  background-position: 11px 11px;
-  background-size: 22px 22px;
-  border-radius: 32px 32px 0 0;
-}
-
-.caption {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 16px;
-  height: 64px;
-  margin: 0;
-  padding: 0 40px 18px;
-  font-size: 19px;
-  line-height: 1.4;
-}
-
-.dots {
-  display: flex;
-  flex: none;
-  gap: 5px;
-}
-
-.dots i {
-  width: 18px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--control-3);
-  transition: background 0.3s;
-}
-
-.dots i.done {
-  background: var(--ink-2);
-}
-
-.dots i.on {
-  background: var(--actor-fill);
-}
-
-.text {
-  color: var(--ink);
-}
-
-.caption-enter-active,
-.caption-leave-active {
-  transition:
-    opacity 0.25s,
-    transform 0.25s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.caption-enter-from {
-  opacity: 0;
-  transform: translateY(6px);
-}
-
-.caption-leave-to {
-  opacity: 0;
-  transform: translateY(-6px);
-}
-
-.controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 12px;
-}
-
-.controls > button {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  place-items: center;
-  border: 0;
-  border-radius: 999px;
-  background: var(--control);
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.controls > button:hover {
-  background: var(--control-2);
-}
-
-.steps {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-left: 8px;
-}
-
-.step {
-  width: 22px;
-  height: 8px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: var(--control-2);
-  cursor: pointer;
-}
-
-.step.on {
-  background: var(--actor-fill);
-}
-</style>

@@ -92,46 +92,47 @@ function cellLit(at: number, row: (typeof ROWS)[number], i: number): boolean {
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Actor drivers: linux-firecracker, linux-container, macos-vz and macos-apple-container, with what each supports for routing and for the recipe's identity, from the README's table.">
     <template #default="{ at }">
-      <div class="intro">
-        <h2 class="display">
+      <div class="absolute top-[26px] left-[40px] w-[316px]">
+        <h2 class="display m-0 text-[30px]">
           Actor Drivers
         </h2>
-        <p class="lead">
+        <p class="mx-0 mb-0 mt-[8px] text-[15px] text-ink-2 leading-[1.45] [&_code]:text-[13px]">
           Where the actor runs. Pick one with <code>actor.driver</code>.
         </p>
-        <ul class="legend">
-          <li v-for="(l, level) in LEVELS" :key="level">
+        <ul class="mx-0 mb-0 mt-[14px] flex list-none flex-wrap gap-x-[14px] gap-y-[6px] p-0 text-[13px] text-ink-2">
+          <li v-for="(l, level) in LEVELS" :key="level" class="flex items-center gap-[6px]">
             <LevelMark :level="level" :size="15" />{{ l.label }}
           </li>
         </ul>
-        <p v-if="STEPS[at]!.note" :key="`n${at}`" class="callout">
+        <p v-if="STEPS[at]!.note" :key="`n${at}`" class="mx-0 mb-0 mt-[12px] rounded-[10px] px-[12px] py-[6px] text-[13.5px] text-actor bg-actor/13 animate-[rise-4_0.4s_cubic-bezier(0.2,0,0,1)_both]">
           {{ STEPS[at]!.note!.text }}
         </p>
       </div>
 
       <div
-        v-for="(d, i) in DRIVERS" :key="d.id" class="head f" :class="colState(at, i)"
+        v-for="(d, i) in DRIVERS" :key="d.id" class="f absolute flex flex-col gap-[4px] rounded-[14px] px-[16px] py-[14px] bg-surface" :class="colState(at, i)"
         :style="{ 'left': `${colX(i)}px`, 'top': `${HEAD.y}px`, 'width': `${COL_W}px`, 'height': `${HEAD.h}px`, '--role': 'var(--actor)' }"
       >
-        <span class="logos">
+        <span class="mb-[4px] flex items-center gap-[8px]">
           <Logo v-for="l in d.logos" :key="l" :name="l" :size="30" />
-          <span v-if="d.ready" class="ready mono">{{ d.ready }}</span>
+          <span v-if="d.ready" class="mono ml-auto rounded-[999px] px-[8px] py-[2px] text-[12px] text-actor bg-actor/12">{{ d.ready }}</span>
         </span>
-        <span class="title display">{{ d.title }}</span>
-        <code class="id">{{ d.id }}</code>
-        <span class="fact">{{ d.host }}</span>
-        <span class="fact muted">{{ d.isolation }}</span>
-        <span class="fact capture">Catches execs with {{ d.capture }}</span>
+        <span class="display whitespace-nowrap text-[19px]">{{ d.title }}</span>
+        <code class="text-[13px] text-actor">{{ d.id }}</code>
+        <span class="text-[12.5px] text-ink-2 leading-[1.35]">{{ d.host }}</span>
+        <span class="text-[12.5px] text-muted leading-[1.35]">{{ d.isolation }}</span>
+        <span class="mt-auto text-[12.5px] text-muted leading-[1.35]">Catches execs with {{ d.capture }}</span>
       </div>
 
       <template v-for="row in ROWS" :key="`${row.kind}-${row.id}`">
-        <div v-if="row.kind === 'group'" class="group f" :class="rowState(at, row)" :style="{ top: `${row.y}px` }">
+        <div v-if="row.kind === 'group'" class="f absolute left-[40px] flex h-[30px] w-[1378px] items-center pl-[8px] text-[16px] text-ink [&.focus]:(!bg-transparent ![transform:none])" :class="rowState(at, row)" :style="{ top: `${row.y}px` }">
           <span class="display">{{ row.label }}</span>
         </div>
-        <div v-else class="row f" :class="rowState(at, row)" :style="{ 'top': `${row.y}px`, '--role': 'var(--actor)' }">
-          <span class="label">{{ row.label }}</span>
+        <div v-else class="f absolute left-[40px] h-[22px] w-[1378px] [&.focus]:(rounded-[6px] !bg-actor/7 ![transform:none])" :class="rowState(at, row)" :style="{ 'top': `${row.y}px`, '--role': 'var(--actor)' }">
+          <span class="absolute top-0 left-[8px] whitespace-nowrap text-[13.5px] text-ink-2 leading-[22px]">{{ row.label }}</span>
           <span
-            v-for="(cell, i) in row.cells" :key="i" class="cell" :class="{ lit: cellLit(at, row, i), off: colState(at, i) === 'dim' && rowState(at, row) === 'focus' }"
+            v-for="(cell, i) in row.cells" :key="i" class="absolute top-0 flex h-[22px] items-center justify-center [transition:transform_0.4s_cubic-bezier(0.2,0,0,1),opacity_0.4s]"
+            :class="[cellLit(at, row, i) && '[transform:scale(1.25)]', colState(at, i) === 'dim' && rowState(at, row) === 'focus' && 'opacity-30']"
             :style="{ left: `${colX(i) - 40}px`, width: `${COL_W}px` }"
           >
             <LevelMark :level="cell.level" :size="16" />
@@ -142,179 +143,3 @@ function cellLit(at: number, row: (typeof ROWS)[number], i: number): boolean {
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.intro {
-  position: absolute;
-  top: 26px;
-  left: 40px;
-  width: 316px;
-}
-
-h2 {
-  margin: 0;
-  font-size: 30px;
-}
-
-.lead {
-  margin: 8px 0 0;
-  color: var(--ink-2);
-  font-size: 15px;
-  line-height: 1.45;
-}
-
-.lead code {
-  font-size: 13px;
-}
-
-.legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 14px;
-  margin: 14px 0 0;
-  padding: 0;
-  color: var(--ink-2);
-  font-size: 13px;
-  list-style: none;
-}
-
-.legend li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.callout {
-  margin: 12px 0 0;
-  padding: 6px 12px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--actor) 13%, transparent);
-  color: var(--actor);
-  font-size: 13.5px;
-  animation: arrive 0.4s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-}
-
-
-
-.head {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 14px 16px;
-  border-radius: 14px;
-  background: var(--surface);
-}
-
-.logos {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.ready {
-  margin-left: auto;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--actor) 12%, transparent);
-  color: var(--actor);
-  font-size: 12px;
-}
-
-.title {
-  font-size: 19px;
-  white-space: nowrap;
-}
-
-.id {
-  color: var(--actor);
-  font-size: 13px;
-}
-
-.fact {
-  color: var(--ink-2);
-  font-size: 12.5px;
-  line-height: 1.35;
-}
-
-.fact.muted {
-  color: var(--muted);
-}
-
-.fact.capture {
-  margin-top: auto;
-  color: var(--muted);
-}
-
-.group {
-  position: absolute;
-  left: 40px;
-  display: flex;
-  width: 1378px;
-  height: 30px;
-  align-items: center;
-  padding-left: 8px;
-  color: var(--ink);
-  font-size: 16px;
-}
-
-.row {
-  position: absolute;
-  left: 40px;
-  width: 1378px;
-  height: 22px;
-}
-
-.row.focus,
-.group.focus {
-  transform: none;
-}
-
-.group.focus {
-  background: transparent;
-}
-
-.row.focus {
-  background: color-mix(in srgb, var(--actor) 7%, transparent);
-  border-radius: 6px;
-}
-
-.label {
-  position: absolute;
-  top: 0;
-  left: 8px;
-  color: var(--ink-2);
-  font-size: 13.5px;
-  line-height: 22px;
-  white-space: nowrap;
-}
-
-.cell {
-  position: absolute;
-  top: 0;
-  display: flex;
-  height: 22px;
-  align-items: center;
-  justify-content: center;
-  transition:
-    transform 0.4s cubic-bezier(0.2, 0, 0, 1),
-    opacity 0.4s;
-}
-
-.cell.lit {
-  transform: scale(1.25);
-}
-
-.cell.off {
-  opacity: 0.3;
-}
-
-</style>

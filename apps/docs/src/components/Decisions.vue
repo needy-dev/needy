@@ -114,54 +114,72 @@ const VERDICTS = ITEMS.map(verdictOf)
 
 const active = ref(0)
 const hovering = ref(false)
+/**
+ * Whether the list is on screen. Off screen the verdict stays closed and the autoplay waits: an open tooltip
+ * whose item scrolled away would otherwise float over the page, pinned to the viewport's edge.
+ */
+const root = ref<HTMLElement>()
+const visible = ref(false)
 let timer: ReturnType<typeof setInterval> | undefined
+let observer: IntersectionObserver | undefined
 onMounted(() => {
+  observer = new IntersectionObserver(([entry]) => (visible.value = entry?.isIntersecting ?? false))
+  observer.observe(root.value!)
   timer = setInterval(() => {
-    if (!hovering.value)
+    if (visible.value && !hovering.value)
       active.value = (active.value + 1) % ITEMS.length
   }, 2600)
 })
-onBeforeUnmount(() => clearInterval(timer))
+onBeforeUnmount(() => {
+  clearInterval(timer)
+  observer?.disconnect()
+})
+
+/** The verdict title takes the light (`-term`) shade of its role, which reads on the tooltip in both themes. */
+const TITLE_TONE: Record<Verdict['tone'], string> = { executor: 'text-executor-term', actor: 'text-actor-term', bad: 'text-bad-term', muted: '' }
 
 const lit = computed(() => VERDICTS[active.value]!.lit)
 const litRole = computed(() => VERDICTS[active.value]!.tone === 'bad' ? 'bad' as const : VERDICTS[active.value]!.tone === 'actor' ? 'actor' as const : 'executor' as const)
 </script>
 
 <template>
-  <div class="decisions">
-    <Yaml :code="PROFILE" :lit="lit" :role="litRole" title="examples/opencode/profile.yaml" class="profile" />
+  <div class="grid items-start gap-[32px] grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)] max-[900px]:grid-cols-[minmax(0,1fr)]">
+    <Yaml :code="PROFILE" :lit="lit" :role="litRole" title="examples/opencode/profile.yaml" class="[&_pre]:text-[13px]" />
 
     <TooltipProvider :delay-duration="0">
-      <ul class="items" @mouseleave="hovering = false">
-        <li class="group-label">
+      <ul ref="root" class="m-0 flex list-none flex-col gap-[4px] p-0" @mouseleave="hovering = false">
+        <li class="mx-0 mb-[6px] mt-[14px] text-[13px] text-muted first:mt-0">
           {{ tr({ en: 'What the harness runs', zh: 'harness 执行的命令' }) }}
         </li>
         <template v-for="(item, i) in ITEMS" :key="item.line">
-          <li v-if="i === 4" class="group-label">
+          <li v-if="i === 4" class="mx-0 mb-[6px] mt-[14px] text-[13px] text-muted first:mt-0">
             {{ tr({ en: 'What it connects to', zh: '它发起的连接' }) }}
           </li>
           <li>
-            <TooltipRoot :open="active === i" disable-hoverable-content>
+            <TooltipRoot :open="visible && active === i" disable-hoverable-content>
               <TooltipTrigger as-child>
+                <!-- The fill of the line in focus reaches past the text, so the text lines up with the labels above it. -->
                 <button
-                  type="button" class="item mono" :class="[VERDICTS[i]!.tone, { on: active === i }]"
+                  type="button"
+                  class="mono ml-[-12px] w-[calc(100%+24px)] flex cursor-default items-center gap-[10px] rounded-[10px] border-0 px-[12px] py-[9px] text-left text-[14px] text-ink [transition:background_0.25s]"
+                  :class="active === i ? 'bg-tone/13' : 'bg-transparent'" :style="{ '--tone': `var(--${VERDICTS[i]!.tone})` }"
                   @mouseenter="active = i; hovering = true" @focus="active = i; hovering = true"
                 >
-                  <span class="prompt">{{ item.kind === 'exec' ? '$' : '→' }}</span>{{ item.line }}
+                  <span :class="active === i ? 'text-tone' : 'text-muted'">{{ item.kind === 'exec' ? '$' : '→' }}</span>{{ item.line }}
                 </button>
               </TooltipTrigger>
               <TooltipPortal>
-                <TooltipContent class="nd-verdict" :class="VERDICTS[i]!.tone" side="bottom" :side-offset="6" align="start" :avoid-collisions="true">
-                  <span class="nd-verdict-title"><Icon :name="VERDICTS[i]!.icon" :size="18" />{{ tr(VERDICTS[i]!.title) }}</span>
-                  <dl>
+                <TooltipContent class="z-[40] max-w-[340px] flex flex-col gap-[8px] rounded-[12px] bg-tip-bg px-[14px] py-[12px] text-[13.5px] text-tip-ink [animation:enter-left-4_0.2s_cubic-bezier(0.2,0,0,1)] [box-shadow:0_10px_28px_rgb(0_0_0/22%)]" side="bottom" :side-offset="6" align="start" :avoid-collisions="true">
+                  <span class="flex items-center gap-[8px] font-display text-[16px]" :class="TITLE_TONE[VERDICTS[i]!.tone]"><Icon :name="VERDICTS[i]!.icon" :size="18" />{{ tr(VERDICTS[i]!.title) }}</span>
+                  <dl class="m-0 grid gap-x-[12px] gap-y-[4px] grid-cols-[auto_minmax(0,1fr)]">
                     <template v-for="f in VERDICTS[i]!.facts" :key="f.label.en">
-                      <dt>{{ tr(f.label) }}</dt>
-                      <dd class="mono">
+                      <dt class="text-tip-muted">{{ tr(f.label) }}</dt>
+                      <dd class="mono m-0 text-[12.5px] [overflow-wrap:anywhere]">
                         {{ f.value }}
                       </dd>
                     </template>
                   </dl>
-                  <TooltipArrow class="nd-verdict-arrow" :width="12" :height="6" />
+                  <TooltipArrow class="fill-tip-bg" :width="12" :height="6" />
                 </TooltipContent>
               </TooltipPortal>
             </TooltipRoot>
@@ -171,150 +189,3 @@ const litRole = computed(() => VERDICTS[active.value]!.tone === 'bad' ? 'bad' as
     </TooltipProvider>
   </div>
 </template>
-
-<style scoped>
-.decisions {
-  display: grid;
-  align-items: start;
-  gap: 32px;
-  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
-}
-
-@media (max-width: 900px) {
-  .decisions {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.profile :deep(pre) {
-  font-size: 13px;
-}
-
-.items {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.group-label {
-  margin: 14px 0 6px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.group-label:first-child {
-  margin-top: 0;
-}
-
-.item {
-  display: flex;
-  width: calc(100% + 24px);
-  align-items: center;
-  gap: 10px;
-  /* The fill of the line in focus reaches past the text, so the text lines up with the labels above it. */
-  margin-left: -12px;
-  padding: 9px 12px;
-  border: 0;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--ink);
-  cursor: default;
-  font-size: 14px;
-  text-align: left;
-  transition: background 0.25s;
-  --tone: var(--executor);
-}
-
-.item.actor {
-  --tone: var(--actor);
-}
-
-.item.bad {
-  --tone: var(--bad);
-}
-
-.item.muted {
-  --tone: var(--muted);
-}
-
-.item.on {
-  background: color-mix(in srgb, var(--tone) 13%, transparent);
-}
-
-.prompt {
-  color: var(--muted);
-}
-
-.item.on .prompt {
-  color: var(--tone);
-}
-</style>
-
-<style>
-/* The verdict is a tooltip, in a portal. */
-.nd-verdict {
-  z-index: 40;
-  display: flex;
-  max-width: 340px;
-  flex-direction: column;
-  gap: 8px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: var(--tip-bg);
-  box-shadow: 0 10px 28px rgb(0 0 0 / 22%);
-  color: var(--tip-ink);
-  font-size: 13.5px;
-  animation: verdict-in 0.2s cubic-bezier(0.2, 0, 0, 1);
-}
-
-@keyframes verdict-in {
-  from {
-    opacity: 0;
-    transform: translateX(-4px);
-  }
-}
-
-.nd-verdict-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-family: var(--font-display);
-  font-size: 16px;
-}
-
-.nd-verdict.executor .nd-verdict-title {
-  color: var(--executor-term);
-}
-
-.nd-verdict.actor .nd-verdict-title {
-  color: var(--actor-term);
-}
-
-.nd-verdict.bad .nd-verdict-title {
-  color: var(--bad-term);
-}
-
-.nd-verdict dl {
-  display: grid;
-  gap: 4px 12px;
-  margin: 0;
-  grid-template-columns: auto minmax(0, 1fr);
-}
-
-.nd-verdict dt {
-  color: var(--tip-muted);
-}
-
-.nd-verdict dd {
-  overflow-wrap: anywhere;
-  margin: 0;
-  font-size: 12.5px;
-}
-
-.nd-verdict-arrow {
-  fill: var(--tip-bg);
-}
-</style>

@@ -180,19 +180,20 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="studio">
-    <div class="pane edit">
-      <div class="bar">
+  <div class="grid items-start gap-[16px] grid-cols-[minmax(0,0.9fr)_minmax(0,1.4fr)] max-[1100px]:grid-cols-[minmax(0,1fr)]">
+    <div class="sticky top-[72px] flex min-w-0 flex-col gap-[8px] max-[1100px]:static">
+      <div class="flex flex-wrap gap-[6px]">
         <SelectRoot v-model="preset">
-          <SelectTrigger class="button select" :aria-label="tr({ en: 'Start from', zh: '从示例开始' })">
+          <SelectTrigger class="inline-flex max-w-[260px] items-center gap-[6px] border-0 rounded-[12px] px-[12px] py-[7px] bg-surface text-[14px] text-ink cursor-pointer hover:bg-control-2" :aria-label="tr({ en: 'Start from', zh: '从示例开始' })">
             <Icon name="mingcute:file-code-line" />
             <SelectValue :placeholder="tr({ en: 'Your profile', zh: '你的 profile' })" />
             <Icon name="mingcute:down-line" />
           </SelectTrigger>
           <SelectPortal>
-            <SelectContent class="nd-menu" position="popper" :side-offset="6">
+            <!-- Menus live in a portal, so their utilities sit on the content and items reka-ui renders there. -->
+            <SelectContent class="z-50 max-h-[360px] overflow-auto rounded-[12px] p-[4px] bg-surface [box-shadow:var(--shadow-card)]" position="popper" :side-offset="6">
               <SelectViewport>
-                <SelectItem v-for="p in PRESETS" :key="p.id" :value="p.id" class="nd-menu-item mono">
+                <SelectItem v-for="p in PRESETS" :key="p.id" :value="p.id" class="mono rounded-[8px] px-[12px] py-[7px] text-[13.5px] text-ink cursor-pointer data-[highlighted]:bg-control">
                   <SelectItemText>{{ p.label }}</SelectItemText>
                 </SelectItem>
               </SelectViewport>
@@ -201,51 +202,54 @@ onMounted(() => {
         </SelectRoot>
 
         <DropdownMenuRoot>
-          <DropdownMenuTrigger class="button">
+          <DropdownMenuTrigger class="inline-flex items-center gap-[6px] border-0 rounded-[12px] px-[12px] py-[7px] bg-surface text-[14px] text-ink cursor-pointer hover:bg-control-2">
             <Icon name="mingcute:add-line" /> {{ tr({ en: 'Add', zh: '添加' }) }}
           </DropdownMenuTrigger>
           <DropdownMenuPortal>
-            <DropdownMenuContent class="nd-menu" :side-offset="6" align="start">
-              <DropdownMenuItem v-for="a in ADD" :key="a.label.en" class="nd-menu-item" @select="a.run">
+            <DropdownMenuContent class="z-50 max-h-[360px] overflow-auto rounded-[12px] p-[4px] bg-surface [box-shadow:var(--shadow-card)]" :side-offset="6" align="start">
+              <DropdownMenuItem v-for="a in ADD" :key="a.label.en" class="rounded-[8px] px-[12px] py-[7px] text-[13.5px] text-ink cursor-pointer data-[highlighted]:bg-control" @select="a.run">
                 {{ tr(a.label) }}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenuPortal>
         </DropdownMenuRoot>
 
-        <span class="spacer" />
-        <button type="button" class="button" @click="copy">
+        <span class="flex-1" />
+        <button type="button" class="inline-flex items-center gap-[6px] border-0 rounded-[12px] px-[12px] py-[7px] bg-surface text-[14px] text-ink cursor-pointer hover:bg-control-2" @click="copy">
           <Icon :name="copied ? 'mingcute:check-line' : 'mingcute:file-code-line'" /> {{ copied ? tr({ en: 'Copied', zh: '已复制' }) : tr({ en: 'Copy', zh: '复制' }) }}
         </button>
-        <button type="button" class="button" @click="share">
+        <button type="button" class="inline-flex items-center gap-[6px] border-0 rounded-[12px] px-[12px] py-[7px] bg-surface text-[14px] text-ink cursor-pointer hover:bg-control-2" @click="share">
           <Icon name="mingcute:git-branch-line" /> {{ tr({ en: 'Link', zh: '链接' }) }}
         </button>
       </div>
 
-      <div class="code">
+      <div class="h-[460px] overflow-hidden rounded-[12px] bg-surface">
         <Editor v-model="text" />
       </div>
 
-      <div class="findings" :class="{ ok: !errors.length }">
+      <div
+        class="rounded-[12px] px-[12px] py-[10px] text-[13.5px]"
+        :class="errors.length ? 'bg-[color-mix(in_srgb,var(--bad)_12%,var(--surface))] text-ink' : 'flex items-center gap-[6px] bg-[color-mix(in_srgb,var(--executor)_12%,var(--surface))] text-executor'"
+      >
         <template v-if="!errors.length">
           <Icon name="mingcute:check-line" /> {{ tr({ en: 'needy would load this profile.', zh: 'needy 可以加载这个 profile。' }) }}
         </template>
-        <ul v-else>
+        <ul v-else class="m-0 flex list-none flex-col gap-[4px] p-0">
           <li v-for="(f, i) in errors.slice(0, 5)" :key="i">
-            <code class="at">{{ where(f.from) }}</code> {{ f.message }}
+            <code class="text-[12px] text-bad">{{ where(f.from) }}</code> {{ f.message }}
           </li>
         </ul>
       </div>
     </div>
 
-    <div class="pane show">
-      <label class="try">
-        <span class="prompt mono">$</span>
-        <input v-model="command" class="mono" spellcheck="false" :aria-label="tr({ en: 'Try a command', zh: '试一条命令' })">
+    <div class="flex min-w-0 flex-col gap-[8px]">
+      <label class="flex items-center gap-[8px] rounded-[12px] py-[6px] pl-[14px] pr-[6px] bg-term">
+        <span class="mono text-actor-term">$</span>
+        <input v-model="command" class="mono min-w-0 flex-1 border-0 px-0 py-[6px] bg-transparent text-[14.5px] text-term-ink [outline:none]" spellcheck="false" :aria-label="tr({ en: 'Try a command', zh: '试一条命令' })">
       </label>
-      <div class="tries">
-        <span class="hint">{{ tr({ en: 'Try:', zh: '试试：' }) }}</span>
-        <button v-for="c in tries" :key="c" type="button" class="chip mono" @click="command = c">
+      <div class="flex flex-wrap items-center gap-[6px]">
+        <span class="text-[13px] text-muted">{{ tr({ en: 'Try:', zh: '试试：' }) }}</span>
+        <button v-for="c in tries" :key="c" type="button" class="mono border-0 rounded-[999px] px-[10px] py-[4px] bg-surface text-[12.5px] text-ink cursor-pointer hover:bg-control-2" @click="command = c">
           {{ c }}
         </button>
       </div>
@@ -253,183 +257,3 @@ onMounted(() => {
     </div>
   </div>
 </template>
-
-<style scoped>
-.studio {
-  display: grid;
-  align-items: start;
-  gap: 16px;
-  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.4fr);
-}
-
-@media (max-width: 1100px) {
-  .studio {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.pane {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.edit {
-  position: sticky;
-}
-
-@media (max-width: 1100px) {
-  .edit {
-    position: static;
-  }
-}
-
-.edit {
-  top: 72px;
-}
-
-.bar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.spacer {
-  flex: 1;
-}
-
-.button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 12px;
-  border: 0;
-  border-radius: 12px;
-  background: var(--surface);
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 14px;
-}
-
-.button:hover {
-  background: var(--control-2);
-}
-
-.select {
-  max-width: 260px;
-}
-
-.code {
-  height: 460px;
-  overflow: hidden;
-  border-radius: 12px;
-  background: var(--surface);
-}
-
-.findings {
-  padding: 10px 12px;
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--bad) 12%, var(--surface));
-  color: var(--ink);
-  font-size: 13.5px;
-}
-
-.findings.ok {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: color-mix(in srgb, var(--executor) 12%, var(--surface));
-  color: var(--executor);
-}
-
-.findings ul {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.at {
-  color: var(--bad);
-  font-size: 12px;
-}
-
-.try {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 6px 6px 14px;
-  border-radius: 12px;
-  background: var(--term);
-}
-
-.try .prompt {
-  color: var(--actor-term);
-}
-
-.try input {
-  flex: 1;
-  min-width: 0;
-  padding: 6px 0;
-  border: 0;
-  background: transparent;
-  color: var(--term-ink);
-  font-size: 14.5px;
-  outline: none;
-}
-
-.tries {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.hint {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.chip {
-  padding: 4px 10px;
-  border: 0;
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 12.5px;
-}
-
-.chip:hover {
-  background: var(--control-2);
-}
-</style>
-
-<style>
-/* Menus live in a portal. */
-.nd-menu {
-  z-index: 50;
-  max-height: 360px;
-  overflow: auto;
-  padding: 4px;
-  border-radius: 12px;
-  background: var(--surface);
-  box-shadow: var(--shadow-card);
-}
-
-.nd-menu-item {
-  padding: 7px 12px;
-  border-radius: 8px;
-  color: var(--ink);
-  cursor: pointer;
-  font-size: 13.5px;
-  outline: none;
-}
-
-.nd-menu-item[data-highlighted] {
-  background: var(--control);
-}
-</style>

@@ -32,63 +32,88 @@ const STEPS: HeroStep[] = [
   { ms: 3200, lines: 3, mac: 'done', routed: true, denied: false },
   { ms: 3200, lines: 5, mac: 'done', routed: true, denied: true },
 ]
+
+// The utilities a terminal line and a tag share; a hidden one fades in from a little below or to the left.
+const LINE = 'flex items-center gap-[10px] min-h-[24px] whitespace-pre [transition:opacity_0.5s_cubic-bezier(0.25,0.8,0.25,1),transform_0.5s_cubic-bezier(0.25,0.8,0.25,1)]'
+const LINE_HIDDEN = 'opacity-0 [transform:translateY(4px)]'
+const TAG = 'p-[1px_10px] rounded-[999px] text-[13px] text-white not-italic [transition:opacity_0.35s_cubic-bezier(0.25,0.8,0.25,1),transform_0.35s_cubic-bezier(0.25,0.8,0.25,1)]'
+const TAG_HIDDEN = 'opacity-0 [transform:translateX(-6px)]'
 </script>
 
+
+
 <template>
-  <div class="wide">
+  <!-- Wide: the stage. Narrow: the compact design instead, at the column's width with real-size type. -->
+  <div class="max-[720px]:hidden">
   <Frame bare :width="W" :height="H" :steps="STEPS" :capture="capture" label="Needy: an isolated sandbox for agent harnesses. In the actor's terminal, the harness runs xcodebuild; needy routes it to a Mac executor, which builds and returns BUILD SUCCEEDED; a git push is denied by a rule.">
     <template #default="{ at }">
-      <div class="intro">
-        <h1 class="mark">
+      <div class="absolute top-[132px] left-[56px] w-[340px]">
+        <h1 class="m-0 text-[92px] leading-[1] tracking-[-0.02em]">
           Needy
         </h1>
-        <p class="lead">
+        <p class="m-[24px_0_0] text-[22px] leading-[1.35] text-ink">
           An isolated sandbox for agent harnesses, with seamless exec routing and policy.
         </p>
       </div>
 
       <!-- The hero: the actor's terminal, whole. -->
-      <div class="window">
-        <div class="bar">
-          <i /><i /><i />
-          <span class="title">Actor <span class="driver mono">opencode</span></span>
+      <!-- The window: whole, at a terminal's proportions; the page is its ground, so no plate. On a dark page depth
+           comes from a lighter surface, so the window steps up from the page instead of sinking into it. -->
+      <div class="absolute top-[84px] left-[500px] w-[720px] h-[432px] overflow-hidden rounded-[14px] bg-term [box-shadow:0_0_0_1px_rgb(255_255_255/6%),0_24px_60px_rgb(0_0_0/18%)] text-term-ink [[data-theme=dark]_&]:bg-term-raised">
+        <div class="flex items-center gap-[7px] h-[40px] p-[0_16px] bg-white/4">
+          <i class="w-[11px] h-[11px] rounded-[50%] bg-white/16" /><i class="w-[11px] h-[11px] rounded-[50%] bg-white/16" /><i class="w-[11px] h-[11px] rounded-[50%] bg-white/16" />
+          <span class="inline-flex items-center gap-[7px] ml-[12px] font-display text-[14px] text-white/80">Actor <span class="mono text-[12px] text-white/42">opencode</span></span>
         </div>
-        <div class="term mono">
-          <span class="line dim">opencode run "fix the build"</span>
-          <span class="line dim">› the model asks to build the app</span>
-          <span class="line cmd shown">
-            <b>$</b> xcodebuild -scheme App
-            <em class="tag to" :class="{ shown: STEPS[at]!.routed }">→ mac</em>
+        <!-- The lines keep to the left; the satellite covers only the empty right of the terminal. -->
+        <div class="mono flex flex-col gap-[8px] p-[28px_28px_0] text-[16px] leading-[1.5]">
+          <span :class="LINE" class="text-white/45">opencode run "fix the build"</span>
+          <span :class="LINE" class="text-white/45">› the model asks to build the app</span>
+          <span :class="LINE">
+            <b class="font-normal text-actor-term">$</b> xcodebuild -scheme App
+            <em :class="[TAG, !STEPS[at]!.routed && TAG_HIDDEN]" class="bg-executor-fill">→ mac</em>
           </span>
-          <span class="line ok" :class="{ shown: STEPS[at]!.lines >= 3 }">** BUILD SUCCEEDED **</span>
-          <span class="line cmd" :class="{ shown: STEPS[at]!.lines >= 5 }">
-            <b>$</b> git push origin main
-            <em class="tag deny" :class="{ shown: STEPS[at]!.denied }">denied</em>
+          <span :class="[LINE, STEPS[at]!.lines < 3 && LINE_HIDDEN]" class="text-executor-term">** BUILD SUCCEEDED **</span>
+          <span :class="[LINE, STEPS[at]!.lines < 5 && LINE_HIDDEN]">
+            <b class="font-normal text-actor-term">$</b> git push origin main
+            <em :class="[TAG, !STEPS[at]!.denied && TAG_HIDDEN]" class="bg-bad-fill">denied</em>
           </span>
-          <span class="line err" :class="{ shown: STEPS[at]!.lines >= 5 }">needy: denied: no pushes from the agent</span>
-          <span class="line filler"><i style="width: 46%" /></span>
-          <span class="line filler"><i style="width: 31%" /></span>
+          <span :class="[LINE, STEPS[at]!.lines < 5 && LINE_HIDDEN]" class="text-bad-term">needy: denied: no pushes from the agent</span>
+          <span :class="LINE"><i class="block h-[8px] rounded-[4px] bg-white/8" style="width: 46%" /></span>
+          <span :class="LINE"><i class="block h-[8px] rounded-[4px] bg-white/8" style="width: 31%" /></span>
         </div>
       </div>
 
       <!-- Where the actor runs: a chip on the window's top-right corner, half outside. -->
-      <span class="where">
+      <!-- The chip: one fact about the whole window, on its top-right corner over the empty title bar, half outside. -->
+      <span class="absolute top-[66px] right-[156px] inline-flex items-center gap-[7px] p-[8px_14px] rounded-[999px] bg-surface [box-shadow:0_1px_2px_rgb(0_0_0/8%),0_8px_22px_rgb(0_0_0/14%)] text-[14px] text-ink whitespace-nowrap">
         <Logo name="firecracker" :size="16" /> Firecracker microVM
-        <span class="dot" /> <Icon name="mingcute:linux-line" :size="15" /> Linux KVM host
+        <span class="w-[4px] h-[4px] m-[0_3px] rounded-[50%] bg-faint" /> <Icon name="mingcute:linux-line" :size="15" /> Linux KVM host
       </span>
 
       <!-- The satellite: the Mac executor, half outside the window's right edge. -->
-      <div class="mac" :class="STEPS[at]!.mac">
-        <div class="mac-head">
-          <span class="tile"><Icon name="mingcute:apple-line" :size="18" /></span>
-          <span class="what">
-            <strong class="display">mac</strong>
-            <span class="sub">Executor · runner on a Mac</span>
+      <!-- A light card on the dark window, straddling its right edge over the terminal's empty margin. -->
+      <div
+        class="absolute top-[262px] left-[1090px] flex w-[250px] flex-col gap-[14px] p-[16px] rounded-[16px] bg-surface [box-shadow:0_1px_2px_rgb(0_0_0/8%),0_12px_32px_rgb(0_0_0/18%)] [transition:transform_0.45s_cubic-bezier(0.2,0,0,1)]"
+        :class="STEPS[at]!.mac !== 'idle' && '[transform:translateY(-4px)]'"
+      >
+        <div class="flex items-center gap-[12px]">
+          <span class="grid w-[38px] h-[38px] flex-none place-items-center rounded-[10px] bg-executor/15 text-executor"><Icon name="mingcute:apple-line" :size="18" /></span>
+          <span class="flex flex-col">
+            <strong class="display text-[18px] font-normal">mac</strong>
+            <span class="text-[13px] text-muted">Executor · runner on a Mac</span>
           </span>
         </div>
-        <div class="mac-body mono">
-          <span class="state">{{ STEPS[at]!.mac === 'done' ? '** BUILD SUCCEEDED **' : STEPS[at]!.mac === 'running' ? 'xcodebuild -scheme App' : 'waiting for work' }}</span>
-          <span class="progress"><i /></span>
+        <div class="mono flex flex-col gap-[10px]">
+          <span
+            class="text-[13px] [transition:color_0.3s]"
+            :class="STEPS[at]!.mac === 'done' ? 'text-executor' : STEPS[at]!.mac === 'running' ? 'text-ink' : 'text-muted'"
+          >{{ STEPS[at]!.mac === 'done' ? '** BUILD SUCCEEDED **' : STEPS[at]!.mac === 'running' ? 'xcodebuild -scheme App' : 'waiting for work' }}</span>
+          <span class="overflow-hidden h-[6px] rounded-[3px] bg-control">
+            <i
+              class="block h-full rounded-[3px] bg-executor-fill"
+              :class="STEPS[at]!.mac === 'done' ? 'w-full [transition:width_0.4s_cubic-bezier(0.25,0.8,0.25,1)]' : STEPS[at]!.mac === 'running' ? 'w-[82%] [transition:width_2.2s_cubic-bezier(0.45,0,0.1,1)]' : 'w-0'"
+            />
+          </span>
         </div>
       </div>
     </template>
@@ -96,393 +121,38 @@ const STEPS: HeroStep[] = [
   </div>
 
   <!-- The compact design, for a phone column: the same story as one still, stacked, at the poster's beat. -->
-  <div v-if="!capture" class="compact">
-    <h1 class="mark">
+  <div v-if="!capture" class="hidden max-[720px]:(flex flex-col gap-0 p-[24px_0_8px])">
+    <h1 class="m-0 text-[64px] leading-[1] tracking-[-0.02em]">
       Needy
     </h1>
-    <p class="lead">
+    <p class="m-[16px_0_0] text-[20px] leading-[1.35] text-ink">
       An isolated sandbox for agent harnesses, with seamless exec routing and policy.
     </p>
-    <span class="where c-where">
-      <Logo name="firecracker" :size="16" /> Firecracker microVM <span class="dot" /> <Icon name="mingcute:linux-line" :size="15" /> Linux KVM host
+    <span class="relative z-2 self-start inline-flex items-center gap-[7px] m-[32px_0_12px] p-[8px_14px] rounded-[999px] bg-surface [box-shadow:0_1px_2px_rgb(0_0_0/8%),0_8px_22px_rgb(0_0_0/14%)] text-[12.5px] text-ink whitespace-nowrap">
+      <Logo name="firecracker" :size="16" /> Firecracker microVM <span class="w-[4px] h-[4px] m-[0_3px] rounded-[50%] bg-faint" /> <Icon name="mingcute:linux-line" :size="15" /> Linux KVM host
     </span>
-    <div class="c-window">
-      <div class="bar">
-        <i /><i /><i /><span class="title">Actor <span class="driver mono">opencode</span></span>
+    <div class="overflow-hidden rounded-[14px] bg-term text-term-ink [[data-theme=dark]_&]:bg-term-raised">
+      <div class="flex items-center gap-[7px] h-[40px] p-[0_16px] bg-white/4">
+        <i class="w-[11px] h-[11px] rounded-[50%] bg-white/16" /><i class="w-[11px] h-[11px] rounded-[50%] bg-white/16" /><i class="w-[11px] h-[11px] rounded-[50%] bg-white/16" /><span class="inline-flex items-center gap-[7px] ml-[12px] font-display text-[14px] text-white/80">Actor <span class="mono text-[12px] text-white/42">opencode</span></span>
       </div>
-      <div class="term mono">
-        <span class="line dim">› the model asks to build the app</span>
-        <span class="line shown"><b>$</b> xcodebuild -scheme App <em class="tag to shown">→ mac</em></span>
-        <span class="line ok shown">** BUILD SUCCEEDED **</span>
+      <div class="mono flex flex-col gap-[8px] p-[18px_16px_22px] text-[13.5px] leading-[1.5]">
+        <span :class="LINE" class="!whitespace-normal flex-wrap text-white/45">› the model asks to build the app</span>
+        <span :class="LINE" class="!whitespace-normal flex-wrap"><b class="font-normal text-actor-term">$</b> xcodebuild -scheme App <em :class="TAG" class="bg-executor-fill">→ mac</em></span>
+        <span :class="LINE" class="!whitespace-normal flex-wrap text-executor-term">** BUILD SUCCEEDED **</span>
       </div>
     </div>
-    <div class="mac done c-mac">
-      <div class="mac-head">
-        <span class="tile"><Icon name="mingcute:apple-line" :size="18" /></span>
-        <span class="what">
-          <strong class="display">mac</strong>
-          <span class="sub">Executor · runner on a Mac</span>
+    <div class="relative flex flex-col gap-[14px] m-[-20px_12px_0_40px] p-[16px] rounded-[16px] bg-surface [box-shadow:0_1px_2px_rgb(0_0_0/8%),0_12px_32px_rgb(0_0_0/18%)]">
+      <div class="flex items-center gap-[12px]">
+        <span class="grid w-[38px] h-[38px] flex-none place-items-center rounded-[10px] bg-executor/15 text-executor"><Icon name="mingcute:apple-line" :size="18" /></span>
+        <span class="flex flex-col">
+          <strong class="display text-[18px] font-normal">mac</strong>
+          <span class="text-[13px] text-muted">Executor · runner on a Mac</span>
         </span>
       </div>
-      <div class="mac-body mono">
-        <span class="state">** BUILD SUCCEEDED **</span>
-        <span class="progress"><i /></span>
+      <div class="mono flex flex-col gap-[10px]">
+        <span class="text-[13px] text-executor">** BUILD SUCCEEDED **</span>
+        <span class="overflow-hidden h-[6px] rounded-[3px] bg-control"><i class="block w-full h-full rounded-[3px] bg-executor-fill" /></span>
       </div>
     </div>
   </div>
 </template>
-
-<style scoped>
-.intro {
-  position: absolute;
-  top: 132px;
-  left: 56px;
-  width: 340px;
-}
-
-.mark {
-  margin: 0;
-  font-size: 92px;
-  line-height: 1;
-  letter-spacing: -0.02em;
-}
-
-.lead {
-  margin: 24px 0 0;
-  color: var(--ink);
-  font-size: 22px;
-  line-height: 1.35;
-}
-
-/* The window: whole, at a terminal's proportions; the page is its ground, so no plate. */
-.window {
-  position: absolute;
-  top: 84px;
-  left: 500px;
-  width: 720px;
-  height: 432px;
-  overflow: hidden;
-  border-radius: 14px;
-  background: var(--term);
-  box-shadow:
-    0 0 0 1px rgb(255 255 255 / 6%),
-    0 24px 60px rgb(0 0 0 / 18%);
-  color: var(--term-ink);
-}
-
-/* On a dark page depth comes from a lighter surface, so the window steps up from the page instead of sinking into it. */
-:root[data-theme='dark'] .window {
-  background: var(--term-raised);
-}
-
-.bar {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  height: 40px;
-  padding: 0 16px;
-  background: rgb(255 255 255 / 4%);
-}
-
-.bar i {
-  width: 11px;
-  height: 11px;
-  border-radius: 50%;
-  background: rgb(255 255 255 / 16%);
-}
-
-.title {
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  margin-left: 12px;
-  color: rgb(255 255 255 / 80%);
-  font-family: var(--font-display);
-  font-size: 14px;
-}
-
-.driver {
-  color: rgb(255 255 255 / 42%);
-  font-size: 12px;
-}
-
-/* The lines keep to the left; the satellite covers only the empty right of the terminal. */
-.term {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 28px 28px 0;
-  font-size: 16px;
-  line-height: 1.5;
-}
-
-.line {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 24px;
-  white-space: pre;
-  opacity: 0;
-  transform: translateY(4px);
-  transition:
-    opacity 0.5s cubic-bezier(0.25, 0.8, 0.25, 1),
-    transform 0.5s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-
-.line.dim,
-.line.shown {
-  opacity: 1;
-  transform: none;
-}
-
-.line.dim {
-  color: rgb(255 255 255 / 45%);
-}
-
-.line b {
-  color: var(--actor-term);
-  font-weight: 400;
-}
-
-.line.ok {
-  color: var(--executor-term);
-}
-
-.line.err {
-  color: var(--bad-term);
-}
-
-.line.filler {
-  opacity: 1;
-  transform: none;
-}
-
-.line.filler i {
-  display: block;
-  height: 8px;
-  border-radius: 4px;
-  background: rgb(255 255 255 / 8%);
-}
-
-.tag {
-  padding: 1px 10px;
-  border-radius: 999px;
-  color: #fff;
-  font-size: 13px;
-  font-style: normal;
-  opacity: 0;
-  transform: translateX(-6px);
-  transition:
-    opacity 0.35s cubic-bezier(0.25, 0.8, 0.25, 1),
-    transform 0.35s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-
-.tag.shown {
-  opacity: 1;
-  transform: none;
-}
-
-.tag.to {
-  background: var(--executor-fill);
-}
-
-.tag.deny {
-  background: var(--bad-fill);
-}
-
-/* The chip: one fact about the whole window, on its top-right corner over the empty title bar, half outside. */
-.where {
-  position: absolute;
-  top: 66px;
-  right: 156px;
-  display: inline-flex;
-  align-items: center;
-  gap: 7px;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: var(--surface);
-  box-shadow:
-    0 1px 2px rgb(0 0 0 / 8%),
-    0 8px 22px rgb(0 0 0 / 14%);
-  color: var(--ink);
-  font-size: 14px;
-  white-space: nowrap;
-}
-
-.where .dot {
-  width: 4px;
-  height: 4px;
-  margin: 0 3px;
-  border-radius: 50%;
-  background: var(--faint);
-}
-
-/* The satellite: a light card on the dark window, straddling its right edge over the terminal's empty margin. */
-.mac {
-  position: absolute;
-  top: 262px;
-  left: 1090px;
-  display: flex;
-  width: 250px;
-  flex-direction: column;
-  gap: 14px;
-  padding: 16px;
-  border-radius: 16px;
-  background: var(--surface);
-  box-shadow:
-    0 1px 2px rgb(0 0 0 / 8%),
-    0 12px 32px rgb(0 0 0 / 18%);
-  transition: transform 0.45s cubic-bezier(0.2, 0, 0, 1);
-}
-
-.mac.running,
-.mac.done {
-  transform: translateY(-4px);
-}
-
-.mac-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.tile {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex: none;
-  place-items: center;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--executor) 15%, transparent);
-  color: var(--executor);
-}
-
-.what {
-  display: flex;
-  flex-direction: column;
-}
-
-strong {
-  font-size: 18px;
-  font-weight: 400;
-}
-
-.sub {
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.mac-body {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.state {
-  color: var(--muted);
-  font-size: 13px;
-  transition: color 0.3s;
-}
-
-.running .state {
-  color: var(--ink);
-}
-
-.done .state {
-  color: var(--executor);
-}
-
-.progress {
-  overflow: hidden;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--control);
-}
-
-.progress i {
-  display: block;
-  width: 0;
-  height: 100%;
-  border-radius: 3px;
-  background: var(--executor-fill);
-}
-
-.running .progress i {
-  width: 82%;
-  transition: width 2.2s cubic-bezier(0.45, 0, 0.1, 1);
-}
-
-.done .progress i {
-  width: 100%;
-  transition: width 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
-}
-</style>
-
-<style scoped>
-/* Wide: the stage. Narrow: the compact design instead, at the column's width with real-size type. */
-.compact {
-  display: none;
-}
-
-@media (max-width: 720px) {
-  .wide {
-    display: none;
-  }
-
-  .compact {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-    padding: 24px 0 8px;
-  }
-
-  .compact .mark {
-    font-size: 64px;
-  }
-
-  .compact .lead {
-    margin-top: 16px;
-    font-size: 20px;
-  }
-
-  .compact .c-where {
-    position: relative;
-    top: auto;
-    right: auto;
-    z-index: 2;
-    align-self: flex-start;
-    margin: 32px 0 12px;
-    font-size: 12.5px;
-  }
-
-  .c-window {
-    overflow: hidden;
-    border-radius: 14px;
-    background: var(--term);
-    color: var(--term-ink);
-  }
-
-  :root[data-theme='dark'] .c-window {
-    background: var(--term-raised);
-  }
-
-  .compact .term {
-    padding: 18px 16px 22px;
-    font-size: 13.5px;
-  }
-
-  .compact .line {
-    white-space: normal;
-    flex-wrap: wrap;
-  }
-
-  .compact .c-mac {
-    position: relative;
-    top: auto;
-    left: auto;
-    width: auto;
-    margin: -20px 12px 0 40px;
-    transform: none;
-  }
-}
-</style>

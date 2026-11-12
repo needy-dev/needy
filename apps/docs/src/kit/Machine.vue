@@ -34,103 +34,21 @@ withDefaults(defineProps<{
 
 <template>
   <div
-    class="machine f" :class="[focus, { flow }]"
+    class="f flex flex-col gap-[8px] rounded-[14px] bg-surface p-[14px]" :class="[focus, flow ? 'relative' : 'absolute']"
     :style="{ 'left': flow ? undefined : `${x}px`, 'top': flow ? undefined : `${y}px`, 'width': flow ? undefined : `${w}px`, 'height': h ? `${h}px` : undefined, '--role': color(role) }"
   >
-    <header>
-      <span v-if="icon" class="tile"><Icon :name="icon" :size="20" /></span>
+    <header class="flex items-center gap-[11px]">
+      <span v-if="icon" class="grid h-[38px] w-[38px] flex-none place-items-center rounded-[10px] bg-role/15 text-role"><Icon :name="icon" :size="20" /></span>
       <Logo v-else-if="logo" :name="logo" :size="26" />
-      <span class="what">
-        <span class="title display">{{ title }}</span>
-        <span v-if="sub" class="sub">{{ sub }}</span>
+      <span class="flex min-w-0 flex-1 flex-col">
+        <span class="display overflow-hidden text-ellipsis whitespace-nowrap text-[17px]">{{ title }}</span>
+        <span v-if="sub" class="overflow-hidden text-ellipsis whitespace-nowrap text-[13px] text-muted">{{ sub }}</span>
       </span>
-      <code v-if="name" class="name">{{ name }}</code>
+      <code v-if="name" class="flex-none rounded-[7px] bg-role/13 px-[8px] py-[2px] text-[13px] text-role">{{ name }}</code>
     </header>
-    <div v-if="$slots.default" class="body">
+    <div v-if="$slots.default" class="flex min-h-0 flex-1 flex-col gap-[6px]">
       <slot />
     </div>
-    <span v-if="badge" class="badge"><Icon name="mingcute:box-3-line" />{{ badge }}</span>
+    <span v-if="badge" class="mt-auto inline-flex items-center gap-[4px] whitespace-nowrap text-[12px] text-muted"><Icon name="mingcute:box-3-line" />{{ badge }}</span>
   </div>
 </template>
-
-<style scoped>
-.machine {
-  position: absolute;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px;
-  border-radius: 14px;
-  background: var(--surface);
-}
-
-.machine.flow {
-  position: relative;
-}
-
-header {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-}
-
-.tile {
-  display: grid;
-  width: 38px;
-  height: 38px;
-  flex: none;
-  place-items: center;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--role) 15%, transparent);
-  color: var(--role);
-}
-
-.what {
-  display: flex;
-  min-width: 0;
-  flex: 1;
-  flex-direction: column;
-}
-
-.title {
-  overflow: hidden;
-  font-size: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sub {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 13px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.name {
-  flex: none;
-  padding: 2px 8px;
-  border-radius: 7px;
-  background: color-mix(in srgb, var(--role) 13%, transparent);
-  color: var(--role);
-  font-size: 13px;
-}
-
-.body {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: auto;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-}
-</style>

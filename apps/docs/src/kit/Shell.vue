@@ -24,6 +24,22 @@ const highlighter = tagHighlighter([
 type Token = { text: string, cls: string }
 
 /**
+ * Catppuccin Mocha's color for each kind of token: https://github.com/catppuccin/palette/blob/v1.8.0/palette.json
+ * A plain word takes the text color, as the block does.
+ */
+const COLOR: Record<string, string> = {
+  '': 'text-[#cdd6f4]',
+  'c': 'text-[#9399b2] italic',
+  's': 'text-[#a6e3a1]',
+  'k': 'text-[#cba6f7]',
+  'v': 'text-[#fab387]',
+  'n': 'text-[#f9e2af]',
+  'o': 'text-[#89dceb]',
+  'cmd': 'text-[#89b4fa]',
+  'f': 'text-[#94e2d5]',
+}
+
+/**
  * The code as lines of tokens. The shell mode colors comments, strings and variables but leaves plain words as one
  * run, so plain runs are split into words here: a line's first word, and the first word after `&&`, `|` or `;`, is
  * the command, and a word starting with `-` is a flag.
@@ -64,45 +80,5 @@ const lines = computed(() => {
 </script>
 
 <template>
-  <pre class="shell mono"><template v-for="(line, l) in lines" :key="l"><span v-for="(t, i) in line" :key="i" :class="t.cls">{{ t.text }}</span>{{ l < lines.length - 1 ? '\n' : '' }}</template></pre>
+  <pre class="mono text-[#cdd6f4]"><template v-for="(line, l) in lines" :key="l"><span v-for="(t, i) in line" :key="i" :class="COLOR[t.cls]">{{ t.text }}</span>{{ l < lines.length - 1 ? '\n' : '' }}</template></pre>
 </template>
-
-<style scoped>
-/* Catppuccin Mocha: https://github.com/catppuccin/palette/blob/v1.8.0/palette.json */
-.shell {
-  color: #cdd6f4;
-}
-
-.c {
-  color: #9399b2;
-  font-style: italic;
-}
-
-.s {
-  color: #a6e3a1;
-}
-
-.k {
-  color: #cba6f7;
-}
-
-.v {
-  color: #fab387;
-}
-
-.n {
-  color: #f9e2af;
-}
-
-.o {
-  color: #89dceb;
-}
-
-.cmd {
-  color: #89b4fa;
-}
-
-.f {
-  color: #94e2d5;
-}
-</style>

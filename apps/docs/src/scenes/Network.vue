@@ -101,20 +101,20 @@ function hostFocus(at: number, id: HostId) {
 <template>
   <Frame :width="W" :height="H" :steps="STEPS" :capture="capture" label="Network: the actor reaches only the hosts on its allowlist and its services; every other host is blocked with 403.">
     <template #default="{ at }">
-      <svg class="wires" :width="W" :height="H" aria-hidden="true">
-        <path :d="curve(OUT.x, OUT.y, CODE.x, lineY(2))" class="wire" />
-        <path v-for="(_, id) in HOSTS" :key="id" :d="curve(CODE.x + CODE.w, lineY(2), HOST_X, hostY(id))" class="wire" :class="{ blocked: id === 'other' }" />
+      <svg class="pointer-events-none absolute inset-0" :width="W" :height="H" aria-hidden="true">
+        <path :d="curve(OUT.x, OUT.y, CODE.x, lineY(2))" class="fill-none stroke-line [stroke-width:1.6] [stroke-dasharray:1.5_6] [stroke-linecap:round]" />
+        <path v-for="(_, id) in HOSTS" :key="id" :d="curve(CODE.x + CODE.w, lineY(2), HOST_X, hostY(id))" class="fill-none stroke-line [stroke-width:1.6] [stroke-dasharray:1.5_6] [stroke-linecap:round]" :class="{ blocked: id === 'other' }" />
       </svg>
 
       <Pod v-bind="POD" logo="firecracker" driver="linux-firecracker" badge="No network of its own">
         <Terminal v-bind="linesAt(at)" :rows="10" :play="at" />
       </Pod>
 
-      <div class="code" :style="{ left: `${CODE.x}px`, top: `${CODE.y}px`, width: `${CODE.w}px` }">
+      <div class="absolute" :style="{ left: `${CODE.x}px`, top: `${CODE.y}px`, width: `${CODE.w}px` }">
         <Profile :code="YAML" :lit="[STEPS[at]!.line]" :role="STEPS[at]!.blocked ? 'bad' : 'executor'" title="profile.yaml" />
       </div>
 
-      <p :key="at" class="status mono" :style="{ 'left': `${STATUS.x}px`, 'top': `${STATUS.y}px`, 'width': `${STATUS.w}px`, '--role': STEPS[at]!.blocked ? 'var(--bad)' : 'var(--executor)', 'animationDelay': `${sent(at) + 200}ms` }">
+      <p :key="at" class="mono absolute m-0 flex items-center gap-[8px] rounded-[10px] px-[14px] py-[8px] text-[13.5px] text-role bg-role/12 animate-[rise-6_0.4s_cubic-bezier(0.2,0,0,1)_both]" :style="{ 'left': `${STATUS.x}px`, 'top': `${STATUS.y}px`, 'width': `${STATUS.w}px`, '--role': STEPS[at]!.blocked ? 'var(--bad)' : 'var(--executor)', 'animationDelay': `${sent(at) + 200}ms` }">
         <Icon :name="STEPS[at]!.blocked ? 'mingcute:forbid-circle-line' : 'mingcute:check-line'" /> {{ STEPS[at]!.event }}
       </p>
 
@@ -127,44 +127,3 @@ function hostFocus(at: number, id: HostId) {
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.wires {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.wire {
-  fill: none;
-  stroke: var(--line);
-  stroke-width: 1.6;
-  stroke-dasharray: 1.5 6;
-  stroke-linecap: round;
-}
-
-.code {
-  position: absolute;
-}
-
-.status {
-  position: absolute;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  padding: 8px 14px;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--role) 12%, transparent);
-  color: var(--role);
-  font-size: 13.5px;
-  animation: arrive 0.4s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-}
-</style>

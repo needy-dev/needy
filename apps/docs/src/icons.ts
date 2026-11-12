@@ -1,5 +1,6 @@
-// The icons that the page uses, as `set:name` from Iconify sets. The build takes only these out of the sets
-// (vite.config.ts), so the page ships these icons and not the whole sets. The file has no imports, so Node reads it.
+// The icons that the page uses, as `set:name` from Iconify sets. UnoCSS's icon preset (uno.config.ts) generates a
+// class for each of these and no others, so the page ships these icons and not the whole sets. The file has no
+// imports, so Node reads it.
 
 export const ICON_NAMES = [
   // Agent harnesses and models, from @proj-airi/lobe-icons.

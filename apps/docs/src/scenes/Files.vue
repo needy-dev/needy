@@ -109,6 +109,18 @@ const STEPS: FilesStep[] = [
   },
 ]
 
+/** A file's row, by what the step does to it: new (it arrives), skip (a filter leaves it out) or mount (served live). */
+function fileClass(state: File['state']): string {
+  const row = 'flex items-center gap-[7px] whitespace-nowrap rounded-[9px] px-[10px] py-[7px]'
+  if (state === 'new')
+    return `${row} text-executor bg-executor/15 animate-[rise-4_0.4s_1.1s_cubic-bezier(0.2,0,0,1)_both]`
+  if (state === 'skip')
+    return `${row} text-muted line-through bg-ink/5`
+  if (state === 'mount')
+    return `${row} text-executor bg-executor/10`
+  return `${row} bg-ink/5`
+}
+
 function wires(at: number): Wire[] {
   const step = STEPS[at]!
   return [
@@ -124,33 +136,33 @@ function wires(at: number): Wire[] {
       <Wires :wires="wires(at)" :width="W" :height="H" />
 
       <Machine v-bind="HOST" role="host" icon="mingcute:server-2-line" title="Control Host" sub="host:" :focus="STEPS[at]!.copy !== 'idle' ? 'focus' : 'idle'">
-        <ul class="files mono">
-          <li v-for="f in STEPS[at]!.host" :key="f.path" :class="f.state">
+        <ul class="mono m-0 mt-[4px] flex list-none flex-col gap-[6px] p-0 text-[12.5px]">
+          <li v-for="f in STEPS[at]!.host" :key="f.path" :class="fileClass(f.state)">
             <Icon name="mingcute:file-code-line" />{{ f.path }}
           </li>
         </ul>
       </Machine>
 
       <Pod v-bind="ACTOR" logo="firecracker" driver="actor:" :focus="STEPS[at]!.gone ? 'gone' : 'idle'">
-        <ul class="files mono">
-          <li v-for="f in STEPS[at]!.actor" :key="f.path" :class="f.state">
+        <ul class="mono m-0 mt-[4px] flex list-none flex-col gap-[6px] p-0 text-[12.5px]">
+          <li v-for="f in STEPS[at]!.actor" :key="f.path" :class="fileClass(f.state)">
             <Icon :name="f.state === 'mount' ? 'mingcute:folder-open-line' : 'mingcute:file-code-line'" />{{ f.path }}
           </li>
         </ul>
-        <p v-if="STEPS[at]!.mapping" :key="at" class="mapping mono">
+        <p v-if="STEPS[at]!.mapping" :key="at" class="mono mx-0 mb-0 mt-auto text-[12.5px] text-muted animate-[rise-4_0.35s_cubic-bezier(0.2,0,0,1)_both]">
           {{ STEPS[at]!.mapping }}
         </p>
       </Pod>
 
       <Machine v-bind="EXEC" icon="mingcute:cube-line" title="Container" name="build" sub="executor:build:" badge="Stateful" :focus="STEPS[at]!.mount ? 'focus' : 'idle'">
-        <ul class="files mono">
-          <li v-for="f in STEPS[at]!.exec" :key="f.path" :class="f.state">
+        <ul class="mono m-0 mt-[4px] flex list-none flex-col gap-[6px] p-0 text-[12.5px]">
+          <li v-for="f in STEPS[at]!.exec" :key="f.path" :class="fileClass(f.state)">
             <Icon name="mingcute:file-code-line" />{{ f.path }}
           </li>
         </ul>
       </Machine>
 
-      <p v-if="STEPS[at]!.gone" class="gone" :style="{ left: `${ACTOR.x}px`, width: `${ACTOR.w}px` }">
+      <p v-if="STEPS[at]!.gone" class="absolute top-[180px] m-0 text-center text-[15px] text-muted animate-[rise-4_0.4s_0.3s_both]" :style="{ left: `${ACTOR.x}px`, width: `${ACTOR.w}px` }">
         The next run starts from the image again.
       </p>
 
@@ -158,65 +170,3 @@ function wires(at: number): Wire[] {
     </template>
   </Frame>
 </template>
-
-<style scoped>
-.files {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin: 4px 0 0;
-  padding: 0;
-  list-style: none;
-  font-size: 12.5px;
-}
-
-.files li {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 7px 10px;
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--ink) 5%, transparent);
-  white-space: nowrap;
-}
-
-.files li.new {
-  background: color-mix(in srgb, var(--executor) 15%, transparent);
-  color: var(--executor);
-  animation: arrive 0.4s 1.1s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-.files li.skip {
-  color: var(--muted);
-  text-decoration: line-through;
-}
-
-.files li.mount {
-  background: color-mix(in srgb, var(--executor) 10%, transparent);
-  color: var(--executor);
-}
-
-@keyframes arrive {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-}
-
-.mapping {
-  margin: auto 0 0;
-  color: var(--muted);
-  font-size: 12.5px;
-  animation: arrive 0.35s cubic-bezier(0.2, 0, 0, 1) both;
-}
-
-.gone {
-  position: absolute;
-  top: 180px;
-  margin: 0;
-  color: var(--muted);
-  font-size: 15px;
-  text-align: center;
-  animation: arrive 0.4s 0.3s both;
-}
-</style>

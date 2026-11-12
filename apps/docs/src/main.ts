@@ -8,6 +8,7 @@ import '@fontsource/maple-mono/400.css'
 import '@fontsource/maple-mono/500.css'
 import './style.css'
 import './kit/focus.css'
+import 'virtual:uno.css'
 // LXGW 975 Yuan for the Chinese text, cut down to its characters at build time.
 import 'virtual:cjk-font'
 

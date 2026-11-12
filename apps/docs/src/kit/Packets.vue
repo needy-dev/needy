@@ -25,9 +25,11 @@ defineProps<{ packets: readonly Packet[] }>()
 </script>
 
 <template>
-  <div class="packets" aria-hidden="true">
+  <div class="pointer-events-none absolute inset-0" aria-hidden="true">
     <span
-      v-for="p in packets" :key="p.id" class="packet mono" :class="{ back: p.back, keep: p.keep, dot: !p.text }"
+      v-for="p in packets" :key="p.id"
+      class="mono absolute left-0 top-0 z-5 whitespace-nowrap rounded-[999px] bg-[var(--fill)] text-[12.5px] text-[#fff] [animation-fill-mode:both] [animation-timing-function:cubic-bezier(0.45,0,0.25,1)] [box-shadow:0_4px_14px_rgb(0_0_0/18%)] [offset-anchor:center] [offset-rotate:0deg]"
+      :class="[p.text ? 'px-[10px] py-[4px]' : 'h-[12px] w-[12px] p-0', p.keep ? '[animation-name:packet-travel-keep]' : p.back ? '[animation-name:packet-travel-back]' : '[animation-name:packet-travel]']"
       :style="{
         'offsetPath': `path('${p.d}')`,
         'animationDelay': `${p.delay ?? 0}ms`,
@@ -37,94 +39,3 @@ defineProps<{ packets: readonly Packet[] }>()
     >{{ p.text }}</span>
   </div>
 </template>
-
-<style scoped>
-.packets {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-}
-
-.packet {
-  position: absolute;
-  top: 0;
-  left: 0;
-  z-index: 5;
-  padding: 4px 10px;
-  border-radius: 999px;
-  background: var(--fill);
-  box-shadow: 0 4px 14px rgb(0 0 0 / 18%);
-  color: #fff;
-  font-size: 12.5px;
-  white-space: nowrap;
-  offset-anchor: center;
-  offset-rotate: 0deg;
-  animation-name: travel;
-  animation-timing-function: cubic-bezier(0.45, 0, 0.25, 1);
-  animation-fill-mode: both;
-}
-
-.packet.dot {
-  width: 12px;
-  height: 12px;
-  padding: 0;
-}
-
-.packet.back {
-  animation-name: travel-back;
-}
-
-.packet.keep {
-  animation-name: travel-keep;
-}
-
-@keyframes travel {
-  0% {
-    offset-distance: 0%;
-    opacity: 0;
-  }
-
-  10%,
-  86% {
-    opacity: 1;
-  }
-
-  100% {
-    offset-distance: 100%;
-    opacity: 0;
-  }
-}
-
-@keyframes travel-back {
-  0% {
-    offset-distance: 100%;
-    opacity: 0;
-  }
-
-  10%,
-  86% {
-    opacity: 1;
-  }
-
-  100% {
-    offset-distance: 0%;
-    opacity: 0;
-  }
-}
-
-@keyframes travel-keep {
-  0% {
-    offset-distance: 0%;
-    opacity: 0;
-  }
-
-  10%,
-  100% {
-    opacity: 1;
-  }
-
-  100% {
-    offset-distance: 100%;
-  }
-}
-</style>
