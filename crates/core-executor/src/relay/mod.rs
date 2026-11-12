@@ -8,13 +8,14 @@
 
 mod keys;
 mod signals;
+mod stdin;
 mod terminal;
 
 use std::time::Duration;
 
 use needy_api_client::exec::{Event, ExecStream, Input};
 use needy_common::process::Exit;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::{CancellationToken, DropGuard};
 
@@ -139,10 +140,11 @@ pub async fn run(mut stream: ExecStream, options: Options) -> Result<Ended, Erro
 /// Forwards local stdin, signals and, with `tty`, window changes to a remote
 /// process. The forwarding tasks stop when this value is dropped.
 pub struct Forward {
-  // NOTICE: the tasks are cancelled, not awaited. A read of tokio's stdin
-  // runs on a blocking thread that cannot be interrupted; the task ends at
-  // once, and the thread at the next input or when the process exits.
+  // NOTICE: the tasks are cancelled, not awaited.
   _stop: DropGuard,
+  /// Ends the thread that reads stdin, without reading more of it (see
+  /// [`stdin`]).
+  _stdin: Option<stdin::Stop>,
   /// The name of a second termination signal, after which the client
   /// leaves.
   pub terminated: mpsc::Receiver<&'static str>,
@@ -163,13 +165,28 @@ impl Forward {
   fn start_with(input: Input, options: &Options) -> Self {
     let cancel = CancellationToken::new();
     let (detached_tx, detached) = mpsc::channel(1);
+    let mut stop_stdin = None;
     if options.stdin || options.detach_keys.is_some() {
       let stdin = Stdin {
         forward: options.stdin && !options.read_only,
         keys: options.detach_keys.clone(),
         detached: detached_tx,
       };
-      tokio::spawn(forward_stdin(input.clone(), stdin, cancel.clone()));
+      // A stdin that cannot be read ends at once, as a read error does.
+      let chunks = match stdin::read() {
+        Ok((chunks, stop)) => {
+          stop_stdin = Some(stop);
+          chunks
+        }
+        Err(e) => {
+          tracing::debug!("relay: cannot read stdin: {e}");
+          let (ended, chunks) = mpsc::channel(1);
+          // A new channel has room for its one chunk.
+          let _ = ended.try_send(Vec::new());
+          chunks
+        }
+      };
+      tokio::spawn(forward_stdin(input.clone(), chunks, stdin, cancel.clone()));
     }
     let (terminated_tx, terminated) = mpsc::channel(1);
     // A read-only viewer sends nothing; its window size would be refused.
@@ -178,6 +195,7 @@ impl Forward {
     }
     Self {
       _stop: cancel.drop_guard(),
+      _stdin: stop_stdin,
       terminated,
       detached,
     }
@@ -195,27 +213,21 @@ struct Stdin {
 /// Forwards local stdin to the process, then half-closes it at end of file.
 /// The detach keys are taken out; when they are typed, it asks the
 /// executor to detach and stops.
-async fn forward_stdin(input: Input, mut stdin_task: Stdin, cancel: CancellationToken) {
-  let mut stdin = tokio::io::stdin();
-  let mut buf = vec![0u8; 32 * 1024];
+async fn forward_stdin(input: Input, mut chunks: stdin::Chunks, mut stdin_task: Stdin, cancel: CancellationToken) {
   loop {
     let read = tokio::select! {
-      read = stdin.read(&mut buf) => read,
+      read = chunks.recv() => read,
       () = cancel.cancelled() => return,
     };
-    let n = match read {
-      Ok(n) => n,
-      Err(e) => {
-        tracing::debug!("relay: stdin: {e}");
-        0
-      }
-    };
+    // The thread ends without a chunk only when the relay stopped it.
+    let Some(read) = read else { return };
+    let n = read.len();
     let (bytes, detach) = match stdin_task.keys.as_mut() {
       Some(keys) if n > 0 => {
-        let scanned = keys.scan(&buf[..n]);
+        let scanned = keys.scan(&read);
         (scanned.forward, scanned.detach)
       }
-      _ => (buf[..n].to_vec(), false),
+      _ => (read, false),
     };
     if !stdin_task.forward {
       if detach {
