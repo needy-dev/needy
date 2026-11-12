@@ -11,7 +11,8 @@
 # https://docs.docker.com/build/ci/github-actions/multi-platform/#distribute-build-across-multiple-runners
 #
 # A plain `workflow_dispatch` builds and verifies everything and publishes
-# nothing: no release assets, no GHCR push.
+# nothing: no release assets, no GHCR push, no attestation (unless `attest`
+# asks for one).
 name: Release
 
 on:
@@ -34,6 +35,11 @@ on:
         description: Existing release tag to upload to when upload_to_release is enabled
         required: false
         type: string
+      attest:
+        description: Attest the build provenance of the archives without publishing them (a publishing run always does)
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -220,19 +226,24 @@ jobs:
         include:
           # The Firecracker actor is x86_64 only (images/Dockerfile). The VM
           # images are base images: no needy inside, which the daemon brings
-          # as a second disk; `base-abi` records the base ABI they speak.
+          # as a second disk; their `manifest.json` records the base ABI they
+          # speak.
           - os: ubuntu-24.04
             arch: amd64
             vm_target: actor
+            vm_driver: linux-firecracker
+            vm_arch: x86_64
             vm_archive: needy-actor-linux-firecracker-x86_64.tar.gz
-            vm_files: vmlinux rootfs.ext4 firecracker base-abi
+            vm_files: vmlinux rootfs.ext4 firecracker
           # The `macos-vz` actor is arm64 only: Virtualization.framework on
           # Apple silicon boots it.
           - os: ubuntu-24.04-arm
             arch: arm64
             vm_target: actor-macos-vz
+            vm_driver: macos-vz
+            vm_arch: aarch64
             vm_archive: needy-actor-macos-vz-aarch64.tar.gz
-            vm_files: Image initrd rootfs.ext4 base-abi
+            vm_files: Image initrd rootfs.ext4
     permissions:
       contents: read
       packages: write
@@ -252,11 +263,11 @@ jobs:
       - uses: docker/setup-buildx-action@v4
 
       # The VM actor's files, exported as images/Dockerfile's header shows
-      # (`--output type=local`). `needy build --out` builds the same target
+      # (`--output type=local`). `needy image build --out` builds the same target
       # through the Docker API, but picks it from the host it runs on (the
       # Firecracker target on any Linux), so it cannot build the `macos-vz`
       # files on a Linux runner. The kernel is built without a recipe, so it
-      # keeps its own `uname` identity; `needy build --recipe` rebuilds it
+      # keeps its own `uname` identity; `needy image build --recipe` rebuilds it
       # with a recipe's.
       - name: Build the ${{ matrix.vm_target }} actor files
         uses: docker/build-push-action@v7
@@ -269,16 +280,38 @@ jobs:
       - name: Verify the actor files
         run: |
           ls -lsh vm
-          for file in ${{ matrix.vm_files }}; do test -s "vm/$file"; done
+          for file in ${{ matrix.vm_files }} base-abi; do test -s "vm/$file"; done
           echo "base ABI $(cat vm/base-abi)"
           if [ -e vm/firecracker ]; then vm/firecracker --version; fi
           sudo e2fsck -fn vm/rootfs.ext4
 
+      # The image's `manifest.json`, in the shape `needy image pull` reads
+      # (`needy_core_actor::image::manifest`, whose test
+      # `the_manifest_of_a_release_archive_has_no_source_or_sha256` holds the
+      # same fields): the needy version of this tree, the driver, the
+      # architecture and the base ABI the Dockerfile exported as `base-abi`,
+      # which the manifest replaces. `needy image pull` adds where it came
+      # from and the archive's SHA-256.
+      - name: Write the image's manifest
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          if [ "$PUBLISH" = true ] && [ "$TAG_NAME" != "v$version" ]; then
+            echo "::warning::the release tag $TAG_NAME is not v$version, the version of this tree; needy $version pulls from v$version"
+          fi
+          jq -n --arg version "$version" --arg driver "${{ matrix.vm_driver }}" --arg arch "${{ matrix.vm_arch }}" \
+            --argjson base_abi "$(cat vm/base-abi)" \
+            '{version: $version, driver: $driver, arch: $arch, base_abi: $base_abi}' > vm/manifest.json
+          rm vm/base-abi
+          cat vm/manifest.json
+
       # `--sparse` keeps the free blocks of rootfs.ext4 out of the archive;
-      # GNU tar recreates them as holes on extraction.
+      # GNU tar recreates them as holes on extraction, and `needy image pull`
+      # writes them back as holes.
       - name: Archive the actor files
         run: |
-          tar --sparse -czf ${{ matrix.vm_archive }} -C vm ${{ matrix.vm_files }}
+          tar --sparse -czf ${{ matrix.vm_archive }} -C vm ${{ matrix.vm_files }} manifest.json
           sha256sum ${{ matrix.vm_archive }} | awk '{ print $1 }' > ${{ matrix.vm_archive }}.sha256
           ls -lh ${{ matrix.vm_archive }}
           sudo rm -rf vm
@@ -445,10 +478,8 @@ jobs:
   # actor driver runs on an Intel Mac.
   # NOTICE(guest-signing): the guest needy is a Linux ELF that macOS never
   # runs, so it is not code-signed or notarized (`codesign` and the notary
-  # service sign Mach-O code); the archive's `.sha256` covers it.
-  # TODO(release-attestation): build provenance attestations
-  # (`actions/attest-build-provenance`) come with `needy image pull`, step 4
-  # of docs/ai/references/architecture/2026-11-12-actor-images-design.md.
+  # service sign Mach-O code); the archive's `.sha256` and its build
+  # provenance attestation (the `attest` job) cover it.
   macos-guest:
     name: macOS archive with the guest needy
     needs: binary
@@ -552,17 +583,29 @@ jobs:
             ${{ matrix.archive }}
             ${{ matrix.archive }}.sha256
 
-  publish:
-    name: Publish release artifacts
+  # Picks the archives a release gets, checks every `.sha256`, and attests
+  # each archive's build provenance with `actions/attest-build-provenance`
+  # (Sigstore, public-good instance for a public repository), which `gh
+  # attestation verify ARCHIVE -R needy-dev/needy` checks. It runs on every
+  # run, after `notarize-macos` when that runs, so `publish` uploads exactly
+  # what it checked; it attests only on a publishing run, or on a dispatch
+  # that asks with `attest`, since an attestation is a public record.
+  # Reference: https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations
+  attest:
+    name: Check and attest the archives
     needs:
       - binary
       - macos-guest
       - images
       - notarize-macos
+    # `notarize-macos` is skipped on a run that does not publish.
+    if: ${{ !cancelled() && !failure() }}
     runs-on: ubuntu-24.04
-    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
     permissions:
-      contents: write
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -583,7 +626,9 @@ jobs:
               *) cp "$file" release/ ;;
             esac
           done
-          test "$(find artifacts -path 'artifacts/notarized-*' -type f | wc -l)" -eq 4
+          if [ "$PUBLISH" = true ]; then
+            test "$(find artifacts -path 'artifacts/notarized-*' -type f | wc -l)" -eq 4
+          fi
 
       - name: Verify checksums
         working-directory: release
@@ -592,6 +637,38 @@ jobs:
           for sum in *.sha256; do
             echo "$(cat "$sum")  ${sum%.sha256}" | sha256sum -c -
           done
+
+      - name: Attest build provenance
+        if: env.PUBLISH == 'true' || inputs.attest
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release/*.tar.gz
+            release/*.zip
+
+      - name: Upload the release assets
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          # See NOTICE(artifact-retention); the archives are compressed.
+          retention-days: 7
+          compression-level: 0
+          path: release
+
+  publish:
+    name: Publish release artifacts
+    needs:
+      - attest
+    runs-on: ubuntu-24.04
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
+    permissions:
+      contents: write
+    steps:
+      - name: Download the checked release assets
+        uses: actions/download-artifact@v8
+        with:
+          name: release-assets
+          path: release
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
