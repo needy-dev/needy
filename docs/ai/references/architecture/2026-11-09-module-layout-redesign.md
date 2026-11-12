@@ -14,6 +14,14 @@
 > `image/`, `identity.rs` and `sidecar/gateway/`; `core-executor`'s
 > `provider/` is `driver/` (`docker.rs` is `linux_container/`).
 
+> **NOTICE (2026-11-12, migration, slice 5 of the drivers design):** the
+> hook point `exec.output` is `file.open`, the file domain's; its trait is
+> `core::intercept::file::StreamFilter`. `core::intercept` is one module per
+> interception domain (`exec`, `net`, `file`), each assembling its own chain;
+> the gateway's allowlist and header injection are `core::network`. The
+> guest's `shim` is `guest/capture/shim.rs` beside `guest/capture/binfmt.rs`.
+> The text below keeps the names of its time.
+
 > **Migration notice (2026-11-10)**: *session* is now *run* in the code, the
 > API, the CLI and the trace (slice 2 of
 > [Runners and runs](2026-11-10-runner-and-run-design.md)). This note keeps

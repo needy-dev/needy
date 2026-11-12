@@ -410,17 +410,24 @@ executor. The parent sees an ordinary child process and exit status.
 
 The mechanism that catches an exec inside an actor and hands it to the
 proxy: the kernel's `binfmt_needy` (VM drivers) or shims (container
-drivers). A capture never decides; what it cannot see (a program created at
-run time under shims) is a coverage gap its driver declares. **Provisional**:
-see the [drivers design](ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md).
+drivers), in `core-actor`'s `guest/capture/`. A capture never decides; what
+it cannot see (a program created at run time under shims) is a coverage gap
+its driver declares. A driver's capture is one of its facets; `actor.start`
+records it, and the report says what shim routing leaves out from it, not
+from the driver's name. **Provisional**: see the
+[drivers design](ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md).
 
 ### Interception domains
 
 Interception has three domains, each with its own hook points, context,
 decision and chain of **interceptors** (policy): **exec** (`exec.decide`:
 rules, chaos), **net** (`net.request`, `net.connect`: allowlist, chaos, header
-injection) and **file** (`file.open`: chaos's file faults). One interceptor
-may serve several domains. Policy never knows the driver. **Provisional**.
+injection) and **file** (`file.open`: chaos's file faults; the hook point
+was `exec.output` before 2026-11-12). One interceptor may serve several
+domains. Policy never knows the driver. Each domain lives in
+`core::intercept::{exec, net, file}`, which also assembles its chain in one
+place; the allowlist and header injection are `core::network`.
+**Provisional**.
 
 ### Adapter
 
@@ -484,8 +491,9 @@ firmware, devices, network identity. A recipe defines it.
 
 Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide`, a payload and the
-payload's schema version (6 since `actor.start` and `run.create` name
-drivers; traces of earlier versions are refused).
+payload's schema version (8 since `actor.start` records the actor's
+capture, after 7 added `actor.ready`; traces of other versions are
+refused).
 The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
 the run directory. Terminal output is not part of the trace.
 

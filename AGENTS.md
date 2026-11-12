@@ -17,8 +17,9 @@ Dependencies point downward; a crate never depends on one above it.
   transitions), `pool` (instances by key, refcounts, slots), `schedule`
   (which runner a profile's `runner:` selector names, and where an actor or
   executor is created), `check` (`profile check` through the control plane),
-  `routing` (the `exec.decide` chain, path maps), `relay` (exec streams and their stream
-  filters), `files` (copy-in, mirror-out), `actor` and `guest` (a run's
+  `routing` (the exec domain's adapter: it runs the `exec.decide` chain and
+  applies path maps), `relay` (exec streams, and the file domain's stream
+  filters on them), `files` (copy-in, mirror-out), `actor` and `guest` (a run's
   VM, gateway and guest API), `runners` (the runner registry) over `store`
   (`state.db`, SeaORM, separate from `trace.db`), and the `executor` and
   `runner` roles. It implements
@@ -26,8 +27,11 @@ Dependencies point downward; a crate never depends on one above it.
   never builds a gRPC status. Every long-lived task belongs to the daemon's
   or a run's `TaskTracker`. Mechanisms live below.
 - `crates/core-actor` (`needy-core-actor`): the actor. `guest` (Linux only)
-  is the in-guest init and exec-routing proxy, on `nix`, logging to the
-  console; everything else is the host side, next to the actor. `driver` is
+  is the in-guest init, the captures that catch an exec (`capture`:
+  `binfmt` sets `binfmt_needy`'s parameters in a VM, `shim` is a container's
+  build-time shims) and the exec-routing proxy every capture hands an exec
+  to, on `nix`, logging to the console; everything else is the host side,
+  next to the actor. `driver` is
   the actor `Driver` trait (start, wait, stop, and the guest, gateway and
   terminal channels the daemon serves or dials) with its `Running` actor and
   the table of drivers, the one place that picks a driver by name (`new`,
@@ -37,11 +41,13 @@ Dependencies point downward; a crate never depends on one above it.
   `needy-core-executor`'s `engine`), `macos_vz` (Virtualization.framework VMs on
   Apple silicon, vfkit's command line in `vfkit`) and `macos_apple_container`
   (Apple's `container` CLI in `cli`). What drivers share is a component:
-  `contract` (vsock ports and channel sockets the guest and host agree on),
+  `contract` (vsock ports, channel sockets and needy's paths in an actor
+  image, which the guest and host agree on),
   `image` (`vm`: needy's kernel and rootfs; `container`: the container actor
   image), `identity` (a recipe's identity files presented from the host) and
   `sshfs`. `sidecar` holds the services a run has next to its actor, with
-  their table: `gateway`, the actor gateway on the `net.*` interceptors.
+  their table: `gateway`, the actor gateway, the mechanism that runs the net
+  domain's chain and applies its decision.
 - `crates/core-executor` (`needy-core-executor`): where commands run.
   `process` is the process host (PTY, pipes, replay, detach, expiry of
   finished processes) with platform code in `process/platform`; `service` is
@@ -54,8 +60,10 @@ Dependencies point downward; a crate never depends on one above it.
   terminal (`crossterm`) for the CLI and the proxy.
 - `crates/core` (`needy-core`): domain logic shared by everything: it
   interprets loaded profiles and recipes (`rules`, `recipe` compilation to a
-  typed VM identity, `chaos`), and owns command patterns (`pattern`), the
-  interceptor traits of each hook point (`intercept`), the values producers
+  typed VM identity, `chaos`, and `network`, the allowlist and header
+  injection), and owns command patterns (`pattern`), the interception
+  domains (`intercept`: `exec`, `net` and `file`, each with its context,
+  decision, interceptor trait and the one assembly of its chain), the values producers
   and consumers share (`types`), the typed event schema (`event`) and report
   rendering (`report`, no IO). No processes, listeners, VMs or storage.
 - `crates/trace` (`needy-trace`): the event pipeline. It carries an envelope
@@ -100,7 +108,7 @@ Dependencies point downward; a crate never depends on one above it.
 ### Extension points
 
 Where needy is meant to be extended sideways (actor drivers, executor
-drivers, sidecars, and later captures and interceptors), one layout rule
+drivers, sidecars, captures, and interceptors by domain), one layout rule
 holds, from the
 [drivers design](docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md):
 

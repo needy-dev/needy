@@ -22,6 +22,14 @@
 > say. The command surface and [Clients](#clients) below are updated; older
 > notes keep `client pair`.
 
+> **NOTICE (2026-11-12, drivers design):** the JSON summary's
+> `actor_runtime` is `actor_driver` (`linux-firecracker`,
+> `linux-container (runc)`, …) since slice 1, and since slice 5
+> `actor_capture` (`kernel` or `shims`, from the driver's facets) says how
+> the actor caught an exec. The note on
+> what shim routing leaves out follows `actor_capture == "shims"`, so a
+> `macos-apple-container` actor's report has it too.
+
 **Status**: pending; implemented as described unless the [closed-loop results](../architecture/2026-11-09-closed-loop-results-evidence.md#not-yet-verified) list it as missing. Terms follow the
 [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
 note. Profiles are described in
@@ -603,6 +611,7 @@ The JSON summary has these fields:
 | `dropped_events` | Events the trace dropped; the counts may be low by as many. |
 | `route_names` | The names the actor routes (`["*"]` for every exec), or `null` without an actor. |
 | `actor_runtime` | What ran the actor (`firecracker`, `container (runc)`, `container (runsc)`), or `null` without an actor or in a trace from before schema version 4. |
+| `actor_capture` | How the actor caught an exec (`kernel` or `shims`), or `null` without an actor or in a trace from before schema version 7. |
 | `commands` | `routed` (`[{executor, commands, failed}]`), `kept_on_actor`, `cli`, `denied`, `faults`, `failed`, `model_calls`. |
 | `top_commands` | `[{command, executor, count, slowest_ms}]`, most frequent first. |
 | `slowest_commands` | `[{command, ms}]`, the three slowest. |

@@ -1,6 +1,6 @@
 # Drivers and extension points
 
-Status: accepted by the owner (2026-11-12); slices 1 to 4 and 6 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3), [Slice 4](#slice-4-one-engine) and [Slice 6: lifecycles](#slice-6-lifecycles)), slice 5 pending. Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
+Status: accepted by the owner (2026-11-12); slices 1 to 6 implemented 2026-11-12 (see [Verification of slices 1 to 3](#verification-of-slices-1-to-3), [Slice 4](#slice-4-one-engine), [Slice 5](#slice-5-policy-and-capture) and [Slice 6: lifecycles](#slice-6-lifecycles)). Breaking API, config and proto changes are allowed; implementers may refine the design and record each refinement under "Decisions during implementation".
 
 ## Why
 
@@ -289,7 +289,8 @@ Proposal:
 | Interceptor (policy) | one trait per domain in `core::intercept::{exec, net, file}` | rules, chaos, allowlist, inject, file faults | `core/` (allowlist and inject move in from the gateway) |
 | Sink (observation) | `trace::Sink` | sqlite, jsonl, memory | `trace/sink/` (already in this shape) |
 
-Each hook point's chain is assembled in one place in the daemon.
+Each domain's chain is assembled in one place, in `core::intercept` (a
+slice 5 decision; the daemon and the gateway only adapt).
 
 ## Slices
 
@@ -502,10 +503,66 @@ directory, on 2026-11-12:
   `TODO(macos-native)` for fenced shims) is where a driver declares its
   capture, and `check.rs` already reads it for the shim warning; the gateway
   is `sidecar::gateway`, with the guest API listed in `sidecar/mod.rs`.
+  (Done: see [Slice 5](#slice-5-policy-and-capture).)
 - Slice 6 (lifecycles): the actor's start and end are in `daemon/actor.rs`
   (`start`, `watch`, `release_actor`); instance states are written by
   `reconcile.rs` through `end_leftover_actor` and `end_leftover_executor`,
   which return the state to write.
+
+### Slice 5: policy and capture
+
+- `core::intercept` is `intercept/{mod, exec, net, file}.rs`. `mod.rs` has
+  the domains table (hook points, context and decision, trait, chain
+  assembly, interceptors, adapter) and the private `fold` every domain's
+  `decide` uses. The decisions moved with their domains:
+  `types::Decision` is `intercept::exec::Decision`, `types::NetDecision`
+  and `NetOutcome` are in `intercept::net`; `Outcome`, `Placement` and
+  `Fired` stay in `types`, since events carry them.
+- The chains are assembled in `core`, not in the daemon as the
+  [Extension kinds](#extension-kinds-side-by-side) section said: one
+  `exec::Chain::new(profile, injector, executor)` (rules, then chaos; a
+  command placed on an executor by name skips the rules), one
+  `net::Chain::new(policy, injector)` (allowlist, chaos, header injection)
+  and one `file::chain(injector, root)` (the SFTP file faults, or no filter
+  when the run has no `file.open` faults). `core` already holds every
+  interceptor, so the order lives next to them, and the adapters (the
+  daemon's `routing` and `relay::filter`, the gateway) only build a context,
+  ask the chain and apply the decision. The table in `intercept/mod.rs`
+  points to each.
+- The hook point `exec.output` is `file.open`, and its trait is
+  `intercept::file::StreamFilter` with `Filtered`. No trace event or timing
+  key carried `exec.output`, so no stored name changed. The daemon's
+  `FileFaults` filter moved to `chaos::sftp::FileFaults`, beside the tap it
+  wraps; `relay/filter.rs` keeps only the adapter's choice of stream (an
+  actor's workspace mount).
+- The gateway's policy is `core::network` (`Policy`, `Allowlist`,
+  `Inject`), named after the profile's `network:` rather than `net`, so it
+  is not confused with the `intercept::net` domain. `sidecar::gateway` keeps
+  the upstream map (where an allowed request is forwarded, which is
+  mechanism) and builds its chain from the policy in `Gateway::new`, whose
+  signature is unchanged. New unit tests in `core/src/network_test.rs` cover
+  the chain without a gateway; the gateway's tests stay as they were.
+- `guest/capture/` holds `binfmt.rs` (the `binfmt_needy` parameters, moved
+  out of init) and `shim.rs` (moved from `guest/shim.rs` with its tests).
+  `capture::Route` (the route's user and names, and `routes`, which mirrors
+  the module's `listed`) is shared by both, so `binfmt` does not depend on
+  `shim`; the route file's format (`Route::parse`, `render`) stays in
+  `shim.rs`. Init turns routing on through one `capture::enable(route,
+  container)`. Route stubs stay in `guest/init/stubs.rs` (candidate below).
+- `contract` also holds needy's paths in an actor image: `NEEDY_DIR`,
+  `INIT`, `PROXY` and `REAL`, which the CLI's dispatch by `argv[0]`, the
+  stubs and the shims used as literals. The guest builds the guest API's
+  address from `libc::VMADDR_CID_HOST` and `contract::GUEST_PORT` instead
+  of the literal `vsock://2:7000`.
+- The report's shim-routing note follows the actor's capture, not the
+  driver's label: `types::Capture` moved from `core-actor`'s driver module
+  to `core` (the report cannot depend on `core-actor`), the daemon records
+  the driver's `Facets::capture` in `actor.start`'s new `capture`, and the
+  summary has `actor_capture`. A `macos-apple-container` actor's report now
+  has the note (`an_apple_container_actors_report_says_what_its_shim_routing_leaves_out`).
+  The trace schema is version 8 (slice 6 made 7 for `actor.ready`); as
+  for 7, only the current version is read, although 8 only adds an
+  optional field.
 
 ### Slice 6: lifecycles
 
@@ -572,14 +629,6 @@ state directory:
 
 ## Candidate next slices
 
-- The guest dials the guest API at a literal `vsock://2:7000`
-  (`guest/mod.rs`); it could build the address from `contract::GUEST_PORT`,
-  which slice 5 (captures and the guest) may do in passing.
-- The report could name its shim-routing note from the trace's driver
-  through the facets instead of the label's prefix; it needs the driver in
-  `actor.start` as a typed value, not the label.
-- The report's shim-routing note for `macos-apple-container` actors: they have
-  the same gap as `linux-container` (`profile check` already warns for both).
 - `needy build` (`cli/commands/build.rs`) builds the container images through
   its own `bollard` client; connecting through `engine::connect` would give
   it the same `DOCKER_HOST` handling and errors (the build itself, BuildKit's
@@ -595,3 +644,9 @@ state directory:
 - `state.db` could keep the actor state of ended runs, if `run ls` should
   show where an actor stopped (for example a run that failed while
   `starting`).
+- Route stubs (`guest/init/stubs.rs`) exist because a capture can only
+  catch a program that exists; they could move into `guest/capture/` as the
+  part both captures share, with init only calling them.
+- `NEEDY_DIR`, `INIT`, `PROXY` and `REAL` in `contract` are still written
+  out again in `images/Dockerfile`, `images/container/shim.sh` and
+  `binfmt_needy.c`; a build-time check that they agree would catch a drift.
