@@ -168,7 +168,7 @@ impl std::str::FromStr for EventKind {
 pub enum DecodeError {
   #[error("unknown event kind {0:?}")]
   Kind(String),
-  #[error("event schema version {found} is not one this build reads (1 to {expected})")]
+  #[error("event schema version {found} is not one this build reads; it reads version {expected} only")]
   Version { found: u32, expected: u32 },
   #[error("invalid {kind} payload")]
   Payload {

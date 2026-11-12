@@ -259,3 +259,20 @@ fn a_principal_is_one_string_in_the_payload() {
   assert_eq!(stop.payload(), r#"{"by":"client:laptop"}"#);
   assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION, r#"{"by":"someone"}"#), Err(DecodeError::Payload { .. })));
 }
+
+// ROOT CAUSE:
+//
+// If a trace held events of an older schema, `needy report` said they were
+// not one this build reads "(1 to 9)", because the message named a range
+// starting at 1 while the build reads only the current version.
+//
+// Before the fix, the message contradicted itself for versions inside 1..9.
+// The fix names the one version the build reads.
+#[test]
+fn a_refused_schema_version_names_the_only_version_this_build_reads() {
+  let error = Event::decode("run.stop", SCHEMA_VERSION - 1, "{}").unwrap_err().to_string();
+  assert_eq!(
+    error,
+    format!("event schema version {} is not one this build reads; it reads version {SCHEMA_VERSION} only", SCHEMA_VERSION - 1)
+  );
+}
