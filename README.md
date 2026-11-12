@@ -53,7 +53,14 @@ too (it builds the actor and executor images from `images/`).
 ```sh
 git clone https://github.com/needy-dev/needy && cd needy
 cargo install --path crates/cli          # installs `needy`
+make guest                               # bin/needy-linux-<arch>, with Docker
+cp bin/needy-linux-* "$(dirname "$(command -v needy)")/"
 ```
+
+Actor images hold no needy: the control daemon brings its own **guest
+needy** into every actor it starts, a static Linux build of its own version.
+It looks for `needy-linux-<arch>` next to its executable (or takes
+`--guest-needy PATH`); a static Linux release `needy` is its own guest.
 
 From the next release on, each
 [GitHub release](https://github.com/needy-dev/needy/releases) carries these
@@ -62,10 +69,10 @@ assets, each with a `.sha256` file:
 | Asset | What it is |
 | --- | --- |
 | `needy-x86_64-unknown-linux-musl.tar.gz`, `needy-aarch64-unknown-linux-musl.tar.gz` | `needy` for Linux, statically linked |
-| `needy-aarch64-apple-darwin.tar.gz`, `needy-x86_64-apple-darwin.tar.gz` | `needy` for macOS, signed with a Developer ID and notarized |
+| `needy-aarch64-apple-darwin.tar.gz`, `needy-x86_64-apple-darwin.tar.gz` | `needy` for macOS, signed with a Developer ID and notarized; the arm64 one also holds `needy-linux-aarch64`, the guest needy (not signed: a Linux binary) |
 | `needy-x86_64-pc-windows-msvc.zip` | `needy.exe` for Windows (executor only), not Authenticode-signed |
-| `needy-actor-linux-firecracker-x86_64.tar.gz` | the `linux-firecracker` actor image: `vmlinux`, `rootfs.ext4`, `firecracker`, `needy` |
-| `needy-actor-macos-vz-aarch64.tar.gz` | the `macos-vz` actor image: `Image`, `initrd`, `rootfs.ext4`, `needy` |
+| `needy-actor-linux-firecracker-x86_64.tar.gz` | the `linux-firecracker` base image: `vmlinux`, `rootfs.ext4`, `firecracker`, `base-abi` |
+| `needy-actor-macos-vz-aarch64.tar.gz` | the `macos-vz` base image: `Image`, `initrd`, `rootfs.ext4`, `base-abi` |
 
 The container images are on GHCR for amd64 and arm64, tagged with the release
 and `latest`: `ghcr.io/needy-dev/needy-actor` and
@@ -90,7 +97,8 @@ docker tag ghcr.io/needy-dev/needy-actor:latest needy-actor:latest
 
 The prebuilt kernels have no recipe's identity; `needy build --recipe` builds
 one that does. Apple's `container` loads `needy-actor` with `needy build
---macos-apple-container`, which still builds it.
+--macos-apple-container`, which still builds it. An image works with every
+needy that speaks its base ABI; needy names the rebuild when it does not.
 
 What each machine needs besides `needy`:
 
@@ -107,7 +115,8 @@ What each machine needs besides `needy`:
 needy daemon --mode control &        # listens on a Unix socket in the state directory
 ```
 
-Add `--listen 127.0.0.1:7400 --token-env NEEDY_CONTROL_TOKEN` to reach it from
+It warns when it finds no guest needy; actors then cannot start. Add
+`--listen 127.0.0.1:7400 --token-env NEEDY_CONTROL_TOKEN` to reach it from
 other machines (through `ssh -L` or another tunnel; needy does not encrypt the
 connection itself).
 
@@ -494,7 +503,7 @@ what the work operates on.
 
 | Crate | Role |
 | --- | --- |
-| `cli` | the `needy` binary; inside an actor also its init and exec proxy |
+| `cli` | the `needy` binary; inside an actor, injected as the guest needy, also its init and exec proxy |
 | `daemon` | the control plane: runs, pool, scheduling, routing, relay, files, runners, `state.db` |
 | `core-actor` | actor drivers, the guest (init, capture, proxy), the gateway sidecar, identity |
 | `core-executor` | executor drivers, the container engine client, the process host |

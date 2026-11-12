@@ -361,6 +361,54 @@ recipes are referenced as `builtin:NAME`.
 
 *Avoid*: persona.
 
+## Images
+
+See the [actor images design](ai/references/architecture/2026-11-12-actor-images-design.md).
+
+### Base image
+
+An actor image without needy's own program in it: the kernel with
+`binfmt_needy` (VM drivers), the root file system, the boot stub and the
+shim stub. One base image serves every needy version that speaks its base
+ABI: `needy build` writes one (a VM image directory, or the `needy-actor`
+container image), and the daemon brings the guest needy when each actor
+starts.
+
+*Avoid*: actor image with needy, versioned image.
+
+### Guest needy
+
+The `needy` binary that runs inside an actor as its init, proxy and shim
+handler: a static Linux build of the daemon's own version for the actor's
+architecture. The daemon injects it at `/.needy/needy`: a read-only bind
+mount of one file in a container, a small read-only SquashFS disk (the
+**guest disk**, `/dev/vdb`) in a VM. It is `--guest-needy PATH`, else
+`needy-linux-<arch>` next to the daemon's executable, else on Linux the
+daemon's own executable when that is static.
+
+### Boot stub
+
+`/.needy/init` in a base image, the actor's PID 1: a tiny static C program.
+In a VM it mounts the guest disk and binds the guest needy over
+`/.needy/needy`; then it runs `/.needy/needy init`.
+
+### Shim stub
+
+`/.needy/proxy` in a base image, a tiny static C program: the program the
+kernel's `binfmt_needy` hands a routed exec to, and in a container image the
+file every program on `PATH` is a hard link to. It runs `/.needy/needy` with
+the caller's argv, its own path (`NEEDY_STUB_EXE`) and the exec's path
+(`NEEDY_STUB_EXECFN`).
+
+### Base ABI
+
+The interface between a base image and the guest needy and daemon: the
+paths under `/.needy`, the stubs' hand-off, the guest disk, and
+`binfmt_needy`'s parameters and never-route rule. It has a version: a VM
+image records it in its `base-abi` file, a container image in its
+`needy.base-abi` label, and a driver refuses an image whose version this
+needy does not speak before the actor starts.
+
 ## Routing
 
 ### Placement
@@ -394,17 +442,19 @@ program, or an exec fault without a pattern, makes it `*`, every exec.
 
 ### Shim
 
-In a container actor, a hard link to `/.needy/proxy` in place of each
-program that was on the image's `PATH` when the image was built; the real
-program is at `/.needy/real/<path>`. A shim runs its real program with the
-caller's argv, or hands the exec to the proxy when the run routes its name.
-Programs created after the build and run directly are not routed.
+In a container actor, a hard link to `/.needy/proxy` (the shim stub) in
+place of each program that was on the image's `PATH` when the image was
+built; the real program is at `/.needy/real/<path>`. Through the stub the
+guest needy runs the real program with the caller's argv, or hands the exec
+to the proxy when the run routes its name. Programs created after the build
+and run directly are not routed.
 
 ### Proxy
 
-`/.needy/proxy` in the actor. It replaces a routed exec, asks the daemon for a
-decision, and either runs the real program locally or streams it from an
-executor. The parent sees an ordinary child process and exit status.
+The guest needy's part that replaces a routed exec, reached through the
+shim stub at `/.needy/proxy`. It asks the daemon for a decision, and either
+runs the real program locally or streams it from an executor. The parent
+sees an ordinary child process and exit status.
 
 ### Capture
 

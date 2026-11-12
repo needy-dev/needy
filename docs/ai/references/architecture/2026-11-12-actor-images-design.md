@@ -1,7 +1,8 @@
 # Actor images
 
 **Status**: accepted by the owner (2026-11-12) as four steps. Step 1 (inject
-the guest `needy` at start) is being implemented; steps 2 to 4 are designed
+the guest `needy` at start) is implemented and verified on 2026-11-12 (see
+[Verification](#verification)); steps 2 to 4 are designed
 here and wait for their own slice. Breaking API, config and image changes
 are allowed; implementers record refinements under
 [Decisions during implementation](#decisions-during-implementation).
@@ -84,7 +85,7 @@ musl in `images/Dockerfile` (`stubs` stage). C, not Rust:
 - each is a few dozen lines of system calls (`readlink`, `getauxval`,
   `mount`, `execve`, `reboot`), which C states directly, as `binfmt_needy.c`
   does;
-- a static musl C binary is about 20 KB; a static Rust binary with `std` is
+- a static musl C binary is 30 KB (x86_64) to 65 KB (arm64); a static Rust binary with `std` is
   about 300 KB, and a container image has one shim per program on `PATH`
   (hard links in one layer, but a copy each wherever a tool does not keep
   links);
@@ -201,13 +202,188 @@ the key. Built with step 2's `needy image build`.
 
 ## Decisions during implementation
 
-(Filled in as step 1 lands.)
+### Step 1
+
+- **Stubs in C, not Rust** (the reasons are under [The stubs](#the-stubs)).
+  They are `images/stub/boot.c` and `shim.c`, built by the Dockerfile's
+  `stubs` stage with `musl-gcc -static -Os -s`; the stage fails unless both
+  are static. Built that way they are about 30 KB (x86_64) and 65 KB
+  (arm64).
+- **The hand-off.** The shim stub passes its path and `AT_EXECFN` in
+  `NEEDY_STUB_EXE` and `NEEDY_STUB_EXECFN` and keeps argv. It replaces values
+  it inherited. The guest needy takes them out of its environment first
+  thing in `main` (`guest::Stub::take`), before any thread exists, so
+  neither a local program nor a routed command's environment sees them. The
+  boot stub passes `init` in argv (`/.needy/needy init`), and init started
+  again as the user's program passes `init --as-user ...`. The CLI
+  dispatches on these, no longer on its own path (`/proc/self/exe`), which
+  is `/.needy/needy` in every role now.
+- **`binfmt_needy` checks a path, not a parent name.** `caller_is_needy`
+  compared the parent directory's name of the caller's executable with
+  `.needy`. A bind-mounted file's dentry is the source file system's, so
+  the guest needy would not count as needy's, and the proxy's local exec
+  would be routed again. It now compares `d_path` of the executable with
+  `/.needy/`. This kernel change is part of base ABI 1.
+- **The VM's boot stub binds the guest over the placeholder.** It mounts the
+  guest disk at `/.needy/disk` and binds `/.needy/disk/needy` over
+  `/.needy/needy`, so the guest needy is at the same path in every driver.
+  An empty `/.needy/needy` is how the stub knows it must mount: a container
+  has the bind mount already. Without the injection, the boot stub says
+  `the guest needy is not injected (... the base image's empty placeholder),
+  and cannot mount the guest disk /dev/vdb: ...`, and a shim says `(the
+  daemon did not inject the guest needy)` for the placeholder's `ENOEXEC`
+  as for `ENOENT`.
+- **The guest disk is SquashFS** through `backhand` (zlib only, no default
+  features). Both kernels have `CONFIG_SQUASHFS_ZLIB`, it needs no `mke2fs`
+  on macOS, and its times are zero, so one binary always makes the same
+  disk. A 36 MB x86_64 guest makes a 15 MB disk. Disks are named by the
+  first 16 hex digits of the binary's SHA-256 in `<data>/guest/`; old ones
+  stay (`TODO(guest-disk)`). The daemon makes one on a blocking thread
+  (`driver::guest_disk`) at the first start of a binary.
+- **Where the base ABI is recorded.** In three places, all from the
+  Dockerfile's `ARG BASE_ABI`, which a test keeps equal to
+  `image::base::ABI` (`the_images_record_the_base_abi_this_needy_speaks`):
+  `base-abi` next to a VM image's files, the `needy.base-abi` label of
+  `needy-actor`, and `/.needy/base-abi` in both root file systems, which the
+  guest init checks first.
+- **`Engine::has_image` became `image_labels`**, which answers `None` for a
+  missing image and the labels otherwise. The executor driver never used
+  `has_image`. Apple's `container` has no label query: the driver reads the
+  `linux/arm64` variant's `config.config.Labels` from `container image
+  inspect`, whose JSON shape is observed (1.7.1), not documented (a
+  `NOTICE` says so).
+- **Image checks moved to create time.** `linux-firecracker`'s `check_host`
+  now checks the image too (files and base ABI), as `macos-vz`'s did, so a
+  wrong image fails the create before anything is acquired. `detect` reads
+  the base ABI as well, so a runner with an image of another ABI does not
+  report `actor(linux-firecracker)`.
+- **Which guest, and when.** The guest's architecture is the host's for
+  every driver today (a `NOTICE` on `guest::arch`). The daemon looks the
+  guest up when a create checks the host and again when the actor starts, so
+  an operator can replace it without a restart. A `--guest-needy` that is
+  not usable stops the daemon at start; without the flag, a daemon that
+  finds none prints a warning and serves executors.
+- **The shim step copies its tools aside.** A shim runs nothing until the
+  guest needy is injected, so `images/container/shim.sh` copies the tools it
+  uses (`readlink`, `dirname`, `mkdir`, `ln`, `cp`, `rm`) to a temporary
+  directory before it replaces them, when they live in a directory it
+  shims; in its tests, whose root is a directory, nothing is copied (macOS
+  kills a copied system binary). The Dockerfile bind-mounts the script for
+  its one step, so it does not stay in the image.
+- **`make guest`** builds the Dockerfile's new `guest` target with Docker on
+  Linux and macOS alike and writes `bin/needy-linux-<arch>`. The VM image
+  targets no longer depend on the `needy` stage, so they build without a
+  Rust build.
+- **Release.** A new `macos-guest` job adds the
+  `aarch64-unknown-linux-musl` binary of the same run to
+  `needy-aarch64-apple-darwin.tar.gz` as `needy-linux-aarch64` and replaces
+  the artifact; `notarize-macos` keeps the file when it repacks. The Intel
+  archive gets no guest: no actor driver runs on an Intel Mac. The images
+  job checks the container image's label, that a shim without the guest
+  fails with the stub's message, and that a shim and the guest needy run
+  with it bind-mounted.
+- Route stubs (`guest/init/stubs.rs`) are unchanged: in a container they
+  are symbolic links to `/.needy/proxy`, now the shim stub, whose
+  `/proc/self/exe` is the proxy and whose `AT_EXECFN` is the route stub.
 
 ## Verification
 
-(Filled in as step 1 lands: each piece by itself on each platform, then the
-full end-to-end run once.)
+Step 1, on 2026-11-12, on an Apple silicon Mac (macOS, OrbStack, vfkit
+0.6.4, Apple's `container` 1.7.1) and a Linux KVM host (x86_64, Docker
+Engine, `runc`). Each piece was checked by itself first, then the whole
+once. The scripts were throwaway files in `.tmp/`.
+
+### Each piece
+
+| Piece | Host | Command | Result |
+| --- | --- | --- | --- |
+| Stubs | Linux KVM host | `cargo test -p needy-core-actor --test stubs` | 8 pass: argv kept (`argv[0]=python3`), `NEEDY_STUB_EXE` and `NEEDY_STUB_EXECFN` set and replaced when inherited, a route stub's link passed as the exec path, `init` passed by the boot stub, the messages for a missing guest and for the placeholder, exit 127 |
+| Stubs | both (Mac: in an arm64 Linux container) | the stubs built `-static` against a hand-made `/tmp/l/.needy`, run with and without a stand-in guest | the same hand-off and messages on x86_64 and aarch64 |
+| Guest check | both | the check over real binaries: `make guest`'s output, `/bin/ls`, a static C program, the Mach-O `needy`, a script | the musl guests (x86_64 36 MB, aarch64 34 MB) pass; `/bin/ls` is refused naming `/lib64/ld-linux-x86-64.so.2` (`/lib/ld-linux-aarch64.so.1`); Mach-O and the script are "not a 64-bit ELF executable"; a lookup without a guest lists each place tried |
+| Container injection | Linux KVM host | `docker run` of `needy-actor` built from the tree, with and without `-v GUEST:/.needy/needy:ro` | label `needy.base-abi=1`; without: `needy: cannot run /usr/bin/true: /.needy/needy: Exec format error (the daemon did not inject the guest needy)`, exit 127, and the boot stub's `the guest needy is not injected ...`; with: `/.needy/needy --version` prints `needy 0.0.1`, `/usr/bin/true` exits 0 and `uname -m` prints `x86_64` through the shim stub, `/proc/mounts` shows the read-only bind, and the boot stub starts `needy init` |
+| Container injection | Mac | `container run` of the arm64 `needy-actor` loaded into Apple's store, as above | the same; the guest is a read-only `virtiofs` mount; `uname -m` prints `aarch64` |
+| VM injection | Linux KVM host | Firecracker by hand from `needy build`'s base image with the guest disk as drive `needy` | the guest reads `Block:needy`, init runs from the disk and logs `cannot reach the daemon at vsock://2:7000` (no daemon), reboots; Firecracker exits 0 |
+| VM injection | Mac | vfkit by hand from `needy build`'s `macos-vz` base image with the guest disk as the second `virtio-blk` | the same; init powers off and vfkit exits 0 |
+| Base ABI refusal | Linux KVM host | a daemon on a copy of the VM image with `base-abi` 2; a profile naming a `needy-actor` built with `--build-arg BASE_ABI=2` | `needy run create` fails at once: `the actor image ... has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy build` ...` (and `needy build --linux-container` for the container), no container left |
+| Base ABI refusal | Mac | a daemon on a copy of the `macos-vz` image with `base-abi` 2 | the same message |
+| Daemon flag | both | `cargo test` (`a_control_daemon_refuses_a_guest_needy_that_is_not_a_static_linux_build`) and a daemon started without a guest | a bad `--guest-needy` stops the daemon with the check's message; without one the daemon warns |
+
+### End to end
+
+With images built from the step's tree (`needy build --out` for the VM
+images; `needy-actor` and `needy-executor` under a scratch tag), the guest
+from `make guest` next to `bin/needy`, and each control daemon in a scratch
+state directory:
+
+| Driver | Host | Profile | Result |
+| --- | --- | --- | --- |
+| `linux-firecracker` | Linux KVM host | `examples/smoke` | Pass: GCE identity (`systemd-detect-virt` says `google`), `python3` routed through `binfmt_needy` and the shim stub to a `linux-container` executor, workspace both ways, `routed exit=7` |
+| `linux-firecracker` | Linux KVM host | `examples/chaos` | Pass: copy-in without the filtered file, `cat broken.json` fails with EIO, `curl` refused with ECONNREFUSED (126), the hwmon fault at 101 °C, mirror-out written |
+| `linux-container` (`runc`) | Linux KVM host | `examples/linux-container` without its workspace mount (no `user_allow_other` on that host, as in earlier slices) | Pass: recipe identity, `python3` routed by the shim stub through the injected guest, `routed exit=7`, report `Actor linux-container (runc)`, no container left |
+| `macos-vz` | Mac | `examples/macos-vz` | Pass: arm64 guest, sensors, `python3` and `/usr/bin/arch` by absolute path routed to the Mac (`arm64`), workspace both ways; the guest disk was made in `<data>/guest/` at the first start |
+| `macos-vz` | Mac | `-it` with the example, and `-t` with `bash` then `run attach` | Pass: the program's output on the terminal; on attach, PID 1 is `/.needy/needy init`, the guest is root's from the disk, `exit 5` is the run's exit |
+| `macos-apple-container` | Mac | `examples/macos-apple-container` with the scratch image | Pass: workspace both ways, `python3` routed, gateway allows `example.com` (200) and denies `example.org` (403) |
+| `macos-apple-container` | Mac | `-it` with `bash`, and `-t` then `run attach` | Pass: PID 1 is `/.needy/needy init`, `/.needy/needy` a read-only `virtiofs` mount, `/usr/bin/ls` a hard link to the 66 KB shim stub; exits 4 and 6 returned |
+
+**Version independence.** A second needy, built from the same tree with
+the version `0.0.2-b` (its daemon and its guest), ran against the images
+the `0.0.1` tree had built, without rebuilding them: on the Linux KVM host
+a `linux-firecracker` actor (also `examples/smoke`) and a `linux-container`
+actor, on the Mac a `macos-vz` and a `macos-apple-container` actor. Inside
+each, `/.needy/needy --version` printed `needy 0.0.2-b`, `/.needy/base-abi`
+was `1`, PID 1 was `/.needy/needy init`, and `python3` reached the
+executor.
+
+**Not as hoped**, and not caused by this step: with `-it` and the
+`macos-vz` example, the run stopped after the first routed `python3` until
+the terminal's input ended (the proxy's relay waits for stdin on a
+terminal; see the candidates). `make check` and `make test` pass on both
+hosts (results in the commit that records this section); a stand-in
+Firecracker test failed once on the Linux host with `Text file busy` and
+passed in six reruns (candidates).
 
 ## Candidate next slices
 
-(Filled in as step 1 lands.)
+- **Guest disk cleanup** (`TODO(guest-disk)`): every guest binary leaves a
+  15 MB disk in `<data>/guest/`; `needy image rm` (step 4) or the daemon at
+  start could remove those of binaries no longer present.
+- **`profile check` names the guest needy**: today a create fails with the
+  lookup's message, but `profile check` does not say the daemon has no
+  usable guest.
+- **A routed command on a terminal waits for stdin's end**: with
+  `run create -it`, the proxy's relay of a routed command that has exited
+  waits until the terminal's input ends (seen with `examples/macos-vz`). The
+  relay is unchanged by this step; a test in `core-executor::relay` should
+  reproduce it first.
+- **Init without channels in a container** loops forever after its reboot
+  fails (seen when the base image is run by hand without a daemon); it
+  could exit when `reboot` is refused.
+- **`Text file busy` in the stand-in Firecracker tests**: a test writes a
+  script and runs it while another test's thread forks, so the child holds
+  the write descriptor; writing the stand-ins once per test binary, or
+  retrying `ETXTBSY` in the test helper, would remove the flake.
+- **The guest's architecture per driver**, once a driver runs another
+  architecture than the host's (`guest::arch` has a `NOTICE`).
+
+### For steps 2 to 4
+
+- **Step 2 (custom images).** An image `FROM needy-actor` adds programs that
+  are not shims. The shim step must run again over them: ship
+  `images/container/shim.sh` in the base (it is bind-mounted for the build
+  today and does not stay) or let `needy image build` run it. It copies its
+  tools aside before it replaces them, since a shim needs the injected
+  guest. `/.needy` (stubs, empty `needy`, `disk/`, `base-abi`) comes from
+  the base and must not be changed by a custom image. For a VM rootfs made
+  from a container image, the shims are harmless (a shim with no route file
+  runs its real program) but cost a re-exec per program; restoring
+  `/.needy/real` over the shims would remove that.
+- **Step 3 (agent examples).** Agents installed with npm or as single
+  binaries under `/usr/local/bin` are shimmed by the shim step if they are
+  there before it runs; programs they download at run time are not routed
+  in container actors (a known gap).
+- **Step 4 (`needy image`).** `manifest.json`'s `base_abi` replaces the
+  `base-abi` file; `image::base::check_dir` is where the daemon reads it.
+  The container images keep the `needy.base-abi` label, which the
+  manifest's value must equal. `pull` downloads the release's base archives
+  (no needy inside now) and `needy-linux-aarch64` stays in the macOS
+  `needy` archive. `rm` is where old guest disks can go too.

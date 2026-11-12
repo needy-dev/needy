@@ -76,8 +76,9 @@ release event, or on a dispatch with `upload_to_release` and a `tag_name`.
 | Job | Runner | Produces |
 | --- | --- | --- |
 | `binary` (5 targets) | `ubuntu-24.04`, `ubuntu-24.04-arm`, `macos-15`, `macos-15-intel`, `windows-2025` | `needy-<target>.tar.gz` (`.zip` on Windows) and `.sha256` |
-| `images amd64` | `ubuntu-24.04` | `needy-actor-linux-firecracker-x86_64.tar.gz` (`vmlinux`, `rootfs.ext4`, `firecracker`, `needy`); `needy-actor` and `needy-executor` for amd64 |
-| `images arm64` | `ubuntu-24.04-arm` | `needy-actor-macos-vz-aarch64.tar.gz` (`Image`, `initrd`, `rootfs.ext4`, `needy`); `needy-actor` and `needy-executor` for arm64 |
+| `macos-guest` | `ubuntu-24.04` | `needy-aarch64-apple-darwin.tar.gz` again, with `needy-linux-aarch64` (the run's static `aarch64-unknown-linux-musl` needy, not code-signed: `NOTICE(guest-signing)`) next to `needy`; see the [actor images design](2026-11-12-actor-images-design.md) |
+| `images amd64` | `ubuntu-24.04` | `needy-actor-linux-firecracker-x86_64.tar.gz` (`vmlinux`, `rootfs.ext4`, `firecracker`, `base-abi`; no needy since the actor images design); `needy-actor` and `needy-executor` for amd64 |
+| `images arm64` | `ubuntu-24.04-arm` | `needy-actor-macos-vz-aarch64.tar.gz` (`Image`, `initrd`, `rootfs.ext4`, `base-abi`); `needy-actor` and `needy-executor` for arm64 |
 | `container manifests` | `ubuntu-24.04` | publishing only: the multi-architecture `ghcr.io/needy-dev/needy-actor` and `needy-executor`, tagged with the release tag and `latest` |
 | `publish` | `ubuntu-24.04` | publishing only: checks every `.sha256` and uploads the archives to the release |
 
@@ -121,11 +122,13 @@ Images:
   target on any Linux), so it cannot build the `macos-vz` files on a Linux
   runner. The kernels are built without a recipe; `needy build --recipe`
   still builds one with a recipe's `uname` identity.
-- The job checks every file is there, runs the image's `needy --version` and
+- The job checks every file is there, prints its `base-abi`, runs
   `firecracker --version`, and runs `e2fsck -fn` on `rootfs.ext4`. The
   archive is written with `tar --sparse`, so `rootfs.ext4`'s free blocks are
   holes again when GNU tar unpacks it.
-- The container images are loaded and started (`needy --version` in each)
+- The container images are loaded and started (`needy --version` in the
+  executor; in `needy-actor`, a shim fails without the guest needy and runs
+  with the `guest` target's needy bind-mounted, as the daemon injects it)
   before anything is pushed. On a publishing run each architecture pushes by
   digest and `container manifests` creates the tagged multi-architecture
   lists (Docker's documented pattern for builds spread over runners). The

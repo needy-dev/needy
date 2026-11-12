@@ -10,8 +10,10 @@ Dependencies point downward; a crate never depends on one above it.
 - `crates/cli` (`needy-cli`, binary `needy`): argument parsing, one module per
   command in `commands/` (each owns its `Args` and `run`), output formats
   (`output/`, tables and JSON), XDG paths (`paths`) and process logs
-  (`logging`, `tracing`). It composes the crates below and, inside an actor,
-  dispatches to the guest init and proxy by `argv[0]`.
+  (`logging`, `tracing`). It composes the crates below and, inside an actor
+  as the injected guest needy, dispatches to the guest init, proxy and shims
+  by what the base image's stubs pass it (`init` in argv, or
+  `NEEDY_STUB_EXE`).
 - `crates/daemon` (`needy-daemon`): the control plane's policy and the
   executor role: `run` (create, get, list, stop, and the run state
   transitions), `pool` (instances by key, refcounts, slots), `schedule`
@@ -44,7 +46,8 @@ Dependencies point downward; a crate never depends on one above it.
   `contract` (vsock ports, channel sockets and needy's paths in an actor
   image, which the guest and host agree on),
   `image` (`vm`: needy's kernel and rootfs; `container`: the container actor
-  image), `identity` (a recipe's identity files presented from the host) and
+  image; `base`: the base ABI an image records; `guest`: the guest needy's
+  lookup and check, and the guest disk the VM drivers attach), `identity` (a recipe's identity files presented from the host) and
   `sshfs`. `sidecar` holds the services a run has next to its actor, with
   their table: `gateway`, the actor gateway, the mechanism that runs the net
   domain's chain and applies its decision.
@@ -102,7 +105,8 @@ Dependencies point downward; a crate never depends on one above it.
   today the `bench` latency and throughput probes.
 - `proto/`: canonical API schemas, linted and generated with Buf.
 - `images/`: actor kernel sources and configurations (x86_64 for
-  Firecracker, arm64 for `macos-vz`), the Firecracker patch and image builds.
+  Firecracker, arm64 for `macos-vz`), the base image's boot and shim stubs
+  (`stub/`, C), the Firecracker patch and image builds.
 - `docs/`: documentation. See [`docs/README.md`](docs/README.md).
 
 ### Extension points
