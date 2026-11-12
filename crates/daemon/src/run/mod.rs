@@ -499,11 +499,10 @@ impl Daemon {
       }
       None => None,
     };
-    let actor_command = if request.actor_command.is_empty() {
-      profile.actor.command.to_vec()
-    } else {
-      request.actor_command.clone()
-    };
+    // NOTICE: arguments extend the profile's driving program and never
+    // replace it (owner decision, 2026-11-12); a profile that `extends`
+    // another sets a different `actor.command`.
+    let actor_command: Vec<String> = profile.actor.command.iter().chain(&request.actor_args).cloned().collect();
     let cancel = self.cancel.child_token();
     Ok(Arc::new(Run {
       id: id.to_string(),

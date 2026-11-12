@@ -31,8 +31,9 @@ message CreateRunRequest {
   string profile_yaml = 1;
   string group = 3;
   string name = 4;
-  // Override the driving program of the actor.
-  repeated string actor_command = 6;
+  // Arguments appended to the profile's driving program (`actor.command`),
+  // as `needy run create -- ARGS` gives them.
+  repeated string actor_args = 6;
   // The profile's name in listings, traces and reports, for example its file
   // name without `.profile.yaml`. Required.
   string profile_name = 7;

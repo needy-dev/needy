@@ -44,6 +44,22 @@ async fn an_actor_with_a_workspace_mount_starts_in_the_workspace() {
   assert_eq!(cwd(WORKSPACE_MOUNT).await, "/home/agent/workspace");
 }
 
+// `needy run create -- ARGS` appends ARGS to the profile's driving program
+// (owner decision, 2026-11-12), so `opencode --continue` needs no profile of
+// its own.
+#[tokio::test]
+async fn run_arguments_are_appended_to_the_profiles_driving_program() {
+  let started = testing::daemon().await;
+  let profile = NO_MOUNT.replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, command: [opencode] }");
+  let mut request = new_run(&profile, started.dir.path());
+  request.actor_args = vec!["--continue".into(), "a b".into()];
+  let created = Runs::create(&started.daemon, request).await.unwrap();
+
+  let config = Guest::config(&started.daemon, &created.id).await.unwrap();
+
+  assert_eq!(config.command, ["opencode", "--continue", "a b"]);
+}
+
 #[tokio::test]
 async fn an_actor_cwd_wins_over_the_default() {
   let profile = NO_MOUNT.replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, cwd: /tmp }");

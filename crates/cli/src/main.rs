@@ -6,6 +6,7 @@ mod credentials;
 mod logging;
 mod output;
 mod paths;
+mod runs;
 
 fn main() {
   // Inside an actor the same binary is the init process and the exec proxy.

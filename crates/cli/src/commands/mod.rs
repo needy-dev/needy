@@ -4,11 +4,11 @@
 
 pub mod attach;
 pub mod build;
-pub mod client;
 pub mod daemon;
 pub mod exec;
 pub mod fs;
 pub mod kill;
+pub mod pair;
 pub mod profile;
 pub mod ps;
 pub mod report;

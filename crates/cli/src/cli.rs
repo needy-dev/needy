@@ -4,11 +4,13 @@
 //! 126 when a rule or an injected fault refuses it and 127 when it cannot
 //! start); 1 for any other error, printed once with a `needy:` prefix.
 
+use std::path::{Component, Path, PathBuf};
+
 use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, build, client, daemon, exec, fs, kill, profile, ps, report, run, runner};
+use crate::commands::{attach, build, daemon, exec, fs, kill, pair, profile, ps, report, run, runner};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -19,7 +21,8 @@ use crate::paths::Paths;
 )]
 struct Cli {
   /// Daemon endpoint: unix:/path, http://host:port or https://host:port.
-  /// Defaults to the control daemon's socket in the runtime directory.
+  /// Defaults to the endpoint this machine paired with last (`needy pair`),
+  /// else the control daemon's socket in the runtime directory.
   #[arg(long, global = true, env = "NEEDY_ENDPOINT")]
   endpoint: Option<String>,
   /// Log to stderr: -v info, -vv debug for needy, -vvv everything.
@@ -47,8 +50,9 @@ enum Command {
   Run(run::Args),
   /// Manage runners: machines that joined this control plane, and join tokens.
   Runner(runner::Args),
-  /// Pair this machine with a control plane, and manage paired clients.
-  Client(client::Args),
+  /// Pair this machine with a control plane once (`pair CODE`), and manage
+  /// pairing codes and paired clients.
+  Pair(pair::Args),
   /// Build an actor image from a recipe, and the executor image.
   Build(build::Args),
   /// Check a profile: show routing decisions, matching faults and the recipe's findings.
@@ -68,17 +72,48 @@ impl Context {
     Paths::resolve()
   }
 
-  /// The daemon endpoint: `--endpoint`, `NEEDY_ENDPOINT`, or the socket.
+  /// The control plane a command reaches: `--endpoint`, `NEEDY_ENDPOINT`,
+  /// the endpoint this machine paired with last (`needy pair`), or the
+  /// control socket.
   pub fn endpoint(&self) -> Result<String> {
+    if let Some(endpoint) = &self.endpoint {
+      return Ok(endpoint.clone());
+    }
+    let paths = self.paths()?;
+    match crate::credentials::default_endpoint(&paths.credentials())? {
+      Some(paired) => Ok(paired),
+      None => Ok(format!("unix:{}", paths.socket().display())),
+    }
+  }
+
+  /// Where a daemon on this machine listens by default: `--endpoint`,
+  /// `NEEDY_ENDPOINT`, or the control socket, never the control plane this
+  /// machine paired with.
+  pub fn listen_endpoint(&self) -> Result<String> {
     match &self.endpoint {
       Some(endpoint) => Ok(endpoint.clone()),
       None => Ok(format!("unix:{}", self.paths()?.socket().display())),
     }
   }
+
+  /// The profile file `--profile` names: a bare name, with no path
+  /// separator and no `.yaml` or `.yml`, is `profiles/NAME.yaml` in the
+  /// config directory (owner decision, 2026-11-12); anything else is a path.
+  pub fn profile(&self, given: &Path) -> Result<PathBuf> {
+    let bare = given.components().count() == 1
+      && matches!(given.components().next(), Some(Component::Normal(_)))
+      && !matches!(given.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"));
+    if !bare {
+      return Ok(given.to_path_buf());
+    }
+    let mut file = given.as_os_str().to_os_string();
+    file.push(".yaml");
+    Ok(self.paths()?.profiles().join(file))
+  }
 }
 
 /// Connects to a daemon, presenting the token in `NEEDY_TOKEN` when it is
-/// set, or else the client token `needy client pair` stored for `endpoint`.
+/// set, or else the client token `needy pair` stored for `endpoint`.
 pub async fn connect(endpoint: &str) -> Result<Client> {
   let client = connect_without_token(endpoint).await?;
   Ok(match token(endpoint)? {
@@ -149,7 +184,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Fs(args) => fs::run(args, &ctx).await,
       Command::Run(args) => run::run(args, &ctx).await,
       Command::Runner(args) => runner::run(args, &ctx).await,
-      Command::Client(args) => client::run(args, &ctx).await,
+      Command::Pair(args) => pair::run(args, &ctx).await,
       Command::Build(args) => build::run(args, &ctx).await,
       Command::Profile(args) => profile::run(args, &ctx).await,
       Command::Report(args) => report::run(args, &ctx).await,

@@ -302,7 +302,7 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     profile_name: request.profile_name,
     group: request.group,
     name: request.name,
-    actor_command: request.actor_command,
+    actor_args: request.actor_args,
     // The adapter sets who asks; the wire does not say.
     by: None,
     tty: request.tty.map(|w| WindowSize {

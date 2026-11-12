@@ -119,8 +119,8 @@ pub struct NewRun {
   pub group: String,
   /// Empty for the run's ID.
   pub name: String,
-  /// Overrides the profile's driving program when not empty.
-  pub actor_command: Vec<String>,
+  /// Appended to the profile's driving program (`actor.command`).
+  pub actor_args: Vec<String>,
   /// Who asks for the run.
   pub by: Option<Principal>,
   /// Run the driving program on a terminal of this size.

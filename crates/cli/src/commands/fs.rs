@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
+use needy_api_client::Client;
 use needy_api_client::files::{self, Target};
 use needy_api_client::proto::v1::Origin;
 
@@ -22,9 +23,11 @@ enum Command {
   Cp {
     source: String,
     destination: String,
-    /// Look the executor up in this run.
-    #[arg(long, default_value = "", hide_default_value = true)]
-    run: String,
+    /// Look the executor up in this run: an ID, an ID prefix, a name or
+    /// `latest`. Defaults to NEEDY_RUN; without either, and with
+    /// `--run ''`, `EXECUTOR` is looked up outside any run.
+    #[arg(long)]
+    run: Option<String>,
     /// `EXECUTOR:` names a runner instead: copy to or from its machine.
     #[arg(long, conflicts_with = "run")]
     runner: bool,
@@ -39,12 +42,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       run,
       runner,
     } => {
+      let client = connect(&ctx.endpoint()?).await?;
+      // `EXECUTOR:` names a runner outside any run, whatever NEEDY_RUN says.
       let place = if runner {
         Place::Runner
       } else {
-        Place::Run(run)
+        Place::Run(crate::runs::select_or_none(&client, run).await?.unwrap_or_default())
       };
-      cp(&ctx.endpoint()?, &place, &source, &destination).await?
+      cp(&client, &place, &source, &destination).await?
     }
   }
   Ok(0)
@@ -91,10 +96,10 @@ fn split(path: &str) -> (String, String) {
 }
 
 /// Copies `source` into the directory `destination`, keeping its name.
-async fn cp(endpoint: &str, place: &Place, source: &str, destination: &str) -> Result<()> {
+async fn cp(client: &Client, place: &Place, source: &str, destination: &str) -> Result<()> {
   match (parse(source), parse(destination)) {
-    (Location::Local(local), Location::Remote { executor, path }) => upload(endpoint, place, &executor, &local, &path).await,
-    (Location::Remote { executor, path }, Location::Local(local)) => download(endpoint, place, &executor, &path, &local).await,
+    (Location::Local(local), Location::Remote { executor, path }) => upload(client, place, &executor, &local, &path).await,
+    (Location::Remote { executor, path }, Location::Local(local)) => download(client, place, &executor, &path, &local).await,
     _ => bail!("one side must be EXECUTOR:path and the other a local path"),
   }
 }
@@ -123,7 +128,7 @@ fn target(place: &Place, name: &str) -> Target {
   }
 }
 
-async fn upload(endpoint: &str, place: &Place, executor: &str, local: &Path, remote_dir: &str) -> Result<()> {
+async fn upload(client: &Client, place: &Place, executor: &str, local: &Path, remote_dir: &str) -> Result<()> {
   let name = local.file_name().context("source has no file name")?.to_os_string();
   let local = local.to_path_buf();
   let archive = tokio::task::spawn_blocking(move || -> Result<Vec<u8>> {
@@ -138,16 +143,14 @@ async fn upload(endpoint: &str, place: &Place, executor: &str, local: &Path, rem
   })
   .await??;
   let size = archive.len();
-  let client = connect(endpoint).await?;
-  files::push(&client, &target(place, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, remote_dir, e))?;
+  files::push(client, &target(place, executor), archive, remote_dir).await.map_err(|e| tar_failed(executor, remote_dir, e))?;
   tracing::info!("copied {size} bytes to {executor}:{remote_dir}");
   Ok(())
 }
 
-async fn download(endpoint: &str, place: &Place, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
+async fn download(client: &Client, place: &Place, executor: &str, remote: &str, local_dir: &Path) -> Result<()> {
   let (parent, name) = split(remote);
-  let client = connect(endpoint).await?;
-  let archive = files::pull(&client, &target(place, executor), &parent, &name).await.map_err(|e| tar_failed(executor, remote, e))?;
+  let archive = files::pull(client, &target(place, executor), &parent, &name).await.map_err(|e| tar_failed(executor, remote, e))?;
   let size = archive.len();
   let local_dir = local_dir.to_path_buf();
   tokio::task::spawn_blocking(move || -> Result<()> {

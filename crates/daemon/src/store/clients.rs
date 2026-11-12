@@ -24,7 +24,7 @@ use super::{Error, Result, Store, check_label};
 
 /// How often a client's `last_used_ms` is written: each request
 /// authenticates it, and a write per request would turn reads into
-/// writes. A minute is fine enough for `client ls`.
+/// writes. A minute is fine enough for `pair ls`.
 const LAST_USED_RESOLUTION_MS: i64 = 60_000;
 
 /// A pairing code without its secret.

@@ -1,6 +1,7 @@
 //! The client tokens this machine holds, by control plane endpoint:
-//! `needy client pair` stores one, and every command that reaches that
-//! endpoint presents it unless `NEEDY_TOKEN` is set.
+//! `needy pair` stores one, and every command that reaches that endpoint
+//! presents it unless `NEEDY_TOKEN` is set. The endpoint paired last is the
+//! default for commands that name none (owner decision, 2026-11-12).
 //!
 //! One JSON file, `credentials.json` in the config directory, private to
 //! the user: the directory is created 0700 (one that exists keeps its mode,
@@ -25,6 +26,11 @@ struct File {
   version: u32,
   /// By endpoint, as [`key`] writes it.
   endpoints: BTreeMap<String, Credential>,
+  /// The endpoint paired last, which commands reach when neither
+  /// `--endpoint` nor `NEEDY_ENDPOINT` names one. A file written before it
+  /// existed has none.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  default_endpoint: Option<String>,
 }
 
 /// A client token for one endpoint.
@@ -67,12 +73,19 @@ pub fn find(path: &Path, endpoint: &str) -> Result<Option<Credential>> {
   Ok(read(path)?.endpoints.remove(&key(endpoint)))
 }
 
+/// The endpoint paired last, in the file at `path`, if any.
+pub fn default_endpoint(path: &Path) -> Result<Option<String>> {
+  Ok(read(path)?.default_endpoint)
+}
+
 /// Stores `credential` for `endpoint` in the file at `path`, replacing one
-/// stored before. Returns a warning for the user when the file's directory
-/// existed already and is open to other users.
+/// stored before, and makes `endpoint` the default. Returns a warning for
+/// the user when the file's directory existed already and is open to other
+/// users.
 pub fn store(path: &Path, endpoint: &str, credential: Credential) -> Result<Option<String>> {
   let mut file = read(path)?;
   file.endpoints.insert(key(endpoint), credential);
+  file.default_endpoint = Some(key(endpoint));
   let text = serde_json::to_string_pretty(&file)? + "\n";
   write_private(path, text.as_bytes())
 }

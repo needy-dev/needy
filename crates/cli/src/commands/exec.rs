@@ -55,13 +55,23 @@ pub struct Args {
   /// Start from an empty environment.
   #[arg(long)]
   clear_env: bool,
-  /// Route within this run's rules and executors.
-  #[arg(long, default_value = "", hide_default_value = true)]
-  run: String,
-  /// Run on this executor instead of letting rules decide.
+  /// Route within this run's rules and executors: an ID, an ID prefix, a
+  /// name or `latest`. Defaults to NEEDY_RUN; without either the command
+  /// runs outside any run, also when one run is live. `--run ''` runs
+  /// outside any run whatever NEEDY_RUN says.
+  // NOTICE: unlike `run attach`, `exec` never takes the only live run, so
+  // `needy exec -- CMD` means outside any run whether a run is live or not;
+  // the owner asked to keep that explicit and left the choice to the CLI UX
+  // slice (2026-11-12).
+  #[arg(long)]
+  run: Option<String>,
+  /// A profile's executor, inside the run: run there instead of letting
+  /// the run's rules decide.
   #[arg(long, default_value = "", hide_default_value = true)]
   executor: String,
-  /// Run on this runner's machine, outside any run.
+  /// A registered machine (a runner that joined this control plane),
+  /// outside any run: run on its machine. Not a profile's executor; that
+  /// is `--executor`.
   #[arg(long, default_value = "", hide_default_value = true, conflicts_with_all = ["run", "executor"])]
   runner: String,
   #[arg(long, value_enum, default_value = "human")]
@@ -87,6 +97,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
   }
   let forward_stdin = !(args.no_stdin || args.detach);
+  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  // A runner is outside any run, whatever NEEDY_RUN says.
+  let run = if args.runner.is_empty() {
+    crate::runs::select_or_none(&connection, args.run).await?.unwrap_or_default()
+  } else {
+    String::new()
+  };
   let start = ExecStart {
     argv: args.command,
     cwd: args.cwd.unwrap_or_default(),
@@ -94,7 +111,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     clear_env: args.clear_env,
     tty: window,
     detach: args.detach,
-    run_id: args.run,
+    run_id: run,
     executor: args.executor,
     runner: args.runner,
     no_stdin: !forward_stdin,
@@ -102,7 +119,6 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     // A path named on the command line must exist where it runs.
     search_path_if_missing: false,
   };
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
   let mut stream = match ExecStream::start(&connection, start).await {
     Ok(stream) => stream,
     Err(error) => return refused(error, args.output),

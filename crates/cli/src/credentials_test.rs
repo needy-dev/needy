@@ -34,6 +34,27 @@ fn pairing_again_replaces_the_endpoints_token() {
 }
 
 #[test]
+fn the_endpoint_paired_last_is_the_default() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("credentials.json");
+  assert_eq!(default_endpoint(&path).unwrap(), None);
+
+  store(&path, "http://127.0.0.1:7443/", credential("needy-client.c1.a")).unwrap();
+  assert_eq!(default_endpoint(&path).unwrap().as_deref(), Some("http://127.0.0.1:7443"));
+  store(&path, "http://127.0.0.1:8443", credential("needy-client.c1.b")).unwrap();
+  assert_eq!(default_endpoint(&path).unwrap().as_deref(), Some("http://127.0.0.1:8443"));
+}
+
+#[test]
+fn a_file_without_a_default_endpoint_is_read() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("credentials.json");
+  std::fs::write(&path, r#"{"version":1,"endpoints":{}}"#).unwrap();
+
+  assert_eq!(default_endpoint(&path).unwrap(), None);
+}
+
+#[test]
 fn no_file_holds_no_token() {
   let dir = tempfile::tempdir().unwrap();
 
@@ -70,7 +91,7 @@ fn the_file_and_its_directory_are_private() {
 
 // ROOT CAUSE:
 //
-// If the config directory existed already with mode 0755, `client pair`
+// If the config directory existed already with mode 0755, `pair`
 // wrote `credentials.json` 0600 into it and said nothing, because a
 // directory that exists keeps its mode (it may be a shared one).
 //

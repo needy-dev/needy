@@ -13,9 +13,11 @@ use crate::output::{self, OutputFormat, Row};
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Only this run's processes.
-  #[arg(long, default_value = "", hide_default_value = true)]
-  run: String,
+  /// Only this run's processes: an ID, an ID prefix, a name or `latest`.
+  /// Defaults to NEEDY_RUN; without either, and with `--run ''`, every
+  /// process is listed.
+  #[arg(long)]
+  run: Option<String>,
   /// Only this runner's processes.
   #[arg(
     long,
@@ -138,10 +140,16 @@ impl From<ProcessInfo> for Process {
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  // A runner's processes are outside any run, whatever NEEDY_RUN says.
+  let run = if args.runner.is_empty() {
+    crate::runs::select_or_none(&connection, args.run).await?.unwrap_or_default()
+  } else {
+    String::new()
+  };
   let list = connection
     .processes()
     .list_processes(ListProcessesRequest {
-      run_id: args.run,
+      run_id: run,
       runner: args.runner,
     })
     .await

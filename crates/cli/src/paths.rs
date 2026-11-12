@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use etcetera::BaseStrategy;
 
 // TODO(config): the build cache (`$XDG_CACHE_HOME/needy`) has no reader yet.
-// Add it when `needy build` keeps a cache. The config directory holds only
-// the client tokens `needy client pair` stores (`credentials`); user
-// configuration waits for the config slice.
+// Add it when `needy build` keeps a cache. The config directory holds the
+// client tokens `needy pair` stores (`credentials`) and profiles by name
+// (`profiles`); other user configuration waits for the config slice.
 #[derive(Debug, Clone)]
 pub struct Paths {
-  /// Client tokens by endpoint: `$XDG_CONFIG_HOME/needy`, or
-  /// `NEEDY_CONFIG_DIR`.
+  /// Client tokens by endpoint and profiles by name:
+  /// `$XDG_CONFIG_HOME/needy`, or `NEEDY_CONFIG_DIR`.
   pub config: PathBuf,
   /// `trace.db`, runs and the daemon log: `$XDG_STATE_HOME/needy`, or
   /// `NEEDY_STATE_DIR`.
@@ -48,9 +48,14 @@ impl Paths {
     self.runtime.join("daemon.sock")
   }
 
-  /// The client tokens `needy client pair` stores, by endpoint.
+  /// The client tokens `needy pair` stores, by endpoint.
   pub fn credentials(&self) -> PathBuf {
     self.config.join("credentials.json")
+  }
+
+  /// Profiles `--profile NAME` finds by name, as `NAME.yaml`.
+  pub fn profiles(&self) -> PathBuf {
+    self.config.join("profiles")
   }
 
   /// The image `needy build` writes and the daemon boots by default.

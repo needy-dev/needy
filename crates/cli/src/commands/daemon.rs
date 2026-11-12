@@ -37,7 +37,7 @@ pub struct Args {
   name: Option<String>,
   /// Environment variable holding the control token: the bootstrap and
   /// admin credential, with which an operator also pairs clients (`needy
-  /// client pair create`); paired clients present their own tokens.
+  /// pair create`); paired clients present their own tokens.
   /// Required to listen on a TCP address other than loopback.
   #[arg(long)]
   token_env: Option<String>,
@@ -117,7 +117,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
     bail!("a runner dials the control plane and listens nowhere; --listen and --token-env are for the executor and control modes");
   }
   let listen = match args.listen {
-    listen if listen.is_empty() => vec![ctx.endpoint()?],
+    listen if listen.is_empty() => vec![ctx.listen_endpoint()?],
     listen => listen,
   };
   if matches!(args.mode, Mode::Executor) && listen.len() > 1 {

@@ -35,6 +35,8 @@ enum Command {
   /// Load a profile, print its findings and where each command would run.
   /// Exits 1 when a finding is an error.
   Check {
+    /// Profile YAML, or a bare NAME for `profiles/NAME.yaml` in the config
+    /// directory, as `run create --profile` reads it.
     profile: PathBuf,
     /// A command to decide, as one shell-quoted string; repeat for more.
     #[arg(long = "cmd")]
@@ -75,12 +77,12 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       profile,
       commands,
       local: true,
-    } => check_local(&profile, &commands),
+    } => check_local(&ctx.profile(&profile)?, &commands),
     Command::Check {
       profile,
       commands,
       local: false,
-    } => check(&profile, &commands, ctx).await,
+    } => check(&ctx.profile(&profile)?, &commands, ctx).await,
   }
 }
 

@@ -13,11 +13,14 @@ use tokio::io::AsyncWriteExt;
 use crate::cli::Context;
 use crate::output::{self, OutputFormat, Row};
 
-// TODO(run-ux): a bare `needy run --profile X [-- cmd]` as `run create` is
-// left out: with the driving program as an optional trailing argument, a
-// program named `ls`, `stop`, `logs` or `create` would parse as a
-// subcommand. Slice 8 keeps `run create -it` and `run attach`; reopen the
-// shorthand on an owner-approved parsing grammar.
+/// How a run command's `RUN` reads (`crate::runs`).
+const RUN_HELP: &str = "The run: an ID, an ID prefix, a name or `latest`. Defaults to NEEDY_RUN, else the only live run";
+
+// TODO(run-ux): a bare `needy run --profile X [-- ARGS]` as `run create` is
+// left out: with the arguments as an optional trailing argument, one named
+// `ls`, `stop`, `logs` or `create` would parse as a subcommand. Slice 8
+// keeps `run create -it` and `run attach`; reopen the shorthand on an
+// owner-approved parsing grammar.
 #[derive(clap::Args)]
 pub struct Args {
   #[command(subcommand)]
@@ -39,7 +42,9 @@ enum Command {
     /// Keys that leave the run running; empty turns detaching off.
     #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
     detach_keys: String,
-    /// Profile YAML; relative paths in it resolve against its directory.
+    /// Profile YAML; relative paths in it resolve against its directory. A
+    /// bare NAME, with no path separator and no `.yaml`, is
+    /// `profiles/NAME.yaml` in the config directory (`NEEDY_CONFIG_DIR`).
     #[arg(long)]
     profile: PathBuf,
     /// Runs in one group share executors whose key uses `{group}`.
@@ -49,9 +54,13 @@ enum Command {
     /// A name to address the run by instead of its ID.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
-    /// Override the actor's driving program.
+    /// Arguments appended to the profile's driving program
+    /// (`actor.command`), as in `-- --continue`.
+    // TODO(run-ux): no flag replaces the driving program; a profile that
+    // `extends` another sets its own `actor.command`. Reopen on an owner
+    // request for a replacement.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-    command: Vec<String>,
+    args: Vec<String>,
   },
   /// List runs, including stopped and failed ones, also across control
   /// plane restarts. An executor no runner reported after a restart shows
@@ -61,10 +70,14 @@ enum Command {
     output: OutputFormat,
   },
   /// Stop a run and release its executors.
-  Stop { run: String },
+  Stop {
+    #[arg(help = RUN_HELP)]
+    run: Option<String>,
+  },
   /// Attach to the driving program's terminal until it exits or you detach.
   Attach {
-    run: String,
+    #[arg(help = RUN_HELP)]
+    run: Option<String>,
     /// Do not draw the current screen before streaming output.
     #[arg(long)]
     no_replay: bool,
@@ -77,7 +90,8 @@ enum Command {
   },
   /// Print the actor's console output: boot messages and the driving program's terminal.
   Logs {
-    run: String,
+    #[arg(help = RUN_HELP)]
+    run: Option<String>,
     /// Keep printing what the actor writes until the run stops running.
     #[arg(short, long)]
     follow: bool,
@@ -223,7 +237,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       profile,
       group,
       name,
-      command,
+      args,
     } => {
       // A usage error like clap's (exit 2), worded to say why.
       if interactive && !tty {
@@ -232,6 +246,12 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       }
       // Refuse invalid keys before creating a run that the caller cannot leave.
       relay::DetachKeys::parse(&detach_keys)?;
+      let profile = ctx.profile(&profile)?;
+      // TODO(cli-local-workspace): this machine's current directory as the
+      // run's workspace needs this machine to join as a runner and the
+      // profile to mount from `executor:laptop`; deferred by the owner
+      // (2026-11-12), see the candidate in
+      // `docs/ai/references/cli/2026-11-09-cli-exec-and-report-design.md`.
       let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
       // The daemon may run on another machine: it gets the profile and its
       // recipe as text, not paths to read.
@@ -245,7 +265,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           profile_name: needy_config::profile::name(&path),
           group,
           name,
-          actor_command: command,
+          actor_args: args,
           tty: tty.then(relay::window),
           wait_for_attach: interactive,
         })
@@ -269,6 +289,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
     Command::Stop { run } => {
       let connection = crate::cli::connect(&endpoint).await?;
+      let run = crate::runs::select(&connection, run).await?;
       connection.runs().stop_run(StopRunRequest { run_id: run }).await.map_err(fail)?;
     }
     Command::Attach {
@@ -278,10 +299,12 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       detach_keys,
     } => {
       let connection = crate::cli::connect(&endpoint).await?;
+      let run = crate::runs::select(&connection, run).await?;
       return attach(&connection, run, !no_replay, read_only, &detach_keys).await;
     }
     Command::Logs { run, follow } => {
       let connection = crate::cli::connect(&endpoint).await?;
+      let run = crate::runs::select(&connection, run).await?;
       let request = GetRunLogsRequest {
         run_id: run,
         follow,

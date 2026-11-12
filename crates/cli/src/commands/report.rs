@@ -33,9 +33,8 @@ enum Format {
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Run ID prefix, or `latest`.
-  #[arg(default_value = "latest")]
-  run: String,
+  /// Run ID prefix, or `latest`. Defaults to NEEDY_RUN, else `latest`.
+  run: Option<String>,
   #[arg(long, value_enum, default_value = "summary")]
   level: Level,
   #[arg(short = 'o', long, value_enum, default_value = "human")]
@@ -110,10 +109,12 @@ async fn remote_events(ctx: &Context, run: &str) -> Result<(String, Vec<Stored>)
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  // The control plane and `trace.db` read a prefix and `latest` themselves.
+  let wanted = crate::runs::wanted(args.run).unwrap_or_else(|| "latest".into());
   let (run, stored) = if args.local {
-    local_events(ctx, &args.run).await?
+    local_events(ctx, &wanted).await?
   } else {
-    remote_events(ctx, &args.run).await?
+    remote_events(ctx, &wanted).await?
   };
   let events = stored
     .iter()

@@ -67,3 +67,43 @@ fn run_ls_marks_a_lost_executor_and_a_released_one() {
   assert_eq!(cells[4], "mac=runner (lost), build=linux-container (released)");
   assert_eq!(cells[5], "the control plane restarted; the actor was lost");
 }
+
+#[derive(clap::Parser)]
+struct Line {
+  #[command(subcommand)]
+  command: Command,
+}
+
+// `needy run create -it --profile P -- ARGS` hands ARGS, flags included, to
+// the driving program (owner decision, 2026-11-12); the control plane
+// appends them to the profile's `actor.command`.
+#[test]
+fn arguments_after_the_separator_reach_the_driving_program() {
+  use clap::Parser as _;
+  let line = Line::try_parse_from([
+    "run",
+    "create",
+    "-it",
+    "--profile",
+    "opencode",
+    "--",
+    "--continue",
+    "-m",
+    "a b",
+  ])
+  .unwrap();
+
+  let Command::Create {
+    profile,
+    args,
+    tty,
+    interactive,
+    ..
+  } = line.command
+  else {
+    panic!("not create");
+  };
+  assert_eq!(profile, PathBuf::from("opencode"));
+  assert_eq!(args, ["--continue", "-m", "a b"]);
+  assert!(tty && interactive);
+}

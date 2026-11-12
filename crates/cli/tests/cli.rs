@@ -31,6 +31,7 @@ impl Home {
     for name in [
       "NEEDY_ENDPOINT",
       "NEEDY_TOKEN",
+      "NEEDY_RUN",
       "XDG_CONFIG_HOME",
       "XDG_STATE_HOME",
       "XDG_DATA_HOME",
@@ -2642,7 +2643,7 @@ fn as_client(home: &Home, endpoint: &str, args: &[&str]) -> Output {
 
 /// A pairing code the operator created for a client named `name`.
 fn pairing_code(control: &Home, endpoint: &str, name: &str) -> String {
-  let created = as_operator(control, endpoint, &["client", "pair", "create", "--name", name]);
+  let created = as_operator(control, endpoint, &["pair", "create", "--name", name]);
   assert!(created.status.success(), "{}", stderr(&created));
   assert!(stderr(&created).contains("it is not shown again"), "{}", stderr(&created));
   stdout(&created).trim().to_string()
@@ -2659,7 +2660,7 @@ fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
   assert_eq!(refused.status.code(), Some(1));
 
   let code = pairing_code(&control, &endpoint, "laptop");
-  let paired = as_client(&laptop, &endpoint, &["client", "pair", &code]);
+  let paired = as_client(&laptop, &endpoint, &["pair", &code]);
 
   assert!(paired.status.success(), "{}", stderr(&paired));
   assert!(stderr(&paired).contains("paired as client laptop"), "{}", stderr(&paired));
@@ -2670,7 +2671,7 @@ fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
   let listed = as_client(&laptop, &endpoint, &["run", "ls"]);
   assert!(listed.status.success(), "{}", stderr(&listed));
   // The code was spent.
-  let again = as_client(&Home::new(), &endpoint, &["client", "pair", &code]);
+  let again = as_client(&Home::new(), &endpoint, &["pair", &code]);
   assert_eq!(again.status.code(), Some(1));
   assert!(stderr(&again).contains("was used already"), "{}", stderr(&again));
 }
@@ -2685,14 +2686,14 @@ fn pair_create_tells_the_operator_which_client_a_named_code_replaces() {
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
-  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
+  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
+  let listed = as_local_operator(&control, &["pair", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
 
-  let replacing = as_operator(&control, &endpoint, &["client", "pair", "create", "--name", "laptop"]);
-  let fresh = as_operator(&control, &endpoint, &["client", "pair", "create", "--name", "desk"]);
-  let unnamed = as_operator(&control, &endpoint, &["client", "pair", "create"]);
+  let replacing = as_operator(&control, &endpoint, &["pair", "create", "--name", "laptop"]);
+  let fresh = as_operator(&control, &endpoint, &["pair", "create", "--name", "desk"]);
+  let unnamed = as_operator(&control, &endpoint, &["pair", "create"]);
 
   assert_eq!(replacing.status.code(), Some(0), "{}", stderr(&replacing));
   let notice = format!("notice: pairing with this code will replace client laptop ({id}) and revoke its token");
@@ -2705,7 +2706,7 @@ fn pair_create_tells_the_operator_which_client_a_named_code_replaces() {
   assert!(stderr(&unnamed).contains("for client client-"), "{}", stderr(&unnamed));
   // Pairing with the replacing code revokes the old token.
   let desk = Home::new();
-  assert!(as_client(&desk, &endpoint, &["client", "pair", stdout(&replacing).trim()]).status.success());
+  assert!(as_client(&desk, &endpoint, &["pair", stdout(&replacing).trim()]).status.success());
   assert_eq!(as_client(&laptop, &endpoint, &["run", "ls"]).status.code(), Some(1));
 }
 
@@ -2715,19 +2716,19 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
-  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
+  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
+  let listed = as_local_operator(&control, &["pair", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
   assert_eq!((clients[0]["name"].as_str(), clients[0]["state"].as_str()), (Some("laptop"), Some("active")));
 
-  let revoked = as_operator(&control, &endpoint, &["client", "revoke", &id]);
+  let revoked = as_operator(&control, &endpoint, &["pair", "revoke", &id]);
   let refused = as_client(&laptop, &endpoint, &["run", "ls"]);
 
   assert!(revoked.status.success(), "{}", stderr(&revoked));
   assert_eq!(refused.status.code(), Some(1));
   assert!(stderr(&refused).contains("missing or invalid bearer token"), "{}", stderr(&refused));
-  let text = stdout(&as_local_operator(&control, &["client", "ls"]));
+  let text = stdout(&as_local_operator(&control, &["pair", "ls"]));
   let rows = table(&text);
   assert_eq!(rows[0], ["ID", "NAME", "STATE", "PAIRED", "LAST USED"]);
   assert_eq!(&rows[1][..3], [id.as_str(), "laptop", "revoked"]);
@@ -2741,11 +2742,11 @@ fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() 
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
 
   let token = as_client(&laptop, &endpoint, &["runner", "token", "create"]);
   let remove = as_client(&laptop, &endpoint, &["runner", "rm", "mac"]);
-  let pair = as_client(&laptop, &endpoint, &["client", "pair", "create"]);
+  let pair = as_client(&laptop, &endpoint, &["pair", "create"]);
 
   for (refused, what) in [
     (&token, "creating join tokens"),
@@ -2755,10 +2756,10 @@ fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() 
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(refused));
     assert!(stderr(refused).contains(&format!("{what} needs the control token; paired client laptop may not")), "{}", stderr(refused));
   }
-  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
+  let listed = as_local_operator(&control, &["pair", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
-  let revoke = as_client(&laptop, &endpoint, &["client", "revoke", &id]);
+  let revoke = as_client(&laptop, &endpoint, &["pair", "revoke", &id]);
   assert_eq!(revoke.status.code(), Some(1), "{}", stderr(&revoke));
   assert!(stderr(&revoke).contains("revoking clients needs the control token"), "{}", stderr(&revoke));
   assert!(as_client(&laptop, &endpoint, &["run", "ls"]).status.success(), "the client was not revoked");
@@ -2773,10 +2774,10 @@ fn join_tokens_and_clients_are_listed_only_on_the_control_hosts_socket() {
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
 
   for (args, what) in [
-    (&["client", "ls"][..], "listing clients"),
+    (&["pair", "ls"][..], "listing clients"),
     (&["runner", "token", "ls"][..], "listing join tokens"),
   ] {
     let local = as_local_operator(&control, args);
@@ -2797,7 +2798,7 @@ fn join_tokens_and_clients_are_listed_only_on_the_control_hosts_socket() {
       stderr(&client)
     );
   }
-  assert!(stdout(&as_local_operator(&control, &["client", "ls"])).contains("laptop"));
+  assert!(stdout(&as_local_operator(&control, &["pair", "ls"])).contains("laptop"));
   let runners = as_client(&laptop, &endpoint, &["runner", "ls"]);
   assert!(runners.status.success(), "{}", stderr(&runners));
 }
@@ -2821,7 +2822,7 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   // plane's `trace.db`.
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["client", "pair", &code]).status.success());
+  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
   let profile = laptop.write("review.profile.yaml", NATIVE_PROFILE);
   let created = as_client(&laptop, &endpoint, &["run", "create", "--profile", profile.to_str().unwrap()]);
   assert!(created.status.success(), "{}", stderr(&created));
@@ -2891,4 +2892,189 @@ fn the_operator_is_named_in_the_report_of_a_run_it_started() {
 
   let summary: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
   assert_eq!((summary["started_by"].as_str(), summary["stopped_by"].as_str()), (Some("operator"), Some("operator")));
+}
+
+// Pairing is a top-level group, and `needy client` is gone (owner decision,
+// 2026-11-12): `pair CODE`, `pair create`, `pair ls`, `pair revoke ID`.
+#[test]
+fn pair_is_a_top_level_group_and_needy_client_is_gone() {
+  let home = Home::new();
+
+  let gone = home.run(&["client", "ls"]);
+  let help = home.run(&["pair", "--help"]);
+
+  assert_eq!(gone.status.code(), Some(2), "{}", stderr(&gone));
+  assert!(help.status.success(), "{}", stderr(&help));
+  for command in ["create", "ls", "revoke"] {
+    assert!(stdout(&help).contains(&format!("  {command} ")), "{}", stdout(&help));
+  }
+}
+
+// After `needy pair --endpoint URL CODE` a machine reaches that control plane
+// without `--endpoint` (owner decision, 2026-11-12); `--endpoint` and
+// `NEEDY_ENDPOINT` still win, and a daemon started on that machine still
+// listens on its own socket.
+#[test]
+fn a_paired_machine_remembers_the_endpoint_and_an_explicit_one_wins() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
+
+  let remembered = laptop.run(&["run", "ls"]);
+  let flag = laptop.needy().args(["--endpoint", "http://127.0.0.1:9", "run", "ls"]).output().unwrap();
+  let env = laptop.needy().env("NEEDY_ENDPOINT", "http://127.0.0.1:9").args(["run", "ls"]).output().unwrap();
+
+  assert!(remembered.status.success(), "{}", stderr(&remembered));
+  for overridden in [&flag, &env] {
+    assert_eq!(overridden.status.code(), Some(1), "{}", stdout(overridden));
+    assert!(stderr(overridden).contains("http://127.0.0.1:9"), "{}", stderr(overridden));
+  }
+  let credentials = laptop.path().join("config").join("credentials.json");
+  let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
+  assert_eq!(stored["default_endpoint"].as_str(), Some(endpoint.as_str()), "{stored}");
+  // `Daemon::start` waits for the laptop's own socket.
+  let _local = Daemon::start(&laptop);
+}
+
+/// A run of `NATIVE_PROFILE` whose profile is named `name`.
+fn named_run(home: &Home, name: &str) -> String {
+  let profile = home.write(&format!("{name}.profile.yaml"), NATIVE_PROFILE);
+  let output = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
+  assert!(output.status.success(), "run create: {}", stderr(&output));
+  stdout(&output).trim().to_string()
+}
+
+/// The state `run ls` shows for `run`.
+fn run_state(home: &Home, run: &str) -> String {
+  let listed = home.run(&["run", "ls", "-o", "json"]);
+  let runs: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+  runs.iter().find(|r| r["id"] == run).map(|r| r["state"].as_str().unwrap().to_string()).unwrap_or_default()
+}
+
+// A command about a run that names none takes the only live run (owner
+// decision, 2026-11-12), so a run ID need not be copied by hand.
+#[test]
+fn a_run_command_without_a_run_takes_the_only_live_run() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+
+  let none = home.run(&["run", "stop"]);
+  let stopped = named_run(&home, "old");
+  assert!(home.run(&["run", "stop", &stopped]).status.success());
+  let live = named_run(&home, "solo");
+  let logs = home.run(&["run", "logs"]);
+  let stop = home.run(&["run", "stop"]);
+
+  assert_eq!(none.status.code(), Some(1));
+  assert!(stderr(&none).contains("no run is live"), "{}", stderr(&none));
+  assert!(logs.status.success(), "{}", stderr(&logs));
+  assert!(stop.status.success(), "{}", stderr(&stop));
+  assert_eq!(run_state(&home, &live), "stopped");
+}
+
+#[test]
+fn a_run_command_without_a_run_lists_the_live_runs_when_there_are_several() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let first = named_run(&home, "first");
+  let second = named_run(&home, "second");
+
+  let output = home.run(&["run", "stop"]);
+
+  assert_eq!(output.status.code(), Some(1));
+  let message = stderr(&output);
+  assert!(message.contains("2 runs are live"), "{message}");
+  for (run, profile) in [(&first, "first"), (&second, "second")] {
+    let line = message.lines().find(|l| l.contains(run.as_str())).unwrap_or_else(|| panic!("{message}"));
+    assert!(line.contains(profile) && line.contains(" ago"), "{line}");
+    assert_eq!(run_state(&home, run), "running");
+  }
+}
+
+// `--run` takes `latest`, an ID prefix or a name, as `report` does; without
+// it `NEEDY_RUN` names the run. `exec`, `ps` and `fs cp` mean something
+// without a run, so they never take the only live run, and `--run ''`
+// overrides `NEEDY_RUN` to leave every run.
+#[test]
+fn run_accepts_latest_a_prefix_and_needy_run() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let first = named_run(&home, "first");
+  let second = named_run(&home, "second");
+  let detached = |args: &[&str], env: Option<&str>| {
+    let mut command = home.needy();
+    if let Some(run) = env {
+      command.env("NEEDY_RUN", run);
+    }
+    let output = command.arg("exec").args(args).args(["-d", "--", "sleep", "30"]).output().unwrap();
+    assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+    stdout(&output).trim().to_string()
+  };
+  let latest = detached(&["--run", "latest"], None);
+  let prefix = detached(&["--run", &first[..11]], None);
+  let env = detached(&[], Some(&first));
+  let left = detached(&["--run", ""], Some(&first));
+  let outside = detached(&[], None);
+  let source = home.write("note.txt", "hello");
+  let dir = home.path().join("copied");
+  let copy = home
+    .needy()
+    .env("NEEDY_RUN", &second[..11])
+    .args([
+      "fs",
+      "cp",
+      source.to_str().unwrap(),
+      &format!("here:{}", dir.display()),
+    ])
+    .output()
+    .unwrap();
+  let report = home.needy().env("NEEDY_RUN", &first).args(["report", "-o", "json"]).output().unwrap();
+  let in_latest = home.run(&["ps", "--run", "latest", "-o", "json"]);
+
+  let listed = home.run(&["ps", "-o", "json"]);
+  let processes: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
+  let run_of = |id: &str| processes.iter().find(|p| p["id"] == id).map(|p| p["run"].as_str().unwrap().to_string());
+  assert_eq!(run_of(&latest).as_deref(), Some(second.as_str()));
+  assert_eq!(run_of(&prefix).as_deref(), Some(first.as_str()));
+  assert_eq!(run_of(&env).as_deref(), Some(first.as_str()));
+  assert_eq!(run_of(&left).as_deref(), Some(""));
+  assert_eq!(run_of(&outside).as_deref(), Some(""));
+  assert!(copy.status.success(), "{}", stderr(&copy));
+  assert_eq!(std::fs::read_to_string(dir.join("note.txt")).unwrap(), "hello");
+  let summary: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
+  assert_eq!(summary["run"].as_str(), Some(first.as_str()));
+  let in_latest: Vec<serde_json::Value> = serde_json::from_str(&stdout(&in_latest)).unwrap();
+  assert!(in_latest.iter().all(|p| p["run"] == second.as_str()), "{in_latest:?}");
+  assert!(in_latest.iter().any(|p| p["id"] == latest.as_str()), "{in_latest:?}");
+  for process in [&left, &outside] {
+    assert!(home.run(&["kill", process, "-s", "SIGKILL"]).status.success());
+  }
+  for run in [&first, &second] {
+    assert!(home.run(&["run", "stop", run]).status.success());
+  }
+}
+
+// `--profile NAME`, without a path separator or `.yaml`, is
+// `profiles/NAME.yaml` in the config directory (owner decision, 2026-11-12).
+#[test]
+fn a_profile_is_found_by_name_in_the_config_directory() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profiles = home.path().join("config").join("profiles");
+  std::fs::create_dir_all(&profiles).unwrap();
+  std::fs::write(profiles.join("named.yaml"), NATIVE_PROFILE).unwrap();
+
+  let created = home.run(&["run", "create", "--profile", "named"]);
+  let missing = home.run(&["run", "create", "--profile", "absent"]);
+
+  assert!(created.status.success(), "{}", stderr(&created));
+  let run = stdout(&created).trim().to_string();
+  let report = home.run(&["report", &run, "-o", "markdown"]);
+  assert_eq!(stdout(&report).lines().next(), Some(format!("# Run report: {run} (profile: named)").as_str()));
+  assert_eq!(missing.status.code(), Some(1));
+  let absent = profiles.join("absent.yaml");
+  assert!(stderr(&missing).contains(absent.to_str().unwrap()), "{}", stderr(&missing));
+  assert!(home.run(&["run", "stop", &run]).status.success());
 }

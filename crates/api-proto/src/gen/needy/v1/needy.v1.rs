@@ -543,9 +543,10 @@ pub struct CreateRunRequest {
     pub group: ::prost::alloc::string::String,
     #[prost(string, tag="4")]
     pub name: ::prost::alloc::string::String,
-    /// Override the driving program of the actor.
+    /// Arguments appended to the profile's driving program (`actor.command`),
+    /// as `needy run create -- ARGS` gives them.
     #[prost(string, repeated, tag="6")]
-    pub actor_command: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    pub actor_args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// The profile's name in listings, traces and reports, for example its file
     /// name without `.profile.yaml`. Required.
     #[prost(string, tag="7")]
