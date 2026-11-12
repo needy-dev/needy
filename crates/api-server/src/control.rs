@@ -452,6 +452,10 @@ pub struct GuestConfig {
   pub process_port: u32,
   /// Subscribe the first terminal client before starting the program.
   pub wait_for_attach: bool,
+  /// The user and group the daemon runs as, who connect to the process
+  /// service a container actor's init binds on a Unix socket.
+  pub daemon_uid: u32,
+  pub daemon_gid: u32,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

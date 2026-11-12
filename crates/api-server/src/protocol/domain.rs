@@ -614,6 +614,8 @@ pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
     tty: config.tty.map(proto_window),
     process_port: config.process_port,
     wait_for_attach: config.wait_for_attach,
+    daemon_uid: config.daemon_uid,
+    daemon_gid: config.daemon_gid,
     run_id: config.run,
     user: Some(v1::GuestUser {
       name: config.user.name,

@@ -24,6 +24,8 @@ mod mounts;
 mod network;
 mod program;
 mod stubs;
+#[cfg(test)]
+mod testing;
 
 pub(super) use stubs::STUB_DIR;
 

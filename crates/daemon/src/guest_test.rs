@@ -72,3 +72,17 @@ async fn run_arguments_are_appended_to_the_profiles_driving_program() {
 
   assert_eq!(config.command, ["opencode", "--continue", "a b"]);
 }
+
+// A container actor's init gives its process socket to these IDs, so a
+// daemon that is not root can connect to its driving program's terminal.
+#[tokio::test]
+async fn the_guest_is_told_the_daemons_user_and_group() {
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(NO_MOUNT, started.dir.path())).await.unwrap();
+
+  let config = Guest::config(&started.daemon, &created.id).await.unwrap();
+
+  // SAFETY: `geteuid` and `getegid` cannot fail.
+  let expected = unsafe { (libc::geteuid(), libc::getegid()) };
+  assert_eq!((config.daemon_uid, config.daemon_gid), expected);
+}

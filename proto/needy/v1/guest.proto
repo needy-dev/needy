@@ -96,6 +96,11 @@ message GetConfigResponse {
   uint32 process_port = 16;
   // Subscribe the first terminal client before starting the program.
   bool wait_for_attach = 17;
+  // The user and group the daemon runs as. Where init binds its process
+  // service on a Unix socket the daemon connects to (a container actor's
+  // channels), it gives the socket to them, mode 0600.
+  uint32 daemon_uid = 18;
+  uint32 daemon_gid = 19;
 }
 
 // An event observed inside the actor. The listener the guest calls is bound to

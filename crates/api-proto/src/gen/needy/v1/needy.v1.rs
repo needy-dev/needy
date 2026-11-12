@@ -485,6 +485,13 @@ pub struct GetConfigResponse {
     /// Subscribe the first terminal client before starting the program.
     #[prost(bool, tag="17")]
     pub wait_for_attach: bool,
+    /// The user and group the daemon runs as. Where init binds its process
+    /// service on a Unix socket the daemon connects to (a container actor's
+    /// channels), it gives the socket to them, mode 0600.
+    #[prost(uint32, tag="18")]
+    pub daemon_uid: u32,
+    #[prost(uint32, tag="19")]
+    pub daemon_gid: u32,
 }
 /// An event observed inside the actor. The listener the guest calls is bound to
 /// its run, so the event names none.

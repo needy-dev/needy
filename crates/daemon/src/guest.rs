@@ -28,6 +28,13 @@ fn mounts(run: &Run) -> Vec<GuestMount> {
     .collect()
 }
 
+/// The user and group this daemon runs as: a container actor's init gives
+/// its process socket to them, so a daemon that is not root can connect.
+fn daemon_user() -> (u32, u32) {
+  // SAFETY: `geteuid` and `getegid` cannot fail.
+  unsafe { (libc::geteuid(), libc::getegid()) }
+}
+
 #[async_trait::async_trait]
 impl Guest for Daemon {
   async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
@@ -116,6 +123,8 @@ impl Guest for Daemon {
       tty: run.tty,
       process_port: channels.process_port,
       wait_for_attach: run.wait_for_attach,
+      daemon_uid: daemon_user().0,
+      daemon_gid: daemon_user().1,
     };
     let in_guest = Some(Presenter::Guest);
     if facets.workspace != Presenter::Guest {

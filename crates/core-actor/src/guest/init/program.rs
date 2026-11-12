@@ -217,14 +217,7 @@ pub(super) async fn run_on_terminal(config: &GetConfigResponse, home: &str, (row
       })
     }
     Terminal::Unix(path) => {
-      // A socket left by an earlier start of this container would make
-      // bind fail.
-      if let Err(e) = std::fs::remove_file(&path)
-        && e.kind() != std::io::ErrorKind::NotFound
-      {
-        tracing::warn!("cannot remove {}: {e}", path.display());
-      }
-      let listener = tokio::net::UnixListener::bind(&path).with_context(|| format!("cannot listen on {}", path.display()))?;
+      let listener = bind_for_daemon(&path, config.daemon_uid, config.daemon_gid)?;
       let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
       tokio::spawn(async move {
         if let Err(e) = router.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned()).await {
@@ -270,6 +263,29 @@ pub(super) async fn run_on_terminal(config: &GetConfigResponse, home: &str, (row
   }
   host.shutdown().await;
   Ok(exit)
+}
+
+/// Binds the process service's Unix socket at `path`, which the daemon
+/// connects to through the bind-mounted channels, and gives it to the
+/// daemon's user `uid` and group `gid`, mode 0600: connecting to a Unix
+/// socket needs write permission on it, and only the daemon may connect.
+/// The run's directory around the channels is private on the host already.
+// NOTICE: the IDs are the daemon's on the host, which are the container's
+// own while the engine maps no user namespace (`userns-remap`, rootless
+// Docker); with one, the socket would need the mapped IDs.
+fn bind_for_daemon(path: &std::path::Path, uid: u32, gid: u32) -> Result<tokio::net::UnixListener> {
+  use std::os::unix::fs::PermissionsExt;
+  // A socket left by an earlier start of this container would make bind
+  // fail.
+  if let Err(e) = std::fs::remove_file(path)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    tracing::warn!("cannot remove {}: {e}", path.display());
+  }
+  let listener = tokio::net::UnixListener::bind(path).with_context(|| format!("cannot listen on {}", path.display()))?;
+  std::os::unix::fs::chown(path, Some(uid), Some(gid)).with_context(|| format!("cannot give {} to {uid}:{gid}", path.display()))?;
+  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).with_context(|| format!("cannot restrict {}", path.display()))?;
+  Ok(listener)
 }
 
 /// Releases an interactive create after its first attach subscribed, so
@@ -342,3 +358,7 @@ pub(super) fn as_user(args: &[String]) -> anyhow::Error {
     Err(e) => e,
   }
 }
+
+#[cfg(test)]
+#[path = "program_test.rs"]
+mod tests;
