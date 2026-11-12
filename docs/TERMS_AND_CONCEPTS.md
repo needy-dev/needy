@@ -73,8 +73,11 @@ suite or an acceptance script. Needy never routes the driving program itself;
 only the commands it starts.
 
 With `run create -t`, the driving program has a terminal; `-it` also
-attaches immediately. `run attach RUN` reconnects to that terminal, and
-detaching leaves the run alive. Init keeps its output in the actor's console
+attaches immediately and exits with the driving program's exit status.
+Arguments after `--` are appended to the profile's `actor.command`.
+`run attach [RUN]` reconnects to that terminal (without `RUN`, to
+`NEEDY_RUN` or the only live run), and detaching leaves the run alive.
+Init keeps its output in the actor's console
 while no client is attached. See the [automated and live-probe evidence](ai/references/cli/2026-11-11-interactive-actor-evidence.md).
 
 ### Harness
@@ -242,16 +245,18 @@ and runners; day-to-day clients use their own **client tokens**.
 
 A program that calls the control plane on behalf of a person or a tool: the
 CLI on another machine, a script. A **paired** client holds its own **client
-token**, is listed (`needy client ls`) and can be revoked (`needy client
-revoke ID`); the trace names it `client:NAME`. A client drives runs (create,
+token**, is listed (`needy pair ls`) and can be revoked (`needy pair revoke
+ID`); the trace names it `client:NAME`. A client drives runs (create,
 list, stop, exec, attach, kill, `ps`, `fs cp`, reports and logs) but does not
 administer the control plane: creating or revoking join tokens, rotating or
 removing runners, creating pairing codes and revoking clients need the control
 token. The
 CLI keeps one token per control plane endpoint in `credentials.json` in its
 config directory (`$XDG_CONFIG_HOME/needy`, mode 0600) and presents it to that
-endpoint; `NEEDY_TOKEN` overrides it. The control plane stores only the
-token's hash. A client's name is a DNS label that no other client that is not
+endpoint; `NEEDY_TOKEN` overrides it. The endpoint paired last is the
+CLI's default control plane; `--endpoint` or `NEEDY_ENDPOINT` names another.
+The control plane stores only the token's hash. A client's name is a DNS
+label that no other client that is not
 revoked holds.
 
 *Avoid*: user, account. Needy has no users; a client is a credential with a
@@ -260,8 +265,8 @@ name.
 ### Pairing code
 
 A short-lived (10 minutes by default), single-use secret an operator creates
-(`needy client pair create [--name NAME]`) and hands to a new client, which
-exchanges it for its client token (`needy client pair --endpoint URL CODE`).
+(`needy pair create [--name NAME]`) and hands to a new client, which
+exchanges it for its client token once (`needy pair --endpoint URL CODE`).
 Shown once; stored hashed.
 
 ### Principal
@@ -294,6 +299,12 @@ finished or failed run releases its executors but keeps its state. The
 control plane writes every change of a run's state, and of the instances
 and processes it holds, to `state.db`.
 
+A command names a run by its ID, an ID prefix, its name or `latest` (the
+run created last), through `--run` or `RUN`, else `NEEDY_RUN`. A **live**
+run is `creating` or `running`; `run attach`, `run stop` and `run logs`
+without a run take the only live one. `exec`, `ps` and `fs cp` without a
+run stay outside any run.
+
 *Avoid*: session (the earlier name), rollout.
 
 ### Group
@@ -304,7 +315,9 @@ all of them, for example a parent agent and its sub-agents. **Provisional.**
 ### Profile
 
 A declarative YAML description of one run: which recipes to use, executors,
-command rules, file mappings, both networks and chaos.
+command rules, file mappings, both networks and chaos. `--profile NAME`
+(no path separator, no `.yaml`) is `profiles/NAME.yaml` in the CLI's config
+directory.
 
 *Avoid*: config.
 

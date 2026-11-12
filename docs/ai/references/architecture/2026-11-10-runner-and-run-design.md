@@ -609,6 +609,13 @@ compared in constant time, shown once. A wrong secret, an unknown ID and a
 malformed code all read "the pairing code is not valid"; only a caller with
 the secret learns that it expired or was used.
 
+> **NOTICE (2026-11-12, migration):** `needy client pair create`, `client
+> pair CODE`, `client ls` and `client revoke` are now `needy pair create`,
+> `pair CODE`, `pair ls` and `pair revoke`, and pairing makes the endpoint
+> the CLI's default; see
+> [Clients](../cli/2026-11-09-cli-exec-and-report-design.md#clients). The
+> text below keeps the names of its time.
+
 **Pairing.** `needy client pair create [--ttl 10m] [--name NAME]` (an
 operator; a client was allowed too until 2026-11-11, see below) creates a single-use code; the name is a DNS label,
 and no other open code may hold it. The name

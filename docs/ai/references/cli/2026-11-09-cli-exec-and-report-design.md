@@ -14,6 +14,14 @@
 > `image/`, `identity.rs` and `sidecar/gateway/`; `core-executor`'s
 > `provider/` is `driver/` (`docker.rs` is `linux_container/`).
 
+> **NOTICE (2026-11-12, migration):** the CLI UX slice replaced `needy client`
+> with the top-level `needy pair` group (`pair CODE`, `pair create`, `pair ls`,
+> `pair revoke ID`), without aliases, and changed `run create -- ARGS` from
+> replacing the driving program to appending to it; runs and profiles are
+> named as [Naming a run](#naming-a-run) and [Profiles by name](#profiles-by-name)
+> say. The command surface and [Clients](#clients) below are updated; older
+> notes keep `client pair`.
+
 **Status**: pending; implemented as described unless the [closed-loop results](../architecture/2026-11-09-closed-loop-results-evidence.md#not-yet-verified) list it as missing. Terms follow the
 [actor and executor separation](../architecture/2026-11-09-actor-executor-separation-design.md)
 note. Profiles are described in
@@ -24,23 +32,24 @@ note. Profiles are described in
 ```text
 needy daemon   [--mode control|executor|runner]  # control plane; executor or runner on every other machine
 needy build    [--recipe FILE] [--out DIR] [--executor] [--container]  # build machine images through the Docker API
-needy run  create|ls|stop|logs [-f] [--group G] # one actor plus its executors; logs prints (and follows) its console
-needy exec     [--run ID | --executor NAME | --runner NAME] -- CMD …   # run a command through placement
-needy ps [-a] [--run ID | --runner NAME] | attach ID | kill ID   # manage detached processes
-needy fs       cp [--run ID | --runner] SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
-needy report   RUN|latest [--level summary|detailed] [-o human|markdown|json] [--file FILE] [--local]
+needy run  create [-it] --profile FILE|NAME [-- ARGS…] | ls | stop [RUN] | attach [RUN] | logs [-f] [RUN]  # one actor plus its executors
+needy exec     [--run RUN | --executor NAME | --runner NAME] -- CMD …   # run a command through placement
+needy ps [-a] [--run RUN | --runner NAME] | attach ID | kill ID   # manage detached processes
+needy fs       cp [--run RUN | --runner] SRC EXECUTOR:DIR | EXECUTOR:PATH DIR   # tar over an exec stream
+needy report   [RUN] [--level summary|detailed] [-o human|markdown|json] [--file FILE] [--local]
 needy profile  check PROFILE [--cmd "COMMAND"]…  # routing decisions, matching faults, recipe findings
 needy runner   token create [--ttl 1h] [--uses N] [--roles R,…] [--labels K=V,…] | token ls | token revoke ID
 needy runner   ls | rotate NAME | rm NAME      # runners that joined this control plane
-needy client   pair create [--ttl 10m] [--name NAME] | pair CODE | ls | revoke ID   # paired clients
+needy pair     CODE | create [--ttl 10m] [--name NAME] | ls | revoke ID   # pair once; paired clients
 ```
 
 A paired client may use every command above except `runner token create`,
-`runner token revoke`, `runner rotate`, `runner rm`, `client pair create` and
-`client revoke`, which need the control token (`NEEDY_TOKEN`) or the control
+`runner token revoke`, `runner rotate`, `runner rm`, `pair create` and
+`pair revoke`, which need the control token (`NEEDY_TOKEN`) or the control
 socket; the control plane refuses them with "… needs the control token".
 
-Every command takes `--endpoint` (or `NEEDY_ENDPOINT`) and `-v`, which turns
+Every command takes `--endpoint` (or `NEEDY_ENDPOINT`; by default the
+endpoint this machine paired with last, else the control socket) and `-v`, which turns
 on logs on stderr: `-v` info, `-vv` debug for needy's crates, `-vvv`
 everything. Logs are off by default; the daemon also writes
 `daemon.YYYY-MM-DD.log` in its state directory.
@@ -93,22 +102,25 @@ from any client.
 ### Clients
 
 Every command reaches the control plane at `--endpoint` (or
-`NEEDY_ENDPOINT`; the control socket by default) and presents a bearer token:
+`NEEDY_ENDPOINT`; by default the endpoint this machine paired with last, else
+the control socket) and presents a bearer token:
 `NEEDY_TOKEN` when it is set, else the client token stored for that endpoint,
 else none. On the control host the socket needs none; elsewhere a machine
 pairs once:
 
 ```text
 # where the control plane is reachable with the control token
-NEEDY_TOKEN=… needy --endpoint http://127.0.0.1:7443 client pair create --name laptop
+NEEDY_TOKEN=… needy --endpoint http://127.0.0.1:7443 pair create --name laptop
 needy: pairing code 1a2b3c4d5e6f for client laptop, valid until …; it is not shown again
 needy-pair.1a2b3c4d5e6f.…
 # on the client
-needy --endpoint http://127.0.0.1:7443 client pair needy-pair.1a2b3c4d5e6f.…
-needy: paired as client laptop (6f5e4d3c2b1a); its token for http://127.0.0.1:7443 is in ~/.config/needy/credentials.json
+needy --endpoint http://127.0.0.1:7443 pair needy-pair.1a2b3c4d5e6f.…
+needy: paired as client laptop (6f5e4d3c2b1a); its token for http://127.0.0.1:7443 is in ~/.config/needy/credentials.json, and commands reach http://127.0.0.1:7443 by default
+# later, on the client: no --endpoint
+needy run ls
 ```
 
-`client pair create` prints the code alone on stdout; `--ttl` defaults to 10
+`pair create` prints the code alone on stdout; `--ttl` defaults to 10
 minutes. Without `--name` the code gets a fresh `client-<code ID>` that no
 client, active or revoked, holds, so it never replaces one. `--name NAME`
 for an active client re-pairs it (owner decision, 2026-11-12): the code is
@@ -120,18 +132,130 @@ needy: notice: pairing with this code will replace client laptop (6f5e4d3c2b1a) 
 ```
 
 A name no active client holds creates the code without the notice.
-`client pair CODE` sends no token
+`pair CODE` sends no token
 (the code authenticates it) and stores the client token in
 `credentials.json` in the config directory (`$XDG_CONFIG_HOME/needy`, or
 `NEEDY_CONFIG_DIR`), keyed by the endpoint as given without a trailing `/`,
 written 0600 through a temporary file in a directory created 0700 (an
-existing directory keeps its mode, and `client pair` warns when other users
+existing directory keeps its mode, and `pair` warns when other users
 may enter it, as the daemon does for its state directories); pairing again
-replaces it. `client ls` prints `ID`, `NAME`, `STATE` (`active` or
-`revoked`), `PAIRED` and `LAST USED`, or JSON with `-o json`; `client revoke
+replaces it. The file also keeps `default_endpoint`, the endpoint paired
+last, which every command reaches when neither `--endpoint` nor
+`NEEDY_ENDPOINT` names one (owner decision, 2026-11-12); a daemon started on
+that machine still listens on its own socket. `pair ls` prints `ID`, `NAME`, `STATE` (`active` or
+`revoked`), `PAIRED` and `LAST USED`, or JSON with `-o json`; `pair revoke
 ID` prints nothing. A revoked client's next command is `needy: missing or
 invalid bearer token`, exit 1. See
 [As built: slice 7](../architecture/2026-11-10-runner-and-run-design.md#as-built-slice-7).
+
+### Naming a run
+
+A run ID need not be copied by hand (owner decision, 2026-11-12). Every
+command that takes a run (`exec --run`, `ps --run`, `fs cp --run`, `run
+stop`, `run attach`, `run logs`, `report`) reads it the same way, through
+one resolver in the CLI (`crates/cli/src/runs.rs`):
+
+1. `--run RUN` (or the `RUN` argument), else `NEEDY_RUN` when it is set and
+   not empty. Either is a full ID, an ID prefix, a run's name or `latest`,
+   the run created last whatever its state. The CLI finds it among `run ls`
+   (`ListRuns`) and sends the full ID, so `ps --run` reads a prefix as
+   `exec --run` does. A prefix of several runs fails and lists them.
+2. Otherwise `run stop`, `run attach` and `run logs` take the only **live**
+   run (`creating` or `running`). With none they fail with `needy: no run
+   is live; …`; with several they fail and list them:
+
+   ```text
+   needy: 2 runs are live; name one (an ID, an ID prefix, a name or `latest`), or set NEEDY_RUN:
+     ID            PROFILE   AGE
+     4c0f3e9d1a27  opencode  12m 3s ago
+     b5eac210aee1  smoke     4s ago
+   ```
+
+3. `exec`, `ps` and `fs cp` never take the only live run: without `--run`
+   or `NEEDY_RUN`, `exec` runs outside any run on the control host (or
+   `--executor` names a pooled executor), `ps` lists every process and `fs
+   cp` looks `EXECUTOR` up outside any run, as before. This keeps `needy
+   exec -- CMD` from changing meaning when a run starts; the owner asked
+   that running outside a run stay possible and explicit and left the
+   choice to this slice. `--run ''` leaves a run `NEEDY_RUN` names, and
+   `--runner` ignores `NEEDY_RUN`.
+
+`report` keeps its own reading of a prefix and `latest` (the control plane's
+or `trace.db`'s), and defaults to `NEEDY_RUN`, else `latest`.
+
+`exec --executor NAME` is a profile's executor inside the run; `exec
+--runner NAME` is a registered machine (a runner that joined this control
+plane) outside any run. The two stay distinct (decided 2026-11-12).
+
+### Profiles by name
+
+`--profile NAME` (`run create`, and `profile check NAME`), where `NAME` has
+no path separator and does not end in `.yaml` or `.yml`, is
+`profiles/NAME.yaml` in the config directory (`$XDG_CONFIG_HOME/needy`, or
+`NEEDY_CONFIG_DIR`); the profile's name is `NAME`. Anything else is a path,
+as before. A missing profile names the file it looked for.
+
+### One command for a remote driving program
+
+The owner's goal (2026-11-12): a local script that calls a driving program
+in a remote actor as if it were installed locally, in one command. On a
+machine that paired once (`needy pair --endpoint URL CODE`) with a profile
+in `profiles/opencode.yaml`:
+
+```sh
+#!/bin/sh
+exec needy run create -it --profile opencode -- "$@"
+```
+
+- The endpoint and the client token come from `credentials.json`.
+- `-- "$@"` is appended to the profile's `actor.command`
+  (`CreateRunRequest.actor_args`), so `opencode --continue` runs
+  `actor.command` plus `--continue`. Nothing replaces the driving program
+  from the command line; a profile that `extends` another sets its own
+  `actor.command`.
+- `-it` starts the driving program on a terminal, attaches at once and
+  exits with its exit status. The run finishes when the driving program
+  exits, and its executors are released.
+- `ctrl-]` detaches and leaves the run running; `needy run attach` with no
+  argument returns to it while it is the only live run (or `NEEDY_RUN`
+  names it).
+
+Evidence (2026-11-12, **[V-test]** on an Apple silicon laptop, macOS 27.2,
+vfkit 0.6.4): a control daemon with `--listen 127.0.0.1:PORT` and a
+`macos-vz` actor image; a second config directory as the laptop, paired once
+with `needy --endpoint http://127.0.0.1:PORT pair CODE`; then, without
+`--endpoint`, the script above with a profile `profiles/vzsh.yaml` whose
+`actor.command` is `sh -c 'echo "args:[$*] n=$#"; exec bash --norc -i' sh`
+and a native executor, driven on a pseudo-terminal:
+
+| Check | Result |
+| --- | --- |
+| `vzsh --continue 'a b'` | prints `args:[--continue a b] n=2`; `echo inside-$((6*7))` gives `inside-42`; `exit 3` makes the script exit 3; the run `finished` with `3`, its executor `(released)`, no vfkit left |
+| `vzsh -m x`, then `ctrl-]` | `needy: detached from run …`, exit 0, the run `running` |
+| `needy run attach` (no run) | back on the same bash; `exit 5` exits 5; the run `finished` with `5` |
+| Two runs from `run create -t`, `needy run attach` | exit 1, both listed with ID, profile `vzsh` and age |
+| `exec --run latest --executor mac`, `run stop latest`, `NEEDY_RUN=<prefix> run stop` | the command ran in the second run; both runs `stopped` |
+| `needy run stop` with one live run | that run `stopped` |
+
+`make check` and `make test` passed on the Mac (759 tests) and on a Linux
+KVM host (779 tests).
+
+#### Candidate: this machine's directory as the workspace
+
+Not built (owner decision, 2026-11-12, marked
+`TODO(cli-local-workspace)` in `crates/cli/src/commands/run.rs`). Running
+the script in a project directory and having the actor's workspace be that
+directory would take:
+
+1. This machine joins the control plane as a runner (`needy daemon --mode
+   runner --join URL`, executor role, `native` driver), next to its client
+   token, and keeps running while the script does.
+2. `run create` names that runner and the current directory, for example as
+   a profile variable, so the profile can say `executors: { laptop: {
+   driver: native, runner: { name: … }, workspace: … } }`.
+3. The profile mounts `executor:laptop:DIR/` at `actor:~/workspace/` and
+   routes the commands that must see local files to `laptop`.
+4. The run's end leaves the runner joined; only the run's processes stop.
 
 ### Runners
 
