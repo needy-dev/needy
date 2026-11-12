@@ -53,9 +53,10 @@ What does not run on Windows, by design rather than as a gap: every actor
 driver (they need Linux or macOS). A Windows machine is an executor only
 (`native`), as the README says.
 
-`cargo test` runs on Windows with these tests skipped
+Until 2026-11-13, `cargo test` ran on Windows with these tests skipped
 (`TODO(windows-tests)` in `check.yml`); each failed on the first Windows run
-for a reason in the tests or the product, not in CI:
+for a reason in the tests or the product, not in CI. All of them run now
+(see the candidates for what changed):
 
 | Skipped | Why it fails on Windows |
 | --- | --- |
@@ -347,10 +348,21 @@ https://github.com/needy-dev/needy/actions/runs/43285128375. It attested the
   with build provenance attestations in the `attest` job.
 - **Authenticode signing** of `needy.exe` once the owner has a certificate
   (`TODO(release-signing)`), so Windows SmartScreen does not warn on it.
-- **The skipped Windows tests** (`TODO(windows-tests)`): a TCP listener in
-  `needy-api-server`'s test harness on Windows would bring back 57 tests;
-  the path-join and signal-name failures each need a look at whether the
-  product or the test is wrong.
+- **The skipped Windows tests** (`TODO(windows-tests)`), done (2026-11-13):
+  `check.yml` runs the whole suite on Windows. Decisions:
+  - `needy-api-server`'s `testing::serve_with` listens on a loopback TCP
+    port on Windows (a Unix socket elsewhere).
+  - Relative host paths in a profile: the product is right, the test was
+    wrong. The profile's directory is this machine's path with its
+    separators, and the profile's own text follows with `/` as written, so
+    a trailing `/` keeps its meaning (`C:\Users\user\p/ws/` on Windows,
+    which Windows opens).
+  - `linux-container` bind-mount sources: the product is right (host paths
+    joined with the host's separator); the tests wrote Unix paths and now
+    join them as the product does.
+  - `signals::name` on Windows: the product was wrong. `needy kill -s 9`
+    from Windows sent `SIG9`, which no executor knows; Windows now names the
+    five portable numbers (1, 2, 3, 9, 15) as Unix does.
 - **`buf breaking` in `check.yml`** once a release promises wire
   compatibility (`NOTICE(proto-breaking)`).
 - **Guest lookup through symlinks**: the daemon looks for

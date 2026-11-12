@@ -15,28 +15,33 @@ pub fn name(number: i32) -> String {
   nix::sys::signal::Signal::try_from(number).map(|s| s.as_str().to_string()).unwrap_or_else(|_| format!("SIG{number}"))
 }
 
-/// Windows has no POSIX signals. These numbers only produce the conventional
-/// `128 + n` shell status for a process that ended by a signal elsewhere.
+/// Windows has no POSIX signals. These numbers produce the conventional
+/// `128 + n` shell status for a process that ended by a signal elsewhere,
+/// and name the signal `needy kill -s N` sends to an executor elsewhere.
 // Source: https://pubs.opengroup.org/onlinepubs/9799919799/utilities/kill.html#tag_20_64_04
 // (POSIX.1-2024, XSI: 1 SIGHUP, 2 SIGINT, 3 SIGQUIT, 9 SIGKILL, 15 SIGTERM).
 // Reference: https://www.gnu.org/software/bash/manual/html_node/Exit-Status.html
 // ("128+N"; POSIX only says greater than 128,
 // https://pubs.opengroup.org/onlinepubs/9799919799/utilities/V3_chap02.html#tag_19_08_02).
 #[cfg(not(unix))]
-pub fn number(name: &str) -> Option<i32> {
-  match name {
-    "SIGHUP" => Some(1),
-    "SIGINT" => Some(2),
-    "SIGQUIT" => Some(3),
-    "SIGKILL" => Some(9),
-    "SIGTERM" => Some(15),
-    _ => None,
-  }
-}
+const PORTABLE: [(&str, i32); 5] = [
+  ("SIGHUP", 1),
+  ("SIGINT", 2),
+  ("SIGQUIT", 3),
+  ("SIGKILL", 9),
+  ("SIGTERM", 15),
+];
 
 #[cfg(not(unix))]
+pub fn number(name: &str) -> Option<i32> {
+  PORTABLE.iter().find(|(n, _)| *n == name).map(|(_, number)| *number)
+}
+
+/// The name of one of the [`PORTABLE`] numbers; another is `SIG<n>`, which
+/// names no signal anywhere.
+#[cfg(not(unix))]
 pub fn name(number: i32) -> String {
-  format!("SIG{number}")
+  PORTABLE.iter().find(|(_, n)| *n == number).map_or_else(|| format!("SIG{number}"), |(name, _)| name.to_string())
 }
 
 /// Shell-style status a client on this machine exits with for `exit`: the
