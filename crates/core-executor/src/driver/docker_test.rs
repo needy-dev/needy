@@ -363,7 +363,7 @@ async fn create_and_destroy_an_executor_container() {
   // The recipe's hostname, then the typed fields as the container's cgroup
   // (v2) and environment see them: 256 MiB, half of a 100 ms period.
   assert_eq!(String::from_utf8_lossy(&stdout).trim(), "instance-1\n268435456\n50000 100000\ntyped");
-  assert_eq!(handle.driver, "docker");
+  assert_eq!(handle.driver, "linux-container");
 
   driver.destroy(&handle).await.unwrap();
   let gone = driver.docker.inspect_container(&handle.id, None).await;
