@@ -46,13 +46,51 @@ The flow is always the same:
 
 ### Install
 
-There are no prebuilt binaries yet; build from a checkout. `needy build` needs
-the checkout too (it builds the actor and executor images from `images/`).
+No release has assets yet. Prebuilt binaries and images come with the next
+release; until then, build from a checkout. `needy build` needs the checkout
+too (it builds the actor and executor images from `images/`).
 
 ```sh
 git clone https://github.com/needy-dev/needy && cd needy
 cargo install --path crates/cli          # installs `needy`
 ```
+
+From the next release on, each
+[GitHub release](https://github.com/needy-dev/needy/releases) carries these
+assets, each with a `.sha256` file:
+
+| Asset | What it is |
+| --- | --- |
+| `needy-x86_64-unknown-linux-musl.tar.gz`, `needy-aarch64-unknown-linux-musl.tar.gz` | `needy` for Linux, statically linked |
+| `needy-aarch64-apple-darwin.tar.gz`, `needy-x86_64-apple-darwin.tar.gz` | `needy` for macOS, signed with a Developer ID and notarized |
+| `needy-x86_64-pc-windows-msvc.zip` | `needy.exe` for Windows (executor only), not Authenticode-signed |
+| `needy-actor-linux-firecracker-x86_64.tar.gz` | the `linux-firecracker` actor image: `vmlinux`, `rootfs.ext4`, `firecracker`, `needy` |
+| `needy-actor-macos-vz-aarch64.tar.gz` | the `macos-vz` actor image: `Image`, `initrd`, `rootfs.ext4`, `needy` |
+
+The container images are on GHCR for amd64 and arm64, tagged with the release
+and `latest`: `ghcr.io/needy-dev/needy-actor` and
+`ghcr.io/needy-dev/needy-executor`.
+
+`needy build` cannot fetch these yet; using them is a manual step that
+replaces the matching `needy build`:
+
+```sh
+# A VM actor image, unpacked where `needy build` writes it: `images/default`
+# in needy's data directory (NEEDY_DATA_DIR if set).
+DATA="${NEEDY_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/needy}"
+mkdir -p "$DATA/images/default"
+tar -xzf needy-actor-linux-firecracker-x86_64.tar.gz -C "$DATA/images/default"
+
+# The container images, under the names profiles use by default.
+docker pull ghcr.io/needy-dev/needy-executor:latest
+docker tag ghcr.io/needy-dev/needy-executor:latest needy-executor:latest
+docker pull ghcr.io/needy-dev/needy-actor:latest
+docker tag ghcr.io/needy-dev/needy-actor:latest needy-actor:latest
+```
+
+The prebuilt kernels have no recipe's identity; `needy build --recipe` builds
+one that does. Apple's `container` loads `needy-actor` with `needy build
+--macos-apple-container`, which still builds it.
 
 What each machine needs besides `needy`:
 
@@ -493,6 +531,10 @@ make test
 make proto
 cargo xtask bench --help      # latency and throughput probes
 ```
+
+GitHub Actions runs the checks and tests on Linux, macOS and Windows, and
+builds the release assets; see
+[Release and CI](docs/ai/references/architecture/2026-11-12-release-and-ci-design.md).
 
 ## Acknowledgements
 

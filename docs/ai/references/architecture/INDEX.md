@@ -15,3 +15,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-12 | [`macos-vz` actor runtime](2026-11-12-macos-vz-actor-evidence.md) | evidence |
 | 2026-11-12 | [Apple `container` actor](2026-11-12-macos-apple-container-actor-evidence.md) | evidence |
 | 2026-11-12 | [Drivers and extension points](2026-11-12-drivers-and-extension-points-design.md) | design |
+| 2026-11-12 | [Release and CI](2026-11-12-release-and-ci-design.md) | design |
