@@ -48,6 +48,15 @@ checksum-url = "https://github.com/needy-dev/needy/releases/download/v{version}/
 exe-path = "needy"
 primary = true
 
+# The arm64 macOS archive also carries the guest needy, a static Linux binary
+# that actors on the Mac run. The control daemon looks for it next to the path
+# it was started by (on macOS `current_exe` does not resolve proto's
+# `~/.proto/bin/needy` symlink), so link it into proto's bin directory too.
+# proto skips it where the archive has none; it needs no shim.
+[install.exes.needy-linux-aarch64]
+exe-path = "needy-linux-aarch64"
+no-shim = true
+
 # proto lists the repository's `v`-prefixed tags to resolve `latest` and
 # version ranges.
 [resolve]
