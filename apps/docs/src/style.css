@@ -1,0 +1,108 @@
+/*
+ * The page is an ink diagram on neutral paper, after the injeca Docs: depth comes from fills and space, not borders.
+ * Color marks a role: blue the actor, green an executor, violet the gateway, cyan the trace, orange a fault, red a
+ * denial. The colors come from src/palette.ts.
+ */
+
+:root {
+  /* Latin from Varela Round and DM Sans. Chinese falls through to LXGW 975 Yuan, which is round like Varela Round. */
+  --font-display: 'Varela Round', 'LXGW 975 Yuan SC', ui-rounded, 'SF Pro Rounded', system-ui, sans-serif;
+  --font-sans: 'DM Sans Variable', 'LXGW 975 Yuan SC', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'Maple Mono', 'LXGW 975 Yuan SC', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --line: rgb(23 23 23 / 14%);
+  --line-strong: rgb(23 23 23 / 50%);
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 4%), 0 10px 28px rgb(0 0 0 / 7%);
+
+  /* A tooltip floats above the page: dark on the light theme, a step lighter than the page on the dark one. Its
+     text and accents (the *-term colors) are the light ones in both, so they read on either ground. */
+  /* The band behind every other chapter: one step off the page. */
+  --band: #ffffff;
+  --tip-bg: #171717;
+  --tip-ink: #ededed;
+  --tip-muted: rgb(237 237 237 / 62%);
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --line: rgb(237 237 237 / 14%);
+  --line-strong: rgb(237 237 237 / 50%);
+  --shadow-card: 0 0 0 1px rgb(255 255 255 / 6%), 0 10px 28px rgb(0 0 0 / 40%);
+
+  --band: #141414;
+  /* A terminal that must stand off the dark page: Catppuccin Mocha's base, one step above the crust terminals use. */
+  --term-raised: #1e1e2e;
+  --tip-bg: #3b3b3b;
+  --tip-ink: #ededed;
+  --tip-muted: rgb(237 237 237 / 62%);
+
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
+}
+
+/* Banners: the page around the rounded frame stays transparent. */
+html.capture,
+html.capture body {
+  background: transparent;
+}
+
+h1,
+h2,
+h3,
+.display {
+  font-family: var(--font-display);
+  font-weight: 400;
+}
+
+code,
+pre,
+.mono {
+  font-family: var(--font-mono);
+  font-feature-settings:
+    'calt' 0,
+    'liga' 0;
+  font-variant-ligatures: none;
+}
+
+a {
+  color: var(--ink);
+  text-decoration-color: var(--line-strong);
+  text-underline-offset: 3px;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--actor);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html:not(.capture) *,
+  html:not(.capture) *::before,
+  html:not(.capture) *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
