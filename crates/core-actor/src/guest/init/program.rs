@@ -40,7 +40,7 @@ pub(super) async fn run(config: &GetConfigResponse, home: &str) -> Result<ExitSt
   let proxy = format!("http://{GATEWAY_LISTEN}");
   // In a container the program's file may be a shim; its real file starts
   // it, so the driving program itself is never routed.
-  let mut command = match crate::guest::shim::resolve(&config.command[0], &format!("{SYSTEM_PATH}:{STUB_DIR}")) {
+  let mut command = match crate::guest::capture::shim::resolve(&config.command[0], &format!("{SYSTEM_PATH}:{STUB_DIR}")) {
     Some(real) => {
       let mut command = tokio::process::Command::new(real);
       command.arg0(&config.command[0]);
@@ -328,7 +328,7 @@ pub(super) fn as_user(args: &[String]) -> anyhow::Error {
     // In a container the program's file may be a shim; its real file
     // starts it, so the driving program itself is never routed.
     let search = std::env::var("PATH").unwrap_or_default();
-    if let Some(real) = crate::guest::shim::resolve(program, &search) {
+    if let Some(real) = crate::guest::capture::shim::resolve(program, &search) {
       use std::os::unix::ffi::OsStrExt;
       let real = std::ffi::CString::new(real.as_os_str().as_bytes())?;
       return Ok(nix::unistd::execv(&real, &argv)?);

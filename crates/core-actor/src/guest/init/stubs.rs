@@ -6,6 +6,9 @@
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+// A container's stubs link to the proxy.
+use crate::contract::PROXY;
+
 /// The stubs' directory, last on the driving program's `PATH`.
 pub(in crate::guest) const STUB_DIR: &str = "/run/needy/bin";
 /// The actor's own programs, searched before the stubs.
@@ -15,9 +18,6 @@ pub(in crate::guest) const STUB_DIR: &str = "/run/needy/bin";
 // Reference: https://github.com/systemd/systemd/blob/v257/src/basic/path-util.h#L23
 // (`DEFAULT_PATH_COMPAT`, the same string).
 pub(super) const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
-
-/// The proxy, which a container's stubs link to.
-const PROXY: &str = "/.needy/proxy";
 
 /// Creates a stub for each plain command name the actor lacks: an empty
 /// file in a VM, a link to the proxy in a container.

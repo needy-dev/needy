@@ -1,4 +1,5 @@
-//! Build-time shims, the container actor's exec routing.
+//! Build-time shims, the capture of a container actor (`linux-container`,
+//! `macos-apple-container`).
 //!
 //! The container actor image's last stage (`images/container/shim.sh`)
 //! copies every executable on the image's `PATH` to `/.needy/real/<path>`
@@ -10,7 +11,7 @@
 //! for the route's user, goes to the proxy, which asks the daemon.
 //!
 //! Init turns routing on by writing [`ROUTE_FILE`] after its setup, as it
-//! sets the kernel module's parameters in a VM; until then, and in the
+//! sets the kernel module's parameters in a VM ([`super::binfmt`]); until then, and in the
 //! image build, every shim runs its real program. Init and the proxy start
 //! programs through their real paths, so needy's own helpers are never
 //! routed, as the kernel guarantees in a VM.
@@ -21,8 +22,9 @@ use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-/// Where the shim stage keeps the real programs, by their original paths.
-pub const REAL: &str = "/.needy/real";
+use super::Route;
+use crate::contract::{NEEDY_DIR, REAL};
+use crate::guest::proxy;
 
 /// Turns routing on: the route's user and names, which init writes once it
 /// set the actor up.
@@ -31,7 +33,7 @@ pub const ROUTE_FILE: &str = "/run/needy/route";
 /// The real program the shim at `exe` stands for, or `None` when `exe` is
 /// not a shim. needy's own files in `/.needy` never are.
 pub fn real(exe: &Path) -> Option<PathBuf> {
-  if exe.starts_with("/.needy") {
+  if exe.starts_with(NEEDY_DIR) {
     return None;
   }
   let real = Path::new(REAL).join(exe.strip_prefix("/").ok()?);
@@ -43,14 +45,7 @@ pub fn invoked() -> bool {
   std::env::current_exe().ok().and_then(|exe| real(&exe)).is_some()
 }
 
-/// Which execs go to the daemon: those of user `uid` whose program has one
-/// of `names`, or every one of theirs when the names are `*`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Route {
-  pub uid: u32,
-  pub names: Vec<String>,
-}
-
+// The route file's format; what a route routes is the capture's (`super`).
 impl Route {
   /// Reads [`ROUTE_FILE`]'s format: the user ID on the first line, the
   /// names comma-separated on the second, as the kernel module's `route`
@@ -64,18 +59,6 @@ impl Route {
 
   pub fn render(&self) -> String {
     format!("{}\n{}\n", self.uid, self.names.join(","))
-  }
-
-  /// Whether an exec by `uid` matched by `names` is routed, as
-  /// `binfmt_needy`'s `listed` decides in a VM.
-  pub fn routes(&self, uid: u32, names: &[String]) -> bool {
-    if uid != self.uid {
-      return false;
-    }
-    if self.names.len() == 1 && self.names[0] == "*" {
-      return true;
-    }
-    names.iter().any(|name| self.names.contains(name))
   }
 }
 
@@ -134,7 +117,7 @@ pub fn main() -> ! {
   };
   let args: Vec<OsString> = std::env::args_os().collect();
   let route = std::fs::read_to_string(ROUTE_FILE).ok().and_then(|text| Route::parse(&text));
-  let execfn = super::proxy::exec_path();
+  let execfn = proxy::exec_path();
   let argv0 = args.first().map(|a| a.to_string_lossy().into_owned()).unwrap_or_default();
   let uid = nix::unistd::getuid().as_raw();
   let routed = route.is_some_and(|route| route.routes(uid, &names(&execfn, &exe, &argv0)));
@@ -145,10 +128,10 @@ pub fn main() -> ! {
   // its interpreter, whose name the `#!` line gave as `argv[0]`.
   let direct = std::fs::canonicalize(&execfn).is_ok_and(|path| path == exe);
   let path = if direct { execfn } else { argv0 };
-  super::proxy::run(super::proxy::Invocation {
+  proxy::run(proxy::Invocation {
     path,
     args: args.iter().map(|a| a.to_string_lossy().into_owned()).collect(),
-    local: super::proxy::Local::Program(real.to_string_lossy().into_owned()),
+    local: proxy::Local::Program(real.to_string_lossy().into_owned()),
   })
 }
 

@@ -1,7 +1,7 @@
 //! The actor's init: the boot sequence, in order. It mounts the system, asks
 //! the daemon for the run's configuration, sets up the identity, the
 //! workspace mounts, the gateway forwarder, route stubs and copy-in, turns
-//! routing on, runs the driving program, mirrors out, reports its exit and
+//! routing on (`super::capture`), runs the driving program, mirrors out, reports its exit and
 //! reboots, which ends the VM.
 //!
 //! In a container (see [`super::in_container`]) the runtime made the system
@@ -157,18 +157,11 @@ async fn boot(container: bool) -> Result<()> {
   }
   identity::schedule_faults(&client, &config);
   // Route only after setup so init's own helpers stay local.
-  if container {
-    let route = super::shim::Route {
-      uid: user.uid,
-      names: config.route_names.clone(),
-    };
-    if let Err(e) = super::shim::enable(&route) {
-      tracing::warn!("cannot turn routing on; every command stays in the actor: {e}");
-    }
-  } else {
-    write_param("/sys/module/binfmt_needy/parameters/route_uid", &user.uid.to_string());
-    write_param("/sys/module/binfmt_needy/parameters/route", &config.route_names.join(","));
-  }
+  let route = super::capture::Route {
+    uid: user.uid,
+    names: config.route_names.clone(),
+  };
+  super::capture::enable(&route, container);
 
   let driven = match &config.tty {
     Some(window) => {

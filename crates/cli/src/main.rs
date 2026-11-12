@@ -19,22 +19,23 @@ fn main() {
 /// Linux.
 #[cfg(target_os = "linux")]
 fn guest() {
+  use needy_core_actor::contract::{INIT, PROXY};
   use needy_core_actor::guest;
   // The kernel starts init before /proc is mounted, so check argv[0]; a
   // container's PID 1 is not an actor's init.
-  if std::env::args_os().next().as_deref() == Some(std::ffi::OsStr::new("/.needy/init")) {
+  if std::env::args_os().next().as_deref() == Some(std::ffi::OsStr::new(INIT)) {
     guest::init_main();
   }
   if let Ok(exe) = std::env::current_exe() {
     match exe.to_str() {
-      Some("/.needy/proxy") => guest::proxy_main(),
-      Some("/.needy/init") => guest::init_main(),
+      Some(PROXY) => guest::proxy_main(),
+      Some(INIT) => guest::init_main(),
       _ => {}
     }
   }
   // In a container actor every program on the image's `PATH` is a link to
   // this binary, started by the program's name.
-  if guest::shim::invoked() {
-    guest::shim::main();
+  if guest::capture::shim::invoked() {
+    guest::capture::shim::main();
   }
 }
