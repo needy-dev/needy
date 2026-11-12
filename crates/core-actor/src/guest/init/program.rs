@@ -57,6 +57,7 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
     .env("SHELL", "/bin/bash")
     .env("PATH", format!("{SYSTEM_PATH}:{STUB_DIR}"))
     .env("TERM", "xterm-256color")
+    .env("COLORTERM", "truecolor")
     .env("LANG", "C.UTF-8")
     .env("HTTP_PROXY", &proxy)
     .env("HTTPS_PROXY", &proxy)
@@ -102,6 +103,15 @@ fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> 
     // The program draws for the terminal model, not for each client's
     // terminal (see the terminal note's G10).
     ("TERM", "xterm-256color".into()),
+    // The model keeps 24-bit colors and draws them again for a client that
+    // attaches; without COLORTERM, programs that pick their palette from it
+    // (pi, opencode, Claude Code) draw in 256 colors. herdr sets the same
+    // for each pane it runs.
+    // Source: https://github.com/herdrdev/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/pane.rs#L100-L108
+    // (`apply_pane_terminal_env`: TERM=xterm-256color, COLORTERM=truecolor).
+    // Reference: the TUI fidelity evidence,
+    // `docs/ai/references/cli/2026-11-13-tui-fidelity-evidence.md`.
+    ("COLORTERM", "truecolor".into()),
     ("LANG", "C.UTF-8".into()),
     ("HTTP_PROXY", proxy.clone()),
     ("HTTPS_PROXY", proxy.clone()),

@@ -34,3 +34,27 @@ async fn the_process_socket_belongs_to_the_daemon_and_only_the_daemon() {
   assert_eq!((meta.uid(), meta.gid()), (uid, gid));
   assert_eq!(meta.permissions().mode() & 0o777, 0o600);
 }
+
+// ROOT CAUSE:
+//
+// If the driving program was a TUI that picks its palette from COLORTERM,
+// it drew in 256 colors through needy although the client's terminal and
+// the terminal model both keep 24-bit colors, because init cleared the
+// environment and set TERM but not COLORTERM.
+//
+// Before the fix, pi, opencode and Claude Code drew no 24-bit color in an
+// actor (the TUI matrix's `create` path against `docker run -it`).
+// The fix keeps COLORTERM=truecolor, which a profile's `actor.env` can
+// still override.
+#[test]
+fn the_driving_program_is_told_its_terminal_draws_24_bit_color() {
+  let colorterm =
+    |config: &GetConfigResponse| environment(config, "/home/user").into_iter().rev().find(|(k, _)| k == "COLORTERM").map(|(_, v)| v);
+  assert_eq!(colorterm(&GetConfigResponse::default()).as_deref(), Some("truecolor"));
+
+  let config = GetConfigResponse {
+    env: [("COLORTERM".to_string(), "24bit".to_string())].into(),
+    ..GetConfigResponse::default()
+  };
+  assert_eq!(colorterm(&config).as_deref(), Some("24bit"));
+}
