@@ -557,6 +557,9 @@ pub struct RunnerHost {
   pub arch: String,
   /// Its CPU and the CPUID entries its KVM supports, for recipe checks.
   pub cpu: needy_core::recipe::HostInfo,
+  /// The home directory of the user the runner runs as: `~` in a native
+  /// executor's paths there. Empty when unknown.
+  pub home: String,
 }
 
 /// A runner asking to join.

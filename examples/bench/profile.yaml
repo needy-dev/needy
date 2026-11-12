@@ -7,6 +7,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command:
     - /bin/sh
     - -c
@@ -27,8 +28,7 @@ executors:
 commands:
   - { match: "{true,head} **", to: build }
 files:
-  workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
   probe: { mode: copy-in, from: "host:../../target/bench-probe/", to: "actor:~/probe/" }
-run_files: [workspace, probe]
+run_files: [probe]
 # Per-hook latencies; `cargo xtask bench run --state-dir DIR` prints them.
 trace: { timing: true }

@@ -28,23 +28,6 @@ fn mounts(run: &Run) -> Vec<GuestMount> {
     .collect()
 }
 
-/// The driving program's working directory when the profile sets no
-/// `actor.cwd`: `~/workspace` when a workspace mount provides it, else the
-/// home directory. Init mounts a fresh home, so `~/workspace` exists only
-/// when a mount at or below it creates it.
-fn default_cwd(home: &str, mounts: &[GuestMount]) -> String {
-  let workspace = format!("{home}/workspace");
-  let provided = mounts.iter().any(|m| {
-    let target = m.target.trim_end_matches('/');
-    target == workspace || target.starts_with(&format!("{workspace}/"))
-  });
-  if provided {
-    workspace
-  } else {
-    home.to_string()
-  }
-}
-
 #[async_trait::async_trait]
 impl Guest for Daemon {
   async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
@@ -55,7 +38,9 @@ impl Guest for Daemon {
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
     let mounts = mounts(&run);
-    let cwd = profile.actor.cwd.clone().unwrap_or_else(|| default_cwd(&home, &mounts));
+    // The workspace, else the home directory: init mounts a fresh home, so
+    // nothing else is sure to exist.
+    let cwd = profile.actor.workspace.as_ref().map_or(home, |w| w.path.clone());
     let mut copy_in = Vec::new();
     let mut mirror_out = Vec::new();
     for (name, mapping) in &profile.files.mappings {

@@ -44,6 +44,7 @@ fn host_without_avx512() -> RunnerHost {
       model_name: "Example CPU without AVX-512".into(),
       kvm_cpuid: None,
     },
+    home: String::new(),
   }
 }
 
@@ -257,13 +258,13 @@ executors:
 }
 
 #[tokio::test]
-async fn a_path_map_that_covers_the_actors_cwd_satisfies_the_check() {
+async fn a_path_map_that_covers_the_actors_workspace_satisfies_the_check() {
   let served = control().await;
   let _mac = runner(&served, "mac", "executor(native)", &[]).await;
 
   let check = check(
     &served,
-    "actor: { driver: linux-firecracker, cwd: /srv/project }\nexecutors:\n  mac: { runner: mac, path_map: { /srv: /Users/user/srv } }\n",
+    "actor: { driver: linux-firecracker, workspace: { path: ~/project } }\nexecutors:\n  mac: { runner: mac, path_map: { /home/agent: /Users/user/home } }\n",
   )
   .await;
 
@@ -288,7 +289,7 @@ async fn a_path_map_key_under_the_users_home_covers_the_actors_cwd() {
   let check = check(
     &served,
     r#"
-actor: { driver: linux-firecracker, cwd: ~/workspace/project }
+actor: { driver: linux-firecracker, workspace: { path: ~/workspace/project } }
 user: { name: dev, uid: 1000, gid: 1000 }
 executors:
   workspace: { runner: mac, path_map: { "~/workspace": /Users/user/work } }

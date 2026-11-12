@@ -4,6 +4,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
   recipe: gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command:
     - opencode
     - run
@@ -41,11 +42,3 @@ commands:
     to: build
   - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
     to: actor
-
-files:
-  workspace:
-    mode: mount
-    from: executor:build:~/workspace/
-    to: actor:~/workspace/
-    writable: true
-run_files: [workspace]

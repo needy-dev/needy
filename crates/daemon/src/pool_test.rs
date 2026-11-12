@@ -126,6 +126,7 @@ async fn a_native_executor_on_a_runner_reaches_its_machine_with_its_platforms_sf
   let site = Site::Runner {
     name: "mac".into(),
     os: "macos".into(),
+    home: "/Users/user".into(),
   };
 
   let instance = pool.acquire(native, &site).await.unwrap();
@@ -134,6 +135,29 @@ async fn a_native_executor_on_a_runner_reaches_its_machine_with_its_platforms_sf
   assert_eq!(instance.handle.sftp, ["/usr/libexec/sftp-server"]);
   // A path on the runner's machine, as written.
   assert_eq!(instance.handle.workspace, "/Users/user/ws");
+}
+
+// `~` in a native executor's paths on a runner is the home of the user the
+// runner runs as, which it reports in its heartbeats; the client and the
+// control plane do not know it.
+#[tokio::test]
+async fn a_native_executor_on_a_runner_expands_tilde_to_the_runners_home() {
+  let executor = testing::Executor::start().await;
+  let pool = Pool::new(executor.native.clone(), None, Arc::default());
+  let mut native = spec("mac", "k", None, OnFull::Wait);
+  native.config.workspace = Some("~/project".into());
+  native.config.path_map = [("/home/agent/project".to_string(), "~/project".to_string())].into();
+  let site = Site::Runner {
+    name: "mac".into(),
+    os: "macos".into(),
+    home: "/Users/user".into(),
+  };
+
+  let instance = pool.acquire(native, &site).await.unwrap();
+
+  assert_eq!(instance.handle.workspace, "/Users/user/project");
+  assert_eq!(instance.path_map["/home/agent/project"], "/Users/user/project");
+  assert_eq!(instance.expand_home("~/project/a.txt"), "/Users/user/project/a.txt");
 }
 
 #[tokio::test]
@@ -145,6 +169,7 @@ async fn a_linux_container_executor_is_never_created_on_a_runner_site() {
   let site = Site::Runner {
     name: "mac".into(),
     os: "macos".into(),
+    home: "/Users/user".into(),
   };
 
   let error = pool.acquire(docker, &site).await.err().unwrap().to_string();

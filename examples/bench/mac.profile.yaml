@@ -7,6 +7,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:mac:/Users/user/needy-ws/demo", writable: true }
   command:
     - /bin/sh
     - -c
@@ -25,11 +26,8 @@ actor:
 executors:
   mac:
     runner: mac
-    workspace: /Users/user/needy-ws/demo
-    path_map: { /home/agent/workspace: /Users/user/needy-ws/demo }
 commands:
   - { match: "{true,head} **", to: mac }
 files:
-  workspace: { mode: mount, from: "executor:mac:/Users/user/needy-ws/demo/", to: "actor:~/workspace/", writable: true }
   probe: { mode: copy-in, from: "host:../../target/bench-probe/", to: "actor:~/probe/" }
-run_files: [workspace, probe]
+run_files: [probe]

@@ -9,14 +9,13 @@ executors:
   here: { driver: native }
 "#;
 
-const WORKSPACE_MOUNT: &str = r#"
-actor: { driver: linux-firecracker }
+const WORKSPACE: &str = r#"
+actor:
+  driver: linux-firecracker
+  workspace: { path: ~/project, from: "executor:here:/srv/ws/", writable: true }
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { driver: native }
-files:
-  workspace: { mode: mount, from: "executor:here:/srv/ws/", to: "actor:~/workspace/", writable: true }
-run_files: [workspace]
 "#;
 
 async fn cwd(profile: &str) -> String {
@@ -33,15 +32,29 @@ async fn cwd(profile: &str) -> String {
 // tmpfs on the home directory, which hides the image's own.
 //
 // Before the fix, the default was `~/workspace` whatever the mounts.
-// The fix makes it the home directory when no mount provides `~/workspace`.
+// The fix makes it the home directory; since `actor.workspace` (2026-11-12)
+// the workspace's path is the only other working directory.
 #[tokio::test]
-async fn an_actor_without_a_workspace_mount_starts_in_its_home_directory() {
+async fn an_actor_without_a_workspace_starts_in_its_home_directory() {
   assert_eq!(cwd(NO_MOUNT).await, "/home/agent");
 }
 
 #[tokio::test]
-async fn an_actor_with_a_workspace_mount_starts_in_the_workspace() {
-  assert_eq!(cwd(WORKSPACE_MOUNT).await, "/home/agent/workspace");
+async fn an_actor_starts_in_its_workspace_which_is_mounted_from_the_executor() {
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(WORKSPACE, started.dir.path())).await.unwrap();
+  let config = Guest::config(&started.daemon, &created.id).await.unwrap();
+
+  assert_eq!(config.cwd, "/home/agent/project");
+  let targets: Vec<_> = config.mounts.iter().map(|m| (m.target.as_str(), m.source.as_str(), m.writable)).collect();
+  assert_eq!(targets, [("/home/agent/project", "/srv/ws", true)]);
+}
+
+#[tokio::test]
+async fn a_fresh_workspace_is_the_working_directory_without_a_mount() {
+  let profile =
+    NO_MOUNT.replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, workspace: { path: ~/scratch } }");
+  assert_eq!(cwd(&profile).await, "/home/agent/scratch");
 }
 
 // `needy run create -- ARGS` appends ARGS to the profile's driving program
@@ -58,10 +71,4 @@ async fn run_arguments_are_appended_to_the_profiles_driving_program() {
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();
 
   assert_eq!(config.command, ["opencode", "--continue", "a b"]);
-}
-
-#[tokio::test]
-async fn an_actor_cwd_wins_over_the_default() {
-  let profile = NO_MOUNT.replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, cwd: /tmp }");
-  assert_eq!(cwd(&profile).await, "/tmp");
 }

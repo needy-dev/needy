@@ -59,6 +59,7 @@ fn a_runners_host_survives_the_wire_with_its_kvm_cpuid() {
       model_name: "Example CPU".into(),
       kvm_cpuid: Some([(0x7, 0), (0xd, 1)].into()),
     },
+    home: "/home/user".into(),
   };
 
   let report = runner_report(heartbeat_with(&host)).unwrap();
@@ -74,6 +75,7 @@ fn a_host_without_kvm_keeps_its_cpuid_unknown() {
     os: "macos".into(),
     arch: "aarch64".into(),
     cpu: Default::default(),
+    home: String::new(),
   };
 
   let report = runner_report(heartbeat_with(&host)).unwrap();

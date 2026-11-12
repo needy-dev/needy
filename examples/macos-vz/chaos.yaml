@@ -6,6 +6,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: macos-vz
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:mac:/tmp/needy-macos-vz-ws", writable: true }
   command:
     - /bin/sh
     - -c
@@ -22,8 +23,6 @@ actor:
 executors:
   mac:
     driver: native
-    workspace: /tmp/needy-macos-vz-ws
-    path_map: { /home/agent/workspace: /tmp/needy-macos-vz-ws }
 commands:
   - { match: "{python3,curl} **", to: mac }
 files:
@@ -32,16 +31,11 @@ files:
     from: "host:../chaos/seed/"
     to: "actor:~/seed/"
     filter: ["- /secret.txt", "+ **"]
-  workspace:
-    mode: mount
-    from: "executor:mac:/tmp/needy-macos-vz-ws/"
-    to: "actor:~/workspace/"
-    writable: true
   results:
     mode: mirror-out
     from: "actor:~/out/"
     to: "host:./out/{run}/"
-run_files: [seed, workspace, results]
+run_files: [seed, results]
 chaos:
   seed: 1
   # No trigger: each fault fires on every match.

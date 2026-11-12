@@ -117,16 +117,14 @@ impl Side {
     Err(format!("file side must start with host:, actor: or executor:: {text:?}"))
   }
 
-  /// Expands `~` to the profile user's home on the actor and executor sides;
-  /// a host path keeps `~` for the host's own home.
+  /// Expands `~` to the profile user's home on the actor side. A host path
+  /// keeps `~` for the control host's home, and an executor path for the
+  /// executor's home, which only the daemon knows once the instance exists
+  /// (`needy-daemon`'s `pool::Instance::expand_home`).
   pub(super) fn expand_home(self, user: &User) -> Self {
     match self {
-      Self::Host(path) => Self::Host(path),
       Self::Actor(path) => Self::Actor(user.expand_home(&path)),
-      Self::Executor { name, path } => Self::Executor {
-        name,
-        path: user.expand_home(&path),
-      },
+      side => side,
     }
   }
 }

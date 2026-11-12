@@ -5,6 +5,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command:
     - /bin/sh
     - -c
@@ -22,6 +23,3 @@ executors:
   build: { driver: linux-container, key: "{run}", max_procs: 4 }
 commands:
   - { match: "python3 **", to: build }
-files:
-  workspace: { mode: mount, from: "executor:build:~/workspace/", to: "actor:~/workspace/", writable: true }
-run_files: [workspace]

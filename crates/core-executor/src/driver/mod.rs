@@ -132,11 +132,32 @@ pub async fn connect(endpoint: &str) -> Result<Client, Error> {
   Ok(needy_api_client::ready::wait(endpoint, Duration::from_secs(10)).await?)
 }
 
+/// The home directory of the user this process runs as, which a `~` in an
+/// executor's paths on this machine names; empty when unknown.
+// NOTICE: `std::env::home_dir` reads `HOME` (or `USERPROFILE` on Windows)
+// and falls back to the password database; it is no longer deprecated
+// since Rust 1.86 (https://github.com/rust-lang/rust/pull/132515).
+pub fn home() -> String {
+  std::env::home_dir().map(|home| home.display().to_string()).unwrap_or_default()
+}
+
+/// `path` with a leading `~` (alone or before a `/`) replaced by `home`. A
+/// `~` elsewhere, or `~user`, stays; so does every `~` when `home` is empty.
+pub fn expand_home(path: &str, home: &str) -> String {
+  if home.is_empty() {
+    return path.into();
+  }
+  match path.strip_prefix('~') {
+    Some("") => home.into(),
+    Some(rest) if rest.starts_with('/') => format!("{}{rest}", home.trim_end_matches('/')),
+    _ => path.into(),
+  }
+}
+
 /// A profile path on this machine: `~` is the user's home directory, and a
 /// relative path resolves against the profile's directory.
 fn host_path(path: &str, base: &Path) -> PathBuf {
-  let home = std::env::var("HOME").unwrap_or_default();
-  let path = path.replacen('~', &home, 1);
+  let path = expand_home(path, &home());
   if Path::new(&path).is_absolute() {
     PathBuf::from(path)
   } else {
@@ -170,3 +191,7 @@ fn sanitize(key: &str) -> String {
     })
     .collect()
 }
+
+#[cfg(test)]
+#[path = "mod_test.rs"]
+mod tests;

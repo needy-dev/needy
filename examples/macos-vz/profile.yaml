@@ -11,6 +11,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: macos-vz
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:mac:/tmp/needy-macos-vz-ws", writable: true }
   command:
     - /bin/sh
     - -c
@@ -28,10 +29,5 @@ actor:
 executors:
   mac:
     driver: native
-    workspace: /tmp/needy-macos-vz-ws
-    path_map: { /home/agent/workspace: /tmp/needy-macos-vz-ws }
 commands:
   - { match: "{python3,arch} **", to: mac }
-files:
-  workspace: { mode: mount, from: "executor:mac:/tmp/needy-macos-vz-ws/", to: "actor:~/workspace/", writable: true }
-run_files: [workspace]

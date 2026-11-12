@@ -240,6 +240,7 @@ fn host() -> RunnerHost {
     os: std::env::consts::OS.into(),
     arch: std::env::consts::ARCH.into(),
     cpu,
+    home: needy_core_executor::driver::home(),
   }
 }
 

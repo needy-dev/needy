@@ -9,13 +9,14 @@ mod network;
 mod rules;
 mod runner;
 mod trace;
+mod workspace;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-pub use actor::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime};
+pub use actor::{Actor, ActorDriver, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime, Workspace};
 pub use chaos::{Chaos, FILE_ERRNOS, Fault, FaultDomain, FileMatch, NetMatch, Readings, SIGNALS, valid_name as valid_fault_name};
 pub use executor::{ContainerBuild, ContainerExecutor, Cpus, Device, Executor, ExecutorDriver, Gpus, MemorySwap, Mount, OnFull, Ulimit};
 pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
@@ -23,6 +24,7 @@ pub use network::{ActorNetwork, NetworkPolicy, SERVICE_DOMAIN, Service, service_
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
 pub use runner::{LabelMatch, RunnerSelector};
 pub use trace::{Trace, TraceSink};
+pub use workspace::{WORKSPACE, WORKSPACE_OUT};
 
 use crate::{Error, Kind, Source, merge, source};
 
@@ -120,10 +122,12 @@ pub fn load(source: &Source) -> Result<Profile, Error> {
   // as on a file mapping's actor side; routing and `profile check` both read
   // the expanded key.
   // NOTICE: a value is a path on the executor's machine, whose home this
-  // profile does not know, so it keeps a `~` as written.
+  // profile does not know, so it keeps a `~` as written; the daemon expands
+  // it to the executor's home once the instance exists.
   for executor in profile.executors.values_mut() {
     executor.path_map = std::mem::take(&mut executor.path_map).into_iter().map(|(from, to)| (user.expand_home(&from), to)).collect();
   }
+  workspace::derive(&mut profile, source)?;
   Ok(profile)
 }
 
@@ -208,8 +212,8 @@ fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), E
 }
 
 /// Makes the relative host paths of a merged profile absolute against
-/// `base`: `host:` sides of file mappings, executors' workspaces and the
-/// sources of their container bind mounts.
+/// `base`: `host:` sides of file mappings and of the actor's workspace,
+/// executors' workspaces and the sources of their container bind mounts.
 // NOTICE: `executors.*.container.build.context` is a host path too, but no
 // driver builds images yet; it is left as written.
 fn absolute_host_paths(document: &mut serde_yaml::Value, base: &Path) {
@@ -227,6 +231,11 @@ fn absolute_host_paths(document: &mut serde_yaml::Value, base: &Path) {
         }
       }
     }
+  }
+  if let Some(Value::String(from)) = document.get_mut("actor").and_then(|actor| actor.get_mut("workspace")).and_then(|w| w.get_mut("from"))
+    && let Some(path) = from.strip_prefix("host:")
+  {
+    *from = format!("host:{}", source::absolute(path, base));
   }
   if let Some(Value::Mapping(files)) = document.get_mut("files") {
     for mapping in files.values_mut() {

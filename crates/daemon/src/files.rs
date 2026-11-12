@@ -20,8 +20,7 @@ use crate::run::Run;
 /// profile's directory.
 fn host_path(run: &Run, path: &str) -> PathBuf {
   let path = path.replace("{run}", &run.id);
-  let home = std::env::var("HOME").unwrap_or_default();
-  let path = path.replacen('~', &home, 1);
+  let path = needy_core_executor::driver::expand_home(&path, &needy_core_executor::driver::home());
   if Path::new(&path).is_absolute() {
     PathBuf::from(path)
   } else {
@@ -144,6 +143,7 @@ pub async fn copy_in(run: &Run) -> Result<()> {
     let Some(instance) = run.executor(exec) else {
       continue;
     };
+    let path = &instance.expand_home(path);
     let root = host_path(run, src);
     let filter = mapping.filter.clone();
     let archive = tokio::task::spawn_blocking(move || needy_common::archive::pack(&root, &filter)).await??;
@@ -178,6 +178,7 @@ pub async fn mirror_out(run: &Run) {
     let Some(instance) = run.executor(exec) else {
       continue;
     };
+    let path = &instance.expand_home(path);
     let mirrored = async {
       let destination = destination(run, dst)?;
       let archive = files::pull(&*instance.handle.executor, &target(), path, ".").await?;

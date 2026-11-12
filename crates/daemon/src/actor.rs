@@ -127,7 +127,9 @@ pub fn mounts(run: &Run) -> Vec<HostMount> {
     mounts.push(HostMount {
       target: target.clone(),
       executor: exec.clone(),
-      source: path.clone(),
+      // The executor's home: a native runner's user's, or the profile
+      // user's in a container.
+      source: instance.expand_home(path),
       writable: mapping.writable,
       sftp_command: instance.handle.sftp.clone(),
     });

@@ -30,8 +30,14 @@ pub struct Instance {
   /// The driver that created the instance and destroys it; `None` for a
   /// runner's machine, which nothing creates.
   driver: Option<Arc<dyn Driver>>,
-  /// Actor path prefix to executor path prefix.
+  /// Actor path prefix to executor path prefix, with a leading `~` of each
+  /// executor path expanded to [`Instance::home`].
   pub path_map: BTreeMap<String, String>,
+  /// The home directory on the executor's side, which a leading `~` in its
+  /// paths names: the profile user's home in a `linux-container` executor,
+  /// the home of the user the daemon or runner runs as for a `native` one.
+  /// Empty when unknown, and `~` then stays as written.
+  pub home: String,
   slots: Option<Arc<Semaphore>>,
   on_full: OnFull,
   refs: AtomicUsize,
@@ -50,6 +56,7 @@ impl Instance {
       handle: native.machine(),
       driver: Some(native.clone()),
       path_map: BTreeMap::new(),
+      home: String::new(),
       slots: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
@@ -66,6 +73,7 @@ impl Instance {
       handle: runner_handle(runner, links, Vec::new(), String::new()),
       driver: None,
       path_map: BTreeMap::new(),
+      home: String::new(),
       slots: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
@@ -87,10 +95,17 @@ impl Instance {
       },
       driver: None,
       path_map: BTreeMap::new(),
+      home: String::new(),
       slots: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
+  }
+
+  /// `path`, a path on the executor's side, with a leading `~` expanded to
+  /// the executor's home.
+  pub fn expand_home(&self, path: &str) -> String {
+    driver::expand_home(path, &self.home)
   }
 
   /// The runner whose own process space the instance is, which owns its
@@ -139,8 +154,13 @@ pub enum Site {
   ControlHost,
   /// A runner's own process space, reached over its streams; `os` is its
   /// operating system as it reported it, which picks the SFTP server of a
-  /// workspace mount.
-  Runner { name: String, os: String },
+  /// workspace mount; `home` is the home directory it reported, which a
+  /// `~` in its native executors' paths names.
+  Runner {
+    name: String,
+    os: String,
+    home: String,
+  },
 }
 
 /// One key's instance: created once by the first acquire, which the others
@@ -206,17 +226,19 @@ impl Pool {
 
   /// Creates the instance of `spec` at `site` through its driver.
   async fn create(&self, spec: &Spec, site: &Site) -> Result<Arc<Instance>> {
-    let (handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match (spec.config.driver, site) {
-      (profile::ExecutorDriver::Native, Site::ControlHost) => (self.native.create(spec).await?, Some(self.native.clone())),
+    let (handle, driver, home): (driver::Instance, Option<Arc<dyn Driver>>, String) = match (spec.config.driver, site) {
+      (profile::ExecutorDriver::Native, Site::ControlHost) => (self.native.create(spec).await?, Some(self.native.clone()), driver::home()),
+      // The container's user is the profile's.
       (kind @ profile::ExecutorDriver::LinuxContainer, Site::ControlHost) => {
         let driver = self.driver(kind).context("no Docker-compatible engine is available on this machine")?;
-        (driver.create(spec).await?, Some(driver))
+        (driver.create(spec).await?, Some(driver), spec.user.home())
       }
       // The runner's machine outlives its runs; nothing creates or
-      // destroys it. Its workspace is a path on that machine, as written.
-      (profile::ExecutorDriver::Native, Site::Runner { name, os }) => {
-        let workspace = spec.config.workspace.clone().unwrap_or_default();
-        (runner_handle(name, &self.links, sftp_command(os), workspace), None)
+      // destroys it. Its workspace is a path on that machine, with `~` the
+      // home of the user the runner runs as.
+      (profile::ExecutorDriver::Native, Site::Runner { name, os, home }) => {
+        let workspace = driver::expand_home(&spec.config.workspace.clone().unwrap_or_default(), home);
+        (runner_handle(name, &self.links, sftp_command(os), workspace), None, home.clone())
       }
       // TODO(runner-docker): a runner creating containers itself (create and
       // destroy tasks on its control stream, execs relayed to the
@@ -232,7 +254,8 @@ impl Pool {
       key: spec.key.clone(),
       handle,
       driver,
-      path_map: spec.config.path_map.clone(),
+      path_map: spec.config.path_map.iter().map(|(from, to)| (from.clone(), driver::expand_home(to, &home))).collect(),
+      home,
       slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
       on_full: spec.config.on_full,
       // Each acquire counts itself under the pool's lock.

@@ -6,6 +6,8 @@ user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
   driver: linux-firecracker
+  # `~` on the executor's side is the home of the user runner `mac` runs as.
+  workspace: { path: ~/workspace, from: "executor:mac:~/needy-ws/demo", writable: true }
   command:
     - /bin/sh
     - -c
@@ -31,18 +33,8 @@ actor:
 executors:
   mac:
     runner: mac
-    workspace: /Users/user/needy-ws/demo
-    path_map: { /home/agent/workspace: /Users/user/needy-ws/demo }
     max_procs: 4
 
 commands:
   - match: "{xcrun,xcodebuild,swift,swiftc,sw_vers,zsh} **"
     to: mac
-
-files:
-  workspace:
-    mode: mount
-    from: "executor:mac:/Users/user/needy-ws/demo/"
-    to: "actor:~/workspace/"
-    writable: true
-run_files: [workspace]

@@ -1143,6 +1143,11 @@ pub struct RunnerHost {
     /// The CPUID entries its KVM supports; unset without a usable KVM.
     #[prost(message, optional, tag="6")]
     pub kvm_cpuid: ::core::option::Option<KvmCpuid>,
+    /// The home directory of the user the runner runs as. A `~` in a native
+    /// executor's paths on this runner (its `workspace`, `path_map` values and
+    /// `executor:NAME:` file sides) is this directory. Empty when unknown.
+    #[prost(string, tag="7")]
+    pub home: ::prost::alloc::string::String,
 }
 /// What `KVM_GET_SUPPORTED_CPUID` reported.
 #[derive(Clone, PartialEq, ::prost::Message)]

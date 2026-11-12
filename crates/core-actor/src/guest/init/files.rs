@@ -22,6 +22,30 @@ pub(super) async fn copy_in(client: &Client, name: &str, path: &str, uid: u32, g
   Ok(())
 }
 
+/// Creates the driving program's working directory `cwd` when it is under
+/// the user's `home` and missing: an `actor.workspace` without `from`.
+/// Each directory it creates belongs to the user; one outside the home is
+/// left alone, since the root file system is read-only.
+pub(super) fn working_directory(cwd: &str, home: &str, uid: u32, gid: u32) {
+  let Ok(relative) = Path::new(cwd).strip_prefix(home) else {
+    return;
+  };
+  let mut dir = PathBuf::from(home);
+  for part in relative.components() {
+    dir.push(part);
+    if dir.is_dir() {
+      continue;
+    }
+    if let Err(e) = std::fs::create_dir(&dir) {
+      tracing::warn!("cannot create the working directory {}: {e}", dir.display());
+      return;
+    }
+    if let Err(e) = std::os::unix::fs::lchown(&dir, Some(uid), Some(gid)) {
+      tracing::warn!("cannot give {} to {uid}:{gid}: {e}", dir.display());
+    }
+  }
+}
+
 /// Gives a tree to the user, without following symbolic links. A file that
 /// cannot be changed is logged and keeps its owner.
 fn chown_tree(path: &Path, uid: u32, gid: u32) {

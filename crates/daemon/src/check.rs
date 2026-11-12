@@ -32,22 +32,16 @@ fn warning(message: String) -> ProfileFinding {
 
 /// The actor's working directory when no entry of `executor`'s path map
 /// covers it, so a command routed there keeps a path of the actor's.
-// NOTICE: without `actor.cwd` the actor starts in `~/workspace` when a
-// mount provides it, else in `~`; both are under `~`, so an entry for either
-// one counts. The mounts are not known until the run is created.
+// NOTICE: the actor starts in `actor.workspace.path`, else in `~`; a
+// workspace from this executor maps its path already (`profile::load`
+// derives the entry).
 fn unmapped_actor_cwd(profile: &Profile, executor: &Executor) -> Option<String> {
-  let home = profile.user.home();
-  let workspace = format!("{home}/workspace");
-  let candidates = match &profile.actor.cwd {
-    Some(cwd) => vec![profile.user.expand_home(cwd)],
-    None => vec![home.clone(), workspace],
-  };
-  let covers = |from: &str, path: &str| {
+  let cwd = profile.actor.workspace.as_ref().map_or_else(|| profile.user.home(), |w| w.path.clone());
+  let covers = |from: &str| {
     let from = from.trim_end_matches('/');
-    path == from || path.starts_with(&format!("{from}/"))
+    cwd == from || cwd.starts_with(&format!("{from}/"))
   };
-  let mapped = candidates.iter().any(|cwd| executor.path_map.keys().any(|from| covers(from, cwd)));
-  (!mapped).then(|| candidates.into_iter().next().unwrap_or(home))
+  (!executor.path_map.keys().any(|from| covers(from))).then_some(cwd)
 }
 
 /// Why a service's `url` cannot be reached from this machine, where the

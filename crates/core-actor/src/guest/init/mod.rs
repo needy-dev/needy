@@ -167,6 +167,8 @@ async fn boot(container: bool) -> Result<()> {
       tracing::warn!("copy-in {}: {e:#}", copy.name);
     }
   }
+  // A workspace no mount or copy-in provides is a fresh directory.
+  files::working_directory(&config.cwd, &home, user.uid, user.gid);
   identity::schedule_faults(&client, &config);
   // Route only after setup so init's own helpers stay local.
   let route = super::capture::Route {

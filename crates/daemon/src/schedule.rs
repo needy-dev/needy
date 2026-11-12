@@ -274,10 +274,14 @@ impl Daemon {
         "runner {name} cannot create linux-container executors yet: only the control host's own runner can \
          (`needy daemon --mode control --local-runner NAME`); use `driver: native` there"
       )),
-      (Placement::Runner(name), _) => Ok(Site::Runner {
-        name: name.clone(),
-        os: self.runner_host(name).map(|host| host.os).unwrap_or_default(),
-      }),
+      (Placement::Runner(name), _) => {
+        let host = self.runner_host(name).unwrap_or_default();
+        Ok(Site::Runner {
+          name: name.clone(),
+          os: host.os,
+          home: host.home,
+        })
+      }
     }
   }
 }

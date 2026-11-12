@@ -6,6 +6,7 @@ actor:
   driver: linux-container
   container: { oci_runtime: runc }
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command:
     - /bin/sh
     - -c
@@ -29,16 +30,11 @@ files:
     from: "host:../chaos/seed/"
     to: "actor:~/seed/"
     filter: ["- /secret.txt", "+ **"]
-  workspace:
-    mode: mount
-    from: "executor:build:~/workspace/"
-    to: "actor:~/workspace/"
-    writable: true
   results:
     mode: mirror-out
     from: "actor:~/out/"
     to: "host:./out/{run}/"
-run_files: [seed, workspace, results]
+run_files: [seed, results]
 chaos:
   seed: 1
   # No trigger: each fault fires on every match.

@@ -151,7 +151,7 @@ fn loads_every_section() {
     files.mappings["workspace"].from,
     Side::Executor {
       name: "build".into(),
-      path: "/home/agent/workspace/".into()
+      path: "~/workspace/".into()
     }
   );
   assert_eq!(files.mappings["skills"].to, Side::Actor("/home/agent/.agents/".into()));
@@ -506,7 +506,7 @@ fn yaml_syntax_errors_name_the_line() {
 }
 
 #[test]
-fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
+fn actor_sides_expand_home_for_the_profile_user_and_executor_sides_keep_it() {
   let p = load_text(
     "user: { name: dev }\nactor: { driver: linux-firecracker }\nfiles: { out: { mode: mirror-out, from: \"executor:b:~\", to: \"host:~/out\" } }",
   )
@@ -516,7 +516,9 @@ fn rule_cwd_and_sides_expand_home_for_the_profile_user() {
     p.files.mappings["out"].from,
     Side::Executor {
       name: "b".into(),
-      path: "/home/dev".into()
+      // The executor's home, which the daemon knows once the instance
+      // exists.
+      path: "~".into()
     }
   );
   assert_eq!(p.files.mappings["out"].to, Side::Host("~/out".into()));

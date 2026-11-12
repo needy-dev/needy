@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use super::files::Side;
 use super::network::ActorNetwork;
 use super::runner::RunnerSelector;
 use crate::value::Words;
@@ -34,13 +35,38 @@ pub struct Actor {
   pub command: Words,
   #[serde(default)]
   pub env: BTreeMap<String, String>,
+  /// The directory the work operates on, and the driving program's working
+  /// directory; the home directory when absent.
+  // NOTICE: `cwd` was removed (owner decision, 2026-11-12) without an
+  // alias: the workspace's `path` is the driving program's working
+  // directory, so a profile no longer keeps `cwd`, the workspace mount and
+  // its path map in agreement by hand.
   #[serde(default)]
-  pub cwd: Option<String>,
+  pub workspace: Option<Workspace>,
   /// How a `linux-container` or `macos-apple-container` actor runs; required
   /// with `linux-container`, optional with `macos-apple-container`, refused
   /// with the VM drivers.
   #[serde(default)]
   pub container: Option<ContainerActor>,
+}
+
+/// The actor's workspace: one directory, written once, from which
+/// `profile::load` derives the file mappings and the path map that make it
+/// appear in the actor (see `profile::workspace`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Workspace {
+  /// The directory in the actor; `~` is the profile user's home.
+  pub path: String,
+  /// Where its files come from: `executor:NAME:PATH` (a live mount of the
+  /// executor's directory), `host:PATH` (copied in when the run starts), or
+  /// absent for a fresh directory in the actor.
+  #[serde(default)]
+  pub from: Option<Side>,
+  /// The actor may change an executor's files; with `host:`, the workspace
+  /// is mirrored back to the host path when the run ends.
+  #[serde(default)]
+  pub writable: bool,
 }
 
 /// What runs an actor: its driver, named after the operating system whose

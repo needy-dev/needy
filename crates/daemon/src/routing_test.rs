@@ -145,3 +145,30 @@ commands:
   assert_eq!(route.argv, ["python3", "/srv/ws/a.py"]);
   assert_eq!(route.cwd, "/srv/ws/sub");
 }
+
+// `actor.workspace` derives the path map of its executor, so a command
+// routed from the workspace runs in the same files on the executor; a `~`
+// on the executor's side is the executor's home, here the home of the user
+// the control daemon runs as.
+#[tokio::test]
+async fn a_command_in_the_workspace_goes_through_the_path_map_the_workspace_derives() {
+  const WORKSPACE: &str = r#"
+actor:
+  driver: linux-firecracker
+  workspace: { path: ~/project, from: "executor:here:~/checkout", writable: true }
+user: { name: dev, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native }
+commands:
+  - { match: "python3 **", to: here }
+"#;
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(WORKSPACE, started.dir.path())).await.unwrap();
+  let asked = ctx(&["python3", "/home/dev/project/a.py"], "/home/dev/project/sub");
+  let route = Runs::decide(&started.daemon, &created.id, asked).await.unwrap();
+
+  let home = needy_core_executor::driver::home();
+  assert_eq!(route.target, Target::Executor("here".into()));
+  assert_eq!(route.argv, ["python3".to_string(), format!("{home}/checkout/a.py")]);
+  assert_eq!(route.cwd, format!("{home}/checkout/sub"));
+}

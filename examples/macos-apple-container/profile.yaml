@@ -8,6 +8,7 @@ user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: macos-apple-container
   recipe: ../opencode/gce.recipe.yaml
+  workspace: { path: ~/workspace, from: "executor:build:/tmp/needy-apple-ws", writable: true }
   network:
     allow: [example.com]
   command:
@@ -29,10 +30,5 @@ actor:
 executors:
   build:
     driver: native
-    workspace: /tmp/needy-apple-ws
-    path_map: { /home/agent/workspace: /tmp/needy-apple-ws }
 commands:
   - { match: "python3 **", to: build }
-files:
-  workspace: { mode: mount, from: "executor:build:/tmp/needy-apple-ws/", to: "actor:~/workspace/", writable: true }
-run_files: [workspace]

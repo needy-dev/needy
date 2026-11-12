@@ -261,6 +261,7 @@ fn runner_host(host: v1::RunnerHost) -> RunnerHost {
       model_name: host.cpu_model,
       kvm_cpuid: host.kvm_cpuid.map(|cpuid| cpuid.entries.into_iter().map(|e| (e.leaf, e.subleaf)).collect()),
     },
+    home: host.home,
   }
 }
 
@@ -275,6 +276,7 @@ pub fn proto_runner_host(host: &RunnerHost) -> v1::RunnerHost {
     kvm_cpuid: host.cpu.kvm_cpuid.as_ref().map(|entries| v1::KvmCpuid {
       entries: entries.iter().map(|&(leaf, subleaf)| v1::CpuidEntry { leaf, subleaf }).collect(),
     }),
+    home: host.home.clone(),
   }
 }
 
