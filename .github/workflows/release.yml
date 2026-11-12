@@ -218,19 +218,21 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The Firecracker actor is x86_64 only (images/Dockerfile).
+          # The Firecracker actor is x86_64 only (images/Dockerfile). The VM
+          # images are base images: no needy inside, which the daemon brings
+          # as a second disk; `base-abi` records the base ABI they speak.
           - os: ubuntu-24.04
             arch: amd64
             vm_target: actor
             vm_archive: needy-actor-linux-firecracker-x86_64.tar.gz
-            vm_files: vmlinux rootfs.ext4 firecracker needy
+            vm_files: vmlinux rootfs.ext4 firecracker base-abi
           # The `macos-vz` actor is arm64 only: Virtualization.framework on
           # Apple silicon boots it.
           - os: ubuntu-24.04-arm
             arch: arm64
             vm_target: actor-macos-vz
             vm_archive: needy-actor-macos-vz-aarch64.tar.gz
-            vm_files: Image initrd rootfs.ext4 needy
+            vm_files: Image initrd rootfs.ext4 base-abi
     permissions:
       contents: read
       packages: write
@@ -268,7 +270,7 @@ jobs:
         run: |
           ls -lsh vm
           for file in ${{ matrix.vm_files }}; do test -s "vm/$file"; done
-          vm/needy --version
+          echo "base ABI $(cat vm/base-abi)"
           if [ -e vm/firecracker ]; then vm/firecracker --version; fi
           sudo e2fsck -fn vm/rootfs.ext4
 
@@ -311,11 +313,32 @@ jobs:
           load: true
           tags: needy-executor:ci
 
-      # The actor's entrypoint is the guest init, which needs a run; its
-      # needy binary is called directly.
+      # The guest needy the daemon injects into actors, from the `needy`
+      # stage the builds above already built.
+      - name: Build the guest needy
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: guest
+          outputs: type=local,dest=guest
+
+      # needy-actor is a base image: its shims (every program on PATH, a
+      # link to the shim stub) run nothing until the guest needy is
+      # injected, as the daemon does with a read-only bind mount. The
+      # actor's entrypoint is the boot stub, which needs a run, so a shim
+      # and the guest needy are started directly.
       - name: Verify the container images start
         run: |
-          docker run --rm --entrypoint /.needy/needy needy-actor:ci --version
+          set -euo pipefail
+          test "$(docker image inspect needy-actor:ci --format '{{ index .Config.Labels "needy.base-abi" }}')" = 1
+          if docker run --rm --entrypoint /usr/bin/true needy-actor:ci 2> stub.err; then
+            echo "a shim ran without the guest needy" >&2; exit 1
+          fi
+          cat stub.err
+          grep -q "the daemon did not inject the guest needy" stub.err
+          docker run --rm -v "$PWD/guest/needy:/.needy/needy:ro" --entrypoint /.needy/needy needy-actor:ci --version
+          docker run --rm -v "$PWD/guest/needy:/.needy/needy:ro" --entrypoint /usr/bin/true needy-actor:ci
           docker run --rm needy-executor:ci needy --version
           docker image ls
 
@@ -411,12 +434,68 @@ jobs:
             docker buildx imagetools inspect "$REGISTRY/$image:$TAG_NAME"
           done
 
+  # The arm64 macOS archive carries the guest needy its daemon injects into
+  # actors, which run arm64 Linux on Apple silicon: the static
+  # aarch64-unknown-linux-musl needy of the same run, as
+  # `needy-linux-aarch64` next to `needy`. The Intel archive gets none: no
+  # actor driver runs on an Intel Mac.
+  # NOTICE(guest-signing): the guest needy is a Linux ELF that macOS never
+  # runs, so it is not code-signed or notarized (`codesign` and the notary
+  # service sign Mach-O code); the archive's `.sha256` covers it.
+  # TODO(release-attestation): build provenance attestations
+  # (`actions/attest-build-provenance`) come with `needy image pull`, step 4
+  # of docs/ai/references/architecture/2026-11-12-actor-images-design.md.
+  macos-guest:
+    name: macOS archive with the guest needy
+    needs: binary
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: needy-aarch64-unknown-linux-musl.tar.gz
+          path: linux
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: needy-aarch64-apple-darwin.tar.gz
+          path: macos
+
+      - name: Add needy-linux-aarch64 to the archive
+        run: |
+          set -euo pipefail
+          mkdir pack
+          tar -xzf macos/needy-aarch64-apple-darwin.tar.gz -C pack
+          tar -xzf linux/needy-aarch64-unknown-linux-musl.tar.gz -C linux
+          install -m 0755 linux/needy pack/needy-linux-aarch64
+          file pack/needy-linux-aarch64
+          readelf -hW pack/needy-linux-aarch64 | grep -q 'Machine:.*AArch64'
+          if readelf -lW pack/needy-linux-aarch64 | grep -q INTERP || readelf -dW pack/needy-linux-aarch64 | grep -q '(NEEDED)'; then
+            echo "needy-linux-aarch64 is not statically linked" >&2
+            exit 1
+          fi
+          tar -czf needy-aarch64-apple-darwin.tar.gz -C pack needy needy-linux-aarch64
+          tar -tzvf needy-aarch64-apple-darwin.tar.gz
+          shasum -a 256 needy-aarch64-apple-darwin.tar.gz | awk '{ print $1 }' > needy-aarch64-apple-darwin.tar.gz.sha256
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: needy-aarch64-apple-darwin.tar.gz
+          # Replaces the binary job's archive of the same name.
+          overwrite: true
+          retention-days: 7
+          path: |
+            needy-aarch64-apple-darwin.tar.gz
+            needy-aarch64-apple-darwin.tar.gz.sha256
+
   # Notarizes the signed macOS binaries, as moeru-ai/auv's `notarize-macos`
   # job does, on publishing runs only. A bare executable cannot be stapled, so
   # Gatekeeper checks the ticket online on first launch.
   notarize-macos:
     name: Notarize macOS ${{ matrix.archive }}
-    needs: binary
+    needs:
+      - binary
+      - macos-guest
     runs-on: macos-15
     if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && inputs.upload_to_release && inputs.tag_name != '')
     strategy:
@@ -454,7 +533,10 @@ jobs:
           if [ "$(lipo -archs needy)" = arm64 ]; then
             ./needy --version
           fi
-          tar -czf ${{ matrix.archive }} needy
+          # The arm64 archive also holds the guest needy (`macos-guest`).
+          files=(needy)
+          if [ -e needy-linux-aarch64 ]; then files+=(needy-linux-aarch64); fi
+          tar -czf ${{ matrix.archive }} "${files[@]}"
           shasum -a 256 ${{ matrix.archive }} | awk '{ print $1 }' > ${{ matrix.archive }}.sha256
 
       - name: Upload notarized macOS artifact
@@ -470,6 +552,7 @@ jobs:
     name: Publish release artifacts
     needs:
       - binary
+      - macos-guest
       - images
       - notarize-macos
     runs-on: ubuntu-24.04
