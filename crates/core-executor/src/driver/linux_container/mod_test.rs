@@ -96,11 +96,14 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
   );
   let host = body.host_config.as_ref().unwrap();
   assert_eq!(host.auto_remove, Some(true));
+  // A bind's source is a path of the daemon's machine, joined with its
+  // separator.
+  let state = Path::new("/home/user/state");
   assert_eq!(
     host.binds.as_deref().unwrap(),
     [
-      "/home/user/state/workspaces/build-s1:/home/agent/workspace",
-      &format!("/home/user/state/executors/{}:/run/needy", socket_id("needy-build-s1"))
+      format!("{}:/home/agent/workspace", state.join("workspaces").join("build-s1").display()),
+      format!("{}:/run/needy", state.join("executors").join(socket_id("needy-build-s1")).display())
     ]
   );
 }
@@ -214,7 +217,7 @@ fn profile_mounts_follow_the_daemon_mounts() {
   assert_eq!(
     mounts,
     [
-      (MountType::BIND, Some("/home/user/profile/ws/cache".into()), "/cache".into(), Some(true), None),
+      (MountType::BIND, Some(Path::new("/home/user/profile").join("ws/cache").display().to_string()), "/cache".into(), Some(true), None),
       (MountType::VOLUME, Some("cargo".into()), "/cargo".into(), Some(false), None),
       (MountType::VOLUME, None, "/scratch".into(), Some(false), None),
       (MountType::TMPFS, None, "/tmp".into(), None, Some(64 << 20)),

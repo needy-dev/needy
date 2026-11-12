@@ -594,11 +594,15 @@ fn a_resolved_profile_merges_its_parents_and_makes_host_paths_absolute() {
   let profile = load(&Source::text(resolved.yaml.clone(), "")).unwrap();
 
   assert!(!resolved.yaml.contains("extends"), "{}", resolved.yaml);
-  assert_eq!(profile.executors["here"].workspace.as_deref(), Some(format!("{}/p/ws/", dir.path().display()).as_str()));
-  assert_eq!(profile.files.mappings["seed"].from, Side::Host(format!("{}/p/seed/", dir.path().display())));
+  // The profile's directory is this machine's path, with its separators (`\`
+  // on Windows); the path the profile wrote follows it as written, with `/`,
+  // so a trailing `/` keeps its meaning.
+  let base = dir.path().join("p");
+  assert_eq!(profile.executors["here"].workspace.as_deref(), Some(format!("{}/ws/", base.display()).as_str()));
+  assert_eq!(profile.files.mappings["seed"].from, Side::Host(format!("{}/seed/", base.display())));
   // A container bind mount's source is a host path; a volume's is a name.
   let mounts = &profile.executors["box"].container.as_ref().unwrap().mounts;
-  assert!(matches!(&mounts[0], Mount::Bind { source, .. } if *source == format!("{}/p/cache", dir.path().display())), "{mounts:?}");
+  assert!(matches!(&mounts[0], Mount::Bind { source, .. } if *source == format!("{}/cache", base.display())), "{mounts:?}");
   assert!(matches!(&mounts[1], Mount::Volume { source: Some(v), .. } if v == "v"), "{mounts:?}");
   // `~` is the home of the machine that reads the path.
   assert_eq!(profile.files.mappings["out"].to, Side::Host("~/out/".into()));
