@@ -3,7 +3,7 @@
 # it. Build the image, then its VM image:
 #
 #   docker build -t needy-custom-jq examples/custom-image
-#   needy build --from needy-custom-jq
+#   needy image build --from needy-custom-jq
 #
 # jq runs in the actor; python3 is routed to an executor, as in
 # examples/smoke. `linux-container.yaml` runs the same image as a container

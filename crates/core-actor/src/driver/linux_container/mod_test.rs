@@ -17,6 +17,11 @@ struct Fake {
   runtimes: Vec<(&'static str, &'static [&'static str])>,
   /// The images it has, by name.
   images: Vec<(String, engine::Image)>,
+  /// The images a pull finds in the registry, by name; a pull of another
+  /// fails as a registry without it does.
+  registry: Vec<(String, engine::Image)>,
+  /// The images pulled so far.
+  pulled: Mutex<Vec<(String, engine::Image)>>,
   code: i64,
   log: &'static str,
 }
@@ -38,12 +43,19 @@ impl Engine for Fake {
   }
 
   async fn inspect_image(&self, image: &str) -> Result<Option<engine::Image>, EngineError> {
-    Ok(self.images.iter().find(|(name, _)| name == image).map(|(_, found)| found.clone()))
+    let pulled = self.pulled.lock().unwrap().clone();
+    Ok(self.images.iter().chain(&pulled).find(|(name, _)| name == image).map(|(_, found)| found.clone()))
   }
 
   async fn pull(&self, image: &str) -> Result<(), EngineError> {
     self.record(format!("pull {image}"));
-    Ok(())
+    match self.registry.iter().find(|(name, _)| name == image) {
+      Some(found) => {
+        self.pulled.lock().unwrap().push(found.clone());
+        Ok(())
+      }
+      None => Err(EngineError::NotFound(format!("manifest for {image} not found: manifest unknown"))),
+    }
   }
 
   async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), EngineError> {
@@ -134,7 +146,7 @@ async fn a_custom_image_without_a_base_abi_names_the_base_to_rebuild_from() {
 
   assert!(error.starts_with("the actor image needy-custom-jq records no base ABI"), "{error}");
   assert!(
-    error.contains("rebuild it FROM a base image of base ABI 1: `needy-actor:latest` after `needy build --linux-container`"),
+    error.contains("rebuild it FROM a base image of base ABI 1: `needy-actor:latest` after `needy image build --linux-container`"),
     "{error}"
   );
 }
@@ -231,7 +243,7 @@ async fn an_image_of_another_base_abi_is_refused_before_the_actor_starts() {
 
   assert_eq!(
     error,
-    "the actor image needy-actor:latest has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy build \
+    "the actor image needy-actor:latest has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy image build \
      --linux-container` from this needy's version, or use a needy that speaks base ABI 2"
   );
 }
@@ -315,10 +327,27 @@ async fn a_host_without_the_oci_runtime_names_how_to_install_gvisor() {
 }
 
 #[tokio::test]
-async fn a_host_without_the_image_names_the_build_that_makes_it() {
+async fn a_missing_image_is_pulled_before_the_actor_starts() {
+  let (container, fake) = runtime(
+    Fake {
+      runtimes: vec![("runc", &[])],
+      registry: vec![image(Some("1"))],
+      ..Default::default()
+    },
+    OciRuntime::Runc,
+  );
+
+  container.check_host().await.unwrap();
+
+  assert_eq!(fake.calls(), ["pull needy-actor:latest"]);
+}
+
+#[tokio::test]
+async fn a_pulled_image_of_another_base_abi_is_refused() {
   let (container, _) = runtime(
     Fake {
       runtimes: vec![("runc", &[])],
+      registry: vec![image(Some("2"))],
       ..Default::default()
     },
     OciRuntime::Runc,
@@ -326,7 +355,25 @@ async fn a_host_without_the_image_names_the_build_that_makes_it() {
 
   let error = container.check_host().await.unwrap_err().to_string();
 
-  assert!(error.contains("needy build --linux-container"), "{error}");
+  assert!(error.starts_with("the actor image needy-actor:latest has base ABI 2"), "{error}");
+}
+
+#[tokio::test]
+async fn a_release_base_that_no_registry_has_names_the_build_that_makes_one() {
+  let fake = Arc::new(Fake {
+    runtimes: vec![("runc", &[])],
+    ..Default::default()
+  });
+  let container = LinuxContainer::with_engine(OciRuntime::Runc, CONTAINER_IMAGE.into(), fake.clone());
+
+  let error = container.check_host().await.unwrap_err().to_string();
+
+  assert_eq!(fake.calls(), [format!("pull {CONTAINER_IMAGE}")]);
+  assert!(
+    error.starts_with(&format!("the container actor image {CONTAINER_IMAGE} is not here and cannot be pulled (docker: manifest for")),
+    "{error}"
+  );
+  assert!(error.ends_with("build the base with `needy image build --linux-container` and set `actor.image: needy-actor:latest`"), "{error}");
 }
 
 #[tokio::test]

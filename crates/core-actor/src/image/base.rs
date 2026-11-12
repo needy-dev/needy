@@ -8,13 +8,14 @@
 //!
 //! See `docs/ai/references/architecture/2026-11-12-actor-images-design.md`.
 
-use std::path::Path;
-
 /// The base ABI version this needy speaks. Raise it with any change to the
 /// parts above, and with it what `images/Dockerfile` records.
 pub const ABI: u32 = 1;
 
-/// The file in a VM image's directory that records its version.
+/// The file `images/Dockerfile`'s VM image targets export next to the
+/// image's files, with the version. `needy image build` and the release
+/// workflow fold it into the image's [`super::manifest`], which is what a
+/// VM driver reads; an image directory does not keep it.
 pub const FILE: &str = "base-abi";
 
 /// The label a container image records its version in.
@@ -53,6 +54,12 @@ impl Mismatch {
   }
 }
 
+/// The advice for a base image that `pull` fetches from this needy's
+/// release and `build` builds from a needy checkout.
+pub fn pull_or_build(pull: &str, build: &str) -> String {
+  format!("pull this needy's base with `{pull}`, or rebuild it with `{build}` in a needy checkout")
+}
+
 /// The advice for a base image, which `command` builds.
 pub fn rebuild_with(command: &str) -> String {
   format!("rebuild it with `{command}` from this needy's version")
@@ -62,11 +69,11 @@ pub fn rebuild_with(command: &str) -> String {
 /// from a base of this needy's base ABI, the local one `build_base` builds
 /// or the release's, and then run `then`, if any.
 pub fn rebuild_from(build_base: &str, then: Option<&str>) -> String {
-  let version = env!("CARGO_PKG_VERSION");
   let then = then.map(|then| format!(", then run `{then}`")).unwrap_or_default();
   format!(
-    "rebuild it FROM a base image of base ABI {ABI}: `{local}` after `{build_base}`, or `ghcr.io/needy-dev/needy-actor:v{version}`{then}",
-    local = needy_config::profile::CONTAINER_IMAGE
+    "rebuild it FROM a base image of base ABI {ABI}: `{local}` after `{build_base}`, or `{release}`{then}",
+    local = needy_config::profile::BUILT_CONTAINER_IMAGE,
+    release = needy_config::profile::CONTAINER_IMAGE,
   )
 }
 
@@ -81,13 +88,6 @@ pub fn check(image: &str, found: Option<&str>, advice: &str) -> Result<(), Misma
       advice: advice.to_string(),
     }),
   }
-}
-
-/// Fails unless the VM image in `dir` records [`ABI`] in its [`FILE`];
-/// `image` names it in the message.
-pub fn check_dir(dir: &Path, image: &str, advice: &str) -> Result<(), Mismatch> {
-  let found = std::fs::read_to_string(dir.join(FILE)).ok();
-  check(image, found.as_deref(), advice)
 }
 
 #[cfg(test)]

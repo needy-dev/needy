@@ -118,9 +118,10 @@ pub struct Config {
   pub runtime_dir: PathBuf,
   /// The base VM image a VM driver boots for a profile without
   /// `actor.image`: `vmlinux`, `rootfs.ext4` and `firecracker`, or the
-  /// `macos-vz` files.
+  /// `macos-vz` files, with their `manifest.json` (`needy image pull`;
+  /// `needy_core_actor::image::vm::base_dir`).
   pub actor_image: PathBuf,
-  /// Where `needy build --from` writes the VM images a profile names by
+  /// Where `needy image build --from` writes the VM images a profile names by
   /// their OCI reference: needy's data directory's `images`.
   pub vm_images: PathBuf,
   /// The KVM device an actor's Firecracker opens:

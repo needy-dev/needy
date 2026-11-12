@@ -3,11 +3,11 @@
 //! exit code.
 
 pub mod attach;
-pub mod build;
 pub mod chaos;
 pub mod daemon;
 pub mod exec;
 pub mod fs;
+pub mod image;
 pub mod kill;
 pub mod pair;
 pub mod profile;

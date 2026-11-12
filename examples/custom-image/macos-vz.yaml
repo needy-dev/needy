@@ -1,9 +1,10 @@
 # The custom image on a Mac with Apple silicon, in a macos-vz VM: build it
 # for linux/arm64 (Docker on the Mac builds arm64 natively), then its VM
-# image, which boots needy's arm64 kernel from the base (`needy build`):
+# image, which boots needy's arm64 kernel from the base (`needy image
+# pull`):
 #
 #   docker build -t needy-custom-jq examples/custom-image
-#   needy build --from needy-custom-jq
+#   needy image build --from needy-custom-jq
 #
 # The executor is the Mac itself, as in examples/macos-vz. Create its
 # directory first: `mkdir -p /tmp/needy-custom-image-ws`.

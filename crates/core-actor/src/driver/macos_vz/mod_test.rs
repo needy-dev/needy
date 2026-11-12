@@ -105,7 +105,11 @@ fn an_image_without_its_kernel_is_missing_the_kernel() {
 
   let error = Image::new(dir.path()).check().unwrap_err();
 
-  assert!(matches!(&error, Error::Missing { path, build } if path == &dir.path().join("Image") && build == "needy build"), "{error:?}");
+  assert!(
+    matches!(&error, Error::Missing { path, advice } if path == &dir.path().join("Image")
+      && advice == "run `needy image pull --driver macos-vz`, or `needy image build` in a needy checkout"),
+    "{error:?}"
+  );
 }
 
 #[test]
@@ -180,7 +184,12 @@ async fn another_host_fails_the_check_naming_the_runtimes_it_has() {
 #[tokio::test]
 async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   let dir = tempfile::tempdir().unwrap();
-  std::fs::write(dir.path().join("base-abi"), "1\n").unwrap();
+  let manifest = crate::image::manifest::Manifest::made(
+    ActorDriver::MacosVz,
+    crate::image::base::ABI,
+    crate::image::manifest::Source::Build { recipe: None },
+  );
+  crate::image::manifest::write(dir.path(), &manifest).unwrap();
   for file in ["Image", "initrd", "rootfs.ext4"] {
     std::fs::write(dir.path().join(file), "").unwrap();
   }

@@ -1,8 +1,11 @@
 //! The container actor image as the container drivers run it: one container
 //! per run, named after the run. A profile's `actor.image` names it, else
-//! the base image `needy build --linux-container` or
-//! `--macos-apple-container` builds (`needy_config::profile::CONTAINER_IMAGE`);
-//! a custom image is an OCI image `FROM` the base.
+//! the base image of this needy's release
+//! (`needy_config::profile::CONTAINER_IMAGE`), which the drivers pull when
+//! it is not here; `needy image build --linux-container` or
+//! `--macos-apple-container` builds the base from a checkout
+//! (`needy_config::profile::BUILT_CONTAINER_IMAGE`). A custom image is an
+//! OCI image `FROM` a base.
 // NOTICE: the image's shim layout (`/.needy/proxy`, `/.needy/real/`) is in
 // `crate::contract` (`PROXY`, `REAL`); the shim capture that reads it is
 // `guest/capture/shim.rs`.
@@ -15,13 +18,31 @@ pub fn name(run: &str) -> String {
 }
 
 /// How to make an image of this needy's base ABI in place of `image`:
-/// rebuild the base with `build_base`, or rebuild a custom image `FROM` a
-/// base of this needy's base ABI.
+/// rebuild the locally built base with `build_base`, or rebuild any other
+/// image `FROM` a base of this needy's base ABI.
 pub fn advice(image: &str, build_base: &str) -> String {
-  if image == needy_config::profile::CONTAINER_IMAGE {
+  if image == needy_config::profile::BUILT_CONTAINER_IMAGE {
     base::rebuild_with(build_base)
   } else {
     base::rebuild_from(build_base, None)
+  }
+}
+
+/// Why a container driver cannot start actors from `image`: it is not in
+/// the engine's (or Apple's) store, and pulling it failed with `why`.
+/// The release's base names how to build one when there is no release to
+/// pull from; `build_base` builds it.
+pub fn unpullable(image: &str, why: &str, build_base: &str) -> String {
+  if image == needy_config::profile::CONTAINER_IMAGE {
+    format!(
+      "the container actor image {image} is not here and cannot be pulled ({why}); a needy without a release (a development \
+       build) has none to pull: build the base with `{build_base}` and set `actor.image: {built}`",
+      built = needy_config::profile::BUILT_CONTAINER_IMAGE
+    )
+  } else if image == needy_config::profile::BUILT_CONTAINER_IMAGE {
+    format!("the container actor image {image} is not here and cannot be pulled ({why}); build it with `{build_base}`")
+  } else {
+    format!("the container actor image {image} is not here and cannot be pulled ({why}); build it, or check its reference")
   }
 }
 

@@ -2,8 +2,10 @@
 # silicon: the driving program is `sh` in a container that Apple's
 # `container` runs in its own lightweight VM; only python3 is routed, to this
 # Mac (a native executor), and the executor's directory is the actor's
-# workspace. Build the image with `needy build --macos-apple-container`, and
-# create the executor's directory first: `mkdir -p /tmp/needy-apple-ws`.
+# workspace. The driver pulls the base image of this needy's release; a
+# needy without a release builds it with `needy image build
+# --macos-apple-container` and adds `image: needy-actor:latest` to `actor`.
+# Create the executor's directory first: `mkdir -p /tmp/needy-apple-ws`.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: macos-apple-container

@@ -265,7 +265,20 @@ fn a_missing_image_file_is_named_in_the_error() {
     panic!("a VM started without an image");
   };
 
-  assert_eq!(error.to_string(), format!("actor image is missing {}; run `needy build`", dir.path().join("vmlinux").display()));
+  assert_eq!(
+    error.to_string(),
+    format!(
+      "actor image is missing {}; run `needy image pull --driver linux-firecracker`, or `needy image build` in a needy checkout",
+      dir.path().join("vmlinux").display()
+    )
+  );
+}
+
+/// Writes the manifest of a base image built here into `dir`.
+fn write_manifest(dir: &Path) {
+  use crate::image::manifest::{self, Manifest};
+  let manifest = Manifest::made(ActorDriver::LinuxFirecracker, crate::image::base::ABI, manifest::Source::Build { recipe: None });
+  manifest::write(dir, &manifest).unwrap();
 }
 
 /// An image whose `firecracker` runs `script` with `sh`.
@@ -274,7 +287,7 @@ fn fake_image(dir: &Path, script: &str) -> Image {
   let image = Image::new(dir);
   std::fs::write(&image.kernel, "").unwrap();
   std::fs::write(&image.rootfs, "").unwrap();
-  std::fs::write(dir.join("base-abi"), "1\n").unwrap();
+  write_manifest(dir);
   std::fs::write(&image.firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
   std::fs::set_permissions(&image.firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();
   image
@@ -329,12 +342,15 @@ fn detection_needs_a_kvm_device_that_opens_and_a_complete_image() {
   for file in ["vmlinux", "rootfs.ext4", "firecracker"] {
     std::fs::write(host.image.join(file), b"").unwrap();
   }
-  let no_base_abi = detect(&host).unwrap_err();
-  std::fs::write(host.image.join("base-abi"), b"1\n").unwrap();
+  let no_manifest = detect(&host).unwrap_err();
+  write_manifest(&host.image);
 
   assert!(no_kvm.starts_with(&format!("cannot open {}: ", host.kvm.display())), "{no_kvm}");
-  assert_eq!(no_image, format!("actor image is missing {}; run `needy build`", host.image.join("vmlinux").display()));
-  assert!(no_base_abi.contains("records no base ABI"), "{no_base_abi}");
+  assert!(
+    no_image.starts_with(&format!("actor image is missing {}; run `needy image pull", host.image.join("vmlinux").display())),
+    "{no_image}"
+  );
+  assert!(no_manifest.starts_with(&format!("actor image is missing {}", host.image.join("manifest.json").display())), "{no_manifest}");
   assert_eq!(detect(&host), Ok(()));
 }
 

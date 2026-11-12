@@ -41,9 +41,10 @@ pub struct Args {
   /// Required to listen on a TCP address other than loopback.
   #[arg(long)]
   token_env: Option<String>,
-  /// Directory with the actor's vmlinux, rootfs.ext4 and firecracker.
-  /// Defaults to the image `needy build` writes. A runner holds the actor
-  /// role with the linux-firecracker driver only when it is complete.
+  /// The base VM image: a directory with vmlinux, rootfs.ext4, firecracker
+  /// and manifest.json (or the macos-vz files). Defaults to the one `needy
+  /// image pull` and `needy image build` write for this host's VM driver. A
+  /// runner holds the actor role with a VM driver only when it is complete.
   #[arg(long)]
   actor_image: Option<PathBuf>,
   /// The runner that runs on this host (control mode). The control plane
@@ -65,8 +66,11 @@ pub struct Args {
   /// executable when that is static (the release binaries).
   #[arg(long, value_name = "PATH")]
   guest_needy: Option<PathBuf>,
-  /// The image of linux-container executors without their own image.
-  #[arg(long, default_value = "needy-executor:latest")]
+  /// The image of linux-container executors without their own image: this
+  /// needy's release's, pulled when missing. A build without a release
+  /// names the one `needy image build --executor` builds,
+  /// `needy-executor:latest`.
+  #[arg(long, default_value = needy_core_executor::driver::linux_container::IMAGE)]
   executor_image: String,
   /// How often runners send a heartbeat (control mode). A runner is
   /// offline after three intervals without one.
@@ -149,7 +153,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
         None => host_name()?,
       };
       let paths = ctx.paths()?;
-      let image = args.actor_image.unwrap_or_else(|| paths.default_image());
+      let image = args.actor_image.unwrap_or_else(|| paths.base_image());
       let kvm = args.kvm.unwrap_or_else(|| needy_core_actor::driver::linux_firecracker::KVM.into());
       let roles: Option<std::collections::BTreeSet<_>> = args.roles.map(|roles| roles.into_iter().collect());
       let (capabilities, warnings) = needy_daemon::capabilities::of_this_machine(&kvm, &image, roles.as_ref()).await;
@@ -175,7 +179,7 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
     #[cfg(unix)]
     Mode::Control => {
       let paths = ctx.paths()?;
-      let image = args.actor_image.unwrap_or_else(|| paths.default_image());
+      let image = args.actor_image.unwrap_or_else(|| paths.base_image());
       let config = needy_daemon::Config {
         guest_disks: paths.guest_disks(),
         vm_images: paths.images(),

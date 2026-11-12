@@ -1,11 +1,17 @@
-//! `needy build`: builds the actor image this host's VM driver boots (the
-//! Firecracker actor's on Linux, the `macos-vz` actor's on Apple silicon macOS)
-//! and, with `--linux-container` and `--executor`, the container actor and
-//! executor images from `images/Dockerfile`, through the Docker API
-//! with BuildKit. With `--macos-apple-container` it builds the container actor
-//! image for linux/arm64 instead of the VM's, and loads it into Apple's
-//! `container`. With `--from REF` it makes the VM image of an OCI image
-//! `FROM` the container base instead (`from`).
+//! `needy image build`: builds the base VM image this host's VM driver boots
+//! (the Firecracker actor's on Linux, the `macos-vz` actor's on Apple silicon
+//! macOS) from a needy checkout and, with `--linux-container` and
+//! `--executor`, the container actor and executor images from
+//! `images/Dockerfile`, through the Docker API with BuildKit. With
+//! `--macos-apple-container` it builds the container actor image for
+//! linux/arm64 instead of the VM's, and loads it into Apple's `container`.
+//! With `--from REF` it makes the VM image of an OCI image `FROM` the
+//! container base instead (`from`), which needs no checkout.
+//!
+//! The images it builds are tagged as built here (`needy-actor:latest`,
+//! `needy-executor:latest`), not as the release's, which the drivers use by
+//! default: a profile names the built actor image with `actor.image`, and
+//! the daemon the executor image with `--executor-image`.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -18,6 +24,7 @@ use futures_util::StreamExt;
 use needy_config::Source;
 use needy_config::validate::Severity;
 use needy_core::recipe::PerRun;
+use needy_core_actor::image::manifest::{self, Manifest};
 
 use crate::cli::Context;
 use crate::output;
@@ -34,21 +41,25 @@ pub struct Args {
   #[arg(long)]
   recipe: Option<String>,
   /// Output directory for the actor image: vmlinux, rootfs.ext4,
-  /// firecracker and base-abi, or on Apple silicon macOS Image, initrd,
-  /// rootfs.ext4 and base-abi for `macos-vz` actors. It is a base image
+  /// firecracker and manifest.json, or on Apple silicon macOS Image, initrd,
+  /// rootfs.ext4 and manifest.json for `macos-vz` actors. It is a base image
   /// without needy, which the daemon injects when an actor starts. Defaults
-  /// to the image the daemon boots.
+  /// to the base image the daemon boots.
   #[arg(long)]
   out: Option<PathBuf>,
-  /// Also build the `needy-executor` Docker image.
+  /// Also build the executor image, `needy-executor:latest` (the daemon
+  /// uses it with `--executor-image needy-executor:latest`).
   #[arg(long)]
   executor: bool,
-  /// Also build the `needy-actor` image, the `linux-container` actor's.
+  /// Also build the `linux-container` actor's base image,
+  /// `needy-actor:latest` (a profile uses it with `actor.image:
+  /// needy-actor:latest`).
   #[arg(long)]
   linux_container: bool,
-  /// Build the `needy-actor` image for linux/arm64 and load it into Apple's
-  /// `container`, for `actor.driver: macos-apple-container` on a Mac with Apple
-  /// silicon, instead of the VM actor image.
+  /// Build the container actor base image, `needy-actor:latest`, for
+  /// linux/arm64 and load it into Apple's `container`, for `actor.driver:
+  /// macos-apple-container` on a Mac with Apple silicon, instead of the VM
+  /// actor image.
   #[arg(long, conflicts_with_all = ["recipe", "out"])]
   macos_apple_container: bool,
   /// Make the VM image of this host's VM driver (`linux-firecracker`, or
@@ -69,7 +80,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   if let Some(reference) = &args.from {
     let paths = ctx.paths()?;
     let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
-    let base = args.base.unwrap_or_else(|| paths.default_image());
+    let base = args.base.unwrap_or_else(|| paths.base_image());
     let from = from::From {
       reference,
       base: &base,
@@ -77,13 +88,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       out: args.out.as_deref(),
     };
     let dir = from::build(&docker, &from).await?;
-    output::message(format_args!("build: {reference} is the VM image {}", dir.display()));
+    output::message(format_args!("image build: {reference} is the VM image {}", dir.display()));
     return Ok(0);
   }
   let root = repo_root()?;
   let out = match args.out {
     Some(out) => out,
-    None => ctx.paths()?.default_image(),
+    None => ctx.paths()?.base_image(),
   };
   let mut build_args = HashMap::new();
   if let Some(reference) = &args.recipe {
@@ -105,6 +116,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     build_for_macos_apple_container(&docker, &context, &ctx.paths()?.state).await?;
   } else {
     build_vm_image(&docker, &context, &out, build_args).await?;
+    record_build(&out, args.recipe)?;
+    output::message(format_args!("image build: the base VM image {}", out.display()));
   }
   if args.linux_container {
     build(
@@ -112,7 +125,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       &context,
       BuildImageOptions {
         target: "actor-container".into(),
-        t: Some(needy_config::profile::CONTAINER_IMAGE.into()),
+        t: Some(needy_config::profile::BUILT_CONTAINER_IMAGE.into()),
         ..options()
       },
     )
@@ -124,13 +137,32 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       &context,
       BuildImageOptions {
         target: "executor".into(),
-        t: Some("needy-executor:latest".into()),
+        t: Some(needy_core_executor::driver::linux_container::BUILT_IMAGE.into()),
         ..options()
       },
     )
     .await?;
   }
   Ok(0)
+}
+
+/// Writes the manifest of the VM image just built into `dir` for this
+/// host's VM driver, from the `base-abi` file the Dockerfile exported next
+/// to its files, which it replaces.
+fn record_build(dir: &Path, recipe: Option<String>) -> Result<()> {
+  let driver = needy_core_actor::image::vm::host_driver();
+  let manifest = Manifest::made(driver, take_base_abi(dir)?, manifest::Source::Build { recipe });
+  Ok(manifest::write(dir, &manifest)?)
+}
+
+/// Reads and removes the `base-abi` file `images/Dockerfile`'s VM targets
+/// export next to the image's files: its value goes in the manifest.
+fn take_base_abi(dir: &Path) -> Result<u32> {
+  let file = dir.join(needy_core_actor::image::base::FILE);
+  let text = std::fs::read_to_string(&file).with_context(|| format!("the build exported no {}", file.display()))?;
+  let abi = text.trim().parse().with_context(|| format!("{} is not a base ABI version: {text:?}", file.display()))?;
+  std::fs::remove_file(&file).with_context(|| format!("cannot remove {}", file.display()))?;
+  Ok(abi)
 }
 
 /// The Dockerfile target of the actor image this host boots, and the
@@ -187,7 +219,7 @@ async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args:
 // TODO(macos-apple-container): build with `container build` when there is no
 // Docker, if the owner wants Macs without Docker to build the image.
 async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratch: &Path) -> Result<()> {
-  let image = needy_config::profile::CONTAINER_IMAGE;
+  let image = needy_config::profile::BUILT_CONTAINER_IMAGE;
   build(
     docker,
     context,
@@ -310,13 +342,22 @@ fn pack_context(root: &Path) -> Result<Vec<u8>> {
 /// runs of zeros in regular files as holes.
 fn unpack(archive: &Path, out: &Path) -> Result<()> {
   let file = std::fs::File::open(archive).with_context(|| format!("cannot open {}", archive.display()))?;
-  let mut tar = tar::Archive::new(std::io::BufReader::new(file));
+  unpack_from(std::io::BufReader::new(file), out)
+}
+
+/// Unpacks the tar stream `reader` into `out` as [`unpack`] does. A GNU
+/// sparse entry (`tar --sparse`, as the release's VM image archives are
+/// made) reads as its whole content, holes as zeros, which are written back
+/// as holes.
+pub(super) fn unpack_from(reader: impl std::io::Read, out: &Path) -> Result<()> {
+  let mut tar = tar::Archive::new(reader);
   tar.set_preserve_permissions(true);
   tar.set_overwrite(true);
   let unpacking = || format!("cannot unpack the image into {}", out.display());
   for entry in tar.entries().with_context(unpacking)? {
     let mut entry = entry.with_context(unpacking)?;
-    if entry.header().entry_type().is_file() {
+    let kind = entry.header().entry_type();
+    if kind.is_file() || kind.is_gnu_sparse() {
       unpack_file(&mut entry, out).with_context(unpacking)?;
     } else {
       entry.unpack_in(out).with_context(unpacking)?;

@@ -8,8 +8,11 @@
 //!   guest disk the VM drivers attach.
 //! - [`base`]: the base ABI between an image and the guest needy, which every
 //!   driver checks an image records before it starts an actor from it.
+//! - [`manifest`]: what a VM image is and where it came from, in its
+//!   directory.
 
 pub mod base;
 pub mod container;
 pub mod guest;
+pub mod manifest;
 pub mod vm;

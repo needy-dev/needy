@@ -309,7 +309,12 @@ pub fn fake_image(dir: &Path, script: &str) {
   std::fs::create_dir_all(dir).unwrap();
   std::fs::write(dir.join("vmlinux"), "").unwrap();
   std::fs::write(dir.join("rootfs.ext4"), "").unwrap();
-  std::fs::write(dir.join("base-abi"), format!("{}\n", needy_core_actor::image::base::ABI)).unwrap();
+  let manifest = needy_core_actor::image::manifest::Manifest::made(
+    needy_config::profile::ActorDriver::LinuxFirecracker,
+    needy_core_actor::image::base::ABI,
+    needy_core_actor::image::manifest::Source::Build { recipe: None },
+  );
+  needy_core_actor::image::manifest::write(dir, &manifest).unwrap();
   let firecracker = dir.join("firecracker");
   std::fs::write(&firecracker, format!("#!/bin/sh\n{script}\n")).unwrap();
   std::fs::set_permissions(&firecracker, std::fs::Permissions::from_mode(0o755)).unwrap();

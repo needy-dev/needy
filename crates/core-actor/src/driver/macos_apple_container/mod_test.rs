@@ -300,14 +300,41 @@ async fn services_that_do_not_answer_name_the_command_that_starts_them() {
 }
 
 #[tokio::test]
-async fn a_missing_image_names_the_build_that_makes_it() {
-  let (runtime, fake) = runtime_failing(&[("image", "inspect")]);
+async fn a_missing_image_is_pulled_and_one_that_cannot_be_names_the_build_that_makes_it() {
+  let (runtime, fake) = runtime_failing(&[("image", "inspect"), ("image", "pull")]);
 
   let error = runtime.check_host().await.unwrap_err().to_string();
 
-  assert!(error.contains("needy-actor:latest is not in Apple's `container` image store"), "{error}");
-  assert!(error.contains("needy build --macos-apple-container"), "{error}");
-  assert_eq!(fake.calls(), ["system status", "image inspect needy-actor:latest"]);
+  assert_eq!(
+    error,
+    "the container actor image needy-actor:latest is not here and cannot be pulled (Error: not found); build it with `needy \
+     image build --macos-apple-container`"
+  );
+  assert_eq!(
+    fake.calls(),
+    [
+      "system status",
+      "image inspect needy-actor:latest",
+      "image pull needy-actor:latest"
+    ]
+  );
+}
+
+#[tokio::test]
+async fn the_store_lists_each_image_with_its_arm64_variants_base_abi() {
+  let (runtime, fake) = runtime(Fake::default());
+
+  let images = runtime.images().await.unwrap();
+
+  assert_eq!(fake.calls(), ["image list --format json"]);
+  assert_eq!(
+    images,
+    [StoreImage {
+      name: "needy-actor:latest".into(),
+      base_abi: Some("1".into()),
+      size: 0,
+    }]
+  );
 }
 
 #[tokio::test]
@@ -328,7 +355,7 @@ async fn an_image_of_another_base_abi_is_refused_before_the_actor_starts() {
 
   assert_eq!(
     error,
-    "the actor image needy-actor:latest has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy build \
+    "the actor image needy-actor:latest has base ABI 2, and this needy speaks base ABI 1; rebuild it with `needy image build \
      --macos-apple-container` from this needy's version, or use a needy that speaks base ABI 2"
   );
 }

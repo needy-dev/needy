@@ -22,9 +22,9 @@ pub struct Actor {
   pub driver: ActorDriver,
   /// The actor image, an OCI image reference, for every driver: the
   /// container drivers run it, the VM drivers boot the VM image `needy
-  /// build --from` made of it. Without it the container drivers run
+  /// image build --from` made of it. Without it the container drivers run
   /// [`CONTAINER_IMAGE`] and the VM drivers boot the daemon's base VM image
-  /// (`needy build`).
+  /// (`needy image pull`).
   #[serde(default)]
   pub image: Option<String>,
   /// The runner the actor runs on; the control host itself when absent.
@@ -121,12 +121,18 @@ impl Actor {
 }
 
 /// The image of a container actor whose profile names none: the base image
-/// `needy build --linux-container` builds for the engine and `needy build
-/// --macos-apple-container` for Apple's `container`.
-// TODO(actor-images): `ghcr.io/needy-dev/needy-actor` of this needy's
-// version becomes the default with `needy image pull` (step 4 of
-// docs/ai/references/architecture/2026-11-12-actor-images-design.md).
-pub const CONTAINER_IMAGE: &str = "needy-actor:latest";
+/// of this needy's release, which the container drivers pull when the
+/// engine or Apple's store does not have it (and `needy image pull` pulls
+/// ahead). A needy without a release (a development build) has none to
+/// pull: build the base with `needy image build --linux-container` (or
+/// `--macos-apple-container`) and name [`BUILT_CONTAINER_IMAGE`] in
+/// `actor.image`.
+pub const CONTAINER_IMAGE: &str = concat!("ghcr.io/needy-dev/needy-actor:v", env!("CARGO_PKG_VERSION"));
+
+/// The base image `needy image build --linux-container` builds for the
+/// engine and `needy image build --macos-apple-container` for Apple's
+/// `container`, from a needy checkout.
+pub const BUILT_CONTAINER_IMAGE: &str = "needy-actor:latest";
 
 /// The OCI runtime of a container actor, by the name Docker registers it
 /// under.

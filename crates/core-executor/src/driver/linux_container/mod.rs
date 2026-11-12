@@ -25,6 +25,17 @@ use needy_config::profile::ExecutorDriver;
 use super::{Driver, Error, Instance, Spec, connect};
 use crate::engine::{self, Engine};
 
+/// The image of an executor whose profile names none, unless the operator
+/// names another (`needy daemon --executor-image`): this needy's release's,
+/// which the driver pulls when the engine does not have it, as `needy image
+/// pull` does ahead. It holds a needy of that version.
+pub const IMAGE: &str = concat!("ghcr.io/needy-dev/needy-executor:v", env!("CARGO_PKG_VERSION"));
+
+/// The executor image `needy image build --executor` builds from a needy
+/// checkout, which a development build without a release names with
+/// `needy daemon --executor-image`.
+pub const BUILT_IMAGE: &str = "needy-executor:latest";
+
 /// What the operator decides for every `linux-container` executor.
 #[derive(Debug, Clone)]
 pub struct Options {

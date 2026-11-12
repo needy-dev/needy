@@ -1,6 +1,7 @@
 # The smoke test with a macos-vz actor, on an Apple silicon Mac: the driving
 # program is `sh` in a Virtualization.framework VM that vfkit runs from
-# needy's arm64 kernel and rootfs (`brew install vfkit`, then `needy build`).
+# needy's arm64 kernel and rootfs (`brew install vfkit`, then `needy image
+# pull`).
 # The executor is the Mac itself (a daemon that is not root cannot hand a
 # Docker executor's socket directory to the container's user). python3 and
 # arch are routed; `/usr/bin/arch` by its absolute path is routed by the

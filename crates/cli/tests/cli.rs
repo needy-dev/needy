@@ -70,7 +70,11 @@ fn stand_in_actor(home: &Home) -> Vec<String> {
   std::fs::create_dir_all(&image).unwrap();
   std::fs::write(image.join("vmlinux"), "").unwrap();
   std::fs::write(image.join("rootfs.ext4"), "").unwrap();
-  std::fs::write(image.join("base-abi"), "1\n").unwrap();
+  std::fs::write(
+    image.join("manifest.json"),
+    r#"{"version":"0.0.1","driver":"linux-firecracker","arch":"x86_64","base_abi":1,"source":{"kind":"build"}}"#,
+  )
+  .unwrap();
   let firecracker = image.join("firecracker");
   let script = "#!/bin/sh\necho boot\necho hello from the actor\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n";
   std::fs::write(&firecracker, script).unwrap();

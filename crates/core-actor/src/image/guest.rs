@@ -153,23 +153,16 @@ pub fn check(path: &Path, arch: &str) -> Result<(), Error> {
 // and `backhand` writes it in Rust on Linux and macOS alike, where no
 // `mke2fs` is at hand. The times are zero, so one binary always makes the
 // same disk.
-// TODO(guest-disk): nothing removes the disks of guest binaries no longer
-// in use; `needy image rm` (step 4 of the actor images design) is where a
-// cleanup belongs.
+// NOTICE: the daemon never removes the disks of guest binaries no longer in
+// use; `needy image rm --guest-disks` removes every one but the current
+// guest's ([`disk_name`]).
 pub fn disk(binary: &Path, cache: &Path) -> Result<PathBuf, Error> {
   use sha2::Digest as _;
-  use std::fmt::Write as _;
   let bytes = std::fs::read(binary).map_err(|e| Error::Refused {
     path: binary.to_path_buf(),
     why: format!("cannot be read: {e}"),
   })?;
-  let digest = sha2::Sha256::digest(&bytes);
-  let name = digest[..8].iter().fold(String::new(), |mut hex, byte| {
-    // NOTICE: writing to a `String` cannot fail.
-    let _ = write!(hex, "{byte:02x}");
-    hex
-  }) + ".squashfs";
-  let path = cache.join(name);
+  let path = cache.join(disk_name(&sha2::Sha256::digest(&bytes)));
   if path.exists() {
     return Ok(path);
   }
@@ -187,6 +180,17 @@ pub fn disk(binary: &Path, cache: &Path) -> Result<PathBuf, Error> {
   fs.write(staged.as_file_mut()).map_err(|e| failed(e.to_string()))?;
   staged.persist(&path).map_err(|e| failed(e.to_string()))?;
   Ok(path)
+}
+
+/// The file name of the guest disk [`disk`] makes of a binary whose SHA-256
+/// is `digest`: its first 16 hex digits, with `.squashfs`.
+pub fn disk_name(digest: &[u8]) -> String {
+  use std::fmt::Write as _;
+  digest[..8].iter().fold(String::new(), |mut hex, byte| {
+    // NOTICE: writing to a `String` cannot fail.
+    let _ = write!(hex, "{byte:02x}");
+    hex
+  }) + ".squashfs"
 }
 
 #[cfg(test)]

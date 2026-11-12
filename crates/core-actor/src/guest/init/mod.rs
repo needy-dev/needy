@@ -106,7 +106,7 @@ fn write_param(path: &str, value: &str) {
 /// (`--guest-needy`).
 fn check_base_abi() -> Result<()> {
   let found = std::fs::read_to_string(crate::contract::BASE_ABI).ok();
-  crate::image::base::check(crate::contract::BASE_ABI, found.as_deref(), "needy build")
+  crate::image::base::check(crate::contract::BASE_ABI, found.as_deref(), "use a base image of the daemon's base ABI")
     .map_err(|e| anyhow::anyhow!("{e}; this guest needy is not of the daemon's needy version (see --guest-needy)"))
 }
 

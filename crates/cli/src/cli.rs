@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result};
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, build, chaos, daemon, exec, fs, kill, pair, profile, ps, report, run, runner};
+use crate::commands::{attach, chaos, daemon, exec, fs, image, kill, pair, profile, ps, report, run, runner};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -55,8 +55,8 @@ enum Command {
   /// Pair this machine with a control plane once (`pair CODE`), and manage
   /// pairing codes and paired clients.
   Pair(pair::Args),
-  /// Build an actor image from a recipe, and the executor image.
-  Build(build::Args),
+  /// Pull, list, build and remove actor images.
+  Image(image::Args),
   /// Check a profile: show routing decisions, matching faults and the recipe's findings.
   Profile(profile::Args),
   /// Report on a run from its trace: who started it, what ran where.
@@ -189,7 +189,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Run(args) => run::run(args, &ctx).await,
       Command::Runner(args) => runner::run(args, &ctx).await,
       Command::Pair(args) => pair::run(args, &ctx).await,
-      Command::Build(args) => build::run(args, &ctx).await,
+      Command::Image(args) => image::run(args, &ctx).await,
       Command::Profile(args) => profile::run(args, &ctx).await,
       Command::Report(args) => report::run(args, &ctx).await,
       Command::Chaos(args) => chaos::run(args, &ctx).await,

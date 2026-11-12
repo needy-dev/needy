@@ -102,8 +102,12 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
     // Detection reads the base image only: a profile's `actor.image` is
     // checked when a run is created.
     // TODO(runner-actor): a runner that holds VM images made with `needy
-    // build --from` does not report them; it needs to once actors run on
-    // runners other than the control host's own.
+    // image build --from` does not report them; it needs to once actors run
+    // on runners other than the control host's own. A runner without its
+    // base VM image reports no VM driver, and its operator runs `needy image
+    // pull` on it by hand (owner decision D4 of the actor images design);
+    // the control plane could tell the runner to pull once it places actors
+    // there.
     images: std::path::PathBuf::new(),
     // Detection starts no actor, so it makes no guest disk.
     guest_disks: std::path::PathBuf::new(),

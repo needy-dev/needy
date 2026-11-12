@@ -325,7 +325,7 @@ fn ignore(result: Result<(), BollardError>, fine: &[u16]) -> Result<(), Error> {
 }
 
 /// An image reference with its tag, `latest` for a bare name: the API pulls
-/// every tag of a bare name, and the VM images `needy build --from` makes
+/// every tag of a bare name, and the VM images `needy image build --from` makes
 /// are named by the tagged reference.
 pub fn with_tag(image: &str) -> String {
   let last = image.rsplit('/').next().unwrap_or(image);

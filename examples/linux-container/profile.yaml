@@ -1,7 +1,8 @@
 # The smoke test with a container actor, for a host without KVM: the driving
 # program is `sh` in a container that the engine (Docker) runs with `runc` (or `runsc`,
-# gVisor); only python3 is routed. Build its image with
-# `needy build --linux-container`.
+# gVisor); only python3 is routed. The driver pulls the base image of this
+# needy's release; a needy without a release builds it with `needy image
+# build --linux-container` and adds `image: needy-actor:latest` to `actor`.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-container

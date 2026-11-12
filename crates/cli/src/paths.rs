@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use etcetera::BaseStrategy;
 
 // TODO(config): the build cache (`$XDG_CACHE_HOME/needy`) has no reader yet.
-// Add it when `needy build` keeps a cache. The config directory holds the
+// Add it when `needy image build` keeps a cache. The config directory holds the
 // client tokens `needy pair` stores (`credentials`) and profiles by name
 // (`profiles`); other user configuration waits for the config slice.
 #[derive(Debug, Clone)]
@@ -58,21 +58,21 @@ impl Paths {
     self.config.join("profiles")
   }
 
-  /// The image `needy build` writes and the daemon boots by default.
-  pub fn default_image(&self) -> PathBuf {
-    self.images().join("default")
+  /// The base VM image of this host's VM driver, which `needy image pull`
+  /// and `needy image build` write and the daemon boots by default.
+  pub fn base_image(&self) -> PathBuf {
+    needy_core_actor::image::vm::base_dir(&self.images(), needy_core_actor::image::vm::host_driver())
   }
 
-  /// needy's VM images: the base in `default`, and those `needy build
-  /// --from` makes in a directory per driver
-  /// (`needy_core_actor::image::vm::dir_of`).
+  /// needy's VM images, a directory per driver: its base
+  /// (`needy_core_actor::image::vm::base_dir`) and those `needy image build
+  /// --from` makes (`needy_core_actor::image::vm::dir_of`).
   pub fn images(&self) -> PathBuf {
     self.data.join("images")
   }
 
   /// The guest disks the VM drivers make from the guest needy (the control
-  /// daemon, Unix only).
-  #[cfg(unix)]
+  /// daemon, Unix only), which `needy image rm --guest-disks` cleans.
   pub fn guest_disks(&self) -> PathBuf {
     self.data.join("guest")
   }

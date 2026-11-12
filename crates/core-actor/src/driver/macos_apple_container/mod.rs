@@ -45,7 +45,7 @@ use crate::image::container::{self, name};
 
 /// What builds the container actor image of this needy's version into
 /// Apple's `container`.
-const REBUILD: &str = "needy build --macos-apple-container";
+const REBUILD: &str = "needy image build --macos-apple-container";
 
 /// What a `macos-apple-container` actor presents: the container image's
 /// shims catch execs; init mounts the workspace and sets the hostname
@@ -148,7 +148,7 @@ impl MacosAppleContainer {
   }
 
   /// Loads the image archive at `archive` (an OCI or `docker save` tar)
-  /// into Apple's `container` image store, as `needy build
+  /// into Apple's `container` image store, as `needy image build
   /// --macos-apple-container` does.
   pub async fn load(&self, archive: &Path) -> Result<(), Error> {
     let archive = archive.display().to_string();
@@ -157,6 +157,36 @@ impl MacosAppleContainer {
       return Err(refused(format!("`container image load` failed: {}", first_line(&loaded))));
     }
     Ok(())
+  }
+
+  /// Pulls the image into Apple's `container` image store (`container image
+  /// pull`), for linux/arm64 on Apple silicon.
+  pub async fn pull(&self) -> Result<(), Error> {
+    let pulled = self.run(&["image", "pull", &self.image]).await?;
+    if !pulled.success {
+      return Err(refused(last_line(&pulled)));
+    }
+    Ok(())
+  }
+
+  /// Deletes the image from Apple's `container` image store (`container
+  /// image delete`).
+  pub async fn delete(&self) -> Result<(), Error> {
+    let deleted = self.run(&["image", "delete", &self.image]).await?;
+    if !deleted.success {
+      return Err(refused(format!("`container image delete {}` failed: {}", self.image, first_line(&deleted))));
+    }
+    Ok(())
+  }
+
+  /// The images in Apple's `container` image store, with what needy reads
+  /// of each.
+  pub async fn images(&self) -> Result<Vec<StoreImage>, Error> {
+    let listed = self.run(&["image", "list", "--format", "json"]).await?;
+    if !listed.success {
+      return Err(refused(format!("`container image list` failed: {}", first_line(&listed))));
+    }
+    store_images(&listed.stdout)
   }
 
   /// The CLI arguments that run the actor for `start`.
@@ -289,6 +319,52 @@ fn base_abi(image: &str, inspected: &str) -> Result<Option<String>, Error> {
   Ok(label.and_then(|v| v.as_str()).map(String::from))
 }
 
+/// An image in Apple's `container` image store, as `needy image ls` shows
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreImage {
+  /// The reference it is stored under (`docker.io/library/alpine:3.22`).
+  pub name: String,
+  /// The base ABI label of its linux/arm64 variant, `None` without one.
+  pub base_abi: Option<String>,
+  /// The linux/arm64 variant's size in bytes, as the store records it; 0
+  /// without such a variant.
+  pub size: u64,
+}
+
+/// The images `container image list --format json` printed.
+// NOTICE: the CLI prints a JSON array with one object per image: its
+// reference in `configuration.name` and its variants as `container image
+// inspect` prints them (see [`base_abi`]), each with a `size`. Observed with
+// `container` 1.7.1; the CLI documents no output format.
+fn store_images(listed: &str) -> Result<Vec<StoreImage>, Error> {
+  let value: serde_json::Value =
+    serde_json::from_str(listed).map_err(|e| refused(format!("cannot read `container image list --format json`: {e}")))?;
+  let images = value.as_array().map(Vec::as_slice).unwrap_or_default();
+  Ok(
+    images
+      .iter()
+      .map(|image| {
+        let name = image.pointer("/configuration/name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+        let variants = image.get("variants").and_then(|v| v.as_array()).map(Vec::as_slice).unwrap_or_default();
+        let arm64 = variants.iter().find(|variant| {
+          let field = |name: &str| variant.pointer(&format!("/config/{name}")).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+          container::check_platform(&name, &field("os"), &field("architecture"), ARCH).is_ok()
+        });
+        StoreImage {
+          base_abi: arm64
+            .and_then(|variant| variant.pointer("/config/config/Labels"))
+            .and_then(|labels| labels.get(base::LABEL))
+            .and_then(|v| v.as_str())
+            .map(String::from),
+          size: arm64.and_then(|variant| variant.get("size")).and_then(|v| v.as_u64()).unwrap_or(0),
+          name,
+        }
+      })
+      .collect(),
+  )
+}
+
 /// The first line of what a failed command said, for an error message.
 fn first_line(output: &Output) -> String {
   let text = if output.stderr.trim().is_empty() {
@@ -297,6 +373,20 @@ fn first_line(output: &Output) -> String {
     &output.stderr
   };
   text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("no output").to_string()
+}
+
+/// The last line of what a failed command said, for a command that prints
+/// its progress first.
+// NOTICE: `container image pull` redraws its progress (`[1/2] Fetching
+// image [1s]`) with carriage returns on stderr and ends with `Error: ...`
+// when it fails. Observed with `container` 1.7.1.
+fn last_line(output: &Output) -> String {
+  let text = if output.stderr.trim().is_empty() {
+    &output.stdout
+  } else {
+    &output.stderr
+  };
+  text.split(['\r', '\n']).map(str::trim).rev().find(|line| !line.is_empty()).unwrap_or("no output").to_string()
 }
 
 /// What of `recipe` (or of a plain machine) an actor under Apple's
@@ -357,14 +447,18 @@ impl Driver for MacosAppleContainer {
 
   async fn check_host(&self) -> Result<(), Error> {
     self.services().await?;
-    let image = self.run(&["image", "inspect", &self.image]).await?;
+    let mut image = self.run(&["image", "inspect", &self.image]).await?;
     if !image.success {
-      let how = if self.image == CONTAINER_IMAGE {
-        format!("run `{REBUILD}`")
-      } else {
-        "build it with `container build`, or pull it with `container image pull`".into()
-      };
-      return Err(refused(format!("the container actor image {} is not in Apple's `container` image store; {how}", self.image)));
+      // Container images are pulled automatically, unlike VM images (owner
+      // decision D4 of the actor images design).
+      tracing::info!("pulling the container actor image {} into Apple's `container`", self.image);
+      if let Err(e) = self.pull().await {
+        return Err(refused(container::unpullable(&self.image, &e.to_string(), REBUILD)));
+      }
+      image = self.run(&["image", "inspect", &self.image]).await?;
+      if !image.success {
+        return Err(refused(container::unpullable(&self.image, &first_line(&image), REBUILD)));
+      }
     }
     let abi = base_abi(&self.image, &image.stdout)?;
     Ok(base::check(&self.image, abi.as_deref(), &container::advice(&self.image, REBUILD))?)

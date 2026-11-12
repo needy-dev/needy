@@ -62,10 +62,12 @@ pub mod macos_vz;
 /// tool or engine refused is [`Error::Driver`], with its message.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  /// A file of a VM image is missing; `build` is the command that writes
-  /// it.
-  #[error("actor image is missing {}; run `{build}`", path.display())]
-  Missing { path: PathBuf, build: String },
+  /// A file of a VM image is missing; `advice` says what writes it.
+  #[error("actor image is missing {}; {advice}", path.display())]
+  Missing { path: PathBuf, advice: String },
+  /// A VM image's manifest that cannot be read.
+  #[error(transparent)]
+  Manifest(#[from] crate::image::manifest::Error),
   #[error("cannot write {}", path.display())]
   Write {
     path: PathBuf,
@@ -239,10 +241,11 @@ pub fn facets(driver: ActorDriver) -> Facets {
 /// images are, the KVM device, and where the VM drivers keep guest disks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Host {
-  /// The base VM image (`needy build`), which a VM driver boots for a
-  /// profile without `actor.image`.
+  /// The base VM image of this host's VM driver (`needy image pull`,
+  /// `crate::image::vm::base_dir`), which a VM driver boots for a profile
+  /// without `actor.image`.
   pub image: PathBuf,
-  /// Where `needy build --from` writes the VM images a profile names by
+  /// Where `needy image build --from` writes the VM images a profile names by
   /// their OCI reference (`crate::image::vm::dir_of`): needy's data
   /// directory's `images`.
   pub images: PathBuf,
@@ -281,6 +284,26 @@ pub async fn detect(driver: ActorDriver, host: &Host, engine: &needy_core_execut
     ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer => {
       let _ = engine;
       Err(format!("{driver} actors run on Linux and macOS only"))
+    }
+  }
+}
+
+/// Whether this host could run `driver`'s actors, whatever images it has:
+/// [`detect`] without the base VM image, for `needy image pull`, which
+/// fetches the images of the drivers this host has.
+pub async fn detect_host(driver: ActorDriver, kvm: &Path, engine: &needy_core_executor::engine::Probe) -> Result<(), String> {
+  match driver {
+    ActorDriver::LinuxFirecracker => linux_firecracker::detect_host(kvm),
+    ActorDriver::MacosVz => macos_vz::detect_host().await,
+    // The container drivers' detection does not look at images.
+    ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer => {
+      let host = Host {
+        image: PathBuf::new(),
+        images: PathBuf::new(),
+        kvm: kvm.to_path_buf(),
+        guest_disks: PathBuf::new(),
+      };
+      detect(driver, &host, engine).await
     }
   }
 }
@@ -406,12 +429,15 @@ pub(crate) fn vm_image<T>(host: &Host, driver: ActorDriver, reference: Option<&s
 
 /// A VM image as [`Driver::image`] shows it.
 pub(crate) fn describe_vm_image(dir: &Path, source: &vm::Source) -> String {
-  match (source, vm::origin(dir)) {
-    (vm::Source::Base, _) => format!("the base VM image {}", dir.display()),
-    (vm::Source::Reference(reference), Some(origin)) => {
-      format!("{reference}, as the VM image {} made from {} ({})", dir.display(), origin.id, origin.platform)
+  let manifest = crate::image::manifest::read(dir).ok().flatten();
+  let origin = manifest.as_ref().and_then(|manifest| manifest.source.as_ref());
+  match (source, origin) {
+    (vm::Source::Base, Some(origin)) => format!("the base VM image {} ({origin})", dir.display()),
+    (vm::Source::Base, None) => format!("the base VM image {}", dir.display()),
+    (vm::Source::Reference(reference), Some(crate::image::manifest::Source::Oci { id, platform, .. })) => {
+      format!("{reference}, as the VM image {} made from {id} ({platform})", dir.display())
     }
-    (vm::Source::Reference(reference), None) => format!("{reference}, as the VM image {}", dir.display()),
+    (vm::Source::Reference(reference), _) => format!("{reference}, as the VM image {}", dir.display()),
   }
 }
 

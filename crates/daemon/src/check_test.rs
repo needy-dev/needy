@@ -341,7 +341,7 @@ async fn the_check_names_the_actor_image_and_the_base_abi_it_records() {
   let check = check(&served, "actor: { driver: linux-firecracker, command: [sh] }").await;
 
   assert_eq!(messages(&check), Vec::<String>::new());
-  assert_eq!(check.actor_image, format!("the base VM image {}", served.dir().join("image").display()));
+  assert_eq!(check.actor_image, format!("the base VM image {} (built)", served.dir().join("image").display()));
   assert_eq!(check.actor_base_abi, Some(needy_core_actor::image::base::ABI));
 }
 
@@ -357,7 +357,7 @@ async fn a_vm_image_not_yet_made_from_the_profiles_oci_image_names_the_build_tha
   assert_eq!(
     messages(&check),
     [format!(
-      "error: actor: on the control host: actor image is missing {}; run `needy build --from needy-custom-jq`",
+      "error: actor: on the control host: actor image is missing {}; run `needy image build --from needy-custom-jq`",
       dir.join("vmlinux").display()
     )]
   );

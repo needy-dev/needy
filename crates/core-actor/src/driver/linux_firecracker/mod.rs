@@ -60,18 +60,25 @@ pub const FACETS: Facets = Facets {
   transport: Transport::Vsock,
 };
 
-/// Whether this host can run `linux-firecracker` actors: Linux, a KVM device
-/// that opens for reading and writing (as Firecracker opens it), and a
-/// complete actor image.
+/// Whether this host can run `linux-firecracker` actors: [`detect_host`],
+/// and a complete base VM image.
 pub fn detect(host: &Host) -> Result<(), String> {
+  detect_host(&host.kvm)?;
+  Image::new(&host.image).check().map_err(|e| e.to_string())
+}
+
+/// Whether this host could run `linux-firecracker` actors, whatever images
+/// it has: Linux, and a KVM device `kvm` that opens for reading and writing
+/// (as Firecracker opens it).
+pub fn detect_host(kvm: &Path) -> Result<(), String> {
   if !cfg!(target_os = "linux") {
     return Err("Firecracker runs on Linux only".into());
   }
   // The OS error alone, without the advice `check_kvm`'s error gives a run.
-  if let Err(e) = std::fs::OpenOptions::new().read(true).write(true).open(&host.kvm) {
-    return Err(format!("cannot open {}: {e}", host.kvm.display()));
+  if let Err(e) = std::fs::OpenOptions::new().read(true).write(true).open(kvm) {
+    return Err(format!("cannot open {}: {e}", kvm.display()));
   }
-  Image::new(&host.image).check().map_err(|e| e.to_string())
+  Ok(())
 }
 
 /// Ends the Firecracker process a daemon that died left, found by its

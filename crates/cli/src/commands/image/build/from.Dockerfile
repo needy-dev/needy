@@ -1,5 +1,5 @@
 # A VM root file system made from an OCI image `FROM` needy's container
-# base image, for `needy build --from` (crates/cli/src/commands/build/from.rs).
+# base image, for `needy image build --from` (crates/cli/src/commands/image/build/from.rs).
 # FROM is the image; the build runs for the VM driver's platform. The result
 # is the `rootfs` target's rootfs.ext4; the kernel and the stubs come from the
 # base (the kernel from the base VM image, the stubs through the image's own

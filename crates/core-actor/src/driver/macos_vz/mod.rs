@@ -87,14 +87,20 @@ pub const FACETS: Facets = Facets {
   transport: Transport::Vsock,
 };
 
-/// Whether this host can run `macos-vz` actors: macOS on Apple silicon, a
-/// `vfkit` that runs, and a complete `macos-vz` actor image.
+/// Whether this host can run `macos-vz` actors: [`detect_host`], and a
+/// complete base VM image.
 pub async fn detect(host: &Host) -> Result<(), String> {
+  detect_host().await?;
+  Image::new(&host.image).check().map_err(|e| e.to_string())
+}
+
+/// Whether this host could run `macos-vz` actors, whatever images it has:
+/// macOS on Apple silicon, and a `vfkit` that runs.
+pub async fn detect_host() -> Result<(), String> {
   if !supported_host() {
     return Err("Virtualization.framework actors run on macOS on Apple silicon only".into());
   }
-  check_vfkit(Path::new(VFKIT)).await.map_err(|e| e.to_string())?;
-  Image::new(&host.image).check().map_err(|e| e.to_string())
+  check_vfkit(Path::new(VFKIT)).await.map_err(|e| e.to_string())
 }
 
 /// Ends the vfkit process a daemon that died left, found by its pidfile on

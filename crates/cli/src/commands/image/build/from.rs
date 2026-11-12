@@ -1,4 +1,4 @@
-//! `needy build --from REF`: a VM image made from an OCI image `FROM`
+//! `needy image build --from REF`: a VM image made from an OCI image `FROM`
 //! needy's container base, for this host's VM driver (`linux-firecracker`,
 //! or `macos-vz` on Apple silicon). Its root file system is the OCI image's,
 //! with the container shims put back as their real programs, as BuildKit
@@ -8,10 +8,9 @@
 //!
 //! The OCI image is checked first: it must record this needy's base ABI
 //! (the `needy.base-abi` label it inherits from the base) and be of the VM's
-//! platform; one the engine does not have is pulled for that platform.
-// TODO(actor-images): this becomes `needy image build` with step 4, which
-// records a `manifest.json` instead of `base-abi` and `origin.json`; see
-// docs/ai/references/architecture/2026-11-12-actor-images-design.md.
+//! platform; one the engine does not have is pulled for that platform. The
+//! new image's `manifest.json` records the reference, the image's ID and
+//! platform.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +20,7 @@ use bollard::Docker;
 use bollard::query_parameters::{BuildImageOptions, CreateImageOptionsBuilder, ImageBuildOutput};
 use futures_util::TryStreamExt as _;
 use needy_config::profile::ActorDriver;
+use needy_core_actor::image::manifest::{self, Manifest};
 use needy_core_actor::image::{base, container, vm};
 
 use crate::output;
@@ -38,18 +38,10 @@ pub struct From<'a> {
   pub out: Option<&'a Path>,
 }
 
-/// This host's VM driver and the architecture of its guests.
-fn driver() -> (ActorDriver, &'static str) {
-  if needy_core_actor::driver::macos_vz::supported_host() {
-    (ActorDriver::MacosVz, "aarch64")
-  } else {
-    (ActorDriver::LinuxFirecracker, "x86_64")
-  }
-}
-
 /// Builds the VM image and returns its directory.
 pub async fn build(docker: &Docker, from: &From<'_>) -> Result<PathBuf> {
-  let (driver, arch) = driver();
+  let driver = vm::host_driver();
+  let arch = vm::arch(driver);
   let platform = format!("linux/{}", container::oci_arch(arch));
   // The base first: it is local, and its kernel is what the image boots.
   check_base(driver, from.base)?;
@@ -57,7 +49,7 @@ pub async fn build(docker: &Docker, from: &From<'_>) -> Result<PathBuf> {
   base::check(
     from.reference,
     image.config.as_ref().and_then(|c| c.labels.as_ref()).and_then(|l| l.get(base::LABEL)).map(String::as_str),
-    &base::rebuild_from("needy build --linux-container", None),
+    &base::rebuild_from("needy image build --linux-container", None),
   )?;
   let (os, architecture) = (image.os.clone().unwrap_or_default(), image.architecture.clone().unwrap_or_default());
   container::check_platform(from.reference, &os, &architecture, arch).map_err(anyhow::Error::msg)?;
@@ -119,7 +111,7 @@ async fn inspect(docker: &Docker, reference: &str, platform: &str) -> Result<bol
 }
 
 /// Writes the VM image into the new directory `dir`: the root file system
-/// built from `image`, the base's other files, the base ABI and the origin.
+/// built from `image`, the base's other files and the manifest.
 async fn write(
   docker: &Docker,
   from: &From<'_>,
@@ -150,14 +142,13 @@ async fn write(
     let (source, target) = (from.base.join(file), dir.join(file));
     std::fs::copy(&source, &target).with_context(|| format!("cannot copy {} to {}", source.display(), target.display()))?;
   }
-  std::fs::write(dir.join(base::FILE), format!("{}\n", base::ABI)).context("cannot write the base ABI")?;
-  let origin = vm::Origin {
+  // The image's label was checked equal to this needy's base ABI.
+  let source = manifest::Source::Oci {
     reference: needy_core_executor::engine::with_tag(from.reference),
     id: image.id.clone().unwrap_or_default(),
     platform: platform.to_string(),
   };
-  std::fs::write(dir.join(vm::ORIGIN), serde_json::to_vec_pretty(&origin)?).context("cannot write the image's origin")?;
-  Ok(())
+  Ok(manifest::write(dir, &Manifest::made(driver, base::ABI, source))?)
 }
 
 /// The build context: the Dockerfile alone.

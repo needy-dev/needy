@@ -44,7 +44,7 @@ use crate::image::base;
 use crate::image::container::{self, name};
 
 /// What builds a container actor image of this needy's version.
-const REBUILD: &str = "needy build --linux-container";
+const REBUILD: &str = "needy image build --linux-container";
 
 /// Where the host-side workspace mounts of the actor in `dir` are.
 fn mounts_dir(dir: &Path) -> PathBuf {
@@ -133,6 +133,22 @@ impl LinuxContainer {
       image,
       engine,
     }
+  }
+
+  /// Pulls the image, which the engine does not have, and returns what it
+  /// records. Container images are pulled automatically, unlike VM images
+  /// (owner decision D4 of the actor images design).
+  async fn pull(&self) -> Result<engine::Image, Error> {
+    tracing::info!("pulling the container actor image {}", self.image);
+    if let Err(e) = self.engine.pull(&self.image).await {
+      return Err(refused(container::unpullable(&self.image, &e.to_string(), REBUILD)));
+    }
+    self
+      .engine
+      .inspect_image(&self.image)
+      .await
+      .map_err(engine_error)?
+      .ok_or_else(|| refused(container::unpullable(&self.image, "the engine pulled it but does not have it", REBUILD)))
   }
 
   /// Ends the container a previous daemon started for run `run`, whose
@@ -340,16 +356,9 @@ impl Driver for LinuxContainer {
         args.join(" ")
       )));
     }
-    // TODO(actor-images): a missing image is pulled automatically with step
-    // 4 (`needy image`), see
-    // docs/ai/references/architecture/2026-11-12-actor-images-design.md.
-    let Some(image) = self.engine.inspect_image(&self.image).await.map_err(engine_error)? else {
-      let how = if self.image == CONTAINER_IMAGE {
-        format!("run `{REBUILD}`")
-      } else {
-        "build it, or pull it with `docker pull`".into()
-      };
-      return Err(refused(format!("the container actor image {} is missing; {how}", self.image)));
+    let image = match self.engine.inspect_image(&self.image).await.map_err(engine_error)? {
+      Some(image) => image,
+      None => self.pull().await?,
     };
     base::check(&self.image, image.labels.get(base::LABEL).map(String::as_str), &container::advice(&self.image, REBUILD))?;
     container::check_platform(&self.image, &image.os, &image.architecture, crate::image::guest::arch()).map_err(refused)
