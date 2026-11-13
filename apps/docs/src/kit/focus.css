@@ -1,0 +1,45 @@
+/*
+ * The focus language of every stage, from src/kit/focus.ts. `--role` is the color of the element's role.
+ * No outlines and no colored shadows: what a step is about takes a tint of its role and rises a little; the rest
+ * steps back. A denial takes the red tint and shakes once.
+ */
+.f {
+  transition:
+    transform 0.42s cubic-bezier(0.2, 0, 0, 1),
+    opacity 0.42s cubic-bezier(0.2, 0, 0, 1),
+    filter 0.42s cubic-bezier(0.2, 0, 0, 1),
+    background 0.42s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.f.focus {
+  background: color-mix(in srgb, var(--role) 13%, var(--surface));
+  transform: translateY(-3px);
+}
+
+.f.dim {
+  opacity: 0.4;
+  filter: saturate(0.3);
+}
+
+.f.gone {
+  opacity: 0.08;
+  filter: blur(2px) saturate(0);
+  transform: scale(0.96);
+}
+
+.f.bad {
+  background: color-mix(in srgb, var(--bad) 14%, var(--surface));
+  animation: shake 0.42s cubic-bezier(0.36, 0, 0.66, 1) 1;
+}
+
+@keyframes shake {
+  20%,
+  60% {
+    translate: -6px 0;
+  }
+
+  40%,
+  80% {
+    translate: 6px 0;
+  }
+}

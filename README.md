@@ -1,3 +1,9 @@
+<picture>
+  <source width="100%" srcset="./docs/assets/banners/hero-dark.webp" media="(prefers-color-scheme: dark)" />
+  <source width="100%" srcset="./docs/assets/banners/hero-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+  <img width="100%" alt="Needy, an isolated sandbox for agent harnesses with seamless exec routing and policy: opencode runs in an actor, a Firecracker microVM on a Linux KVM host; its xcodebuild goes to a Mac executor and succeeds, and a rule denies its git push." src="./docs/assets/banners/hero-light.webp" />
+</picture>
+
 <h1 align="center">Needy</h1>
 
 Needy separates the program that drives work from the environments where that
@@ -44,6 +50,12 @@ The flow is always the same:
    where.
 4. `needy run create` starts a **run**: one actor and its executors.
 5. Look at it with `needy report`, `needy exec`, `needy ps`.
+
+<picture>
+  <source width="100%" srcset="./docs/assets/banners/getting-started-dark.webp" media="(prefers-color-scheme: dark)" />
+  <source width="100%" srcset="./docs/assets/banners/getting-started-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+  <img width="100%" alt="Getting started in five steps: install needy and pull its images, start the control daemon, check a profile with a linux-firecracker actor and a rule that sends python3 to a build container, run bash in the actor where python3 runs in the container, and read needy report." src="./docs/assets/banners/getting-started-light.webp" />
+</picture>
 
 ### Install
 
@@ -449,6 +461,12 @@ Named mappings move other files between the control host (`host:`), the actor
 (`actor:`) and an executor (`executor:NAME:`). `run_files` lists the ones every
 run uses; a rule's `files:` adds some for the commands it matches.
 
+<picture>
+  <source width="100%" srcset="./docs/assets/banners/files-dark.webp" media="(prefers-color-scheme: dark)" />
+  <source width="100%" srcset="./docs/assets/banners/files-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+  <img width="100%" alt="Files: copy-in brings a login from the control host into the stateless actor; the build container serves the workspace and the actor mounts it over sshfs, so a file the actor writes is on the executor; mirror-out copies the login back when the run ends." src="./docs/assets/banners/files-light.webp" />
+</picture>
+
 ```yaml
 files:
   login-in:                        # copied in when the run starts
@@ -473,6 +491,12 @@ The actor has no network of its own: everything goes through the gateway on
 the control host. HTTPS is tunnelled as is (no MITM, no injected CA, and so no
 injected headers).
 
+<picture>
+  <source width="100%" srcset="./docs/assets/banners/network-dark.webp" media="(prefers-color-scheme: dark)" />
+  <source width="100%" srcset="./docs/assets/banners/network-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+  <img width="100%" alt="The gateway: the actor has no network of its own. models.dev is on the allowlist and is tunnelled; example.com is refused with 403 over HTTP and HTTPS; the service model.needy is forwarded to a local model at 127.0.0.1:11434." src="./docs/assets/banners/network-light.webp" />
+</picture>
+
 ```yaml
 actor:
   network:
@@ -492,6 +516,12 @@ host.
 Named faults, each in one domain, with real effects. They fire from a seed,
 so a replayed run injects the same ones; a fault without `probability`,
 `nth`, `times`, `after` or `until` fires on every match.
+
+<picture>
+  <source width="100%" srcset="./docs/assets/banners/chaos-dark.webp" media="(prefers-color-scheme: dark)" />
+  <source width="100%" srcset="./docs/assets/banners/chaos-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+  <img width="100%" alt="examples/chaos from seed 1: opening broken.json fails with Input/output error, curl fails with its own error and exit 7 without running, the sensors read +101.0°C ALARM (CRIT) two seconds in, and needy report counts the three injected faults by name." src="./docs/assets/banners/chaos-light.webp" />
+</picture>
 
 ```yaml
 chaos:
@@ -614,6 +644,12 @@ flowchart LR
   D -. lifecycle .- E1
 ```
 
+<picture>
+  <source width="100%" srcset="./docs/assets/banners/routing-dark.webp" media="(prefers-color-scheme: dark)" />
+  <source width="100%" srcset="./docs/assets/banners/routing-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
+  <img width="100%" alt="Rules decide where each command runs: python3 -m pytest and npm install go to the build container, /usr/bin/git push matches the deny rule by its basename and exits 126, and the trace records the exec.decide." src="./docs/assets/banners/routing-light.webp" />
+</picture>
+
 - **Capture, decide, apply.** A driver's capture catches each exec, the
   gateway sidecar every connection, the workspace mount every file open. The
   daemon runs the domain's interceptors (rules, then chaos; the allowlist,
@@ -689,6 +725,15 @@ and `--hosts FILE` runs on several at once, each building natively; see the
 GitHub Actions runs the checks and tests on Linux, macOS and Windows, the e2e
 cells without an actor on Linux and macOS, and builds the release assets; see
 [Release and CI](docs/ai/references/architecture/2026-11-12-release-and-ci-design.md).
+
+The figures in this README are animated scenes in [`apps/docs`](apps/docs), a
+page you can also open to step through them and route your own commands:
+
+```sh
+cd apps/docs && pnpm install
+pnpm dev                      # the page
+pnpm banners                  # re-render docs/assets/banners (needs Chrome and img2webp)
+```
 
 ## Acknowledgements
 
