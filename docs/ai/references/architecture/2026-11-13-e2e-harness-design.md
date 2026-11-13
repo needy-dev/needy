@@ -130,12 +130,13 @@ prints it; `matrix::tests` keep its coverage.
 | Network | an allowed host, a denied host, a service |
 | User | default (`agent`, 1000), renamed (`bob`, 1001) |
 | Executor | `native`, `linux-container`, a runner's `native` (local, or a Windows machine) |
+| Transport | how a local runner reaches the control plane: `direct`, `ssh-l`, `idle-proxy`, `cloudflare` (see [Transports](#transports)) |
 | Daemon user | non-root; no cell needs root (see [Decisions](#decisions)) |
 | TUI | the cases of `xtask/src/e2e/tui.rs`: Codex's start screen, before a login (see [TUI cells](#tui-cells)) |
 
 ### Cells per actor driver
 
-29 to 31 cells per driver, IDs `DRIVER/SCENARIO[/DIM=VALUE,…]`:
+28 to 35 cells per driver (`cargo xtask e2e --list` prints them), IDs `DRIVER/SCENARIO[/DIM=VALUE,…]`:
 
 | Scenario | Cells | Fixed dimensions |
 | --- | --- | --- |
@@ -148,7 +149,7 @@ prints it; `matrix::tests` keep its coverage.
 | `identity` | `user=default|renamed` × `executor=native|linux-container` | |
 | `terminal` | `mode=t`, `mode=it` | |
 | `fake-agent` | one | `-t`, `run stop`, nested config, routed shells |
-| `runner` | `at=local`, `at=windows` | a native executor on a runner |
+| `runner` | `at=local,transport=direct|ssh-l|idle-proxy|cloudflare`, `at=windows` | a native executor on a runner; for `at=local`, the workspace from it |
 | `tui` | one per TUI case | `-it` |
 
 And two cells without an actor: `none/exec` (`needy exec`: exit codes,
@@ -162,6 +163,58 @@ host socket (`NOTICE` in `crates/core-executor/src/driver/linux_container/mod.rs
 a macOS driver has no container-executor cells at all. Cells of the other
 platform are listed as "other platforms" and do not change the exit code;
 another host covers them.
+
+### Transports
+
+The `runner/at=local` cells vary how the runner reaches its cell's control
+daemon, which listens on a loopback TCP port as well as its socket
+(`xtask/src/e2e/transport.rs`):
+
+| Transport | The runner joins | Runs when |
+| --- | --- | --- |
+| `direct` | the daemon's port, `http://127.0.0.1:PORT` | always |
+| `ssh-l` | an `ssh -L` forward to that port | `ssh.destination` is set in the local settings |
+| `idle-proxy` | `cargo xtask link-proxy`'s proxy in front of the port, which drops a connection idle for 30 s | always |
+| `cloudflare` | `exec:cloudflared access tcp --hostname H`, with a service token; the harness runs the tunnel's connector (`cloudflared tunnel run`) in front of the port | `cloudflare` is set in the local settings and the variables it names are |
+
+Each cell's actor mounts its workspace from the runner's executor, writes
+to it, stays idle for 45 s (longer than the proxy's limit; needy's HTTP/2
+pings every 20 s keep the connections), reads it again, and prints
+`cut-me`. The harness then drops every connection of the transport at
+once, as a tunnel that restarts does (the proxy closes them; the `ssh -L`
+or the tunnel connector is ended and started again; nothing for
+`direct`), and writes `cut.done` on the runner's side. The actor must see
+`cut.done` through the mount, write `after.txt` back, and route one more
+command: the runner reconnects, and the mount starts its SFTP stream again
+(`crates/core-actor/src/sshfs/stream.rs`).
+
+The local settings name real machines and accounts, so they are a file
+outside the repository: `transports.json` in the work directory (`.tmp/e2e/`,
+git-ignored), or the file `NEEDY_E2E_TRANSPORTS` names. Secrets stay in the
+environment; the file names the variables:
+
+```json
+{
+  "ssh": { "destination": "user@host.example.com" },
+  "cloudflare": {
+    "hostname": "needy-e2e.example.com",
+    "origin_port": 7400,
+    "tunnel_token_env": "CF_TUNNEL_TOKEN",
+    "client_id_env": "CF_ACCESS_CLIENT_ID",
+    "client_secret_env": "CF_ACCESS_CLIENT_SECRET"
+  }
+}
+```
+
+`ssh.destination` must reach this host's loopback (its own sshd). The
+Cloudflare tunnel's ingress must forward `hostname` to
+`tcp://localhost:ORIGIN_PORT` on this host, behind an Access application
+whose policy admits the service token; no other connector may run for that
+tunnel meanwhile, and the Cloudflare cells run one at a time. Without the
+settings, a cell is not covered and says which setting is missing.
+
+`cargo xtask link-proxy --to PORT [--delay 75ms] [--idle 30s]` is the same
+proxy on its own: it prints its port, and adds the delay to each direction.
 
 ### The fake agent
 
@@ -381,6 +434,22 @@ waits for runsc. No flake showed in the three runs; the two flakes of the
 first round (the actor state and `exec --runner`) are fixed above, and the
 `Text file busy` failure was seen once, before its fix.
 
+### Transport cells
+
+The `runner/at=local` transport cells, run on their own on 2026-11-13
+(`--only runner/at=local`):
+
+| Host | `direct` | `idle-proxy` | `cloudflare` | `ssh-l` |
+| --- | --- | --- | --- | --- |
+| Apple silicon Mac, `macos-vz` | pass | pass | not covered (the tunnel's connector ran elsewhere) | not covered (no sshd accepts this host's key) |
+| Linux KVM host, `linux-firecracker` (static harness, `--no-prepare`) | pass | pass | pass, after the connector-registration wait (`fa22458`) | not covered (same) |
+
+On a tree whose mount does not reconnect (the reconnect window set to
+zero), `macos-vz/runner/at=local,transport=idle-proxy` fails with
+`after-cut: expected ok, got fail` and no `after.txt`: the cell catches the
+bug it was written for. Measurements over these transports are in the
+[Cloudflare transport evidence](2026-11-13-cloudflare-transport-evidence.md).
+
 ## Decisions
 
 Made on the spot, as the brief allowed:
@@ -444,6 +513,12 @@ Made on the spot, as the brief allowed:
   the two cells without an actor run on Linux and macOS in `check.yml`.
 
 ## Follow-up candidates
+
+- `ssh-l` needs an sshd that reaches the harness's host; neither the Mac
+  nor the Linux build host of 2026-11-13 accepts its own key, so those
+  cells were not covered there (the
+  [Cloudflare transport evidence](2026-11-13-cloudflare-transport-evidence.md)
+  ran `ssh -L` by hand).
 
 - A `runner` host for a build host's cells (`TODO(e2e-runner)` in
   `remote.rs`): the build host would need its own ssh access to the runner.

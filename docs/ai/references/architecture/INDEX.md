@@ -18,3 +18,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-12 | [Release and CI](2026-11-12-release-and-ci-design.md) | design |
 | 2026-11-12 | [Actor images](2026-11-12-actor-images-design.md) | design |
 | 2026-11-13 | [End-to-end harness](2026-11-13-e2e-harness-design.md) | design |
+| 2026-11-13 | [needy through a Cloudflare Tunnel](2026-11-13-cloudflare-transport-evidence.md) | evidence |

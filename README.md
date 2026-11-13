@@ -372,6 +372,33 @@ Profiles place executors (and the actor) on runners by name or label:
 the SSH session (for example with `Invoke-CimMethod Win32_Process`), with full
 paths and the token in `--join-token-file`.
 
+#### Over a tunnel
+
+needy serves plain gRPC on a loopback port and encrypts nothing itself. To
+reach it from elsewhere, give runners and clients an `exec:` endpoint: a
+command whose stdin and stdout carry each connection, as ssh's
+`ProxyCommand`. needy starts it for every connection, so no forwarding
+process has to be started by hand:
+
+```sh
+# Cloudflare Tunnel with Access: the tunnel forwards needy.example.com to the
+# control host's tcp://localhost:7400; an Access application with a service
+# token protects it. cloudflared reads the token from these variables.
+export TUNNEL_SERVICE_TOKEN_ID=... TUNNEL_SERVICE_TOKEN_SECRET=...
+JOIN=... needy daemon --mode runner --join 'exec:cloudflared access tcp --hostname needy.example.com' --join-token-env JOIN
+needy --endpoint 'exec:cloudflared access tcp --hostname needy.example.com' pair CODE
+
+# ssh to the control host, then to its loopback port
+needy --endpoint 'exec:ssh -W 127.0.0.1:7400 user@ctl.example.com' runner ls
+```
+
+Use a TCP route of the tunnel (`tcp://`, `cloudflared access tcp`): proxied
+HTTPS hostnames do not carry gRPC through Cloudflare Tunnel. A dropped
+connection costs little: runners connect again with backoff, and a workspace
+mount starts its SFTP stream again for up to 2 minutes. Measurements and
+limits are in the
+[Cloudflare transport evidence](docs/ai/references/architecture/2026-11-13-cloudflare-transport-evidence.md).
+
 ## Actor drivers
 
 `actor.driver` picks where the actor runs. The prefix is the operating system

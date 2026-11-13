@@ -256,7 +256,11 @@ CLI keeps one token per control plane endpoint in `credentials.json` in its
 config directory (`$XDG_CONFIG_HOME/needy`, mode 0600) and presents it to that
 endpoint; `NEEDY_TOKEN` overrides it. The endpoint paired last is the
 CLI's default control plane; `--endpoint` or `NEEDY_ENDPOINT` names another.
-The control plane stores only the token's hash. A client's name is a DNS
+An endpoint is `unix:PATH`, `http://` or `https://HOST:PORT`, or
+`exec:COMMAND`: a command whose standard input and output carry each
+connection, as ssh's `ProxyCommand` (`exec:cloudflared access tcp --hostname
+H`, `exec:ssh -W 127.0.0.1:7400 HOST`); a runner's `--join` takes the same
+forms. The control plane stores only the token's hash. A client's name is a DNS
 label that no other client that is not
 revoked holds.
 
@@ -571,7 +575,9 @@ The executor network sits near what the work operates on.
 A plain-HTTP name the actor uses for an endpoint outside it:
 `actor.network.services.NAME.url`. In the actor it is `http://NAME.needy`;
 the gateway forwards each request to the URL, which the control host (where
-the gateway runs) resolves. The actor never learns the real address.
+the gateway runs) resolves, and a `CONNECT NAME.needy:80` (clients that
+tunnel plain HTTP through a proxy) to the URL's host and port. The actor
+never learns the real address.
 
 ### User
 
