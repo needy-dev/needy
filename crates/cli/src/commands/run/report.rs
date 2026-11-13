@@ -1,7 +1,7 @@
-//! `needy report`: a report of a run from the trace, as plain text for
+//! `needy run report`: a report of a run from the trace, as plain text for
 //! people, markdown or JSON. The control plane sends the run's events
 //! (`RunService.GetRunEvents`), so any client it reaches can report; with
-//! `--local` they are read from this machine's `trace.db` instead, offline.
+//! `--offline` they are read from this machine's `trace.db` instead, offline.
 //! Either way they are decoded into `needy_core::event` values and rendered
 //! by `needy_core::report`; this command picks the format and the colors.
 
@@ -34,7 +34,7 @@ enum Format {
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Run ID prefix, or `latest`. Defaults to NEEDY_RUN, else `latest`.
+  /// Run ID, unique prefix, name (online only), or latest. Defaults to the inherited run, else latest.
   run: Option<String>,
   #[arg(long, value_enum, default_value = "summary")]
   level: Level,
@@ -47,7 +47,7 @@ pub struct Args {
   /// (`NEEDY_STATE_DIR`) instead of asking the control plane, as on the
   /// control host with no daemon running.
   #[arg(long)]
-  local: bool,
+  offline: bool,
 }
 
 /// Colors only for a terminal, and not when `NO_COLOR` is set
@@ -89,10 +89,9 @@ async fn local_events(ctx: &Context, run: &str) -> Result<(String, Vec<Stored>)>
 /// The run's full ID and its events, from the control plane.
 async fn remote_events(ctx: &Context, run: &str) -> Result<(String, Vec<Stored>)> {
   let fail = needy_api_client::Error::from;
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
-  let request = GetRunEventsRequest {
-    run_id: run.to_string(),
-  };
+  let connection = ctx.connect().await?;
+  let selected = crate::runs::select(&connection, Some(run.to_string()), ctx).await?;
+  let request = GetRunEventsRequest { run_id: selected };
   let mut stream = connection.runs().get_run_events(request).await.map_err(fail)?.into_inner();
   let mut id = String::new();
   let mut events = Vec::new();
@@ -111,8 +110,8 @@ async fn remote_events(ctx: &Context, run: &str) -> Result<(String, Vec<Stored>)
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   // The control plane and `trace.db` read a prefix and `latest` themselves.
-  let wanted = crate::runs::wanted(args.run).unwrap_or_else(|| "latest".into());
-  let (run, stored) = if args.local {
+  let wanted = crate::runs::wanted(args.run, ctx)?.unwrap_or_else(|| "latest".into());
+  let (run, stored) = if args.offline {
     local_events(ctx, &wanted).await?
   } else {
     remote_events(ctx, &wanted).await?

@@ -30,7 +30,7 @@ use needy_api_client::proto::v1::{
 use needy_api_client::{Client, Kind};
 use needy_api_server::control::RunnerHost;
 use needy_api_server::protocol::domain::{proto_capabilities, proto_runner_host};
-use needy_core::types::Capabilities;
+use needy_core::types::{Capabilities, RunnerRole};
 use needy_core_executor::process::{Host, Input};
 use needy_core_executor::service::ExecutorService;
 use serde::{Deserialize, Serialize};
@@ -96,6 +96,42 @@ pub struct Config {
   pub grace: Duration,
 }
 
+/// Runtime selections saved at enrollment. Role/image serve overrides are
+/// transient; explicitly accepted label overrides update the saved settings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Settings {
+  pub roles: Option<BTreeSet<RunnerRole>>,
+  pub labels: BTreeMap<String, String>,
+  pub actor_image: Option<PathBuf>,
+}
+
+/// The saved runner name and non-secret runtime settings.
+pub fn enrollment(state_dir: &Path) -> Result<(String, Settings)> {
+  let enrollment = load(&state_dir.join(ENROLLMENT))?.context("this runner has not joined yet; run needy runner join NAME")?;
+  Ok((enrollment.name, enrollment.settings))
+}
+
+/// Joins once and stores the credential/settings, without starting work streams.
+pub async fn enroll(config: Config, mut settings: Settings) -> Result<()> {
+  if load(&config.state_dir.join(ENROLLMENT))?.is_some() {
+    bail!("this runner already joined; use needy runner serve");
+  }
+  if settings.roles.is_none() {
+    let mut roles = BTreeSet::new();
+    if !config.capabilities.actor.is_empty() {
+      roles.insert(RunnerRole::Actor);
+    }
+    if !config.capabilities.executor.is_empty() {
+      roles.insert(RunnerRole::Executor);
+    }
+    settings.roles = Some(roles);
+  }
+  let mut runner = Runner::start(config).await?;
+  runner.enrollment.settings = settings;
+  store(&runner.path, &runner.enrollment)
+}
+
 /// What a runner keeps between starts.
 #[derive(Serialize, Deserialize)]
 struct Enrollment {
@@ -103,6 +139,8 @@ struct Enrollment {
   control: String,
   name: String,
   credential: String,
+  #[serde(default)]
+  settings: Settings,
 }
 
 /// A runner that joined.
@@ -276,6 +314,7 @@ async fn join(config: &Config, control: &str, join_token: &str, path: &Path) -> 
     control: control.to_string(),
     name: config.name.clone(),
     credential: joined.credential,
+    settings: Settings::default(),
   };
   store(path, &enrollment)?;
   tracing::info!("joined the control plane at {control} as runner {}", config.name);
@@ -594,10 +633,7 @@ async fn end_run(service: &ExecutorService, run: &str) -> EndRunResponse {
 }
 
 fn task_error(status: &tonic::Status) -> TaskError {
-  TaskError {
-    code: status.code() as i32,
-    message: status.message().to_string(),
-  }
+  needy_api_client::diagnostic::task_error(status)
 }
 
 /// Opens the task stream of exec task `id` and runs the exec on it: the
@@ -688,12 +724,23 @@ async fn exec(client: Client, service: ExecutorService, id: u64) -> Result<()> {
 /// is and fails, naming the processes still running. Ends with an error when
 /// the control plane refuses the runner's credential.
 pub async fn serve(config: Config) -> Result<()> {
+  serve_with_labels(config, false).await
+}
+
+/// Serves an enrolled runner. Explicit labels are persisted only after the
+/// control plane accepts their syntax and invitation-imposed constraints.
+pub async fn serve_with_labels(config: Config, persist_labels: bool) -> Result<()> {
   // Listening before the join: a signal during it lets the join end and
   // the credential be stored, which the control plane has already issued
   // and counted against the join token, before the runner stops.
   let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
   let served = async {
-    let runner = Runner::start(config).await?;
+    let mut runner = Runner::start(config).await?;
+    if persist_labels {
+      runner.beat().await.context("runner label overrides were not accepted; saved settings are unchanged")?;
+      runner.enrollment.settings.labels = runner.labels.clone();
+      store(&runner.path, &runner.enrollment)?;
+    }
     tracing::info!("runner {} dialing the control plane at {}", runner.name(), runner.control);
     runner.serve(termination.stop()).await
   };

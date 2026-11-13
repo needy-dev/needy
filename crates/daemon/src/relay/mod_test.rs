@@ -157,10 +157,11 @@ async fn attaching_to_a_workspace_mount_is_refused() {
     )
     .await;
 
-  let Err(ControlError::Denied { message, .. }) = refused else {
+  let Err(ControlError::Diagnostic { error, diagnostic }) = refused else {
     panic!("attaching to a workspace mount must be refused");
   };
-  assert_eq!(message, format!("process {process} is needy's own (origin actor-mount); it cannot be attached"));
+  assert_eq!(diagnostic.reason, "process.internal_attach_denied");
+  assert_eq!(error.to_string(), format!("process {process} is needy's own (origin actor-mount); it cannot be attached"));
   Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 }
 
@@ -553,10 +554,15 @@ async fn a_routed_command_whose_unmapped_cwd_is_missing_says_so_and_points_at_pa
     ..spec(&["sh", "-c", "true"], &created.id, "here")
   };
 
-  let Err(ControlError::Failed(message)) = daemon.exec(ExecOpen::Start(routed), attached()).await else {
+  let Err(ControlError::Diagnostic { error, diagnostic }) = daemon.exec(ExecOpen::Start(routed), attached()).await else {
     panic!("a missing working directory cannot start");
   };
 
+  assert_eq!(diagnostic.reason, "process.cwd_invalid");
+  assert_eq!(diagnostic.facts.get("cwd"), Some(&missing));
+  assert_eq!(diagnostic.facts.get("executor").map(String::as_str), Some("here"));
+  assert_eq!(diagnostic.facts.get("path_map").map(String::as_str), Some("unmapped"));
+  let message = error.to_string();
   assert!(message.starts_with(&format!("cannot start sh: working directory {missing} does not exist")), "{message}");
   assert!(message.contains("executor here has no path_map entry for it"), "{message}");
 }

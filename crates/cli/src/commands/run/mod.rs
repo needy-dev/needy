@@ -1,5 +1,8 @@
 //! `needy run`: create, list, stop runs and read an actor's console.
 
+mod chaos;
+mod report;
+
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
@@ -14,7 +17,7 @@ use crate::cli::Context;
 use crate::output::{self, OutputFormat, Row, outln};
 
 /// How a run command's `RUN` reads (`crate::runs`).
-const RUN_HELP: &str = "The run: an ID, an ID prefix, a name or `latest`. Defaults to NEEDY_RUN, else the only live run";
+const RUN_HELP: &str = "The run: an ID, an ID prefix, a name or `latest`. Defaults to the inherited run, else the only live run";
 
 // TODO(run-ux): a bare `needy run --profile X [-- ARGS]` as `run create` is
 // left out: with the arguments as an optional trailing argument, one named
@@ -29,6 +32,12 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Execute through a run's routing and bound executors.
+  Exec(super::proc::exec::RunArgs),
+  /// Render a run report online or from this machine's trace store.
+  Report(report::Args),
+  /// Manage a run's live faults.
+  Chaos(chaos::Args),
   /// Create a run from a profile and start its actor.
   Create {
     /// Run the driving program on a terminal, available to `run attach`.
@@ -255,9 +264,11 @@ fn actor_state(value: i32) -> Result<Option<ActorState>> {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let endpoint = ctx.endpoint()?;
   let fail = needy_api_client::Error::from;
   match args.command {
+    Command::Exec(args) => return super::proc::exec::run_in_run(args, ctx).await,
+    Command::Report(args) => return report::run(args, ctx).await,
+    Command::Chaos(args) => return chaos::run(args, ctx).await,
     Command::Create {
       tty,
       interactive,
@@ -284,7 +295,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       // The daemon may run on another machine: it gets the profile and its
       // recipe as text, not paths to read.
       let resolved = needy_config::profile::resolve(&needy_config::Source::file(&path))?;
-      let connection = crate::cli::connect(&endpoint).await?;
+      let connection = ctx.connect().await?;
       let run = connection
         .runs()
         .create_run(CreateRunRequest {
@@ -305,19 +316,19 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       if interactive {
         // Keep the run ID out of the driving program's terminal output.
         output::message(format!("run {}", run.run_id));
-        return attach(&connection, run.run_id, true, false, &detach_keys).await;
+        return attach(&connection, run.run_id, true, false, &detach_keys, ctx).await;
       }
       outln!("{}", run.run_id)?;
     }
     Command::Ls { output: format } => {
-      let connection = crate::cli::connect(&endpoint).await?;
+      let connection = ctx.connect().await?;
       let list = connection.runs().list_runs(ListRunsRequest {}).await.map_err(fail)?.into_inner();
       let rows = list.runs.into_iter().map(RunRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
     Command::Stop { run, grace, now } => {
-      let connection = crate::cli::connect(&endpoint).await?;
-      let run = crate::runs::select(&connection, run).await?;
+      let connection = ctx.connect().await?;
+      let run = crate::runs::select(&connection, run, ctx).await?;
       let request = StopRunRequest {
         run_id: run.clone(),
         now,
@@ -336,13 +347,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       read_only,
       detach_keys,
     } => {
-      let connection = crate::cli::connect(&endpoint).await?;
-      let run = crate::runs::select(&connection, run).await?;
-      return attach(&connection, run, !no_replay, read_only, &detach_keys).await;
+      let connection = ctx.connect().await?;
+      let run = crate::runs::select(&connection, run, ctx).await?;
+      return attach(&connection, run, !no_replay, read_only, &detach_keys, ctx).await;
     }
     Command::Logs { run, follow } => {
-      let connection = crate::cli::connect(&endpoint).await?;
-      let run = crate::runs::select(&connection, run).await?;
+      let connection = ctx.connect().await?;
+      let run = crate::runs::select(&connection, run, ctx).await?;
       let request = GetRunLogsRequest {
         run_id: run,
         follow,
@@ -363,14 +374,21 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 }
 
 /// Connects the local terminal to a run through the ordinary process relay.
-async fn attach(connection: &needy_api_client::Client, run: String, replay: bool, read_only: bool, detach_keys: &str) -> Result<i32> {
+async fn attach(
+  connection: &needy_api_client::Client,
+  run: String,
+  replay: bool,
+  read_only: bool,
+  detach_keys: &str,
+  ctx: &Context,
+) -> Result<i32> {
   let request = v1::ExecAttach {
     run_id: run,
     replay,
     read_only,
     ..Default::default()
   };
-  super::attach::relay(connection, request, detach_keys).await
+  super::proc::attach::relay(connection, request, detach_keys, ctx).await
 }
 
 #[cfg(test)]

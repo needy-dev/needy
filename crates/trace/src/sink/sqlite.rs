@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use sea_orm::sea_query::Expr;
 use sea_orm::{
   ActiveValue::Set, ColumnTrait, ConnectOptions, ConnectionTrait, Database, DatabaseConnection, EntityTrait, Order, QueryFilter, QueryOrder,
+  QuerySelect,
 };
 use sea_orm_migration::{MigratorTrait, SchemaManager};
 use serde_json::value::RawValue;
@@ -125,8 +126,10 @@ pub struct Loaded {
   pub events: Vec<Event>,
 }
 
-/// Reads the events of `run`, an ID prefix or `latest`. A prefix that
-/// matches several runs picks the one that started last.
+/// Reads a full ID, a unique ID prefix or `latest`. An ambiguous prefix is
+/// rejected rather than silently choosing the newest run.
+// NOTICE: the CLI configuration/access redesign changes prefix selection;
+// exact IDs and explicit `latest` keep their previous meaning.
 pub async fn load(path: &Path, run: &str) -> Result<Loaded, Error> {
   if !path.exists() {
     return Err(Error::NoDatabase(PathBuf::from(path)));
@@ -135,15 +138,28 @@ pub async fn load(path: &Path, run: &str) -> Result<Loaded, Error> {
   if !store.has_trace().await? {
     return Err(Error::NoRun(run.to_string()));
   }
-  let mut query = entity::run::Entity::find()
+  let query = entity::run::Entity::find()
     .order_by_desc(entity::run::Column::FirstMs)
     // NOTICE: runs that started in the same millisecond keep the order
     // they were added in through SQLite's implicit `rowid`.
     .order_by(Expr::cust("rowid"), Order::Desc);
-  if run != "latest" {
-    query = query.filter(entity::run::Column::Id.starts_with(run));
-  }
-  let found = query.one(&store.db).await?.ok_or_else(|| Error::NoRun(run.to_string()))?;
+  let found = if run == "latest" {
+    query.one(&store.db).await?.ok_or_else(|| Error::NoRun(run.to_string()))?
+  } else if let Some(exact) = entity::run::Entity::find_by_id(run).one(&store.db).await? {
+    exact
+  } else {
+    let matches = query.filter(entity::run::Column::Id.starts_with(run)).limit(2).all(&store.db).await?;
+    match matches.len() {
+      0 => return Err(Error::NoRun(run.to_string())),
+      1 => matches.into_iter().next().expect("one run"),
+      _ => {
+        return Err(Error::AmbiguousRun {
+          prefix: run.to_string(),
+          candidates: matches.into_iter().map(|run| run.id).collect(),
+        });
+      }
+    }
+  };
   let rows = entity::event::Entity::find()
     .filter(entity::event::Column::Run.eq(&found.id))
     .order_by_asc(entity::event::Column::Seq)

@@ -9,7 +9,7 @@ use needy_api_client::Client;
 use needy_api_client::files::{self, Target};
 use needy_api_client::proto::v1::Origin;
 
-use crate::cli::{Context, connect};
+use crate::cli::Context;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -23,14 +23,18 @@ enum Command {
   Cp {
     source: String,
     destination: String,
-    /// Look the executor up in this run: an ID, an ID prefix, a name or
-    /// `latest`. Defaults to NEEDY_RUN; without either, and with
-    /// `--run ''`, `EXECUTOR` is looked up outside any run.
-    #[arg(long)]
+    /// Bound run; requires its named executor.
+    #[arg(long, requires = "executor", conflicts_with_all = ["runner", "host"])]
     run: Option<String>,
-    /// `EXECUTOR:` names a runner instead: copy to or from its machine.
-    #[arg(long, conflicts_with = "run")]
-    runner: bool,
+    /// One registered runner's machine.
+    #[arg(long, conflicts_with_all = ["executor", "host"])]
+    runner: Option<String>,
+    /// The selected control or standalone executor host.
+    #[arg(long, conflicts_with = "executor")]
+    host: bool,
+    /// A run-bound executor, or a uniquely named pooled executor outside a run.
+    #[arg(long)]
+    executor: Option<String>,
   },
 }
 
@@ -41,13 +45,38 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       destination,
       run,
       runner,
+      host,
+      executor,
     } => {
-      let client = connect(&ctx.endpoint()?).await?;
-      // `EXECUTOR:` names a runner outside any run, whatever NEEDY_RUN says.
-      let place = if runner {
-        Place::Runner
+      let count = usize::from(runner.is_some()) + usize::from(host) + usize::from(executor.is_some());
+      if count != 1
+        || !matches!(
+          (parse(&source), parse(&destination)),
+          (Location::Local(_), Location::Remote { .. }) | (Location::Remote { .. }, Location::Local(_))
+        )
+      {
+        return Err(
+          crate::diagnostics::Error::new(
+            "files.invalid_target",
+            "Copy requires one local path and one remote:PATH with one explicit target",
+          )
+          .check("Use --host, --runner NAME, --executor NAME, or --run RUN --executor NAME.")
+          .into(),
+        );
+      }
+      let client = ctx.connect().await?;
+      let place = if let Some(runner) = runner {
+        Place::Runner(runner)
+      } else if let Some(executor) = executor {
+        Place::Run {
+          run: match run {
+            Some(run) => crate::runs::select(&client, Some(run), ctx).await?,
+            None => String::new(),
+          },
+          executor,
+        }
       } else {
-        Place::Run(crate::runs::select_or_none(&client, run).await?.unwrap_or_default())
+        Place::Host
       };
       cp(&client, &place, &source, &destination).await?
     }
@@ -57,26 +86,24 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 
 /// What the `EXECUTOR:` side of a copy names.
 enum Place {
-  /// An executor, within this run when it is not empty.
-  Run(String),
-  /// A runner's machine.
-  Runner,
+  Run { run: String, executor: String },
+  Runner(String),
+  Host,
 }
 
-/// `EXECUTOR:path`, or a local path.
 enum Location {
   Local(PathBuf),
-  Remote { executor: String, path: String },
+  Remote { path: String },
 }
 
 fn parse(spec: &str) -> Location {
-  // A Windows drive letter is a local path, not an executor name.
-  match spec.split_once(':') {
-    Some((executor, path)) if executor.len() > 1 && !executor.contains('/') => Location::Remote {
-      executor: executor.to_string(),
+  // Only the reserved marker is remote. Windows drive letters, filenames
+  // containing colons and platform path syntax stay local.
+  match spec.strip_prefix("remote:") {
+    Some(path) => Location::Remote {
       path: path.to_string(),
     },
-    _ => Location::Local(PathBuf::from(spec)),
+    None => Location::Local(PathBuf::from(spec)),
   }
 }
 
@@ -98,9 +125,9 @@ fn split(path: &str) -> (String, String) {
 /// Copies `source` into the directory `destination`, keeping its name.
 async fn cp(client: &Client, place: &Place, source: &str, destination: &str) -> Result<()> {
   match (parse(source), parse(destination)) {
-    (Location::Local(local), Location::Remote { executor, path }) => upload(client, place, &executor, &local, &path).await,
-    (Location::Remote { executor, path }, Location::Local(local)) => download(client, place, &executor, &path, &local).await,
-    _ => bail!("one side must be EXECUTOR:path and the other a local path"),
+    (Location::Local(local), Location::Remote { path }) => upload(client, place, &place_name(place), &local, &path).await,
+    (Location::Remote { path }, Location::Local(local)) => download(client, place, &place_name(place), &path, &local).await,
+    _ => bail!("one side must be remote:PATH and the other a local path"),
   }
 }
 
@@ -115,10 +142,19 @@ fn tar_failed(executor: &str, path: &str, error: needy_api_client::Error) -> any
   }
 }
 
-fn target(place: &Place, name: &str) -> Target {
+fn place_name(place: &Place) -> String {
+  match place {
+    Place::Run { executor, .. } => executor.clone(),
+    Place::Runner(name) => name.clone(),
+    Place::Host => "host".into(),
+  }
+}
+
+fn target(place: &Place, _: &str) -> Target {
   let (executor, run, runner) = match place {
-    Place::Run(run) => (name.to_string(), run.clone(), String::new()),
-    Place::Runner => (String::new(), String::new(), name.to_string()),
+    Place::Run { run, executor } => (executor.clone(), run.clone(), String::new()),
+    Place::Runner(name) => (String::new(), String::new(), name.clone()),
+    Place::Host => (String::new(), String::new(), String::new()),
   };
   Target {
     executor,
@@ -161,9 +197,13 @@ async fn download(client: &Client, place: &Place, executor: &str, remote: &str, 
       // Refuse paths that escape the destination.
       let path = entry.path()?.into_owned();
       if path.is_absolute() || path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        bail!("unsafe path in archive: {}", path.display());
+        return Err(crate::diagnostics::Error::new("files.unsafe_archive", "The archive contains a path outside the destination").into());
       }
-      entry.unpack_in(&local_dir)?;
+      if !entry.unpack_in(&local_dir)? {
+        return Err(
+          crate::diagnostics::Error::new("files.unsafe_archive", "The archive entry could not be extracted inside the destination").into(),
+        );
+      }
     }
     Ok(())
   })

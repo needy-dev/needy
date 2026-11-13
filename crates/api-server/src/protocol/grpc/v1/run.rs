@@ -30,8 +30,8 @@ impl<S> Adapter<S> {
   fn operator<T>(&self, request: &Request<T>, refusal: &str) -> Result<Caller, Status> {
     match caller(&self.caller, request) {
       caller @ (Caller::Operator | Caller::Client { .. }) => Ok(caller),
-      Caller::Actor { .. } => Err(ControlError::denied(refusal).into()),
-      Caller::Runner { .. } => Err(ControlError::denied("runners cannot manage runs").into()),
+      Caller::Actor { .. } => Err(ControlError::role_denied(refusal).into()),
+      Caller::Runner { .. } => Err(ControlError::role_denied("runners cannot manage runs").into()),
     }
   }
 }
@@ -122,7 +122,7 @@ impl<S: Runs> RunService for Adapter<S> {
     let run = match &caller {
       Caller::Actor { run } => run.clone(),
       Caller::Operator | Caller::Client { .. } => std::mem::take(&mut request.run_id),
-      Caller::Runner { .. } => return Err(ControlError::denied("runners cannot place commands").into()),
+      Caller::Runner { .. } => return Err(ControlError::role_denied("runners cannot place commands").into()),
     };
     let route = self.runs.decide(&run, domain::exec_context(request)).await?;
     Ok(Response::new(domain::proto_route(route)))

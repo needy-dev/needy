@@ -1,46 +1,33 @@
-//! Which run a command addresses, so a run ID need not be copied by hand
-//! (owner decision, 2026-11-12). A command's `--run` (or `RUN` argument)
-//! wins, else `NEEDY_RUN`; either may be a full ID, an ID prefix, a run's
-//! name or `latest`, the run created last. Commands that only make sense
-//! about a run (`run attach`, `run stop`, `run logs`) then take the only
-//! live run; `exec`, `ps` and `fs cp`, which mean something without a run,
-//! stay outside any run instead (the CLI UX slice's choice, which keeps
-//! `needy exec -- CMD` from changing meaning when a run starts).
-//!
-//! The run is found among the control plane's runs (`ListRuns`) and sent as
-//! its full ID, so every command reads a prefix the same way, also `ps`,
-//! whose executors match run IDs exactly.
+//! Resolve run references through the selected control plane. Run operations
+//! may inherit a fixed execution reference; process creation never calls this.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{self, ListRunsRequest, Run};
 
-/// The variable that names the run when a command does not.
-pub const ENV: &str = "NEEDY_RUN";
-
-/// The full ID of the run `given` or `NEEDY_RUN` names, else of the only
-/// live run. An empty `given` counts as not given.
-pub async fn select(connection: &Client, given: Option<String>) -> Result<String> {
+/// Resolve an explicit/inherited reference, otherwise require one live run.
+pub async fn select(connection: &Client, given: Option<String>, ctx: &crate::cli::Context) -> Result<String> {
   let runs = list(connection).await?;
-  match wanted(given.filter(|g| !g.is_empty())) {
+  match wanted(given, ctx)? {
     Some(wanted) => find(&runs, &wanted),
     None => only_live(&runs),
   }
 }
 
-/// The full ID of the run `given` or `NEEDY_RUN` names, or `None` outside any
-/// run: when neither names one, or `given` is empty (`--run ''`), which
-/// leaves a run `NEEDY_RUN` names.
-pub async fn select_or_none(connection: &Client, given: Option<String>) -> Result<Option<String>> {
-  match wanted(given) {
-    Some(wanted) if !wanted.is_empty() => Ok(Some(find(&list(connection).await?, &wanted)?)),
-    _ => Ok(None),
+/// A caller's explicit run wins. An explicit target suppresses inherited run
+/// selection, so a reference from another control plane cannot redirect it.
+pub fn wanted(given: Option<String>, ctx: &crate::cli::Context) -> Result<Option<String>> {
+  if let Some(given) = given {
+    anyhow::ensure!(!given.is_empty(), "RUN cannot be empty; choose a run explicitly");
+    return Ok(Some(given));
   }
-}
-
-/// `given`, else `NEEDY_RUN` when it is set and not empty.
-pub fn wanted(given: Option<String>) -> Option<String> {
-  given.or_else(|| std::env::var(ENV).ok().filter(|v| !v.is_empty()))
+  if ctx.selected_context.is_some() || ctx.address.is_some() {
+    return Ok(None);
+  }
+  if let Some(execution) = crate::connection::inherited()? {
+    return Ok(execution.run);
+  }
+  Ok(None)
 }
 
 async fn list(connection: &Client) -> Result<Vec<Run>> {
@@ -55,7 +42,11 @@ fn find(runs: &[Run], wanted: &str) -> Result<String> {
     // `max_by_key` keeps the last of equals, and runs come oldest first.
     return match runs.iter().max_by_key(|run| run.created_at_ms) {
       Some(run) => Ok(run.run_id.clone()),
-      None => bail!("there is no run yet; create one with `needy run create`"),
+      None => Err(
+        crate::diagnostics::Error::new("run.not_found", "There is no run yet")
+          .check("Create one with `needy run create --profile PROFILE`.")
+          .into(),
+      ),
     };
   }
   if let Some(exact) = runs.iter().find(|run| run.run_id == wanted) {
@@ -63,9 +54,20 @@ fn find(runs: &[Run], wanted: &str) -> Result<String> {
   }
   let matches: Vec<&Run> = runs.iter().filter(|run| run.run_id.starts_with(wanted) || run.name == wanted).collect();
   match matches.as_slice() {
-    [] => bail!("no run {wanted}"),
+    [] => Err(
+      crate::diagnostics::Error::new("run.not_found", format!("No run {wanted}"))
+        .check("List runs on this control plane with `needy run ls`.")
+        .into(),
+    ),
     [one] => Ok(one.run_id.clone()),
-    several => bail!("run {wanted} is ambiguous: {} runs match; give more of the ID:\n{}", several.len(), table(several)),
+    several => Err(
+      crate::diagnostics::Error::new(
+        "run.ambiguous",
+        format!("run {wanted} is ambiguous: {} runs match; give more of the ID:\n{}", several.len(), table(several)),
+      )
+      .check("Give a full run ID from `needy run ls`.")
+      .into(),
+    ),
   }
 }
 
@@ -73,11 +75,21 @@ fn find(runs: &[Run], wanted: &str) -> Result<String> {
 fn only_live(runs: &[Run]) -> Result<String> {
   let live: Vec<&Run> = runs.iter().filter(|run| is_live(run)).collect();
   match live.as_slice() {
-    [] => bail!("no run is live; name a run (an ID, an ID prefix, a name or `latest`) or create one with `needy run create`"),
+    [] => Err(
+      crate::diagnostics::Error::new(
+        "run.not_found",
+        "no run is live; name a run (an ID, a unique prefix, a name or latest) or create one with `needy run create`",
+      )
+      .into(),
+    ),
     [one] => Ok(one.run_id.clone()),
-    several => {
-      bail!("{} runs are live; name one (an ID, an ID prefix, a name or `latest`), or set {ENV}:\n{}", several.len(), table(several))
-    }
+    several => Err(
+      crate::diagnostics::Error::new(
+        "run.ambiguous",
+        format!("{} runs are live; name one (an ID, a unique prefix, a name or latest):\n{}", several.len(), table(several)),
+      )
+      .into(),
+    ),
   }
 }
 

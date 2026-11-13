@@ -5,6 +5,8 @@
 
 #![allow(clippy::all, clippy::pedantic)]
 
+pub mod diagnostic;
+
 pub mod needy {
   pub mod v1 {
     include!("gen/needy/v1/needy.v1.rs");

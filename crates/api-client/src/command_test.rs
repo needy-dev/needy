@@ -96,3 +96,18 @@ async fn an_empty_or_unbalanced_endpoint_command_is_invalid() {
     assert!(matches!(error, Error::InvalidEndpoint(_)), "{endpoint}: {error:?}");
   }
 }
+
+#[tokio::test]
+async fn a_connector_exit_before_the_handshake_retains_its_observed_exit_result() {
+  let error = Client::connect_command(vec!["sh".into(), "-c".into(), "exit 42".into()]).await.unwrap_err();
+  let diagnostic = error.diagnostic().expect("the process exit was observed");
+  assert_eq!(diagnostic.reason, "connector.failed");
+  assert_eq!(diagnostic.facts.get("program").map(String::as_str), Some("sh"));
+  assert_eq!(diagnostic.facts.get("exit_code").map(String::as_str), Some("42"));
+}
+
+#[tokio::test]
+async fn a_missing_connector_is_distinct_from_a_running_connector_failure() {
+  let error = Client::connect_command(vec!["needy-no-such-endpoint-command".into()]).await.unwrap_err();
+  assert_eq!(error.diagnostic().unwrap().reason, "connector.not_found");
+}

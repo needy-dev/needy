@@ -21,9 +21,16 @@ fn exited(code: i32) -> Result<relay::Ended, relay::Error> {
 #[cfg(unix)]
 #[test]
 fn a_windows_exit_code_above_255_is_a_failure_on_a_unix_client() {
-  assert_eq!(status(exited(256)).unwrap(), signals::OUT_OF_RANGE);
-  assert_eq!(status(exited(300)).unwrap(), signals::OUT_OF_RANGE);
-  assert_eq!(status(exited(-1_073_741_510)).unwrap(), signals::OUT_OF_RANGE);
-  assert_eq!(status(exited(7)).unwrap(), 7);
-  assert_eq!(status(exited(0)).unwrap(), 0);
+  let ctx = Context {
+    config: None,
+    selected_context: None,
+    address: None,
+    credential_file: None,
+    diagnostic_format: crate::diagnostics::Format::Human,
+  };
+  assert_eq!(status(exited(256), &ctx).unwrap(), signals::OUT_OF_RANGE);
+  assert_eq!(status(exited(300), &ctx).unwrap(), signals::OUT_OF_RANGE);
+  assert_eq!(status(exited(-1_073_741_510), &ctx).unwrap(), signals::OUT_OF_RANGE);
+  assert_eq!(status(exited(7), &ctx).unwrap(), 7);
+  assert_eq!(status(exited(0), &ctx).unwrap(), 0);
 }

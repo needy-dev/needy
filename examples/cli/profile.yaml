@@ -1,6 +1,6 @@
-# A `linux-container` executor for `needy exec --run`. The actor only waits: the
-# commands come from `needy exec`, which the rules send to `build`.
-# `needy exec --runner NAME` reaches a runner's machine without a run.
+# A `linux-container` executor for `needy run exec RUN`. The actor only waits: the
+# commands come from `needy run exec`, which the rules send to `build`.
+# `needy proc exec --runner NAME` reaches a runner's machine without a run.
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker

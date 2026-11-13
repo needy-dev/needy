@@ -90,6 +90,30 @@ pub mod client_service_client {
             self.inner = self.inner.max_encoding_message_size(limit);
             self
         }
+        pub async fn get_caller(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetCallerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCallerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.ClientService/GetCaller",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("needy.v1.ClientService", "GetCaller"));
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn create_pairing_code(
             &mut self,
             request: impl tonic::IntoRequest<super::CreatePairingCodeRequest>,
@@ -198,6 +222,13 @@ pub mod client_service_server {
     /// Generated trait containing gRPC methods that should be implemented for use with ClientServiceServer.
     #[async_trait]
     pub trait ClientService: std::marker::Send + std::marker::Sync + 'static {
+        async fn get_caller(
+            &self,
+            request: tonic::Request<super::GetCallerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetCallerResponse>,
+            tonic::Status,
+        >;
         async fn create_pairing_code(
             &self,
             request: tonic::Request<super::CreatePairingCodeRequest>,
@@ -300,6 +331,51 @@ pub mod client_service_server {
         }
         fn call(&mut self, req: http::Request<B>) -> Self::Future {
             match req.uri().path() {
+                "/needy.v1.ClientService/GetCaller" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetCallerSvc<T: ClientService>(pub Arc<T>);
+                    impl<
+                        T: ClientService,
+                    > tonic::server::UnaryService<super::GetCallerRequest>
+                    for GetCallerSvc<T> {
+                        type Response = super::GetCallerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetCallerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ClientService>::get_caller(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetCallerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
                 "/needy.v1.ClientService/CreatePairingCode" => {
                     #[allow(non_camel_case_types)]
                     struct CreatePairingCodeSvc<T: ClientService>(pub Arc<T>);

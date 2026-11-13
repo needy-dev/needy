@@ -31,6 +31,7 @@ mod runs;
 #[cfg(unix)]
 mod scenarios;
 #[cfg(unix)]
+#[cfg(unix)]
 mod summary;
 #[cfg(unix)]
 mod term;
@@ -212,6 +213,12 @@ mod run {
     let wants_windows =
       selected.iter().any(|c| c.scenario == matrix::Scenario::Runner(matrix::RunnerAt::Windows) && c.elsewhere(here).is_none());
     let windows = match &args.windows_runner {
+      Some(_) if wants_windows && !super::windows::enrollment_available() => {
+        // TODO(windows-acl): the canonical runner join code-file flow needs
+        // Windows private-file ACL validation; see the CLI access specification.
+        // Do not ship/build remotely when enrollment cannot be accepted yet.
+        Some(Err("automated Windows runner enrollment is not covered until Windows private code-file ACL validation is implemented".into()))
+      }
       Some(ssh) if wants_windows && !args.list => Some(super::windows::prepare(&root, ssh, &args.windows_dir).map_err(|e| format!("{e:#}"))),
       Some(ssh) => Some(Ok(super::windows::Windows {
         ssh: ssh.clone(),
@@ -390,6 +397,7 @@ mod run {
       }
       env.start_daemon()?;
       invariants::sockets(&env, &mut checks, "at daemon start");
+      invariants::discovery(&env, &mut checks);
       scenarios::run(&mut env, &cell, &mut checks)
     })();
     if let Err(e) = ran {

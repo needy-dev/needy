@@ -89,6 +89,7 @@ pub struct Server {
   clients: Option<Arc<dyn Clients>>,
   /// The group the Unix sockets this server binds are given to, mode 0660.
   socket_group: Option<u32>,
+  management: Option<(PathBuf, u32)>,
 }
 
 impl Server {
@@ -101,6 +102,7 @@ impl Server {
       runners: None,
       clients: None,
       socket_group: None,
+      management: None,
     }
   }
 
@@ -109,14 +111,21 @@ impl Server {
   /// that group, such as a container executor's daemon of another user
   /// (`needy daemon --socket-group`). The server's user must be a member of
   /// the group.
+  /// Designates the private owner/root management entry. Other control
+  /// listeners require explicit registered credentials, including loopback.
+  pub fn management_socket(mut self, path: PathBuf, owner_uid: u32) -> Self {
+    self.management = Some((path, owner_uid));
+    self
+  }
+
   pub fn socket_group(mut self, gid: Option<u32>) -> Self {
     self.socket_group = gid;
     self
   }
 
-  /// The bearer token every method but health (and `Join`) needs; any
-  /// token is accepted when there is none. A runner's credential is no
-  /// substitute: it reaches the runner methods only.
+  /// A static incoming token for standalone services and explicit legacy
+  /// callers. Registered client/runner credentials retain their own identity.
+  /// A management socket grants operator admission independently of this token.
   pub fn token(mut self, token: Option<String>) -> Self {
     self.token = token;
     self
@@ -178,16 +187,17 @@ impl Server {
   /// earlier server that no longer listens is replaced; one where a server
   /// still answers is [`Error::InUse`]. The socket files this server binds
   /// are removed when it stops serving, or when [`Bound`] is dropped
-  /// without serving. Without a token, a TCP listener on a
-  /// non-loopback address is refused ([`Error::Unauthenticated`]); one on a
-  /// loopback address, where tunnels end, starts with a warning. A TCP
+  /// without serving. A server with a designated management socket requires
+  /// credentials on its other listeners. Otherwise a tokenless TCP listener
+  /// off loopback is refused; loopback starts with a warning. A TCP
   /// listener on port 0 gets a free port; [`Bound::addresses`] tells which.
   pub async fn bind(self, listen: &[Listen]) -> Result<Bound, Error> {
     let mut listeners = Vec::with_capacity(listen.len());
     #[cfg(unix)]
     let mut sockets = Vec::new();
     for listen in listen {
-      let listener = Listener::bind(listen, self.socket_group).await?;
+      let management = self.management.as_ref().is_some_and(|(path, _)| *listen == Listen::Unix(path.clone()));
+      let listener = Listener::bind(listen, if management { None } else { self.socket_group }).await?;
       #[cfg(unix)]
       if let (Listener::Unix(_), Listen::Unix(path)) = (&listener, listen) {
         // Held from here, so a later listener that fails to bind removes
@@ -197,7 +207,7 @@ impl Server {
           source,
         })?);
       }
-      if self.token.is_none() {
+      if self.token.is_none() && self.management.is_none() {
         listener.check_unauthenticated(listen)?;
       }
       listeners.push((listener.address(listen), listener));
@@ -205,12 +215,14 @@ impl Server {
     Ok(Bound {
       routes: self.routes,
       credentials: Credentials {
+        allow_anonymous: true,
         listener: self.caller,
         token: Token(self.token),
         runners: self.runners,
         clients: self.clients,
       },
       listeners,
+      management: self.management,
       #[cfg(unix)]
       sockets,
     })
@@ -390,6 +402,7 @@ pub struct Bound {
   routes: Routes,
   credentials: Credentials,
   listeners: Vec<(Listen, Listener)>,
+  management: Option<(PathBuf, u32)>,
   /// The Unix socket files bound, removed when this server stops serving.
   #[cfg(unix)]
   sockets: Vec<SocketFile>,
@@ -407,9 +420,19 @@ impl Bound {
     // Dropped when this returns or is dropped, which removes the files.
     #[cfg(unix)]
     let _sockets = self.sockets;
-    let auth = AuthLayer::new(self.credentials);
+    let credentials = self.credentials;
     let mut serving = tokio::task::JoinSet::new();
     for (listen, listener) in self.listeners {
+      let mut credentials = credentials.clone();
+      let owner_uid = self.management.as_ref().and_then(|(path, uid)| (listen == Listen::Unix(path.clone())).then_some(*uid));
+      if self.management.is_some() {
+        credentials.allow_anonymous = owner_uid.is_some();
+      }
+      // Local admission, rather than a legacy shared token, grants operator authority.
+      if owner_uid.is_some() {
+        credentials.token = Token(None);
+      }
+      let auth = AuthLayer::new(credentials).owner(owner_uid);
       let router = tonic::transport::Server::builder()
         .http2_keepalive_interval(Some(Duration::from_secs(20)))
         .tcp_nodelay(true)

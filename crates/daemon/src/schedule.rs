@@ -108,6 +108,56 @@ pub enum Unschedulable {
   },
 }
 
+impl Unschedulable {
+  /// Facts come from the scheduler's actual candidates, never message parsing.
+  pub(crate) fn diagnostic(&self) -> needy_api_server::control::Diagnostic {
+    let mut facts = BTreeMap::new();
+    let reason = match self {
+      Self::NoSuchRunner { name, known } => {
+        facts.insert("runner".into(), name.clone());
+        facts.insert("candidates".into(), known.join(", "));
+        "runner.not_found"
+      }
+      Self::Lacks {
+        name, need, able, ..
+      } => {
+        facts.insert("runner".into(), name.clone());
+        facts.insert("need".into(), need.to_string());
+        facts.insert("candidates".into(), able.join(", "));
+        "runner.capability_missing"
+      }
+      Self::NotConnected(name) => {
+        facts.insert("runner".into(), name.clone());
+        "runner.not_connected"
+      }
+      Self::NoMatch {
+        need,
+        labels,
+        candidates,
+      } => {
+        facts.insert("need".into(), need.to_string());
+        facts.insert("selector".into(), list_labels(labels));
+        facts.insert("candidates".into(), candidates.iter().map(|(name, why)| format!("{name} ({why})")).collect::<Vec<_>>().join(", "));
+        "runner.selector_no_match"
+      }
+      Self::Ambiguous {
+        need,
+        labels,
+        matches,
+      } => {
+        facts.insert("need".into(), need.to_string());
+        facts.insert("selector".into(), list_labels(labels));
+        facts.insert("candidates".into(), matches.join(", "));
+        "runner.selector_ambiguous"
+      }
+    };
+    needy_api_server::control::Diagnostic {
+      reason: reason.into(),
+      facts,
+    }
+  }
+}
+
 fn joined(known: &[String]) -> String {
   if known.is_empty() {
     "no runner has joined".into()
@@ -256,7 +306,7 @@ impl Daemon {
       Placement::Runner(name) if self.is_local(name) => None,
       Placement::Runner(name) => Some(format!(
         "runner {name} cannot host actors yet: an actor runs on the control host, or on its own runner \
-         (`needy daemon --mode control --local-runner NAME`)"
+         (`needy daemon serve --local-runner NAME`)"
       )),
     }
   }
@@ -272,7 +322,7 @@ impl Daemon {
       // `pool::Pool::create`.
       (Placement::Runner(name), ExecutorDriver::LinuxContainer) => Err(format!(
         "runner {name} cannot create linux-container executors yet: only the control host's own runner can \
-         (`needy daemon --mode control --local-runner NAME`); use `driver: native` there"
+         (`needy daemon serve --local-runner NAME`); use `driver: native` there"
       )),
       (Placement::Runner(name), _) => {
         let host = self.runner_host(name).unwrap_or_default();

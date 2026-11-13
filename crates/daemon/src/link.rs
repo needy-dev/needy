@@ -33,7 +33,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
-use tonic::{Code, Status};
+use tonic::Status;
 
 // NOTICE: how long the control plane waits for a runner to open an exec's
 // task stream, or to answer a list or a kill. A connected runner does either
@@ -361,6 +361,7 @@ fn relayed(runner: String, responses: FromRunner<TaskRequest>) -> Responses {
           Some(Err(failed)) => {
             tracing::debug!("runner {runner}: task stream: {}", failed.message());
             let ended = ExecResponse {
+              diagnostic: None,
               payload: Some(exec_response::Payload::Ended(ExecEnded {
                 reason: format!("runner {runner} disconnected"),
               })),
@@ -377,7 +378,7 @@ fn relayed(runner: String, responses: FromRunner<TaskRequest>) -> Responses {
 
 /// A runner's error as the status its process service returned.
 fn status(error: TaskError) -> Status {
-  Status::new(Code::from_i32(error.code), error.message)
+  needy_api_client::diagnostic::task_status(error)
 }
 
 /// A connected runner's machine, reached through its control stream. It

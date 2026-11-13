@@ -173,7 +173,7 @@ async fn pull_vm(client: &reqwest::Client, images: &Path, driver: ActorDriver, v
     output::message(format_args!("image pull: downloading {url}"));
     let actual = download(client, &url, &archive).await?;
     if actual != expected {
-      bail!("{name} from {url} has SHA-256 {actual}, and its .sha256 says {expected}; nothing was installed");
+      return Err(integrity(&name, &expected, &actual).into());
     }
     output::message(format_args!("image pull: verified {name} (sha256 {actual})"));
     install(
@@ -253,7 +253,7 @@ async fn import(images: &Path, driver: Option<ActorDriver>, file: &Path) -> Resu
     Ok(text) => {
       let expected = text.split_whitespace().next().unwrap_or_default().to_ascii_lowercase();
       if expected != actual {
-        bail!("{} has SHA-256 {actual}, and {} says {expected}; nothing was installed", file.display(), PathBuf::from(&sum).display());
+        return Err(integrity(&file.display().to_string(), &expected, &actual).into());
       }
       output::message(format_args!("image pull: verified {} (sha256 {actual})", file.display()));
     }
@@ -264,6 +264,14 @@ async fn import(images: &Path, driver: Option<ActorDriver>, file: &Path) -> Resu
   }
   std::fs::create_dir_all(images).with_context(|| format!("cannot create {}", images.display()))?;
   install(images, driver, &file, &actual, manifest::Source::File { path: file.clone() }).await
+}
+
+fn integrity(artifact: &str, expected: &str, actual: &str) -> crate::diagnostics::Error {
+  crate::diagnostics::Error::new("image.integrity_failed", "Image verification failed; this image was not installed")
+    .fact("artifact", artifact)
+    .fact("expected_sha256", expected)
+    .fact("actual_sha256", actual)
+    .check("Retry a trusted image source; preserve previously installed images and keep checksum verification enabled.")
 }
 
 /// The SHA-256 of the file at `path`, as lowercase hex.
@@ -331,16 +339,36 @@ fn check(manifest: &Manifest, driver: Option<ActorDriver>) -> Result<()> {
     bail!("the archive's manifest names {found}, which boots no VM image");
   }
   if manifest.arch != vm::arch(found) {
-    bail!("the archive's {found} image is for {}, and {found} actors run {}", manifest.arch, vm::arch(found));
+    return Err(
+      crate::diagnostics::Error::new(
+        "image.architecture_mismatch",
+        format!("the archive's {found} image is for {}, and {found} actors run {}", manifest.arch, vm::arch(found)),
+      )
+      .fact("driver", found.as_str())
+      .fact("architecture", &manifest.arch)
+      .fact("expected_architecture", vm::arch(found))
+      .check("Pull or build the matching architecture for this actor driver.")
+      .into(),
+    );
   }
   if manifest.base_abi != base::ABI {
-    bail!(
-      "the {found} base of needy {} has base ABI {}, and this needy speaks base ABI {}; pull this needy's release (without \
+    return Err(
+      crate::diagnostics::Error::new(
+        "image.abi_mismatch",
+        format!(
+          "the {found} base of needy {} has base ABI {}, and this needy speaks base ABI {}; pull this needy's release (without \
        --version), or use a needy that speaks base ABI {}",
-      manifest.version,
-      manifest.base_abi,
-      base::ABI,
-      manifest.base_abi
+          manifest.version,
+          manifest.base_abi,
+          base::ABI,
+          manifest.base_abi
+        ),
+      )
+      .fact("driver", found.as_str())
+      .fact("base_abi", manifest.base_abi.to_string())
+      .fact("expected_base_abi", base::ABI.to_string())
+      .check("Pull this binary's matching release image, or build its base from the same source revision.")
+      .into(),
     );
   }
   Ok(())

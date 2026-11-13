@@ -15,7 +15,7 @@ pub struct Args {
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let signal = needy_core_executor::signals::parse(&args.signal).ok_or_else(|| anyhow!("unknown signal {}", args.signal))?;
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  let connection = ctx.connect().await?;
   connection
     .processes()
     .kill_process(KillProcessRequest {

@@ -1,4 +1,4 @@
-//! `needy chaos`: add, list and remove a live run's chaos faults. A fault
+//! `needy run chaos`: add, list and remove a live run's chaos faults. A fault
 //! takes the fields of a profile's `chaos.faults` entry, as flags or as a
 //! YAML file; the control plane checks it as it checks a profile, and
 //! records each addition and removal in the run's trace.
@@ -33,7 +33,7 @@ enum Command {
   Rm(RmArgs),
 }
 
-/// The run: an ID, an ID prefix, a name or `latest`; NEEDY_RUN, else the
+/// The run: an ID, an ID prefix, a name or `latest`; the inherited run, else the
 /// only live run, when absent.
 #[derive(clap::Args)]
 struct RunArg {
@@ -48,7 +48,7 @@ struct AddArgs {
   #[command(flatten)]
   run: RunArg,
   /// The fault as YAML, written as a `chaos.faults` entry.
-  #[arg(long, conflicts_with_all = ["exec", "open", "connect", "request"])]
+  #[arg(long, conflicts_with_all = ["exec", "open", "connect", "request", "exit", "signal", "stderr", "hang", "delay", "errno", "refuse", "reset", "status", "probability", "nth", "times", "after", "until"])]
   file: Option<PathBuf>,
   /// exec: a command pattern, such as "curl **".
   #[arg(long, value_name = "PATTERN")]
@@ -122,11 +122,11 @@ struct RmArgs {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  let connection = ctx.connect().await?;
   match args.command {
     Command::Add(args) => {
       let fault_yaml = fault_yaml(&args)?;
-      let run = crate::runs::select(&connection, args.run.run).await?;
+      let run = crate::runs::select(&connection, args.run.run, ctx).await?;
       let added = connection
         .runs()
         .add_fault(AddFaultRequest {
@@ -143,14 +143,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       outln!("added {} to run {}", args.name, added.run_id)?;
     }
     Command::Ls(args) => {
-      let run = crate::runs::select(&connection, args.run.run).await?;
+      let run = crate::runs::select(&connection, args.run.run, ctx).await?;
       let listed =
         connection.runs().list_faults(ListFaultsRequest { run_id: run }).await.map_err(needy_api_client::Error::from)?.into_inner();
       let rows: Vec<Listed> = listed.faults.into_iter().map(Listed::from).collect();
       output::print(args.output, &rows)?;
     }
     Command::Rm(args) => {
-      let run = crate::runs::select(&connection, args.run.run).await?;
+      let run = crate::runs::select(&connection, args.run.run, ctx).await?;
       let removed = connection
         .runs()
         .remove_fault(RemoveFaultRequest {

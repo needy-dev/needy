@@ -1,20 +1,18 @@
 //! `ClientService` over [`Clients`].
 //!
-//! Only the operator creates pairing codes and revokes clients (the control
-//! token, or the control socket), and lists clients only on the control
-//! host's Unix socket. `Pair` is public; the pairing code in the request
-//! authenticates it.
+//! Local operators and administrator clients manage registrations over any
+//! admitted listener. `Pair` authenticates with its single-use invitation.
 
 use std::sync::Arc;
 
 use needy_api_proto::v1::client_service_server::ClientService;
 use needy_api_proto::v1::{
-  CreatePairingCodeRequest, CreatePairingCodeResponse, ListClientsRequest, ListClientsResponse, PairRequest, PairResponse,
-  RevokeClientRequest, RevokeClientResponse,
+  CallerKind, CreatePairingCodeRequest, CreatePairingCodeResponse, GetCallerRequest, GetCallerResponse, ListClientsRequest,
+  ListClientsResponse, PairRequest, PairResponse, RevokeClientRequest, RevokeClientResponse,
 };
 use tonic::{Request, Response, Status};
 
-use super::{administer, administer_locally};
+use super::{administer, caller};
 use crate::control::{Caller, Clients, ControlError, NewPairingCode};
 use crate::protocol::domain;
 
@@ -24,7 +22,7 @@ pub struct Adapter<C> {
 }
 
 impl<C> Adapter<C> {
-  /// Refuses a call only the operator may make: a client is refused too.
+  /// Refuses management calls without operator or administrator authority.
   fn admin<T>(&self, request: &Request<T>, what: &str) -> Result<(), Status> {
     administer(&self.caller, request, what, "only operators manage clients")
   }
@@ -32,17 +30,37 @@ impl<C> Adapter<C> {
 
 #[tonic::async_trait]
 impl<C: Clients> ClientService for Adapter<C> {
+  async fn get_caller(&self, request: Request<GetCallerRequest>) -> Result<Response<GetCallerResponse>, Status> {
+    let response = match caller(&self.caller, &request) {
+      Caller::Operator => GetCallerResponse {
+        kind: CallerKind::LocalOperator as i32,
+        access: needy_api_proto::v1::ClientAccess::Admin as i32,
+        ..Default::default()
+      },
+      Caller::Client { id, name, access } => GetCallerResponse {
+        kind: CallerKind::Client as i32,
+        client_id: id,
+        name,
+        access: domain::proto_client_access(access),
+      },
+      _ => return Err(ControlError::role_denied("caller inspection is available to operators and clients").into()),
+    };
+    Ok(Response::new(response))
+  }
+
   async fn create_pairing_code(&self, request: Request<CreatePairingCodeRequest>) -> Result<Response<CreatePairingCodeResponse>, Status> {
     self.admin(&request, "creating pairing codes")?;
     let request = request.into_inner();
     let created = self
       .clients
       .create_pairing_code(NewPairingCode {
+        access: domain::client_access(request.access).map_err(ControlError::from)?,
         ttl_ms: request.ttl_ms,
         name: request.name,
       })
       .await?;
     Ok(Response::new(CreatePairingCodeResponse {
+      access: domain::proto_client_access(created.access),
       id: created.id,
       name: created.name,
       expires_at_ms: created.expires_ms,
@@ -64,7 +82,7 @@ impl<C: Clients> ClientService for Adapter<C> {
   }
 
   async fn list_clients(&self, request: Request<ListClientsRequest>) -> Result<Response<ListClientsResponse>, Status> {
-    administer_locally(&self.caller, &request, "listing clients", "only operators manage clients")?;
+    self.admin(&request, "listing clients")?;
     let clients = self.clients.clients().await?.into_iter().map(domain::proto_client).collect();
     Ok(Response::new(ListClientsResponse { clients }))
   }

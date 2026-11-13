@@ -36,7 +36,7 @@ pub use self::secret::Secret;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  #[error("{0} was written by another version of needy; move it away to start afresh")]
+  #[error("{0} was written by another version of needy; inspect its schema and use a compatible version or explicit migration")]
   Schema(PathBuf),
   /// Malformed, unknown, or with a wrong secret: which of these is not
   /// said, so a guess learns nothing.

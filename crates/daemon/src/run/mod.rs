@@ -280,7 +280,18 @@ fn follow_console(run: Arc<Run>, path: PathBuf) -> Logs {
 async fn load_trace(db: &Path, run: &str) -> Result<needy_trace::sink::sqlite::Loaded, ControlError> {
   needy_trace::sink::sqlite::load(db, run).await.map_err(|e| match e {
     needy_trace::Error::NoRun(_) | needy_trace::Error::NoDatabase(_) => ControlError::NotFound(format!("no trace of a run matching {run}")),
-    e => ControlError::Internal(format!("{}: {e}", db.display())),
+    needy_trace::Error::AmbiguousRun { prefix, candidates } => {
+      ControlError::Invalid(format!("run {prefix} is ambiguous: {} runs match", candidates.len())).with_diagnostic(
+        "run.ambiguous",
+        [
+          ("run".into(), prefix),
+          ("candidates".into(), candidates.join(", ")),
+        ],
+      )
+    }
+    e => {
+      ControlError::Internal(format!("{}: {e}", db.display())).with_diagnostic("state.read_failed", [("store".into(), "trace.db".into())])
+    }
   })
 }
 
@@ -342,7 +353,13 @@ impl Registry {
       Err(ControlError::NotFound(_)) => self.find_info(id).await?,
       Err(e) => return Err(e),
     };
-    Err(ControlError::NotFound(format!("run {} has ended: {}", info.id, info.state)))
+    Err(ControlError::NotFound(format!("run {} has ended: {}", info.id, info.state)).with_diagnostic(
+      "run.ended",
+      [
+        ("run".into(), info.id),
+        ("state".into(), info.state.to_string()),
+      ],
+    ))
   }
 
   /// The live or ended run `id` names; live runs are looked at
@@ -458,7 +475,10 @@ fn pick<T: Clone>(id: &str, items: &[T], names: impl Fn(&T) -> (&str, &str)) -> 
   match matches.as_slice() {
     [] => Ok(None),
     [one] => Ok(Some((*one).clone())),
-    _ => Err(ControlError::Invalid(format!("run {id} is ambiguous: {} runs match", matches.len()))),
+    _ => Err(
+      ControlError::Invalid(format!("run {id} is ambiguous: {} runs match", matches.len()))
+        .with_diagnostic("run.ambiguous", [("run".into(), id.into())]),
+    ),
   }
 }
 
@@ -969,7 +989,13 @@ fn load_profile(id: &str, request: &NewRun) -> Result<Profile> {
 impl Runs for Daemon {
   async fn create(&self, request: NewRun) -> Result<RunInfo, ControlError> {
     // Shutdown waits for creates in progress to end or unwind.
-    let run = self.creates.track_future(self.create_run(request)).await.map_err(failed)?;
+    let run = self
+      .creates
+      .track_future(async {
+        self.admit_work()?;
+        self.create_run(request).await.map_err(failed)
+      })
+      .await?;
     Ok(run.info())
   }
 
@@ -996,7 +1022,9 @@ impl Runs for Daemon {
       // The output so far: a run that ended writes nothing more.
       return match tokio::fs::read(&path).await {
         Ok(bytes) => Ok(Box::pin(tokio_stream::iter([Ok(bytes)]))),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ControlError::NotFound(format!("run {id} has no actor console"))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(
+          ControlError::NotFound(format!("run {id} has no actor console")).with_diagnostic("run.no_console", [("run".into(), id.into())]),
+        ),
         Err(e) => Err(ControlError::Internal(format!("cannot read {}: {e}", path.display()))),
       };
     };

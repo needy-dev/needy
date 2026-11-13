@@ -12,27 +12,43 @@
 
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tonic::transport::{Channel, Endpoint, Uri};
 
-use crate::Result;
+use crate::{Error, Result};
+
+type Observation = Arc<Mutex<Option<Error>>>;
 
 /// A channel whose every connection runs `argv`.
 pub(crate) async fn connect(endpoint: Endpoint, argv: Vec<String>) -> Result<Channel> {
-  Ok(
-    endpoint
-      .connect_with_connector(tower::service_fn(move |_: Uri| {
-        let argv = argv.clone();
-        async move { spawn(&argv).map(hyper_util::rt::TokioIo::new) }
-      }))
-      .await?,
-  )
+  let observed = Observation::default();
+  let connector_observed = observed.clone();
+  let connected = endpoint
+    .connect_with_connector(tower::service_fn(move |_: Uri| {
+      let argv = argv.clone();
+      let observed = connector_observed.clone();
+      async move { spawn(&argv, observed).map(hyper_util::rt::TokioIo::new) }
+    }))
+    .await;
+  let channel = match connected {
+    Ok(channel) => channel,
+    Err(error) => return Err(observed.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or(Error::Transport(error))),
+  };
+  // Establish protocol readiness while the spawning boundary still holds
+  // its observation. Health is role-neutral and never starts work. Stderr
+  // remains inherited; arbitrary vendor output is not classified or logged.
+  let mut health = needy_api_proto::v1::health_service_client::HealthServiceClient::new(channel.clone());
+  if let Err(status) = health.check(needy_api_proto::v1::CheckRequest {}).await {
+    return Err(observed.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or(Error::Status(status)));
+  }
+  Ok(channel)
 }
 
-fn spawn(argv: &[String]) -> std::io::Result<Piped> {
+fn spawn(argv: &[String], observed: Observation) -> std::io::Result<Piped> {
   let (program, args) = argv.split_first().ok_or_else(|| std::io::Error::other("an empty endpoint command"))?;
   let mut child = tokio::process::Command::new(program)
     .args(args)
@@ -42,12 +58,27 @@ fn spawn(argv: &[String]) -> std::io::Result<Piped> {
     // The connection is the process: dropping the connection ends it.
     .kill_on_drop(true)
     .spawn()
-    .map_err(|e| std::io::Error::new(e.kind(), format!("cannot start the endpoint command {program}: {e}")))?;
+    .map_err(|e| {
+      let reason = if e.kind() == std::io::ErrorKind::NotFound {
+        "connector.not_found"
+      } else {
+        "connector.start_failed"
+      };
+      *observed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Error::Connector {
+        reason,
+        program: program.clone(),
+        message: e.to_string(),
+        exit_code: None,
+      });
+      std::io::Error::new(e.kind(), format!("cannot start the endpoint command {program}: {e}"))
+    })?;
   let (Some(input), Some(output)) = (child.stdin.take(), child.stdout.take()) else {
     return Err(std::io::Error::other("the endpoint command has no standard input or output"));
   };
   Ok(Piped {
-    _child: child,
+    child,
+    observed,
+    program: program.clone(),
     input,
     output,
   })
@@ -56,14 +87,41 @@ fn spawn(argv: &[String]) -> std::io::Result<Piped> {
 /// One connection: reads come from the command's standard output, writes go
 /// to its standard input. The command is killed when this is dropped.
 struct Piped {
-  _child: Child,
+  child: Child,
+  observed: Observation,
+  program: String,
   input: ChildStdin,
   output: ChildStdout,
 }
 
+impl Piped {
+  fn observe_exit(&mut self) {
+    if let Ok(Some(status)) = self.child.try_wait() {
+      *self.observed.lock().unwrap_or_else(|e| e.into_inner()) = Some(Error::Connector {
+        reason: "connector.failed",
+        program: self.program.clone(),
+        message: format!("exited before a protocol connection was established ({status})"),
+        exit_code: status.code(),
+      });
+    }
+  }
+}
+
+impl Drop for Piped {
+  fn drop(&mut self) {
+    self.observe_exit();
+  }
+}
+
 impl AsyncRead for Piped {
   fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().output).poll_read(cx, buf)
+    let this = self.get_mut();
+    let before = buf.filled().len();
+    let result = Pin::new(&mut this.output).poll_read(cx, buf);
+    if matches!(result, Poll::Ready(Ok(()))) && before == buf.filled().len() {
+      this.observe_exit();
+    }
+    result
   }
 }
 

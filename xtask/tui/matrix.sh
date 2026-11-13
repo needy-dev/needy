@@ -13,7 +13,7 @@
 #               moments `attach` snaps
 #   background  needy run create -t (no client while the TUI starts), then
 #               needy run attach
-#   exec        needy exec -t of direct.sh on a native executor of the run
+#   exec        needy run exec -t of direct.sh on a native executor of the run
 #
 # Needs: a control daemon NEEDY reaches, the agents image (IMAGE, default
 # needy-agents) in the local Docker engine and, for the VM drivers, its VM
@@ -145,7 +145,7 @@ for tui in $tuis; do
   if has background || has exec; then
     "$NEEDY" run create -t --name "$id-bg" --profile "$p" > /dev/null
     # shellcheck disable=SC2046
-    has exec && harness exec "$scenario" -- "$NEEDY" exec -t "${exec_env[@]}" --run "$id-bg" --executor host -- "$here/direct.sh" "$tui" $(direct_args "$tui")
+    has exec && harness exec "$scenario" -- "$NEEDY" run exec "$id-bg" -t "${exec_env[@]}" --executor host -- "$here/direct.sh" "$tui" $(direct_args "$tui")
     has background && harness background "$scenario" -- "$NEEDY" run attach "$id-bg"
     "$NEEDY" run stop "$id-bg" > /dev/null 2>&1
   fi

@@ -186,6 +186,7 @@ pub mod client {
     pub id: String,
     /// What the trace names it: `client:NAME`.
     pub name: String,
+    pub access: i32,
     /// The ID of the pairing code it paired with.
     pub pairing_code: String,
     /// The SHA-256 of its token; `None` once revoked.
@@ -216,6 +217,7 @@ pub mod pairing_code {
     pub hash: Vec<u8>,
     /// The name of the client that pairs with it.
     pub name: String,
+    pub access: i32,
     pub created_ms: i64,
     pub expires_ms: i64,
     /// When a client paired with it; a code is used once.

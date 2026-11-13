@@ -25,19 +25,19 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  let connection = ctx.connect().await?;
   let attach = ExecAttach {
     process_id: args.process_id,
     replay: !args.no_replay,
     read_only: args.read_only,
     ..Default::default()
   };
-  relay(&connection, attach, &args.detach_keys).await
+  relay(&connection, attach, &args.detach_keys, ctx).await
 }
 
 /// Attaches this terminal to a process or run until it exits or the user types
 /// `detach_keys`; the exit code as `needy exec` returns it.
-pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: ExecAttach, detach_keys: &str) -> Result<i32> {
+pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: ExecAttach, detach_keys: &str, ctx: &Context) -> Result<i32> {
   let detach_keys = relay::DetachKeys::parse(detach_keys)?;
   let tty = relay::interactive();
   // The process's terminal takes this client's size, so a full-screen
@@ -57,6 +57,6 @@ pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: Exe
       crate::output::after_terminal(format!("detached from run {run}; `needy run attach {run}` returns to it"));
       Ok(0)
     }
-    ended => super::exec::status(ended),
+    ended => super::exec::status(ended, ctx),
   }
 }

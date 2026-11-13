@@ -658,6 +658,7 @@ exit 0"#
     runs::wait_marker(env, &id, "E2E-READY")?;
     let out = env.needy(
       &[
+        "run",
         "chaos",
         "add",
         "later",
@@ -670,9 +671,9 @@ exit 0"#
       ],
       Duration::from_secs(60),
     )?;
-    checks.check("`needy chaos add` succeeds", out.ok(), out.brief());
-    let listed = env.needy(&["chaos", "ls", "--run", &id], Duration::from_secs(60))?;
-    checks.check("`needy chaos ls` lists the added fault", listed.ok() && listed.stdout.contains("later"), listed.brief());
+    checks.check("`needy run chaos add` succeeds", out.ok(), out.brief());
+    let listed = env.needy(&["run", "chaos", "ls", "--run", &id], Duration::from_secs(60))?;
+    checks.check("`needy run chaos ls` lists the added fault", listed.ok() && listed.stdout.contains("later"), listed.brief());
   }
   let (row, console) = end_run(env, &id, End::Exit, checks, env.ctx.timeout)?;
   check_ended(checks, End::Exit, &row, 0);
@@ -1100,14 +1101,15 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
   let t = Duration::from_secs(120);
   let out = env.needy(
     &[
-      "runner", "token", "create", "--ttl", "10m", "--roles", "executor",
+      "runner", "invite", "--ttl", "10m", "--roles", "executor", "-o", "json",
     ],
     t,
   )?;
   if !out.ok() {
-    bail!("runner token create failed: {}", out.brief());
+    bail!("runner invite failed: {}", out.brief());
   }
-  let token = out.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
+  let invitation: Value = serde_json::from_str(&out.stdout).context("runner invite printed no JSON")?;
+  let token = invitation["code"].as_str().context("runner invite returned no code")?.to_string();
   // A runner's name is a DNS label; the cell's directory makes it unique
   // where several cells share a Windows runner.
   let suffix = env.dir.file_name().and_then(|n| n.to_str()).unwrap_or("x").trim_start_matches("ne2e-").to_string();
@@ -1151,8 +1153,12 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
   checks.check("runner ls: the runner is online with executor(native)", row.to_string().contains("native"), row.to_string());
 
   let exec: Vec<&str> = match at {
-    RunnerAt::Local(_) => vec!["exec", "--runner", &name, "--", "sh", "-c", "exit 5"],
-    RunnerAt::Windows => vec!["exec", "--runner", &name, "--", "cmd", "/c", "exit 5"],
+    RunnerAt::Local(_) => vec![
+      "proc", "exec", "--runner", &name, "--", "sh", "-c", "exit 5",
+    ],
+    RunnerAt::Windows => vec![
+      "proc", "exec", "--runner", &name, "--", "cmd", "/c", "exit 5",
+    ],
   };
   let out = env.needy(&exec, t)?;
   checks.check("exec --runner: the command's exit code is 5", out.code == Some(5), out.brief());
@@ -1284,16 +1290,29 @@ fn tui(env: &mut CellEnv, cell: &Cell, index: usize, checks: &mut Checks) -> Res
 
 fn host_exec(env: &mut CellEnv, checks: &mut Checks) -> Result<()> {
   let t = Duration::from_secs(60);
-  let out = env.needy(&["exec", "--", "sh", "-c", "exit 7"], t)?;
+  let out = env.needy(&["proc", "exec", "--host", "--", "sh", "-c", "exit 7"], t)?;
   checks.eq("exec: the command's exit code", Some(7), out.code);
-  let out = env.needy(&["exec", "--", "sh", "-c", "echo out; echo err >&2"], t)?;
+  let out = env.needy(
+    &[
+      "proc",
+      "exec",
+      "--host",
+      "--",
+      "sh",
+      "-c",
+      "echo out; echo err >&2",
+    ],
+    t,
+  )?;
   checks.eq("exec: stdout", "out", out.stdout.trim());
   checks.eq("exec: stderr", "err", out.stderr.trim());
-  let out = env.needy(&["exec", "--", "e2e-no-such-command"], t)?;
+  let out = env.needy(&["proc", "exec", "--host", "--", "e2e-no-such-command"], t)?;
   checks.eq("exec: a missing command exits 127", Some(127), out.code);
   let out = env.needy(
     &[
+      "proc",
       "exec",
+      "--host",
       "--output",
       "json",
       "--",
@@ -1307,7 +1326,9 @@ fn host_exec(env: &mut CellEnv, checks: &mut Checks) -> Result<()> {
   let json: Option<Value> = serde_json::from_str(out.stdout.trim()).ok();
   checks.check("exec --output json prints one JSON object", json.as_ref().is_some_and(Value::is_object), out.brief());
   let mut term = env.term(&[
+    "proc",
     "exec",
+    "--host",
     "-t",
     "--",
     "sh",
@@ -1316,12 +1337,12 @@ fn host_exec(env: &mut CellEnv, checks: &mut Checks) -> Result<()> {
   ])?;
   term.expect("E2E-ON-TTY", t)?;
   checks.eq("exec -t: a terminal on both ends, and its exit code", 4, term.wait(t)?);
-  let out = env.needy(&["exec", "-d", "--", "sleep", "60"], t)?;
+  let out = env.needy(&["proc", "exec", "--host", "-d", "--", "sleep", "60"], t)?;
   let process = out.stdout.trim().to_string();
   checks.check("exec -d prints a process ID", out.ok() && !process.is_empty(), out.brief());
-  let ps = env.needy(&["ps"], t)?;
+  let ps = env.needy(&["proc", "ls"], t)?;
   checks.check("ps lists the detached process", ps.stdout.contains(&process), ps.brief());
-  let kill = env.needy(&["kill", &process], t)?;
+  let kill = env.needy(&["proc", "kill", &process], t)?;
   checks.check("kill ends the detached process", kill.ok(), kill.brief());
   Ok(())
 }
@@ -1334,8 +1355,9 @@ fn host_copy(env: &mut CellEnv, checks: &mut Checks) -> Result<()> {
     &[
       "fs",
       "cp",
+      "--host",
       &seed.display().to_string(),
-      &format!("local:{}", dest.display()),
+      &format!("remote:{}", dest.display()),
     ],
     t,
   )?;
@@ -1356,7 +1378,8 @@ fn host_copy(env: &mut CellEnv, checks: &mut Checks) -> Result<()> {
     &[
       "fs",
       "cp",
-      &format!("local:{}", dest.join("seed").display()),
+      "--host",
+      &format!("remote:{}", dest.join("seed").display()),
       &back.display().to_string(),
     ],
     t,

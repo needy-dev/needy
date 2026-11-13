@@ -6,12 +6,14 @@ package needy.v1;
 // ClientService pairs clients (the CLI on another machine, tools) with the
 // control plane and manages their tokens.
 //
-// An operator creates a pairing code with the control daemon's token, or
-// with a client token, which has the same rights. `Pair` needs no bearer
+// A local operator or administrator client creates a pairing code with
+// server-granted runs or administrator access. `Pair` needs no bearer
 // token: the pairing code in the request authenticates it, and the response
 // carries the client's own token, which it then presents as its bearer
 // token. Every trace event a client causes names it as `client:NAME`.
 service ClientService {
+  // Inspect the authenticated caller without returning credentials.
+  rpc GetCaller(GetCallerRequest) returns (GetCallerResponse);
   // Create a pairing code. Its secret is in the response only.
   rpc CreatePairingCode(CreatePairingCodeRequest) returns (CreatePairingCodeResponse);
   // Exchange a pairing code for a client token, once.
@@ -30,6 +32,7 @@ message CreatePairingCodeRequest {
   // name of an active client re-pairs it: see
   // `CreatePairingCodeResponse.replaces`.
   string name = 2;
+  ClientAccess access = 3;
 }
 
 message CreatePairingCodeResponse {
@@ -44,6 +47,7 @@ message CreatePairingCodeResponse {
   // replaces it and revokes its token. Unset for a name no active client
   // holds.
   Client replaces = 5;
+  ClientAccess access = 6;
 }
 
 message PairRequest {
@@ -52,7 +56,7 @@ message PairRequest {
 
 message PairResponse {
   Client client = 1;
-  // The client's token, a bearer token for every operator method. Not
+  // The client's token, bound to the granted access. Not
   // stored, not shown again.
   string token = 2;
 }
@@ -66,6 +70,7 @@ message Client {
   int64 last_used_at_ms = 4;
   // 0 unless revoked.
   int64 revoked_at_ms = 5;
+  ClientAccess access = 6;
 }
 
 message ListClientsRequest {}
@@ -79,3 +84,25 @@ message RevokeClientRequest {
 }
 
 message RevokeClientResponse {}
+
+// Server-granted client authority. Legacy unspecified values mean runs.
+enum ClientAccess {
+  CLIENT_ACCESS_UNSPECIFIED = 0;
+  CLIENT_ACCESS_RUNS = 1;
+  CLIENT_ACCESS_ADMIN = 2;
+}
+
+message GetCallerRequest {}
+
+message GetCallerResponse {
+  CallerKind kind = 1;
+  string client_id = 2;
+  string name = 3;
+  ClientAccess access = 4;
+}
+
+enum CallerKind {
+  CALLER_KIND_UNSPECIFIED = 0;
+  CALLER_KIND_LOCAL_OPERATOR = 1;
+  CALLER_KIND_CLIENT = 2;
+}
