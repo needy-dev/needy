@@ -1,0 +1,41 @@
+# Claude runs in Linux. Captured child processes run on the Mac.
+# Walkthrough: docs/ai/explanations/linux-actor-mac-executor.md
+# NOTICE: container capture covers image shims, not new unshimmed programs.
+user: { name: agent, uid: 1000, gid: 1000 }
+
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }
+  image: needy-agents:latest
+  command: [claude]
+  workspace:
+    path: ~/workspace
+    from: "executor:mac:~/needy-demo"
+    writable: true
+  env:
+    CLAUDE_CONFIG_DIR: /home/agent/.claude
+    DISABLE_UPDATES: "1"
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1"
+  network:
+    allow: ["*"]
+
+executors:
+  mac: { runner: mac, driver: native }
+
+commands:
+  - { match: "**", to: mac }
+
+unknown: mac
+
+files:
+  login-in:
+    mode: copy-in
+    from: "host:~/needy-state/claude-mac/"
+    to: "actor:~/.claude/"
+  login-out:
+    mode: mirror-out
+    from: "actor:~/.claude/"
+    to: "host:~/needy-state/claude-mac/"
+    filter: ["- /shell-snapshots/**", "- /downloads/**", "+ **"]
+run_files: [login-in, login-out]
