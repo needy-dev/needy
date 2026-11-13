@@ -11,7 +11,7 @@ use std::fmt::Write;
 use needy_config::profile::FaultDomain;
 use serde::Serialize;
 
-use crate::event::{ActorExit, ActorStop, Event, Recorded, Transfer};
+use crate::event::{ActorExit, ActorStop, Event, HookTiming, Recorded, Transfer};
 use crate::pattern::basename;
 use crate::types::{Capture, Network, Origin, Outcome, Placement, Principal, RunState};
 
@@ -108,6 +108,8 @@ fn truncate(s: &str, n: usize) -> String {
 /// What the report counts, gathered in one pass over the events.
 #[derive(Default)]
 struct Tally {
+  /// Per-hook latency from `trace.timing`, merged across its payloads.
+  latency: BTreeMap<String, HookTiming>,
   profile: Option<String>,
   created: Option<i64>,
   /// The first end: an actor exit, a stop or a failure.
@@ -273,12 +275,21 @@ impl Tally {
         self.actor_driver = start.driver.clone();
         self.actor_capture = start.capture;
       }
-      Event::ActorReady(_)
-      | Event::ExecKill(_)
-      | Event::FilesCopyIn(_)
-      | Event::FilesMirrorOut(_)
-      | Event::NetError(_)
-      | Event::TraceTiming(_) => {}
+      Event::ActorReady(_) | Event::ExecKill(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) => {}
+      Event::TraceTiming(timing) => {
+        for (hook, sample) in &timing.hooks {
+          let merged = self.latency.entry(hook.clone()).or_insert(HookTiming {
+            count: 0,
+            total_us: 0,
+            min_us: u64::MAX,
+            max_us: 0,
+          });
+          merged.count += sample.count;
+          merged.total_us += sample.total_us;
+          merged.min_us = merged.min_us.min(sample.min_us);
+          merged.max_us = merged.max_us.max(sample.max_us);
+        }
+      }
     }
   }
 
@@ -375,6 +386,10 @@ pub struct Summary {
   pub slowest_commands: Vec<SlowCommand>,
   /// Hosts reached through the gateways, most frequent first.
   pub network: Vec<HostCount>,
+  /// Latency of each hook point, by name (`exec.decide`, `net.request`,
+  /// ...), from `trace.timing`; empty unless the profile set
+  /// `trace.timing`.
+  pub latency: Vec<HookLatency>,
   pub findings: Vec<Finding>,
   /// The event timeline, at the detailed level only.
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -427,6 +442,41 @@ pub struct HostCount {
   pub network: Network,
   pub host: String,
   pub count: usize,
+}
+
+/// One hook point's latency over a run, in microseconds.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HookLatency {
+  pub hook: String,
+  pub count: u64,
+  pub mean_us: u64,
+  pub min_us: u64,
+  pub max_us: u64,
+}
+
+/// The hooks' latency, by hook name.
+fn latency(t: &Tally) -> Vec<HookLatency> {
+  t.latency
+    .iter()
+    .filter(|(_, timing)| timing.count > 0)
+    .map(|(hook, timing)| HookLatency {
+      hook: hook.clone(),
+      count: timing.count,
+      mean_us: timing.total_us / timing.count,
+      min_us: timing.min_us,
+      max_us: timing.max_us,
+    })
+    .collect()
+}
+
+/// A latency: microseconds under a millisecond, else milliseconds with one
+/// decimal.
+fn ms(us: u64) -> String {
+  if us < 1000 {
+    format!("{us} µs")
+  } else {
+    format!("{}.{} ms", us / 1000, us % 1000 / 100)
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -557,6 +607,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     top_commands,
     slowest_commands: slowest.into_iter().take(3).map(|(ms, command)| SlowCommand { command, ms }).collect(),
     network,
+    latency: latency(t),
     findings,
     events: (level == Level::Detailed).then(|| {
       events
@@ -696,6 +747,15 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   }
   if !any {
     writeln!(out, "- No activity.")?;
+  }
+  let hooks = latency(t);
+  if !hooks.is_empty() {
+    writeln!(out, "\n## Latency\n")?;
+    writeln!(out, "| Hook | Count | Mean | Min | Max |")?;
+    writeln!(out, "| --- | --- | --- | --- | --- |")?;
+    for h in &hooks {
+      writeln!(out, "| `{}` | {} | {} | {} | {} |", h.hook, h.count, ms(h.mean_us), ms(h.min_us), ms(h.max_us))?;
+    }
   }
 
   if level == Level::Detailed {

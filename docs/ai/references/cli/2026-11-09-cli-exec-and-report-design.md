@@ -622,6 +622,7 @@ The JSON summary has these fields:
 | `top_commands` | `[{command, executor, count, slowest_ms}]`, most frequent first. |
 | `slowest_commands` | `[{command, ms}]`, the three slowest. |
 | `network` | `[{network, host, count}]` through the gateways, most frequent first. |
+| `latency` | `[{hook, count, mean_us, min_us, max_us}]` by hook point (`exec.decide`, `net.request`, `net.connect`, ...), merged from the run's `trace.timing` events; empty unless the profile sets `trace: { timing: true }`. The human report shows it as `Latency`, markdown as a table (added 2026-11-13). |
 | `findings` | `[{kind, message}]`; `kind` is `run_failed`, `files_failed` (a copy-in or mirror-out), `probing`, `denied_command`, `denied_network` or `faults`. |
 | `events` | `--level detailed` only: `[{offset_ms, kind, payload}]`. |
 

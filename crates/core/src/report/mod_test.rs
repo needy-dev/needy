@@ -227,8 +227,10 @@ fn a_failed_run_shows_its_state_and_reason() {
   assert!(report.contains("- ❌ Run failed: executor build: no such image\n"), "{report}");
 }
 
+// Timing payloads count nothing as activity; they add only the latency of
+// each hook point.
 #[test]
-fn timing_summaries_are_not_activity() {
+fn timing_summaries_are_not_activity_and_show_as_latency() {
   let mut events = actor_run();
   let hooks = [(
     "exec.decide".to_string(),
@@ -246,7 +248,42 @@ fn timing_summaries_are_not_activity() {
     }),
   ));
 
-  assert_eq!(render("7f3a", &events, Level::Summary, Format::Markdown), render("7f3a", &actor_run(), Level::Summary, Format::Markdown));
+  let with = render("7f3a", &events, Level::Summary, Format::Markdown);
+  let without = render("7f3a", &actor_run(), Level::Summary, Format::Markdown);
+  let latency =
+    "\n## Latency\n\n| Hook | Count | Mean | Min | Max |\n| --- | --- | --- | --- | --- |\n| `exec.decide` | 3 | 30 µs | 20 µs | 40 µs |\n";
+  assert_eq!(with, format!("{without}{latency}"));
+  let human = render("7f3a", &events, Level::Summary, Format::Human { color: false });
+  assert!(human.contains("\nLatency\n  exec.decide  3 calls, mean 30 µs, min 20 µs, max 40 µs\n"), "{human}");
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &events, Level::Summary, Format::Json)).unwrap();
+  assert_eq!(json["latency"], serde_json::json!([{ "hook": "exec.decide", "count": 3, "mean_us": 30, "min_us": 20, "max_us": 40 }]));
+}
+
+// Payloads merge: one per flush of the trace.
+#[test]
+fn latency_merges_every_timing_payload_by_hook() {
+  let mut events = actor_run();
+  for (time, total, min, max) in [(7_100, 3_000, 500, 2_000), (7_200, 9_000, 1_000, 8_000)] {
+    let hooks = [(
+      "exec.decide".to_string(),
+      HookTiming {
+        count: 2,
+        total_us: total,
+        min_us: min,
+        max_us: max,
+      },
+    )];
+    events.push(at(
+      time,
+      Event::TraceTiming(TraceTiming {
+        hooks: hooks.into(),
+      }),
+    ));
+  }
+
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &events, Level::Summary, Format::Json)).unwrap();
+
+  assert_eq!(json["latency"], serde_json::json!([{ "hook": "exec.decide", "count": 4, "mean_us": 3000, "min_us": 500, "max_us": 8000 }]));
 }
 
 fn create(time_ms: i64) -> Recorded {
