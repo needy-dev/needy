@@ -321,7 +321,12 @@ pub struct LinkProxy {
 
 impl LinkProxy {
   pub fn start(target: u16, idle: Option<Duration>, delay: Duration) -> Result<LinkProxy> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
+    Self::start_on(0, target, idle, delay)
+  }
+
+  /// [`LinkProxy::start`] on loopback port `port` (any free one for 0).
+  pub fn start_on(port: u16, target: u16, idle: Option<Duration>, delay: Duration) -> Result<LinkProxy> {
+    let listener = TcpListener::bind(("127.0.0.1", port)).with_context(|| format!("cannot listen on 127.0.0.1:{port}"))?;
     let port = listener.local_addr()?.port();
     listener.set_nonblocking(true)?;
     let open: Arc<Mutex<Vec<TcpStream>>> = Arc::default();
@@ -452,6 +457,9 @@ pub struct ProxyArgs {
   /// The loopback port to forward to.
   #[arg(long)]
   to: u16,
+  /// The loopback port to listen on; a free one when absent.
+  #[arg(long, default_value_t = 0)]
+  port: u16,
   /// Added in each direction, so a round trip gains twice this (`75ms`).
   #[arg(long, value_parser = humantime::parse_duration, default_value = "0s")]
   delay: Duration,
@@ -461,7 +469,7 @@ pub struct ProxyArgs {
 }
 
 pub fn proxy_main(args: ProxyArgs) -> Result<()> {
-  let proxy = LinkProxy::start(args.to, args.idle, args.delay)?;
+  let proxy = LinkProxy::start_on(args.port, args.to, args.idle, args.delay)?;
   // The port is the one line on stdout, for scripts.
   println!("{}", proxy.port);
   eprintln!("link-proxy: 127.0.0.1:{} -> 127.0.0.1:{} (delay {:?} each way, idle {:?})", proxy.port, args.to, args.delay, args.idle);
