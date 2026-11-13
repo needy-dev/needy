@@ -64,11 +64,6 @@ executors:
 On a Mac, the agent's commands run on the Mac as your user, in that
 directory. On Linux they run in a container.
 
-`linux-container` needs a control daemon that runs as root for `-t` and
-`-it`: the actor's init creates its terminal socket as root, and a daemon
-that is not root cannot connect to it (see the
-[step 3 checks](../../docs/ai/references/architecture/2026-11-12-actor-images-design.md#step-3-checks)).
-
 ## First start and login
 
 Make the directory that keeps the agent's login and settings, then start
