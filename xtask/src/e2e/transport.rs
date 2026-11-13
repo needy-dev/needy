@@ -233,15 +233,27 @@ impl Link {
         let program = cloudflared.clone();
         let start = move || -> Result<Child> {
           let out = std::fs::File::options().create(true).append(true).open(&log)?;
+          let before = registrations(&log);
           // The run token goes in the environment, not the arguments.
-          Command::new(&program)
+          let child = Command::new(&program)
             .args(["tunnel", "--no-autoupdate", "run"])
             .env("TUNNEL_TOKEN", &token)
             .stdin(Stdio::null())
             .stdout(out.try_clone()?)
             .stderr(out)
             .spawn()
-            .context("cannot start cloudflared tunnel run")
+            .context("cannot start cloudflared tunnel run")?;
+          // A runner that joins before the connector registered gets
+          // `websocket: bad handshake` from the edge, and a failed first join
+          // ends it: wait for this connector's first registered connection.
+          let deadline = Instant::now() + Duration::from_secs(60);
+          while registrations(&log) <= before {
+            if Instant::now() > deadline {
+              bail!("cloudflared registered no tunnel connection within 60 s (see {})", log.display());
+            }
+            std::thread::sleep(Duration::from_millis(250));
+          }
+          Ok(child)
         };
         link.child = Some(start()?);
         link.restart = Some(Box::new(start));
@@ -289,6 +301,14 @@ fn end(child: &mut Child) {
   if let Err(e) = child.wait() {
     eprintln!("e2e: cannot wait for transport process {}: {e}", child.id());
   }
+}
+
+/// How many tunnel connections `cloudflared` logged as registered in `log`.
+// NOTICE: cloudflared 2026.9.0 logs `Registered tunnel connection` once per
+// connection to the edge (seen 2026-11-13 in its info-level output); no
+// other readiness signal is offered without its metrics server.
+fn registrations(log: &Path) -> usize {
+  std::fs::read_to_string(log).map(|text| text.matches("Registered tunnel connection").count()).unwrap_or(0)
 }
 
 /// A free loopback TCP port.
