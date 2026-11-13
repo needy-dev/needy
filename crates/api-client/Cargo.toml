@@ -14,6 +14,7 @@ hyper-util = { workspace = true, features = ["tokio"] }
 needy-api-proto.workspace = true
 needy-common.workspace = true
 prost.workspace = true
+shell-words.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
@@ -25,6 +26,7 @@ tracing.workspace = true
 tokio-vsock.workspace = true
 
 [dev-dependencies]
+libc.workspace = true
 needy-core-executor.workspace = true
 tempfile.workspace = true
 tonic = { workspace = true, features = ["router", "transport"] }

@@ -76,8 +76,9 @@ pub struct Args {
   /// offline after three intervals without one.
   #[arg(long, default_value = "15s", value_parser = humantime::parse_duration)]
   heartbeat_interval: std::time::Duration,
-  /// The control plane to join (runner mode): unix:/path, http://host:port
-  /// or https://host:port. Defaults to the one it joined before.
+  /// The control plane to join (runner mode): unix:/path, http://host:port,
+  /// https://host:port or exec:COMMAND (see --endpoint). Defaults to the one
+  /// it joined before.
   #[arg(long, value_name = "ENDPOINT")]
   join: Option<String>,
   /// Environment variable holding the join token (runner mode, first start

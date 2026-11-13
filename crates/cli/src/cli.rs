@@ -21,7 +21,9 @@ use crate::paths::Paths;
   about = "Route a driving program's work to executors"
 )]
 struct Cli {
-  /// Daemon endpoint: unix:/path, http://host:port or https://host:port.
+  /// Daemon endpoint: unix:/path, http://host:port, https://host:port, or
+  /// exec:COMMAND, a command whose stdin and stdout carry each connection
+  /// (as ssh's ProxyCommand: `exec:cloudflared access tcp --hostname H`).
   /// Defaults to the endpoint this machine paired with last (`needy pair`),
   /// else the control daemon's socket in the runtime directory.
   #[arg(long, global = true, env = "NEEDY_ENDPOINT")]

@@ -1,9 +1,11 @@
 //! Client for the Needy daemon API.
 //!
 //! [`Client`] owns one gRPC channel and hands out a typed client per service.
-//! Endpoints are `http://`, `https://`, `unix:/path` and, inside a Linux guest,
-//! `vsock://CID:PORT`. Every call carries the bearer token when the caller
-//! sets one; the library never reads a token from the environment.
+//! Endpoints are `http://`, `https://`, `unix:/path`, `exec:COMMAND` (a
+//! command whose standard input and output carry the connection, as ssh's
+//! `ProxyCommand`) and, inside a Linux guest, `vsock://CID:PORT`. Every call
+//! carries the bearer token when the caller sets one; the library never reads
+//! a token from the environment.
 //!
 //! - [`Executor`]: what serves `ProcessService` to a caller: a daemon over
 //!   gRPC ([`Client`]), or a runner over the stream it dialed.
@@ -13,6 +15,7 @@
 //! - [`files`]: tar archives over exec streams, to and from an executor.
 //! - [`error`]: errors, with the server's status mapped to a [`Kind`].
 
+mod command;
 pub mod error;
 pub mod exec;
 pub mod files;
@@ -93,6 +96,13 @@ impl Client {
     };
     if let Some(path) = url.strip_prefix("unix:") {
       return Ok(Self::from_channel(connect_unix(configure(placeholder()), path.to_string()).await?));
+    }
+    if let Some(command) = url.strip_prefix("exec:") {
+      let argv = shell_words::split(command).map_err(|_| Error::InvalidEndpoint(url.to_string()))?;
+      if argv.is_empty() {
+        return Err(Error::InvalidEndpoint(url.to_string()));
+      }
+      return Ok(Self::from_channel(command::connect(configure(placeholder()), argv).await?));
     }
     if let Some(rest) = url.strip_prefix("vsock://") {
       let (cid, port) = rest
