@@ -23,11 +23,13 @@ pub enum Caller {
   /// A client of the control socket, or one holding the daemon's own
   /// token: the bootstrap and admin credential.
   Operator,
-  /// A paired client, by its own token. It has an operator's rights over
-  /// runs and processes, but not the administration only `Operator` may do:
-  /// join tokens, rotating and removing runners, pairing codes and revoking
-  /// clients. The trace names it `client:NAME`.
-  Client { id: String, name: String },
+  /// A named paired client with server-granted access. The trace names
+  /// it `client:NAME`, including when it has administrator access.
+  Client {
+    id: String,
+    name: String,
+    access: ClientAccess,
+  },
   /// An actor, on the listener bound to its run. Its calls act on that
   /// run; it may not create, stop or read the logs of runs.
   Actor { run: String },
@@ -54,10 +56,23 @@ impl Caller {
   }
 }
 
+/// Safe producer facts. The protocol adapters validate and bound their wire form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+  pub reason: String,
+  pub facts: BTreeMap<String, String>,
+}
+
 /// Why the daemon refused or failed a call. Each variant is one row of the
 /// status table in `protocol::status`.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ControlError {
+  /// Original domain cause with safe producer facts.
+  #[error("{error}")]
+  Diagnostic {
+    error: Box<ControlError>,
+    diagnostic: Diagnostic,
+  },
   /// The caller may not do this, or a rule or an injected fault refused a
   /// command. `events` are the refused command's trace events: the faults
   /// chaos injected and the placement decision.
@@ -87,6 +102,22 @@ pub enum ControlError {
 }
 
 impl ControlError {
+  /// Attaches a known producer reason without changing the original cause.
+  pub fn with_diagnostic(self, reason: &str, facts: impl IntoIterator<Item = (String, String)>) -> Self {
+    Self::Diagnostic {
+      error: Box::new(self),
+      diagnostic: Diagnostic {
+        reason: reason.into(),
+        facts: facts.into_iter().collect(),
+      },
+    }
+  }
+
+  /// A known caller/protocol boundary refusal.
+  pub fn role_denied(message: impl Into<String>) -> Self {
+    Self::denied(message).with_diagnostic("auth.role_denied", [])
+  }
+
   /// A refusal that carries no trace events.
   pub fn denied(message: impl Into<String>) -> Self {
     Self::Denied {
@@ -262,6 +293,7 @@ pub enum Placement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileFinding {
+  pub diagnostic: Option<Diagnostic>,
   pub error: bool,
   pub message: String,
 }
@@ -407,6 +439,11 @@ pub enum ExecOutput {
   Exited(Exit),
   /// The executor reported an error instead of an exit.
   Error(String),
+  /// An in-band error with bounded safe producer facts.
+  DiagnosticError {
+    message: String,
+    diagnostic: Diagnostic,
+  },
   /// The daemon ends the stream before the process exited, for this
   /// reason; nothing follows.
   Ended(String),
@@ -666,7 +703,11 @@ pub enum Credential {
   /// The credential of this runner.
   Runner(String),
   /// The token of this paired client.
-  Client { id: String, name: String },
+  Client {
+    id: String,
+    name: String,
+    access: ClientAccess,
+  },
   /// Shaped like a runner credential or a client token, but nobody holds
   /// it: removed, revoked, rotated away, or never issued.
   Refused,
@@ -693,8 +734,9 @@ pub trait Runners: Send + Sync + 'static {
   async fn rotate(&self, runner: &str) -> Result<()>;
   async fn remove(&self, runner: &str) -> Result<()>;
   /// Whose credential a bearer token is. The middleware calls it for every
-  /// token that is not the control token.
-  async fn credential(&self, token: &str) -> Credential;
+  /// token that is not the control token. Backend failures are errors;
+  /// invalid credentials are `Credential::Refused`.
+  async fn credential(&self, token: &str) -> Result<Credential>;
   /// The control stream of `runner`: `results` are what it answers, the
   /// returned stream the tasks it gets. It replaces an earlier control
   /// stream of the same runner.
@@ -719,9 +761,20 @@ pub trait Runners: Send + Sync + 'static {
 
 // -------------------------------------------------------------- clients
 
+/// The authority granted by the server, independent of transport.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ClientAccess {
+  /// Legacy omitted grants can drive runs and processes.
+  #[default]
+  Runs,
+  /// May also manage registered clients, runners and invitations.
+  Admin,
+}
+
 /// A pairing code to create.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NewPairingCode {
+  pub access: ClientAccess,
   pub ttl_ms: i64,
   /// The client's name once it pairs; empty for a fresh one derived from
   /// the code's ID, which no client holds.
@@ -731,6 +784,7 @@ pub struct NewPairingCode {
 /// A pairing code just created, with its secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatedPairingCode {
+  pub access: ClientAccess,
   pub id: String,
   pub name: String,
   pub expires_ms: i64,
@@ -742,6 +796,7 @@ pub struct CreatedPairingCode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientInfo {
+  pub access: ClientAccess,
   pub id: String,
   pub name: String,
   pub created_ms: i64,
@@ -771,6 +826,7 @@ pub trait Clients: Send + Sync + 'static {
   async fn clients(&self) -> Result<Vec<ClientInfo>>;
   async fn revoke(&self, id: &str) -> Result<()>;
   /// Whose token a bearer token is. The middleware calls it for every
-  /// token that is not the control token.
-  async fn credential(&self, token: &str) -> Credential;
+  /// token that is not the control token. Backend failures are errors;
+  /// invalid credentials are `Credential::Refused`.
+  async fn credential(&self, token: &str) -> Result<Credential>;
 }

@@ -17,52 +17,60 @@ work takes effect.
   **recipe** that fixes its identity: OS, kernel, CPU, firmware and devices.
 
 > [!NOTE]
-> Needy is experimental (0.0.1). The first closed loop works: opencode runs in
-> an actor while its commands run in Docker or on a Mac. See the
-> [results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md).
-
-## Table of Contents
-
-- [Getting started](#getting-started)
-  - [Install](#install)
-  - [Start the control daemon](#start-the-control-daemon)
-  - [Pick a profile](#pick-a-profile)
-  - [Run it](#run-it)
-  - [One command from your laptop](#one-command-from-your-laptop)
-  - [Add machines](#add-machines)
-- [Actor drivers](#actor-drivers)
-- [Configuration](#configuration)
-- [Examples](#examples)
-- [How it works](#how-it-works)
-- [Architecture](#architecture)
-- [Documentation](#documentation)
-- [Development](#development)
-- [Acknowledgements](#acknowledgements)
+> Needy is experimental. Start with a small project directory.
+> Evidence: [initial closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md)
+> and the [onboarding review](docs/ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md#onboarding-review).
 
 ## Getting started
 
-The flow is always the same:
+Choose what you want to run. Each walkthrough identifies the machine,
+terminal, project directory, and expected result at every step.
 
-1. Install `needy` on every machine that takes part, and pull its images
-   with `needy image pull`.
-2. Start a **control daemon** on the machine that runs actors.
-3. Write a **profile**: which actor driver, which executors, which commands go
-   where.
-4. `needy run create` starts a **run**: one actor and its executors.
-5. Look at it with `needy report`, `needy exec`, `needy ps`.
+| Your task | Start here |
+| --- | --- |
+| Explore Linux bash with Mac child processes | [bash → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#bash) |
+| Run Claude Code in Linux with Mac tools | [Claude Code → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#claude-code) |
+| Run OpenCode in Linux with Mac tools | [OpenCode → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#opencode) |
 
-<picture>
-  <source width="100%" srcset="./docs/assets/banners/getting-started-dark.webp" media="(prefers-color-scheme: dark)" />
-  <source width="100%" srcset="./docs/assets/banners/getting-started-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
-  <img width="100%" alt="Getting started in five steps: install needy and pull its images, start the control daemon, check a profile with a linux-firecracker actor and a rule that sends python3 to a build container, run bash in the actor where python3 runs in the container, and read needy report." src="./docs/assets/banners/getting-started-light.webp" />
-</picture>
+These three examples use a Linux Docker host and a Mac native runner:
+
+| Linux server | Mac |
+| --- | --- |
+| Control daemon and your program in an actor | Runner, toolchain, and project files |
+| Starts runs from its setup terminal | Keeps one SSH tunnel and one runner process open |
+| Mounts the shared project into the actor | Keeps the project in `~/needy-demo` |
+
+Start with the [common setup](docs/ai/explanations/linux-actor-mac-executor.md#where-things-run).
+Then save one complete [example profile](examples/linux-mac).
+The website and Profile Studio read these same examples.
+
+1. Install needy on both machines. Only the actor host needs actor images.
+2. Start the control daemon on Linux and verify local management discovery.
+3. Start one SSH tunnel and enroll the runner on the Mac.
+4. Mount the Mac project directory and save the selected profile.
+5. Start bash, Claude, or OpenCode. Check a real command and the shared files.
+
+The entrypoint stays in Linux. These profiles send captured child processes
+to the Mac. Shell builtins stay in their shell; built-in file editors use the
+shared mount. Container capture has [limits](#actor-drivers).
+
+**Verification status:** shell routing, shared files, and the agent interfaces
+have live-probe evidence. Fresh installation and authenticated model tool calls
+still need verification. The walkthrough is a draft for review.
+
+For another driver or source builds, expand the reference below.
+For contributors, see [Development](#development).
+
+## Reference
+
+<details>
+<summary><strong>Installation, other drivers, and configuration</strong></summary>
 
 ### Install
 
-No release has assets yet. Prebuilt binaries and images come with the next
-release, and the channels below work from then on; until then, build from a
-checkout. `needy image build` needs the checkout too (it builds the actor
-and executor images from `images/`).
+Released binaries and images are available from [GitHub Releases](https://github.com/needy-dev/needy/releases).
+Use a release for the walkthroughs. Build from source when developing needy.
+`needy image build` needs a checkout of the image sources.
 
 #### From source
 
@@ -142,7 +150,7 @@ image alone. needy never downloads a VM
 image by itself: a run without one fails and names `needy image pull`. The
 container drivers pull a missing container image themselves.
 
-From the next release on, each
+Each
 [GitHub release](https://github.com/needy-dev/needy/releases) carries these
 assets, each with a `.sha256` file:
 
@@ -169,7 +177,8 @@ builds, `needy-actor:latest` and `needy-executor:latest`:
 ```sh
 needy image build                                  # the base VM image of this host's VM driver
 needy image build --linux-container --executor     # or --macos-apple-container on a Mac
-needy daemon --mode control --executor-image needy-executor:latest &
+needy config set daemon.executor_image needy-executor:latest
+needy daemon service install --now
 # and in a container actor's profile: actor: { image: needy-actor:latest, ... }
 ```
 
@@ -206,14 +215,39 @@ from `PATH`.
 
 ### Start the control daemon
 
+Install a user service on a Linux systemd host or a Mac with launchd:
+
 ```sh
-needy daemon --mode control &        # listens on a Unix socket in the state directory
+needy daemon service install --now
+needy daemon service status
+needy runner ls
 ```
 
-It warns when it finds no guest needy; actors then cannot start. Add
-`--listen 127.0.0.1:7400 --token-env NEEDY_CONTROL_TOKEN` to reach it from
-other machines (through `ssh -L` or another tunnel; needy does not encrypt the
-connection itself).
+Local commands discover the private management socket. No client pairing or
+bearer is required on the control host. A saved remote context does not change
+service operations.
+
+For remote runners or clients, configure an additional listener before installation:
+
+```sh
+needy config set daemon.listen '[tcp://127.0.0.1:7400]'
+needy daemon service install --now
+```
+
+If the service is already installed, use `install --replace --now` to update
+its configuration snapshot. Remote machines use registered credentials through
+an SSH tunnel. The network listener keeps the local management socket.
+
+For development or an external supervisor, use foreground serving:
+
+```sh
+needy daemon serve --listen tcp://127.0.0.1:7400
+```
+
+TCP carries no encryption itself. If the daemon finds no guest needy, it warns
+and cannot start actors. User-service acceptance is recorded for macOS in the
+[CLI evidence](docs/ai/references/cli/2026-11-14-cli-lifecycle-evidence.md).
+Linux and system-scope service acceptance remain separate checks.
 
 ### Pick a profile
 
@@ -290,9 +324,9 @@ commands:
 
 </details>
 
-`needy profile check demo` says where the actor and each executor would run,
+`needy config profile check demo --mode control` says where the actor and each executor would run,
 what of the recipe the driver cannot present, and where a command would go:
-`needy profile check demo --cmd "python3 -V"`.
+`needy config profile check demo --mode control --cmd "python3 -V"`.
 
 ### Run it
 
@@ -301,96 +335,103 @@ needy run create -it --profile demo
 #   agent@instance:~$ uname -a                                  # the actor
 #   agent@instance:~$ python3 -c 'import platform; print(platform.node())'   # the executor
 #   agent@instance:~$ exit
-needy report latest                       # what was routed, faults, the actor's identity
+needy run report latest                       # what was routed, faults, the actor's identity
 ```
 
-`ctrl-]` detaches and leaves the run going. You never copy a run ID:
-`run attach`, `run logs` and `run stop` take the only live run; every `--run`
-takes `latest`, an ID prefix, or `NEEDY_RUN`; `report` defaults to `latest`.
+`ctrl-]` detaches and leaves the run active. Run commands accept an ID,
+unique prefix, name, or `latest`. With no selector, attach/logs/stop select the
+only live run. Reports default to `latest`.
 
 ```sh
-needy run ls                                    # ACTOR: starting, configured, ready (attach connects), exited
-needy run attach                                # back to the driving program
-needy exec --run latest -- uname -a             # one command through the run's rules
-export NEEDY_RUN=latest                         # or set it once
-needy exec -d -- python3 -m http.server         # prints a process ID
-needy ps; needy attach PROCESS                  # replays recent output
-needy fs cp ./src build:/home/agent/workspace
+needy run ls
+needy run attach
+needy run exec latest -- uname -a
+needy proc exec --host -d -- python3 -m http.server
+needy proc ls
+needy proc attach PROCESS
+needy fs cp --run latest ./src build:/home/agent/workspace
 needy run stop
 ```
 
-`run stop` ends a running driving program gracefully: SIGTERM, then SIGKILL
-after `--grace` (default 10s); the actor then mirrors out and ends, and the
-stop goes on. `--now` kills the actor at once, without its mirror-out. The
-report says which it was.
+`run stop` gives the driving program SIGTERM, then SIGKILL after `--grace`
+(default 10s). The actor mirrors out before the stop completes.
+`--now` kills the actor immediately and skips mirror-out. The report records
+which stop occurred. Controlled daemon shutdown uses the same cleanup within
+its finite shutdown budget.
 
-Without `--run` or `NEEDY_RUN`, `needy exec` runs on this machine outside any
-run, so starting a run never changes what a plain `needy exec` does.
+`proc exec` runs one process outside a run. Select `--host`, `--runner NAME`,
+or `--executor ID` explicitly. `run exec` routes through a run's rules.
 Arguments after `--` in `run create` are appended to the profile's
 `actor.command`.
 
 ### One command from your laptop
 
-Pair the laptop once with a code the operator creates on the control host,
-then call the remote program as if it were local:
+Client pairing lets a Mac control runs. Runner enrollment lets it execute
+commands. A Mac can hold both roles, but each role needs its own credential.
+The [Linux-to-Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md)
+starts runs from Linux and does not require client pairing.
+
+If you also want a Mac control client, reuse the walkthrough's SSH tunnel.
+In the **Linux setup terminal**, create a pairing code:
 
 ```sh
-NEEDY_TOKEN=... needy pair create --name laptop       # on the control host, with the control token
-needy --endpoint http://127.0.0.1:7400 pair CODE      # on the laptop, once; the endpoint is remembered
+needy client invite --name mac-cli --admin
 ```
 
-Then save the profile on the laptop as `~/.config/needy/profiles/opencode.yaml`
-(see [`examples/opencode`](examples/opencode/profile.yaml)) and add a script:
+In a **new Mac terminal**, pair at the hidden code prompt, then select the saved connection:
 
 ```sh
-#!/bin/sh
-# ~/bin/ropencode: opencode in an actor on the control host
-exec needy run create -it --profile opencode -- "$@"
+needy --address tcp://127.0.0.1:7400 config context pair control
+needy config use control
+needy runner ls
 ```
 
-`needy pair ls` and `needy pair revoke ID` manage paired clients; the trace and
-`needy report` name each one as `client:NAME`.
+Pairing saves the transport and client credential without changing the default.
+`config use control` selects that connection. The Mac can attach to
+runs without a local profile. To create runs from the Mac, also save the
+complete profile there. `host:` paths still refer to the Linux control host.
+Use the [interactive OpenCode example](examples/linux-mac/opencode.yaml) for
+an interactive session. The [local-model experiment](examples/opencode/profile.yaml)
+requires a separate model service.
 
 ### Add machines
 
-Any other machine, such as a Mac or a Windows box, joins the control plane as
-a **runner**. It dials out and keeps that connection open, so it needs no
-listening port:
+For the Linux-to-Mac scenario, use the
+[runner enrollment steps](docs/ai/explanations/linux-actor-mac-executor.md#5-register-the-mac-runner).
+Run enrollment on the executor machine, then check both its name and OS.
+A native runner needs needy and its toolchain, not actor images.
 
-```sh
-needy runner token create --ttl 1h --roles executor          # on the control host
-JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN
-needy runner ls
-#   NAME  STATUS  CAPABILITIES                                              HOST
-#   kvm   online  actor(linux-firecracker) executor(linux-container,native) linux/x86_64
-#   mac   online  actor(macos-vz) executor(native)                          macos/aarch64
-needy exec --runner mac -- uname -a        # on that machine, outside any run
+Profiles select it by name:
+
+```yaml
+executors:
+  mac: { runner: mac, driver: native }
 ```
 
-Profiles place executors (and the actor) on runners by name or label:
-`executors: { mac: { runner: mac } }`. On Windows, start the runner outside
-the SSH session (for example with `Invoke-CimMethod Win32_Process`), with full
-paths and the token in `--join-token-file`.
+`needy runner ls` lists enrolled machines. `needy proc exec --runner mac -- uname -s`
+runs directly on that machine, outside any run. On Windows, start the runner
+outside the SSH session, with its normal tool PATH. `runner join` reads the code at a hidden prompt;
+`runner serve` reuses the saved runner credential.
 
 #### Over a tunnel
 
-needy serves plain gRPC on a loopback port and encrypts nothing itself. To
-reach it from elsewhere, give runners and clients an `exec:` endpoint: a
-command whose stdin and stdout carry each connection, as ssh's
-`ProxyCommand`. needy starts it for every connection, so no forwarding
-process has to be started by hand:
+needy serves plain gRPC on a loopback port. Connector argv can carry each
+connection through an authenticated tunnel. Save the transport during pairing
+or runner enrollment:
 
 ```sh
-# Cloudflare Tunnel with Access: the tunnel forwards needy.example.com to the
-# control host's tcp://localhost:7400; an Access application with a service
-# token protects it. cloudflared reads the token from these variables.
-export TUNNEL_SERVICE_TOKEN_ID=... TUNNEL_SERVICE_TOKEN_SECRET=...
-JOIN=... needy daemon --mode runner --join 'exec:cloudflared access tcp --hostname needy.example.com' --join-token-env JOIN
-needy --endpoint 'exec:cloudflared access tcp --hostname needy.example.com' pair CODE
+# cloudflared reads its own Access credentials from its configured environment.
+needy runner join mac --roles executor -- cloudflared access tcp --hostname needy.example.com
+needy runner serve
 
-# ssh to the control host, then to its loopback port
-needy --endpoint 'exec:ssh -W 127.0.0.1:7400 user@ctl.example.com' runner ls
+# Pair a control client separately, then select its saved connection.
+needy config context pair control -- ssh -W 127.0.0.1:7400 user@example.com
+needy config use control
+needy runner ls
 ```
+
+The invitation codes come from `runner invite` and `client invite` on the
+control host. Each consumer reads its code through a hidden prompt.
 
 Use a TCP route of the tunnel (`tcp://`, `cloudflared access tcp`): proxied
 HTTPS hostnames do not carry gRPC through Cloudflare Tunnel. A dropped
@@ -414,7 +455,7 @@ whose isolation the driver relies on.
 | Route a command by name | ✅ | ✅ | ✅ | ✅ |
 | Route by absolute path (`/usr/bin/git`) | ✅ | ✅ | ✅ | ✅ |
 | Route programs added at run time (`pip`, `npm`, built in the workspace) | ✅ | ❌ | ✅ | ❌ |
-| Network only through the gateway (allowlist, header injection) | ✅ | ✅ | ✅ | ✅ |
+| HTTP(S) hostname policy through the gateway | ✅ | ✅ | ✅ | ✅ |
 | Workspace mount from an executor | ✅ | ✅ | ✅ | ✅ |
 | Copy-in, mirror-out | ✅ | ✅ | ✅ | ✅ |
 | Exec and file faults | ✅ | ✅ | ✅ | ✅ |
@@ -430,7 +471,7 @@ whose isolation the driver relies on.
 | Uptime offset | ✅ | ❌ | ➖ | ❌ |
 
 ✅ verified end to end, ❌ not possible with this driver, ➖ expected to work but
-not yet recorded. `needy profile check` lists every gap for your recipe and
+not yet recorded. `needy config profile check` lists every gap for your recipe and
 host; a recipe's `required:` turns a gap into an error. Evidence:
 [closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md),
 [container actor](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity),
@@ -450,8 +491,9 @@ profile. The full reference is in the
 
 ### Commands
 
-Rules decide where each exec runs. The first match wins; a command no rule
-names runs in the actor.
+Rules apply in order. A single-valued action takes its first assigned value.
+Collections accumulate until `final: true` stops evaluation. A command with
+no placement uses `default_executor`, or stays in the actor when none is set.
 
 ```yaml
 commands:
@@ -534,7 +576,7 @@ actor:
 ```
 
 A service is a plain-HTTP name the actor uses; the gateway forwards it to
-`url`, so the actor never learns the real address. `needy profile check`
+`url`, so the actor never learns the real address. `needy config profile check`
 lists the services and warns when a URL does not answer from the control
 host.
 
@@ -547,7 +589,7 @@ so a replayed run injects the same ones; a fault without `probability`,
 <picture>
   <source width="100%" srcset="./docs/assets/banners/chaos-dark.webp" media="(prefers-color-scheme: dark)" />
   <source width="100%" srcset="./docs/assets/banners/chaos-light.webp" media="(prefers-color-scheme: light), (prefers-color-scheme: no-preference)" />
-  <img width="100%" alt="examples/chaos from seed 1: opening broken.json fails with Input/output error, curl fails with its own error and exit 7 without running, the sensors read +101.0°C ALARM (CRIT) two seconds in, and needy report counts the three injected faults by name." src="./docs/assets/banners/chaos-light.webp" />
+  <img width="100%" alt="examples/chaos from seed 1: opening broken.json fails with Input/output error, curl fails with its own error and exit 7 without running, the sensors read +101.0°C ALARM (CRIT) two seconds in, and needy run report counts the three injected faults by name." src="./docs/assets/banners/chaos-light.webp" />
 </picture>
 
 ```yaml
@@ -574,9 +616,9 @@ chaos:
 Change a live run's faults; the trace records each change:
 
 ```sh
-needy chaos add api-down --request ollama.needy --status 503 --after 1m
-needy chaos ls
-needy chaos rm api-down
+needy run chaos add api-down --request ollama.needy --status 503 --after 1m
+needy run chaos ls
+needy run chaos rm api-down
 ```
 
 ### Executors
@@ -626,23 +668,25 @@ kernel options. `linux-container` takes `actor.container.oci_runtime`.
 
 | Variable | Meaning |
 | --- | --- |
-| `NEEDY_ENDPOINT` | the daemon to talk to, as `--endpoint`; both override the endpoint `needy pair` remembered |
-| `NEEDY_TOKEN` | a bearer token that overrides the paired one |
-| `NEEDY_RUN` | the run that `--run` defaults to |
 | `NEEDY_STATE_DIR` | traces, `state.db`, run directories, the socket on macOS (`$XDG_STATE_HOME/needy`) |
 | `NEEDY_DATA_DIR` | VM images in `images/<driver>/` and guest disks (`$XDG_DATA_HOME/needy`) |
-| `NEEDY_CONFIG_DIR` | client tokens and `profiles/` (`$XDG_CONFIG_HOME/needy`) |
+| `NEEDY_CONFIG_DIR` | the global configuration, saved connections, and `profiles/` (`$XDG_CONFIG_HOME/needy`) |
 | `NEEDY_RUNTIME_DIR` | the daemon's socket (`$XDG_RUNTIME_DIR/needy`) |
 | `NEEDY_REPO` | the checkout `needy image build` builds from, when not run inside it |
 | `DOCKER_HOST` | the Docker-compatible engine (Docker Engine, OrbStack, Podman) |
 
-`--token-env NAME` and `--join-token-env NAME` name the variables that hold the
-control token and a join token; `-v` turns on logs.
+`--config FILE` selects the client configuration file. `--context NAME` selects
+a saved connection for one invocation. For direct transport, combine
+`--address URI` with an optional private `--credential-file FILE`.
+`-v` turns on logs. Old endpoint/token selectors are unsupported; old run variables
+and endpoint-keyed credential files are not read or imported. Create named
+connections explicitly with `needy config context pair`.
 
 ## Examples
 
 | Profile | Shows |
 | --- | --- |
+| [`examples/linux-mac`](examples/linux-mac) | Linux bash, Claude Code, or OpenCode with a shared project and child processes on a Mac |
 | [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model as the service `http://model.needy`, shells in a container |
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
@@ -653,7 +697,7 @@ control token and a join token; `-v` turns on logs.
 | [`examples/custom-image`](examples/custom-image/profile.yaml) | An actor image `FROM` needy's base with jq added, on every driver |
 | [`examples/agents`](examples/agents/README.md) | pi, Claude Code, Codex, opencode and herdr in an actor: one image, a profile each, their logins kept across runs |
 | [`examples/local`](examples/local/profile.yaml) | This machine as a native executor: copy-in, mirror-out, chaos and the trace |
-| [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy exec`, with an actor that only waits |
+| [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy proc exec`, with an actor that only waits |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
 
 ## How it works
@@ -684,15 +728,15 @@ flowchart LR
   PIDs, pipes, terminals and exit codes.
 - **Observe.** Routing decisions, routed execs, file transfers, gateway
   requests and faults are typed events in the trace (SQLite or JSONL, as the
-  profile's `trace:` says). `needy report` summarizes a run as text, markdown
+  profile's `trace:` says). `needy run report` summarizes a run as text, markdown
   or JSON. Commands that stay in the actor and terminal output are not
   recorded.
 - **Shape.** Faults (`EIO`, delays, an overheating sensor) and a machine
   identity built from a recipe.
 
-The actor's network sits near its main dependency, such as inference, and its
-gateway injects credentials so the actor never holds them. Executors sit near
-what the work operates on.
+The actor can sit near its model API. The gateway applies its network policy.
+Agent credentials live in the actor's mapped state directory. Executors hold
+the project files and toolchains.
 
 ## Architecture
 
@@ -726,6 +770,8 @@ and [`AGENTS.md`](AGENTS.md).
 - [Closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md):
   what runs, and latency and throughput numbers.
 - [Where documents go](docs/README.md)
+
+</details>
 
 ## Development
 

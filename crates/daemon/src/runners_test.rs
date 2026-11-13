@@ -105,6 +105,8 @@ async fn a_spent_or_revoked_join_token_is_refused_as_unauthenticated() {
   let spent = served.client.runners().join(join(&token, "two")).await.unwrap_err();
   let revoked = served.client.runners().join(join(&revoked, "three")).await.unwrap_err();
 
+  assert_eq!(needy_api_client::diagnostic::from_status(&spent).unwrap().reason, "bootstrap.used");
+  assert_eq!(needy_api_client::diagnostic::from_status(&revoked).unwrap().reason, "bootstrap.revoked");
   assert_eq!(spent.code(), Code::Unauthenticated);
   assert!(spent.message().ends_with("has no uses left"), "{}", spent.message());
   assert_eq!(revoked.code(), Code::Unauthenticated);

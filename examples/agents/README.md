@@ -102,6 +102,10 @@ back to the host:
 | pi | `~/needy-state/pi/` | `~/.pi/agent/` |
 | opencode | `~/needy-state/opencode/` | `~/.local/share/opencode/` |
 
+To save selected files, add a `filter` to both the copy-in and mirror-out mappings.
+See [file filters and state between runs](file-filters.md)
+for the syntax and examples: authentication only, authentication with configuration, excluded caches, and selected directories.
+
 Read these points before you log in:
 
 - `needy run stop --now` kills the actor without its mirror-out, so a
@@ -120,7 +124,7 @@ The actor can reach only the hosts in `actor.network.allow`. The gateway
 refuses all other hosts with 403 and records each refusal:
 
 ```sh
-needy report latest
+needy run report latest
 #   Findings
 #     network denied: files.openai.com (actor network)
 ```
@@ -139,7 +143,7 @@ The profiles include the API and sign-in hosts. The tests did not log in
 (see the verification in the
 [actor images design](../../docs/ai/references/architecture/2026-11-12-actor-images-design.md#step-3-checks)),
 so a host that only an authenticated session uses can be missing. If so,
-`needy report` shows it.
+`needy run report` shows it.
 
 ## herdr
 

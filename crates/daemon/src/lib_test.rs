@@ -332,3 +332,34 @@ async fn a_stream_outside_a_run_hears_the_daemon_is_shutting_down_while_it_serve
     other => panic!("{other:?}"),
   }
 }
+
+// Controlled shutdown leaves the API available for guest cleanup, but must
+// refuse new work even while an old daemon clone still exists.
+#[tokio::test]
+async fn shutdown_rejects_new_runs_and_process_starts() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  daemon.shutdown().await;
+  let error = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap_err();
+  assert!(matches!(error, ControlError::Diagnostic { .. }), "{error:?}");
+  assert!(error.to_string().contains("shutting down"));
+  let spec = ExecSpec {
+    argv: vec!["true".into()],
+    cwd: String::new(),
+    env: HashMap::new(),
+    clear_env: false,
+    tty: None,
+    detach: false,
+    run: String::new(),
+    executor: String::new(),
+    runner: String::new(),
+    no_stdin: true,
+    origin: Origin::Cli,
+    search_path_if_missing: false,
+    by: None,
+  };
+  let result = Processes::exec(daemon, ExecOpen::Start(spec), Box::pin(tokio_stream::empty())).await;
+  let error = result.err().expect("new executor work must be refused during shutdown");
+  assert!(matches!(error, ControlError::Diagnostic { .. }), "{error:?}");
+  assert!(error.to_string().contains("shutting down"));
+}

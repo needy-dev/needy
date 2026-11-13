@@ -17,7 +17,7 @@ import ProfileView from './ProfileView.vue'
  * at build time.
  */
 
-const EXAMPLES = import.meta.glob(['../../../../examples/*/profile.yaml', '../../../../examples/agents/*.yaml'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>
+const EXAMPLES = import.meta.glob(['../../../../examples/*/profile.yaml', '../../../../examples/agents/*.yaml', '../../../../examples/linux-mac/*.yaml'], { query: '?raw', import: 'default', eager: true }) as Record<string, string>
 
 /** The README's "Pick a profile" blocks: one per actor driver. */
 const DRIVER_PROFILES: Record<string, string> = {
@@ -74,7 +74,7 @@ const PRESETS: Array<{ id: string, label: string, text: string }> = [
   }),
 ]
 
-const preset = ref('examples/opencode')
+const preset = ref('examples/linux-mac/bash.yaml')
 const text = ref(PRESETS.find(p => p.id === preset.value)?.text ?? DRIVER_PROFILES.kvm!)
 
 watch(preset, (id) => {

@@ -258,6 +258,27 @@ async fn a_command_a_runner_cannot_start_is_refused_as_on_any_executor() {
   let error = ExecStream::start(&setup.client(), on_runner("mac", &["needy-no-such-command"])).await.err().unwrap();
 
   assert_eq!(error.kind(), Kind::Failed, "{error}");
+  assert_eq!(error.diagnostic().unwrap().reason, "process.start_failed");
+}
+
+#[tokio::test]
+async fn cwd_failure_has_the_same_typed_cause_through_a_runner_and_the_control_host() {
+  let setup = Setup::start().await;
+  let missing = setup.served.dir().join("missing-workspace").display().to_string();
+  for runner in ["", "mac"] {
+    let start = ExecStart {
+      cwd: missing.clone(),
+      ..on_runner(runner, &["sh", "-c", "true"])
+    };
+    let error = ExecStream::start(&setup.client(), start).await.err().expect("missing cwd is refused");
+    assert_eq!(error.kind(), Kind::Failed);
+    let diagnostic = error.diagnostic().expect("typed cwd failure crosses every hop");
+    assert_eq!(diagnostic.reason, "process.cwd_invalid");
+    assert_eq!(diagnostic.facts.get("cwd"), Some(&missing));
+    assert_eq!(diagnostic.facts.get("program").map(String::as_str), Some("sh"));
+    assert_eq!(diagnostic.facts.get("executor").map(String::as_str), Some(if runner.is_empty() { "local" } else { "mac" }));
+    assert_eq!(diagnostic.facts.get("runner").map(String::as_str), if runner.is_empty() { None } else { Some("mac") });
+  }
 }
 
 #[tokio::test]

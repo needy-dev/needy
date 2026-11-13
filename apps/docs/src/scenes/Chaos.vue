@@ -68,7 +68,7 @@ const STEPS: ChaosStep[] = [
     ms: 4600,
     clear: true,
     lines: [
-      { text: 'needy report latest', kind: 'cmd' },
+      { text: 'needy run report latest', kind: 'cmd' },
       { text: '…', kind: 'dim' },
       { text: 'Findings' },
       { text: '  injected faults: 3 (broken-json (file) (1), curl-down (exec) (1), overheat (sensor) (1))', kind: 'fault' },

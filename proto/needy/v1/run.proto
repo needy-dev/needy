@@ -3,6 +3,7 @@ syntax = "proto3";
 
 package needy.v1;
 
+import "needy/v1/diagnostic.proto";
 import "needy/v1/process.proto";
 
 // RunService manages runs: one actor and the executors bound to it.
@@ -290,6 +291,7 @@ message Placement {
 }
 
 message ProfileFinding {
+  ErrorDiagnostic diagnostic = 3;
   FindingSeverity severity = 1;
   string message = 2;
 }

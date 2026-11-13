@@ -59,3 +59,16 @@ async fn a_malformed_endpoint_fails_at_once_instead_of_retrying() {
   assert!(matches!(error, Error::InvalidEndpoint(_)), "{error:?}");
   assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
 }
+
+#[tokio::test]
+async fn strict_readiness_refuses_a_healthy_server_of_the_wrong_role() {
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("other.sock");
+  let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+  tokio::spawn(
+    tonic::transport::Server::builder().add_service(HealthServiceServer::new(Health)).serve_with_incoming(UnixListenerStream::new(listener)),
+  );
+  let error =
+    wait_expected(&format!("unix:{}", socket.display()), Duration::from_millis(100), "control", "expected-instance").await.unwrap_err();
+  assert!(error.to_string().contains("identity mismatch"), "{error}");
+}

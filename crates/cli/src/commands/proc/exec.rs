@@ -30,7 +30,7 @@ enum Output {
 }
 
 #[derive(clap::Args)]
-pub struct Args {
+pub struct Options {
   /// Force a terminal.
   #[arg(short = 't', conflicts_with = "no_tty")]
   tty: bool,
@@ -55,32 +55,75 @@ pub struct Args {
   /// Start from an empty environment.
   #[arg(long)]
   clear_env: bool,
-  /// Route within this run's rules and executors: an ID, an ID prefix, a
-  /// name or `latest`. Defaults to NEEDY_RUN; without either the command
-  /// runs outside any run, also when one run is live. `--run ''` runs
-  /// outside any run whatever NEEDY_RUN says.
-  // NOTICE: unlike `run attach`, `exec` never takes the only live run, so
-  // `needy exec -- CMD` means outside any run whether a run is live or not;
-  // the owner asked to keep that explicit and left the choice to the CLI UX
-  // slice (2026-11-12).
-  #[arg(long)]
-  run: Option<String>,
-  /// A profile's executor, inside the run: run there instead of letting
-  /// the run's rules decide.
-  #[arg(long, default_value = "", hide_default_value = true)]
-  executor: String,
-  /// A registered machine (a runner that joined this control plane),
-  /// outside any run: run on its machine. Not a profile's executor; that
-  /// is `--executor`.
-  #[arg(long, default_value = "", hide_default_value = true, conflicts_with_all = ["run", "executor"])]
-  runner: String,
-  #[arg(long, value_enum, default_value = "human")]
+  #[arg(short = 'o', long, value_enum, default_value = "human")]
   output: Output,
-  #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+  #[arg(required = true, last = true, allow_hyphen_values = true)]
   command: Vec<String>,
 }
 
+#[derive(clap::Args)]
+#[group(id = "process_target", required = true, multiple = false)]
+pub struct Args {
+  /// Execute on the selected control or standalone executor host.
+  #[arg(long, group = "process_target")]
+  host: bool,
+  /// Execute on one registered runner.
+  #[arg(long, group = "process_target")]
+  runner: Option<String>,
+  /// Execute on a uniquely named pooled executor, outside a run.
+  #[arg(long, group = "process_target")]
+  executor: Option<String>,
+  #[command(flatten)]
+  options: Options,
+}
+
+#[derive(clap::Args)]
+pub struct RunArgs {
+  /// Run ID, unique prefix, name or latest; omitted selects the inherited or only live run.
+  run: Option<String>,
+  /// Override the run's routing with this bound executor.
+  #[arg(long)]
+  executor: Option<String>,
+  #[command(flatten)]
+  options: Options,
+}
+
+enum Target {
+  Run {
+    run: Option<String>,
+    executor: String,
+  },
+  Outside {
+    runner: String,
+    executor: String,
+  },
+}
+
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  execute(
+    args.options,
+    Target::Outside {
+      runner: args.runner.unwrap_or_default(),
+      executor: args.executor.unwrap_or_default(),
+    },
+    ctx,
+  )
+  .await
+}
+
+pub async fn run_in_run(args: RunArgs, ctx: &Context) -> Result<i32> {
+  execute(
+    args.options,
+    Target::Run {
+      run: args.run,
+      executor: args.executor.unwrap_or_default(),
+    },
+    ctx,
+  )
+  .await
+}
+
+async fn execute(args: Options, target: Target, ctx: &Context) -> Result<i32> {
   let detach_keys = relay::DetachKeys::parse(&args.detach_keys)?;
   let interactive = relay::interactive();
   let tty = (args.tty || (interactive && !args.no_tty)) && args.output == Output::Human;
@@ -97,13 +140,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
   }
   let forward_stdin = !(args.no_stdin || args.detach);
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
-  // A runner is outside any run, whatever NEEDY_RUN says.
-  let run = if args.runner.is_empty() {
-    crate::runs::select_or_none(&connection, args.run).await?.unwrap_or_default()
-  } else {
-    String::new()
+  let selected = crate::connection::resolve(ctx)?;
+  let connection = selected.connect().await?;
+  let (run, runner, executor) = match target {
+    Target::Run { run, executor } => (crate::runs::select(&connection, run, ctx).await?, String::new(), executor),
+    Target::Outside { runner, executor } => (String::new(), runner, executor),
   };
+  if let Some(execution) = selected.execution((!run.is_empty()).then(|| run.clone()))? {
+    env.entry(crate::connection::EXECUTION_CONTEXT.into()).or_insert(execution);
+  }
   let start = ExecStart {
     argv: args.command,
     cwd: args.cwd.unwrap_or_default(),
@@ -112,8 +157,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     tty: window,
     detach: args.detach,
     run_id: run,
-    executor: args.executor,
-    runner: args.runner,
+    executor,
+    runner,
     no_stdin: !forward_stdin,
     origin: Origin::Cli.into(),
     // A path named on the command line must exist where it runs.
@@ -121,10 +166,10 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   };
   let mut stream = match ExecStream::start(&connection, start).await {
     Ok(stream) => stream,
-    Err(error) => return refused(error, args.output),
+    Err(error) => return refused(error, args.output, ctx),
   };
   if args.detach {
-    return detached(&mut stream, args.output).await;
+    return detached(&mut stream, args.output, ctx).await;
   }
   match args.output {
     Output::Human => {
@@ -135,26 +180,26 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         detach_keys: detach_keys.filter(|_| tty),
         ..relay::Options::default()
       };
-      status(relay::run(stream, options).await)
+      status(relay::run(stream, options).await, ctx)
     }
     Output::Json | Output::Ndjson => {
       let _forward = relay::Forward::start(stream.input(), forward_stdin, false);
-      events(stream, args.output).await
+      events(stream, args.output, ctx).await
     }
   }
 }
 
 /// The exit code of a relayed command: its own, 0 when the user detached,
 /// or 255 with a message when the stream ended before it exited.
-pub(crate) fn status(relayed: Result<relay::Ended, relay::Error>) -> Result<i32> {
+pub(crate) fn status(relayed: Result<relay::Ended, relay::Error>, ctx: &Context) -> Result<i32> {
   match relayed {
     Ok(relay::Ended::Exited(exit)) => Ok(exit_code(&exit)),
     Ok(relay::Ended::Detached { process }) => {
-      output::after_terminal(format!("detached from process {process}; `needy attach {process}` returns to it"));
+      output::after_terminal(format!("detached from process {process}; `needy proc attach {process}` returns to it"));
       Ok(0)
     }
     Err(error) if error.ended() => {
-      output::message(&error);
+      unknown(&error.to_string(), ctx);
       Ok(signals::ENDED)
     }
     // A second SIGTERM or SIGHUP: the client leaves like a shell's child.
@@ -175,7 +220,7 @@ fn exit_code(exit: &Exit) -> i32 {
 /// Exit code and output for a start the daemon refused, like a shell's: 126
 /// when a rule or an injected fault refuses the command, 127 when it cannot
 /// start. Other errors are errors.
-fn refused(error: Error, format: Output) -> Result<i32> {
+fn refused(error: Error, format: Output, ctx: &Context) -> Result<i32> {
   let code = match error.kind() {
     Kind::Denied => 126,
     Kind::Failed => 127,
@@ -200,13 +245,13 @@ fn refused(error: Error, format: Output) -> Result<i32> {
       line(&json!({"type": "exit", "code": code, "signal": ""}))?;
     }
   }
-  output::message(&message);
+  crate::diagnostics::render_in(&error.into(), ctx.diagnostic_format, Some(ctx));
   Ok(code)
 }
 
 /// Waits until the detached process starts and prints its ID. A stream that
 /// ends first leaves the process's fate unknown: 255 and why it ended.
-async fn detached(stream: &mut ExecStream, format: Output) -> Result<i32> {
+async fn detached(stream: &mut ExecStream, format: Output, ctx: &Context) -> Result<i32> {
   let reason = loop {
     let event = match stream.next().await {
       Ok(Some(event)) => event,
@@ -233,12 +278,12 @@ async fn detached(stream: &mut ExecStream, format: Output) -> Result<i32> {
     Output::Json => line(&json!({"error": message}))?,
     Output::Ndjson => line(&json!({"type": "error", "message": message}))?,
   }
-  output::message(&message);
+  unknown(&message, ctx);
   Ok(signals::ENDED)
 }
 
 /// Collects (`json`) or streams (`ndjson`) the process's events until it exits.
-async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
+async fn events(mut stream: ExecStream, format: Output, ctx: &Context) -> Result<i32> {
   let mut summary: BTreeMap<&str, Value> = BTreeMap::new();
   let mut stdout = Vec::new();
   let mut stderr = Vec::new();
@@ -293,7 +338,7 @@ async fn events(mut stream: ExecStream, format: Output) -> Result<i32> {
       line(&json!({"type": "error", "message": message}))?;
     }
     summary.insert("error", json!(message));
-    output::message(&message);
+    unknown(&message, ctx);
     code = signals::ENDED;
   }
   if format == Output::Json {
@@ -332,3 +377,12 @@ fn line(value: &Value) -> Result<()> {
 #[cfg(test)]
 #[path = "exec_test.rs"]
 mod tests;
+
+/// An ended stream provides no evidence that the child completed. Keep the
+/// execution stdout schema and shell exit while reporting that uncertainty.
+fn unknown(message: &str, ctx: &Context) {
+  let error = crate::diagnostics::Error::new("process.outcome_unknown", message)
+    .outcome_unknown()
+    .check("Inspect the process or run before retrying; the command may still be running or may have completed.");
+  crate::diagnostics::render_in(&error.into(), ctx.diagnostic_format, Some(ctx));
+}

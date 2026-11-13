@@ -65,7 +65,7 @@ pub struct CellEnv<'a> {
   /// The loopback TCP port the daemon also listens on, for a runner that
   /// joins through a tunnel.
   pub tcp: Option<u16>,
-  /// Runners the cell started: a local `daemon --mode runner`, or the ssh
+  /// Runners the cell started: a local `runner serve`, or the ssh
   /// session a remote one lives in.
   runners: Vec<Child>,
   /// The runs the cell created, for the leftover checks.
@@ -105,6 +105,11 @@ impl<'a> CellEnv<'a> {
       }
     }
     bail!("cannot find a free cell directory under {}", base.display())
+  }
+
+  /// Process identity from the child handle the harness itself started.
+  pub fn daemon_pid(&self) -> Option<u32> {
+    self.daemon.as_ref().map(Child::id)
   }
 
   pub fn state(&self) -> PathBuf {
@@ -161,7 +166,12 @@ impl<'a> CellEnv<'a> {
     let mut command = Command::new(&self.ctx.needy);
     command.args(args).current_dir(&self.dir);
     // A caller's own run, token or endpoint must not leak into a cell.
-    for var in ["NEEDY_RUN", "NEEDY_TOKEN", "NEEDY_ENDPOINT"] {
+    for var in [
+      "NEEDY_RUN",
+      "NEEDY_TOKEN",
+      "NEEDY_ENDPOINT",
+      "NEEDY_EXECUTION_CONTEXT",
+    ] {
       command.env_remove(var);
     }
     command.envs(self.env());
@@ -178,14 +188,30 @@ impl<'a> CellEnv<'a> {
   /// harness's caller.
   pub fn cell_env(&self) -> Vec<String> {
     let mut env: Vec<String> = self.env().into_iter().map(|(k, v)| format!("{k}={v}")).collect();
-    env.push("NEEDY_RUN=".into());
+    env.extend(
+      [
+        "NEEDY_RUN=",
+        "NEEDY_TOKEN=",
+        "NEEDY_ENDPOINT=",
+        "NEEDY_EXECUTION_CONTEXT=",
+      ]
+      .map(str::to_string),
+    );
     env
   }
 
   /// `needy ARGS` on a pseudo-terminal.
   pub fn term(&self, args: &[&str]) -> Result<Term> {
     let mut env = self.env();
-    env.push(("NEEDY_RUN".into(), String::new()));
+    env.extend(
+      [
+        "NEEDY_RUN",
+        "NEEDY_TOKEN",
+        "NEEDY_ENDPOINT",
+        "NEEDY_EXECUTION_CONTEXT",
+      ]
+      .map(|name| (name.into(), String::new())),
+    );
     Term::spawn(&self.ctx.needy, args, &env, &self.dir)
   }
 
@@ -206,20 +232,13 @@ impl<'a> CellEnv<'a> {
     let log = File::options().create(true).append(true).open(self.dir.join("daemon.log"))?;
     let mut args = vec![
       "daemon".to_string(),
-      "--mode".into(),
-      "control".into(),
+      "serve".into(),
       "--local-runner".into(),
       "e2e".into(),
       "-v".into(),
     ];
     if let Some(port) = self.tcp {
-      let socket = self.runtime().join("daemon.sock");
-      args.extend([
-        "--listen".into(),
-        format!("unix:{}", socket.display()),
-        "--listen".into(),
-        format!("127.0.0.1:{port}"),
-      ]);
+      args.extend(["--listen".into(), format!("tcp://127.0.0.1:{port}")]);
     }
     if let Ok(guest) = &self.ctx.host.guest {
       args.extend(["--guest-needy".into(), guest.display().to_string()]);
@@ -277,36 +296,48 @@ impl<'a> CellEnv<'a> {
     Ok(())
   }
 
-  /// Starts a runner on this host, `name`, joined to this cell's daemon
-  /// with `token` over its control socket, with directories of its own.
-  /// Starts a runner on this host that joins `join` (an endpoint), with
-  /// `env` added to its environment.
+  /// Enrolls a runner on this host through `join`, then serves its saved
+  /// enrollment with directories of its own and the transport environment.
   pub fn start_local_runner(&mut self, token: &str, name: &str, join: &str, env: &[(String, String)]) -> Result<()> {
     let log = File::options().create(true).append(true).open(self.dir.join("runner.log"))?;
-    let args = [
-      "daemon",
-      "--mode",
-      "runner",
-      "--join",
-      join,
-      "--join-token-env",
-      "NEEDY_E2E_JOIN",
-      "--name",
-      name,
-      "--roles",
-      "executor",
-      "-v",
+    let code = self.file("runner-code", token, 0o600)?;
+    let mut args = vec![
+      "runner".to_string(),
+      "join".into(),
+      name.into(),
+      "--code-file".into(),
+      code.display().to_string(),
+      "--roles".into(),
+      "executor".into(),
     ];
-    let mut command = self.command(&args);
-    command
-      .env("NEEDY_STATE_DIR", self.dir.join("rs"))
-      .env("NEEDY_RUNTIME_DIR", self.dir.join("rr"))
-      .env("NEEDY_CONFIG_DIR", self.dir.join("rc"))
-      .env("NEEDY_E2E_JOIN", token)
-      .envs(env.iter().map(|(k, v)| (k, v)))
-      .stdin(Stdio::null())
-      .stdout(log.try_clone()?)
-      .stderr(log);
+    if let Some(command) = join.strip_prefix("exec:") {
+      args.push("--".into());
+      args.extend(shell_words::split(command).context("invalid runner connector argv")?);
+    } else {
+      args.extend(["--address".into(), join.into()]);
+    }
+    let configure = |command: &mut Command| -> Result<()> {
+      command
+        .env("NEEDY_STATE_DIR", self.dir.join("rs"))
+        .env("NEEDY_RUNTIME_DIR", self.dir.join("rr"))
+        .env("NEEDY_CONFIG_DIR", self.dir.join("rc"))
+        .envs(env.iter().map(|(k, v)| (k, v)))
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log.try_clone()?);
+      Ok(())
+    };
+    let mut enroll = self.command(&args.iter().map(String::as_str).collect::<Vec<_>>());
+    configure(&mut enroll)?;
+    let enrolled = proc::run(enroll, Duration::from_secs(60));
+    std::fs::remove_file(code).context("cannot remove the consumed runner invitation file")?;
+    let enrolled = enrolled?;
+    if !enrolled.ok() {
+      let log = std::fs::read_to_string(self.dir.join("runner.log")).unwrap_or_default();
+      bail!("cannot enroll the local runner: {}; log: {}", enrolled.brief(), runs_tail(&log));
+    }
+    let mut command = self.command(&["runner", "serve", "-v"]);
+    configure(&mut command)?;
     let child = command.spawn().context("cannot start the local runner")?;
     DAEMONS.lock().map(|mut d| d.push(child.id() as i32)).ok();
     self.runners.push(child);

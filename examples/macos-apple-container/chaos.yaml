@@ -1,7 +1,7 @@
 # examples/chaos with an Apple `container` actor: copy-in and mirror-out on
 # the actor, a file fault on the shared workspace and an exec fault, with
 # this Mac as a native executor. The sensor fault has no effect here: Apple's
-# default kernel has no sensors (`needy profile check` says so). Create the
+# default kernel has no sensors (`needy config profile check` says so). Create the
 # executor's directory and the results' first: `mkdir -p
 # /tmp/needy-apple-chaos-ws examples/macos-apple-container/out`.
 user: { name: agent, uid: 1000, gid: 1000 }

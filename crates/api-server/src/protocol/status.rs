@@ -21,6 +21,16 @@ use crate::control::ControlError;
 
 pub fn status(error: ControlError) -> Status {
   match error {
+    ControlError::Diagnostic { error, diagnostic } => {
+      let mut status = status(*error);
+      if let Some(diagnostic) = domain::proto_diagnostic(diagnostic) {
+        status
+          .metadata_mut()
+          .insert_bin(needy_api_proto::diagnostic::METADATA_KEY, tonic::metadata::MetadataValue::from_bytes(&diagnostic.encode_to_vec()));
+      }
+      status
+    }
+
     ControlError::Denied { message, events } => {
       let details = ExecRefusal {
         events: events.iter().map(domain::proto_exec_event).collect(),

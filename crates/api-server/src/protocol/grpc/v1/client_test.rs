@@ -19,6 +19,7 @@ fn with(client: &Client, token: &str) -> Client {
 async fn an_operator_creates_a_pairing_code_whose_secret_is_in_the_response() {
   let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let request = CreatePairingCodeRequest {
+    access: needy_api_proto::v1::ClientAccess::Runs as i32,
     ttl_ms: 600_000,
     name: "laptop".into(),
   };
@@ -36,6 +37,7 @@ async fn a_pairing_code_for_an_active_clients_name_names_the_client_it_replaces(
   let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let operator = with(&served.client, CONTROL_TOKEN);
   let request = |name: &str| CreatePairingCodeRequest {
+    access: needy_api_proto::v1::ClientAccess::Runs as i32,
     ttl_ms: 600_000,
     name: name.into(),
   };
@@ -194,7 +196,7 @@ async fn a_client_token_cannot_manage_join_tokens_runners_or_clients() {
 
   for refused in refusals {
     assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
-    assert!(refused.message().contains("needs the control token"), "{}", refused.message());
+    assert!(refused.message().contains("needs administrator access"), "{}", refused.message());
   }
   assert!(served.fake.calls().is_empty(), "{:?}", served.fake.calls());
 }
@@ -221,47 +223,65 @@ async fn an_actor_cannot_manage_clients() {
   assert!(served.fake.calls().is_empty());
 }
 
-// Join tokens and clients are listed only on the control host itself
-// (owner decision, 2026-11-12): by the operator on the control daemon's
-// Unix socket, not over TCP even with the control token, and never by a
-// paired client. Runners stay listed for clients. Unix only: Windows binds
-// no Unix socket, so the harness serves TCP there and the operator's side
-// does not exist (nor does a control daemon on Windows).
+// Management metadata follows the same explicit authority policy over both
+// Unix and TCP, so network administrators can inspect the registry.
 #[cfg(unix)]
 #[tokio::test]
-async fn join_tokens_and_clients_are_listed_only_by_the_operator_on_the_unix_socket() {
-  use needy_api_proto::v1::{ListJoinTokensRequest, ListRunnersRequest};
-
+async fn management_metadata_is_available_to_operators_over_unix_and_tcp() {
   use crate::testing::serve_tcp;
-
+  use needy_api_proto::v1::{ListJoinTokensRequest, ListRunnersRequest};
   let local = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
   let remote = serve_tcp(Caller::Operator, Some(CONTROL_TOKEN)).await;
-
-  let operator = with(&local.client, CONTROL_TOKEN);
-  operator.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap();
-  operator.clients().list_clients(ListClientsRequest {}).await.unwrap();
-  assert_eq!(local.fake.calls(), ["list tokens", "list clients"]);
-
-  let tunnelled = with(&remote.client, CONTROL_TOKEN);
-  for refused in [
-    tunnelled.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap_err(),
-    tunnelled.clients().list_clients(ListClientsRequest {}).await.unwrap_err(),
-  ] {
-    assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
-    assert!(refused.message().contains("only on the control host's Unix socket, not over TCP"), "{}", refused.message());
-  }
   for served in [&local, &remote] {
+    let operator = with(&served.client, CONTROL_TOKEN);
+    operator.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap();
+    operator.clients().list_clients(ListClientsRequest {}).await.unwrap();
     let client = with(&served.client, CLIENT_TOKEN);
-    for refused in [
-      client.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap_err(),
-      client.clients().list_clients(ListClientsRequest {}).await.unwrap_err(),
-    ] {
-      assert_eq!(refused.code(), Code::PermissionDenied, "{refused:?}");
-      assert!(refused.message().contains("paired client laptop may not"), "{}", refused.message());
-    }
+    assert_eq!(client.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap_err().code(), Code::PermissionDenied);
+    assert_eq!(client.clients().list_clients(ListClientsRequest {}).await.unwrap_err().code(), Code::PermissionDenied);
+    client.runners().list_runners(ListRunnersRequest {}).await.unwrap();
   }
-  assert!(remote.fake.calls().is_empty(), "{:?}", remote.fake.calls());
+}
 
-  with(&remote.client, CLIENT_TOKEN).runners().list_runners(ListRunnersRequest {}).await.unwrap();
-  assert_eq!(remote.fake.calls(), ["list runners"]);
+#[tokio::test]
+async fn credential_registry_failure_is_not_reported_as_a_bad_secret() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  let failed = with(&served.client, "registry-outage").runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+  let invalid = with(&served.client, "wrong-secret").runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+  assert_eq!(failed.code(), Code::Unavailable);
+  assert_eq!(invalid.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn unknown_access_is_refused_before_the_registry_creates_a_secret() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  let invalid = with(&served.client, CONTROL_TOKEN)
+    .clients()
+    .create_pairing_code(CreatePairingCodeRequest {
+      ttl_ms: 1000,
+      name: "other".into(),
+      access: 999,
+    })
+    .await
+    .unwrap_err();
+  assert_eq!(invalid.code(), Code::InvalidArgument);
+  assert!(served.fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn an_invitation_requires_an_explicit_known_access_grant() {
+  let served = serve_with(Caller::Operator, Some(CONTROL_TOKEN)).await;
+  for access in [0, 99] {
+    let result = with(&served.client, CONTROL_TOKEN)
+      .clients()
+      .create_pairing_code(CreatePairingCodeRequest {
+        access,
+        ttl_ms: 600_000,
+        name: "new-client".into(),
+      })
+      .await
+      .unwrap_err();
+    assert_eq!(result.code(), Code::InvalidArgument);
+  }
+  assert!(served.fake.calls().is_empty());
 }

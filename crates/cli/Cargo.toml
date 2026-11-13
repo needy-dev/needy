@@ -23,6 +23,7 @@ futures-util.workspace = true
 gethostname.workspace = true
 humantime.workspace = true
 ignore.workspace = true
+libc.workspace = true
 needy-api-client.workspace = true
 needy-api-server.workspace = true
 needy-common.workspace = true
@@ -34,16 +35,23 @@ needy-core-executor.workspace = true
 needy-daemon.workspace = true
 needy-trace = { workspace = true, features = ["sqlite"] }
 reqwest.workspace = true
+rpassword = "7"
 serde.workspace = true
 serde_json.workspace = true
+serde_path_to_error.workspace = true
 sha2.workspace = true
 shell-words.workspace = true
 tar.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
+tonic = { workspace = true, features = ["transport"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 needy-common = { workspace = true, features = ["testing"] }

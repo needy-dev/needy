@@ -123,7 +123,11 @@ pub async fn place(run: &Run, spec: &mut ExecSpec) -> Result<(Placed, Vec<Event>
       if explicit.is_none() {
         events.push(record(run, ctx, decision, origin, decision.outcome.clone()));
       }
-      return Err(ControlError::Denied { message, events });
+      let reason = match &decision.outcome {
+        Outcome::Fault(_) => "fault.exec_injected",
+        _ => "policy.exec_denied",
+      };
+      return Err(ControlError::Denied { message, events }.with_diagnostic(reason, []));
     }
   }
   if explicit.is_none() {

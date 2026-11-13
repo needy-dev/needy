@@ -11,6 +11,8 @@ pub struct CreatePairingCodeRequest {
     /// `CreatePairingCodeResponse.replaces`.
     #[prost(string, tag="2")]
     pub name: ::prost::alloc::string::String,
+    #[prost(enumeration="ClientAccess", tag="3")]
+    pub access: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CreatePairingCodeResponse {
@@ -30,6 +32,8 @@ pub struct CreatePairingCodeResponse {
     /// holds.
     #[prost(message, optional, tag="5")]
     pub replaces: ::core::option::Option<Client>,
+    #[prost(enumeration="ClientAccess", tag="6")]
+    pub access: i32,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PairRequest {
@@ -40,7 +44,7 @@ pub struct PairRequest {
 pub struct PairResponse {
     #[prost(message, optional, tag="1")]
     pub client: ::core::option::Option<Client>,
-    /// The client's token, a bearer token for every operator method. Not
+    /// The client's token, bound to the granted access. Not
     /// stored, not shown again.
     #[prost(string, tag="2")]
     pub token: ::prost::alloc::string::String,
@@ -60,6 +64,8 @@ pub struct Client {
     /// 0 unless revoked.
     #[prost(int64, tag="5")]
     pub revoked_at_ms: i64,
+    #[prost(enumeration="ClientAccess", tag="6")]
+    pub access: i32,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListClientsRequest {
@@ -76,6 +82,87 @@ pub struct RevokeClientRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RevokeClientResponse {
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetCallerRequest {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetCallerResponse {
+    #[prost(enumeration="CallerKind", tag="1")]
+    pub kind: i32,
+    #[prost(string, tag="2")]
+    pub client_id: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(enumeration="ClientAccess", tag="4")]
+    pub access: i32,
+}
+/// Server-granted client authority. Legacy unspecified values mean runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ClientAccess {
+    Unspecified = 0,
+    Runs = 1,
+    Admin = 2,
+}
+impl ClientAccess {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CLIENT_ACCESS_UNSPECIFIED",
+            Self::Runs => "CLIENT_ACCESS_RUNS",
+            Self::Admin => "CLIENT_ACCESS_ADMIN",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CLIENT_ACCESS_UNSPECIFIED" => Some(Self::Unspecified),
+            "CLIENT_ACCESS_RUNS" => Some(Self::Runs),
+            "CLIENT_ACCESS_ADMIN" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CallerKind {
+    Unspecified = 0,
+    LocalOperator = 1,
+    Client = 2,
+}
+impl CallerKind {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CALLER_KIND_UNSPECIFIED",
+            Self::LocalOperator => "CALLER_KIND_LOCAL_OPERATOR",
+            Self::Client => "CALLER_KIND_CLIENT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CALLER_KIND_UNSPECIFIED" => Some(Self::Unspecified),
+            "CALLER_KIND_LOCAL_OPERATOR" => Some(Self::LocalOperator),
+            "CALLER_KIND_CLIENT" => Some(Self::Client),
+            _ => None,
+        }
+    }
+}
+/// Bounded safe facts accompany the original status or stream payload.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ErrorDiagnostic {
+    #[prost(string, tag="1")]
+    pub reason: ::prost::alloc::string::String,
+    #[prost(map="string, string", tag="2")]
+    pub facts: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct WindowSize {
@@ -120,8 +207,8 @@ pub struct ExecStart {
     #[prost(bool, tag="12")]
     pub search_path_if_missing: bool,
     /// Runner name: run on that runner's own machine, outside any run. Empty
-    /// for a run's or this daemon's executors. Set at most one of `run_id`,
-    /// `executor` and `runner`.
+    /// for a run's or this daemon's executors. Runner is exclusive with
+    /// `run_id` and `executor`; run plus executor selects a run executor.
     #[prost(string, tag="13")]
     pub runner: ::prost::alloc::string::String,
 }
@@ -237,8 +324,10 @@ pub struct ExecRefusal {
     #[prost(message, repeated, tag="1")]
     pub events: ::prost::alloc::vec::Vec<ExecEvent>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecResponse {
+    #[prost(message, optional, tag="9")]
+    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
     #[prost(oneof="exec_response::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8")]
     pub payload: ::core::option::Option<exec_response::Payload>,
 }
@@ -867,8 +956,10 @@ pub struct Placement {
     #[prost(string, tag="1")]
     pub runner: ::prost::alloc::string::String,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ProfileFinding {
+    #[prost(message, optional, tag="3")]
+    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
     #[prost(enumeration="FindingSeverity", tag="1")]
     pub severity: i32,
     #[prost(string, tag="2")]
@@ -1406,22 +1497,26 @@ pub mod task_result {
 }
 /// Why a runner refused or failed a task, as the gRPC status its process
 /// service returned.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskError {
+    #[prost(bytes="vec", tag="3")]
+    pub details: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag="4")]
+    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
     /// A `google.rpc.Code` value.
     #[prost(int32, tag="1")]
     pub code: i32,
     #[prost(string, tag="2")]
     pub message: ::prost::alloc::string::String,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct TaskRequest {
     #[prost(oneof="task_request::Payload", tags="1, 2, 3")]
     pub payload: ::core::option::Option<task_request::Payload>,
 }
 /// Nested message and enum types in `TaskRequest`.
 pub mod task_request {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Payload {
         /// The first request: the task this stream is for.
         #[prost(uint64, tag="1")]

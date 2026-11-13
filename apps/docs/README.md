@@ -15,6 +15,9 @@ Its layout and banner pipeline follow the
 - `src/scenes`: one Vue component per scene, each a list of steps; `sizes.ts`
   lists them with their design sizes, which are the banner sizes (2.5:1, 2:1,
   3:1).
+- `src/setup`: the environment wizard generates steps and a profile for the
+  selected entrypoint, actor host, driver, and executor. Its profile templates
+  come from `examples/linux-mac/`. Each command block names one terminal context.
 - `src/components`: the guide's sections; `src/content.ts` holds their text
   in English and Chinese.
 - `src/kit`: what scenes are made of: the frame and its player, boxes, wires,
@@ -23,7 +26,8 @@ Its layout and banner pipeline follow the
   the cases of `crates/core/src/pattern_test.rs`. The routing scene and the
   playground decide with it, and `network.ts` ports the gateway's allowlist.
   When `pattern.rs`, `rules/mod.rs` or `network.rs` changes, change these too.
-- `src/studio`: the profile studio; `schema.ts` and `check.ts` port the
+- `src/studio`: the profile studio, starting with the Linux-to-Mac bash example;
+  `schema.ts` and `check.ts` port the
   profile schema and checks of `crates/config`, and change with it.
 - `src/data/drivers.ts`: the actor drivers table, from the README.
 - `scripts/banners.ts`: renders each scene to `docs/assets/banners` as a

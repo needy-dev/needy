@@ -129,3 +129,42 @@ async fn heartbeats_pick_up_a_rotated_credential_and_end_once_the_runner_is_remo
   assert!(error.starts_with("the control plane refused this runner's credential"), "{error}");
   assert_eq!(listed(&served).await[0].status(), RunnerStatus::Removed);
 }
+
+#[tokio::test]
+async fn enrollment_saves_role_bounds_and_settings_without_starting_the_runner() {
+  let served = control(Duration::from_secs(15)).await;
+  let state = tempfile::tempdir().unwrap();
+  let settings = Settings {
+    roles: None,
+    labels: BTreeMap::from([("os".into(), "darwin".into())]),
+    actor_image: Some(std::path::PathBuf::from("/home/user/actor-image")),
+  };
+  enroll(config(&served, state.path(), Some(join_token(&served).await)), settings).await.unwrap();
+  let (name, saved) = enrollment(state.path()).unwrap();
+  assert_eq!(name, "mac");
+  assert_eq!(saved.roles, Some(BTreeSet::from([needy_core::types::RunnerRole::Executor])));
+  assert_eq!(saved.labels.get("os").map(String::as_str), Some("darwin"));
+  assert_eq!(saved.actor_image.as_deref(), Some(std::path::Path::new("/home/user/actor-image")));
+  let error = enroll(config(&served, state.path(), None), Settings::default()).await.unwrap_err();
+  assert!(error.to_string().contains("already joined"));
+  let mut runner = Runner::start(config(&served, state.path(), None)).await.unwrap();
+  runner.beat().await.unwrap();
+  assert_eq!(listed(&served).await.len(), 1);
+}
+
+#[tokio::test]
+async fn rejected_label_overrides_do_not_replace_saved_runner_settings() {
+  let served = control(Duration::from_secs(15)).await;
+  let state = tempfile::tempdir().unwrap();
+  let settings = Settings {
+    labels: BTreeMap::from([("os".into(), "darwin".into())]),
+    ..Settings::default()
+  };
+  enroll(config(&served, state.path(), Some(join_token(&served).await)), settings).await.unwrap();
+  let mut overridden = config(&served, state.path(), None);
+  overridden.labels = BTreeMap::from([("invalid key".into(), "value".into())]);
+  let error = serve_with_labels(overridden, true).await.unwrap_err();
+  assert!(error.to_string().contains("not accepted"));
+  assert_eq!(enrollment(state.path()).unwrap().1.labels.get("os").map(String::as_str), Some("darwin"));
+  assert!(!enrollment(state.path()).unwrap().1.labels.contains_key("invalid key"));
+}

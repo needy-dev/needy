@@ -14,6 +14,7 @@ impl MigratorTrait for Migrator {
       Box::new(CreateClients),
       Box::new(RunnerCapabilities),
       Box::new(Drivers),
+      Box::new(ClientAccess),
     ]
   }
 }
@@ -388,5 +389,35 @@ impl MigrationTrait for Drivers {
     let db = manager.get_connection();
     db.execute_unprepared("UPDATE instances SET provider = driver, runtime = driver").await?;
     manager.alter_table(Table::alter().table(Instances::Table).drop_column(Instances::Driver).to_owned()).await
+  }
+}
+
+/// Existing clients and outstanding codes retain runs-only access.
+struct ClientAccess;
+impl MigrationName for ClientAccess {
+  fn name(&self) -> &str {
+    "m20261114_000010_client_access"
+  }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for ClientAccess {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    for table in ["clients", "pairing_codes"] {
+      manager
+        .alter_table(
+          Table::alter()
+            .table(Alias::new(table))
+            .add_column(ColumnDef::new(Alias::new("access")).integer().not_null().default(1))
+            .to_owned(),
+        )
+        .await?;
+    }
+    Ok(())
+  }
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    for table in ["clients", "pairing_codes"] {
+      manager.alter_table(Table::alter().table(Alias::new(table)).drop_column(Alias::new("access")).to_owned()).await?;
+    }
+    Ok(())
   }
 }

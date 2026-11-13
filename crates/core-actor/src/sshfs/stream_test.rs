@@ -71,6 +71,7 @@ impl Executor for Fake {
         let bytes = match request.payload {
           Some(exec_request::Payload::Start(_)) => {
             let started = ExecResponse {
+              diagnostic: None,
               payload: Some(exec_response::Payload::Started(ExecStarted::default())),
             };
             let _sent = tx.send(Ok(started)).await;
@@ -88,6 +89,7 @@ impl Executor for Fake {
             _ => continue,
           };
           let stdout = ExecResponse {
+            diagnostic: None,
             payload: Some(exec_response::Payload::Stdout(reply)),
           };
           // The bridge may have left this server; nothing to do then.
@@ -121,6 +123,7 @@ impl Fake {
   async fn lose(&self, server: usize) {
     let tx = self.servers.lock().unwrap()[server].responses.clone();
     let ended = ExecResponse {
+      diagnostic: None,
       payload: Some(exec_response::Payload::Ended(ExecEnded {
         reason: "runner r disconnected".into(),
       })),
@@ -131,6 +134,7 @@ impl Fake {
   async fn exit(&self, server: usize) {
     let tx = self.servers.lock().unwrap()[server].responses.clone();
     let exited = ExecResponse {
+      diagnostic: None,
       payload: Some(exec_response::Payload::Exited(ExecExited {
         signal: "SIGKILL".into(),
         ..Default::default()

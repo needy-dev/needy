@@ -24,7 +24,7 @@ fn run(caller: &Caller, named: String) -> Result<String, Status> {
   match caller {
     Caller::Actor { run } => Ok(run.clone()),
     Caller::Operator | Caller::Client { .. } => Ok(named),
-    Caller::Runner { .. } => Err(ControlError::denied("runners cannot run processes here").into()),
+    Caller::Runner { .. } => Err(ControlError::role_denied("runners cannot run processes here").into()),
   }
 }
 
@@ -32,7 +32,7 @@ fn run(caller: &Caller, named: String) -> Result<String, Status> {
 /// rules and may not name one.
 fn runner(caller: &Caller, named: String) -> Result<String, Status> {
   match caller {
-    Caller::Actor { .. } if !named.is_empty() => Err(ControlError::denied("an actor cannot name a runner").into()),
+    Caller::Actor { .. } if !named.is_empty() => Err(ControlError::role_denied("an actor cannot name a runner").into()),
     _ => Ok(named),
   }
 }

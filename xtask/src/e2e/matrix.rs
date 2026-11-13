@@ -68,7 +68,7 @@ impl Oci {
 }
 
 /// The actor driver dimension. `Host` is the cells without an actor:
-/// `needy exec` and `needy fs cp` against the control daemon's own native
+/// `needy proc exec --host` and `needy fs cp` against the control daemon's own native
 /// executor, which need no VM or engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Driver {
@@ -241,7 +241,7 @@ pub enum Fault {
   File,
   Net,
   Sensor,
-  /// `needy chaos add` while the run is live.
+  /// `needy run chaos add` while the run is live.
   Added,
 }
 
@@ -299,8 +299,10 @@ impl RunnerAt {
 /// vary itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
+  /// Opt-in user service lifecycle on this platform manager.
+  Service,
   /// Routing to a native executor on a runner that joined the control
-  /// plane, and `needy exec --runner`.
+  /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
   /// Copy-in from the host into the actor, nested and single-level; mirror-out
   /// from the actor with and without a filter.
@@ -323,7 +325,7 @@ pub enum Scenario {
   FakeAgent,
   /// A TUI fidelity case from `super::tui`, by its index there.
   Tui(usize),
-  /// `needy exec` outside any run: exit codes, a terminal, JSON output.
+  /// `needy proc exec --host` outside any run: exit codes, a terminal, JSON output.
   HostExec,
   /// `needy fs cp` outside any run, into a nested directory and back.
   HostCopy,
@@ -352,7 +354,7 @@ impl Cell {
     // Scenarios that route somewhere route to a native executor unless the
     // cell says otherwise; the others have none.
     let executor = match scenario {
-      Scenario::Terminal | Scenario::Tui(_) | Scenario::Network(_) | Scenario::Workspace(Workspace::Host) => None,
+      Scenario::Service | Scenario::Terminal | Scenario::Tui(_) | Scenario::Network(_) | Scenario::Workspace(Workspace::Host) => None,
       Scenario::Chaos(Fault::Net | Fault::Sensor) => None,
       _ => Some(Executor::Native),
     };
@@ -388,6 +390,7 @@ impl Cell {
       Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name).unwrap_or("?")),
       Scenario::HostExec => format!("{driver}/exec"),
       Scenario::HostCopy => format!("{driver}/fs-cp"),
+      Scenario::Service => format!("{driver}/service/user"),
     }
   }
 
@@ -473,6 +476,7 @@ pub fn cells() -> Vec<Cell> {
       ..Cell::new(Driver::Host, Scenario::HostExec)
     },
     Cell::new(Driver::Host, Scenario::HostCopy),
+    Cell::new(Driver::Host, Scenario::Service),
   ];
   for driver in Driver::ACTORS {
     let cell = |scenario| Cell::new(driver, scenario);

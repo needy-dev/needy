@@ -3,7 +3,7 @@ use needy_api_proto::v1::health_service_server::{HealthService, HealthServiceSer
 use needy_api_proto::v1::{CheckRequest, CheckResponse};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Code, Request, Response};
+use tonic::{Code, Request, Response, Status};
 
 use super::*;
 
@@ -24,8 +24,8 @@ struct Secret;
 
 #[async_trait::async_trait]
 impl Authenticator for Secret {
-  async fn authenticate(&self, _method: &str, token: &str) -> Option<Caller> {
-    (token == "secret").then_some(Caller::Operator)
+  async fn authenticate(&self, _method: &str, token: &str) -> crate::control::Result<Option<Caller>> {
+    Ok((token == "secret").then_some(Caller::Operator))
   }
 }
 

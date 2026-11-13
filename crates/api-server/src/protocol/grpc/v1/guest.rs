@@ -29,7 +29,7 @@ impl<G> Adapter<G> {
   fn run(&self) -> Result<&str, Status> {
     match &self.caller {
       Caller::Actor { run } => Ok(run),
-      Caller::Operator | Caller::Client { .. } | Caller::Runner { .. } => Err(ControlError::denied("not an actor listener").into()),
+      Caller::Operator | Caller::Client { .. } | Caller::Runner { .. } => Err(ControlError::role_denied("not an actor listener").into()),
     }
   }
 }

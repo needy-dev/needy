@@ -16,6 +16,7 @@
 //! - [`error`]: errors, with the server's status mapped to a [`Kind`].
 
 mod command;
+pub mod diagnostic;
 pub mod error;
 pub mod exec;
 pub mod files;
@@ -87,6 +88,9 @@ impl Client {
   }
 
   async fn connect_with(url: &str, keep_alive: bool) -> Result<Self> {
+    let normalized = url.strip_prefix("tcp://").map(|rest| format!("http://{rest}"));
+    let url = normalized.as_deref().unwrap_or(url);
+
     let configure = move |endpoint: Endpoint| {
       if keep_alive {
         endpoint.http2_keep_alive_interval(KEEP_ALIVE).keep_alive_timeout(KEEP_ALIVE).keep_alive_while_idle(true)
@@ -95,7 +99,7 @@ impl Client {
       }
     };
     if let Some(path) = url.strip_prefix("unix:") {
-      return Ok(Self::from_channel(connect_unix(configure(placeholder()), path.to_string()).await?));
+      return Ok(Self::from_channel(connect_unix(configure(placeholder()), path.strip_prefix("//").unwrap_or(path).to_string()).await?));
     }
     if let Some(command) = url.strip_prefix("exec:") {
       let argv = shell_words::split(command).map_err(|_| Error::InvalidEndpoint(url.to_string()))?;
@@ -119,6 +123,14 @@ impl Client {
       endpoint = endpoint.tls_config(ClientTlsConfig::new().with_native_roots())?;
     }
     Ok(Self::from_channel(configure(endpoint).connect().await?))
+  }
+
+  /// Connects through the exact argv vector; no shell parsing is performed.
+  pub async fn connect_command(argv: Vec<String>) -> Result<Self> {
+    if argv.is_empty() {
+      return Err(Error::InvalidEndpoint("empty connector argv".into()));
+    }
+    Ok(Self::from_channel(command::connect(placeholder(), argv).await?))
   }
 
   /// Connects to a guest's vsock `port` through the host side of a

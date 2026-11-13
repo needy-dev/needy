@@ -75,6 +75,9 @@ fn forwarded(args: &Args, only: &[String], skip: &[String], parallel: usize) -> 
   if args.keep {
     out.push("--keep".into());
   }
+  if args.services {
+    out.push("--services".into());
+  }
   out
 }
 
@@ -106,6 +109,31 @@ fn ship(root: &Path, host: &str, dir: &str) -> Result<()> {
     bail!("cannot ship HEAD to {host}:{dir}/src");
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use clap::Parser as _;
+
+  #[test]
+  fn remote_service_acceptance_retains_its_explicit_opt_in() {
+    let crate::Task::E2e(args) = crate::Cli::try_parse_from(["xtask", "e2e", "--services", "--only", "none/service/user"]).unwrap().task
+    else {
+      panic!("e2e arguments must select the e2e task");
+    };
+    let forwarded = forwarded(&args, &args.only, &args.skip, args.parallel);
+    assert!(forwarded.iter().any(|arg| arg == "--services"), "remote service acceptance must not silently omit its selected cell");
+    assert!(forwarded.windows(2).any(|args| args == ["--only", "none/service/user"]));
+
+    let crate::Task::E2e(args) = crate::Cli::try_parse_from(["xtask", "e2e"]).unwrap().task else {
+      panic!("e2e arguments must select the e2e task");
+    };
+    assert!(
+      !super::forwarded(&args, &args.only, &args.skip, args.parallel).iter().any(|arg| arg == "--services"),
+      "remote runs must preserve the service opt-in boundary"
+    );
+  }
 }
 
 /// `cargo xtask ARGS` in `dir/src` on a build host. A non-interactive ssh

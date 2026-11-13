@@ -34,6 +34,7 @@ pub struct ExecutorService {
 
 fn exited(exit: &Exit) -> ExecResponse {
   ExecResponse {
+    diagnostic: None,
     payload: Some(exec_response::Payload::Exited(ExecExited {
       code: exit.code,
       signal: exit.signal.clone(),
@@ -85,6 +86,7 @@ fn stream_process(
         Some(exec_request::Payload::Detach(_)) => {
           detach_input.store(true, Ordering::SeqCst);
           let detached = ExecResponse {
+            diagnostic: None,
             payload: Some(exec_response::Payload::Detached(true)),
           };
           // The client waits for this before it leaves; one that left
@@ -122,6 +124,7 @@ async fn relay_output(
     async move { tx.send(Ok(event)).await.is_ok() }
   };
   let mut alive = send(ExecResponse {
+    diagnostic: None,
     payload: Some(exec_response::Payload::Started(started)),
   })
   .await;
@@ -285,20 +288,30 @@ fn clamp(n: u32) -> u16 {
 /// A command that cannot start is a failed precondition, which clients
 /// report like a shell does (127).
 fn spawn_status(error: Error) -> Status {
-  match error {
-    Error::ShuttingDown => Status::unavailable(error.to_string()),
-    Error::EmptyCommand | Error::Start { .. } | Error::StartTerminal { .. } | Error::WorkingDirectory { .. } | Error::Terminal(_) => {
-      Status::failed_precondition(error.to_string())
-    }
-  }
+  let (reason, facts) = match &error {
+    Error::WorkingDirectory { program, cwd, .. } => ("process.cwd_invalid", vec![("program", program.clone()), ("cwd", cwd.clone())]),
+    Error::Start { program, .. } => ("process.start_failed", vec![("program", program.clone())]),
+    Error::StartTerminal { program, .. } => ("process.terminal_failed", vec![("program", program.clone())]),
+    Error::Terminal(_) => ("process.terminal_failed", Vec::new()),
+    Error::EmptyCommand => ("process.start_failed", Vec::new()),
+    Error::ShuttingDown => return Status::unavailable(error.to_string()),
+  };
+  let status = Status::failed_precondition(error.to_string());
+  let diagnostic = needy_api_proto::v1::ErrorDiagnostic {
+    reason: reason.into(),
+    facts: facts.into_iter().map(|(key, value)| (key.into(), value)).collect(),
+  };
+  needy_api_client::diagnostic::with_status(status, diagnostic)
 }
 
 fn to_response(event: &Output) -> ExecResponse {
   match event {
     Output::Stdout(b) => ExecResponse {
+      diagnostic: None,
       payload: Some(exec_response::Payload::Stdout(b.to_vec())),
     },
     Output::Stderr(b) => ExecResponse {
+      diagnostic: None,
       payload: Some(exec_response::Payload::Stderr(b.to_vec())),
     },
     Output::Exit(exit) => exited(exit),

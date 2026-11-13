@@ -37,4 +37,9 @@ pub enum Error {
   NoDatabase(std::path::PathBuf),
   #[error("no run matches {0}")]
   NoRun(String),
+  #[error("run prefix {prefix} is ambiguous; give a full ID (candidates: {candidates:?})")]
+  AmbiguousRun {
+    prefix: String,
+    candidates: Vec<String>,
+  },
 }

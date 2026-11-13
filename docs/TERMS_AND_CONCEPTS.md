@@ -236,11 +236,32 @@ heartbeat, and the old one stops working once the runner uses the new one;
 
 ### Control token
 
+NOTICE: this section describes current behavior. The proposed
+[access redesign](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md)
+replaces the manually supplied shared control token in normal use with local
+OS admission and individually revocable remote client credentials. Existing
+paired clients would retain their granted permissions during migration.
+
 The bearer token a control daemon reads from `--token-env`: the bootstrap and
 admin credential, held by the **operator**. It is required for a TCP listener
 on a non-loopback address; the control socket on the control host needs none
 (its file permissions guard it). An operator uses it to pair the first clients
 and runners; day-to-day clients use their own **client tokens**.
+
+NOTICE: the current server applies its configured control token across its
+listeners, including Unix sockets. The token-free local-socket statement above
+describes a server without that token configured. Separating local and network
+admission is proposed below; it has not landed.
+
+### Local discovery (proposed)
+
+A control daemon publishes its actual local management endpoint and instance
+identity in a protected descriptor. The CLI resolves that record to reach the
+local operator entrypoint automatically. Discovery locates a daemon; OS access
+to its management socket or a verified credential grants authority. Actor and
+runner channels retain their existing identities. This is a proposed contract,
+not current behavior; see the
+[local discovery design](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md).
 
 ### Client
 
@@ -266,6 +287,28 @@ revoked holds.
 
 *Avoid*: user, account. Needy has no users; a client is a credential with a
 name.
+
+### Connection context (proposed)
+
+A named, persistent control-plane connection: its address or stdio connector
+and the credential used with it. Multiple contexts may name different control
+planes or different identities on the same control plane. An explicitly
+selected current context is the default for new commands; pairing does not
+change that choice. Proposed `needy config context pair` and `needy config use`
+commands obtain a credential and select a connection, while `client invite` authorizes a client
+on the server. Its authority is recorded by the server, not self-declared in
+the context. Proposed `needy config context` commands manage these records;
+they are distinct from task profiles and execution contexts. See the
+[context design](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md).
+
+### Execution context (proposed)
+
+Non-secret connection-context and run references inherited by a needy-launched
+process, so it can resolve the intended control plane and run without manual
+exports of independent settings. Credentials are resolved separately and the
+context does not grant authority. This is proposed, not the existing CLI's
+internal `Context` type or a task profile; see the
+[discovery and context design](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md).
 
 ### Pairing code
 

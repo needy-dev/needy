@@ -56,7 +56,7 @@ export const CAPABILITIES: Capability[] = [
   {
     icon: 'mingcute:chart-network-line',
     title: { en: 'See how an agent system works', zh: '看清 agent 系统如何运作' },
-    text: { en: 'Every decision is a typed event; needy report sums up a run.', zh: '每次判定都是带类型的事件，needy report 汇总一次运行。' },
+    text: { en: 'Every decision is a typed event; needy run report sums up a run.', zh: '每次判定都是带类型的事件，needy run report 汇总一次运行。' },
     status: 'works',
     more: 'decisions',
   },
@@ -250,8 +250,8 @@ export const SECTIONS: Record<string, Section> = {
     title: { en: 'Try it', zh: '动手试试' },
     body: [
       {
-        en: 'Answer a few questions about where you want things to run, and the steps next to them change with your answers.',
-        zh: '回答几个「东西想跑在哪」的问题，旁边的步骤会跟着你的选择变。',
+        en: 'Choose the program, your machines, and what is already installed. The steps and profile follow your answers.',
+        zh: '选择入口程序、机器环境和已有条件，旁边的步骤和 profile 会跟着你的选择变。',
       },
     ],
   },
@@ -275,7 +275,7 @@ export const COMPARISON: Array<{ aspect: Text, usual: Text, needy: Text }> = [
 
 /** What needy does not do, or does at a cost, today. From the README and the closed-loop results. */
 export const LIMITS: Text[] = [
-  { en: 'Experimental (0.0.1), built from a checkout.', zh: '还在实验阶段（0.0.1），要从源码自己编。' },
+  { en: 'Experimental. Capture and identity limits depend on the actor driver.', zh: '仍在实验阶段，捕获与机器身份的限制取决于 actor driver。' },
   { en: 'A routed exec costs about 1.5 ms to a Docker executor and 12 ms to a Mac over a tunnel (p50).', zh: '每次转发都有开销：转到 Docker executor 大约 1.5 ms，经隧道转到 Mac 大约 12 ms（p50）。' },
   { en: 'Container actors catch execs with shims, so programs added at run time are not routed.', zh: '容器版 actor 靠 shim 拦 exec，跑起来之后才装上的程序拦不到。' },
   { en: 'HTTPS is tunnelled, not inspected: the allowlist works by host.', zh: 'HTTPS 只做透传，不解密，所以白名单只能按主机来。' },

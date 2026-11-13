@@ -171,7 +171,7 @@ const CELL = 'overflow-hidden text-ellipsis whitespace-nowrap'
           The README's table does not list this field; the closed-loop results record it on <code>linux-firecracker</code>.
         </p>
         <p v-else class="m-[6px_0_0] text-[15px] leading-[1.5] text-ink-2 [&_code]:text-[13px]">
-          The program never sees the host. <code>needy profile check</code> lists what of a recipe a driver cannot present, and a recipe's <code>required:</code> turns a gap into an error.
+          The program never sees the host. <code>needy config profile check</code> lists what of a recipe a driver cannot present, and a recipe's <code>required:</code> turns a gap into an error.
         </p>
       </div>
     </template>

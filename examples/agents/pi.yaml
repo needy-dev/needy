@@ -43,7 +43,7 @@ actor:
     # api.individual.githubcopilot.com), OpenRouter and OpenCode Zen; and
     # pi.dev, which pi asks at start even with the version check off, and
     # whose /oauth documents some sign-ins use. Add another provider's host
-    # here; `needy report` lists denied hosts.
+    # here; `needy run report` lists denied hosts.
     allow: [pi.dev, api.anthropic.com, claude.ai, platform.claude.com,
             api.openai.com, auth.openai.com, chatgpt.com,
             github.com, api.github.com, api.individual.githubcopilot.com,

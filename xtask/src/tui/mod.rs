@@ -7,7 +7,7 @@
 //! terminal emulator does ([`emulator`]), encodes keys, pastes and mouse
 //! events for the modes the program turned on ([`input`]), and runs any
 //! command: a TUI directly (`docker run -it IMAGE pi`), or through needy
-//! (`needy run create -it`, `needy run attach`, `needy exec -t`), so two
+//! (`needy run create -it`, `needy run attach`, `needy run exec -t`), so two
 //! reports of the same scenario can be compared with `tui diff`.
 //!
 //! A scenario is one step per line; `#` starts a comment:

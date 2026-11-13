@@ -209,6 +209,7 @@ pub fn proto_join_token(token: JoinTokenInfo) -> v1::JoinToken {
 
 pub fn proto_client(client: ClientInfo) -> v1::Client {
   v1::Client {
+    access: proto_client_access(client.access),
     id: client.id,
     name: client.name,
     created_at_ms: client.created_ms,
@@ -404,6 +405,7 @@ pub fn proto_profile_check(check: ProfileCheck) -> v1::CheckProfileResponse {
       .findings
       .into_iter()
       .map(|finding| v1::ProfileFinding {
+        diagnostic: finding.diagnostic.and_then(proto_diagnostic),
         severity: if finding.error {
           v1::FindingSeverity::Error
         } else {
@@ -550,6 +552,16 @@ pub fn exec_input(payload: v1::exec_request::Payload) -> Option<ExecInput> {
 }
 
 pub fn proto_exec_output(output: ExecOutput) -> v1::ExecResponse {
+  if let ExecOutput::DiagnosticError {
+    message,
+    diagnostic,
+  } = output
+  {
+    return v1::ExecResponse {
+      payload: Some(v1::exec_response::Payload::Error(message)),
+      diagnostic: proto_diagnostic(diagnostic),
+    };
+  }
   use v1::exec_response::Payload;
   let payload = match output {
     ExecOutput::Trace(event) => Payload::Event(proto_exec_event(&event)),
@@ -568,10 +580,12 @@ pub fn proto_exec_output(output: ExecOutput) -> v1::ExecResponse {
     ExecOutput::Stderr(bytes) => Payload::Stderr(bytes),
     ExecOutput::Exited(exit) => Payload::Exited(proto_exit(exit)),
     ExecOutput::Error(message) => Payload::Error(message),
+    ExecOutput::DiagnosticError { .. } => unreachable!("handled above"),
     ExecOutput::Ended(reason) => Payload::Ended(v1::ExecEnded { reason }),
     ExecOutput::Detached => Payload::Detached(true),
   };
   v1::ExecResponse {
+    diagnostic: None,
     payload: Some(payload),
   }
 }
@@ -711,3 +725,39 @@ pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
 #[cfg(test)]
 #[path = "domain_test.rs"]
 mod tests;
+
+/// Client grants must be explicit; unspecified and unknown grants fail closed.
+pub fn client_access(value: i32) -> Result<crate::control::ClientAccess, Error> {
+  match v1::ClientAccess::try_from(value) {
+    Ok(v1::ClientAccess::Runs) => Ok(crate::control::ClientAccess::Runs),
+    Ok(v1::ClientAccess::Unspecified) => Err(Error::Unspecified("client access")),
+    Ok(v1::ClientAccess::Admin) => Ok(crate::control::ClientAccess::Admin),
+    Err(_) => Err(Error::Unknown {
+      field: "client access",
+      value,
+    }),
+  }
+}
+
+pub fn proto_client_access(value: crate::control::ClientAccess) -> i32 {
+  match value {
+    crate::control::ClientAccess::Runs => v1::ClientAccess::Runs as i32,
+    crate::control::ClientAccess::Admin => v1::ClientAccess::Admin as i32,
+  }
+}
+
+/// Accepts only the known bounded wire detail; malformed facts are discarded.
+pub fn diagnostic(value: v1::ErrorDiagnostic) -> Option<crate::control::Diagnostic> {
+  let value = needy_api_proto::diagnostic::validated(&value)?;
+  Some(crate::control::Diagnostic {
+    reason: value.reason,
+    facts: value.facts.into_iter().collect(),
+  })
+}
+
+pub fn proto_diagnostic(value: crate::control::Diagnostic) -> Option<v1::ErrorDiagnostic> {
+  needy_api_proto::diagnostic::validated(&v1::ErrorDiagnostic {
+    reason: value.reason,
+    facts: value.facts.into_iter().collect(),
+  })
+}

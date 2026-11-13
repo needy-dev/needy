@@ -3,6 +3,7 @@
 //! cell's control daemon through an ssh reverse tunnel for the length of
 //! the cell. Its ssh shell is `cmd.exe`, the default of Windows OpenSSH.
 
+use std::io::Write as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
@@ -25,6 +26,13 @@ fn ssh(host: &str) -> Command {
   let mut command = Command::new("ssh");
   command.args(["-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", host]);
   command
+}
+
+/// Whether automated enrollment can enforce the CLI's private code-file policy.
+pub fn enrollment_available() -> bool {
+  // TODO(windows-acl): enable after Windows private code-file ACL validation
+  // and its acceptance land, as deferred in the CLI access specification.
+  false
 }
 
 /// Ships `HEAD` to the Windows host and builds `needy.exe` there.
@@ -54,17 +62,34 @@ pub fn prepare(root: &Path, host: &str, dir: &str) -> Result<Windows> {
 }
 
 impl Windows {
-  /// Starts `needy.exe daemon --mode runner` named `name` there, joined to
-  /// the control daemon's loopback `port` here with `token`, through
+  /// Enrolls with a code file, then serves the saved enrollment through
   /// `ssh -R`. The runner lives as long as the returned ssh process.
   pub fn start(&self, port: u16, token: &str, name: &str) -> Result<Child> {
-    let dir = &self.dir;
-    // `set X=Y&&` leaves no trailing space in Y. The state directory is
-    // the runner's own, so it never meets another needy there.
+    // TODO(windows-acl): this flow remains not covered until private code-file
+    // ACL validation lands; see the CLI configuration and access specification.
+    // The code arrives on stdin so neither ssh nor PowerShell argv carries it.
     let script = format!(
-      r"cd /d {dir} && set NEEDY_STATE_DIR=%CD%\state-{name}&& set NEEDY_E2E_JOIN={token}&& src\target\debug\needy.exe daemon --mode runner --join http://127.0.0.1:{port} --join-token-env NEEDY_E2E_JOIN --name {name} --roles executor"
+      "$ErrorActionPreference = 'Stop'; \
+       Set-Location '{}'; \
+       $state = Join-Path (Get-Location) 'state-{name}'; \
+       New-Item -ItemType Directory -Force $state | Out-Null; \
+       $env:NEEDY_STATE_DIR = $state; \
+       $env:NEEDY_RUNTIME_DIR = Join-Path $state 'runtime'; \
+       $env:NEEDY_CONFIG_DIR = Join-Path $state 'config'; \
+       $env:NEEDY_EXECUTION_CONTEXT = ''; $env:NEEDY_ENDPOINT = ''; $env:NEEDY_TOKEN = ''; \
+       $code = Join-Path $state 'invitation'; \
+       $config = Join-Path $state 'config.yaml'; \
+       [IO.File]::WriteAllText($config, 'version: 1'); \
+       [IO.File]::WriteAllText($code, [Console]::ReadLine()); \
+       & src\\target\\debug\\needy.exe --config $config runner join {name} --address tcp://127.0.0.1:{port} --code-file $code --roles executor; \
+       $joined = $LASTEXITCODE; Remove-Item $code; \
+       if ($joined -ne 0) {{ exit $joined }}; \
+       & src\\target\\debug\\needy.exe --config $config runner serve; exit $LASTEXITCODE",
+      self.dir
     );
-    let child = Command::new("ssh")
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(utf16);
+    let mut child = Command::new("ssh")
       .args([
         "-o",
         "BatchMode=yes",
@@ -74,12 +99,13 @@ impl Windows {
       ])
       .arg(format!("{port}:127.0.0.1:{port}"))
       .arg(&self.ssh)
-      .arg(script)
-      .stdin(Stdio::null())
+      .arg(format!("powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"))
+      .stdin(Stdio::piped())
       .stdout(Stdio::null())
       .stderr(Stdio::null())
       .spawn()
       .context("cannot start the Windows runner")?;
+    writeln!(child.stdin.take().context("no Windows enrollment input")?, "{token}")?;
     Ok(child)
   }
 
@@ -87,7 +113,7 @@ impl Windows {
   /// says how many there were: none once a cell's ssh session closed.
   pub fn leftovers(&self, name: &str) -> Result<u32> {
     let script = format!(
-      "$p = @(Get-CimInstance Win32_Process -Filter \"Name='needy.exe'\" | Where-Object {{ $_.CommandLine -like '*--name {name}*' }}); \
+      "$p = @(Get-CimInstance Win32_Process -Filter \"Name='needy.exe'\" | Where-Object {{ $_.CommandLine -like '*state-{name}*config.yaml*' }}); \
        $p | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}; \
        Write-Output $p.Count"
     );

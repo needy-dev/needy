@@ -3,6 +3,8 @@ syntax = "proto3";
 
 package needy.v1;
 
+import "needy/v1/diagnostic.proto";
+
 // ProcessService starts, attaches to and controls processes. The daemon owns a
 // process and its terminal, so a client may disconnect and attach again.
 service ProcessService {
@@ -44,8 +46,8 @@ message ExecStart {
   // names a path itself leaves it unset and fails when the path is missing.
   bool search_path_if_missing = 12;
   // Runner name: run on that runner's own machine, outside any run. Empty
-  // for a run's or this daemon's executors. Set at most one of `run_id`,
-  // `executor` and `runner`.
+  // for a run's or this daemon's executors. Runner is exclusive with
+  // `run_id` and `executor`; run plus executor selects a run executor.
   string runner = 13;
 
   reserved 10;
@@ -149,6 +151,7 @@ message ExecRefusal {
 }
 
 message ExecResponse {
+  ErrorDiagnostic diagnostic = 9;
   oneof payload {
     ExecStarted started = 1;
     bytes stdout = 2;

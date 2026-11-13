@@ -63,8 +63,24 @@ impl Timers {
 fn relayed(e: needy_api_client::Error) -> ControlError {
   use needy_api_client::Kind;
   let message = e.to_string();
-  match e.kind() {
-    Kind::Denied => ControlError::denied(message),
+  let diagnostic = if e.kind() == Kind::Unauthenticated {
+    Some(needy_api_server::control::Diagnostic {
+      reason: "executor.authentication_failed".into(),
+      facts: Default::default(),
+    })
+  } else {
+    e.diagnostic().and_then(domain::diagnostic)
+  };
+  let error = match e.kind() {
+    Kind::Denied => ControlError::Denied {
+      message,
+      events: e
+        .refusal()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|event| needy_core::event::Event::decode(&event.kind, needy_core::event::SCHEMA_VERSION, &event.payload).ok())
+        .collect(),
+    },
     // The executor refused the daemon's own token; to the daemon's caller
     // the executor is unavailable, not the command refused.
     Kind::Unauthenticated => ControlError::Unavailable(message),
@@ -75,6 +91,13 @@ fn relayed(e: needy_api_client::Error) -> ControlError {
     // The executor's stream ended before the process exited.
     Kind::Unavailable | Kind::Ended => ControlError::Unavailable(message),
     Kind::Other => ControlError::Internal(message),
+  };
+  match diagnostic {
+    Some(diagnostic) => ControlError::Diagnostic {
+      error: Box::new(error),
+      diagnostic,
+    },
+    None => error,
   }
 }
 
@@ -156,7 +179,10 @@ impl Daemon {
     if self.links.get(runner).is_none()
       && !(self.runner_online(runner).await && self.links.connected(runner, self.config.heartbeat_interval).await.is_some())
     {
-      return Err(ControlError::Unavailable(crate::link::not_connected(runner)));
+      return Err(
+        ControlError::Unavailable(crate::link::not_connected(runner))
+          .with_diagnostic("runner.not_connected", [("runner".into(), runner.into())]),
+      );
     }
     Ok(Instance::runner(runner, &self.links))
   }
@@ -166,10 +192,10 @@ impl Daemon {
   async fn driving_program(&self, id: &str) -> Result<(String, Known), ControlError> {
     let run = self.runs.find_open(id).await?;
     if run.tty.is_none() {
-      return Err(ControlError::Failed(format!(
-        "the driving program of run {} has no terminal; create the run with `needy run create -t`",
-        run.id
-      )));
+      return Err(
+        ControlError::Failed(format!("the driving program of run {} has no terminal; create the run with `needy run create -t`", run.id))
+          .with_diagnostic("run.no_terminal", [("run".into(), run.id.clone())]),
+      );
     }
     let instance = run.terminal.get_or_try_init(|| actor::terminal(self, &run)).await?.clone();
     let listed = instance.handle.executor.list_processes(ListProcessesRequest::default()).await.map_err(|s| relayed(s.into()))?;
@@ -182,7 +208,9 @@ impl Daemon {
 
   fn process(&self, process: &str) -> Result<Known, ControlError> {
     let processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    processes.get(process).cloned().ok_or_else(|| ControlError::NotFound("no such process".into()))
+    processes.get(process).cloned().ok_or_else(|| {
+      ControlError::NotFound("no such process".into()).with_diagnostic("process.not_found", [("process".into(), process.into())])
+    })
   }
 
   /// What the daemon knows of `process`, which `instance` listed: what it
@@ -260,6 +288,7 @@ impl Processes for Daemon {
     let requested = Instant::now();
     let (run, relay, decided, upstream) = match open {
       ExecOpen::Start(mut spec) => {
+        self.admit_work()?;
         let origin = spec.origin;
         // The run comes from the start request, never from a lookup by
         // an empty ID.
@@ -314,7 +343,15 @@ impl Processes for Daemon {
         // An attach forwards the caller's input: keystrokes in an SFTP or tar
         // stream corrupt it, and its output is binary.
         if let Some(origin) = known.origin.filter(|o| o.is_internal()) {
-          return Err(ControlError::denied(format!("process {process} is needy's own (origin {origin}); it cannot be attached")));
+          return Err(
+            ControlError::denied(format!("process {process} is needy's own (origin {origin}); it cannot be attached")).with_diagnostic(
+              "process.internal_attach_denied",
+              [
+                ("process".into(), process.clone()),
+                ("origin".into(), origin.to_string()),
+              ],
+            ),
+          );
         }
         // An attach shares the process's run lifetime even though it adds
         // no second exec record to that run's trace or state.db.
@@ -374,12 +411,25 @@ impl Processes for Daemon {
       }
     }
     .map_err(relayed)
-    .map_err(|error| match (error, unmapped_cwd) {
-      (ControlError::Failed(message), Some(cwd)) if message.contains(&format!("working directory {cwd} ")) => ControlError::Failed(format!(
-        "{message}; executor {} has no path_map entry for it, so the command kept the actor's directory",
-        relay.instance.name
-      )),
-      (error, _) => error,
+    .map_err(|error| match error {
+      ControlError::Diagnostic {
+        mut error,
+        mut diagnostic,
+      } => {
+        diagnostic.facts.insert("executor".into(), relay.instance.name.clone());
+        if let Some(runner) = relay.instance.on_runner() {
+          diagnostic.facts.insert("runner".into(), runner.into());
+        }
+        if diagnostic.reason == "process.cwd_invalid" && unmapped_cwd.as_ref() == diagnostic.facts.get("cwd") {
+          diagnostic.facts.insert("path_map".into(), "unmapped".into());
+          if let ControlError::Failed(message) = &mut *error {
+            *message =
+              format!("{message}; executor {} has no path_map entry for it, so the command kept the actor's directory", relay.instance.name);
+          }
+        }
+        ControlError::Diagnostic { error, diagnostic }
+      }
+      error => error,
     })?;
     // A run's relays stop with the run; the others when the daemon begins
     // to shut down.
@@ -648,6 +698,29 @@ impl Relay {
         Ok(None) => break,
         // The executor reported an error instead of an exit; the stream
         // goes on.
+        Err(needy_api_client::Error::RemoteDiagnostic {
+          message,
+          diagnostic,
+        }) => {
+          if !client_gone
+            && out_tx
+              .send(Ok(ExecOutput::DiagnosticError {
+                message,
+                diagnostic: match domain::diagnostic(diagnostic) {
+                  Some(value) => value,
+                  None => continue,
+                },
+              }))
+              .await
+              .is_err()
+          {
+            if !self.detach.load(Ordering::SeqCst) {
+              break;
+            }
+            client_gone = true;
+          }
+          continue;
+        }
         Err(needy_api_client::Error::Remote(message)) => {
           if !client_gone && out_tx.send(Ok(ExecOutput::Error(message))).await.is_err() {
             if !self.detach.load(Ordering::SeqCst) {

@@ -39,3 +39,39 @@ pub async fn wait(endpoint: &str, within: Duration) -> Result<Client> {
 #[cfg(all(test, unix))]
 #[path = "ready_test.rs"]
 mod tests;
+
+/// Waits for a successful health response from the expected process instance
+/// and role. Every attempt and the whole operation share the caller's deadline.
+pub async fn wait_expected(endpoint: &str, within: Duration, role: &str, instance_id: &str) -> Result<Client> {
+  let deadline = tokio::time::Instant::now() + within;
+  let mut message = "no successful health response".to_string();
+  loop {
+    let attempt = async {
+      let client = Client::connect(endpoint).await?;
+      let health = client.health().check(CheckRequest {}).await?.into_inner();
+      if health.role != role || health.instance_id != instance_id {
+        return Err(Error::IdentityMismatch {
+          expected_role: role.into(),
+          expected_instance: instance_id.into(),
+          role: health.role,
+          instance: health.instance_id,
+        });
+      }
+      Ok(client)
+    };
+    match tokio::time::timeout_at(deadline, attempt).await {
+      Ok(Ok(client)) => return Ok(client),
+      Ok(Err(error @ (Error::InvalidEndpoint(_) | Error::IdentityMismatch { .. }))) => return Err(error),
+      Ok(Err(error)) => message = error.to_string(),
+      Err(_) => break,
+    }
+    if tokio::time::Instant::now() + DELAY >= deadline {
+      break;
+    }
+    tokio::time::sleep(DELAY).await;
+  }
+  Err(Error::Unreachable {
+    endpoint: endpoint.into(),
+    message,
+  })
+}

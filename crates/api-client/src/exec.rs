@@ -96,7 +96,15 @@ impl ExecStream {
         Some(exec_response::Payload::Stderr(bytes)) => Event::Stderr(bytes),
         Some(exec_response::Payload::Exited(exited)) => Event::Exited(exit(exited)),
         Some(exec_response::Payload::Detached(_)) => Event::Detached,
-        Some(exec_response::Payload::Error(message)) => return Err(Error::Remote(message)),
+        Some(exec_response::Payload::Error(error)) => {
+          return Err(match message.diagnostic.and_then(|value| needy_api_proto::diagnostic::validated(&value)) {
+            Some(diagnostic) => Error::RemoteDiagnostic {
+              message: error,
+              diagnostic,
+            },
+            None => Error::Remote(error),
+          });
+        }
         Some(exec_response::Payload::Ended(ended)) => {
           return Err(Error::Ended {
             reason: (!ended.reason.is_empty()).then_some(ended.reason),
