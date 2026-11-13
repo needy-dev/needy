@@ -796,6 +796,8 @@ commands:
   `files.fail` and is a `needy report` finding.
 - Filters follow rclone: ordered `+` and `-` rules, `**` for any depth, a
   leading `/` anchored at the mapping root.
+  The [file filter guide](../../../../examples/agents/file-filters.md) describes the
+  implemented rules, default inclusion and examples for state between runs.
 - Harness home directories contain credentials, such as Codex's `auth.json`.
   Model keys are injected by the actor gateway, so credentials must never be
   copied into the actor; otherwise an agent that replaces its harness can read

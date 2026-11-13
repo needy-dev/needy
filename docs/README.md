@@ -1,5 +1,10 @@
 # Needy Documentation
 
+## Start using needy
+
+- [File filters and state between runs](../examples/agents/file-filters.md):
+  filter syntax and examples for authentication files, configuration, caches and directories.
+
 Needy docs are split by **purpose**. Reference notes are further split by
 **responsibility folder**, and each folder has an index. The project contract
 for contributors and agents is [`AGENTS.md`](../AGENTS.md).
