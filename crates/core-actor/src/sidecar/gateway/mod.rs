@@ -13,14 +13,17 @@
 //!
 //! A fault's effect is delivered as a real upstream would deliver it through
 //! a proxy: `refuse` answers 502 as when the upstream refuses the
-//! connection, `reset` closes the actor's connection without an answer,
+//! connection, `reset` resets the actor's connection without an answer,
 //! `hang` holds it until the actor gives up or the run ends, `delay` waits
 //! first, and `status` answers a plain-HTTP request with that status.
 
 mod connect;
 mod http;
 
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
@@ -116,11 +119,21 @@ impl Gateway {
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
   {
     let gateway = self.clone();
+    let stream = Resettable::new(stream, self.tasks.clone());
+    let reset = stream.reset.clone();
     // A service error makes hyper close the connection without writing a
-    // response, which is how a `reset` fault is delivered.
+    // response, which is how a `reset` fault is delivered; `Resettable`
+    // tells the guest's forwarder first.
     let service = service_fn(move |request| {
       let gateway = gateway.clone();
-      async move { gateway.handle(request).await }
+      let reset = reset.clone();
+      async move {
+        let handled = gateway.handle(request).await;
+        if handled.is_err() {
+          reset.store(true, Ordering::SeqCst);
+        }
+        handled
+      }
     });
     let connection = http1::Builder::new().preserve_header_case(true).serve_connection(TokioIo::new(stream), service).with_upgrades();
     tokio::select! {
@@ -187,17 +200,106 @@ impl Gateway {
   }
 }
 
-/// What a fault that fails a request or tunnel answers.
-// NOTICE: a `reset` closes the gateway's side of the actor's connection;
-// the in-actor forwarder then closes the program's. vfkit 0.6.4, which
-// carries a `macos-vz` actor's gateway channel, does not pass that close to
-// the guest (its `tcpproxy` relay keeps the vsock connection open while the
-// guest side is), so there the program waits until its own timeout instead
-// of reading an end of stream (seen 2026-11-13; `linux-firecracker` and
-// `macos-apple-container` deliver it). Source:
+/// A connection to the gateway that, when a `reset` fault closes it before
+/// the gateway wrote anything on it, first writes
+/// [`GATEWAY_RESET`](crate::contract::GATEWAY_RESET): the guest's forwarder
+/// then resets the driving program's connection, since a close alone does
+/// not reach every guest.
+// NOTICE: vfkit 0.6.4, which carries a `macos-vz` actor's gateway channel,
+// does not pass a close to the guest (its `tcpproxy` relay keeps the vsock
+// connection open while the guest side is), so a program waited until its
+// own timeout there instead of reading a reset (seen 2026-11-13;
+// `linux-firecracker` and `macos-apple-container` passed the close). Source:
 // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/vsock.go#L77-L120
-// TODO(macos-vz-reset): deliver it there once vfkit passes the close, or
-// through a guest call the owner approves.
+// TODO(macos-vz-reset): a reset of a later request on a kept-alive
+// plain-HTTP connection, after the gateway answered an earlier one, is still
+// only a close, which a `macos-vz` guest does not see: the marker is
+// recognized only at a connection's start, where it cannot be part of a
+// response. Telling it there needs framing between the forwarder and the
+// gateway; add it when a program is seen to depend on it.
+struct Resettable<S: tokio::io::AsyncWrite + Unpin + Send + 'static> {
+  stream: Option<S>,
+  /// Set by the service when a `reset` fault fails a request.
+  reset: Arc<AtomicBool>,
+  /// Whether the gateway wrote anything on the connection.
+  written: bool,
+  tasks: TaskTracker,
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin + Send + 'static> Resettable<S> {
+  fn new(stream: S, tasks: TaskTracker) -> Self {
+    Self {
+      stream: Some(stream),
+      reset: Arc::new(AtomicBool::new(false)),
+      written: false,
+      tasks,
+    }
+  }
+
+  fn stream(&mut self) -> std::io::Result<&mut S> {
+    self.stream.as_mut().ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotConnected))
+  }
+}
+
+impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static> tokio::io::AsyncRead for Resettable<S> {
+  fn poll_read(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+    match self.get_mut().stream() {
+      Ok(stream) => Pin::new(stream).poll_read(cx, buf),
+      Err(e) => Poll::Ready(Err(e)),
+    }
+  }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin + Send + 'static> tokio::io::AsyncWrite for Resettable<S> {
+  fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
+    let this = self.get_mut();
+    let written = match this.stream() {
+      Ok(stream) => Pin::new(stream).poll_write(cx, buf),
+      Err(e) => return Poll::Ready(Err(e)),
+    };
+    if matches!(written, Poll::Ready(Ok(n)) if n > 0) {
+      this.written = true;
+    }
+    written
+  }
+
+  fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    match self.get_mut().stream() {
+      Ok(stream) => Pin::new(stream).poll_flush(cx),
+      Err(e) => Poll::Ready(Err(e)),
+    }
+  }
+
+  fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+    match self.get_mut().stream() {
+      Ok(stream) => Pin::new(stream).poll_shutdown(cx),
+      Err(e) => Poll::Ready(Err(e)),
+    }
+  }
+}
+
+impl<S: tokio::io::AsyncWrite + Unpin + Send + 'static> Drop for Resettable<S> {
+  fn drop(&mut self) {
+    if self.written || !self.reset.load(Ordering::SeqCst) {
+      return;
+    }
+    let Some(mut stream) = self.stream.take() else {
+      return;
+    };
+    // `Drop` cannot wait for the write: a task the gateway owns does it.
+    self.tasks.spawn(async move {
+      use tokio::io::AsyncWriteExt;
+      if let Err(e) = stream.write_all(crate::contract::GATEWAY_RESET).await {
+        tracing::debug!("cannot tell the forwarder of a reset: {e}");
+      }
+      // The close follows when the stream is dropped; a shutdown error
+      // means the forwarder went away, which needs no reset any more.
+      let _ = stream.shutdown().await;
+    });
+  }
+}
+
+/// What a fault that fails a request or tunnel answers.
 fn fault_response(fired: &Fired, host: &str) -> Result<Response<Body>, Reset> {
   let effect = &fired.effect;
   if effect.reset {
@@ -214,7 +316,8 @@ fn fault_response(fired: &Fired, host: &str) -> Result<Response<Body>, Reset> {
 }
 
 /// A `reset` fault: the service fails, and hyper closes the connection
-/// without a response.
+/// without a response (after [`Resettable`]'s marker, at a connection's
+/// start).
 #[derive(Debug)]
 pub(crate) struct Reset(String);
 

@@ -25,6 +25,18 @@ pub const GATEWAY_SOCKET: &str = "gateway.sock";
 /// The driving program's process service, which init serves.
 pub const PROCESS_SOCKET: &str = "process.sock";
 
+/// What the actor gateway writes on a connection before it closes it for a
+/// `reset` fault, as the first bytes on that connection: the guest's
+/// gateway forwarder then resets the driving program's connection itself.
+// NOTICE: needy's own choice. It starts with a NUL byte, so it is never the
+// start of the HTTP response a gateway sends first on any other connection
+// ("HTTP/1.1 ..."). A close alone does not reach a `macos-vz` guest: vfkit's
+// vsock relay passes no half-close to it (`VirtioSocketConnection` has no
+// `CloseWrite`):
+// https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/vsock.go#L77-L120
+// https://github.com/Code-Hex/vz/blob/v3.7.1/socket.go#L285-L299
+pub const GATEWAY_RESET: &[u8] = b"\0needy-reset\0";
+
 /// needy's own programs in an actor: the kernel never routes an exec they
 /// make (`binfmt_needy`'s `caller_is_needy`, `images/kernel/binfmt_needy.c`),
 /// and a shim never stands for one.

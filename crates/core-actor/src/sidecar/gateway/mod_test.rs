@@ -244,8 +244,18 @@ async fn a_delay_fault_holds_the_request_then_lets_it_through() {
   assert_eq!(seen.lock().unwrap().len(), 1);
 }
 
+// ROOT CAUSE:
+//
+// If a `reset` fault fired for a `macos-vz` actor, its program waited until
+// its own timeout (curl 28) instead of reading a reset, because the gateway
+// only closed its side of the connection and vfkit's vsock relay passes no
+// close to the guest, so the guest's forwarder never learned of it.
+//
+// Before the fix, the gateway closed the connection without a byte.
+// The fix writes `GATEWAY_RESET` first, at a connection's start, so the
+// forwarder resets the program's connection itself, whatever the relay.
 #[tokio::test]
-async fn a_reset_fault_closes_the_connection_without_an_answer() {
+async fn a_reset_fault_tells_the_forwarder_and_closes_the_connection_without_an_answer() {
   let (address, _) = upstream().await;
   let gateway = start(address, "faults: { cut: {net: {connect: '*'}, reset: true} }");
 
@@ -256,11 +266,26 @@ async fn a_reset_fault_closes_the_connection_without_an_answer() {
     let mut stream = UnixStream::connect(&gateway.socket).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut answer = Vec::new();
-    let read = tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer)).await.expect("the gateway closes");
-    assert!(answer.is_empty(), "{request}: {:?}", String::from_utf8_lossy(&answer));
-    // End of file, or a reset.
-    assert!(!matches!(read, Ok(n) if n > 0));
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer)).await.expect("the gateway closes").unwrap();
+    assert_eq!(answer, crate::contract::GATEWAY_RESET, "{request}: {:?}", String::from_utf8_lossy(&answer));
   }
+}
+
+#[tokio::test]
+async fn a_reset_after_an_answer_on_the_same_connection_is_a_close_without_the_marker() {
+  let (address, _) = upstream().await;
+  // The first request to `model.needy` is answered, the second reset.
+  let gateway = start(address, "faults: { cut: {net: {request: 'model.needy'}, reset: true, nth: 2} }");
+  let mut stream = UnixStream::connect(&gateway.socket).await.unwrap();
+  let request = "GET http://model.needy/ HTTP/1.1\r\nHost: model.needy\r\n\r\n";
+  stream.write_all(format!("{request}{request}").as_bytes()).await.unwrap();
+
+  let mut answer = Vec::new();
+  tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut answer)).await.expect("the gateway closes").unwrap();
+
+  let answer = String::from_utf8_lossy(&answer);
+  assert!(answer.starts_with("HTTP/1.1 200"), "{answer:?}");
+  assert!(!answer.contains("needy-reset"), "{answer:?}");
 }
 
 #[tokio::test]
