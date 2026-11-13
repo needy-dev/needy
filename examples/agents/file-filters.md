@@ -110,13 +110,13 @@ For nested files, include their parent directories too, or map the selected subd
 For example, `+ /projects/**` permits traversal into `projects/` before the final exclusion.
 These paths select saved files. They do not establish which files an application's login requires.
 
-The [Codex profile](../../../examples/agents/codex.yaml) and
-[Claude Code profile](../../../examples/agents/claude.yaml) show complete profiles that save their configuration directories.
+The [Codex profile](codex.yaml) and
+[Claude Code profile](claude.yaml) show complete profiles that save their configuration directories.
 
 ## Evidence
 
 Evidence level: implementation and automated unit tests.
-The [filter rules](../../../crates/common/src/filter.rs) cover ordered matching, root anchoring and nested paths.
-The [archive tests](../../../crates/common/src/archive.rs) cover transfer filters and excluded parent directories.
-The [daemon tests](../../../crates/daemon/src/files_test.rs) cover filtered mirror-out from actors and executors.
+The [filter rules](../../crates/common/src/filter.rs) cover ordered matching, root anchoring and nested paths.
+The [archive tests](../../crates/common/src/archive.rs) cover transfer filters and excluded parent directories.
+The [daemon tests](../../crates/daemon/src/files_test.rs) cover filtered mirror-out from actors and executors.
 These checks establish file selection, not authenticated access or token refresh across runs.

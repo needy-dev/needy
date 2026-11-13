@@ -103,7 +103,7 @@ back to the host:
 | opencode | `~/needy-state/opencode/` | `~/.local/share/opencode/` |
 
 To save selected files, add a `filter` to both the copy-in and mirror-out mappings.
-See [file filters and state between runs](../../docs/ai/explanations/file-filters.md)
+See [file filters and state between runs](file-filters.md)
 for the syntax and examples: authentication only, authentication with configuration, excluded caches, and selected directories.
 
 Read these points before you log in:

@@ -2,7 +2,7 @@
 
 ## Start using needy
 
-- [File filters and state between runs](ai/explanations/file-filters.md):
+- [File filters and state between runs](../examples/agents/file-filters.md):
   filter syntax and examples for authentication files, configuration, caches and directories.
 
 Needy docs are split by **purpose**. Reference notes are further split by
