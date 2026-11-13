@@ -18,8 +18,24 @@ work takes effect.
 
 > [!NOTE]
 > Needy is experimental. Start with a small project directory.
-> Evidence: [initial closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md)
-> and the [onboarding review](docs/ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md#onboarding-review).
+
+## Table of Contents
+
+- [Getting started](#getting-started)
+  - [Install](#install)
+  - [Start the control daemon](#start-the-control-daemon)
+  - [Pick a profile](#pick-a-profile)
+  - [Run it](#run-it)
+  - [One command from your laptop](#one-command-from-your-laptop)
+  - [Add machines](#add-machines)
+- [Actor drivers](#actor-drivers)
+- [Configuration](#configuration)
+- [Examples](#examples)
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
+- [Documentation](#documentation)
+- [Development](#development)
+- [Acknowledgements](#acknowledgements)
 
 ## Getting started
 
@@ -53,18 +69,6 @@ The website and Profile Studio read these same examples.
 The entrypoint stays in Linux. These profiles send captured child processes
 to the Mac. Shell builtins stay in their shell; built-in file editors use the
 shared mount. Container capture has [limits](#actor-drivers).
-
-**Verification status:** shell routing, shared files, and the agent interfaces
-have live-probe evidence. Fresh installation and authenticated model tool calls
-still need verification. The walkthrough is a draft for review.
-
-For another driver or source builds, expand the reference below.
-For contributors, see [Development](#development).
-
-## Reference
-
-<details>
-<summary><strong>Installation, other drivers, and configuration</strong></summary>
 
 ### Install
 
@@ -245,9 +249,7 @@ needy daemon serve --listen tcp://127.0.0.1:7400
 ```
 
 TCP carries no encryption itself. If the daemon finds no guest needy, it warns
-and cannot start actors. User-service acceptance is recorded for macOS in the
-[CLI evidence](docs/ai/references/cli/2026-11-14-cli-lifecycle-evidence.md).
-Linux and system-scope service acceptance remain separate checks.
+and cannot start actors.
 
 ### Pick a profile
 
@@ -436,9 +438,7 @@ control host. Each consumer reads its code through a hidden prompt.
 Use a TCP route of the tunnel (`tcp://`, `cloudflared access tcp`): proxied
 HTTPS hostnames do not carry gRPC through Cloudflare Tunnel. A dropped
 connection costs little: runners connect again with backoff, and a workspace
-mount starts its SFTP stream again for up to 2 minutes. Measurements and
-limits are in the
-[Cloudflare transport evidence](docs/ai/references/architecture/2026-11-13-cloudflare-transport-evidence.md).
+mount starts its SFTP stream again for up to 2 minutes.
 
 ## Actor drivers
 
@@ -470,13 +470,9 @@ whose isolation the driver relies on.
 | Kernel version | ✅ | ❌ (host or gVisor) | ➖ | ❌ |
 | Uptime offset | ✅ | ❌ | ➖ | ❌ |
 
-✅ verified end to end, ❌ not possible with this driver, ➖ expected to work but
-not yet recorded. `needy config profile check` lists every gap for your recipe and
-host; a recipe's `required:` turns a gap into an error. Evidence:
-[closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md),
-[container actor](docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md#identity),
-[`macos-vz`](docs/ai/references/architecture/2026-11-12-macos-vz-actor-evidence.md),
-[`macos-apple-container`](docs/ai/references/architecture/2026-11-12-macos-apple-container-actor-evidence.md).
+✅ available, ❌ unavailable, ➖ experimental.
+`needy config profile check` lists gaps for your recipe and host.
+A recipe's `required:` turns a gap into an error.
 
 Executor drivers: `native` (the machine itself: Linux, macOS, Windows) and
 `linux-container` (a container through the same engine). A `macos-native`
@@ -486,8 +482,7 @@ actor (Seatbelt and shims, no VM) exists as a proof of concept on the
 ## Configuration
 
 A profile is YAML; unknown keys are errors, and `extends:` builds on another
-profile. The full reference is in the
-[profile design](docs/ai/references/config/2026-11-09-profile-and-rules-design.md).
+profile. See the [example profiles](#examples) for complete configurations.
 
 ### Commands
 
@@ -655,9 +650,8 @@ actor:
 user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree in the actor
 ```
 
-A [recipe](docs/ai/references/config/2026-11-09-recipe-design.md) sets the
-machine: CPU model and count, memory, kernel, firmware strings, devices,
-hostname (`instance-{time}`), and which identity fields are `required:`.
+A recipe sets the machine: CPU model and count, memory, kernel, firmware
+strings, devices, hostname (`instance-{time}`), and which identity fields are `required:`.
 `needy image build --recipe RECIPE` builds the actor kernel with a recipe's
 kernel options. `linux-container` takes `actor.container.oci_runtime`.
 `actor.image: REF` runs your own image `FROM` needy's base on every driver
@@ -754,24 +748,13 @@ the project files and toolchains.
 Extension points are directories with one implementation each: actor drivers
 (`core-actor/src/driver/`), executor drivers (`core-executor/src/driver/`),
 interceptor domains (`core/src/intercept/`), sidecars
-(`core-actor/src/sidecar/`) and trace sinks (`trace/src/sink/`). See the
-[drivers and extension points design](docs/ai/references/architecture/2026-11-12-drivers-and-extension-points-design.md)
-and [`AGENTS.md`](AGENTS.md).
+(`core-actor/src/sidecar/`) and trace sinks (`trace/src/sink/`).
 
 ## Documentation
 
+- [Linux actor and Mac executor walkthrough](docs/ai/explanations/linux-actor-mac-executor.md)
+- [Example profiles](examples)
 - [Terms and concepts](docs/TERMS_AND_CONCEPTS.md)
-- [Actor and executor separation](docs/ai/references/architecture/2026-11-09-actor-executor-separation-design.md):
-  model, terms, network and experiments.
-- [Runners and runs](docs/ai/references/architecture/2026-11-10-runner-and-run-design.md)
-- [CLI, exec streams and reports](docs/ai/references/cli/2026-11-09-cli-exec-and-report-design.md)
-- [Profiles and rules](docs/ai/references/config/2026-11-09-profile-and-rules-design.md)
-- [Recipes](docs/ai/references/config/2026-11-09-recipe-design.md)
-- [Closed-loop results](docs/ai/references/architecture/2026-11-09-closed-loop-results-evidence.md):
-  what runs, and latency and throughput numbers.
-- [Where documents go](docs/README.md)
-
-</details>
 
 ## Development
 
@@ -792,12 +775,10 @@ nothing left behind). It builds the guest needy and the images from the tree
 first. A cell it cannot run here is reported as not covered, with the reason,
 and the exit code says so. `--list` shows the cells, `--only` and `--skip`
 pick some, `--remote HOST` runs on another machine from `git archive HEAD`,
-and `--hosts FILE` runs on several at once, each building natively; see the
-[e2e harness design](docs/ai/references/architecture/2026-11-13-e2e-harness-design.md).
+and `--hosts FILE` runs on several at once, each building natively.
 
 GitHub Actions runs the checks and tests on Linux, macOS and Windows, the e2e
-cells without an actor on Linux and macOS, and builds the release assets; see
-[Release and CI](docs/ai/references/architecture/2026-11-12-release-and-ci-design.md).
+cells without an actor on Linux and macOS, and builds the release assets.
 
 The figures in this README are animated scenes in [`apps/docs`](apps/docs), a
 page you can also open to step through them and route your own commands:
