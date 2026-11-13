@@ -299,6 +299,8 @@ impl RunnerAt {
 /// vary itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
+  /// Opt-in user service lifecycle on this platform manager.
+  Service,
   /// Routing to a native executor on a runner that joined the control
   /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
@@ -352,7 +354,7 @@ impl Cell {
     // Scenarios that route somewhere route to a native executor unless the
     // cell says otherwise; the others have none.
     let executor = match scenario {
-      Scenario::Terminal | Scenario::Tui(_) | Scenario::Network(_) | Scenario::Workspace(Workspace::Host) => None,
+      Scenario::Service | Scenario::Terminal | Scenario::Tui(_) | Scenario::Network(_) | Scenario::Workspace(Workspace::Host) => None,
       Scenario::Chaos(Fault::Net | Fault::Sensor) => None,
       _ => Some(Executor::Native),
     };
@@ -388,6 +390,7 @@ impl Cell {
       Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name).unwrap_or("?")),
       Scenario::HostExec => format!("{driver}/exec"),
       Scenario::HostCopy => format!("{driver}/fs-cp"),
+      Scenario::Service => format!("{driver}/service/user"),
     }
   }
 
@@ -473,6 +476,7 @@ pub fn cells() -> Vec<Cell> {
       ..Cell::new(Driver::Host, Scenario::HostExec)
     },
     Cell::new(Driver::Host, Scenario::HostCopy),
+    Cell::new(Driver::Host, Scenario::Service),
   ];
   for driver in Driver::ACTORS {
     let cell = |scenario| Cell::new(driver, scenario);

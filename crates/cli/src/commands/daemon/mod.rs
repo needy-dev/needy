@@ -1,6 +1,7 @@
-//! Foreground control and standalone executor serving.
+//! Foreground serving and local OS service lifecycle.
 
 mod runner;
+mod service;
 
 pub use runner::{RunnerArgs, join_runner, run_runner};
 
@@ -32,14 +33,14 @@ impl Args {
   }
 }
 
-// TODO: OS service installation is isolated in the dependent service-management
-// PR; this slice provides foreground serving and does not install manager jobs.
 #[derive(clap::Subcommand)]
 enum Command {
   /// Serve the control plane in the foreground.
   Serve(ServeArgs),
   /// Serve standalone executor processes on this machine.
   Executor(ExecutorArgs),
+  /// Manage this machine's control service.
+  Service(service::Args),
 }
 
 #[derive(clap::Args, Default)]
@@ -92,6 +93,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       needy_daemon::executor::serve(&listen, args.name, token, args.socket_group).await?;
       Ok(0)
     }
+    Command::Service(args) => service::run(args, ctx).await,
   }
 }
 

@@ -38,6 +38,7 @@ const X: &str = "x";
 
 pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
   match cell.scenario {
+    Scenario::Service => super::service::run(env, checks),
     Scenario::ActorFiles => actor_files(env, cell, checks),
     Scenario::ExecutorFiles => executor_files(env, cell, checks),
     Scenario::Workspace(from) => workspace(env, cell, from, checks),
