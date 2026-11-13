@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use needy_config::profile::{Chaos, FaultDomain};
 
+use needy_common::sftp::SSH_FXP_STATUS;
+
 use super::*;
 use crate::chaos::Injector;
 

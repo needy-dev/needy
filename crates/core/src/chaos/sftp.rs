@@ -12,15 +12,7 @@ use std::time::{Duration, Instant};
 use super::{Injector, Subject};
 use crate::intercept::file::{Filtered, Later, Outbound, StreamFilter};
 use crate::types::Fired;
-
-// Source: https://github.com/openssh/openssh-portable/blob/V_10_6_P2/sftp.h#L36
-// (`SSH2_FXP_OPEN 3`) and #L58 (`SSH2_FXP_STATUS 101`), protocol version 3
-// (#L32), which `sftp-server` speaks.
-// Reference: https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-02#section-3
-// (packet `uint32 length, byte type`, then `uint32 id`, section 6.3) and
-// #section-7 (SSH_FXP_STATUS: id, code, message, language tag).
-const SSH_FXP_OPEN: u8 = 3;
-const SSH_FXP_STATUS: u8 = 101;
+use needy_common::sftp::{SSH_FXP_OPEN, read_u32, status_reply, take_packets};
 
 /// SFTP status code for an errno. sshfs maps unknown codes to EIO.
 // Source: https://github.com/libfuse/sshfs/blob/sshfs-3.7.6/sshfs.c#L1766-L1779
@@ -40,36 +32,6 @@ fn sftp_code(errno: &str) -> u32 {
     "EOPNOTSUPP" => 8,
     _ => 255,
   }
-}
-
-fn read_u32(b: &[u8]) -> Option<u32> {
-  Some(u32::from_be_bytes(b.get(..4)?.try_into().ok()?))
-}
-
-/// Splits complete SFTP packets off the front of `buf`.
-fn take_packets(buf: &mut Vec<u8>) -> Vec<Vec<u8>> {
-  let mut out = Vec::new();
-  while let Some(len) = read_u32(buf) {
-    let total = 4 + len as usize;
-    if buf.len() < total {
-      break;
-    }
-    out.push(buf.drain(..total).collect());
-  }
-  out
-}
-
-/// Builds `SSH_FXP_STATUS` for request `id`.
-fn status_reply(id: u32, code: u32, message: &str) -> Vec<u8> {
-  let mut body = vec![SSH_FXP_STATUS];
-  body.extend(id.to_be_bytes());
-  body.extend(code.to_be_bytes());
-  body.extend((message.len() as u32).to_be_bytes());
-  body.extend(message.as_bytes());
-  body.extend(0u32.to_be_bytes()); // empty language tag
-  let mut packet = (body.len() as u32).to_be_bytes().to_vec();
-  packet.extend(body);
-  packet
 }
 
 /// One mount's SFTP stream, framed in both directions.

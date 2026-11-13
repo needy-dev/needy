@@ -38,6 +38,9 @@ tracing.workspace = true
 # Stopping the VM sends Firecracker `SIGTERM`; reconciling a leftover VM
 # finds its process by its command line.
 [target.'cfg(unix)'.dependencies]
+# A workspace mount's SFTP stream (`sshfs::stream`) is plain Unix.
+needy-api-client.workspace = true
+needy-api-proto.workspace = true
 nix = { workspace = true, features = ["signal"] }
 sysinfo.workspace = true
 
@@ -48,8 +51,6 @@ kvm-bindings.workspace = true
 kvm-ioctls.workspace = true
 backon.workspace = true
 libc.workspace = true
-needy-api-client.workspace = true
-needy-api-proto.workspace = true
 nix = { workspace = true, features = ["fs", "hostname", "ioctl", "mount", "net", "process", "reboot", "sched", "signal", "socket"] }
 procfs-core.workspace = true
 # `tonic014`: the process service for a driving program on a terminal is
@@ -63,3 +64,4 @@ needy-common = { workspace = true, features = ["testing"] }
 tar.workspace = true
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true
+tonic.workspace = true

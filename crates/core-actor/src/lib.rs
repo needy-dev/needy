@@ -13,8 +13,9 @@
 //!   container actor image.
 //! - [`identity`]: a recipe's identity files presented from the host.
 //! - [`guest`] (Linux only): the in-guest init and the exec-routing proxy.
-//! - `sshfs` (Linux only): workspace mounts over a needy exec stream, made
-//!   by a VM's init or, for a container, on the daemon's machine.
+//! - `sshfs` (mounting on Linux only): workspace mounts over a needy exec
+//!   stream that survives lost connections, made by a VM's init or, for a
+//!   container, on the daemon's machine.
 
 pub mod contract;
 pub mod driver;
@@ -24,5 +25,5 @@ pub mod guest;
 pub mod identity;
 pub mod image;
 pub mod sidecar;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod sshfs;
