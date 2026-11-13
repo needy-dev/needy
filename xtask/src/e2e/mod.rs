@@ -195,7 +195,8 @@ mod run {
     } else {
       Prepare::Build
     };
-    let host = host::prepare(&root, &work, &needy, mode, &mut notes)?;
+    let tui = selected.iter().any(|c| matches!(c.scenario, matrix::Scenario::Tui(_)) && c.elsewhere(here).is_none());
+    let host = host::prepare(&root, &work, &needy, mode, tui, &mut notes)?;
     if let Some(out) = &args.export {
       for note in &notes.0 {
         eprintln!("e2e: {note}");
@@ -314,6 +315,11 @@ mod run {
     if matches!(cell.driver, Driver::Container(_))
       && cell.mounts_workspace()
       && let Err(reason) = &host.host_sshfs
+    {
+      return Some((Status::NotCovered, reason.clone()));
+    }
+    if let matrix::Scenario::Tui(_) = cell.scenario
+      && let Some(Err(reason)) = host.agents.get(&cell.driver)
     {
       return Some((Status::NotCovered, reason.clone()));
     }

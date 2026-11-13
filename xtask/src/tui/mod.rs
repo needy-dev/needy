@@ -111,6 +111,13 @@ struct Run {
   env: Vec<String>,
   #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
   command: Vec<String>,
+  /// The program's working directory; the harness's own by default.
+  #[arg(skip)]
+  cwd: Option<PathBuf>,
+  /// Leave out the line per step on stderr, for a caller that reports the
+  /// steps itself (the e2e harness).
+  #[arg(skip)]
+  silent: bool,
 }
 
 pub fn main(args: Args) -> Result<()> {
@@ -165,7 +172,10 @@ impl Session {
     };
     let mut command = CommandBuilder::new(program);
     command.args(&run.command[1..]);
-    command.cwd(std::env::current_dir()?);
+    command.cwd(match &run.cwd {
+      Some(cwd) => cwd.clone(),
+      None => std::env::current_dir()?,
+    });
     command.env("TERM", "xterm-256color");
     command.env("COLORTERM", "truecolor");
     for pair in &run.env {
@@ -390,6 +400,41 @@ impl Session {
 
 fn run_scenario(run: &Run) -> Result<()> {
   let scenario = std::fs::read_to_string(&run.scenario).with_context(|| format!("cannot read {}", run.scenario.display()))?;
+  let report = play(run, &scenario)?;
+  let text = serde_json::to_string_pretty(&report)?;
+  match &run.out {
+    Some(path) => std::fs::write(path, text + "\n").with_context(|| format!("cannot write {}", path.display()))?,
+    None => println!("{text}"),
+  }
+  Ok(())
+}
+
+/// Runs `command` (the program and its arguments) on a pseudo-terminal of
+/// 30 by 100 cells, through `scenario` (the steps, one per line), with
+/// `env` (`KEY=VALUE`) added and `cwd` as its working directory, the raw
+/// output written to `raw` when given, and returns the report `tui run`
+/// writes. For callers in this crate: the e2e harness's TUI cells.
+pub(crate) fn report(scenario: &str, command: Vec<String>, env: Vec<String>, cwd: &std::path::Path, raw: Option<PathBuf>) -> Result<Value> {
+  let run = Run {
+    scenario: PathBuf::new(),
+    out: None,
+    marks: None,
+    follow: None,
+    raw,
+    rows: 30,
+    cols: 100,
+    answers: Answers::All,
+    env,
+    command,
+    cwd: Some(cwd.to_path_buf()),
+    silent: true,
+  };
+  play(&run, scenario)
+}
+
+/// Runs `run`'s command through the steps of `scenario` and returns the
+/// report.
+fn play(run: &Run, scenario: &str) -> Result<Value> {
   let mut session = Session::start(run)?;
   let started = Instant::now();
   let mut steps = Vec::new();
@@ -402,7 +447,9 @@ fn run_scenario(run: &Run) -> Result<()> {
     let words = shell_words::split(line).with_context(|| format!("line {}: {line}", n + 1))?;
     let at = started.elapsed().as_millis();
     let ok = session.step(&words, &mut snaps).with_context(|| format!("line {}: {line}", n + 1))?;
-    eprintln!("tui: {} {line}", if ok { "ok  " } else { "FAIL" });
+    if !run.silent {
+      eprintln!("tui: {} {line}", if ok { "ok  " } else { "FAIL" });
+    }
     steps.push(json!({ "line": n + 1, "step": line, "ok": ok, "at_ms": at }));
   }
   let exited = session.exit.is_some();
@@ -427,12 +474,7 @@ fn run_scenario(run: &Run) -> Result<()> {
     // Meaningful once the program exited: what it left on for the shell.
     "left_on": session.emulator.leftover_modes(),
   });
-  let text = serde_json::to_string_pretty(&report)?;
-  match &run.out {
-    Some(path) => std::fs::write(path, text + "\n").with_context(|| format!("cannot write {}", path.display()))?,
-    None => println!("{text}"),
-  }
-  Ok(())
+  Ok(report)
 }
 
 /// `line` with each run of digits, and each word of eight or more
@@ -469,7 +511,15 @@ fn diff(a: &PathBuf, b: &PathBuf) -> Result<()> {
   let read = |p: &PathBuf| -> Result<Value> {
     Ok(serde_json::from_str(&std::fs::read_to_string(p).with_context(|| format!("cannot read {}", p.display()))?)?)
   };
-  let (a, b) = (read(a)?, read(b)?);
+  let out = compare(&read(a)?, &read(b)?);
+  println!("{}", serde_json::to_string_pretty(&out)?);
+  Ok(())
+}
+
+/// What `tui diff` prints for reports `a` and `b`: each snap of `a`,
+/// `"equal"` or how `b`'s differs, then the queries, the modes left on,
+/// the exits and the failed steps of both.
+pub(crate) fn compare(a: &Value, b: &Value) -> Value {
   let mut summary = serde_json::Map::new();
   let empty = serde_json::Map::new();
   let snaps_a = a["snaps"].as_object().unwrap_or(&empty);
@@ -533,15 +583,13 @@ fn diff(a: &PathBuf, b: &PathBuf) -> Result<()> {
     kinds.dedup();
     kinds
   };
-  let out = json!({
+  json!({
     "snaps": summary,
-    "queries": { "a": kinds(&a), "b": kinds(&b) },
+    "queries": { "a": kinds(a), "b": kinds(b) },
     "left_on": { "a": a["left_on"], "b": b["left_on"] },
     "exit": { "a": a["exit"], "b": b["exit"] },
     "failed_steps": { "a": a["failed"], "b": b["failed"] },
-  });
-  println!("{}", serde_json::to_string_pretty(&out)?);
-  Ok(())
+  })
 }
 
 #[cfg(test)]
@@ -571,6 +619,8 @@ mod tests {
       answers,
       env: Vec::new(),
       command: command.iter().map(|s| s.to_string()).collect(),
+      cwd: None,
+      silent: false,
     };
     run_scenario(&run).unwrap();
     let report = serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();

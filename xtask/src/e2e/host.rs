@@ -19,6 +19,14 @@ use super::proc;
 /// `needy-executor:latest` someone built by hand.
 pub const ACTOR_IMAGE: &str = "needy-e2e-actor:latest";
 pub const EXECUTOR_IMAGE: &str = "needy-e2e-executor:latest";
+/// The agents image of the TUI cells: `examples/agents`, built on
+/// [`ACTOR_IMAGE`].
+pub const AGENTS_IMAGE: &str = "needy-e2e-agents:latest";
+
+/// `examples/agents/Dockerfile`, in the harness, so a host without a
+/// checkout (a run host) builds the agents image too. It copies nothing
+/// from its build context.
+const AGENTS_DOCKERFILE: &str = include_str!("../../../examples/agents/Dockerfile");
 
 const BUILD: Duration = Duration::from_secs(3600);
 
@@ -39,6 +47,11 @@ pub struct Host {
   pub guest: Result<PathBuf, String>,
   /// The base VM image of this host's VM driver.
   pub vm_image: Option<PathBuf>,
+  /// Where the VM images made from container images are (the agents
+  /// image's): a daemon's data directory's `images` links here.
+  pub images: Option<PathBuf>,
+  /// Each actor driver's agents image for the TUI cells: there, or why not.
+  pub agents: BTreeMap<Driver, Result<(), String>>,
   /// Whether `needy run stop` has `--now`.
   pub stop_now: bool,
   /// The engine every daemon is given, when the harness found it through
@@ -141,7 +154,7 @@ const IMAGE_SOURCES: &[&str] = &["images"];
 /// needy, the base VM image of this host's VM driver, the container actor
 /// image and the executor image. Then probes the host. Every failure ends
 /// up as the reason of the cells that needed the missing piece.
-pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, notes: &mut Notes) -> Result<Host> {
+pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool, notes: &mut Notes) -> Result<Host> {
   let skip = mode != Prepare::Build;
   // Listing builds nothing and judges nothing it would build.
   let listing = mode == Prepare::Skip;
@@ -297,8 +310,7 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, notes: &mu
         // The archive is only the way into Apple's store.
         let _ = std::fs::remove_file(&archive);
         loaded?;
-        // The engine's copy only fed the archive.
-        let _ = proc::simple("docker", &["image", "rm", ACTOR_IMAGE], Duration::from_secs(60));
+        // The engine's copy stays: the TUI cells' agents image is built on it.
         stamp("actor-apple-container", &image_hash).map_err(|e| e.to_string())
       })
     };
@@ -330,6 +342,14 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, notes: &mu
     }
   } else {
     Err("container executors run on Linux only".into())
+  };
+
+  // The TUI cells' agents image, when any runs: built on every host, a
+  // run host included, since it only downloads the agents' releases.
+  let agents = if tui && !listing {
+    agents(root, work, needy, vm_image.as_deref(), &could, &needs_docker)
+  } else {
+    BTreeMap::new()
   };
 
   // Now what a runner would report, with the VM image just built.
@@ -394,9 +414,133 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, notes: &mu
     host_sshfs,
     guest,
     vm_image,
+    images: Some(work.join("images")),
+    agents,
     stop_now,
     docker_host,
   })
+}
+
+/// Builds the agents image (`examples/agents/Dockerfile` on
+/// [`ACTOR_IMAGE`]) when it is missing or stale, and from it what each
+/// actor driver of this host boots: the image itself for `linux-container`,
+/// a VM image for `linux-firecracker` and `macos-vz`, the image in Apple's
+/// store for `macos-apple-container`. Returns each driver's result.
+fn agents(
+  root: &Path,
+  work: &Path,
+  needy: &Path,
+  vm_image: Option<&Path>,
+  could: &BTreeMap<ActorDriver, Result<(), String>>,
+  needs_docker: &dyn Fn(&str) -> Result<(), String>,
+) -> BTreeMap<Driver, Result<(), String>> {
+  let platform = Platform::this();
+  // A run host has no checkout: its builds run in the work directory.
+  let cwd = if root.join("images").exists() {
+    root
+  } else {
+    work
+  };
+  let stamps = work.join("stamps");
+  let fresh = |name: &str, hash: &str| std::fs::read_to_string(stamps.join(name)).is_ok_and(|s| s.trim() == hash);
+  let stamp = |name: &str, hash: &str| std::fs::write(stamps.join(name), hash).map_err(|e| e.to_string());
+  // On a Mac the base is built for Apple silicon, which both macOS drivers
+  // run.
+  let arm = platform == Platform::Macos;
+  let built_image = (|| -> Result<String, String> {
+    needs_docker("the agents image")?;
+    // The base in the engine: a Mac keeps its actor image in Apple's store,
+    // so the engine may lack it.
+    if !image_present(ACTOR_IMAGE) {
+      eprintln!("e2e: building {ACTOR_IMAGE} for the agents image");
+      let mut command = docker(cwd);
+      command.args(["build", "-f", "images/Dockerfile"]);
+      if arm {
+        command.args(["--platform", "linux/arm64"]);
+      }
+      command.args(["--target", "actor-container", "-t", ACTOR_IMAGE, "."]);
+      built(command, "the container actor image")?;
+    }
+    let base = image_id(ACTOR_IMAGE).ok_or_else(|| format!("{ACTOR_IMAGE} is not in the engine"))?;
+    let hash = format!("{}-{base}", hex(&Sha256::digest(AGENTS_DOCKERFILE.as_bytes())));
+    if !(fresh("agents", &hash) && image_present(AGENTS_IMAGE)) {
+      eprintln!("e2e: building {AGENTS_IMAGE} from examples/agents");
+      let context = work.join("agents");
+      std::fs::create_dir_all(&context).map_err(|e| e.to_string())?;
+      std::fs::write(context.join("Dockerfile"), AGENTS_DOCKERFILE).map_err(|e| e.to_string())?;
+      let mut command = docker(cwd);
+      command.arg("build");
+      if arm {
+        command.args(["--platform", "linux/arm64"]);
+      }
+      command
+        .args([
+          "--build-arg",
+          &format!("BASE={ACTOR_IMAGE}"),
+          "-t",
+          AGENTS_IMAGE,
+        ])
+        .arg(&context);
+      built(command, "the agents image")?;
+      stamp("agents", &hash)?;
+    }
+    image_id(AGENTS_IMAGE).ok_or_else(|| format!("{AGENTS_IMAGE} is not in the engine"))
+  })();
+  let mut out = BTreeMap::new();
+  for driver in Driver::ACTORS {
+    if driver.platform() != platform {
+      continue;
+    }
+    let profile_driver = match driver {
+      Driver::Firecracker => ActorDriver::LinuxFirecracker,
+      Driver::Container(_) => ActorDriver::LinuxContainer,
+      Driver::Vz => ActorDriver::MacosVz,
+      Driver::AppleContainer => ActorDriver::MacosAppleContainer,
+      Driver::Host => continue,
+    };
+    let result = built_image.clone().and_then(|id| match driver {
+      Driver::Container(_) => Ok(()),
+      Driver::Firecracker | Driver::Vz => {
+        could.get(&profile_driver).cloned().unwrap_or_else(|| Err("not probed".into()))?;
+        let base = vm_image.filter(|b| b.join("manifest.json").exists()).ok_or("no base VM image to take the kernel from")?;
+        let dir = needy_core_actor::image::vm::dir_of(&work.join("images"), profile_driver, AGENTS_IMAGE);
+        let name = format!("agents-vm-{}", profile_driver.as_str());
+        if !(fresh(&name, &id) && dir.join("manifest.json").exists()) {
+          eprintln!("e2e: building the {} VM image of {AGENTS_IMAGE}", profile_driver.as_str());
+          let mut command = Command::new(needy);
+          command.current_dir(cwd).args(["image", "build", "--from", AGENTS_IMAGE, "--base"]).arg(base).arg("--out").arg(&dir);
+          built(command, "the agents VM image")?;
+          stamp(&name, &id)?;
+        }
+        Ok(())
+      }
+      Driver::AppleContainer => {
+        could.get(&profile_driver).cloned().unwrap_or_else(|| Err("not probed".into()))?;
+        if !(fresh("agents-apple", &id) && apple_image_present(AGENTS_IMAGE)) {
+          eprintln!("e2e: loading {AGENTS_IMAGE} into Apple's container");
+          let archive = work.join("agents-image.tar");
+          let mut save = docker(cwd);
+          save.args(["save", AGENTS_IMAGE, "-o"]).arg(&archive);
+          built(save, "the agents image's archive")?;
+          let mut load = Command::new("container");
+          load.args(["image", "load", "--input"]).arg(&archive);
+          let loaded = built(load, "the agents image in Apple's container");
+          // The archive is only the way into Apple's store.
+          let _ = std::fs::remove_file(&archive);
+          loaded?;
+          stamp("agents-apple", &id)?;
+        }
+        Ok(())
+      }
+      Driver::Host => Ok(()),
+    });
+    out.insert(driver, result);
+  }
+  out
+}
+
+fn hex(bytes: &[u8]) -> String {
+  bytes.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// The engine probe the drivers share, as the daemon builds it.
@@ -470,6 +614,21 @@ fn allows_other() -> bool {
 /// under `images/`, and `containers/ID.tar` for the container actor and
 /// executor images.
 pub fn export(root: &Path, host: &Host, out: &Path) -> Result<()> {
+  // An earlier export's images would be offered again under names this one
+  // does not write.
+  for stale in ["containers", "images", "images.hash"] {
+    let path = out.join(stale);
+    let removed = if path.is_dir() {
+      std::fs::remove_dir_all(&path)
+    } else {
+      std::fs::remove_file(&path)
+    };
+    if let Err(e) = removed
+      && e.kind() != std::io::ErrorKind::NotFound
+    {
+      return Err(e).with_context(|| format!("cannot remove {}", path.display()));
+    }
+  }
   let bin = out.join("bin");
   std::fs::create_dir_all(&bin)?;
   eprintln!("e2e: building the static needy and harness for export");
@@ -496,17 +655,20 @@ pub fn export(root: &Path, host: &Host, out: &Path) -> Result<()> {
     let mut copy = Command::new("cp");
     copy.arg("-R").arg(image).arg(dest.join("base"));
     built(copy, "the base VM image's copy").map_err(anyhow::Error::msg)?;
+    // What the image was built from, so a run host that has this one
+    // already is not sent it again.
+    std::fs::write(out.join("images.hash"), tree_hash(root, IMAGE_SOURCES)?)?;
   }
   // One archive per image, named by its ID, so a run host that has an
   // image already is not sent it again.
   let containers = out.join("containers");
   std::fs::create_dir_all(&containers)?;
-  for image in [ACTOR_IMAGE, EXECUTOR_IMAGE] {
+  for (role, image) in [("actor", ACTOR_IMAGE), ("executor", EXECUTOR_IMAGE)] {
     let Some(id) = image_id(image) else {
       continue;
     };
     let mut save = docker(root);
-    save.args(["save", image, "-o"]).arg(containers.join(format!("{}.tar", id.trim_start_matches("sha256:"))));
+    save.args(["save", image, "-o"]).arg(containers.join(format!("{role}-{}.tar", id.trim_start_matches("sha256:"))));
     built(save, "a container image's archive").map_err(anyhow::Error::msg)?;
   }
   eprintln!("e2e: exported to {}", out.display());
@@ -517,7 +679,7 @@ pub fn export(root: &Path, host: &Host, out: &Path) -> Result<()> {
 /// directory. Leaves everything else alone.
 pub fn clean(work: &Path) -> Result<()> {
   if proc::on_path("docker") {
-    for image in [ACTOR_IMAGE, EXECUTOR_IMAGE] {
+    for image in [AGENTS_IMAGE, ACTOR_IMAGE, EXECUTOR_IMAGE] {
       if image_present(image) {
         let out = proc::simple("docker", &["image", "rm", image], Duration::from_secs(120))?;
         if !out.ok() {
@@ -527,12 +689,14 @@ pub fn clean(work: &Path) -> Result<()> {
       }
     }
   }
-  if proc::on_path("container") && apple_image_present(ACTOR_IMAGE) {
-    let out = proc::simple("container", &["image", "delete", ACTOR_IMAGE], Duration::from_secs(120))?;
-    if !out.ok() {
-      bail!("cannot remove {ACTOR_IMAGE} from Apple's container: {}", out.brief());
+  for image in [AGENTS_IMAGE, ACTOR_IMAGE] {
+    if proc::on_path("container") && apple_image_present(image) {
+      let out = proc::simple("container", &["image", "delete", image], Duration::from_secs(120))?;
+      if !out.ok() {
+        bail!("cannot remove {image} from Apple's container: {}", out.brief());
+      }
+      eprintln!("e2e: removed {image} from Apple's container");
     }
-    eprintln!("e2e: removed {ACTOR_IMAGE} from Apple's container");
   }
   if work.exists() {
     std::fs::remove_dir_all(work).with_context(|| format!("cannot remove {}", work.display()))?;

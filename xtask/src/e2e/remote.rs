@@ -296,7 +296,13 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
           .and_then(|_| remote(&h.ssh, &format!("rm -rf {}", h.dir)).map(|_| ())),
         Role::Run => remote(
           &h.ssh,
-          &format!("docker image rm {} {} 2>/dev/null; rm -rf {}", super::host::ACTOR_IMAGE, super::host::EXECUTOR_IMAGE, h.dir),
+          &format!(
+            "docker image rm {} {} {} 2>/dev/null; rm -rf {}",
+            super::host::AGENTS_IMAGE,
+            super::host::ACTOR_IMAGE,
+            super::host::EXECUTOR_IMAGE,
+            h.dir
+          ),
         )
         .map(|_| ()),
         Role::Runner => Ok(()),
@@ -455,6 +461,13 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
   Ok(code)
 }
 
+/// Whether the run host has an executor image of the harness, whatever its
+/// ID.
+fn executor_present(run: &Host) -> Result<bool> {
+  let (code, _) = remote(&run.ssh, &format!("docker image inspect {} >/dev/null 2>&1", super::host::EXECUTOR_IMAGE))?;
+  Ok(code == 0)
+}
+
 /// Streams `build`'s export into `run`'s work directory, loads the
 /// container images there, and gives the directory to the test user.
 fn fetch(build: &Host, run: &Host) -> Result<()> {
@@ -474,26 +487,48 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
     ),
   )?;
   let have = String::from_utf8_lossy(&have).to_string();
-  let (_, offered) = remote(&build.ssh, &format!("ls {}/export/containers", build.dir))?;
+  let work = format!("{}/work", run.dir);
+  let (_, offered) = remote(&build.ssh, &format!("ls {0}/export/containers; cat {0}/export/images.hash 2>/dev/null", build.dir))?;
+  let offered = String::from_utf8_lossy(&offered).to_string();
+  let (_, images_hash) = remote(&run.ssh, &format!("cat {work}/images.hash 2>/dev/null; true"))?;
+  let images_hash = String::from_utf8_lossy(&images_hash).trim().to_string();
   let mut parts = vec!["bin".to_string()];
-  if have.lines().any(|l| l == "kvm") {
+  // The base VM image only where it boots, and only when it changed.
+  let offered_hash = offered.lines().find(|l| !l.ends_with(".tar")).unwrap_or("").trim().to_string();
+  if have.lines().any(|l| l == "kvm") && (offered_hash.is_empty() || offered_hash != images_hash) {
     parts.push("images".into());
+    parts.push("images.hash".into());
   }
-  for archive in String::from_utf8_lossy(&offered).split_whitespace() {
-    let id = archive.trim_end_matches(".tar");
-    if !have.contains(id) {
-      parts.push(format!("containers/{archive}"));
+  // NOTICE: the executor image differs from the last one only in its needy
+  // layer, which this commit changes every time, and sending all of it
+  // through this machine's uplink took most of a run (2026-11-13). A run
+  // host that has an executor image already gets it rebuilt from the
+  // static needy sent anyway (below), which compiles nothing.
+  let mut rebuild_executor = false;
+  for archive in offered.split_whitespace().filter(|a| a.ends_with(".tar")) {
+    let (role, id) = archive.trim_end_matches(".tar").split_once('-').unwrap_or(("", archive));
+    if have.contains(id) {
+      continue;
     }
+    if role == "executor" && executor_present(run)? {
+      rebuild_executor = true;
+      continue;
+    }
+    parts.push(format!("containers/{archive}"));
   }
   eprintln!("e2e: {}: fetching {} of the export of {}", run.name, parts.join(", "), build.name);
-  let work = format!("{}/work", run.dir);
+  let replaced = if parts.iter().any(|p| p == "images") {
+    format!("{work}/images {work}/images.hash")
+  } else {
+    String::new()
+  };
   // NOTICE: the stream goes through this machine, whose uplink is the
   // bottleneck to far hosts; `gzip -1` trades a little CPU for about half
   // the bytes (the sparse rootfs and image layers compress well).
   let mut pack =
     ssh(&build.ssh).arg(format!("tar -C {}/export -c {} | gzip -1", build.dir, shell_words::join(&parts))).stdout(Stdio::piped()).spawn()?;
   let mut unpack = ssh(&run.ssh)
-    .arg(format!("rm -rf {work}/bin {work}/guest {work}/images {work}/containers && mkdir -p {work} && gzip -dc | tar -x -C {work}"))
+    .arg(format!("rm -rf {work}/bin {work}/guest {replaced} {work}/containers && mkdir -p {work} && gzip -dc | tar -x -C {work}"))
     .stdin(pack.stdout.take().context("no export stream")?)
     .spawn()?;
   let (packed, unpacked) = (pack.wait()?, unpack.wait()?);
@@ -505,6 +540,15 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
      && for f in {work}/containers/*.tar; do [ -f \"$f\" ] || continue; docker load -i \"$f\" || exit 1; done \
      && rm -rf {work}/containers"
   );
+  if rebuild_executor {
+    // The run host's executor image with this commit's needy in it.
+    let image = super::host::EXECUTOR_IMAGE;
+    script.push_str(&format!(
+      " && mkdir -p {work}/executor && cp {work}/bin/needy {work}/executor/needy \
+       && printf 'FROM {image}\\nUSER root\\nCOPY needy /usr/local/bin/needy\\nUSER agent\\n' > {work}/executor/Dockerfile \
+       && docker build -q -t {image} {work}/executor >/dev/null && rm -rf {work}/executor"
+    ));
+  }
   if let Some(user) = &run.user {
     script.push_str(&format!(" && chown -R {user}: {}", run.dir));
   }

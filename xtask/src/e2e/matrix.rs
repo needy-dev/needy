@@ -381,7 +381,7 @@ impl Cell {
       Scenario::Terminal => format!("{driver}/terminal/mode={}", self.terminal.name()),
       Scenario::FakeAgent => format!("{driver}/fake-agent"),
       Scenario::Runner(at) => format!("{driver}/runner/at={}", at.name()),
-      Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name()).unwrap_or("?")),
+      Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name).unwrap_or("?")),
       Scenario::HostExec => format!("{driver}/exec"),
       Scenario::HostCopy => format!("{driver}/fs-cp"),
     }

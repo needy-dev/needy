@@ -26,6 +26,8 @@ run = [
   "dep:sha2",
   "dep:tokio",
   "dep:vt100",
+  # The TUI cells drive `tui`'s scenarios.
+  "tui",
 ]
 # `tui`: the terminal fidelity harness, a pseudo-terminal and a terminal model.
 tui = ["dep:portable-pty", "dep:vt100", "dep:vte"]

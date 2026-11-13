@@ -15,6 +15,9 @@ pub struct Check {
 #[derive(Debug, Default)]
 pub struct Checks {
   pub list: Vec<Check>,
+  /// Why invariants the cell would assert were not: deferred work the
+  /// product does not do yet. A cell with any is not covered, never passed.
+  pub deferred: Vec<String>,
 }
 
 impl Checks {
@@ -42,6 +45,17 @@ impl Checks {
   /// Records a value the driving program printed: `key` equals `expected`.
   pub fn value(&mut self, console: &Console, key: &str, expected: &str) -> bool {
     self.eq(format!("console {key}"), Some(expected.to_string()), console.value(key))
+  }
+
+  /// Records that the cell does not assert something because the product
+  /// does not do it yet, for `reason` (which names the deferral). The cell
+  /// still asserts everything else; it is not covered when all of that
+  /// held.
+  pub fn defer(&mut self, reason: impl Into<String>) {
+    let reason = reason.into();
+    if !self.deferred.contains(&reason) {
+      self.deferred.push(reason);
+    }
   }
 
   pub fn passed(&self) -> bool {
@@ -136,5 +150,14 @@ mod tests {
     checks.eq("b", 1, 2);
     assert!(!checks.passed());
     assert_eq!(checks.list.iter().filter(|c| !c.ok).count(), 1);
+  }
+
+  #[test]
+  fn a_deferral_is_recorded_once() {
+    let mut checks = Checks::default();
+    checks.defer("deferred: D1");
+    checks.defer("deferred: D1");
+    assert_eq!(checks.deferred, ["deferred: D1"]);
+    assert!(checks.passed());
   }
 }

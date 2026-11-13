@@ -171,6 +171,15 @@ impl<'a> CellEnv<'a> {
     proc::run(self.command(args), timeout)
   }
 
+  /// The environment of a `needy` the cell starts on a pseudo-terminal of
+  /// the TUI harness, as `KEY=VALUE`: the cell's, and no run of the
+  /// harness's caller.
+  pub fn cell_env(&self) -> Vec<String> {
+    let mut env: Vec<String> = self.env().into_iter().map(|(k, v)| format!("{k}={v}")).collect();
+    env.push("NEEDY_RUN=".into());
+    env
+  }
+
   /// `needy ARGS` on a pseudo-terminal.
   pub fn term(&self, args: &[&str]) -> Result<Term> {
     let mut env = self.env();
@@ -181,6 +190,17 @@ impl<'a> CellEnv<'a> {
   /// Starts this cell's control daemon as the harness's own user and waits
   /// until it answers.
   pub fn start_daemon(&mut self) -> Result<()> {
+    // The VM images the harness built from container images (the TUI
+    // cells' agents image) are where the daemon looks for a profile's
+    // `actor.image`: its data directory's `images`.
+    let images = self.dir.join("d").join("images");
+    if let Some(built) = &self.ctx.host.images
+      && built.exists()
+      && !images.exists()
+    {
+      std::fs::create_dir_all(self.dir.join("d"))?;
+      std::os::unix::fs::symlink(built, &images).with_context(|| format!("cannot link {}", images.display()))?;
+    }
     let log = File::options().create(true).append(true).open(self.dir.join("daemon.log"))?;
     let mut args = vec![
       "daemon".to_string(),

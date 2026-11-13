@@ -218,9 +218,25 @@ echo "E2E out-written=yes"
     // expected; see the design note's decisions.
     return Ok(());
   }
+  if cell.end == End::DaemonKill {
+    defer_crash_mirror_out(checks);
+    return Ok(());
+  }
   mirrored(checks, &out.join("all"), "actor mirror-out", false);
   mirrored(checks, &out.join("filtered"), "actor mirror-out filtered", true);
   Ok(())
+}
+
+/// The mirror-outs of a run whose control plane was killed are deferred:
+/// the restarted control plane fails the run (`check_ended` asserts that)
+/// and mirrors nothing out, since the actor and the executors were lost
+/// with it.
+// TODO(graceful-shutdown): mirror-out after a control-plane crash is the
+// deferred item D1, keeping runs alive across a control-plane restart
+// (`TODO(graceful-shutdown)` in `Daemon::shutdown`). When runs survive a
+// restart, these cells assert `mirrored` again, as every other end does.
+fn defer_crash_mirror_out(checks: &mut Checks) {
+  checks.defer("deferred: D1 (runs do not survive a control-plane crash)");
 }
 
 /// Checks the owner `USER:GROUP` of `path`; a group of `*` is any group.
@@ -361,6 +377,10 @@ print("E2E xout-written=yes")
   }
   checks.eq("executor copy-in nested: the filter excludes secret.txt", Some(Stat::Absent), console.stat("xstat", "cfg/a/b/seed/secret.txt"));
   checks.eq("executor copy-in nested: the filter excludes cache/", Some(Stat::Absent), console.stat("xstat", "cfg/a/b/seed/cache"));
+  if cell.end == End::DaemonKill {
+    defer_crash_mirror_out(checks);
+    return Ok(());
+  }
   mirrored(checks, &out.join("xall"), "executor mirror-out", false);
   mirrored(checks, &out.join("xfiltered"), "executor mirror-out filtered", true);
   Ok(())
@@ -1202,27 +1222,7 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
 fn tui(env: &mut CellEnv, cell: &Cell, index: usize, checks: &mut Checks) -> Result<()> {
   let cases = super::tui::cases();
   let case = cases.get(index).context("no such TUI case")?;
-  let mut actor = actor(cell, "");
-  actor["command"] = json!(case.command());
-  let profile = env.profile(&json!({ "user": user(cell), "actor": actor }))?;
-  let profile = profile.display().to_string();
-  let mut term = env.term(&[
-    "run",
-    "create",
-    "-it",
-    "--profile",
-    &profile,
-    "--name",
-    "tui",
-  ])?;
-  let driven = case.drive(&mut term);
-  checks.check(format!("TUI case {}", case.name()), driven.is_ok(), driven.err().map(|e| format!("{e:#}")).unwrap_or_default());
-  if let Ok(row) = runs::row(env, "tui")
-    && let Some(id) = row["id"].as_str()
-  {
-    env.runs.push(id.to_string());
-  }
-  Ok(())
+  super::tui::run(env, cell, case, checks)
 }
 
 // ---------------------------------------------------------------------------
