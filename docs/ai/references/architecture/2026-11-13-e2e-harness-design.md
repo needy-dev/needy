@@ -1,7 +1,8 @@
 # End-to-end harness (`cargo xtask e2e`)
 
 **Status**: implemented, 2026-11-13. The harness is `xtask/src/e2e/`. Results
-before and after the four fixes of 2026-11-13 are under [Results](#results).
+before and after the four fixes of 2026-11-13, and of the second round of
+fixes with the TUI cells, are under [Results](#results).
 
 Related notes:
 
@@ -82,7 +83,7 @@ are never part of the repository. Each host has a role:
 | --- | --- | --- |
 | `local` | This machine, as `cargo xtask e2e`. Gets `--windows-runner` when a `runner` host is listed. | the toolchain |
 | `build` | Gets `HEAD`, builds needy, the guest and the images natively, runs its cells; for its `run` hosts it also exports (`--export`) a static needy, a static harness (`images/Dockerfile`'s `e2e` target), the base VM image and the container images. | the toolchain, Docker |
-| `run` | Compiles nothing. Gets what it lacks of its build host's export, streamed through this machine (`tar` and `gzip -1` over ssh): the static needy and harness always, the base VM image only where `/dev/kvm` exists, each container image only when it does not have that image ID already (`docker load`). Then runs the static harness with `--no-prepare`, as `user` when the ssh login is root. | same architecture as its build host, Docker |
+| `run` | Compiles nothing. Gets what it lacks of its build host's export, streamed through this machine (`tar` and `gzip -1` over ssh): the static needy and harness always, the base VM image only where `/dev/kvm` exists, each container image only when it does not have that image ID already (`docker load`), the base VM image only when its hash changed, and the executor image rebuilt there from the static needy when it has one already. Then runs the static harness with `--no-prepare`, as `user` when the ssh login is root. | same architecture as its build host, Docker |
 | `runner` | A Windows machine: builds its own `needy.exe` from `HEAD` and joins the `local` host's `runner/at=windows` cells. | the toolchain (MSVC), OpenSSH with `cmd.exe` |
 
 ```json
@@ -130,7 +131,7 @@ prints it; `matrix::tests` keep its coverage.
 | User | default (`agent`, 1000), renamed (`bob`, 1001) |
 | Executor | `native`, `linux-container`, a runner's `native` (local, or a Windows machine) |
 | Daemon user | non-root; no cell needs root (see [Decisions](#decisions)) |
-| TUI | the cases of `xtask/src/e2e/tui.rs` (none yet; see [TUI hook](#tui-hook)) |
+| TUI | the cases of `xtask/src/e2e/tui.rs`: Codex's start screen, before a login (see [TUI cells](#tui-cells)) |
 
 ### Cells per actor driver
 
@@ -222,17 +223,43 @@ Per scenario:
   `runner ls`; `exec --runner` returns the command's exit code; a run routes to
   it; nothing of it is left on the remote machine afterwards.
 
-## TUI hook
+## TUI cells
 
-`xtask/src/e2e/tui.rs` holds a `Case` trait (the driving program, and a
-`drive` function given the pseudo-terminal, `term::Term`, which keeps the raw
-transcript and a `vt100` screen) and `cases()`, empty today
-(`TODO(tui-fidelity)`). Each case becomes a cell per actor driver,
-`DRIVER/tui/NAME`, run with `run create -it`. The TUI fidelity harness
-(`cargo xtask tui`, `xtask/src/tui/`) landed alongside; its scenarios
-(`xtask/tui/*.scenario`) drive agents that need accounts, so none is a cell
-yet. A case that needs no account registers in `cases()`, and its `drive`
-runs a scenario through `cargo xtask tui` or drives `Term` itself.
+`xtask/src/e2e/tui.rs` registers each TUI case in `cases()`; each becomes a
+cell per actor driver, `DRIVER/tui/NAME`. Today there is one case, `codex`:
+Codex's sign-in picker before a login, which needs no account and is the
+same on every start.
+
+The cell drives the program with the TUI fidelity harness (`cargo xtask
+tui`, `xtask/src/tui/`, called in process through `tui::report` and
+`tui::compare`), twice, through one scenario: wait for the start screen,
+snap it (`start`), resize to 40x120 and snap (`grown`), resize back to
+30x100 and snap (`back`).
+
+- **Direct**: `docker run -it` of the agents image as its user in its home,
+  with the program under `/.needy/real` (as `xtask/tui/direct.sh` does),
+  then the program's own quit keys.
+- **Through needy**: `needy run create -it` of a profile that runs the same
+  program in the agents image, with its profile's allowlist, then ctrl-]
+  (detach).
+
+It asserts that each snap through needy equals the direct one (`tui diff`
+semantics: digits and long hexadecimal IDs masked, text, cursor, modes, wide
+cells, title and truecolor compared), that `run create -it` returns 0 on the
+detach and leaves nothing on in the client's terminal (`left_on` empty: the
+relay's restore), that the detached run is `running` with its actor
+`ready`, and that `run stop` ends it as every stop cell checks. The other
+paths of the fidelity matrix (typing, pastes, mouse, a read-only viewer, a
+background start, `exec -t`) stay with `xtask/tui/matrix.sh` (`NOTICE` in
+`tui.rs`).
+
+The agents image is `examples/agents/Dockerfile` (embedded in the harness)
+on the harness's actor image, tagged `needy-e2e-agents:latest`, built on
+every host that runs a TUI cell, run hosts included: it downloads the
+agents' pinned releases and compiles nothing. From it the harness makes this
+host's VM image (`needy image build --from`, into the work directory's
+`images/`, which each cell's data directory links to) or loads it into
+Apple's `container`.
 
 ## Results
 
@@ -308,6 +335,52 @@ the renamed user on a container executor with a non-root daemon, and on
 after the runner joined (`macos-apple-container/runner/at=windows`); the
 check now records the command's output.
 
+### Second round: the remaining failures, and the TUI cells
+
+`main` at `1083056`. What failed after the first round, and what became of
+it:
+
+| Failure | Class | Root cause | Fix |
+| --- | --- | --- | --- |
+| `identity/user=renamed,executor=linux-container` (2 on the build host, 1 per Linux run host) | product | A container executor runs as the profile's user, and the daemon shared its socket and default workspace directories by giving them to that user, which only root may do; the executor's socket was 0600, its own user's only. | `e874f0b`: a daemon that is not root shares them by its group (mode 0770, the container joins it with `group_add`) and the executor gives its socket to that group, mode 0660 (`needy daemon --socket-group`). |
+| `*/end=daemon-kill` mirror-out (6 on the build host, 2 on the Mac, 3 per Linux run host) | deferred | The actor and executors are lost with the control plane; surviving that is D1. | None: the cells are not covered, `deferred: D1 (runs do not survive a control-plane crash)`, after asserting everything else (`TODO(graceful-shutdown)` in `scenarios.rs`). |
+| An ended run's actor `configured` (flake, `macos-apple-container`) | product | The guest's exit report ended the run, while the actor ended only when its VM or container exited (after init's mirror-out and shutdown), so `run ls` could read the run `finished` with its actor `configured`. | `1c3014d`: the exit report records the exit; the run finishes once its actor exited. |
+| `exec --runner` returned 1 for `cmd /c exit 5` (flake, Windows runner) | product | A runner is `online` from its join and heartbeats, but its control stream, which an exec needs, opens a moment later; an exec in between failed "runner … is not connected" (exit 1), not an exit status or relay problem. | `5f11cd4`: an exec on an online runner without its control stream waits for it, up to one heartbeat interval; a runner that is not online still fails at once. |
+| `reset` fault on `macos-vz` hangs (curl 28) | product, through vfkit | vfkit's vsock relay passes no close to the guest (`VirtioSocketConnection` has no `CloseWrite`), so the gateway's close never reached the guest's forwarder. | `854f722`: at a connection's start the gateway writes a marker (`contract::GATEWAY_RESET`) before closing; the forwarder then resets the program's connection (`SO_LINGER` 0), on every driver. A reset of a later request on a kept-alive plain-HTTP connection is still only a close (`TODO(macos-vz-reset)`). |
+| `linux-firecracker/executor-files/executor=native,end=daemon-kill`: a routed `python3` failed with `Text file busy` (126), found in this round | product | Init rewrote every VM route stub in place each time the route list came, and it comes twice at start (configuration, then the guest control stream), so a program's exec met a stub open for writing. | `d67b73a`: a stub that exists stays; a new one is renamed into place. |
+| TUI harness tests failing together on the Mac, found in this round | test | Two tests started in the same clock tick shared a directory. | `1083056` |
+
+On the Linux build host, the 8 failing cells were 6 `end=daemon-kill`
+(deferred, D1) and 2 renamed users on a container executor (product, fixed);
+none was a harness or environment fault.
+
+Harness changes in `98ef353`: the TUI cells (see [TUI cells](#tui-cells)), a
+cell that defers an invariant is not covered with the deferral as its
+reason, and a run host receives only changed images (the executor image is
+rebuilt there from the static needy).
+
+#### Final runs
+
+Three `--hosts` runs back to back on `1083056` plus this note: the Mac
+(with the Windows runner) and the Linux build host, at once. The cloud run
+hosts could not be reached for them: the jump host's key was not loaded in
+the session's ssh agent while the owner was away. Their results are from the
+run just before on `1083056` (`cloud-runc`), or there are none.
+
+| Host | Run 1 | Run 2 | Run 3 | Not covered because |
+| --- | --- | --- | --- | --- |
+| Apple silicon Mac: `macos-vz`, `macos-apple-container`, `none`, the Windows runner | 49 pass, 0 fail, 4 not covered | same | same | deferred: D1 (4) |
+| Linux KVM host, build host: `linux-firecracker`, `linux-container` (runc, runsc), `none` | 58 pass, 0 fail, 40 not covered | same | same | runsc is registered without `--host-uds=all` (31; the owner installs it with sudo), deferred: D1 (6), no Windows runner for its cells (3) |
+| Cloud VM, no KVM, run host: `linux-container` (runc), `none` | 30 pass, 0 fail, 4 not covered (the run before) | not run | not run | deferred: D1 (3), no Windows runner (1); later runs: host unreachable, jump-host key not loaded while the owner is away |
+| Cloud VM, nested KVM, run host: `linux-firecracker`, `none` | not run | not run | not run | all its cells: host unreachable, jump-host key not loaded while the owner is away |
+| Cloud VM, gVisor, run host: `linux-container` (runsc), `none` | not run | not run | not run | all its cells: host unreachable, jump-host key not loaded while the owner is away |
+
+The TUI cells pass on `macos-vz`, `macos-apple-container`,
+`linux-firecracker` and `linux-container.runc`; `linux-container.runsc/tui`
+waits for runsc. No flake showed in the three runs; the two flakes of the
+first round (the actor state and `exec --runner`) are fixed above, and the
+`Text file busy` failure was seen once, before its fix.
+
 ## Decisions
 
 Made on the spot, as the brief allowed:
@@ -333,8 +406,20 @@ Made on the spot, as the brief allowed:
   wait for the driving program, and init mirrors out after it exits; the
   executor's mirror-out, which the daemon does, is still expected. Revisit
   with the graceful-stop fix.
-- **A daemon SIGKILL expects mirror-out too.** The brief says every way a run
-  ends; those cells fail today and say so.
+- **A daemon SIGKILL defers the mirror-out (2026-11-13, second round).** The
+  actor and the executors are lost with the control plane, and surviving that
+  is the deferred item D1, keeping runs alive across a control-plane restart.
+  The `end=daemon-kill` cells still assert everything else (the run `failed`
+  naming the restart, its executors released or lost, nothing left), and are
+  then **not covered** with the reason `deferred: D1 (runs do not survive a
+  control-plane crash)`, never passed (`Checks::defer`,
+  `TODO(graceful-shutdown)` in `scenarios.rs`).
+- **A run host rebuilds its executor image instead of receiving it** when it
+  has one already: `FROM needy-e2e-executor:latest` with this commit's static
+  needy copied in, which compiles nothing. Every commit changes only that
+  layer, and sending the whole image through this machine's uplink took most
+  of a run. The base VM image is sent only when its sources' hash changed
+  (`images.hash`).
 - **Own image tags.** `needy-e2e-actor:latest` and `needy-e2e-executor:latest`,
   so a harness run never replaces the owner's `needy-actor:latest`.
 - **`DOCKER_HOST` from the Docker CLI's context** when it is unset, so the
@@ -364,4 +449,6 @@ Made on the spot, as the brief allowed:
   `remote.rs`): the build host would need its own ssh access to the runner.
 - A cell that runs its daemon as root, should a feature genuinely need one
   (`TODO(e2e-root)`).
-- TUI fidelity cases (`TODO(tui-fidelity)`).
+- More TUI cases (pi, opencode, Claude Code, herdr) and more of the
+  fidelity matrix's paths as cells; Codex alone already covers the start,
+  resize and detach path on every driver.
