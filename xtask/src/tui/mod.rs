@@ -628,8 +628,18 @@ mod tests {
     report
   }
 
-  fn rand_suffix() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+  // ROOT CAUSE:
+  //
+  // If two of these tests started in the same clock tick (macOS's clock
+  // counts microseconds), they shared a directory and one read the other's
+  // scenario (`unknown step ":"`), because the suffix was the time alone.
+  //
+  // The suffix now also counts the directories this process made.
+  fn rand_suffix() -> String {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    format!("{nanos}-{n}")
   }
 
   // A program that asks for the primary device attributes and prints what
