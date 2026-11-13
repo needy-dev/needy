@@ -22,9 +22,16 @@ pub(super) const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/
 /// Creates a stub for each plain command name the actor lacks: an empty
 /// file in a VM, a link to the proxy in a container.
 pub(super) fn create(names: &[String], container: bool) {
-  let dir = Path::new(STUB_DIR);
+  create_in(Path::new(STUB_DIR), names, container);
+}
+
+/// [`create`] in `dir`. A stub that exists stays as it is, and a new one
+/// appears whole: it is written under a temporary name and renamed into
+/// place, since executing a file that is open for writing fails with
+/// `ETXTBSY` and the route list can come again while the program runs.
+fn create_in(dir: &Path, names: &[String], container: bool) {
   if let Err(e) = std::fs::create_dir_all(dir) {
-    tracing::warn!("cannot create {STUB_DIR}; routed commands the actor lacks are not found: {e}");
+    tracing::warn!("cannot create {}; routed commands the actor lacks are not found: {e}", dir.display());
     return;
   }
   for name in names {
@@ -35,13 +42,25 @@ pub(super) fn create(names: &[String], container: bool) {
       continue;
     }
     let stub = dir.join(name);
+    if stub.symlink_metadata().is_ok() {
+      continue;
+    }
+    let temporary = dir.join(format!(".{name}.new"));
+    // One a start that died midway left; usually there is none.
+    let _ = std::fs::remove_file(&temporary);
     let created = if container {
-      std::os::unix::fs::symlink(PROXY, &stub)
+      std::os::unix::fs::symlink(PROXY, &temporary)
     } else {
-      std::fs::write(&stub, b"").and_then(|()| std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)))
+      std::fs::write(&temporary, b"").and_then(|()| std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)))
     };
-    if let Err(e) = created {
+    if let Err(e) = created.and_then(|()| std::fs::rename(&temporary, &stub)) {
       tracing::warn!("cannot create the route stub {}: {e}", stub.display());
+      // Nothing to clean up when the temporary file was never made.
+      let _ = std::fs::remove_file(&temporary);
     }
   }
 }
+
+#[cfg(test)]
+#[path = "stubs_test.rs"]
+mod tests;
