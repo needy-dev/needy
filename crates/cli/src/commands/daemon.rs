@@ -102,6 +102,12 @@ pub struct Args {
   // is the design's; a shorter one lets a test see the runner end them.
   #[arg(long, value_name = "DURATION", hide = true, value_parser = humantime::parse_duration)]
   disconnect_grace: Option<std::time::Duration>,
+  /// Give the executor's Unix socket to this group, mode 0660, instead of
+  /// keeping it this user's alone (executor mode): for a control daemon of
+  /// another user in that group, which a linux-container executor of
+  /// another user than a daemon that is not root has.
+  #[arg(long, value_name = "GID")]
+  socket_group: Option<u32>,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -123,6 +129,9 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
   }
   if !matches!(args.mode, Mode::Runner) && args.roles.is_some() {
     bail!("--roles is for the runner mode");
+  }
+  if !matches!(args.mode, Mode::Executor) && args.socket_group.is_some() {
+    bail!("--socket-group is for the executor mode");
   }
   if !matches!(args.mode, Mode::Runner) && args.disconnect_grace.is_some() {
     bail!("--disconnect-grace is for the runner mode");
@@ -146,7 +155,9 @@ async fn serve(args: Args, ctx: &Context) -> Result<i32> {
     None => None,
   };
   match args.mode {
-    Mode::Executor => needy_daemon::executor::serve(&listen[0], args.name.unwrap_or_else(|| "local".into()), token).await?,
+    Mode::Executor => {
+      needy_daemon::executor::serve(&listen[0], args.name.unwrap_or_else(|| "local".into()), token, args.socket_group).await?
+    }
     Mode::Runner => {
       let name = match args.name {
         Some(name) => name,

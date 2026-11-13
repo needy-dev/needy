@@ -44,9 +44,7 @@ pub enum Error {
   },
   /// A directory shared with a container cannot be given to the
   /// container's user.
-  #[error(
-    "cannot give {path} to the container's user {uid}:{gid}, so its executor cannot create its socket there; run the daemon as root or as that user"
-  )]
+  #[error("cannot give {path} to the container's user {uid}:{gid}, so its executor cannot create its socket there")]
   Ownership {
     path: PathBuf,
     uid: u32,

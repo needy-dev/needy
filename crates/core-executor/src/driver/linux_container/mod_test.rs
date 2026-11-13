@@ -458,37 +458,102 @@ fn a_directory_for_a_container_of_the_daemons_own_user_is_private() {
 // and failed with a transport error that did not mention permissions.
 #[cfg(unix)]
 #[test]
-fn a_directory_for_a_container_of_another_user_is_theirs_or_the_error_says_why() {
+fn a_root_daemon_gives_the_directory_to_the_containers_user() {
   use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  if !nix::unistd::geteuid().is_root() {
+    eprintln!("skipped: only root can give a directory to another user");
+    return;
+  }
   let dir = tempfile::tempdir().unwrap();
   let shared = dir.path().join("executors").join("abc");
-  let me = nix::unistd::geteuid().as_raw();
-  let other = if me == 4242 { 4243 } else { 4242 };
 
-  let shared_result = share_with_container(&shared, &user(other));
+  let group = share_with_container(&shared, &user(4242)).unwrap();
 
-  if me == 0 {
-    shared_result.unwrap();
-    let metadata = std::fs::metadata(&shared).unwrap();
-    assert_eq!((metadata.uid(), metadata.gid()), (other, other));
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
-  } else {
-    let message = anyhow_like(shared_result.unwrap_err());
-    assert!(message.contains(&shared.display().to_string()), "{message}");
-    assert!(message.contains(&format!("{other}:{other}")), "{message}");
-    assert!(message.contains("cannot create its socket"), "{message}");
-  }
+  assert_eq!(group, None);
+  let metadata = std::fs::metadata(&shared).unwrap();
+  assert_eq!((metadata.uid(), metadata.gid()), (4242, 4242));
+  assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
 }
 
-/// An error with its causes, as a client prints them.
-fn anyhow_like(error: Error) -> String {
-  let mut text = error.to_string();
-  let mut source = std::error::Error::source(&error);
-  while let Some(cause) = source {
-    text.push_str(&format!(": {cause}"));
-    source = cause.source();
+// ROOT CAUSE:
+//
+// If a profile's user (`bob`, 1001) was not the user of a daemon that is not
+// root, `run create` of a linux-container executor failed with "cannot give
+// ... to the container's user 1001:1001 ... run the daemon as root",
+// because the socket directory was shared by giving it to the container's
+// user, which only root can do.
+//
+// Before the fix, such a daemon refused the executor.
+// The fix shares the directory by the daemon's group instead: mode 0770,
+// the daemon's, which the container joins.
+#[cfg(unix)]
+#[test]
+fn a_daemon_that_is_not_root_shares_the_directory_by_its_group() {
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  let me = nix::unistd::geteuid();
+  if me.is_root() {
+    eprintln!("skipped: a root daemon gives the directory away instead");
+    return;
   }
-  text
+  let dir = tempfile::tempdir().unwrap();
+  let shared = dir.path().join("executors").join("abc");
+  let other = if me.as_raw() == 4242 { 4243 } else { 4242 };
+
+  let group = share_with_container(&shared, &user(other)).unwrap();
+
+  let gid = nix::unistd::getegid().as_raw();
+  assert_eq!(group, Some(gid));
+  let metadata = std::fs::metadata(&shared).unwrap();
+  assert_eq!((metadata.uid(), metadata.gid()), (me.as_raw(), gid));
+  assert_eq!(metadata.permissions().mode() & 0o777, 0o770);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_container_of_another_user_joins_the_daemons_group_and_gives_it_its_socket() {
+  if nix::unistd::geteuid().is_root() {
+    eprintln!("skipped: a root daemon gives the directory away instead");
+    return;
+  }
+  let state = tempfile::tempdir().unwrap();
+  let options = Options {
+    state_dir: state.path().to_path_buf(),
+    ..options()
+  };
+  let fake = Arc::new(Fake::default());
+  let driver = LinuxContainer::with_engine(options, fake.clone());
+  let mut spec = spec(ContainerConfig::default());
+  let me = nix::unistd::geteuid().as_raw();
+  spec.user = user(if me == 4242 { 4243 } else { 4242 });
+
+  // The fake engine's container does not start; its body is what matters.
+  let _ = driver.create(&spec).await;
+
+  let gid = nix::unistd::getegid().as_raw().to_string();
+  let body = fake.bodies.lock().unwrap().iter().find(|(name, _)| name == "needy-build-s1").map(|(_, body)| body.clone()).unwrap();
+  assert_eq!(body.host_config.unwrap().group_add, Some(vec![gid.clone()]));
+  let cmd = body.cmd.unwrap();
+  assert_eq!(cmd[cmd.len() - 2..], ["--socket-group".to_string(), gid]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_container_of_the_daemons_own_user_joins_no_group() {
+  let state = tempfile::tempdir().unwrap();
+  let options = Options {
+    state_dir: state.path().to_path_buf(),
+    ..options()
+  };
+  let fake = Arc::new(Fake::default());
+  let driver = LinuxContainer::with_engine(options, fake.clone());
+  let mut spec = spec(ContainerConfig::default());
+  spec.user = user(nix::unistd::geteuid().as_raw());
+
+  let _ = driver.create(&spec).await;
+
+  let body = fake.bodies.lock().unwrap().iter().find(|(name, _)| name == "needy-build-s1").map(|(_, body)| body.clone()).unwrap();
+  assert_eq!(body.host_config.unwrap().group_add, None);
+  assert!(!body.cmd.unwrap().contains(&"--socket-group".to_string()));
 }
 
 /// An engine without the executor's image until it is pulled, whose
@@ -496,6 +561,8 @@ fn anyhow_like(error: Error) -> String {
 #[derive(Default)]
 struct Fake {
   calls: std::sync::Mutex<Vec<String>>,
+  /// The body of each container created, by its name.
+  bodies: std::sync::Mutex<Vec<(String, ContainerCreateBody)>>,
 }
 
 impl Fake {
@@ -523,8 +590,9 @@ impl Engine for Fake {
     Ok(())
   }
 
-  async fn create(&self, name: &str, _body: ContainerCreateBody) -> Result<(), engine::Error> {
+  async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), engine::Error> {
     self.record(format!("create {name}"));
+    self.bodies.lock().unwrap().push((name.to_string(), body));
     if self.pulled() {
       Ok(())
     } else {

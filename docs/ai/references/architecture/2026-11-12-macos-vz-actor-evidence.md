@@ -282,6 +282,9 @@ Each is marked in the code:
   refuses otherwise (`share_with_container` in
   `crates/core-executor/src/provider/docker.rs`). This is not specific to
   `macos-vz`; the checks used the Mac as a native executor instead. Not changed here.
+  (Since 2026-11-13 a daemon that is not root shares the directory by its
+  group instead, `share_with_container` in
+  `crates/core-executor/src/driver/linux_container/mod.rs`.)
 - The kernel recipe identity and the uptime offset were not run on arm64.
 
 ## Found on the way

@@ -87,6 +87,8 @@ pub struct Server {
   runners: Option<Arc<dyn Runners>>,
   /// The client registry, which also authenticates clients' tokens.
   clients: Option<Arc<dyn Clients>>,
+  /// The group the Unix sockets this server binds are given to, mode 0660.
+  socket_group: Option<u32>,
 }
 
 impl Server {
@@ -98,7 +100,18 @@ impl Server {
       token: None,
       runners: None,
       clients: None,
+      socket_group: None,
     }
+  }
+
+  /// Gives every Unix socket this server binds to group `gid`, mode 0660,
+  /// instead of mode 0600: for a server whose client is another user in
+  /// that group, such as a container executor's daemon of another user
+  /// (`needy daemon --socket-group`). The server's user must be a member of
+  /// the group.
+  pub fn socket_group(mut self, gid: Option<u32>) -> Self {
+    self.socket_group = gid;
+    self
   }
 
   /// The bearer token every method but health (and `Join`) needs; any
@@ -174,7 +187,7 @@ impl Server {
     #[cfg(unix)]
     let mut sockets = Vec::new();
     for listen in listen {
-      let listener = Listener::bind(listen).await?;
+      let listener = Listener::bind(listen, self.socket_group).await?;
       #[cfg(unix)]
       if let (Listener::Unix(_), Listen::Unix(path)) = (&listener, listen) {
         // Held from here, so a later listener that fails to bind removes
@@ -298,7 +311,7 @@ enum Listener {
 }
 
 impl Listener {
-  async fn bind(listen: &Listen) -> Result<Self, Error> {
+  async fn bind(listen: &Listen, group: Option<u32>) -> Result<Self, Error> {
     let failed = |source| Error::Bind {
       listen: listen.clone(),
       source,
@@ -317,11 +330,22 @@ impl Listener {
         // narrowed right after. A directory this server created is 0700, so
         // nobody else can reach the socket in between.
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(failed)?;
+        let mode = match group {
+          Some(gid) => {
+            std::os::unix::fs::chown(path, None, Some(gid)).map_err(failed)?;
+            0o660
+          }
+          None => 0o600,
+        };
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(failed)?;
         Ok(Self::Unix(listener))
       }
       #[cfg(not(unix))]
-      Listen::Unix(_) => Err(Error::Unsupported(listen.clone())),
+      Listen::Unix(_) => {
+        // Unix sockets, and so their group, are unsupported here.
+        let _ = group;
+        Err(Error::Unsupported(listen.clone()))
+      }
       Listen::Tcp(address) => Ok(Self::Tcp(tokio::net::TcpListener::bind(address).await.map_err(failed)?)),
     }
   }

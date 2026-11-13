@@ -55,13 +55,20 @@ pub struct Options {
 }
 
 /// Creates a host directory the container's user writes through a bind
-/// mount: mode 0700, owned by that user. The directory's parents stay the
-/// daemon's and private; a bind mount does not need them to be searchable.
-// NOTICE: the container runs as the profile's `user`, which may differ from
-// the daemon's (a daemon run as root, as on the cloud hosts of 2026-11-10).
-// Only root can give a directory to another user; any other daemon fails at
-// once with the reason instead of the container's executor failing to bind.
-fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Result<(), Error> {
+/// mount. The directory's parents stay the daemon's and private; a bind
+/// mount does not need them to be searchable. Returns the group the
+/// container must join to write it, when it is shared by group.
+///
+/// - A container of the daemon's own user: mode 0700, the daemon's.
+/// - A daemon run as root: mode 0700, given to the container's user.
+/// - A daemon that is neither: mode 0770, the daemon's user and group; the
+///   container joins the daemon's group (`group_add`), and its executor
+///   gives its socket to that group (`needy daemon --socket-group`) so the
+///   daemon can connect. Only root can give a directory to another user.
+// NOTICE: the IDs are the host's, which are the container's own while the
+// engine maps no user namespace (`userns-remap`, rootless Docker); with
+// one, the directory would need the mapped IDs.
+fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Result<Option<u32>, Error> {
   let failed = |source| Error::Directory {
     path: path.to_path_buf(),
     source,
@@ -70,22 +77,46 @@ fn share_with_container(path: &Path, user: &needy_config::profile::User) -> Resu
   {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path).map_err(failed)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
-    if nix::unistd::geteuid().as_raw() != user.uid {
+    let euid = nix::unistd::geteuid().as_raw();
+    if euid == user.uid {
+      std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
+      return Ok(None);
+    }
+    if euid == 0 {
+      std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(failed)?;
       std::os::unix::fs::chown(path, Some(user.uid), Some(user.gid)).map_err(|source| Error::Ownership {
         path: path.to_path_buf(),
         uid: user.uid,
         gid: user.gid,
         source,
       })?;
+      return Ok(None);
     }
+    let gid = nix::unistd::getegid().as_raw();
+    std::os::unix::fs::chown(path, None, Some(gid)).map_err(failed)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o770)).map_err(failed)?;
+    Ok(Some(gid))
   }
   #[cfg(not(unix))]
   {
     let _ = user;
     std::fs::create_dir_all(path).map_err(failed)?;
+    Ok(None)
   }
-  Ok(())
+}
+
+/// Lets the container join `gid` for the directories shared with it by
+/// group, and has its executor give its socket to that group.
+fn join_group(container: &mut Container, gid: u32) {
+  if let Some(host) = container.body.host_config.as_mut() {
+    let groups = host.group_add.get_or_insert_default();
+    if !groups.contains(&gid.to_string()) {
+      groups.push(gid.to_string());
+    }
+  }
+  if let Some(cmd) = container.body.cmd.as_mut() {
+    cmd.extend(["--socket-group".to_string(), gid.to_string()]);
+  }
 }
 
 /// The host directory with the account files of the container `name`
@@ -160,21 +191,26 @@ impl Driver for LinuxContainer {
   }
 
   async fn create(&self, spec: &Spec) -> Result<Instance, Error> {
-    let container = container(spec, &self.options)?;
-    share_with_container(&container.socket_dir, &spec.user)?;
+    let mut container = container(spec, &self.options)?;
+    let mut group = share_with_container(&container.socket_dir, &spec.user)?;
     // A workspace the profile names is the user's; the default one is the
     // daemon's, and the container writes it.
+    // NOTICE: files the container's user writes in a default workspace
+    // shared by group are that user's, so a daemon that is not root cannot
+    // remove them; the daemon never removes a workspace.
     if spec.config.workspace.is_some() {
       std::fs::create_dir_all(&container.workspace_dir).map_err(|source| Error::Directory {
         path: container.workspace_dir.clone(),
         source,
       })?;
     } else {
-      share_with_container(&container.workspace_dir, &spec.user)?;
+      group = group.or(share_with_container(&container.workspace_dir, &spec.user)?);
+    }
+    if let Some(gid) = group {
+      join_group(&mut container, gid);
     }
     // The profile's user in the container's account files, which the
     // container's user cannot write.
-    let mut container = container;
     let image = container.body.image.clone().unwrap_or_default();
     let user = needy_common::account::Account {
       name: &spec.user.name,

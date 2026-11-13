@@ -11,8 +11,9 @@ use needy_core_executor::service::ExecutorService;
 /// or `HOST:PORT`); clients present `token` when one is set. On a
 /// termination signal the listener stops, then the processes are killed. A
 /// second termination signal ends that where it is and fails, naming the
-/// processes still running; the caller should then exit.
-pub async fn serve(listen: &str, name: String, token: Option<String>) -> Result<()> {
+/// processes still running; the caller should then exit. A Unix socket is
+/// given to `socket_group`, mode 0660, when one is set.
+pub async fn serve(listen: &str, name: String, token: Option<String>, socket_group: Option<u32>) -> Result<()> {
   let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
@@ -23,7 +24,12 @@ pub async fn serve(listen: &str, name: String, token: Option<String>) -> Result<
     host: host.clone(),
     name,
   };
-  let server = Server::new(health, Caller::Operator).token(token).process_service(service).bind(&[Listen::parse(listen)]).await?;
+  let server = Server::new(health, Caller::Operator)
+    .token(token)
+    .socket_group(socket_group)
+    .process_service(service)
+    .bind(&[Listen::parse(listen)])
+    .await?;
   // The bound address, not `listen`: a port 0 is the one the system picked.
   for address in server.addresses() {
     tracing::info!("executor listening on {address}");

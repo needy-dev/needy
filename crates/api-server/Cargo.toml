@@ -27,3 +27,6 @@ tracing.workspace = true
 [dev-dependencies]
 needy-api-client.workspace = true
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+libc.workspace = true

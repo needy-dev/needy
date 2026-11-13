@@ -68,6 +68,54 @@ async fn a_socket_file_another_server_bound_since_is_not_removed() {
   assert!(socket.exists(), "the other server's socket was removed");
 }
 
+// ROOT CAUSE:
+//
+// If a linux-container executor ran as another user than a daemon that is
+// not root (a profile's user `bob`, 1001, under a daemon of 1000), the
+// daemon could not connect to the executor's socket, because the server
+// always made its sockets 0600, its own user's only.
+//
+// Before the fix, a Unix socket was always mode 0600.
+// The fix gives the socket to the group a server is told, mode 0660, so the
+// daemon connects as a member of that group.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_socket_given_to_a_group_is_that_groups_with_mode_0660() {
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  // Another of this user's groups when it has one, so the socket's group
+  // tells a given socket apart from one left with the user's own group.
+  // SAFETY: a zero count asks only for the number of groups; the second
+  // call has room for that many; `getegid` cannot fail.
+  let gid = unsafe {
+    let count = libc::getgroups(0, std::ptr::null_mut());
+    let mut groups = vec![0; usize::try_from(count).unwrap_or(0)];
+    let count = libc::getgroups(count, groups.as_mut_ptr());
+    groups.truncate(usize::try_from(count).unwrap_or(0));
+    let own = libc::getegid();
+    groups.into_iter().find(|&g| g != own).unwrap_or(own)
+  };
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("api.sock");
+
+  let _bound = Server::new(health(), Caller::Operator).socket_group(Some(gid)).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
+
+  let meta = std::fs::metadata(&socket).unwrap();
+  assert_eq!(meta.gid(), gid);
+  assert_eq!(meta.permissions().mode() & 0o777, 0o660);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_socket_is_its_users_only_by_default() {
+  use std::os::unix::fs::PermissionsExt;
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("api.sock");
+
+  let _bound = Server::new(health(), Caller::Operator).bind(&[Listen::Unix(socket.clone())]).await.unwrap();
+
+  assert_eq!(std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
 #[tokio::test]
 async fn health_needs_no_token_and_everything_else_does() {
   let served = serve_with(Caller::Operator, Some("secret")).await;
