@@ -274,6 +274,37 @@ async fn a_runner_that_is_not_connected_fails_at_once() {
   assert_eq!((listed.code(), listed.message()), (tonic::Code::Unavailable, "runner ghost is not connected"));
 }
 
+// ROOT CAUSE:
+//
+// If `needy exec --runner` came right after the runner joined (the e2e
+// harness's Windows runner, once: exit 1 instead of the command's 5), it
+// failed with "runner ... is not connected", because a runner is online in
+// `runner ls` from its join and heartbeats, while its control stream, which
+// an exec needs, opens a moment later, and later again after a reconnect.
+//
+// Before the fix, an exec on an online runner without its control stream
+// failed at once.
+// The fix waits for that runner's control stream, up to one heartbeat
+// interval; a runner that is not online still fails at once.
+#[tokio::test]
+async fn a_command_on_an_online_runner_waits_for_its_control_stream() {
+  let setup = Setup::start().await;
+  let client = setup.client();
+  setup.proxy.down();
+  let links = &setup.served.daemon().links;
+  eventually("the runner disconnects", async || links.get("mac").is_none()).await;
+
+  let exec = tokio::spawn({
+    let client = client.clone();
+    async move { ExecStream::start(&client, on_runner("mac", &["echo", "waited"])).await?.run(None).await }
+  });
+  tokio::time::sleep(Duration::from_millis(300)).await;
+  setup.proxy.restore();
+
+  let ran = tokio::time::timeout(Duration::from_secs(20), exec).await.expect("the exec waits too long").unwrap();
+  assert_eq!(ran.map(|r| r.stdout).map_err(|e| e.to_string()), Ok(b"waited\n".to_vec()));
+}
+
 #[tokio::test]
 async fn a_command_names_a_run_or_a_runner_not_both() {
   let setup = Setup::start().await;

@@ -24,6 +24,20 @@ impl Daemon {
     i64::try_from(self.config.heartbeat_interval.as_millis()).unwrap_or(i64::MAX)
   }
 
+  /// Whether `runner` joined, was not removed and sends heartbeats, as
+  /// `runner ls` shows it online.
+  pub(crate) async fn runner_online(&self, runner: &str) -> bool {
+    let runners = match self.state.runners().await {
+      Ok(runners) => runners,
+      Err(e) => {
+        tracing::warn!("cannot read the runner registry: {e}");
+        return false;
+      }
+    };
+    let now = now_ms();
+    runners.into_iter().find(|r| r.name == runner).is_some_and(|r| self.runner_info(r, now).status == RunnerStatus::Online)
+  }
+
   fn runner_info(&self, runner: store::Runner, now: i64) -> RunnerInfo {
     let status = match runner.removed_ms {
       Some(_) => RunnerStatus::Removed,

@@ -54,6 +54,8 @@ pub(crate) type OnReport = Box<dyn Fn(&str, RunnerReport) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct Links {
   links: Mutex<HashMap<String, Arc<Link>>>,
+  /// Notified whenever a runner's control stream opens.
+  opened: tokio::sync::Notify,
 }
 
 /// One runner's control stream.
@@ -91,6 +93,22 @@ impl Links {
     self.lock().get(runner).cloned()
   }
 
+  /// The runner's link once its control stream is open, waiting up to
+  /// `wait` for it; `None` when it did not open by then.
+  pub(crate) async fn connected(&self, runner: &str, wait: Duration) -> Option<Arc<Link>> {
+    let waited = tokio::time::timeout(wait, async {
+      loop {
+        // Registered before the check, so an open between the two wakes it.
+        let opened = self.opened.notified();
+        if let Some(link) = self.get(runner) {
+          return link;
+        }
+        opened.await;
+      }
+    });
+    waited.await.ok()
+  }
+
   /// The names of the connected runners, sorted.
   pub(crate) fn names(&self) -> Vec<String> {
     let mut names: Vec<String> = self.lock().keys().cloned().collect();
@@ -123,6 +141,7 @@ impl Links {
       earlier.close();
     }
     tracing::info!("runner {runner} connected");
+    self.opened.notify_waiters();
     let links = self.clone();
     let reader = link.clone();
     let stop = cancel.clone();

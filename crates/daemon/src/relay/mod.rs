@@ -139,7 +139,7 @@ impl Daemon {
       if !name.is_empty() {
         return Err(ControlError::Invalid("name an executor or a runner, not both".into()));
       }
-      return self.runner_instance(runner);
+      return self.runner_instance(runner).await;
     }
     match name {
       "" | "local" => Ok(self.local.clone()),
@@ -147,9 +147,15 @@ impl Daemon {
     }
   }
 
-  /// A connected runner's machine; one that is not connected fails at once.
-  fn runner_instance(&self, runner: &str) -> Result<Arc<Instance>, ControlError> {
-    if self.links.get(runner).is_none() {
+  /// A connected runner's machine. A runner that is online (`runner ls`)
+  /// but whose control stream is not open, as right after it joined or
+  /// while it connects again, is waited for up to one heartbeat interval,
+  /// within which an online runner dials; any other that is not connected
+  /// fails at once.
+  async fn runner_instance(&self, runner: &str) -> Result<Arc<Instance>, ControlError> {
+    if self.links.get(runner).is_none()
+      && !(self.runner_online(runner).await && self.links.connected(runner, self.config.heartbeat_interval).await.is_some())
+    {
       return Err(ControlError::Unavailable(crate::link::not_connected(runner)));
     }
     Ok(Instance::runner(runner, &self.links))
@@ -415,7 +421,7 @@ impl Processes for Daemon {
       if !run.is_empty() {
         return Err(ControlError::Invalid("name a run or a runner, not both".into()));
       }
-      vec![self.runner_instance(runner)?]
+      vec![self.runner_instance(runner).await?]
     } else {
       match self.runs.find(run) {
         Ok(run) => run.executors().into_values().collect(),
