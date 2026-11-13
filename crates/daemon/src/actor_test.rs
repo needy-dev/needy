@@ -145,6 +145,52 @@ async fn an_actor_that_exits_releases_its_executors_and_sockets() {
 
 // ROOT CAUSE:
 //
+// If `run ls` read a run between its driving program's exit and its actor's,
+// it showed the run `finished` with its actor still `configured` (seen once
+// by the e2e harness on macos-apple-container), because the guest's report
+// of the exit ended the run while the actor ended only when its VM or
+// container exited, which takes as long as init's mirror-out and the
+// shutdown.
+//
+// Before the fix, a run was finished as soon as its guest reported the exit.
+// The fix records the exit and ends the run once its actor exited, so an
+// ended run's actor is always exited (or gone).
+#[tokio::test]
+async fn a_run_ends_only_once_its_actor_exited() {
+  use needy_api_server::control::Guest;
+  use needy_core::types::ActorState;
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
+  let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let exit = needy_common::process::Exit {
+    code: Some(3),
+    signal: String::new(),
+  };
+
+  Guest::exit(daemon, &created.id, exit).await.unwrap();
+
+  let info = Runs::get(daemon, &created.id).await.unwrap();
+  assert_eq!(info.state, RunState::Running, "the run ended before its actor: {:?}", info.actor);
+  assert_eq!(info.actor_exit.map(|e| e.code), Some(Some(3)));
+
+  std::fs::write(run_dir(&started, &created.id).join("rebooted"), "").unwrap();
+  let ended = async {
+    loop {
+      let info = Runs::get(daemon, &created.id).await.unwrap();
+      if info.state != RunState::Running {
+        return info;
+      }
+      tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+  };
+  let info = tokio::time::timeout(Duration::from_secs(10), ended).await.expect("the run did not end");
+  assert_eq!(info.state, RunState::Finished);
+  assert!(matches!(info.actor, None | Some(ActorState::Exited)), "{:?}", info.actor);
+}
+
+// ROOT CAUSE:
+//
 // If the actor's VM exited without its driving program having reported an
 // exit, such as a Firecracker that refused the recipe's CPU template, the
 // run was `finished` with no findings, because the VM watch finished

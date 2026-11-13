@@ -233,6 +233,7 @@ async fn a_finished_run_keeps_its_driving_programs_exit() {
   use needy_common::process::Exit;
   let started = testing::daemon().await;
   let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
   let created = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
   assert_eq!(created.actor_exit, None);
 
@@ -241,8 +242,18 @@ async fn a_finished_run_keeps_its_driving_programs_exit() {
     signal: String::new(),
   };
   Guest::exit(daemon, &created.id, exit.clone()).await.unwrap();
-
-  let finished = Runs::get(daemon, &created.id).await.unwrap();
+  // The run finishes once its actor exited.
+  std::fs::write(started.dir.path().join("state/runs").join(&created.id).join("rebooted"), "").unwrap();
+  let finished = async {
+    loop {
+      let info = Runs::get(daemon, &created.id).await.unwrap();
+      if info.state != RunState::Running {
+        return info;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+  };
+  let finished = tokio::time::timeout(std::time::Duration::from_secs(10), finished).await.expect("the run did not end");
   assert_eq!(finished.state, RunState::Finished);
   assert_eq!(finished.actor_exit, Some(exit));
   assert_eq!(finished.failure, None);

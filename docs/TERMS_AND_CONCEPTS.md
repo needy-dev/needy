@@ -292,7 +292,7 @@ runner's machine without a run, and a run whose actor only waits serves
 
 A run is `creating` while it acquires its executors, copies files in and
 starts its actor, then `running`. It ends `stopped` (after `stopping`, by
-`needy run stop`), `finished` (its actor's driving program exited) or
+`needy run stop`), `finished` (its actor's driving program exited, once the actor ended too) or
 `failed` (its create failed, its actor's VM exited before the driving
 program did, or the control plane restarted and lost its actor, with the
 reason). The first of these end states stays: stopping a

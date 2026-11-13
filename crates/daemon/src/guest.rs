@@ -10,7 +10,7 @@ use needy_api_server::control::{
 use needy_common::process::Exit;
 use needy_config::profile::{FaultDomain, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
-use needy_core::types::{ActorState, RunState};
+use needy_core::types::ActorState;
 use needy_core_actor::driver::Side as Presenter;
 use tokio_stream::wrappers::WatchStream;
 
@@ -161,9 +161,9 @@ impl Guest for Daemon {
       code: exit.code,
       signal: (!exit.signal.is_empty()).then_some(exit.signal),
     }));
-    if let Err(refused) = run.state.advance(RunState::Finished) {
-      tracing::debug!("run {}: {refused}", run.id);
-    }
+    // The run finishes once its actor exited (`actor::watch`), not here:
+    // init still mirrors out and shuts down, and an ended run's actor is
+    // exited.
     Ok(())
   }
 
