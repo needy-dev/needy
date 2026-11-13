@@ -11,6 +11,8 @@
 
 use std::fmt;
 
+pub use super::transport::Transport;
+
 /// Where a cell can run at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Platform {
@@ -275,9 +277,10 @@ impl Net {
 /// Where the runner of a runner cell runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerAt {
-  /// A second needy on this host, `daemon --mode runner`, joined over the
-  /// control socket.
-  Local,
+  /// A second needy on this host, `daemon --mode runner`, joined to the
+  /// control daemon's loopback port over a transport (the transport
+  /// dimension, `super::transport`).
+  Local(Transport),
   /// A Windows machine over ssh (`--windows-runner`), joined through a
   /// reverse tunnel to the control daemon's loopback port.
   Windows,
@@ -286,7 +289,7 @@ pub enum RunnerAt {
 impl RunnerAt {
   fn name(self) -> &'static str {
     match self {
-      RunnerAt::Local => "local",
+      RunnerAt::Local(_) => "local",
       RunnerAt::Windows => "windows",
     }
   }
@@ -380,6 +383,7 @@ impl Cell {
       Scenario::Identity => format!("{driver}/identity/user={},executor={executor}", self.user.name()),
       Scenario::Terminal => format!("{driver}/terminal/mode={}", self.terminal.name()),
       Scenario::FakeAgent => format!("{driver}/fake-agent"),
+      Scenario::Runner(RunnerAt::Local(transport)) => format!("{driver}/runner/at=local,transport={}", transport.name()),
       Scenario::Runner(at) => format!("{driver}/runner/at={}", at.name()),
       Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name).unwrap_or("?")),
       Scenario::HostExec => format!("{driver}/exec"),
@@ -537,9 +541,10 @@ pub fn cells() -> Vec<Cell> {
       end: End::Stop,
       ..cell(Scenario::FakeAgent)
     });
-    for at in [RunnerAt::Local, RunnerAt::Windows] {
-      cells.push(cell(Scenario::Runner(at)));
+    for transport in Transport::ALL {
+      cells.push(cell(Scenario::Runner(RunnerAt::Local(transport))));
     }
+    cells.push(cell(Scenario::Runner(RunnerAt::Windows)));
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -602,6 +607,14 @@ mod tests {
       };
       for executor in executors {
         assert!(mine.iter().any(|c| c.executor == Some(*executor)), "{} lacks executor {}", driver.name(), executor.name());
+      }
+      for transport in Transport::ALL {
+        assert!(
+          mine.iter().any(|c| c.scenario == Scenario::Runner(RunnerAt::Local(transport))),
+          "{} lacks transport {}",
+          driver.name(),
+          transport.name()
+        );
       }
       // The bugs of 2026-11-13 hid in these combinations.
       assert!(mine.iter().any(|c| c.scenario == Scenario::ActorFiles && c.end == End::Stop));

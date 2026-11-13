@@ -35,6 +35,8 @@ mod summary;
 #[cfg(unix)]
 mod term;
 #[cfg(unix)]
+pub mod transport;
+#[cfg(unix)]
 mod tui;
 #[cfg(unix)]
 mod windows;
@@ -218,7 +220,9 @@ mod run {
       None => None,
     };
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let transports = super::transport::Settings::load(&work)?;
     let ctx = Ctx {
+      transports,
       windows,
       needy,
       host,
@@ -292,6 +296,12 @@ mod run {
         Some(Ok(_)) => {}
       }
     }
+    if let matrix::Scenario::Runner(matrix::RunnerAt::Local(transport)) = cell.scenario
+      && cell.elsewhere(here).is_none()
+      && let Some(reason) = ctx.transports.blocker(transport)
+    {
+      return Some((Status::NotCovered, format!("transport {}: {reason}", transport.name())));
+    }
     let host = &ctx.host;
     if let Some(reason) = cell.elsewhere(here) {
       return Some((Status::Elsewhere, reason));
@@ -348,7 +358,13 @@ mod run {
     done.into_inner().unwrap_or_else(|e| e.into_inner())
   }
 
+  /// Held by a Cloudflare transport cell: the tunnel forwards to one fixed
+  /// port, so those cells run one at a time.
+  static CLOUDFLARE: Mutex<()> = Mutex::new(());
+
   fn run_cell(ctx: &Ctx, cell: Cell) -> Outcome {
+    let _tunnel = (cell.scenario == matrix::Scenario::Runner(matrix::RunnerAt::Local(matrix::Transport::Cloudflare)))
+      .then(|| CLOUDFLARE.lock().unwrap_or_else(|e| e.into_inner()));
     let start = Instant::now();
     let mut checks = Checks::default();
     let mut env = match CellEnv::new(ctx) {
@@ -363,6 +379,14 @@ mod run {
         // A free loopback port, for the remote runner's tunnel back here.
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         env.tcp = Some(port);
+      }
+      if let matrix::Scenario::Runner(matrix::RunnerAt::Local(transport)) = cell.scenario {
+        // The port the transport forwards to: the tunnel's fixed origin
+        // for Cloudflare, else a free one.
+        env.tcp = Some(match (transport, &ctx.transports.cloudflare) {
+          (matrix::Transport::Cloudflare, Some(cf)) => cf.origin_port,
+          _ => super::transport::free_port()?,
+        });
       }
       env.start_daemon()?;
       invariants::sockets(&env, &mut checks, "at daemon start");

@@ -49,6 +49,8 @@ pub struct Ctx {
   pub timeout: Duration,
   /// The Windows runner (`--windows-runner`), or why it is not there.
   pub windows: Option<Result<super::windows::Windows, String>>,
+  /// The local settings of the transports that need outside machines.
+  pub transports: super::transport::Settings,
 }
 
 static NEXT: AtomicU32 = AtomicU32::new(0);
@@ -277,16 +279,16 @@ impl<'a> CellEnv<'a> {
 
   /// Starts a runner on this host, `name`, joined to this cell's daemon
   /// with `token` over its control socket, with directories of its own.
-  pub fn start_local_runner(&mut self, token: &str, name: &str) -> Result<()> {
+  /// Starts a runner on this host that joins `join` (an endpoint), with
+  /// `env` added to its environment.
+  pub fn start_local_runner(&mut self, token: &str, name: &str, join: &str, env: &[(String, String)]) -> Result<()> {
     let log = File::options().create(true).append(true).open(self.dir.join("runner.log"))?;
-    let socket = self.runtime().join("daemon.sock");
-    let join = format!("unix:{}", socket.display());
     let args = [
       "daemon",
       "--mode",
       "runner",
       "--join",
-      &join,
+      join,
       "--join-token-env",
       "NEEDY_E2E_JOIN",
       "--name",
@@ -301,6 +303,7 @@ impl<'a> CellEnv<'a> {
       .env("NEEDY_RUNTIME_DIR", self.dir.join("rr"))
       .env("NEEDY_CONFIG_DIR", self.dir.join("rc"))
       .env("NEEDY_E2E_JOIN", token)
+      .envs(env.iter().map(|(k, v)| (k, v)))
       .stdin(Stdio::null())
       .stdout(log.try_clone()?)
       .stderr(log);

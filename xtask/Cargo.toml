@@ -39,6 +39,7 @@ anyhow.workspace = true
 base64 = { workspace = true, optional = true }
 clap.workspace = true
 glob-match = { workspace = true, optional = true }
+humantime.workspace = true
 http-body-util = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
@@ -49,6 +50,7 @@ needy-core-executor = { workspace = true, optional = true }
 needy-daemon = { workspace = true, optional = true }
 needy-trace = { workspace = true, optional = true, features = ["sqlite"] }
 portable-pty = { workspace = true, optional = true }
+serde.workspace = true
 serde_json.workspace = true
 sha2 = { workspace = true, optional = true }
 shell-words.workspace = true

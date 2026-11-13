@@ -1,6 +1,7 @@
 //! `cargo xtask <task>`: developer tasks that are not part of the product
 //! binary: `bench`, `tui`, the terminal fidelity harness, `e2e`, the
-//! end-to-end matrix, and `mock-model`, a scripted model server for agents.
+//! end-to-end matrix, `mock-model`, a scripted model server for agents, and
+//! `link-proxy`, a slow or idle-dropping link for transport experiments.
 
 mod bench;
 #[cfg(feature = "run")]
@@ -43,6 +44,10 @@ enum Task {
   /// loop runs without an account.
   #[cfg(feature = "mock-model")]
   MockModel(mock_model::Args),
+  /// A loopback TCP proxy that adds delay and drops idle connections: the
+  /// e2e harness's `idle-proxy` transport, on its own.
+  #[cfg(all(unix, feature = "run"))]
+  LinkProxy(e2e::transport::ProxyArgs),
 }
 
 fn main() -> Result<()> {
@@ -57,5 +62,7 @@ fn main() -> Result<()> {
     }
     #[cfg(feature = "mock-model")]
     Task::MockModel(args) => mock_model::main(args),
+    #[cfg(all(unix, feature = "run"))]
+    Task::LinkProxy(args) => e2e::transport::proxy_main(args),
   }
 }

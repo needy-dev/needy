@@ -25,6 +25,7 @@ use super::env::CellEnv;
 use super::host::ACTOR_IMAGE;
 use super::matrix::{Cell, Driver, End, Executor, Fault, Net, RunnerAt, Scenario, Terminal, Workspace};
 use super::runs::{self, check_ended, end_run};
+use super::transport::{Link, PROXY_IDLE};
 
 /// Helpers every driving program starts with.
 const PRELUDE: &str = r#"
@@ -1111,12 +1112,16 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
   // where several cells share a Windows runner.
   let suffix = env.dir.file_name().and_then(|n| n.to_str()).unwrap_or("x").trim_start_matches("ne2e-").to_string();
   let name = match at {
-    RunnerAt::Local => "e2e-local".to_string(),
+    RunnerAt::Local(_) => "e2e-local".to_string(),
     RunnerAt::Windows => format!("e2e-w{suffix}"),
   };
+  let mut link = None;
   let windows = match at {
-    RunnerAt::Local => {
-      env.start_local_runner(&token, &name)?;
+    RunnerAt::Local(transport) => {
+      let port = env.tcp.context("the daemon listens on no TCP port")?;
+      let started = Link::start(transport, &env.ctx.transports, port, &env.dir.join("transport.log"))?;
+      env.start_local_runner(&token, &name, &started.endpoint, &started.env)?;
+      link = Some(started);
       None
     }
     RunnerAt::Windows => {
@@ -1146,21 +1151,40 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
   checks.check("runner ls: the runner is online with executor(native)", row.to_string().contains("native"), row.to_string());
 
   let exec: Vec<&str> = match at {
-    RunnerAt::Local => vec!["exec", "--runner", &name, "--", "sh", "-c", "exit 5"],
+    RunnerAt::Local(_) => vec!["exec", "--runner", &name, "--", "sh", "-c", "exit 5"],
     RunnerAt::Windows => vec!["exec", "--runner", &name, "--", "cmd", "/c", "exit 5"],
   };
   let out = env.needy(&exec, t)?;
   checks.check("exec --runner: the command's exit code is 5", out.code == Some(5), out.brief());
 
   let marker = env.file("marker", "here\n", 0o644)?;
-  let (block, script, rule) = match at {
-    RunnerAt::Local => {
-      let home = env.mkdir("xh", 0o755)?;
+  let (block, script, rule, workspace) = match at {
+    RunnerAt::Local(_) => {
+      let base = env.mkdir("xw", 0o755)?;
       let routed_marker = py(&format!("import os; print(\"E2E routed-marker=\" + str(os.path.exists(\"{}\")))", marker.display()));
+      // The workspace comes from the runner's executor over the transport:
+      // it stays idle past the idle proxy's limit, then the harness drops
+      // every connection of the transport (at `cut-me`) and writes
+      // `cut.done` on the runner's side; the actor waits to see it through
+      // the mount, which has to come back.
+      // REVIEW(path-map): no `~` entry beside the workspace (see `workspace`).
       (
-        json!({ "driver": "native", "runner": name, "path_map": { "~": home.display().to_string() } }),
-        format!("python3 -c \"import sys; sys.exit(7)\"; echo \"E2E routed-rc=$?\"\n{routed_marker}\nexit 0"),
+        json!({ "driver": "native", "runner": name }),
+        format!(
+          r#"python3 -c "import sys; sys.exit(7)"; echo "E2E routed-rc=$?"
+{routed_marker}
+echo before > before.txt && echo "E2E before=ok" || echo "E2E before=fail"
+sleep {idle}
+cat before.txt >/dev/null 2>&1 && echo "E2E after-idle=ok" || echo "E2E after-idle=fail"
+echo "E2E cut-me=now"
+i=0; while [ $i -lt 120 ]; do [ -f cut.done ] && break; sleep 1; i=$((i+1)); done
+cat cut.done >/dev/null 2>&1 && echo after > after.txt && echo "E2E after-cut=ok" || echo "E2E after-cut=fail"
+python3 -c "import sys; sys.exit(3)"; echo "E2E routed-after-cut-rc=$?"
+exit 0"#,
+          idle = (PROXY_IDLE + Duration::from_secs(15)).as_secs()
+        ),
         "python3 **",
+        Some(base),
       )
     }
     RunnerAt::Windows => (
@@ -1168,22 +1192,52 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
       json!({ "driver": "native", "runner": name, "path_map": { "~": "~" } }),
       "cmd /c exit 7; echo \"E2E routed-rc=$?\"\necho \"E2E win-os=$(cmd /c echo %OS%)\"\nexit 0".to_string(),
       "cmd **",
+      None,
     ),
   };
-  let profile = json!({
+  let mut profile = json!({
     "user": user(cell),
     "actor": actor(cell, &script),
     "executors": { X: block },
     "commands": [{ "match": rule, "to": X }],
   });
+  if let Some(base) = &workspace {
+    profile["actor"]["workspace"] = json!({ "path": "~/workspace", "from": format!("executor:{X}:{}", base.display()), "writable": true });
+  }
   let profile = env.profile(&profile)?;
   let id = runs::create(env, &profile, &[])?;
+  if let (Some(link), Some(base)) = (&mut link, &workspace) {
+    runs::wait_marker(env, &id, "E2E cut-me=now")?;
+    if link.transport.can_cut() {
+      link.cut()?;
+    }
+    std::fs::write(base.join("cut.done"), "cut\n")?;
+  }
   let (row, console) = end_run(env, &id, End::Exit, checks, env.ctx.timeout)?;
   check_ended(checks, End::Exit, &row, 0);
   checks.value(&console, "routed-rc", "7");
   match at {
-    RunnerAt::Local => {
+    RunnerAt::Local(transport) => {
       checks.value(&console, "routed-marker", "True");
+      checks.value(&console, "before", "ok");
+      // Idle past the proxy's limit: needy's keepalives hold the runner's
+      // connections, so the mount answers without reconnecting.
+      checks.value(&console, "after-idle", "ok");
+      // Every connection dropped (not for `direct`): the runner reconnects,
+      // and the mount and routed commands work again.
+      checks.value(&console, "after-cut", "ok");
+      checks.value(&console, "routed-after-cut-rc", "3");
+      let cut = if transport.can_cut() {
+        " after every connection was dropped"
+      } else {
+        ""
+      };
+      let after = workspace.as_ref().and_then(|b| std::fs::read_to_string(b.join("after.txt")).ok());
+      checks.check(
+        format!("the actor wrote after.txt on the runner through the mount{cut}"),
+        after.as_deref() == Some("after\n"),
+        format!("{after:?}"),
+      );
     }
     RunnerAt::Windows => {
       checks.value(&console, "win-os", "Windows_NT");
