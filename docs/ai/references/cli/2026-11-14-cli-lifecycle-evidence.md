@@ -147,3 +147,8 @@ ACLs, authenticated model calls, or a live managed-service stop with an active
 VM mirror-out. Controlled shutdown with mirror-out has separate daemon-trait
 regression evidence; the Linux real-VM graceful run-stop cell proves the actor
 file path. Those observations remain distinct.
+
+The final service-lock implementation at commit `58f8d69` was then rebuilt
+and rerun on the same non-root Linux host: `none/exec`, `none/fs-cp`, and
+`none/service/user` all passed (50 checks). The final local Rust suite again
+passed all 1,029 tests, and workspace Clippy passed with warnings denied.
