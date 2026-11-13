@@ -92,7 +92,7 @@ interface ClusterStep extends Step {
 const STEPS: ClusterStep[] = [
   {
     ms: 3200,
-    lines: [{ text: 'needy daemon --mode control --listen 127.0.0.1:7400 --token-env NEEDY_CONTROL_TOKEN &', kind: 'cmd' }],
+    lines: [{ text: 'needy daemon serve --listen tcp://127.0.0.1:7400', kind: 'cmd' }],
     joined: false,
     beats: false,
     scheduled: false,
@@ -103,9 +103,10 @@ const STEPS: ClusterStep[] = [
   {
     ms: 3800,
     lines: [
-      { text: 'needy runner token create --ttl 1h --roles executor', kind: 'cmd' },
+      { text: 'needy runner invite --ttl 1h', kind: 'cmd' },
       { text: '# on each machine', kind: 'dim' },
-      { text: 'JOIN=... needy daemon --mode runner --join http://127.0.0.1:7400 --join-token-env JOIN', kind: 'cmd' },
+      { text: 'needy --address tcp://127.0.0.1:7400 runner join NAME', kind: 'cmd' },
+      { text: 'needy runner serve', kind: 'cmd' },
     ],
     joined: true,
     beats: false,
@@ -231,7 +232,7 @@ const PART = 'flex flex-wrap items-baseline gap-x-[8px] gap-y-[4px] p-[7px_10px]
         <Terminal v-bind="screenAt(at)" title="Operator · control host" :rows="8" :play="at" />
       </div>
 
-      <Machine v-bind="PLANE" role="host" icon="mingcute:server-2-line" title="Control Plane" sub="needy daemon --mode control" :focus="STEPS[at]!.focus.includes('plane') ? 'focus' : 'idle'">
+      <Machine v-bind="PLANE" role="host" icon="mingcute:server-2-line" title="Control Plane" sub="needy daemon serve" :focus="STEPS[at]!.focus.includes('plane') ? 'focus' : 'idle'">
         <ul class="flex flex-col gap-[8px] m-[6px_0_0] p-0 list-none">
           <li :class="PART">
             <b class="font-medium">Control daemon</b><span class="text-[12.5px] text-muted">schedules runs, routes their work</span>

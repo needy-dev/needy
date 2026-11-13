@@ -104,7 +104,7 @@ function tagOf(t: Target): Line['tag'] {
   return { text: `→ ${t.id}`, role: 'executor' }
 }
 
-/** What the decision says, as `needy profile check` would name the target. */
+/** What the decision says, as `needy config profile check` would name the target. */
 function statusOf(t: Target): { text: string, role: 'executor' | 'bad' | 'actor' } {
   if (t.kind === 'deny')
     return { text: `rule ${t.rule} · deny · exit 126`, role: 'bad' }

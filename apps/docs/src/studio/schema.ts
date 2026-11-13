@@ -5,7 +5,7 @@
 // NOTICE: this is a port of the serde structs there, cut to what the studio checks and offers. When a field or an
 // enum value changes in crates/config/src/profile, change it here too.
 // TODO(docs-studio): value types (durations, sizes, globs, `cpus`, `gpus`, `ulimits`, `mounts`) are not checked, only
-// that the key exists; the daemon's `needy profile check` is the real check. Port them if the studio needs them.
+// that the key exists; the daemon's `needy config profile check` is the real check. Port them if the studio needs them.
 
 export type Field
   = | { kind: 'map', fields: Record<string, Field>, doc?: string, required?: string[] }

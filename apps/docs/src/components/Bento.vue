@@ -25,7 +25,7 @@ interface Tile {
 }
 
 const TILES: Record<string, Tile> = {
-  hero: { id: 'hero', more: 'decisions', lead: { en: 'Every decision, on record.', zh: '每一次判定都有据可查。' }, rest: { en: 'Routed, denied and faulted commands are typed events; needy report sums up a run.', zh: '命令被转到哪、被拦了几次、出过什么故障，全都记成事件，needy report 一眼看完。' } },
+  hero: { id: 'hero', more: 'decisions', lead: { en: 'Every decision, on record.', zh: '每一次判定都有据可查。' }, rest: { en: 'Routed, denied and faulted commands are typed events; needy run report sums up a run.', zh: '命令被转到哪、被拦了几次、出过什么故障，全都记成事件，needy run report 一眼看完。' } },
   stat: { id: 'stat', more: 'isolation', lead: { en: 'On a Linux KVM host,', zh: '在 Linux KVM 主机上，' }, rest: { en: 'Needy boots a Firecracker actor sandbox in', zh: 'Needy 拉起一个 Firecracker actor 沙箱，只要' } },
   rules: { id: 'rules', more: 'decisions', lead: { en: 'Policy per command.', zh: '每条命令都能单独管。' }, rest: { en: 'Route it, keep it, or deny it.', zh: '转出去、留下来，还是直接拦掉。' } },
   identity: { id: 'identity', more: 'identity', lead: { en: 'Any machine you describe.', zh: '想装成什么机器都行。' }, rest: { en: 'A recipe sets the CPU, firmware and devices the program sees.', zh: 'CPU、固件、设备，程序看到的都由 recipe 说了算。' } },
@@ -61,12 +61,12 @@ const STATUS: Record<'partly' | 'vision', Text> = {
         >{{ tr(STATUS[t.status]) }}</span>
       </p>
 
-      <!-- The hero: `needy report`, the one window of the grid, running off the right and the bottom. The format is
+      <!-- The hero: `needy run report`, the one window of the grid, running off the right and the bottom. The format is
            crates/core/src/report/human.rs; the run ID and the counts are made up for the tile. Its window is inset
            on the copy's gutter, off the right edge and the bottom. -->
       <div v-if="t.id === 'hero'" class="mt-[28px] w-[calc(100%+60px)] rounded-[14px_0_0] bg-term text-term-ink">
         <div class="flex items-center gap-[6px] px-[14px] py-[12px]">
-          <i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><span class="mono ml-[10px] text-[12px] text-[rgb(255_255_255/45%)]">needy report latest</span>
+          <i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><i class="h-[10px] w-[10px] rounded-[50%] bg-[rgb(255_255_255/16%)]" /><span class="mono ml-[10px] text-[12px] text-[rgb(255_255_255/45%)]">needy run report latest</span>
         </div>
         <div class="mono flex flex-col gap-[4px] px-[18px] pb-[24px] pt-[4px] text-[14px] leading-[1.55]">
           <span><span class="inline-block w-[9ch] text-[rgb(255_255_255/55%)]">Run</span>3f9c0e2a71b4  (profile opencode)</span>

@@ -56,7 +56,7 @@ export const CAPABILITIES: Capability[] = [
   {
     icon: 'mingcute:chart-network-line',
     title: { en: 'See how an agent system works', zh: '看清 agent 系统如何运作' },
-    text: { en: 'Every decision is a typed event; needy report sums up a run.', zh: '每次判定都是带类型的事件，needy report 汇总一次运行。' },
+    text: { en: 'Every decision is a typed event; needy run report sums up a run.', zh: '每次判定都是带类型的事件，needy run report 汇总一次运行。' },
     status: 'works',
     more: 'decisions',
   },
@@ -201,11 +201,15 @@ export const SECTIONS: Record<string, Section> = {
   config: {
     id: 'config',
     nav: { en: 'Configuration', zh: '配置' },
-    title: { en: 'You only write two kinds of file', zh: '只需要写两种文件' },
+    title: { en: 'Profiles describe your runs', zh: '用 profile 描述运行' },
     body: [
       {
-        en: 'There are two kinds of file. A profile describes a run: which actor driver to use, which executors exist, and the rules for commands, files, the network and faults. A recipe describes the machine the actor pretends to be. Profiles can extend each other, and needy rejects unknown keys, so a typo fails loudly instead of being quietly ignored.',
-        zh: '要写的文件就两种。profile 管一次运行：用哪种 actor driver、有哪些 executor，还有命令、文件、网络、故障各自的规则。recipe 管 actor 要装成的那台机器。profile 之间可以继承；写了 needy 不认识的键会直接报错，不会被悄悄吞掉，所以手滑打错一个字段名也能第一时间发现。',
+        en: 'A profile describes a run: its actor driver, executors, and rules for commands, files, the network and faults. A recipe describes the machine the actor presents. Profiles can extend each other. Needy rejects unknown keys, so a typo produces an error.',
+        zh: 'profile 描述一次运行：actor driver、executor，以及命令、文件、网络和故障的规则。recipe 描述 actor 呈现的机器。profile 之间可以继承。needy 拒绝未知字段，字段名拼错会直接报错。',
+      },
+      {
+        en: 'Global configuration is separate from task profiles. Use needy config for daemon configuration and saved client contexts. Use needy config profile to list, show, or check local profiles. A context selects a connection and client identity. It does not grant new permissions.',
+        zh: '全局配置与任务 profile 分开。needy config 管理 daemon 配置和已保存的客户端 context。needy config profile 列出、显示或检查本地 profile。context 选择连接和客户端身份，不会授予新的权限。',
       },
       {
         en: 'The studio lets you paste a profile, pick values from dropdowns, and see the run it would set up.',
@@ -219,12 +223,12 @@ export const SECTIONS: Record<string, Section> = {
     title: { en: 'Bring in every machine you have', zh: '手边的机器都能接进来' },
     body: [
       {
-        en: 'Machines join a control plane as runners. A runner dials out and keeps that connection open, so it needs no open port; that makes it easy to add a Mac under a desk or a Windows box behind NAT. Profiles then place the actor and the executors on runners by name or by label.',
-        zh: '机器以 runner 的身份接进控制平面。runner 是主动往外连的，连上之后一直挂着，自己不用开任何端口，所以桌子底下那台 Mac、躲在 NAT 后面的 Windows，都能很轻松地接进来。接进来之后，在 profile 里按名字或者标签，把 actor 和 executor 分到对应的机器上就行。',
+        en: 'Linux and macOS machines join a control plane as runners. A runner connects out and keeps that connection open, without an inbound port. Profiles place the actor and executors on runners by name or label. Windows runner enrollment is planned.',
+        zh: 'Linux 和 macOS 机器以 runner 身份接入控制平面。runner 主动向外连接，并保持连接，无需开放入站端口。profile 按名称或标签把 actor 和 executor 放到 runner 上。Windows runner 注册尚在计划中。',
       },
       {
-        en: 'It works the other way round as well: a laptop that only has the needy client can pair with a control host once, and start runs there from then on.',
-        zh: '反过来也可以：笔记本上只装一个 needy 客户端，跟控制主机配对一次，以后随时都能在那边发起运行。',
+        en: 'A laptop with the needy client can manage runs on a control host. The operator issues a code with needy client invite. The laptop saves its connection with needy config context pair, then selects it with needy config use. Runner invitations and client invitations are separate.',
+        zh: '只安装 needy 客户端的笔记本也可以管理控制主机上的 run。管理员用 needy client invite 签发邀请码。笔记本用 needy config context pair 保存连接，再用 needy config use 选择连接。runner 邀请码与客户端邀请码相互独立。',
       },
     ],
   },
@@ -250,8 +254,8 @@ export const SECTIONS: Record<string, Section> = {
     title: { en: 'Try it', zh: '动手试试' },
     body: [
       {
-        en: 'Answer a few questions about where you want things to run, and the steps next to them change with your answers.',
-        zh: '回答几个「东西想跑在哪」的问题，旁边的步骤会跟着你的选择变。',
+        en: 'Choose the program, your machines, and what is already installed. The steps and profile follow your answers.',
+        zh: '选择入口程序、机器环境和已有条件，旁边的步骤和 profile 会跟着你的选择变。',
       },
     ],
   },
@@ -268,14 +272,14 @@ export const COMPARISON: Array<{ aspect: Text, usual: Text, needy: Text }> = [
   { aspect: { en: 'Where the harness runs', zh: 'harness 跑在哪' }, usual: { en: 'In the sandbox, with its tools', zh: '和工具挤在同一个沙箱里' }, needy: { en: 'In its own actor, near the model', zh: '单独待在 actor 里，离模型近' } },
   { aspect: { en: 'How a command reaches the work', zh: '命令怎么跑到干活的地方' }, usual: { en: 'Runs where the harness is, or the harness calls an SDK', zh: '就地跑，或者 harness 自己去调 SDK' }, needy: { en: 'Caught in the kernel and routed by rules; the harness is unchanged', zh: '内核里直接拦下来按规则转走，harness 不用改' } },
   { aspect: { en: 'Policy', zh: '策略' }, usual: { en: 'Network on or off for the whole box', zh: '整个沙箱的网络，要么开要么关' }, needy: { en: 'Per command and per host; local services by name, their addresses kept outside', zh: '细到每条命令、每个主机；本地服务按名字访问，真实地址不进沙箱' } },
-  { aspect: { en: 'Machines', zh: '机器' }, usual: { en: 'Linux containers', zh: 'Linux 容器' }, needy: { en: 'Containers, microVMs, a Mac or Windows box as executors', zh: '容器、microVM，Mac 和 Windows 也能当 executor' } },
+  { aspect: { en: 'Machines', zh: '机器' }, usual: { en: 'Linux containers', zh: 'Linux 容器' }, needy: { en: 'Containers, microVMs, Linux and macOS executors', zh: '容器、microVM、Linux 和 macOS executor' } },
   { aspect: { en: 'What the program sees', zh: '程序以为自己在哪' }, usual: { en: 'The image', zh: '就是那个镜像' }, needy: { en: 'A machine from a recipe: CPU, DMI, PCI', zh: 'recipe 里写的那台机器，CPU、DMI、PCI 都对得上' } },
   { aspect: { en: 'Seeing and breaking it', zh: '看得见、敢搞坏' }, usual: { en: 'Logs', zh: '日志' }, needy: { en: 'Typed events for every decision; seeded faults', zh: '每次判定都有事件记录；故障按 seed 注入' } },
 ]
 
 /** What needy does not do, or does at a cost, today. From the README and the closed-loop results. */
 export const LIMITS: Text[] = [
-  { en: 'Experimental (0.0.1), built from a checkout.', zh: '还在实验阶段（0.0.1），要从源码自己编。' },
+  { en: 'Experimental. Capture and identity limits depend on the actor driver.', zh: '仍在实验阶段，捕获与机器身份的限制取决于 actor driver。' },
   { en: 'A routed exec costs about 1.5 ms to a Docker executor and 12 ms to a Mac over a tunnel (p50).', zh: '每次转发都有开销：转到 Docker executor 大约 1.5 ms，经隧道转到 Mac 大约 12 ms（p50）。' },
   { en: 'Container actors catch execs with shims, so programs added at run time are not routed.', zh: '容器版 actor 靠 shim 拦 exec，跑起来之后才装上的程序拦不到。' },
   { en: 'HTTPS is tunnelled, not inspected: the allowlist works by host.', zh: 'HTTPS 只做透传，不解密，所以白名单只能按主机来。' },
