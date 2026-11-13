@@ -129,6 +129,31 @@ async fn connect(socket: &Path, authority: &str) -> (u16, UnixStream) {
   (status, stream)
 }
 
+// ROOT CAUSE:
+//
+// If an HTTP client tunnels plain HTTP through the proxy (Node's undici sends
+// `CONNECT mock.needy:80` for `http://mock.needy`, as pi does), the gateway
+// connected to the name `mock.needy` itself, which resolves nowhere, and
+// answered 502: pi could not reach a service (seen 2026-11-13 with pi 1.5.2
+// and the mock model as a service).
+//
+// Before the fix, a service was reached only by absolute-form requests.
+// The fix keeps the tunnel opaque and points it at the service's URL.
+#[tokio::test]
+async fn a_connect_to_a_service_s_host_tunnels_to_its_url() {
+  let (address, seen) = upstream().await;
+  let gateway = start(address, "");
+
+  let (status, mut stream) = connect(&gateway.socket, "model.needy:80").await;
+  stream.write_all(b"GET /v1/models HTTP/1.1\r\nHost: model.needy\r\nConnection: close\r\n\r\n").await.unwrap();
+  let mut reply = String::new();
+  stream.read_to_string(&mut reply).await.unwrap();
+
+  assert_eq!(status, 200);
+  assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("upstream"), "{reply}");
+  assert_eq!(seen.lock().unwrap().iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), ["/v1/models"]);
+}
+
 #[tokio::test]
 async fn a_service_s_host_is_forwarded_to_its_url_as_sent() {
   let (address, seen) = upstream().await;
