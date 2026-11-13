@@ -298,4 +298,4 @@ Native Mac commands run as the user who started the runner.
 
 This example does not configure a machine recipe. An lxcfs warning concerns
 container resource views; it is not evidence of recipe fidelity.
-For other runtimes and policies, see the [README reference](../../../README.md#reference).
+For other runtimes and policies, see the [README reference](../../../README.md#install).
