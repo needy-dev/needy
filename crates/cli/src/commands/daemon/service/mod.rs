@@ -192,7 +192,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     if !directory.try_exists()? {
       return Err(missing().into());
     }
-    Some(lock(&directory)?)
+    Some(lock(&manager.definition()?)?)
   } else {
     None
   };
@@ -438,9 +438,10 @@ async fn status(manager: &dyn Manager, registration: &Registration) -> Result<St
   Ok(row)
 }
 
-fn lock(directory: &Path) -> Result<std::fs::File> {
-  #[cfg(unix)]
-  needy_api_server::create_private_dir(directory)?;
+fn lock(definition: &Path) -> Result<std::fs::File> {
+  if let Some(parent) = definition.parent() {
+    std::fs::create_dir_all(parent)?;
+  }
   let mut options = std::fs::OpenOptions::new();
   options.create(true).truncate(false).read(true).write(true);
   #[cfg(unix)]
@@ -448,7 +449,12 @@ fn lock(directory: &Path) -> Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
   }
-  let file = options.open(directory.join("installation.lock"))?;
+  // The canonical definition is shared by all client configuration files.
+  // Keep this lock inode after uninstall: unlinking it would let a concurrent
+  // installer lock a new inode while an older transaction still owns this one.
+  let mut name = definition.as_os_str().to_os_string();
+  name.push(".lock");
+  let file = options.open(PathBuf::from(name))?;
   file.try_lock().map_err(|cause| {
     crate::diagnostics::Error::new("service.definition_conflict", "Another service operation owns the installation lock")
       .check("Wait for the current service operation to finish, then inspect status before retrying.")
@@ -488,7 +494,9 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
   let definition = manager.definition()?;
   // One transaction covers ownership inspection, stop of an older generation,
   // and publication. Competing mutations fail instead of interleaving receipts.
-  let _lock = lock(directory)?;
+  #[cfg(unix)]
+  needy_api_server::create_private_dir(directory)?;
+  let _lock = lock(&definition)?;
   let previous = match std::fs::read(receipt) {
     Ok(bytes) => Some(serde_json::from_slice::<Registration>(&bytes).context("invalid service registration")?),
     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,

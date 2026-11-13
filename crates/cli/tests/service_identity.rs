@@ -101,7 +101,7 @@ exit 0
     assert!(Instant::now() < deadline);
     std::thread::sleep(Duration::from_millis(10));
   }
-  let second = needy(
+  let second = command(
     home.path(),
     &[
       "--diagnostic-format",
@@ -110,7 +110,10 @@ exit 0
       "service",
       "install",
     ],
-  );
+  )
+  .env("NEEDY_CONFIG_DIR", home.path().join("other-config"))
+  .output()
+  .unwrap();
   let stopped = needy(home.path(), &["--diagnostic-format", "json", "daemon", "service", "stop"]);
   std::fs::write(home.path().join("release"), "resume the owned installation").unwrap();
   let first = first.wait_with_output().unwrap();

@@ -1,7 +1,7 @@
 # CLI lifecycle implementation and evidence
 
-Date: 2026-11-14. Evidence level: local CLI integration, daemon API-trait
-regression tests, and one non-root macOS user-service e2e cell.
+Date: 2026-11-14. Evidence level: CLI integration, daemon API-trait regression
+tests, non-root macOS and Linux user-service e2e, and Linux Firecracker e2e.
 This note records the current implementation. Linux and system-scope acceptance
 are listed separately below.
 
@@ -57,8 +57,8 @@ privacy, child PID/health identity and descriptor removal during shutdown.
 
 ## Remaining acceptance
 
-Linux systemd service execution and both platforms' system-scope installation
-need their own manager/account fixtures. The implementation does not change
+Linux user systemd execution passed in the remote acceptance below. Both
+platforms' system-scope installations still need dedicated manager/account fixtures. The implementation does not change
 linger, elevate privileges, or select a runtime account implicitly.
 System scope requires `--run-as USER`.
 
@@ -114,3 +114,36 @@ Automated Windows enrollment is reported as not covered before remote preparatio
 private code-file reads require the deferred Windows ACL boundary. Native Windows
 runner implementation remains present. No relaxed file permissions or legacy
 join-token path is used to bypass that limitation.
+
+## Remote Linux acceptance
+
+A non-root Linux x86_64 KVM host built commit `d2d2646` through the existing
+`cargo xtask e2e --remote` source-shipping boundary. Docker built the guest
+binary and actor/executor images from that source. Six selected cells passed
+with 180 checks and no failed or uncovered cells:
+
+- `none/exec` and `none/fs-cp`: command output/exits and explicit file targets.
+- `none/service/user`: actual systemd install, start, readiness, logs, stop,
+  restart, uninstall and retained configuration/state.
+- `linux-firecracker/routing`: a real actor and routed child execution.
+- `linux-firecracker/actor-files/end=stop`: copy-in and graceful mirror-out.
+- `linux-firecracker/actor-files/end=stop-now`: immediate-stop behavior,
+  including its intentional lack of graceful mirror-out.
+
+The matching macOS run passed three cells with 53 checks: host exec, file copy
+and user launchd lifecycle. These are host-role and hardware observations;
+private host identifiers, addresses and raw logs are not part of this note.
+
+A final regression extended the service transaction test to two distinct
+configuration directories targeting the same canonical manager definition.
+It reproduced a race after the first implementation commit. The fix puts the
+lock next to that canonical definition so all configuration sources serialize
+on the same inode. The inode is retained after uninstall to prevent lock
+replacement races. The CLI manager-boundary regressions and actual macOS
+launchd lifecycle were rerun after this fix.
+
+These cells do not establish system-scope service support, Windows credential
+ACLs, authenticated model calls, or a live managed-service stop with an active
+VM mirror-out. Controlled shutdown with mirror-out has separate daemon-trait
+regression evidence; the Linux real-VM graceful run-stop cell proves the actor
+file path. Those observations remain distinct.
