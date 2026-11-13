@@ -99,7 +99,7 @@ const EXEC: Choice<Exec>[] = [
         <div :class="CHOICES" role="group" :aria-label="tr({ en: 'Actor host OS', zh: 'actor 宿主机系统' })">
           <button v-for="c in OS" :key="c.value" type="button" :class="CHOICE" :data-state="env.os === c.value ? 'on' : 'off'" :aria-pressed="env.os === c.value" @click="env.os = c.value"><Icon v-if="c.icon" :name="c.icon" />{{ tr(c.label) }}</button>
         </div>
-        <span :class="ASIDE">{{ tr({ en: 'Windows can be an executor, not an actor host.', zh: 'Windows 可以作为 executor，但不能运行 actor。' }) }}</span>
+        <span :class="ASIDE">{{ tr({ en: 'Windows runner enrollment is planned. Use Linux or macOS for this guide.', zh: 'Windows runner 注册尚在计划中。此教程请使用 Linux 或 macOS。' }) }}</span>
       </div>
       <div v-if="env.os === 'linux'" :class="Q">
         <span :class="ASK">{{ tr({ en: 'Which package manager?', zh: '用哪个包管理器？' }) }}</span>
@@ -149,7 +149,7 @@ const EXEC: Choice<Exec>[] = [
         </div>
       </details>
       <p class="m-0 text-[15px] text-ink-2">{{ tr({ en: 'Your actor driver:', zh: '你的 actor driver：' }) }} <code>{{ driver }}</code></p>
-      <p class="m-0 text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'These steps administer runs from the actor host. If it is remote, use its SSH shell. Client pairing is optional.', zh: '下方管理命令在 actor 宿主机执行。宿主机在远端时，使用它的 SSH shell。控制客户端配对是可选操作。' }) }}</p>
+      <p class="m-0 text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'These steps manage runs from the actor host. If it is remote, use its SSH shell. An optional client context saves a connection and client identity. Runner enrollment uses its own invitation and credential.', zh: '下方命令在 actor 宿主机上管理 run。宿主机在远端时，使用它的 SSH shell。可选的客户端 context 保存连接和客户端身份。runner 注册使用自己的邀请码和凭据。' }) }}</p>
       <a href="https://github.com/needy-dev/needy#one-command-from-your-laptop" class="text-[13px] text-ink-2">{{ tr({ en: 'Optional client pairing and source builds ↗', zh: '可选客户端配对与源码构建 ↗' }) }}</a>
     </div>
 

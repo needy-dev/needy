@@ -73,6 +73,8 @@ export function needsDocker(program: Program, env: Environment): boolean {
 
 /** Rejects values that cannot name a runner or a usable directory. No input is silently replaced. */
 export function configurationIssue(env: Environment): Text | undefined {
+  if (env.executor === 'runner' && env.runnerOs === 'windows')
+    return { en: 'Windows runner enrollment is not supported yet. Choose a Linux or macOS executor for this walkthrough.', zh: '暂不支持 Windows runner 注册。此教程请选择 Linux 或 macOS executor。' }
   if (env.executor === 'runner' && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(env.runnerName))
     return { en: 'Use a runner name of 1–63 lowercase letters, digits, or hyphens.', zh: 'runner 名称需为 1–63 个小写字母、数字或连字符，且首尾不能是连字符。' }
   if (env.executor !== 'container' && (!env.workspace.trim() || /[\r\n\0]/.test(env.workspace)))
@@ -87,11 +89,6 @@ function quote(value: string): string {
 
 function shellPath(path: string): string {
   return path.startsWith('~/') ? `"$HOME"/${quote(path.slice(2))}` : quote(path)
-}
-
-function powershellPath(path: string): string {
-  const quoted = (value: string) => `'${value.replaceAll("'", "''")}'`
-  return path.startsWith('~/') ? `(Join-Path $HOME ${quoted(path.slice(2))})` : quoted(path)
 }
 
 /** Derives one profile and its per-machine steps from all wizard answers. */
@@ -157,20 +154,15 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
 
   steps.push({ id: 'daemon', machine: 'host', terminal: host,
     title: { en: 'Start and reach the control daemon', zh: '启动控制 daemon 并确认连接' },
-    text: { en: 'Install one user service on the control host. Local commands use its private management socket. A user systemd or launchd manager must be available.', zh: '在控制主机上安装一个用户服务。本机管理命令自动使用私有 socket，需要可用的 systemd 用户管理器或 launchd。' },
-    code: `${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\n" : ''}needy daemon service install --now\nneedy daemon service status\nneedy runner ls`,
+    text: { en: 'Install a user service on the control host, with systemd or launchd available. Select local for the following management commands. For an existing service, replace the install line with needy daemon service install --replace --now. Replacement applies the current configuration and stops active runs.', zh: '在控制主机上安装用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。已有服务时，把安装命令替换为 needy daemon service install --replace --now。替换会应用当前配置，并停止正在运行的 run。' },
+    code: `needy config use local\n${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\n" : ''}needy daemon service install --now\nneedy daemon service status\nneedy runner ls`,
     expected: { en: 'The service reports ready. The runner table appears without a client bearer or an address export.', zh: '服务状态为 ready，无需客户端令牌或地址环境变量即可列出 runner。' } })
 
   if (env.executor === 'runner') {
-    const windows = env.runnerOs === 'windows'
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the executor machine', zh: '准备执行命令的机器' },
-      text: windows
-        ? { en: 'Install the Windows release from GitHub Releases. Put needy and Git Bash (bash.exe) in PATH. Use PowerShell outside the server SSH session. Install your project tools here.', zh: '从 GitHub Releases 安装 Windows 发布包。把 needy 和 Git Bash 的 bash.exe 加入 PATH。在服务器 SSH 会话之外使用 PowerShell，项目工具也安装在这台机器上。' }
-        : { en: 'Install needy and your project tools here. A native runner needs no actor images.', zh: '在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。' },
-      code: windows
-        ? `needy --version\nbash --version\nNew-Item -ItemType Directory -Force -Path ${powershellPath(env.workspace)} | Out-Null`
-        : `${INSTALL_NEEDY}\nmkdir -p ${shellPath(env.workspace)}`,
+      text: { en: 'Install needy and your project tools here. A native runner needs no actor images.', zh: '在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。' },
+      code: `${INSTALL_NEEDY}\nmkdir -p ${shellPath(env.workspace)}`,
       expected: { en: 'The project directory exists. The runner inherits this terminal’s PATH.', zh: '项目目录已创建。runner 会继承这个终端的 PATH。' } },
     { id: 'tunnel', machine: 'runner', terminal: { en: 'Executor machine · a separate tunnel terminal', zh: 'executor 机器 · 另开的隧道终端' },
       title: { en: 'Open one tunnel to the control host', zh: '建立一条到控制主机的隧道' },
@@ -178,13 +170,13 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
       code: 'ssh -N -o ExitOnForwardFailure=yes -L 7400:127.0.0.1:7400 user@example.com',
       expected: { en: 'The connection stays open. Reuse it instead of opening another tunnel on port 7400.', zh: '连接保持开启。复用这条连接，不要再占用一次本地 7400 端口。' } },
     { id: 'token', machine: 'host', terminal: host,
-      title: { en: 'Create a runner join token', zh: '创建 runner 加入令牌' },
-      text: { en: 'Copy the printed token for the executor machine. Client pairing is separate and optional.', zh: '把输出的令牌交给 executor 机器。控制客户端配对是另一项可选操作。' },
+      title: { en: 'Create a runner invitation', zh: '创建 runner 邀请码' },
+      text: { en: 'Use this code only to enroll the executor. A runner saves its own credential. An optional client context uses a separate client invitation to manage runs.', zh: '此邀请码只用于注册 executor。runner 保存自己的凭据。可选的客户端 context 使用单独的客户端邀请码来管理 run。' },
       code: 'needy runner invite --ttl 1h --roles executor' },
     { id: 'paste-token', machine: 'runner', terminal: remote,
       title: { en: 'Enroll the executor once', zh: '完成一次 executor 注册' },
       text: { en: 'Run this command. Paste the invitation code at its hidden prompt. Enrollment saves the runner credential and returns.', zh: '执行命令后，在隐藏输入提示中粘贴邀请码。注册会保存 runner 凭据并返回。' },
-      code: `needy --address tcp://127.0.0.1:7400 runner join ${windows ? `'${env.runnerName}'` : runner} --roles executor` },
+      code: `needy --address tcp://127.0.0.1:7400 runner join ${runner} --roles executor` },
     { id: 'runner', machine: 'runner', terminal: remote,
       title: { en: 'Start the enrolled runner', zh: '启动已注册的 runner' },
       text: { en: 'Leave this process running outside the server SSH session. It reconnects with its saved credential and enrollment settings.', zh: '在服务器 SSH 会话之外持续运行此进程。它使用已保存的凭据和注册配置重连。' },
@@ -192,8 +184,8 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     { id: 'check-runner', machine: 'host', terminal: host,
       title: { en: 'Check which machine joined', zh: '确认加入的是哪台机器' },
       text: { en: 'Check the HOST column as well as the runner name.', zh: '既看 runner 名称，也看 HOST 列，确认操作系统与所选机器一致。' },
-      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- ${windows ? 'cmd /c ver' : 'uname -s'}`,
-      expected: { en: `The runner is online. Its command reports ${windows ? 'Windows' : env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}.`, zh: `runner 为 online，命令返回 ${windows ? 'Windows' : env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}。` } })
+      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- uname -s`,
+      expected: { en: `The runner is online. Its command reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}.`, zh: `runner 为 online，命令返回 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}。` } })
   }
   else if (env.executor === 'native') {
     steps.push({ id: 'workspace', machine: 'host', terminal: host,

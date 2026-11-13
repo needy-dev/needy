@@ -62,6 +62,9 @@ describe('environment wizard', () => {
     expect(control.terminal.zh).toContain('同一个 SSH 配置终端')
     expect(control.code).toContain('needy config set daemon.listen')
     expect(control.code).toContain('needy daemon service install --now')
+    expect(control.code).toContain('needy config use local')
+    expect(control.text.en).toContain('needy daemon service install --replace --now')
+    expect(steps.find(step => step.id === 'token')?.text.en).toContain('client context')
     expect(control.code).not.toContain('NEEDY_TOKEN')
     expect(control.code).not.toContain('NEEDY_ENDPOINT')
   })
@@ -79,13 +82,12 @@ describe('environment wizard', () => {
     expect(steps.find(step => step.id === 'install')?.code).toContain('ghcr.io/needy-dev/needy-executor:v${needy_release}')
   })
 
-  it('uses PowerShell on a Windows runner and checks its Bash prerequisite', () => {
-    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', runnerOs: 'windows' })
-    expect(steps.find(step => step.id === 'runner-install')?.code).toContain('bash --version')
-    expect(steps.find(step => step.id === 'runner-install')?.code).toContain('New-Item')
-    expect(steps.find(step => step.id === 'paste-token')?.code).toContain('runner join')
-    expect(steps.find(step => step.id === 'paste-token')?.code).not.toContain('PASTE_JOIN_TOKEN')
-    expect(steps.find(step => step.id === 'check-runner')?.code).toContain('cmd /c ver')
+  // Windows enrollment cannot yet persist private credentials. A complete
+  // generated walkthrough incorrectly promised it could reach an online runner.
+  it('explains the Windows enrollment limit without generating setup commands', () => {
+    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, runnerOs: 'windows' as const }
+    expect(configurationIssue(env)?.en).toContain('Windows runner enrollment is not supported yet')
+    expect(guide('bash', env)).toEqual([])
   })
 
   it('quotes user project paths without executing shell substitutions', () => {
