@@ -1,0 +1,13 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "mock": {
+      "baseUrl": "http://mock.needy/v1",
+      "api": "openai-completions",
+      "apiKey": "mock",
+      "models": [
+        { "id": "mock", "name": "mock", "reasoning": false, "input": ["text"] }
+      ]
+    }
+  }
+}

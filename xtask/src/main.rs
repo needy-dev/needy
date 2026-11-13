@@ -1,10 +1,12 @@
 //! `cargo xtask <task>`: developer tasks that are not part of the product
-//! binary: `bench`, `tui`, the terminal fidelity harness, and `e2e`, the
-//! end-to-end matrix.
+//! binary: `bench`, `tui`, the terminal fidelity harness, `e2e`, the
+//! end-to-end matrix, and `mock-model`, a scripted model server for agents.
 
 mod bench;
 #[cfg(feature = "run")]
 mod e2e;
+#[cfg(feature = "mock-model")]
+mod mock_model;
 // NOTICE: the harness drives Unix pseudo-terminals; Windows terminals are
 // not part of the TUI matrix (see the terminal note).
 #[cfg(all(unix, feature = "tui"))]
@@ -36,6 +38,11 @@ enum Task {
   /// against its own non-root control daemon.
   #[cfg(feature = "run")]
   E2e(e2e::Args),
+  /// A scripted OpenAI-compatible model server: it answers a coding agent
+  /// with one shell tool call, then with the call's output, so the agent's
+  /// loop runs without an account.
+  #[cfg(feature = "mock-model")]
+  MockModel(mock_model::Args),
 }
 
 fn main() -> Result<()> {
@@ -48,5 +55,7 @@ fn main() -> Result<()> {
       let code = e2e::main(args)?;
       std::process::exit(code);
     }
+    #[cfg(feature = "mock-model")]
+    Task::MockModel(args) => mock_model::main(args),
   }
 }
