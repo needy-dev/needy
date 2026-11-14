@@ -1,7 +1,7 @@
 //! Child processes with deadlines: every command the harness runs ends,
 //! whether the product under test answers or not.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -43,10 +43,31 @@ impl Output {
 
 /// Runs `command` to its end or until `timeout`, then kills it. Its stdin
 /// is empty.
-pub fn run(mut command: Command, timeout: Duration) -> Result<Output> {
-  command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+pub fn run(command: Command, timeout: Duration) -> Result<Output> {
+  collect(command, None, timeout)
+}
+
+/// Sends fixture bytes on stdin without placing them in the process argv.
+/// The same output pumps and deadline apply to remote file writes.
+pub fn with_input(command: Command, input: &[u8], timeout: Duration) -> Result<Output> {
+  collect(command, Some(input.to_vec()), timeout)
+}
+
+fn collect(mut command: Command, input: Option<Vec<u8>>, timeout: Duration) -> Result<Output> {
+  command
+    .stdin(if input.is_some() {
+      Stdio::piped()
+    } else {
+      Stdio::null()
+    })
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
   let shown = format!("{command:?}");
   let mut child = command.spawn().with_context(|| format!("cannot start {shown}"))?;
+  let writer = input.map(|bytes| {
+    let mut stdin = child.stdin.take().expect("requested piped input");
+    thread::spawn(move || stdin.write_all(&bytes))
+  });
   let mut stdout = child.stdout.take().context("no stdout")?;
   let mut stderr = child.stderr.take().context("no stderr")?;
   // Both pipes are drained on their own threads, so a chatty child never
@@ -76,6 +97,9 @@ pub fn run(mut command: Command, timeout: Duration) -> Result<Output> {
     }
     thread::sleep(Duration::from_millis(20));
   };
+  if let Some(writer) = writer {
+    writer.join().map_err(|_| anyhow::anyhow!("fixture input writer panicked"))?.context("cannot write fixture input")?;
+  }
   let stdout = String::from_utf8_lossy(&out.join().unwrap_or_default()).into_owned();
   let stderr = String::from_utf8_lossy(&err.join().unwrap_or_default()).into_owned();
   Ok(Output {
@@ -137,4 +161,20 @@ pub fn signal(pid: i32, signal: nix::sys::signal::Signal) {
 /// Whether `pid` still runs (or is a zombie nobody reaped).
 pub fn alive(pid: i32) -> bool {
   nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn fixture_input_keeps_bytes_out_of_argv_and_preserves_them() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "test \"$#\" -eq 0 || exit 3; cat"]);
+    let text = b"line one\nquotes '\" and literal $(id)\n";
+    let out = with_input(command, text, Duration::from_secs(5)).unwrap();
+    assert!(out.ok(), "{}", out.brief());
+    assert_eq!(out.stdout.as_bytes(), text);
+    assert!(out.stderr.is_empty());
+  }
 }

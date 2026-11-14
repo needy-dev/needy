@@ -49,6 +49,7 @@ pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
     Scenario::Terminal => terminal(env, cell, checks),
     Scenario::FakeAgent => fake_agent(env, cell, checks),
     Scenario::Runner(at) => runner(env, cell, at, checks),
+    Scenario::ClientExecution(at) => super::client::run(env, cell, at, checks),
     Scenario::Tui(i) => tui(env, cell, i, checks),
     Scenario::HostExec => host_exec(env, checks),
     Scenario::HostCopy => host_copy(env, checks),
@@ -70,7 +71,7 @@ fn home(cell: &Cell) -> (String, String) {
 }
 
 /// The profile's `actor`, running `script` under `sh`.
-fn actor(cell: &Cell, script: &str) -> Value {
+pub(super) fn actor(cell: &Cell, script: &str) -> Value {
   let command = json!(["/bin/sh", "-c", format!("{PRELUDE}\n{script}")]);
   match cell.driver {
     Driver::Firecracker | Driver::Vz => json!({ "driver": cell.driver.profile_name(), "command": command }),

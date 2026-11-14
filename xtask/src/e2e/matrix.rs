@@ -295,6 +295,13 @@ impl RunnerAt {
   }
 }
 
+/// Where the invocation that supplies execution runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAt {
+  Local,
+  Remote,
+}
+
 /// What a cell exercises. Each scenario fixes the dimensions it does not
 /// vary itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +311,8 @@ pub enum Scenario {
   /// Routing to a native executor on a runner that joined the control
   /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
+  /// Public CLI creation supplies a same-account native execution holder.
+  ClientExecution(ClientAt),
   /// Copy-in from the host into the actor, nested and single-level; mirror-out
   /// from the actor with and without a filter.
   ActorFiles,
@@ -387,6 +396,13 @@ impl Cell {
       Scenario::FakeAgent => format!("{driver}/fake-agent"),
       Scenario::Runner(RunnerAt::Local(transport)) => format!("{driver}/runner/at=local,transport={}", transport.name()),
       Scenario::Runner(at) => format!("{driver}/runner/at={}", at.name()),
+      Scenario::ClientExecution(at) => format!(
+        "{driver}/client-execution/at={}",
+        match at {
+          ClientAt::Local => "local",
+          ClientAt::Remote => "remote",
+        }
+      ),
       Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name).unwrap_or("?")),
       Scenario::HostExec => format!("{driver}/exec"),
       Scenario::HostCopy => format!("{driver}/fs-cp"),
@@ -414,6 +430,10 @@ impl Cell {
       Scenario::FakeAgent => vec![
         "copy-in host->actor nested (filtered)",
         "mirror-out actor->host filtered",
+      ],
+      Scenario::ClientExecution(_) => vec![
+        "client workspace mount",
+        "actor and routed-command writes on creating client",
       ],
       Scenario::Runner(_) => vec![],
       Scenario::HostCopy => vec!["fs cp host->executor nested", "fs cp executor->host"],
@@ -458,7 +478,7 @@ impl Cell {
   /// Whether the actor's workspace is mounted from an executor, which a
   /// `linux-container` actor does with sshfs on the host.
   pub fn mounts_workspace(&self) -> bool {
-    matches!(self.scenario, Scenario::Workspace(Workspace::Executor(_)) | Scenario::Chaos(Fault::File))
+    matches!(self.scenario, Scenario::Workspace(Workspace::Executor(_)) | Scenario::Chaos(Fault::File) | Scenario::ClientExecution(_))
   }
 }
 
@@ -549,6 +569,13 @@ pub fn cells() -> Vec<Cell> {
       cells.push(cell(Scenario::Runner(RunnerAt::Local(transport))));
     }
     cells.push(cell(Scenario::Runner(RunnerAt::Windows)));
+    for at in [ClientAt::Local, ClientAt::Remote] {
+      cells.push(Cell {
+        terminal: Terminal::Later,
+        end: End::Stop,
+        ..cell(Scenario::ClientExecution(at))
+      });
+    }
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -580,6 +607,22 @@ pub fn selected(id: &str, only: &[String], skip: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn client_execution_is_selectable_without_enabling_runner_or_restart_cells() {
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["client-execution".into()], &[])).collect();
+    assert_eq!(mine.len(), Driver::ACTORS.len() * 2);
+    for driver in Driver::ACTORS {
+      for at in [ClientAt::Local, ClientAt::Remote] {
+        let cell = mine.iter().find(|cell| cell.driver == driver && cell.scenario == Scenario::ClientExecution(at)).unwrap();
+        assert_eq!(cell.end, End::Stop);
+        assert!(cell.mounts_workspace());
+      }
+    }
+    let remote: Vec<_> = mine.iter().filter(|cell| selected(&cell.id(), &["**/client-execution/at=remote".into()], &[])).collect();
+    assert_eq!(remote.len(), Driver::ACTORS.len());
+    assert!(remote.iter().all(|cell| cell.scenario == Scenario::ClientExecution(ClientAt::Remote)));
+  }
 
   #[test]
   fn ids_are_unique() {

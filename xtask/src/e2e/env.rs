@@ -49,6 +49,10 @@ pub struct Ctx {
   pub timeout: Duration,
   /// The Windows runner (`--windows-runner`), or why it is not there.
   pub windows: Option<Result<super::windows::Windows, String>>,
+  /// The creating client on another machine, or its preparation failure.
+  pub client: Option<Result<super::client::Remote, super::client::SetupError>>,
+  /// A local orchestrator serves creating-client operations over SSH stdio.
+  pub client_callback: bool,
   /// The local settings of the transports that need outside machines.
   pub transports: super::transport::Settings,
 }
