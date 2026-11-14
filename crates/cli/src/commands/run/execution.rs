@@ -3,12 +3,18 @@
 
 use crate::{cli::Context, connection::Resolved};
 use anyhow::{Context as _, Result};
-use needy_api_client::{Client, proto::v1::PrepareClientExecutionRequest};
+use needy_api_client::Client;
+#[cfg(unix)]
+use needy_api_client::proto::v1::PrepareClientExecutionRequest;
+#[cfg(unix)]
 use needy_api_server::control::RunnerHost;
+#[cfg(unix)]
 use needy_api_server::protocol::domain::proto_runner_host;
 use needy_daemon::runner::ClientExecutionConfig;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::Child;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 pub(super) struct Holder {
   pub capability: String,

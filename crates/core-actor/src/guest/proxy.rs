@@ -273,7 +273,7 @@ fn refused(error: &needy_api_client::Error) -> Option<i32> {
     Kind::Denied => Some(126),
     Kind::Failed => Some(127),
     // A transport failure after dispatch may have lost only the response.
-    Kind::Unavailable | Kind::Ended => Some(signals::ENDED),
+    Kind::Unavailable | Kind::Ended | Kind::Other => Some(signals::ENDED),
     _ => None,
   }
 }

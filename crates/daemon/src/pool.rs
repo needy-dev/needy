@@ -305,7 +305,9 @@ impl Pool {
       .get_or_try_init(|| async {
         let (mut handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match saved.driver.as_str() {
           "native" => (self.native.machine(), Some(self.native.clone())),
-          "runner" => (runner_handle(&saved.id, &self.links, saved.sftp.clone(), saved.workspace.clone()), None),
+          "runner" => {
+            (runner_handle(&saved.id, &self.links, saved.sftp.clone(), saved.workspace.clone(), config.unavailable_timeout.into()), None)
+          }
           "linux-container" => {
             let driver = self.container.as_ref().context("the original container executor's engine is unavailable")?;
             (driver.reconnect(&saved.id, saved.sftp.clone(), saved.workspace.clone()).await?, Some(driver.clone()))

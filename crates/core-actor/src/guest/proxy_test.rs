@@ -63,3 +63,11 @@ fn a_command_the_actor_has_keeps_the_path_it_ran() {
 
   assert_eq!(argv, strings(&["/usr/bin/git", "status"]));
 }
+
+// A protocol error may be reported after the executor accepted a request,
+// before the proxy receives Started. It cannot be called a policy refusal.
+#[test]
+fn a_protocol_failure_after_dispatch_is_an_unknown_outcome() {
+  let error = needy_api_client::Error::from(tonic::Status::internal("invalid first task response"));
+  assert_eq!(refused(&error), Some(255));
+}
