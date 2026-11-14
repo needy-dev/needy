@@ -105,6 +105,14 @@ impl Piped {
       });
     }
   }
+
+  // A dead connector surfaces as an IO error (EPIPE on write, reset on read)
+  // before its exit is observed, so error results check for it too.
+  fn observe_exit_on_error<T>(&mut self, result: &Poll<std::io::Result<T>>) {
+    if matches!(result, Poll::Ready(Err(_))) {
+      self.observe_exit();
+    }
+  }
 }
 
 impl Drop for Piped {
@@ -121,21 +129,31 @@ impl AsyncRead for Piped {
     if matches!(result, Poll::Ready(Ok(()))) && before == buf.filled().len() {
       this.observe_exit();
     }
+    this.observe_exit_on_error(&result);
     result
   }
 }
 
 impl AsyncWrite for Piped {
   fn poll_write(self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<std::io::Result<usize>> {
-    Pin::new(&mut self.get_mut().input).poll_write(cx, buf)
+    let this = self.get_mut();
+    let result = Pin::new(&mut this.input).poll_write(cx, buf);
+    this.observe_exit_on_error(&result);
+    result
   }
 
   fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().input).poll_flush(cx)
+    let this = self.get_mut();
+    let result = Pin::new(&mut this.input).poll_flush(cx);
+    this.observe_exit_on_error(&result);
+    result
   }
 
   fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-    Pin::new(&mut self.get_mut().input).poll_shutdown(cx)
+    let this = self.get_mut();
+    let result = Pin::new(&mut this.input).poll_shutdown(cx);
+    this.observe_exit_on_error(&result);
+    result
   }
 }
 
