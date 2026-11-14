@@ -52,3 +52,15 @@ fn unavailable_is_not_proof_that_a_command_was_not_started() {
   ));
   assert!(confirmed.not_started());
 }
+
+#[test]
+fn a_closed_invocation_can_confirm_that_a_late_command_never_started() {
+  let confirmed = super::Error::from(crate::diagnostic::with_status(
+    tonic::Status::failed_precondition("the invocation ended"),
+    needy_api_proto::v1::ErrorDiagnostic {
+      reason: "process.not_started".into(),
+      facts: Default::default(),
+    },
+  ));
+  assert!(confirmed.not_started());
+}

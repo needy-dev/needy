@@ -222,9 +222,9 @@ fn exit_code(exit: &Exit) -> i32 {
 /// start. Other errors are errors.
 fn refused(error: Error, format: Output, ctx: &Context) -> Result<i32> {
   let code = match error.kind() {
+    _ if error.not_started() => 125,
     Kind::Denied => 126,
     Kind::Failed => 127,
-    Kind::Unavailable if error.not_started() => 125,
     _ => return Err(error.into()),
   };
   let message = error.to_string();

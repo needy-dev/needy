@@ -266,10 +266,12 @@ fn command(path: &str, args: &[String]) -> Vec<String> {
 /// shell's: 126 when a rule or an injected fault refuses the command, 127
 /// when it cannot start. Other errors are the proxy's own.
 fn refused(error: &needy_api_client::Error) -> Option<i32> {
+  if error.not_started() {
+    return Some(125);
+  }
   match error.kind() {
     Kind::Denied => Some(126),
     Kind::Failed => Some(127),
-    Kind::Unavailable if error.not_started() => Some(125),
     // A transport failure after dispatch may have lost only the response.
     Kind::Unavailable | Kind::Ended => Some(signals::ENDED),
     _ => None,
