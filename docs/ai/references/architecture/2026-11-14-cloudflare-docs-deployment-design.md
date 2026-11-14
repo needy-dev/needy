@@ -54,12 +54,27 @@ this approval gate. A workflow comment alone does not enforce approval.
 
 ## Verification
 
-Evidence level: local configuration and build checks until the deployment
-runs and live URL probes are recorded here.
+Evidence level: successful GitHub Actions deployments and live HTTP probes,
+recorded on 2026-11-14.
 
 - Frozen dependency installation, production build, and Vue typecheck passed.
-- All 254 existing frontend tests passed.
+- All 254 existing frontend tests passed. Wrangler 4.161.0 dry-run read the
+  22 production assets and completed without an error.
 - The workflow linter passes with one stale action-schema warning excluded:
   `allow-unsafe-pr-checkout` exists in checkout v6's current
   [action definition](https://github.com/actions/checkout/blob/d23441a48e516b6c34aea4fa41551a30e30af803/action.yml).
-- Production and PR preview deployment evidence will follow the first live runs.
+- [Production deployment](https://github.com/needy-dev/needy/actions/runs/43590003748)
+  succeeded. Both production hosts served the homepage, JavaScript, CSS,
+  and `/studio` with HTTP 200. Unknown paths served the SPA HTML fallback.
+- [Test PR 10](https://github.com/needy-dev/needy/pull/10) added only a temporary
+  static marker. Its [prepare run](https://github.com/needy-dev/needy/actions/runs/43590063057)
+  succeeded. The deploy job waited for the `Preview` environment review.
+- After approval, the [preview deployment](https://github.com/needy-dev/needy/actions/runs/43590080162)
+  succeeded and replaced the approval comment with both preview links.
+  The version URL and PR alias served the marker and `/studio` HTML.
+  Neither production hostname served the marker. The test PR was closed
+  without merging, and its branch was deleted.
+
+These probes verify asset delivery, SPA fallback, the approval gate, and preview
+separation from production. Browser rendering was not inspected because the
+browser control host was unavailable. This run did not exercise a fork PR.
