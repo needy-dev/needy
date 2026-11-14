@@ -101,14 +101,17 @@ impl Locked {
     })
   }
 
+  // TODO(windows-acl): persistence remains unsupported until owner-approved ACL
+  // support can enforce private storage; Unix modes do not provide Windows ACLs.
+  #[cfg(not(unix))]
+  fn open_inner(_: &Path) -> Result<Self> {
+    anyhow::bail!("private configuration persistence on Windows requires ACL support; see CLI configuration specification")
+  }
+
+  #[cfg(unix)]
   fn open_inner(path: &Path) -> Result<Self> {
     let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
-    #[cfg(unix)]
     needy_api_server::create_private_dir(dir).with_context(|| format!("cannot create configuration directory {}", dir.display()))?;
-    // TODO(windows-acl): persistence remains unsupported until owner-approved ACL
-    // support can enforce private storage; Unix modes do not provide Windows ACLs.
-    #[cfg(not(unix))]
-    anyhow::bail!("private configuration persistence on Windows requires ACL support; see CLI configuration specification");
     let lock_path = path.with_extension("yaml.lock");
     reject_symlink(&lock_path)?;
     let mut options = std::fs::OpenOptions::new();
@@ -265,7 +268,7 @@ pub fn read_secret(path: &Path) -> Result<String> {
     use std::os::unix::fs::OpenOptionsExt as _;
     options.custom_flags(libc::O_NOFOLLOW);
   }
-  let mut file = options.open(path).context("cannot open private credential file")?;
+  let file = options.open(path).context("cannot open private credential file")?;
   let metadata = file.metadata().context("cannot inspect private credential file")?;
   anyhow::ensure!(metadata.is_file(), "credential file must be a regular file");
   #[cfg(unix)]
@@ -277,11 +280,15 @@ pub fn read_secret(path: &Path) -> Result<String> {
   }
   #[cfg(not(unix))]
   anyhow::bail!("private credential file reads on Windows require explicit ACL support");
-  let mut text = String::new();
-  std::io::Read::read_to_string(&mut file, &mut text).context("cannot read private credential file")?;
-  let secret = text.trim_end_matches(['\r', '\n']);
-  anyhow::ensure!(!secret.is_empty() && !secret.contains(['\r', '\n', '\0']), "credential file must contain one nonempty credential");
-  Ok(secret.to_owned())
+  #[cfg(unix)]
+  {
+    let mut file = file;
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut file, &mut text).context("cannot read private credential file")?;
+    let secret = text.trim_end_matches(['\r', '\n']);
+    anyhow::ensure!(!secret.is_empty() && !secret.contains(['\r', '\n', '\0']), "credential file must contain one nonempty credential");
+    Ok(secret.to_owned())
+  }
 }
 
 pub fn invalid(error: needy_config::global::Error, path: &Path) -> anyhow::Error {
