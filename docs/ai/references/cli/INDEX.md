@@ -12,3 +12,6 @@ The `needy` command surface, exec streams, traces and reports.
 | 2026-11-14 | [CLI lifecycle implementation and evidence](2026-11-14-cli-lifecycle-evidence.md) | evidence |
 | 2026-11-14 | [CLI installation and enrollment feedback](2026-11-14-installation-feedback-evidence.md) | evidence |
 | 2026-11-15 | [Setup locations, workspace checks, and coverage](2026-11-15-setup-locations-and-coverage-evidence.md) | evidence |
+| 2026-11-14 | [Starting a run from the execution machine](2026-11-14-client-bound-run-usage-discussion.md) | discussion |
+| 2026-11-15 | [Configuration authority and when changes take effect](2026-11-15-configuration-authority-and-lifecycle-discussion.md) | discussion |
+| 2026-11-15 | [Client execution and actor lifecycle (approved contract)](../architecture/2026-11-15-client-execution-and-actor-lifecycle-spec.md) | spec |
