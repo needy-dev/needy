@@ -1,0 +1,49 @@
+# Source: https://github.com/moeru-ai/airi/blob/936008404e1e48461f531ebf51b407ed8b31576d/.github/workflows/deploy-cloudflare-workers.yml
+name: Cloudflare Workers
+
+on:
+  push:
+    branches:
+      - 'main'
+
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy - docs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    environment:
+      name: Production
+      url: https://needy.ayaka.io/
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/setup@v2
+        with:
+          version: 12.18.0
+          working-directory: apps/docs
+          runtime: node@^26.12.1
+          cache: true
+          install: false
+      # NOTICE(wrangler-install): Keep Wrangler outside the app's dependency graph.
+      # wrangler-action reuses the global installation without changing the lockfile.
+      # Reference: https://github.com/cloudflare/wrangler-action/issues/181#issuecomment-2127990708
+      - run: pnpm i -g wrangler@4
+      - run: pnpm --dir apps/docs install --frozen-lockfile
+      - name: Build docs
+        run: pnpm --dir apps/docs run build
+
+      - uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy -c ./apps/docs/wrangler.toml
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}

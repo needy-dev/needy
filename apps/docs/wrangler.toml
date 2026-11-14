@@ -1,0 +1,14 @@
+# Source: https://github.com/moeru-ai/airi/blob/936008404e1e48461f531ebf51b407ed8b31576d/apps/stage-web/wrangler.toml
+# Reference: https://developers.cloudflare.com/workers/static-assets/get-started/
+name = "needy"
+compatibility_date = "2026-11-14"
+workers_dev = true
+preview_urls = true
+
+[[routes]]
+pattern = "needy.ayaka.io"
+custom_domain = true
+
+[assets]
+directory = "./dist"
+not_found_handling = "single-page-application"

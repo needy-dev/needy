@@ -42,9 +42,22 @@ pnpm install
 pnpm dev                    # the page
 pnpm test                   # the matcher and rules port
 pnpm typecheck
+pnpm build                  # the static site in dist/
 pnpm banners                # all banners; BANNERS=hero,routing for some
 STILLS=1 pnpm banners       # a PNG of the end of each step, in .tmp/banners/
 ```
 
 `pnpm banners` needs Google Chrome (or `CHROME=/path/to/chrome`) and
 `img2webp` (`brew install webp`).
+
+## Cloudflare Workers
+
+The site deploys to <https://needy.ayaka.io/> and
+<https://needy.ayakamoe.workers.dev/>. `wrangler.toml` serves `dist/` with an
+SPA fallback for `/studio`.
+
+The production and PR preview workflows follow airi. The repository needs
+`CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` secrets. The `Preview`
+GitHub environment requires maintainer approval before it builds PR code.
+See the [deployment reference](../../docs/ai/references/architecture/2026-11-14-cloudflare-docs-deployment-design.md)
+for the workflow split and verification evidence.
