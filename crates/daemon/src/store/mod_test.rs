@@ -348,7 +348,11 @@ async fn a_database_another_schema_wrote_is_refused() {
 async fn a_runner_registry_from_before_capabilities_migrates_and_takes_them_at_the_next_heartbeat() {
   let (store, dir) = store().await;
   joined(&store, "mac").await;
-  migration::Migrator::down(&store.db, Some(2)).await.unwrap();
+  // Roll back through the driver migration that clears old capability names,
+  // independently of later additions to the registry schema.
+  let migrations = migration::Migrator::migrations();
+  let first = migrations.iter().position(|m| m.name() == "m20261112_000090_drivers").unwrap();
+  migration::Migrator::down(&store.db, Some((migrations.len() - first) as u32)).await.unwrap();
   drop(store);
 
   let store = Store::open(&dir.path().join("state.db")).await.unwrap();

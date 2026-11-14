@@ -1,7 +1,9 @@
 //! `needy run`: create, list, stop runs and read an actor's console.
 
 mod chaos;
+mod execution;
 mod report;
+mod snapshot;
 
 use std::path::PathBuf;
 
@@ -32,6 +34,12 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
+  /// Internal same-account process owner for one client-bound invocation.
+  #[command(hide = true)]
+  ExecutionHolder {
+    #[arg(long)]
+    startup_file: PathBuf,
+  },
   /// Execute through a run's routing and bound executors.
   Exec(super::proc::exec::RunArgs),
   /// Render a run report online or from this machine's trace store.
@@ -54,8 +62,10 @@ enum Command {
     /// Profile YAML; relative paths in it resolve against its directory. A
     /// bare NAME, with no path separator and no `.yaml`, is
     /// `profiles/NAME.yaml` in the config directory (`NEEDY_CONFIG_DIR`).
-    #[arg(long)]
+    #[arg(short = 'f', long)]
     profile: PathBuf,
+    #[command(flatten)]
+    overrides: snapshot::Overrides,
     /// Runs in one group share executors whose key uses `{group}`.
     /// Defaults to the run ID.
     #[arg(long, default_value = "", hide_default_value = true)]
@@ -65,9 +75,6 @@ enum Command {
     name: String,
     /// Arguments appended to the profile's driving program
     /// (`actor.command`), as in `-- --continue`.
-    // TODO(run-ux): no flag replaces the driving program; a profile that
-    // `extends` another sets its own `actor.command`. Reopen on an owner
-    // request for a replacement.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
   },
@@ -266,6 +273,7 @@ fn actor_state(value: i32) -> Result<Option<ActorState>> {
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let fail = needy_api_client::Error::from;
   match args.command {
+    Command::ExecutionHolder { startup_file } => return execution::serve(&startup_file).await,
     Command::Exec(args) => return super::proc::exec::run_in_run(args, ctx).await,
     Command::Report(args) => return report::run(args, ctx).await,
     Command::Chaos(args) => return chaos::run(args, ctx).await,
@@ -274,6 +282,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       interactive,
       detach_keys,
       profile,
+      overrides,
       group,
       name,
       args,
@@ -286,16 +295,24 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       // Refuse invalid keys before creating a run that the caller cannot leave.
       relay::DetachKeys::parse(&detach_keys)?;
       let profile = ctx.profile(&profile)?;
-      // TODO(cli-local-workspace): this machine's current directory as the
-      // run's workspace needs this machine to join as a runner and the
-      // profile to mount from `executor:laptop`; deferred by the owner
-      // (2026-11-12), see the candidate in
-      // `docs/ai/references/cli/2026-11-09-cli-exec-and-report-design.md`.
       let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
       // The daemon may run on another machine: it gets the profile and its
       // recipe as text, not paths to read.
-      let resolved = needy_config::profile::resolve(&needy_config::Source::file(&path))?;
-      let connection = ctx.connect().await?;
+      let resolved = snapshot::resolve(&path, overrides)?;
+      let selection = crate::connection::resolve(ctx)?;
+      let connection = selection.connect().await?;
+      let loaded = needy_config::profile::load(&needy_config::Source::text(resolved.yaml.clone(), PathBuf::new()))?;
+      let needs_client = loaded.executors.values().any(|e| matches!(e.runner, Some(needy_config::profile::RunnerSelector::Client)));
+      let mut holder = if needs_client {
+        Some(execution::launch(ctx, &selection, &connection).await?)
+      } else {
+        None
+      };
+      // Once a create can reach control, its outcome can be unknown. Control
+      // owns the bound holder's lifetime; an unused capability expires there.
+      if let Some(holder) = &mut holder {
+        holder.keep();
+      }
       let run = connection
         .runs()
         .create_run(CreateRunRequest {
@@ -307,6 +324,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           actor_args: args,
           tty: tty.then(relay::window),
           wait_for_attach: interactive,
+          client_execution: holder.as_ref().map(|h| h.capability.clone()).unwrap_or_default(),
         })
         .await
         .map_err(fail)?

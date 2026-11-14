@@ -11,6 +11,8 @@ use serde::de::{self, Deserializer};
 /// created (`needy_daemon`'s scheduler).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunnerSelector {
+  /// The execution capability supplied with this creation. Never a named runner.
+  Client,
   Name(String),
   /// Never empty.
   Labels(Vec<LabelMatch>),
@@ -46,6 +48,7 @@ impl fmt::Display for LabelMatch {
 impl fmt::Display for RunnerSelector {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
+      Self::Client => f.write_str("creating client"),
       Self::Name(name) => write!(f, "runner {name}"),
       Self::Labels(labels) => {
         let labels: Vec<String> = labels.iter().map(LabelMatch::to_string).collect();
@@ -79,6 +82,13 @@ impl std::str::FromStr for LabelMatch {
 enum Written {
   Name(String),
   Labels(Labels),
+  Client(Client),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Client {
+  client: bool,
 }
 
 #[derive(Deserialize)]
@@ -93,8 +103,10 @@ impl<'de> Deserialize<'de> for RunnerSelector {
     // the value is read as YAML first and each form gets its own message.
     let value = serde_yaml::Value::deserialize(deserializer)?;
     let written: Written = serde_yaml::from_value(value)
-      .map_err(|_| de::Error::custom("a runner selector is a runner's name or { labels: [KEY, KEY=VALUE, ...] }"))?;
+      .map_err(|_| de::Error::custom("a runner selector is a runner's name, { labels: [KEY, KEY=VALUE, ...] }, or { client: true }"))?;
     match written {
+      Written::Client(Client { client: true }) => Ok(Self::Client),
+      Written::Client(_) => Err(de::Error::custom("client selection requires { client: true }")),
       Written::Name(name) if name.is_empty() => Err(de::Error::custom("a runner's name is empty")),
       Written::Name(name) => Ok(Self::Name(name)),
       Written::Labels(Labels { labels }) if labels.is_empty() => {

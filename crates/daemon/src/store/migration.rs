@@ -15,6 +15,7 @@ impl MigratorTrait for Migrator {
       Box::new(RunnerCapabilities),
       Box::new(Drivers),
       Box::new(ClientAccess),
+      Box::new(ClientExecutions),
     ]
   }
 }
@@ -419,5 +420,32 @@ impl MigrationTrait for ClientAccess {
       manager.alter_table(Table::alter().table(Alias::new(table)).drop_column(Alias::new("access")).to_owned()).await?;
     }
     Ok(())
+  }
+}
+
+/// Private run bindings are distinct from shared runner enrollment metadata.
+struct ClientExecutions;
+impl MigrationName for ClientExecutions {
+  fn name(&self) -> &str {
+    "m20261115_000010_client_executions"
+  }
+}
+#[async_trait::async_trait]
+impl MigrationTrait for ClientExecutions {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .create_table(
+        Table::create()
+          .table(Alias::new("client_executions"))
+          .col(ColumnDef::new(Alias::new("holder")).text().not_null().primary_key())
+          .col(ColumnDef::new(Alias::new("invocation")).text().not_null().unique_key())
+          .col(ColumnDef::new(Alias::new("run")).text().unique_key())
+          .col(ColumnDef::new(Alias::new("created_ms")).big_integer().not_null())
+          .to_owned(),
+      )
+      .await
+  }
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.drop_table(Table::drop().table(Alias::new("client_executions")).to_owned()).await
   }
 }

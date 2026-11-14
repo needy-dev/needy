@@ -254,7 +254,7 @@ pub fn runner_report(request: v1::HeartbeatRequest) -> Result<RunnerReport, Erro
   })
 }
 
-fn runner_host(host: v1::RunnerHost) -> RunnerHost {
+pub fn runner_host(host: v1::RunnerHost) -> RunnerHost {
   RunnerHost {
     os: host.os,
     arch: host.arch,
@@ -355,6 +355,7 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
       cols: w.cols,
     }),
     wait_for_attach: request.wait_for_attach,
+    client_execution: request.client_execution,
   })
 }
 

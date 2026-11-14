@@ -482,3 +482,29 @@ async fn a_runs_life_is_written_to_state_db_and_listed_after_a_restart() {
   assert_eq!((sleep.state, sleep.instance.as_str()), (ProcessState::Ended, here.as_str()));
   assert_eq!(sleep.origin, Some(needy_core::types::Origin::Cli));
 }
+
+#[tokio::test]
+async fn client_executor_without_creation_capability_fails_closed() {
+  let started = testing::daemon().await;
+  let profile = "actor: {driver: linux-firecracker}\nexecutors:\n  client: {driver: native, runner: {client: true}}\n";
+  let error = Runs::create(&started.daemon, new_run(profile, started.dir.path())).await.unwrap_err();
+  assert!(error.to_string().contains("client execution capability is required"), "{error}");
+}
+
+#[tokio::test]
+async fn client_execution_capability_is_private_and_cannot_be_reused() {
+  use needy_api_server::control::{RunnerHost, Runners};
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let reserved = Runs::prepare_client_execution(daemon, RunnerHost::default()).await.unwrap();
+  assert!(Runners::runners(daemon).await.unwrap().is_empty(), "a holder is not a shared runner");
+  let profile = "actor: {driver: linux-firecracker}\nexecutors:\n  here: {driver: native, runner: {client: true}}\n";
+  let mut request = new_run(profile, started.dir.path());
+  request.client_execution = reserved.capability;
+  // No holder has connected. The first create still consumes its capability;
+  // a second invocation cannot acquire the same account binding.
+  let first = Runs::create(daemon, request.clone()).await.unwrap_err();
+  assert!(first.to_string().contains("client execution holder is not connected"), "{first}");
+  let second = Runs::create(daemon, request).await.unwrap_err();
+  assert!(second.to_string().contains("capability was used"), "{second}");
+}

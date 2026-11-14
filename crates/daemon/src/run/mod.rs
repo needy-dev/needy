@@ -488,7 +488,13 @@ impl Daemon {
   /// Creates a run; a failure is kept as a failed run and recorded
   /// as `run.fail`.
   async fn create_run(&self, request: NewRun) -> Result<Arc<Run>> {
-    let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let id = if request.client_execution.is_empty() {
+      uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+    } else {
+      let invocation = self.state.client_execution_invocation(&request.client_execution).await?;
+      self.state.bind_client_execution(&request.client_execution, &invocation, now_ms()).await?;
+      invocation
+    };
     let created_ms = now_ms();
     // The run's directory is private; the trace's JSONL sink would
     // otherwise create it first.
@@ -508,7 +514,19 @@ impl Daemon {
     };
     self.runs.insert(run.clone());
     self.save_run(&run).await;
-    let provisioned = self.provision(&run).await.and_then(|()| unwinding(&run));
+    let bound = async {
+      let client_selected = run.profile.executors.values().any(|e| matches!(e.runner, Some(needy_config::profile::RunnerSelector::Client)));
+      if client_selected {
+        if request.client_execution.is_empty() {
+          bail!("client execution capability is required");
+        }
+      } else if !request.client_execution.is_empty() {
+        bail!("a client execution capability was supplied but no executor selects the creating client");
+      }
+      self.provision(&run).await
+    }
+    .await;
+    let provisioned = bound.and_then(|()| unwinding(&run));
     if let Err(error) = provisioned {
       self.rollback(&run, &request, &error).await;
       return Err(error);
@@ -622,10 +640,25 @@ impl Daemon {
     };
     actor::check_host(self, run).await?;
     files::check_host_paths(run)?;
+    let client_holder = self.state.client_execution_for_run(&run.id).await?;
+    // NOTICE: this bounds initial helper startup only. A bound executor's
+    // disconnection deadline during commands belongs to the exec policy.
+    if let Some(holder) = &client_holder
+      && self.links.connected(holder, std::time::Duration::from_secs(10)).await.is_none()
+    {
+      bail!("client execution holder is not connected; no control-host fallback is allowed");
+    }
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
-      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
-        .with_context(|| format!("executor {exec_name}"))?;
+      let placement = if matches!(config.runner, Some(needy_config::profile::RunnerSelector::Client)) {
+        if config.driver != needy_config::profile::ExecutorDriver::Native {
+          bail!("executor {exec_name}: client execution supports native executors; remote container creation is not supported");
+        }
+        Placement::Runner(client_holder.clone().context("client execution capability is required")?)
+      } else {
+        schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
+          .with_context(|| format!("executor {exec_name}"))?
+      };
       let site = self.site(&placement, config.driver).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
       sites.push(site);
     }
@@ -640,7 +673,12 @@ impl Daemon {
       ]);
       let spec = Spec {
         name: exec_name.clone(),
-        key: format!("{exec_name}@{key}"),
+        // A creation capability is an account binding, so a profile/group
+        // key cannot share its instance with another creation's holder.
+        key: match (&config.runner, &client_holder) {
+          (Some(needy_config::profile::RunnerSelector::Client), Some(holder)) => format!("{exec_name}@{key}@{holder}"),
+          _ => format!("{exec_name}@{key}"),
+        },
         run: run.id.clone(),
         config: config.clone(),
         base: run.profile.base_dir.clone(),
@@ -848,6 +886,13 @@ impl Daemon {
         None => self.end_on_control_host(run, instance).await,
       }
     }
+    // Closing this private link makes an online holder reconnect and learn
+    // its invocation ended, even when no user processes remain on it.
+    match self.state.client_execution_for_run(&run.id).await {
+      Ok(Some(holder)) => self.links.close(&holder),
+      Ok(None) => {}
+      Err(error) => tracing::warn!("run {}: cannot read its client holder for cleanup: {error}", run.id),
+    }
     for instance in instances.values() {
       self.advance_instance(&run.id, &store::executor_instance(&run.id, &instance.name), InstanceState::Released, now_ms()).await;
       self.pool.release(instance).await;
@@ -987,6 +1032,20 @@ fn load_profile(id: &str, request: &NewRun) -> Result<Profile> {
 
 #[async_trait::async_trait]
 impl Runs for Daemon {
+  async fn prepare_client_execution(
+    &self,
+    host: needy_api_server::control::RunnerHost,
+  ) -> Result<needy_api_server::control::ClientExecution, ControlError> {
+    self.admit_work()?;
+    let (holder, run, capability) = self.state.prepare_client_execution(now_ms()).await.map_err(|e| failed(e.into()))?;
+    self.runner_hosts.lock().unwrap_or_else(|e| e.into_inner()).insert(holder.clone(), host);
+    Ok(needy_api_server::control::ClientExecution {
+      run,
+      holder,
+      capability: capability.into_string(),
+    })
+  }
+
   async fn create(&self, request: NewRun) -> Result<RunInfo, ControlError> {
     // Shutdown waits for creates in progress to end or unwind.
     let run = self

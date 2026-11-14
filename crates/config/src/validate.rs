@@ -54,6 +54,9 @@ impl fmt::Display for Finding {
 /// mappings it defines.
 pub fn profile(profile: &Profile) -> Vec<Finding> {
   let mut findings = Vec::new();
+  if matches!(profile.actor.runner, Some(crate::profile::RunnerSelector::Client)) {
+    findings.push(Finding::error("actor.runner cannot select the creating client; client selection is for executors"));
+  }
   match (profile.actor.driver, &profile.actor.container) {
     (ActorDriver::LinuxContainer, None | Some(ContainerActor { oci_runtime: None, .. })) => findings
       .push(Finding::error("actor.container: a linux-container actor needs `container: { oci_runtime: runc }` (or `runsc`, gVisor)")),
@@ -77,6 +80,11 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
     findings.push(Finding::error(format!("unknown names unknown executor {name:?}")));
   }
   for (name, executor) in &profile.executors {
+    if matches!(executor.runner, Some(crate::profile::RunnerSelector::Client)) && executor.driver != ExecutorDriver::Native {
+      findings.push(Finding::error(format!(
+        "executors.{name}: client execution supports native executors; remote container creation is not supported"
+      )));
+    }
     if executor.container.is_some() && executor.driver != ExecutorDriver::LinuxContainer {
       findings.push(Finding::error(format!(
         "executors.{name} has `container:` options but its driver is {}; add `driver: linux-container`",

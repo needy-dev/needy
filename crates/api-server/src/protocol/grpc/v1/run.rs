@@ -38,6 +38,20 @@ impl<S> Adapter<S> {
 
 #[tonic::async_trait]
 impl<S: Runs> RunService for Adapter<S> {
+  async fn prepare_client_execution(
+    &self,
+    request: Request<needy_api_proto::v1::PrepareClientExecutionRequest>,
+  ) -> Result<Response<needy_api_proto::v1::PrepareClientExecutionResponse>, Status> {
+    self.operator(&request, "actors cannot reserve client execution")?;
+    let host = request.into_inner().host.ok_or_else(|| Status::invalid_argument("client host is required"))?;
+    let reserved = self.runs.prepare_client_execution(domain::runner_host(host)).await?;
+    Ok(Response::new(needy_api_proto::v1::PrepareClientExecutionResponse {
+      holder: reserved.holder,
+      capability: reserved.capability,
+      run_id: reserved.run,
+    }))
+  }
+
   async fn create_run(&self, request: Request<CreateRunRequest>) -> Result<Response<CreateRunResponse>, Status> {
     let caller = self.operator(&request, "actors cannot create runs")?;
     let mut request = domain::new_run(request.into_inner()).map_err(ControlError::from)?;

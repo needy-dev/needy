@@ -136,7 +136,7 @@ pub type Outputs = Pin<Box<dyn Stream<Item = Result<ExecOutput>> + Send>>;
 // ------------------------------------------------------------- runs
 
 /// A run to create from a profile.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct NewRun {
   /// The profile, self-contained: no `extends` to read, host paths
   /// absolute.
@@ -158,6 +158,19 @@ pub struct NewRun {
   pub tty: Option<WindowSize>,
   /// Start only after the first terminal client subscribed (`run create -it`).
   pub wait_for_attach: bool,
+  /// One-use execution capability supplied by the creating client.
+  pub client_execution: String,
+}
+
+impl std::fmt::Debug for NewRun {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("NewRun")
+      .field("profile_name", &self.profile_name)
+      .field("name", &self.name)
+      .field("group", &self.group)
+      .field("client_execution", &(!self.client_execution.is_empty()).then_some("<redacted>"))
+      .finish_non_exhaustive()
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,8 +353,19 @@ impl Default for StopMode {
   }
 }
 
+/// A reserved private execution holder, usable by exactly one creation.
+pub struct ClientExecution {
+  pub run: String,
+  pub holder: String,
+  pub capability: String,
+}
+
 #[async_trait::async_trait]
 pub trait Runs: Send + Sync + 'static {
+  /// Reserve an execution holder using the creating client's admitted access.
+  async fn prepare_client_execution(&self, _host: RunnerHost) -> Result<ClientExecution> {
+    Err(ControlError::Unavailable("client execution is unavailable on this service".into()))
+  }
   async fn create(&self, request: NewRun) -> Result<RunInfo>;
   /// A running, finished, stopped or failed run by ID.
   async fn get(&self, id: &str) -> Result<RunInfo>;

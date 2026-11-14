@@ -178,10 +178,9 @@ chaos:
     slow-sleep: { exec: "sleep *", delay: 1ms }
 "#;
 
-/// A profile the daemon refuses when it creates the run: its default
-/// executor does not exist.
-const BROKEN_PROFILE: &str =
-  "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker }\ndefault_executor: missing-executor\n";
+/// A locally valid profile the daemon cannot schedule: its actor runner
+/// has not joined. Static profile errors are rejected before submission.
+const BROKEN_PROFILE: &str = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker, runner: missing-executor }\n";
 
 fn create_run(home: &Home, profile: &str) -> String {
   let profile = home.write("profile.yaml", profile);
@@ -660,7 +659,7 @@ fn run_ls_shows_released_executors_and_why_a_run_failed() {
   );
   assert_eq!(rows[2][1..3], ["broken", "failed"]);
   let exit = rows[2].last().unwrap();
-  assert!(exit.starts_with("invalid profile: ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
+  assert!(exit.starts_with("actor: ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
 }
 
 #[test]
@@ -3577,3 +3576,112 @@ fn run_execution_keeps_every_word_after_the_separator_in_argv() {
   let missing_separator = home.run(&["run", "exec", "demo", "echo", "hi"]);
   assert_eq!(missing_separator.status.code(), Some(2));
 }
+
+#[test]
+fn client_execution_automatically_uses_creating_account_and_cleans_up() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("client.yaml", "actor: {driver: linux-firecracker}\nexecutors:\n  workstation: {driver: native, runner: {client: true}, workspace: '~'}\ncommands:\n  - {match: '**', to: workstation}\n");
+  let created = home.run(&["run", "create", "-f", profile.to_str().unwrap()]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  let run = String::from_utf8(created.stdout).unwrap().trim().to_string();
+  let output = home.run(&["run", "exec", &run, "--", "id", "-u"]);
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), unsafe { libc::getuid() }.to_string());
+  let shared = home.run(&["runner", "ls", "-o", "json"]);
+  assert!(shared.status.success(), "{}", stderr(&shared));
+  assert_eq!(serde_json::from_slice::<serde_json::Value>(&shared.stdout).unwrap(), serde_json::json!([]));
+  let stopped = home.run(&["run", "stop", &run, "--now"]);
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  let holders = home.path().join("run/client-executions");
+  let deadline = Instant::now() + Duration::from_secs(12);
+  while holders.read_dir().unwrap().next().is_some() && Instant::now() < deadline {
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  assert!(holders.read_dir().unwrap().next().is_none(), "run stop must reclaim its helper");
+}
+
+#[test]
+fn local_creation_reads_fresh_inheritance_and_overrides_only_the_snapshot() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let base = home.write("base.yaml", "actor: {driver: linux-firecracker, command: 'sh -l', env: {BASE: first, KEEP: inherited}}\n");
+  let source = "extends: base.yaml\nactor: {env: {CHILD: present}}\n";
+  let profile = home.write("local.yaml", source);
+  let create = |extra: &[&str]| {
+    let mut args = vec!["run", "create", "-f", profile.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    let output = home.run(&args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run = stdout(&output).trim().to_string();
+    let snapshot = std::fs::read_to_string(home.path().join("state/runs").join(&run).join("profile.yaml")).unwrap();
+    (run, serde_yaml::from_str::<serde_yaml::Value>(&snapshot).unwrap())
+  };
+  let (first, initial) = create(&[]);
+  assert_eq!(initial["actor"]["env"]["BASE"], "first");
+  std::fs::write(&base, "actor: {driver: linux-firecracker, command: 'sh -l', env: {BASE: edited, KEEP: inherited}}\n").unwrap();
+  let (second, changed) = create(&[
+    "--workspace",
+    "~/work",
+    "--env",
+    "BASE=temporary",
+    "--entry-command",
+    "printf 'two words'",
+    "--",
+    "appended",
+  ]);
+  assert_eq!(changed["actor"]["env"]["BASE"], "temporary");
+  assert_eq!(changed["actor"]["env"]["KEEP"], "inherited");
+  assert_eq!(changed["actor"]["env"]["CHILD"], "present");
+  assert_eq!(changed["actor"]["workspace"]["path"], "~/work");
+  assert_eq!(changed["actor"]["command"], serde_yaml::to_value(["printf", "two words"]).unwrap());
+  assert_eq!(std::fs::read_to_string(&profile).unwrap(), source);
+  let (third, fresh) = create(&[]);
+  assert_eq!(fresh["actor"]["env"]["BASE"], "edited");
+  for run in [first, second, third] {
+    assert!(home.run(&["run", "stop", &run, "--now"]).status.success());
+  }
+}
+
+#[test]
+fn simultaneous_client_invocations_do_not_share_a_group_pool_binding() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("client.yaml", "actor: {driver: linux-firecracker}\nexecutors:\n  workstation: {driver: native, runner: {client: true}, key: '{group}'}\ncommands:\n  - {match: '**', to: workstation}\n");
+  let create = || {
+    let output = home.run(&[
+      "run",
+      "create",
+      "-f",
+      profile.to_str().unwrap(),
+      "--group",
+      "same",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    stdout(&output).trim().to_owned()
+  };
+  let first = create();
+  let second = create();
+  let parent = |run: &str| {
+    let output = home.run(&[
+      "run",
+      "exec",
+      run,
+      "--",
+      "sh",
+      "-c",
+      "printf '%s' \"$PPID\"",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    stdout(&output)
+  };
+  let first_holder = parent(&first);
+  let second_holder = parent(&second);
+  assert_ne!(first_holder, second_holder, "creation capabilities must bind independent process holders");
+  assert!(home.run(&["run", "stop", &first, "--now"]).status.success());
+  assert_eq!(parent(&second), second_holder, "stopping another invocation must not replace this holder");
+  assert!(home.run(&["run", "stop", &second, "--now"]).status.success());
+}
+
+#[path = "client_execution/lost_create_reply.rs"]
+mod lost_create_reply;

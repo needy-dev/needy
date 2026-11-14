@@ -136,3 +136,30 @@ fn arguments_after_the_separator_reach_the_driving_program() {
   assert_eq!(args, ["--continue", "-m", "a b"]);
   assert!(tty && interactive);
 }
+
+#[test]
+fn create_accepts_local_file_and_temporary_overrides() {
+  use clap::Parser as _;
+  let line = Line::try_parse_from([
+    "run",
+    "create",
+    "-f",
+    "profile.yaml",
+    "--image",
+    "example.com/actor:trial",
+    "--workspace",
+    "/work",
+    "--env",
+    "MODE=trial",
+    "--entry-command",
+    "sh -l",
+    "--",
+    "extra",
+  ])
+  .unwrap();
+  let Command::Create { profile, args, .. } = line.command else {
+    panic!("not create")
+  };
+  assert_eq!(profile, PathBuf::from("profile.yaml"));
+  assert_eq!(args, ["extra"]);
+}

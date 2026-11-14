@@ -5,9 +5,12 @@ package needy.v1;
 
 import "needy/v1/diagnostic.proto";
 import "needy/v1/process.proto";
+import "needy/v1/runner.proto";
 
 // RunService manages runs: one actor and the executors bound to it.
 service RunService {
+  // Reserve a private execution holder for one creation. Not a shared runner.
+  rpc PrepareClientExecution(PrepareClientExecutionRequest) returns (PrepareClientExecutionResponse);
   rpc CreateRun(CreateRunRequest) returns (CreateRunResponse);
   rpc GetRun(GetRunRequest) returns (GetRunResponse);
   rpc ListRuns(ListRunsRequest) returns (ListRunsResponse);
@@ -60,6 +63,8 @@ message CreateRunRequest {
   // With tty: start the program after its first terminal client subscribed,
   // so `run create -it` also receives a program that exits immediately.
   bool wait_for_attach = 10;
+  // Single-use capability for executors selecting {client: true}.
+  string client_execution = 11;
 
   // The client's profile directory, which the daemon cannot read when it
   // runs on another machine.
@@ -359,4 +364,17 @@ enum FindingSeverity {
   FINDING_SEVERITY_UNSPECIFIED = 0;
   FINDING_SEVERITY_ERROR = 1;
   FINDING_SEVERITY_WARNING = 2;
+}
+
+// Local host facts; native execution always runs as the holder's OS account.
+message PrepareClientExecutionRequest {
+  RunnerHost host = 1;
+}
+message PrepareClientExecutionResponse {
+  // Internal identity for the existing outbound task transport.
+  string holder = 1;
+  // Used once by CreateRun and by this holder on Control/Task/Heartbeat.
+  string capability = 2;
+  // Reserved invocation identity; task inputs must name this run.
+  string run_id = 3;
 }

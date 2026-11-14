@@ -78,6 +78,8 @@ impl fmt::Display for Need {
 /// Why a selector names no runner.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unschedulable {
+  #[error("client execution capability is required; create this run from a client execution holder")]
+  ClientRequired,
   #[error("no runner is named {name}; {}", joined(.known))]
   NoSuchRunner { name: String, known: Vec<String> },
   #[error("runner {name} cannot host {need}: it has {capabilities}; {}", list_able(*.need, .able))]
@@ -113,6 +115,7 @@ impl Unschedulable {
   pub(crate) fn diagnostic(&self) -> needy_api_server::control::Diagnostic {
     let mut facts = BTreeMap::new();
     let reason = match self {
+      Self::ClientRequired => "execution.client_required",
       Self::NoSuchRunner { name, known } => {
         facts.insert("runner".into(), name.clone());
         facts.insert("candidates".into(), known.join(", "));
@@ -192,6 +195,7 @@ pub fn pick(selector: &RunnerSelector, need: Need, runners: &[Candidate]) -> Res
   let mut runners: Vec<&Candidate> = runners.iter().collect();
   runners.sort_by(|a, b| a.name.cmp(&b.name));
   match selector {
+    RunnerSelector::Client => Err(Unschedulable::ClientRequired),
     RunnerSelector::Name(name) => {
       let Some(runner) = runners.iter().find(|r| &r.name == name) else {
         return Err(Unschedulable::NoSuchRunner {
@@ -276,8 +280,14 @@ impl Daemon {
   /// Every runner that was not removed, and whether it is connected now.
   pub(crate) async fn candidates(&self) -> anyhow::Result<Vec<Candidate>> {
     let runners = self.state.runners().await.context("cannot read the runner registry")?;
+    let mut shared = Vec::new();
+    for runner in runners {
+      if self.state.client_execution(&runner.name).await?.is_none() {
+        shared.push(runner);
+      }
+    }
     Ok(
-      runners
+      shared
         .into_iter()
         .filter(|runner| runner.removed_ms.is_none())
         .map(|runner| Candidate {
