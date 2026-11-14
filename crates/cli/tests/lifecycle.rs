@@ -39,6 +39,24 @@ impl Drop for Serving {
   }
 }
 
+#[test]
+fn starting_an_uninstalled_service_reports_installation_guidance() {
+  let home = Home::new();
+  let output = home.command().args(["--diagnostic-format", "json", "daemon", "service", "start"]).output().unwrap();
+  assert!(!output.status.success());
+  assert!(output.stdout.is_empty());
+  let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+  assert_eq!(diagnostic["reason"], "service.not_installed");
+  assert!(
+    diagnostic["checks"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .any(|check| check["argv"] == serde_json::json!(["needy", "daemon", "service", "install"]))
+  );
+  assert!(!home.path().join("config/services").exists(), "inspection must not create an installation");
+}
+
 #[tokio::test]
 async fn network_control_keeps_private_management_discovery_and_cleans_its_record() {
   let home = Home::new();
@@ -73,4 +91,96 @@ async fn network_control_keeps_private_management_discovery_and_cleans_its_recor
   }
   assert!(!runtime.join("control.json").exists());
   assert!(!runtime.join("daemon.sock").exists());
+}
+
+#[test]
+fn service_install_snapshots_settings_without_starting_and_refuses_foreign_definition() {
+  let home = Home::new();
+  let bin = home.path().join("bin");
+  std::fs::create_dir(&bin).unwrap();
+  let calls = home.path().join("calls");
+  let name = if cfg!(target_os = "macos") {
+    "launchctl"
+  } else {
+    "systemctl"
+  };
+  // The OS-manager executable is the external boundary. No live manager or
+  // unrelated service is changed by this installation test.
+  needy_common::testing::write_executable(&bin.join(name), &format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$*\" in *show*) printf 'LoadState=not-found\\nActiveState=inactive\\nMainPID=0\\n';; esac\n", calls.display())).unwrap();
+  let output = home.command().env("PATH", &bin).args(["daemon", "service", "install"]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+  let calls = std::fs::read_to_string(calls).unwrap();
+  assert!(!calls.lines().any(|line| line.starts_with("bootstrap ") || line.split_whitespace().any(|word| word == "start")), "{calls}");
+  let receipt = home.path().join("config/services/user/registration.json");
+  let registration: serde_json::Value = serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
+  let snapshot = Path::new(registration["snapshot"].as_str().unwrap());
+  let saved: serde_yaml::Value = serde_yaml::from_slice(&std::fs::read(snapshot).unwrap()).unwrap();
+  assert_eq!(saved["current_context"].as_str(), Some("local"));
+  assert_eq!(saved["contexts"].as_mapping().unwrap().len(), 0);
+  assert_eq!(registration["path"].as_str().unwrap(), bin.to_str().unwrap());
+  let definition = Path::new(registration["definition"].as_str().unwrap());
+  std::fs::write(definition, "foreign service definition\n").unwrap();
+  let replaced = home.command().env("PATH", &bin).args(["daemon", "service", "install", "--replace"]).output().unwrap();
+  assert!(!replaced.status.success());
+  assert_eq!(std::fs::read_to_string(definition).unwrap(), "foreign service definition\n");
+  assert!(snapshot.exists(), "configuration snapshots survive failed replacement");
+}
+
+#[tokio::test]
+async fn service_readiness_does_not_adopt_a_healthy_manual_daemon() {
+  let home = Home::new();
+  let mut manual = Serving(home.command().args(["daemon", "serve"]).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap());
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while needy_daemon::discovery::read(&home.path().join("run")).is_err() {
+    assert!(manual.0.try_wait().unwrap().is_none());
+    assert!(Instant::now() < deadline);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let bin = home.path().join("bin");
+  std::fs::create_dir(&bin).unwrap();
+  let marker = home.path().join("manager-running");
+  let (name, script) = if cfg!(target_os = "macos") {
+    (
+      "launchctl",
+      format!(
+        "#!/bin/sh\ncase \"$2\" in gui/*/dev.needy.control) printf 'path = %s\\nprogram = %s\\n' '{}' '{}'; exit 0;; esac\nif [ -e '{}' ]; then printf '1 - dev.needy.control\\n'; fi\n",
+        home.path().join("Library/LaunchAgents/dev.needy.control.plist").display(),
+        env!("CARGO_BIN_EXE_needy"),
+        marker.display()
+      ),
+    )
+  } else {
+    (
+      "systemctl",
+      format!(
+        "#!/bin/sh\ncase \"$*\" in *FragmentPath*) printf 'FragmentPath=%s\\n' '{}'; exit 0;; esac\nif [ -e '{}' ]; then printf 'LoadState=loaded\\nActiveState=active\\nMainPID=1\\n'; else printf 'LoadState=not-found\\nActiveState=inactive\\nMainPID=0\\n'; fi\n",
+        home.path().join("config-base/systemd/user/needy.service").display(),
+        marker.display()
+      ),
+    )
+  };
+  needy_common::testing::write_executable(&bin.join(name), &script).unwrap();
+  let installed = home.command().env("PATH", &bin).args(["daemon", "service", "install"]).output().unwrap();
+  assert!(installed.status.success(), "{}", String::from_utf8_lossy(&installed.stderr));
+  std::fs::write(marker, "manager PID intentionally differs from manual child\n").unwrap();
+  let started = home
+    .command()
+    .env("PATH", &bin)
+    .args([
+      "--diagnostic-format",
+      "json",
+      "daemon",
+      "service",
+      "start",
+      "--timeout",
+      "200ms",
+    ])
+    .output()
+    .unwrap();
+  assert!(!started.status.success(), "a healthy manual daemon cannot satisfy managed readiness");
+  let diagnostic: serde_json::Value = serde_json::from_slice(&started.stderr).unwrap();
+  assert_eq!(diagnostic["reason"], "connection.timeout");
+  assert!(manual.0.try_wait().unwrap().is_none(), "the service command must not signal the manual daemon");
+  let record = needy_daemon::discovery::read(&home.path().join("run")).unwrap();
+  assert_eq!(record.pid, manual.0.id());
 }

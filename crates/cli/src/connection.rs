@@ -81,7 +81,7 @@ impl Resolved {
         .fact("source", self.source)
         .fact("transport", self.display())
         .check(if self.context.as_deref() == Some("local") {
-          "Start the local control plane with `needy daemon serve` and inspect its console."
+          "Run `needy daemon service status`; start the local service or use `needy daemon serve`."
         } else {
           "Run `needy config context check` for the selected connection and verify its tunnel or connector."
         })
@@ -93,7 +93,7 @@ impl Resolved {
           .await
           .map_err(|_| {
             crate::diagnostics::Error::new("connection.timeout", "The local daemon did not answer its health check in time")
-              .check("Inspect the local daemon console and discovery ownership before retrying.")
+              .check("Inspect `needy daemon service status` and logs before retrying.")
           })?
           .map_err(needy_api_client::Error::from)?
           .into_inner();

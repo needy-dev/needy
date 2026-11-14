@@ -7,9 +7,8 @@ access, and unspecified access grants are rejected. Database schema upgrades
 remain necessary to preserve stored state.
 
 The command tree and access changes are present in the current worktree.
-Implementation is split for review: CLI/configuration/access and foreground serving
-land first; OS service installation lands in a dependent PR. Tutorials and the
-website have separate review boundaries. The complete target contract follows.
+The [lifecycle evidence](2026-11-14-cli-lifecycle-evidence.md) records the tested
+local discovery, shutdown and macOS user-service slice and its remaining limits.
 The source inventory below describes commit `cfc6f8e9a09cf3e5264887d51679a72743f5db0a`.
 Historical observations and design reviews retain their own dates and evidence limits.
 

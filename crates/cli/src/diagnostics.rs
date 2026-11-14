@@ -116,7 +116,9 @@ pub fn render_in(error: &anyhow::Error, format: Format, context: Option<&crate::
     #[cfg(unix)]
     if let Some(discovery) = cause.downcast_ref::<needy_daemon::discovery::Error>() {
       diagnostic.reason = discovery.reason().into();
-      diagnostic.checks.push(check("Start the local control plane with `needy daemon serve` and inspect its console."));
+      diagnostic
+        .checks
+        .push(check("Inspect `needy daemon service status`; start or install the local service, or use `needy daemon serve`."));
       break;
     }
     if let Some(api) = cause.downcast_ref::<needy_api_client::Error>() {
@@ -142,7 +144,7 @@ pub fn render_in(error: &anyhow::Error, format: Format, context: Option<&crate::
         }
         Kind::Unavailable => (
           "connection.unavailable",
-          "Check the selected connection and its tunnel; inspect the foreground daemon console for a local target.",
+          "Check the selected connection and its tunnel. Local services can be inspected with `needy daemon service status`.",
         ),
         Kind::Ended => ("process.outcome_unknown", "Inspect the process or run before starting it again; the command may have completed."),
         Kind::Other => {
@@ -178,7 +180,8 @@ pub fn render_in(error: &anyhow::Error, format: Format, context: Option<&crate::
   }
   let argv: &[&str] = match diagnostic.reason.as_str() {
     "process.outcome_unknown" | "process.not_found" => &["needy", "proc", "ls"],
-    "discovery.not_found" | "discovery.invalid_record" | "discovery.stale_record" => &["needy", "daemon", "serve"],
+    "service.not_installed" => &["needy", "daemon", "service", "install"],
+    "discovery.not_found" | "discovery.invalid_record" | "discovery.stale_record" => &["needy", "daemon", "service", "status"],
     "auth.admin_required" | "auth.credential_rejected" => &["needy", "config", "context", "ls"],
     "run.not_found" | "run.ambiguous" | "run.ended" | "policy.exec_denied" | "fault.exec_injected" => &["needy", "run", "ls"],
     "runner.not_found" | "runner.offline" | "runner.not_connected" => &["needy", "runner", "ls"],
