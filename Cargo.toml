@@ -16,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 rust-version = "1.97"
 repository = "https://github.com/needy-dev/needy"
@@ -97,16 +97,16 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
-needy-api-client = { path = "crates/api-client", version = "0.0.3" }
-needy-api-proto = { path = "crates/api-proto", version = "0.0.3" }
-needy-api-server = { path = "crates/api-server", version = "0.0.3" }
-needy-common = { path = "crates/common", version = "0.0.3" }
-needy-config = { path = "crates/config", version = "0.0.3" }
-needy-core = { path = "crates/core", version = "0.0.3" }
-needy-core-actor = { path = "crates/core-actor", version = "0.0.3" }
-needy-core-executor = { path = "crates/core-executor", version = "0.0.3" }
-needy-daemon = { path = "crates/daemon", version = "0.0.3" }
-needy-trace = { path = "crates/trace", version = "0.0.3", default-features = false }
+needy-api-client = { path = "crates/api-client", version = "0.0.4" }
+needy-api-proto = { path = "crates/api-proto", version = "0.0.4" }
+needy-api-server = { path = "crates/api-server", version = "0.0.4" }
+needy-common = { path = "crates/common", version = "0.0.4" }
+needy-config = { path = "crates/config", version = "0.0.4" }
+needy-core = { path = "crates/core", version = "0.0.4" }
+needy-core-actor = { path = "crates/core-actor", version = "0.0.4" }
+needy-core-executor = { path = "crates/core-executor", version = "0.0.4" }
+needy-daemon = { path = "crates/daemon", version = "0.0.4" }
+needy-trace = { path = "crates/trace", version = "0.0.4", default-features = false }
 
 [profile.release]
 lto = "thin"
