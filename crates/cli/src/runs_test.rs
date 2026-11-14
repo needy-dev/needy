@@ -43,8 +43,8 @@ fn a_prefix_of_several_runs_lists_them() {
 
 #[test]
 fn an_unknown_run_is_an_error() {
-  assert_eq!(find(&runs(), "zz").unwrap_err().to_string(), "no run zz");
-  assert!(find(&[], "latest").unwrap_err().to_string().starts_with("there is no run yet"));
+  assert_eq!(find(&runs(), "zz").unwrap_err().to_string(), "No run zz");
+  assert!(find(&[], "latest").unwrap_err().to_string().starts_with("There is no run yet"));
 }
 
 #[test]

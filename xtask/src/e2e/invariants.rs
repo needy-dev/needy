@@ -37,6 +37,34 @@ pub fn sockets(env: &CellEnv, checks: &mut Checks, when: &str) {
   }
 }
 
+/// Discovery must identify this cell's actual child and a healthy control
+/// instance. This runs with the harness's non-root user and never adopts a PID.
+pub fn discovery(env: &CellEnv, checks: &mut Checks) {
+  let checked = (|| -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    runtime.block_on(async {
+      let deadline = std::time::Instant::now() + Duration::from_secs(5);
+      let record = loop {
+        if let Ok(record) = needy_daemon::discovery::read(&env.runtime()) {
+          break record;
+        }
+        anyhow::ensure!(std::time::Instant::now() < deadline, "daemon discovery did not become available");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+      };
+      anyhow::ensure!(Some(record.pid) == env.daemon_pid(), "descriptor PID differs from the cell's child handle");
+      needy_api_client::ready::wait_expected(&record.address, Duration::from_secs(2), "control", &record.instance_id).await?;
+      let mode = std::fs::metadata(env.runtime().join("control.json"))?.permissions().mode() & 0o777;
+      anyhow::ensure!(mode == 0o600, "discovery descriptor mode is {mode:o}, expected 600");
+      Ok::<_, anyhow::Error>(())
+    })
+  })();
+  checks.check(
+    "private discovery matches child PID, health role and instance",
+    checked.is_ok(),
+    checked.err().map(|error| format!("{error:#}")).unwrap_or_default(),
+  );
+}
+
 fn find_sockets(dir: &Path) -> Vec<std::path::PathBuf> {
   let mut found = Vec::new();
   let mut stack = vec![dir.to_path_buf()];
@@ -67,6 +95,11 @@ pub fn after(env: &mut CellEnv, checks: &mut Checks) {
   if let Err(e) = env.stop_daemon() {
     checks.check("the daemon stops on SIGTERM", false, e);
   }
+  checks.check(
+    "owned discovery is removed after shutdown",
+    !env.runtime().join("control.json").exists(),
+    "control.json remained after the managed child stopped",
+  );
   let needle = env.dir.display().to_string();
   // Processes the daemon started end with it or just after (a VM process
   // that powers off, a container runtime's shim).

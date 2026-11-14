@@ -3,7 +3,8 @@
 //!
 //! - [`source`]: where a document comes from (a file, `builtin:NAME` or text)
 //!   and its `extends` chain.
-//! - [`profile`] and [`recipe`]: the schemas and `load`.
+//! - [`profile`] and [`recipe`]: the task schemas and `load`.
+//! - [`global`]: versioned client configuration and typed daemon defaults.
 //! - [`validate`]: cross-references inside a loaded profile, as findings.
 //! - [`value`]: values users write, such as durations and sizes.
 //!
@@ -11,6 +12,7 @@
 //! job; this crate never sees processes, sockets or gRPC.
 
 pub mod builtin;
+pub mod global;
 mod merge;
 pub mod profile;
 pub mod recipe;

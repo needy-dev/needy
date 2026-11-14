@@ -6,7 +6,9 @@
 
 mod cli;
 mod commands;
-mod credentials;
+mod configuration;
+mod connection;
+mod diagnostics;
 mod logging;
 mod output;
 mod paths;

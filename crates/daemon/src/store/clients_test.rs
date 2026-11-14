@@ -12,7 +12,7 @@ async fn store() -> (Store, tempfile::TempDir) {
 
 /// A client `name` that paired with a fresh code, and its token.
 async fn paired(store: &Store, name: &str) -> (Client, Secret) {
-  let (_, code) = store.create_pairing_code(name, 10 * MINUTE_MS, NOW).await.unwrap();
+  let (_, code) = store.create_pairing_code(name, 10 * MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
   store.pair(code.expose(), NOW).await.unwrap()
 }
 
@@ -20,7 +20,8 @@ async fn paired(store: &Store, name: &str) -> (Client, Secret) {
 async fn a_pairing_code_gives_a_client_a_token_that_authenticates_it() {
   let (store, _dir) = store().await;
 
-  let (code, secret) = store.create_pairing_code("laptop", 10 * MINUTE_MS, NOW).await.unwrap();
+  let (code, secret) =
+    store.create_pairing_code("laptop", 10 * MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
   let (client, token) = store.pair(secret.expose(), NOW + 1).await.unwrap();
 
   assert_eq!((code.name.as_str(), code.expires_ms), ("laptop", NOW + 10 * MINUTE_MS));
@@ -35,7 +36,8 @@ async fn a_pairing_code_gives_a_client_a_token_that_authenticates_it() {
 #[tokio::test]
 async fn a_pairing_code_is_used_once() {
   let (store, _dir) = store().await;
-  let (code, secret) = store.create_pairing_code("laptop", 10 * MINUTE_MS, NOW).await.unwrap();
+  let (code, secret) =
+    store.create_pairing_code("laptop", 10 * MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
   store.pair(secret.expose(), NOW).await.unwrap();
 
   let again = store.pair(secret.expose(), NOW + 1).await.unwrap_err();
@@ -46,7 +48,7 @@ async fn a_pairing_code_is_used_once() {
 #[tokio::test]
 async fn an_expired_pairing_code_pairs_nobody() {
   let (store, _dir) = store().await;
-  let (code, secret) = store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap();
+  let (code, secret) = store.create_pairing_code("laptop", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
 
   let late = store.pair(secret.expose(), NOW + MINUTE_MS).await.unwrap_err();
 
@@ -57,7 +59,7 @@ async fn an_expired_pairing_code_pairs_nobody() {
 #[tokio::test]
 async fn a_wrong_or_malformed_code_says_only_that_it_is_not_valid() {
   let (store, _dir) = store().await;
-  let (code, _) = store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap();
+  let (code, _) = store.create_pairing_code("laptop", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
 
   for guess in [
     format!("needy-pair.{}.00", code.id),
@@ -105,7 +107,7 @@ async fn pairing_again_under_a_clients_name_revokes_its_old_token() {
   let (store, _dir) = store().await;
   let (old, old_token) = paired(&store, "laptop").await;
 
-  let (_, code) = store.create_pairing_code("laptop", MINUTE_MS, NOW + 1).await.unwrap();
+  let (_, code) = store.create_pairing_code("laptop", MINUTE_MS, NOW + 1, needy_api_server::control::ClientAccess::Runs).await.unwrap();
   let (new, new_token) = store.pair(code.expose(), NOW + 2).await.unwrap();
 
   assert_ne!(new.id, old.id);
@@ -125,9 +127,9 @@ async fn a_code_for_an_active_clients_name_names_the_client_it_replaces() {
   let (revoked, _) = paired(&store, "old").await;
   store.revoke_client(&revoked.id, NOW).await.unwrap();
 
-  let (replacing, _) = store.create_pairing_code("laptop", MINUTE_MS, NOW + 1).await.unwrap();
-  let (fresh, _) = store.create_pairing_code("desk", MINUTE_MS, NOW + 1).await.unwrap();
-  let (reused, _) = store.create_pairing_code("old", MINUTE_MS, NOW + 1).await.unwrap();
+  let (replacing, _) = store.create_pairing_code("laptop", MINUTE_MS, NOW + 1, needy_api_server::control::ClientAccess::Runs).await.unwrap();
+  let (fresh, _) = store.create_pairing_code("desk", MINUTE_MS, NOW + 1, needy_api_server::control::ClientAccess::Runs).await.unwrap();
+  let (reused, _) = store.create_pairing_code("old", MINUTE_MS, NOW + 1, needy_api_server::control::ClientAccess::Runs).await.unwrap();
 
   assert_eq!(replacing.replaces.map(|c| c.id), Some(laptop.id));
   assert_eq!(fresh.replaces, None);
@@ -144,7 +146,7 @@ async fn a_code_without_a_name_gets_a_name_no_client_holds() {
   let (gone, _) = paired(&store, "").await;
   store.revoke_client(&gone.id, NOW).await.unwrap();
 
-  let (code, _) = store.create_pairing_code("", MINUTE_MS, NOW + 1).await.unwrap();
+  let (code, _) = store.create_pairing_code("", MINUTE_MS, NOW + 1, needy_api_server::control::ClientAccess::Runs).await.unwrap();
 
   assert!(code.name.starts_with("client-"), "{}", code.name);
   assert_eq!(code.name, format!("client-{}", code.id));
@@ -156,10 +158,10 @@ async fn a_code_without_a_name_gets_a_name_no_client_holds() {
 #[tokio::test]
 async fn a_name_with_an_open_pairing_code_is_refused() {
   let (store, _dir) = store().await;
-  store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap();
+  store.create_pairing_code("laptop", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
 
-  let taken = store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap_err();
-  store.create_pairing_code("laptop", MINUTE_MS, NOW + MINUTE_MS).await.unwrap();
+  let taken = store.create_pairing_code("laptop", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap_err();
+  store.create_pairing_code("laptop", MINUTE_MS, NOW + MINUTE_MS, needy_api_server::control::ClientAccess::Runs).await.unwrap();
 
   assert!(matches!(taken, Error::PairingCodeOpen(ref name) if name == "laptop"), "{taken}");
 }
@@ -167,8 +169,8 @@ async fn a_name_with_an_open_pairing_code_is_refused() {
 #[tokio::test]
 async fn a_derived_name_and_a_given_name_both_pair() {
   let (store, _dir) = store().await;
-  let (_, first) = store.create_pairing_code("", MINUTE_MS, NOW).await.unwrap();
-  let (_, second) = store.create_pairing_code("ci", MINUTE_MS, NOW).await.unwrap();
+  let (_, first) = store.create_pairing_code("", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
+  let (_, second) = store.create_pairing_code("ci", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
   let (one, _) = store.pair(first.expose(), NOW).await.unwrap();
   store.pair(second.expose(), NOW).await.unwrap();
 
@@ -182,8 +184,14 @@ async fn a_derived_name_and_a_given_name_both_pair() {
 async fn a_pairing_code_needs_a_positive_ttl_and_a_dns_label_name() {
   let (store, _dir) = store().await;
 
-  assert!(matches!(store.create_pairing_code("laptop", 0, NOW).await, Err(Error::Invalid(_))));
-  assert!(matches!(store.create_pairing_code("Neko's Mac", MINUTE_MS, NOW).await, Err(Error::Invalid(_))));
+  assert!(matches!(
+    store.create_pairing_code("laptop", 0, NOW, needy_api_server::control::ClientAccess::Runs).await,
+    Err(Error::Invalid(_))
+  ));
+  assert!(matches!(
+    store.create_pairing_code("Neko's Mac", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await,
+    Err(Error::Invalid(_))
+  ));
 }
 
 // Every request authenticates the client; writing `last_used` on each
@@ -205,7 +213,7 @@ async fn last_used_is_written_at_most_once_a_minute() {
 #[tokio::test]
 async fn only_the_hashes_are_stored() {
   let (store, dir) = store().await;
-  let (_, code) = store.create_pairing_code("laptop", MINUTE_MS, NOW).await.unwrap();
+  let (_, code) = store.create_pairing_code("laptop", MINUTE_MS, NOW, needy_api_server::control::ClientAccess::Runs).await.unwrap();
   let code_text = code.expose().to_string();
   let (_, token) = store.pair(&code_text, NOW).await.unwrap();
   drop(store);
@@ -219,4 +227,48 @@ async fn only_the_hashes_are_stored() {
     let random = secret.rsplit('.').next().unwrap();
     assert!(!text.contains(random), "{secret} is stored in plain text");
   }
+}
+
+#[tokio::test]
+async fn legacy_clients_and_unused_invitations_migrate_to_runs_access() {
+  use needy_api_server::control::ClientAccess;
+  use sea_orm_migration::MigratorTrait as _;
+  let (store, dir) = store().await;
+  let (_, bearer) = paired(&store, "existing").await;
+  let (_, invitation) = store.create_pairing_code("pending", MINUTE_MS, NOW, ClientAccess::Runs).await.unwrap();
+  // Fixture: remove only the new columns to reproduce the pre-access schema.
+  super::super::migration::Migrator::down(&store.db, Some(1)).await.unwrap();
+  drop(store);
+  let reopened = Store::open(&dir.path().join("state.db")).await.unwrap();
+  assert_eq!(reopened.authenticate_client(bearer.expose(), NOW + 1).await.unwrap().unwrap().access, ClientAccess::Runs);
+  assert_eq!(reopened.pair(invitation.expose(), NOW + 1).await.unwrap().0.access, ClientAccess::Runs);
+}
+
+#[tokio::test]
+async fn administrator_grants_persist_in_clients_and_unused_invitations() {
+  use needy_api_server::control::ClientAccess;
+  let (store, dir) = store().await;
+  let (_, invitation) = store.create_pairing_code("administrator", MINUTE_MS, NOW, ClientAccess::Admin).await.unwrap();
+  drop(store);
+  let reopened = Store::open(&dir.path().join("state.db")).await.unwrap();
+  let (client, bearer) = reopened.pair(invitation.expose(), NOW + 1).await.unwrap();
+  assert_eq!(client.access, ClientAccess::Admin);
+  drop(reopened);
+  let reopened = Store::open(&dir.path().join("state.db")).await.unwrap();
+  assert_eq!(reopened.authenticate_client(bearer.expose(), NOW + 2).await.unwrap().unwrap().access, ClientAccess::Admin);
+}
+
+// An unreadable grant must fail before creating a replacement invitation:
+// otherwise a failed request leaves an unknown secret occupying the name.
+#[tokio::test]
+async fn unknown_stored_access_refuses_authentication_and_creates_no_invitation() {
+  use needy_api_server::control::ClientAccess;
+  use sea_orm::ConnectionTrait as _;
+  let (store, _dir) = store().await;
+  let (_, bearer) = paired(&store, "existing").await;
+  store.db.execute_unprepared("UPDATE clients SET access = 99").await.unwrap();
+  assert!(store.authenticate_client(bearer.expose(), NOW + 1).await.is_err());
+  assert!(store.create_pairing_code("existing", MINUTE_MS, NOW + 1, ClientAccess::Runs).await.is_err());
+  store.db.execute_unprepared("UPDATE clients SET access = 1").await.unwrap();
+  assert!(store.create_pairing_code("existing", MINUTE_MS, NOW + 1, ClientAccess::Runs).await.is_ok());
 }

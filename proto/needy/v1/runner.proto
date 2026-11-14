@@ -3,6 +3,7 @@ syntax = "proto3";
 
 package needy.v1;
 
+import "needy/v1/diagnostic.proto";
 import "needy/v1/process.proto";
 
 // RunnerService is the control plane's runner registry: join tokens, the
@@ -333,6 +334,8 @@ message TaskResult {
 // Why a runner refused or failed a task, as the gRPC status its process
 // service returned.
 message TaskError {
+  bytes details = 3;
+  ErrorDiagnostic diagnostic = 4;
   // A `google.rpc.Code` value.
   int32 code = 1;
   string message = 2;

@@ -126,9 +126,9 @@ pub fn tail(text: &str) -> String {
   lines[lines.len().saturating_sub(12)..].join(" | ")
 }
 
-/// `needy report RUN -o json --level detailed`.
+/// `needy run report RUN -o json --level detailed`.
 pub fn report(env: &CellEnv, id: &str) -> Result<Value> {
-  let out = env.needy(&["report", id, "-o", "json", "--level", "detailed"], CLI)?;
+  let out = env.needy(&["run", "report", id, "-o", "json", "--level", "detailed"], CLI)?;
   if !out.ok() {
     bail!("report failed: {}", out.brief());
   }

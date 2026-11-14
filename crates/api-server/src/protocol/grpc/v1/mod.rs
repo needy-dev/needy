@@ -35,47 +35,19 @@ fn caller<T>(listener: &Caller, request: &tonic::Request<T>) -> Caller {
   request.extensions().get::<Caller>().cloned().unwrap_or_else(|| listener.clone())
 }
 
-/// Refuses a call that administers the control plane (`what`, such as
-/// "creating join tokens") unless the operator makes it: the control token,
-/// or the control socket without a client token. A paired client drives runs
-/// but does not change who may reach the control plane (owner decision,
-/// 2026-11-11). `others` is the refusal for actors and runners.
+/// Management authority is an explicit server grant, independent of transport.
 fn administer<T>(listener: &Caller, request: &tonic::Request<T>, what: &str, others: &str) -> Result<(), Status> {
   match caller(listener, request) {
-    Caller::Operator => Ok(()),
-    Caller::Client { name, .. } => Err(ControlError::denied(format!("{what} needs the control token; paired client {name} may not")).into()),
-    Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied(others).into()),
-  }
-}
-
-/// Refuses a call that reads the control plane's credentials (`what`, such
-/// as "listing join tokens") unless the operator makes it on the control
-/// host itself: on a Unix socket, which only the control host's own users
-/// reach. The control token over TCP and a paired client are refused (owner
-/// decision, 2026-11-12). `others` is the refusal for actors and runners.
-fn administer_locally<T>(listener: &Caller, request: &tonic::Request<T>, what: &str, others: &str) -> Result<(), Status> {
-  match caller(listener, request) {
-    Caller::Operator if over_unix_socket(request) => Ok(()),
-    Caller::Operator => Err(ControlError::denied(format!("{what} works only on the control host's Unix socket, not over TCP")).into()),
-    Caller::Client { name, .. } => {
-      Err(ControlError::denied(format!("{what} works only on the control host's Unix socket; paired client {name} may not")).into())
-    }
-    Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied(others).into()),
-  }
-}
-
-/// Whether `request` came over a Unix socket: tonic puts the connection's
-/// `UdsConnectInfo` into the extensions of every request it serves on one
-/// (`tonic-0.14.9/src/transport/server/mod.rs`, `ConnectInfoLayer`), and
-/// `TcpConnectInfo` on TCP.
-fn over_unix_socket<T>(request: &tonic::Request<T>) -> bool {
-  #[cfg(unix)]
-  {
-    request.extensions().get::<tonic::transport::server::UdsConnectInfo>().is_some()
-  }
-  #[cfg(not(unix))]
-  {
-    let _ = request;
-    false
+    Caller::Operator
+    | Caller::Client {
+      access: crate::control::ClientAccess::Admin,
+      ..
+    } => Ok(()),
+    Caller::Client { name, .. } => Err(
+      ControlError::denied(format!("{what} needs administrator access; paired client {name} may not"))
+        .with_diagnostic("auth.admin_required", [("caller".into(), name), ("access".into(), "runs".into())])
+        .into(),
+    ),
+    Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied(others).with_diagnostic("auth.role_denied", []).into()),
   }
 }

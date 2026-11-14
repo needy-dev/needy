@@ -21,8 +21,9 @@ use needy_core::rules;
 use needy_core::types::Outcome;
 use serde::Serialize;
 
+use super::config::DocumentFormat;
 use crate::cli::Context;
-use crate::output::{self, Row, outln};
+use crate::output::{self, OutputFormat, Row, outln};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -32,20 +33,50 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Load a profile, print its findings and where each command would run.
-  /// Exits 1 when a finding is an error.
-  Check {
-    /// Profile YAML, or a bare NAME for `profiles/NAME.yaml` in the config
-    /// directory, as `run create --profile` reads it.
+  /// List local named YAML files, retaining findings for malformed rows.
+  Ls {
+    #[arg(short = 'o', long, value_enum, default_value_t)]
+    output: OutputFormat,
+  },
+  /// Display source or resolved profile data. Environment values and credentials
+  /// are masked; arbitrary argv/free text can still contain unknown secrets.
+  Show {
     profile: PathBuf,
-    /// A command to decide, as one shell-quoted string; repeat for more.
+    #[arg(long)]
+    resolved: bool,
+    #[arg(short = 'o', long, value_enum, default_value_t)]
+    output: DocumentFormat,
+  },
+  /// Check schema and routing, optionally adding host or control-plane facts.
+  Check {
+    profile: PathBuf,
     #[arg(long = "cmd")]
     commands: Vec<String>,
-    /// Check offline against this machine's CPU instead of asking the
-    /// control plane; runner selectors are not resolved.
-    #[arg(long)]
-    local: bool,
+    #[arg(long, value_enum, default_value_t)]
+    mode: Mode,
+    #[arg(short = 'o', long, value_enum, default_value_t)]
+    output: OutputFormat,
   },
+}
+
+#[derive(Clone, Copy, Default, clap::ValueEnum)]
+enum Mode {
+  #[default]
+  Static,
+  Host,
+  Control,
+}
+
+impl Args {
+  pub fn uses_control(&self) -> bool {
+    matches!(
+      self.command,
+      Command::Check {
+        mode: Mode::Control,
+        ..
+      }
+    )
+  }
 }
 
 #[derive(Serialize)]
@@ -73,17 +104,103 @@ impl Row for Decision {
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   match args.command {
+    Command::Ls { output } => {
+      #[derive(Serialize)]
+      struct ProfileRow {
+        name: String,
+        source: PathBuf,
+        finding: String,
+      }
+      impl Row for ProfileRow {
+        const HEADER: &'static [&'static str] = &["NAME", "SOURCE", "FINDING"];
+        fn cells(&self) -> Vec<String> {
+          vec![
+            self.name.clone(),
+            self.source.display().to_string(),
+            self.finding.clone(),
+          ]
+        }
+      }
+      let rows: Vec<_> = entries(ctx)?
+        .into_iter()
+        .map(|(name, source, finding)| ProfileRow {
+          name,
+          source,
+          finding,
+        })
+        .collect();
+      output::print(output, &rows)?;
+      Ok(0)
+    }
+    Command::Show {
+      profile,
+      resolved,
+      output,
+    } => {
+      let path = ctx.profile(&profile)?;
+      let yaml = if resolved {
+        needy_config::profile::resolve(&Source::file(&path))?.yaml
+      } else {
+        std::fs::read_to_string(&path).with_context(|| format!("cannot read profile {}", path.display()))?
+      };
+      let mut value: serde_json::Value = serde_yaml::from_str(&yaml).context("invalid profile YAML")?;
+      let config = ctx.configuration()?;
+      let secrets: Vec<_> = config.contexts.values().map(|c| c.credential.as_str()).collect();
+      crate::configuration::redact(&mut value, &secrets);
+      match output {
+        DocumentFormat::Yaml => output::write(format_args!("{}", crate::configuration::yaml(&value)?))?,
+        DocumentFormat::Json => outln!("{}", serde_json::to_string_pretty(&value)?)?,
+      }
+      Ok(0)
+    }
     Command::Check {
       profile,
       commands,
-      local: true,
-    } => check_local(&ctx.profile(&profile)?, &commands),
+      mode,
+      output: OutputFormat::Json,
+    } => check_json(&ctx.profile(&profile)?, &commands, mode, ctx).await,
     Command::Check {
       profile,
       commands,
-      local: false,
-    } => check(&ctx.profile(&profile)?, &commands, ctx).await,
+      mode,
+      output: OutputFormat::Table,
+    } => match mode {
+      Mode::Static => check_static(&ctx.profile(&profile)?, &commands),
+      Mode::Host => check_local(&ctx.profile(&profile)?, &commands),
+      Mode::Control => check(&ctx.profile(&profile)?, &commands, ctx).await,
+    },
   }
+}
+
+pub(super) fn entries(ctx: &Context) -> Result<Vec<(String, PathBuf, String)>> {
+  let directory = ctx.paths()?.profiles();
+  let listing = match std::fs::read_dir(&directory) {
+    Ok(listing) => listing,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+    Err(e) => return Err(e).context("cannot list named profiles"),
+  };
+  let mut rows = Vec::new();
+  for entry in listing {
+    let path = entry?.path();
+    if !matches!(path.extension().and_then(|s| s.to_str()), Some("yaml" | "yml")) || !path.is_file() {
+      continue;
+    }
+    let name = path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+    let finding = needy_config::profile::load(&Source::file(&path)).err().map(|e| e.to_string()).unwrap_or_default();
+    rows.push((name, path, finding));
+  }
+  rows.sort_by(|a, b| a.0.cmp(&b.0));
+  Ok(rows)
+}
+
+fn check_static(path: &Path, commands: &[String]) -> Result<i32> {
+  let profile = needy_config::profile::load(&Source::file(path))?;
+  let findings = validate::profile(&profile);
+  if let Some(reference) = &profile.actor.recipe {
+    needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
+  }
+  outln!("runtime placement and host recipe facts: unresolved (static mode)")?;
+  finish(&profile, findings, commands)
 }
 
 /// Asks the control plane where the profile would run and what it finds,
@@ -92,7 +209,7 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
   let profile = needy_config::profile::load(&Source::file(path))?;
   // As `run create` sends it: the control plane may run on another machine.
   let resolved = needy_config::profile::resolve(&Source::file(path))?;
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
+  let connection = ctx.connect().await?;
   let request = CheckProfileRequest {
     profile_yaml: resolved.yaml,
     recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
@@ -122,6 +239,11 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
     // The control plane checked the recipe against the actor's host; the
     // summary does not depend on the host, so it is compiled here.
     print_recipe(&profile, &Default::default())?;
+  }
+  for finding in &check.findings {
+    if let Some(diagnostic) = &finding.diagnostic {
+      outln!("reason: {} {}", diagnostic.reason, serde_json::to_string(&diagnostic.facts)?)?;
+    }
   }
   let findings: Vec<Finding> = check
     .findings
@@ -205,6 +327,14 @@ fn finish(profile: &Profile, findings: Vec<Finding>, commands: &[String]) -> Res
   if commands.is_empty() {
     return Ok(code);
   }
+  let rows = decisions(profile, commands)?;
+  outln!()?;
+  output::print_table(&rows)?;
+  Ok(code)
+}
+
+/// Route evaluation is shared by human and JSON renderers.
+fn decisions(profile: &Profile, commands: &[String]) -> Result<Vec<Decision>> {
   let injector = Injector::new(&profile.chaos);
   let mut rows = Vec::new();
   for command in commands {
@@ -235,8 +365,70 @@ fn finish(profile: &Profile, findings: Vec<Finding>, commands: &[String]) -> Res
       faults,
     });
   }
-  outln!()?;
-  output::print_table(&rows)?;
+  Ok(rows)
+}
+
+async fn check_json(path: &Path, commands: &[String], mode: Mode, ctx: &Context) -> Result<i32> {
+  let profile = needy_config::profile::load(&Source::file(path))?;
+  let mut findings = validate::profile(&profile);
+  let mut placement = serde_json::json!({"status":"unresolved"});
+  let mut recipe_facts = serde_json::Value::Null;
+  let mut diagnostics = Vec::new();
+  match mode {
+    Mode::Static => {
+      if let Some(reference) = &profile.actor.recipe {
+        needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
+      }
+    }
+    Mode::Host => {
+      if let Some(reference) = &profile.actor.recipe {
+        let recipe = needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
+        let host = needy_core_actor::driver::linux_firecracker::kvm::detect()?;
+        let compiled = needy_core::recipe::compile(&recipe, &host, &PerRun::at(1, 0));
+        recipe_facts = serde_json::json!({"vcpus":compiled.vcpus,"mem_mib":compiled.mem_mib});
+        findings.extend(compiled.findings.into_iter().map(|f| Finding {
+          message: format!("recipe: {}", f.message),
+          ..f
+        }));
+      }
+    }
+    Mode::Control => {
+      let resolved = needy_config::profile::resolve(&Source::file(path))?;
+      let checked = ctx
+        .connect()
+        .await?
+        .runs()
+        .check_profile(CheckProfileRequest {
+          profile_yaml: resolved.yaml,
+          recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
+        })
+        .await
+        .map_err(needy_api_client::Error::from)?
+        .into_inner();
+      let host = |p: &v1::Placement| {
+        if p.runner.is_empty() {
+          "control host".to_owned()
+        } else {
+          format!("runner {}", p.runner)
+        }
+      };
+      placement = serde_json::json!({"status":"checked","actor":checked.actor.as_ref().map(host),"executors":checked.executors.iter().map(|(name,p)| (name.clone(),host(p))).collect::<std::collections::BTreeMap<_,_>>(),"actor_cpu":checked.actor_cpu,"actor_image":checked.actor_image,"actor_base_abi":checked.actor_base_abi});
+      diagnostics =
+        checked.findings.iter().map(|f| f.diagnostic.as_ref().map(|d| serde_json::json!({"reason":d.reason,"facts":d.facts}))).collect();
+      findings = checked
+        .findings
+        .into_iter()
+        .map(|f| match f.severity() {
+          v1::FindingSeverity::Warning => Finding::warning(f.message),
+          _ => Finding::error(f.message),
+        })
+        .collect();
+    }
+  }
+  let code = i32::from(findings.iter().any(|f| f.severity == Severity::Error));
+  let findings: Vec<_> = findings.into_iter().enumerate().map(|(index, f)| serde_json::json!({"severity":f.severity.to_string(),"message":f.message,"diagnostic":diagnostics.get(index).cloned().flatten()})).collect();
+  let report = serde_json::json!({"mode":match mode { Mode::Static=>"static",Mode::Host=>"host",Mode::Control=>"control" },"findings":findings,"placement":placement,"recipe":recipe_facts,"decisions":decisions(&profile, commands)?});
+  outln!("{}", serde_json::to_string_pretty(&report)?)?;
   Ok(code)
 }
 

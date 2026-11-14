@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
 use needy_api_client::proto::v1::{
   self, CreateJoinTokenRequest, ListJoinTokensRequest, ListRunnersRequest, RemoveRunnerRequest, RevokeJoinTokenRequest, RotateRunnerRequest,
@@ -24,51 +24,88 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Manage join tokens, which let a machine join as a runner.
+  /// Issue a runner invitation; print its secret once.
+  Invite(InviteArgs),
+  /// Enroll this machine once and save its own credential.
+  Join(JoinArgs),
+  /// Reconnect from this machine's saved enrollment.
+  Serve(ServeArgs),
+  /// Inspect or revoke join-code metadata.
   Token {
     #[command(subcommand)]
     command: TokenCommand,
   },
-  /// List runners, including removed ones.
+  /// List runners, including removed machines.
   Ls {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Give a runner a new credential at its next heartbeat. Its old one
-  /// works until it uses the new one. Needs the control token.
+  /// Rotate a runner's credential at its next heartbeat.
   Rotate { name: String },
-  /// Revoke a runner's credential. It stays listed as removed. Needs the
-  /// control token.
+  /// Revoke one runner; keep its registry record.
   Rm { name: String },
+}
+
+impl Args {
+  pub fn allows_selection(&self) -> bool {
+    !matches!(&self.command, Command::Serve(_))
+  }
+}
+
+#[derive(clap::Args)]
+struct InviteArgs {
+  #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
+  ttl: Duration,
+  #[arg(long, default_value_t = 1)]
+  uses: u32,
+  #[arg(long, value_delimiter = ',')]
+  roles: Vec<RunnerRole>,
+  #[arg(long, value_delimiter = ',', value_parser = label)]
+  labels: Vec<(String, String)>,
+  #[arg(short = 'o', long, value_enum, default_value_t)]
+  output: OutputFormat,
+}
+
+#[derive(clap::Args)]
+struct JoinArgs {
+  name: String,
+  #[arg(long)]
+  code_file: Option<std::path::PathBuf>,
+  #[arg(long, value_delimiter = ',')]
+  roles: Option<Vec<RunnerRole>>,
+  #[arg(long, value_delimiter = ',', value_parser = label)]
+  labels: Vec<(String, String)>,
+  #[arg(long)]
+  actor_image: Option<std::path::PathBuf>,
+  #[arg(long, hide = true)]
+  kvm: Option<std::path::PathBuf>,
+  /// Connector argv; conflicts with an explicit address or context.
+  #[arg(last = true, allow_hyphen_values = true)]
+  command: Vec<String>,
+}
+
+#[derive(clap::Args)]
+struct ServeArgs {
+  #[arg(long, value_delimiter = ',')]
+  roles: Option<Vec<RunnerRole>>,
+  #[arg(long, value_delimiter = ',', value_parser = label)]
+  labels: Vec<(String, String)>,
+  #[arg(long)]
+  actor_image: Option<std::path::PathBuf>,
+  #[arg(long, hide = true)]
+  kvm: Option<std::path::PathBuf>,
+  #[arg(long, hide = true, value_parser = humantime::parse_duration)]
+  disconnect_grace: Option<Duration>,
 }
 
 #[derive(Subcommand)]
 enum TokenCommand {
-  /// Create a join token and print it. It is not shown again. Needs the
-  /// control token.
-  Create {
-    /// How long the token can be used to join.
-    #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
-    ttl: Duration,
-    /// How many runners can join with it.
-    #[arg(long, default_value_t = 1)]
-    uses: u32,
-    /// The roles a runner may declare: actor, executor. Every role when
-    /// none is given.
-    #[arg(long, value_delimiter = ',')]
-    roles: Vec<RunnerRole>,
-    /// Labels every runner that joins with it gets: KEY=VALUE,...
-    #[arg(long, value_delimiter = ',', value_parser = label)]
-    labels: Vec<(String, String)>,
-  },
-  /// List join tokens, including expired, spent and revoked ones. Only the
-  /// operator, on the control host's Unix socket.
+  /// List join-code metadata, including spent and revoked invitations.
   Ls {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Revoke a join token. Runners that joined with it stay. Needs the
-  /// control token.
+  /// Revoke a join code; existing runners keep their own credentials.
   Revoke { id: String },
 }
 
@@ -309,29 +346,121 @@ impl TryFrom<v1::Runner> for RunnerRow {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let endpoint = ctx.endpoint()?;
-  let fail = needy_api_client::Error::from;
-  let connection = crate::cli::connect(&endpoint).await?;
-  let mut runners = connection.runners();
   match args.command {
-    Command::Token {
-      command: TokenCommand::Create {
-        ttl,
-        uses,
-        roles,
-        labels,
-      },
-    } => {
+    Command::Join(args) => return join(args, ctx).await,
+    Command::Serve(args) => {
+      return super::daemon::run_runner(
+        super::daemon::RunnerArgs {
+          name: None,
+          actor_image: args.actor_image,
+          kvm: args.kvm,
+          join: None,
+          join_token_env: None,
+          join_token_file: None,
+          roles: args.roles,
+          labels: args.labels,
+          disconnect_grace: args.disconnect_grace,
+        },
+        ctx,
+      )
+      .await;
+    }
+    command => management(command, ctx).await,
+  }
+}
+
+async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
+  anyhow::ensure!(needy_config::global::valid_name(&args.name), "runner name must be a DNS label");
+  anyhow::ensure!(ctx.credential_file.is_none(), "runner join uses its invitation, not --credential-file");
+  let count = usize::from(ctx.address.is_some()) + usize::from(ctx.selected_context.is_some()) + usize::from(!args.command.is_empty());
+  anyhow::ensure!(count == 1, "runner join requires exactly one --address URI, --context NAME transport or -- PROGRAM ARG...");
+  let address = if !args.command.is_empty() {
+    anyhow::ensure!(!args.command[0].is_empty() && !args.command.iter().any(|a| a.contains('\0')), "connector argv is invalid");
+    format!("exec:{}", shell_words::join(&args.command))
+  } else if let Some(address) = &ctx.address {
+    needy_config::global::validate_address(address, false)?;
+    address.clone()
+  } else {
+    let config = ctx.configuration()?;
+    let name = ctx.selected_context.as_ref().unwrap();
+    if name == "local" {
+      #[cfg(unix)]
+      {
+        needy_daemon::discovery::read(&ctx.paths()?.runtime)?.address
+      }
+      #[cfg(not(unix))]
+      {
+        bail!("local control hosting is not supported on this platform yet");
+      }
+    } else {
+      let record = config.contexts.get(name).ok_or_else(|| anyhow::anyhow!("unknown context {name:?}; use `needy config context ls`"))?;
+      match (&record.address, &record.command) {
+        (Some(address), None) => address.clone(),
+        (None, Some(command)) => format!("exec:{}", shell_words::join(command)),
+        _ => bail!("the selected context has an invalid transport"),
+      }
+    }
+  };
+  let code = match args.code_file {
+    Some(path) => crate::configuration::read_secret(&path)?,
+    None => rpassword::prompt_password("Runner invitation code: ")?,
+  };
+  anyhow::ensure!(!code.trim().is_empty(), "runner invitation code is empty");
+  super::daemon::join_runner(
+    super::daemon::RunnerArgs {
+      name: Some(args.name),
+      actor_image: args.actor_image,
+      kvm: args.kvm,
+      join: Some(address),
+      join_token_env: None,
+      join_token_file: None,
+      roles: args.roles,
+      labels: args.labels,
+      disconnect_grace: None,
+    },
+    ctx,
+    code.trim().into(),
+  )
+  .await
+}
+
+async fn management(command: Command, ctx: &Context) -> Result<i32> {
+  let fail = needy_api_client::Error::from;
+  let connection = ctx.connect().await?;
+  let mut runners = connection.runners();
+  match command {
+    Command::Invite(InviteArgs {
+      ttl,
+      uses,
+      roles: selected_roles,
+      labels,
+      output: format,
+    }) => {
       let request = CreateJoinTokenRequest {
         ttl_ms: i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX),
         uses,
-        roles: roles.into_iter().map(proto_role).collect(),
+        roles: selected_roles.into_iter().map(proto_role).collect(),
         labels: labels.into_iter().collect(),
       };
       let created = runners.create_join_token(request).await.map_err(fail)?.into_inner();
-      let id = created.join_token.map(|t| t.id).unwrap_or_default();
-      output::message(format_args!("join token {id}; it is not shown again"));
-      outln!("{}", created.token)?;
+      let token = created.join_token.context("server returned an invitation without metadata")?;
+      let roles = roles(&token.roles)?;
+      match format {
+        OutputFormat::Json => outln!(
+          "{}",
+          serde_json::to_string_pretty(
+            &serde_json::json!({"version":1,"id":token.id,"roles":roles,"expires_at_ms":token.expires_at_ms,"uses_left":token.uses_left,"code":created.token})
+          )?
+        )?,
+        OutputFormat::Table => outln!(
+          "ID  {}\nROLES  {}\nEXPIRES  {}\nUSES LEFT  {}\nCODE (shown once)  {}",
+          token.id,
+          roles.join(","),
+          time(token.expires_at_ms),
+          token.uses_left,
+          created.token
+        )?,
+      }
     }
     Command::Token {
       command: TokenCommand::Ls { output: format },
@@ -356,6 +485,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Rm { name } => {
       runners.remove_runner(RemoveRunnerRequest { name }).await.map_err(fail)?;
     }
+    Command::Join(_) | Command::Serve(_) => unreachable!("local runner commands are dispatched before connecting"),
   }
   Ok(0)
 }

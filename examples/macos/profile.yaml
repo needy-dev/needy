@@ -1,6 +1,6 @@
 # The actor runs on a Linux KVM host; Apple toolchain commands run on runner
-# `mac`, a Mac that joined the control plane (`needy runner token create`,
-# then `needy daemon --mode runner` on the Mac). The Mac workspace is mounted
+# `mac`, a Mac that joined the control plane (`needy runner invite`,
+# then `needy runner join mac` and `needy runner serve` on the Mac). The Mac workspace is mounted
 # in the actor.
 user: { name: agent, uid: 1000, gid: 1000 }
 

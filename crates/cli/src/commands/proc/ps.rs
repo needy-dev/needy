@@ -1,4 +1,4 @@
-//! `needy ps`: list processes of a run, of a runner, or of every executor
+//! `needy proc ls`: list processes of a run, of a runner, or of every executor
 //! and connected runner. Needy's
 //! own processes (file transfers and workspace mounts) are hidden unless
 //! `--all` asks for them.
@@ -14,8 +14,7 @@ use crate::output::{self, OutputFormat, Row};
 #[derive(clap::Args)]
 pub struct Args {
   /// Only this run's processes: an ID, an ID prefix, a name or `latest`.
-  /// Defaults to NEEDY_RUN; without either, and with `--run ''`, every
-  /// process is listed.
+  /// Without a run or runner filter, list all visible processes.
   #[arg(long)]
   run: Option<String>,
   /// Only this runner's processes.
@@ -139,10 +138,13 @@ impl From<ProcessInfo> for Process {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let connection = crate::cli::connect(&ctx.endpoint()?).await?;
-  // A runner's processes are outside any run, whatever NEEDY_RUN says.
+  let connection = ctx.connect().await?;
+  // Runner processes are outside any run, independent of inherited run selection.
   let run = if args.runner.is_empty() {
-    crate::runs::select_or_none(&connection, args.run).await?.unwrap_or_default()
+    match args.run {
+      Some(run) => crate::runs::select(&connection, Some(run), ctx).await?,
+      None => String::new(),
+    }
   } else {
     String::new()
   };

@@ -10,13 +10,14 @@ use etcetera::BaseStrategy;
 
 // TODO(config): the build cache (`$XDG_CACHE_HOME/needy`) has no reader yet.
 // Add it when `needy image build` keeps a cache. The config directory holds the
-// client tokens `needy pair` stores (`credentials`) and profiles by name
-// (`profiles`); other user configuration waits for the config slice.
+// versioned client document and named profiles; state/data/runtime are resolved
+// independently of a client document override.
 #[derive(Debug, Clone)]
 pub struct Paths {
-  /// Client tokens by endpoint and profiles by name:
+  /// The global document and profiles by name:
   /// `$XDG_CONFIG_HOME/needy`, or `NEEDY_CONFIG_DIR`.
   pub config: PathBuf,
+  configuration_file: Option<PathBuf>,
   /// `trace.db`, runs and the daemon log: `$XDG_STATE_HOME/needy`, or
   /// `NEEDY_STATE_DIR`.
   pub state: PathBuf,
@@ -37,20 +38,41 @@ impl Paths {
     let runtime = dir("NEEDY_RUNTIME_DIR").or_else(|| base.runtime_dir().map(|d| d.join("needy"))).unwrap_or_else(|| state.clone());
     Ok(Self {
       config,
+      configuration_file: None,
       state,
       data,
       runtime,
     })
   }
 
-  /// The control daemon's socket, which the CLI reaches by default.
-  pub fn socket(&self) -> PathBuf {
-    self.runtime.join("daemon.sock")
+  /// Select a document and its sibling named-profile directory only.
+  pub fn with_config_file(mut self, path: PathBuf) -> Self {
+    self.config = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+    self.configuration_file = Some(path);
+    self
   }
 
-  /// The client tokens `needy pair` stores, by endpoint.
-  pub fn credentials(&self) -> PathBuf {
-    self.config.join("credentials.json")
+  pub fn config_file(&self) -> PathBuf {
+    self.configuration_file.clone().unwrap_or_else(|| self.config.join("config.yaml"))
+  }
+
+  /// Environment overrides retain priority over saved directory settings.
+  pub fn apply(&mut self, overrides: &needy_config::global::Paths) {
+    if dir("NEEDY_STATE_DIR").is_none()
+      && let Some(path) = &overrides.state
+    {
+      self.state = path.clone();
+    }
+    if dir("NEEDY_DATA_DIR").is_none()
+      && let Some(path) = &overrides.data
+    {
+      self.data = path.clone();
+    }
+    if dir("NEEDY_RUNTIME_DIR").is_none()
+      && let Some(path) = &overrides.runtime
+    {
+      self.runtime = path.clone();
+    }
   }
 
   /// Profiles `--profile NAME` finds by name, as `NAME.yaml`.

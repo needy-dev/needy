@@ -30,6 +30,7 @@ impl Home {
     let mut command = Command::new(env!("CARGO_BIN_EXE_needy"));
     for name in [
       "NEEDY_ENDPOINT",
+      "NEEDY_EXECUTION_CONTEXT",
       "NEEDY_TOKEN",
       "NEEDY_RUN",
       "XDG_CONFIG_HOME",
@@ -130,19 +131,13 @@ struct Daemon {
 
 impl Daemon {
   fn start(home: &Home) -> Self {
-    let child = home
-      .needy()
-      .args(["daemon", "--mode", "control"])
-      .args(stand_in_actor(home))
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .spawn()
-      .unwrap();
+    let child =
+      home.needy().args(["daemon", "serve"]).args(stand_in_actor(home)).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
     let socket = home.path().join("run").join("daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(20);
-    // A connection, not the file: the file appears before the daemon
-    // listens, and a client that connects in between is refused.
-    while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    // Publication follows health and reconciliation; a listening socket alone
+    // does not mean local discovery is ready for a command.
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
       assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
       std::thread::sleep(Duration::from_millis(50));
     }
@@ -209,7 +204,7 @@ fn exec_fault_exits_with_its_code_and_writes_its_stderr() {
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["exec", "--run", &run, "--", "curl", "http://example.com"]);
+  let output = home.run(&["run", "exec", &run, "--", "curl", "http://example.com"]);
 
   assert_eq!(output.status.code(), Some(7));
   assert_eq!(stderr(&output), "curl: (7) Failed to connect to example.com port 80\n");
@@ -222,15 +217,15 @@ fn chaos_add_ls_and_rm_change_a_live_run_s_faults() {
   let run = create_run(&home, NATIVE_PROFILE);
 
   let added = home.run(&[
-    "chaos", "add", "crash", "--run", &run, "--exec", "true **", "--signal", "SEGV", "--times", "1",
+    "run", "chaos", "add", "crash", "--run", &run, "--exec", "true **", "--signal", "SEGV", "--times", "1",
   ]);
   assert!(added.status.success(), "{}", stderr(&added));
-  let crashed = home.run(&["exec", "--run", &run, "--", "true"]);
+  let crashed = home.run(&["run", "exec", &run, "--", "true"]);
   assert_eq!(crashed.status.code(), Some(128 + 11), "{}", stderr(&crashed));
   // `times: 1`: the next one runs.
-  assert_eq!(home.run(&["exec", "--run", &run, "--", "true"]).status.code(), Some(0));
+  assert_eq!(home.run(&["run", "exec", &run, "--", "true"]).status.code(), Some(0));
 
-  let listed = home.run(&["chaos", "ls", "--run", &run, "-o", "json"]);
+  let listed = home.run(&["run", "chaos", "ls", "--run", &run, "-o", "json"]);
   assert!(listed.status.success(), "{}", stderr(&listed));
   let faults: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
   let rows: Vec<(String, String, u64, u64)> = faults
@@ -256,20 +251,20 @@ fn chaos_add_ls_and_rm_change_a_live_run_s_faults() {
   );
 
   // A profile's fault can be removed too, and a removed one is gone.
-  assert!(home.run(&["chaos", "rm", "curl-down", "--run", &run]).status.success());
-  assert_eq!(home.run(&["exec", "--run", &run, "--", "curl", "--version"]).status.code(), Some(0));
-  let again = home.run(&["chaos", "rm", "curl-down", "--run", &run]);
+  assert!(home.run(&["run", "chaos", "rm", "curl-down", "--run", &run]).status.success());
+  assert_eq!(home.run(&["run", "exec", &run, "--", "curl", "--version"]).status.code(), Some(0));
+  let again = home.run(&["run", "chaos", "rm", "curl-down", "--run", &run]);
   assert!(stderr(&again).contains("has no fault named \"curl-down\""), "{}", stderr(&again));
 
   // A fault the schema refuses is refused before it reaches the run.
   let refused = home.run(&[
-    "chaos", "add", "bad", "--run", &run, "--exec", "curl **", "--errno", "EIO",
+    "run", "chaos", "add", "bad", "--run", &run, "--exec", "curl **", "--errno", "EIO",
   ]);
   assert!(!refused.status.success());
   assert!(stderr(&refused).contains("errno is not for exec faults"), "{}", stderr(&refused));
 
   // Both changes are in the trace, with who made them.
-  let report = home.run(&["report", &run, "-o", "markdown"]);
+  let report = home.run(&["run", "report", &run, "-o", "markdown"]);
   assert!(stdout(&report).contains("Chaos changed while running: +crash (exec), -curl-down"), "{}", stdout(&report));
 }
 
@@ -279,10 +274,12 @@ fn exec_denied_by_a_rule_exits_126() {
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["exec", "--run", &run, "--", "rm", "-rf", "/"]);
+  let output = home.run(&["run", "exec", &run, "--", "rm", "-rf", "/"]);
 
   assert_eq!(output.status.code(), Some(126));
-  assert_eq!(stderr(&output), "needy: denied: no deleting here\n");
+  assert!(stderr(&output).starts_with("needy: denied: no deleting here [policy.exec_denied]"));
+  assert!(stderr(&output).contains("matching routing rule"));
+  assert!(!stderr(&output).contains("administrator invitation"));
 }
 
 #[test]
@@ -292,10 +289,10 @@ fn exec_fault_in_json_output_reports_the_exit_code() {
   let run = create_run(&home, NATIVE_PROFILE);
 
   let output = home.run(&[
+    "run",
     "exec",
     "--output",
     "json",
-    "--run",
     &run,
     "--",
     "curl",
@@ -325,7 +322,7 @@ fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
   let run = create_run(&home, NATIVE_PROFILE);
 
   let delayed = home.run(&[
-    "exec", "--output", "ndjson", "--run", &run, "--", "sleep", "0",
+    "run", "exec", "--output", "ndjson", &run, "--", "sleep", "0",
   ]);
 
   assert_eq!(delayed.status.code(), Some(0), "{}", stderr(&delayed));
@@ -339,10 +336,10 @@ fn exec_ndjson_includes_the_placement_decision_and_injected_faults() {
   assert_eq!(lines[1]["origin"], "cli");
 
   let refused = home.run(&[
+    "run",
     "exec",
     "--output",
     "ndjson",
-    "--run",
     &run,
     "--",
     "curl",
@@ -362,7 +359,7 @@ fn exec_ndjson_without_a_run_has_no_decision() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
 
-  let output = home.run(&["exec", "--output", "ndjson", "--", "true"]);
+  let output = home.run(&["proc", "exec", "--host", "--output", "ndjson", "--", "true"]);
 
   assert_eq!(types(&ndjson(&output)), ["started", "exit"]);
 }
@@ -381,11 +378,21 @@ fn exec_without_a_run_stays_out_of_a_running_run() {
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
 
-  let output = home.run(&["exec", "--", "sh", "-c", "echo outside-a-run"]);
+  let output = home.run(&[
+    "proc",
+    "exec",
+    "--host",
+    "--",
+    "sh",
+    "-c",
+    "echo outside-a-run",
+  ]);
   assert_eq!(stdout(&output), "outside-a-run\n");
   assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let report = stdout(&home.run(&["report", &run, "--level", "detailed", "-o", "markdown"]));
+  let report = stdout(&home.run(&[
+    "run", "report", &run, "--level", "detailed", "-o", "markdown",
+  ]));
   assert!(report.contains("| run.stop |"), "{report}");
   assert!(!report.contains("outside-a-run"), "{report}");
 }
@@ -395,7 +402,13 @@ fn exec_of_a_missing_command_exits_127() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
 
-  let output = home.run(&["exec", "--", "/nonexistent/needy-test-command"]);
+  let output = home.run(&[
+    "proc",
+    "exec",
+    "--host",
+    "--",
+    "/nonexistent/needy-test-command",
+  ]);
 
   assert_eq!(output.status.code(), Some(127));
   let message = stderr(&output);
@@ -408,7 +421,15 @@ fn exec_returns_the_command_exit_code_and_output() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
 
-  let output = home.run(&["exec", "--", "sh", "-c", "echo out; echo err >&2; exit 7"]);
+  let output = home.run(&[
+    "proc",
+    "exec",
+    "--host",
+    "--",
+    "sh",
+    "-c",
+    "echo out; echo err >&2; exit 7",
+  ]);
 
   assert_eq!(output.status.code(), Some(7));
   assert_eq!(stdout(&output), "out\n");
@@ -479,7 +500,7 @@ fn a_failed_run_create_records_run_fail_with_the_reason() {
   let failed = home.run(&["run", "create", "--profile", broken.to_str().unwrap()]);
   assert_eq!(failed.status.code(), Some(1));
 
-  let output = home.run(&["report", "latest", "-o", "markdown"]);
+  let output = home.run(&["run", "report", "latest", "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
@@ -500,7 +521,7 @@ fn report_names_the_profile_after_its_file() {
   assert!(created.status.success(), "{}", stderr(&created));
   let run = stdout(&created).trim().to_string();
 
-  let output = home.run(&["report", &run, "-o", "markdown"]);
+  let output = home.run(&["run", "report", &run, "-o", "markdown"]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let title = stdout(&output).lines().next().unwrap().to_string();
@@ -514,7 +535,9 @@ fn run_stop_is_traced_with_who_stopped_the_run() {
   let run = create_run(&home, NATIVE_PROFILE);
   assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let output = home.run(&["report", &run, "--level", "detailed", "-o", "markdown"]);
+  let output = home.run(&[
+    "run", "report", &run, "--level", "detailed", "-o", "markdown",
+  ]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
@@ -536,7 +559,7 @@ fn run_stop_now_kills_the_actor_and_the_report_says_so() {
 
   assert!(stopped.status.success(), "{}", stderr(&stopped));
   assert!(stderr(&stopped).is_empty(), "a stop asked to be at once warns of nothing: {}", stderr(&stopped));
-  let report = stdout(&home.run(&["report", &run]));
+  let report = stdout(&home.run(&["run", "report", &run]));
   assert!(report.contains("forced: asked to stop at once"), "{report}");
 }
 
@@ -585,7 +608,14 @@ fn a_closed_stdout_ends_a_command_quietly_with_141() {
   for args in [
     &["run", "ls"][..],
     &["run", "ls", "--output", "json"],
-    &["profile", "check", "--local", profile.to_str().unwrap()],
+    &[
+      "config",
+      "profile",
+      "check",
+      "--mode",
+      "host",
+      profile.to_str().unwrap(),
+    ],
   ] {
     let output = run_into_a_closed_pipe(&home, args);
 
@@ -687,7 +717,8 @@ fn run_logs_of_a_run_whose_actor_never_started_says_so() {
   let output = home.run(&["run", "logs", &run]);
 
   assert_eq!(output.status.code(), Some(1));
-  assert_eq!(stderr(&output), format!("needy: run {run} has no actor console\n"));
+  assert!(stderr(&output).contains(&format!("run {run} has no actor console")), "{}", stderr(&output));
+  assert!(stderr(&output).contains("[run.no_console]"));
 }
 
 #[test]
@@ -696,9 +727,11 @@ fn profile_check_splits_quoted_commands_and_shows_matching_faults() {
   let profile = home.write("profile.yaml", NATIVE_PROFILE);
 
   let output = home.run(&[
+    "config",
     "profile",
     "check",
-    "--local",
+    "--mode",
+    "host",
     profile.to_str().unwrap(),
     "--cmd",
     "curl 'http://example.com/a b'",
@@ -740,7 +773,14 @@ fn profile_check_accepts_every_example_profile() {
   assert!(profiles.len() >= 8, "{profiles:?}");
 
   for profile in profiles {
-    let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+    let output = home.run(&[
+      "config",
+      "profile",
+      "check",
+      "--mode",
+      "host",
+      profile.to_str().unwrap(),
+    ]);
 
     assert!(output.status.success(), "{}: {}{}", profile.display(), stdout(&output), stderr(&output));
     assert!(!stdout(&output).contains("error:"), "{}: {}", profile.display(), stdout(&output));
@@ -755,7 +795,14 @@ fn profile_check_reports_unknown_names_and_exits_1() {
     "actor: { driver: linux-firecracker }\nexecutors: { build: {} }\ncommands:\n  - { match: \"git **\", to: biuld }\n  - { match: \"make **\", use: [fast] }\n",
   );
 
-  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "host",
+    profile.to_str().unwrap(),
+  ]);
 
   assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
   let text = stdout(&output);
@@ -773,7 +820,14 @@ fn profile_check_lists_route_names_of_rules_without_a_placement() {
     "actor: { driver: linux-firecracker }\ncommands:\n  - { match: \"rm -rf **\", deny: \"not here\" }\n  - { match: \"npm **\", env: { set: { CI: \"1\" } } }\n",
   );
 
-  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "host",
+    profile.to_str().unwrap(),
+  ]);
 
   let text = stdout(&output);
   let line = text.lines().find(|l| l.starts_with("route names: ")).unwrap_or_else(|| panic!("{text}{}", stderr(&output)));
@@ -789,7 +843,14 @@ fn profile_check_lists_route_names_of_exec_faults() {
   let profile =
     home.write("profile.yaml", "actor: { driver: linux-firecracker }\nchaos: { faults: { curl-down: { exec: \"curl **\", exit: 7 } } }\n");
 
-  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "host",
+    profile.to_str().unwrap(),
+  ]);
 
   let text = stdout(&output);
   let line = text.lines().find(|l| l.starts_with("route names: ")).unwrap_or_else(|| panic!("{text}{}", stderr(&output)));
@@ -807,7 +868,7 @@ fn profile_check_rejects_flattened_captures() {
     "actor: { driver: linux-firecracker }\ncommands: [{ match: \"node {script}\", when: { script: \"**/cli.js\" }, to: actor }]\n",
   );
 
-  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+  let output = home.run(&["config", "profile", "check", profile.to_str().unwrap()]);
 
   assert_eq!(output.status.code(), Some(1));
   let message = stderr(&output);
@@ -820,7 +881,14 @@ fn profile_check_compiles_a_built_in_recipe() {
   let home = Home::new();
   let profile = home.write("profile.yaml", "actor: { driver: linux-firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n");
 
-  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "host",
+    profile.to_str().unwrap(),
+  ]);
 
   // The host CPU decides whether the recipe has findings, so only the
   // compiled machine is checked here.
@@ -843,7 +911,14 @@ fn profile_check_says_which_recipe_values_each_run_generates() {
   let home = Home::new();
   let profile = home.write("profile.yaml", "actor: { driver: linux-firecracker, recipe: \"builtin:gce-ubuntu-22.04\" }\n");
 
-  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "host",
+    profile.to_str().unwrap(),
+  ]);
 
   let text = stdout(&output);
   assert!(text.contains("recipe: 2 vCPU, 8192 MiB, hostname generated per run, uptime offset"), "{text}{}", stderr(&output));
@@ -860,7 +935,14 @@ fn profile_check_says_a_hostname_from_the_runs_time_is_generated_per_run() {
   home.write("time.recipe.yaml", "os: { hostname: \"ci-{time}\" }\n");
   let profile = home.write("profile.yaml", "actor: { driver: linux-firecracker, recipe: time.recipe.yaml }\n");
 
-  let output = home.run(&["profile", "check", "--local", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "host",
+    profile.to_str().unwrap(),
+  ]);
 
   let text = stdout(&output);
   assert!(text.contains(", hostname generated per run, "), "{text}{}", stderr(&output));
@@ -872,7 +954,16 @@ fn profile_check_asks_the_control_plane_where_the_profile_would_run() {
   let _daemon = Daemon::start(&home);
   let profile = home.write("profile.yaml", NATIVE_PROFILE);
 
-  let output = home.run(&["profile", "check", profile.to_str().unwrap(), "--cmd", "ls"]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "control",
+    profile.to_str().unwrap(),
+    "--cmd",
+    "ls",
+  ]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let text = stdout(&output);
@@ -888,7 +979,14 @@ fn profile_check_through_the_control_plane_names_a_runner_nobody_joined_as_and_e
   let profile =
     home.write("profile.yaml", "executors: { mac: { runner: mac } }\nactor: { driver: linux-firecracker, runner: { labels: [kvm] } }\n");
 
-  let output = home.run(&["profile", "check", profile.to_str().unwrap()]);
+  let output = home.run(&[
+    "config",
+    "profile",
+    "check",
+    "--mode",
+    "control",
+    profile.to_str().unwrap(),
+  ]);
 
   assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
   let text = stdout(&output);
@@ -917,10 +1015,9 @@ fn run_create_explains_profile_and_group() {
   let output = home.run(&["run", "create", "--help"]);
 
   let text = stdout(&output);
-  let help = |flag: &str| text.lines().find(|l| l.trim_start().starts_with(flag)).unwrap().split_once(flag).unwrap().1.trim().to_string();
-  assert!(help("--profile <PROFILE>").starts_with("Profile YAML"), "{text}");
-  assert!(help("--group <GROUP>").starts_with("Runs in one group share executors"), "{text}");
-  assert!(!help("--group <GROUP>").contains("[default"), "{text}");
+  assert!(text.contains("--profile <PROFILE>") && text.contains("Profile YAML"), "{text}");
+  assert!(text.contains("--group <GROUP>") && text.contains("Runs in one group share executors"), "{text}");
+  assert!(text.contains("Defaults to the run ID"), "{text}");
 }
 
 #[test]
@@ -986,7 +1083,7 @@ fn an_immediately_exiting_interactive_actor_returns_its_output_and_exit() {
   let home = Home::new();
   let child = home
     .needy()
-    .args(["daemon", "--mode", "control", "--actor-image"])
+    .args(["daemon", "serve", "--actor-image"])
     .arg(image)
     .arg("--guest-needy")
     .arg(guest)
@@ -1051,7 +1148,7 @@ fn the_session_command_is_gone() {
 fn state_directory_follows_needy_state_dir() {
   let home = Home::new();
 
-  let output = home.run(&["report", "--local"]);
+  let output = home.run(&["run", "report", "--offline"]);
 
   assert_eq!(output.status.code(), Some(1));
   let expected = home.path().join("state").join("trace.db");
@@ -1062,22 +1159,26 @@ fn state_directory_follows_needy_state_dir() {
 fn state_directory_defaults_to_xdg_state_home() {
   let home = Home::new();
 
-  let output =
-    home.needy().env_remove("NEEDY_STATE_DIR").env("XDG_STATE_HOME", home.path().join("xdg")).args(["report", "--local"]).output().unwrap();
+  let output = home
+    .needy()
+    .env_remove("NEEDY_STATE_DIR")
+    .env("XDG_STATE_HOME", home.path().join("xdg"))
+    .args(["run", "report", "--offline"])
+    .output()
+    .unwrap();
 
   let expected = home.path().join("xdg").join("needy").join("trace.db");
   assert!(stderr(&output).contains(expected.to_str().unwrap()), "{}", stderr(&output));
 }
 
 #[test]
-fn socket_is_in_the_state_directory_without_a_runtime_directory() {
+fn runtime_defaults_to_the_state_directory_without_a_runtime_directory() {
   let home = Home::new();
-
-  let output = home.needy().env_remove("NEEDY_RUNTIME_DIR").arg("ps").output().unwrap();
-
-  assert_eq!(output.status.code(), Some(1));
-  let socket = home.path().join("state").join("daemon.sock");
-  assert!(stderr(&output).contains(&format!("unix:{}", socket.display())), "{}", stderr(&output));
+  let output = home.needy().env_remove("NEEDY_RUNTIME_DIR").args(["config", "paths", "-o", "json"]).output().unwrap();
+  assert!(output.status.success(), "{}", stderr(&output));
+  let rows: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
+  let runtime = rows.iter().find(|row| row["name"] == "runtime").unwrap();
+  assert_eq!(runtime["source"], home.path().join("state").display().to_string());
 }
 
 /// Sends signal `name` to process `pid`.
@@ -1086,19 +1187,23 @@ fn kill(pid: u32, name: &str) {
   assert!(status.success(), "kill -{name} {pid}");
 }
 
-/// A daemon in `mode` on the home's socket whose stderr the test reads.
+/// A foreground control or standalone executor on this home's socket.
 fn spawn_daemon(home: &Home, mode: &str) -> Child {
   let mut command = home.needy();
-  command.args(["daemon", "--mode", mode]);
+  let socket = home.path().join("run").join("daemon.sock");
   if mode == "control" {
-    command.args(stand_in_actor(home));
+    command.args(["daemon", "serve"]).args(stand_in_actor(home));
+  } else {
+    command.args([
+      "daemon",
+      "executor",
+      "--listen",
+      &format!("unix:{}", socket.display()),
+    ]);
   }
   let daemon = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-  let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  // A connection, not the file: the file appears before the daemon
-  // listens, and a client that connects in between is refused.
-  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() || (mode == "control" && !home.path().join("run/control.json").exists()) {
     assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
@@ -1148,7 +1253,7 @@ fn exec_whose_run_stops_exits_255_and_says_why() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
-  let (attached, sleep) = attach_sleep(&home, &["exec", "--run", &run]);
+  let (attached, sleep) = attach_sleep(&home, &["run", "exec", &run]);
 
   assert!(home.run(&["run", "stop", &run]).status.success());
   let output = exited(attached);
@@ -1156,7 +1261,11 @@ fn exec_whose_run_stops_exits_255_and_says_why() {
   let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).status();
 
   assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
-  assert_eq!(stderr(&output), "needy: the connection ended before the command exited: run stopped\n");
+  assert!(
+    stderr(&output).starts_with("needy: the connection ended before the command exited: run stopped [process.outcome_unknown]"),
+    "{}",
+    stderr(&output)
+  );
 }
 
 #[test]
@@ -1164,7 +1273,7 @@ fn exec_json_whose_run_stops_reports_an_error_instead_of_an_exit() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let run = create_run(&home, NATIVE_PROFILE);
-  let (attached, _) = attach_sleep(&home, &["exec", "--output", "json", "--run", &run]);
+  let (attached, _) = attach_sleep(&home, &["run", "exec", "--output", "json", &run]);
 
   assert!(home.run(&["run", "stop", &run]).status.success());
   let output = exited(attached);
@@ -1179,7 +1288,7 @@ fn exec_json_whose_run_stops_reports_an_error_instead_of_an_exit() {
 fn exec_whose_daemon_shuts_down_exits_255_and_says_why() {
   let home = Home::new();
   let mut daemon = spawn_daemon(&home, "control");
-  let (attached, sleep) = attach_sleep(&home, &["exec"]);
+  let (attached, sleep) = attach_sleep(&home, &["proc", "exec", "--host"]);
 
   kill(daemon.id(), "TERM");
   let output = exited(attached);
@@ -1187,7 +1296,11 @@ fn exec_whose_daemon_shuts_down_exits_255_and_says_why() {
   let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).status();
 
   assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
-  assert_eq!(stderr(&output), "needy: the connection ended before the command exited: daemon shutting down\n");
+  assert!(
+    stderr(&output).starts_with("needy: the connection ended before the command exited: daemon shutting down [process.outcome_unknown]"),
+    "{}",
+    stderr(&output)
+  );
 }
 
 /// A daemon whose exec streams end before their command starts: with
@@ -1216,6 +1329,7 @@ impl EndingDaemon {
       async fn exec(&self, _: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
         let ended = self.0.iter().map(|reason| {
           Ok(ExecResponse {
+            diagnostic: None,
             payload: Some(exec_response::Payload::Ended(ExecEnded {
               reason: reason.clone(),
             })),
@@ -1267,9 +1381,11 @@ fn detached_exec_whose_stream_ends_before_the_start_exits_255_and_says_why() {
   let daemon = EndingDaemon::start(&home, Some("run stopped"));
 
   let output = home.run(&[
-    "--endpoint",
+    "--address",
     &daemon.endpoint,
+    "proc",
     "exec",
+    "--host",
     "-d",
     "--",
     "sleep",
@@ -1278,7 +1394,11 @@ fn detached_exec_whose_stream_ends_before_the_start_exits_255_and_says_why() {
 
   assert_eq!(output.status.code(), Some(255), "{}", stderr(&output));
   assert_eq!(stdout(&output), "");
-  assert_eq!(stderr(&output), "needy: the connection ended before the command started: run stopped\n");
+  assert!(
+    stderr(&output).starts_with("needy: the connection ended before the command started: run stopped [process.outcome_unknown]"),
+    "{}",
+    stderr(&output)
+  );
 }
 
 #[test]
@@ -1287,9 +1407,11 @@ fn detached_exec_json_whose_stream_closes_before_the_start_reports_an_error() {
   let daemon = EndingDaemon::start(&home, None);
 
   let output = home.run(&[
-    "--endpoint",
+    "--address",
     &daemon.endpoint,
+    "proc",
     "exec",
+    "--host",
     "-d",
     "--output",
     "json",
@@ -1302,6 +1424,44 @@ fn detached_exec_json_whose_stream_closes_before_the_start_reports_an_error() {
   let summary: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
   assert_eq!(summary["error"], "the connection ended before the command started", "{summary}");
   assert!(summary.get("process_id").is_none(), "{summary}");
+}
+
+// ROOT CAUSE:
+//
+// Early stream completion returned 255 through the exec-specific output path,
+// bypassing global diagnostic rendering. A caller could not distinguish an
+// unknown outcome from a completed child that deliberately exited 255.
+#[test]
+fn an_unknown_exec_outcome_honors_json_diagnostics_without_changing_stdout() {
+  let home = Home::new();
+  let daemon = EndingDaemon::start(&home, None);
+  let output = home.run(&[
+    "--diagnostic-format",
+    "json",
+    "--address",
+    &daemon.endpoint,
+    "proc",
+    "exec",
+    "--host",
+    "-d",
+    "--output",
+    "json",
+    "--",
+    "sleep",
+    "30",
+  ]);
+  assert_eq!(output.status.code(), Some(255));
+  let summary: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+  assert_eq!(summary["error"], "the connection ended before the command started");
+  assert!(summary.get("exit_code").is_none());
+  let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+  assert_eq!(diagnostic["reason"], "process.outcome_unknown");
+  assert_eq!(diagnostic["completion"], "unknown");
+  assert_eq!(diagnostic["checks"][0]["location"], "client");
+  let argv = diagnostic["checks"][0]["argv"].as_array().unwrap();
+  assert_eq!(argv[0], "needy");
+  assert!(argv.windows(2).any(|args| args[0] == "--address" && args[1] == daemon.endpoint));
+  assert_eq!(&argv[argv.len() - 2..], &[serde_json::json!("proc"), serde_json::json!("ls")]);
 }
 
 /// Sends SIGTERM twice, half a second apart, and returns how long the
@@ -1344,7 +1504,7 @@ fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
   )
   .unwrap();
   let run = create_run(&home, NATIVE_PROFILE);
-  let (mut attached, sleep) = attach_sleep(&home, &["exec", "--run", &run]);
+  let (mut attached, sleep) = attach_sleep(&home, &["run", "exec", &run]);
 
   // The VM ignores SIGTERM once it says so.
   let trapped = home.path().join("state").join("runs").join(&run).join("trapped");
@@ -1373,7 +1533,8 @@ fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
 fn a_second_sigterm_makes_the_executor_exit_at_once() {
   let home = Home::new();
   let daemon = spawn_daemon(&home, "executor");
-  let (mut attached, sleep) = attach_sleep(&home, &["exec"]);
+  let address = format!("unix:{}", home.path().join("run/daemon.sock").display());
+  let (mut attached, sleep) = attach_sleep(&home, &["--address", &address, "proc", "exec", "--host"]);
 
   let (elapsed, output) = terminate_twice(daemon);
   attached.kill().ok();
@@ -1440,6 +1601,10 @@ fn a_daemon_starts_over_stale_sockets_nobody_listens_on() {
   let home = Home::new();
   let run = home.path().join("run");
   std::fs::create_dir_all(&run).unwrap();
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o700)).unwrap();
+  }
   // A daemon that was killed leaves its sockets bound to no listener.
   for name in ["daemon.sock", "local.sock"] {
     drop(std::os::unix::net::UnixListener::bind(run.join(name)).unwrap());
@@ -1451,7 +1616,7 @@ fn a_daemon_starts_over_stale_sockets_nobody_listens_on() {
   // host (2026-11-12) with no output to say why; 2,000 runs under load and
   // 48 full suites did not fail again (2026-11-13). `ps`'s stderr names the
   // cause if it does.
-  let ps = home.run(&["ps"]);
+  let ps = home.run(&["proc", "ls"]);
   assert!(ps.status.success(), "ps: {}", stderr(&ps));
 }
 
@@ -1472,20 +1637,14 @@ fn a_second_daemon_on_the_same_sockets_is_refused() {
   let socket = home.path().join("run").join("daemon.sock");
   let first_socket = std::fs::metadata(&socket).unwrap().ino();
 
-  let second = home
-    .needy()
-    .args(["daemon", "--mode", "control"])
-    .args(stand_in_actor(&home))
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .spawn()
-    .unwrap();
+  let second =
+    home.needy().args(["daemon", "serve"]).args(stand_in_actor(&home)).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
   let output = daemon_exit(second);
 
   assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
-  assert!(stderr(&output).contains("another server is listening on unix:"), "{}", stderr(&output));
+  assert!(stderr(&output).contains("[discovery.instance_conflict]"), "{}", stderr(&output));
   assert_eq!(std::fs::metadata(&socket).unwrap().ino(), first_socket, "the first daemon's socket was replaced");
-  assert!(home.run(&["ps"]).status.success(), "the first daemon no longer answers");
+  assert!(home.run(&["proc", "ls"]).status.success(), "the first daemon no longer answers");
 }
 
 /// The table rows `needy ps` prints, split into cells by two or more spaces.
@@ -1497,7 +1656,7 @@ fn table(text: &str) -> Vec<Vec<String>> {
 /// `mkdir` and `tar` are needy's own processes.
 fn run_with_internal_processes(home: &Home) -> String {
   let run = create_run(home, NATIVE_PROFILE);
-  let exec = home.run(&["exec", "--run", &run, "--", "echo", "mine"]);
+  let exec = home.run(&["run", "exec", &run, "--", "echo", "mine"]);
   assert!(exec.status.success(), "{}", stderr(&exec));
   let file = home.write("copied.txt", "copied\n");
   let dir = home.path().join("into");
@@ -1506,8 +1665,10 @@ fn run_with_internal_processes(home: &Home) -> String {
     "cp",
     "--run",
     &run,
+    "--executor",
+    "here",
     file.to_str().unwrap(),
-    &format!("here:{}", dir.display()),
+    &format!("remote:{}", dir.display()),
   ]);
   assert!(cp.status.success(), "{}", stderr(&cp));
   run
@@ -1522,7 +1683,7 @@ fn ps_shows_run_and_origin_and_hides_needys_own_processes() {
   let _daemon = Daemon::start(&home);
   let run = run_with_internal_processes(&home);
 
-  let output = home.run(&["ps", "--run", &run]);
+  let output = home.run(&["proc", "ls", "--run", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let rows = table(&stdout(&output));
@@ -1538,7 +1699,7 @@ fn ps_all_shows_needys_own_processes_with_their_origin() {
   let _daemon = Daemon::start(&home);
   let run = run_with_internal_processes(&home);
 
-  let output = home.run(&["ps", "-a", "--run", &run]);
+  let output = home.run(&["proc", "ls", "-a", "--run", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let rows = table(&stdout(&output));
@@ -1561,8 +1722,8 @@ fn ps_json_carries_run_and_origin_and_respects_all() {
     serde_json::from_str(&stdout(&output)).unwrap()
   };
 
-  let mine = json(&["ps", "-o", "json", "--run", &run]);
-  let all = json(&["ps", "-o", "json", "--all", "--run", &run]);
+  let mine = json(&["proc", "ls", "-o", "json", "--run", &run]);
+  let all = json(&["proc", "ls", "-o", "json", "--all", "--run", &run]);
 
   assert_eq!(mine.len(), 1, "{mine:?}");
   assert_eq!((mine[0]["run"].as_str(), mine[0]["origin"].as_str()), (Some(run.as_str()), Some("cli")));
@@ -1572,7 +1733,7 @@ fn ps_json_carries_run_and_origin_and_respects_all() {
 
 /// Starts `command` detached in `run` and returns its process ID.
 fn detach(home: &Home, run: &str, command: &[&str]) -> String {
-  let output = home.needy().args(["exec", "-d", "--run", run, "--"]).args(command).output().unwrap();
+  let output = home.needy().args(["run", "exec", "-d", run, "--"]).args(command).output().unwrap();
   assert!(output.status.success(), "{}", stderr(&output));
   stdout(&output).trim().to_string()
 }
@@ -1581,7 +1742,7 @@ fn detach(home: &Home, run: &str, command: &[&str]) -> String {
 fn wait_until_ended(home: &Home, run: &str, id: &str) {
   let deadline = Instant::now() + Duration::from_secs(20);
   loop {
-    let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-o", "json", "--run", run]))).unwrap();
+    let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["proc", "ls", "-o", "json", "--run", run]))).unwrap();
     if listed.iter().any(|p| p["id"] == id && p["state"] != "running") {
       return;
     }
@@ -1600,11 +1761,11 @@ fn ps_shows_state_and_exit_in_separate_columns() {
   let running = detach(&home, &run, &["sleep", "30"]);
   let exited = detach(&home, &run, &["sh", "-c", "exit 3"]);
   let killed = detach(&home, &run, &["sleep", "31"]);
-  assert!(home.run(&["kill", &killed, "--signal", "SIGINT"]).status.success());
+  assert!(home.run(&["proc", "kill", &killed, "--signal", "SIGINT"]).status.success());
   wait_until_ended(&home, &run, &exited);
   wait_until_ended(&home, &run, &killed);
 
-  let output = home.run(&["ps", "--run", &run]);
+  let output = home.run(&["proc", "ls", "--run", &run]);
 
   let text = stdout(&output);
   let header: Vec<&str> = text.lines().next().unwrap().split_whitespace().collect();
@@ -1624,7 +1785,7 @@ fn ps_shows_state_and_exit_in_separate_columns() {
   assert_eq!(row(&running), ("running".into(), "".into()));
   assert_eq!(row(&exited), ("exited".into(), "3".into()));
   assert_eq!(row(&killed), ("killed".into(), "SIGINT".into()));
-  assert!(home.run(&["kill", &running, "--signal", "SIGKILL"]).status.success());
+  assert!(home.run(&["proc", "kill", &running, "--signal", "SIGKILL"]).status.success());
 }
 
 #[test]
@@ -1634,11 +1795,11 @@ fn ps_json_has_separate_state_exit_code_and_signal() {
   let run = create_run(&home, NATIVE_PROFILE);
   let exited = detach(&home, &run, &["sh", "-c", "exit 3"]);
   let killed = detach(&home, &run, &["sleep", "31"]);
-  assert!(home.run(&["kill", &killed, "--signal", "SIGINT"]).status.success());
+  assert!(home.run(&["proc", "kill", &killed, "--signal", "SIGINT"]).status.success());
   wait_until_ended(&home, &run, &exited);
   wait_until_ended(&home, &run, &killed);
 
-  let output = home.run(&["ps", "-o", "json", "--run", &run]);
+  let output = home.run(&["proc", "ls", "-o", "json", "--run", &run]);
 
   let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&output)).unwrap();
   let fields = |id: &str| {
@@ -1654,13 +1815,14 @@ fn attach_refuses_needys_own_processes() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let run = run_with_internal_processes(&home);
-  let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["ps", "-a", "-o", "json", "--run", &run]))).unwrap();
+  let listed: Vec<serde_json::Value> = serde_json::from_str(&stdout(&home.run(&["proc", "ls", "-a", "-o", "json", "--run", &run]))).unwrap();
   let tar = listed.iter().find(|p| p["argv"][0] == "tar").unwrap()["id"].as_str().unwrap().to_string();
 
-  let output = home.run(&["attach", &tar]);
+  let output = home.run(&["proc", "attach", &tar]);
 
   assert_eq!(output.status.code(), Some(1));
-  assert_eq!(stderr(&output), format!("needy: process {tar} is needy's own (origin fs); it cannot be attached\n"));
+  assert!(stderr(&output).contains(&format!("process {tar} is needy\'s own (origin fs)")), "{}", stderr(&output));
+  assert!(stderr(&output).contains("[process.internal_attach_denied]"));
 }
 
 // The owner's 2026-11-10 trial: the default report was markdown, which
@@ -1672,10 +1834,10 @@ fn report_defaults_to_plain_text() {
   let profile = home.write("review.profile.yaml", NATIVE_PROFILE);
   let created = home.run(&["run", "create", "--profile", profile.to_str().unwrap()]);
   let run = stdout(&created).trim().to_string();
-  assert!(home.run(&["exec", "--run", &run, "--", "sh", "-c", "exit 2"]).status.code() == Some(2));
+  assert!(home.run(&["run", "exec", &run, "--", "sh", "-c", "exit 2"]).status.code() == Some(2));
   assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let output = home.run(&["report", &run]);
+  let output = home.run(&["run", "report", &run]);
 
   assert!(output.status.success(), "{}", stderr(&output));
   let report = stdout(&output);
@@ -1700,6 +1862,7 @@ fn report_json_is_a_summary_and_file_writes_it() {
   let file = home.path().join("report.json");
 
   let output = home.run(&[
+    "run",
     "report",
     &run,
     "-o",
@@ -1731,105 +1894,60 @@ fn daemon_within(home: &Home, args: &[&str], timeout: Duration) -> (bool, Output
   (true, daemon.wait_with_output().unwrap())
 }
 
-// ROOT CAUSE:
-//
-// If `needy daemon --listen HOST:PORT` named a non-loopback address and no
-// token, it served every method to anyone who could reach the port, because
-// the server accepted any token when it had none.
-//
-// Before the fix, both modes listened on `0.0.0.0` without a token.
-// The fix refuses such a listener at once, naming the address and
-// `--token-env`.
+// A standalone executor uses an explicit incoming private credential on every
+// network listener, including loopback. Reachability alone is not admission.
 #[test]
-fn a_daemon_refuses_a_network_listener_without_a_token() {
+fn a_network_executor_requires_an_explicit_private_token_file() {
   let home = Home::new();
-  for mode in ["executor", "control"] {
-    let (exited, output) = daemon_within(&home, &["--mode", mode, "--listen", "0.0.0.0:0"], Duration::from_secs(10));
-
-    assert!(exited, "the {mode} daemon listened on 0.0.0.0 without a token");
-    assert_eq!(output.status.code(), Some(1), "{mode}: {}", stderr(&output));
-    assert!(stderr(&output).contains("0.0.0.0:0"), "{mode}: {}", stderr(&output));
-    assert!(stderr(&output).contains("--token-env"), "{mode}: {}", stderr(&output));
+  for address in ["tcp://0.0.0.0:0", "tcp://127.0.0.1:0"] {
+    let (exited, output) = daemon_within(&home, &["executor", "--listen", address], Duration::from_secs(10));
+    assert!(exited);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("--token-file"), "{}", stderr(&output));
   }
 }
 
-// ROOT CAUSE:
-//
-// If the machine was busy, the test failed although the daemon warned,
-// because it gave the daemon a fixed 2 s to log the warning.
-//
-// Before the fix, a slow start read the daemon's output before the warning.
-// The fix waits for the warning's line itself, within a generous bound.
 #[test]
-fn a_daemon_on_a_loopback_address_without_a_token_starts_with_a_warning() {
-  use std::io::BufRead as _;
+fn an_executor_refuses_an_insecure_private_token_file() {
   let home = Home::new();
-  let mut daemon = home
-    .needy()
-    .args([
-      "daemon",
-      "-v",
-      "--mode",
-      "executor",
-      "--listen",
-      "127.0.0.1:0",
-    ])
-    .stdout(Stdio::null())
-    .stderr(Stdio::piped())
-    .spawn()
-    .unwrap();
-  // The daemon's log is read on another thread, so the bound below holds
-  // even if the daemon logs nothing.
-  let log = std::io::BufReader::new(daemon.stderr.take().unwrap());
-  let (lines, read) = std::sync::mpsc::channel();
-  std::thread::spawn(move || {
-    for line in log.lines().map_while(Result::ok) {
-      if lines.send(line).is_err() {
-        break;
-      }
-    }
-  });
-  let deadline = Instant::now() + Duration::from_secs(60);
-  let mut seen = Vec::new();
-  let warning = loop {
-    let left = deadline.saturating_duration_since(Instant::now());
-    match read.recv_timeout(left) {
-      Ok(line) if line.contains("without a token") => break Some(line),
-      Ok(line) => seen.push(line),
-      // The daemon exited, or the bound passed.
-      Err(_) => break None,
-    }
-  };
-  let running = daemon.try_wait().unwrap().is_none();
-  if daemon.kill().is_ok() {
-    daemon.wait().unwrap();
-  }
-
-  let warning = warning.unwrap_or_else(|| panic!("no warning; the daemon logged: {}", seen.join("\n")));
-  assert!(warning.contains("WARN"), "{warning}");
-  assert!(running, "the executor did not keep running after the warning: {}", seen.join("\n"));
-}
-
-#[test]
-fn a_daemon_refuses_a_token_variable_that_is_not_set() {
-  let home = Home::new();
-
+  use std::os::unix::fs::PermissionsExt as _;
+  let token = home.write("incoming-token", "synthetic-token");
+  std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o644)).unwrap();
   let (exited, output) = daemon_within(
     &home,
     &[
-      "--mode",
       "executor",
       "--listen",
-      "127.0.0.1:0",
-      "--token-env",
-      "NEEDY_TEST_UNSET_TOKEN",
+      "tcp://127.0.0.1:0",
+      "--token-file",
+      token.to_str().unwrap(),
     ],
     Duration::from_secs(10),
   );
+  assert!(exited);
+  assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+  assert!(stderr(&output).contains("private"), "{}", stderr(&output));
+  assert!(!stderr(&output).contains("synthetic-token"));
+}
 
-  assert!(exited, "the executor listened without the token it was told to use");
+#[test]
+fn an_executor_refuses_a_missing_private_token_file() {
+  let home = Home::new();
+  let missing = home.path().join("missing-token");
+  let (exited, output) = daemon_within(
+    &home,
+    &[
+      "executor",
+      "--listen",
+      "tcp://127.0.0.1:0",
+      "--token-file",
+      missing.to_str().unwrap(),
+    ],
+    Duration::from_secs(10),
+  );
+  assert!(exited);
   assert_eq!(output.status.code(), Some(1));
-  assert!(stderr(&output).contains("NEEDY_TEST_UNSET_TOKEN"), "{}", stderr(&output));
+  assert!(stderr(&output).contains("credential file"), "{}", stderr(&output));
 }
 
 /// The permission bits of `path`.
@@ -1856,7 +1974,7 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
   let mut command = Command::new("sh");
   command.args([
     "-c",
-    "umask 000; exec \"$0\" daemon --mode control \"$@\"",
+    "umask 000; exec \"$0\" daemon serve \"$@\"",
     needy.get_program().to_str().unwrap(),
   ]);
   command.args(stand_in_actor(&home));
@@ -1869,8 +1987,7 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
   let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  // A connection, not the file: the file appears before the daemon
-  // listens, and a client that connects in between is refused.
+  // Wait for discovery publication as well as socket admission.
   while std::os::unix::net::UnixStream::connect(&socket).is_err() {
     assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
@@ -1904,7 +2021,7 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   std::fs::create_dir_all(&elsewhere).unwrap();
   let child = home
     .needy()
-    .args(["daemon", "--mode", "control"])
+    .args(["daemon", "serve"])
     .args(stand_in_actor(&home))
     .current_dir(&elsewhere)
     .stdout(Stdio::null())
@@ -1913,8 +2030,7 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
     .unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  // A connection, not the file: the file appears before the daemon
-  // listens, and a client that connects in between is refused.
+  // Wait for discovery publication as well as socket admission.
   while std::os::unix::net::UnixStream::connect(&socket).is_err() {
     assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
@@ -2016,7 +2132,7 @@ fn exec_on_a_terminal_turns_off_the_programs_terminal_modes_when_it_ends() {
   let _daemon = Daemon::start(&home);
   let modes = r"printf '\033[?1049h\033[?1000h\033[?1006h\033[?2004h\033[?1004h\033[>1u\033[?25lMODES-ON'";
 
-  let (code, written) = on_terminal(&home, &["exec", "-t", "--", "sh", "-c", modes], (24, 80));
+  let (code, written) = on_terminal(&home, &["proc", "exec", "--host", "-t", "--", "sh", "-c", modes], (24, 80));
 
   assert_eq!(code, Some(0), "{:?}", String::from_utf8_lossy(&written));
   let after = written.windows(8).position(|w| w == b"MODES-ON").expect("the program's output") + 8;
@@ -2041,16 +2157,30 @@ fn exec_on_a_terminal_restores_it_when_a_second_sigterm_makes_it_leave() {
   let _daemon = Daemon::start(&home);
   let ignores_term = r"trap '' TERM; printf '\033[?1049h\033[?2004hMODES-ON'; sleep 30";
 
-  let (code, written) = on_terminal_with(&home, &["exec", "-t", "--", "sh", "-c", ignores_term], (24, 80), |pid, written| {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while !written.lock().unwrap().windows(8).any(|w| w == b"MODES-ON") {
-      assert!(Instant::now() < deadline, "the program did not start");
-      std::thread::sleep(Duration::from_millis(20));
-    }
-    kill(pid, "TERM");
-    std::thread::sleep(Duration::from_millis(300));
-    kill(pid, "TERM");
-  });
+  let (code, written) = on_terminal_with(
+    &home,
+    &[
+      "proc",
+      "exec",
+      "--host",
+      "-t",
+      "--",
+      "sh",
+      "-c",
+      ignores_term,
+    ],
+    (24, 80),
+    |pid, written| {
+      let deadline = Instant::now() + Duration::from_secs(20);
+      while !written.lock().unwrap().windows(8).any(|w| w == b"MODES-ON") {
+        assert!(Instant::now() < deadline, "the program did not start");
+        std::thread::sleep(Duration::from_millis(20));
+      }
+      kill(pid, "TERM");
+      std::thread::sleep(Duration::from_millis(300));
+      kill(pid, "TERM");
+    },
+  );
 
   assert_eq!(code, Some(143), "{:?}", String::from_utf8_lossy(&written));
   let after = written.windows(8).position(|w| w == b"MODES-ON").unwrap() + 8;
@@ -2070,7 +2200,9 @@ fn exec_on_a_terminal_forwards_colorterm_and_replaces_an_unknown_term() {
     .env("TERM", "needy-no-such-terminal")
     .env("COLORTERM", "needy-test-colors")
     .args([
+      "proc",
       "exec",
+      "--host",
       "-t",
       "--",
       "sh",
@@ -2088,9 +2220,10 @@ fn exec_on_a_terminal_forwards_colorterm_and_replaces_an_unknown_term() {
 
 /// `needy runner token create` with `args`: the token it printed.
 fn create_join_token(home: &Home, args: &[&str]) -> String {
-  let output = home.needy().args(["runner", "token", "create"]).args(args).output().unwrap();
+  let output = home.needy().args(["runner", "invite", "-o", "json"]).args(args).output().unwrap();
   assert!(output.status.success(), "token create: {}", stderr(&output));
-  stdout(&output).trim().to_string()
+  let issued: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
+  issued["code"].as_str().unwrap().to_owned()
 }
 
 #[test]
@@ -2147,15 +2280,15 @@ fn runner_token_revoke_shows_it_revoked() {
   assert_eq!(rows[0]["state"], "revoked");
   assert_eq!(rows[0]["roles"], serde_json::json!([]), "a token without roles allows every role");
   assert_eq!(missing.status.code(), Some(1));
-  assert_eq!(stderr(&missing), "needy: no join token nope\n");
+  assert!(stderr(&missing).contains("no join token nope") && stderr(&missing).contains("[bootstrap.invalid_code]"), "{}", stderr(&missing));
 }
 
 #[test]
 fn runner_token_create_refuses_an_unknown_role_and_a_malformed_label() {
   let home = Home::new();
 
-  let role = home.run(&["runner", "token", "create", "--roles", "builder"]);
-  let label = home.run(&["runner", "token", "create", "--labels", "os"]);
+  let role = home.run(&["runner", "invite", "--roles", "builder"]);
+  let label = home.run(&["runner", "invite", "--labels", "os"]);
 
   assert_eq!(role.status.code(), Some(2));
   assert!(stderr(&role).contains("unknown runner role \"builder\""), "{}", stderr(&role));
@@ -2194,21 +2327,17 @@ fn runner_rotate_and_rm_name_a_missing_runner() {
   let rotate = home.run(&["runner", "rotate", "ghost"]);
   let rm = home.run(&["runner", "rm", "ghost"]);
 
-  assert_eq!((rotate.status.code(), stderr(&rotate).as_str()), (Some(1), "needy: no runner ghost\n"));
-  assert_eq!((rm.status.code(), stderr(&rm).as_str()), (Some(1), "needy: no runner ghost\n"));
+  for output in [&rotate, &rm] {
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr(output).contains("no runner ghost") && stderr(output).contains("[runner.not_found]"), "{}", stderr(output));
+  }
 }
 
 /// A control daemon whose runners send a heartbeat every 200 ms.
 fn spawn_control_with_fast_heartbeats(home: &Home) -> Daemon {
   let child = home
     .needy()
-    .args([
-      "daemon",
-      "--mode",
-      "control",
-      "--heartbeat-interval",
-      "200ms",
-    ])
+    .args(["daemon", "serve", "--heartbeat-interval", "200ms"])
     .args(stand_in_actor(home))
     .stdout(Stdio::null())
     .stderr(Stdio::null())
@@ -2216,30 +2345,56 @@ fn spawn_control_with_fast_heartbeats(home: &Home) -> Daemon {
     .unwrap();
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
-  // A connection, not the file: the file appears before the daemon
-  // listens, and a client that connects in between is refused.
-  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+  // Wait for discovery publication as well as socket admission.
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
     assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
   Daemon { child }
 }
 
-/// `needy daemon --mode runner` in its own home, joining `control`.
-fn spawn_runner(home: &Home, control: &Home, join_token: Option<&str>) -> Child {
-  let endpoint = format!("unix:{}", control.path().join("run").join("daemon.sock").display());
-  let mut command = home.needy();
-  command.args([
-    "daemon", "--mode", "runner", "--join", &endpoint, "--name", "mac", "--labels", "os=test",
-  ]);
-  if let Some(token) = join_token {
-    command.args(["--join-token-env", "NEEDY_TEST_JOIN_TOKEN"]).env("NEEDY_TEST_JOIN_TOKEN", token);
+/// Enroll once, then start a runner from its independent saved credential.
+fn enroll_runner(home: &Home, control: &Home, token: &str, extra: &[String]) -> Output {
+  let endpoint = format!("unix:{}", control.path().join("run/daemon.sock").display());
+  let invitation = home.write("invitation", token);
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&invitation, std::fs::Permissions::from_mode(0o600)).unwrap();
   }
-  // NOTICE: a Docker daemon nobody listens for, so the runner detects the
-  // same capabilities on a host with Docker as on one without.
-  command.env("DOCKER_HOST", format!("unix://{}", home.path().join("no-docker.sock").display()));
-  command.env("PATH", path_without_apple_container());
-  command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap()
+  home
+    .needy()
+    .args([
+      "--address",
+      &endpoint,
+      "runner",
+      "join",
+      "mac",
+      "--code-file",
+      invitation.to_str().unwrap(),
+      "--labels",
+      "os=test",
+    ])
+    .args(extra)
+    .env("DOCKER_HOST", format!("unix://{}", home.path().join("no-docker.sock").display()))
+    .env("PATH", path_without_apple_container())
+    .output()
+    .unwrap()
+}
+
+fn spawn_runner(home: &Home, control: &Home, join_token: Option<&str>) -> Child {
+  if let Some(token) = join_token {
+    let joined = enroll_runner(home, control, token, &[]);
+    assert!(joined.status.success(), "runner join: {}", stderr(&joined));
+  }
+  home
+    .needy()
+    .args(["runner", "serve"])
+    .env("DOCKER_HOST", format!("unix://{}", home.path().join("no-docker.sock").display()))
+    .env("PATH", path_without_apple_container())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap()
 }
 
 /// This test's `PATH` without the directories that hold Apple's `container`
@@ -2422,19 +2577,20 @@ fn a_runner_daemon_stopped_while_it_joins_keeps_its_credential() {
   let machine = Home::new();
   let control = HeldJoin::start(&machine);
   let mut command = machine.needy();
-  command
-    .args([
-      "daemon",
-      "--mode",
-      "runner",
-      "--join",
-      &control.endpoint,
-      "--name",
-      "mac",
-      "--join-token-env",
-      "NEEDY_TEST_JOIN_TOKEN",
-    ])
-    .env("NEEDY_TEST_JOIN_TOKEN", "a-join-token");
+  let invitation = machine.write("invitation", "a-join-token");
+  {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::set_permissions(&invitation, std::fs::Permissions::from_mode(0o600)).unwrap();
+  }
+  command.args([
+    "--address",
+    &control.endpoint,
+    "runner",
+    "join",
+    "mac",
+    "--code-file",
+    invitation.to_str().unwrap(),
+  ]);
   let runner = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
   control.arrived.recv_timeout(Duration::from_secs(20)).expect("the runner joins");
 
@@ -2461,8 +2617,8 @@ fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
   exited(first);
   std::thread::sleep(Duration::from_millis(5));
 
-  let late = exited(spawn_runner(&Home::new(), &control, Some(&expired)));
-  let again = exited(spawn_runner(&Home::new(), &control, Some(&spent)));
+  let late = enroll_runner(&Home::new(), &control, &expired, &[]);
+  let again = enroll_runner(&Home::new(), &control, &spent, &[]);
 
   assert_eq!(late.status.code(), Some(1));
   assert!(stderr(&late).contains("expired"), "{}", stderr(&late));
@@ -2470,19 +2626,16 @@ fn a_runner_daemon_with_an_expired_or_spent_join_token_is_refused() {
   assert!(stderr(&again).contains("has no uses left"), "{}", stderr(&again));
 }
 
-/// `needy daemon --mode runner` for `mac` with `extra` arguments, run to
-/// its exit or until `control` lists it, then killed.
+/// Enroll with capability settings, then reconnect from the saved enrollment.
+#[cfg(target_os = "linux")]
 fn runner_with(machine: &Home, control: &Home, extra: &[String]) -> Child {
   let token = create_join_token(control, &[]);
-  let endpoint = format!("unix:{}", control.path().join("run").join("daemon.sock").display());
+  let joined = enroll_runner(machine, control, &token, extra);
+  assert!(joined.status.success(), "runner join: {}", stderr(&joined));
   machine
     .needy()
-    .args([
-      "daemon", "--mode", "runner", "--join", &endpoint, "--name", "mac",
-    ])
+    .args(["runner", "serve"])
     .args(extra)
-    .args(["--join-token-env", "NEEDY_TEST_JOIN_TOKEN"])
-    .env("NEEDY_TEST_JOIN_TOKEN", token)
     .env("DOCKER_HOST", format!("unix://{}", machine.path().join("no-docker.sock").display()))
     .env("PATH", path_without_apple_container())
     .stdout(Stdio::null())
@@ -2518,12 +2671,13 @@ fn a_runner_restricted_to_roles_this_machine_cannot_host_warns_and_does_not_star
   let machine = Home::new();
   let no_kvm = machine.path().join("no-kvm").display().to_string();
 
-  let refused = exited(runner_with(&machine, &control, &["--roles".into(), "actor".into(), "--kvm".into(), no_kvm]));
+  let token = create_join_token(&control, &[]);
+  let refused = enroll_runner(&machine, &control, &token, &["--roles".into(), "actor".into(), "--kvm".into(), no_kvm]);
 
   assert_eq!(refused.status.code(), Some(1));
   let text = stderr(&refused);
   assert!(text.contains("--roles names actor, which this machine cannot host"), "{text}");
-  assert!(text.contains("this machine can host none of the roles --roles names"), "{text}");
+  assert!(text.contains("explicitly requested runner role is unavailable"), "{text}");
 }
 
 /// A runner daemon, killed when dropped.
@@ -2545,7 +2699,7 @@ fn connected_runner(machine: &Home, control: &Home) -> RunnerDaemon {
   let runner = RunnerDaemon(spawn_runner(machine, control, Some(&token)));
   let deadline = Instant::now() + Duration::from_secs(20);
   loop {
-    let ps = control.run(&["ps", "--runner", "mac"]);
+    let ps = control.run(&["proc", "ls", "--runner", "mac"]);
     if ps.status.success() {
       return runner;
     }
@@ -2562,6 +2716,7 @@ fn exec_on_a_runner_returns_the_command_exit_code_and_output() {
   let _runner = connected_runner(&machine, &control);
 
   let output = control.run(&[
+    "proc",
     "exec",
     "-T",
     "--runner",
@@ -2571,8 +2726,16 @@ fn exec_on_a_runner_returns_the_command_exit_code_and_output() {
     "-c",
     "echo hi; echo oops >&2; exit 3",
   ]);
-  let missing = control.run(&["exec", "--runner", "mac", "--", "needy-no-such-command"]);
+  let missing = control.run(&[
+    "proc",
+    "exec",
+    "--runner",
+    "mac",
+    "--",
+    "needy-no-such-command",
+  ]);
   let json = control.run(&[
+    "proc",
     "exec",
     "--runner",
     "mac",
@@ -2599,16 +2762,19 @@ fn a_detached_process_on_a_runner_is_listed_and_killed_and_files_copy_to_it() {
   let source = control.write("hello.txt", "hello runner\n");
   let destination = machine.path().join("copied");
 
-  let detached = control.run(&["exec", "-d", "--runner", "mac", "--", "sleep", "600"]);
+  let detached = control.run(&[
+    "proc", "exec", "-d", "--runner", "mac", "--", "sleep", "600",
+  ]);
   let id = stdout(&detached).trim().to_string();
-  let listed = control.run(&["ps", "--runner", "mac", "-o", "json"]);
-  let killed = control.run(&["kill", "-s", "SIGKILL", &id]);
+  let listed = control.run(&["proc", "ls", "--runner", "mac", "-o", "json"]);
+  let killed = control.run(&["proc", "kill", "-s", "SIGKILL", &id]);
   let copied = control.run(&[
     "fs",
     "cp",
     "--runner",
+    "mac",
     source.to_str().unwrap(),
-    &format!("mac:{}", destination.display()),
+    &format!("remote:{}", destination.display()),
   ]);
 
   assert!(detached.status.success(), "{}", stderr(&detached));
@@ -2626,12 +2792,18 @@ fn exec_on_a_runner_that_is_not_connected_fails_at_once() {
   let _daemon = Daemon::start(&control);
   let started = Instant::now();
 
-  let exec = control.run(&["exec", "--runner", "ghost", "--", "true"]);
-  let ps = control.run(&["ps", "--runner", "ghost"]);
+  let exec = control.run(&["proc", "exec", "--runner", "ghost", "--", "true"]);
+  let ps = control.run(&["proc", "ls", "--runner", "ghost"]);
 
   assert!(started.elapsed() < Duration::from_secs(5), "{:?}", started.elapsed());
-  assert_eq!((exec.status.code(), stderr(&exec).as_str()), (Some(1), "needy: runner ghost is not connected\n"));
-  assert_eq!((ps.status.code(), stderr(&ps).as_str()), (Some(1), "needy: runner ghost is not connected\n"));
+  for output in [&exec, &ps] {
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+      stderr(output).contains("runner ghost is not connected") && stderr(output).contains("[runner.not_connected]"),
+      "{}",
+      stderr(output)
+    );
+  }
 }
 
 #[test]
@@ -2639,60 +2811,47 @@ fn a_control_daemon_refuses_a_guest_needy_that_is_not_a_static_linux_build() {
   let home = Home::new();
   let guest = home.write("needy-linux", "#!/bin/sh\n");
 
-  let (exited, output) = daemon_within(
-    &home,
-    &[
-      "--mode",
-      "control",
-      "--guest-needy",
-      &guest.display().to_string(),
-    ],
-    Duration::from_secs(20),
-  );
+  let (exited, output) = daemon_within(&home, &["serve", "--guest-needy", &guest.display().to_string()], Duration::from_secs(20));
 
   assert!(exited, "the daemon started with a guest needy it cannot use");
   assert_eq!(output.status.code(), Some(1));
-  assert_eq!(
-    stderr(&output),
-    format!(
-      "needy: the guest needy {}: is not a 64-bit ELF executable; the guest needy is a static Linux build of needy\n",
-      guest.display()
-    )
+  assert!(stderr(&output).contains(&format!("the guest needy {}", guest.display())), "{}", stderr(&output));
+  assert!(
+    stderr(&output).contains("is not a 64-bit ELF executable; the guest needy is a static Linux build of needy"),
+    "{}",
+    stderr(&output)
   );
 }
 
 #[test]
-fn only_a_control_daemon_takes_a_guest_needy() {
+fn only_control_serving_accepts_a_guest_needy() {
   let home = Home::new();
-
   let output = home.run(&[
     "daemon",
-    "--mode",
     "executor",
+    "--listen",
+    "unix:///tmp/example.sock",
     "--guest-needy",
     "/nonexistent",
   ]);
-
-  assert_eq!(output.status.code(), Some(1));
-  assert_eq!(stderr(&output), "needy: --guest-needy is for the control mode, which starts actors\n");
+  assert_eq!(output.status.code(), Some(2));
+  assert!(stderr(&output).contains("--guest-needy"), "{}", stderr(&output));
 }
 
 #[test]
 fn a_runner_listens_nowhere() {
   let home = Home::new();
-
-  let output = home.run(&["daemon", "--mode", "runner", "--listen", "127.0.0.1:0"]);
-
-  assert_eq!(output.status.code(), Some(1));
-  assert!(stderr(&output).contains("a runner dials the control plane and listens nowhere"), "{}", stderr(&output));
+  let output = home.run(&["runner", "serve", "--listen", "tcp://127.0.0.1:0"]);
+  assert_eq!(output.status.code(), Some(2));
+  assert!(stderr(&output).contains("--listen"), "{}", stderr(&output));
 }
 
 #[test]
-fn exec_names_a_runner_or_a_run_not_both() {
+fn process_execution_cannot_combine_a_runner_with_a_run_selector() {
   let home = Home::new();
-
-  let output = home.run(&["exec", "--runner", "mac", "--run", "r1", "--", "true"]);
-
+  let output = home.run(&[
+    "proc", "exec", "--runner", "mac", "--run", "r1", "--", "true",
+  ]);
   assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
 }
 
@@ -2764,8 +2923,6 @@ fn gone_now(pid: u32) -> bool {
 
 // ------------------------------------------------------------- clients
 
-const CONTROL_TOKEN: &str = "control-secret";
-
 // ROOT CAUSE:
 //
 // If another test's listener took the port this helper picked, the test
@@ -2778,28 +2935,13 @@ const CONTROL_TOKEN: &str = "control-secret";
 // the helper's readiness loop connected to the other test's listener.
 // The fix lets the daemon bind port 0 itself and takes the port from the
 // daemon's own "listening on" line, so a test only talks to its own daemon.
-/// A control daemon on a loopback TCP port that needs `CONTROL_TOKEN`, as
-/// one reached through a tunnel, and its endpoint. It also listens on
-/// `home`'s own socket, where the operator lists join tokens and clients
-/// (`as_local_operator`).
+/// A control daemon with authenticated TCP access and its independent
+/// private management socket. The local operator needs no bearer.
 fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
   use std::io::BufRead as _;
-  let socket = format!("unix:{}", home.path().join("run").join("daemon.sock").display());
   let mut child = home
     .needy()
-    .args([
-      "daemon",
-      "-v",
-      "--mode",
-      "control",
-      "--listen",
-      &socket,
-      "--listen",
-      "127.0.0.1:0",
-      "--token-env",
-      "NEEDY_TEST_CONTROL_TOKEN",
-    ])
-    .env("NEEDY_TEST_CONTROL_TOKEN", CONTROL_TOKEN)
+    .args(["daemon", "serve", "-v", "--listen", "tcp://127.0.0.1:0"])
     .args(stand_in_actor(home))
     .stdout(Stdio::null())
     .stderr(Stdio::piped())
@@ -2829,30 +2971,69 @@ fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
     }
     seen.push(line);
   };
+  let deadline = Instant::now() + Duration::from_secs(20);
+  loop {
+    let local = home.run(&["run", "ls"]);
+    if local.status.success() {
+      break;
+    }
+    assert!(Instant::now() < deadline, "local management did not become ready: {}", stderr(&local));
+    std::thread::sleep(Duration::from_millis(20));
+  }
   (daemon, format!("http://{listen}"))
 }
 
-/// `needy` against `endpoint` as the operator, with the control token.
+/// Pair one named local connection through a private invitation file.
+fn pair_context(home: &Home, endpoint: &str, name: &str, code: &str) -> Output {
+  use std::os::unix::fs::PermissionsExt as _;
+  let path = home.write("invitation", code);
+  std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+  home.run(&[
+    "config",
+    "context",
+    "pair",
+    name,
+    "--address",
+    endpoint,
+    "--code-file",
+    path.to_str().unwrap(),
+  ])
+}
+
+/// A named network administrator bootstrapped by this control host's owner.
 fn as_operator(home: &Home, endpoint: &str, args: &[&str]) -> Output {
-  home.needy().args(["--endpoint", endpoint]).args(args).env("NEEDY_TOKEN", CONTROL_TOKEN).output().unwrap()
+  if !home.run(&["config", "context", "show", "administration"]).status.success() {
+    let invitation = home.run(&[
+      "client",
+      "invite",
+      "--admin",
+      "--name",
+      "administrator",
+      "-o",
+      "json",
+    ]);
+    assert!(invitation.status.success(), "{}", stderr(&invitation));
+    let value: serde_json::Value = serde_json::from_str(&stdout(&invitation)).unwrap();
+    let paired = pair_context(home, endpoint, "administration", value["code"].as_str().unwrap());
+    assert!(paired.status.success(), "{}", stderr(&paired));
+  }
+  home.needy().args(["--context", "administration"]).args(args).output().unwrap()
 }
 
-/// `needy` on the control host, against its Unix socket, as the operator.
 fn as_local_operator(home: &Home, args: &[&str]) -> Output {
-  home.needy().args(args).env("NEEDY_TOKEN", CONTROL_TOKEN).output().unwrap()
+  home.run(args)
 }
 
-/// `needy` against `endpoint` with only what `home` stored.
-fn as_client(home: &Home, endpoint: &str, args: &[&str]) -> Output {
-  home.needy().args(["--endpoint", endpoint]).args(args).output().unwrap()
+/// Explicit saved identity: never borrow a credential for a direct address.
+fn as_client(home: &Home, _endpoint: &str, args: &[&str]) -> Output {
+  home.needy().args(["--context", "remote"]).args(args).output().unwrap()
 }
 
-/// A pairing code the operator created for a client named `name`.
-fn pairing_code(control: &Home, endpoint: &str, name: &str) -> String {
-  let created = as_operator(control, endpoint, &["pair", "create", "--name", name]);
+fn pairing_code(control: &Home, _endpoint: &str, name: &str) -> String {
+  let created = as_local_operator(control, &["client", "invite", "--name", name, "-o", "json"]);
   assert!(created.status.success(), "{}", stderr(&created));
-  assert!(stderr(&created).contains("it is not shown again"), "{}", stderr(&created));
-  stdout(&created).trim().to_string()
+  let value: serde_json::Value = serde_json::from_str(&stdout(&created)).unwrap();
+  value["code"].as_str().unwrap().to_string()
 }
 
 #[test]
@@ -2866,18 +3047,19 @@ fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
   assert_eq!(refused.status.code(), Some(1));
 
   let code = pairing_code(&control, &endpoint, "laptop");
-  let paired = as_client(&laptop, &endpoint, &["pair", &code]);
+  let paired = pair_context(&laptop, &endpoint, "remote", &code);
 
   assert!(paired.status.success(), "{}", stderr(&paired));
-  assert!(stderr(&paired).contains("paired as client laptop"), "{}", stderr(&paired));
-  let credentials = laptop.path().join("config").join("credentials.json");
+  assert!(stderr(&paired).contains("paired context remote as client"), "{}", stderr(&paired));
+  let credentials = laptop.path().join("config").join("config.yaml");
   assert_eq!(std::fs::metadata(&credentials).unwrap().permissions().mode() & 0o777, 0o600);
-  let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
-  assert!(stored["endpoints"][&endpoint]["token"].as_str().unwrap().starts_with("needy-client."), "{stored}");
+  let stored: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
+  assert!(stored["contexts"]["remote"]["credential"].as_str().unwrap().starts_with("needy-client."));
+  assert_eq!(stored["current_context"].as_str(), Some("local"));
   let listed = as_client(&laptop, &endpoint, &["run", "ls"]);
   assert!(listed.status.success(), "{}", stderr(&listed));
   // The code was spent.
-  let again = as_client(&Home::new(), &endpoint, &["pair", &code]);
+  let again = pair_context(&Home::new(), &endpoint, "remote", &code);
   assert_eq!(again.status.code(), Some(1));
   assert!(stderr(&again).contains("was used already"), "{}", stderr(&again));
 }
@@ -2887,32 +3069,41 @@ fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
 // replaces that client; a code without a name never takes an existing
 // client's.
 #[test]
-fn pair_create_tells_the_operator_which_client_a_named_code_replaces() {
+fn client_invite_tells_the_operator_which_client_a_named_code_replaces() {
   let control = Home::new();
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
-  let listed = as_local_operator(&control, &["pair", "ls", "-o", "json"]);
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
+  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
 
-  let replacing = as_operator(&control, &endpoint, &["pair", "create", "--name", "laptop"]);
-  let fresh = as_operator(&control, &endpoint, &["pair", "create", "--name", "desk"]);
-  let unnamed = as_operator(&control, &endpoint, &["pair", "create"]);
+  let replacing = as_operator(&control, &endpoint, &["client", "invite", "--name", "laptop", "-o", "json"]);
+  let fresh = as_operator(&control, &endpoint, &["client", "invite", "--name", "desk", "-o", "json"]);
+  let unnamed = as_operator(&control, &endpoint, &["client", "invite", "-o", "json"]);
 
   assert_eq!(replacing.status.code(), Some(0), "{}", stderr(&replacing));
-  let notice = format!("notice: pairing with this code will replace client laptop ({id}) and revoke its token");
+  let notice = format!("pairing with this invitation replaces client laptop ({id}) and revokes its credential");
   assert!(stderr(&replacing).contains(&notice), "{}", stderr(&replacing));
-  assert!(stdout(&replacing).trim().starts_with("needy-pair."), "{}", stdout(&replacing));
+  assert!(serde_json::from_str::<serde_json::Value>(&stdout(&replacing)).unwrap()["code"].as_str().unwrap().starts_with("needy-pair."));
   for created in [&fresh, &unnamed] {
     assert_eq!(created.status.code(), Some(0), "{}", stderr(created));
     assert!(!stderr(created).contains("notice:"), "{}", stderr(created));
   }
-  assert!(stderr(&unnamed).contains("for client client-"), "{}", stderr(&unnamed));
+  assert!(serde_json::from_str::<serde_json::Value>(&stdout(&unnamed)).unwrap()["name"].as_str().unwrap().starts_with("client-"));
   // Pairing with the replacing code revokes the old token.
   let desk = Home::new();
-  assert!(as_client(&desk, &endpoint, &["pair", stdout(&replacing).trim()]).status.success());
+  assert!(
+    pair_context(
+      &desk,
+      &endpoint,
+      "remote",
+      serde_json::from_str::<serde_json::Value>(&stdout(&replacing)).unwrap()["code"].as_str().unwrap()
+    )
+    .status
+    .success()
+  );
   assert_eq!(as_client(&laptop, &endpoint, &["run", "ls"]).status.code(), Some(1));
 }
 
@@ -2922,22 +3113,22 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
-  let listed = as_local_operator(&control, &["pair", "ls", "-o", "json"]);
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
+  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
   assert_eq!((clients[0]["name"].as_str(), clients[0]["state"].as_str()), (Some("laptop"), Some("active")));
 
-  let revoked = as_operator(&control, &endpoint, &["pair", "revoke", &id]);
+  let revoked = as_operator(&control, &endpoint, &["client", "revoke", &id]);
   let refused = as_client(&laptop, &endpoint, &["run", "ls"]);
 
   assert!(revoked.status.success(), "{}", stderr(&revoked));
   assert_eq!(refused.status.code(), Some(1));
   assert!(stderr(&refused).contains("missing or invalid bearer token"), "{}", stderr(&refused));
-  let text = stdout(&as_local_operator(&control, &["pair", "ls"]));
+  let text = stdout(&as_local_operator(&control, &["client", "ls"]));
   let rows = table(&text);
-  assert_eq!(rows[0], ["ID", "NAME", "STATE", "PAIRED", "LAST USED"]);
-  assert_eq!(&rows[1][..3], [id.as_str(), "laptop", "revoked"]);
+  assert_eq!(rows[0], ["ID", "NAME", "ACCESS", "STATE", "PAIRED", "LAST USED"]);
+  assert_eq!(&rows[1][..4], [id.as_str(), "laptop", "runs", "revoked"]);
 }
 
 // A paired client drives runs but does not administer the control plane
@@ -2948,11 +3139,11 @@ fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() 
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
 
-  let token = as_client(&laptop, &endpoint, &["runner", "token", "create"]);
+  let token = as_client(&laptop, &endpoint, &["runner", "invite"]);
   let remove = as_client(&laptop, &endpoint, &["runner", "rm", "mac"]);
-  let pair = as_client(&laptop, &endpoint, &["pair", "create"]);
+  let pair = as_client(&laptop, &endpoint, &["client", "invite", "-o", "json"]);
 
   for (refused, what) in [
     (&token, "creating join tokens"),
@@ -2960,53 +3151,35 @@ fn a_paired_client_cannot_create_join_tokens_remove_runners_or_manage_clients() 
     (&pair, "creating pairing codes"),
   ] {
     assert_eq!(refused.status.code(), Some(1), "{}", stderr(refused));
-    assert!(stderr(refused).contains(&format!("{what} needs the control token; paired client laptop may not")), "{}", stderr(refused));
+    assert!(stderr(refused).contains(&format!("{what} needs administrator access; paired client laptop may not")), "{}", stderr(refused));
   }
-  let listed = as_local_operator(&control, &["pair", "ls", "-o", "json"]);
+  let listed = as_local_operator(&control, &["client", "ls", "-o", "json"]);
   let clients: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let id = clients[0]["id"].as_str().unwrap().to_string();
-  let revoke = as_client(&laptop, &endpoint, &["pair", "revoke", &id]);
+  let revoke = as_client(&laptop, &endpoint, &["client", "revoke", &id]);
   assert_eq!(revoke.status.code(), Some(1), "{}", stderr(&revoke));
-  assert!(stderr(&revoke).contains("revoking clients needs the control token"), "{}", stderr(&revoke));
+  assert!(stderr(&revoke).contains("revoking clients needs administrator access"), "{}", stderr(&revoke));
   assert!(as_client(&laptop, &endpoint, &["run", "ls"]).status.success(), "the client was not revoked");
 }
 
-// Join tokens and clients are listed only on the control host's Unix socket
-// (owner decision, 2026-11-12): over TCP the control token is refused as a
-// paired client is. Runners stay listed for paired clients.
+// Management grants work over authenticated networks. Runs-only identities
+// keep their named principal but do not gain registry authority.
 #[test]
-fn join_tokens_and_clients_are_listed_only_on_the_control_hosts_socket() {
+fn network_administrators_manage_clients_while_runs_only_clients_are_denied() {
   let control = Home::new();
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
-
-  for (args, what) in [
-    (&["pair", "ls"][..], "listing clients"),
-    (&["runner", "token", "ls"][..], "listing join tokens"),
-  ] {
-    let local = as_local_operator(&control, args);
-    let tunnelled = as_operator(&control, &endpoint, args);
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
+  for args in [&["client", "ls"][..], &["runner", "token", "ls"][..]] {
+    assert!(as_local_operator(&control, args).status.success());
+    let administrator = as_operator(&control, &endpoint, args);
+    assert!(administrator.status.success(), "{}", stderr(&administrator));
     let client = as_client(&laptop, &endpoint, args);
-
-    assert!(local.status.success(), "{args:?}: {}", stderr(&local));
-    assert_eq!(tunnelled.status.code(), Some(1), "{args:?}: {}", stdout(&tunnelled));
-    assert!(
-      stderr(&tunnelled).contains(&format!("{what} works only on the control host's Unix socket, not over TCP")),
-      "{}",
-      stderr(&tunnelled)
-    );
-    assert_eq!(client.status.code(), Some(1), "{args:?}: {}", stdout(&client));
-    assert!(
-      stderr(&client).contains(&format!("{what} works only on the control host's Unix socket; paired client laptop may not")),
-      "{}",
-      stderr(&client)
-    );
+    assert_eq!(client.status.code(), Some(1), "{}", stdout(&client));
+    assert!(stderr(&client).contains("administrator access"), "{}", stderr(&client));
   }
-  assert!(stdout(&as_local_operator(&control, &["pair", "ls"])).contains("laptop"));
-  let runners = as_client(&laptop, &endpoint, &["runner", "ls"]);
-  assert!(runners.status.success(), "{}", stderr(&runners));
+  assert!(as_client(&laptop, &endpoint, &["runner", "ls"]).status.success());
 }
 
 // ROOT CAUSE:
@@ -3028,16 +3201,16 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   // plane's `trace.db`.
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
   let profile = laptop.write("review.profile.yaml", NATIVE_PROFILE);
   let created = as_client(&laptop, &endpoint, &["run", "create", "--profile", profile.to_str().unwrap()]);
   assert!(created.status.success(), "{}", stderr(&created));
   let run = stdout(&created).trim().to_string();
-  assert_eq!(as_client(&laptop, &endpoint, &["exec", "--run", &run, "--", "sh", "-c", "exit 2"]).status.code(), Some(2));
+  assert_eq!(as_client(&laptop, &endpoint, &["run", "exec", &run, "--", "sh", "-c", "exit 2"]).status.code(), Some(2));
   // The stand-in actor prints two lines; `-f` shows them while the run runs
   // and follows until the run stops.
   const CONSOLE: &str = "boot\nhello from the actor\n";
-  let mut follow = laptop.needy().args(["--endpoint", &endpoint, "run", "logs", "-f", &run]).stdout(Stdio::piped()).spawn().unwrap();
+  let mut follow = laptop.needy().args(["--context", "remote", "run", "logs", "-f", &run]).stdout(Stdio::piped()).spawn().unwrap();
   let (shown, printed) = std::sync::mpsc::channel();
   let reader = std::thread::spawn({
     use std::io::Read as _;
@@ -3070,9 +3243,9 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   }
   let followed = reader.join().unwrap();
 
-  let human = as_client(&laptop, &endpoint, &["report", &run]);
-  let json = as_client(&laptop, &endpoint, &["report", &run[..6], "-o", "json"]);
-  let local = as_client(&laptop, &endpoint, &["report", "--local", &run]);
+  let human = as_client(&laptop, &endpoint, &["run", "report", &run]);
+  let json = as_client(&laptop, &endpoint, &["run", "report", &run[..6], "-o", "json"]);
+  let local = laptop.run(&["run", "report", "--offline", &run]);
 
   assert_eq!(followed, CONSOLE);
   assert!(human.status.success(), "{}", stderr(&human));
@@ -3094,54 +3267,42 @@ fn the_operator_is_named_in_the_report_of_a_run_it_started() {
   let run = create_run(&home, NATIVE_PROFILE);
   assert!(home.run(&["run", "stop", &run]).status.success());
 
-  let json = home.run(&["report", &run, "-o", "json"]);
+  let json = home.run(&["run", "report", &run, "-o", "json"]);
 
   let summary: serde_json::Value = serde_json::from_str(&stdout(&json)).unwrap();
   assert_eq!((summary["started_by"].as_str(), summary["stopped_by"].as_str()), (Some("operator"), Some("operator")));
 }
 
-// Pairing is a top-level group, and `needy client` is gone (owner decision,
-// 2026-11-12): `pair CODE`, `pair create`, `pair ls`, `pair revoke ID`.
 #[test]
-fn pair_is_a_top_level_group_and_needy_client_is_gone() {
+fn pairing_is_local_configuration_and_authorization_is_a_separate_group() {
   let home = Home::new();
-
-  let gone = home.run(&["client", "ls"]);
-  let help = home.run(&["pair", "--help"]);
-
-  assert_eq!(gone.status.code(), Some(2), "{}", stderr(&gone));
+  assert_eq!(home.run(&["pair", "--help"]).status.code(), Some(2));
+  let help = home.run(&["client", "--help"]);
   assert!(help.status.success(), "{}", stderr(&help));
-  for command in ["create", "ls", "revoke"] {
-    assert!(stdout(&help).contains(&format!("  {command} ")), "{}", stdout(&help));
+  for command in ["invite", "ls", "revoke"] {
+    assert!(stdout(&help).contains(command));
   }
+  assert!(home.run(&["config", "context", "pair", "--help"]).status.success());
 }
 
-// After `needy pair --endpoint URL CODE` a machine reaches that control plane
-// without `--endpoint` (owner decision, 2026-11-12); `--endpoint` and
-// `NEEDY_ENDPOINT` still win, and a daemon started on that machine still
-// listens on its own socket.
 #[test]
-fn a_paired_machine_remembers_the_endpoint_and_an_explicit_one_wins() {
+fn pairing_preserves_local_selection_and_failed_explicit_targets_never_fall_back() {
   let control = Home::new();
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
-  assert!(as_client(&laptop, &endpoint, &["pair", &code]).status.success());
-
-  let remembered = laptop.run(&["run", "ls"]);
-  let flag = laptop.needy().args(["--endpoint", "http://127.0.0.1:9", "run", "ls"]).output().unwrap();
-  let env = laptop.needy().env("NEEDY_ENDPOINT", "http://127.0.0.1:9").args(["run", "ls"]).output().unwrap();
-
-  assert!(remembered.status.success(), "{}", stderr(&remembered));
-  for overridden in [&flag, &env] {
-    assert_eq!(overridden.status.code(), Some(1), "{}", stdout(overridden));
-    assert!(stderr(overridden).contains("http://127.0.0.1:9"), "{}", stderr(overridden));
-  }
-  let credentials = laptop.path().join("config").join("credentials.json");
-  let stored: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
-  assert_eq!(stored["default_endpoint"].as_str(), Some(endpoint.as_str()), "{stored}");
-  // `Daemon::start` waits for the laptop's own socket.
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
+  assert_eq!(laptop.run(&["run", "ls"]).status.code(), Some(1), "pairing did not select a remote default");
+  assert!(laptop.run(&["config", "use", "remote"]).status.success());
+  assert!(laptop.run(&["run", "ls"]).status.success());
+  let failed = laptop.needy().args(["--address", "http://127.0.0.1:9", "run", "ls"]).output().unwrap();
+  assert_eq!(failed.status.code(), Some(1));
+  assert!(stderr(&failed).contains("http://127.0.0.1:9"), "{}", stderr(&failed));
   let _local = Daemon::start(&laptop);
+  let local = laptop.run(&["--context", "local", "client", "ls", "-o", "json"]);
+  assert!(local.status.success(), "{}", stderr(&local));
+  assert_eq!(serde_json::from_str::<Vec<serde_json::Value>>(&stdout(&local)).unwrap().len(), 0);
+  assert!(laptop.run(&["run", "ls"]).status.success(), "remote selection survived local serving");
 }
 
 /// A run of `NATIVE_PROFILE` whose profile is named `name`.
@@ -3199,64 +3360,65 @@ fn a_run_command_without_a_run_lists_the_live_runs_when_there_are_several() {
   }
 }
 
-// `--run` takes `latest`, an ID prefix or a name, as `report` does; without
-// it `NEEDY_RUN` names the run. `exec`, `ps` and `fs cp` mean something
-// without a run, so they never take the only live run, and `--run ''`
-// overrides `NEEDY_RUN` to leave every run.
+// Run selection accepts stable IDs, latest, prefixes and an inherited nonsecret
+// execution reference. Explicit process execution remains outside that run.
 #[test]
-fn run_accepts_latest_a_prefix_and_needy_run() {
+fn run_accepts_latest_a_prefix_and_inherited_execution_selection() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let first = named_run(&home, "first");
   let second = named_run(&home, "second");
-  let detached = |args: &[&str], env: Option<&str>| {
+  let inherited = serde_json::json!({
+    "version":1, "config_file":home.path().join("config/config.yaml"),
+    "context":"local", "address":format!("unix:{}", home.path().join("run/daemon.sock").display()),
+    "command":null, "run":first
+  })
+  .to_string();
+  let detached = |selector: &[&str], inherited: Option<&str>| {
     let mut command = home.needy();
-    if let Some(run) = env {
-      command.env("NEEDY_RUN", run);
+    if let Some(reference) = inherited {
+      command.env("NEEDY_EXECUTION_CONTEXT", reference);
     }
-    let output = command.arg("exec").args(args).args(["-d", "--", "sleep", "30"]).output().unwrap();
-    assert!(output.status.success(), "{args:?}: {}", stderr(&output));
+    let output = command.args(["run", "exec"]).args(selector).args(["-d", "--", "sleep", "30"]).output().unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
     stdout(&output).trim().to_string()
   };
-  let latest = detached(&["--run", "latest"], None);
-  let prefix = detached(&["--run", &first[..11]], None);
-  let env = detached(&[], Some(&first));
-  let left = detached(&["--run", ""], Some(&first));
-  let outside = detached(&[], None);
+  let latest = detached(&["latest"], None);
+  let prefix = detached(&[&first[..11]], None);
+  let selected = detached(&[], Some(&inherited));
+  let outside =
+    home.needy().env("NEEDY_EXECUTION_CONTEXT", &inherited).args(["proc", "exec", "--host", "-d", "--", "sleep", "30"]).output().unwrap();
+  assert!(outside.status.success(), "{}", stderr(&outside));
+  let outside = stdout(&outside).trim().to_string();
   let source = home.write("note.txt", "hello");
   let dir = home.path().join("copied");
-  let copy = home
-    .needy()
-    .env("NEEDY_RUN", &second[..11])
-    .args([
-      "fs",
-      "cp",
-      source.to_str().unwrap(),
-      &format!("here:{}", dir.display()),
-    ])
-    .output()
-    .unwrap();
-  let report = home.needy().env("NEEDY_RUN", &first).args(["report", "-o", "json"]).output().unwrap();
-  let in_latest = home.run(&["ps", "--run", "latest", "-o", "json"]);
-
-  let listed = home.run(&["ps", "-o", "json"]);
+  let copied = home.run(&[
+    "fs",
+    "cp",
+    "--run",
+    &second[..11],
+    "--executor",
+    "here",
+    source.to_str().unwrap(),
+    &format!("remote:{}", dir.display()),
+  ]);
+  let report = home.needy().env("NEEDY_EXECUTION_CONTEXT", &inherited).args(["run", "report", "-o", "json"]).output().unwrap();
+  let in_latest = home.run(&["proc", "ls", "--run", "latest", "-o", "json"]);
+  let listed = home.run(&["proc", "ls", "-o", "json"]);
   let processes: Vec<serde_json::Value> = serde_json::from_str(&stdout(&listed)).unwrap();
   let run_of = |id: &str| processes.iter().find(|p| p["id"] == id).map(|p| p["run"].as_str().unwrap().to_string());
   assert_eq!(run_of(&latest).as_deref(), Some(second.as_str()));
   assert_eq!(run_of(&prefix).as_deref(), Some(first.as_str()));
-  assert_eq!(run_of(&env).as_deref(), Some(first.as_str()));
-  assert_eq!(run_of(&left).as_deref(), Some(""));
+  assert_eq!(run_of(&selected).as_deref(), Some(first.as_str()));
   assert_eq!(run_of(&outside).as_deref(), Some(""));
-  assert!(copy.status.success(), "{}", stderr(&copy));
+  assert!(copied.status.success(), "{}", stderr(&copied));
   assert_eq!(std::fs::read_to_string(dir.join("note.txt")).unwrap(), "hello");
   let summary: serde_json::Value = serde_json::from_str(&stdout(&report)).unwrap();
   assert_eq!(summary["run"].as_str(), Some(first.as_str()));
   let in_latest: Vec<serde_json::Value> = serde_json::from_str(&stdout(&in_latest)).unwrap();
-  assert!(in_latest.iter().all(|p| p["run"] == second.as_str()), "{in_latest:?}");
-  assert!(in_latest.iter().any(|p| p["id"] == latest.as_str()), "{in_latest:?}");
-  for process in [&left, &outside] {
-    assert!(home.run(&["kill", process, "-s", "SIGKILL"]).status.success());
-  }
+  assert!(in_latest.iter().all(|p| p["run"] == second.as_str()));
+  assert!(in_latest.iter().any(|p| p["id"] == latest.as_str()));
+  assert!(home.run(&["proc", "kill", &outside, "-s", "SIGKILL"]).status.success());
   for run in [&first, &second] {
     assert!(home.run(&["run", "stop", run]).status.success());
   }
@@ -3277,10 +3439,37 @@ fn a_profile_is_found_by_name_in_the_config_directory() {
 
   assert!(created.status.success(), "{}", stderr(&created));
   let run = stdout(&created).trim().to_string();
-  let report = home.run(&["report", &run, "-o", "markdown"]);
+  let report = home.run(&["run", "report", &run, "-o", "markdown"]);
   assert_eq!(stdout(&report).lines().next(), Some(format!("# Run report: {run} (profile: named)").as_str()));
   assert_eq!(missing.status.code(), Some(1));
   let absent = profiles.join("absent.yaml");
   assert!(stderr(&missing).contains(absent.to_str().unwrap()), "{}", stderr(&missing));
   assert!(home.run(&["run", "stop", &run]).status.success());
+}
+
+#[test]
+fn run_execution_keeps_every_word_after_the_separator_in_argv() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("argv.yaml", NATIVE_PROFILE);
+  let created = home.run(&[
+    "run",
+    "create",
+    "--profile",
+    profile.to_str().unwrap(),
+    "--name",
+    "demo",
+  ]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  let omitted = home.run(&["run", "exec", "--", "echo", "hi"]);
+  assert_eq!(omitted.status.code(), Some(0), "{}", stderr(&omitted));
+  assert_eq!(omitted.stdout, b"hi\n");
+  let named = home.run(&["run", "exec", "demo", "--", "printf", "%s", "--help"]);
+  assert_eq!(named.status.code(), Some(0), "{}", stderr(&named));
+  assert_eq!(named.stdout, b"--help");
+  let subcommand = home.run(&["run", "exec", "demo", "--", "ls", "-d", "."]);
+  assert_eq!(subcommand.status.code(), Some(0), "{}", stderr(&subcommand));
+  assert_eq!(subcommand.stdout, b".\n");
+  let missing_separator = home.run(&["run", "exec", "demo", "echo", "hi"]);
+  assert_eq!(missing_separator.status.code(), Some(2));
 }

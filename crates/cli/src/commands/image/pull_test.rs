@@ -127,7 +127,7 @@ async fn an_archive_that_does_not_match_its_sha256_is_not_installed() {
 
   let error = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets).await.unwrap_err().to_string();
 
-  assert!(error.contains(&format!("and its .sha256 says {}; nothing was installed", "0".repeat(64))), "{error}");
+  assert!(error.contains("this image was not installed"), "{error}");
   assert_eq!(entries(images.path()), Vec::<String>::new());
 }
 
@@ -195,7 +195,7 @@ async fn an_imported_archive_whose_sha256_beside_it_differs_is_refused() {
 
   let error = import(images.path(), None, &file).await.unwrap_err().to_string();
 
-  assert!(error.ends_with(&format!("says {}; nothing was installed", "0".repeat(64))), "{error}");
+  assert!(error.contains("this image was not installed"), "{error}");
   assert!(!vm::base_dir(images.path(), ActorDriver::LinuxFirecracker).exists());
 }
 

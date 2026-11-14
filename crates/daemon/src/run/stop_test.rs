@@ -181,3 +181,38 @@ async fn a_graceful_stop_kills_an_actor_that_does_not_end_in_time() {
   assert!(reason.contains("did not end within 0.3 s"), "{reason}");
   assert_eq!(Runs::get(&daemon, &created.id).await.unwrap().state, RunState::Stopped);
 }
+
+// Shutdown must use the same guest cleanup contract as an explicit graceful stop.
+#[tokio::test]
+async fn daemon_shutdown_waits_for_the_actors_mirror_out() {
+  let started = testing::daemon().await;
+  let daemon = started.daemon.clone();
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
+  let host = started.dir.path().join("out");
+  let created = Runs::create(&daemon, new_run(&profile(&host), started.dir.path())).await.unwrap();
+  // The guest: it waits for a stop, then, as its driving program exits,
+  // takes a while to mirror out, reports the exit and ends the VM.
+  let source = started.dir.path().join("in-actor");
+  std::fs::create_dir_all(&source).unwrap();
+  std::fs::write(source.join("auth.json"), "token").unwrap();
+  let guest = {
+    let (daemon, id, dir) = (daemon.clone(), created.id.clone(), started.dir.path().to_path_buf());
+    tokio::spawn(async move {
+      let grace = wait_stop(&daemon, &id).await.unwrap();
+      tokio::time::sleep(Duration::from_millis(300)).await;
+      let archive = needy_common::archive::pack(&source, &[]).unwrap();
+      Guest::push_files(&daemon, &id, "out", archive).await.unwrap();
+      testing::exit_actor(&daemon, &dir, &id).await;
+      grace
+    })
+  };
+  guest_waits(&daemon, &created.id).await;
+
+  let grace = needy_api_server::control::STOP_GRACE;
+  daemon.shutdown().await;
+  assert_eq!(guest.await.unwrap(), grace, "the guest got the stop's grace period");
+  assert_eq!(std::fs::read_to_string(host.join("auth.json")).unwrap(), "token", "the actor's mirror-out reached the host");
+  assert_eq!(Runs::get(&daemon, &created.id).await.unwrap().state, RunState::Stopped);
+  let stop = stop_event(started.dir.path(), &created.id).await;
+  assert!(stop.contains(r#""actor":{"how":"graceful"}"#), "{stop}");
+}

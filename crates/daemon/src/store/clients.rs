@@ -13,6 +13,8 @@
 //! revoked re-pairs that client, and pairing with it revokes the client's
 //! old token in the same transaction.
 
+use needy_api_server::control::ClientAccess;
+
 use sea_orm::{
   ActiveModelTrait as _, ActiveValue::Set, ColumnTrait as _, Condition, ConnectionTrait, EntityTrait as _, IntoActiveModel as _,
   QueryFilter as _, QueryOrder as _, TransactionTrait as _,
@@ -30,6 +32,7 @@ const LAST_USED_RESOLUTION_MS: i64 = 60_000;
 /// A pairing code without its secret.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingCode {
+  pub access: ClientAccess,
   pub id: String,
   /// The name of the client that pairs with it.
   pub name: String,
@@ -43,6 +46,7 @@ pub struct PairingCode {
 /// A client without its token.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Client {
+  pub access: ClientAccess,
   pub id: String,
   pub name: String,
   pub created_ms: i64,
@@ -62,7 +66,7 @@ impl Store {
   /// `client-<code ID>` that no client or pairing code holds, so a code
   /// without a name never replaces a client; the name of an active client
   /// names that client in [`PairingCode::replaces`].
-  pub async fn create_pairing_code(&self, name: &str, ttl_ms: i64, now: i64) -> Result<(PairingCode, Secret)> {
+  pub async fn create_pairing_code(&self, name: &str, ttl_ms: i64, now: i64, access: ClientAccess) -> Result<(PairingCode, Secret)> {
     if ttl_ms <= 0 {
       return Err(Error::Invalid("a pairing code needs a positive time to live".into()));
     }
@@ -78,8 +82,10 @@ impl Store {
     check_no_open_code(&txn, &name, now).await?;
     let replaces =
       client::Entity::find().filter(client::Column::Name.eq(&name)).filter(client::Column::RevokedMs.is_null()).one(&txn).await?;
+    let replaces = replaces.map(client_of).transpose()?;
     let code = Secret::generate(secret::PAIRING, &id);
     let row = pairing_code::Model {
+      access: access_value(access),
       id,
       hash: code.hash(),
       name,
@@ -89,8 +95,8 @@ impl Store {
     };
     pairing_code::Entity::insert(row.clone().into_active_model()).exec(&txn).await?;
     txn.commit().await?;
-    let mut created = pairing_code_of(row);
-    created.replaces = replaces.map(client_of);
+    let mut created = pairing_code_of(row)?;
+    created.replaces = replaces;
     Ok((created, code))
   }
 
@@ -119,7 +125,9 @@ impl Store {
     used.update(&txn).await?;
     let client_id = secret::random_id();
     let token = Secret::generate(secret::CLIENT, &client_id);
+    let access = stored_access(row.access)?;
     let paired = client::Model {
+      access: access_value(access),
       id: client_id,
       name: row.name,
       pairing_code: row.id,
@@ -130,7 +138,7 @@ impl Store {
     };
     client::Entity::insert(paired.clone().into_active_model()).exec(&txn).await?;
     txn.commit().await?;
-    Ok((client_of(paired), token))
+    Ok((client_of(paired)?, token))
   }
 
   /// The client `token` belongs to, or `None` when no client holds it.
@@ -146,13 +154,13 @@ impl Store {
     if !holds {
       return Ok(None);
     }
+    let mut client = client_of(row.clone())?;
     let stale = row.last_used_ms.is_none_or(|last| now - last >= LAST_USED_RESOLUTION_MS);
     if stale {
       let mut seen = row.clone().into_active_model();
       seen.last_used_ms = Set(Some(now));
       seen.update(&self.db).await?;
     }
-    let mut client = client_of(row);
     if stale {
       client.last_used_ms = Some(now);
     }
@@ -162,7 +170,7 @@ impl Store {
   /// Every client, including revoked ones, oldest first.
   pub async fn clients(&self) -> Result<Vec<Client>> {
     let rows = client::Entity::find().order_by_asc(client::Column::CreatedMs).order_by_asc(client::Column::Id).all(&self.db).await?;
-    Ok(rows.into_iter().map(client_of).collect())
+    rows.into_iter().map(client_of).collect()
   }
 
   /// Revokes a client's token. It stays listed as revoked; revoking it
@@ -220,26 +228,43 @@ async fn check_no_open_code(db: &impl ConnectionTrait, name: &str, now: i64) -> 
   }
 }
 
-fn pairing_code_of(row: pairing_code::Model) -> PairingCode {
-  PairingCode {
+fn pairing_code_of(row: pairing_code::Model) -> Result<PairingCode> {
+  Ok(PairingCode {
+    access: stored_access(row.access)?,
     id: row.id,
     name: row.name,
     created_ms: row.created_ms,
     expires_ms: row.expires_ms,
     replaces: None,
-  }
+  })
 }
 
-fn client_of(row: client::Model) -> Client {
-  Client {
+fn client_of(row: client::Model) -> Result<Client> {
+  Ok(Client {
+    access: stored_access(row.access)?,
     id: row.id,
     name: row.name,
     created_ms: row.created_ms,
     last_used_ms: row.last_used_ms,
     revoked_ms: row.revoked_ms,
-  }
+  })
 }
 
 #[cfg(test)]
 #[path = "clients_test.rs"]
 mod tests;
+
+fn access_value(access: ClientAccess) -> i32 {
+  match access {
+    ClientAccess::Runs => 1,
+    ClientAccess::Admin => 2,
+  }
+}
+
+fn stored_access(value: i32) -> Result<ClientAccess> {
+  match value {
+    0 | 1 => Ok(ClientAccess::Runs),
+    2 => Ok(ClientAccess::Admin),
+    _ => Err(Error::Invalid("unknown stored client access".into())),
+  }
+}

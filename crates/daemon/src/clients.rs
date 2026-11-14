@@ -11,6 +11,7 @@ use crate::store;
 
 fn client_info(client: store::Client) -> ClientInfo {
   ClientInfo {
+    access: client.access,
     id: client.id,
     name: client.name,
     created_ms: client.created_ms,
@@ -22,13 +23,14 @@ fn client_info(client: store::Client) -> ClientInfo {
 #[async_trait::async_trait]
 impl Clients for Daemon {
   async fn create_pairing_code(&self, request: NewPairingCode) -> Result<CreatedPairingCode> {
-    let created = self.state.create_pairing_code(&request.name, request.ttl_ms, now_ms()).await;
-    let (code, secret) = created.map_err(control_error)?;
+    let created = self.state.create_pairing_code(&request.name, request.ttl_ms, now_ms(), request.access).await;
+    let (code, secret) = created.map_err(|error| control_error(error, true))?;
     match &code.replaces {
       Some(old) => tracing::info!("pairing code {} created for client {}, replacing client {}", code.id, code.name, old.id),
       None => tracing::info!("pairing code {} created for client {}", code.id, code.name),
     }
     Ok(CreatedPairingCode {
+      access: code.access,
       id: code.id,
       name: code.name,
       expires_ms: code.expires_ms,
@@ -40,7 +42,7 @@ impl Clients for Daemon {
   async fn pair(&self, code: &str) -> Result<Paired> {
     let (client, token) = self.state.pair(code, now_ms()).await.map_err(|e| {
       tracing::warn!("a client cannot pair: {e}");
-      control_error(e)
+      control_error(e, true)
     })?;
     tracing::info!("client {} ({}) paired", client.name, client.id);
     Ok(Paired {
@@ -50,31 +52,35 @@ impl Clients for Daemon {
   }
 
   async fn clients(&self) -> Result<Vec<ClientInfo>> {
-    let clients = self.state.clients().await.map_err(control_error)?;
+    let clients = self.state.clients().await.map_err(|error| control_error(error, false))?;
     Ok(clients.into_iter().map(client_info).collect())
   }
 
   async fn revoke(&self, id: &str) -> Result<()> {
-    self.state.revoke_client(id, now_ms()).await.map_err(control_error)?;
+    self.state.revoke_client(id, now_ms()).await.map_err(|error| control_error(error, true))?;
     tracing::info!("client {id} revoked");
     Ok(())
   }
 
-  async fn credential(&self, token: &str) -> Credential {
+  async fn credential(&self, token: &str) -> Result<Credential> {
     if !store::is_client_token(token) {
-      return Credential::Other;
+      return Ok(Credential::Other);
     }
-    match self.state.authenticate_client(token, now_ms()).await {
+    Ok(match self.state.authenticate_client(token, now_ms()).await {
       Ok(Some(client)) => Credential::Client {
         id: client.id,
         name: client.name,
+        access: client.access,
       },
       Ok(None) => Credential::Refused,
       Err(e) => {
         tracing::error!("state.db: cannot check a client token: {e:#}");
-        Credential::Refused
+        return Err(
+          needy_api_server::control::ControlError::Unavailable("authentication registry unavailable".into())
+            .with_diagnostic("auth.backend_unavailable", []),
+        );
       }
-    }
+    })
   }
 }
 

@@ -34,6 +34,8 @@
 //
 
 pub mod capabilities;
+#[cfg(unix)]
+pub mod discovery;
 pub mod executor;
 pub mod runner;
 
@@ -170,11 +172,22 @@ pub fn guest_needy(config: &Config) -> anyhow::Result<PathBuf> {
   actor::guest_needy(config)
 }
 
+/// Normal cleanup did not complete within the shutdown budget or returned an
+/// error. Retained state belongs to reconciliation, not to automatic deletion.
+#[cfg(unix)]
+#[derive(Debug, thiserror::Error)]
+#[error("controlled daemon shutdown did not complete; inspect retained run state and daemon logs")]
+pub struct IncompleteShutdown {
+  pub runs: Vec<String>,
+}
+
 #[cfg(unix)]
 /// The control daemon. Clones share it.
 #[derive(Clone)]
 pub struct Daemon {
   pub(crate) config: Arc<Config>,
+  instance_id: String,
+  discovery: Arc<discovery::Publisher>,
   /// `trace.db`, shared by the runs' SQLite sinks.
   pub(crate) traces: Store,
   /// `state.db`: the runner registry, and runs with their instances and
@@ -215,6 +228,8 @@ pub struct Daemon {
   /// [`Daemon::shutdown`] waits for the same stop instead of starting
   /// another.
   runs_stopped: Arc<tokio::sync::OnceCell<()>>,
+  cleanup_incomplete: Arc<AtomicBool>,
+  shutdown_started: Arc<std::sync::OnceLock<std::time::Instant>>,
 }
 
 #[cfg(unix)]
@@ -226,6 +241,8 @@ impl Daemon {
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
     }
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    let discovery = Arc::new(discovery::Publisher::acquire(&config.runtime_dir, &instance_id)?);
     let runs_dir = config.state_dir.join("runs");
     create_private_dir(&runs_dir).with_context(|| format!("cannot create {}", runs_dir.display()))?;
     let trace_db = config.state_dir.join("trace.db");
@@ -278,6 +295,8 @@ impl Daemon {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, container, links.clone())),
       config: Arc::new(config),
+      instance_id,
+      discovery,
       traces,
       runs: Arc::new(Registry::new(state.clone())),
       state,
@@ -291,6 +310,8 @@ impl Daemon {
       cancel,
       shutting_down: Arc::default(),
       runs_stopped: Arc::default(),
+      cleanup_incomplete: Arc::default(),
+      shutdown_started: Arc::default(),
     };
     daemon.reconcile_open_runs().await.context("cannot reconcile the runs in state.db")?;
     Ok(daemon)
@@ -307,6 +328,14 @@ impl Daemon {
       .unless_forced(async {
         let served = self.serve_until(listen, token, termination.stop()).await;
         self.shutdown().await;
+        if self.cleanup_incomplete.load(Ordering::SeqCst) {
+          return Err(
+            IncompleteShutdown {
+              runs: self.runs.live().iter().map(|run| run.id.clone()).collect(),
+            }
+            .into(),
+          );
+        }
         served
       })
       .await;
@@ -334,6 +363,7 @@ impl Daemon {
         {
           tracing::warn!("cannot remove {}: {e}", local_sock.display());
         }
+        self.discovery.retract();
         tracing::error!("{message}");
         bail!(message)
       }
@@ -341,24 +371,39 @@ impl Daemon {
   }
 
   async fn serve_until(&self, listen: &[String], token: Option<String>, stop: CancellationToken) -> Result<()> {
-    let listen: Vec<Listen> = listen.iter().map(|l| Listen::parse(l)).collect();
-    let server = self.server(token).bind(&listen).await?;
-    // The bound address, not `listen`: a port 0 is the one the system picked.
+    let management = self.config.runtime_dir.join("daemon.sock");
+    let mut listen: Vec<Listen> = listen.iter().map(|l| Listen::parse(l)).collect();
+    if !listen.iter().any(|address| matches!(address, Listen::Unix(path) if path == &management)) {
+      listen.insert(0, Listen::Unix(management.clone()));
+    }
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    let owner = unsafe { libc::geteuid() };
+    let server = self.server(token).management_socket(management.clone(), owner).bind(&listen).await?;
     for address in server.addresses() {
       tracing::info!("control daemon listening on {address}");
     }
-    // Runners' control streams never end on their own; they end as the
-    // server stops, so its grace period does not wait for them, and the
-    // runners connect again to whoever serves next. The runs stop first,
-    // while the streams can still tell the runners to end their processes.
-    let daemon = self.clone();
-    let stopping = stop.clone();
-    self.tasks.spawn(async move {
-      stopping.cancelled().await;
-      daemon.stop_runs().await;
-      daemon.links.close_all();
-    });
-    server.serve(stop).await?;
+    // Keep control/runner streams available until normal run cleanup has
+    // finished. Cancelling the listeners first would cut off mirror-out.
+    let server_stop = CancellationToken::new();
+    let serving = server.serve(server_stop.clone());
+    tokio::pin!(serving);
+    let address = format!("unix:{}", management.display());
+    let ready = needy_api_client::ready::wait_expected(&address, Duration::from_secs(30), "control", &self.instance_id);
+    tokio::pin!(ready);
+    tokio::select! {
+      result = &mut serving => { result?; return Ok(()); }
+      result = &mut ready => { result?; self.discovery.publish(&address)?; }
+      () = stop.cancelled() => {}
+    }
+    tokio::select! {
+      result = &mut serving => result?,
+      () = stop.cancelled() => {
+        self.stop_runs().await;
+        self.links.close_all();
+        server_stop.cancel();
+        serving.await?;
+      }
+    }
     Ok(())
   }
 
@@ -369,7 +414,7 @@ impl Daemon {
   pub(crate) fn server(&self, token: Option<String>) -> Server {
     let api = Arc::new(self.clone());
     let health = Health {
-      instance_id: uuid::Uuid::new_v4().to_string(),
+      instance_id: self.instance_id.clone(),
       role: "control",
     };
     Server::new(health, Caller::Operator).token(token).runs(api.clone()).processes(api.clone()).runners(api.clone()).clients(api)
@@ -381,19 +426,45 @@ impl Daemon {
   pub async fn shutdown(&self) {
     self.stop_runs().await;
     self.cancel.cancel();
-    self.host.shutdown().await;
     self.tasks.close();
-    self.tasks.wait().await;
+    // Run cleanup and the control stream drain share this total deadline
+    // with executor/task cleanup, rather than each resetting a stop budget.
+    let elapsed = self.shutdown_started.get_or_init(std::time::Instant::now).elapsed();
+    let remaining = Duration::from_secs(60).saturating_sub(elapsed);
+    if tokio::time::timeout(remaining, async {
+      self.host.shutdown().await;
+      self.tasks.wait().await;
+    })
+    .await
+    .is_err()
+    {
+      self.cleanup_incomplete.store(true, Ordering::SeqCst);
+      tracing::error!("executor cleanup exceeded the shutdown budget");
+    }
+    if let Err(error) = self.discovery.finish(!self.cleanup_incomplete.load(Ordering::SeqCst)) {
+      self.cleanup_incomplete.store(true, Ordering::SeqCst);
+      tracing::error!("cannot record the daemon cleanup outcome: {error:#}");
+    }
   }
 
   /// The first part of [`Daemon::shutdown`]: unwinds the runs being
   /// created and stops every other run. Serving calls it before it ends the
   /// runners' control streams, so the runners hear that the runs ended.
   async fn stop_runs(&self) {
-    self.runs_stopped.get_or_init(|| self.stop_every_run()).await;
+    self
+      .runs_stopped
+      .get_or_init(|| async {
+        if tokio::time::timeout(Duration::from_secs(55), self.stop_every_run()).await.is_err() {
+          self.cleanup_incomplete.store(true, Ordering::SeqCst);
+          self.outside_runs.cancel();
+          tracing::error!("run cleanup exceeded 55s; remaining cleanup is incomplete");
+        }
+      })
+      .await;
   }
 
   async fn stop_every_run(&self) {
+    self.shutdown_started.get_or_init(std::time::Instant::now);
     self.shutting_down.store(true, Ordering::SeqCst);
     // A create sees its cancelled token before its next step and unwinds
     // through its rollback. A create that finished meanwhile is running
@@ -406,12 +477,8 @@ impl Daemon {
     self.creates.close();
     self.creates.wait().await;
     for run in self.runs.live() {
-      // TODO(graceful-shutdown): a shutting-down control plane kills its
-      // actors at once, as before graceful stops, so their mirror-outs are
-      // lost; stopping them gracefully would hold a termination signal for
-      // up to the grace period and the mirror-out wait per run, which waits
-      // for the owner's word on how long a shutdown may take.
-      if let Err(e) = self.stop_run(&run, None, needy_api_server::control::StopMode::Now).await {
+      if let Err(e) = self.stop_run(&run, None, needy_api_server::control::StopMode::default()).await {
+        self.cleanup_incomplete.store(true, Ordering::SeqCst);
         tracing::warn!("run {}: {e}", run.id);
       }
     }
@@ -424,6 +491,15 @@ impl Daemon {
 
 #[cfg(unix)]
 impl Daemon {
+  /// New work is refused during the API drain; guest cleanup and existing
+  /// streams keep their own channels until the normal run stop completes.
+  pub(crate) fn admit_work(&self) -> Result<(), ControlError> {
+    if self.shutting_down.load(Ordering::SeqCst) {
+      return Err(ControlError::Unavailable("the control daemon is shutting down".into()).with_diagnostic("daemon.shutting_down", []));
+    }
+    Ok(())
+  }
+
   /// Why the daemon ends an open exec stream: its run stopped, or the
   /// daemon, which stops every run first, is shutting down.
   pub(crate) fn end_reason(&self) -> &'static str {
@@ -456,7 +532,14 @@ fn warn_if_shared(dir: &std::path::Path) {
 /// A failure of the daemon's own work, such as an invalid profile or a
 /// copy-in that cannot be packed.
 pub(crate) fn failed(e: anyhow::Error) -> ControlError {
-  ControlError::Failed(format!("{e:#}"))
+  let error = ControlError::Failed(format!("{e:#}"));
+  match e.downcast_ref::<schedule::Unschedulable>() {
+    Some(cause) => ControlError::Diagnostic {
+      error: Box::new(error),
+      diagnostic: cause.diagnostic(),
+    },
+    None => error,
+  }
 }
 
 #[cfg(all(test, unix))]

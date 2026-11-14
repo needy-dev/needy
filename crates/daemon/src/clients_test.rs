@@ -32,6 +32,7 @@ fn operator(served: &Served) -> Client {
 /// A client named `name` paired through `served`, holding its own token.
 async fn paired(served: &Served, name: &str) -> (Client, String) {
   let request = CreatePairingCodeRequest {
+    access: needy_api_client::proto::v1::ClientAccess::Runs as i32,
     ttl_ms: 60_000,
     name: name.into(),
   };
@@ -83,6 +84,7 @@ async fn a_paired_client_works_until_it_is_revoked() {
 async fn a_pairing_code_pairs_one_client() {
   let served = served().await;
   let request = CreatePairingCodeRequest {
+    access: needy_api_client::proto::v1::ClientAccess::Runs as i32,
     ttl_ms: 60_000,
     name: "laptop".into(),
   };
@@ -200,4 +202,53 @@ async fn followed_logs_carry_what_the_actor_writes_until_the_run_stops() {
 
   assert!(console.contains("first\n"), "{console}");
   assert!(end.is_ok(), "the stream ends with the run");
+}
+
+#[tokio::test]
+async fn server_granted_admin_access_keeps_named_trace_identity_and_revocation() {
+  use needy_api_client::proto::v1::{ClientAccess, GetCallerRequest, ListJoinTokensRequest};
+  let served = served().await;
+  let created = operator(&served)
+    .clients()
+    .create_pairing_code(CreatePairingCodeRequest {
+      ttl_ms: 60_000,
+      name: "administrator".into(),
+      access: ClientAccess::Admin as i32,
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  assert_eq!(created.access, ClientAccess::Admin as i32);
+  let grant = served.client.clients().pair(PairRequest { code: created.code }).await.unwrap().into_inner();
+  assert_eq!(grant.client.as_ref().unwrap().access, ClientAccess::Admin as i32);
+  let admin = served.client.clone().with_token(&grant.token).unwrap();
+  let caller = admin.clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+  assert_eq!(caller.name, "administrator");
+  assert_eq!(caller.access, ClientAccess::Admin as i32);
+  admin.runners().list_join_tokens(ListJoinTokensRequest {}).await.unwrap();
+  let (restricted, _) = paired(&served, "restricted").await;
+  assert_eq!(restricted.clients().list_clients(ListClientsRequest {}).await.unwrap_err().code(), Code::PermissionDenied);
+  admin.clients().list_clients(ListClientsRequest {}).await.unwrap();
+  let run = admin.runs().create_run(create(&served)).await.unwrap().into_inner().run.unwrap().run_id;
+  admin
+    .runs()
+    .stop_run(StopRunRequest {
+      run_id: run.clone(),
+      ..Default::default()
+    })
+    .await
+    .unwrap();
+  let attributed = events(&admin, &run).await;
+  assert!(attributed.iter().any(
+    |event| matches!(event, Event::RunCreate(created) if created.by.as_ref().is_some_and(|by| by.to_string() == "client:administrator"))
+  ));
+  operator(&served)
+    .clients()
+    .revoke_client(RevokeClientRequest {
+      id: caller.client_id,
+    })
+    .await
+    .unwrap();
+  assert_eq!(admin.clients().get_caller(GetCallerRequest {}).await.unwrap_err().code(), Code::Unauthenticated);
+  restricted.runs().list_runs(ListRunsRequest {}).await.unwrap();
 }

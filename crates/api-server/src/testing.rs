@@ -166,6 +166,7 @@ impl Runs for Fake {
       actor_image: "needy-custom-jq".into(),
       actor_base_abi: Some(1),
       findings: vec![ProfileFinding {
+        diagnostic: None,
         error: true,
         message: "recipe: avx512f is missing".into(),
       }],
@@ -445,12 +446,12 @@ impl Runners for Fake {
     Ok(())
   }
 
-  async fn credential(&self, token: &str) -> Credential {
-    match token {
+  async fn credential(&self, token: &str) -> Result<Credential> {
+    Ok(match token {
       MAC_CREDENTIAL => Credential::Runner("mac".into()),
       REVOKED_CREDENTIAL => Credential::Refused,
       _ => Credential::Other,
-    }
+    })
   }
 
   /// Announces one list task.
@@ -488,6 +489,7 @@ pub const PAIRING_CODE: &str = "needy-pair.k1.secret";
 
 fn fake_client() -> ClientInfo {
   ClientInfo {
+    access: ClientAccess::Runs,
     id: "c1".into(),
     name: "laptop".into(),
     created_ms: 1,
@@ -508,6 +510,7 @@ impl Clients for Fake {
       request.name
     };
     Ok(CreatedPairingCode {
+      access: request.access,
       id: "k1".into(),
       replaces: (name == "laptop").then(fake_client),
       name,
@@ -537,15 +540,17 @@ impl Clients for Fake {
     Ok(())
   }
 
-  async fn credential(&self, token: &str) -> Credential {
-    match token {
+  async fn credential(&self, token: &str) -> Result<Credential> {
+    Ok(match token {
+      "registry-outage" => return Err(ControlError::Unavailable("authentication registry unavailable".into())),
       CLIENT_TOKEN => Credential::Client {
+        access: ClientAccess::Runs,
         id: "c1".into(),
         name: "laptop".into(),
       },
       REVOKED_CLIENT_TOKEN => Credential::Refused,
       _ => Credential::Other,
-    }
+    })
   }
 }
 

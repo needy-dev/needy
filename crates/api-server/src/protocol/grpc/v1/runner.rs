@@ -16,7 +16,7 @@ use needy_api_proto::v1::{
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::{Streamed, administer, administer_locally, caller};
+use super::{Streamed, administer, caller};
 use crate::control::{Caller, ControlError, Runners};
 use crate::protocol::domain;
 
@@ -30,7 +30,7 @@ impl<R> Adapter<R> {
   fn operator<T>(&self, request: &Request<T>) -> Result<(), Status> {
     match caller(&self.caller, request) {
       Caller::Operator | Caller::Client { .. } => Ok(()),
-      Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::denied("only operators manage runners").into()),
+      Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::role_denied("only operators manage runners").into()),
     }
   }
 
@@ -43,7 +43,9 @@ impl<R> Adapter<R> {
   fn runner<T>(&self, request: &Request<T>, what: &str) -> Result<String, Status> {
     match caller(&self.caller, request) {
       Caller::Runner { name } => Ok(name),
-      Caller::Operator | Caller::Client { .. } | Caller::Actor { .. } => Err(ControlError::denied(format!("only runners {what}")).into()),
+      Caller::Operator | Caller::Client { .. } | Caller::Actor { .. } => {
+        Err(ControlError::role_denied(format!("only runners {what}")).into())
+      }
     }
   }
 }
@@ -83,7 +85,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
   }
 
   async fn list_join_tokens(&self, request: Request<ListJoinTokensRequest>) -> Result<Response<ListJoinTokensResponse>, Status> {
-    administer_locally(&self.caller, &request, "listing join tokens", "only operators manage runners")?;
+    self.admin(&request, "listing join tokens")?;
     let join_tokens = self.runners.join_tokens().await?.into_iter().map(domain::proto_join_token).collect();
     Ok(Response::new(ListJoinTokensResponse { join_tokens }))
   }
@@ -106,7 +108,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
 
   async fn heartbeat(&self, request: Request<HeartbeatRequest>) -> Result<Response<HeartbeatResponse>, Status> {
     let Caller::Runner { name } = caller(&self.caller, &request) else {
-      return Err(ControlError::denied("only runners send heartbeats").into());
+      return Err(ControlError::role_denied("only runners send heartbeats").into());
     };
     let report = domain::runner_report(request.into_inner()).map_err(ControlError::from)?;
     let beat = self.runners.heartbeat(&name, report).await?;

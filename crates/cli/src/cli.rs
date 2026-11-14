@@ -7,11 +7,11 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{attach, chaos, daemon, exec, fs, image, kill, pair, profile, ps, report, run, runner};
+use crate::commands::{client, config, daemon, fs, image, proc, run, runner};
 use crate::paths::Paths;
 
 #[derive(Parser)]
@@ -21,13 +21,21 @@ use crate::paths::Paths;
   about = "Route a driving program's work to executors"
 )]
 struct Cli {
-  /// Daemon endpoint: unix:/path, http://host:port, https://host:port, or
-  /// exec:COMMAND, a command whose stdin and stdout carry each connection
-  /// (as ssh's ProxyCommand: `exec:cloudflared access tcp --hostname H`).
-  /// Defaults to the endpoint this machine paired with last (`needy pair`),
-  /// else the control daemon's socket in the runtime directory.
-  #[arg(long, global = true, env = "NEEDY_ENDPOINT")]
-  endpoint: Option<String>,
+  /// Client configuration document. Named profiles are beside it in profiles/.
+  #[arg(long, global = true)]
+  config: Option<PathBuf>,
+  /// Saved control-plane connection for this invocation.
+  #[arg(long = "context", global = true, conflicts_with = "address")]
+  selected_context: Option<String>,
+  /// Direct transport: tcp://HOST:PORT, https://HOST:PORT or unix:///PATH.
+  #[arg(long, global = true)]
+  address: Option<String>,
+  /// Private outgoing bearer file; only with a direct address.
+  #[arg(long, global = true, requires = "address")]
+  credential_file: Option<PathBuf>,
+  /// Infrastructure errors on stderr; child output is unchanged.
+  #[arg(long, global = true, value_enum, default_value = "human")]
+  diagnostic_format: crate::diagnostics::Format,
   /// Log to stderr: -v info, -vv debug for needy, -vvv everything.
   #[arg(short, long, global = true, action = clap::ArgAction::Count)]
   verbose: u8,
@@ -37,75 +45,61 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Run a daemon.
-  // Boxed: its options are the largest by far (clippy::large_enum_variant
-  // on Windows, where paths are larger).
+  /// Manage client configuration, connections and task profiles.
+  Config(config::Args),
+  /// Serve locally or manage this machine's control service.
   Daemon(Box<daemon::Args>),
-  /// Run a command through placement.
-  Exec(exec::Args),
-  /// List processes.
-  Ps(ps::Args),
-  /// Reattach to a process, replaying recent output first.
-  Attach(attach::Args),
-  /// Send a signal to a process.
-  Kill(kill::Args),
-  /// Copy files between this machine and executors.
-  Fs(fs::Args),
-  /// Manage runs: one actor and its executors.
-  Run(run::Args),
-  /// Manage runners: machines that joined this control plane, and join tokens.
+  /// Authorize clients on the selected control plane.
+  Client(client::Args),
+  /// Register execution machines and manage runner credentials.
   Runner(runner::Args),
-  /// Pair this machine with a control plane once (`pair CODE`), and manage
-  /// pairing codes and paired clients.
-  Pair(pair::Args),
-  /// Pull, list, build and remove actor images.
+  /// Manage an actor and its bound executors.
+  Run(run::Args),
+  /// Execute, list, attach and signal executor processes.
+  Proc(proc::Args),
+  /// Copy files between this machine and an explicit remote target.
+  Fs(fs::Args),
+  /// Pull, list, build and remove local images.
   Image(image::Args),
-  /// Check a profile: show routing decisions, matching faults and the recipe's findings.
-  Profile(profile::Args),
-  /// Report on a run from its trace: who started it, what ran where.
-  Report(report::Args),
-  /// Add, list and remove a live run's chaos faults.
-  Chaos(chaos::Args),
 }
 
-/// What every command may need. Paths are resolved on first use, so a command
-/// that only talks to an explicit endpoint works without a home directory.
+/// Invocation inputs. Target resolution lives in one connection boundary.
 pub struct Context {
-  endpoint: Option<String>,
+  pub(crate) config: Option<PathBuf>,
+  pub(crate) selected_context: Option<String>,
+  pub(crate) address: Option<String>,
+  pub(crate) credential_file: Option<PathBuf>,
+  pub(crate) diagnostic_format: crate::diagnostics::Format,
 }
 
 impl Context {
+  pub fn configuration_file(&self) -> Result<PathBuf> {
+    Ok(self.base_paths()?.config_file())
+  }
+
+  pub(crate) fn base_paths(&self) -> Result<Paths> {
+    let paths = Paths::resolve()?;
+    Ok(match &self.config {
+      Some(path) => paths.with_config_file(path.clone()),
+      None => paths,
+    })
+  }
+
+  pub fn configuration(&self) -> Result<needy_config::global::Config> {
+    crate::configuration::load(&self.configuration_file()?)
+  }
+
   pub fn paths(&self) -> Result<Paths> {
-    Paths::resolve()
+    let mut paths = self.base_paths()?;
+    paths.apply(&self.configuration()?.paths);
+    Ok(paths)
   }
 
-  /// The control plane a command reaches: `--endpoint`, `NEEDY_ENDPOINT`,
-  /// the endpoint this machine paired with last (`needy pair`), or the
-  /// control socket.
-  pub fn endpoint(&self) -> Result<String> {
-    if let Some(endpoint) = &self.endpoint {
-      return Ok(endpoint.clone());
-    }
-    let paths = self.paths()?;
-    match crate::credentials::default_endpoint(&paths.credentials())? {
-      Some(paired) => Ok(paired),
-      None => Ok(format!("unix:{}", paths.socket().display())),
-    }
+  pub async fn connect(&self) -> Result<Client> {
+    crate::connection::resolve(self)?.connect().await
   }
 
-  /// Where a daemon on this machine listens by default: `--endpoint`,
-  /// `NEEDY_ENDPOINT`, or the control socket, never the control plane this
-  /// machine paired with.
-  pub fn listen_endpoint(&self) -> Result<String> {
-    match &self.endpoint {
-      Some(endpoint) => Ok(endpoint.clone()),
-      None => Ok(format!("unix:{}", self.paths()?.socket().display())),
-    }
-  }
-
-  /// The profile file `--profile` names: a bare name, with no path
-  /// separator and no `.yaml` or `.yml`, is `profiles/NAME.yaml` in the
-  /// config directory (owner decision, 2026-11-12); anything else is a path.
+  /// A bare profile name is resolved only in the selected config directory.
   pub fn profile(&self, given: &Path) -> Result<PathBuf> {
     let bare = given.components().count() == 1
       && matches!(given.components().next(), Some(Component::Normal(_)))
@@ -113,40 +107,25 @@ impl Context {
     if !bare {
       return Ok(given.to_path_buf());
     }
-    let mut file = given.as_os_str().to_os_string();
-    file.push(".yaml");
-    Ok(self.paths()?.profiles().join(file))
+    let profiles = self.paths()?.profiles();
+    let named = |extension: &str| {
+      let mut name = given.as_os_str().to_os_string();
+      name.push(extension);
+      profiles.join(name)
+    };
+    let yaml = named(".yaml");
+    let yml = named(".yml");
+    match (yaml.try_exists()?, yml.try_exists()?) {
+      (true, true) => Err(
+        crate::diagnostics::Error::new("config.invalid_reference", "The named profile has both .yaml and .yml files")
+          .fact("profile", given.display().to_string())
+          .check("Choose an explicit profile path or remove the duplicate name.")
+          .into(),
+      ),
+      (false, true) => Ok(yml),
+      _ => Ok(yaml),
+    }
   }
-}
-
-/// Connects to a daemon, presenting the token in `NEEDY_TOKEN` when it is
-/// set, or else the client token `needy pair` stored for `endpoint`.
-pub async fn connect(endpoint: &str) -> Result<Client> {
-  let client = connect_without_token(endpoint).await?;
-  Ok(match token(endpoint)? {
-    Some(token) => client.with_token(&token)?,
-    None => client,
-  })
-}
-
-/// Connects to a daemon without presenting a token, for `Pair`.
-pub async fn connect_without_token(endpoint: &str) -> Result<Client> {
-  Client::connect(endpoint).await.with_context(|| format!("cannot reach the daemon at {endpoint}"))
-}
-
-/// The bearer token for `endpoint`: `NEEDY_TOKEN`, which wins so an
-/// operator can act with the control token, or the stored client token.
-fn token(endpoint: &str) -> Result<Option<String>> {
-  if let Ok(token) = std::env::var("NEEDY_TOKEN")
-    && !token.is_empty()
-  {
-    return Ok(Some(token));
-  }
-  // Without a home directory there is no stored token to find.
-  let Ok(paths) = Paths::resolve() else {
-    return Ok(None);
-  };
-  Ok(crate::credentials::find(&paths.credentials(), endpoint)?.map(|credential| credential.token))
 }
 
 /// The exit code of a command whose stdout's reader went away, as with
@@ -161,11 +140,19 @@ pub const CLOSED_STDOUT: i32 = 128 + 13;
 /// Parses the command line, runs the command and returns the exit code.
 pub fn run() -> i32 {
   let cli = Cli::parse();
+  let format = cli.diagnostic_format;
+  let diagnostic_context = Context {
+    config: cli.config.clone(),
+    selected_context: cli.selected_context.clone(),
+    address: cli.address.clone(),
+    credential_file: cli.credential_file.clone(),
+    diagnostic_format: format,
+  };
   match dispatch(cli) {
     Ok(code) => code,
     Err(error) if stdout_closed(&error) => CLOSED_STDOUT,
     Err(error) => {
-      crate::output::message(format_args!("{error:#}"));
+      crate::diagnostics::render_in(&error, format, Some(&diagnostic_context));
       1
     }
   }
@@ -189,9 +176,32 @@ fn stdout_closed(error: &anyhow::Error) -> bool {
 }
 
 fn dispatch(cli: Cli) -> Result<i32> {
+  let remote = cli.selected_context.is_some() || cli.address.is_some() || cli.credential_file.is_some();
+  if remote && matches!(&cli.command, Command::Daemon(_) | Command::Image(_)) {
+    anyhow::bail!("this operation is local; remove --context/--address and use its local options");
+  }
+  if remote && matches!(&cli.command, Command::Config(args) if !args.allows_selection()) {
+    anyhow::bail!("this configuration operation is local; remove --context/--address");
+  }
+  if remote && matches!(&cli.command, Command::Runner(args) if !args.allows_selection()) {
+    anyhow::bail!("runner serve uses this machine's saved enrollment; remove --context/--address");
+  }
   let ctx = Context {
-    endpoint: cli.endpoint,
+    config: cli.config,
+    selected_context: cli.selected_context,
+    address: cli.address,
+    credential_file: cli.credential_file,
+    diagnostic_format: cli.diagnostic_format,
   };
+  if let Command::Daemon(args) = &cli.command {
+    // SAFETY: argument parsing and configuration reads above spawn no threads.
+    // Apply daemon process settings before logging or the Tokio runtime starts.
+    for (name, value) in args.environment(&ctx)? {
+      unsafe {
+        std::env::set_var(name, value);
+      }
+    }
+  }
   // Only the daemon writes a log file; a missing home directory leaves it
   // without one instead of failing here.
   let log_dir = match &cli.command {
@@ -210,19 +220,14 @@ fn dispatch(cli: Cli) -> Result<i32> {
   let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
   let code = runtime.block_on(async move {
     match cli.command {
+      Command::Config(args) => config::run(args, &ctx).await,
       Command::Daemon(args) => daemon::run(*args, &ctx).await,
-      Command::Exec(args) => exec::run(args, &ctx).await,
-      Command::Ps(args) => ps::run(args, &ctx).await,
-      Command::Attach(args) => attach::run(args, &ctx).await,
-      Command::Kill(args) => kill::run(args, &ctx).await,
-      Command::Fs(args) => fs::run(args, &ctx).await,
-      Command::Run(args) => run::run(args, &ctx).await,
+      Command::Client(args) => client::run(args, &ctx).await,
       Command::Runner(args) => runner::run(args, &ctx).await,
-      Command::Pair(args) => pair::run(args, &ctx).await,
+      Command::Run(args) => run::run(args, &ctx).await,
+      Command::Proc(args) => proc::run(args, &ctx).await,
+      Command::Fs(args) => fs::run(args, &ctx).await,
       Command::Image(args) => image::run(args, &ctx).await,
-      Command::Profile(args) => profile::run(args, &ctx).await,
-      Command::Report(args) => report::run(args, &ctx).await,
-      Command::Chaos(args) => chaos::run(args, &ctx).await,
     }
   });
   // NOTICE: a task may still block on reading stdin, which a runtime drop

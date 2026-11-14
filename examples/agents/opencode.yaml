@@ -37,7 +37,7 @@ actor:
     # when it first uses a provider; then the providers' APIs: Anthropic,
     # OpenAI, OpenRouter and GitHub Copilot (github.com and api.github.com
     # for its device sign-in). Add another provider's host here;
-    # `needy report` lists denied hosts.
+    # `needy run report` lists denied hosts.
     allow: [opencode.ai, "*.opencode.ai", models.dev, "*.models.dev", registry.npmjs.org,
             api.anthropic.com, api.openai.com, openrouter.ai,
             github.com, api.github.com, api.individual.githubcopilot.com]

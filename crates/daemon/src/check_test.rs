@@ -155,6 +155,10 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
   .await;
 
   assert!(!check.executors.contains_key("linux"));
+  let diagnostics: Vec<_> = check.findings.iter().filter_map(|finding| finding.diagnostic.as_ref()).collect();
+  assert_eq!(diagnostics.iter().map(|value| value.reason.as_str()).collect::<Vec<_>>(), ["runner.not_found", "runner.selector_no_match"]);
+  assert_eq!(diagnostics[0].facts.get("runner").map(String::as_str), Some("windows"));
+  assert_eq!(diagnostics[1].facts.get("candidates").map(String::as_str), Some("mac (no label os=linux)"));
   assert_eq!(
     messages(&check),
     [

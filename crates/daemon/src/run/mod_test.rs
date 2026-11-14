@@ -135,12 +135,13 @@ async fn a_prefix_of_several_runs_is_ambiguous() {
     by_first.entry(created.id.chars().next().unwrap()).or_default().push(created.id);
   }
   let (first, ids) = by_first.iter().find(|(_, ids)| ids.len() > 1).unwrap();
-  let Err(ControlError::Invalid(message)) =
+  let Err(ControlError::Diagnostic { error, diagnostic }) =
     Runs::stop(daemon, &first.to_string(), needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await
   else {
     panic!("an ambiguous prefix must be refused");
   };
-  assert!(message.contains("ambiguous"), "{message}");
+  assert_eq!(diagnostic.reason, "run.ambiguous");
+  assert!(error.to_string().contains("ambiguous"), "{error}");
   for id in ids {
     assert_eq!(Runs::get(daemon, id).await.unwrap().state, RunState::Running);
   }
@@ -387,10 +388,12 @@ executors:
   mac: { runner: { labels: [os=darwin] } }
 "#;
 
-  let Err(ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, served.dir())).await else {
+  let Err(ControlError::Diagnostic { error, diagnostic }) = Runs::create(daemon, new_run(profile, served.dir())).await else {
     panic!("a create whose selector names no runner must fail");
   };
 
+  assert_eq!(diagnostic.reason, "runner.selector_no_match");
+  let message = error.to_string();
   assert!(
     message.contains("executor mac: no connected runner with executor(native) has labels os=darwin; candidates: far (no label os=darwin)"),
     "{message}"

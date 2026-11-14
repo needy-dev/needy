@@ -329,7 +329,7 @@ async fn a_database_another_schema_wrote_is_refused() {
 async fn a_runner_registry_from_before_capabilities_migrates_and_takes_them_at_the_next_heartbeat() {
   let (store, dir) = store().await;
   joined(&store, "mac").await;
-  migration::Migrator::down(&store.db, Some(1)).await.unwrap();
+  migration::Migrator::down(&store.db, Some(2)).await.unwrap();
   drop(store);
 
   let store = Store::open(&dir.path().join("state.db")).await.unwrap();

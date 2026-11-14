@@ -18,6 +18,7 @@ use crate::{Daemon, failed, schedule};
 
 fn error(message: String) -> ProfileFinding {
   ProfileFinding {
+    diagnostic: None,
     error: true,
     message,
   }
@@ -25,6 +26,7 @@ fn error(message: String) -> ProfileFinding {
 
 fn warning(message: String) -> ProfileFinding {
   ProfileFinding {
+    diagnostic: None,
     error: false,
     message,
   }
@@ -81,6 +83,7 @@ impl Daemon {
     let profile = needy_config::profile::load(&source).map_err(|e| ControlError::Invalid(format!("{:#}", anyhow::Error::from(e))))?;
     let mut check = ProfileCheck::default();
     check.findings.extend(validate::profile(&profile).into_iter().map(|f| ProfileFinding {
+      diagnostic: None,
       error: f.severity == Severity::Error,
       message: f.message,
     }));
@@ -102,7 +105,11 @@ impl Daemon {
         }
         check.actor = Some(placement);
       }
-      Err(e) => check.findings.push(error(format!("actor: {e}"))),
+      Err(e) => {
+        let mut finding = error(format!("actor: {e}"));
+        finding.diagnostic = Some(e.diagnostic());
+        check.findings.push(finding);
+      }
     }
     for (name, service) in &profile.actor.network.services {
       if let Some(problem) = unreachable(&service.url).await {
@@ -130,6 +137,7 @@ impl Daemon {
     {
       for (is_error, message) in crate::actor::identity_findings(driver.as_ref(), recipe.as_ref()) {
         check.findings.push(ProfileFinding {
+          diagnostic: None,
           error: is_error,
           message: format!("actor: {message}"),
         });
@@ -154,7 +162,11 @@ impl Daemon {
           }
           check.executors.insert(name.clone(), placement);
         }
-        Err(e) => check.findings.push(error(format!("executors.{name}: {e}"))),
+        Err(e) => {
+          let mut finding = error(format!("executors.{name}: {e}"));
+          finding.diagnostic = Some(e.diagnostic());
+          check.findings.push(finding);
+        }
       }
     }
     Ok(check)
@@ -216,6 +228,7 @@ impl Daemon {
     let compiled = needy_core::recipe::compile(&recipe, &host, &needy_core::recipe::PerRun::at(1, needy_common::time::now_ms()));
     check.actor_cpu = host.model_name;
     check.findings.extend(compiled.findings.iter().map(|f| ProfileFinding {
+      diagnostic: None,
       error: f.severity == Severity::Error,
       message: format!("recipe: {}", f.message),
     }));

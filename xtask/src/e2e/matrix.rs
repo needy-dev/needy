@@ -68,7 +68,7 @@ impl Oci {
 }
 
 /// The actor driver dimension. `Host` is the cells without an actor:
-/// `needy exec` and `needy fs cp` against the control daemon's own native
+/// `needy proc exec --host` and `needy fs cp` against the control daemon's own native
 /// executor, which need no VM or engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Driver {
@@ -241,7 +241,7 @@ pub enum Fault {
   File,
   Net,
   Sensor,
-  /// `needy chaos add` while the run is live.
+  /// `needy run chaos add` while the run is live.
   Added,
 }
 
@@ -300,7 +300,7 @@ impl RunnerAt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scenario {
   /// Routing to a native executor on a runner that joined the control
-  /// plane, and `needy exec --runner`.
+  /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
   /// Copy-in from the host into the actor, nested and single-level; mirror-out
   /// from the actor with and without a filter.
@@ -323,7 +323,7 @@ pub enum Scenario {
   FakeAgent,
   /// A TUI fidelity case from `super::tui`, by its index there.
   Tui(usize),
-  /// `needy exec` outside any run: exit codes, a terminal, JSON output.
+  /// `needy proc exec --host` outside any run: exit codes, a terminal, JSON output.
   HostExec,
   /// `needy fs cp` outside any run, into a nested directory and back.
   HostCopy,

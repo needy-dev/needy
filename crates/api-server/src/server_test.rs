@@ -176,3 +176,44 @@ fn listen_addresses_are_unix_paths_or_host_and_port() {
   assert_eq!(Listen::parse("unix:/run/needy.sock"), Listen::Unix("/run/needy.sock".into()));
   assert_eq!(Listen::parse("127.0.0.1:7000"), Listen::Tcp("127.0.0.1:7000".into()));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn only_the_designated_management_socket_admits_the_owner_without_a_bearer() {
+  use crate::testing::{CLIENT_TOKEN, Fake};
+  use needy_api_client::Client;
+  use needy_api_proto::v1::GetCallerRequest;
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("management.sock");
+  let fake = Arc::new(Fake::default());
+  // SAFETY: getuid has no arguments and cannot fail.
+  let owner = unsafe { libc::getuid() };
+  let bound = Server::new(health(), Caller::Operator)
+    .clients(fake.clone())
+    .runs(fake)
+    .management_socket(socket.clone(), owner)
+    .bind(&[
+      Listen::Unix(socket.clone()),
+      Listen::Tcp("127.0.0.1:0".into()),
+    ])
+    .await
+    .unwrap();
+  let remote = bound.addresses()[1].to_string();
+  let stop = CancellationToken::new();
+  let serving = tokio::spawn(bound.serve(stop.clone()));
+  let local = Client::connect(&format!("unix:{}", socket.display())).await.unwrap();
+  local.clients().get_caller(GetCallerRequest {}).await.unwrap();
+  let invalid = local.clone().with_token("invalid-explicit-bearer").unwrap().clients().get_caller(GetCallerRequest {}).await.unwrap_err();
+  assert_eq!(invalid.code(), Code::Unauthenticated);
+  let empty = local.clone().with_token("").unwrap().clients().get_caller(GetCallerRequest {}).await.unwrap_err();
+  assert_eq!(empty.code(), Code::Unauthenticated);
+  let mut malformed = tonic::Request::new(GetCallerRequest {});
+  malformed.metadata_mut().insert("authorization", "Basic invalid".parse().unwrap());
+  assert_eq!(local.clients().get_caller(malformed).await.unwrap_err().code(), Code::Unauthenticated);
+  let restricted = local.with_token(CLIENT_TOKEN).unwrap().clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+  assert_eq!(restricted.access, needy_api_proto::v1::ClientAccess::Runs as i32);
+  let client = Client::connect(&format!("http://{remote}")).await.unwrap();
+  assert_eq!(client.clients().get_caller(GetCallerRequest {}).await.unwrap_err().code(), Code::Unauthenticated);
+  stop.cancel();
+  serving.await.unwrap().unwrap();
+}
