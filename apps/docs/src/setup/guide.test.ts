@@ -1,5 +1,10 @@
 import type { Environment, Executor } from './guide'
 
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 
@@ -15,6 +20,77 @@ const hosts: Array<Partial<Environment> & { driver: string }> = [
 const executors: Executor[] = ['container', 'native', 'runner']
 
 describe('environment wizard', () => {
+  // ROOT CAUSE:
+  //
+  // If installation was reused, workspace preparation was easy to skip
+  // because it was part of the install step; readiness checked only uname.
+  // Before the fix, the guide offered no serving-account directory probe.
+  // The fix verifies the source directory before the actor mounts it.
+  it('verifies the remote workspace through the serving runner before mounting it', () => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner', workspace: '~/my project' })
+    const workspace = steps.find(step => step.id === 'workspace')
+    expect(workspace?.machine).toBe('runner')
+    expect(workspace?.code).toContain('test -d')
+    const probe = steps.find(step => step.id === 'check-runner')!
+    expect(probe.code).toContain('test -d')
+    expect(probe.code).toContain('id')
+    expect(steps.indexOf(probe)).toBeLessThan(steps.findIndex(step => step.id === 'start'))
+  })
+
+  it('includes client authorization and launches from the executor when selected', () => {
+    const env = { ...DEFAULT_ENVIRONMENT, where: 'server' as const, executor: 'runner' as const, launchFrom: 'runner' as const }
+    const steps = guide('bash', env)
+    expect(steps.find(step => step.id === 'client-invite')?.machine).toBe('host')
+    expect(steps.find(step => step.id === 'client-pair')?.machine).toBe('runner')
+    expect(steps.find(step => step.id === 'client-pair')?.code).toContain('config context pair control')
+    expect(steps.find(step => step.profile)?.machine).toBe('runner')
+    expect(steps.find(step => step.id === 'start')?.machine).toBe('runner')
+    expect(steps.find(step => step.id === 'client-invite')?.code).not.toContain('--admin')
+  })
+
+  it('keeps control-host launches available without adding a client invitation', () => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', launchFrom: 'host' })
+    expect(steps.find(step => step.profile)?.machine).toBe('host')
+    expect(steps.find(step => step.id === 'start')?.machine).toBe('host')
+    expect(steps.some(step => step.id === 'client-pair')).toBe(false)
+  })
+
+  // The two shells deliberately have different HOME values. Expanding the
+  // runner path in the control shell would inspect the wrong machine's home.
+  it('fails a missing-directory probe and expands quoted paths only on the executor', () => {
+    const root = mkdtempSync(join(tmpdir(), 'needy-guide-'))
+    try {
+      const control = join(root, 'control')
+      const executor = join(root, 'executor')
+      mkdirSync(control)
+      mkdirSync(executor)
+      const path = "~/my 'project' $(touch unwanted)"
+      const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', workspace: path })
+      const probe = steps.find(step => step.id === 'check-runner')!.code!
+      // Replace only the external execution boundary. The generated shell
+      // quoting and the executor's sh -c body execute unchanged.
+      const dispatch = `needy() {
+        if [ "$1" = runner ]; then return 0; fi
+        while [ "$1" != -- ]; do shift; done
+        shift
+        HOME="$EXECUTOR_HOME" "$@"
+      }\n${probe}`
+      const run = (script: string, home: string) => spawnSync('sh', ['-c', script], {
+        cwd: root, env: { ...process.env, HOME: home, EXECUTOR_HOME: executor }, encoding: 'utf8',
+      })
+      expect(run(dispatch, control).status).not.toBe(0)
+      expect(run(steps.find(step => step.id === 'workspace')!.code!, executor).status).toBe(0)
+      const checked = run(dispatch, control)
+      expect(checked.status).toBe(0)
+      expect(checked.stdout).toContain(join(executor, path.slice(2)))
+      expect(existsSync(join(control, path.slice(2)))).toBe(false)
+      expect(existsSync(join(root, 'unwanted'))).toBe(false)
+    }
+    finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   // The fixed walkthrough removed the environment answers. Previously the
   // agent appendix also kept Firecracker even after a different driver was chosen.
   for (const host of hosts) {
@@ -37,7 +113,7 @@ describe('environment wizard', () => {
         expect(profile.actor.workspace.writable).toBe(true)
         expect(profile.commands).toEqual([{ match: '**', to: target }])
         expect(profile.unknown).toBe(target)
-        expect(saved.machine).toBe('host')
+        expect(saved.machine).toBe(executor === 'runner' ? 'runner' : 'host')
         expect(saved.code).toContain(`profiles/${id}-demo.yaml`)
         expect(steps.find(step => step.id === 'start')?.code).toContain(`--profile ${id}-demo`)
         expect(steps.find(step => step.id === 'install')?.code).toContain(`needy image pull --driver ${host.driver}`)
@@ -54,12 +130,12 @@ describe('environment wizard', () => {
   it('keeps local management, hidden enrollment, and the single tunnel in their terminal contexts', () => {
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner' })
     expect(steps.find(step => step.id === 'paste-token')?.code).toContain('needy --address tcp://127.0.0.1:7400 runner join')
-    expect(steps.find(step => step.id === 'runner')?.code).toBe('needy runner serve')
+    expect(steps.find(step => step.id === 'runner')?.code).toContain('needy runner serve')
     expect(steps.find(step => step.id === 'runner')?.machine).toBe('runner')
     expect(steps.find(step => step.id === 'token')?.machine).toBe('host')
     expect(steps.filter(step => step.code?.includes('ssh -N'))).toHaveLength(1)
     const control = steps.find(step => step.id === 'daemon')!
-    expect(control.terminal.zh).toContain('同一个 SSH 配置终端')
+    expect(control.terminal.zh).toContain('控制主机 · SSH 终端')
     expect(control.code).toContain('needy config set daemon.listen')
     expect(control.code).toContain('needy daemon service install --now')
     expect(control.code).toContain('needy config use local')
@@ -102,5 +178,6 @@ describe('environment wizard', () => {
     expect(configurationIssue(env)).toBeDefined()
     expect(guide('bash', env)).toEqual([])
     expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '' })).toBeDefined()
+    expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '.' })).toBeDefined()
   })
 })

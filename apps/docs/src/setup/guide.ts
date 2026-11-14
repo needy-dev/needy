@@ -21,6 +21,7 @@ export interface Environment {
   kvm: boolean
   macRuntime: 'vz' | 'apple'
   executor: Executor
+  launchFrom: 'host' | 'runner'
   docker: boolean
   pm: PackageManager
   runnerOs: Os | 'windows'
@@ -49,7 +50,30 @@ export const PROGRAMS: Array<{ id: Program, name: string }> = [
 
 export const DEFAULT_ENVIRONMENT: Environment = {
   where: 'here', os: 'linux', kvm: true, macRuntime: 'vz', executor: 'container',
+  launchFrom: 'runner',
   docker: true, pm: 'apt', runnerOs: 'mac', runnerName: 'mac', workspace: '~/needy-demo', routing: 'all',
+}
+
+/** Machine roles shared by the route overview and each instruction's location badge. */
+export function locations(env: Environment): Record<Machine, { name: Text, description: Text }> {
+  const executorOs = env.runnerOs === 'mac' ? 'macOS' : env.runnerOs === 'linux' ? 'Linux' : 'Windows'
+  const controlOs = env.os === 'mac' ? 'macOS' : 'Linux'
+  return {
+    host: {
+      name: { en: `Control host · ${controlOs}`, zh: `控制主机 · ${controlOs}` },
+      description: env.where === 'server'
+        ? { en: 'Run host commands in an SSH shell on the server, as the daemon account. The daemon and actor live here.', zh: '在服务器的 SSH shell 中，以 daemon 的账号执行宿主机命令。daemon 和 actor 在这里运行。' }
+        : { en: 'Run host commands in a terminal on this computer, as the daemon account. The daemon and actor live here.', zh: '在这台电脑的终端中，以 daemon 的账号执行宿主机命令。daemon 和 actor 在这里运行。' },
+    },
+    runner: {
+      name: { en: `Executor · ${executorOs}`, zh: `执行机器 · ${executorOs}` },
+      description: { en: 'Run these commands in a terminal on the executor machine, as the account running runner serve. Its home and project paths belong to this machine.', zh: '在执行机器的终端中，以运行 runner serve 的账号执行。这里的 HOME 和项目路径属于执行机器。' },
+    },
+    actor: {
+      name: { en: 'Actor · Linux', zh: 'Actor · Linux' },
+      description: { en: 'Use the program terminal opened by run create -it. The program lives in the Linux actor; captured child commands follow the routing rules.', zh: '使用 run create -it 打开的程序终端。程序运行在 Linux actor 中，捕获到的子命令按规则路由。' },
+    },
+  }
 }
 
 const PROFILES: Record<Program, string> = { bash, claude, opencode }
@@ -79,6 +103,10 @@ export function configurationIssue(env: Environment): Text | undefined {
     return { en: 'Use a runner name of 1–63 lowercase letters, digits, or hyphens.', zh: 'runner 名称需为 1–63 个小写字母、数字或连字符，且首尾不能是连字符。' }
   if (env.executor !== 'container' && (!env.workspace.trim() || /[\r\n\0]/.test(env.workspace)))
     return { en: 'Enter a project directory on the executor, without line breaks.', zh: '填写 executor 上的项目目录，不要包含换行。' }
+  // NOTICE: client-current-directory binding is not implemented. Relative
+  // paths would depend on the submitted profile's base, not this form.
+  if (env.executor !== 'container' && !(env.workspace.startsWith('/') || env.workspace === '~' || env.workspace.startsWith('~/')))
+    return { en: 'Use an absolute executor path or ~/path. The client current directory is not bound automatically.', zh: '请使用执行机器上的绝对路径或 ~/路径，不会自动绑定客户端当前目录。' }
   return undefined
 }
 
@@ -88,7 +116,12 @@ function quote(value: string): string {
 }
 
 function shellPath(path: string): string {
-  return path.startsWith('~/') ? `"$HOME"/${quote(path.slice(2))}` : quote(path)
+  return path === '~' ? '"$HOME"' : path.startsWith('~/') ? `"$HOME"/${quote(path.slice(2))}` : quote(path)
+}
+
+/** Runs on the executor: home expansion must use the serving account, not the control host. */
+function workspaceProbe(path: string): string {
+  return `workspace=${shellPath(path)}\nid\nuname -s\nprintf 'HOME=%s\\n' "$HOME"\ntest -d "$workspace" && test -r "$workspace" && test -w "$workspace" && test -x "$workspace" && cd "$workspace" && pwd`
 }
 
 /** Derives one profile and its per-machine steps from all wizard answers. */
@@ -98,9 +131,12 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   const driver = actorDriver(env)
   const vm = driver === 'linux-firecracker' || driver === 'macos-vz'
   const host = env.where === 'server'
-    ? { en: 'Server · the same SSH setup terminal', zh: '服务器 · 同一个 SSH 配置终端' }
-    : { en: 'This computer · the same setup terminal', zh: '本机 · 同一个配置终端' }
-  const remote = { en: 'Executor machine · local terminal, outside SSH', zh: 'executor 机器 · 本地终端，不在服务器 SSH 会话里' }
+    ? { en: 'Control host · SSH terminal', zh: '控制主机 · SSH 终端' }
+    : { en: 'Control host · local terminal', zh: '控制主机 · 本地终端' }
+  const remote = { en: 'Executor · setup terminal', zh: '执行机器 · 配置终端' }
+  const fromRunner = env.executor === 'runner' && env.launchFrom === 'runner'
+  const launchMachine: Machine = fromRunner ? 'runner' : 'host'
+  const launchTerminal = fromRunner ? remote : host
   const target = env.executor === 'runner' ? 'remote' : env.executor === 'native' ? 'here' : 'build'
   const name = `${program}-demo`
   const runner = quote(env.runnerName)
@@ -162,8 +198,13 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the executor machine', zh: '准备执行命令的机器' },
       text: { en: 'Install needy and your project tools here. A native runner needs no actor images.', zh: '在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。' },
-      code: `${INSTALL_NEEDY}\nmkdir -p ${shellPath(env.workspace)}`,
-      expected: { en: 'The project directory exists. The runner inherits this terminal’s PATH.', zh: '项目目录已创建。runner 会继承这个终端的 PATH。' } },
+      code: INSTALL_NEEDY,
+      expected: { en: 'The executor has needy and its project tools. Use the account that will serve commands.', zh: '执行机器已安装 needy 和项目工具。使用将要执行命令的账号。' } },
+    { id: 'workspace', machine: 'runner', terminal: remote,
+      title: { en: 'Prepare the project on the executor', zh: '在执行机器上准备项目目录' },
+      text: { en: 'Use the same account for this directory and runner serve. Use an existing project, or create this empty demo directory. Creating it on the control host will not create it here.', zh: '目录和 runner serve 使用同一账号。可填写已有项目，或创建这个空演示目录。在控制主机创建目录不会在这里创建它。' },
+      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace)}`,
+      expected: { en: 'The identity and HOME belong to the executor account, and pwd prints the project path. Stop if any check fails.', zh: '身份与 HOME 属于执行账号，pwd 输出项目路径。任一检查失败时先停止后续步骤。' } },
     { id: 'tunnel', machine: 'runner', terminal: { en: 'Executor machine · a separate tunnel terminal', zh: 'executor 机器 · 另开的隧道终端' },
       title: { en: 'Open one tunnel to the control host', zh: '建立一条到控制主机的隧道' },
       text: { en: 'Replace user@example.com with the actor host’s SSH destination. Keep this tunnel open.', zh: '把 user@example.com 换成 actor 宿主机的 SSH 地址，保持这个隧道开启。' },
@@ -177,15 +218,26 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
       title: { en: 'Enroll the executor once', zh: '完成一次 executor 注册' },
       text: { en: 'Run this command. Paste the invitation code at its hidden prompt. Enrollment saves the runner credential and returns.', zh: '执行命令后，在隐藏输入提示中粘贴邀请码。注册会保存 runner 凭据并返回。' },
       code: `needy --address tcp://127.0.0.1:7400 runner join ${runner} --roles executor` },
-    { id: 'runner', machine: 'runner', terminal: remote,
+    { id: 'runner', machine: 'runner', terminal: { en: 'Executor · separate runner terminal', zh: '执行机器 · 单独的 runner 终端' },
       title: { en: 'Start the enrolled runner', zh: '启动已注册的 runner' },
-      text: { en: 'Leave this process running outside the server SSH session. It reconnects with its saved credential and enrollment settings.', zh: '在服务器 SSH 会话之外持续运行此进程。它使用已保存的凭据和注册配置重连。' },
-      code: 'needy runner serve' },
+      text: { en: 'Keep this process running as the executor account, not with sudo. Native commands inherit its permissions. Client pairing below does not change this identity. The current release requires this persistent runner; execution inside the launching CLI is not implemented.', zh: '以执行账号持续运行，不要使用 sudo。native 命令继承它的权限，下方客户端配对不会改变这个身份。当前版本需要持续运行此 runner，尚未实现由启动 CLI 自身承接执行。' },
+      code: 'export PATH="$HOME/.local/bin:$PATH"\nneedy runner serve' },
     { id: 'check-runner', machine: 'host', terminal: host,
       title: { en: 'Check which machine joined', zh: '确认加入的是哪台机器' },
-      text: { en: 'Check the HOST column as well as the runner name.', zh: '既看 runner 名称，也看 HOST 列，确认操作系统与所选机器一致。' },
-      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- uname -s`,
-      expected: { en: `The runner is online. Its command reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}.`, zh: `runner 为 online，命令返回 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}。` } })
+      text: { en: 'This probe runs through the actual serving runner. Compare its identity, HOME and project path with the executor setup step. A missing directory here is the same condition that prevents the workspace mount.', zh: '通过实际接任务的 runner 探测。将身份、HOME、项目路径与执行机器的准备步骤对照。这里缺少目录，就会导致后面的 workspace 挂载失败。' },
+      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace))}`,
+      expected: { en: `The runner is online, reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}, and the directory checks succeed under the intended account.`, zh: `runner 为 online，系统为 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}，目录检查在预期账号下通过。` } })
+    if (fromRunner) {
+      steps.push({ id: 'client-invite', machine: 'host', terminal: host,
+        title: { en: 'Authorize a control client on the executor', zh: '授权执行机器上的控制客户端' },
+        text: { en: 'Create a separate client invitation. This grants run/process access, not administrator access. The runner invitation cannot be reused here.', zh: '创建独立的客户端邀请码，授予 run/process 权限，不授予管理权限。不能重复使用 runner 邀请码。' },
+        code: 'needy client invite --name executor-cli',
+      }, { id: 'client-pair', machine: 'runner', terminal: remote,
+        title: { en: 'Pair and select the control connection', zh: '配对并选择控制连接' },
+        text: { en: 'Reuse the open SSH tunnel. Paste the client invitation at the hidden prompt. Keep the runner terminal running; pairing gives this CLI control access, not a new execution identity. For an existing context, select and check it instead of pairing again.', zh: '复用已开启的 SSH 隧道，在隐藏提示中粘贴客户端邀请码。保持 runner 终端运行；配对只授予此 CLI 控制权限，不会创建新的执行身份。已有 context 时直接选择并检查，不必再次配对。' },
+        code: 'needy --address tcp://127.0.0.1:7400 config context pair control\nneedy config use control\nneedy config context check control\nneedy run ls',
+      })
+    }
   }
   else if (env.executor === 'native') {
     steps.push({ id: 'workspace', machine: 'host', terminal: host,
@@ -225,15 +277,15 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   profile.commands = [{ match: env.routing === 'all' ? '**' : '{bash,sh,dash,zsh} **', to: target }]
   profile.unknown = env.routing === 'all' ? target : 'actor'
   const yaml = '# Generated from examples/linux-mac for the selected environment.\n# Container capture covers image shims, not new unshimmed programs.\n' + stringify(profile, { lineWidth: 0 })
-  steps.push({ id: 'profile', machine: 'host', terminal: host,
+  steps.push({ id: 'profile', machine: launchMachine, terminal: launchTerminal,
     title: { en: 'Save the selected profile', zh: '保存按选择生成的 profile' },
-    text: { en: 'Save it on the actor host. The workspace derives both the mount and command path map.', zh: '保存在 actor 宿主机上。workspace 会同时生成共享挂载和命令路径映射。' },
+    text: { en: 'Save this profile where you will run needy run create. The CLI sends its resolved contents to the control daemon. Executor workspace paths still belong to the selected executor; host file paths belong to the control host.', zh: '保存在将要执行 needy run create 的机器上。CLI 会把解析后的内容发送给控制 daemon。executor 的 workspace 路径仍属于所选执行机器，host 文件路径仍属于控制主机。' },
     profile: yaml,
     code: `mkdir -p ~/.config/needy/profiles\ncat > ~/.config/needy/profiles/${name}.yaml <<'YAML'\n${yaml.trimEnd()}\nYAML`,
     expected: { en: `${name}: ${driver}, ${program}, executor ${target}.`, zh: `${name}：${driver}，入口 ${program}，executor 为 ${target}。` } },
-  { id: 'start', machine: 'host', terminal: host,
+  { id: 'start', machine: launchMachine, terminal: launchTerminal,
     title: { en: `Start ${PROGRAMS.find(p => p.id === program)!.name}`, zh: `启动 ${PROGRAMS.find(p => p.id === program)!.name}` },
-    text: { en: 'Check the profile, then start its entrypoint. Keep any runner and tunnel open.', zh: '先检查 profile，再启动入口程序。远端 runner 和隧道需要继续运行。' },
+    text: { en: 'Profile check inspects configuration, placement and host capabilities; --cmd predicts routing and does not execute pwd or verify the workspace. Complete the workspace probe first, then start. Keep the runner and tunnel open. The actor terminal appears in this terminal.', zh: 'profile check 检查配置、调度和宿主机能力；--cmd 预测路由，不会执行 pwd 或验证 workspace。先完成目录探测再启动，保持 runner 和隧道开启。actor 终端会出现在当前终端。' },
     code: `needy config profile check ${name} --mode control --cmd 'bash -c "pwd"'\nneedy run create -it --profile ${name}` })
   if (program === 'bash') {
     steps.push({ id: 'observe', machine: 'actor', terminal: { en: 'Inside the new bash', zh: '在刚进入的 bash 内' },
@@ -253,7 +305,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
       text: { en: 'Check the actual tool output and the file on the selected executor.', zh: '查看实际工具输出，并在所选 executor 上查看同一份文件。' },
       prompt: { en: 'Create needy-check.txt with the text "shared workspace check" using your file editor. Then run uname -s and cat needy-check.txt with your shell tool. Show the exact output.', zh: '用文件编辑工具创建 needy-check.txt，内容为 shared workspace check。再用 shell 工具执行 uname -s 和 cat needy-check.txt，给我看实际输出。' } })
   }
-  steps.push({ id: 'again', machine: 'host', terminal: host,
+  steps.push({ id: 'again', machine: launchMachine, terminal: launchTerminal,
     title: { en: 'Return to the setup shell', zh: '回到配置终端' },
     text: { en: 'Ctrl-] detaches without stopping the run. Replace RUN_ID with its listed ID; run each lifecycle command separately.', zh: 'Ctrl-] 只断开终端，不会停止 run。把 RUN_ID 换成列表中的编号，接回、停止命令分别执行。' },
     code: 'needy run ls',
