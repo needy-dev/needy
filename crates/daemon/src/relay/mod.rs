@@ -392,23 +392,33 @@ impl Processes for Daemon {
       (Some(_), Upstream::Start(spec)) if routing::unmapped(&relay.instance, &spec.cwd) => Some(spec.cwd.clone()),
       _ => None,
     };
-    let upstream = match upstream {
-      Upstream::Start(spec) => ExecStream::start(executor, domain::proto_exec_start(spec)).await,
-      Upstream::Attach {
-        process,
-        replay,
-        window,
-        read_only,
-      } => {
-        let attach = ExecAttach {
-          process_id: process,
+    let open = async {
+      match upstream {
+        Upstream::Start(spec) => ExecStream::start(executor, domain::proto_exec_start(spec)).await,
+        Upstream::Attach {
+          process,
           replay,
-          window: window.map(domain::proto_window),
+          window,
           read_only,
-          run_id: String::new(),
-        };
-        ExecStream::attach(executor, attach).await
+        } => {
+          let attach = ExecAttach {
+            process_id: process,
+            replay,
+            window: window.map(domain::proto_window),
+            read_only,
+            run_id: String::new(),
+          };
+          ExecStream::attach(executor, attach).await
+        }
       }
+    };
+    let upstream = match &run {
+      Some(run) => tokio::select! {
+        biased;
+        () = run.cancel.cancelled() => Err(needy_api_client::Error::Ended { reason: Some("run stopped while opening its executor stream".into()) }),
+        result = open => result,
+      },
+      None => open.await,
     }
     .map_err(relayed)
     .map_err(|error| match error {

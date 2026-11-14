@@ -11,17 +11,29 @@ use super::*;
 // fault that refuses it.
 #[test]
 fn a_routed_program_that_cannot_start_exits_127() {
-  assert_eq!(refused(Kind::Failed), Some(127));
+  assert_eq!(refused(&needy_api_client::Error::from(tonic::Status::failed_precondition("start failed"))), Some(127));
 }
 
 #[test]
 fn a_routed_command_a_rule_or_fault_refuses_exits_126() {
-  assert_eq!(refused(Kind::Denied), Some(126));
+  assert_eq!(refused(&needy_api_client::Error::from(tonic::Status::permission_denied("denied"))), Some(126));
 }
 
 #[test]
-fn other_start_errors_are_the_proxys_own() {
-  assert_eq!(refused(Kind::Unavailable), None);
+fn a_lost_start_response_does_not_claim_that_the_command_never_ran() {
+  assert_eq!(refused(&needy_api_client::Error::from(tonic::Status::unavailable("lost response"))), Some(255));
+}
+
+#[test]
+fn a_confirmed_pre_dispatch_timeout_exits_125() {
+  let status = needy_api_client::diagnostic::with_status(
+    tonic::Status::unavailable("not dispatched"),
+    needy_api_proto::v1::ErrorDiagnostic {
+      reason: "process.not_started".into(),
+      facts: Default::default(),
+    },
+  );
+  assert_eq!(refused(&status.into()), Some(125));
 }
 
 fn strings(words: &[&str]) -> Vec<String> {

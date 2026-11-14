@@ -81,6 +81,20 @@ enum Pending {
   },
 }
 
+/// Removing an abandoned task also drops its queued start request. Without
+/// this guard, cancellation while waiting for the task stream could leave
+/// work for a runner to accept after its caller stopped waiting.
+struct PendingExec<'a> {
+  link: &'a Link,
+  id: u64,
+}
+
+impl Drop for PendingExec<'_> {
+  fn drop(&mut self) {
+    self.link.take(self.id);
+  }
+}
+
 impl Links {
   fn lock(&self) -> MutexGuard<'_, HashMap<String, Arc<Link>>> {
     // NOTICE: every change under the lock is one map update, so a panic
@@ -313,6 +327,7 @@ impl Link {
     let id = self.next.fetch_add(1, Ordering::Relaxed);
     let (opened, stream) = oneshot::channel();
     self.pending().insert(id, Pending::Exec { requests, opened });
+    let pending = PendingExec { link: self, id };
     let opened = async {
       self.announce(id, runner_task::Kind::Exec(ExecTask {})).await?;
       tokio::select! {
@@ -322,7 +337,7 @@ impl Link {
     };
     let opened = opened.await;
     // Still pending when the runner never opened the stream.
-    self.take(id);
+    drop(pending);
     let mut responses = opened?;
     match responses.next().await {
       Some(Ok(TaskRequest {
@@ -387,6 +402,8 @@ fn status(error: TaskError) -> Status {
 pub(crate) struct RunnerExecutor {
   pub runner: String,
   pub links: Arc<Links>,
+  /// Only waits before handing any request to a runner.
+  pub unavailable_timeout: Duration,
 }
 
 impl RunnerExecutor {
@@ -403,7 +420,23 @@ pub(crate) fn not_connected(runner: &str) -> String {
 #[async_trait::async_trait]
 impl Executor for RunnerExecutor {
   async fn exec(&self, requests: mpsc::Receiver<ExecRequest>) -> Result<Responses, Status> {
-    self.link()?.exec(requests).await
+    let link = match self.links.get(&self.runner) {
+      Some(link) => link,
+      None => self.links.connected(&self.runner, self.unavailable_timeout).await.ok_or_else(|| {
+        // No exec task or request has been handed to a runner. A timeout
+        // here cannot leave queued work to execute after reconnection.
+        needy_api_client::diagnostic::with_status(
+          Status::unavailable("executor is unavailable; the wait deadline expired; the command was not started"),
+          needy_api_client::proto::v1::ErrorDiagnostic {
+            reason: "process.not_started".into(),
+            facts: [("runner".into(), self.runner.clone())].into(),
+          },
+        )
+      })?,
+    };
+    // After this call begins, loss of a response does not prove that the
+    // request was never accepted. Do not retry or label it not-started.
+    link.exec(requests).await
   }
 
   async fn list_processes(&self, request: ListProcessesRequest) -> Result<ListProcessesResponse, Status> {

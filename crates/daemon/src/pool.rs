@@ -70,7 +70,7 @@ impl Instance {
       name: runner.to_string(),
       key: String::new(),
       // No run mounts a workspace from it.
-      handle: runner_handle(runner, links, Vec::new(), String::new()),
+      handle: runner_handle(runner, links, Vec::new(), String::new(), std::time::Duration::ZERO),
       driver: None,
       path_map: BTreeMap::new(),
       home: String::new(),
@@ -132,10 +132,17 @@ impl Instance {
 const RUNNER: &str = "runner";
 
 /// A runner's own process space, reached over its streams.
-fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace: String) -> driver::Instance {
+fn runner_handle(
+  runner: &str,
+  links: &Arc<Links>,
+  sftp: Vec<String>,
+  workspace: String,
+  unavailable_timeout: std::time::Duration,
+) -> driver::Instance {
   let executor = RunnerExecutor {
     runner: runner.to_string(),
     links: links.clone(),
+    unavailable_timeout,
   };
   driver::Instance {
     driver: RUNNER,
@@ -238,7 +245,7 @@ impl Pool {
       // home of the user the runner runs as.
       (profile::ExecutorDriver::Native, Site::Runner { name, os, home }) => {
         let workspace = driver::expand_home(&spec.config.workspace.clone().unwrap_or_default(), home);
-        (runner_handle(name, &self.links, sftp_command(os), workspace), None, home.clone())
+        (runner_handle(name, &self.links, sftp_command(os), workspace, spec.config.unavailable_timeout.into()), None, home.clone())
       }
       // TODO(runner-docker): a runner creating containers itself (create and
       // destroy tasks on its control stream, execs relayed to the

@@ -21,7 +21,7 @@ pub fn validated(diagnostic: &ErrorDiagnostic) -> Option<ErrorDiagnostic> {
     "process.cwd_invalid" => &["cwd", "program", "executor", "runner", "path_map"],
     "process.start_failed" | "process.terminal_failed" => &["program", "executor", "runner"],
     "auth.backend_unavailable" => &[],
-    "executor.authentication_failed" => &["executor", "runner"],
+    "executor.authentication_failed" | "process.not_started" => &["executor", "runner"],
     "runner.not_found"
     | "runner.not_connected"
     | "runner.offline"

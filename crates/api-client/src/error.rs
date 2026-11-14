@@ -97,6 +97,12 @@ pub enum Kind {
 }
 
 impl Error {
+  /// The producer confirms that this command was never dispatched. A lost
+  /// connection or missing start acknowledgement alone is not such proof.
+  pub fn not_started(&self) -> bool {
+    self.kind() == Kind::Unavailable && self.diagnostic().is_some_and(|value| value.reason == "process.not_started")
+  }
+
   /// Bounded producer facts, when available; the original cause stays intact.
   pub fn diagnostic(&self) -> Option<needy_api_proto::v1::ErrorDiagnostic> {
     let value = match self {

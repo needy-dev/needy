@@ -36,6 +36,9 @@ pub struct Executor {
   pub on_full: OnFull,
   pub max_instances: Option<u32>,
   pub idle_timeout: Option<Duration>,
+  /// Maximum pre-dispatch wait for a disconnected executor. Expiry proves
+  /// the command was not sent; dispatched work is never retried.
+  pub unavailable_timeout: Duration,
 }
 
 impl Default for Executor {
@@ -52,6 +55,7 @@ impl Default for Executor {
       on_full: OnFull::Wait,
       max_instances: None,
       idle_timeout: None,
+      unavailable_timeout: Duration::from_secs(10),
     }
   }
 }
