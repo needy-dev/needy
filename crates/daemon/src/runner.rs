@@ -29,7 +29,7 @@ use needy_api_client::proto::v1::{
   TaskError, TaskRequest, TaskResult, control_request, control_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Client, Kind};
-use needy_api_server::control::RunnerHost;
+use needy_api_server::control::{ControlError, RunnerHost};
 use needy_api_server::protocol::domain::{proto_capabilities, proto_runner_host};
 use needy_core::types::{Capabilities, RunnerRole};
 use needy_core_executor::process::{Host, Input};
@@ -565,12 +565,12 @@ impl Dialer {
           runner_task::Kind::Exec(_) => true, // The first ExecRequest is checked below.
         };
         if !allowed {
-          let error = tonic::Status::permission_denied("task does not belong to this client execution invocation");
+          let error = ControlError::denied("task does not belong to this client execution invocation");
           results
             .send(ControlRequest {
               payload: Some(control_request::Payload::Result(TaskResult {
                 task_id: id,
-                result: Some(task_result::Result::Error(task_error(&error))),
+                result: Some(task_result::Result::Error(task_error(&error.into()))),
               })),
             })
             .await
@@ -724,12 +724,12 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
                   _ => true,
                 };
                 if !allowed {
-                  let status = tonic::Status::permission_denied("exec does not belong to this client execution invocation");
+                  let error = ControlError::denied("exec does not belong to this client execution invocation");
                   // The remote side may already have closed; a failed refusal
                   // delivery has no remaining recipient.
                   if up
                     .send(TaskRequest {
-                      payload: Some(task_request::Payload::Error(task_error(&status))),
+                      payload: Some(task_request::Payload::Error(task_error(&error.into()))),
                     })
                     .await
                     .is_err()

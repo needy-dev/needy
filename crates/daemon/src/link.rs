@@ -425,13 +425,8 @@ impl Executor for RunnerExecutor {
       None => self.links.connected(&self.runner, self.unavailable_timeout).await.ok_or_else(|| {
         // No exec task or request has been handed to a runner. A timeout
         // here cannot leave queued work to execute after reconnection.
-        needy_api_client::diagnostic::with_status(
-          Status::unavailable("executor is unavailable; the wait deadline expired; the command was not started"),
-          needy_api_client::proto::v1::ErrorDiagnostic {
-            reason: "process.not_started".into(),
-            facts: [("runner".into(), self.runner.clone())].into(),
-          },
-        )
+        ControlError::Unavailable("executor is unavailable; the wait deadline expired; the command was not started".into())
+          .with_diagnostic("process.not_started", [("runner".into(), self.runner.clone())])
       })?,
     };
     // After this call begins, loss of a response does not prove that the
