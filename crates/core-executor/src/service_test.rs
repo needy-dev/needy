@@ -563,3 +563,55 @@ async fn a_cursor_query_a_departing_client_left_unanswered_is_answered() {
 
   assert_eq!(exit_code(&executor, &process).await, Some(0));
 }
+
+#[tokio::test]
+async fn an_execution_holder_preserves_an_attached_process_when_control_leaves() {
+  let service = ExecutorService {
+    host: Host::default(),
+    name: "holder".into(),
+  };
+  let (requests, rx) = tokio::sync::mpsc::channel(8);
+  requests
+    .send(Ok(needy_api_proto::v1::ExecRequest {
+      payload: Some(needy_api_proto::v1::exec_request::Payload::Start(ExecStart {
+        argv: vec!["sleep".into(), "300".into()],
+        run_id: "invocation".into(),
+        ..Default::default()
+      })),
+    }))
+    .await
+    .unwrap();
+  let mut output = service.open_preserving(Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx))).await.unwrap();
+  let first = output.next().await.unwrap().unwrap();
+  let needy_api_proto::v1::exec_response::Payload::Started(started) = first.payload.unwrap() else {
+    panic!("not started")
+  };
+  drop(output);
+  drop(requests);
+  tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+  let process = service.host.get(&started.process_id).unwrap();
+  assert!(process.exit().is_none(), "transport loss must not terminate the holder's invocation process");
+  process.send(Input::Signal("SIGKILL".into()));
+  process.wait().await;
+  service.host.shutdown().await;
+}
+
+#[tokio::test]
+async fn ending_an_invocation_rejects_a_late_dispatched_start() {
+  let service = ExecutorService {
+    host: Host::default(),
+    name: "holder".into(),
+  };
+  service.host.end_run("ended-invocation");
+  let request = needy_api_proto::v1::ExecRequest {
+    payload: Some(needy_api_proto::v1::exec_request::Payload::Start(ExecStart {
+      argv: vec!["sh".into(), "-c".into(), "exit 0".into()],
+      run_id: "ended-invocation".into(),
+      ..Default::default()
+    })),
+  };
+  let error = service.open_preserving(Box::pin(tokio_stream::iter([Ok(request)]))).await.err().unwrap();
+  assert!(error.message().contains("invocation ended"), "{error}");
+  assert!(service.host.list().is_empty(), "a late start must never reach the OS");
+  service.host.shutdown().await;
+}

@@ -18,7 +18,7 @@ mod platform;
 #[path = "platform/windows.rs"]
 mod platform;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -65,6 +65,8 @@ pub enum Error {
   Terminal(String),
   #[error("the host is shutting down")]
   ShuttingDown,
+  #[error("the invocation ended; command was not started")]
+  RunEnded,
 }
 
 impl Error {
@@ -156,6 +158,10 @@ pub struct Host {
 
 struct Inner {
   procs: Mutex<HashMap<String, Arc<Proc>>>,
+  /// Held through spawn+table insertion and through end_run's snapshot.
+  /// Tombstones live as long as the host: a delayed task must never revive a
+  /// finished invocation even after its process replay records expired.
+  ended_runs: Mutex<HashSet<String>>,
   retention: Duration,
   /// Every task the host's processes and streams run on.
   tasks: TaskTracker,
@@ -174,6 +180,7 @@ impl Host {
     Self {
       inner: Arc::new(Inner {
         procs: Mutex::new(HashMap::new()),
+        ended_runs: Mutex::new(HashSet::new()),
         retention,
         tasks: TaskTracker::new(),
         cancel: CancellationToken::new(),
@@ -195,6 +202,10 @@ impl Host {
 
   /// Starts a process. Its tasks belong to the host, not to the caller.
   pub fn spawn(&self, mut spec: Spec) -> Result<Arc<Proc>, Error> {
+    let ended = self.inner.ended_runs.lock().unwrap_or_else(|e| e.into_inner());
+    if !spec.run_id.is_empty() && ended.contains(&spec.run_id) {
+      return Err(Error::RunEnded);
+    }
     let Some(asked) = spec.argv.first().filter(|program| !program.is_empty()).cloned() else {
       return Err(Error::EmptyCommand);
     };
@@ -221,7 +232,17 @@ impl Host {
     // path the caller asked for.
     let proc = spawned.map_err(|error| error.naming(asked))?;
     self.table().insert(proc.id.clone(), proc.clone());
+    drop(ended);
     Ok(proc)
+  }
+
+  /// Seals an invocation against late starts and returns its running
+  /// processes under the same admission lock as spawn. The caller sends the
+  /// stop signal and waits for these processes according to its stop policy.
+  pub fn end_run(&self, run: &str) -> Vec<Arc<Proc>> {
+    let mut ended = self.inner.ended_runs.lock().unwrap_or_else(|e| e.into_inner());
+    ended.insert(run.to_owned());
+    self.list().into_iter().filter(|p| p.run_id == run && p.exit().is_none()).collect()
   }
 
   /// Kills every running process and waits for the host's tasks to end.

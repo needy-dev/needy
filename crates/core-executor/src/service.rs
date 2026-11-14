@@ -294,6 +294,7 @@ fn spawn_status(error: Error) -> Status {
     Error::StartTerminal { program, .. } => ("process.terminal_failed", vec![("program", program.clone())]),
     Error::Terminal(_) => ("process.terminal_failed", Vec::new()),
     Error::EmptyCommand => ("process.start_failed", Vec::new()),
+    Error::RunEnded => ("process.not_started", Vec::new()),
     Error::ShuttingDown => return Status::unavailable(error.to_string()),
   };
   let status = Status::failed_precondition(error.to_string());
@@ -345,7 +346,23 @@ impl ExecutorService {
   /// `inbound`, the first of which starts or attaches, and returns the
   /// process's stream to that client. `exec` serves this over gRPC; a
   /// runner serves it over the task streams it opens to its control plane.
-  pub async fn open(&self, mut inbound: Inbound) -> Result<ExecStream, Status> {
+  pub async fn open(&self, inbound: Inbound) -> Result<ExecStream, Status> {
+    self.open_with_disconnect(inbound, false).await
+  }
+
+  /// An owning holder keeps processes when its control transport disappears.
+  /// The starting client retains ordinary attached PTY behavior; only stream
+  /// disconnection ceases to be a request to terminate the process.
+  pub async fn open_preserving(&self, inbound: Inbound) -> Result<ExecStream, Status> {
+    self.open_with_disconnect(inbound, true).await
+  }
+
+  /// A gRPC process service with holder-owned process lifetimes.
+  pub fn preserving(self) -> PreservingService {
+    PreservingService(self)
+  }
+
+  async fn open_with_disconnect(&self, mut inbound: Inbound, preserve: bool) -> Result<ExecStream, Status> {
     let first = inbound.next().await.transpose()?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
     match first.payload {
       Some(exec_request::Payload::Start(start)) => {
@@ -383,7 +400,7 @@ impl ExecutorService {
             used: f.used.clone(),
           }),
         };
-        Ok(stream_process(&self.host, proc, client, inbound, started, subscription, start.detach))
+        Ok(stream_process(&self.host, proc, client, inbound, started, subscription, start.detach || preserve))
       }
       Some(exec_request::Payload::Attach(attach)) => {
         let proc = self.host.get(&attach.process_id).ok_or_else(|| Status::not_found("no such process"))?;
@@ -440,3 +457,21 @@ impl ProcessService for ExecutorService {
 #[cfg(all(test, unix))]
 #[path = "service_test.rs"]
 mod tests;
+
+/// ProcessService adapter for a holder that outlives control connections.
+#[derive(Clone)]
+pub struct PreservingService(ExecutorService);
+
+#[tonic::async_trait]
+impl ProcessService for PreservingService {
+  type ExecStream = ExecStream;
+  async fn exec(&self, request: Request<Streaming<ExecRequest>>) -> Result<Response<Self::ExecStream>, Status> {
+    Ok(Response::new(self.0.open_preserving(Box::pin(request.into_inner())).await?))
+  }
+  async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
+    self.0.list_processes(request).await
+  }
+  async fn kill_process(&self, request: Request<KillProcessRequest>) -> Result<Response<KillProcessResponse>, Status> {
+    self.0.kill_process(request).await
+  }
+}
