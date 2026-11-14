@@ -113,7 +113,23 @@ Use `needy --context actor-host run stop RUN` to end the invocation. Use
 explicit stop invalidates holder admission and reclaims its local helper.
 Missing client execution never selects the daemon's account or another client.
 
+## Setup guide
+
+The setup guide's executor-computer launch uses explicit client selection.
+It pairs a control client, saves the profile there, and calls `run create -f`.
+It does not enroll or serve a persistent runner for that path. Its static
+profile check predicts routing; creation supplies the execution capability.
+Control-host launches retain the named persistent-runner procedure.
+
+The guide hides the unused runner name for client selection. It blocks Windows
+automatic execution with the private startup-file ACL limitation. Location
+labels identify the invoking CLI account in English and Chinese.
+
 ## Automated evidence
+
+- [Setup guide tests](../../../../apps/docs/src/setup/guide.test.ts): client
+  versus named selection, omitted enrollment steps, local profile creation,
+  account labels, workspace quoting, and the Windows limitation.
 
 - [CLI parsing](../../../../crates/cli/src/commands/run/run_test.rs): `-f`,
   temporary flags, and unchanged trailing argument parsing.

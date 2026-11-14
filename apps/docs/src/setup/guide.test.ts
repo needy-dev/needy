@@ -9,7 +9,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
 
 import { check } from '../studio/check'
-import { actorDriver, configurationIssue, DEFAULT_ENVIRONMENT, guide, PROGRAMS } from './guide'
+import { actorDriver, configurationIssue, DEFAULT_ENVIRONMENT, guide, locations, PROGRAMS } from './guide'
 
 const hosts: Array<Partial<Environment> & { driver: string }> = [
   { os: 'linux', kvm: true, driver: 'linux-firecracker' },
@@ -20,6 +20,37 @@ const hosts: Array<Partial<Environment> & { driver: string }> = [
 const executors: Executor[] = ['container', 'native', 'runner']
 
 describe('environment wizard', () => {
+  it('uses a private creating-client binding without persistent runner setup', () => {
+    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, launchFrom: 'runner' as const, runnerName: 'unused invalid name' }
+    expect(configurationIssue(env)).toBeUndefined()
+    const steps = guide('bash', env)
+    const profile = parse(steps.find(step => step.profile)!.profile!)
+    expect(profile.executors.remote).toEqual({ driver: 'native', runner: { client: true } })
+    expect(steps.some(step => ['token', 'paste-token', 'runner', 'check-runner'].includes(step.id))).toBe(false)
+    expect(steps.find(step => step.id === 'client-pair')?.text.en).toContain('invoking CLI account')
+    expect(steps.find(step => step.id === 'workspace')?.text.en).toContain('run create')
+    expect(steps.find(step => step.id === 'start')?.code).toContain('--mode static')
+    expect(steps.find(step => step.id === 'start')?.code).toContain('-f ~/.config/needy/profiles/bash-demo.yaml')
+    expect(locations(env).runner.description.en).toContain('invoking CLI account')
+    expect(locations(env).runner.description.en).not.toContain('runner serve')
+  })
+
+  it('keeps explicit persistent runner selection when creation starts on the control host', () => {
+    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, launchFrom: 'host' as const, runnerName: 'workstation' }
+    const steps = guide('bash', env)
+    expect(parse(steps.find(step => step.profile)!.profile!).executors.remote.runner).toBe('workstation')
+    expect(steps.find(step => step.id === 'runner')?.code).toContain('runner serve')
+    expect(steps.some(step => step.id === 'client-pair')).toBe(false)
+    expect(locations(env).runner.description.en).toContain('runner serve')
+  })
+
+  it('blocks automatic Windows client execution at the canonical private ACL limitation', () => {
+    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, launchFrom: 'runner' as const, runnerOs: 'windows' as const }
+    expect(configurationIssue(env)?.en).toContain('Windows automatic client execution')
+    expect(configurationIssue(env)?.en).toContain('ACL')
+    expect(guide('bash', env)).toEqual([])
+  })
+
   // ROOT CAUSE:
   //
   // If installation was reused, workspace preparation was easy to skip
@@ -27,7 +58,7 @@ describe('environment wizard', () => {
   // Before the fix, the guide offered no serving-account directory probe.
   // The fix verifies the source directory before the actor mounts it.
   it('verifies the remote workspace through the serving runner before mounting it', () => {
-    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner', workspace: '~/my project' })
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner', launchFrom: 'host', workspace: '~/my project' })
     const workspace = steps.find(step => step.id === 'workspace')
     expect(workspace?.machine).toBe('runner')
     expect(workspace?.code).toContain('test -d')
@@ -65,7 +96,7 @@ describe('environment wizard', () => {
       mkdirSync(control)
       mkdirSync(executor)
       const path = "~/my 'project' $(touch unwanted)"
-      const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', workspace: path })
+      const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', launchFrom: 'host', workspace: path })
       const probe = steps.find(step => step.id === 'check-runner')!.code!
       // Replace only the external execution boundary. The generated shell
       // quoting and the executor's sh -c body execute unchanged.
@@ -107,7 +138,7 @@ describe('environment wizard', () => {
         expect(profile.actor.driver).toBe(host.driver)
         expect(profile.actor.container).toEqual(host.driver === 'linux-container' ? { oci_runtime: 'runc' } : undefined)
         expect(profile.executors).toEqual({ [target]: executor === 'runner'
-          ? { runner: 'workstation', driver: 'native' }
+          ? { runner: { client: true }, driver: 'native' }
           : { driver: executor === 'container' ? 'linux-container' : 'native' } })
         expect(profile.actor.workspace.from).toBe(`executor:${target}:${executor === 'container' ? '~/workspace' : '~/my project'}`)
         expect(profile.actor.workspace.writable).toBe(true)
@@ -115,7 +146,7 @@ describe('environment wizard', () => {
         expect(profile.unknown).toBe(target)
         expect(saved.machine).toBe(executor === 'runner' ? 'runner' : 'host')
         expect(saved.code).toContain(`profiles/${id}-demo.yaml`)
-        expect(steps.find(step => step.id === 'start')?.code).toContain(`--profile ${id}-demo`)
+        expect(steps.find(step => step.id === 'start')?.code).toContain(`-f ~/.config/needy/profiles/${id}-demo.yaml`)
         expect(steps.find(step => step.id === 'install')?.code).toContain(`needy image pull --driver ${host.driver}`)
         expect(check(saved.profile!).findings.filter(f => f.severity === 'error')).toEqual([])
         expect(steps.some(step => step.id === 'tunnel')).toBe(executor === 'runner')
@@ -128,7 +159,7 @@ describe('environment wizard', () => {
   }
 
   it('keeps local management, hidden enrollment, and the single tunnel in their terminal contexts', () => {
-    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner' })
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner', launchFrom: 'host' })
     expect(steps.find(step => step.id === 'paste-token')?.code).toContain('needy --address tcp://127.0.0.1:7400 runner join')
     expect(steps.find(step => step.id === 'runner')?.code).toContain('needy runner serve')
     expect(steps.find(step => step.id === 'runner')?.machine).toBe('runner')
@@ -161,7 +192,7 @@ describe('environment wizard', () => {
   // Windows enrollment cannot yet persist private credentials. A complete
   // generated walkthrough incorrectly promised it could reach an online runner.
   it('explains the Windows enrollment limit without generating setup commands', () => {
-    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, runnerOs: 'windows' as const }
+    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, launchFrom: 'host' as const, runnerOs: 'windows' as const }
     expect(configurationIssue(env)?.en).toContain('Windows runner enrollment is not supported yet')
     expect(guide('bash', env)).toEqual([])
   })
@@ -174,7 +205,7 @@ describe('environment wizard', () => {
   })
 
   it('shows invalid answers instead of silently replacing them', () => {
-    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, runnerName: 'bad name' }
+    const env = { ...DEFAULT_ENVIRONMENT, executor: 'runner' as const, launchFrom: 'host' as const, runnerName: 'bad name' }
     expect(configurationIssue(env)).toBeDefined()
     expect(guide('bash', env)).toEqual([])
     expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '' })).toBeDefined()
