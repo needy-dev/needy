@@ -3,6 +3,7 @@ import type { IconName } from '../icons'
 import type { Text } from '../i18n'
 import type { Environment, Os, Program } from '../setup/guide'
 
+import { TooltipProvider } from 'reka-ui'
 import { computed, reactive, ref } from 'vue'
 
 import { tr } from '../i18n'
@@ -10,6 +11,7 @@ import Icon from '../kit/Icon.vue'
 import Shell from '../kit/Shell.vue'
 import Yaml from '../kit/Yaml.vue'
 import { actorDriver, configurationIssue, DEFAULT_ENVIRONMENT, guide, needsDocker, PROGRAMS } from '../setup/guide'
+import SetupLocation from './SetupLocation.vue'
 
 const program = ref<Program>('bash')
 const env = reactive<Environment>({ ...DEFAULT_ENVIRONMENT })
@@ -18,6 +20,7 @@ const dockerNeeded = computed(() => needsDocker(program.value, env))
 const issue = computed(() => configurationIssue(env))
 const steps = computed(() => guide(program.value, env))
 const host = computed(() => env.where === 'server' ? tr({ en: 'the server', zh: '服务器' }) : tr({ en: 'this computer', zh: '这台电脑' }))
+const clientOnExecutor = computed(() => env.executor === 'runner' && env.launchFrom === 'runner')
 const copied = ref<string>()
 const copyError = ref(false)
 
@@ -79,6 +82,7 @@ const EXEC: Choice<Exec>[] = [
 </script>
 
 <template>
+  <TooltipProvider :delay-duration="150">
   <div class="grid items-start gap-[56px] grid-cols-[minmax(0,0.85fr)_minmax(0,1.15fr)] max-[960px]:grid-cols-[minmax(0,1fr)]">
     <!-- Keep the environment questions next to their generated instructions. -->
     <div class="top-[88px] flex flex-col gap-[28px] min-[961px]:(sticky max-h-[calc(100dvh-112px)] overflow-y-auto pr-[12px])">
@@ -99,7 +103,7 @@ const EXEC: Choice<Exec>[] = [
         <div :class="CHOICES" role="group" :aria-label="tr({ en: 'Actor host OS', zh: 'actor 宿主机系统' })">
           <button v-for="c in OS" :key="c.value" type="button" :class="CHOICE" :data-state="env.os === c.value ? 'on' : 'off'" :aria-pressed="env.os === c.value" @click="env.os = c.value"><Icon v-if="c.icon" :name="c.icon" />{{ tr(c.label) }}</button>
         </div>
-        <span :class="ASIDE">{{ tr({ en: 'Windows runner enrollment is planned. Use Linux or macOS for this guide.', zh: 'Windows runner 注册尚在计划中。此教程请使用 Linux 或 macOS。' }) }}</span>
+        <span :class="ASIDE">{{ tr({ en: 'The control host needs Linux or macOS. The actor runs Linux in either case.', zh: '控制主机需要 Linux 或 macOS；两种情况下 actor 内运行的都是 Linux。' }) }}</span>
       </div>
       <div v-if="env.os === 'linux'" :class="Q">
         <span :class="ASK">{{ tr({ en: 'Which package manager?', zh: '用哪个包管理器？' }) }}</span>
@@ -133,7 +137,15 @@ const EXEC: Choice<Exec>[] = [
         <div :class="CHOICES" role="group" :aria-label="tr({ en: 'Runner OS', zh: 'runner 系统' })">
           <button v-for="c in (['mac', 'linux', 'windows'] as const)" :key="c" type="button" :class="CHOICE" :data-state="env.runnerOs === c ? 'on' : 'off'" :aria-pressed="env.runnerOs === c" @click="env.runnerOs = c">{{ c === 'mac' ? 'macOS' : c === 'linux' ? 'Linux' : 'Windows' }}</button>
         </div>
+        <span :class="ASIDE">{{ tr({ en: 'Windows enrollment is not supported by this guide yet. Choose Linux or macOS for the complete setup.', zh: '此向导尚不支持 Windows 注册。完整配置流程请选择 Linux 或 macOS。' }) }}</span>
         <label class="flex flex-col gap-[8px] text-[13px] text-muted">{{ tr({ en: 'Runner name (use the existing name when already enrolled)', zh: 'Runner 名称（已加入时使用已有名称）' }) }}<input v-model="env.runnerName" :class="INPUT" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <div v-if="env.executor === 'runner'" :class="Q">
+        <span :class="ASK">{{ tr({ en: 'Where will you start and use the program?', zh: '你会在哪里启动和使用程序？' }) }}</span>
+        <div :class="CHOICES" role="group" :aria-label="tr({ en: 'Launch location', zh: '启动位置' })">
+          <button type="button" :class="CHOICE" :data-state="env.launchFrom === 'runner' ? 'on' : 'off'" :aria-pressed="env.launchFrom === 'runner'" @click="env.launchFrom = 'runner'">{{ tr({ en: 'On the executor computer', zh: '在执行命令的电脑上' }) }}</button>
+          <button type="button" :class="CHOICE" :data-state="env.launchFrom === 'host' ? 'on' : 'off'" :aria-pressed="env.launchFrom === 'host'" @click="env.launchFrom = 'host'">{{ tr({ en: 'On the control host', zh: '在控制主机上' }) }}</button>
+        </div>
       </div>
       <div v-if="dockerNeeded" :class="Q">
         <span :class="ASK">{{ tr({ en: 'Is Docker or a compatible engine installed?', zh: '装了 Docker 或兼容引擎吗？' }) }}</span>
@@ -149,18 +161,36 @@ const EXEC: Choice<Exec>[] = [
         </div>
       </details>
       <p class="m-0 text-[15px] text-ink-2">{{ tr({ en: 'Your actor driver:', zh: '你的 actor driver：' }) }} <code>{{ driver }}</code></p>
-      <p class="m-0 text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'These steps manage runs from the actor host. If it is remote, use its SSH shell. An optional client context saves a connection and client identity. Runner enrollment uses its own invitation and credential.', zh: '下方命令在 actor 宿主机上管理 run。宿主机在远端时，使用它的 SSH shell。可选的客户端 context 保存连接和客户端身份。runner 注册使用自己的邀请码和凭据。' }) }}</p>
-      <a href="https://github.com/needy-dev/needy#one-command-from-your-laptop" class="text-[13px] text-ink-2">{{ tr({ en: 'Optional client pairing and source builds ↗', zh: '可选客户端配对与源码构建 ↗' }) }}</a>
+      <p class="m-0 text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'Each colored label names where to run a step. Hover or focus it for details. Use a separate terminal for the SSH tunnel and the persistent runner.', zh: '每个颜色标签说明该步骤在哪里运行。悬停或用键盘聚焦可查看说明。SSH 隧道和持续运行的 runner 各用一个单独的终端。' }) }}</p>
+      <a href="https://github.com/needy-dev/needy#one-command-from-your-laptop" class="text-[13px] text-ink-2">{{ tr({ en: 'Client access and source builds ↗', zh: '客户端连接与源码构建 ↗' }) }}</a>
     </div>
 
     <div class="min-w-0">
+      <div class="mb-[28px] rounded-[14px] bg-control p-[16px]" data-testid="setup-route">
+        <p class="m-0 mb-[12px] text-[14px] text-ink">{{ tr({ en: 'Your execution path', zh: '本次执行路径' }) }}</p>
+        <div class="flex flex-wrap items-center gap-[8px]">
+          <span class="text-[12px] text-muted">{{ tr({ en: 'Client', zh: '客户端' }) }}</span>
+          <SetupLocation :machine="clientOnExecutor ? 'runner' : 'host'" :env="env" />
+          <span aria-hidden="true" class="text-muted">→</span>
+          <SetupLocation machine="host" :env="env" />
+          <span aria-hidden="true" class="text-muted">→</span>
+          <SetupLocation machine="actor" :env="env" />
+          <span aria-hidden="true" class="text-muted">→</span>
+          <SetupLocation v-if="env.executor === 'runner'" machine="runner" :env="env" />
+          <SetupLocation v-else machine="host" :env="env" :terminal="{ en: env.executor === 'container' ? 'Executor container on the control host' : 'Native executor on the control host', zh: env.executor === 'container' ? '控制主机上的执行容器' : '控制主机上的 native executor' }" />
+        </div>
+        <p class="mb-0 mt-[12px] text-[13px] text-ink-2 leading-[1.7]">{{ tr(clientOnExecutor
+          ? { en: 'Save the profile and run create on the executor computer. The interactive Linux actor terminal opens there. Child commands return to the registered executor account.', zh: '在执行机器上保存 profile 并运行 run create。Linux actor 的交互终端会在这里打开，子命令返回已注册的执行账号。' }
+          : { en: 'Save the profile and run create on the control host. The interactive actor terminal opens in that shell.', zh: '在控制主机保存 profile 并运行 run create。actor 交互终端在那个 shell 中打开。' }) }}</p>
+        <p v-if="env.executor === 'runner'" class="mb-0 mt-[8px] text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'This is the current persistent-runner workflow. A client that hosts execution only for its own invocation is not implemented yet.', zh: '这是当前的持久 runner 流程。仅为自身这次启动承接执行的客户端模式尚未实现。' }) }}</p>
+      </div>
       <p v-if="issue" role="alert" class="m-0 text-[14px] text-fault">{{ tr(issue) }}</p>
       <ol v-else class="m-0 flex list-none flex-col gap-[36px] p-0">
         <li v-for="(s, i) in steps" :id="`setup-${s.id}`" :key="s.id" class="grid scroll-mt-[90px] grid-cols-[28px_minmax(0,1fr)] gap-[16px]">
           <span class="mono grid h-[28px] w-[28px] place-items-center rounded-[8px] bg-control text-[13px] text-muted">{{ i + 1 }}</span>
           <div class="flex min-w-0 flex-col gap-[8px]">
             <span class="display text-[19px]">{{ tr(s.title) }}</span>
-            <span class="text-[13.5px] text-muted">{{ tr(s.terminal) }}</span>
+            <SetupLocation :machine="s.machine" :env="env" :terminal="s.terminal" />
             <p class="m-0 text-[14px] text-ink-2 leading-[1.7]">{{ tr(s.text) }}</p>
             <div v-if="s.profile">
               <div class="max-h-[400px] overflow-auto rounded-[14px]"><Yaml :code="s.profile" class="min-w-max" /></div>
@@ -186,4 +216,5 @@ const EXEC: Choice<Exec>[] = [
       </details>
     </div>
   </div>
+  </TooltipProvider>
 </template>

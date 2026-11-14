@@ -17,7 +17,10 @@ Its layout and banner pipeline follow the
   3:1).
 - `src/setup`: the environment wizard generates steps and a profile for the
   selected entrypoint, actor host, driver, and executor. Its profile templates
-  come from `examples/linux-mac/`. Each command block names one terminal context.
+  come from `examples/linux-mac/`. Each command block has a colored location
+  label with a keyboard-accessible tooltip. Remote executor setups can launch
+  from the control host or from a separately paired client on the executor.
+  The directory probe runs through the serving runner before run creation.
 - `src/components`: the guide's sections; `src/content.ts` holds their text
   in English and Chinese.
 - `src/kit`: what scenes are made of: the frame and its player, boxes, wires,
