@@ -94,7 +94,7 @@ const STEPS: ConfigStep[] = [
   { ms: 3200, section: 'commands', caption: 'Commands: rules that send each command to an executor, deny it, or change how it runs.' },
   { ms: 3000, section: 'files', caption: 'Files: named mappings between the host, the actor and an executor; run_files picks them.' },
   { ms: 2800, section: 'chaos', caption: 'Chaos: faults on exec, files, the network and sensors, fired from a seed.' },
-  { ms: 2800, section: 'trace', caption: 'Trace: where the events go, for needy report.' },
+  { ms: 2800, section: 'trace', caption: 'Trace: where the events go, for needy run report.' },
 ]
 
 const sectionOf = (at: number) => SECTIONS.find(s => s.id === STEPS[at]!.section)!

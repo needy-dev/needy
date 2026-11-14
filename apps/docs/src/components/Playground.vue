@@ -14,7 +14,7 @@ import { argvOf, decide } from '../route/rules'
 /**
  * Route your own commands: edit a profile's `commands:` rules, type a command line, and see where needy would run it,
  * which rules matched and what they caught. The decision comes from src/route/rules.ts, the port of needy's rules;
- * `needy profile check PROFILE --cmd "..."` gives the same answer from the real daemon.
+ * `needy config profile check PROFILE --mode control --cmd "..."` gives the same answer from the real daemon.
  */
 
 interface EditableRule {
@@ -186,7 +186,7 @@ const BLOCK = 'flex flex-col gap-[8px] rounded-[12px] bg-surface px-[14px] py-[1
       </div>
 
       <div :class="BLOCK">
-        <span class="mono text-[13px] text-ink-2">needy profile check demo --cmd "…"</span>
+        <span class="mono text-[13px] text-ink-2">needy config profile check demo --mode control --cmd "…"</span>
         <div class="mono grid gap-x-[18px] gap-y-[4px] overflow-x-auto text-[13px] grid-cols-[minmax(0,1fr)_auto_auto]">
           <span class="text-[11.5px] tracking-[0.04em] text-muted">COMMAND</span><span class="text-[11.5px] tracking-[0.04em] text-muted">TARGET</span><span class="text-[11.5px] tracking-[0.04em] text-muted">RULES</span>
           <span class="overflow-hidden text-ellipsis whitespace-nowrap">{{ command }}</span><span>{{ result.target }}</span><span>{{ decision.matched.join(',') || '—' }}</span>

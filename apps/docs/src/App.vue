@@ -52,6 +52,7 @@ const isStudio = () => location.pathname.replace(/\/+$/, '').endsWith('/studio')
 const page = ref<'guide' | 'studio'>(isStudio() ? 'studio' : 'guide')
 /** The base path the page is served under, so the links work from any directory. */
 const base = location.pathname.replace(/\/?studio\/?$/, '').replace(/\/$/, '')
+const startHref = `${base}/${location.search}#start`
 function go(to: 'guide' | 'studio', event?: MouseEvent): void {
   if (event && (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0))
     return
@@ -63,7 +64,14 @@ function go(to: 'guide' | 'studio', event?: MouseEvent): void {
   window.scrollTo(0, 0)
 }
 const onPop = () => (page.value = isStudio() ? 'studio' : 'guide')
-onMounted(() => window.addEventListener('popstate', onPop))
+onMounted(() => {
+  window.addEventListener('popstate', onPop)
+  // Fragment navigation can run before Vue creates the guide sections.
+  // Wait for fonts too, so the hero's final height does not move the target.
+  void document.fonts.ready.then(() => {
+    document.getElementById(location.hash.slice(1))?.scrollIntoView()
+  })
+})
 onBeforeUnmount(() => window.removeEventListener('popstate', onPop))
 
 const ORDER = ['start', 'why', 'harness', 'separation', 'isolation', 'identity', 'decisions', 'files', 'chaos', 'config', 'cluster', 'future'] as const
@@ -75,10 +83,11 @@ const NAV: Section[] = ORDER.map(id => SECTIONS[id]!)
 <template>
   <component :is="captured" v-if="captured" capture />
   <template v-else>
-    <header class="sticky top-0 z-20 flex items-center gap-[8px] px-[20px] py-[10px] bg-paper/86 [backdrop-filter:blur(12px)] max-[600px]:(gap-[6px] px-[12px])">
+    <header class="sticky top-0 z-20 flex items-center gap-[8px] px-[20px] py-[10px] bg-paper/86 [backdrop-filter:blur(12px)] max-[600px]:(flex-wrap gap-[6px] px-[12px])">
       <a class="display text-[22px] text-ink [text-decoration:none] max-[600px]:hidden" :href="`${base}/`" @click="go('guide', $event)">Needy</a>
-      <nav class="ml-[16px] flex gap-[4px] max-[600px]:ml-0">
+      <nav class="ml-[16px] flex gap-[4px] max-[600px]:(order-3 ml-0 w-full)">
         <a :href="`${base}/`" class="whitespace-nowrap rounded-[10px] px-[12px] py-[6px] text-[14.5px] [text-decoration:none] max-[600px]:(px-[10px] text-[14px])" :class="page === 'guide' ? 'bg-control text-ink' : 'text-ink-2'" @click="go('guide', $event)">{{ tr({ en: 'Guide', zh: '指南' }) }}</a>
+        <a :href="startHref" class="whitespace-nowrap rounded-[10px] px-[12px] py-[6px] text-[14.5px] text-ink-2 [text-decoration:none] max-[600px]:(px-[10px] text-[14px])">{{ tr({ en: 'Get started', zh: '开始使用' }) }}</a>
         <a :href="`${base}/studio`" class="whitespace-nowrap rounded-[10px] px-[12px] py-[6px] text-[14.5px] [text-decoration:none] max-[600px]:(px-[10px] text-[14px])" :class="page === 'studio' ? 'bg-control text-ink' : 'text-ink-2'" @click="go('studio', $event)">{{ tr({ en: 'Profile Studio', zh: 'Profile 工作台' }) }}</a>
       </nav>
       <span class="flex-1" />

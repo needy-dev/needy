@@ -13,7 +13,7 @@ import { DEMO_PROFILE } from '../route/samples'
 
 /**
  * The README's Getting started, typed out: install, start the control daemon, check a profile, run it, and read the
- * report. The outputs follow what the CLI prints: `needy profile check` from crates/cli/src/commands/profile.rs, the
+ * report. The outputs follow what the CLI prints: `needy config profile check` from crates/cli/src/commands/profile.rs, the
  * deny and fault lines from crates/cli/tests/cli.rs, and the report from crates/core/src/report/human.rs, with a run
  * ID, durations and the recipe lines made up for the scene.
  */
@@ -57,7 +57,7 @@ const STEPS: StartStep[] = [
   {
     ms: 2600,
     phase: 1,
-    lines: [{ text: 'needy daemon --mode control &', kind: 'cmd' }, { text: '# listens on a Unix socket in the state directory', kind: 'dim' }],
+    lines: [{ text: 'needy daemon service install --now', kind: 'cmd' }, { text: '# publishes a private local management socket', kind: 'dim' }],
     lit: [],
     up: ['daemon'],
     caption: 'Start a control daemon on the machine that runs actors.',
@@ -66,7 +66,7 @@ const STEPS: StartStep[] = [
     ms: 4600,
     phase: 2,
     lines: [
-      { text: 'needy profile check demo --cmd "python3 -V"', kind: 'cmd' },
+      { text: 'needy config profile check demo --mode control --cmd "python3 -V"', kind: 'cmd' },
       { text: 'user: agent (1000:1000)' },
       { text: '…', kind: 'dim' },
       { text: 'route names: python3' },
@@ -111,7 +111,7 @@ const STEPS: StartStep[] = [
     phase: 4,
     clear: true,
     lines: [
-      { text: 'needy report latest', kind: 'cmd' },
+      { text: 'needy run report latest', kind: 'cmd' },
       { text: 'Run         3f9c0e2a71b4  (profile demo)' },
       { text: 'State       finished, driving program exit 0' },
       { text: 'Duration    21.4s' },
@@ -132,7 +132,7 @@ const STEPS: StartStep[] = [
     ],
     lit: [],
     up: ['trace'],
-    caption: 'needy report reads the trace: what was routed, denied and faulted, and where.',
+    caption: 'needy run report reads the trace: what was routed, denied and faulted, and where.',
   },
 ]
 
@@ -183,7 +183,7 @@ function screenHeight(at: number): number {
       <div class="absolute top-[348px] left-[48px] w-[560px]">
         <span class="font-display text-[15px] text-muted">On the control host</span>
         <div class="mt-[10px] grid grid-cols-[1fr_1fr] gap-[12px] [&>*]:min-h-[112px]">
-          <Machine flow role="host" icon="mingcute:server-2-line" title="Control Daemon" sub="needy daemon --mode control" :focus="partFocus(at, 'daemon')" />
+          <Machine flow role="host" icon="mingcute:server-2-line" title="Control Daemon" sub="needy daemon serve" :focus="partFocus(at, 'daemon')" />
           <Pod flow logo="firecracker" driver="linux-firecracker" badge="" :focus="partFocus(at, 'actor')" />
           <Machine flow icon="mingcute:cube-line" title="Container" name="build" sub="linux-container" :focus="partFocus(at, 'build')" />
           <Machine flow role="trace" icon="mingcute:git-branch-line" title="Trace" sub="trace.db" :focus="partFocus(at, 'trace')" />

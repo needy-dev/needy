@@ -62,7 +62,7 @@ const STEPS: DriversStep[] = [
   { ms: 2800, rows: ['identity/*'], note: { text: '/proc/cpuinfo under macos-vz: not possible on arm64', row: 'identity/cpuinfo', col: 2 }, caption: 'The recipe\'s identity depends on what the driver can present.' },
   { ms: 3000, rows: ['identity/cpuid', 'identity/pci'], cols: ['linux-firecracker'], note: { text: 'CPUID and PCI IDs: only linux-firecracker', row: 'identity/cpuid', col: 0 }, caption: 'CPUID and PCI IDs need needy\'s patched Firecracker.' },
   { ms: 3000, rows: ['identity/dmi', 'identity/hwmon'], cols: ['linux-container'], note: { text: 'linux-container: where the host has DMI or hwmon; any host under runsc', row: 'identity/dmi', col: 1 }, caption: 'A container shows DMI and sensors where the host has them, and on any host under gVisor.' },
-  { ms: 3200, rows: ['identity/kernel', 'identity/uptime'], cols: ['macos-vz'], note: { text: 'macos-vz: expected, not yet recorded. linux-container shows the host\'s or gVisor\'s kernel', row: 'identity/kernel', col: 2 }, caption: 'needy profile check lists every gap for your recipe and host.' },
+  { ms: 3200, rows: ['identity/kernel', 'identity/uptime'], cols: ['macos-vz'], note: { text: 'macos-vz: expected, not yet recorded. linux-container shows the host\'s or gVisor\'s kernel', row: 'identity/kernel', col: 2 }, caption: 'needy config profile check lists every gap for your recipe and host.' },
 ]
 
 function rowState(at: number, row: (typeof ROWS)[number]): 'idle' | 'focus' | 'dim' {
