@@ -345,20 +345,19 @@ async fn start(manager: &dyn Manager, registration: &Registration, deadline: Ins
           .into(),
       );
     }
-    if let Some(pid) = before.pid {
-      #[cfg(unix)]
-      if let Ok(record) = needy_daemon::discovery::read(&registration.runtime)
-        && record.pid == pid
-      {
-        let remaining = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(500));
-        if needy_api_client::ready::wait_expected(&record.address, remaining, "control", &record.instance_id).await.is_ok() {
-          let after = inspect(manager, registration, deadline).await?;
-          if before == after
-            && needy_daemon::discovery::read(&registration.runtime)
-              .is_ok_and(|after| after.pid == record.pid && after.instance_id == record.instance_id)
-          {
-            return Ok(());
-          }
+    #[cfg(unix)]
+    if let Some(pid) = before.pid
+      && let Ok(record) = needy_daemon::discovery::read(&registration.runtime)
+      && record.pid == pid
+    {
+      let remaining = deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(500));
+      if needy_api_client::ready::wait_expected(&record.address, remaining, "control", &record.instance_id).await.is_ok() {
+        let after = inspect(manager, registration, deadline).await?;
+        if before == after
+          && needy_daemon::discovery::read(&registration.runtime)
+            .is_ok_and(|after| after.pid == record.pid && after.instance_id == record.instance_id)
+        {
+          return Ok(());
         }
       }
     }
@@ -409,7 +408,7 @@ impl output::Row for Status {
 async fn status(manager: &dyn Manager, registration: &Registration) -> Result<Status> {
   verify_owned(registration)?;
   let before = inspect(manager, registration, Instant::now() + Duration::from_secs(5)).await?;
-  let mut row = Status {
+  let row = Status {
     state: before.state.clone(),
     manager: manager.name().into(),
     account: registration.account.clone(),
@@ -418,6 +417,8 @@ async fn status(manager: &dyn Manager, registration: &Registration) -> Result<St
     admission: "unknown".into(),
     log: registration.log.display().to_string(),
   };
+  #[cfg(unix)]
+  let mut row = row;
   #[cfg(unix)]
   if let Some(pid) = before.pid {
     row.state = "api-unreachable".into();
@@ -681,13 +682,13 @@ fn prepare_directory(path: &Path, uid: u32, gid: u32) -> Result<()> {
     if !existed {
       std::os::unix::fs::chown(path, Some(uid), Some(gid))?;
     }
+    Ok(())
   }
   #[cfg(not(unix))]
   {
     let _ = (path, uid, gid);
     bail!("control services are unsupported on Windows yet");
   }
-  Ok(())
 }
 fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
   use std::io::Write as _;
@@ -735,5 +736,7 @@ fn verify_executable(path: &Path, uid: u32, gid: u32) -> Result<()> {
       }
     }
   }
+  #[cfg(not(unix))]
+  let _ = (path, uid, gid);
   Ok(())
 }
