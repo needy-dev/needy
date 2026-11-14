@@ -239,7 +239,7 @@ pub fn facets(driver: ActorDriver) -> Facets {
 
 /// What the daemon's machine gives every driver: where needy's VM actor
 /// images are, the KVM device, and where the VM drivers keep guest disks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Host {
   /// The base VM image of this host's VM driver (`needy image pull`,
   /// `crate::image::vm::base_dir`), which a VM driver boots for a profile
@@ -336,7 +336,7 @@ pub async fn reconcile(driver: ActorDriver, leftover: &Leftover<'_>) -> bool {
 
 /// An executor directory mounted into the actor over SFTP, as the daemon
 /// tells a driver that mounts on the host side.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HostMount {
   /// The path in the actor.
   pub target: String,

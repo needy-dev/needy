@@ -223,18 +223,11 @@ files:
   assert!(last.payload.get().contains("copy-in seed"), "{}", last.payload.get());
 }
 
-// ROOT CAUSE:
-//
-// If the control daemon was stopped by a termination signal during a run
-// on a runner, the run's processes kept running on the runner until it
-// connected to the next control daemon, because serving ended the runners'
-// control streams as soon as the signal came, before the shutdown stopped
-// the runs and told the runners to end them.
-//
-// Before the fix, the sleep below outlived the daemon's shutdown.
-// The fix stops the runs first, then ends the control streams.
+// A management service stop now detaches control from the invocation. Earlier
+// control shutdown ended runner processes before dropping their streams; the
+// approved holder lifecycle keeps them alive until explicit run stop instead.
 #[tokio::test]
-async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_it_drops_them() {
+async fn a_control_listener_stop_preserves_the_runs_processes_on_runners() {
   const TOKEN: &str = "control-secret";
   let started = testing::daemon().await;
   let daemon = started.daemon.clone();
@@ -245,7 +238,7 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
     let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
     async move {
       daemon.serve_until(std::slice::from_ref(&endpoint), Some(TOKEN.into()), stop).await.unwrap();
-      daemon.shutdown().await;
+      daemon.suspend_control().await;
     }
   });
   while std::os::unix::net::UnixStream::connect(&socket).is_err() {
@@ -282,7 +275,11 @@ async fn a_daemon_stopped_by_a_signal_ends_its_runs_processes_on_runners_before_
   stop.cancel();
   tokio::time::timeout(Duration::from_secs(20), serving).await.expect("the daemon shuts down").unwrap();
 
-  assert!(testing::ended(pid).await, "process {pid} outlived the daemon's shutdown");
+  assert!(testing::running(pid), "control listener stop ended the run's process");
+  // This fixture owns the runner: stopping it explicitly reclaims its process.
+  drop(_runner_stop);
+  assert!(testing::ended(pid).await);
+  daemon.shutdown().await;
 }
 
 // ROOT CAUSE:

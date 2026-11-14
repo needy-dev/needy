@@ -21,7 +21,7 @@ use needy_api_server::{Health, Listen, Server};
 use needy_config::profile::{FaultDomain, FileMode, Side as FileSide};
 use needy_core::event::{ActorReady, ActorStart, ActorVmExit, Event};
 use needy_core::types::{ActorState, Effect, Fired, Network, RunState};
-use needy_core_actor::driver::{self, Channels, Driver, Endpoint, Facets, HostMount, Running, Side, Start, Terminal, Transport};
+use needy_core_actor::driver::{self, Channels, Driver, Facets, HostMount, Running, Side, Terminal, Transport};
 use needy_core_actor::image::guest;
 use needy_core_actor::sidecar::gateway;
 use tokio_util::sync::CancellationToken;
@@ -172,20 +172,25 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     Side::Guest => Vec::new(),
     Side::Host => mounts(run),
   };
-  let start = Start {
-    run: &run.id,
-    dir: &run.dir,
-    recipe: run.recipe.as_ref(),
-    user: &run.profile.user,
-    mounts: &mounts,
-    guest: &guest,
-  };
-  let vm = match driver.start(&start).await {
+  daemon.snapshot_run(run).await?;
+  let vm = match daemon
+    .holder
+    .start(crate::holder::Actor {
+      run: run.id.clone(),
+      dir: run.dir.clone(),
+      host: host(daemon),
+      profile_yaml: run.profile_yaml.clone(),
+      recipe: run.recipe.clone(),
+      mounts,
+      guest,
+    })
+    .await
+  {
     Ok(vm) => vm,
     Err(e) => {
       actor.cancel();
       advance(run, ActorState::Exited);
-      return Err(e.into());
+      return Err(e);
     }
   };
   run.emit(&Event::ActorStart(ActorStart {
@@ -195,7 +200,8 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     driver: Some(driver.label()),
     capture: Some(facets.capture),
   }));
-  // A restarted control plane finds the VM by its PID and directory.
+  // Recovery proves the holder identity from the protected snapshot. The
+  // PID is diagnostic metadata, never ownership or liveness evidence.
   let record = InstanceRecord {
     id: store::actor_instance(&run.id),
     run: run.id.clone(),
@@ -215,7 +221,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   // Where the actor has no sensors (Apple's `container`), `profile check`
   // says so, and the faults are not recorded as fired.
   if facets.identity.hwmon == Some(Side::Host) {
-    schedule_sensor_faults(run, Arc::from(driver), &actor);
+    schedule_sensor_faults(run, Arc::from(driver), &actor, Duration::ZERO, &Default::default());
   }
   // Only a driving program on a terminal has a process service to answer.
   if run.tty.is_some() {
@@ -263,9 +269,18 @@ async fn await_ready(daemon: Daemon, run: Arc<Run>, actor: CancellationToken) {
 // refused (its `at` counts from the actor's start, which has passed, and a
 // VM's init schedules sensor faults once, at boot); applying one at once
 // waits for the owner to approve a guest call for it.
-fn schedule_sensor_faults(run: &Arc<Run>, driver: Arc<dyn Driver>, actor: &CancellationToken) {
+fn schedule_sensor_faults(
+  run: &Arc<Run>,
+  driver: Arc<dyn Driver>,
+  actor: &CancellationToken,
+  elapsed: Duration,
+  applied: &std::collections::BTreeSet<String>,
+) {
   for (name, fault) in run.injector.faults(FaultDomain::Sensor) {
-    let at = fault.at.map(Duration::from).unwrap_or_default();
+    if applied.contains(&name) {
+      continue;
+    }
+    let at = fault.at.map(Duration::from).unwrap_or_default().saturating_sub(elapsed);
     let temp_mc = needy_core::chaos::sensor_temp_mc(&fault);
     let (task_run, driver, actor) = (run.clone(), driver.clone(), actor.clone());
     run.tasks.spawn(async move {
@@ -289,6 +304,31 @@ fn schedule_sensor_faults(run: &Arc<Run>, driver: Arc<dyn Driver>, actor: &Cance
       }));
     });
   }
+}
+
+/// Restores control-side services for the existing actor. Sensor deadlines
+/// retain their original origin; changes already recorded are not injected
+/// twice, and a deadline crossed during the gap runs as soon as control returns.
+pub(crate) fn resume_services(daemon: &Daemon, run: &Arc<Run>, actor: &CancellationToken, events: &[needy_trace::Event]) -> Result<()> {
+  if facets(run).identity.hwmon == Some(Side::Host) {
+    let started = events.iter().find(|event| event.kind == "actor.start").map_or(run.created_ms, |event| event.time_ms);
+    let elapsed = Duration::from_millis(needy_common::time::now_ms().saturating_sub(started).max(0) as u64);
+    let applied = events
+      .iter()
+      .filter(|event| event.kind == "fault.injected")
+      .filter_map(|event| {
+        let fired: needy_core::types::Fired = serde_json::from_str(event.payload.get()).ok()?;
+        (fired.domain == FaultDomain::Sensor).then_some(fired.name)
+      })
+      .collect();
+    // NOTICE: if a crash follows a sensor write but precedes its queued trace
+    // record, the idempotent temperature write can be repeated on adoption.
+    schedule_sensor_faults(run, Arc::from(driver_for(daemon, &run.profile.actor)?), actor, elapsed, &applied);
+  }
+  if run.tty.is_some() {
+    run.tasks.spawn(await_ready(daemon.clone(), run.clone(), actor.clone()));
+  }
+  Ok(())
 }
 
 /// How long an attach waits for the actor's process service: the guest
@@ -367,16 +407,15 @@ async fn answers(client: needy_api_client::Client) -> Result<needy_api_client::C
   }
 }
 
-/// The listener the API server binds for `endpoint`.
-fn listen(endpoint: &Endpoint) -> Listen {
-  match endpoint {
-    Endpoint::Unix(path) => Listen::Unix(path.clone()),
-  }
-}
-
 /// Serves the run's API to the actor on its guest channel, as
 /// `Caller::Actor` bound to the run, until `actor` is cancelled.
-async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, transport: Transport, actor: &CancellationToken) -> Result<()> {
+pub(crate) async fn serve_guest(
+  daemon: &Daemon,
+  run: &Run,
+  _channels: &Channels,
+  _transport: Transport,
+  actor: &CancellationToken,
+) -> Result<()> {
   let api = Arc::new(daemon.clone());
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
@@ -385,12 +424,12 @@ async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, transport:
   let caller = Caller::Actor {
     run: run.id.clone(),
   };
-  let listener = Server::new(health, caller).runs(api.clone()).processes(api.clone()).guest(api).bind(&[listen(&channels.guest)]).await?;
+  let listener =
+    Server::new(health, caller).runs(api.clone()).processes(api.clone()).guest(api).bind(&[Listen::Unix(run.dir.join("cu.sock"))]).await?;
   // A socket mounted into the actor keeps its file mode there, and the
   // driving program's proxy runs as the profile's user.
-  if transport == Transport::Socket {
-    open_to_every_user(&channels.guest)?;
-  }
+  // Only the holder dials this backend; the actor-facing socket is opened
+  // by the holder, inside the private run directory.
   let id = run.id.clone();
   let stop = actor.clone();
   run.tasks.spawn(async move {
@@ -401,28 +440,10 @@ async fn serve_guest(daemon: &Daemon, run: &Run, channels: &Channels, transport:
   Ok(())
 }
 
-/// Lets every user in the actor connect to the guest socket at `endpoint`:
-/// the socket and its directory, which the server created private. The
-/// directory is bind-mounted into the actor; on the host the run's
-/// directory around it stays private.
-fn open_to_every_user(endpoint: &Endpoint) -> Result<()> {
-  use std::os::unix::fs::PermissionsExt;
-  let Endpoint::Unix(socket) = endpoint;
-  let mut modes = vec![(socket.as_path(), 0o666)];
-  if let Some(dir) = socket.parent() {
-    modes.push((dir, 0o755));
-  }
-  for (path, mode) in modes {
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-      .with_context(|| format!("cannot open {} to the actor", path.display()))?;
-  }
-  Ok(())
-}
-
 /// Serves the actor's gateway on its gateway channel until `actor` is
 /// cancelled.
-fn serve_gateway(run: &Run, channels: &Channels, actor: &CancellationToken) -> Result<()> {
-  let Endpoint::Unix(path) = &channels.gateway;
+pub(crate) fn serve_gateway(run: &Run, _channels: &Channels, actor: &CancellationToken) -> Result<()> {
+  let path = &run.dir.join("cg.sock");
   // TODO(mitm): the gateway adds no headers (header injection was removed
   // on 2026-11-12); on HTTPS it needs a separate MITM infrastructure (its
   // own CA, opt-in, per host), deferred until that exists and the owner
@@ -470,10 +491,15 @@ pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir
 /// An actor that exits before the driving program reported its exit fails
 /// the run instead, with the actor's exit and the end of its log as the
 /// reason. `name` is the actor's driver.
-async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dyn Running>, actor: CancellationToken) {
+pub(crate) async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dyn Running>, actor: CancellationToken) {
   let waited = tokio::select! {
     waited = vm.wait() => waited,
     () = actor.cancelled() => {
+      if daemon.suspending.load(std::sync::atomic::Ordering::SeqCst) {
+        // Only control ended. Dropping this remote wait leaves the original
+        // driver handle and actor owned by the protected holder.
+        return;
+      }
       // The run stopped: its VM stops with it.
       if let Err(e) = vm.stop(VM_STOP_GRACE).await {
         tracing::warn!("run {}: cannot stop {name} {}: {e}", run.id, vm.pid());
@@ -484,7 +510,11 @@ async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut vm: Box<dy
     }
   };
   advance(&run, ActorState::Exited);
-  release_actor(&daemon, &run).await;
+  if waited.is_err() {
+    daemon.advance_instance(&run.id, &store::actor_instance(&run.id), InstanceState::Lost, needy_common::time::now_ms()).await;
+  } else {
+    release_actor(&daemon, &run).await;
+  }
   let exit = match waited {
     Ok(status) => {
       use std::os::unix::process::ExitStatusExt;

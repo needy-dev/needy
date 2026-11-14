@@ -8,13 +8,11 @@
 //! the processes of runs it still runs; the control plane claims those of
 //! live runs and ends the others.
 //!
-//! A control plane that starts finds in `state.db` the runs it left open.
-//! It does not adopt their actors (see `needy_core_actor::driver::reconcile`):
-//! each such run ends `failed` (`stopped` if it was stopping), its actor is
-//! ended through its driver, its control-host executor instances through
-//! theirs, and its instances on
-//! runners wait for the runners' reports for [`REPORT_WAIT`]; those nobody
-//! reports by then are marked lost.
+//! At startup, control reconnects to a protected local holder whose stable
+//! identity matches each invocation's private snapshot. Surviving actors are
+//! adopted without starting them again. When no holder can prove ownership,
+//! reconciliation ends verified leftovers and records failure or unknown/lost
+//! instances; runners still report their process inventory after reconnect.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -148,6 +146,9 @@ impl Daemon {
     let open = self.state.runs_in(&[RunState::Creating, RunState::Running, RunState::Stopping]).await.context("cannot read the runs")?;
     let mut on_runners = false;
     for mut record in open {
+      if self.adopt_run(&record).await.with_context(|| format!("cannot adopt run {}", record.id))? {
+        continue;
+      }
       let before = record.state;
       let now = now_ms();
       let instances = self.state.instances_of(&record.id).await.context("cannot read the instances")?;
@@ -181,7 +182,7 @@ impl Daemon {
       } else {
         record.failure = Some(match before {
           RunState::Creating => "the control plane restarted while the run was being created; its actor was lost".into(),
-          _ => "the control plane restarted; the actor was lost".into(),
+          _ => "the original runtime holder or actor was lost; continuity could not be verified".into(),
         });
         RunState::Failed
       };

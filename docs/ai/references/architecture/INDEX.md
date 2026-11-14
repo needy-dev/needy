@@ -24,3 +24,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-15 | [Deployment topology and daemon responsibilities](2026-11-15-topology-and-daemon-responsibilities-design.md) | design |
 | 2026-11-15 | [Actor survival, reconnection and history](2026-11-15-actor-survival-and-history-design.md) | design |
 | 2026-11-15 | [Client execution and actor lifecycle (approved contract)](2026-11-15-client-execution-and-actor-lifecycle-spec.md) | spec |
+| 2026-11-15 | [Actor holder and control recovery](2026-11-15-actor-holder-implementation-evidence.md) | implementation evidence |

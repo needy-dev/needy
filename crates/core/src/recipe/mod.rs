@@ -12,13 +12,14 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use needy_config::recipe::{Hypervisor, Recipe};
 use needy_config::validate::Finding;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 pub use host::HostInfo;
 pub use identity::{PciId, Smbios};
 use identity::{fill_placeholders, pci_id};
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SensorSpec {
   pub chip: String,
   pub idle_mc: i32,
@@ -29,7 +30,7 @@ pub struct SensorSpec {
 
 /// What the VM presents about itself through the hypervisor: CPU brand,
 /// the hypervisor bit, SMBIOS and PCI bridges.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmIdentity {
   pub cpu_brand: Option<String>,
   /// Clears the CPUID hypervisor bit and the KVM leaves.
@@ -49,7 +50,7 @@ impl VmIdentity {
 /// What the recipe says of its CPU as `/proc/cpuinfo` shows it, for a
 /// container actor, whose identity files stand in for the CPUID a VM's
 /// patched Firecracker presents.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpuView {
   pub brand: Option<String>,
   /// Family, model and stepping.
@@ -93,7 +94,7 @@ fn time(created_ms: i64) -> String {
 }
 
 /// A recipe compiled for one host and run.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompiledRecipe {
   pub vcpus: u32,
   pub mem_mib: u32,
@@ -117,6 +118,9 @@ pub struct CompiledRecipe {
   pub os_image: Option<String>,
   /// The identity fields the actor must present (`required:`).
   pub required: Vec<needy_config::recipe::IdentityField>,
+  // Validation findings belong to admission and were logged there; the
+  // holder receives only the resolved runtime identity.
+  #[serde(skip)]
   pub findings: Vec<Finding>,
 }
 

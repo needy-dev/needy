@@ -43,6 +43,20 @@ pub struct Instance {
   refs: AtomicUsize,
 }
 
+/// A control instance's saved view of a held executor. Restoration reconnects
+/// the saved handle; it does not create a replacement execution environment.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Saved {
+  pub name: String,
+  pub key: String,
+  pub driver: String,
+  pub id: String,
+  pub sftp: Vec<String>,
+  pub workspace: String,
+  pub path_map: BTreeMap<String, String>,
+  pub home: String,
+}
+
 /// A command's hold on an instance's slot; dropping it frees the slot.
 pub type Slot = Option<OwnedSemaphorePermit>;
 
@@ -100,6 +114,19 @@ impl Instance {
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
+  }
+
+  pub(crate) fn saved(&self) -> Saved {
+    Saved {
+      name: self.name.clone(),
+      key: self.key.clone(),
+      driver: self.handle.driver.into(),
+      id: self.handle.id.clone(),
+      sftp: self.handle.sftp.clone(),
+      workspace: self.handle.workspace.clone(),
+      path_map: self.path_map.clone(),
+      home: self.home.clone(),
+    }
   }
 
   /// `path`, a path on the executor's side, with a leading `~` expanded to
@@ -268,6 +295,46 @@ impl Pool {
       // Each acquire counts itself under the pool's lock.
       refs: AtomicUsize::new(0),
     }))
+  }
+
+  /// Restores one invocation's hold while retaining key sharing and reference
+  /// counts. A missing service fails recovery instead of starting replacement work.
+  pub(crate) async fn restore(&self, saved: Saved, config: &profile::Executor) -> Result<Arc<Instance>> {
+    let cell = self.lock().entry(saved.key.clone()).or_default().clone();
+    let instance = cell
+      .get_or_try_init(|| async {
+        let (mut handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match saved.driver.as_str() {
+          "native" => (self.native.machine(), Some(self.native.clone())),
+          "runner" => (runner_handle(&saved.id, &self.links, saved.sftp.clone(), saved.workspace.clone()), None),
+          "linux-container" => {
+            let driver = self.container.as_ref().context("the original container executor's engine is unavailable")?;
+            (driver.reconnect(&saved.id, saved.sftp.clone(), saved.workspace.clone()).await?, Some(driver.clone()))
+          }
+          _ => bail!("executor {} has an unknown saved driver", saved.name),
+        };
+        if handle.id != saved.id {
+          bail!("executor {} changed identity", saved.name);
+        }
+        handle.workspace = saved.workspace.clone();
+        handle.sftp = saved.sftp.clone();
+        Ok::<_, anyhow::Error>(Arc::new(Instance {
+          name: saved.name.clone(),
+          key: saved.key.clone(),
+          handle,
+          driver,
+          path_map: saved.path_map.clone(),
+          home: saved.home.clone(),
+          slots: config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
+          on_full: config.on_full,
+          refs: AtomicUsize::new(0),
+        }))
+      })
+      .await?;
+    if instance.handle.id != saved.id || instance.handle.driver != saved.driver {
+      bail!("executor pool key names a different surviving instance");
+    }
+    instance.refs.fetch_add(1, Ordering::SeqCst);
+    Ok(instance.clone())
   }
 
   /// Gives back one hold on `instance`; the last one destroys it.

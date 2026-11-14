@@ -51,8 +51,12 @@ impl super::Manager for Manager {
     .iter()
     .map(|(key, path)| format!("Environment={}\n", quote(&format!("{key}={}", path.display()))))
     .collect::<String>();
+    // Source: https://www.freedesktop.org/software/systemd/man/256/systemd.kill.html#KillMode=
+    // Reference: systemd.kill(5), version 256, KillMode.
+    // NOTICE: only control belongs to this unit's stop; the protected runtime
+    // holder has its own work lifetime and must survive the service restart.
     Ok(format!(
-      "# {}\n[Unit]\nDescription=Needy control daemon\n[Service]\nType=simple\n{}ExecStart={} --config {} daemon serve\nWorkingDirectory=/\nEnvironment={}\n{}{directories}Restart=on-failure\nTimeoutStopSec=65s\nKillSignal=SIGTERM\n[Install]\nWantedBy={}\n",
+      "# {}\n[Unit]\nDescription=Needy control daemon\n[Service]\nType=simple\n{}ExecStart={} --config {} daemon serve\nWorkingDirectory=/\nEnvironment={}\n{}{directories}Restart=on-failure\nTimeoutStopSec=65s\nKillSignal=SIGTERM\nKillMode=process\n[Install]\nWantedBy={}\n",
       super::MARKER,
       user,
       quote(&registration.executable.to_string_lossy()),

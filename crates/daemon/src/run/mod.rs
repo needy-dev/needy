@@ -11,6 +11,7 @@
 //! ended runs are listed from there, also after a restart, and a restarted
 //! control plane reconciles the runs it finds open (`crate::reconcile`).
 
+mod recovery;
 pub mod state;
 pub mod stop;
 
@@ -67,7 +68,7 @@ pub struct Run {
   pub profile_name: String,
   pub profile: Profile,
   /// The profile as the client resolved it, kept in `state.db`.
-  profile_yaml: String,
+  pub(crate) profile_yaml: String,
   pub created_ms: i64,
   pub dir: PathBuf,
   pub state: State,
@@ -902,6 +903,11 @@ impl Daemon {
   /// Kills the run's processes on an executor of the control host, which
   /// does not know runs: by listing them and killing each.
   async fn end_on_control_host(&self, run: &Run, instance: &Instance) {
+    if instance.handle.driver == "native"
+      && let Err(error) = self.holder.end_run(&run.id).await
+    {
+      tracing::warn!("run {}: cannot close native process admission: {error:#}", run.id);
+    }
     let request = ListProcessesRequest {
       run_id: run.id.clone(),
       ..Default::default()
@@ -952,6 +958,10 @@ impl Daemon {
   /// Starts the trace of run `id` with the sinks `config` selects; the
   /// default sinks when the profile could not be read.
   fn run_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
+    self.run_trace_at(id, config, 0)
+  }
+
+  fn run_trace_at(&self, id: &str, config: Option<&needy_config::profile::Trace>, next_seq: u64) -> Dispatch {
     let default = needy_config::profile::Trace::default();
     let config = config.unwrap_or(&default);
     let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
@@ -969,7 +979,7 @@ impl Daemon {
         }
       }
     }
-    Dispatch::new(
+    Dispatch::resume(
       id,
       sinks,
       needy_trace::Options {
@@ -977,6 +987,7 @@ impl Daemon {
         version: event::SCHEMA_VERSION,
         timing: config.timing,
       },
+      next_seq,
     )
   }
 }

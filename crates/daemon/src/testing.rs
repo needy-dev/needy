@@ -103,7 +103,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
 /// Shuts `started`'s daemon down, as a termination signal does, and starts
 /// another on the same directories, as a restart does.
 pub async fn restart(started: Started) -> Started {
-  started.daemon.shutdown().await;
+  started.daemon.suspend_control().await;
   let config = (*started.daemon.config).clone();
   drop(started.daemon);
   let daemon = Daemon::start(config).await.unwrap();

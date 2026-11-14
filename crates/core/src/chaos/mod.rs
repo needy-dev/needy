@@ -75,7 +75,7 @@ impl FaultSource {
 }
 
 /// One fault of a run with its counts, as `needy chaos ls` lists it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaultState {
   pub name: String,
   pub fault: Fault,
@@ -193,6 +193,22 @@ impl Injector {
         fired: entry.fired,
       })
       .collect()
+  }
+
+  /// Restores the policy and counters of an already-created invocation. The
+  /// process holder, not this policy snapshot, establishes runtime liveness.
+  pub fn restore(chaos: &Chaos, created: Instant, states: Vec<FaultState>) -> Self {
+    let injector = Self::since(chaos, created);
+    *injector.lock() = states
+      .into_iter()
+      .map(|state| {
+        let mut entry = Entry::new(state.fault, state.source);
+        entry.matched = state.matched;
+        entry.fired = state.fired;
+        (state.name, entry)
+      })
+      .collect();
+    injector
   }
 
   /// Whether the run has a fault in `domain` now.

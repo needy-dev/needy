@@ -56,6 +56,14 @@ uptime offset (the guest, the host, or nobody: a gap), and its transport
 *Avoid*: actor runtime (the name before 2026-11-12); "driver" alone for the
 driving program.
 
+### Runtime holder
+
+The protected local process that owns actor driver handles and native executor
+processes independently of control management. A control restart reconnects to
+its stable identity and saved bindings. A PID alone does not prove ownership.
+Viewer loss and control loss leave held work alive. Explicit run stop ends it.
+See the [implementation evidence and limits](ai/references/architecture/2026-11-15-actor-holder-implementation-evidence.md).
+
 ### Executor driver
 
 What creates and destroys executor instances, named by a profile's
@@ -185,12 +193,12 @@ current implementation, before the approved restart-survival change. When a
 runner connects it
 **reports** the processes of runs it still runs; the control plane
 **claims** those of live runs that hold an executor on it and tells it to
-end the others. When a control plane starts, it loads from `state.db` the
-runs it left open: it does not adopt their actors, so each ends `failed`
-(`the control plane restarted; the actor was lost`), or `stopped` if it was
-stopping; it ends a still-running actor VM and removes their control-host
-containers, and waits for runners to report the instances the runs held
-there.
+end the others. When a control plane starts, it loads open invocations from `state.db`.
+It adopts the original actor only after the protected runtime holder proves
+its identity. It reconnects saved executor handles without replacing work.
+If ownership cannot be proved, it records failure or lost instances and
+cleans up verified leftovers. See the
+[implementation evidence and limits](ai/references/architecture/2026-11-15-actor-holder-implementation-evidence.md).
 
 The **approved contract** instead requires recovering management of the same
 surviving actor and driving program, using stable identity and protected
@@ -202,8 +210,7 @@ end work; replacement actors are new invocations. See the
 
 An instance of a run that nobody reported after the control plane
 restarted: no runner reported it within the wait (60 s), or it was one of
-the control host's own native executors, whose processes a killed daemon
-leaves unrecorded. Whether it still runs is unknown; `run ls` marks it
+a native executor whose protected holder identity cannot be recovered. Whether it still runs is unknown; `run ls` marks it
 `(lost)`. The runner's own grace period still ends its processes.
 
 ### Runner selector
@@ -402,7 +409,7 @@ Current state transitions: a run is `creating` while it acquires its
 executors, copies files in and starts its actor, then `running`. It ends `stopped` (after `stopping`, by
 `needy run stop`), `finished` (its actor's driving program exited, once the actor ended too) or
 `failed` (its create failed, its actor's VM exited before the driving
-program did, or the control plane restarted and lost its actor, with the
+program did, or its original actor or runtime holder was lost, with the
 reason). The first of these end states stays: stopping a
 finished or failed run releases its executors but keeps its state. A
 **graceful stop** (the default of `needy run stop`) ends a running driving
