@@ -1,5 +1,5 @@
 //! `needy runner`: join tokens and the runners that joined with them.
-//! A runner itself is `needy daemon --mode runner`.
+//! A runner enrolls with `runner join`, then connects with `runner serve`.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -69,6 +69,9 @@ struct InviteArgs {
 #[derive(clap::Args)]
 struct JoinArgs {
   name: String,
+  /// Read the joining token from a private file, or `-` for standard input.
+  // NOTICE: Files and stdin cover automation in this slice. Token-valued argv
+  // and implicit environment inputs need a separate owner-approved input contract.
   #[arg(long)]
   code_file: Option<std::path::PathBuf>,
   #[arg(long, value_delimiter = ',')]
@@ -402,10 +405,20 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
     }
   };
   let code = match args.code_file {
+    Some(path) if path == std::path::Path::new("-") => {
+      use std::io::Read as _;
+      let mut code = String::new();
+      std::io::stdin().read_to_string(&mut code).context("cannot read joining token from stdin")?;
+      code
+    }
     Some(path) => crate::configuration::read_secret(&path)?,
-    None => rpassword::prompt_password("Runner invitation code: ")?,
+    None => {
+      eprintln!("{}", joining_guidance(args.roles.as_deref()));
+      rpassword::prompt_password("Joining token: ")?
+    }
   };
-  anyhow::ensure!(!code.trim().is_empty(), "runner invitation code is empty");
+  let code = code.trim();
+  anyhow::ensure!(!code.is_empty() && !code.contains(['\r', '\n', '\0']), "provide one nonempty joining token");
   super::daemon::join_runner(
     super::daemon::RunnerArgs {
       name: Some(args.name),
@@ -419,9 +432,25 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
       disconnect_grace: None,
     },
     ctx,
-    code.trim().into(),
+    code.into(),
   )
   .await
+}
+
+/// Instruction text for the interactive prompt; explicit input skips it.
+fn joining_guidance(roles: Option<&[RunnerRole]>) -> String {
+  let roles = role_arguments(roles.unwrap_or_default());
+  format!(
+    "To obtain a joining token, run on the control host:\n\n  needy runner invite --ttl 1h{roles}\n\nCopy its token and paste it below.\nFor automation, use --code-file FILE or pipe the token with --code-file -.\n"
+  )
+}
+
+fn role_arguments(roles: &[RunnerRole]) -> String {
+  if roles.is_empty() {
+    String::new()
+  } else {
+    format!(" --roles {}", roles.iter().map(ToString::to_string).collect::<Vec<_>>().join(","))
+  }
 }
 
 async fn management(command: Command, ctx: &Context) -> Result<i32> {
@@ -452,14 +481,27 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
             &serde_json::json!({"version":1,"id":token.id,"roles":roles,"expires_at_ms":token.expires_at_ms,"uses_left":token.uses_left,"code":created.token})
           )?
         )?,
-        OutputFormat::Table => outln!(
-          "ID  {}\nROLES  {}\nEXPIRES  {}\nUSES LEFT  {}\nCODE (shown once)  {}",
-          token.id,
-          roles.join(","),
-          time(token.expires_at_ms),
-          token.uses_left,
-          created.token
-        )?,
+        OutputFormat::Table => {
+          let selected_roles = token.roles.iter().map(|value| role(*value)).collect::<Result<Vec<_>>>()?;
+          let arguments = role_arguments(&selected_roles);
+          let roles = if roles.is_empty() {
+            "any".to_string()
+          } else {
+            roles.join(",")
+          };
+          outln!(
+            "Runner invitation created.\n\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the runner machine, run:\n\n  needy --address <control-address> runner join <runner-name>{arguments}\n\nUse an address reachable from the runner, or its local tunnel address.\nPaste the token when prompted.\n\nJoining token (shown once):\n\n  {}\n\nFor automation, create an invitation with -o json, extract .code,\nand pipe it to runner join with --code-file -. A private --code-file FILE also works.",
+            "ID:",
+            token.id,
+            "Roles:",
+            roles,
+            "Expires:",
+            time(token.expires_at_ms),
+            "Uses left:",
+            token.uses_left,
+            created.token
+          )?;
+        }
       }
     }
     Command::Token {

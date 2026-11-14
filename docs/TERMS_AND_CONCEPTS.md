@@ -218,12 +218,19 @@ control stream is not open is *not connected*; tasks for it fail at once.
 
 ### Join token
 
-A short-lived secret an operator creates with `needy runner token create` and
+A short-lived secret an operator creates with `needy runner invite` and
 hands to one machine so it can join as a runner. It has a time to live, a
 number of uses (1 by default), the roles it allows (every role when it names
 none) and labels it gives every runner that joins with it. The control plane
 stores only its hash; it is shown once. A token that expired, is used up or
 was revoked is refused.
+
+New invitations use `<id>.<secret>` without a product/type prefix. The secret
+contains 32 random bytes encoded as 64 hexadecimal digits. Already-issued
+v0.0.4 invitations with the `needy-join.` prefix remain readable until expiry.
+This format change does not change stored runner credentials.
+`runner join` enrolls the machine and saves its credential; `runner serve`
+opens the persistent connection used for work.
 
 ### Runner credential
 

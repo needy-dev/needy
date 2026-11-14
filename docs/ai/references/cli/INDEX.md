@@ -10,3 +10,4 @@ The `needy` command surface, exec streams, traces and reports.
 | 2026-11-13 | [TUI fidelity: evidence](2026-11-13-tui-fidelity-evidence.md) | evidence |
 | 2026-11-14 | [CLI configuration, access, lifecycle, and diagnostics](2026-11-14-cli-configuration-and-access-spec.md) | spec |
 | 2026-11-14 | [CLI lifecycle implementation and evidence](2026-11-14-cli-lifecycle-evidence.md) | evidence |
+| 2026-11-14 | [CLI installation and enrollment feedback](2026-11-14-installation-feedback-evidence.md) | evidence |

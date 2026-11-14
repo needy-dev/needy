@@ -2,6 +2,7 @@
 //! https://www.freedesktop.org/software/systemd/man/256/systemctl.html
 use super::{Action, Registration, Scope, State};
 use anyhow::{Context as _, Result};
+const UNIT: &str = "needy.service";
 pub(super) struct Manager {
   scope: Scope,
 }
@@ -23,13 +24,13 @@ impl super::Manager for Manager {
   }
   fn definition(&self) -> Result<std::path::PathBuf> {
     Ok(match self.scope {
-      Scope::System => "/etc/systemd/system/needy.service".into(),
+      Scope::System => std::path::PathBuf::from("/etc/systemd/system").join(UNIT),
       Scope::User => {
         let base = std::env::var_os("XDG_CONFIG_HOME")
           .map(std::path::PathBuf::from)
           .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".config")))
           .context("cannot find user systemd directory")?;
-        base.join("systemd/user/needy.service")
+        base.join("systemd/user").join(UNIT)
       }
     })
   }
@@ -75,7 +76,7 @@ impl super::Manager for Manager {
       Action::Reload => "daemon-reload",
     });
     if !matches!(action, Action::Reload) {
-      command.arg("needy.service");
+      command.arg(UNIT);
     }
     command
   }
@@ -83,7 +84,7 @@ impl super::Manager for Manager {
     let mut command = self.base();
     command.args([
       "show",
-      "needy.service",
+      UNIT,
       "--property=LoadState,ActiveState,SubState,MainPID",
       "--no-pager",
     ]);
@@ -91,12 +92,7 @@ impl super::Manager for Manager {
   }
   fn inspect_binding(&self, _: &Registration) -> tokio::process::Command {
     let mut command = self.base();
-    command.args([
-      "show",
-      "needy.service",
-      "--property=FragmentPath",
-      "--no-pager",
-    ]);
+    command.args(["show", UNIT, "--property=FragmentPath", "--no-pager"]);
     command
   }
   fn owns_binding(&self, registration: &Registration, output: &str) -> bool {
@@ -120,12 +116,17 @@ impl super::Manager for Manager {
       loaded: value("LoadState=") != "not-found",
     })
   }
+  fn status_command(&self, _: &Registration) -> tokio::process::Command {
+    let mut command = self.base();
+    command.args(["status", UNIT]);
+    command
+  }
   fn logs(&self, _: &Registration, follow: bool, tail: usize) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("journalctl");
     if matches!(self.scope, Scope::User) {
       command.arg("--user");
     }
-    command.args(["--unit=needy.service", "--no-pager", "--lines"]).arg(tail.to_string());
+    command.arg(format!("--unit={UNIT}")).args(["--no-pager", "--lines"]).arg(tail.to_string());
     if follow {
       command.arg("--follow");
     }

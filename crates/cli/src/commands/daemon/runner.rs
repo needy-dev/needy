@@ -26,6 +26,8 @@ pub struct RunnerArgs {
   pub(crate) disconnect_grace: Option<std::time::Duration>,
 }
 
+/// `runner join` enrolls through the daemon boundary, saves its credential,
+/// and reports how to start serving; it does not open persistent work streams.
 pub async fn join_runner(args: RunnerArgs, ctx: &Context, code: String) -> Result<i32> {
   execute(args, ctx, Some(code)).await
 }
@@ -87,16 +89,23 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
   if capabilities.is_empty() {
     bail!("this machine can host none of the roles --roles names");
   }
+  let capability_summary = capabilities.to_string();
+  let control_summary = match args.join.as_deref() {
+    Some(address) if address.starts_with("exec:") => "saved connector".to_string(),
+    Some(address) => address.to_string(),
+    None => "saved control connection".to_string(),
+  };
   let config = needy_daemon::runner::Config {
     state_dir: paths.state,
     control: args.join,
     join_token: code,
-    name,
+    name: name.clone(),
     capabilities,
     labels: args.labels.into_iter().collect(),
     grace: args.disconnect_grace.unwrap_or(needy_daemon::runner::DISCONNECT_GRACE),
   };
   if joining {
+    crate::output::outln!("Contacting control daemon: {control_summary}")?;
     // An enrollment code is consumed remotely. The first signal must let its
     // response reach private storage, as the former combined join/serve did.
     let termination = needy_api_server::termination::Termination::listen()?;
@@ -106,6 +115,13 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
         "a second termination signal ended enrollment before its credential was saved; inspect the runner registration before retrying"
       ),
     }
+    crate::output::success("Joined successfully. Enrollment saved.")?;
+    crate::output::outln!(
+      "\n  {:<20}{name}\n  {:<20}{control_summary}\n  {:<20}{capability_summary}\n\nOn this machine, start the runner and keep it connected:\n\n  needy runner serve\n\nOn the control host, inspect runners with:\n\n  needy runner ls\n\nFor an OS-managed control daemon, inspect its status and logs with:\n\n  needy daemon service status\n  needy daemon service logs --follow",
+      "Runner:",
+      "Control daemon:",
+      "Local capabilities:"
+    )?;
   } else {
     needy_daemon::runner::serve_with_labels(config, labels_overridden).await?;
   }

@@ -175,7 +175,7 @@ impl Store {
     }
     check_labels(&new.scope.labels)?;
     let id = secret::random_id();
-    let token = Secret::generate(secret::JOIN, &id);
+    let token = Secret::generate_join(&id);
     let row = join_token::Model {
       id: id.clone(),
       hash: token.hash(),
@@ -216,7 +216,7 @@ impl Store {
   /// join again.
   pub async fn join(&self, token: &str, name: &str, report: Report, now: i64) -> Result<(Runner, Secret)> {
     check_name(name)?;
-    let id = secret::id(secret::JOIN, token).ok_or(Error::InvalidJoinToken)?;
+    let id = secret::join_id(token).ok_or(Error::InvalidJoinToken)?;
     let txn = self.db.begin().await?;
     let found = join_token::Entity::find_by_id(id).one(&txn).await?;
     let row = found.filter(|row| secret::matches(token, &row.hash)).ok_or(Error::InvalidJoinToken)?;

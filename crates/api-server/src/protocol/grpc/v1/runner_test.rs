@@ -20,7 +20,7 @@ fn native() -> Option<RunnerCapabilities> {
 
 fn join() -> JoinRequest {
   JoinRequest {
-    join_token: "needy-join.t1.secret".into(),
+    join_token: "t1.secret".into(),
     name: "mac".into(),
     capabilities: native(),
     ..Default::default()
@@ -50,7 +50,7 @@ async fn an_operator_creates_a_join_token_whose_secret_is_in_the_response() {
 
   let created = with(&served.client, CONTROL_TOKEN).runners().create_join_token(request).await.unwrap().into_inner();
 
-  assert_eq!(created.token, "needy-join.t1.secret");
+  assert_eq!(created.token, "t1.secret");
   let token = created.join_token.unwrap();
   assert_eq!((token.id.as_str(), token.uses_left, token.state()), ("t1", 2, JoinTokenState::Valid));
   assert_eq!(served.fake.calls(), [r#"create token ttl=60000 uses=2 roles={Executor} labels={"os": "darwin"}"#]);
@@ -62,7 +62,7 @@ async fn joining_needs_no_bearer_token_even_where_the_control_token_is_required(
 
   let joined = served.client.runners().join(join()).await.unwrap().into_inner();
   let wrong = JoinRequest {
-    join_token: "needy-join.t1.guess".into(),
+    join_token: "t1.guess".into(),
     ..join()
   };
   let status = served.client.runners().join(wrong).await.unwrap_err();

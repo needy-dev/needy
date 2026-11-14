@@ -29,9 +29,9 @@ impl Engine for Fake {
     Ok(None)
   }
 
-  async fn pull(&self, image: &str) -> Result<(), Error> {
+  fn pull_progress(&self, image: &str) -> BoxStream<'static, Result<crate::engine::models::CreateImageInfo, Error>> {
     self.record(format!("pull {image}"));
-    Ok(())
+    Box::pin(futures_util::stream::empty())
   }
 
   async fn create(&self, name: &str, _body: ContainerCreateBody) -> Result<(), Error> {

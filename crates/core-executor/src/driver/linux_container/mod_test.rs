@@ -585,9 +585,9 @@ impl Engine for Fake {
     Ok(self.pulled().then(Default::default))
   }
 
-  async fn pull(&self, image: &str) -> Result<(), engine::Error> {
+  fn pull_progress(&self, image: &str) -> futures_util::stream::BoxStream<'static, Result<engine::models::CreateImageInfo, engine::Error>> {
     self.record(format!("pull {image}"));
-    Ok(())
+    Box::pin(futures_util::stream::empty())
   }
 
   async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), engine::Error> {

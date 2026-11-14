@@ -397,7 +397,7 @@ impl Runners for Fake {
         uses_left: request.uses,
         state: JoinTokenState::Valid,
       },
-      token: "needy-join.t1.secret".into(),
+      token: "t1.secret".into(),
     })
   }
 
@@ -413,7 +413,7 @@ impl Runners for Fake {
 
   async fn join(&self, request: Joining) -> Result<Joined> {
     self.call(format!("join {} with {} as {}", request.name, request.join_token, request.report.capabilities));
-    if request.join_token != "needy-join.t1.secret" {
+    if request.join_token != "t1.secret" {
       return Err(ControlError::Unauthenticated("the join token is not valid".into()));
     }
     Ok(Joined {

@@ -119,6 +119,9 @@ impl super::Manager for Manager {
       loaded: row.is_some(),
     })
   }
+  fn status_command(&self, registration: &Registration) -> tokio::process::Command {
+    self.inspect_binding(registration)
+  }
   fn logs(&self, registration: &Registration, follow: bool, tail: usize) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("tail");
     command.arg("-n").arg(tail.to_string());

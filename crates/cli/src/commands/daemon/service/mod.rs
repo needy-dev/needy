@@ -116,6 +116,8 @@ pub(super) trait Manager {
   fn parse_state(&self, output: &str) -> Result<State>;
   fn inspect_binding(&self, registration: &Registration) -> tokio::process::Command;
   fn owns_binding(&self, registration: &Registration, output: &str) -> bool;
+  /// The native command a user can run to inspect this service.
+  fn status_command(&self, registration: &Registration) -> tokio::process::Command;
   fn logs(&self, registration: &Registration, follow: bool, tail: usize) -> tokio::process::Command;
 }
 
@@ -493,6 +495,12 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
   }
   let (account, uid, gid) = account(run_as.as_deref())?;
   let definition = manager.definition()?;
+  let scope_name = match scope {
+    Scope::User => "user",
+    Scope::System => "system",
+  };
+  output::outln!("Detected service manager: {} ({scope_name} scope)", manager.name())?;
+  output::outln!("Runtime account: {account}")?;
   // One transaction covers ownership inspection, stop of an older generation,
   // and publication. Competing mutations fail instead of interleaving receipts.
   #[cfg(unix)]
@@ -611,21 +619,35 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
     std::fs::create_dir_all(parent)?;
   }
   std::fs::create_dir_all(directory)?;
+  output::outln!("Writing configuration snapshot: {}", registration.snapshot.display())?;
   write_new(&registration.snapshot, serde_yaml::to_string(&config)?.as_bytes(), 0o600)?;
   #[cfg(unix)]
   if matches!(scope, Scope::System) {
     std::os::unix::fs::chown(&registration.snapshot, Some(uid), Some(gid))?;
   }
   let definition = manager.render(&registration)?;
+  output::outln!("Writing service definition: {}", registration.definition.display())?;
   write_atomic(&registration.definition, definition.as_bytes(), 0o644)?;
+  output::outln!("Writing service registration: {}", receipt.display())?;
   write_atomic(receipt, &serde_json::to_vec_pretty(&registration)?, 0o600)?;
+  output::outln!("Check status: {}", command_line(&manager.status_command(&registration)))?;
+  output::outln!("View logs: {}", command_line(&manager.logs(&registration, true, 100)))?;
+  output::outln!("Enabling {} control service ({scope_name})", manager.name())?;
   execute(manager.command(Action::Reload, &registration), deadline).await?;
   execute(manager.command(Action::Enable, &registration), deadline).await?;
   if now {
+    output::outln!("Starting {} control service ({scope_name})", manager.name())?;
     start(manager, &registration, deadline).await?;
   }
-  output::outln!("Installed {} control service ({scope:?}); configuration snapshot: {}", manager.name(), registration.snapshot.display())?;
+  output::outln!("Installed {} control service ({scope_name})", manager.name())?;
   Ok(())
+}
+
+/// Native service managers run on Unix; shell quoting keeps log paths with
+/// spaces usable when a user copies the displayed command.
+fn command_line(command: &tokio::process::Command) -> String {
+  let command = command.as_std();
+  shell_words::join(std::iter::once(command.get_program()).chain(command.get_args()).map(|arg| arg.to_string_lossy()))
 }
 
 #[cfg(unix)]
@@ -740,3 +762,7 @@ fn verify_executable(path: &Path, uid: u32, gid: u32) -> Result<()> {
   let _ = (path, uid, gid);
   Ok(())
 }
+
+#[cfg(all(test, unix))]
+#[path = "mod_test.rs"]
+mod tests;

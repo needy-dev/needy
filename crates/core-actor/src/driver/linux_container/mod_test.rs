@@ -47,14 +47,17 @@ impl Engine for Fake {
     Ok(self.images.iter().chain(&pulled).find(|(name, _)| name == image).map(|(_, found)| found.clone()))
   }
 
-  async fn pull(&self, image: &str) -> Result<(), EngineError> {
+  fn pull_progress(&self, image: &str) -> BoxStream<'static, Result<engine::models::CreateImageInfo, EngineError>> {
     self.record(format!("pull {image}"));
     match self.registry.iter().find(|(name, _)| name == image) {
       Some(found) => {
         self.pulled.lock().unwrap().push(found.clone());
-        Ok(())
+        futures_util::stream::empty().boxed()
       }
-      None => Err(EngineError::NotFound(format!("manifest for {image} not found: manifest unknown"))),
+      None => futures_util::stream::iter([Err(EngineError::NotFound(format!(
+        "manifest for {image} not found: manifest unknown"
+      )))])
+      .boxed(),
     }
   }
 

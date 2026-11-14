@@ -119,6 +119,24 @@ fn service_install_snapshots_settings_without_starting_and_refuses_foreign_defin
   assert_eq!(saved["contexts"].as_mapping().unwrap().len(), 0);
   assert_eq!(registration["path"].as_str().unwrap(), bin.to_str().unwrap());
   let definition = Path::new(registration["definition"].as_str().unwrap());
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let manager = if cfg!(target_os = "macos") {
+    "launchd"
+  } else {
+    "systemd"
+  };
+  assert!(stdout.contains(&format!("Detected service manager: {manager} (user scope)")), "{stdout}");
+  assert!(stdout.contains(&format!("Writing configuration snapshot: {}", snapshot.display())), "{stdout}");
+  assert!(stdout.contains(&format!("Writing service definition: {}", definition.display())), "{stdout}");
+  assert!(stdout.contains(&format!("Writing service registration: {}", receipt.display())), "{stdout}");
+  if cfg!(target_os = "macos") {
+    let uid = registration["uid"].as_u64().unwrap();
+    assert!(stdout.contains(&format!("Check status: launchctl print gui/{uid}/dev.needy.control")), "{stdout}");
+    assert!(stdout.contains("View logs: tail -n 100 -f "), "{stdout}");
+  } else {
+    assert!(stdout.contains("Check status: systemctl --user status needy.service"), "{stdout}");
+    assert!(stdout.contains("View logs: journalctl --user '--unit=needy.service' --no-pager --lines 100 --follow"), "{stdout}");
+  }
   std::fs::write(definition, "foreign service definition\n").unwrap();
   let replaced = home.command().env("PATH", &bin).args(["daemon", "service", "install", "--replace"]).output().unwrap();
   assert!(!replaced.status.success());
@@ -145,7 +163,9 @@ async fn service_readiness_does_not_adopt_a_healthy_manual_daemon() {
       format!(
         "#!/bin/sh\ncase \"$2\" in gui/*/dev.needy.control) printf 'path = %s\\nprogram = %s\\n' '{}' '{}'; exit 0;; esac\nif [ -e '{}' ]; then printf '1 - dev.needy.control\\n'; fi\n",
         home.path().join("Library/LaunchAgents/dev.needy.control.plist").display(),
-        env!("CARGO_BIN_EXE_needy"),
+        // The service records the executable's canonical identity, including
+        // when the isolated Cargo target directory is reached through a symlink.
+        std::fs::canonicalize(env!("CARGO_BIN_EXE_needy")).unwrap().display(),
         marker.display()
       ),
     )
@@ -179,7 +199,7 @@ async fn service_readiness_does_not_adopt_a_healthy_manual_daemon() {
     .unwrap();
   assert!(!started.status.success(), "a healthy manual daemon cannot satisfy managed readiness");
   let diagnostic: serde_json::Value = serde_json::from_slice(&started.stderr).unwrap();
-  assert_eq!(diagnostic["reason"], "connection.timeout");
+  assert_eq!(diagnostic["reason"], "connection.timeout", "{diagnostic:#}");
   assert!(manual.0.try_wait().unwrap().is_none(), "the service command must not signal the manual daemon");
   let record = needy_daemon::discovery::read(&home.path().join("run")).unwrap();
   assert_eq!(record.pid, manual.0.id());
