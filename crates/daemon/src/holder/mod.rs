@@ -100,7 +100,7 @@ impl Client {
     }
     #[cfg(not(test))]
     {
-      let mut command = std::process::Command::new(std::env::current_exe()?);
+      let mut command = std::process::Command::new(&config.holder_executable);
       command.args(["daemon", "holder", "--config-file"]).arg(&launch);
       command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
       // A service manager's control process group and terminal must not own

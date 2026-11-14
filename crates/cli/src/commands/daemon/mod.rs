@@ -6,6 +6,8 @@ mod service;
 pub use runner::{RunnerArgs, join_runner, run_runner};
 
 use crate::cli::Context;
+#[cfg(unix)]
+use anyhow::Context as _;
 use anyhow::Result;
 
 #[derive(clap::Args)]
@@ -148,6 +150,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   }
   let settings = effective.daemon;
   let config = needy_daemon::Config {
+    holder_executable: std::env::current_exe().context("cannot locate the runtime holder executable")?,
     guest_disks: paths.guest_disks(),
     vm_images: paths.images(),
     actor_image: args.actor_image.or(settings.actor_image).unwrap_or_else(|| paths.base_image()),

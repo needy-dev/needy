@@ -104,6 +104,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
   let dir = tempfile::tempdir().unwrap();
   let runtime_dir = dir.path().join("r".repeat(120));
   let config = crate::Config {
+    holder_executable: Default::default(),
     state_dir: dir.path().join("state"),
     runtime_dir: runtime_dir.clone(),
     actor_image: dir.path().join("image"),

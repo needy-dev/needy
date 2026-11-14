@@ -508,3 +508,17 @@ async fn client_execution_capability_is_private_and_cannot_be_reused() {
   let second = Runs::create(daemon, request).await.unwrap_err();
   assert!(second.to_string().contains("capability was used"), "{second}");
 }
+
+// Holder-facing listeners are control resources too. Explicit stop must
+// remove their socket files, while control detach must leave actor resources.
+#[tokio::test]
+async fn explicit_stop_removes_control_backend_sockets() {
+  let started = testing::daemon().await;
+  let run = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let directory = started.dir.path().join("state").join("runs").join(&run.id);
+  assert!(directory.join("cu.sock").exists());
+  assert!(directory.join("cg.sock").exists());
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(!directory.join("cu.sock").exists(), "control guest socket outlived explicit stop");
+  assert!(!directory.join("cg.sock").exists(), "control gateway socket outlived explicit stop");
+}

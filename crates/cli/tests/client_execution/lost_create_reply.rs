@@ -48,6 +48,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
   stand_in_actor(&home);
   let daemon = Arc::new(
     needy_daemon::Daemon::start(needy_daemon::Config {
+      holder_executable: env!("CARGO_BIN_EXE_needy").into(),
       state_dir: home.path().join("state"),
       runtime_dir: home.path().join("runtime"),
       actor_image: home.path().join("image"),

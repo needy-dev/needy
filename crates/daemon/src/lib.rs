@@ -112,6 +112,9 @@ use crate::run::Registry;
 /// Where the control daemon keeps its state and finds its images.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
+  /// Executable that implements the local `daemon holder` entry point.
+  /// The composition layer supplies it; an embedding process need not be the CLI.
+  pub holder_executable: PathBuf,
   /// `state.db`, `trace.db` and the runs' directories.
   pub state_dir: PathBuf,
   /// The local executor's socket.

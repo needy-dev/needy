@@ -82,6 +82,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
   let guest = dir.path().join("needy-linux");
   fake_guest(&guest);
   let mut config = Config {
+    holder_executable: Default::default(),
     state_dir: dir.path().join("state"),
     runtime_dir: dir.path().join("run"),
     actor_image: dir.path().join("image"),

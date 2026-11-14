@@ -466,8 +466,8 @@ pub(crate) fn serve_gateway(run: &Run, _channels: &Channels, actor: &Cancellatio
 }
 
 /// Removes the sockets of an actor of kind `kind` from the run's directory
-/// `dir`: those its channels leave there (the vsock device's and the host
-/// ports' the guest connects to, under Firecracker).
+/// `dir`: the driver's channels and the control backends behind the holder.
+/// Only a completed invocation removes these; control suspend preserves them.
 pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir: &Path) {
   let driver = match driver_for(daemon, actor) {
     Ok(driver) => driver,
@@ -477,7 +477,7 @@ pub fn remove_sockets(daemon: &Daemon, actor: &needy_config::profile::Actor, dir
       return;
     }
   };
-  for path in driver.channels(dir).sockets {
+  for path in driver.channels(dir).sockets.into_iter().chain([dir.join("cu.sock"), dir.join("cg.sock")]) {
     if let Err(e) = std::fs::remove_file(&path)
       && e.kind() != std::io::ErrorKind::NotFound
     {
