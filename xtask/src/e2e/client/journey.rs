@@ -101,13 +101,16 @@ pub fn run(env: &mut CellEnv, cell: &Cell, at: ClientAt, checks: &mut Checks) ->
     let out = env.needy(&["run", "stop", &ids[0]], env.ctx.timeout)?;
     ensure!(out.ok(), "first stop failed: {}", out.brief());
     runs::wait_end(env, &ids[0], env.ctx.timeout)?;
+    // The first invocation is already stopped. Keep only still-owned runs
+    // in cleanup; stop does not promise idempotence for historical IDs.
+    ids.remove(0);
     client.wait_holders(1)?;
     checks.check("stopping the first invocation releases only its holder", true, "one client execution holder remains");
     let out = env.needy(
       &[
         "run",
         "exec",
-        &ids[1],
+        &ids[0],
         "--",
         "python3",
         "-c",
