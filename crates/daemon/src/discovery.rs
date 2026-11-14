@@ -101,9 +101,19 @@ impl Publisher {
     needy_api_server::create_private_dir(runtime)?;
     check_directory(runtime)?;
     let lock = private_file(&runtime.join("control.lock"), true)?;
-    lock
-      .try_lock()
-      .map_err(|error| Error::new("discovery.instance_conflict", "Another control daemon owns this runtime directory", error))?;
+    // A restart can reach here while the previous instance's release is
+    // still in flight; only a live owner keeps the lock past a brief wait.
+    for attempt in 0..50 {
+      match lock.try_lock() {
+        Ok(()) => break,
+        Err(std::fs::TryLockError::WouldBlock) if attempt < 49 => {
+          std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Err(error) => {
+          return Err(Error::new("discovery.instance_conflict", "Another control daemon owns this runtime directory", error).into());
+        }
+      }
+    }
     Ok(Self {
       runtime: runtime.to_path_buf(),
       instance: instance.to_string(),
