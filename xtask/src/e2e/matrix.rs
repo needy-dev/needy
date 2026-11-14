@@ -163,9 +163,9 @@ pub enum End {
   Stop,
   /// `needy run stop --now`, when this needy has it.
   StopNow,
-  /// The control daemon is killed with SIGKILL and started again on the
-  /// same state: the restarted control plane reconciles the run.
-  DaemonKill,
+  /// The actual actor VM/container is forcibly ended while control remains
+  /// available; control loss belongs to the lifecycle continuity journey.
+  RuntimeKill,
 }
 
 impl End {
@@ -174,7 +174,7 @@ impl End {
       End::Exit => "exit",
       End::Stop => "stop",
       End::StopNow => "stop-now",
-      End::DaemonKill => "daemon-kill",
+      End::RuntimeKill => "runtime-kill",
     }
   }
 }
@@ -302,6 +302,22 @@ pub enum ClientAt {
   Remote,
 }
 
+/// The real resource and process lifetime boundaries, independent of a viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+  Continuity,
+  ActorLoss,
+}
+
+impl Lifecycle {
+  fn name(self) -> &'static str {
+    match self {
+      Self::Continuity => "continuity",
+      Self::ActorLoss => "actor-loss",
+    }
+  }
+}
+
 /// What a cell exercises. Each scenario fixes the dimensions it does not
 /// vary itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -313,6 +329,8 @@ pub enum Scenario {
   Runner(RunnerAt),
   /// Public CLI creation supplies a same-account native execution holder.
   ClientExecution(ClientAt),
+  /// The original driving program across viewer/control loss, or actual runtime loss.
+  Lifecycle(Lifecycle),
   /// Copy-in from the host into the actor, nested and single-level; mirror-out
   /// from the actor with and without a filter.
   ActorFiles,
@@ -384,6 +402,7 @@ impl Cell {
     let driver = self.driver.name();
     let executor = self.executor.map(Executor::name).unwrap_or("none");
     match self.scenario {
+      Scenario::Lifecycle(journey) => format!("{driver}/lifecycle/{}", journey.name()),
       Scenario::ActorFiles => format!("{driver}/actor-files/end={}", self.end.name()),
       Scenario::ExecutorFiles => format!("{driver}/executor-files/executor={executor},end={}", self.end.name()),
       Scenario::Workspace(Workspace::Executor(e)) => format!("{driver}/workspace/from=executor-{}", e.name()),
@@ -500,14 +519,14 @@ pub fn cells() -> Vec<Cell> {
   ];
   for driver in Driver::ACTORS {
     let cell = |scenario| Cell::new(driver, scenario);
-    for end in [End::Exit, End::Stop, End::StopNow, End::DaemonKill] {
+    for end in [End::Exit, End::Stop, End::StopNow, End::RuntimeKill] {
       cells.push(Cell {
         end,
         ..cell(Scenario::ActorFiles)
       });
     }
     for executor in [Executor::Native, Executor::Container] {
-      for end in [End::Exit, End::Stop, End::DaemonKill] {
+      for end in [End::Exit, End::Stop, End::RuntimeKill] {
         cells.push(Cell {
           end,
           executor: Some(executor),
@@ -576,6 +595,18 @@ pub fn cells() -> Vec<Cell> {
         ..cell(Scenario::ClientExecution(at))
       });
     }
+    // NOTICE: lifecycle acceptance starts with the authorized Linux
+    // Firecracker/runc hosts. Add macOS/runsc cells with their real resource
+    // identity/loss probes when those acceptance hosts are scheduled.
+    if matches!(driver, Driver::Firecracker | Driver::Container(Oci::Runc)) {
+      for journey in [Lifecycle::Continuity, Lifecycle::ActorLoss] {
+        cells.push(Cell {
+          terminal: Terminal::Later,
+          end: End::Stop,
+          ..cell(Scenario::Lifecycle(journey))
+        });
+      }
+    }
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -609,6 +640,22 @@ mod tests {
   use super::*;
 
   #[test]
+  fn real_actor_lifecycle_cells_cover_restart_and_loss_on_linux() {
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["lifecycle".into()], &[])).collect();
+    assert_eq!(mine.len(), 4, "Firecracker and runc each need continuity and actual-loss acceptance");
+    for driver in ["linux-firecracker", "linux-container.runc"] {
+      for journey in ["continuity", "actor-loss"] {
+        let expected = format!("{driver}/lifecycle/{journey}");
+        let cell = mine.iter().find(|cell| cell.id() == expected).unwrap_or_else(|| panic!("missing {expected}"));
+        assert_eq!(cell.platform(), Some(Platform::Linux));
+        assert_eq!(cell.terminal, Terminal::Later);
+        assert_eq!(cell.executor, Some(Executor::Native));
+        assert!(!cell.root, "lifecycle acceptance must use a non-root daemon");
+      }
+    }
+  }
+
+  #[test]
   fn client_execution_is_selectable_without_enabling_runner_or_restart_cells() {
     let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["client-execution".into()], &[])).collect();
     assert_eq!(mine.len(), Driver::ACTORS.len() * 2);
@@ -639,7 +686,7 @@ mod tests {
     let cells = cells();
     for driver in Driver::ACTORS {
       let mine: Vec<&Cell> = cells.iter().filter(|c| c.driver == driver).collect();
-      for end in [End::Exit, End::Stop, End::StopNow, End::DaemonKill] {
+      for end in [End::Exit, End::Stop, End::StopNow, End::RuntimeKill] {
         assert!(mine.iter().any(|c| c.end == end), "{} lacks end {}", driver.name(), end.name());
       }
       for terminal in [Terminal::None, Terminal::Later, Terminal::Now] {

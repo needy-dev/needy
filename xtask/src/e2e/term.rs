@@ -126,6 +126,13 @@ impl Term {
     self.writer.flush().context("cannot write to the terminal")
   }
 
+  /// Terminates this viewer process, as a CLI crash would. The actor and
+  /// its driving program are outside this pseudo-terminal's child lifetime.
+  pub fn kill(&mut self) -> Result<()> {
+    anyhow::ensure!(self.child.try_wait()?.is_none(), "the viewer exited before the requested termination");
+    self.child.kill().context("cannot terminate the viewer")
+  }
+
   /// Waits for the program to exit and returns its exit code; kills it
   /// after `timeout`.
   pub fn wait(&mut self, timeout: Duration) -> Result<u32> {

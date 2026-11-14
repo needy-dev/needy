@@ -25,6 +25,8 @@ mod host;
 #[cfg(unix)]
 mod invariants;
 #[cfg(unix)]
+mod lifecycle;
+#[cfg(unix)]
 mod matrix;
 #[cfg(unix)]
 mod proc;

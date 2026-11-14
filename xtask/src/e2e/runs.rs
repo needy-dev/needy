@@ -180,9 +180,8 @@ pub fn end_run(env: &mut CellEnv, id: &str, end: End, checks: &mut Checks, timeo
       let out = env.needy(&args, timeout)?;
       checks.check(format!("`needy {}` succeeds", args.join(" ")), out.ok(), out.brief());
     }
-    End::DaemonKill => {
-      env.kill_daemon()?;
-      env.start_daemon()?;
+    End::RuntimeKill => {
+      super::lifecycle::kill_actor(env, id)?;
     }
   }
   let row = wait_end(env, id, timeout)?;
@@ -201,11 +200,11 @@ pub fn check_ended(checks: &mut Checks, end: End, row: &Value, exit: i64) {
     End::Stop | End::StopNow => {
       checks.eq("run ls: state", "stopped", state(row));
     }
-    End::DaemonKill => {
-      checks.eq("run ls after restart: state", "failed", state(row));
+    End::RuntimeKill => {
+      checks.eq("run ls after actual runtime loss: state", "failed", state(row));
       checks.check(
-        "run ls after restart: the failure names the restart",
-        row["failure"].as_str().is_some_and(|f| f.contains("restart")),
+        "run ls after actual runtime loss: the failure identifies actor loss",
+        row["failure"].as_str().is_some_and(|f| f.contains("actor")),
         row["failure"].to_string(),
       );
     }
