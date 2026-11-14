@@ -134,7 +134,8 @@ do not imply that history can restore a lost process.
 ### Executor failure contract
 
 - Wait only before dispatch while the selected executor is disconnected,
-  using a bounded configurable deadline. No command may execute late after
+  using the executor unavailable_timeout setting (10 seconds by default).
+  No command may execute late after
   returning a confirmed-not-started result.
 - Confirmed not dispatched at deadline: proxy exits 125 and identifies the
   logical executor, unavailability, and that the command was not started.

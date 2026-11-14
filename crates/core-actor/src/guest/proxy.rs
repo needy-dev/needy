@@ -263,8 +263,8 @@ fn command(path: &str, args: &[String]) -> Vec<String> {
 }
 
 /// The exit code for a start the daemon refused, like `needy exec`'s and a
-/// shell's: 126 when a rule or an injected fault refuses the command, 127
-/// when it cannot start. Other errors are the proxy's own.
+/// shell's: 126 for a policy refusal, 127 for a program start failure, 125
+/// for confirmed no-start, and 255 for an uncertain transport outcome.
 fn refused(error: &needy_api_client::Error) -> Option<i32> {
   if error.not_started() {
     return Some(125);

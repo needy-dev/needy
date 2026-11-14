@@ -600,3 +600,20 @@ async fn a_silent_process_ends_when_its_client_leaves_the_daemon_without_detachi
   }
   Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await.unwrap();
 }
+
+// A private execution capability must not become a shared runner merely
+// because a caller learned its transport name.
+#[tokio::test]
+async fn a_client_holder_cannot_be_selected_as_a_standalone_runner() {
+  let started = testing::daemon().await;
+  let reserved = Runs::prepare_client_execution(&started.daemon, Default::default()).await.unwrap();
+  let mut command = spec(&["true"], "", "");
+  command.runner = reserved.holder.clone();
+  let error = match started.daemon.exec(ExecOpen::Start(command), attached()).await {
+    Ok(_) => panic!("private holder accepted standalone work"),
+    Err(error) => error,
+  };
+  assert!(error.to_string().contains("only through their bound run"), "{error}");
+  let error = Processes::list(&started.daemon, "", &reserved.holder).await.unwrap_err();
+  assert!(error.to_string().contains("only through their bound run"), "{error}");
+}

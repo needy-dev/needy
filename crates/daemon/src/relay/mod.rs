@@ -166,8 +166,23 @@ impl Daemon {
     }
     match name {
       "" | "local" => Ok(self.local.clone()),
-      name => self.pool.named(name).await,
+      name => {
+        let instance = self.pool.named(name).await?;
+        if let Some(runner) = instance.on_runner() {
+          self.require_shared_runner(runner).await?;
+        }
+        Ok(instance)
+      }
     }
+  }
+
+  /// Private client holders are selected by their invocation's binding,
+  /// never by a transport name supplied to a standalone command.
+  async fn require_shared_runner(&self, runner: &str) -> Result<(), ControlError> {
+    if self.state.client_execution(runner).await.map_err(|error| crate::runners::control_error(error, false))?.is_some() {
+      return Err(ControlError::Invalid("client execution holders are available only through their bound run".into()));
+    }
+    Ok(())
   }
 
   /// A connected runner's machine. A runner that is online (`runner ls`)
@@ -176,6 +191,7 @@ impl Daemon {
   /// within which an online runner dials; any other that is not connected
   /// fails at once.
   async fn runner_instance(&self, runner: &str) -> Result<Arc<Instance>, ControlError> {
+    self.require_shared_runner(runner).await?;
     if self.links.get(runner).is_none()
       && !(self.runner_online(runner).await && self.links.connected(runner, self.config.heartbeat_interval).await.is_some())
     {
@@ -488,7 +504,11 @@ impl Processes for Daemon {
         Err(_) => {
           let mut all = vec![self.local.clone()];
           all.extend(self.pool.instances().await);
-          all.extend(self.links.names().iter().map(|runner| Instance::runner(runner, &self.links)));
+          for runner in self.links.names() {
+            if self.state.client_execution(&runner).await.map_err(|error| crate::runners::control_error(error, false))?.is_none() {
+              all.push(Instance::runner(&runner, &self.links));
+            }
+          }
           all
         }
       }
