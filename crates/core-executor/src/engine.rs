@@ -106,7 +106,13 @@ pub trait Engine: Send + Sync {
   /// What `image` records, or `None` when the engine does not have it.
   async fn inspect_image(&self, image: &str) -> Result<Option<Image>, Error>;
   /// Pulls `image`; a bare name means its `latest` tag.
-  async fn pull(&self, image: &str) -> Result<(), Error>;
+  async fn pull(&self, image: &str) -> Result<(), Error> {
+    self.pull_progress(image).try_for_each(|_| async { Ok(()) }).await
+  }
+  /// Pulls `image`, yielding the engine's layer/status updates as they arrive.
+  /// Consume the stream to its end to finish the pull and observe any error.
+  /// Callers without a progress display use [`Self::pull`] instead.
+  fn pull_progress(&self, image: &str) -> BoxStream<'static, Result<models::CreateImageInfo, Error>>;
   /// Creates the container `name`; [`Error::NotFound`] when its image is
   /// not here.
   async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), Error>;
@@ -190,8 +196,8 @@ impl Engine for Unreachable {
     Err(self.error())
   }
 
-  async fn pull(&self, _image: &str) -> Result<(), Error> {
-    Err(self.error())
+  fn pull_progress(&self, _image: &str) -> BoxStream<'static, Result<models::CreateImageInfo, Error>> {
+    futures_util::stream::iter([Err(self.error())]).boxed()
   }
 
   async fn create(&self, _name: &str, _body: ContainerCreateBody) -> Result<(), Error> {
@@ -248,10 +254,9 @@ impl Engine for Docker {
     }
   }
 
-  async fn pull(&self, image: &str) -> Result<(), Error> {
+  fn pull_progress(&self, image: &str) -> BoxStream<'static, Result<models::CreateImageInfo, Error>> {
     let options = CreateImageOptionsBuilder::default().from_image(&with_tag(image)).build();
-    self.0.create_image(Some(options), None, None).try_collect::<Vec<_>>().await?;
-    Ok(())
+    self.0.create_image(Some(options), None, None).map_err(Error::from).boxed()
   }
 
   async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), Error> {

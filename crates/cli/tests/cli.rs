@@ -2031,7 +2031,7 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
   let socket = home.path().join("run").join("daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
   // Wait for discovery publication as well as socket admission.
-  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
     assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
@@ -2218,12 +2218,116 @@ fn exec_on_a_terminal_forwards_colorterm_and_replaces_an_unknown_term() {
 
 // ------------------------------------------------------------- runners
 
-/// `needy runner token create` with `args`: the token it printed.
+/// `needy runner invite` with `args`: the token it printed.
 fn create_join_token(home: &Home, args: &[&str]) -> String {
   let output = home.needy().args(["runner", "invite", "-o", "json"]).args(args).output().unwrap();
   assert!(output.status.success(), "token create: {}", stderr(&output));
   let issued: serde_json::Value = serde_json::from_str(&stdout(&output)).unwrap();
   issued["code"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn runner_invitation_explains_joining_with_aligned_metadata() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let output = home.run(&["runner", "invite", "--ttl", "1h", "--roles", "executor"]);
+  let text = stdout(&output);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert!(text.contains("On the runner machine, run:"), "{text}");
+  assert!(text.contains("needy --address <control-address> runner join <runner-name> --roles executor"), "{text}");
+  assert!(text.contains("Joining token (shown once):"), "{text}");
+  assert!(text.contains("  Roles:      executor\n"), "{text}");
+  assert!(text.contains("  Expires:    "), "{text}");
+  assert!(text.contains("--code-file -"), "{text}");
+  assert!(text.contains("-o json"), "{text}");
+}
+
+#[test]
+fn runner_invitation_can_be_piped_to_join_and_reports_the_next_steps() {
+  use std::io::Write as _;
+
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let code = create_join_token(&control, &["--roles", "executor"]);
+  let runner = Home::new();
+  let address = format!("unix:{}", control.path().join("run/daemon.sock").display());
+  let mut joining = runner
+    .needy()
+    .args([
+      "--address",
+      &address,
+      "runner",
+      "join",
+      "example-runner",
+      "--roles",
+      "executor",
+      "--code-file",
+      "-",
+    ])
+    .env("DOCKER_HOST", format!("unix://{}", runner.path().join("no-docker.sock").display()))
+    .env("PATH", path_without_apple_container())
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+  joining.stdin.take().unwrap().write_all(format!("{code}\n").as_bytes()).unwrap();
+  let output = joining.wait_with_output().unwrap();
+  let text = stdout(&output);
+
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert!(text.contains("Joined successfully. Enrollment saved."), "{text}");
+  assert!(text.contains("example-runner"), "{text}");
+  assert!(text.contains(&address), "{text}");
+  assert!(text.contains("executor(native)"), "{text}");
+  assert!(text.contains("needy runner serve"), "{text}");
+  assert!(text.contains("On the control host"), "{text}");
+  assert!(text.contains("needy runner ls"), "{text}");
+  assert!(!text.contains(&code), "joining must not echo the invitation");
+  let style = anstyle::AnsiColor::Green.on_default().to_string();
+  assert!(!text.contains(&style), "piped output must not contain terminal colors");
+  assert!(!stderr(&output).contains("Joining token:"), "stdin input must not open an interactive prompt");
+  assert!(runner.path().join("state/runner.json").exists());
+}
+
+#[test]
+fn runner_join_highlights_success_on_a_terminal() {
+  use std::os::unix::fs::PermissionsExt as _;
+
+  let control = Home::new();
+  let _daemon = Daemon::start(&control);
+  let code = create_join_token(&control, &["--roles", "executor"]);
+  let runner = Home::new();
+  let file = runner.write("joining-token", &code);
+  std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+  let address = format!("unix:{}", control.path().join("run/daemon.sock").display());
+  let (status, bytes) = on_terminal(
+    &runner,
+    &[
+      "--address",
+      &address,
+      "runner",
+      "join",
+      "example-runner",
+      "--roles",
+      "executor",
+      "--code-file",
+      file.to_str().unwrap(),
+    ],
+    (40, 120),
+  );
+  let text = String::from_utf8_lossy(&bytes);
+  let style = anstyle::AnsiColor::Green.on_default();
+  let styled = format!("{style}Joined successfully. Enrollment saved.{style:#}");
+
+  assert_eq!(status, Some(0), "{text}");
+  if std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()) {
+    assert!(text.contains(&styled), "{text}");
+  } else {
+    assert!(!text.contains(&styled), "{text}");
+  }
+  assert!(!text.contains(&code), "success must not echo the invitation");
 }
 
 #[test]
@@ -2247,8 +2351,8 @@ fn runner_token_create_prints_the_token_once_and_ls_lists_it_without_the_secret(
   let table = home.run(&["runner", "token", "ls"]);
   let json = home.run(&["runner", "token", "ls", "-o", "json"]);
 
-  let id = token.split('.').nth(1).unwrap();
-  assert!(token.starts_with("needy-join."), "{token}");
+  let id = token.split('.').next().unwrap();
+  assert!(!token.starts_with("needy-"), "{token}");
   assert!(!stdout(&json).contains(&token));
   let table = stdout(&table);
   let lines: Vec<&str> = table.lines().collect();
@@ -2269,7 +2373,7 @@ fn runner_token_revoke_shows_it_revoked() {
   let home = Home::new();
   let _daemon = Daemon::start(&home);
   let token = create_join_token(&home, &[]);
-  let id = token.split('.').nth(1).unwrap();
+  let id = token.split('.').next().unwrap();
 
   let revoked = home.run(&["runner", "token", "revoke", id]);
   let listed = home.run(&["runner", "token", "ls", "-o", "json"]);

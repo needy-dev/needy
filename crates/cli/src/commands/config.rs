@@ -52,7 +52,8 @@ enum Command {
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Select an existing saved connection or built-in local, without a server.
+  /// Select a saved connection or `local`, the built-in target for this machine's daemon.
+  /// No server connection is required to save the selection.
   Use { name: String },
   /// Manage saved transports and identities.
   Context {

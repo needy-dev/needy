@@ -4,6 +4,16 @@ use needy_core::types::RunnerRole;
 use super::*;
 
 #[test]
+fn joining_guidance_names_the_control_host_command_and_script_inputs() {
+  let text = joining_guidance(Some(&[RunnerRole::Executor]));
+
+  assert!(text.contains("run on the control host:"), "{text}");
+  assert!(text.contains("needy runner invite --ttl 1h --roles executor"), "{text}");
+  assert!(text.contains("--code-file FILE"), "{text}");
+  assert!(text.contains("--code-file -"), "{text}");
+}
+
+#[test]
 fn roles_statuses_and_token_states_are_read_from_the_wire() {
   assert_eq!(role(v1::RunnerRole::Actor as i32).unwrap(), RunnerRole::Actor);
   assert_eq!(role(v1::RunnerRole::Executor as i32).unwrap(), RunnerRole::Executor);

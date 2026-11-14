@@ -2191,6 +2191,7 @@ dependencies = [
 name = "needy-cli"
 version = "0.0.4"
 dependencies = [
+ "anstyle",
  "anyhow",
  "base64 0.22.1",
  "bollard",

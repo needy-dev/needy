@@ -51,6 +51,7 @@ async fn an_unreachable_engine_fails_every_use_and_the_probe_with_the_reason() {
   let engine: Arc<dyn Engine> = Arc::new(Unreachable("socket missing".into()));
 
   assert_eq!(engine.remove("c").await.unwrap_err().to_string(), "no Docker-compatible engine answers: socket missing");
+  assert_eq!(engine.pull("image").await.unwrap_err().to_string(), "no Docker-compatible engine answers: socket missing");
   assert_eq!(detect(engine).await, Err("no Docker-compatible engine answers: socket missing".into()));
 }
 

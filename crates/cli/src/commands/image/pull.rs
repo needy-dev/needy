@@ -23,6 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+use futures_util::TryStreamExt as _;
 use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core_actor::image::manifest::{self, Manifest};
 use needy_core_actor::image::{base, container, vm};
@@ -414,7 +415,7 @@ async fn pull_engine(version: &str) -> Result<()> {
   let actor = release_image("needy-actor", version);
   let mut failures = Vec::new();
   output::message(format_args!("image pull: pulling {actor}"));
-  match engine.pull(&actor).await {
+  match pull_container(engine.as_ref(), &actor).await {
     Ok(()) => match engine.inspect_image(&actor).await? {
       Some(image) => match base::check(
         &actor,
@@ -442,7 +443,7 @@ async fn pull_engine(version: &str) -> Result<()> {
 async fn pull_executor(engine: &std::sync::Arc<dyn needy_core_executor::engine::Engine>, version: &str) -> Result<()> {
   let executor = release_image("needy-executor", version);
   output::message(format_args!("image pull: pulling {executor}"));
-  match engine.pull(&executor).await {
+  match pull_container(engine.as_ref(), &executor).await {
     Ok(()) => {
       output::message(format_args!("image pull: linux-container executors: {executor}"));
       Ok(())
@@ -453,6 +454,33 @@ async fn pull_executor(engine: &std::sync::Arc<dyn needy_core_executor::engine::
       needy_core_executor::driver::linux_container::BUILT_IMAGE
     )),
   }
+}
+
+/// Displays the engine's progress on stderr while pulling, including cached
+/// layers and extraction. A stream error still fails the pull.
+async fn pull_container(engine: &dyn needy_core_executor::engine::Engine, image: &str) -> Result<(), needy_core_executor::engine::Error> {
+  let mut progress = engine.pull_progress(image);
+  while let Some(update) = progress.try_next().await? {
+    let mut parts = Vec::new();
+    if let Some(id) = update.id {
+      parts.push(format!("{id}:"));
+    }
+    if let Some(status) = update.status {
+      parts.push(status);
+    }
+    if let Some(detail) = update.progress_detail
+      && let Some(current) = detail.current
+    {
+      parts.push(match detail.total {
+        Some(total) if total > 0 => format!("{current}/{total} bytes"),
+        _ => format!("{current} bytes"),
+      });
+    }
+    if !parts.is_empty() {
+      output::message(format_args!("image pull: {}", parts.join(" ")));
+    }
+  }
+  Ok(())
 }
 
 /// Pulls the container actor base of release `version` into Apple's

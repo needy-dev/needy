@@ -231,6 +231,24 @@ Local commands discover the private management socket. No client pairing or
 bearer is required on the control host. A saved remote context does not change
 service operations.
 
+`local` is the built-in default context, not an entry you create or pair.
+`needy config use local` selects this machine's management discovery again.
+An additional TCP listener does not change what `local` means.
+
+Service installation reports the manager, scope, runtime account, generated
+files, and native status/log commands. On Linux the default user service is
+`~/.config/systemd/user/needy.service`, managed with
+`systemctl --user status needy.service`. This stays a user service when the
+installing account is root. The installation snapshots the daemon settings;
+it also writes `services/user/registration.json` under the configuration directory.
+
+System services use `--scope system --run-as USER`, require installation by
+root, and write `/etc/systemd/system/needy.service` on Linux. `USER` is the
+daemon's runtime account; it can be a non-root account. The selected account
+still needs access to the binary, images, KVM device, or container engine it uses.
+The [service installation reference](docs/ai/references/cli/2026-11-14-installation-feedback-evidence.md)
+lists the scope and permission boundaries.
+
 For remote runners or clients, configure an additional listener before installation:
 
 ```sh
@@ -370,6 +388,12 @@ Arguments after `--` in `run create` are appended to the profile's
 
 Client pairing lets a Mac control runs. Runner enrollment lets it execute
 commands. A Mac can hold both roles, but each role needs its own credential.
+`needy runner invite --roles executor` prints joining instructions and a token.
+Use `-o json` for machine-readable output; `.code` is the token.
+`runner join NAME --code-file FILE` reads a private token file; `--code-file -`
+reads a token piped to stdin. A successful join saves enrollment, then
+`needy runner serve` keeps the runner connected. See the
+[invitation and status examples](docs/ai/references/cli/2026-11-14-installation-feedback-evidence.md#runner-onboarding).
 The [Linux-to-Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md)
 starts runs from Linux and does not require client pairing.
 

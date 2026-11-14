@@ -3,6 +3,7 @@
 
 mod table;
 
+use std::io::IsTerminal as _;
 use std::io::Write as _;
 
 use anyhow::Result;
@@ -32,6 +33,18 @@ pub(crate) use {out, outln};
 /// never with `print!`, which panics when the reader is gone.
 pub fn write(args: std::fmt::Arguments) -> std::io::Result<()> {
   std::io::stdout().lock().write_fmt(args)
+}
+
+/// A successful interactive step. Redirected output stays plain text, and
+/// `NO_COLOR` has the same meaning as for rendered run reports.
+pub fn success(message: &str) -> std::io::Result<()> {
+  let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+  let style = if color {
+    anstyle::AnsiColor::Green.on_default()
+  } else {
+    anstyle::Style::new()
+  };
+  outln!("{style}{message}{style:#}")
 }
 
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]

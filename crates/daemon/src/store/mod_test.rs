@@ -71,13 +71,32 @@ async fn a_join_token_is_listed_without_its_secret_and_stored_hashed() {
 
   let (created, token) = store.create_join_token(any_scope(2), NOW).await.unwrap();
 
-  assert!(token.expose().starts_with(&format!("needy-join.{}.", created.id)), "{}", token.expose());
+  assert!(token.expose().starts_with(&format!("{}.", created.id)), "{}", token.expose());
+  assert_eq!(token.expose().split('.').count(), 2);
+  assert_eq!(token.expose().rsplit('.').next().unwrap().len(), 64, "keep the existing 256 random bits");
   assert_eq!(created.expires_ms, NOW + HOUR_MS);
   assert_eq!(created.uses_left, 2);
   assert_eq!(store.join_tokens().await.unwrap(), [created]);
   let secret = token.expose().rsplit('.').next().unwrap();
   let database = std::fs::read(dir.path().join("state.db")).unwrap();
   assert!(!database.windows(secret.len()).any(|w| w == secret.as_bytes()), "the secret is not stored in plain text");
+}
+
+// v0.0.4 issued prefixed invitations. Reading that public format must keep
+// the original hash and usage checks while new invitations omit the prefix.
+#[tokio::test]
+async fn an_invitation_issued_by_v0_0_4_still_joins_and_spends_its_use() {
+  let (store, _dir) = store().await;
+  let (created, token) = store.create_join_token(any_scope(1), NOW).await.unwrap();
+  let legacy = format!("needy-join.{}", token.expose());
+  let mut row = join_token::Entity::find_by_id(&created.id).one(&store.db).await.unwrap().unwrap().into_active_model();
+  row.hash = Set(secret::hash(&legacy));
+  row.update(&store.db).await.unwrap();
+
+  let (runner, _) = store.join(&legacy, "example-runner", executor(), NOW).await.unwrap();
+  assert_eq!(runner.name, "example-runner");
+  assert_eq!(store.join_tokens().await.unwrap()[0].uses_left, 0);
+  assert!(matches!(store.join(&legacy, "another-runner", executor(), NOW).await.unwrap_err(), Error::UsedUp(_)));
 }
 
 #[tokio::test]
@@ -136,7 +155,7 @@ async fn a_join_token_with_a_wrong_secret_says_nothing_about_the_token() {
   let (store, _dir) = store().await;
   let (created, _) = store.create_join_token(any_scope(1), NOW).await.unwrap();
   store.revoke_join_token(&created.id, NOW).await.unwrap();
-  let guess = format!("needy-join.{}.{}", created.id, "0".repeat(64));
+  let guess = format!("{}.{}", created.id, "0".repeat(64));
 
   let error = store.join(&guess, "mac", executor(), NOW).await.unwrap_err();
 
