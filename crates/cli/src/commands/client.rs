@@ -133,10 +133,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         OutputFormat::Json => outln!("{}", serde_json::to_string_pretty(&row)?)?,
         OutputFormat::Table => {
           outln!(
-            "ID  {}\nNAME  {}\nACCESS  {}\nEXPIRES  {}\nCODE (shown once)  {}",
+            "Client invitation created.\n\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the client machine, run:\n\n  needy --address <control-address> config context pair control\n\nUse an address reachable from the client, or its local tunnel address.\nPaste the code when prompted. Then select and check the connection:\n\n  needy config use control\n  needy config context check control\n\nInvitation code (shown once):\n\n  {}\n\nFor automation, create an invitation with -o json, extract .code,\nand pipe it to config context pair with --code-file -. A private\n--code-file FILE also works.",
+            "ID",
             created.id,
+            "NAME",
             created.name,
+            "ACCESS",
             if admin { "admin" } else { "runs" },
+            "EXPIRES",
             time(created.expires_at_ms),
             created.code
           )?;

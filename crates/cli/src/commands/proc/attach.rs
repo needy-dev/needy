@@ -46,6 +46,9 @@ pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: Exe
   let read_only = attach.read_only;
   let run = attach.run_id.clone();
   let stream = ExecStream::attach(connection, attach).await?;
+  // TODO(viewer-reconnect): transport loss currently returns to the caller.
+  // Automatic recovery needs a separate attachment-only slice: preserve the
+  // existing run/process, never retry Start or replay previously sent input.
   let options = relay::Options {
     tty,
     stdin: true,

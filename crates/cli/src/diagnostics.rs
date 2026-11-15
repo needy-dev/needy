@@ -247,7 +247,7 @@ pub fn render_in(error: &anyhow::Error, format: Format, context: Option<&crate::
       Err(_) => eprintln!("{{\"version\":1,\"reason\":\"internal.render_failed\",\"summary\":\"Cannot render diagnostic\"}}"),
     },
     Format::Human => {
-      eprintln!("needy: {} [{}]", diagnostic.summary, diagnostic.reason);
+      crate::output::error(format_args!("{} [{}]", diagnostic.summary, diagnostic.reason));
       for (key, value) in &diagnostic.facts {
         eprintln!("  {key}: {value}");
       }

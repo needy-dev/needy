@@ -60,10 +60,13 @@ async fn direct_context_check_reports_standalone_executor_without_control_identi
   assert!(result.status.success(), "{}{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
   let rows: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
   assert_eq!(rows[0]["name"], "direct");
-  let finding = rows[0]["finding"].as_str().unwrap();
-  assert!(finding.contains("role=executor"), "{finding}");
-  assert!(finding.contains("instance=standalone-instance"), "{finding}");
-  assert!(finding.contains("unknown: caller inspection unavailable for executor"), "{finding}");
+  assert_eq!(rows[0]["role"], "executor");
+  assert_eq!(rows[0]["instance"], "standalone-instance");
+  assert_eq!(rows[0]["status"], "ok");
+  assert!(rows[0]["client"].is_null());
+  assert!(rows[0]["client_id"].is_null());
+  assert!(rows[0]["access"].is_null());
+  assert!(rows[0]["error"].is_null());
   assert!(!home.path().join("config/config.yaml").exists());
 }
 
