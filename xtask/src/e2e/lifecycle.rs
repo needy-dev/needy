@@ -73,7 +73,9 @@ pub fn run(env: &mut CellEnv, cell: &Cell, journey: Lifecycle, checks: &mut Chec
   runs::wait_actor(env, &id, &["ready"], BOOT)?;
   let mut term = env.term(&["run", "attach", &id])?;
   term.expect("LIFECYCLE> ", STEP)?;
-  let console = runs::wait_marker(env, &id, "LIFECYCLE> ")?;
+  // Console logs retain complete lines; the prompt above is intentionally
+  // unterminated. Read the PID from the newline-terminated startup marker.
+  let console = runs::wait_marker(env, &id, "E2E lifecycle-boot=")?;
   let pid = console.value("lifecycle-boot").context("the driving program printed no PID")?.parse::<u32>()?;
   let original = resource(env, &id)?;
   term.send("remember\r")?;
