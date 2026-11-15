@@ -380,6 +380,8 @@ Use this root-cause block format in regression tests when relevant:
 
 Repository skills live in `.agents/skills/`; `.claude/skills` links to it.
 Use `use-buf` and `use-buf-plugins` when changing `proto/` or Buf configuration.
+Use `create-pr` when preparing or updating PRs, or auditing specified revisions
+for caller-visible changes.
 
 ## Build and Test
 
