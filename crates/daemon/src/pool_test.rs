@@ -56,16 +56,39 @@ async fn an_executor_name_with_instances_under_two_keys_is_ambiguous() {
   assert!(Arc::ptr_eq(&pool.named("here").await.unwrap(), &b));
 }
 
+/// Exercises the pool's resolved policy through the real process service.
+async fn start(instance: &Instance, argv: &[&str]) -> needy_api_client::Result<needy_api_client::exec::ExecStream> {
+  let start = needy_api_client::proto::v1::ExecStart {
+    argv: argv.iter().map(|s| s.to_string()).collect(),
+    detach: true,
+    ..Default::default()
+  };
+  match instance.capacity() {
+    Some(capacity) => {
+      needy_api_client::exec::ExecStream::start_limited(
+        &*instance.handle.executor,
+        needy_api_client::proto::v1::LimitedExecStart {
+          start: Some(start),
+          capacity: Some(capacity),
+        },
+      )
+      .await
+    }
+    None => needy_api_client::exec::ExecStream::start(&*instance.handle.executor, start).await,
+  }
+}
+
 #[tokio::test]
 async fn a_full_instance_rejects_with_on_full_reject() {
   let executor = testing::Executor::start().await;
   let pool = Pool::new(executor.native.clone(), None, Arc::default());
   let instance = pool.acquire(spec("here", "s", Some(1), OnFull::Reject), &Site::ControlHost).await.unwrap();
-  let held = instance.slot().await.unwrap();
-  assert!(held.is_some());
-  assert!(matches!(instance.slot().await, Err(ControlError::Exhausted(_))));
-  drop(held);
-  assert!(instance.slot().await.unwrap().is_some());
+  let first = start(&instance, &["sleep", "300"]).await.unwrap();
+  let error = start(&instance, &["true"]).await.err().expect("the full instance rejects another command");
+  assert_eq!(error.kind(), needy_api_client::Kind::Exhausted);
+  first.input().signal("SIGKILL").await.unwrap();
+  first.run(None).await.unwrap();
+  assert_eq!(start(&instance, &["true"]).await.unwrap().run(None).await.unwrap().exit.code, Some(0));
 }
 
 #[tokio::test]
@@ -73,26 +96,30 @@ async fn a_full_instance_makes_a_command_wait_with_on_full_wait() {
   let executor = testing::Executor::start().await;
   let pool = Pool::new(executor.native.clone(), None, Arc::default());
   let instance = pool.acquire(spec("here", "s", Some(1), OnFull::Wait), &Site::ControlHost).await.unwrap();
-  let held = instance.slot().await.unwrap();
+  let first = start(&instance, &["sleep", "300"]).await.unwrap();
   let waiting = tokio::spawn({
     let instance = instance.clone();
-    async move { instance.slot().await.map(|slot| slot.is_some()) }
+    async move { start(&instance, &["true"]).await }
   });
   tokio::time::sleep(Duration::from_millis(50)).await;
-  assert!(!waiting.is_finished(), "the second command waits for the slot");
-  drop(held);
-  let taken = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
-  assert_eq!(taken, Ok(true));
+  assert!(!waiting.is_finished(), "the second command waits until actual process exit");
+  first.input().signal("SIGKILL").await.unwrap();
+  first.run(None).await.unwrap();
+  let second = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap().unwrap();
+  assert_eq!(second.run(None).await.unwrap().exit.code, Some(0));
 }
 
 #[tokio::test]
-async fn an_instance_without_max_procs_has_no_slots() {
+async fn an_instance_without_max_procs_can_start_two_commands() {
   let executor = testing::Executor::start().await;
   let pool = Pool::new(executor.native.clone(), None, Arc::default());
   let instance = pool.acquire(spec("here", "s", None, OnFull::Reject), &Site::ControlHost).await.unwrap();
-  let first = instance.slot().await.unwrap();
-  let second = instance.slot().await.unwrap();
-  assert!(first.is_none() && second.is_none());
+  let first = start(&instance, &["sleep", "300"]).await.unwrap();
+  let second = start(&instance, &["sleep", "300"]).await.unwrap();
+  first.input().signal("SIGKILL").await.unwrap();
+  second.input().signal("SIGKILL").await.unwrap();
+  assert_eq!(first.run(None).await.unwrap().exit.signal, "SIGKILL");
+  assert_eq!(second.run(None).await.unwrap().exit.signal, "SIGKILL");
 }
 
 // TODO(test): the regression test for an instance whose creation is slow

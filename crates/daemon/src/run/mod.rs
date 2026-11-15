@@ -796,6 +796,27 @@ impl Daemon {
     if stopping {
       self.save_run(run).await;
     }
+    self.complete_stop(run, by, mode, stopping).await
+  }
+
+  /// Completes a stop admitted by an earlier control instance. Its durable
+  /// `stopping` state remains authoritative throughout recovery; this path
+  /// never reopens the invocation to work or attempts a running transition.
+  pub(crate) async fn resume_stop(&self, run: &Arc<Run>) -> Result<Option<ActorStop>, ControlError> {
+    if run.state.get() != RunState::Stopping {
+      return Err(ControlError::Failed(format!("run {} has no accepted stop to resume", run.id)));
+    }
+    self.complete_stop(run, None, StopMode::Now, true).await
+  }
+
+  /// The common completion after fresh stop admission or restored intent.
+  async fn complete_stop(
+    &self,
+    run: &Arc<Run>,
+    by: Option<Principal>,
+    mode: StopMode,
+    stopping: bool,
+  ) -> Result<Option<ActorStop>, ControlError> {
     let actor = if stopping {
       self.end_actor(run, mode).await
     } else {
@@ -812,6 +833,7 @@ impl Daemon {
     }
     self.release_executors(run).await;
     run.emit(&Event::RunStop(RunStop {
+      ended: stopping,
       by,
       actor: actor.clone(),
     }));
@@ -884,7 +906,9 @@ impl Daemon {
       asked.push(executor);
       match instance.on_runner() {
         Some(runner) => self.end_on_runner(&run.id, runner).await,
-        None => self.end_on_control_host(run, instance).await,
+        None => {
+          self.end_on_control_host(&run.id, instance).await;
+        }
       }
     }
     // Closing this private link makes an online holder reconnect and learn
@@ -901,22 +925,25 @@ impl Daemon {
   }
 
   /// Kills the run's processes on an executor of the control host, which
-  /// does not know runs: by listing them and killing each.
-  async fn end_on_control_host(&self, run: &Run, instance: &Instance) {
+  /// does not know runs: by listing them and killing each. Returns whether
+  /// admission closure and every requested process cleanup succeeded.
+  pub(crate) async fn end_on_control_host(&self, run: &str, instance: &Instance) -> bool {
+    let mut completed = true;
     if instance.handle.driver == "native"
-      && let Err(error) = self.holder.end_run(&run.id).await
+      && let Err(error) = self.holder.end_run(run).await
     {
-      tracing::warn!("run {}: cannot close native process admission: {error:#}", run.id);
+      tracing::warn!("run {}: cannot close native process admission: {error:#}", run);
+      completed = false;
     }
     let request = ListProcessesRequest {
-      run_id: run.id.clone(),
+      run_id: run.to_owned(),
       ..Default::default()
     };
     let processes = match instance.handle.executor.list_processes(request).await {
       Ok(list) => list.processes,
       Err(status) => {
-        tracing::warn!("run {}: cannot list its processes on executor {}: {}", run.id, instance.name, status.message());
-        return;
+        tracing::warn!("run {}: cannot list its processes on executor {}: {}", run, instance.name, status.message());
+        return false;
       }
     };
     let mut ended = Vec::new();
@@ -930,11 +957,13 @@ impl Daemon {
       match instance.handle.executor.kill_process(kill).await {
         Ok(()) => ended.push(process.process_id.clone()),
         Err(status) => {
-          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run.id, process.process_id, instance.name, status.message())
+          completed = false;
+          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run, process.process_id, instance.name, status.message())
         }
       }
     }
     self.record_ended(&processes, &ended).await;
+    completed
   }
 
   /// Writes run `run` as it stands now to `state.db`.

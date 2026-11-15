@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 use needy_core::chaos::{FaultState, Injector};
+use needy_core::event::ExecutorRef;
 use needy_core::types::{ActorState, RunState};
 use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
@@ -33,12 +34,59 @@ struct Snapshot {
   faults: Vec<FaultState>,
 }
 
+/// One restored reference graph. Activation is deferred until every open
+/// invocation has restored its pool references, so no watch or pending stop
+/// can release a resource while another survivor is still absent from the pool.
+pub(crate) struct Restored {
+  run: Arc<Run>,
+  runtime: Box<dyn needy_core_actor::driver::Running>,
+  events: Vec<needy_trace::Event>,
+  released: Vec<store::InstanceRecord>,
+}
+
+impl Restored {
+  /// Enables this invocation's services and watch after all references exist.
+  /// Pending stops are returned to the caller and completed only after every
+  /// service activation succeeded; a failed startup retains their intent.
+  pub(crate) async fn activate(self, daemon: &Daemon) -> Result<Option<Arc<Run>>> {
+    let Self {
+      run,
+      runtime,
+      events,
+      released,
+    } = self;
+    for instance in released {
+      // A released local container may have outlasted the request that removed
+      // it. Reconciliation is idempotent and respects all restored pool holds.
+      // Native admission and runner EndRun precede the release checkpoint;
+      // neither of those logical references owns a container to destroy here.
+      if instance.runner.is_none()
+        && instance.driver == needy_config::profile::ExecutorDriver::LinuxContainer.as_str()
+        && daemon.end_leftover_executor(&instance).await == store::InstanceState::Lost
+      {
+        bail!("cannot complete release of executor {} for run {}", instance.name, run.id);
+      }
+    }
+    let channels = actor::channels(daemon, &run)?;
+    let token = run.cancel.child_token();
+    actor::serve_guest(daemon, &run, &channels, actor::facets(&run).transport, &token).await?;
+    actor::serve_gateway(&run, &channels, &token)?;
+    actor::resume_services(daemon, &run, &token, &events)?;
+    // A configured guest resumes its persistent control stream. The actor
+    // process service proves terminal readiness again when next attached.
+    let driver = run.profile.actor.driver.as_str();
+    run.tasks.spawn(actor::watch(daemon.clone(), run.clone(), driver, runtime, token));
+    daemon.save_run(&run).await;
+    Ok((run.state.get() == RunState::Stopping).then_some(run))
+  }
+}
+
 impl Daemon {
   /// Written after acquisition and before actor start, then at graceful
   /// control detach. The directory and snapshot stay private to the owner.
   pub(crate) async fn snapshot_run(&self, run: &Run) -> Result<()> {
     let snapshot = Snapshot {
-      version: 1,
+      version: 2,
       holder: self.holder.id().into(),
       command: run.actor_command.clone(),
       tty: run.tty.map(|tty| (tty.rows, tty.cols)),
@@ -59,24 +107,25 @@ impl Daemon {
     Ok(())
   }
 
-  /// Returns false when no protected holder can prove ownership of this
-  /// invocation. Existing reconciliation then records actual runtime loss.
-  pub(crate) async fn adopt_run(&self, record: &store::RunRecord) -> Result<bool> {
+  /// Restores references without enabling services, watches or cleanup.
+  /// `None` means the protected holder cannot prove ownership of this
+  /// invocation; reconciliation then records actual runtime loss.
+  pub(crate) async fn restore_run(&self, record: &store::RunRecord) -> Result<Option<Restored>> {
     let file =
       match OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(self.run_dir(&record.id).join("control-snapshot.json")) {
         Ok(file) => file,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
       };
     let snapshot: Snapshot = serde_json::from_reader(file)?;
-    if snapshot.version != 1 {
+    if snapshot.version != 2 {
       bail!("unsupported control snapshot version");
     }
     let runtime = match self.holder.adopt(&record.id, &snapshot.holder).await {
       Ok(runtime) => runtime,
       Err(error) => {
         tracing::warn!("run {}: cannot reconnect its original holder: {error:#}", record.id);
-        return Ok(false);
+        return Ok(None);
       }
     };
     let profile = needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), std::path::PathBuf::new()))?;
@@ -95,8 +144,30 @@ impl Daemon {
     };
     let next_seq = events.last().map_or(0, |event| event.seq + 1);
     let trace = self.run_trace_at(&record.id, Some(&profile.trace), next_seq);
+    // Instance release is persisted before the external destroy operation and
+    // final stopped record. That checkpoint is newer than this snapshot: an
+    // interrupted accepted stop must not resurrect or reconnect the reference.
+    // Release alone says nothing about mirror-out success; retain its existing
+    // trace outcome and let mirror_out skip executors no longer held.
+    let released = if record.state == RunState::Stopping {
+      self
+        .state
+        .instances_of(&record.id)
+        .await?
+        .into_iter()
+        .filter(|instance| {
+          instance.kind == store::InstanceKind::Executor
+            && matches!(instance.state, store::InstanceState::Released | store::InstanceState::Ended)
+        })
+        .collect::<Vec<_>>()
+    } else {
+      Vec::new()
+    };
     let mut executors = BTreeMap::new();
     for saved in snapshot.executors {
+      if released.iter().any(|instance| instance.name == saved.name) {
+        continue;
+      }
       let config = profile.executors.get(&saved.name).context("a saved executor is absent from its profile")?;
       let instance = self.pool.restore(saved, config).await?;
       executors.insert(instance.name.clone(), instance);
@@ -125,7 +196,7 @@ impl Daemon {
       profile_yaml: record.profile_yaml.clone(),
       created_ms: record.created_ms,
       dir: self.run_dir(&record.id),
-      state: State::restore(if matches!(record.state, RunState::Creating | RunState::Stopping) {
+      state: State::restore(if record.state == RunState::Creating {
         RunState::Running
       } else {
         record.state
@@ -141,7 +212,16 @@ impl Daemon {
       routes,
       trace,
       executors: Mutex::new(executors),
-      released: Default::default(),
+      released: Mutex::new(
+        released
+          .iter()
+          .map(|instance| ExecutorRef {
+            name: instance.name.clone(),
+            driver: instance.driver.clone(),
+            instance: instance.handle.clone(),
+          })
+          .collect(),
+      ),
       actor_exit: Mutex::new(record.actor_exit.clone()),
       failure: Mutex::new(record.failure.clone()),
       actor_runner: Mutex::new(record.actor_runner.clone()),
@@ -151,21 +231,11 @@ impl Daemon {
     });
     run.update_routes();
     self.runs.insert(run.clone());
-    let channels = actor::channels(self, &run)?;
-    let token = run.cancel.child_token();
-    actor::serve_guest(self, &run, &channels, actor::facets(&run).transport, &token).await?;
-    actor::serve_gateway(&run, &channels, &token)?;
-    actor::resume_services(self, &run, &token, &events)?;
-    // A configured guest resumes its persistent control stream. The actor
-    // process service proves terminal readiness again when next attached.
-    let driver = run.profile.actor.driver.as_str();
-    run.tasks.spawn(actor::watch(self.clone(), run.clone(), driver, runtime, token));
-    self.save_run(&run).await;
-    if record.state == RunState::Stopping {
-      // An explicit stop admitted before a crash must still complete; it is
-      // not cancelled by adopting the original actor.
-      self.stop_run(&run, None, needy_api_server::control::StopMode::Now).await.map_err(anyhow::Error::msg)?;
-    }
-    Ok(true)
+    Ok(Some(Restored {
+      run,
+      runtime,
+      events,
+      released,
+    }))
   }
 }

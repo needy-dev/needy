@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use needy_api_server::control::ControlError;
 use needy_config::profile::{self, OnFull};
 use needy_core_executor::driver::{self, Driver, LinuxContainer, Native, Spec, sftp_command};
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::OnceCell;
 
 use crate::link::{Links, RunnerExecutor};
 
@@ -38,7 +38,7 @@ pub struct Instance {
   /// the home of the user the daemon or runner runs as for a `native` one.
   /// Empty when unknown, and `~` then stays as written.
   pub home: String,
-  slots: Option<Arc<Semaphore>>,
+  max_procs: Option<u32>,
   on_full: OnFull,
   refs: AtomicUsize,
 }
@@ -55,10 +55,10 @@ pub(crate) struct Saved {
   pub workspace: String,
   pub path_map: BTreeMap<String, String>,
   pub home: String,
+  /// The first acquisition's resolved policy, independent of restore order.
+  pub max_procs: Option<u32>,
+  pub on_full: OnFull,
 }
-
-/// A command's hold on an instance's slot; dropping it frees the slot.
-pub type Slot = Option<OwnedSemaphorePermit>;
 
 impl Instance {
   /// This machine, through the daemon's in-process executor. It is never
@@ -71,7 +71,7 @@ impl Instance {
       driver: Some(native.clone()),
       path_map: BTreeMap::new(),
       home: String::new(),
-      slots: None,
+      max_procs: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
@@ -88,7 +88,7 @@ impl Instance {
       driver: None,
       path_map: BTreeMap::new(),
       home: String::new(),
-      slots: None,
+      max_procs: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
@@ -110,7 +110,7 @@ impl Instance {
       driver: None,
       path_map: BTreeMap::new(),
       home: String::new(),
-      slots: None,
+      max_procs: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
@@ -126,6 +126,8 @@ impl Instance {
       workspace: self.handle.workspace.clone(),
       path_map: self.path_map.clone(),
       home: self.home.clone(),
+      max_procs: self.max_procs,
+      on_full: self.on_full,
     }
   }
 
@@ -141,17 +143,20 @@ impl Instance {
     (self.handle.driver == RUNNER).then_some(self.handle.id.as_str())
   }
 
-  /// Takes a slot for one command. A full instance refuses the command with
-  /// `on_full: reject` and makes it wait otherwise.
-  pub async fn slot(&self) -> Result<Slot, ControlError> {
-    let Some(slots) = &self.slots else {
-      return Ok(None);
-    };
-    let permit = match self.on_full {
-      OnFull::Reject => slots.clone().try_acquire_owned().map_err(|_| ControlError::Exhausted("executor is full".into()))?,
-      OnFull::Wait => slots.clone().acquire_owned().await.map_err(|_| ControlError::Unavailable("executor closed".into()))?,
-    };
-    Ok(Some(permit))
+  /// Only the resolved instance supplies capacity to an executor service.
+  /// The process owner keeps its permits through stream/control loss, so
+  /// recovery reconnects to occupancy rather than recreating a semaphore.
+  pub(crate) fn capacity(&self) -> Option<needy_api_client::proto::v1::ExecutorCapacity> {
+    use needy_api_client::proto::v1::{CapacityOnFull, ExecutorCapacity};
+    self.max_procs.map(|max_procs| ExecutorCapacity {
+      key: self.key.clone(),
+      max_procs,
+      on_full: match self.on_full {
+        OnFull::Wait => CapacityOnFull::Wait,
+        OnFull::Reject => CapacityOnFull::Reject,
+      }
+      .into(),
+    })
   }
 }
 
@@ -290,7 +295,7 @@ impl Pool {
       driver,
       path_map: spec.config.path_map.iter().map(|(from, to)| (from.clone(), driver::expand_home(to, &home))).collect(),
       home,
-      slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
+      max_procs: spec.config.max_procs,
       on_full: spec.config.on_full,
       // Each acquire counts itself under the pool's lock.
       refs: AtomicUsize::new(0),
@@ -326,14 +331,17 @@ impl Pool {
           driver,
           path_map: saved.path_map.clone(),
           home: saved.home.clone(),
-          slots: config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
-          on_full: config.on_full,
+          max_procs: saved.max_procs,
+          on_full: saved.on_full,
           refs: AtomicUsize::new(0),
         }))
       })
       .await?;
     if instance.handle.id != saved.id || instance.handle.driver != saved.driver {
       bail!("executor pool key names a different surviving instance");
+    }
+    if instance.max_procs != saved.max_procs || instance.on_full != saved.on_full {
+      bail!("executor pool key has inconsistent saved capacity policy");
     }
     instance.refs.fetch_add(1, Ordering::SeqCst);
     Ok(instance.clone())

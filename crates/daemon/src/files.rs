@@ -113,12 +113,12 @@ fn record_failure(run: &Run, name: &str, transfer: Transfer, error: &anyhow::Err
   }));
 }
 
-/// Where the daemon's own `tar` runs: straight on the instance's executor,
-/// outside any run.
-fn target() -> Target {
+/// The selected executor receives file commands directly, with the owning
+/// invocation retained for its admission checks and process cleanup.
+fn target(run: &Run, executor: &str) -> Target {
   Target {
-    executor: String::new(),
-    run: String::new(),
+    executor: executor.to_string(),
+    run: run.id.clone(),
     runner: String::new(),
     origin: WireOrigin::Files,
   }
@@ -148,7 +148,7 @@ pub async fn copy_in(run: &Run) -> Result<()> {
     let filter = mapping.filter.clone();
     let archive = tokio::task::spawn_blocking(move || needy_common::archive::pack(&root, &filter)).await??;
     let size = archive.len();
-    files::push(&*instance.handle.executor, &target(), archive, path).await.with_context(|| format!("copy-in {name}"))?;
+    files::push(&*instance.handle.executor, &target(run, exec), archive, path).await.with_context(|| format!("copy-in {name}"))?;
     run.emit(&Event::FilesCopyIn(FilesCopyIn {
       name: name.clone(),
       to: FileEnd::Executor {
@@ -181,7 +181,7 @@ pub async fn mirror_out(run: &Run) {
     let path = &instance.expand_home(path);
     let mirrored = async {
       let destination = destination(run, dst)?;
-      let archive = files::pull(&*instance.handle.executor, &target(), path, ".").await?;
+      let archive = files::pull(&*instance.handle.executor, &target(run, exec), path, ".").await?;
       let size = archive.len();
       let filter = mapping.filter.clone();
       tokio::task::spawn_blocking(move || needy_common::archive::unpack(&archive, &destination, &filter)).await??;

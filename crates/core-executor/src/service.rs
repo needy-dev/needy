@@ -18,7 +18,7 @@ use tonic::{Request, Response, Status, Streaming};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::process::{Client, Error, Exit, Host, Input, Output, Proc, Spec, Subscriber, Subscription};
+use crate::process::{Capacity, Client, Error, Exit, Host, Input, Output, Proc, Spec, Subscriber, Subscription};
 
 pub type ExecStream = Pin<Box<dyn Stream<Item = Result<ExecResponse, Status>> + Send>>;
 
@@ -96,7 +96,7 @@ fn stream_process(
           }
         }
         // A second start or attach on one stream has no meaning.
-        Some(exec_request::Payload::Start(_) | exec_request::Payload::Attach(_)) | None => {}
+        Some(exec_request::Payload::Start(_) | exec_request::Payload::LimitedStart(_) | exec_request::Payload::Attach(_)) | None => {}
       }
     }
   });
@@ -295,6 +295,8 @@ fn spawn_status(error: Error) -> Status {
     Error::Terminal(_) => ("process.terminal_failed", Vec::new()),
     Error::EmptyCommand => ("process.start_failed", Vec::new()),
     Error::RunEnded => ("process.not_started", Vec::new()),
+    Error::Full => return Status::resource_exhausted(error.to_string()),
+    Error::InvalidCapacity | Error::CapacityChanged => return Status::invalid_argument(error.to_string()),
     Error::ShuttingDown => return Status::unavailable(error.to_string()),
   };
   let status = Status::failed_precondition(error.to_string());
@@ -364,7 +366,15 @@ impl ExecutorService {
 
   async fn open_with_disconnect(&self, mut inbound: Inbound, preserve: bool) -> Result<ExecStream, Status> {
     let first = inbound.next().await.transpose()?.ok_or_else(|| Status::invalid_argument("empty request stream"))?;
-    match first.payload {
+    let (payload, capacity) = match first.payload {
+      Some(exec_request::Payload::LimitedStart(limited)) => {
+        let start = limited.start.ok_or_else(|| Status::invalid_argument("limited start has no command"))?;
+        let capacity = limited.capacity.ok_or_else(|| Status::invalid_argument("limited start has no capacity policy"))?;
+        (Some(exec_request::Payload::Start(start)), Some(capacity))
+      }
+      payload => (payload, None),
+    };
+    match payload {
       Some(exec_request::Payload::Start(start)) => {
         let tty = start.tty.map(|t| (clamp(t.rows), clamp(t.cols)));
         let spec = Spec {
@@ -377,7 +387,21 @@ impl ExecutorService {
           run_id: start.run_id,
           search_path_if_missing: start.search_path_if_missing,
         };
-        let proc = self.host.spawn(spec).map_err(spawn_status)?;
+        let capacity = capacity
+          .map(|policy| {
+            use needy_api_proto::v1::CapacityOnFull;
+            Ok(Capacity {
+              key: policy.key,
+              max_procs: policy.max_procs,
+              on_full: match CapacityOnFull::try_from(policy.on_full) {
+                Ok(CapacityOnFull::Wait) => needy_config::profile::OnFull::Wait,
+                Ok(CapacityOnFull::Reject) => needy_config::profile::OnFull::Reject,
+                _ => return Err(Status::invalid_argument("executor capacity on_full is unspecified or unknown")),
+              },
+            })
+          })
+          .transpose()?;
+        let proc = self.host.spawn_with_capacity(spec, capacity).await.map_err(spawn_status)?;
         // The starting client subscribes before anything else runs, with the
         // replay buffer, so output written since the spawn reaches it too.
         // NOTICE: a process that writes more than the replay buffer (256

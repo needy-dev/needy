@@ -25,6 +25,15 @@ A recorded sensor change does not run again.
 The snapshot retains executor pool keys and handles, including private client binding keys.
 Pool restoration retains key sharing and reference counts.
 Container restoration connects to the saved process service and does not create a replacement container.
+Recovery restores all surviving pool references before it enables actor watches or cleans up any invocation.
+Cleanup of an unadoptable invocation ends only its processes when another invocation still holds the shared executor.
+An accepted stop keeps its durable `stopping` state through recovery and failed startup retries.
+Pending stops complete after all recovered services activate successfully.
+Recovery also honors released and ended executor checkpoints in `state.db` when the final stopped record was interrupted.
+It retains those references in history and does not reconnect or reacquire their removed resources.
+After all surviving references are restored, it idempotently removes any released local container that remains unheld.
+A container still held by a surviving invocation remains alive.
+The release checkpoint does not establish mirror-out success; existing transfer records remain authoritative.
 
 ## Protected recovery
 
@@ -64,6 +73,11 @@ The focused daemon tests cover these outcomes:
 - A damaged holder credential fails closed and leaves the original process alive
 - Runtime and snapshot permissions remain private
 - An idle holder releases its socket after control disconnects
+- A stopping invocation cannot destroy a later survivor's shared container executor
+- An unadoptable invocation cannot destroy a survivor's shared container executor
+- An accepted stop survives a real gateway bind failure and another startup attempt
+- An interrupted stop completes after its container and socket were removed, without reacquiring its released reference
+- An interrupted stop also removes a released container when deletion had not started
 
 The service-definition test checks the generated manager directives.
 The engine test closes a container wait connection, then reports the same container alive.
@@ -91,7 +105,8 @@ Cross-machine real actor tests, actual holder loss, and native service-manager r
 
 ## Validation record
 
-- `cargo test -p needy-daemon --lib`: 236 passed on macOS
+- `cargo test -p needy-daemon --lib`: 248 passed on macOS
+- Five recovery regressions use the public run and process APIs, a real process service at the external container-runtime boundary, paused removal boundaries, and a filesystem bind fault
 - Service-definition and Docker wait-disconnect regressions passed
 - `cargo fmt --all` and `git diff --check` passed
 - Linux cross-check stopped before project compilation because `aarch64-linux-musl-gcc` was unavailable

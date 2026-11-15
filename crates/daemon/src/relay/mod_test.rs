@@ -605,3 +605,100 @@ async fn a_client_holder_cannot_be_selected_as_a_standalone_runner() {
   let error = Processes::list(&started.daemon, "", &reserved.holder).await.unwrap_err();
   assert!(error.to_string().contains("only through their bound run"), "{error}");
 }
+
+const LIMITED_PROFILE: &str = "actor: {driver: linux-firecracker}\nexecutors:\n  here: {driver: native, max_procs: 1, on_full: reject}\ncommands:\n  - {match: '**', to: here}\n";
+
+// ROOT CAUSE:
+//
+// A process survives control in the holder, but a new pool used to restore
+// every semaphore at full capacity. Its second command could then overlap
+// the first despite max_procs: 1.
+#[tokio::test]
+async fn a_recovered_executor_keeps_capacity_occupied_until_its_process_exits() {
+  let started = testing::daemon().await;
+  let run = Runs::create(&started.daemon, new_run(LIMITED_PROFILE, started.dir.path())).await.unwrap();
+  let (process, pid) = testing::detached_sleep(&started.daemon, &run.id).await;
+  let started = testing::restart(started).await;
+  assert!(testing::running(pid), "the original process must survive before capacity is checked");
+  let recovered = Processes::list(&started.daemon, &run.id, "").await.unwrap();
+  assert!(recovered.iter().any(|p| p.process == process && p.pid == pid));
+  let overlapping = started.daemon.exec(ExecOpen::Start(spec(&["true"], &run.id, "")), attached()).await;
+  started.daemon.kill(&process, "SIGKILL", needy_core::types::Principal::Operator).await.unwrap();
+  assert!(testing::ended(pid).await);
+  if let Ok(outputs) = overlapping {
+    finish(outputs).await;
+    panic!("restoration freed a slot still occupied by the surviving process");
+  }
+  assert!(matches!(overlapping, Err(ControlError::Exhausted(_))), "the existing reject policy must survive recovery");
+  let outputs = tokio::time::timeout(Duration::from_secs(5), started.daemon.exec(ExecOpen::Start(spec(&["true"], &run.id, "")), attached()))
+    .await
+    .unwrap()
+    .unwrap();
+  assert_eq!(finish(outputs).await.1.unwrap().code, Some(0), "actual exit must free capacity");
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+}
+
+#[tokio::test]
+async fn an_attach_does_not_take_another_execution_slot() {
+  let started = testing::daemon().await;
+  let run = Runs::create(&started.daemon, new_run(LIMITED_PROFILE, started.dir.path())).await.unwrap();
+  let (process, _) = testing::detached_sleep(&started.daemon, &run.id).await;
+  let attached = started
+    .daemon
+    .exec(
+      ExecOpen::Attach {
+        process: process.clone(),
+        run: String::new(),
+        replay: false,
+        window: None,
+        read_only: true,
+      },
+      attached(),
+    )
+    .await;
+  started.daemon.kill(&process, "SIGKILL", needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(attached.is_ok(), "an attached viewer must not need a second execution slot");
+}
+
+#[tokio::test]
+async fn losing_a_native_viewer_does_not_free_a_surviving_process_slot() {
+  let started = testing::daemon().await;
+  let run = Runs::create(&started.daemon, new_run(LIMITED_PROFILE, started.dir.path())).await.unwrap();
+  let mut outputs = started.daemon.exec(ExecOpen::Start(spec(&["sleep", "300"], &run.id, "")), attached()).await.unwrap();
+  let first = loop {
+    if let ExecOutput::Started(first) = outputs.next().await.unwrap().unwrap() {
+      break first;
+    }
+  };
+  drop(outputs);
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  assert!(testing::running(first.pid), "the native holder must preserve the process after viewer loss");
+  let overlapping = started.daemon.exec(ExecOpen::Start(spec(&["true"], &run.id, "")), attached()).await;
+  started.daemon.kill(&first.process, "SIGKILL", needy_core::types::Principal::Operator).await.unwrap();
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(matches!(overlapping, Err(ControlError::Exhausted(_))), "a surviving native process still occupies its slot");
+}
+
+#[tokio::test]
+async fn recovery_retains_the_first_acquired_shared_instance_capacity_policy() {
+  let started = testing::daemon().await;
+  let first_profile = LIMITED_PROFILE.replace("max_procs: 1, on_full: reject", "key: shared, max_procs: 1, on_full: reject");
+  let later_profile = first_profile.replace("max_procs: 1, on_full: reject", "max_procs: 2, on_full: wait");
+  let first = Runs::create(&started.daemon, new_run(&first_profile, started.dir.path())).await.unwrap();
+  let later = Runs::create(&started.daemon, new_run(&later_profile, started.dir.path())).await.unwrap();
+  let (process, pid) = testing::detached_sleep(&started.daemon, &later.id).await;
+  // Only the later profile survives. Its configured limit differs from the
+  // resolved policy of the instance it acquired from the earlier invocation.
+  Runs::stop(&started.daemon, &first.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  let started = testing::restart(started).await;
+  let restored = Processes::list(&started.daemon, &later.id, "").await.unwrap();
+  assert!(restored.iter().any(|p| p.process == process && p.pid == pid && p.running));
+  let overlapping =
+    tokio::time::timeout(Duration::from_secs(2), started.daemon.exec(ExecOpen::Start(spec(&["true"], &later.id, "")), attached()))
+      .await
+      .expect("the original reject policy must not become wait");
+  Runs::stop(&started.daemon, &later.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(matches!(overlapping, Err(ControlError::Exhausted(_))), "recovery must retain the acquired instance's limit and reject policy");
+  assert!(testing::ended(pid).await);
+}

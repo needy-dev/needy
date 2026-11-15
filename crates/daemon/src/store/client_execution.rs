@@ -2,7 +2,7 @@
 //! transport authentication; this table prevents their use as shared resources.
 
 use super::{
-  Error, Result, Secret, Store,
+  Error, InstanceKind, InstanceState, Result, Secret, Store,
   entity::{client_execution as binding, runner},
   json, secret,
 };
@@ -98,10 +98,23 @@ impl Store {
     match binding.run {
       None => Ok(now < binding.created_ms + RESERVATION_MS),
       Some(run) => Ok(match self.run(&run).await? {
-        Some(r) => matches!(
-          r.state,
-          needy_core::types::RunState::Creating | needy_core::types::RunState::Running | needy_core::types::RunState::Stopping
-        ),
+        Some(r) => {
+          if matches!(
+            r.state,
+            needy_core::types::RunState::Creating | needy_core::types::RunState::Running | needy_core::types::RunState::Stopping
+          ) {
+            true
+          } else {
+            // Natural completion saves the terminal run before mirror-out.
+            // Its holder still serves owned cleanup until its exact executor
+            // reference is released; terminal runs cannot admit new work.
+            self.instances_of(&run).await?.iter().any(|instance| {
+              instance.kind == InstanceKind::Executor
+                && instance.state == InstanceState::Running
+                && instance.runner.as_deref() == Some(holder)
+            })
+          }
+        }
         // Claim precedes writing the run. Bound admission remains bounded if
         // the create crashes in that interval.
         None => now < binding.created_ms + RESERVATION_MS,

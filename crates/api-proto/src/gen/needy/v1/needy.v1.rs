@@ -212,6 +212,26 @@ pub struct ExecStart {
     #[prost(string, tag="13")]
     pub runner: ::prost::alloc::string::String,
 }
+/// Control supplies this request after resolving its pooled instance. The
+/// public control adapter rejects this lower-level process-owner message.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LimitedExecStart {
+    #[prost(message, optional, tag="1")]
+    pub start: ::core::option::Option<ExecStart>,
+    #[prost(message, optional, tag="2")]
+    pub capacity: ::core::option::Option<ExecutorCapacity>,
+}
+/// Admission policy carried to the process owner, whose permits follow actual
+/// child lifetime even when its control connection disappears.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutorCapacity {
+    #[prost(string, tag="1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub max_procs: u32,
+    #[prost(enumeration="CapacityOnFull", tag="3")]
+    pub on_full: i32,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecAttach {
     #[prost(string, tag="1")]
@@ -237,7 +257,7 @@ pub struct ExecAttach {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecRequest {
-    #[prost(oneof="exec_request::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof="exec_request::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8")]
     pub payload: ::core::option::Option<exec_request::Payload>,
 }
 /// Nested message and enum types in `ExecRequest`.
@@ -261,6 +281,10 @@ pub mod exec_request {
         /// stream, and the process keeps running as if started with `detach`.
         #[prost(bool, tag="7")]
         Detach(bool),
+        /// A limited start is a distinct variant so older services reject it
+        /// before spawning, instead of silently ignoring an additive policy field.
+        #[prost(message, tag="8")]
+        LimitedStart(super::LimitedExecStart),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -409,6 +433,35 @@ pub struct KillProcessRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KillProcessResponse {
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CapacityOnFull {
+    Unspecified = 0,
+    Wait = 1,
+    Reject = 2,
+}
+impl CapacityOnFull {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CAPACITY_ON_FULL_UNSPECIFIED",
+            Self::Wait => "CAPACITY_ON_FULL_WAIT",
+            Self::Reject => "CAPACITY_ON_FULL_REJECT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CAPACITY_ON_FULL_UNSPECIFIED" => Some(Self::Unspecified),
+            "CAPACITY_ON_FULL_WAIT" => Some(Self::Wait),
+            "CAPACITY_ON_FULL_REJECT" => Some(Self::Reject),
+            _ => None,
+        }
+    }
 }
 /// Who started an exec. It decides whether the daemon applies the run's rules
 /// and how the trace and the report count the process.

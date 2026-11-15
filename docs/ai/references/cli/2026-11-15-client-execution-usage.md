@@ -113,6 +113,21 @@ Use `needy --context actor-host run stop RUN` to end the invocation. Use
 explicit stop invalidates holder admission and reclaims its local helper.
 Missing client execution never selects the daemon's account or another client.
 
+## Executor capacity
+
+The process host owns each `max_procs` permit until the actual process exits.
+Viewer loss and control restart do not free that permit. Attach does not take
+another execution slot. Recovery retains the acquired instance's original limit
+and wait/reject policy, including shared instances with different profile settings.
+
+Limited commands use a distinct process-owner request. An older executor refuses
+that request before execution instead of ignoring its limit. Upgrade executor
+binaries and rebuild executor images together with the control binary.
+
+Automated evidence covers [daemon recovery and viewer loss](../../../../crates/daemon/src/relay/mod_test.rs),
+[wait/reject behavior](../../../../crates/daemon/src/pool_test.rs), and
+[process-service admission, cancellation, and old-reader refusal](../../../../crates/core-executor/src/service_test.rs).
+
 ## Setup guide
 
 The setup guide's executor-computer launch uses explicit client selection.

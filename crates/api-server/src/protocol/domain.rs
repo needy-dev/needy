@@ -548,7 +548,7 @@ pub fn exec_input(payload: v1::exec_request::Payload) -> Option<ExecInput> {
       cols: size.cols,
     })),
     Payload::Detach(_) => Some(ExecInput::Detach),
-    Payload::Start(_) | Payload::Attach(_) => None,
+    Payload::Start(_) | Payload::LimitedStart(_) | Payload::Attach(_) => None,
   }
 }
 

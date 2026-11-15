@@ -21,6 +21,7 @@ impl ProcessService for Service {
     let first = incoming.next().await;
     let preserve = match first.as_ref().and_then(|request| request.as_ref().ok()).and_then(|request| request.payload.as_ref()) {
       Some(exec_request::Payload::Start(start)) => !start.run_id.is_empty(),
+      Some(exec_request::Payload::LimitedStart(limited)) => limited.start.as_ref().is_some_and(|start| !start.run_id.is_empty()),
       Some(exec_request::Payload::Attach(attach)) => self.0.host.get(&attach.process_id).is_some_and(|process| !process.run_id.is_empty()),
       _ => false,
     };

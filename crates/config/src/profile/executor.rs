@@ -101,7 +101,7 @@ impl fmt::Display for ExecutorDriver {
 // (owner decision, 2026-11-11): it waited like `wait`, since a second
 // instance per key needs `max_instances`, which is not built. A profile that
 // still names it is refused by serde's message naming `wait` and `reject`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnFull {
   #[default]

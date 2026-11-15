@@ -3784,3 +3784,86 @@ fn simultaneous_client_invocations_do_not_share_a_group_pool_binding() {
 
 #[path = "client_execution/lost_create_reply.rs"]
 mod lost_create_reply;
+
+// ROOT CAUSE:
+//
+// Profile-owned copy-in and mirror-out bypass the routing relay and used to
+// send an empty run ID. The private creating-client holder correctly refused
+// those unbound tar/mkdir requests. File operations must retain their invocation.
+#[test]
+fn client_file_mappings_copy_and_mirror_with_their_invocation_identity() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let source = home.path().join("seed");
+  let project = home.path().join("client-project");
+  let output = project.join("out");
+  let mirror = home.path().join("mirrored");
+  std::fs::create_dir_all(&source).unwrap();
+  std::fs::create_dir_all(&output).unwrap();
+  let seed = b"seed\0\xffbytes\n";
+  std::fs::write(source.join("seed.bin"), seed).unwrap();
+  let profile = serde_json::json!({
+    "actor": {"driver": "linux-firecracker"},
+    "executors": {"workstation": {"driver": "native", "runner": {"client": true}}},
+    "commands": [{"match": "**", "to": "workstation"}],
+    "files": {
+      "seed": {"mode": "copy-in", "from": format!("host:{}", source.display()), "to": format!("executor:workstation:{}/in", project.display())},
+      "result": {"mode": "mirror-out", "from": format!("executor:workstation:{}", output.display()), "to": format!("host:{}", mirror.display())},
+    },
+  });
+  let profile = home.write("client-files.yaml", &profile.to_string());
+  let created = home.run(&["run", "create", "-f", profile.to_str().unwrap()]);
+  let holders = home.path().join("run/client-executions");
+  let wait_for_holder_cleanup = || {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while holders.read_dir().unwrap().next().is_some() && Instant::now() < deadline {
+      std::thread::sleep(Duration::from_millis(50));
+    }
+    holders.read_dir().unwrap().next().is_none()
+  };
+  if !created.status.success() {
+    // A refused creation already rolled its run back. Keep management alive
+    // until its private helper observes that outcome and exits.
+    assert!(wait_for_holder_cleanup(), "a refused creation left its execution helper running");
+  }
+  assert!(created.status.success(), "copy-in must reach the bound client: {}", stderr(&created));
+  let run = stdout(&created).trim().to_string();
+  let checks = (|| -> anyhow::Result<()> {
+    let copied = home.run(&[
+      "run",
+      "exec",
+      &run,
+      "--",
+      "cat",
+      project.join("in/seed.bin").to_str().unwrap(),
+    ]);
+    anyhow::ensure!(copied.status.success(), "cannot read copied client bytes: {}", stderr(&copied));
+    anyhow::ensure!(copied.stdout == seed, "copy-in changed binary contents");
+    let written = home.run(&[
+      "run",
+      "exec",
+      &run,
+      "--",
+      "sh",
+      "-c",
+      "printf 'mirror\\000\\377bytes\\n' > \"$1\"",
+      "sh",
+      output.join("result.bin").to_str().unwrap(),
+    ]);
+    anyhow::ensure!(written.status.success(), "cannot write the client result: {}", stderr(&written));
+    let listed = home.run(&["proc", "ls", "--all", "-o", "json"]);
+    anyhow::ensure!(listed.status.success(), "cannot inspect transfer processes: {}", stderr(&listed));
+    let processes: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout)?;
+    anyhow::ensure!(processes.iter().any(|p| p["argv"][0] == "tar"), "copy-in tar was not listed");
+    anyhow::ensure!(processes.iter().all(|p| p["run"] == run), "a profile file operation escaped invocation ownership");
+    Ok(())
+  })();
+  // Stop even when a byte or ownership assertion failed. Executor mirror-out
+  // precedes release; --now only skips the actor's graceful guest teardown.
+  let stopped = home.run(&["run", "stop", &run, "--now"]);
+  let cleaned = wait_for_holder_cleanup();
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  assert!(cleaned, "explicit stop must reclaim the client holder and its processes");
+  checks.unwrap();
+  assert_eq!(std::fs::read(mirror.join("result.bin")).unwrap(), b"mirror\0\xffbytes\n");
+}

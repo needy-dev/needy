@@ -1,5 +1,5 @@
 //! The exec relay, through `api-server`'s `Processes` trait: places a
-//! command, takes a slot on its instance, opens the upstream exec stream
+//! command, forwards its resolved capacity policy, opens the upstream exec stream
 //! there, and relays both ways through the stream filters installed for the
 //! run. A run's relays are its tasks and stop with it; a relay
 //! outside any run is the daemon's.
@@ -25,7 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::pool::{Instance, Slot};
+use crate::pool::Instance;
 use crate::run::{self, Run};
 use crate::{Daemon, actor};
 use crate::{routing, store};
@@ -397,7 +397,6 @@ impl Processes for Daemon {
         )
       }
     };
-    let slot = relay.instance.slot().await?;
     let (out_tx, out_rx) = mpsc::channel(64);
     for event in decided {
       out_tx.send(Ok(ExecOutput::Trace(event))).await.map_err(|_| ControlError::Internal("exec output channel closed".into()))?;
@@ -410,7 +409,22 @@ impl Processes for Daemon {
     };
     let open = async {
       match upstream {
-        Upstream::Start(spec) => ExecStream::start(executor, domain::proto_exec_start(spec)).await,
+        Upstream::Start(spec) => {
+          let start = domain::proto_exec_start(spec);
+          match relay.instance.capacity() {
+            Some(capacity) => {
+              ExecStream::start_limited(
+                executor,
+                needy_api_client::proto::v1::LimitedExecStart {
+                  start: Some(start),
+                  capacity: Some(capacity),
+                },
+              )
+              .await
+            }
+            None => ExecStream::start(executor, start).await,
+          }
+        }
         Upstream::Attach {
           process,
           replay,
@@ -476,7 +490,7 @@ impl Processes for Daemon {
     let cancel = cancel.clone();
     tasks.spawn(async move {
       let ended = out_tx.clone();
-      if cancel.run_until_cancelled(relay.run(daemon.clone(), upstream, slot, out_tx)).await.is_none() {
+      if cancel.run_until_cancelled(relay.run(daemon.clone(), upstream, out_tx)).await.is_none() {
         // The run stopped or the daemon is shutting down before the
         // process exited; the caller learns why before the stream closes.
         // NOTICE: `try_send`, so a caller that reads nothing cannot hold up
@@ -701,11 +715,9 @@ impl Relay {
     daemon.advance_process(run, process, store::ProcessState::Exited, Some(exit.clone()), now_ms()).await;
   }
 
-  /// Relays the process's output to the caller until it exits. The slot is
-  /// held until then: a detached process keeps it after the caller leaves,
-  /// so the stream is drained without a caller.
-  async fn run(self, daemon: Daemon, mut upstream: ExecStream, slot: Slot, out_tx: Sender) {
-    let _slot = slot;
+  /// Relays output while a viewer remains, or drains a detached process.
+  /// Its execution capacity belongs to the process host, not this stream.
+  async fn run(self, daemon: Daemon, mut upstream: ExecStream, out_tx: Sender) {
     let started_ms = now_ms();
     let mut process_id = String::new();
     let mut client_gone = false;

@@ -615,3 +615,119 @@ async fn ending_an_invocation_rejects_a_late_dispatched_start() {
   assert!(service.host.list().is_empty(), "a late start must never reach the OS");
   service.host.shutdown().await;
 }
+
+fn limited(argv: &[&str], key: &str, on_full: needy_api_proto::v1::CapacityOnFull) -> needy_api_proto::v1::LimitedExecStart {
+  needy_api_proto::v1::LimitedExecStart {
+    start: Some(ExecStart {
+      argv: argv.iter().map(|s| s.to_string()).collect(),
+      detach: true,
+      ..Default::default()
+    }),
+    capacity: Some(needy_api_proto::v1::ExecutorCapacity {
+      key: key.into(),
+      max_procs: 1,
+      on_full: on_full.into(),
+    }),
+  }
+}
+
+#[tokio::test]
+async fn losing_the_start_acknowledgement_does_not_release_process_capacity() {
+  let executor = executor().await;
+  let first = ExecStream::start_limited(&executor.client, limited(&["sleep", "300"], "shared", needy_api_proto::v1::CapacityOnFull::Reject))
+    .await
+    .unwrap();
+  // Do not read Started: capacity is already owned by the actual process.
+  drop(first);
+  let error = ExecStream::start_limited(&executor.client, limited(&["true"], "shared", needy_api_proto::v1::CapacityOnFull::Reject))
+    .await
+    .err()
+    .expect("a lost acknowledgement must not free the process permit");
+  assert_eq!(error.kind(), Kind::Exhausted);
+  let rows = executor.client.processes().list_processes(ListProcessesRequest::default()).await.unwrap().into_inner().processes;
+  assert_eq!(rows.len(), 1);
+  executor
+    .client
+    .processes()
+    .kill_process(KillProcessRequest {
+      process_id: rows[0].process_id.clone(),
+      signal: "SIGKILL".into(),
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_active_capacity_key_rejects_changed_limits_and_unknown_policies() {
+  let executor = executor().await;
+  let first = ExecStream::start_limited(&executor.client, limited(&["sleep", "300"], "shared", needy_api_proto::v1::CapacityOnFull::Reject))
+    .await
+    .unwrap();
+  let mut changed = limited(&["true"], "shared", needy_api_proto::v1::CapacityOnFull::Reject);
+  changed.capacity.as_mut().unwrap().max_procs = 2;
+  let error = ExecStream::start_limited(&executor.client, changed).await.err().expect("a live key cannot increase its limit");
+  assert_eq!(error.kind(), Kind::Invalid);
+  let mut unknown = limited(&["true"], "other", needy_api_proto::v1::CapacityOnFull::Reject);
+  unknown.capacity.as_mut().unwrap().on_full = 42;
+  let error = ExecStream::start_limited(&executor.client, unknown).await.err().expect("unknown admission policy must fail closed");
+  assert_eq!(error.kind(), Kind::Invalid);
+  first.input().signal("SIGKILL").await.unwrap();
+  first.run(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_capacity_wait_does_not_start_a_command_later() {
+  let executor = executor().await;
+  let first = ExecStream::start_limited(&executor.client, limited(&["sleep", "300"], "shared", needy_api_proto::v1::CapacityOnFull::Wait))
+    .await
+    .unwrap();
+  let marker = executor.dir.path().join("late-start");
+  let queued = ExecStream::start_limited(
+    &executor.client,
+    limited(&["touch", marker.to_str().unwrap()], "shared", needy_api_proto::v1::CapacityOnFull::Wait),
+  );
+  assert!(tokio::time::timeout(std::time::Duration::from_millis(100), queued).await.is_err());
+  first.input().signal("SIGKILL").await.unwrap();
+  first.run(None).await.unwrap();
+  let next =
+    ExecStream::start_limited(&executor.client, limited(&["true"], "shared", needy_api_proto::v1::CapacityOnFull::Wait)).await.unwrap();
+  assert_eq!(next.run(None).await.unwrap().exit.code, Some(0));
+  tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+  assert!(!marker.exists(), "the cancelled waiter must never execute after the first process exits");
+}
+
+#[tokio::test]
+async fn a_limited_start_is_not_decoded_as_an_unlimited_start_by_an_older_reader() {
+  use prost::Message as _;
+  // Source: the old Start field at
+  // https://github.com/needy-dev/needy/blob/9a2c08e6b5eb0ba921642e7a6e26538b24d96b90/proto/needy/v1/process.proto#L91-L111
+  // Reference: the repository's canonical ExecRequest contract. Other legacy
+  // fields are irrelevant here; Prost discards the unknown limited-start tag.
+  #[derive(prost::Message)]
+  struct LegacyExecRequest {
+    #[prost(message, optional, tag = "1")]
+    start: Option<ExecStart>,
+  }
+  let request = needy_api_proto::v1::ExecRequest {
+    payload: Some(needy_api_proto::v1::exec_request::Payload::LimitedStart(limited(
+      &["true"],
+      "shared",
+      needy_api_proto::v1::CapacityOnFull::Reject,
+    ))),
+  };
+  let legacy = LegacyExecRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+  assert!(legacy.start.is_none(), "an old reader must not see an ordinary Start with an ignored limit");
+  let service = ExecutorService {
+    host: Host::default(),
+    name: "legacy".into(),
+  };
+  let decoded = needy_api_proto::v1::ExecRequest {
+    payload: legacy.start.map(needy_api_proto::v1::exec_request::Payload::Start),
+  };
+  let error =
+    service.open(Box::pin(tokio_stream::iter([Ok(decoded)]))).await.err().expect("a legacy service must refuse the unknown request");
+  assert_eq!(error.code(), tonic::Code::InvalidArgument);
+  let listed = service.list_processes(tonic::Request::new(ListProcessesRequest::default())).await.unwrap().into_inner();
+  assert!(listed.processes.is_empty(), "the old-reader path must have no OS side effect");
+  service.host.shutdown().await;
+}

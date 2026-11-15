@@ -252,7 +252,10 @@ impl Runner {
         // instead of leaving both valid for an interval.
         Ok(()) if self.enrollment.credential != before => Duration::ZERO,
         Ok(()) => self.interval.unwrap_or(RETRY),
-        Err(e) if refused(&e) => return Err(refusal(&self.path)),
+        // Keep the typed refusal: an invocation holder treats its normal
+        // credential revocation as completion, while a persistent runner
+        // still reports the enrollment guidance to its operator.
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
         Err(e) => {
           tracing::warn!("runner {}: heartbeat: {e:#}", self.enrollment.name);
           // The connection is made again for the next heartbeat.
@@ -455,7 +458,7 @@ impl Dialer {
         self.orphan(&stop);
       }
       match ended {
-        Err(e) if refused(&e) => return Err(refusal(&self.path)),
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
         Err(e) => tracing::warn!("runner {}: control stream: {e:#}", self.name),
         Ok(()) => tracing::info!("runner {}: the control plane ended the control stream", self.name),
       }
@@ -718,6 +721,10 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
                 use needy_api_client::proto::v1::exec_request::Payload;
                 let allowed = match &request.payload {
                   Some(Payload::Start(start)) => !ended.load(Ordering::SeqCst) && start.run_id == *run && start.runner.is_empty(),
+                  Some(Payload::LimitedStart(limited)) => limited
+                    .start
+                    .as_ref()
+                    .is_some_and(|start| !ended.load(Ordering::SeqCst) && start.run_id == *run && start.runner.is_empty()),
                   Some(Payload::Attach(attach)) => {
                     attach.run_id == *run || host.list().iter().any(|p| p.id == attach.process_id && p.run_id == *run)
                   }
@@ -759,10 +766,19 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
       payload: Some(task_request::Payload::Error(task_error(status))),
     };
     let inbound = Box::pin(ReceiverStream::new(inbound));
-    let opened = if preserve {
-      service.open_preserving(inbound).await
-    } else {
-      service.open(inbound).await
+    let opening = async {
+      if preserve {
+        service.open_preserving(inbound).await
+      } else {
+        service.open(inbound).await
+      }
+    };
+    let opened = tokio::select! {
+      biased;
+      // A capacity waiter owns no process yet. Cancel its admission when
+      // control drops the task stream, rather than starting it later.
+      () = left.cancelled() => return,
+      result = opening => result,
     };
     let mut responses = match opened {
       Ok(responses) => responses,

@@ -295,7 +295,13 @@ impl Daemon {
       cleanup_incomplete: Arc::default(),
       shutdown_started: Arc::default(),
     };
-    daemon.reconcile_open_runs().await.context("cannot reconcile the runs in state.db")?;
+    if let Err(error) = daemon.reconcile_open_runs().await {
+      // A failed activation can already own guest listeners and watches.
+      // Stop only this control instance, preserving the original holder and
+      // durable stop intent before releasing discovery for another retry.
+      daemon.suspend_control().await;
+      return Err(error.context("cannot reconcile the runs in state.db"));
+    }
     Ok(daemon)
   }
 

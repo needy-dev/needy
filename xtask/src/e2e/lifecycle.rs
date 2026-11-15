@@ -16,6 +16,9 @@ use super::{proc, runs, scenarios};
 
 const STEP: Duration = Duration::from_secs(30);
 const BOOT: Duration = Duration::from_secs(180);
+// Source: https://www.rfc-editor.org/rfc/rfc20.html#section-2 (ASCII, 1969).
+// Reference: https://github.com/needy-dev/needy/blob/9a2c08e6b5eb0ba921642e7a6e26538b24d96b90/crates/core-executor/src/relay/keys.rs#L127-L149
+// Derived with the relay's control-key mask: ']' (0x5d) & 0x1f = GS (0x1d).
 const DETACH: &str = "\x1d";
 
 /// The shell variable proves retained process memory: only the original
@@ -122,6 +125,8 @@ fn continuity(
   let from = term.mark();
   term.send("interrupt\r")?;
   term.expect_from(from, "E2E INTERRUPT-READY", STEP)?;
+  // Source: RFC 20 section 2 (permalink above); ASCII 'C' is 0x43.
+  // Derived with the same control-key mask: 0x43 & 0x1f = ETX (0x03).
   term.send("\x03")?;
   // Source: Bash 5.2 reference manual, section 3.7.5 (128 + signal number).
   // Reference: crates/core-executor/src/signals.rs, `shell_code`.

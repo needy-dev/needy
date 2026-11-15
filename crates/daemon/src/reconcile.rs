@@ -144,11 +144,18 @@ impl Daemon {
   /// instances they held. Called once as the daemon starts.
   pub(crate) async fn reconcile_open_runs(&self) -> Result<()> {
     let open = self.state.runs_in(&[RunState::Creating, RunState::Running, RunState::Stopping]).await.context("cannot read the runs")?;
-    let mut on_runners = false;
-    for mut record in open {
-      if self.adopt_run(&record).await.with_context(|| format!("cannot adopt run {}", record.id))? {
-        continue;
+    let mut restored = Vec::new();
+    let mut leftovers = Vec::new();
+    // Pool references must be complete before any watch, stop or leftover
+    // cleanup can release a physical resource shared with a later record.
+    for record in open {
+      match self.restore_run(&record).await.with_context(|| format!("cannot restore run {}", record.id))? {
+        Some(run) => restored.push(run),
+        None => leftovers.push(record),
       }
+    }
+    let mut on_runners = false;
+    for mut record in leftovers {
       let before = record.state;
       let now = now_ms();
       let instances = self.state.instances_of(&record.id).await.context("cannot read the instances")?;
@@ -163,7 +170,7 @@ impl Daemon {
           (InstanceKind::Executor, None) => {
             let state = self.end_leftover_executor(instance).await;
             self.advance_instance(&instance.run, &instance.id, state, now).await;
-            let ended = if state == InstanceState::Ended {
+            let ended = if matches!(state, InstanceState::Ended | InstanceState::Released) {
               ProcessState::Ended
             } else {
               ProcessState::Lost
@@ -193,6 +200,15 @@ impl Daemon {
       // sequence; `state.db` and `run ls` carry the reason meanwhile.
       self.state.save_run(&record).await.context("cannot write a reconciled run")?;
       tracing::warn!("run {} ended {} at start: {}", record.id, record.state, record.failure.as_deref().unwrap_or("it was stopping"));
+    }
+    let mut stopping = Vec::new();
+    for run in restored {
+      if let Some(run) = run.activate(self).await? {
+        stopping.push(run);
+      }
+    }
+    for run in stopping {
+      self.resume_stop(&run).await.map_err(anyhow::Error::msg)?;
     }
     if on_runners {
       let daemon = self.clone();
@@ -253,7 +269,18 @@ impl Daemon {
 
   /// Ends, through its driver, an executor instance a previous control
   /// plane created for a run on the control host, and says whether it did.
-  async fn end_leftover_executor(&self, instance: &InstanceRecord) -> InstanceState {
+  pub(crate) async fn end_leftover_executor(&self, instance: &InstanceRecord) -> InstanceState {
+    if let Some(held) =
+      self.pool.instances().await.into_iter().find(|held| held.handle.driver == instance.driver && held.handle.id == instance.handle)
+    {
+      // The missing invocation does not own this surviving resource alone.
+      // End its processes through the shared service without destroying it.
+      return if self.end_on_control_host(&instance.run, &held).await {
+        InstanceState::Released
+      } else {
+        InstanceState::Lost
+      };
+    }
     let driver = ExecutorDriver::ALL.into_iter().find(|d| d.as_str() == instance.driver).and_then(|d| self.pool.driver(d));
     let Some(driver) = driver else {
       tracing::warn!("run {}: executor driver {:?} is not available to end {}", instance.run, instance.driver, instance.handle);
@@ -318,3 +345,7 @@ impl Daemon {
 #[cfg(test)]
 #[path = "reconcile_test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "recovery_test.rs"]
+mod recovery_tests;
