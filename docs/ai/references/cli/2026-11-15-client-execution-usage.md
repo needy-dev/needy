@@ -6,6 +6,7 @@ execution as the creating client's OS account.
 Evidence level: automated CLI and process-service tests, plus real non-root
 Linux Firecracker/runc actor journeys with macOS and Linux creating clients.
 The selected matrix passed 12 cells and 486 checks at `05eea63`.
+Five runc cells also passed 201 checks on a separate Linux host without `/dev/kvm` at `3738a3e`.
 See the [integration evidence and limits](../architecture/2026-11-15-client-lifecycle-integration-evidence.md)
 and the [approved contract](../architecture/2026-11-15-client-execution-and-actor-lifecycle-spec.md).
 

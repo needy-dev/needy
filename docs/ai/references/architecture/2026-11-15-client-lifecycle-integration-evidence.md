@@ -8,6 +8,10 @@ The [sanitized acceptance record](2026-11-15-client-lifecycle-acceptance.json)
 retains the cell IDs, check counts, source identity, and raw-report digests.
 Private host inventories, credentials, paths, and raw output remain outside the repository.
 
+A separate [host without KVM](2026-11-15-non-kvm-lifecycle-acceptance.json)
+passed all five selected runc cells and 201 checks at `3738a3e`.
+This is an additional environment record for existing cells, not five new scenario definitions.
+
 The [approved contract](2026-11-15-client-execution-and-actor-lifecycle-spec.md)
 sets the required behavior. The [holder evidence](2026-11-15-actor-holder-implementation-evidence.md)
 and [client usage](../cli/2026-11-15-client-execution-usage.md) describe the implementation and its narrower evidence levels.
@@ -95,6 +99,7 @@ These records describe actual CLI runs or builds. A failed cell remains failed d
 | `9e26e70` | Two macOS client journeys passed. Six of ten Linux-local cells passed; four lifecycle cells failed before their lifecycle assertions. | The harness waited for an unterminated prompt in line-oriented logs. Fix: `fef3a57` waits for the complete startup marker. |
 | `fef3a57` | Both macOS client journeys and eight Linux-local cells passed. Two continuity cells failed after the viewer termination step. | The PTY library sent SIGHUP before killing the viewer; the CLI forwarded that deliberate signal to the actor. Fix: `05eea63` uses SIGKILL for the crash probe. |
 | `05eea63` | Final canonical matrix: 12/12 cells and 486/486 checks passed. | Non-root control daemons; real Linux Firecracker and runc actors; macOS and Linux creating clients. No failed, skipped, or unavailable cell in this selected matrix. |
+| `3738a3e`, separate host without `/dev/kvm` | 5/5 selected runc cells and 201/201 checks passed. | Non-root Linux creating client and control account. Client execution, continuity, actual actor loss, actor-file loss, and native executor-file loss passed. |
 
 The macOS journeys observed the invoking account, HOME, platform, mapped cwd, mounted actor writes, and routed command writes and exits.
 They also observed separate invocation holders, multiple logical executors, and continued execution after the other invocation stopped.
@@ -129,6 +134,14 @@ The [matrix](../../../../xtask/src/e2e/matrix.rs),
 SSH authentication and signing resumed after the owner unlocked the existing agent.
 No authentication or signing policy was disabled.
 Every final cell checked for owned processes, containers, mounts, and sockets after cleanup; none remained.
+
+The additional no-KVM host exposed no `/dev/kvm` and allowed FUSE access under the test account.
+Its required static binaries and actor archive came from the canonical export, with matching SHA-256 digests on both hosts.
+The first complete-export transfer timed out before tests started.
+The retry delivered the required artifacts; transfer of the unused executor-container image was stopped.
+All five selected cells use native executors and ran unchanged through the static harness with `--no-prepare`.
+No selected cell was skipped, and no runtime privilege check was bypassed.
+This record does not test a macOS creating client against that additional host or a container executor there.
 
 This selected matrix does not test actual holder-process loss, a whole-host reboot,
 or a native service-manager restart while an actor is running.

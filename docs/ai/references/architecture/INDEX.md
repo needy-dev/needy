@@ -27,3 +27,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-15 | [Actor holder and control recovery](2026-11-15-actor-holder-implementation-evidence.md) | implementation evidence |
 | 2026-11-15 | [Client execution and lifecycle integration](2026-11-15-client-lifecycle-integration-evidence.md) | integration evidence |
 | 2026-11-15 | [Client lifecycle acceptance record](2026-11-15-client-lifecycle-acceptance.json) | sanitized results: 12 cells, 486 checks |
+| 2026-11-15 | [Lifecycle acceptance without KVM](2026-11-15-non-kvm-lifecycle-acceptance.json) | separate non-root runc host: 5 cells, 201 checks |
