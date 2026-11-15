@@ -208,13 +208,22 @@ For a `linux-container` actor, install SSHFS and FUSE 3 on the **Linux actor
 host**. The daemon mounts the workspace there, even when the source is a
 remote Mac. Choose the command for that host:
 
+Debian / Ubuntu:
+
 ```sh
-# Debian / Ubuntu
 sudo apt-get update
 sudo apt-get install -y sshfs fuse3
-# Fedora
+```
+
+Fedora:
+
+```sh
 sudo dnf install -y fuse-sshfs fuse3
-# Arch Linux
+```
+
+Arch Linux:
+
+```sh
 sudo pacman -S --noconfirm sshfs fuse3
 ```
 
