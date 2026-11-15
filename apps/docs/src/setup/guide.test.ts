@@ -46,20 +46,30 @@ describe('environment wizard', () => {
   it('keeps FUSE inside VM images and checks the Mac SFTP server as the executor account', () => {
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, os: 'mac', executor: 'runner', runnerOs: 'mac' })
     expect(steps.find(step => step.id === 'prepare')?.code).not.toMatch(/sshfs|fusermount3|fuse\.conf/)
-    const install = steps.find(step => step.id === 'runner-install')!
-    expect(install.text.en).toContain('macFUSE')
-    const workspace = steps.find(step => step.id === 'workspace')!
-    expect(workspace.machine).toBe('runner')
-    expect(workspace.code).toContain('test -x /usr/libexec/sftp-server || exit 1')
-    expect(workspace.text.en).toContain('same account')
+    const sftp = steps.find(step => step.id === 'prepare-sftp')!
+    expect(sftp.machine).toBe('runner')
+    expect(sftp.text.en).toContain('macFUSE')
+    expect(sftp.text.en).toContain('executor account')
+    expect(sftp.code).toBe('id\ntest -x /usr/libexec/sftp-server')
+    expect(steps.indexOf(sftp)).toBeLessThan(steps.findIndex(step => step.id === 'workspace'))
   })
 
   it('checks Linux native SFTP on the executor without assuming the actor host package manager', () => {
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', runnerOs: 'linux', pm: 'dnf' })
-    const install = steps.find(step => step.id === 'runner-install')!
-    expect(install.text.en).toContain('openssh-sftp-server')
-    expect(install.code).not.toContain('dnf')
-    expect(steps.find(step => step.id === 'workspace')?.code).toContain('test -x /usr/lib/openssh/sftp-server || exit 1')
+    const sftp = steps.find(step => step.id === 'prepare-sftp')!
+    expect(sftp.machine).toBe('runner')
+    expect(sftp.text.en).toContain('openssh-sftp-server')
+    expect(sftp.code).not.toContain('dnf')
+    expect(sftp.code).toBe('id\ntest -x /usr/lib/openssh/sftp-server')
+  })
+
+  it('checks a local native workspace source as the daemon account and leaves container sources to their image', () => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'native' })
+    const sftp = steps.find(step => step.id === 'prepare-sftp')!
+    expect(sftp.machine).toBe('host')
+    expect(sftp.text.en).toContain('daemon account')
+    expect(sftp.code).toBe('id\ntest -x /usr/lib/openssh/sftp-server')
+    expect(guide('bash').some(step => step.id === 'prepare-sftp')).toBe(false)
   })
 
   // ROOT CAUSE:
@@ -211,7 +221,7 @@ describe('environment wizard', () => {
   it('quotes user project paths without executing shell substitutions', () => {
     const workspace = "~/a 'project' $(touch unwanted)"
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'native', workspace })
-    expect(steps.find(step => step.id === 'workspace')?.code?.split('\n')[0]).toBe('mkdir -p "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\'')
+    expect(steps.find(step => step.id === 'workspace')?.code).toBe('mkdir -p "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\'')
     expect(parse(steps.find(step => step.profile)!.profile!).actor.workspace.from).toBe(`executor:here:${workspace}`)
   })
 

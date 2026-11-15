@@ -125,19 +125,8 @@ function shellPath(path: string): string {
 }
 
 /** Runs on the executor: home expansion must use the serving account, not the control host. */
-function workspaceProbe(path: string, os: Os | 'windows'): string {
-  // These paths match core-executor's driver::sftp_command. Native Linux
-  // currently requires the Debian/Ubuntu location, not a PATH lookup.
-  // TODO: SFTP path discovery needs a separate approved executor-driver
-  // slice. Until then, check the exact path that the driver uses.
-  const sftp = os === 'mac' ? '/usr/libexec/sftp-server' : '/usr/lib/openssh/sftp-server'
-  return `workspace=${shellPath(path)}\nid\nuname -s\nprintf 'HOME=%s\\n' "$HOME"\ntest -x ${sftp} || exit 1\ntest -d "$workspace" && test -r "$workspace" && test -w "$workspace" && test -x "$workspace" && cd "$workspace" && pwd`
-}
-
-function nativePrerequisites(os: Os | 'windows'): Text {
-  return os === 'mac'
-    ? { en: 'The workspace source uses /usr/libexec/sftp-server. This native Mac executor needs no macFUSE or SSHFS.', zh: 'workspace 来源使用 /usr/libexec/sftp-server。这个 native Mac executor 不需要 macFUSE 或 SSHFS。' }
-    : { en: 'The workspace source requires executable /usr/lib/openssh/sftp-server. On Debian or Ubuntu, install it with sudo apt-get install -y openssh-sftp-server. Other distributions can use a different path. Stop if the executable check fails.', zh: 'workspace 来源需要可执行的 /usr/lib/openssh/sftp-server。Debian 或 Ubuntu 可执行 sudo apt-get install -y openssh-sftp-server 安装。其他发行版的路径可能不同。可执行文件检查失败时，先停止后续步骤。' }
+function workspaceProbe(path: string): string {
+  return `workspace=${shellPath(path)}\nid\nuname -s\nprintf 'HOME=%s\\n' "$HOME"\ntest -d "$workspace" && test -r "$workspace" && test -w "$workspace" && test -x "$workspace" && cd "$workspace" && pwd`
 }
 
 /** Derives one profile and its per-machine steps from all wizard answers. */
@@ -215,16 +204,35 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     code: `needy config use local\n${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\n" : ''}needy daemon service install --now\nneedy daemon service status\nneedy runner ls`,
     expected: { en: 'The service reports ready. The runner table appears without a client bearer or an address export.', zh: '服务状态为 ready，无需客户端令牌或地址环境变量即可列出 runner。' } })
 
+  if (env.executor !== 'container') {
+    const sourceOs = env.executor === 'runner' ? env.runnerOs : env.os
+    // These paths match core-executor's driver::sftp_command.
+    // TODO: SFTP path discovery needs a separate approved executor-driver
+    // slice. Until then, check the exact path that the driver uses.
+    const sftp = sourceOs === 'mac' ? '/usr/libexec/sftp-server' : '/usr/lib/openssh/sftp-server'
+    const account = env.executor === 'runner'
+      ? { en: 'executor account that will serve this run', zh: '将要执行此 run 的 executor 账号' }
+      : { en: 'daemon account', zh: 'daemon 账号' }
+    const installation = sourceOs === 'mac'
+      ? { en: 'This native Mac executor needs no macFUSE or SSHFS.', zh: '这个 native Mac executor 不需要 macFUSE 或 SSHFS。' }
+      : { en: 'On Debian or Ubuntu, install it with sudo apt-get install -y openssh-sftp-server. Other distributions can use a different path.', zh: 'Debian 或 Ubuntu 可执行 sudo apt-get install -y openssh-sftp-server 安装。其他发行版的路径可能不同。' }
+    steps.push({ id: 'prepare-sftp', machine: env.executor === 'runner' ? 'runner' : 'host', terminal: env.executor === 'runner' ? remote : host,
+      title: { en: 'Check the workspace source SFTP server', zh: '检查 workspace 来源的 SFTP server' },
+      text: { en: `Run these checks as the ${account.en}, without sudo. The workspace source requires executable ${sftp}. ${installation.en} Stop if the executable check fails.`, zh: `以${account.zh}执行检查，不要使用 sudo。workspace 来源需要可执行的 ${sftp}。${installation.zh}可执行文件检查失败时，先停止后续步骤。` },
+      code: `id\ntest -x ${sftp}`,
+      expected: { en: 'The identity matches the serving account, and the executable check succeeds.', zh: '身份与执行账号一致，且可执行文件检查通过。' } })
+  }
+
   if (env.executor === 'runner') {
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the executor machine', zh: '准备执行命令的机器' },
-      text: { en: `Install needy and your project tools here. A native runner needs no actor images. ${nativePrerequisites(env.runnerOs).en}`, zh: `在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。${nativePrerequisites(env.runnerOs).zh}` },
+      text: { en: 'Install needy and your project tools here. A native runner needs no actor images.', zh: '在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。' },
       code: INSTALL_NEEDY,
       expected: { en: 'The executor has needy and its project tools. Use the account that will serve commands.', zh: '执行机器已安装 needy 和项目工具。使用将要执行命令的账号。' } },
     { id: 'workspace', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the project on the executor', zh: '在执行机器上准备项目目录' },
       text: { en: 'Use the same account for this directory and runner serve. Use an existing project, or create this empty demo directory. Creating it on the control host will not create it here.', zh: '目录和 runner serve 使用同一账号。可填写已有项目，或创建这个空演示目录。在控制主机创建目录不会在这里创建它。' },
-      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace, env.runnerOs)}`,
+      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace)}`,
       expected: { en: 'The identity and HOME belong to the executor account, and pwd prints the project path. Stop if any check fails.', zh: '身份与 HOME 属于执行账号，pwd 输出项目路径。任一检查失败时先停止后续步骤。' } },
     { id: 'tunnel', machine: 'runner', terminal: { en: 'Executor machine · a separate tunnel terminal', zh: 'executor 机器 · 另开的隧道终端' },
       title: { en: 'Open one tunnel to the control host', zh: '建立一条到控制主机的隧道' },
@@ -246,7 +254,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     { id: 'check-runner', machine: 'host', terminal: host,
       title: { en: 'Check which machine joined', zh: '确认加入的是哪台机器' },
       text: { en: 'This probe runs through the actual serving runner. Compare its identity, HOME and project path with the executor setup step. A missing directory here is the same condition that prevents the workspace mount.', zh: '通过实际接任务的 runner 探测。将身份、HOME、项目路径与执行机器的准备步骤对照。这里缺少目录，就会导致后面的 workspace 挂载失败。' },
-      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace, env.runnerOs))}`,
+      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace))}`,
       expected: { en: `The runner is online, reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}, and the directory checks succeed under the intended account.`, zh: `runner 为 online，系统为 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}，目录检查在预期账号下通过。` } })
     if (fromRunner) {
       steps.push({ id: 'client-invite', machine: 'host', terminal: host,
@@ -263,8 +271,8 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   else if (env.executor === 'native') {
     steps.push({ id: 'workspace', machine: 'host', terminal: host,
       title: { en: 'Create the native project directory', zh: '创建本机项目目录' },
-      text: { en: `Native means the actor host itself. Use the daemon account for the directory and checks. ${nativePrerequisites(env.os).en}`, zh: `native 指 actor 所在宿主机本身。以 daemon 的账号准备目录并执行检查。${nativePrerequisites(env.os).zh}` },
-      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace, env.os)}` })
+      text: { en: 'Native means the actor host itself. The directory belongs to this machine.', zh: 'native 指 actor 所在宿主机本身，项目目录属于这台机器。' },
+      code: `mkdir -p ${shellPath(env.workspace)}` })
   }
 
   if (program !== 'bash') {
