@@ -79,10 +79,15 @@ export function locations(env: Environment): Record<Machine, { name: Text, descr
 }
 
 const PROFILES: Record<Program, string> = { bash, claude, opencode }
+// Sources: distro package indexes (mutable, retrieved 2026-11-15):
+// https://packages.ubuntu.com/noble/sshfs
+// https://packages.fedoraproject.org/pkgs/fuse-sshfs/fuse-sshfs/fedora-43.html
+// https://archlinux.org/packages/extra/x86_64/sshfs/
+// Reference: README.md#workspace-mount-prerequisites includes helper file lists.
 const INSTALL: Record<PackageManager, string> = {
-  apt: 'sudo apt-get install -y sshfs',
-  dnf: 'sudo dnf install -y fuse-sshfs',
-  pacman: 'sudo pacman -S --noconfirm sshfs',
+  apt: 'sudo apt-get update\nsudo apt-get install -y sshfs fuse3',
+  dnf: 'sudo dnf install -y fuse-sshfs fuse3',
+  pacman: 'sudo pacman -S --noconfirm sshfs fuse3',
 }
 const INSTALL_NEEDY = 'curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh\nexport PATH="$HOME/.local/bin:$PATH"\nneedy --version'
 
@@ -155,8 +160,11 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   }
   if (needsDocker(program, env))
     prerequisites.push('docker info --format \'{{.ServerVersion}}\'')
-  if (driver === 'linux-container')
-    prerequisites.push(INSTALL[env.pm], 'sudo sh -c \'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf\'', 'test -r /dev/fuse && test -w /dev/fuse')
+  if (driver === 'linux-container') {
+    // Source: https://github.com/libfuse/libfuse/blob/fuse-3.16.2/util/fuse.conf#L3-L9
+    // allow_other lets the container's user access the daemon's host mount.
+    prerequisites.push(INSTALL[env.pm], 'sudo sh -c \'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf\'', 'id', 'command -v sshfs && command -v fusermount3', 'test -r /dev/fuse && test -w /dev/fuse')
+  }
   if (driver === 'linux-firecracker')
     prerequisites.push('test -r /dev/kvm && test -w /dev/kvm')
   if (driver === 'macos-vz')
@@ -166,7 +174,9 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   steps.push({
     id: 'prepare', machine: 'host', terminal: host,
     title: { en: 'Prepare the actor host', zh: '准备 actor 宿主机' },
-    text: { en: 'Use the account that will run needy. Docker and device checks must succeed under this account.', zh: '使用将要运行 needy 的账号。Docker 与设备访问检查都必须在这个账号下通过。' },
+    text: driver === 'linux-container'
+      ? { en: 'Install SSHFS and FUSE 3 on this actor host. The daemon mounts the workspace here, even for a remote executor. Run the helper, Docker and device checks as the daemon account, without sudo. user_allow_other permits the container user to access this mount.', zh: '在这台 actor 宿主机安装 SSHFS 和 FUSE 3。即使 executor 在远端，daemon 仍在这里挂载 workspace。以 daemon 的账号执行辅助程序、Docker 和设备检查，不要使用 sudo。user_allow_other 允许容器用户访问此挂载。' }
+      : { en: `Use the daemon account. Docker and device checks must succeed under this account.${vm ? ' VM actor images contain their own SSHFS and FUSE helpers.' : ''}`, zh: `使用 daemon 的账号。Docker 与设备访问检查都必须在这个账号下通过。${vm ? 'VM actor 镜像自带 SSHFS 和 FUSE 辅助程序。' : ''}` },
     code: prerequisites.join('\n'),
     expected: { en: `The host is ready for ${driver}. Start Docker first if its application is not running.`, zh: `宿主机具备 ${driver} 的前提；Docker 应用未运行时，先启动它。` },
   }, {
@@ -197,6 +207,25 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     text: { en: 'Install a user service on the control host, with systemd or launchd available. Select local for the following management commands. For an existing service, replace the install line with needy daemon service install --replace --now. Replacement restarts control with the current configuration. Use run stop to end an invocation.', zh: '在控制主机上安装用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。已有服务时，把安装命令替换为 needy daemon service install --replace --now。替换会应用当前配置并重启控制服务。需要结束某个 run 时，使用 run stop。' },
     code: `needy config use local\n${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\n" : ''}needy daemon service install --now\nneedy daemon service status\nneedy runner ls`,
     expected: { en: 'The service reports ready. The runner table appears without a client bearer or an address export.', zh: '服务状态为 ready，无需客户端令牌或地址环境变量即可列出 runner。' } })
+
+  if (env.executor !== 'container') {
+    const sourceOs = env.executor === 'runner' ? env.runnerOs : env.os
+    // These paths match core-executor's driver::sftp_command.
+    // TODO: SFTP path discovery needs a separate approved executor-driver
+    // slice. Until then, check the exact path that the driver uses.
+    const sftp = sourceOs === 'mac' ? '/usr/libexec/sftp-server' : '/usr/lib/openssh/sftp-server'
+    const account = env.executor === 'runner'
+      ? { en: 'executor account that will serve this run', zh: '将要执行此 run 的 executor 账号' }
+      : { en: 'daemon account', zh: 'daemon 账号' }
+    const installation = sourceOs === 'mac'
+      ? { en: 'This native Mac executor needs no macFUSE or SSHFS.', zh: '这个 native Mac executor 不需要 macFUSE 或 SSHFS。' }
+      : { en: 'On Debian or Ubuntu, install it with sudo apt-get install -y openssh-sftp-server. Other distributions can use a different path.', zh: 'Debian 或 Ubuntu 可执行 sudo apt-get install -y openssh-sftp-server 安装。其他发行版的路径可能不同。' }
+    steps.push({ id: 'prepare-sftp', machine: env.executor === 'runner' ? 'runner' : 'host', terminal: env.executor === 'runner' ? remote : host,
+      title: { en: 'Check the workspace source SFTP server', zh: '检查 workspace 来源的 SFTP server' },
+      text: { en: `Run these checks as the ${account.en}, without sudo. The workspace source requires executable ${sftp}. ${installation.en} Stop if the executable check fails.`, zh: `以${account.zh}执行检查，不要使用 sudo。workspace 来源需要可执行的 ${sftp}。${installation.zh}可执行文件检查失败时，先停止后续步骤。` },
+      code: `id\ntest -x ${sftp}`,
+      expected: { en: 'The identity matches the serving account, and the executable check succeeds.', zh: '身份与执行账号一致，且可执行文件检查通过。' } })
+  }
 
   if (env.executor === 'runner') {
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
