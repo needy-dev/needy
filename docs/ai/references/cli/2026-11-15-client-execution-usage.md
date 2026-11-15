@@ -3,10 +3,11 @@
 Date: 2026-11-15. Scope: local profile submission, temporary overrides, and
 execution as the creating client's OS account.
 
-Evidence level: automated CLI tests with a stand-in actor and in-process
-process-service tests. These tests do not establish live actor or cross-machine
-support. See the [approved contract](../architecture/2026-11-15-client-execution-and-actor-lifecycle-spec.md)
-for the complete acceptance requirements.
+Evidence level: automated CLI and process-service tests, plus real non-root
+Linux Firecracker/runc actor journeys with macOS and Linux creating clients.
+The selected matrix passed 12 cells and 486 checks at `05eea63`.
+See the [integration evidence and limits](../architecture/2026-11-15-client-lifecycle-integration-evidence.md)
+and the [approved contract](../architecture/2026-11-15-client-execution-and-actor-lifecycle-spec.md).
 
 ## Locations and account
 

@@ -1,8 +1,10 @@
 # Actor holder and control recovery
 
 Status: implementation evidence for the approved actor lifecycle slice.
-Evidence level: automated domain tests with a stand-in Firecracker and a real native process host.
-Real actor continuity across a separate control process restart requires the e2e harness evidence.
+Evidence level: automated domain tests with a stand-in Firecracker and a real native process host,
+plus real non-root Linux Firecracker and runc continuity and runtime-loss cells.
+See the [completed integration matrix](2026-11-15-client-lifecycle-integration-evidence.md)
+for source checkpoints, check counts, and the limits of that live evidence.
 
 ## Ownership boundary
 
@@ -101,7 +103,8 @@ If a crash follows a sensor write before its queued trace record, adoption can r
 
 End-only mirror-out retains its existing abrupt-loss limits.
 Stored traces and terminal replay do not restore a lost process.
-Cross-machine real actor tests, actual holder loss, and native service-manager restart remain e2e acceptance requirements.
+The selected real actor and cross-machine client matrix passed at `05eea63`.
+Actual holder-process loss and a native service-manager restart with a running actor remain untested boundaries.
 
 ## Validation record
 
@@ -110,5 +113,6 @@ Cross-machine real actor tests, actual holder loss, and native service-manager r
 - Service-definition and Docker wait-disconnect regressions passed
 - `cargo fmt --all` and `git diff --check` passed
 - Linux cross-check stopped before project compilation because `aarch64-linux-musl-gcc` was unavailable
+- Later integration built the Linux ARM guest and harness through the existing Dockerfile, passed the complete selected live matrix, and completed a Windows native MSVC build and CLI suite; see the integration evidence above
 
 This record does not count the unavailable cross-check as a passed check.

@@ -1,8 +1,12 @@
 # Client execution and lifecycle integration evidence
 
-Date: 2026-11-15. Status: locally verified implementation; signed integration and final cross-machine acceptance are pending.
-The source checkpoint is `66ccbe4`, plus the uncommitted review patches described here.
-This note does not establish released or general cross-machine support.
+Date: 2026-11-15. Status: the approved Linux actor and macOS/Linux client acceptance matrix passed.
+The final harness checkpoint is `05eea63`; production source is unchanged from `9e26e70`.
+Both checkpoints are signed commits. This note does not establish released or general platform support.
+
+The [sanitized acceptance record](2026-11-15-client-lifecycle-acceptance.json)
+retains the cell IDs, check counts, source identity, and raw-report digests.
+Private host inventories, credentials, paths, and raw output remain outside the repository.
 
 The [approved contract](2026-11-15-client-execution-and-actor-lifecycle-spec.md)
 sets the required behavior. The [holder evidence](2026-11-15-actor-holder-implementation-evidence.md)
@@ -57,7 +61,9 @@ The combined workspace suite passed 1,088 tests across 33 reported suites. This 
 | --- | --- | --- |
 | Integrated workspace | 1,088 passed; full workspace Clippy passed with warnings denied | Current integrated source, including the review fixes. |
 | Linux ARM guest and harness build | Static musl builds passed through the existing Dockerfile | Linux-specific compilation, not actor or cross-machine behavior. |
-| Windows GNU cross-build | Existing Dockerfile target produced the executable | Current Windows code compiles; native MSVC and Windows runtime acceptance remain pending. |
+| Windows GNU cross-build | Existing Dockerfile target produced the executable | Compilation only; separate native results follow below. |
+| Windows native MSVC at `9e26e70` | Build passed; 45 CLI tests passed; no warnings | Rust/Cargo 1.95.0, `x86_64-pc-windows-msvc`. Unix-only lifecycle binaries ran zero tests on Windows. |
+| Final harness at `05eea63` | 31 tests passed; Clippy passed with warnings denied | Includes the failing-then-passing viewer-crash regression. Production source did not change. |
 | Targeted core checks | 134 passed | Event and report behavior, including the versioned stop record. |
 | Targeted daemon recovery checks | 2 passed | Focused recovery regressions, not real actor restart acceptance. |
 | Capacity branch before integration | Full suite: 1,078 passed | Earlier branch checkpoint, not the final integrated source. |
@@ -72,7 +78,7 @@ The [daemon file tests](../../../../crates/daemon/src/files_test.rs)
 cover mirror-out before client-holder revocation.
 The holder note records the separate recovery and service-definition checks.
 Independent Standards and Spec reviews reported no remaining actionable findings after the review fixes.
-These are source reviews; their conclusions do not replace the pending live matrix.
+These are source reviews; the live matrix below supplies separate runtime evidence.
 
 ## Live records
 
@@ -86,29 +92,47 @@ These records describe actual CLI runs or builds. A failed cell remains failed d
 | `b671cc8` | The same cross-machine journey after lifecycle integration. | 41/42 checks passed. Gateway socket files remained after shutdown. Fix: `951e6f3`, with a failing regression followed by a passing regression. |
 | `66ccbe4` | Final cross-machine acceptance attempt. | SSH signing failed before archive transfer. Zero of 12 planned cells ran, with zero behavior checks executed. |
 | `aa79f24` Windows build | A native build completed with four Unix-import warnings. | Source guards changed at `b671cc8`. This earlier build does not prove current Windows runtime behavior. |
+| `9e26e70` | Two macOS client journeys passed. Six of ten Linux-local cells passed; four lifecycle cells failed before their lifecycle assertions. | The harness waited for an unterminated prompt in line-oriented logs. Fix: `fef3a57` waits for the complete startup marker. |
+| `fef3a57` | Both macOS client journeys and eight Linux-local cells passed. Two continuity cells failed after the viewer termination step. | The PTY library sent SIGHUP before killing the viewer; the CLI forwarded that deliberate signal to the actor. Fix: `05eea63` uses SIGKILL for the crash probe. |
+| `05eea63` | Final canonical matrix: 12/12 cells and 486/486 checks passed. | Non-root control daemons; real Linux Firecracker and runc actors; macOS and Linux creating clients. No failed, skipped, or unavailable cell in this selected matrix. |
 
 The macOS journeys observed the invoking account, HOME, platform, mapped cwd, mounted actor writes, and routed command writes and exits.
 They also observed separate invocation holders, multiple logical executors, and continued execution after the other invocation stopped.
-The final record still needs a passing rerun after the cleanup fixes and review patches.
+The final rerun includes the cleanup fixes and review patches.
+
+The continuity cells retain the original driving PID, shell variable, and single start marker through repeated attach/detach and a SIGKILL of the viewer.
+They then terminate control with SIGTERM and SIGKILL, confirm a new control instance, and reattach to the original actor resource and driving process.
+The dispatched native process keeps its original PID and OS identity, and the trace records one dispatch across both control gaps.
+Foreground Ctrl-C interrupts the child without deleting the invocation.
+Explicit stop removes the original resources and ends the native process.
+
+The two earlier failures were harness defects, each recorded before its correction.
+The PTY HUP-sentinel regression fails with the old crash probe and passes with direct SIGKILL.
+Production signal forwarding remains unchanged.
 
 Raw records and private host inventories remain outside the repository. This note retains only role, OS, source, and outcome information.
 
-## Remaining gates and limits
+## Verified matrix and limits
 
-The final live matrix remains unexecuted:
+The final live matrix passed in full:
 
-| Journey | Pending cells |
-| --- | --- |
-| macOS client with Linux Firecracker and runc actors | 2 |
-| Linux-local client execution with both drivers | 2 |
-| Actor continuity and actual actor loss with both drivers | 4 |
-| Actor-files and native executor-files runtime loss with both drivers | 4 |
+| Journey | Passed cells | Passed checks |
+| --- | --- | --- |
+| macOS client with Linux Firecracker and runc actors | 2 | 84 |
+| Linux-local client execution with both drivers | 2 | 84 |
+| Actor continuity and actual actor loss with both drivers | 4 | 112 |
+| Actor-files and native executor-files runtime loss with both drivers | 4 | 206 |
 
 The [matrix](../../../../xtask/src/e2e/matrix.rs),
 [client journey](../../../../xtask/src/e2e/client/journey.rs), and
 [lifecycle journey](../../../../xtask/src/e2e/lifecycle.rs) define those checks.
-SSH authentication and commit signing remain blocked. No authentication or signing policy was disabled, and further retries remain paused.
-The final live run needs a clean checkpoint that includes the review patches.
+SSH authentication and signing resumed after the owner unlocked the existing agent.
+No authentication or signing policy was disabled.
+Every final cell checked for owned processes, containers, mounts, and sockets after cleanup; none remained.
+
+This selected matrix does not test actual holder-process loss, a whole-host reboot,
+or a native service-manager restart while an actor is running.
+It does not establish macOS actor-driver or Windows executor interoperability support.
 
 Automatic Windows client holders remain unsupported because canonical private-file ACL support is deliberately deferred.
 A native Windows build cannot remove that boundary.
@@ -119,5 +143,5 @@ Actual holder, runtime, or host loss does not restore process memory.
 End-only mirror-out does not guarantee durable output after abrupt loss.
 Existing trace records and terminal replay do not restore a lost process.
 
-Main remains clean. The integration worktree contains review changes.
+Main remains clean. Implementation, harness fixes, and evidence are kept on the integration branch.
 This slice made no new GitHub publication or deployment.
