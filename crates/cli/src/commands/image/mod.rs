@@ -25,6 +25,7 @@ use crate::cli::Context;
 
 mod build;
 mod ls;
+mod progress;
 mod pull;
 mod rm;
 

@@ -178,7 +178,12 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     args.listen
   };
   let listen = listen.iter().map(|address| listener(address)).collect::<Result<Vec<_>>>()?;
+  let progress =
+    crate::output::Progress::new(!matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json), "Initializing control service...");
   let daemon = needy_daemon::Daemon::start(config).await?;
+  progress.finish();
+  // TODO(startup-feedback): listener readiness needs a serve callback before
+  // progress can cover binding; keep persistent serving free of UI overlays.
   daemon.serve(&listen, None).await?;
   Ok(0)
 }

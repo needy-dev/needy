@@ -6,6 +6,7 @@
 //! through the daemon's trace store.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use tracing_appender::non_blocking::WorkerGuard;
@@ -17,6 +18,13 @@ use tracing_subscriber::{Layer, fmt};
 
 /// Keeps the file writer flushing; drop it last.
 pub struct Guard(#[allow(dead_code, reason = "held for its Drop")] Option<WorkerGuard>);
+
+static STDERR_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Animated feedback must not overwrite process logs on the same stream.
+pub(crate) fn stderr_active() -> bool {
+  STDERR_ACTIVE.load(Ordering::Relaxed)
+}
 
 /// Installs the global subscriber. `verbosity` is the number of `-v` flags;
 /// `log_dir` adds a daily file for the daemon.
@@ -35,6 +43,7 @@ pub fn init(verbosity: u8, log_dir: Option<&Path>) -> Result<Guard> {
     None => (None, None),
   };
   tracing_subscriber::registry().with(stderr).with(file).try_init()?;
+  STDERR_ACTIVE.store(verbosity > 0, Ordering::Relaxed);
   if let Some(error) = file_error {
     // A read-only home, as in some containers, must not stop the daemon.
     tracing::warn!("no log file: {error:#}");

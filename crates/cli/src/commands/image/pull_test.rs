@@ -98,7 +98,7 @@ async fn a_release_image_is_verified_and_put_in_its_drivers_base_directory() {
   ])
   .await;
 
-  let dir = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets).await.unwrap();
+  let dir = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets, false).await.unwrap();
 
   assert_eq!(dir, vm::base_dir(images.path(), ActorDriver::LinuxFirecracker));
   assert_eq!(std::fs::read(dir.join("rootfs.ext4")).unwrap(), b"rootfs");
@@ -125,7 +125,7 @@ async fn an_archive_that_does_not_match_its_sha256_is_not_installed() {
   ])
   .await;
 
-  let error = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets).await.unwrap_err().to_string();
+  let error = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets, false).await.unwrap_err().to_string();
 
   assert!(error.contains("this image was not installed"), "{error}");
   assert_eq!(entries(images.path()), Vec::<String>::new());
@@ -136,7 +136,7 @@ async fn a_version_without_a_release_names_the_build_and_another_version() {
   let images = tempfile::tempdir().unwrap();
   let assets = serve(Vec::new()).await;
 
-  let error = pull_vm(&client(), images.path(), ActorDriver::MacosVz, "0.0.9", &assets).await.unwrap_err().to_string();
+  let error = pull_vm(&client(), images.path(), ActorDriver::MacosVz, "0.0.9", &assets, false).await.unwrap_err().to_string();
 
   assert_eq!(
     error,
@@ -154,7 +154,7 @@ async fn a_base_of_another_base_abi_is_refused_and_leaves_nothing() {
   let file = images.path().join("needy-actor-linux-firecracker-x86_64.tar.gz");
   std::fs::write(&file, firecracker_archive(base::ABI + 1)).unwrap();
 
-  let error = import(images.path(), None, &file).await.unwrap_err().to_string();
+  let error = import(images.path(), None, &file, false).await.unwrap_err().to_string();
 
   assert!(error.starts_with(&format!("the linux-firecracker base of needy 0.0.9 has base ABI {}", base::ABI + 1)), "{error}");
   assert_eq!(entries(images.path()), ["needy-actor-linux-firecracker-x86_64.tar.gz"]);
@@ -173,7 +173,7 @@ async fn an_imported_archive_takes_its_driver_from_its_manifest_and_is_checked_a
   std::fs::write(&file, &packed).unwrap();
   std::fs::write(images.path().join("offline.tar.gz.sha256"), format!("{}  offline.tar.gz\n", sha256(&packed))).unwrap();
 
-  let dir = import(images.path(), None, &file).await.unwrap();
+  let dir = import(images.path(), None, &file, false).await.unwrap();
 
   assert_eq!(dir, vm::base_dir(images.path(), ActorDriver::MacosVz));
   let manifest = manifest::read(&dir).unwrap().unwrap();
@@ -193,7 +193,7 @@ async fn an_imported_archive_whose_sha256_beside_it_differs_is_refused() {
   std::fs::write(&file, firecracker_archive(base::ABI)).unwrap();
   std::fs::write(images.path().join("offline.tar.gz.sha256"), "0".repeat(64)).unwrap();
 
-  let error = import(images.path(), None, &file).await.unwrap_err().to_string();
+  let error = import(images.path(), None, &file, false).await.unwrap_err().to_string();
 
   assert!(error.contains("this image was not installed"), "{error}");
   assert!(!vm::base_dir(images.path(), ActorDriver::LinuxFirecracker).exists());
@@ -205,7 +205,7 @@ async fn an_archive_of_another_driver_than_the_one_named_is_refused() {
   let file = images.path().join("needy-actor-linux-firecracker-x86_64.tar.gz");
   std::fs::write(&file, firecracker_archive(base::ABI)).unwrap();
 
-  let error = import(images.path(), Some(ActorDriver::MacosVz), &file).await.unwrap_err().to_string();
+  let error = import(images.path(), Some(ActorDriver::MacosVz), &file, false).await.unwrap_err().to_string();
 
   assert_eq!(error, "the archive holds a linux-firecracker image, not a macos-vz one");
   assert_eq!(entries(images.path()), ["needy-actor-linux-firecracker-x86_64.tar.gz"]);
@@ -226,7 +226,7 @@ async fn an_archive_without_a_manifest_is_no_vm_image() {
   )
   .unwrap();
 
-  let error = import(images.path(), None, &file).await.unwrap_err().to_string();
+  let error = import(images.path(), None, &file, false).await.unwrap_err().to_string();
 
   assert_eq!(error, format!("{} has no manifest.json: it is not a needy VM image archive", std::fs::canonicalize(&file).unwrap().display()));
 }
@@ -236,7 +236,7 @@ async fn a_newer_pull_replaces_the_older_image_whole() {
   let images = tempfile::tempdir().unwrap();
   let file = images.path().join("a.tar.gz");
   std::fs::write(&file, firecracker_archive(base::ABI)).unwrap();
-  let dir = import(images.path(), None, &file).await.unwrap();
+  let dir = import(images.path(), None, &file, false).await.unwrap();
   std::fs::write(dir.join("left-over"), "").unwrap();
 
   let newer = archive(&[
@@ -247,7 +247,7 @@ async fn a_newer_pull_replaces_the_older_image_whole() {
   ]);
   let mut file = std::fs::File::create(images.path().join("b.tar.gz")).unwrap();
   file.write_all(&newer).unwrap();
-  import(images.path(), None, &images.path().join("b.tar.gz")).await.unwrap();
+  import(images.path(), None, &images.path().join("b.tar.gz"), false).await.unwrap();
 
   assert_eq!(std::fs::read(dir.join("vmlinux")).unwrap(), b"kernel 2");
   assert!(!dir.join("left-over").exists());

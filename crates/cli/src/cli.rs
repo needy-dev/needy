@@ -73,6 +73,14 @@ pub struct Context {
 }
 
 impl Context {
+  /// A connector owns stderr for prompts and diagnostics throughout a request.
+  /// If selection cannot be inspected, omit animation; the connection boundary
+  /// still reports the original selection error when the command connects.
+  pub(crate) fn connection_feedback(&self) -> bool {
+    !matches!(self.diagnostic_format, crate::diagnostics::Format::Json)
+      && crate::connection::resolve(self).is_ok_and(|selected| selected.command.is_none())
+  }
+
   pub fn configuration_file(&self) -> Result<PathBuf> {
     Ok(self.base_paths()?.config_file())
   }

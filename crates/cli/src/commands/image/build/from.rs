@@ -39,13 +39,13 @@ pub struct From<'a> {
 }
 
 /// Builds the VM image and returns its directory.
-pub async fn build(docker: &Docker, from: &From<'_>) -> Result<PathBuf> {
+pub async fn build(docker: &Docker, from: &From<'_>, feedback: bool) -> Result<PathBuf> {
   let driver = vm::host_driver();
   let arch = vm::arch(driver);
   let platform = format!("linux/{}", container::oci_arch(arch));
   // The base first: it is local, and its kernel is what the image boots.
   check_base(driver, from.base)?;
-  let image = inspect(docker, from.reference, &platform).await?;
+  let image = inspect(docker, from.reference, &platform, feedback).await?;
   base::check(
     from.reference,
     image.config.as_ref().and_then(|c| c.labels.as_ref()).and_then(|l| l.get(base::LABEL)).map(String::as_str),
@@ -63,8 +63,9 @@ pub async fn build(docker: &Docker, from: &From<'_>) -> Result<PathBuf> {
   // Written next to the output and renamed into place, so a daemon never
   // boots a half-written image.
   let staging = parent.join(format!(".needy-build-{}", uuid::Uuid::new_v4()));
-  let built = write(docker, from, driver, &platform, &image, &staging).await;
+  let built = write(docker, from, driver, &platform, &image, &staging, feedback).await;
   let placed = built.and_then(|()| {
+    let _progress = output::Progress::new(feedback, format!("Installing VM image from {}", from.reference));
     if out.exists() {
       std::fs::remove_dir_all(&out).with_context(|| format!("cannot replace {}", out.display()))?;
     }
@@ -91,7 +92,8 @@ fn check_base(driver: ActorDriver, dir: &Path) -> Result<()> {
 }
 
 /// What the engine has of `reference`, pulled for `platform` if it has none.
-async fn inspect(docker: &Docker, reference: &str, platform: &str) -> Result<bollard::models::ImageInspect> {
+async fn inspect(docker: &Docker, reference: &str, platform: &str, feedback: bool) -> Result<bollard::models::ImageInspect> {
+  let progress = output::Progress::new(feedback, format!("Inspecting {reference}"));
   match docker.inspect_image(reference).await {
     Ok(image) => return Ok(image),
     Err(bollard::errors::Error::DockerResponseServerError {
@@ -99,14 +101,20 @@ async fn inspect(docker: &Docker, reference: &str, platform: &str) -> Result<bol
     }) => {}
     Err(e) => return Err(e).with_context(|| format!("cannot inspect {reference}")),
   }
-  output::message(format_args!("build: pulling {reference} for {platform}"));
+  progress.message(format!("Pulling {reference} for {platform}"));
+  if !progress.is_visible() {
+    output::message(format_args!("build: pulling {reference} for {platform}"));
+  }
   let options =
     CreateImageOptionsBuilder::default().from_image(&needy_core_executor::engine::with_tag(reference)).platform(platform).build();
+  // TODO: Stream missing-image pull details when that behavior is approved;
+  // this presentation-only slice retains the existing collection semantics.
   docker
     .create_image(Some(options), None, None)
     .try_collect::<Vec<_>>()
     .await
     .with_context(|| format!("{reference} is not here, and cannot be pulled for {platform}"))?;
+  progress.message(format!("Inspecting {reference}"));
   docker.inspect_image(reference).await.with_context(|| format!("cannot inspect {reference}"))
 }
 
@@ -119,6 +127,7 @@ async fn write(
   platform: &str,
   image: &bollard::models::ImageInspect,
   dir: &Path,
+  feedback: bool,
 ) -> Result<()> {
   std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
   let archive = dir.join(".needy-build.tar");
@@ -133,11 +142,14 @@ async fn write(
       outputs: Some(ImageBuildOutput::Tar(archive.display().to_string())),
       ..super::options()
     },
+    feedback,
   )
   .await?;
   let (unpack_from, unpack_to) = (archive.clone(), dir.to_path_buf());
+  let progress = output::Progress::new(feedback, "Extracting built root file system");
   tokio::task::spawn_blocking(move || super::unpack(&unpack_from, &unpack_to)).await??;
   std::fs::remove_file(&archive).with_context(|| format!("cannot remove {}", archive.display()))?;
+  progress.message("Copying base VM image files");
   for file in vm::base_files(driver) {
     let (source, target) = (from.base.join(file), dir.join(file));
     std::fs::copy(&source, &target).with_context(|| format!("cannot copy {} to {}", source.display(), target.display()))?;
@@ -148,6 +160,7 @@ async fn write(
     id: image.id.clone().unwrap_or_default(),
     platform: platform.to_string(),
   };
+  progress.message("Writing VM image manifest");
   Ok(manifest::write(dir, &Manifest::made(driver, base::ABI, source))?)
 }
 

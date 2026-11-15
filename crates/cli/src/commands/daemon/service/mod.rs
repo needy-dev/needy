@@ -204,6 +204,10 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Err(error) => return Err(error.into()),
   };
   if let Command::Status { output, .. } = args.command {
+    let progress = output::Progress::new(
+      matches!(output, output::OutputFormat::Table) && !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json),
+      "Inspecting control service...",
+    );
     let row = match registration {
       Some(registration) => status(manager.as_ref(), &registration).await?,
       None => Status {
@@ -216,27 +220,41 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         log: String::new(),
       },
     };
+    progress.finish();
     output::print(output, &[row])?;
     return Ok(0);
   }
   let registration = registration.ok_or_else(missing)?;
   verify_owned(&registration)?;
+  let progress = !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json);
   match args.command {
-    Command::Start { timeout, .. } => start(manager.as_ref(), &registration, Instant::now() + timeout).await?,
-    Command::Stop { timeout, .. } => stop(manager.as_ref(), &registration, Instant::now() + timeout).await?,
+    Command::Start { timeout, .. } => {
+      start(manager.as_ref(), &registration, Instant::now() + timeout, progress).await?;
+      output::acknowledge("Control service is ready.")?;
+    }
+    Command::Stop { timeout, .. } => {
+      stop(manager.as_ref(), &registration, Instant::now() + timeout, progress).await?;
+      output::acknowledge("Control service is stopped.")?;
+    }
     Command::Restart { timeout, .. } => {
       let deadline = Instant::now() + timeout;
-      stop(manager.as_ref(), &registration, deadline).await?;
-      start(manager.as_ref(), &registration, deadline).await?;
+      stop(manager.as_ref(), &registration, deadline, progress).await?;
+      start(manager.as_ref(), &registration, deadline, progress).await?;
+      output::acknowledge("Control service restarted; control API is ready.")?;
     }
     Command::Uninstall { timeout, .. } => {
       let deadline = Instant::now() + timeout;
-      stop(manager.as_ref(), &registration, deadline).await?;
+      stop(manager.as_ref(), &registration, deadline, progress).await?;
       execute(manager.command(Action::Disable, &registration), deadline).await?;
       std::fs::remove_file(&registration.definition)?;
       execute(manager.command(Action::Reload, &registration), deadline).await?;
       std::fs::remove_file(&receipt)?;
       // Configuration, credentials, snapshots, logs, state and images remain.
+      output::acknowledge("Control service uninstalled.")?;
+      {
+        use std::io::Write as _;
+        writeln!(std::io::stderr().lock(), "\nRemoved:\n  {}\n  {}", registration.definition.display(), receipt.display())?;
+      }
     }
     Command::Logs { follow, tail, .. } => {
       let status = manager.logs(&registration, follow, tail).status().await.context("cannot read service logs")?;
@@ -293,7 +311,7 @@ async fn inspect(manager: &dyn Manager, registration: &Registration, deadline: I
   Ok(state)
 }
 
-async fn stop(manager: &dyn Manager, registration: &Registration, deadline: Instant) -> Result<()> {
+async fn stop(manager: &dyn Manager, registration: &Registration, deadline: Instant, progress: bool) -> Result<()> {
   let state = inspect(manager, registration, deadline).await?;
   if state.pid.is_none() && state.state != "starting" {
     return Ok(());
@@ -301,6 +319,9 @@ async fn stop(manager: &dyn Manager, registration: &Registration, deadline: Inst
   #[cfg(unix)]
   let expected = needy_daemon::discovery::read(&registration.runtime).ok().filter(|record| Some(record.pid) == state.pid);
   execute(manager.command(Action::Stop, registration), deadline).await?;
+  // Manager commands finish before the spinner owns the terminal. Only the
+  // silent stop/cleanup wait renders progress, including during replacement.
+  let _progress = output::Progress::new(progress, "Waiting for control service to stop and verify cleanup");
   loop {
     let state = inspect(manager, registration, deadline).await?;
     if state.pid.is_none() && state.state != "starting" {
@@ -328,7 +349,7 @@ async fn stop(manager: &dyn Manager, registration: &Registration, deadline: Inst
   }
 }
 
-async fn start(manager: &dyn Manager, registration: &Registration, deadline: Instant) -> Result<()> {
+async fn start(manager: &dyn Manager, registration: &Registration, deadline: Instant, progress: bool) -> Result<()> {
   let initial = inspect(manager, registration, deadline).await?;
   if initial.pid.is_none() {
     let action = if initial.loaded && manager.name() == "launchd" {
@@ -338,6 +359,8 @@ async fn start(manager: &dyn Manager, registration: &Registration, deadline: Ins
     };
     execute(manager.command(action, registration), deadline).await?;
   }
+  // Clear on return before the caller prints success or the next install step.
+  let _progress = output::Progress::new(progress, "Waiting for a ready control service");
   loop {
     let before = inspect(manager, registration, deadline).await?;
     if before.state == "failed" {
@@ -610,7 +633,7 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
     );
   }
   if let Some(previous) = &previous {
-    stop(manager, previous, deadline).await?;
+    stop(manager, previous, deadline, !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)).await?;
   }
   for path in [&paths.state, &paths.data, &paths.runtime, &snapshot_dir] {
     prepare_directory(path, uid, gid)?;
@@ -637,9 +660,9 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
   execute(manager.command(Action::Enable, &registration), deadline).await?;
   if now {
     output::outln!("Starting {} control service ({scope_name})", manager.name())?;
-    start(manager, &registration, deadline).await?;
+    start(manager, &registration, deadline, !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)).await?;
   }
-  output::outln!("Installed {} control service ({scope_name})", manager.name())?;
+  output::success(&format!("Installed {} control service ({scope_name})", manager.name()))?;
   Ok(())
 }
 

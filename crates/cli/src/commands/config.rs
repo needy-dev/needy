@@ -72,10 +72,12 @@ pub enum DocumentFormat {
 
 #[derive(clap::Args)]
 struct Transport {
-  #[arg(long, conflicts_with = "command", required_unless_present = "command")]
+  // The root --address flag works before or after the subcommand. A local
+  // flag with the same name shadows it during clap's required-arg checks.
+  #[arg(skip)]
   address: Option<String>,
   /// Connector argv; stdout must carry protocol data only.
-  #[arg(last = true, num_args = 1.., required_unless_present = "address")]
+  #[arg(last = true, num_args = 1.., conflicts_with = "address")]
   command: Vec<String>,
 }
 impl Transport {
@@ -111,6 +113,10 @@ enum ContextCommand {
     name: String,
     #[command(flatten)]
     transport: Transport,
+    /// One-time client invitation token.
+    #[arg(long, value_name = "TOKEN", conflicts_with = "code_file")]
+    token: Option<String>,
+    /// Read an invitation from a private file, or `-` for standard input.
     #[arg(long)]
     code_file: Option<PathBuf>,
     #[arg(long)]
@@ -159,13 +165,53 @@ struct ContextRow {
   identity: String,
   recorded_access: String,
 }
+
+/// Health and authenticated identity are separate observations, not findings
+/// about a configuration file. Missing values stay unknown on a failed probe.
+#[derive(Serialize)]
+struct CheckRow {
+  name: String,
+  address: String,
+  status: &'static str,
+  role: Option<String>,
+  instance: Option<String>,
+  client: Option<String>,
+  client_id: Option<String>,
+  access: Option<String>,
+  error: Option<String>,
+}
+
+impl Row for CheckRow {
+  const HEADER: &'static [&'static str] = &[
+    "NAME",
+    "ADDRESS",
+    "STATUS",
+    "SERVICE",
+    "INSTANCE",
+    "CLIENT",
+    "CLIENT ROLE",
+  ];
+
+  fn cells(&self) -> Vec<String> {
+    let known = |value: &Option<String>| value.clone().unwrap_or_else(|| "unknown".into());
+    vec![
+      self.name.clone(),
+      self.address.clone(),
+      self.status.into(),
+      known(&self.role),
+      known(&self.instance),
+      known(&self.client),
+      known(&self.access),
+    ]
+  }
+}
 impl Row for ContextRow {
   const HEADER: &'static [&'static str] = &[
     "NAME",
     "CURRENT",
     "TRANSPORT",
     "RECORDED IDENTITY",
-    "RECORDED ACCESS",
+    "RECORDED CLIENT ROLE",
   ];
   fn cells(&self) -> Vec<String> {
     vec![
@@ -274,11 +320,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let mut locked = Locked::open(&path)?;
       locked.config = mutation(&locked.config, &key, Some(&value))?;
       locked.save()?;
+      updated("Configuration updated.", &path)?;
     }
     Command::Unset { key } => {
       let mut locked = Locked::open(&path)?;
       locked.config = mutation(&locked.config, &key, None)?;
       locked.save()?;
+      updated("Configuration updated.", &path)?;
     }
     Command::Use { name } => {
       let mut locked = Locked::open(&path)?;
@@ -287,6 +335,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       }
       locked.config.current_context = name;
       locked.save()?;
+      updated("Context selected.", &path)?;
     }
     Command::Context { command } => return context(command, ctx, &path).await,
     Command::Show { output } => {
@@ -387,22 +436,29 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         return Err(missing(&name));
       }
       locked.save()?;
+      updated("Context removed.", path)?;
     }
-    ContextCommand::Set { name, transport } => {
+    ContextCommand::Set {
+      name,
+      mut transport,
+    } => {
       anyhow::ensure!(
         ctx.selected_context.is_none() && ctx.credential_file.is_none(),
         "context set changes its named transport; omit --context and --credential-file"
       );
+      transport.address = ctx.address.clone();
       transport.validate()?;
       let mut locked = Locked::open(path)?;
       let record = locked.config.contexts.get_mut(&name).ok_or_else(|| missing(&name))?;
       record.address = transport.address;
       record.command = (!transport.command.is_empty()).then_some(transport.command);
       locked.save()?;
+      updated("Context updated.", path)?;
     }
     ContextCommand::Pair {
       name,
-      transport,
+      mut transport,
+      token,
       code_file,
       replace,
     } => {
@@ -410,6 +466,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         ctx.selected_context.is_none() && ctx.credential_file.is_none(),
         "pair uses its own transport and invitation; omit --context and --credential-file"
       );
+      transport.address = ctx.address.clone();
       transport.validate()?;
       anyhow::ensure!(name != "local" && global::valid_name(&name), "context name requires a DNS label; local is reserved");
       let mut locked = Locked::open(path)?;
@@ -425,20 +482,35 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
           .into(),
         );
       }
-      let code = match code_file {
-        Some(path) => configuration::read_secret(&path).context("cannot read invitation code file")?,
-        None => rpassword::prompt_password("Invitation code: ").context("cannot read hidden invitation code; use --code-file")?,
+      let code = if let Some(token) = token {
+        token
+      } else {
+        match code_file {
+          Some(path) if path == std::path::Path::new("-") => {
+            use std::io::Read as _;
+            let mut code = String::new();
+            std::io::stdin().read_to_string(&mut code).context("cannot read client invitation from stdin")?;
+            code
+          }
+          Some(path) => configuration::read_secret(&path).context("cannot read invitation code file")?,
+          None => {
+            eprintln!(
+              "To obtain a client invitation, run on the control host:\n\n  needy client invite --name <client-name>\n\nPaste its token below. You can also pass --token TOKEN,\nuse --code-file FILE, or pipe the token with --code-file -.\n"
+            );
+            rpassword::prompt_password("Invitation code: ")
+              .context("cannot read hidden invitation code; use --code-file FILE or --code-file -")?
+          }
+        }
       };
-      anyhow::ensure!(!code.trim().is_empty(), "invitation code is empty");
+      let code = code.trim();
+      anyhow::ensure!(!code.is_empty() && !code.contains(['\r', '\n', '\0']), "provide one nonempty client invitation code");
+      let progress = output::Progress::new(
+        !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json) && transport.command.is_empty(),
+        "Pairing with control service...",
+      );
       let connection = transport.connect().await?;
-      let paired = connection
-        .clients()
-        .pair(v1::PairRequest {
-          code: code.trim().into(),
-        })
-        .await
-        .map_err(needy_api_client::Error::from)?
-        .into_inner();
+      let paired =
+        connection.clients().pair(v1::PairRequest { code: code.into() }).await.map_err(needy_api_client::Error::from)?.into_inner();
       let client = paired.client.ok_or_else(|| unsaved("unknown", anyhow::anyhow!("server issued a credential without client identity")))?;
       let access = match v1::ClientAccess::try_from(client.access) {
         Ok(v1::ClientAccess::Runs) => Access::Runs,
@@ -459,9 +531,11 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       };
       record.validate().map_err(|cause| unsaved(&id, cause.into()))?;
       connection.with_token(&record.credential).map_err(|cause| unsaved(&id, cause.into()))?;
+      progress.message("Saving client configuration...");
       locked.config.contexts.insert(name.clone(), record);
       locked.save().map_err(|cause| unsaved(&id, cause))?;
-      output::message(format_args!("paired context {name} as client {id}; current selection is unchanged"));
+      progress.finish();
+      updated("Paired successfully!", path)?;
     }
     ContextCommand::Check {
       name,
@@ -488,10 +562,14 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         return Err(missing(&name));
       }
       let transport = ctx.address.clone().unwrap_or_else(|| {
-        record
-          .map(|r| r.address.clone().unwrap_or_else(|| shell_words::join(r.command.as_ref().unwrap())))
-          .unwrap_or_else(|| "local discovery".into())
+        record.map(|r| r.address.clone().unwrap_or_else(|| "connector".into())).unwrap_or_else(|| "local discovery".into())
       });
+      let progress = output::Progress::new(
+        matches!(output, OutputFormat::Table)
+          && !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)
+          && record.is_none_or(|r| r.command.is_none()),
+        "Checking connection...",
+      );
       let probe = async {
         let client = if direct {
           ctx.connect().await?
@@ -511,38 +589,79 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
           matches!(health.role.as_str(), "control" | "executor") && !health.instance_id.is_empty(),
           "endpoint did not identify a supported service role and instance"
         );
-        let identity = if health.role == "executor" {
-          "unknown: caller inspection unavailable for executor".into()
+        let (identity, client_id, access) = if health.role == "executor" {
+          (None, None, None)
         } else {
           match client.clients().get_caller(v1::GetCallerRequest {}).await {
             Ok(response) => {
               let c = response.into_inner();
-              format!("{} ({}) access={}", c.name, c.client_id, c.access)
+              let access = match v1::ClientAccess::try_from(c.access) {
+                Ok(v1::ClientAccess::Admin) => "admin",
+                Ok(v1::ClientAccess::Runs) => "runs",
+                _ => "unknown",
+              };
+              (Some(c.name), Some(c.client_id), Some(access.to_owned()))
             }
-            Err(e) if e.code() == tonic::Code::Unimplemented => "unknown: caller inspection unavailable".into(),
+            Err(e) if e.code() == tonic::Code::Unimplemented => (None, None, None),
             Err(e) => return Err(anyhow::Error::from(needy_api_client::Error::from(e))),
           }
         };
-        Ok::<_, anyhow::Error>((health.role, health.instance_id, identity))
+        Ok::<_, anyhow::Error>((health.role, health.instance_id, identity, client_id, access))
       };
       let result = tokio::time::timeout(timeout, probe).await;
-      let (finding, status) = match result {
-        Ok(Ok((role, instance, identity))) => (format!("role={role}; instance={instance}; caller={identity}"), 0),
-        Ok(Err(e)) => (format!("unknown: {e:#}"), 1),
-        Err(_) => ("unknown: check timed out".into(), 1),
-      };
+      progress.finish();
       let secrets: Vec<_> = config.contexts.values().map(|r| r.credential.as_str()).collect();
-      let rows = [Entry {
-        kind: "context".into(),
+      let mut row = CheckRow {
         name,
-        source: path.display().to_string(),
-        finding: configuration::safe_text(&format!("{}; {finding}", transport), &secrets),
-      }];
-      output::print(output, &rows)?;
-      return Ok(status);
+        address: configuration::safe_text(&transport, &secrets),
+        status: "error",
+        role: None,
+        instance: None,
+        client: None,
+        client_id: None,
+        access: None,
+        error: None,
+      };
+      let failure = match result {
+        Ok(Ok((role, instance, client, client_id, access))) => {
+          row.status = "ok";
+          row.role = Some(configuration::safe_text(&role, &secrets));
+          row.instance = Some(configuration::safe_text(&instance, &secrets));
+          row.client = client.map(|v| configuration::safe_text(&v, &secrets));
+          row.client_id = client_id.map(|v| configuration::safe_text(&v, &secrets));
+          row.access = access;
+          None
+        }
+        Ok(Err(error)) => Some(error),
+        Err(_) => Some(anyhow::anyhow!("connection check timed out after {}", humantime::format_duration(timeout))),
+      };
+      row.error = failure.as_ref().map(|e| configuration::safe_text(&format!("{e:#}"), &secrets));
+      // A positional check target can differ from the saved default. Error
+      // advice must retain the target that was actually probed.
+      let checked_context = Context {
+        config: ctx.config.clone(),
+        selected_context: (!direct).then(|| row.name.clone()),
+        address: ctx.address.clone(),
+        credential_file: ctx.credential_file.clone(),
+        diagnostic_format: ctx.diagnostic_format,
+      };
+      output::print(output, &[row])?;
+      if let Some(error) = failure {
+        crate::diagnostics::render_in(&error, ctx.diagnostic_format, Some(&checked_context));
+        return Ok(1);
+      }
+      return Ok(0);
     }
   }
   Ok(0)
+}
+
+/// A local mutation reports the configuration artifact that actually changed.
+fn updated(message: &str, path: &std::path::Path) -> Result<()> {
+  use std::io::Write as _;
+  output::acknowledge(message)?;
+  writeln!(std::io::stderr().lock(), "\nUpdated:\n  {}", path.display())?;
+  Ok(())
 }
 
 fn missing(name: &str) -> anyhow::Error {

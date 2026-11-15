@@ -1,7 +1,10 @@
 //! Output formats for people (borderless tables) and tools (JSON). Rows are
 //! typed structs; each command defines its own.
 
+mod progress;
 mod table;
+
+pub use progress::Progress;
 
 use std::io::IsTerminal as _;
 use std::io::Write as _;
@@ -47,6 +50,29 @@ pub fn success(message: &str) -> std::io::Result<()> {
   outln!("{style}{message}{style:#}")
 }
 
+/// Confirms a mutation on stderr without contaminating script/data stdout.
+pub fn acknowledge(message: &str) -> std::io::Result<()> {
+  let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+  let style = if color {
+    anstyle::AnsiColor::Green.on_default()
+  } else {
+    anstyle::Style::new()
+  };
+  writeln!(std::io::stderr().lock(), "{style}{message}{style:#}")
+}
+
+/// An infrastructure error label on stderr. Redirected diagnostics and
+/// NO_COLOR stay plain; child-process output does not pass through here.
+pub fn error(message: impl std::fmt::Display) {
+  let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+  let style = if color {
+    anstyle::AnsiColor::Red.on_default().bold()
+  } else {
+    anstyle::Style::new()
+  };
+  eprintln!("{style}error:{style:#} {message}");
+}
+
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
 pub enum OutputFormat {
   #[default]
@@ -74,8 +100,8 @@ pub fn print_table<R: Row>(rows: &[R]) -> std::io::Result<()> {
   out!("{}", table::render(R::HEADER, rows.iter().map(Row::cells)))
 }
 
-/// Prints a message for people on stderr, such as a failure the command
-/// handled itself or a warning, with the prefix of an error that ends a command.
+/// Prints a general message on stderr, such as progress, a warning, or a
+/// handled outcome. Infrastructure errors use [`error`] instead.
 pub fn message(message: impl std::fmt::Display) {
   eprintln!("needy: {message}");
 }

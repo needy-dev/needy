@@ -49,7 +49,11 @@ enum Command {
   },
   /// Check schema and routing, optionally adding host or control-plane facts.
   Check {
-    profile: PathBuf,
+    #[arg(required_unless_present = "file", conflicts_with = "file")]
+    profile: Option<PathBuf>,
+    /// Check a profile file on this client, as with run create -f.
+    #[arg(short = 'f', long, value_name = "FILE")]
+    file: Option<PathBuf>,
     #[arg(long = "cmd")]
     commands: Vec<String>,
     #[arg(long, value_enum, default_value_t)]
@@ -155,20 +159,21 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
     Command::Check {
       profile,
+      file,
       commands,
       mode,
-      output: OutputFormat::Json,
-    } => check_json(&ctx.profile(&profile)?, &commands, mode, ctx).await,
-    Command::Check {
-      profile,
-      commands,
-      mode,
-      output: OutputFormat::Table,
-    } => match mode {
-      Mode::Static => check_static(&ctx.profile(&profile)?, &commands),
-      Mode::Host => check_local(&ctx.profile(&profile)?, &commands),
-      Mode::Control => check(&ctx.profile(&profile)?, &commands, ctx).await,
-    },
+      output,
+    } => {
+      let path = ctx.profile(&file.or(profile).expect("clap requires a profile or --file"))?;
+      match output {
+        OutputFormat::Json => check_json(&path, &commands, mode, ctx).await,
+        OutputFormat::Table => match mode {
+          Mode::Static => check_static(&path, &commands),
+          Mode::Host => check_local(&path, &commands),
+          Mode::Control => check(&path, &commands, ctx).await,
+        },
+      }
+    }
   }
 }
 
@@ -209,12 +214,14 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
   let profile = needy_config::profile::load(&Source::file(path))?;
   // As `run create` sends it: the control plane may run on another machine.
   let resolved = needy_config::profile::resolve(&Source::file(path))?;
+  let progress = output::Progress::new(ctx.connection_feedback(), "Checking profile with control service");
   let connection = ctx.connect().await?;
   let request = CheckProfileRequest {
     profile_yaml: resolved.yaml,
     recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
   };
   let check = connection.runs().check_profile(request).await.map_err(needy_api_client::Error::from)?.into_inner();
+  progress.finish();
   outln!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid)?;
   let host = |placement: Option<&v1::Placement>| match placement {
     None => "unresolved".to_string(),

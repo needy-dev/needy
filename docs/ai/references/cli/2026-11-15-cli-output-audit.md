@@ -1,0 +1,2083 @@
+# CLI output design and baseline audit
+
+Date: 2026-11-15. This update is docs-only.
+
+This document starts with concrete terminal examples for all 55 public operational commands.
+The [v0.0.5 baseline audit](#v005-baseline-audit) follows the examples.
+
+Jump to [configuration](#configuration), [clients](#client-authorization), [runners](#runner-enrollment-and-service),
+[daemon services](#daemon-output-designs), [runs](#run-output-designs), [processes](#process-output-designs),
+[files](#file-output-design), or [images](#image-output-designs).
+The [implementation evidence](2026-11-15-client-onboarding-output-evidence.md) describes the changes already implemented in PR #17.
+
+## How to read the examples
+
+These examples are synthetic design artifacts, not captured terminal sessions.
+All names, IDs, timestamps, paths, credentials, and output data are examples.
+The `$` prefix marks input. It is not part of the program output.
+
+Each command has a status label:
+
+- **Implemented in PR #17:** The branch contains the stated behavior. This does not mean it is released.
+- **Retained:** The design keeps the existing output contract. Values in the example are synthetic.
+- **Proposed:** The output is a reviewable mockup. The code does not necessarily print it.
+
+The **proposed convention** uses green completion labels without a `needy:` prefix.
+Errors use a bold red `error:` label. Proposed warnings use a distinct `warning:` label.
+PR #17 implements green pairing completion, the invitation `--token` command, human service/client-role labels, and red infrastructure errors.
+It also implements scoped terminal feedback at the command boundaries listed below.
+Where an example proposes different wording, file lists, or readiness callbacks, that part remains Proposed.
+Color is not the only signal: the text explains the outcome.
+`NO_COLOR` and redirected output contain no Needy-added color codes.
+The fences omit ANSI escapes; the status text describes the intended colors.
+Animations are suppressed for redirected/dumb terminals, nonempty `NO_COLOR`, JSON diagnostics, verbose stderr logging, and command-connector transports.
+Suppressing connector animation protects SSH or other connector prompts.
+Successful command JSON/NDJSON modes also keep their existing stdout schemas.
+
+The implemented stream convention keeps data on stdout and progress, warnings, errors, and no-data mutation acknowledgements on stderr.
+Existing human invitation, enrollment, and service-install stage output remain stdout exceptions. Runner join also retains its plain stdout contact line when animation is hidden.
+Image pull prints a green completion on stdout only when its live display and stdout are terminals; redirecting stdout retains the existing stderr-only pull contract.
+A no-data mutation uses a green stderr completion label. Local configuration changes also list the actual configuration file.
+Additional artifact lists shown for other commands remain Proposed unless their section marks them implemented.
+Implemented terminal feedback uses a spinner or progress bar that refreshes in place on stderr.
+The indicator disappears before the final result, error, ID, or child output.
+In-progress and completed fences show separate snapshots of one operation, not a permanent phase log.
+Immediate reads keep their data output without an added completion wrapper.
+Remote mutations do not invent local files or undisclosed server paths.
+Commands that return an ID or relay child output keep that stdout contract; extra progress and next steps go to stderr.
+A supported `-o json` or `-o ndjson` mode contains only its machine-readable data on stdout.
+These examples do not introduce an output flag on commands that have none.
+Child programs, actor terminals, and native service log tools keep their own bytes and colors.
+
+Acknowledgements describe only the operation that completed.
+Human `SERVICE` names the responding service (`control` or `executor`).
+Human `CLIENT ROLE` names the client authority (`admin` or `runs`), with `unknown` when inspection is unavailable.
+These headings do not rename JSON `role`/`access`, persisted configuration fields, or Protobuf fields.
+Runner roles remain `actor` and `executor`.
+
+Saving a context does not select it. Enrolling a runner does not keep it online.
+Requesting a signal does not prove that a process exited.
+A static profile check does not prove that an actor can start.
+
+## Shared error and automation examples
+
+### Invalid arguments
+
+**Retained:** The parser owns usage errors and exit 2. The error label is red on a terminal.
+
+```shell
+$ needy config profile check --mode invalid ./profile.yaml
+error: invalid value 'invalid' for '--mode <MODE>'
+  [possible values: static, host, control]
+
+For more information, try '--help'.
+```
+
+### Connection or credential failure
+
+**Proposed presentation:** Stderr states the selected target and gives one useful next action. Exit 1.
+The example does not erase credentials, switch contexts, or retry a mutation.
+
+```shell
+$ needy --context control run ls
+error: Cannot reach the control service. [connection.unavailable]
+
+  Context:  control
+  Address:  tcp://127.0.0.1:7400
+
+Check that the service and its tunnel are running:
+
+  needy config context check control
+```
+
+```shell
+$ needy --context control run ls
+error: The control service rejected this client credential. [auth.credential_rejected]
+
+  Context:  control
+
+Ask the control host operator to check this client's access.
+```
+
+### Machine-readable diagnostics
+
+**Retained schema:** Successful data and infrastructure errors use separate streams.
+The example shows stderr; stdout is empty for this failed invocation.
+
+```shell
+$ needy --diagnostic-format json config use missing
+{"version":1,"reason":"config.context_not_found","summary":"The saved context does not exist","facts":{"context":"missing"},"completion":null,"checks":[{"summary":"Inspect config context ls, then select an existing name or pair a new one.","location":"client"}]}
+```
+
+### Version and help
+
+**Retained:** Version/help text goes to stdout and exits 0.
+The help command displays the selected command's real options; no operation runs.
+
+```shell
+$ needy --version
+needy 0.0.5
+
+$ needy config context pair --help
+Consume one invitation and save its independent identity; selection stays unchanged
+
+Usage: needy config context pair [OPTIONS] <NAME> [-- <COMMAND>...]
+```
+
+The help excerpt ends before its options. Its wording remains generated by the parser.
+
+## Configuration
+
+### `needy config ls`
+
+Status: Existing retained. A local inventory, without a connection probe.
+
+```shell
+$ needy config ls
+KIND     NAME           SOURCE                                      FINDING
+global   configuration  /home/user/.config/needy/config.yaml
+context  local          /home/user/.config/needy/config.yaml
+context  control        /home/user/.config/needy/config.yaml
+profile  development    /home/user/.config/needy/profiles/development.yaml
+```
+
+Proposed presentation only for a concise malformed-profile finding. The existing listing already retains invalid profiles and exits 0.
+
+```shell
+$ needy config ls
+KIND     NAME           SOURCE                                      FINDING
+global   configuration  /home/user/.config/needy/config.yaml
+context  local          /home/user/.config/needy/config.yaml
+profile  broken         /home/user/.config/needy/profiles/broken.yaml  invalid profile: unknown field `executorz`
+```
+
+### `needy config show`
+
+Status: Existing retained. This example uses an empty default configuration and supported JSON output. Recognized credentials are redacted when contexts exist.
+
+```shell
+$ needy config show -o json
+{
+  "contexts": {},
+  "current_context": "local",
+  "daemon": {
+    "actor_image": null,
+    "engine_host": null,
+    "executor_image": null,
+    "guest_needy": null,
+    "heartbeat_interval": "15s",
+    "listen": [],
+    "local_runner": null,
+    "process_path": null
+  },
+  "paths": {
+    "data": null,
+    "runtime": null,
+    "state": null
+  },
+  "version": 1
+}
+```
+
+### `needy config get`
+
+Status: Existing retained. Scalar JSON contains only the value.
+
+```shell
+$ needy config get daemon.heartbeat_interval -o json
+"15s"
+```
+
+Proposed presentation only for a concise unknown-key error on stderr, exit 1:
+
+```shell
+$ needy config get daemon.heartbeat
+error: Unknown global configuration key [config.key_unknown]
+  field: daemon.heartbeat
+  Check: Use a schema-defined key, such as daemon.heartbeat_interval.
+```
+
+### `needy config set`
+
+Status: Implemented in PR #17: local completion and actual configuration artifact on stderr. Stdout remains empty.
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy config set daemon.heartbeat_interval 20s
+Configuration updated.
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+The value is saved; this does not assert that a running daemon applied it.
+
+Proposed failure on stderr, exit 1:
+
+```shell
+$ needy config set daemon.heartbeat_interval 0s
+error: The value does not fit the global configuration field [config.invalid_field]
+  field: daemon.heartbeat_interval
+  Check: Use a positive duration, such as 20s.
+```
+
+### `needy config unset`
+
+Status: Implemented in PR #17: local completion and actual configuration artifact on stderr. Stdout remains empty.
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy config unset daemon.heartbeat_interval
+Configuration updated.
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+### `needy config paths`
+
+Status: Existing retained. The example assumes Linux platform defaults without overrides.
+
+```shell
+$ needy config paths
+KIND  NAME         SOURCE                                FINDING
+path  config_file  /home/user/.config/needy/config.yaml    platform default
+path  config       /home/user/.config/needy                platform default
+path  profiles     /home/user/.config/needy/profiles       platform default
+path  state        /home/user/.local/state/needy           platform default
+path  data         /home/user/.local/share/needy           platform default
+path  runtime      /run/user/1000/needy                    platform default
+```
+
+`-o json` retains the existing array of `kind`, `name`, `source`, and `finding` objects. Paths describe the current machine.
+
+### `needy config use`
+
+Status: Implemented in PR #17: local completion and actual configuration artifact on stderr. Stdout remains empty.
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy config use control
+Context selected.
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+Selection does not probe the server. Proposed failure on stderr, exit 1:
+
+```shell
+$ needy config use missing
+error: The saved context does not exist [config.context_not_found]
+  context: missing
+  Check: List saved contexts with needy config context ls.
+```
+
+### `needy config context ls`
+
+Status: Implemented in PR #17: human `RECORDED CLIENT ROLE` heading; existing values and JSON schema retained. Recorded identity and client role are not a live authorization check.
+
+```shell
+$ needy config context ls
+NAME     CURRENT  TRANSPORT                   RECORDED IDENTITY                  RECORDED CLIENT ROLE
+local    false    local discovery             OS account                         unknown until checked
+control  true     tcp://192.0.2.10:7400        example-client (example-client-id)  runs
+```
+
+### `needy config context show`
+
+Status: Existing retained. JSON displays the saved record, not a health result.
+
+```shell
+$ needy config context show control -o json
+{
+  "address": "tcp://192.0.2.10:7400",
+  "credential": "<redacted>",
+  "identity": {
+    "access": "runs",
+    "client_id": "example-client-id",
+    "name": "example-client",
+    "paired_at_ms": 1794744000000
+  }
+}
+```
+
+### `needy config context pair`
+
+Status: Implemented in PR #17: token input, scoped spinner, and concise stderr completion. Stdout remains empty. Pairing accepts the one-time invitation through `--token`, a private file, stdin, or a hidden prompt. Only pairing receives `--token` in this slice. The token is an invitation, not a saved bearer credential.
+
+With no explicit invitation, the guidance and hidden prompt remain. Input is hidden and absent from this mockup.
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 config context pair control
+To obtain a client invitation, run on the control host:
+
+  needy client invite --name <client-name>
+
+Paste its token below. You can also pass --token TOKEN,
+use --code-file FILE, or pipe the token with --code-file -.
+
+Invitation code:
+```
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 config context pair control
+⠋ Pairing with control service...
+```
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 config context pair control --token example-client-code
+Paired successfully!
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+A selected configuration path is the actual file listed after completion:
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy --config '/home/user/example config.yaml' --address tcp://192.0.2.10:7400 config context pair control --code-file /home/user/client-invitation
+Paired successfully!
+
+Updated:
+  /home/user/example config.yaml
+```
+
+The completion does not dump the saved context, client ID, or current selection. Pairing still does not select the connection. `--code-file -` remains the stdin alternative. The spinner clears before either completion or failure.
+
+Proposed replacement conflict on stderr, exit 1. The invitation is not consumed:
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 config context pair control --code-file /home/user/client-invitation
+error: Context control already exists [config.context_conflict]
+  Check: Inspect needy config context show control. Use --replace only to replace this saved identity.
+```
+
+If remote issuance succeeds but private storage fails, `bootstrap.save_failed` identifies the issued public client ID. Revoke that client and obtain a fresh invitation; do not retry the consumed code.
+
+### `needy config context set`
+
+Status: Implemented in PR #17: local completion and actual configuration artifact on stderr. Stdout remains empty.
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy --address tcp://192.0.2.20:7400 config context set control
+Context updated.
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+This saves a transport without granting a new identity or asserting connectivity. Connector argv after `--` remains an alternative to an address.
+
+### `needy config context check`
+
+Status: Implemented in PR #17: human labels, scoped spinner, and typed results. Service facts and authenticated client role occupy separate columns.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy config context check control
+⠋ Checking connection...
+```
+
+**Implemented completed snapshot (stdout):**
+
+```shell
+$ needy config context check control
+NAME     ADDRESS                 STATUS  SERVICE  INSTANCE          CLIENT          CLIENT ROLE
+control  tcp://192.0.2.10:7400   ok      control  example-instance  example-client  runs
+```
+
+A failed check emits the row on stdout, a diagnostic on stderr, and exit 1.
+The typed row values are implemented; the revised human labels are implemented. The concise timeout diagnostic below is **proposed**, including its reason code.
+
+```shell
+$ needy config context check control --timeout 5s
+NAME     ADDRESS                 STATUS  SERVICE  INSTANCE  CLIENT   CLIENT ROLE
+control  tcp://192.0.2.10:7400   error   unknown  unknown   unknown  unknown
+error: Connection check timed out after 5s. [connection.timeout]
+  Context: control
+  Address: tcp://192.0.2.10:7400
+  Check: Inspect the service and its tunnel, then check this connection again.
+```
+
+For a healthy standalone executor, caller inspection is unavailable. JSON uses null identity fields without inventing a client identity.
+
+```shell
+$ needy --address tcp://192.0.2.30:7400 config context check -o json
+[
+  {
+    "name": "direct",
+    "address": "tcp://192.0.2.30:7400",
+    "status": "ok",
+    "role": "executor",
+    "instance": "example-executor-instance",
+    "client": null,
+    "client_id": null,
+    "access": null,
+    "error": null
+  }
+]
+```
+
+### `needy config context rm`
+
+Status: Implemented in PR #17: local completion and actual configuration artifact on stderr. Stdout remains empty.
+
+**Implemented completed snapshot (stderr; stdout empty):**
+
+```shell
+$ needy config context rm retired
+Context removed.
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+Removal affects the local record; server revocation remains separate. Proposed failure on stderr, exit 1:
+
+```shell
+$ needy config context rm control
+error: Switch contexts before removing the current context [config.context_conflict]
+  Check: Select another context with needy config use local, then remove control.
+```
+
+### `needy config profile ls`
+
+Status: Existing retained table layout. The concise malformed-profile wording is proposed presentation only. The listing exits 0.
+
+```shell
+$ needy config profile ls
+NAME         SOURCE                                                     FINDING
+development  /home/user/.config/needy/profiles/development.yaml
+broken       /home/user/.config/needy/profiles/broken.yaml               invalid profile: unknown field `executorz`
+```
+
+### `needy config profile show`
+
+Status: Existing retained. The profile argument is positional; `-f` is not supported here. This example displays a synthetic source profile without resolution.
+
+```shell
+$ needy config profile show development
+actor:
+  command:
+  - bash
+  driver: linux-firecracker
+executors:
+  build:
+    driver: native
+    runner: example-runner
+unknown: build
+user:
+  gid: 1000
+  name: user
+  uid: 1000
+```
+
+`--resolved` expands profile inheritance. `-o json` selects JSON. Recognized environment values and credentials remain redacted in both formats.
+
+### `needy config profile check`
+
+Implemented in PR #17: scoped feedback for control-mode checks only; static/host data output is unchanged.
+
+Status: Implemented in PR #17 for `-f/--file` parity. Existing positional names and paths remain supported. The fixture routes unknown commands to executor `build` and has no recipe or chaos faults.
+
+Existing retained static output:
+
+```shell
+$ needy config profile check -f /home/user/development.yaml --cmd 'cargo test'
+runtime placement and host recipe facts: unresolved (static mode)
+
+COMMAND     TARGET          ARGV        RULES  FAULTS
+cargo test  executor build  cargo test
+```
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy config profile check -f /home/user/development.yaml --mode control --cmd 'cargo test'
+⠋ Checking profile with control service
+```
+
+Completed snapshot with existing control-mode data, assuming the selected control plane resolves the actor to its host and executor `build` to `example-runner`:
+
+```shell
+$ needy config profile check -f /home/user/development.yaml --mode control --cmd 'cargo test'
+user: user (1000:1000)
+actor: the control host
+executors: build (runner example-runner)
+route names: * (every exec)
+
+COMMAND     TARGET          ARGV        RULES  FAULTS
+cargo test  executor build  cargo test
+```
+
+Optional actor CPU/image/ABI lines appear when the control plane returns those facts. `--mode host` adds facts from this machine rather than querying control. Static mode makes no placement or host-readiness claim.
+
+Existing retained static JSON shape for the same command:
+
+```shell
+$ needy config profile check development --cmd 'cargo test' -o json
+{
+  "decisions": [
+    {
+      "argv": ["cargo", "test"],
+      "command": "cargo test",
+      "faults": [],
+      "rules": [],
+      "target": "executor build"
+    }
+  ],
+  "findings": [],
+  "mode": "static",
+  "placement": {"status": "unresolved"},
+  "recipe": null
+}
+```
+
+An error finding goes on stdout and makes the check exit 1. This concise fixture illustrates the existing finding format:
+
+```shell
+$ needy config profile check /home/user/broken.yaml
+runtime placement and host recipe facts: unresolved (static mode)
+error: unknown names unknown executor "missing"
+```
+
+## Client authorization
+
+### `needy client invite`
+
+Status: Implemented in PR #17: invitation `--token` command with one code occurrence, CLIENT ROLE label, green invitation heading, and scoped spinner. The shorter human layout below remains Proposed; invitation data stays on stdout.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy client invite --name example-client --ttl 10m
+⠋ Creating client invitation...
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy client invite --name example-client --ttl 10m
+Client invitation created successfully!
+
+Client role: runs
+Expires: 2026-11-15T12:10:00Z
+
+On the client machine, run:
+
+  needy --address tcp://192.0.2.10:7400 config context pair control --token example-client-code
+```
+
+The invitation appears once in the primary copyable command. There is no second token dump or routine selection/check walkthrough. `--token` contains a one-time invitation, never the resulting bearer.
+
+Supported JSON remains separate and unchanged:
+
+```shell
+$ needy client invite --name example-client -o json
+{
+  "version": 1,
+  "id": "example-invitation-id",
+  "name": "example-client",
+  "access": "runs",
+  "expires_at_ms": 1794744600000,
+  "code": "example-client-code"
+}
+```
+
+File/stdin workflows remain available. The external JSON tool extracts `.code`; no new Needy command is introduced:
+
+```shell
+$ umask 077
+$ needy client invite --name example-client -o json | jq -r .code > /home/user/client-invitation
+```
+
+After secure transfer of the private file, pairing uses the same concise completion:
+
+**Implemented pairing completion (stderr; stdout empty):**
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 config context pair control --code-file /home/user/client-invitation
+Paired successfully!
+
+Updated:
+  /home/user/.config/needy/config.yaml
+```
+
+`--code-file -` is the stdin alternative. For a replacement invitation, the existing notice remains on stderr. Proposed completed snapshot:
+
+```shell
+$ needy client invite --name example-client
+warning: Pairing with this invitation replaces client example-client (example-client-id) and revokes its credential
+Client invitation created successfully!
+
+Client role: runs
+Expires: 2026-11-15T12:10:00Z
+
+On the client machine, run:
+
+  needy --address tcp://192.0.2.10:7400 config context pair control --token example-replacement-code
+```
+
+Replacement revocation occurs when pairing consumes the invitation. This operation modifies the control plane; it does not write the operator's client configuration or expose a guessed server path.
+
+### `needy client ls`
+
+Status: Implemented in PR #17: human `CLIENT ROLE` heading and scoped progress. Existing identity data and JSON schema retained. The list includes revoked records without credentials.
+
+```shell
+$ needy client ls
+ID                 NAME            CLIENT ROLE  STATE    PAIRED                LAST USED
+example-client-id  example-client  runs    active   2026-11-15T12:00:00Z  30s ago
+example-old-id     retired-client  runs    revoked  2026-11-14T12:00:00Z  1day ago
+```
+
+A supported empty JSON result is pure JSON:
+
+```shell
+$ needy client ls -o json
+[]
+```
+
+### `needy client revoke`
+
+Status: Implemented in PR #17: scoped spinner and green acknowledgement on stderr. Stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy client revoke example-client-id
+⠋ Revoking client...
+```
+
+**Implemented completed snapshot (stderr):**
+
+```shell
+$ needy client revoke example-client-id
+Client revoked.
+```
+
+The audit record stays on the control plane. No local configuration file changes. Proposed authorization failure on stderr, exit 1:
+
+```shell
+$ needy --context restricted client revoke example-client-id
+error: This operation requires management access [auth.admin_required]
+  Check: Select an administrator context or ask the control-plane operator to revoke this client.
+```
+
+## Runner enrollment and service
+
+### `needy runner invite`
+
+Status: Implemented in PR #17: scoped management spinner. The concise human layout below remains Proposed; existing invitation metadata and JSON stay on stdout. Runner join has no --token flag.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy runner invite --ttl 1h --roles executor
+⠋ Creating runner invitation
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy runner invite --ttl 1h --roles executor
+Runner invitation created successfully!
+
+Roles: executor
+Expires: 2026-11-15T13:00:00Z
+Uses left: 1
+
+On the runner machine, run:
+
+  needy --address tcp://192.0.2.10:7400 runner join example-runner --roles executor
+
+Joining token (shown once):
+
+  example-runner-code
+```
+
+Runner join accepts this token through its existing hidden prompt, private file, or stdin. The invitation is not a client-role grant. Supported JSON stays unchanged:
+
+```shell
+$ needy runner invite --roles executor -o json
+{
+  "version": 1,
+  "id": "example-runner-invitation-id",
+  "roles": ["executor"],
+  "expires_at_ms": 1794747600000,
+  "uses_left": 1,
+  "code": "example-runner-code"
+}
+```
+
+### `needy runner join`
+
+Status: Implemented in PR #17: scoped capability/enrollment spinners that clear before the existing stdout enrollment summary. The shorter Updated/file completion below remains Proposed; current enrollment metadata and next steps remain stdout.
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 runner join example-runner --roles executor
+To obtain a joining token, run on the control host:
+
+  needy runner invite --ttl 1h --roles executor
+
+Joining token:
+```
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 runner join example-runner --roles executor
+⠋ Contacting control daemon: tcp://192.0.2.10:7400
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy --address tcp://192.0.2.10:7400 runner join example-runner --roles executor --code-file /home/user/runner-invitation
+Joined successfully!
+
+Updated:
+  /home/user/.local/state/needy/runner.json
+```
+
+Enrollment saves a credential without starting persistent serving. `needy runner serve` remains a separate action. `--code-file -` and the hidden prompt remain available; no `--token` flag is added to runner join. Capability warnings remain on stderr.
+
+### `needy runner serve`
+
+Status: Proposed presentation only. Persistent serving has no connection-state UI callback; no spinner runs for its entire lifetime.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy runner serve
+⠋ Connecting the runner…
+```
+
+**Proposed connected snapshot:**
+
+```shell
+$ needy runner serve
+Runner connected successfully!
+
+Serving in the foreground. Press Ctrl-C to stop.
+```
+
+The connected snapshot appears only after a persistent connection succeeds. No enrollment file is rewritten merely to show this status. This presentation does not change reconnection, grace periods, or role grants.
+
+Proposed missing-enrollment error on stderr:
+
+```shell
+$ needy runner serve
+error: This machine has no saved runner enrollment.
+  Check: Obtain a runner invitation and enroll with needy runner join before serving.
+```
+
+### `needy runner token ls`
+
+Implemented in PR #17: scoped feedback clears before the retained data or child stream.
+
+Status: Existing retained. Only invitation metadata appears, including spent and revoked records.
+
+```shell
+$ needy runner token ls
+ID                            STATE     USES LEFT  EXPIRES               ROLES     LABELS
+example-runner-invitation-id   valid     1          2026-11-15T13:00:00Z  executor  -
+example-spent-invitation-id    used-up   0          2026-11-14T13:00:00Z  executor  -
+```
+
+### `needy runner token revoke`
+
+Status: Implemented in PR #17: scoped spinner and green acknowledgement on stderr. Stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy runner token revoke example-runner-invitation-id
+⠋ Revoking runner invitation example-runner-invitation-id
+```
+
+**Implemented completed snapshot (stderr):**
+
+```shell
+$ needy runner token revoke example-runner-invitation-id
+Revoked runner invitation: example-runner-invitation-id
+```
+
+Existing runner credentials remain independent of the revoked invitation. No local file path is invented for the remote registry update.
+
+### `needy runner ls`
+
+Implemented in PR #17: scoped feedback clears before the retained data or child stream.
+
+Status: Existing retained. Missing first-heartbeat host facts use `-`. A registered record alone does not establish a current connection.
+
+```shell
+$ needy runner ls
+NAME            STATUS              CAPABILITIES      HOST          CPU  LABELS  LAST SEEN
+example-runner  online              executor(native)  linux/x86_64  -    -       2s ago
+example-old     removed             executor(native)  -             -    -       1day ago
+example-rotate  online (rotating)    executor(native)  linux/x86_64  -    -       3s ago
+```
+
+### `needy runner rotate`
+
+Status: Implemented in PR #17: scoped spinner and green acknowledgement on stderr. Stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy runner rotate example-runner
+⠋ Requesting credential rotation for runner example-runner
+```
+
+**Implemented completed snapshot (stderr):**
+
+```shell
+$ needy runner rotate example-runner
+Requested credential rotation for runner: example-runner
+```
+
+This acknowledges the request. The runner receives a new credential at its next heartbeat; completion is not asserted. No local file path is invented for the remote registry update.
+
+### `needy runner rm`
+
+Status: Implemented in PR #17: scoped spinner and green acknowledgement on stderr. Stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy runner rm example-runner
+⠋ Revoking runner example-runner
+```
+
+**Implemented completed snapshot (stderr):**
+
+```shell
+$ needy runner rm example-runner
+Revoked runner: example-runner
+```
+
+The control plane retains the registry record. This acknowledgement does not claim that existing work stopped. No local file path is invented for the remote registry update.
+
+## Daemon output designs
+
+These synthetic examples use the shared conventions above. Per-example stream notes distinguish progress, results, and child output.
+
+### `needy daemon serve`
+
+Status: Implemented in PR #17: initial spinner while recovering daemon state. The spinner ends before listener binding. The serving/readiness callbacks and file summaries below remain Proposed.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon serve
+⠋ Initializing control service...
+```
+
+**Proposed serving snapshot:**
+
+```shell
+$ needy daemon serve
+Control service started successfully!
+
+Updated:
+  /run/user/1000/needy/control.json
+
+Serving in the foreground. Press Ctrl-C to stop.
+```
+
+The service line appears after binding succeeds. This does not establish authenticated client admission or actor readiness. A missing default guest binary remains a warning on stderr:
+
+```shell
+$ needy daemon serve
+warning: Guest needy was not found; actors cannot start until it is available.
+Control service started successfully!
+
+Updated:
+  /run/user/1000/needy/control.json
+
+Serving in the foreground. Press Ctrl-C to stop.
+```
+
+The runtime path is synthetic. Real output uses the effective runtime directory. The spinner clears before the serving snapshot.
+
+### `needy daemon executor`
+
+Status: Proposed presentation only: no readiness callback exists for a serving acknowledgement. Network token requirements remain unchanged.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon executor --listen unix:/home/user/.local/run/needy/executor.sock --name local
+⠋ Starting the executor service…
+```
+
+**Proposed serving snapshot:**
+
+```shell
+$ needy daemon executor --listen unix:/home/user/.local/run/needy/executor.sock --name local
+Executor service started successfully!
+
+Socket:
+  /home/user/.local/run/needy/executor.sock
+
+Serving in the foreground. Press Ctrl-C to stop.
+```
+
+A socket is a listener artifact, not a configuration-file update. Network listeners retain the existing incoming token requirement. Show the serving snapshot only after successful binding.
+
+### `needy daemon service install`
+
+Status: Implemented in PR #17: scoped waits during service stop/start and green installed heading. Existing installation-stage stdout is retained. The consolidated artifact layout below remains Proposed.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon service install --now
+⠋ Installing the systemd control service…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy daemon service install --now
+Control service installed successfully!
+
+Updated:
+  /home/user/.config/needy/services/user/control-00000000-0000-4000-8000-000000000000.yaml
+  /home/user/.config/systemd/user/needy.service
+  /home/user/.config/needy/services/user/registration.json
+```
+
+Linux/systemd user scope is shown. The example lists the actual snapshot generation, service definition, and receipt for this invocation. Real output uses the paths selected by the service manager and configuration. The existing `--now` wait checks a matching ready API instance; it does not check client admission. Without `--now`, installation does not imply startup. No phase log or routine status/log walkthrough remains after completion.
+
+### `needy daemon service uninstall`
+
+Status: Implemented in PR #17: stop wait, green stderr acknowledgement, and actual removed definition/receipt paths. Stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon service uninstall
+⠋ Waiting for control service to stop and verify cleanup
+```
+
+**Implemented completed snapshot (stderr):**
+
+```shell
+$ needy daemon service uninstall
+Control service uninstalled.
+
+Removed:
+  /home/user/.config/systemd/user/needy.service
+  /home/user/.config/needy/services/user/registration.json
+```
+
+Only owned registration and definition removal appear in this file list. Existing retention of configuration, credentials, snapshots, logs, state, and images is unchanged.
+
+### `needy daemon service start`
+
+Status: Implemented in PR #17: scoped readiness wait and green stderr `Control service is ready.` acknowledgement. The longer completion/file list below remains Proposed; stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon service start
+⠋ Waiting for a ready control service
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy daemon service start
+Control service started successfully!
+
+Updated:
+  /run/user/1000/needy/control.json
+```
+
+Completion follows the existing matching-instance readiness wait. Client admission remains unchecked. On failure, clear the spinner before the stderr diagnostic:
+
+```shell
+$ needy daemon service start --timeout 5s
+error: The managed service did not publish a matching ready control instance [connection.timeout]
+  Check: Inspect service status and logs.
+    this machine: needy daemon service status
+    this machine: needy daemon service logs --tail 100
+```
+
+### `needy daemon service stop`
+
+Status: Implemented in PR #17: scoped stop/cleanup wait and green stderr `Control service is stopped.` acknowledgement. The conditional artifact list below remains Proposed; stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon service stop
+⠋ Waiting for control service to stop and verify cleanup
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy daemon service stop
+Control service stopped successfully!
+
+Updated:
+  /run/user/1000/needy/control-exit.json
+```
+
+The running-service case completes only after existing cleanup verification. The proposed already-stopped wording is `Control service is already stopped.`; current implementation reports `Control service is stopped.` without asserting cleanup of an earlier lifetime or listing an unwritten file. Unverified cleanup remains an error on stderr:
+
+```shell
+$ needy daemon service stop
+error: The service stopped without a verified successful cleanup result [service.cleanup_incomplete]
+  Check: Inspect retained run state and service logs; do not assume mirror-out completed.
+    this machine: needy daemon service status
+    this machine: needy daemon service logs --tail 100
+```
+
+### `needy daemon service restart`
+
+Status: Implemented in PR #17: scoped stop/start waits and green stderr `Control service restarted; control API is ready.` acknowledgement. The artifact-list mockup below remains Proposed; stdout stays empty.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy daemon service restart
+⠋ Waiting for a ready control service
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy daemon service restart
+Control service restarted successfully!
+
+Updated:
+  /run/user/1000/needy/control-exit.json
+  /run/user/1000/needy/control.json
+```
+
+Stop and start share the existing total timeout. The new API instance must satisfy the existing readiness check. Client admission is not asserted. The file list is conditional on the stages that actually wrote those records.
+
+### `needy daemon service status`
+
+Implemented in PR #17: scoped feedback clears before the retained data or child stream.
+
+**Status: existing output retained.** Linux/systemd example. `ready` describes the observed API and matching manager process; `ADMISSION unknown` remains honest. Successful inspection exits 0 even for `api-unreachable`, `failed`, or `not-installed`.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy daemon service status
+STATE  MANAGER  ACCOUNT  PID   INSTANCE       ADMISSION  LOG
+ready  systemd  user     4200  control-demo1  unknown    /home/user/.local/state/needy/service.log
+$ needy daemon service status -o json
+[
+  {
+    "state": "ready",
+    "manager": "systemd",
+    "account": "user",
+    "pid": 4200,
+    "instance": "control-demo1",
+    "admission": "unknown",
+    "log": "/home/user/.local/state/needy/service.log"
+  }
+]
+```
+
+### `needy daemon service logs`
+
+**Status: existing output retained.** macOS/launchd example: bytes below are synthetic service-log contents passed through by `tail`, without a Needy success wrapper or recoloring. Linux uses `journalctl` and retains its own formatting.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy daemon service logs --tail 2
+2026-11-15T10:00:00Z INFO control listener bound
+2026-11-15T10:00:01Z INFO runner connected
+```
+
+## Run output designs
+
+### `needy run create`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing ID/child output retained; implemented in-place spinner.** Noninteractive stdout remains exactly the run ID. Progress stays on stderr and names only stages the client actually observes. A returned create response does not by itself prove that the actor is ready. No permanent phase lines or routine next-step hints are added on success. In the blocks below, progress and guidance are stderr; the ID line and child bytes are stdout.
+
+Run ID or child output: stdout. The spinner, retained run identity, and recovery hints use stderr.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy run create --profile /home/user/profiles/demo.yaml --name demo
+⠋ Creating run
+```
+
+Completed snapshot after the spinner clears:
+
+```shell
+$ needy run create --profile /home/user/profiles/demo.yaml --name demo
+111111111111
+```
+
+Interactive creation uses the same spinner, cleared before any run identity or child bytes appear. It keeps the run ID outside the child stream. The shell prompt and `ready` line are the driving program's own bytes. The bracketed key description is a transcript annotation, not output.
+
+Run ID or child output: stdout. The spinner, retained run identity, and recovery hints use stderr.
+
+```shell
+$ needy run create -it --profile /home/user/profiles/demo.yaml --name demo
+needy: run 111111111111
+ready
+user@actor:~$ [press Ctrl-]]
+needy: detached from run 111111111111; `needy run attach 111111111111` returns to it
+```
+
+Detach exits 0 without claiming the driving program exited. A viewer disconnect has **no automatic reconnect today**. After the create response supplied an ID, recovery attaches to that existing run; it never repeats create:
+
+Run ID or child output: stdout. The spinner, retained run identity, and recovery hints use stderr.
+
+```shell
+$ needy run create -it --profile /home/user/profiles/demo.yaml --name demo
+needy: run 111111111111
+user@actor:~$
+error: The connection ended before the process exit was observed [process.outcome_unknown]
+  Check: Inspect the existing run before starting anything again; the driving program may still be running.
+    selected control: needy run ls
+    selected control: needy run attach 111111111111
+$ echo $?
+255
+$ needy run attach 111111111111
+user@actor:~$
+```
+
+If the connection fails before the create response returns an ID, do not invent one. Inspect `needy run ls` before considering another create; the create outcome may be unknown. The `-i`-without-`-t` usage error stays explicit: use `-it` (exit 2).
+The recovery wording above is proposed. It does not claim that every raw transport error already receives this classification.
+
+### `needy run ls`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing output retained.** Keep ended runs and executor loss visible. `(lost)` means the executor's current state is unknown, not confirmed stopped.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy run ls
+ID                                    NAME  STATE    ACTOR  GROUP  EXECUTORS                       EXIT
+111111111111  demo  running  ready  -      build=native
+222222222222  old   stopped  -      -      build=linux-container (lost)
+$ needy run ls -o json
+[
+  {
+    "id": "111111111111",
+    "name": "demo",
+    "state": "running",
+    "actor": "ready",
+    "group": "111111111111",
+    "executors": [{"name":"build","driver":"native","released":false,"lost":false}],
+    "exit_code": null,
+    "signal": null,
+    "failure": null,
+    "tty": true
+  }
+]
+```
+
+The JSON block is a separate synthetic single-run inventory; the command does not add a list filter.
+
+### `needy run stop`
+
+Status: Implemented in PR #17: scoped stop spinner and green stderr acknowledgement. Stdout remains empty. Warning rewording below remains Proposed.
+
+**Implemented in-progress snapshot (stderr):**
+
+```shell
+$ needy run stop demo --grace 10s
+⠋ Stopping run 111111111111
+```
+
+**Implemented acknowledgement; proposed extra consequence text where shown (stderr):**
+
+```shell
+$ needy run stop demo --grace 10s
+Stopped run 111111111111.
+```
+
+This is a remote operation. The client does not invent a control-host file path. An unexpected forced stop keeps the warning and exit 0; no successful mirror-out is asserted:
+
+```shell
+$ needy run stop demo
+warning: Run 111111111111 was killed without its mirror-out: actor did not stop before the deadline.
+$ echo $?
+0
+```
+
+Explicit immediate stop acknowledges the requested consequence:
+
+**Implemented acknowledgement; proposed extra consequence text where shown (stderr):**
+
+```shell
+$ needy run stop demo --now
+Stopped run 111111111111.
+
+Mirror-out was skipped.
+```
+
+### `needy run attach`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing child output and detach hint retained.** Replayed terminal screen and live output are unchanged. The bracketed key description is an annotation.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy run attach demo
+user@actor:~$ printf 'hello\n'
+hello
+user@actor:~$ [press Ctrl-]]
+needy: detached from run 111111111111; `needy run attach 111111111111` returns to it
+$ echo $?
+0
+```
+
+`--read-only` retains screen replay while sending no input, signals, or window changes. For a recognized ended-stream error, retain exit 255 and use the manual recovery shown under create.
+Raw transport/RPC errors can still exit 1 today; classification of those errors is a separate proposed fix.
+Do not print a reconnect spinner or imply that buffered input will be replayed.
+
+### `needy run logs`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing raw output retained.** The synthetic console sample includes boot and driving-program bytes. Do not add progress or completion text to stdout. End of this log stream exits 0 independently of the actor exit.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy run logs demo
+[    0.000000] Linux version example
+[    0.800000] needy guest init
+ready
+user@actor:~$
+```
+
+### `needy run exec`
+
+Implemented in PR #17: scoped feedback clears before the retained data or child stream.
+
+**Status: existing execution output and schemas retained.** Human child stdout/stderr pass through unchanged. No green success line is appended to a child's output. The `false` example produces no bytes and its exit remains 1.
+
+Child/data: stdout. Child errors in pipe mode, infrastructure errors, and detach hints: stderr.
+
+```shell
+$ needy run exec demo -T -- sh -c 'printf "building\n"; printf "compile failed\n" >&2; exit 7'
+building
+compile failed
+$ echo $?
+7
+$ needy run exec demo -T -- false
+$ echo $?
+1
+$ needy run exec demo -o json -- sh -c 'printf "building\n"; printf "compile failed\n" >&2; exit 7'
+{"executor":"build","exit_code":7,"process_id":"333333333333","signal":"","stderr":"compile failed\n","stdout":"building\n"}
+$ echo $?
+7
+```
+
+NDJSON is a stream, one compact object per event. The following host command uses an explicit bound executor to avoid adding a routing trace to this small example; routed commands may also emit trace events.
+
+Child/data: stdout. Child errors in pipe mode, infrastructure errors, and detach hints: stderr.
+
+```shell
+$ needy run exec demo --executor build -o ndjson -- printf 'hello\n'
+{"argv":["printf","hello\n"],"executor":"build","pid":4300,"process_id":"333333333333","type":"started"}
+{"data":"hello\n","type":"stdout"}
+{"code":0,"signal":"","type":"exit"}
+```
+
+For a stream failure after start, retain partial data, report uncertainty on stderr, and never fabricate `exit_code: 0` or an NDJSON exit event. Diagnostic wording below is proposed; the unknown-outcome schema and exit 255 already exist.
+
+Child/data: stdout. Child errors in pipe mode, infrastructure errors, and detach hints: stderr.
+
+```shell
+$ needy run exec demo --executor build -o ndjson -- sh -c 'printf "started\n"; sleep 60'
+{"argv":["sh","-c","printf \"started\\n\"; sleep 60"],"executor":"build","pid":4301,"process_id":"444444444444","type":"started"}
+{"data":"started\n","type":"stdout"}
+{"message":"the connection ended before the process exited","type":"error"}
+error: The connection ended before the process exited [process.outcome_unknown]
+  Check: Inspect the process or run before retrying; the command may still be running or may have completed.
+    selected control: needy proc ls --run demo
+$ echo $?
+255
+```
+
+The corresponding existing JSON shape keeps partial output with no fabricated exit field:
+
+Child/data: stdout. Child errors in pipe mode, infrastructure errors, and detach hints: stderr.
+
+```shell
+$ needy run exec demo --executor build -o json -- sh -c 'printf "started\n"; sleep 60'
+{"error":"the connection ended before the process exited","executor":"build","process_id":"444444444444","stderr":"","stdout":"started\n"}
+error: The connection ended before the process exited [process.outcome_unknown]
+  Check: Inspect the process or run before retrying; the command may still be running or may have completed.
+$ echo $?
+255
+```
+
+For explicit refusal, existing exits remain 125 (confirmed not started), 126 (denied), and 127 (cannot start). A confirmed refusal can include an NDJSON exit event; an unknown outcome cannot. A signal exit remains 128 plus the local signal number. Structured output retains the real child code even if it cannot fit the local shell status.
+
+### `needy run report`
+
+**Status: proposed human layout and file acknowledgement only.** Rendering a report successfully is not evidence that the run succeeded. The report's JSON/Markdown formats and `--offline` source selection remain available without adding fields here.
+
+Streams: rendered report is stdout; the proposed file-write acknowledgement is stderr.
+
+```shell
+$ needy run report demo
+Run          111111111111
+State        finished
+Actor exit   0
+Commands     3 routed, 1 failed
+Trace gaps   0
+$ echo $?
+0
+$ needy run report demo -o markdown --file /home/user/reports/demo.md
+Report written successfully!
+
+Updated:
+  /home/user/reports/demo.md
+```
+
+The summary above is a presentation sketch using recorded report facts; it does not introduce a new execution-health check. File acknowledgement is proposed stderr; report file bytes and selected format stay unchanged.
+
+### `needy run chaos add`
+
+Status: Proposed presentation only.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy run chaos add slow-fetch --run demo --exec 'curl **' --delay 2s --times 1
+⠋ Adding the fault…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy run chaos add slow-fetch --run demo --exec 'curl **' --delay 2s --times 1
+Fault added successfully!
+```
+
+Proposed human completion only. Existing fault fields, warning behavior, and remote trace recording are retained. No local file changes or guessed remote paths are listed.
+
+### `needy run chaos ls`
+
+**Status: existing output retained.** Human fault text remains compact YAML; JSON retains the YAML string and counters.
+
+Streams: successful acknowledgement/table/JSON is stdout; server warnings and infrastructure diagnostics use stderr.
+
+```shell
+$ needy run chaos ls --run demo
+NAME        DOMAIN  SOURCE  MATCHED  FIRED  FAULT
+slow-fetch  exec    added   3        1      {exec: curl **, delay: 2s, times: 1}
+$ needy run chaos ls --run demo -o json
+[
+  {
+    "name": "slow-fetch",
+    "domain": "exec",
+    "source": "added",
+    "matched": 3,
+    "fired": 1,
+    "fault": "exec: curl **\ndelay: 2s\ntimes: 1\n"
+  }
+]
+```
+
+### `needy run chaos rm`
+
+Status: Proposed presentation only.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy run chaos rm slow-fetch --run demo
+⠋ Removing the fault…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy run chaos rm slow-fetch --run demo
+Fault removed successfully!
+```
+
+Proposed human completion only. Existing remote fault removal and trace recording are retained. No local file path is invented.
+
+## Process output designs
+
+### `needy proc exec`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing output retained.** This path targets one host, runner, or pooled executor without run routing. It has the same child-exit and unknown-outcome rules as `run exec`.
+
+Child/data: stdout. Child errors in pipe mode, infrastructure errors, and detach hints: stderr.
+
+```shell
+$ needy proc exec --host -T -- printf 'hello\n'
+hello
+$ needy proc exec --runner worker-demo -d -- sleep 60
+555555555555
+$ needy proc exec --host -d -o json -- sleep 60
+{"executor":"local","process_id":"666666666666"}
+```
+
+A detached start exits 0 when start is confirmed; it reports no completion. It must not say the command finished successfully. Interactive detach retains a process-specific reattach hint:
+
+Child/data: stdout. Child errors in pipe mode, infrastructure errors, and detach hints: stderr.
+
+```shell
+$ needy proc exec --host -t -- sh
+$ [press Ctrl-]]
+needy: detached from process 777777777777; `needy proc attach 777777777777` returns to it
+$ echo $?
+0
+```
+
+### `needy proc ls`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing output retained.** Preserve the distinction between a running process and observed completion. Internal transfer/mount processes remain hidden unless `--all` is selected.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy proc ls --runner worker-demo
+ID                                    RUN  ORIGIN  EXECUTOR    PID   STATE    EXIT  TTY  COMMAND
+555555555555  -    cli     worker-demo  4302  running        no   sleep 60
+$ needy proc ls --runner worker-demo -o json
+[
+  {
+    "id": "555555555555",
+    "run": "",
+    "origin": "cli",
+    "executor": "worker-demo",
+    "pid": 4302,
+    "state": "running",
+    "exit_code": null,
+    "signal": null,
+    "tty": false,
+    "argv": ["sleep", "60"]
+  }
+]
+```
+
+### `needy proc attach`
+
+Implemented in PR #17: scoped waiting feedback clears before stdout data, IDs, or child output.
+
+**Status: existing output retained.** A terminal attachment replays the current screen, then relays subsequent bytes. The key description is an annotation. Pipe attachment replays recent captured pipe output instead.
+
+Data: stdout. Detach hints and infrastructure errors: stderr.
+
+```shell
+$ needy proc attach 777777777777
+$ printf 'still here\n'
+still here
+$ [press Ctrl-]]
+needy: detached from process 777777777777; `needy proc attach 777777777777` returns to it
+```
+
+For a recognized ended-stream error, the existing behavior is `process.outcome_unknown`, exit 255, and manual `proc ls`/`proc attach` inspection.
+Extending this classification to currently unclassified transport/RPC errors is proposed; those can still exit 1 today.
+Do not report that the process stopped or automatically rerun it.
+
+### `needy proc kill`
+
+**Status: implemented in PR #17: scoped spinner and stderr signal acknowledgement.** Success acknowledges the signal request, not observed process exit.
+
+Streams: implemented green signal acknowledgement is stderr; the following process listing is stdout. A waiting indicator, if needed, clears before acknowledgement. No process-exit claim or file update is invented.
+
+```shell
+$ needy proc kill 555555555555
+Requested SIGTERM for process 555555555555.
+$ needy proc ls --runner worker-demo
+ID                                    RUN  ORIGIN  EXECUTOR    PID   STATE   EXIT     TTY  COMMAND
+555555555555  -    cli     worker-demo  4302  killed  SIGTERM  no   sleep 60
+```
+
+The listing is a separate observed result. The signal acknowledgement must not wait for or invent it.
+
+## File output design
+
+### `needy fs cp`
+
+Status: Implemented in PR #17: scoped connection/copy spinner and green stderr copy acknowledgement. The explicit file-list layout below remains Proposed; stdout stays empty.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy fs cp /home/user/work/result.txt remote:/home/user/results --run demo --executor build
+⠋ Copying /home/user/work/result.txt…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy fs cp /home/user/work/result.txt remote:/home/user/results --run demo --executor build
+Files copied successfully!
+
+Updated:
+  build:/home/user/results/result.txt
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy fs cp remote:/home/user/results/result.txt /home/user/downloads --run demo --executor build
+Files copied successfully!
+
+Updated:
+  /home/user/downloads/result.txt
+```
+
+The spinner clears after transfer/extraction and before the completion. The remote artifact path identifies executor `build`; CLI input still uses literal `remote:PATH` and explicit target flags. Byte counts, if shown while waiting, count transferred tar bytes. No new JSON mode is introduced.
+
+## Image output designs
+
+Per-layer bars and phase spinners are implemented; alternative wording and consolidated artifact layouts remain Proposed. Waiting rows refresh in place on terminal stderr and disappear before final results. Use a byte bar only when total bytes are known; otherwise use a spinner. Nonterminal stderr uses plain progress without cursor control. Successful file artifacts use a green completion and a separate `Updated:` list. Container stores expose image references rather than host filesystem paths. JSON inventory and child bytes remain unchanged.
+
+### `needy image pull`
+
+Status: Implemented in PR #17: per-layer terminal bars, VM download/checksum/extraction/install feedback, and green terminal completion. The consolidated artifact layouts below remain Proposed. Redirected progress retains plain text.
+
+In-progress layer snapshot on stderr:
+
+```shell
+$ needy image pull --driver linux-container --version 0.0.5
+7a7a7a7a7a7a  Pull complete
+8b8b8b8b8b8b  [==========>          ] 24.0 MiB/48.0 MiB
+9c9c9c9c9c9c  Waiting
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy image pull --driver linux-container --version 0.0.5
+Images pulled successfully!
+
+Images:
+  ghcr.io/needy-dev/needy-actor:v0.0.5
+  ghcr.io/needy-dev/needy-executor:v0.0.5
+```
+
+The actor image's base ABI check must succeed. The engine owns storage paths, so references replace a guessed file list.
+
+Unknown-total VM download snapshot:
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy image pull --driver linux-firecracker --version 0.0.5
+⠋ Downloading archive: 96.0 MiB (total unknown)…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy image pull --driver linux-firecracker --version 0.0.5
+Image installed successfully!
+
+Updated:
+  /home/user/.local/share/needy/images/linux-firecracker/base/vmlinux
+  /home/user/.local/share/needy/images/linux-firecracker/base/rootfs.ext4
+  /home/user/.local/share/needy/images/linux-firecracker/base/firecracker
+  /home/user/.local/share/needy/images/linux-firecracker/base/manifest.json
+```
+
+The checksum, manifest, and ABI checks finish before the completion. A local archive without an adjacent checksum file keeps the integrity limitation visible as a warning:
+
+```shell
+$ needy image pull --driver linux-firecracker --file /home/user/downloads/needy-actor-linux-firecracker-x86_64.tar.gz
+warning: No adjacent .sha256 file; the archive checksum could not be verified.
+Image imported successfully!
+
+Updated:
+  /home/user/.local/share/needy/images/linux-firecracker/base/vmlinux
+  /home/user/.local/share/needy/images/linux-firecracker/base/rootfs.ext4
+  /home/user/.local/share/needy/images/linux-firecracker/base/firecracker
+  /home/user/.local/share/needy/images/linux-firecracker/base/manifest.json
+```
+
+A calculated digest is not verification or release-attestation evidence. Multiple requested drivers retain successful artifact results when another driver fails; after clearing progress, print the failure on stderr and return 1:
+
+```shell
+$ needy image pull --driver linux-firecracker --driver linux-container --version 0.0.5
+Image installed successfully!
+
+Updated:
+  /home/user/.local/share/needy/images/linux-firecracker/base/vmlinux
+  /home/user/.local/share/needy/images/linux-firecracker/base/rootfs.ext4
+  /home/user/.local/share/needy/images/linux-firecracker/base/firecracker
+  /home/user/.local/share/needy/images/linux-firecracker/base/manifest.json
+
+error: Cannot pull linux-container image: registry request failed.
+  Check: Inspect the container engine and registry access, then retry the failed driver.
+    this machine: needy image pull --driver linux-container --version 0.0.5
+$ echo $?
+1
+```
+
+### `needy image ls`
+
+**Status: existing table/JSON retained; proposed store-omission warning.** A local inventory is not a driver-support or complete-store claim. The warning is stderr; successful partial listing remains exit 0.
+
+Streams: inventory is stdout; the proposed omitted-store warning is stderr.
+
+```shell
+$ needy image ls
+warning: Container engine inventory is unavailable; the listing may be incomplete.
+DRIVER             IMAGE  VERSION  BASE ABI  SOURCE          SIZE       PATH
+linux-firecracker  base   0.0.5    1         release v0.0.5  256.0 MiB  /home/user/.local/share/needy/images/linux-firecracker/base
+$ needy image ls -o json
+[
+  {
+    "driver": "linux-firecracker",
+    "image": "base",
+    "version": "0.0.5",
+    "base_abi": "1",
+    "source": "release v0.0.5",
+    "size": 268435456,
+    "path": "/home/user/.local/share/needy/images/linux-firecracker/base"
+  }
+]
+```
+
+A warning about an unavailable store also stays on stderr in JSON mode; JSON remains the existing image-row array. The source string is the current release-source rendering, not a new provenance schema.
+
+### `needy image build`
+
+Status: Implemented in PR #17: packing, BuildKit stage, extraction, and installation spinners using actual stage names. The concise completion and artifact layouts below remain Proposed; existing completion messages are retained.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy image build --out /home/user/images/demo --linux-container --executor
+⠋ Building container targets (12s)…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy image build --out /home/user/images/demo --linux-container --executor
+Images built successfully!
+
+Updated:
+  /home/user/images/demo/vmlinux
+  /home/user/images/demo/rootfs.ext4
+  /home/user/images/demo/firecracker
+  /home/user/images/demo/manifest.json
+
+Images:
+  needy-actor:latest
+  needy-executor:latest
+```
+
+The image references follow the file list. No routine usage walkthrough or permanent build-phase log remains. Actual BuildKit stage names can appear in the refreshing progress area. The Linux example lists only files actually exported for this invocation.
+
+OCI-to-VM conversion keeps its distinct artifacts and existing flags:
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy image build --from example.com/demo/actor:demo --base /home/user/images/base --out /home/user/images/custom
+VM image built successfully!
+
+Updated:
+  /home/user/images/custom/vmlinux
+  /home/user/images/custom/rootfs.ext4
+  /home/user/images/custom/firecracker
+  /home/user/images/custom/manifest.json
+```
+
+The registry reference is synthetic. Failed steps retain their buffered output in the stderr diagnostic, after clearing the spinner:
+
+```shell
+$ needy image build --out /home/user/images/demo
+error: BuildKit step failed: build actor kernel
+  make: *** [vmlinux] Error 2
+  Check: Inspect the failed build output and correct the build environment before retrying.
+$ echo $?
+1
+```
+
+### `needy image rm`
+
+Status: Proposed presentation only.
+
+**Proposed in-progress snapshot (stderr):**
+
+```shell
+$ needy image rm base --driver linux-firecracker
+⠋ Removing the VM image…
+```
+
+**Proposed completed snapshot (stderr; retained invitation/enrollment data uses stdout):**
+
+```shell
+$ needy image rm base --driver linux-firecracker
+Image removed successfully!
+
+Removed:
+  /home/user/.local/share/needy/images/linux-firecracker/base
+```
+
+```shell
+$ needy image rm --guest-disks
+No obsolete guest disks to remove.
+```
+
+Removal lists the actual affected image directory or obsolete disk files. Container-store removal still requires `--container`; no VM-only removal claims to clean those stores. Missing targets remain failures:
+
+```shell
+$ needy image rm missing-demo --driver linux-firecracker
+error: No linux-firecracker VM image missing-demo was found.
+  Check: List local images before selecting a removal target.
+    this machine: needy image ls
+$ echo $?
+1
+```
+
+## v0.0.5 baseline audit
+
+Date: 2026-11-15. Change classification: docs-only.
+
+This audit records the public command surface at commit
+`8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c`, the v0.0.5 baseline.
+Later onboarding changes do not change the observations recorded here.
+See the [working-branch changes and regression evidence](2026-11-15-client-onboarding-output-evidence.md) for the current fixes.
+The improvement list separates the active approved slice from proposed follow-up work.
+
+### Evidence and coverage
+
+Evidence levels in this document:
+
+- **Help probe:** Read-only execution of `needy --version` and recursive `needy ... --help` on the installed release binary.
+- **Source audit:** Inspection of the command handlers and shared output code at the baseline commit.
+- **Proposed:** A candidate improvement, without an implementation or behavior claim.
+
+The help probe returned `needy 0.0.5`.
+It found eight public top-level groups and 55 operational leaf commands.
+Generated `help`, `--help`, and `--version` are additional presentation surfaces.
+Hidden internal commands, guest dispatch, and `cargo xtask` are outside this public CLI inventory.
+
+| Group | Public operational leaves |
+| --- | ---: |
+| `config` | 16 |
+| `daemon` | 9 |
+| `client` | 3 |
+| `runner` | 8 |
+| `run` | 10 |
+| `proc` | 4 |
+| `fs` | 1 |
+| `image` | 4 |
+| Total | 55 |
+
+Discovery started at `needy --help`, followed each public `Commands:` entry,
+and stopped at commands without further public children.
+The audit did not start services, consume invitations, create runs, transfer files, or change images.
+It did not connect through SSH or install software.
+Except for help/version, the matrices describe source-backed behavior, not live verification or platform support.
+Exact external program output, remote error messages, timing, and terminal escape bytes remain runtime-dependent.
+
+### Shared presentation and exit rules
+
+The [root dispatcher](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/cli.rs)
+and [output module](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/output/mod.rs)
+define the common rules.
+
+| Surface or condition | Output and exit behavior |
+| --- | --- |
+| Successful ordinary operation | Exit 0, unless its matrix row specifies another result. “None” means no command-owned output on that stream. |
+| `--help`, `-h`, or generated `help [COMMAND...]` | Clap prints help to stdout and exits 0. Long help can include additional descriptions. No command handler runs. |
+| Root `--version` or `-V` | Version line on stdout, exit 0. |
+| Argument parse error | Clap owns the diagnostic, usage, and exit 2. This occurs before the infrastructure diagnostic renderer. |
+| Unhandled command/configuration/connection/filesystem/API error | Infrastructure diagnostic on stderr, exit 1. Partial stdout from earlier steps can remain. |
+| Closed local stdout pipe | Exit 141 without an infrastructure diagnostic. A broken remote API connection does not count as closed stdout. |
+| Row output | Default borderless table with a header, including an empty result. `-o json` prints a pretty JSON array, including `[]`. |
+| Document output | Default YAML or pretty JSON object/value, according to the command. This is distinct from row output. |
+| Informational messages and handled warnings | Usually plain `needy: ...` on stderr. They do not pass through the infrastructure diagnostic renderer. |
+| Verbosity | Default process logs on stderr are off. `-v` enables info, `-vv` adds Needy debug, and `-vvv` enables trace for all targets. Logs can coexist with data and diagnostics. |
+| Daemon process logs | Daemon commands also initialize daily log files in the resolved state directory. These differ from the product trace and OS service logs. |
+
+The [diagnostic renderer](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/diagnostics.rs)
+selects advice from typed reasons and API error kinds.
+Human errors start with `needy: SUMMARY [reason]`, then facts and `Check:` lines.
+Some checks include `client: needy ...` commands with the relevant selection arguments.
+Known credentials, URL user information, and terminal control bytes receive redaction or escaping at this boundary.
+Unknown errors can retain the `internal.unknown` reason.
+
+`--diagnostic-format json` changes infrastructure errors on stderr to compact JSON.
+Its fields are `version`, `reason`, `summary`, `facts`, `completion`, and `checks`.
+Each check has `summary`, `location`, and optional `argv`.
+`completion` can identify `unknown` or `not_started` outcomes.
+The flag does not make all stderr JSON: prompts, process logs, progress messages, warnings, and child stderr retain their own formats.
+It also does not select the command's successful `-o json` format.
+
+At the baseline, infrastructure human diagnostics have no explicit semantic color styling.
+The runner enrollment success line is green only on terminal stdout with an absent or empty `NO_COLOR`.
+Human run reports use the same terminal/`NO_COLOR` condition and disable color for `--file`.
+Tables and ordinary `output::message` lines do not add semantic color.
+Logging and child programs control their own styling.
+
+#### Root selection flags
+
+| Input | Meaning and visible consequences |
+| --- | --- |
+| `--config FILE` | Selects the client configuration document and adjacent `profiles/`. It also affects resolved paths and commands printed in diagnostic advice. |
+| `--context NAME` | Selects a saved transport and identity for this invocation. A context name does not grant access. |
+| `--address URI` | Selects direct TCP, HTTPS, or Unix transport. It conflicts with global `--context`. |
+| `--credential-file FILE` | Supplies the private outgoing bearer for direct `--address`. Clap requires an address. |
+| No explicit connection selector | Resolution uses the inherited execution reference, then the saved current context. Built-in `local` uses private local discovery and the OS account. |
+| Failed connection | Resolution reports the selected target's failure. It does not switch to another daemon or identity. |
+
+These rules come from the
+[connection boundary](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/connection.rs).
+Inherited selection carries references, not credential bytes.
+A direct bearer file does not create a saved identity reference for later child invocations.
+Legacy endpoint/token environment selectors can produce `config.selection_conflict` with explicit migration advice.
+
+Daemon and image operations are local and reject global connection selectors.
+Most configuration operations also reject them.
+Context pair/set/check and profile checks in control mode have specialized selection behavior.
+`runner serve` uses saved local enrollment and rejects global connection selectors.
+At the baseline, pair/set also declare a local `--address` with the same name as the global flag.
+The help probe shows that spelling, but does not prove that the direct-address pairing path parses correctly.
+That parser collision belongs to the active onboarding fix.
+
+### Configuration matrix
+
+Sources: [configuration commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/config.rs)
+and [profile commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/profile.rs).
+All command names in the matrices have the `needy` prefix.
+Common error and exit rules apply to every row.
+
+| Command | Successful stdout | Stderr, prompts, progress, and conditions | Machine-readable output and exit behavior |
+| --- | --- | --- | --- |
+| `config ls` | `KIND NAME SOURCE FINDING` rows for global configuration, built-in/saved contexts, and local profiles. | None normally. Malformed profile findings remain in rows. | `-o json`: entry array. Listing malformed profile rows still exits 0. |
+| `config show` | Global configuration document with recognized secrets masked. | None normally. Configuration load/validation errors use shared diagnostics. | `-o yaml` default, or `json`. |
+| `config get KEY` | The selected schema-defined value with recognized secrets masked. | Unknown key diagnostic names the field and writable keys. | YAML default or JSON, including scalar/null values. |
+| `config set KEY VALUE` | None. | No success confirmation or prompt. Invalid/managed fields give typed diagnostics and preserve the existing configuration. | No successful structured output. Exit 0 after atomic save. |
+| `config unset KEY` | None. | No success confirmation or prompt. Same writable-key restrictions as `set`. | No successful structured output. Exit 0 after atomic save. |
+| `config paths` | `KIND NAME SOURCE FINDING` rows for configuration, profiles, state, data, and runtime paths. | None normally. Findings identify the flag, environment variable, saved value, or platform default that selected each path. | `-o json`: entry array. |
+| `config use NAME` | None. | No success confirmation or connection probe. Unknown context gives list/pair advice. | No successful structured output. Exit 0 means selection was saved. |
+| `config context ls` | `NAME CURRENT TRANSPORT RECORDED IDENTITY RECORDED ACCESS` rows, including built-in `local`. | None normally. Local identity is `OS account`, access is `unknown until checked`. Saved identity/access are recorded facts. | `-o json`: context-row array. |
+| `config context show NAME` | Saved record with credential masked, or the synthetic local transport/identity document. | Unknown context gives list/pair advice. | YAML default or JSON. |
+| `config context pair NAME` | None at baseline. | Hidden `Invitation code: ` prompt unless `--code-file` is supplied. Success: `needy: paired context NAME as client ID; current selection is unchanged`. No onboarding guidance before the prompt. | No successful structured format. Baseline code-file input reads a private file, without a special stdin `-` branch. |
+| `config context set NAME` | None. | No success confirmation. Requires one address or connector argv, preserves identity/selection, rejects global context/credential inputs. | No successful structured output. |
+| `config context check [NAME]` | One `KIND NAME SOURCE FINDING` row. The finding combines transport, service role, instance, and caller text. | No progress message. Probe errors become an `unknown: ...` finding on stdout. Pre-probe argument/configuration errors still use stderr diagnostics. | `-o json`: the same entry array. Probe success exits 0, error/timeout exits 1. |
+| `config context rm NAME` | None. | No prompt or success confirmation. Built-in local cannot be removed. Removing the current context gives switch-first advice. Server revocation is separate. | No successful structured output. |
+| `config profile ls` | `NAME SOURCE FINDING` rows for local `.yaml`/`.yml` files. | None normally. A missing profiles directory is an empty listing. Invalid files retain load findings. | `-o json`: profile-row array. Malformed rows do not make the listing fail. |
+| `config profile show PROFILE` | YAML source data, or resolved data with `--resolved`. Recognized credentials and environment values are masked. | No prompt. File/YAML/resolve errors use shared diagnostics. Arbitrary argv/free text can contain unrecognized secrets. | YAML default or JSON. Output is serialized data, not original YAML formatting. |
+| `config profile check PROFILE` | Static: unresolved runtime/host line and findings. Host: user, executors, routes, optional services/faults/recipe/identity, and findings. Control: placement, optional CPU/image/ABI, routes/recipe, reasons, and findings. Repeated `--cmd` adds decision rows. | No interactive prompt or progress. Schema/recipe/host/API errors use shared diagnostics. | `-o json`: object with mode, findings, placement, recipe, decisions. Error findings exit 1, warnings alone exit 0. |
+
+Pairing validates the context name and replacement condition before consuming a code.
+An existing record requires `--replace`, and `--replace` requires an existing record.
+After remote credential issuance, save/identity validation failures use `bootstrap.save_failed`.
+That diagnostic gives the public client ID and instructs revocation plus a fresh invitation.
+It explicitly warns against retrying the consumed code.
+
+Context checks use a five-second default timeout.
+An executor endpoint or an older control endpoint can succeed with caller inspection marked `unknown`.
+The baseline combines that limitation into free text rather than separate service, identity, and admission fields.
+
+Profile checks default to static mode.
+Host mode adds facts about the current machine, while control mode asks the selected control plane about placement.
+The JSON form and human form have different detail shapes. JSON recipe facts are limited to compiled vCPU and memory values in host mode.
+
+### Daemon matrix
+
+Sources: [foreground commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/daemon/mod.rs),
+[service lifecycle](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/daemon/service/mod.rs),
+[systemd adapter](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/daemon/service/systemd.rs),
+and [launchd adapter](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/daemon/service/launchd.rs).
+
+| Command | Successful stdout | Stderr, prompts, progress, and conditions | Machine-readable output and exit behavior |
+| --- | --- | --- | --- |
+| `daemon serve` | None from the handler. Runs in the foreground. | Missing default guest binary prints a warning that actors cannot start. Explicit guest path errors fail. Startup/runtime logs require verbosity on stderr. | No successful structured output. Exit 0 after serving ends successfully. Windows control hosting gives `platform.unsupported`. |
+| `daemon executor` | None from the handler. Runs in the foreground. | Network listeners require `--token-file`. Token/listener/serve errors use shared diagnostics. Process logs follow verbosity. | No successful structured output. Exit 0 after serving ends successfully. |
+| `daemon service install` | Detected manager/scope, runtime account, snapshot/definition/registration write steps, native status/log commands, enable step, optional start step, final installed line. | No confirmation prompt. Existing/foreign registration, scope/account, executable access, ownership, manager, readiness, and timeout failures use diagnostics. Earlier progress remains visible. | No successful structured output. `--now` adds readiness wait. `--replace` requires an existing owned installation. |
+| `daemon service uninstall` | None. | No prompt or success confirmation. Stops with cleanup verification, disables, and removes owned definition/receipt. Failure gives manager/cleanup/timeout diagnostics. | No successful structured output. Configuration, state, credentials, logs, snapshots, and images remain. |
+| `daemon service start` | None. | No progress or success confirmation. Waits for the manager PID and matching ready control instance. Missing install gives install advice. | No successful structured output. Deadline/readiness/manager failures exit 1. |
+| `daemon service stop` | None. | No progress or success confirmation. Checks cleanup when stopping a running service. An already stopped service can return silently. | No successful structured output. Unverified cleanup or timeout exits 1. |
+| `daemon service restart` | None. | No progress or success confirmation. Stop and start share the total timeout budget. | No successful structured output. Failure in either stage exits 1. |
+| `daemon service status` | `STATE MANAGER ACCOUNT PID INSTANCE ADMISSION LOG` row. Missing receipt produces `not-installed`. Running PID without a matching API produces `api-unreachable`. | No normal stderr output. Ownership/manager inspection failures use diagnostics. | `-o json`: one-row array. `not-installed`, `failed`, or `api-unreachable` states still exit 0 when inspection succeeds. Admission remains `unknown`. |
+| `daemon service logs` | Inherited output of `journalctl` on Linux or `tail` of the service log on macOS. Default tail is 100 lines. `--follow` continues. | The external log command inherits stderr and can emit its own errors. Needy adds a diagnostic when it fails. | No successful structured output. External nonzero status becomes Needy exit 1. |
+
+Service management chooses the platform before installation writes.
+Unsupported platforms give `platform.unsupported`.
+User scope is the default. System installation requires `--run-as` and root, without automatic privilege elevation.
+The installer prints native manager commands, while subsequent lifecycle commands mostly succeed silently.
+
+### Client and runner matrix
+
+Sources: [client commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/client.rs),
+[runner commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/runner.rs),
+and [local runner startup](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/daemon/runner.rs).
+
+| Command | Successful stdout | Stderr, prompts, progress, and conditions | Machine-readable output and exit behavior |
+| --- | --- | --- | --- |
+| `client invite` | Baseline vertical fields: ID, NAME, ACCESS, EXPIRES, and CODE (shown once). Defaults: ten-minute TTL, run/process access. | Replacement invitations warn that pairing revokes the previous named client's credential. `--admin` verifies the caller and server-confirmed access. No pairing instructions at baseline. | `-o json`: version 1 object with id, name, access, expires_at_ms, code. Replacement warning stays on stderr. |
+| `client ls` | `ID NAME ACCESS STATE PAIRED LAST USED` rows, including revoked clients. | No normal stderr output. Authentication/authorization/API errors use shared diagnostics. | `-o json`: identities with timestamps and optional revocation/last-used values. No credential/code field. |
+| `client revoke CLIENT_ID` | None. | No prompt or success confirmation. Retains the audit record. | No successful structured output. |
+| `runner invite` | “Runner invitation created”, metadata, runner-side join command, reachable-address/tunnel guidance, one-time joining token, and automation instructions. Defaults: one-hour TTL and one use. | No normal stderr output. Role/label/TTL parsing and management errors follow common rules. | `-o json`: version 1 object with id, roles, expires_at_ms, uses_left, code. Human guidance is omitted. |
+| `runner join NAME` | Contacting control daemon line, success line, runner/control/capability summary, `runner serve`, control-side `runner ls`, and service status/log hints. | Without code input: invitation acquisition guidance on stderr, then hidden `Joining token: ` prompt. Capability warnings use stderr. | No successful structured output. `--code-file FILE` skips the prompt. `--code-file -` reads stdin. Exit 0 means enrollment saved, not persistent serving. |
+| `runner serve` | None from the handler. Keeps the saved enrollment connected. | Capability warnings on stderr. Process logs require verbosity. Missing enrollment, unavailable explicit roles, or expanded enrolled roles fail. | No successful structured output. Uses saved connection, roles, labels, and actor image unless permitted overrides apply. |
+| `runner token ls` | `ID STATE USES LEFT EXPIRES ROLES LABELS` rows, including expired, spent, and revoked invitations. | No normal stderr output. Unknown/unspecified wire states or roles fail rather than invent defaults. | `-o json`: metadata array, including creation/expiry timestamps. No token secret. |
+| `runner token revoke ID` | None. | No prompt or success confirmation. Existing runner credentials remain independent. | No successful structured output. |
+| `runner ls` | `NAME STATUS CAPABILITIES HOST CPU LABELS LAST SEEN` rows, including removed machines. Rotation adds `(rotating)` to status. Missing host/CPU uses `-`. | No normal stderr output. Unknown wire role/runtime/provider/status values fail. | `-o json`: complete runner rows, including rotation, capabilities, optional host, labels, timestamps, and join-token ID. |
+| `runner rotate NAME` | None. | No prompt or success confirmation. Credential rotation takes effect at the next heartbeat. | No successful structured output. Exit 0 acknowledges the request, not completed rotation. |
+| `runner rm NAME` | None. | No prompt or success confirmation. Revokes the runner while preserving its registry record. | No successful structured output. |
+
+Runner join requires exactly one explicit address, saved context transport, or connector command.
+It rejects `--credential-file` because enrollment uses the invitation.
+It validates one nonempty joining token and supports private-file/stdin input.
+Its first termination signal allows credential storage to finish.
+A second termination signal can produce a warning about uncertain saved enrollment and inspection before retry.
+
+### Runs and processes matrix
+
+Sources: [run commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/run/mod.rs),
+[report command](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/run/report.rs),
+[chaos commands](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/run/chaos.rs),
+[exec](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/proc/exec.rs),
+[attach](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/proc/attach.rs),
+[process listing](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/proc/ps.rs),
+and [process signals](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/proc/kill.rs).
+
+| Command | Successful stdout | Stderr, prompts, progress, and conditions | Machine-readable output and exit behavior |
+| --- | --- | --- | --- |
+| `run exec [RUN] -- COMMAND...` | Human: child output through the selected run's routing, or bound executor override. Detached: process ID. | Child stderr in pipe mode. Terminal mode merges child streams. Infrastructure failures and detach hints follow the execution rules that follow. | `-o human/json/ndjson`, default human. Child/refusal/stream exits apply. |
+| `run report [RUN]` | Human report by default, Markdown or JSON on request. Summary is default, detailed adds timeline information. | No progress or prompt. Missing traces, unreadable event versions/payloads, connection, selection, and file-write errors use shared diagnostics. | `-o human/markdown/json`. `--file FILE` writes the report with no stdout confirmation. Exit 0 does not mean the reported run succeeded. |
+| `run chaos add NAME` | `added NAME to run ID`. | Server-returned warnings use `needy: warning: ...`. Invalid fault YAML/domain/effect combinations and API errors fail. No prompt. | No successful structured output. |
+| `run chaos ls` | `NAME DOMAIN SOURCE MATCHED FIRED FAULT` rows. Fault text uses compact flow-style YAML. | No normal stderr output. | `-o json`: rows with original fault YAML string and counters. |
+| `run chaos rm NAME` | `removed NAME from run ID`. | No prompt. API/selection errors use shared diagnostics. | No successful structured output. |
+| `run create --profile PROFILE` | Noninteractive: run ID only. `-it`: driving program terminal output, without the run ID mixed into stdout. | Interactive creation prints `needy: run ID` on stderr before attachment. `-i` without `-t` prints a specific use-`-it` message and exits 2. No creation progress summary. | No creation JSON flag. Noninteractive success exits 0. Interactive follows attachment/child exit behavior. |
+| `run ls` | `ID NAME STATE ACTOR GROUP EXECUTORS EXIT` rows, including ended runs. Default ID-derived name/group uses `-`. Executors show `(lost)` or `(released)`. | No normal stderr output. Unknown wire states fail. EXIT shows code, signal, or first failure line truncated to 48 characters. | `-o json`: full failure text, actor/exit fields, executor flags, and tty state. |
+| `run stop [RUN]` | None. | No prompt or normal success confirmation. Unexpected forced stop prints `run ID: the actor was killed without its mirror-out: REASON`. Explicit `--now` suppresses that warning. | No successful structured output. Successful response exits 0 even with the unexpected forced-stop warning. |
+| `run attach [RUN]` | Replayed terminal screen and subsequent driving program output. `--no-replay` omits replay. | Detach prints a new-line `needy: detached from run ID; ... run attach ID ...` hint. Read-only mode sends no input/signals/window changes. | No structured format. Child/stream/detach exit rules apply. |
+| `run logs [RUN]` | Raw actor console bytes, including boot messages and driving program terminal output. `--follow` flushes arriving chunks until the run stops. | No progress or prompt. Streaming API errors use shared diagnostics. | No structured format. Successful end of the log stream exits 0, independent of the actor's exit. |
+| `proc exec TARGET -- COMMAND...` | Human child output, or process ID with `-d`. Target is exactly one host, runner, or pooled executor. | Same execution rules as `run exec`, without run routing. | `-o human/json/ndjson`, default human. Child/refusal/stream exits apply. |
+| `proc ls` | `ID RUN ORIGIN EXECUTOR PID STATE EXIT TTY COMMAND` rows. Missing run/origin uses `-`. Internal transfers/mounts stay hidden unless `--all`. | No normal stderr output. `--run` and `--runner` conflict. | `-o json`: array with separate argv, optional exit/signal/origin, and tty. |
+| `proc attach PROCESS_ID` | Recent pipe output or current terminal screen, then subsequent output. `--no-replay` omits replay. | Detach prints a new-line hint with `needy proc attach PROCESS_ID`. Read-only mode prevents input/signals/window changes. | No structured format. Child/stream/detach exit rules apply. |
+| `proc kill PROCESS_ID` | None. | No prompt or success confirmation. Unknown signal fails before connection. Default signal is SIGTERM. | No successful structured output. Exit 0 acknowledges the signal request. |
+
+#### Execution, terminal, and native child output
+
+Human execution and attachment relay child bytes directly.
+A native executor session can show the shell's own prompt, colors, errors, and progress.
+Infrastructure formatting does not wrap or recolor these bytes.
+The same distinction applies to actor terminal output, raw run logs, and inherited service-log command output.
+
+Execution automatically requests a terminal only for an interactive client in human mode.
+`-t` forces a terminal, `-T` forces separate pipes, and structured output always uses pipes.
+`-n` disables stdin forwarding. `-d` also disables forwarding and returns after the process starts.
+Detach keys apply only to terminal input. The default is `ctrl-]`, and an empty value disables detachment.
+
+| Execution condition | Output and exit |
+| --- | --- |
+| Child exits normally | Human: child's streams. JSON: one final object with process_id, executor, exit_code, signal, stdout, stderr. NDJSON: streamed events. Shell exit follows the child code. |
+| Child ends by signal | Exit is 128 plus the local signal number, with fallback number 1. Structured output retains the signal. |
+| Child code cannot fit the local exit status | Stderr names the actual code and exit 1. JSON preserves the real code. See the [signal mapping](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/core-executor/src/signals.rs). |
+| Detach keys | Exit 0 and a stderr reattach hint. This is not evidence that the child exited. |
+| `-d` start confirmed | Human process ID, JSON process_id/executor object, or NDJSON started event, then exit 0. No completion output is collected. |
+| Start explicitly marked not started | Exit 125 plus infrastructure diagnostic. |
+| Start denied | Exit 126 plus infrastructure diagnostic. |
+| Start fails a precondition/cannot start | Exit 127 plus infrastructure diagnostic. |
+| Refusal with `-o json` | stdout object with exit_code, signal, error, plus the stderr infrastructure diagnostic. |
+| Refusal with `-o ndjson` | Available refusal trace events, error event, exit event, plus the stderr infrastructure diagnostic. |
+| Exec stream ends before observed exit | Exit 255 and `process.outcome_unknown` diagnostic. JSON includes partial output and error. NDJSON emits error without an invented exit event. |
+| Second termination signal handled by relay | Exit 128 plus signal number. |
+
+NDJSON writes one compact object per event on stdout.
+Started events include process ID, executor, PID, and argv.
+Output chunks use `data` for UTF-8 or `data_base64` for non-UTF-8 bytes.
+Trace events use their event kind as `type`. Exit events contain code and signal.
+Final JSON decodes captured stdout/stderr with lossy UTF-8 conversion.
+Infrastructure JSON diagnostics remain a separate stderr schema.
+
+Run selectors accept ID, unique prefix, name, or `latest`.
+Most run operations default to the inherited run, then the only live run.
+Reports instead default to the inherited run, then latest, and support offline lookup in the local trace database.
+An ambiguous or missing selection produces an infrastructure error rather than a selection prompt.
+
+### Files and images matrix
+
+Sources: [file copy](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/fs.rs),
+[image pull](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/image/pull.rs),
+[image listing](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/image/ls.rs),
+[image build](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/image/build.rs),
+[OCI conversion](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/image/build/from.rs),
+and [image removal](https://github.com/needy-dev/needy/blob/8a5c79399d4c46a4a0b3a5fa0fd524666f6add1c/crates/cli/src/commands/image/rm.rs).
+
+| Command | Successful stdout | Stderr, prompts, progress, and conditions | Machine-readable output and exit behavior |
+| --- | --- | --- | --- |
+| `fs cp SOURCE DESTINATION` | None. | No prompt, progress, or success confirmation by default. `-v` shows copied byte count and target. Requires one local path, one literal `remote:PATH`, and one explicit target. Tar/path errors name the target/path. Unsafe downloaded archives fail. | No successful structured output. Exit 0 after transfer/extraction. |
+| `image pull` | None. | Plain `needy:` messages describe detected drivers, download URL, periodic MiB progress, checksum verification, destination, container pull/layer progress, and final driver results. Local import reports checksum status and destination. | No successful structured format. Per-driver failures print messages and return 1 after remaining pulls. Early setup/import errors use shared diagnostics. |
+| `image ls` | `DRIVER IMAGE VERSION BASE ABI SOURCE SIZE PATH` rows for local VM and available container stores. Missing fields use `-`, size uses binary units. Invalid/missing manifests appear in SOURCE. | Unavailable container-store reasons appear only in info logs with verbosity. VM listing skips unreadable/missing directories and some entries. | `-o json`: complete image rows with numeric bytes and optional path/version/ABI. A partial or empty inventory can still exit 0. |
+| `image build` | None from the handler. | BuildKit step-start messages, recipe findings, optional OCI pull notice, optional Apple store load notice, and VM destination success message. Debug verbosity adds build log lines. A failed BuildKit step includes buffered tail output in its diagnostic. | No successful structured format. Recipe error findings, missing checkout/runtime, build/conversion/ABI failures use shared diagnostics and exit 1. Container-only additions have step output without a uniform final summary. |
+| `image rm [IMAGE...]` | None. | Plain stderr removal messages per VM image, container store, and obsolete guest disk. Missing images print a message, including `image ls` advice for VM misses. No confirmation prompt. | No successful structured format. Missing targets accumulate exit 1. `--guest-disks` with nothing obsolete can succeed silently. Filesystem errors use shared diagnostics. |
+
+Image pull reports progress approximately every additional 32 MiB for VM downloads.
+Container progress includes layer status and available current/total byte counts.
+Import without an adjacent checksum file prints the calculated SHA-256 and states that no checksum file exists.
+These notices describe different integrity evidence and do not establish release-attestation verification.
+
+The file-copy help describes an `EXECUTOR:PATH` form, while the implementation recognizes only the literal `remote:` marker.
+That discrepancy is a source-backed documentation gap, separate from the onboarding slice.
+
+### Prioritized gaps and proposed follow-up
+
+This list records presentation gaps. It does not authorize implementation outside the owner's named slice.
+Silence on successful mutations is existing behavior, not automatically a bug.
+
+| Priority | Gap and consequence | Status and bounded next slice |
+| --- | --- | --- |
+| P0 | Pair/set local `--address` overlaps the global parser field. Help alone does not establish that direct pairing works. | **Active approved slice:** repair and reproduce the parser behavior for pairing/transport updates. |
+| P1 | `client invite` exposes a code without client-side pairing guidance. Pairing starts with an unexplained hidden prompt and ends with one stderr line. | **Active approved slice:** invitation, prompt, save outcome, and next-step guidance. Keep secret input separate from argv. |
+| P1 | Context check combines transport, instance, caller, and failure into one finding cell. Service reachability and authenticated identity are hard to distinguish. | **Active approved slice:** make the check result and its limits clear. Preserve honest unknown outcomes. |
+| P1 | Infrastructure human errors lack semantic colors, despite an existing colored enrollment success line. | **Active approved slice:** terminal-aware diagnostic colors and explicit plain redirected/`NO_COLOR` behavior. Child bytes retain their own styling. |
+| P1 | `config profile check` accepts a positional profile but rejects the `-f` file spelling used by `run create`. | **Active approved slice:** accept `-f/--file`, retain positional input, reject both together. |
+| P1 | A foreground run viewer returns on transport failure without reconnecting. Runner/holder backoff does not reconnect that viewer. | **Open recovery slice:** reconnect only the existing run attachment; never repeat create, process start, or buffered input. The reported h2 failure has not been reproduced. |
+| P2 | `fs cp` help names an executor prefix that the parser does not recognize. | **Proposed docs-only slice:** align command help with literal `remote:PATH` and explicit target flags. |
+| P2 | Many mutations have no success confirmation, while chaos operations and enrollment provide explicit outcomes. | **Proposed contract slice:** choose one family at a time and specify interactive confirmation versus stable automation output. Start only after owner selection. |
+| P2 | Successful service inspection can show failed/unreachable/not-installed state with exit 0. Image listing can silently omit unavailable stores. | **Proposed documentation slice:** explain observation success versus healthy/complete inventory. A stricter exit mode requires a separate approved contract. |
+| P2 | Several progress/warning paths remain plain text under `--diagnostic-format json`. Image pull can return 1 through handled text errors. | **Proposed contract slice:** define whether automation needs structured progress and handled errors for one command family. The existing diagnostic flag covers infrastructure errors only. |
+| P3 | Suggested commands vary between native manager commands, generic commands, and context-preserving diagnostic argv. | **Proposed review slice:** inspect one onboarding/lifecycle flow for correct machine location and retained selection. Do not expand every hint in this audit. |
+| P3 | Human and structured profile checks carry different recipe/identity detail. Some list schemas expose more than their tables. | **Proposed documentation slice:** document the selected machine-output fields before considering schema additions. |
+
+### Remaining verification limits
+
+The help probe establishes command discovery and advertised flags on one installed v0.0.5 binary.
+The source audit establishes intended branches at the pinned commit.
+No cross-platform runtime matrix, external service-manager transcript, full TTY session, or remote failure matrix ran for this audit.
+Prompt placement follows the password library call and explicit stderr guidance in source, without a captured interactive session.
+The exact terminal/log bytes and remotely supplied messages depend on the actual child, endpoint, manager, and runtime state.
+Active onboarding changes require their own tests and evidence before this historical baseline can describe the resulting release.

@@ -74,7 +74,12 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
   let image = args.actor_image.unwrap_or_else(|| paths.base_image());
   let kvm = args.kvm.unwrap_or_else(|| needy_core_actor::driver::linux_firecracker::KVM.into());
   let roles: Option<std::collections::BTreeSet<_>> = args.roles.map(|roles| roles.into_iter().collect());
+  let progress = crate::output::Progress::new(
+    joining && !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json),
+    "Checking local runner capabilities",
+  );
   let (capabilities, warnings) = needy_daemon::capabilities::of_this_machine(&kvm, &image, roles.as_ref()).await;
+  progress.finish();
   for warning in &warnings {
     crate::output::message(format_args!("warning: {warning}"));
   }
@@ -105,7 +110,15 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     grace: args.disconnect_grace.unwrap_or(needy_daemon::runner::DISCONNECT_GRACE),
   };
   if joining {
-    crate::output::outln!("Contacting control daemon: {control_summary}")?;
+    let progress = crate::output::Progress::new(
+      !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)
+        && !config.control.as_deref().is_some_and(|control| control.starts_with("exec:")),
+      format!("Contacting control daemon: {control_summary}"),
+    );
+    // Keep the existing plain contact line when terminal animation is hidden.
+    if !progress.is_visible() {
+      crate::output::outln!("Contacting control daemon: {control_summary}")?;
+    }
     // An enrollment code is consumed remotely. The first signal must let its
     // response reach private storage, as the former combined join/serve did.
     let termination = needy_api_server::termination::Termination::listen()?;
@@ -115,6 +128,7 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
         "a second termination signal ended enrollment before its credential was saved; inspect the runner registration before retrying"
       ),
     }
+    progress.finish();
     crate::output::success("Joined successfully. Enrollment saved.")?;
     crate::output::outln!(
       "\n  {:<20}{name}\n  {:<20}{control_summary}\n  {:<20}{capability_summary}\n\nOn this machine, start the runner and keep it connected:\n\n  needy runner serve\n\nOn the control host, inspect runners with:\n\n  needy runner ls\n\nFor an OS-managed control daemon, inspect its status and logs with:\n\n  needy daemon service status\n  needy daemon service logs --follow",
@@ -123,6 +137,9 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
       "Local capabilities:"
     )?;
   } else {
+    // TODO(runner-progress): persistent serve has no connection-state callback;
+    // add waiting feedback only with an owner-approved callback that separates
+    // connection/reconnection from active serving, without covering its lifetime.
     needy_daemon::runner::serve_with_labels(config, labels_overridden).await?;
   }
   Ok(0)

@@ -77,6 +77,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
   if let Some(reference) = &args.from {
     let paths = ctx.paths()?;
     let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
@@ -87,7 +88,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       images: &paths.images(),
       out: args.out.as_deref(),
     };
-    let dir = from::build(&docker, &from).await?;
+    let dir = from::build(&docker, &from, feedback).await?;
     output::message(format_args!("image build: {reference} is the VM image {}", dir.display()));
     return Ok(0);
   }
@@ -110,12 +111,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
     build_args.extend(compiled.kernel_build_env);
   }
+  let packing = output::Progress::new(feedback, "Packing image build context");
   let context = tokio::task::spawn_blocking(move || pack_context(&root)).await??;
+  packing.finish();
   let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
   if args.macos_apple_container {
-    build_for_macos_apple_container(&docker, &context, &ctx.paths()?.state).await?;
+    build_for_macos_apple_container(&docker, &context, &ctx.paths()?.state, feedback).await?;
   } else {
-    build_vm_image(&docker, &context, &out, build_args).await?;
+    build_vm_image(&docker, &context, &out, build_args, feedback).await?;
     record_build(&out, args.recipe)?;
     output::message(format_args!("image build: the base VM image {}", out.display()));
   }
@@ -128,6 +131,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         t: Some(needy_config::profile::BUILT_CONTAINER_IMAGE.into()),
         ..options()
       },
+      feedback,
     )
     .await?;
   }
@@ -140,6 +144,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         t: Some(needy_core_executor::driver::linux_container::BUILT_IMAGE.into()),
         ..options()
       },
+      feedback,
     )
     .await?;
   }
@@ -180,7 +185,7 @@ fn actor_target() -> (&'static str, &'static str) {
 
 /// Builds the actor image this host's VM driver boots, with the recipe's
 /// kernel `build_args`, into `out`.
-async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args: HashMap<String, String>) -> Result<()> {
+async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args: HashMap<String, String>, feedback: bool) -> Result<()> {
   std::fs::create_dir_all(out).with_context(|| format!("cannot create {}", out.display()))?;
   let out = std::fs::canonicalize(out)?;
   // NOTICE: bollard's local exporter (`ImageBuildOutput::Local`, bollard
@@ -200,12 +205,15 @@ async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args:
       outputs: Some(ImageBuildOutput::Tar(archive.display().to_string())),
       ..options()
     },
+    feedback,
   )
   .await?;
   let unpack_to = out.clone();
   let unpack_from = archive.clone();
+  let progress = output::Progress::new(feedback, "Extracting built VM image");
   tokio::task::spawn_blocking(move || unpack(&unpack_from, &unpack_to)).await??;
   std::fs::remove_file(&archive).with_context(|| format!("cannot remove {}", archive.display()))?;
+  progress.finish();
   Ok(())
 }
 
@@ -218,7 +226,7 @@ async fn build_vm_image(docker: &Docker, context: &[u8], out: &Path, build_args:
 // Docker API only.
 // TODO(macos-apple-container): build with `container build` when there is no
 // Docker, if the owner wants Macs without Docker to build the image.
-async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratch: &Path) -> Result<()> {
+async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratch: &Path, feedback: bool) -> Result<()> {
   let image = needy_config::profile::BUILT_CONTAINER_IMAGE;
   build(
     docker,
@@ -229,17 +237,23 @@ async fn build_for_macos_apple_container(docker: &Docker, context: &[u8], scratc
       platform: "linux/arm64".into(),
       ..options()
     },
+    feedback,
   )
   .await?;
   std::fs::create_dir_all(scratch).with_context(|| format!("cannot create {}", scratch.display()))?;
   let archive = scratch.join(format!(".needy-actor-{}.tar", uuid::Uuid::new_v4()));
+  let progress = output::Progress::new(feedback, format!("Exporting {image}"));
   let loaded = match save_image(docker, image, &archive).await {
     Ok(()) => {
-      output::message(format_args!("build: loading {image} into Apple's container"));
+      progress.message(format!("Loading {image} into Apple's container"));
+      if !progress.is_visible() {
+        output::message(format_args!("build: loading {image} into Apple's container"));
+      }
       load_into_apple_container(image, &archive).await
     }
     Err(e) => Err(e),
   };
+  progress.finish();
   if let Err(e) = std::fs::remove_file(&archive)
     && e.kind() != std::io::ErrorKind::NotFound
   {
@@ -450,11 +464,13 @@ fn write_sparse(reader: &mut impl std::io::Read, file: &mut std::fs::File) -> st
 
 /// Runs one build and prints each step as it starts; a failed step also
 /// prints the end of its output.
-async fn build(docker: &Docker, context: &[u8], options: BuildImageOptions) -> Result<()> {
+async fn build(docker: &Docker, context: &[u8], options: BuildImageOptions, feedback: bool) -> Result<()> {
   let target = options.target.clone();
+  let progress = output::Progress::new(feedback, format!("Building {target}"));
   let body = bollard::body_full(context.to_vec().into());
   let mut stream = docker.build_image(options, None, Some(body));
   let mut names: HashMap<String, String> = HashMap::new();
+  let mut active: Vec<(String, String)> = Vec::new();
   let mut logs: HashMap<String, VecDeque<String>> = HashMap::new();
   while let Some(info) = stream.next().await {
     let info = info.with_context(|| format!("docker build of {target}"))?;
@@ -467,14 +483,27 @@ async fn build(docker: &Docker, context: &[u8], options: BuildImageOptions) -> R
     };
     for vertex in status.vertexes {
       if vertex.started.is_some() && !names.contains_key(&vertex.digest) {
-        output::message(format_args!("build {target}: {}", vertex.name));
+        if !progress.is_visible() {
+          output::message(format_args!("build {target}: {}", vertex.name));
+        }
         names.insert(vertex.digest.clone(), vertex.name.clone());
+      }
+      if vertex.completed.is_some() {
+        active.retain(|(digest, _)| digest != &vertex.digest);
+      } else if vertex.started.is_some() && !active.iter().any(|(digest, _)| digest == &vertex.digest) {
+        active.push((vertex.digest.clone(), vertex.name.clone()));
       }
       if !vertex.error.is_empty() {
         let output: Vec<String> = logs.remove(&vertex.digest).unwrap_or_default().into();
         bail!("docker build of {target}: {}: {}\n{}", vertex.name, vertex.error, output.join("\n"));
       }
     }
+    // BuildKit can run vertexes concurrently. Show the latest reported one
+    // still running, without inventing an overall step count or percentage.
+    progress.message(match active.last() {
+      Some((_, name)) => format!("Building {target}: {name}"),
+      None => format!("Building {target}"),
+    });
     for log in status.logs {
       let lines = logs.entry(log.vertex).or_default();
       for line in String::from_utf8_lossy(&log.msg).lines() {
@@ -486,6 +515,7 @@ async fn build(docker: &Docker, context: &[u8], options: BuildImageOptions) -> R
       }
     }
   }
+  progress.finish();
   Ok(())
 }
 

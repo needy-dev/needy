@@ -10,6 +10,7 @@ use needy_api_client::files::{self, Target};
 use needy_api_client::proto::v1::Origin;
 
 use crate::cli::Context;
+use crate::output;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -64,6 +65,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           .into(),
         );
       }
+      let progress = output::Progress::new(ctx.connection_feedback(), "Connecting for file copy");
       let client = ctx.connect().await?;
       let place = if let Some(runner) = runner {
         Place::Runner(runner)
@@ -78,7 +80,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       } else {
         Place::Host
       };
-      cp(&client, &place, &source, &destination).await?
+      let target = place_name(&place);
+      progress.message(format!("Copying {source} to {destination} ({target})"));
+      cp(&client, &place, &source, &destination).await?;
+      progress.finish();
+      output::acknowledge(&format!("Copied {source} to {destination} (target {target})."))?;
     }
   }
   Ok(0)

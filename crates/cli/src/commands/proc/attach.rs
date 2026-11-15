@@ -7,6 +7,7 @@ use needy_api_client::proto::v1::ExecAttach;
 use needy_core_executor::relay;
 
 use crate::cli::Context;
+use crate::output;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -25,7 +26,9 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let progress = output::Progress::new(ctx.connection_feedback(), "Connecting for process attachment");
   let connection = ctx.connect().await?;
+  progress.finish();
   let attach = ExecAttach {
     process_id: args.process_id,
     replay: !args.no_replay,
@@ -45,7 +48,12 @@ pub(crate) async fn relay(connection: &needy_api_client::Client, mut attach: Exe
   attach.window = tty.then(relay::window);
   let read_only = attach.read_only;
   let run = attach.run_id.clone();
+  let progress = output::Progress::new(ctx.connection_feedback(), "Opening attachment stream");
   let stream = ExecStream::attach(connection, attach).await?;
+  progress.finish();
+  // TODO(viewer-reconnect): transport loss currently returns to the caller.
+  // Automatic recovery needs a separate attachment-only slice: preserve the
+  // existing run/process, never retry Start or replay previously sent input.
   let options = relay::Options {
     tty,
     stdin: true,

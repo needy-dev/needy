@@ -317,26 +317,26 @@ not current behavior; see the
 
 ### Client
 
-A program that calls the control plane on behalf of a person or a tool: the
-CLI on another machine, a script. A **paired** client holds its own **client
-token**, is listed (`needy pair ls`) and can be revoked (`needy pair revoke
-ID`); the trace names it `client:NAME`. A client with the `runs` grant drives
-runs (create, list, stop, exec, attach, kill, `ps`, `fs cp`, reports and logs).
-The `admin` grant also permits client and runner administration. These grants
-are server authority, not a local OS account or a creator-only ACL. The
-[access protocol](ai/references/cli/2026-11-15-configuration-authority-and-lifecycle-discussion.md#protocol-identity-and-os-account)
-records current source evidence. The CLI keeps one token per control plane
-endpoint in `credentials.json` in its
-config directory (`$XDG_CONFIG_HOME/needy`, mode 0600) and presents it to that
-endpoint; `NEEDY_TOKEN` overrides it. The endpoint paired last is the
-CLI's default control plane; `--endpoint` or `NEEDY_ENDPOINT` names another.
-An endpoint is `unix:PATH`, `http://` or `https://HOST:PORT`, or
-`exec:COMMAND`: a command whose standard input and output carry each
-connection, as ssh's `ProxyCommand` (`exec:cloudflared access tcp --hostname
-H`, `exec:ssh -W 127.0.0.1:7400 HOST`); a runner's `--join` takes the same
-forms. The control plane stores only the token's hash. A client's name is a DNS
-label that no other client that is not
-revoked holds.
+A program that calls the control plane on behalf of a person or a tool, such
+as the CLI on another machine or a script. A **paired** client holds its own
+**client token**, is listed with `needy client ls`, and can be revoked with
+`needy client revoke ID`. The trace names it `client:NAME`. The `runs` client
+role permits run and process operations; `admin` also permits client and
+runner administration. This authority is separate from a local OS account
+or a creator-only ACL.
+
+The CLI stores saved connection contexts, their server-issued identities,
+and credentials in its private `config.yaml` document. A context contains an
+address or connector argv and the credential used with that transport.
+`needy config context pair` exchanges a one-time invitation for a credential;
+it does not change the current selection. `needy config use NAME` saves the
+default context, and `--context NAME` selects one for an invocation.
+`--address URI` selects a direct transport; an optional private
+`--credential-file FILE` supplies its outgoing bearer. Legacy endpoint/token
+environment selectors do not select a connection. The control plane stores
+only the token hash. An active client name is a unique DNS label. See the
+[configuration and access specification](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md)
+and [authority evidence](ai/references/cli/2026-11-15-configuration-authority-and-lifecycle-discussion.md#protocol-identity-and-os-account).
 
 Authenticated clients retain existing role grants and daemon-wide visibility
 under the **approved contract**. This slice adds no human-account model,
@@ -346,6 +346,27 @@ account used by an execution holder.
 
 *Avoid*: user, account. Needy has no users; a client is a credential with a
 name.
+
+### Client role and responding service
+
+A **client role** is the authority granted to a paired client: `runs` permits
+run and process operations, and `admin` also permits client and runner
+administration. These are the existing grants, not a new access system.
+A local context records the server-issued grant; its name does not confer
+authority. Runner roles (`actor`, `executor`) describe hosting capabilities
+and are separate from client roles.
+
+A **responding service** is the API endpoint inspected by a connection check:
+`control` or `executor`. Its service instance identifies one service lifetime.
+The endpoint being reachable does not by itself establish the caller's client
+role. An unavailable identity inspection leaves the client role unknown;
+`unknown` is an observation limit, not a third grant.
+
+The [CLI output design](ai/references/cli/2026-11-15-cli-output-audit.md#needy-config-context-check)
+uses human headings `SERVICE` and `CLIENT ROLE` to separate these concepts.
+This presentation does not rename JSON `role` and `access`, persisted
+configuration fields, or Protobuf fields. A responding API service is also
+separate from an actor network [service](#service).
 
 ### Connection context (proposed)
 
