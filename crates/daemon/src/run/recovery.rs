@@ -149,20 +149,22 @@ impl Daemon {
     // interrupted accepted stop must not resurrect or reconnect the reference.
     // Release alone says nothing about mirror-out success; retain its existing
     // trace outcome and let mirror_out skip executors no longer held.
-    let released = if record.state == RunState::Stopping {
+    let ended = if record.state == RunState::Stopping {
       self
         .state
         .instances_of(&record.id)
         .await?
         .into_iter()
-        .filter(|instance| {
-          instance.kind == store::InstanceKind::Executor
-            && matches!(instance.state, store::InstanceState::Released | store::InstanceState::Ended)
-        })
+        .filter(|instance| matches!(instance.state, store::InstanceState::Released | store::InstanceState::Ended))
         .collect::<Vec<_>>()
     } else {
       Vec::new()
     };
+    // Stop releases its actor before its executors. That terminal checkpoint
+    // also supersedes the snapshot: resuming before the watch observes the
+    // holder's cached exit must not report a second forced actor stop.
+    let actor_released = ended.iter().any(|instance| instance.kind == store::InstanceKind::Actor);
+    let released = ended.into_iter().filter(|instance| instance.kind == store::InstanceKind::Executor).collect::<Vec<_>>();
     let mut executors = BTreeMap::new();
     for saved in snapshot.executors {
       if released.iter().any(|instance| instance.name == saved.name) {
@@ -176,17 +178,21 @@ impl Daemon {
     let created = Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now);
     let injector = Arc::new(Injector::restore(&profile.chaos, created, snapshot.faults));
     let routes = tokio::sync::watch::Sender::new(super::route_list(needy_core::rules::route_names(&profile)));
-    let observed_actor = events
-      .iter()
-      .rev()
-      .find_map(|event| match event.kind.as_str() {
-        "actor.ready" => Some(ActorState::Ready),
-        "actor.config" => Some(ActorState::Configured),
-        "actor.start" => Some(ActorState::Starting),
-        _ => None,
-      })
-      .or(snapshot.actor)
-      .or(Some(ActorState::Starting));
+    let observed_actor = if actor_released {
+      Some(ActorState::Exited)
+    } else {
+      events
+        .iter()
+        .rev()
+        .find_map(|event| match event.kind.as_str() {
+          "actor.ready" => Some(ActorState::Ready),
+          "actor.config" => Some(ActorState::Configured),
+          "actor.start" => Some(ActorState::Starting),
+          _ => None,
+        })
+        .or(snapshot.actor)
+        .or(Some(ActorState::Starting))
+    };
     let run = Arc::new(Run {
       id: record.id.clone(),
       name: record.name.clone(),

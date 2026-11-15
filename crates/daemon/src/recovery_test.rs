@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use needy_api_server::control::{Caller, Guest, GuestControl, Processes, Runs, StopMode};
 use needy_api_server::{Health, Listen, Server};
-use needy_core::types::{Principal, RunState};
+use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_executor::driver::{LinuxContainer, Native, linux_container};
 use needy_core_executor::engine::{self, Engine};
 use needy_core_executor::process::Host;
@@ -396,17 +396,29 @@ async fn an_unadoptable_run_cannot_destroy_a_restored_siblings_shared_executor()
 // Accepted stop recovery must honor the newer durable release checkpoint.
 #[tokio::test]
 async fn an_interrupted_stop_does_not_restore_an_already_released_container() {
-  interrupted_release(false).await;
+  interrupted_release(false, false).await;
 }
 
 // The same durable release checkpoint also precedes the external deletion.
 // Retrying cleanup must remove that unheld resource without reacquiring it.
 #[tokio::test]
 async fn an_interrupted_stop_finishes_deleting_an_already_released_container() {
-  interrupted_release(true).await;
+  interrupted_release(true, false).await;
 }
 
-async fn interrupted_release(before_removal: bool) {
+// ROOT CAUSE:
+//
+// Recovery restored the snapshot's live actor state even after stop had
+// durably released that actor. If stop completion ran before the restored
+// watch observed the cached VM exit, it invented another forced stop outcome.
+// Restore the release checkpoint before enabling the watch or resuming stop.
+// CI regression: https://github.com/needy-dev/needy/actions/runs/43704794008
+#[tokio::test]
+async fn a_restored_stop_observes_actor_release_before_starting_its_watch() {
+  interrupted_release(true, true).await;
+}
+
+async fn interrupted_release(before_removal: bool, before_watch: bool) {
   let dir = tempfile::Builder::new().prefix("recovery-").tempdir_in("/tmp").unwrap();
   let started = testing::daemon_in(dir, |_| {}).await;
   let runtime = Arc::new(Runtime::default());
@@ -438,7 +450,23 @@ async fn interrupted_release(before_removal: bool) {
   assert_eq!(checkpoint.state, RunState::Stopping);
   assert!(checkpoint.executors.is_empty());
   assert_eq!(checkpoint.released.len(), 1);
-  let reconciled = recovered.reconcile_open_runs().await;
+  let reconciled = if before_watch {
+    let instances = recovered.state.instances_of(&run.id).await.unwrap();
+    let actor = instances.iter().find(|instance| instance.kind == crate::store::InstanceKind::Actor).unwrap();
+    assert_eq!(actor.state, crate::store::InstanceState::Released);
+    assert!(testing::ended(actor.pid.unwrap()).await, "the released actor must already be gone");
+    let record = recovered.state.run(&run.id).await.unwrap().unwrap();
+    let restored = recovered.restore_run(&record).await.unwrap().unwrap();
+    // This is the startup boundary before any watch can repair stale state.
+    // Assert through Runs rather than depending on which task runs first.
+    assert_eq!(Runs::get(&recovered, &run.id).await.unwrap().actor, Some(ActorState::Exited));
+    let stopping = restored.activate(&recovered).await.unwrap().unwrap();
+    let actor = recovered.resume_stop(&stopping).await.unwrap();
+    assert!(actor.is_none(), "an already released actor was stopped again: {actor:?}");
+    Ok(())
+  } else {
+    recovered.reconcile_open_runs().await
+  };
   let info = Runs::get(&recovered, &run.id).await.unwrap();
   let events = Runs::events(&recovered, &run.id).await.unwrap();
   let records = events
@@ -452,7 +480,7 @@ async fn interrupted_release(before_removal: bool) {
   let report = needy_core::report::render(&run.id, &records, needy_core::report::Level::Summary, needy_core::report::Format::Json);
   let summary: serde_json::Value = serde_json::from_str(&report).unwrap();
   assert_eq!(summary["state"], "stopped", "report and durable stop disagree: {report}");
-  assert!(summary["actor_stop"].is_null(), "recovery must not invent a new actor stop outcome");
+  assert!(summary["actor_stop"].is_null(), "recovery must not invent a new actor stop outcome: {report}");
   recovered.shutdown().await;
 
   assert!(reconciled.is_ok(), "an accepted stop reconnected an already released resource: {reconciled:?}");
