@@ -51,18 +51,29 @@ export PATH="$HOME/.local/bin:$PATH"
 needy --version
 ```
 
-For Ubuntu or Debian, install the workspace mount helper:
+For Ubuntu or Debian, install SSHFS and FUSE 3 on the **Linux server**:
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y sshfs
+sudo apt-get install -y sshfs fuse3
 sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf'
+```
+
+The daemon mounts the Mac workspace on this server. `user_allow_other`
+permits the container user to access the daemon's mount.
+Run these checks as the **daemon account**, without `sudo`:
+
+```sh
+id
+command -v sshfs && command -v fusermount3
 docker info --format '{{.ServerVersion}}'
 test -r /dev/fuse && test -w /dev/fuse
 ```
 
-For another distribution, install its equivalent `sshfs` package.
-The last two commands must succeed before you continue.
+Each check must succeed before you continue. `fusermount3` handles
+unprivileged unmounts. For Fedora or Arch, use the package commands in
+[Workspace mount prerequisites](../../../README.md#workspace-mount-prerequisites).
+That section also links the distribution package references.
 No KVM or recipe is required for this container example.
 
 ## 2. Prepare the Mac
@@ -74,10 +85,18 @@ curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/instal
 export PATH="$HOME/.local/bin:$PATH"
 needy --version
 mkdir -p ~/needy-demo
+id
+test -x /usr/libexec/sftp-server
+test -r ~/needy-demo && test -w ~/needy-demo && test -x ~/needy-demo
 ```
 
-The Mac needs your project tools, such as Xcode. It does not need Docker,
-actor images, or a guest needy for this native runner.
+Use the same account for these checks and `needy runner serve`.
+Each check must succeed. The Mac serves workspace files through
+`/usr/libexec/sftp-server`. The SSHFS mount lives on the Linux server,
+so this native Mac executor needs no macFUSE or SSHFS.
+
+The Mac needs your project tools, such as Xcode. This native runner does
+not need Docker, actor images, or a guest needy.
 If you want to use a tool, check its path in this same terminal:
 
 ```sh

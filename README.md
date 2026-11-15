@@ -198,9 +198,72 @@ What each machine needs besides `needy`:
 | Machine | Needs | Then |
 | --- | --- | --- |
 | Linux with KVM (actor host) | Docker or another Docker-compatible engine | `needy image pull` (the `linux-firecracker` base, and the container images) |
-| Linux without KVM (actor host) | a Docker-compatible engine; `sshfs` and `user_allow_other` in `/etc/fuse.conf` for workspace mounts; `lxcfs` for resource views | `needy image pull` (the container images) |
+| Linux without KVM (actor host) | a Docker-compatible engine; [SSHFS and FUSE 3](#workspace-mount-prerequisites) for workspace mounts; `lxcfs` for resource views | `needy image pull` (the container images) |
 | Apple silicon Mac (actor host) | `brew install vfkit`, or Apple's [`container`](https://github.com/apple/container) | `needy image pull` (the `macos-vz` base, or the base in Apple's `container`) |
-| Any Linux, macOS or Windows machine (executor only) | nothing | join as a runner, see [Add machines](#add-machines) |
+| Any Linux, macOS or Windows machine (executor only) | project tools; an [SFTP server](#workspace-mount-prerequisites) for an executor-backed workspace | join as a runner, see [Add machines](#add-machines) |
+
+#### Workspace mount prerequisites
+
+For a `linux-container` actor, install SSHFS and FUSE 3 on the **Linux actor
+host**. The daemon mounts the workspace there, even when the source is a
+remote Mac. Choose the command for that host:
+
+```sh
+# Debian / Ubuntu
+sudo apt-get update
+sudo apt-get install -y sshfs fuse3
+# Fedora
+sudo dnf install -y fuse-sshfs fuse3
+# Arch Linux
+sudo pacman -S --noconfirm sshfs fuse3
+```
+
+Enable `allow_other` for the non-root daemon. The container user needs access
+to the mount that the daemon owns:
+
+```sh
+sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf'
+```
+
+Run these checks as the **daemon account**, without `sudo`:
+
+```sh
+id
+command -v sshfs && command -v fusermount3
+test -r /dev/fuse && test -w /dev/fuse
+docker info --format '{{.ServerVersion}}'
+```
+
+Each check must succeed. `fusermount3` handles unprivileged unmounts. If a
+check fails, fix the account's `PATH`, device permissions, or engine access
+before you start the daemon. VM actor images contain their own SSHFS and
+FUSE helpers. Their hosts do not need this installation.
+
+The **executor account** must have access to the source project directory
+and its SFTP server. Native Linux execution currently uses the exact path
+`/usr/lib/openssh/sftp-server`. On Debian or Ubuntu, install
+`openssh-sftp-server`, then check `test -x /usr/lib/openssh/sftp-server`
+under that account. Other distributions can place it elsewhere. An OpenSSH
+package at a different path does not satisfy this requirement.
+
+A native Mac executor uses `/usr/libexec/sftp-server`. Check
+`test -x /usr/libexec/sftp-server` under the executor account. This role
+does not require macFUSE or SSHFS. The released Linux executor image includes
+its SFTP server. See the [Linux actor / Mac executor walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#1-prepare-the-linux-server)
+for the per-machine steps.
+
+<!-- Package indexes are mutable, retrieved 2026-11-15. No immutable package
+index snapshots were available. Package names and helper paths come from
+these indexes, not from a fresh-install verification. -->
+Package references: [Ubuntu SSHFS](https://packages.ubuntu.com/noble/sshfs),
+[Debian FUSE 3 files](https://packages.debian.org/trixie/amd64/fuse3/filelist),
+[Fedora SSHFS](https://packages.fedoraproject.org/pkgs/fuse-sshfs/fuse-sshfs/fedora-43.html),
+[Fedora FUSE 3 files](https://packages.fedoraproject.org/pkgs/fuse3/fuse3/fedora-43.html#files),
+[Arch SSHFS](https://archlinux.org/packages/extra/x86_64/sshfs/),
+[Arch FUSE 3 files](https://archlinux.org/packages/extra/x86_64/fuse3/files/),
+and [Ubuntu SFTP server files](https://packages.ubuntu.com/noble/amd64/openssh-sftp-server/filelist).
+The tagged [libfuse configuration](https://github.com/libfuse/libfuse/blob/fuse-3.16.2/util/fuse.conf#L3-L9)
+explains `user_allow_other`.
 
 #### Uninstall
 

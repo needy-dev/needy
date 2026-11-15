@@ -77,10 +77,15 @@ export function locations(env: Environment): Record<Machine, { name: Text, descr
 }
 
 const PROFILES: Record<Program, string> = { bash, claude, opencode }
+// Sources: distro package indexes (mutable, retrieved 2026-11-15):
+// https://packages.ubuntu.com/noble/sshfs
+// https://packages.fedoraproject.org/pkgs/fuse-sshfs/fuse-sshfs/fedora-43.html
+// https://archlinux.org/packages/extra/x86_64/sshfs/
+// Reference: README.md#workspace-mount-prerequisites includes helper file lists.
 const INSTALL: Record<PackageManager, string> = {
-  apt: 'sudo apt-get install -y sshfs',
-  dnf: 'sudo dnf install -y fuse-sshfs',
-  pacman: 'sudo pacman -S --noconfirm sshfs',
+  apt: 'sudo apt-get update\nsudo apt-get install -y sshfs fuse3',
+  dnf: 'sudo dnf install -y fuse-sshfs fuse3',
+  pacman: 'sudo pacman -S --noconfirm sshfs fuse3',
 }
 const INSTALL_NEEDY = 'curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh\nexport PATH="$HOME/.local/bin:$PATH"\nneedy --version'
 
@@ -120,8 +125,19 @@ function shellPath(path: string): string {
 }
 
 /** Runs on the executor: home expansion must use the serving account, not the control host. */
-function workspaceProbe(path: string): string {
-  return `workspace=${shellPath(path)}\nid\nuname -s\nprintf 'HOME=%s\\n' "$HOME"\ntest -d "$workspace" && test -r "$workspace" && test -w "$workspace" && test -x "$workspace" && cd "$workspace" && pwd`
+function workspaceProbe(path: string, os: Os | 'windows'): string {
+  // These paths match core-executor's driver::sftp_command. Native Linux
+  // currently requires the Debian/Ubuntu location, not a PATH lookup.
+  // TODO: SFTP path discovery needs a separate approved executor-driver
+  // slice. Until then, check the exact path that the driver uses.
+  const sftp = os === 'mac' ? '/usr/libexec/sftp-server' : '/usr/lib/openssh/sftp-server'
+  return `workspace=${shellPath(path)}\nid\nuname -s\nprintf 'HOME=%s\\n' "$HOME"\ntest -x ${sftp} || exit 1\ntest -d "$workspace" && test -r "$workspace" && test -w "$workspace" && test -x "$workspace" && cd "$workspace" && pwd`
+}
+
+function nativePrerequisites(os: Os | 'windows'): Text {
+  return os === 'mac'
+    ? { en: 'The workspace source uses /usr/libexec/sftp-server. This native Mac executor needs no macFUSE or SSHFS.', zh: 'workspace 来源使用 /usr/libexec/sftp-server。这个 native Mac executor 不需要 macFUSE 或 SSHFS。' }
+    : { en: 'The workspace source requires executable /usr/lib/openssh/sftp-server. On Debian or Ubuntu, install it with sudo apt-get install -y openssh-sftp-server. Other distributions can use a different path. Stop if the executable check fails.', zh: 'workspace 来源需要可执行的 /usr/lib/openssh/sftp-server。Debian 或 Ubuntu 可执行 sudo apt-get install -y openssh-sftp-server 安装。其他发行版的路径可能不同。可执行文件检查失败时，先停止后续步骤。' }
 }
 
 /** Derives one profile and its per-machine steps from all wizard answers. */
@@ -151,8 +167,11 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   }
   if (needsDocker(program, env))
     prerequisites.push('docker info --format \'{{.ServerVersion}}\'')
-  if (driver === 'linux-container')
-    prerequisites.push(INSTALL[env.pm], 'sudo sh -c \'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf\'', 'test -r /dev/fuse && test -w /dev/fuse')
+  if (driver === 'linux-container') {
+    // Source: https://github.com/libfuse/libfuse/blob/fuse-3.16.2/util/fuse.conf#L3-L9
+    // allow_other lets the container's user access the daemon's host mount.
+    prerequisites.push(INSTALL[env.pm], 'sudo sh -c \'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf\'', 'id', 'command -v sshfs && command -v fusermount3', 'test -r /dev/fuse && test -w /dev/fuse')
+  }
   if (driver === 'linux-firecracker')
     prerequisites.push('test -r /dev/kvm && test -w /dev/kvm')
   if (driver === 'macos-vz')
@@ -162,7 +181,9 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   steps.push({
     id: 'prepare', machine: 'host', terminal: host,
     title: { en: 'Prepare the actor host', zh: '准备 actor 宿主机' },
-    text: { en: 'Use the account that will run needy. Docker and device checks must succeed under this account.', zh: '使用将要运行 needy 的账号。Docker 与设备访问检查都必须在这个账号下通过。' },
+    text: driver === 'linux-container'
+      ? { en: 'Install SSHFS and FUSE 3 on this actor host. The daemon mounts the workspace here, even for a remote executor. Run the helper, Docker and device checks as the daemon account, without sudo. user_allow_other permits the container user to access this mount.', zh: '在这台 actor 宿主机安装 SSHFS 和 FUSE 3。即使 executor 在远端，daemon 仍在这里挂载 workspace。以 daemon 的账号执行辅助程序、Docker 和设备检查，不要使用 sudo。user_allow_other 允许容器用户访问此挂载。' }
+      : { en: `Use the daemon account. Docker and device checks must succeed under this account.${vm ? ' VM actor images contain their own SSHFS and FUSE helpers.' : ''}`, zh: `使用 daemon 的账号。Docker 与设备访问检查都必须在这个账号下通过。${vm ? 'VM actor 镜像自带 SSHFS 和 FUSE 辅助程序。' : ''}` },
     code: prerequisites.join('\n'),
     expected: { en: `The host is ready for ${driver}. Start Docker first if its application is not running.`, zh: `宿主机具备 ${driver} 的前提；Docker 应用未运行时，先启动它。` },
   }, {
@@ -197,13 +218,13 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   if (env.executor === 'runner') {
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the executor machine', zh: '准备执行命令的机器' },
-      text: { en: 'Install needy and your project tools here. A native runner needs no actor images.', zh: '在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。' },
+      text: { en: `Install needy and your project tools here. A native runner needs no actor images. ${nativePrerequisites(env.runnerOs).en}`, zh: `在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。${nativePrerequisites(env.runnerOs).zh}` },
       code: INSTALL_NEEDY,
       expected: { en: 'The executor has needy and its project tools. Use the account that will serve commands.', zh: '执行机器已安装 needy 和项目工具。使用将要执行命令的账号。' } },
     { id: 'workspace', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the project on the executor', zh: '在执行机器上准备项目目录' },
       text: { en: 'Use the same account for this directory and runner serve. Use an existing project, or create this empty demo directory. Creating it on the control host will not create it here.', zh: '目录和 runner serve 使用同一账号。可填写已有项目，或创建这个空演示目录。在控制主机创建目录不会在这里创建它。' },
-      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace)}`,
+      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace, env.runnerOs)}`,
       expected: { en: 'The identity and HOME belong to the executor account, and pwd prints the project path. Stop if any check fails.', zh: '身份与 HOME 属于执行账号，pwd 输出项目路径。任一检查失败时先停止后续步骤。' } },
     { id: 'tunnel', machine: 'runner', terminal: { en: 'Executor machine · a separate tunnel terminal', zh: 'executor 机器 · 另开的隧道终端' },
       title: { en: 'Open one tunnel to the control host', zh: '建立一条到控制主机的隧道' },
@@ -225,7 +246,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     { id: 'check-runner', machine: 'host', terminal: host,
       title: { en: 'Check which machine joined', zh: '确认加入的是哪台机器' },
       text: { en: 'This probe runs through the actual serving runner. Compare its identity, HOME and project path with the executor setup step. A missing directory here is the same condition that prevents the workspace mount.', zh: '通过实际接任务的 runner 探测。将身份、HOME、项目路径与执行机器的准备步骤对照。这里缺少目录，就会导致后面的 workspace 挂载失败。' },
-      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace))}`,
+      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace, env.runnerOs))}`,
       expected: { en: `The runner is online, reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}, and the directory checks succeed under the intended account.`, zh: `runner 为 online，系统为 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}，目录检查在预期账号下通过。` } })
     if (fromRunner) {
       steps.push({ id: 'client-invite', machine: 'host', terminal: host,
@@ -242,8 +263,8 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   else if (env.executor === 'native') {
     steps.push({ id: 'workspace', machine: 'host', terminal: host,
       title: { en: 'Create the native project directory', zh: '创建本机项目目录' },
-      text: { en: 'Native means the actor host itself. The directory belongs to this machine.', zh: 'native 指 actor 所在宿主机本身，项目目录属于这台机器。' },
-      code: `mkdir -p ${shellPath(env.workspace)}` })
+      text: { en: `Native means the actor host itself. Use the daemon account for the directory and checks. ${nativePrerequisites(env.os).en}`, zh: `native 指 actor 所在宿主机本身。以 daemon 的账号准备目录并执行检查。${nativePrerequisites(env.os).zh}` },
+      code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace, env.os)}` })
   }
 
   if (program !== 'bash') {

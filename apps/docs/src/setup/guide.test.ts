@@ -22,6 +22,48 @@ const executors: Executor[] = ['container', 'native', 'runner']
 describe('environment wizard', () => {
   // ROOT CAUSE:
   //
+  // If an existing installation lacked fusermount3 in PATH, setup did not
+  // detect it before the non-root daemon tried to detach a workspace mount.
+  // The guide must locate installation and checks on the mounting host.
+  it.each([
+    ['apt', 'sudo apt-get install -y sshfs fuse3'],
+    ['dnf', 'sudo dnf install -y fuse-sshfs fuse3'],
+    ['pacman', 'sudo pacman -S --noconfirm sshfs fuse3'],
+  ] as const)('prepares both mount helpers on the Linux container actor host with %s', (pm, install) => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, kvm: false, executor: 'runner', pm })
+    const prepare = steps.find(step => step.id === 'prepare')!
+    expect(prepare.machine).toBe('host')
+    expect(prepare.code).toContain(install)
+    expect(prepare.code).toContain('command -v sshfs && command -v fusermount3')
+    expect(prepare.code).toContain('user_allow_other')
+    expect(prepare.code).toContain('test -r /dev/fuse && test -w /dev/fuse')
+    expect(prepare.text.en).toContain('daemon account')
+    expect(prepare.text.en).toContain('actor host')
+    expect(steps.indexOf(prepare)).toBeLessThan(steps.findIndex(step => step.id === 'daemon'))
+    expect(steps.find(step => step.id === 'runner-install')?.code).not.toContain('sshfs')
+  })
+
+  it('keeps FUSE inside VM images and checks the Mac SFTP server as the executor account', () => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, os: 'mac', executor: 'runner', runnerOs: 'mac' })
+    expect(steps.find(step => step.id === 'prepare')?.code).not.toMatch(/sshfs|fusermount3|fuse\.conf/)
+    const install = steps.find(step => step.id === 'runner-install')!
+    expect(install.text.en).toContain('macFUSE')
+    const workspace = steps.find(step => step.id === 'workspace')!
+    expect(workspace.machine).toBe('runner')
+    expect(workspace.code).toContain('test -x /usr/libexec/sftp-server || exit 1')
+    expect(workspace.text.en).toContain('same account')
+  })
+
+  it('checks Linux native SFTP on the executor without assuming the actor host package manager', () => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', runnerOs: 'linux', pm: 'dnf' })
+    const install = steps.find(step => step.id === 'runner-install')!
+    expect(install.text.en).toContain('openssh-sftp-server')
+    expect(install.code).not.toContain('dnf')
+    expect(steps.find(step => step.id === 'workspace')?.code).toContain('test -x /usr/lib/openssh/sftp-server || exit 1')
+  })
+
+  // ROOT CAUSE:
+  //
   // If installation was reused, workspace preparation was easy to skip
   // because it was part of the install step; readiness checked only uname.
   // Before the fix, the guide offered no serving-account directory probe.
@@ -169,7 +211,7 @@ describe('environment wizard', () => {
   it('quotes user project paths without executing shell substitutions', () => {
     const workspace = "~/a 'project' $(touch unwanted)"
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'native', workspace })
-    expect(steps.find(step => step.id === 'workspace')?.code).toBe('mkdir -p "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\'')
+    expect(steps.find(step => step.id === 'workspace')?.code?.split('\n')[0]).toBe('mkdir -p "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\'')
     expect(parse(steps.find(step => step.profile)!.profile!).actor.workspace.from).toBe(`executor:here:${workspace}`)
   })
 
