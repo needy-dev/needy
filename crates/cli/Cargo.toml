@@ -24,6 +24,7 @@ futures-util.workspace = true
 gethostname.workspace = true
 humantime.workspace = true
 ignore.workspace = true
+indicatif.workspace = true
 libc.workspace = true
 needy-api-client.workspace = true
 needy-api-server.workspace = true
@@ -56,6 +57,7 @@ libc.workspace = true
 
 [dev-dependencies]
 http.workspace = true
+indicatif = { workspace = true, features = ["in_memory"] }
 tower.workspace = true
 needy-common = { workspace = true, features = ["testing"] }
 portable-pty.workspace = true

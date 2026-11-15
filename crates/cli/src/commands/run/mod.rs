@@ -299,11 +299,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       // The daemon may run on another machine: it gets the profile and its
       // recipe as text, not paths to read.
       let resolved = snapshot::resolve(&path, overrides)?;
+      let progress = output::Progress::new(ctx.connection_feedback(), "Connecting to control service");
       let selection = crate::connection::resolve(ctx)?;
       let connection = selection.connect().await?;
       let loaded = needy_config::profile::load(&needy_config::Source::text(resolved.yaml.clone(), PathBuf::new()))?;
       let needs_client = loaded.executors.values().any(|e| matches!(e.runner, Some(needy_config::profile::RunnerSelector::Client)));
       let mut holder = if needs_client {
+        progress.message("Preparing client execution");
         Some(execution::launch(ctx, &selection, &connection).await?)
       } else {
         None
@@ -313,6 +315,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       if let Some(holder) = &mut holder {
         holder.keep();
       }
+      progress.message("Creating run");
       let run = connection
         .runs()
         .create_run(CreateRunRequest {
@@ -331,6 +334,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .into_inner()
         .run
         .unwrap_or_default();
+      progress.finish();
       if interactive {
         // Keep the run ID out of the driving program's terminal output.
         output::message(format!("run {}", run.run_id));
@@ -339,25 +343,31 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       outln!("{}", run.run_id)?;
     }
     Command::Ls { output: format } => {
+      let progress = output::Progress::new(matches!(format, OutputFormat::Table) && ctx.connection_feedback(), "Fetching runs...");
       let connection = ctx.connect().await?;
       let list = connection.runs().list_runs(ListRunsRequest {}).await.map_err(fail)?.into_inner();
+      progress.finish();
       let rows = list.runs.into_iter().map(RunRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
     Command::Stop { run, grace, now } => {
+      let progress = output::Progress::new(ctx.connection_feedback(), "Connecting to control service");
       let connection = ctx.connect().await?;
       let run = crate::runs::select(&connection, run, ctx).await?;
+      progress.message(format!("Stopping run {run}"));
       let request = StopRunRequest {
         run_id: run.clone(),
         now,
         grace_ms: grace.map(|g| i64::try_from(g.as_millis()).unwrap_or(i64::MAX)),
       };
       let stopped = connection.runs().stop_run(request).await.map_err(fail)?.into_inner();
+      progress.finish();
       // An actor killed without being asked to (`--now`) lost its
       // mirror-out; say so where the user looks.
       if stopped.graceful == Some(false) && !now {
         eprintln!("run {run}: the actor was killed without its mirror-out: {}", stopped.reason);
       }
+      output::acknowledge(&format!("Stopped run {run}."))?;
     }
     Command::Attach {
       run,
@@ -365,11 +375,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       read_only,
       detach_keys,
     } => {
+      let progress = output::Progress::new(ctx.connection_feedback(), "Connecting for run attachment...");
       let connection = ctx.connect().await?;
       let run = crate::runs::select(&connection, run, ctx).await?;
+      progress.finish();
       return attach(&connection, run, !no_replay, read_only, &detach_keys, ctx).await;
     }
     Command::Logs { run, follow } => {
+      let progress = output::Progress::new(ctx.connection_feedback(), "Fetching run logs");
       let connection = ctx.connect().await?;
       let run = crate::runs::select(&connection, run, ctx).await?;
       let request = GetRunLogsRequest {
@@ -377,6 +390,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         follow,
       };
       let mut stream = connection.runs().get_run_logs(request).await.map_err(fail)?.into_inner();
+      progress.finish();
       let mut stdout = tokio::io::stdout();
       while let Some(chunk) = stream.message().await.map_err(fail)? {
         stdout.write_all(&chunk.data).await?;

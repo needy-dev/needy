@@ -52,7 +52,7 @@ struct ClientRow {
 }
 
 impl Row for ClientRow {
-  const HEADER: &'static [&'static str] = &["ID", "NAME", "ACCESS", "STATE", "PAIRED", "LAST USED"];
+  const HEADER: &'static [&'static str] = &["ID", "NAME", "CLIENT ROLE", "STATE", "PAIRED", "LAST USED"];
 
   fn cells(&self) -> Vec<String> {
     vec![
@@ -92,6 +92,11 @@ impl From<v1::Client> for ClientRow {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let human = match &args.command {
+    Command::Invite { output, .. } | Command::Ls { output } => matches!(output, OutputFormat::Table),
+    Command::Revoke { .. } => true,
+  };
+  let progress = output::Progress::new(human && ctx.connection_feedback(), "Connecting to control service...");
   let connection = ctx.connect().await?;
   let fail = needy_api_client::Error::from;
   match args.command {
@@ -101,6 +106,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       admin,
       output: format,
     } => {
+      progress.message("Creating client invitation...");
       let access = if admin {
         ClientAccess::Admin
       } else {
@@ -125,6 +131,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       if admin && created.access != ClientAccess::Admin as i32 {
         bail!("the server did not confirm administrator access; no administrator invitation was accepted");
       }
+      progress.finish();
       if let Some(old) = &created.replaces {
         output::message(format!("pairing with this invitation replaces client {} ({}) and revokes its credential", old.name, old.id));
       }
@@ -132,28 +139,34 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       match format {
         OutputFormat::Json => outln!("{}", serde_json::to_string_pretty(&row)?)?,
         OutputFormat::Table => {
+          output::success("Client invitation created.")?;
           outln!(
-            "Client invitation created.\n\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the client machine, run:\n\n  needy --address <control-address> config context pair control\n\nUse an address reachable from the client, or its local tunnel address.\nPaste the code when prompted. Then select and check the connection:\n\n  needy config use control\n  needy config context check control\n\nInvitation code (shown once):\n\n  {}\n\nFor automation, create an invitation with -o json, extract .code,\nand pipe it to config context pair with --code-file -. A private\n--code-file FILE also works.",
+            "\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the client machine, run:\n\n  needy --address <control-address> config context pair control --token {}\n\nUse an address reachable from the client, or its local tunnel address.\nThen select and check the connection:\n\n  needy config use control\n  needy config context check control\n\nThe token is shown once. Omit --token to enter it at the hidden prompt.\nFor automation, use -o json, extract .code, and pipe it to pair with\n--code-file -. A private --code-file FILE also works.",
             "ID",
             created.id,
             "NAME",
             created.name,
-            "ACCESS",
+            "CLIENT ROLE",
             if admin { "admin" } else { "runs" },
             "EXPIRES",
             time(created.expires_at_ms),
-            created.code
+            shell_words::quote(&created.code)
           )?;
         }
       }
     }
     Command::Ls { output: format } => {
+      progress.message("Fetching clients...");
       let list = connection.clients().list_clients(ListClientsRequest {}).await.map_err(fail)?.into_inner();
+      progress.finish();
       let rows: Vec<ClientRow> = list.clients.into_iter().map(ClientRow::from).collect();
       output::print(format, &rows)?;
     }
     Command::Revoke { client_id } => {
+      progress.message("Revoking client...");
       connection.clients().revoke_client(RevokeClientRequest { id: client_id }).await.map_err(fail)?;
+      progress.finish();
+      output::acknowledge("Client revoked.")?;
     }
   }
   Ok(0)

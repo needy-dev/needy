@@ -113,6 +113,9 @@ enum ContextCommand {
     name: String,
     #[command(flatten)]
     transport: Transport,
+    /// One-time client invitation token.
+    #[arg(long, value_name = "TOKEN", conflicts_with = "code_file")]
+    token: Option<String>,
     /// Read an invitation from a private file, or `-` for standard input.
     #[arg(long)]
     code_file: Option<PathBuf>,
@@ -180,7 +183,13 @@ struct CheckRow {
 
 impl Row for CheckRow {
   const HEADER: &'static [&'static str] = &[
-    "NAME", "ADDRESS", "STATUS", "ROLE", "INSTANCE", "CLIENT", "ACCESS",
+    "NAME",
+    "ADDRESS",
+    "STATUS",
+    "SERVICE",
+    "INSTANCE",
+    "CLIENT",
+    "CLIENT ROLE",
   ];
 
   fn cells(&self) -> Vec<String> {
@@ -202,7 +211,7 @@ impl Row for ContextRow {
     "CURRENT",
     "TRANSPORT",
     "RECORDED IDENTITY",
-    "RECORDED ACCESS",
+    "RECORDED CLIENT ROLE",
   ];
   fn cells(&self) -> Vec<String> {
     vec![
@@ -311,11 +320,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let mut locked = Locked::open(&path)?;
       locked.config = mutation(&locked.config, &key, Some(&value))?;
       locked.save()?;
+      updated("Configuration updated.", &path)?;
     }
     Command::Unset { key } => {
       let mut locked = Locked::open(&path)?;
       locked.config = mutation(&locked.config, &key, None)?;
       locked.save()?;
+      updated("Configuration updated.", &path)?;
     }
     Command::Use { name } => {
       let mut locked = Locked::open(&path)?;
@@ -324,6 +335,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       }
       locked.config.current_context = name;
       locked.save()?;
+      updated("Context selected.", &path)?;
     }
     Command::Context { command } => return context(command, ctx, &path).await,
     Command::Show { output } => {
@@ -424,6 +436,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         return Err(missing(&name));
       }
       locked.save()?;
+      updated("Context removed.", path)?;
     }
     ContextCommand::Set {
       name,
@@ -440,10 +453,12 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       record.address = transport.address;
       record.command = (!transport.command.is_empty()).then_some(transport.command);
       locked.save()?;
+      updated("Context updated.", path)?;
     }
     ContextCommand::Pair {
       name,
       mut transport,
+      token,
       code_file,
       replace,
     } => {
@@ -467,24 +482,32 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
           .into(),
         );
       }
-      let code = match code_file {
-        Some(path) if path == std::path::Path::new("-") => {
-          use std::io::Read as _;
-          let mut code = String::new();
-          std::io::stdin().read_to_string(&mut code).context("cannot read client invitation from stdin")?;
-          code
-        }
-        Some(path) => configuration::read_secret(&path).context("cannot read invitation code file")?,
-        None => {
-          eprintln!(
-            "To obtain a client invitation, run on the control host:\n\n  needy client invite --name <client-name>\n\nPaste its code below. For automation, use --code-file FILE\nor pipe the code with --code-file -.\n"
-          );
-          rpassword::prompt_password("Invitation code: ")
-            .context("cannot read hidden invitation code; use --code-file FILE or --code-file -")?
+      let code = if let Some(token) = token {
+        token
+      } else {
+        match code_file {
+          Some(path) if path == std::path::Path::new("-") => {
+            use std::io::Read as _;
+            let mut code = String::new();
+            std::io::stdin().read_to_string(&mut code).context("cannot read client invitation from stdin")?;
+            code
+          }
+          Some(path) => configuration::read_secret(&path).context("cannot read invitation code file")?,
+          None => {
+            eprintln!(
+              "To obtain a client invitation, run on the control host:\n\n  needy client invite --name <client-name>\n\nPaste its token below. You can also pass --token TOKEN,\nuse --code-file FILE, or pipe the token with --code-file -.\n"
+            );
+            rpassword::prompt_password("Invitation code: ")
+              .context("cannot read hidden invitation code; use --code-file FILE or --code-file -")?
+          }
         }
       };
       let code = code.trim();
       anyhow::ensure!(!code.is_empty() && !code.contains(['\r', '\n', '\0']), "provide one nonempty client invitation code");
+      let progress = output::Progress::new(
+        !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json) && transport.command.is_empty(),
+        "Pairing with control service...",
+      );
       let connection = transport.connect().await?;
       let paired =
         connection.clients().pair(v1::PairRequest { code: code.into() }).await.map_err(needy_api_client::Error::from)?.into_inner();
@@ -508,17 +531,11 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       };
       record.validate().map_err(|cause| unsaved(&id, cause.into()))?;
       connection.with_token(&record.credential).map_err(|cause| unsaved(&id, cause.into()))?;
+      progress.message("Saving client configuration...");
       locked.config.contexts.insert(name.clone(), record);
       locked.save().map_err(|cause| unsaved(&id, cause))?;
-      output::success("Paired successfully!")?;
-      let local_command = match &ctx.config {
-        Some(path) => shell_words::join(["needy", "--config", &path.to_string_lossy()]),
-        None => "needy".into(),
-      };
-      outln!(
-        "\nSaved context: {name}\nClient ID: {id}\nCurrent context: {}\n\nTo use this connection by default:\n\n  {local_command} config use {name}\n\nTo check this connection:\n\n  {local_command} config context check {name}",
-        locked.config.current_context
-      )?;
+      progress.finish();
+      updated("Paired successfully!", path)?;
     }
     ContextCommand::Check {
       name,
@@ -547,6 +564,12 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       let transport = ctx.address.clone().unwrap_or_else(|| {
         record.map(|r| r.address.clone().unwrap_or_else(|| "connector".into())).unwrap_or_else(|| "local discovery".into())
       });
+      let progress = output::Progress::new(
+        matches!(output, OutputFormat::Table)
+          && !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)
+          && record.is_none_or(|r| r.command.is_none()),
+        "Checking connection...",
+      );
       let probe = async {
         let client = if direct {
           ctx.connect().await?
@@ -586,6 +609,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         Ok::<_, anyhow::Error>((health.role, health.instance_id, identity, client_id, access))
       };
       let result = tokio::time::timeout(timeout, probe).await;
+      progress.finish();
       let secrets: Vec<_> = config.contexts.values().map(|r| r.credential.as_str()).collect();
       let mut row = CheckRow {
         name,
@@ -630,6 +654,14 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
     }
   }
   Ok(0)
+}
+
+/// A local mutation reports the configuration artifact that actually changed.
+fn updated(message: &str, path: &std::path::Path) -> Result<()> {
+  use std::io::Write as _;
+  output::acknowledge(message)?;
+  writeln!(std::io::stderr().lock(), "\nUpdated:\n  {}", path.display())?;
+  Ok(())
 }
 
 fn missing(name: &str) -> anyhow::Error {

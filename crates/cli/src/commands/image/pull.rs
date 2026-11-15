@@ -29,7 +29,7 @@ use needy_core_actor::image::manifest::{self, Manifest};
 use needy_core_actor::image::{base, container, vm};
 use sha2::{Digest as _, Sha256};
 
-use super::{is_vm, release_image};
+use super::{is_vm, progress, release_image};
 use crate::cli::Context;
 use crate::output;
 
@@ -62,13 +62,18 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
   let images = ctx.paths()?.images();
   if let Some(file) = &args.file {
     if args.drivers.len() > 1 || args.drivers.iter().any(|driver| !is_vm(*driver)) {
       bail!("--file imports one VM image archive; name its driver, linux-firecracker or macos-vz, with --driver, or none");
     }
-    let dir = import(&images, args.drivers.first().copied(), file).await?;
-    output::message(format_args!("image pull: imported {} into {}", file.display(), dir.display()));
+    let dir = import(&images, args.drivers.first().copied(), file, feedback).await?;
+    progress::complete(
+      feedback,
+      format_args!("Imported image to {}", dir.display()),
+      format_args!("image pull: imported {} into {}", file.display(), dir.display()),
+    )?;
     return Ok(0);
   }
   let version = match &args.version {
@@ -88,18 +93,25 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let mut failed = 0;
   for driver in drivers {
     let pulled = match driver {
-      ActorDriver::LinuxFirecracker | ActorDriver::MacosVz => pull_vm(&client, &images, driver, &version, &assets(&version))
-        .await
-        .map(|dir| output::message(format_args!("image pull: {driver}: {}", dir.display()))),
-      ActorDriver::LinuxContainer => pull_engine(&version).await,
-      ActorDriver::MacosAppleContainer => pull_apple(&version).await,
+      ActorDriver::LinuxFirecracker | ActorDriver::MacosVz => {
+        pull_vm(&client, &images, driver, &version, &assets(&version), feedback).await.and_then(|dir| {
+          progress::complete(
+            feedback,
+            format_args!("Installed {driver} image at {}", dir.display()),
+            format_args!("image pull: {driver}: {}", dir.display()),
+          )?;
+          Ok(())
+        })
+      }
+      ActorDriver::LinuxContainer => pull_engine(&version, feedback).await,
+      ActorDriver::MacosAppleContainer => pull_apple(&version, feedback).await,
     };
     if let Err(e) = pulled {
       output::message(format_args!("image pull: {driver}: {e:#}"));
       failed += 1;
     }
   }
-  if executor && let Err(e) = pull_executor(&needy_core_executor::engine::connect()?, &version).await {
+  if executor && let Err(e) = pull_executor(&needy_core_executor::engine::connect()?, &version, feedback).await {
     output::message(format_args!("image pull: linux-container executors: {e:#}"));
     failed += 1;
   }
@@ -163,20 +175,31 @@ fn assets(version: &str) -> String {
 
 /// Downloads `driver`'s base VM image of release `version` from `assets`,
 /// checks it and puts it in place; returns its directory.
-async fn pull_vm(client: &reqwest::Client, images: &Path, driver: ActorDriver, version: &str, assets: &str) -> Result<PathBuf> {
+async fn pull_vm(
+  client: &reqwest::Client,
+  images: &Path,
+  driver: ActorDriver,
+  version: &str,
+  assets: &str,
+  feedback: bool,
+) -> Result<PathBuf> {
   let name = archive_name(driver);
   let tag = format!("v{version}");
   let url = format!("{assets}/{name}");
+  let checksum = output::Progress::new(feedback, format!("Fetching checksum for {name}"));
   let expected = expected_sha256(client, &format!("{url}.sha256"), version, &name).await?;
+  checksum.finish();
   std::fs::create_dir_all(images).with_context(|| format!("cannot create {}", images.display()))?;
   let archive = images.join(format!(".needy-pull-{}.tar.gz", uuid::Uuid::new_v4()));
   let installed = async {
-    output::message(format_args!("image pull: downloading {url}"));
-    let actual = download(client, &url, &archive).await?;
+    progress::phase(feedback, format_args!("image pull: downloading {url}"));
+    let actual = download(client, &url, &archive, feedback).await?;
+    let verification = output::Progress::new(feedback, format!("Verifying checksum for {name}"));
     if actual != expected {
       return Err(integrity(&name, &expected, &actual).into());
     }
-    output::message(format_args!("image pull: verified {name} (sha256 {actual})"));
+    verification.finish();
+    progress::phase(feedback, format_args!("image pull: verified {name} (sha256 {actual})"));
     install(
       images,
       Some(driver),
@@ -186,6 +209,7 @@ async fn pull_vm(client: &reqwest::Client, images: &Path, driver: ActorDriver, v
         tag,
         url: url.clone(),
       },
+      feedback,
     )
     .await
   }
@@ -216,11 +240,13 @@ async fn expected_sha256(client: &reqwest::Client, url: &str, version: &str, nam
 }
 
 /// Downloads `url` into `path`, and returns its SHA-256 as lowercase hex.
-async fn download(client: &reqwest::Client, url: &str, path: &Path) -> Result<String> {
+async fn download(client: &reqwest::Client, url: &str, path: &Path, feedback: bool) -> Result<String> {
   use tokio::io::AsyncWriteExt as _;
+  let progress = progress::Download::new(feedback, "Downloading image archive".into());
   let mut response =
     client.get(url).send().await.and_then(reqwest::Response::error_for_status).with_context(|| format!("cannot download {url}"))?;
   let total = response.content_length();
+  progress.total(total);
   let mut file = tokio::fs::File::create(path).await.with_context(|| format!("cannot write {}", path.display()))?;
   let mut hasher = Sha256::new();
   let (mut received, mut shown) = (0u64, 0u64);
@@ -228,9 +254,10 @@ async fn download(client: &reqwest::Client, url: &str, path: &Path) -> Result<St
     hasher.update(&chunk);
     file.write_all(&chunk).await.with_context(|| format!("cannot write {}", path.display()))?;
     received += chunk.len() as u64;
+    progress.received(received);
     // NOTICE: a line every 32 MiB: an image archive is about 180 MiB, so a
     // slow download still shows it moves without flooding the terminal.
-    if received - shown >= 32 << 20 {
+    if !progress.visible() && received - shown >= 32 << 20 {
       shown = received;
       match total {
         Some(total) => output::message(format_args!("image pull: {} of {} MiB", received >> 20, total >> 20)),
@@ -244,10 +271,12 @@ async fn download(client: &reqwest::Client, url: &str, path: &Path) -> Result<St
 
 /// Imports the VM image archive `file`, of `driver` when it is named, after
 /// checking it against the `.sha256` next to it when there is one.
-async fn import(images: &Path, driver: Option<ActorDriver>, file: &Path) -> Result<PathBuf> {
+async fn import(images: &Path, driver: Option<ActorDriver>, file: &Path, feedback: bool) -> Result<PathBuf> {
   let file = std::fs::canonicalize(file).with_context(|| format!("cannot open {}", file.display()))?;
   let hashed = file.clone();
+  let verification = output::Progress::new(feedback, "Verifying image archive checksum");
   let actual = tokio::task::spawn_blocking(move || sha256_of(&hashed)).await??;
+  verification.finish();
   let mut sum = file.clone().into_os_string();
   sum.push(".sha256");
   match std::fs::read_to_string(&sum) {
@@ -256,7 +285,7 @@ async fn import(images: &Path, driver: Option<ActorDriver>, file: &Path) -> Resu
       if expected != actual {
         return Err(integrity(&file.display().to_string(), &expected, &actual).into());
       }
-      output::message(format_args!("image pull: verified {} (sha256 {actual})", file.display()));
+      progress::phase(feedback, format_args!("image pull: verified {} (sha256 {actual})", file.display()));
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
       output::message(format_args!("image pull: no .sha256 next to {}; its SHA-256 is {actual}", file.display()))
@@ -264,7 +293,7 @@ async fn import(images: &Path, driver: Option<ActorDriver>, file: &Path) -> Resu
     Err(e) => return Err(e).with_context(|| format!("cannot read {}", PathBuf::from(&sum).display())),
   }
   std::fs::create_dir_all(images).with_context(|| format!("cannot create {}", images.display()))?;
-  install(images, driver, &file, &actual, manifest::Source::File { path: file.clone() }).await
+  install(images, driver, &file, &actual, manifest::Source::File { path: file.clone() }, feedback).await
 }
 
 fn integrity(artifact: &str, expected: &str, actual: &str) -> crate::diagnostics::Error {
@@ -292,16 +321,25 @@ fn hex(bytes: &[u8]) -> String {
 /// checks it is an image of `driver` (when named), of its architecture and
 /// of this needy's base ABI, records `source` and `sha256` in its manifest,
 /// and renames it into the driver's base directory. Returns that directory.
-async fn install(images: &Path, driver: Option<ActorDriver>, archive: &Path, sha256: &str, source: manifest::Source) -> Result<PathBuf> {
+async fn install(
+  images: &Path,
+  driver: Option<ActorDriver>,
+  archive: &Path,
+  sha256: &str,
+  source: manifest::Source,
+  feedback: bool,
+) -> Result<PathBuf> {
   let staging = images.join(format!(".needy-pull-{}", uuid::Uuid::new_v4()));
   let (from, to) = (archive.to_path_buf(), staging.clone());
   let installed = async {
+    let progress = output::Progress::new(feedback, "Extracting image archive");
     tokio::task::spawn_blocking(move || -> Result<()> {
       std::fs::create_dir(&to).with_context(|| format!("cannot create {}", to.display()))?;
       let file = std::fs::File::open(&from).with_context(|| format!("cannot open {}", from.display()))?;
       super::build::unpack_from(flate2::read::GzDecoder::new(std::io::BufReader::new(file)), &to)
     })
     .await??;
+    progress.message("Checking extracted image");
     let mut manifest = manifest::read(&staging)?
       .with_context(|| format!("{} has no {}: it is not a needy VM image archive", archive.display(), manifest::FILE))?;
     check(&manifest, driver)?;
@@ -314,7 +352,9 @@ async fn install(images: &Path, driver: Option<ActorDriver>, archive: &Path, sha
       ActorDriver::MacosVz => vm::MacosVz::new(&staging).check()?,
       _ => vm::LinuxFirecracker::new(&staging).check()?,
     }
+    progress.message("Installing image");
     replace(&staging, &target)?;
+    progress.finish();
     Ok(target)
   }
   .await;
@@ -410,26 +450,30 @@ fn remove_file(path: &Path) {
 
 /// Pulls the container actor base and the executor image of release
 /// `version` through the engine, and checks the base's base ABI.
-async fn pull_engine(version: &str) -> Result<()> {
+async fn pull_engine(version: &str, feedback: bool) -> Result<()> {
   let engine = needy_core_executor::engine::connect()?;
   let actor = release_image("needy-actor", version);
   let mut failures = Vec::new();
-  output::message(format_args!("image pull: pulling {actor}"));
-  match pull_container(engine.as_ref(), &actor).await {
+  progress::phase(feedback, format_args!("image pull: pulling {actor}"));
+  match pull_container(engine.as_ref(), &actor, feedback).await {
     Ok(()) => match engine.inspect_image(&actor).await? {
       Some(image) => match base::check(
         &actor,
         image.labels.get(base::LABEL).map(String::as_str),
         &base::rebuild_from("needy image build --linux-container", None),
       ) {
-        Ok(()) => output::message(format_args!("image pull: linux-container: {actor} (base ABI {})", base::ABI)),
+        Ok(()) => progress::complete(
+          feedback,
+          format_args!("Pulled actor image {actor}"),
+          format_args!("image pull: linux-container: {actor} (base ABI {})", base::ABI),
+        )?,
         Err(e) => failures.push(e.to_string()),
       },
       None => failures.push(format!("the engine pulled {actor} but does not have it")),
     },
     Err(e) => failures.push(container::unpullable(&actor, &e.to_string(), "needy image build --linux-container")),
   }
-  if let Err(e) = pull_executor(&engine, version).await {
+  if let Err(e) = pull_executor(&engine, version, feedback).await {
     failures.push(e.to_string());
   }
   if failures.is_empty() {
@@ -440,12 +484,16 @@ async fn pull_engine(version: &str) -> Result<()> {
 }
 
 /// Pulls the executor image of release `version` through `engine`.
-async fn pull_executor(engine: &std::sync::Arc<dyn needy_core_executor::engine::Engine>, version: &str) -> Result<()> {
+async fn pull_executor(engine: &std::sync::Arc<dyn needy_core_executor::engine::Engine>, version: &str, feedback: bool) -> Result<()> {
   let executor = release_image("needy-executor", version);
-  output::message(format_args!("image pull: pulling {executor}"));
-  match pull_container(engine.as_ref(), &executor).await {
+  progress::phase(feedback, format_args!("image pull: pulling {executor}"));
+  match pull_container(engine.as_ref(), &executor, feedback).await {
     Ok(()) => {
-      output::message(format_args!("image pull: linux-container executors: {executor}"));
+      progress::complete(
+        feedback,
+        format_args!("Pulled executor image {executor}"),
+        format_args!("image pull: linux-container executors: {executor}"),
+      )?;
       Ok(())
     }
     Err(e) => Err(anyhow!(
@@ -458,27 +506,15 @@ async fn pull_executor(engine: &std::sync::Arc<dyn needy_core_executor::engine::
 
 /// Displays the engine's progress on stderr while pulling, including cached
 /// layers and extraction. A stream error still fails the pull.
-async fn pull_container(engine: &dyn needy_core_executor::engine::Engine, image: &str) -> Result<(), needy_core_executor::engine::Error> {
-  let mut progress = engine.pull_progress(image);
-  while let Some(update) = progress.try_next().await? {
-    let mut parts = Vec::new();
-    if let Some(id) = update.id {
-      parts.push(format!("{id}:"));
-    }
-    if let Some(status) = update.status {
-      parts.push(status);
-    }
-    if let Some(detail) = update.progress_detail
-      && let Some(current) = detail.current
-    {
-      parts.push(match detail.total {
-        Some(total) if total > 0 => format!("{current}/{total} bytes"),
-        _ => format!("{current} bytes"),
-      });
-    }
-    if !parts.is_empty() {
-      output::message(format_args!("image pull: {}", parts.join(" ")));
-    }
+async fn pull_container(
+  engine: &dyn needy_core_executor::engine::Engine,
+  image: &str,
+  feedback: bool,
+) -> Result<(), needy_core_executor::engine::Error> {
+  let mut display = progress::Pull::new(feedback, image);
+  let mut updates = engine.pull_progress(image);
+  while let Some(update) = updates.try_next().await? {
+    display.update(update);
   }
   Ok(())
 }
@@ -486,23 +522,30 @@ async fn pull_container(engine: &dyn needy_core_executor::engine::Engine, image:
 /// Pulls the container actor base of release `version` into Apple's
 /// `container`, and checks its base ABI.
 #[cfg(unix)]
-async fn pull_apple(version: &str) -> Result<()> {
+async fn pull_apple(version: &str, feedback: bool) -> Result<()> {
   use needy_core_actor::driver::macos_apple_container::MacosAppleContainer;
   let actor = release_image("needy-actor", version);
   let store = MacosAppleContainer::new(actor.clone());
-  output::message(format_args!("image pull: pulling {actor} into Apple's container"));
+  progress::phase(feedback, format_args!("image pull: pulling {actor} into Apple's container"));
+  let progress = output::Progress::new(feedback, format!("Pulling {actor} into Apple's container"));
   if let Err(e) = store.pull().await {
     bail!(container::unpullable(&actor, &e.to_string(), "needy image build --macos-apple-container"));
   }
+  progress.message("Checking container image");
   let images = store.images().await?;
   let found = images.iter().find(|image| image.name == actor).and_then(|image| image.base_abi.clone());
   base::check(&actor, found.as_deref(), &base::rebuild_from("needy image build --macos-apple-container", None))?;
-  output::message(format_args!("image pull: macos-apple-container: {actor} (base ABI {})", base::ABI));
+  progress.finish();
+  progress::complete(
+    feedback,
+    format_args!("Pulled actor image {actor} into Apple's container"),
+    format_args!("image pull: macos-apple-container: {actor} (base ABI {})", base::ABI),
+  )?;
   Ok(())
 }
 
 #[cfg(not(unix))]
-async fn pull_apple(_version: &str) -> Result<()> {
+async fn pull_apple(_version: &str, _feedback: bool) -> Result<()> {
   bail!("Apple's `container` runs on macOS only, on a Mac with Apple silicon")
 }
 

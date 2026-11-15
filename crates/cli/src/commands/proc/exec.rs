@@ -140,6 +140,7 @@ async fn execute(args: Options, target: Target, ctx: &Context) -> Result<i32> {
     }
   }
   let forward_stdin = !(args.no_stdin || args.detach);
+  let progress = output::Progress::new(args.output == Output::Human && ctx.connection_feedback(), "Connecting for command execution");
   let selected = crate::connection::resolve(ctx)?;
   let connection = selected.connect().await?;
   let (run, runner, executor) = match target {
@@ -164,7 +165,12 @@ async fn execute(args: Options, target: Target, ctx: &Context) -> Result<i32> {
     // A path named on the command line must exist where it runs.
     search_path_if_missing: false,
   };
-  let mut stream = match ExecStream::start(&connection, start).await {
+  progress.message("Opening command stream");
+  let opened = ExecStream::start(&connection, start).await;
+  // Refusals can render JSON/events themselves, and a successful stream may
+  // already contain child output. Neither shares the terminal with progress.
+  progress.finish();
+  let mut stream = match opened {
     Ok(stream) => stream,
     Err(error) => return refused(error, args.output, ctx),
   };

@@ -455,6 +455,20 @@ fn role_arguments(roles: &[RunnerRole]) -> String {
 
 async fn management(command: Command, ctx: &Context) -> Result<i32> {
   let fail = needy_api_client::Error::from;
+  let human = !matches!(
+    &command,
+    Command::Invite(InviteArgs {
+      output: OutputFormat::Json,
+      ..
+    }) | Command::Token {
+      command: TokenCommand::Ls {
+        output: OutputFormat::Json
+      }
+    } | Command::Ls {
+      output: OutputFormat::Json
+    }
+  );
+  let progress = output::Progress::new(human && ctx.connection_feedback(), "Connecting to control service");
   let connection = ctx.connect().await?;
   let mut runners = connection.runners();
   match command {
@@ -471,7 +485,9 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
         roles: selected_roles.into_iter().map(proto_role).collect(),
         labels: labels.into_iter().collect(),
       };
+      progress.message("Creating runner invitation");
       let created = runners.create_join_token(request).await.map_err(fail)?.into_inner();
+      progress.finish();
       let token = created.join_token.context("server returned an invitation without metadata")?;
       let roles = roles(&token.roles)?;
       match format {
@@ -507,25 +523,38 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
     Command::Token {
       command: TokenCommand::Ls { output: format },
     } => {
+      progress.message("Fetching runner invitations");
       let list = runners.list_join_tokens(ListJoinTokensRequest {}).await.map_err(fail)?.into_inner();
+      progress.finish();
       let rows = list.join_tokens.into_iter().map(TokenRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
     Command::Token {
       command: TokenCommand::Revoke { id },
     } => {
-      runners.revoke_join_token(RevokeJoinTokenRequest { id }).await.map_err(fail)?;
+      progress.message(format!("Revoking runner invitation {id}"));
+      runners.revoke_join_token(RevokeJoinTokenRequest { id: id.clone() }).await.map_err(fail)?;
+      progress.finish();
+      output::acknowledge(&format!("Revoked runner invitation: {id}"))?;
     }
     Command::Ls { output: format } => {
+      progress.message("Fetching runners");
       let list = runners.list_runners(ListRunnersRequest {}).await.map_err(fail)?.into_inner();
+      progress.finish();
       let rows = list.runners.into_iter().map(RunnerRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
     Command::Rotate { name } => {
-      runners.rotate_runner(RotateRunnerRequest { name }).await.map_err(fail)?;
+      progress.message(format!("Requesting credential rotation for runner {name}"));
+      runners.rotate_runner(RotateRunnerRequest { name: name.clone() }).await.map_err(fail)?;
+      progress.finish();
+      output::acknowledge(&format!("Requested credential rotation for runner: {name}"))?;
     }
     Command::Rm { name } => {
-      runners.remove_runner(RemoveRunnerRequest { name }).await.map_err(fail)?;
+      progress.message(format!("Revoking runner {name}"));
+      runners.remove_runner(RemoveRunnerRequest { name: name.clone() }).await.map_err(fail)?;
+      progress.finish();
+      output::acknowledge(&format!("Revoked runner: {name}"))?;
     }
     Command::Join(_) | Command::Serve(_) => unreachable!("local runner commands are dispatched before connecting"),
   }

@@ -214,12 +214,14 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
   let profile = needy_config::profile::load(&Source::file(path))?;
   // As `run create` sends it: the control plane may run on another machine.
   let resolved = needy_config::profile::resolve(&Source::file(path))?;
+  let progress = output::Progress::new(ctx.connection_feedback(), "Checking profile with control service");
   let connection = ctx.connect().await?;
   let request = CheckProfileRequest {
     profile_yaml: resolved.yaml,
     recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
   };
   let check = connection.runs().check_profile(request).await.map_err(needy_api_client::Error::from)?.into_inner();
+  progress.finish();
   outln!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid)?;
   let host = |placement: Option<&v1::Placement>| match placement {
     None => "unresolved".to_string(),

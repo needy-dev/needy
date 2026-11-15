@@ -138,6 +138,8 @@ impl From<ProcessInfo> for Process {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  let progress =
+    output::Progress::new(matches!(args.output, output::OutputFormat::Table) && ctx.connection_feedback(), "Fetching processes...");
   let connection = ctx.connect().await?;
   // Runner processes are outside any run, independent of inherited run selection.
   let run = if args.runner.is_empty() {
@@ -157,6 +159,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     .await
     .map_err(needy_api_client::Error::from)?
     .into_inner();
+  progress.finish();
   let rows: Vec<Process> =
     list.processes.into_iter().map(Process::from).filter(|p| args.all || !p.origin.is_some_and(Origin::is_internal)).collect();
   output::print(args.output, &rows)?;

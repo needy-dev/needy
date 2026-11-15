@@ -1,7 +1,10 @@
 //! Output formats for people (borderless tables) and tools (JSON). Rows are
 //! typed structs; each command defines its own.
 
+mod progress;
 mod table;
+
+pub use progress::Progress;
 
 use std::io::IsTerminal as _;
 use std::io::Write as _;
@@ -45,6 +48,17 @@ pub fn success(message: &str) -> std::io::Result<()> {
     anstyle::Style::new()
   };
   outln!("{style}{message}{style:#}")
+}
+
+/// Confirms a mutation on stderr without contaminating script/data stdout.
+pub fn acknowledge(message: &str) -> std::io::Result<()> {
+  let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+  let style = if color {
+    anstyle::AnsiColor::Green.on_default()
+  } else {
+    anstyle::Style::new()
+  };
+  writeln!(std::io::stderr().lock(), "{style}{message}{style:#}")
 }
 
 /// An infrastructure error label on stderr. Redirected diagnostics and

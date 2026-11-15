@@ -557,7 +557,8 @@ fn run_stop_now_kills_the_actor_and_the_report_says_so() {
   let stopped = home.run(&["run", "stop", "--now", &run]);
 
   assert!(stopped.status.success(), "{}", stderr(&stopped));
-  assert!(stderr(&stopped).is_empty(), "a stop asked to be at once warns of nothing: {}", stderr(&stopped));
+  assert_eq!(stderr(&stopped), format!("Stopped run {run}.\n"));
+  assert!(stdout(&stopped).is_empty(), "stop confirmation must not become script data");
   let report = stdout(&home.run(&["run", "report", &run]));
   assert!(report.contains("forced: asked to stop at once"), "{report}");
 }
@@ -3244,7 +3245,7 @@ fn pairing_code(control: &Home, _endpoint: &str, name: &str) -> String {
 // shadowed that global value, so clap rejected the command before reading
 // the invitation. Pair and context set must share the root transport flag.
 #[test]
-fn client_pair_accepts_the_guides_global_address_and_explains_the_next_step() {
+fn client_pair_accepts_the_guides_global_address_and_reports_the_written_file() {
   use std::os::unix::fs::PermissionsExt as _;
   let control = Home::new();
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
@@ -3263,14 +3264,12 @@ fn client_pair_accepts_the_guides_global_address_and_explains_the_next_step() {
     path.to_str().unwrap(),
   ]);
   assert!(paired.status.success(), "{}", stderr(&paired));
-  let text = stdout(&paired);
+  let text = stderr(&paired);
   assert!(text.contains("Paired successfully!"), "{text}");
-  assert!(text.contains("Current context: local"), "{text}");
-  assert!(text.contains("needy config use control"), "{text}");
-  assert!(text.contains("needy config context check control"), "{text}");
+  assert_eq!(text, format!("Paired successfully!\n\nUpdated:\n  {}\n", laptop.path().join("config/config.yaml").display()));
   assert!(!text.contains(&code));
   assert!(!text.contains("needy:"));
-  assert!(stderr(&paired).is_empty(), "{}", stderr(&paired));
+  assert!(stdout(&paired).is_empty(), "{}", stdout(&paired));
   let changed = laptop.run(&[
     "--address",
     &endpoint,
@@ -3307,6 +3306,12 @@ fn client_pair_accepts_the_guides_global_address_and_explains_the_next_step() {
   let styled = format!("{style}Paired successfully!{style:#}");
   if std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()) {
     assert!(text.contains(&styled), "{text}");
+    if std::env::var_os("TERM").is_none_or(|value| value != "dumb") {
+      let waiting = text.find("Pairing with control service").expect("terminal pairing must show waiting feedback");
+      let completed = text.find("Paired successfully!").unwrap();
+      assert!(waiting < completed, "{text}");
+      assert!(!text[completed..].contains("Pairing with control service"), "progress must finish before confirmation: {text}");
+    }
   } else {
     assert!(!text.contains('\u{1b}'), "{text}");
   }
@@ -3346,9 +3351,143 @@ fn client_invite_shows_pairing_instructions_and_stdin_pairing_does_not_echo_secr
   child.stdin.take().unwrap().write_all(code.as_bytes()).unwrap();
   let paired = child.wait_with_output().unwrap();
   assert!(paired.status.success(), "{}", stderr(&paired));
-  assert!(stdout(&paired).contains("Paired successfully!"));
-  assert!(!stdout(&paired).contains(&code));
+  assert!(stderr(&paired).contains("Paired successfully!"));
+  assert!(!stderr(&paired).contains(&code));
   assert!(!stderr(&paired).contains("Invitation code:"));
+}
+
+#[test]
+fn the_invitation_command_pairs_with_a_one_time_token_argument() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let human = control.run(&["client", "invite", "--name", "laptop"]);
+  assert!(human.status.success(), "{}", stderr(&human));
+  let text = stdout(&human);
+  assert!(text.contains("CLIENT ROLE"), "{text}");
+  let command = text.lines().find(|l| l.trim_start().starts_with("needy --address ")).unwrap();
+  let mut argv = shell_words::split(command.trim()).unwrap();
+  let index = argv.iter().position(|a| a == "--token").expect("invitation must print a copyable token command");
+  let code = argv[index + 1].clone();
+  assert_eq!(text.matches(&code).count(), 1, "invitation code must be shown once");
+  argv[2] = endpoint;
+  let laptop = Home::new();
+  let paired = laptop.needy().args(&argv[1..]).output().unwrap();
+  assert!(paired.status.success(), "{}", stderr(&paired));
+  assert!(stderr(&paired).contains("Paired successfully!"));
+  assert!(!stderr(&paired).contains(&code));
+  assert!(!stderr(&paired).contains(&code));
+  assert!(stdout(&paired).is_empty(), "pairing confirmation must not become script data");
+  assert!(!stderr(&paired).contains('\u{1b}'), "redirected status must not animate");
+  let repeated = Home::new().needy().args(&argv[1..]).output().unwrap();
+  assert_eq!(repeated.status.code(), Some(1));
+  assert!(stderr(&repeated).contains("was used already"), "{}", stderr(&repeated));
+}
+
+#[test]
+fn a_token_argument_conflicts_with_file_input_before_consuming_the_invitation() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let code = pairing_code(&control, &endpoint, "laptop");
+  let laptop = Home::new();
+  let conflict = laptop.run(&[
+    "--address",
+    &endpoint,
+    "config",
+    "context",
+    "pair",
+    "control",
+    "--token",
+    &code,
+    "--code-file",
+    "-",
+  ]);
+  assert_eq!(conflict.status.code(), Some(2));
+  assert!(!stderr(&conflict).contains(&code));
+  let paired = laptop.run(&[
+    "--address",
+    &endpoint,
+    "config",
+    "context",
+    "pair",
+    "control",
+    "--token",
+    &code,
+  ]);
+  assert!(paired.status.success(), "{}", stderr(&paired));
+}
+
+#[test]
+fn pairing_does_not_animate_over_verbose_logs_or_connector_stderr() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  let (status, bytes) = on_terminal(
+    &laptop,
+    &[
+      "-v",
+      "--address",
+      &endpoint,
+      "config",
+      "context",
+      "pair",
+      "control",
+      "--token",
+      &code,
+    ],
+    (40, 120),
+  );
+  let text = String::from_utf8_lossy(&bytes);
+  assert_eq!(status, Some(0), "{text}");
+  assert!(text.contains("Paired successfully!"));
+  assert!(!text.contains("Pairing with control service"), "verbose logs own stderr: {text}");
+  assert!(!text.contains(&code));
+
+  let fresh = Home::new();
+  let (status, bytes) = on_terminal(
+    &fresh,
+    &[
+      "config",
+      "context",
+      "pair",
+      "control",
+      "--token",
+      "synthetic-invitation",
+      "--",
+      "sh",
+      "-c",
+      "printf 'Connector needs attention\\n' >&2; exit 23",
+    ],
+    (40, 120),
+  );
+  let text = String::from_utf8_lossy(&bytes);
+  assert_eq!(status, Some(1), "{text}");
+  assert!(text.contains("Connector needs attention"), "{text}");
+  assert!(!text.contains("Pairing with control service"), "connector owns stderr: {text}");
+}
+
+#[test]
+fn command_execution_leaves_connector_stderr_free_of_progress() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let home = Home::new();
+  let directory = home.path().join("config");
+  std::fs::create_dir_all(&directory).unwrap();
+  let config = directory.join("config.yaml");
+  let value = serde_json::json!({
+    "current_context": "control",
+    "contexts": {"control": {
+      "command": ["sh", "-c", "printf 'Connector needs attention\\n' >&2; exit 23"],
+      "credential": "synthetic-credential",
+      "identity": {"client_id": "example-client-id", "name": "example-client", "access": "runs", "paired_at_ms": 1}
+    }}
+  });
+  std::fs::write(&config, value.to_string()).unwrap();
+  std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+  let (status, bytes) = on_terminal(&home, &["proc", "exec", "--host", "-T", "--", "true"], (40, 120));
+  let text = String::from_utf8_lossy(&bytes);
+  assert_eq!(status, Some(1), "{text}");
+  assert!(text.contains("Connector needs attention"), "{text}");
+  assert!(!text.contains("Connecting for command execution"), "{text}");
 }
 
 #[test]
@@ -3372,11 +3511,19 @@ fn context_check_reports_service_and_identity_as_separate_fields() {
   let human = laptop.run(&["config", "context", "check", "remote"]);
   assert!(human.status.success(), "{}", stderr(&human));
   let text = stdout(&human);
-  for column in ["ADDRESS", "STATUS", "ROLE", "INSTANCE", "CLIENT", "ACCESS"] {
+  for column in [
+    "ADDRESS",
+    "STATUS",
+    "SERVICE",
+    "INSTANCE",
+    "CLIENT",
+    "CLIENT ROLE",
+  ] {
     assert!(text.contains(column), "{text}");
   }
   assert!(!text.contains("role="));
   assert!(!text.contains("access=1"));
+  assert!(!text.contains("ACCESS"));
 }
 
 // The run-create file flag was not accepted by profile check, so the same
@@ -3436,7 +3583,7 @@ fn profile_check_accepts_a_file_flag_and_keeps_positional_profiles() {
 }
 
 #[test]
-fn pairing_next_steps_preserve_an_explicit_configuration_file() {
+fn pairing_reports_an_explicit_configuration_file() {
   use std::os::unix::fs::PermissionsExt as _;
   let control = Home::new();
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
@@ -3458,16 +3605,10 @@ fn pairing_next_steps_preserve_an_explicit_configuration_file() {
     file.to_str().unwrap(),
   ]);
   assert!(paired.status.success(), "{}", stderr(&paired));
-  let mut checked = 0;
-  for line in stdout(&paired).lines().filter(|line| line.trim_start().starts_with("needy ")) {
-    let argv = shell_words::split(line.trim()).unwrap();
-    assert_eq!(argv[1], "--config", "{line}");
-    assert_eq!(argv[2], config.to_str().unwrap());
-    let output = laptop.needy().args(&argv[1..]).output().unwrap();
-    assert!(output.status.success(), "{}", stderr(&output));
-    checked += 1;
-  }
-  assert_eq!(checked, 2);
+  assert_eq!(stderr(&paired), format!("Paired successfully!\n\nUpdated:\n  {}\n", config.display()));
+  let stored: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+  assert!(stored["contexts"]["remote"]["credential"].as_str().is_some());
+  assert_eq!(stored["current_context"].as_str(), Some("local"));
   assert!(!laptop.path().join("config/config.yaml").exists());
 }
 
@@ -3535,7 +3676,7 @@ fn a_client_pairs_stores_its_token_privately_and_uses_it_for_that_endpoint() {
   let paired = pair_context(&laptop, &endpoint, "remote", &code);
 
   assert!(paired.status.success(), "{}", stderr(&paired));
-  assert!(stdout(&paired).contains("Paired successfully!"), "{}", stdout(&paired));
+  assert!(stderr(&paired).contains("Paired successfully!"), "{}", stderr(&paired));
   let credentials = laptop.path().join("config").join("config.yaml");
   assert_eq!(std::fs::metadata(&credentials).unwrap().permissions().mode() & 0o777, 0o600);
   let stored: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&credentials).unwrap()).unwrap();
@@ -3612,7 +3753,7 @@ fn a_revoked_client_is_refused_and_listed_as_revoked() {
   assert!(stderr(&refused).contains("missing or invalid bearer token"), "{}", stderr(&refused));
   let text = stdout(&as_local_operator(&control, &["client", "ls"]));
   let rows = table(&text);
-  assert_eq!(rows[0], ["ID", "NAME", "ACCESS", "STATE", "PAIRED", "LAST USED"]);
+  assert_eq!(rows[0], ["ID", "NAME", "CLIENT ROLE", "STATE", "PAIRED", "LAST USED"]);
   assert_eq!(&rows[1][..4], [id.as_str(), "laptop", "runs", "revoked"]);
 }
 
