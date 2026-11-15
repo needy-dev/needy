@@ -23,8 +23,10 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// version 9 gave `fault.injected` the fault's `name` and `domain` and its
 /// effects their own fields (`exit`, `signal`, `refuse`, `status`, ...), and
 /// added `chaos.add` and `chaos.remove`; version 10 added `run.stop`'s
-/// `actor`, how a stop ended a running actor.
-pub const SCHEMA_VERSION: u32 = 10;
+/// `actor`, how a stop ended a running actor. Version 11 adds `run.stop`
+/// `ended`, distinguishing completion of accepted stop intent after recovery
+/// from cleanup of an invocation that had already finished or failed.
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -39,10 +41,13 @@ pub const SCHEMA_VERSION: u32 = 10;
 // of 7 are refused all the same, by the same rule. Version 9 renamed
 // `fault.injected`'s `kind` to `domain` with new values, so traces of 8 are
 // refused as well. Version 10 only added an optional field (`run.stop`'s
-// `actor`); traces of 9 are refused by the same rule.
+// `actor`); traces of 9 are refused by the same rule. Version 11 adds the
+// required stop-ownership fact `ended`. Version 10 remains readable through
+// StopV10: missing ownership stays false, preserving that version's semantics.
+// No older versions are added to this narrowly versioned historical boundary.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
-pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = SCHEMA_VERSION..=SCHEMA_VERSION;
+pub const READ_VERSIONS: std::ops::RangeInclusive<u32> = 10..=SCHEMA_VERSION;
 
 /// Declares the kinds, their names on the wire and their payload types.
 macro_rules! events {
@@ -101,6 +106,10 @@ macro_rules! events {
         }
         let kind: EventKind = kind.parse()?;
         let wrap = |source| DecodeError::Payload { kind, source };
+        if version == 10 && kind == EventKind::RunStop {
+          let old: StopV10 = serde_json::from_str(payload).map_err(wrap)?;
+          return Ok(Event::RunStop(RunStop { by: old.by, actor: old.actor, ended: false }));
+        }
         Ok(match kind {
           $( EventKind::$variant => Event::$variant(serde_json::from_str(payload).map_err(wrap)?), )*
         })
@@ -170,7 +179,7 @@ impl std::str::FromStr for EventKind {
 pub enum DecodeError {
   #[error("unknown event kind {0:?}")]
   Kind(String),
-  #[error("event schema version {found} is not one this build reads; it reads version {expected} only")]
+  #[error("event schema version {found} is not one this build reads; it reads versions {} through {expected}", READ_VERSIONS.start())]
   Version { found: u32, expected: u32 },
   #[error("invalid {kind} payload")]
   Payload {
@@ -229,6 +238,20 @@ pub struct RunStop {
   /// ended already, or the run had none.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub actor: Option<ActorStop>,
+  /// This stop established the terminal state, including completion of a
+  /// stop admitted before control restarted. False for cleanup after finish/failure.
+  pub ended: bool,
+}
+
+// NOTICE(trace-v10): only schema 10 lacks the ownership fact. Keep its strict
+// payload separate so schema 11 cannot silently omit a required `ended` value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StopV10 {
+  #[serde(default)]
+  by: Option<Principal>,
+  #[serde(default)]
+  actor: Option<ActorStop>,
 }
 
 /// How `run stop` ended a running actor.

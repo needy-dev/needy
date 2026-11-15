@@ -671,7 +671,10 @@ fn macos_apple_container_is_an_actor_driver() {
 #[test]
 fn a_runner_selector_of_another_form_is_rejected() {
   let err = load_text("executors: { mac: { runner: { name: mac } } }").unwrap_err().to_string();
-  assert!(err.contains("executors.mac.runner: a runner selector is a runner's name or { labels: [KEY, KEY=VALUE, ...] }"), "{err}");
+  assert!(
+    err.contains("executors.mac.runner: a runner selector is a runner's name, { labels: [KEY, KEY=VALUE, ...] }, or { client: true }"),
+    "{err}"
+  );
 
   let err = load_text("executors: { mac: { runner: { labels: [] } } }").unwrap_err().to_string();
   assert!(err.contains("executors.mac.runner: `labels` selects no runner when empty"), "{err}");
@@ -882,4 +885,13 @@ fn container_args_is_an_unknown_field() {
   let err = load_text("executors: { build: { driver: linux-container, container: { args: [--cpus=4] } } }").unwrap_err().to_string();
 
   assert!(err.contains("unknown field `args`"), "{err}");
+}
+
+#[test]
+fn client_executor_is_explicit_and_named_client_stays_a_name() {
+  let profile = super::load(&crate::Source::text(
+    "actor: {driver: linux-firecracker}\nexecutors:\n  here: {driver: native, runner: {client: true}}\n  named: {driver: native, runner: client}\n", std::path::PathBuf::new(),
+  )).unwrap();
+  assert_eq!(profile.executors["here"].runner.as_ref().unwrap().to_string(), "creating client");
+  assert_eq!(profile.executors["named"].runner.as_ref().unwrap().to_string(), "runner client");
 }

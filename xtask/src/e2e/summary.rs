@@ -59,21 +59,18 @@ impl Outcome {
     }
   }
 
-  /// A cell that ran: failed when any check failed, else not covered when
-  /// it deferred an invariant (with the deferrals as its reason), else
-  /// passed.
+  /// A completed cell passes only when every selected invariant held.
+  /// Unavailable scenarios are reported explicitly with `skipped`.
   pub fn ran(cell: Cell, checks: Checks, duration: Duration, artifacts: Option<PathBuf>) -> Self {
     let status = if !checks.passed() {
       Status::Fail
-    } else if !checks.deferred.is_empty() {
-      Status::NotCovered
     } else {
       Status::Pass
     };
     Self {
       cell,
       status,
-      reason: checks.deferred.join("; "),
+      reason: String::new(),
       checks: checks.list,
       duration,
       artifacts,

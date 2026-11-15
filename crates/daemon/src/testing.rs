@@ -82,6 +82,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
   let guest = dir.path().join("needy-linux");
   fake_guest(&guest);
   let mut config = Config {
+    holder_executable: Default::default(),
     state_dir: dir.path().join("state"),
     runtime_dir: dir.path().join("run"),
     actor_image: dir.path().join("image"),
@@ -103,7 +104,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
 /// Shuts `started`'s daemon down, as a termination signal does, and starts
 /// another on the same directories, as a restart does.
 pub async fn restart(started: Started) -> Started {
-  started.daemon.shutdown().await;
+  started.daemon.suspend_control().await;
   let config = (*started.daemon.config).clone();
   drop(started.daemon);
   let daemon = Daemon::start(config).await.unwrap();

@@ -229,3 +229,21 @@ pub mod pairing_code {
 
   impl ActiveModelBehavior for ActiveModel {}
 }
+
+/// A private execution holder; absent from the shared runner resource set.
+pub mod client_execution {
+  use sea_orm::entity::prelude::*;
+  #[derive(Clone, Debug, PartialEq, Eq, DeriveEntityModel)]
+  #[sea_orm(table_name = "client_executions")]
+  pub struct Model {
+    #[sea_orm(primary_key, auto_increment = false)]
+    pub holder: String,
+    /// Reserved invocation, known to the holder before creation is submitted.
+    pub invocation: String,
+    pub run: Option<String>,
+    pub created_ms: i64,
+  }
+  #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+  pub enum Relation {}
+  impl ActiveModelBehavior for ActiveModel {}
+}

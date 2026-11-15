@@ -60,6 +60,12 @@ impl ExecStream {
     Self::open(executor, exec_request::Payload::Start(start)).await
   }
 
+  /// Starts a capacity-limited command on its process owner. A separate
+  /// request variant makes services without admission support fail before spawn.
+  pub async fn start_limited(executor: &dyn Executor, start: needy_api_proto::v1::LimitedExecStart) -> Result<Self> {
+    Self::open(executor, exec_request::Payload::LimitedStart(start)).await
+  }
+
   /// Attaches to a running or finished process. With `replay`, what came
   /// before comes first: a terminal's current screen, or the buffered
   /// output of pipes. A process on a terminal takes the `window` of the

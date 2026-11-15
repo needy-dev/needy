@@ -1,0 +1,107 @@
+{
+  "source": "05eea6314627af3834ff81e88b2077ec80ad26a9",
+  "production_source": "9e26e70457ca2dec7ec3bd0c37c74a9ebf0dd14d",
+  "evidence": "canonical non-root CLI E2E",
+  "reports": [
+    {
+      "lane": "mac-client",
+      "report_sha256": "c7fb206884350c2e23b2add152aba8189a427cf57b8cf4f0b7a80c2c954c4b9f",
+      "cells": [
+        {
+          "id": "linux-firecracker/client-execution/at=remote",
+          "status": "pass",
+          "checks": 42,
+          "duration_ms": 19162
+        },
+        {
+          "id": "linux-container.runc/client-execution/at=remote",
+          "status": "pass",
+          "checks": 42,
+          "duration_ms": 8185
+        }
+      ]
+    },
+    {
+      "lane": "linux-local",
+      "report_sha256": "cb4925bbbac711cffaa3dca419cd5e53addcd4ff02e306a8f326eb7c3dc89817",
+      "cells": [
+        {
+          "id": "linux-firecracker/executor-files/executor=native,end=runtime-kill",
+          "status": "pass",
+          "checks": 53,
+          "duration_ms": 13143
+        },
+        {
+          "id": "linux-firecracker/actor-files/end=runtime-kill",
+          "status": "pass",
+          "checks": 50,
+          "duration_ms": 13352
+        },
+        {
+          "id": "linux-firecracker/lifecycle/continuity",
+          "status": "pass",
+          "checks": 39,
+          "duration_ms": 14204
+        },
+        {
+          "id": "linux-firecracker/client-execution/at=local",
+          "status": "pass",
+          "checks": 42,
+          "duration_ms": 17223
+        },
+        {
+          "id": "linux-container.runc/actor-files/end=runtime-kill",
+          "status": "pass",
+          "checks": 50,
+          "duration_ms": 3273
+        },
+        {
+          "id": "linux-container.runc/executor-files/executor=native,end=runtime-kill",
+          "status": "pass",
+          "checks": 53,
+          "duration_ms": 3234
+        },
+        {
+          "id": "linux-firecracker/lifecycle/actor-loss",
+          "status": "pass",
+          "checks": 17,
+          "duration_ms": 13214
+        },
+        {
+          "id": "linux-container.runc/client-execution/at=local",
+          "status": "pass",
+          "checks": 42,
+          "duration_ms": 7343
+        },
+        {
+          "id": "linux-container.runc/lifecycle/actor-loss",
+          "status": "pass",
+          "checks": 17,
+          "duration_ms": 3262
+        },
+        {
+          "id": "linux-container.runc/lifecycle/continuity",
+          "status": "pass",
+          "checks": 39,
+          "duration_ms": 7309
+        }
+      ]
+    }
+  ],
+  "total_cells": 12,
+  "total_checks": 486,
+  "capture_date": "2026-11-15",
+  "hosts": {
+    "actor_and_control": "Linux x86_64 KVM and Docker-compatible engine host",
+    "creating_clients": [
+      "macOS",
+      "Linux"
+    ],
+    "control_account": "non-root"
+  },
+  "sanitization": "Retained only cell IDs, verdicts, counts, durations, source identities, and report digests. Removed host aliases, account names, local paths, credentials, invocation IDs, and raw command output.",
+  "commands_with_private_values_replaced": [
+    "cargo xtask e2e --actor-host actor.example.com --remote-dir acceptance --only linux-container.runc/client-execution/at=remote --only linux-firecracker/client-execution/at=remote --needy /Users/user/acceptance/needy -o json",
+    "cargo xtask e2e --work-dir ../work --parallel 2 --only linux-firecracker/client-execution/at=local --only linux-container.runc/client-execution/at=local --only linux-firecracker/lifecycle/ --only linux-container.runc/lifecycle/ --only linux-firecracker/actor-files/end=runtime-kill --only linux-container.runc/actor-files/end=runtime-kill --only linux-firecracker/executor-files/executor=native,end=runtime-kill --only linux-container.runc/executor-files/executor=native,end=runtime-kill -o json"
+  ]
+}

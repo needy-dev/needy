@@ -21,3 +21,10 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-13 | [needy through a Cloudflare Tunnel](2026-11-13-cloudflare-transport-evidence.md) | evidence |
 | 2026-11-14 | [CLI, discovery, authority, and lifecycle (consolidated proposal)](../cli/2026-11-14-cli-configuration-and-access-spec.md) | spec |
 | 2026-11-14 | [Cloudflare docs deployment](2026-11-14-cloudflare-docs-deployment-design.md) | design |
+| 2026-11-15 | [Deployment topology and daemon responsibilities](2026-11-15-topology-and-daemon-responsibilities-design.md) | design |
+| 2026-11-15 | [Actor survival, reconnection and history](2026-11-15-actor-survival-and-history-design.md) | design |
+| 2026-11-15 | [Client execution and actor lifecycle (approved contract)](2026-11-15-client-execution-and-actor-lifecycle-spec.md) | spec |
+| 2026-11-15 | [Actor holder and control recovery](2026-11-15-actor-holder-implementation-evidence.md) | implementation evidence |
+| 2026-11-15 | [Client execution and lifecycle integration](2026-11-15-client-lifecycle-integration-evidence.md) | integration evidence |
+| 2026-11-15 | [Client lifecycle acceptance record](2026-11-15-client-lifecycle-acceptance.json) | sanitized results: 12 cells, 486 checks |
+| 2026-11-15 | [Lifecycle acceptance without KVM](2026-11-15-non-kvm-lifecycle-acceptance.json) | separate non-root runc host: 5 cells, 201 checks |

@@ -206,3 +206,75 @@ async fn an_executor_mirror_out_applies_the_mappings_filter_on_the_host() {
 
   assert_filtered(&out);
 }
+
+// ROOT CAUSE:
+//
+// If an actor completed naturally, saving its terminal state revoked the
+// client holder before mirror-out opened its file stream. Cleanup still owns
+// the executor until its instance reference is released.
+#[tokio::test]
+async fn a_completed_actor_mirrors_client_files_before_revoking_its_holder() {
+  use std::time::Duration;
+
+  use needy_api_server::control::{Credential, Runners, StopMode};
+  use tokio_util::task::AbortOnDropHandle;
+
+  let started = testing::daemon().await;
+  testing::fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
+  let served = testing::serve(started, None).await;
+  let daemon = served.daemon();
+  let source = served.dir().join("produced");
+  std::fs::create_dir(&source).unwrap();
+  std::fs::write(source.join("result.bin"), b"completed\0\xffbytes\n").unwrap();
+  let destination = served.dir().join("mirrored");
+  let reserved = Runs::prepare_client_execution(daemon, Default::default()).await.unwrap();
+  let capability = reserved.capability.clone();
+  let holder = reserved.holder.clone();
+  let helper = AbortOnDropHandle::new(tokio::spawn(crate::runner::serve_client_execution(crate::runner::ClientExecutionConfig {
+    control: Some(served.endpoint.clone()),
+    command: None,
+    holder: holder.clone(),
+    capability: capability.clone(),
+    run: reserved.run,
+    directory: served.dir().join("client-holder"),
+  })));
+  // Wait for this real transport during fixture setup; the assertions below
+  // use the run, file artifact, and authentication domain boundaries.
+  daemon.links.connected(&holder, Duration::from_secs(5)).await.expect("client holder connected");
+  let yaml = format!(
+    "actor: {{driver: linux-firecracker}}\nexecutors:\n  client: {{driver: native, runner: {{client: true}}}}\nfiles:\n  result: {{mode: mirror-out, from: \"executor:client:{}\", to: \"host:{}\"}}\n",
+    source.display(),
+    destination.display()
+  );
+  let mut request = new_run(&yaml, served.dir());
+  request.client_execution = reserved.capability;
+  let created = Runs::create(daemon, request).await.unwrap();
+  testing::exit_actor(daemon, served.dir(), &created.id).await;
+  let released = tokio::time::timeout(Duration::from_secs(10), async {
+    loop {
+      let info = Runs::get(daemon, &created.id).await.unwrap();
+      if info.state == RunState::Finished
+        && info.executors.is_empty()
+        && matches!(Runners::credential(daemon, &capability).await.unwrap(), Credential::Refused)
+      {
+        break info;
+      }
+      tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+  })
+  .await;
+  // Explicit cleanup also runs if completion failed, before asserting output.
+  Runs::stop(daemon, &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  let info = released.expect("natural completion released its executor");
+  assert_eq!(info.released.len(), 1);
+  assert!(
+    matches!(Runners::credential(daemon, &capability).await.unwrap(), Credential::Refused),
+    "released holder credential remains active"
+  );
+  tokio::time::timeout(Duration::from_secs(10), helper)
+    .await
+    .expect("released holder exits")
+    .unwrap()
+    .expect("normal invocation revocation is a successful holder exit");
+  assert_eq!(std::fs::read(destination.join("result.bin")).expect("natural completion mirrored client output"), b"completed\0\xffbytes\n");
+}

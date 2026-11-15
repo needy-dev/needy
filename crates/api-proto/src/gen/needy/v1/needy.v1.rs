@@ -212,6 +212,26 @@ pub struct ExecStart {
     #[prost(string, tag="13")]
     pub runner: ::prost::alloc::string::String,
 }
+/// Control supplies this request after resolving its pooled instance. The
+/// public control adapter rejects this lower-level process-owner message.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LimitedExecStart {
+    #[prost(message, optional, tag="1")]
+    pub start: ::core::option::Option<ExecStart>,
+    #[prost(message, optional, tag="2")]
+    pub capacity: ::core::option::Option<ExecutorCapacity>,
+}
+/// Admission policy carried to the process owner, whose permits follow actual
+/// child lifetime even when its control connection disappears.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutorCapacity {
+    #[prost(string, tag="1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub max_procs: u32,
+    #[prost(enumeration="CapacityOnFull", tag="3")]
+    pub on_full: i32,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecAttach {
     #[prost(string, tag="1")]
@@ -237,7 +257,7 @@ pub struct ExecAttach {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExecRequest {
-    #[prost(oneof="exec_request::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof="exec_request::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8")]
     pub payload: ::core::option::Option<exec_request::Payload>,
 }
 /// Nested message and enum types in `ExecRequest`.
@@ -261,6 +281,10 @@ pub mod exec_request {
         /// stream, and the process keeps running as if started with `detach`.
         #[prost(bool, tag="7")]
         Detach(bool),
+        /// A limited start is a distinct variant so older services reject it
+        /// before spawning, instead of silently ignoring an additive policy field.
+        #[prost(message, tag="8")]
+        LimitedStart(super::LimitedExecStart),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -409,6 +433,35 @@ pub struct KillProcessRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct KillProcessResponse {
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum CapacityOnFull {
+    Unspecified = 0,
+    Wait = 1,
+    Reject = 2,
+}
+impl CapacityOnFull {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "CAPACITY_ON_FULL_UNSPECIFIED",
+            Self::Wait => "CAPACITY_ON_FULL_WAIT",
+            Self::Reject => "CAPACITY_ON_FULL_REJECT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CAPACITY_ON_FULL_UNSPECIFIED" => Some(Self::Unspecified),
+            "CAPACITY_ON_FULL_WAIT" => Some(Self::Wait),
+            "CAPACITY_ON_FULL_REJECT" => Some(Self::Reject),
+            _ => None,
+        }
+    }
 }
 /// Who started an exec. It decides whether the daemon applies the run's rules
 /// and how the trace and the report count the process.
@@ -668,516 +721,6 @@ pub struct CheckResponse {
     /// Operating system and architecture of the machine, for example "linux/x86_64".
     #[prost(string, tag="4")]
     pub platform: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CreateRunRequest {
-    /// Profile as YAML text, self-contained: its `extends` chain merged and its
-    /// host paths absolute. The daemon reads no path on the client's machine.
-    #[prost(string, tag="1")]
-    pub profile_yaml: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub group: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub name: ::prost::alloc::string::String,
-    /// Arguments appended to the profile's driving program (`actor.command`),
-    /// as `needy run create -- ARGS` gives them.
-    #[prost(string, repeated, tag="6")]
-    pub actor_args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// The profile's name in listings, traces and reports, for example its file
-    /// name without `.profile.yaml`. Required.
-    #[prost(string, tag="7")]
-    pub profile_name: ::prost::alloc::string::String,
-    /// The actor's recipe as YAML with its `extends` chain merged, when
-    /// `actor.recipe` names a file. Empty for a built-in recipe or none.
-    #[prost(string, tag="8")]
-    pub recipe_yaml: ::prost::alloc::string::String,
-    /// Run the driving program on a terminal of this size, which `needy run
-    /// attach` connects to. Unset: no terminal, stdin `/dev/null`, output to
-    /// the actor's console.
-    #[prost(message, optional, tag="9")]
-    pub tty: ::core::option::Option<WindowSize>,
-    /// With tty: start the program after its first terminal client subscribed,
-    /// so `run create -it` also receives a program that exits immediately.
-    #[prost(bool, tag="10")]
-    pub wait_for_attach: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecutorRef {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// The executor driver that created the instance (`native`,
-    /// `linux-container`), or `runner` for a runner's own process space.
-    #[prost(string, tag="2")]
-    pub driver: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub instance: ::prost::alloc::string::String,
-    /// The run gave the executor back: it stopped, finished or failed.
-    #[prost(bool, tag="4")]
-    pub released: bool,
-    /// The control plane restarted, and no runner reported the instance
-    /// within the time it waits for reports: whether it still runs is unknown.
-    #[prost(bool, tag="5")]
-    pub lost: bool,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Run {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(string, tag="3")]
-    pub group: ::prost::alloc::string::String,
-    #[prost(enumeration="RunState", tag="8")]
-    pub state: i32,
-    #[prost(message, repeated, tag="5")]
-    pub executors: ::prost::alloc::vec::Vec<ExecutorRef>,
-    #[prost(int64, tag="6")]
-    pub created_at_ms: i64,
-    /// The profile's name, as `CreateRunRequest.profile_name` gave it.
-    #[prost(string, tag="7")]
-    pub profile: ::prost::alloc::string::String,
-    /// How the actor's driving program ended. Unset while it runs, for a
-    /// run without an actor, and for an actor whose VM ended before the
-    /// program reported its exit.
-    #[prost(message, optional, tag="9")]
-    pub actor_exit: ::core::option::Option<ExecExited>,
-    /// Why the run failed, with its causes. Empty unless it failed.
-    #[prost(string, tag="10")]
-    pub failure: ::prost::alloc::string::String,
-    /// The driving program runs on a terminal (`CreateRunRequest.tty`).
-    #[prost(bool, tag="11")]
-    pub tty: bool,
-    /// Where the run's actor stands. Unspecified before it starts, and for a
-    /// run the control plane lists from its database after the run ended.
-    #[prost(enumeration="ActorState", tag="12")]
-    pub actor_state: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CreateRunResponse {
-    #[prost(message, optional, tag="1")]
-    pub run: ::core::option::Option<Run>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetRunRequest {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetRunResponse {
-    #[prost(message, optional, tag="1")]
-    pub run: ::core::option::Option<Run>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListRunsRequest {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListRunsResponse {
-    #[prost(message, repeated, tag="1")]
-    pub runs: ::prost::alloc::vec::Vec<Run>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct StopRunRequest {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// End the actor at once: no grace period and no actor mirror-out.
-    #[prost(bool, tag="2")]
-    pub now: bool,
-    /// How long the driving program has after SIGTERM before SIGKILL; unset
-    /// for the control plane's default.
-    #[prost(int64, optional, tag="3")]
-    pub grace_ms: ::core::option::Option<i64>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct StopRunResponse {
-    /// How the run's running actor ended: unset when the run had no running
-    /// actor, true when it ended after its mirror-out, false when it was
-    /// killed.
-    #[prost(bool, optional, tag="1")]
-    pub graceful: ::core::option::Option<bool>,
-    /// Why a running actor was killed.
-    #[prost(string, tag="2")]
-    pub reason: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetRunLogsRequest {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// Keep streaming what the actor writes until the run ends or the caller
-    /// leaves.
-    #[prost(bool, tag="2")]
-    pub follow: bool,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetRunLogsResponse {
-    #[prost(bytes="vec", tag="1")]
-    pub data: ::prost::alloc::vec::Vec<u8>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct GetRunEventsRequest {
-    /// A run ID, an ID prefix (the run that started last among those it
-    /// matches), or `latest`.
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GetRunEventsResponse {
-    /// The full run ID.
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
-    pub events: ::prost::alloc::vec::Vec<StoredEvent>,
-}
-/// One trace event as stored. The payload's schema belongs to its kind and
-/// version; clients decode it with the same rules as the control plane.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct StoredEvent {
-    /// The event's place in its run, from 0.
-    #[prost(uint64, tag="1")]
-    pub seq: u64,
-    #[prost(int64, tag="2")]
-    pub time_ms: i64,
-    /// For example `exec.decide`.
-    #[prost(string, tag="3")]
-    pub kind: ::prost::alloc::string::String,
-    /// The payload schema version.
-    #[prost(uint32, tag="4")]
-    pub version: u32,
-    /// A JSON object.
-    #[prost(string, tag="5")]
-    pub payload: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DecideRequest {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag="2")]
-    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(string, tag="3")]
-    pub cwd: ::prost::alloc::string::String,
-    #[prost(map="string, string", tag="4")]
-    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    #[prost(bool, tag="5")]
-    pub tty: bool,
-    /// The processes the command runs under, nearest first: its parent, the
-    /// parent's parent and so on, up to but not including the actor's init.
-    /// Rules match `when.under` against them.
-    #[prost(message, repeated, tag="6")]
-    pub ancestors: ::prost::alloc::vec::Vec<Ancestor>,
-}
-/// A process a command runs under.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Ancestor {
-    #[prost(string, repeated, tag="1")]
-    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct DecideResponse {
-    /// "actor", an executor name, or empty when denied.
-    #[prost(string, tag="1")]
-    pub target: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag="2")]
-    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    #[prost(map="string, string", tag="3")]
-    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    #[prost(bool, tag="4")]
-    pub clear_env: bool,
-    #[prost(string, tag="5")]
-    pub cwd: ::prost::alloc::string::String,
-    /// Set when a rule refuses the command: the message to show,
-    /// "denied: <rule message>".
-    #[prost(string, tag="6")]
-    pub deny: ::prost::alloc::string::String,
-    /// The value of `ExecStart.search_path_if_missing` for the routed exec.
-    #[prost(bool, tag="7")]
-    pub search_path_if_missing: bool,
-    /// Set when a chaos fault ends the command instead of running it.
-    #[prost(message, optional, tag="8")]
-    pub fault: ::core::option::Option<ExecFault>,
-}
-/// How a chaos fault ends a command in place of running it: exactly one of
-/// `exit_code`, `signal` and `hang`.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecFault {
-    /// The fault's name.
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// Exit with this code.
-    #[prost(int32, optional, tag="2")]
-    pub exit_code: ::core::option::Option<i32>,
-    /// Die of this signal, by name, such as `SIGSEGV`.
-    #[prost(string, tag="3")]
-    pub signal: ::prost::alloc::string::String,
-    /// Never finish, until the caller gives up or the run ends.
-    #[prost(bool, tag="4")]
-    pub hang: bool,
-    /// Written to stderr first.
-    #[prost(string, tag="5")]
-    pub stderr: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CheckProfileRequest {
-    /// As in `CreateRunRequest`.
-    #[prost(string, tag="1")]
-    pub profile_yaml: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub recipe_yaml: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CheckProfileResponse {
-    /// Where the actor would run; unset when its runner selector does not
-    /// resolve, which a finding explains.
-    #[prost(message, optional, tag="1")]
-    pub actor: ::core::option::Option<Placement>,
-    /// Where each executor would run, by name; an executor whose selector does
-    /// not resolve is missing, and a finding explains why.
-    #[prost(map="string, message", tag="2")]
-    pub executors: ::std::collections::HashMap<::prost::alloc::string::String, Placement>,
-    /// The model name of the CPU the recipe was checked against; empty when the
-    /// actor's host did not report one.
-    #[prost(string, tag="3")]
-    pub actor_cpu: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="4")]
-    pub findings: ::prost::alloc::vec::Vec<ProfileFinding>,
-    /// The image the actor would start from, as its driver names it: a
-    /// container image's reference, or a VM image's directory and the OCI image
-    /// it was made from. Empty when the actor's driver is not this control
-    /// host's.
-    #[prost(string, tag="5")]
-    pub actor_image: ::prost::alloc::string::String,
-    /// The base ABI the actor image records, when it is the one this control
-    /// plane speaks; empty when it is not, which a finding explains.
-    #[prost(string, tag="6")]
-    pub actor_base_abi: ::prost::alloc::string::String,
-}
-/// The host an actor or executor would run on.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct Placement {
-    /// A runner's name; empty for the control host itself.
-    #[prost(string, tag="1")]
-    pub runner: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ProfileFinding {
-    #[prost(message, optional, tag="3")]
-    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
-    #[prost(enumeration="FindingSeverity", tag="1")]
-    pub severity: i32,
-    #[prost(string, tag="2")]
-    pub message: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AddFaultRequest {
-    /// A run ID, an ID prefix, a name or `latest`.
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// The fault's name: letters, digits, `-`, `_` and `.`.
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    /// The fault as YAML, written as an entry of a profile's `chaos.faults`,
-    /// for example `{ exec: "curl **", exit: 7 }`.
-    #[prost(string, tag="3")]
-    pub fault_yaml: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct AddFaultResponse {
-    /// The full run ID.
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// What the fault cannot reach. Nothing does today: the daemon sends a
-    /// running actor its new route list (`GuestService.Control`), so an exec
-    /// fault reaches every command.
-    #[prost(string, repeated, tag="2")]
-    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListFaultsRequest {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListFaultsResponse {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    /// In name order.
-    #[prost(message, repeated, tag="2")]
-    pub faults: ::prost::alloc::vec::Vec<FaultInfo>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct FaultInfo {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// `exec`, `file`, `net` or `sensor`.
-    #[prost(string, tag="2")]
-    pub domain: ::prost::alloc::string::String,
-    /// The fault as YAML, as `AddFaultRequest.fault_yaml` takes it.
-    #[prost(string, tag="3")]
-    pub fault_yaml: ::prost::alloc::string::String,
-    #[prost(enumeration="FaultSource", tag="4")]
-    pub source: i32,
-    /// Operations it matched within its time window.
-    #[prost(uint64, tag="5")]
-    pub matched: u64,
-    /// Times it fired.
-    #[prost(uint64, tag="6")]
-    pub fired: u64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RemoveFaultRequest {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RemoveFaultResponse {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-}
-/// A run's life cycle. The first terminal state (stopped, finished or
-/// failed) wins.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum RunState {
-    Unspecified = 0,
-    Creating = 1,
-    Running = 2,
-    Stopping = 3,
-    Stopped = 4,
-    /// The actor's driving program exited.
-    Finished = 5,
-    Failed = 6,
-}
-impl RunState {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "RUN_STATE_UNSPECIFIED",
-            Self::Creating => "RUN_STATE_CREATING",
-            Self::Running => "RUN_STATE_RUNNING",
-            Self::Stopping => "RUN_STATE_STOPPING",
-            Self::Stopped => "RUN_STATE_STOPPED",
-            Self::Finished => "RUN_STATE_FINISHED",
-            Self::Failed => "RUN_STATE_FAILED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "RUN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "RUN_STATE_CREATING" => Some(Self::Creating),
-            "RUN_STATE_RUNNING" => Some(Self::Running),
-            "RUN_STATE_STOPPING" => Some(Self::Stopping),
-            "RUN_STATE_STOPPED" => Some(Self::Stopped),
-            "RUN_STATE_FINISHED" => Some(Self::Finished),
-            "RUN_STATE_FAILED" => Some(Self::Failed),
-            _ => None,
-        }
-    }
-}
-/// An actor's life cycle, the same for every actor driver. Exited is
-/// terminal.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum ActorState {
-    Unspecified = 0,
-    /// Its driver is starting it, or its guest boots.
-    Starting = 1,
-    /// Its guest fetched the run's configuration.
-    Configured = 2,
-    /// Its process service answered a request: a client can attach. Only a
-    /// driving program on a terminal has one.
-    Ready = 3,
-    /// It exited, or its run stopped it.
-    Exited = 4,
-}
-impl ActorState {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ACTOR_STATE_UNSPECIFIED",
-            Self::Starting => "ACTOR_STATE_STARTING",
-            Self::Configured => "ACTOR_STATE_CONFIGURED",
-            Self::Ready => "ACTOR_STATE_READY",
-            Self::Exited => "ACTOR_STATE_EXITED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ACTOR_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "ACTOR_STATE_STARTING" => Some(Self::Starting),
-            "ACTOR_STATE_CONFIGURED" => Some(Self::Configured),
-            "ACTOR_STATE_READY" => Some(Self::Ready),
-            "ACTOR_STATE_EXITED" => Some(Self::Exited),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum FaultSource {
-    Unspecified = 0,
-    /// The run's profile.
-    Profile = 1,
-    /// AddFault, while the run ran.
-    Added = 2,
-}
-impl FaultSource {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "FAULT_SOURCE_UNSPECIFIED",
-            Self::Profile => "FAULT_SOURCE_PROFILE",
-            Self::Added => "FAULT_SOURCE_ADDED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "FAULT_SOURCE_UNSPECIFIED" => Some(Self::Unspecified),
-            "FAULT_SOURCE_PROFILE" => Some(Self::Profile),
-            "FAULT_SOURCE_ADDED" => Some(Self::Added),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum FindingSeverity {
-    Unspecified = 0,
-    Error = 1,
-    Warning = 2,
-}
-impl FindingSeverity {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "FINDING_SEVERITY_UNSPECIFIED",
-            Self::Error => "FINDING_SEVERITY_ERROR",
-            Self::Warning => "FINDING_SEVERITY_WARNING",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "FINDING_SEVERITY_UNSPECIFIED" => Some(Self::Unspecified),
-            "FINDING_SEVERITY_ERROR" => Some(Self::Error),
-            "FINDING_SEVERITY_WARNING" => Some(Self::Warning),
-            _ => None,
-        }
-    }
 }
 /// What a runner can host: each role with its drivers. A role with none is a
 /// role it does not hold.
@@ -1710,6 +1253,537 @@ impl RunnerStatus {
             "RUNNER_STATUS_ONLINE" => Some(Self::Online),
             "RUNNER_STATUS_OFFLINE" => Some(Self::Offline),
             "RUNNER_STATUS_REMOVED" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CreateRunRequest {
+    /// Profile as YAML text, self-contained: its `extends` chain merged and its
+    /// host paths absolute. The daemon reads no path on the client's machine.
+    #[prost(string, tag="1")]
+    pub profile_yaml: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub group: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub name: ::prost::alloc::string::String,
+    /// Arguments appended to the profile's driving program (`actor.command`),
+    /// as `needy run create -- ARGS` gives them.
+    #[prost(string, repeated, tag="6")]
+    pub actor_args: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The profile's name in listings, traces and reports, for example its file
+    /// name without `.profile.yaml`. Required.
+    #[prost(string, tag="7")]
+    pub profile_name: ::prost::alloc::string::String,
+    /// The actor's recipe as YAML with its `extends` chain merged, when
+    /// `actor.recipe` names a file. Empty for a built-in recipe or none.
+    #[prost(string, tag="8")]
+    pub recipe_yaml: ::prost::alloc::string::String,
+    /// Run the driving program on a terminal of this size, which `needy run
+    /// attach` connects to. Unset: no terminal, stdin `/dev/null`, output to
+    /// the actor's console.
+    #[prost(message, optional, tag="9")]
+    pub tty: ::core::option::Option<WindowSize>,
+    /// With tty: start the program after its first terminal client subscribed,
+    /// so `run create -it` also receives a program that exits immediately.
+    #[prost(bool, tag="10")]
+    pub wait_for_attach: bool,
+    /// Single-use capability for executors selecting {client: true}.
+    #[prost(string, tag="11")]
+    pub client_execution: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecutorRef {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// The executor driver that created the instance (`native`,
+    /// `linux-container`), or `runner` for a runner's own process space.
+    #[prost(string, tag="2")]
+    pub driver: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub instance: ::prost::alloc::string::String,
+    /// The run gave the executor back: it stopped, finished or failed.
+    #[prost(bool, tag="4")]
+    pub released: bool,
+    /// The control plane restarted, and no runner reported the instance
+    /// within the time it waits for reports: whether it still runs is unknown.
+    #[prost(bool, tag="5")]
+    pub lost: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Run {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub group: ::prost::alloc::string::String,
+    #[prost(enumeration="RunState", tag="8")]
+    pub state: i32,
+    #[prost(message, repeated, tag="5")]
+    pub executors: ::prost::alloc::vec::Vec<ExecutorRef>,
+    #[prost(int64, tag="6")]
+    pub created_at_ms: i64,
+    /// The profile's name, as `CreateRunRequest.profile_name` gave it.
+    #[prost(string, tag="7")]
+    pub profile: ::prost::alloc::string::String,
+    /// How the actor's driving program ended. Unset while it runs, for a
+    /// run without an actor, and for an actor whose VM ended before the
+    /// program reported its exit.
+    #[prost(message, optional, tag="9")]
+    pub actor_exit: ::core::option::Option<ExecExited>,
+    /// Why the run failed, with its causes. Empty unless it failed.
+    #[prost(string, tag="10")]
+    pub failure: ::prost::alloc::string::String,
+    /// The driving program runs on a terminal (`CreateRunRequest.tty`).
+    #[prost(bool, tag="11")]
+    pub tty: bool,
+    /// Where the run's actor stands. Unspecified before it starts, and for a
+    /// run the control plane lists from its database after the run ended.
+    #[prost(enumeration="ActorState", tag="12")]
+    pub actor_state: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateRunResponse {
+    #[prost(message, optional, tag="1")]
+    pub run: ::core::option::Option<Run>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRunRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRunResponse {
+    #[prost(message, optional, tag="1")]
+    pub run: ::core::option::Option<Run>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListRunsRequest {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListRunsResponse {
+    #[prost(message, repeated, tag="1")]
+    pub runs: ::prost::alloc::vec::Vec<Run>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StopRunRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// End the actor at once: no grace period and no actor mirror-out.
+    #[prost(bool, tag="2")]
+    pub now: bool,
+    /// How long the driving program has after SIGTERM before SIGKILL; unset
+    /// for the control plane's default.
+    #[prost(int64, optional, tag="3")]
+    pub grace_ms: ::core::option::Option<i64>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StopRunResponse {
+    /// How the run's running actor ended: unset when the run had no running
+    /// actor, true when it ended after its mirror-out, false when it was
+    /// killed.
+    #[prost(bool, optional, tag="1")]
+    pub graceful: ::core::option::Option<bool>,
+    /// Why a running actor was killed.
+    #[prost(string, tag="2")]
+    pub reason: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRunLogsRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// Keep streaming what the actor writes until the run ends or the caller
+    /// leaves.
+    #[prost(bool, tag="2")]
+    pub follow: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRunLogsResponse {
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetRunEventsRequest {
+    /// A run ID, an ID prefix (the run that started last among those it
+    /// matches), or `latest`.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetRunEventsResponse {
+    /// The full run ID.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="2")]
+    pub events: ::prost::alloc::vec::Vec<StoredEvent>,
+}
+/// One trace event as stored. The payload's schema belongs to its kind and
+/// version; clients decode it with the same rules as the control plane.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StoredEvent {
+    /// The event's place in its run, from 0.
+    #[prost(uint64, tag="1")]
+    pub seq: u64,
+    #[prost(int64, tag="2")]
+    pub time_ms: i64,
+    /// For example `exec.decide`.
+    #[prost(string, tag="3")]
+    pub kind: ::prost::alloc::string::String,
+    /// The payload schema version.
+    #[prost(uint32, tag="4")]
+    pub version: u32,
+    /// A JSON object.
+    #[prost(string, tag="5")]
+    pub payload: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecideRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="2")]
+    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag="3")]
+    pub cwd: ::prost::alloc::string::String,
+    #[prost(map="string, string", tag="4")]
+    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(bool, tag="5")]
+    pub tty: bool,
+    /// The processes the command runs under, nearest first: its parent, the
+    /// parent's parent and so on, up to but not including the actor's init.
+    /// Rules match `when.under` against them.
+    #[prost(message, repeated, tag="6")]
+    pub ancestors: ::prost::alloc::vec::Vec<Ancestor>,
+}
+/// A process a command runs under.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Ancestor {
+    #[prost(string, repeated, tag="1")]
+    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct DecideResponse {
+    /// "actor", an executor name, or empty when denied.
+    #[prost(string, tag="1")]
+    pub target: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="2")]
+    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(map="string, string", tag="3")]
+    pub env: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(bool, tag="4")]
+    pub clear_env: bool,
+    #[prost(string, tag="5")]
+    pub cwd: ::prost::alloc::string::String,
+    /// Set when a rule refuses the command: the message to show,
+    /// "denied: <rule message>".
+    #[prost(string, tag="6")]
+    pub deny: ::prost::alloc::string::String,
+    /// The value of `ExecStart.search_path_if_missing` for the routed exec.
+    #[prost(bool, tag="7")]
+    pub search_path_if_missing: bool,
+    /// Set when a chaos fault ends the command instead of running it.
+    #[prost(message, optional, tag="8")]
+    pub fault: ::core::option::Option<ExecFault>,
+}
+/// How a chaos fault ends a command in place of running it: exactly one of
+/// `exit_code`, `signal` and `hang`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecFault {
+    /// The fault's name.
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Exit with this code.
+    #[prost(int32, optional, tag="2")]
+    pub exit_code: ::core::option::Option<i32>,
+    /// Die of this signal, by name, such as `SIGSEGV`.
+    #[prost(string, tag="3")]
+    pub signal: ::prost::alloc::string::String,
+    /// Never finish, until the caller gives up or the run ends.
+    #[prost(bool, tag="4")]
+    pub hang: bool,
+    /// Written to stderr first.
+    #[prost(string, tag="5")]
+    pub stderr: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CheckProfileRequest {
+    /// As in `CreateRunRequest`.
+    #[prost(string, tag="1")]
+    pub profile_yaml: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub recipe_yaml: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CheckProfileResponse {
+    /// Where the actor would run; unset when its runner selector does not
+    /// resolve, which a finding explains.
+    #[prost(message, optional, tag="1")]
+    pub actor: ::core::option::Option<Placement>,
+    /// Where each executor would run, by name; an executor whose selector does
+    /// not resolve is missing, and a finding explains why.
+    #[prost(map="string, message", tag="2")]
+    pub executors: ::std::collections::HashMap<::prost::alloc::string::String, Placement>,
+    /// The model name of the CPU the recipe was checked against; empty when the
+    /// actor's host did not report one.
+    #[prost(string, tag="3")]
+    pub actor_cpu: ::prost::alloc::string::String,
+    #[prost(message, repeated, tag="4")]
+    pub findings: ::prost::alloc::vec::Vec<ProfileFinding>,
+    /// The image the actor would start from, as its driver names it: a
+    /// container image's reference, or a VM image's directory and the OCI image
+    /// it was made from. Empty when the actor's driver is not this control
+    /// host's.
+    #[prost(string, tag="5")]
+    pub actor_image: ::prost::alloc::string::String,
+    /// The base ABI the actor image records, when it is the one this control
+    /// plane speaks; empty when it is not, which a finding explains.
+    #[prost(string, tag="6")]
+    pub actor_base_abi: ::prost::alloc::string::String,
+}
+/// The host an actor or executor would run on.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Placement {
+    /// A runner's name; empty for the control host itself.
+    #[prost(string, tag="1")]
+    pub runner: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ProfileFinding {
+    #[prost(message, optional, tag="3")]
+    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
+    #[prost(enumeration="FindingSeverity", tag="1")]
+    pub severity: i32,
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddFaultRequest {
+    /// A run ID, an ID prefix, a name or `latest`.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// The fault's name: letters, digits, `-`, `_` and `.`.
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    /// The fault as YAML, written as an entry of a profile's `chaos.faults`,
+    /// for example `{ exec: "curl **", exit: 7 }`.
+    #[prost(string, tag="3")]
+    pub fault_yaml: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct AddFaultResponse {
+    /// The full run ID.
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// What the fault cannot reach. Nothing does today: the daemon sends a
+    /// running actor its new route list (`GuestService.Control`), so an exec
+    /// fault reaches every command.
+    #[prost(string, repeated, tag="2")]
+    pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListFaultsRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListFaultsResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    /// In name order.
+    #[prost(message, repeated, tag="2")]
+    pub faults: ::prost::alloc::vec::Vec<FaultInfo>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FaultInfo {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// `exec`, `file`, `net` or `sensor`.
+    #[prost(string, tag="2")]
+    pub domain: ::prost::alloc::string::String,
+    /// The fault as YAML, as `AddFaultRequest.fault_yaml` takes it.
+    #[prost(string, tag="3")]
+    pub fault_yaml: ::prost::alloc::string::String,
+    #[prost(enumeration="FaultSource", tag="4")]
+    pub source: i32,
+    /// Operations it matched within its time window.
+    #[prost(uint64, tag="5")]
+    pub matched: u64,
+    /// Times it fired.
+    #[prost(uint64, tag="6")]
+    pub fired: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveFaultRequest {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveFaultResponse {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+/// Local host facts; native execution always runs as the holder's OS account.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PrepareClientExecutionRequest {
+    #[prost(message, optional, tag="1")]
+    pub host: ::core::option::Option<RunnerHost>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PrepareClientExecutionResponse {
+    /// Internal identity for the existing outbound task transport.
+    #[prost(string, tag="1")]
+    pub holder: ::prost::alloc::string::String,
+    /// Used once by CreateRun and by this holder on Control/Task/Heartbeat.
+    #[prost(string, tag="2")]
+    pub capability: ::prost::alloc::string::String,
+    /// Reserved invocation identity; task inputs must name this run.
+    #[prost(string, tag="3")]
+    pub run_id: ::prost::alloc::string::String,
+}
+/// A run's life cycle. The first terminal state (stopped, finished or
+/// failed) wins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RunState {
+    Unspecified = 0,
+    Creating = 1,
+    Running = 2,
+    Stopping = 3,
+    Stopped = 4,
+    /// The actor's driving program exited.
+    Finished = 5,
+    Failed = 6,
+}
+impl RunState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUN_STATE_UNSPECIFIED",
+            Self::Creating => "RUN_STATE_CREATING",
+            Self::Running => "RUN_STATE_RUNNING",
+            Self::Stopping => "RUN_STATE_STOPPING",
+            Self::Stopped => "RUN_STATE_STOPPED",
+            Self::Finished => "RUN_STATE_FINISHED",
+            Self::Failed => "RUN_STATE_FAILED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUN_STATE_CREATING" => Some(Self::Creating),
+            "RUN_STATE_RUNNING" => Some(Self::Running),
+            "RUN_STATE_STOPPING" => Some(Self::Stopping),
+            "RUN_STATE_STOPPED" => Some(Self::Stopped),
+            "RUN_STATE_FINISHED" => Some(Self::Finished),
+            "RUN_STATE_FAILED" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+/// An actor's life cycle, the same for every actor driver. Exited is
+/// terminal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ActorState {
+    Unspecified = 0,
+    /// Its driver is starting it, or its guest boots.
+    Starting = 1,
+    /// Its guest fetched the run's configuration.
+    Configured = 2,
+    /// Its process service answered a request: a client can attach. Only a
+    /// driving program on a terminal has one.
+    Ready = 3,
+    /// It exited, or its run stopped it.
+    Exited = 4,
+}
+impl ActorState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACTOR_STATE_UNSPECIFIED",
+            Self::Starting => "ACTOR_STATE_STARTING",
+            Self::Configured => "ACTOR_STATE_CONFIGURED",
+            Self::Ready => "ACTOR_STATE_READY",
+            Self::Exited => "ACTOR_STATE_EXITED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACTOR_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTOR_STATE_STARTING" => Some(Self::Starting),
+            "ACTOR_STATE_CONFIGURED" => Some(Self::Configured),
+            "ACTOR_STATE_READY" => Some(Self::Ready),
+            "ACTOR_STATE_EXITED" => Some(Self::Exited),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FaultSource {
+    Unspecified = 0,
+    /// The run's profile.
+    Profile = 1,
+    /// AddFault, while the run ran.
+    Added = 2,
+}
+impl FaultSource {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FAULT_SOURCE_UNSPECIFIED",
+            Self::Profile => "FAULT_SOURCE_PROFILE",
+            Self::Added => "FAULT_SOURCE_ADDED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FAULT_SOURCE_UNSPECIFIED" => Some(Self::Unspecified),
+            "FAULT_SOURCE_PROFILE" => Some(Self::Profile),
+            "FAULT_SOURCE_ADDED" => Some(Self::Added),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum FindingSeverity {
+    Unspecified = 0,
+    Error = 1,
+    Warning = 2,
+}
+impl FindingSeverity {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "FINDING_SEVERITY_UNSPECIFIED",
+            Self::Error => "FINDING_SEVERITY_ERROR",
+            Self::Warning => "FINDING_SEVERITY_WARNING",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "FINDING_SEVERITY_UNSPECIFIED" => Some(Self::Unspecified),
+            "FINDING_SEVERITY_ERROR" => Some(Self::Error),
+            "FINDING_SEVERITY_WARNING" => Some(Self::Warning),
             _ => None,
         }
     }

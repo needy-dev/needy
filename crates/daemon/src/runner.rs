@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context as _, Result, bail};
@@ -28,7 +29,7 @@ use needy_api_client::proto::v1::{
   TaskError, TaskRequest, TaskResult, control_request, control_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Client, Kind};
-use needy_api_server::control::RunnerHost;
+use needy_api_server::control::{ControlError, RunnerHost};
 use needy_api_server::protocol::domain::{proto_capabilities, proto_runner_host};
 use needy_core::types::{Capabilities, RunnerRole};
 use needy_core_executor::process::{Host, Input};
@@ -251,7 +252,10 @@ impl Runner {
         // instead of leaving both valid for an interval.
         Ok(()) if self.enrollment.credential != before => Duration::ZERO,
         Ok(()) => self.interval.unwrap_or(RETRY),
-        Err(e) if refused(&e) => return Err(refusal(&self.path)),
+        // Keep the typed refusal: an invocation holder treats its normal
+        // credential revocation as completion, while a persistent runner
+        // still reports the enrollment guidance to its operator.
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
         Err(e) => {
           tracing::warn!("runner {}: heartbeat: {e:#}", self.enrollment.name);
           // The connection is made again for the next heartbeat.
@@ -377,6 +381,9 @@ impl Runner {
     let host = service.host.clone();
     let dialer = Dialer {
       control: self.control.clone(),
+      command: None,
+      bound_run: None,
+      ended: Arc::new(AtomicBool::new(false)),
       name: self.name().to_string(),
       path: self.path.clone(),
       credential: self.credential.clone(),
@@ -407,6 +414,11 @@ impl Runner {
 /// The runner's side of its control stream and task streams.
 struct Dialer {
   control: String,
+  command: Option<Vec<String>>,
+  /// Private client holders accept tasks for this invocation only and keep
+  /// its processes through an arbitrarily long control disconnection.
+  bound_run: Option<String>,
+  ended: Arc<AtomicBool>,
   name: String,
   /// `runner.json`, named when the credential is refused.
   path: PathBuf,
@@ -442,11 +454,11 @@ impl Dialer {
         () = stop.cancelled() => return Ok(()),
       };
       // The processes of runs wait for the control plane to come back.
-      if connected {
+      if connected && self.bound_run.is_none() {
         self.orphan(&stop);
       }
       match ended {
-        Err(e) if refused(&e) => return Err(refusal(&self.path)),
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
         Err(e) => tracing::warn!("runner {}: control stream: {e:#}", self.name),
         Ok(()) => tracing::info!("runner {}: the control plane ended the control stream", self.name),
       }
@@ -509,8 +521,12 @@ impl Dialer {
 
   /// One control stream, from connecting until it ends.
   async fn session(&self, stop: &CancellationToken, connected: &mut bool) -> Result<()> {
-    let client =
-      Client::connect_kept_alive(&self.control).await.with_context(|| format!("cannot reach the control plane at {}", self.control))?;
+    let client = match &self.command {
+      Some(command) => Client::connect_command(command.clone()).await?,
+      None => {
+        Client::connect_kept_alive(&self.control).await.with_context(|| format!("cannot reach the control plane at {}", self.control))?
+      }
+    };
     let (results, rx) = mpsc::channel(RESULTS);
     // The first message says what the runner still runs for runs.
     let report = ControlRequest {
@@ -528,10 +544,43 @@ impl Dialer {
       let Some(control_response::Payload::Task(task)) = message.payload else {
         continue;
       };
-      let Some(kind) = task.kind else {
+      let Some(mut kind) = task.kind else {
         continue;
       };
       let id = task.id;
+      if let Some(run) = &self.bound_run {
+        // A private holder is never an unrestricted shared process host.
+        let allowed = match &mut kind {
+          runner_task::Kind::ListProcesses(request) => {
+            let allowed = request.run_id.is_empty() || request.run_id == *run;
+            request.run_id = run.clone();
+            allowed
+          }
+          runner_task::Kind::EndRun(request) => {
+            if request.run_id == *run {
+              self.ended.store(true, Ordering::SeqCst);
+              true
+            } else {
+              false
+            }
+          }
+          runner_task::Kind::KillProcess(request) => self.service.host.list().iter().any(|p| p.id == request.process_id && p.run_id == *run),
+          runner_task::Kind::Exec(_) => true, // The first ExecRequest is checked below.
+        };
+        if !allowed {
+          let error = ControlError::denied("task does not belong to this client execution invocation");
+          results
+            .send(ControlRequest {
+              payload: Some(control_request::Payload::Result(TaskResult {
+                task_id: id,
+                result: Some(task_result::Result::Error(task_error(&error.into()))),
+              })),
+            })
+            .await
+            .context("control stream ended before task refusal")?;
+          continue;
+        }
+      }
       let service = self.service.clone();
       let stop = stop.clone();
       match kind {
@@ -539,8 +588,10 @@ impl Dialer {
           // A task stream presents the credential current when it opens.
           let client = self.authenticated(&client)?;
           let name = self.name.clone();
+          let bound_run = self.bound_run.clone();
+          let ended = self.ended.clone();
           self.tasks.spawn(async move {
-            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id)).await {
+            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id, bound_run, ended)).await {
               tracing::warn!("runner {name}: exec task {id}: {e:#}");
             }
           });
@@ -603,7 +654,7 @@ async fn run_processes(service: &ExecutorService) -> Vec<ProcessInfo> {
 // run on the control host, which removes them); one that does removes the
 // run's containers here too.
 async fn end_run(service: &ExecutorService, run: &str) -> EndRunResponse {
-  let procs: Vec<_> = service.host.list().into_iter().filter(|p| p.run_id == run && p.exit().is_none()).collect();
+  let procs = service.host.end_run(run);
   let mut ended = Vec::new();
   for proc in &procs {
     // NOTICE: SIGKILL, as the executors' own shutdown uses: the run is over,
@@ -639,9 +690,9 @@ fn task_error(status: &tonic::Status) -> TaskError {
 /// Opens the task stream of exec task `id` and runs the exec on it: the
 /// control plane's requests go to this machine's process service, its
 /// responses back up. When the control plane leaves the stream, or the
-/// connection ends, the exec's client is gone: a process it did not detach
-/// ends as with any client that leaves.
-async fn exec(client: Client, service: ExecutorService, id: u64) -> Result<()> {
+/// connection ends, a persistent runner follows ordinary stream semantics;
+/// a private client holder preserves the process under its invocation owner.
+async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Option<String>, ended: Arc<AtomicBool>) -> Result<()> {
   let (up, rx) = mpsc::channel::<TaskRequest>(RESULTS);
   let named = TaskRequest {
     payload: Some(task_request::Payload::TaskId(id)),
@@ -656,16 +707,48 @@ async fn exec(client: Client, service: ExecutorService, id: u64) -> Result<()> {
   // exec ended or was refused: dropping it would reset the stream, and the
   // reset can overtake the last responses (the refusal, the exit) still on
   // their way up.
+  let preserve = bound_run.is_some();
   let pump = {
     let left = left.clone();
+    let up = up.clone();
+    let host = service.host.clone();
     async move {
       loop {
         match down.message().await {
           Ok(Some(message)) => {
-            if let Some(request) = message.exec
-              && requests.send(Ok(request)).await.is_err()
-            {
-              tracing::debug!("exec task {id}: a request after the exec ended");
+            if let Some(request) = message.exec {
+              if let Some(run) = &bound_run {
+                use needy_api_client::proto::v1::exec_request::Payload;
+                let allowed = match &request.payload {
+                  Some(Payload::Start(start)) => !ended.load(Ordering::SeqCst) && start.run_id == *run && start.runner.is_empty(),
+                  Some(Payload::LimitedStart(limited)) => limited
+                    .start
+                    .as_ref()
+                    .is_some_and(|start| !ended.load(Ordering::SeqCst) && start.run_id == *run && start.runner.is_empty()),
+                  Some(Payload::Attach(attach)) => {
+                    attach.run_id == *run || host.list().iter().any(|p| p.id == attach.process_id && p.run_id == *run)
+                  }
+                  _ => true,
+                };
+                if !allowed {
+                  let error = ControlError::denied("exec does not belong to this client execution invocation");
+                  // The remote side may already have closed; a failed refusal
+                  // delivery has no remaining recipient.
+                  if up
+                    .send(TaskRequest {
+                      payload: Some(task_request::Payload::Error(task_error(&error.into()))),
+                    })
+                    .await
+                    .is_err()
+                  {
+                    tracing::debug!("exec task {id}: control left before invocation refusal");
+                  }
+                  break;
+                }
+              }
+              if requests.send(Ok(request)).await.is_err() {
+                tracing::debug!("exec task {id}: a request after the exec ended");
+              }
             }
           }
           Ok(None) => break,
@@ -682,7 +765,22 @@ async fn exec(client: Client, service: ExecutorService, id: u64) -> Result<()> {
     let error = |status: &tonic::Status| TaskRequest {
       payload: Some(task_request::Payload::Error(task_error(status))),
     };
-    let mut responses = match service.open(Box::pin(ReceiverStream::new(inbound))).await {
+    let inbound = Box::pin(ReceiverStream::new(inbound));
+    let opening = async {
+      if preserve {
+        service.open_preserving(inbound).await
+      } else {
+        service.open(inbound).await
+      }
+    };
+    let opened = tokio::select! {
+      biased;
+      // A capacity waiter owns no process yet. Cancel its admission when
+      // control drops the task stream, rather than starting it later.
+      () = left.cancelled() => return,
+      result = opening => result,
+    };
+    let mut responses = match opened {
       Ok(responses) => responses,
       Err(status) => {
         // The control plane gave up waiting; nothing to tell it.
@@ -757,3 +855,89 @@ pub async fn serve_with_labels(config: Config, persist_labels: bool) -> Result<(
 #[cfg(all(test, unix))]
 #[path = "runner_test.rs"]
 mod tests;
+
+/// Private, same-account helper startup data. The CLI hands this through a
+/// protected file, never argv or the environment. It contains no control token.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClientExecutionConfig {
+  pub control: Option<String>,
+  pub command: Option<Vec<String>>,
+  pub holder: String,
+  pub capability: String,
+  pub run: String,
+  pub directory: PathBuf,
+}
+
+/// Serves exactly one client's reserved invocation, across viewer loss and
+/// control restarts. The control plane's run state, rather than viewer or
+/// connection lifetime, decides when its capability stops being accepted.
+pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()> {
+  let termination = needy_api_server::termination::Termination::listen().context("cannot handle execution holder signals")?;
+  let stop = termination.stop();
+  let service = ExecutorService {
+    host: Host::default(),
+    name: config.holder.clone(),
+  };
+  let host = service.host.clone();
+  let dialer = Dialer {
+    control: config.control.clone().unwrap_or_default(),
+    command: config.command.clone(),
+    bound_run: Some(config.run),
+    ended: Arc::new(AtomicBool::new(false)),
+    name: config.holder.clone(),
+    path: config.directory.clone(),
+    credential: Arc::new(Mutex::new(config.capability.clone())),
+    service,
+    tasks: TaskTracker::new(),
+    grace: DISCONNECT_GRACE,
+    orphaned: Mutex::default(),
+  };
+  let tasks = dialer.tasks.clone();
+  let heartbeats = async {
+    loop {
+      let beat = async {
+        let client = match &config.command {
+          Some(command) => Client::connect_command(command.clone()).await?,
+          None => Client::connect(config.control.as_deref().context("holder has no control transport")?).await?,
+        }
+        .with_token(&config.capability)?;
+        client
+          .runners()
+          .heartbeat(HeartbeatRequest {
+            capabilities: Some(proto_capabilities(&Capabilities {
+              actor: Default::default(),
+              executor: [needy_config::profile::ExecutorDriver::Native].into(),
+            })),
+            host: Some(proto_runner_host(&self::host())),
+            labels: Default::default(),
+          })
+          .await
+          .map_err(needy_api_client::Error::from)?;
+        Ok::<_, anyhow::Error>(())
+      }
+      .await;
+      match beat {
+        Err(error) if refused(&error) => return Ok::<_, anyhow::Error>(()),
+        Err(error) => tracing::debug!("client execution holder heartbeat: {error:#}"),
+        Ok(()) => {}
+      }
+      tokio::select! { () = stop.cancelled() => return Ok(()), () = tokio::time::sleep(RETRY) => {} }
+    }
+  };
+  let served = async {
+    tokio::select! {
+      ended = dialer.run(stop.clone()) => match ended {
+        Err(error) if refused(&error) => Ok(()),
+        result => result,
+      },
+      ended = heartbeats => ended,
+    }
+  };
+  let result = termination.unless_forced(served).await.context("execution holder was forced to stop")?;
+  stop.cancel();
+  host.shutdown().await;
+  tasks.close();
+  tasks.wait().await;
+  result
+}

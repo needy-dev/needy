@@ -67,7 +67,9 @@ export function locations(env: Environment): Record<Machine, { name: Text, descr
     },
     runner: {
       name: { en: `Executor · ${executorOs}`, zh: `执行机器 · ${executorOs}` },
-      description: { en: 'Run these commands in a terminal on the executor machine, as the account running runner serve. Its home and project paths belong to this machine.', zh: '在执行机器的终端中，以运行 runner serve 的账号执行。这里的 HOME 和项目路径属于执行机器。' },
+      description: env.launchFrom === 'runner'
+        ? { en: 'Run these commands on the executor machine as the invoking CLI account. Its automatic holder executes this invocation under that account. HOME and project paths belong here.', zh: '在执行机器上，以启动 CLI 的账号执行这些命令。自动启动的 holder 以该账号承接本次 run 的执行。HOME 和项目路径属于这里。' }
+        : { en: 'Run these commands in a terminal on the executor machine, as the account running runner serve. Its home and project paths belong to this machine.', zh: '在执行机器的终端中，以运行 runner serve 的账号执行。这里的 HOME 和项目路径属于执行机器。' },
     },
     actor: {
       name: { en: 'Actor · Linux', zh: 'Actor · Linux' },
@@ -97,9 +99,11 @@ export function needsDocker(program: Program, env: Environment): boolean {
 
 /** Rejects values that cannot name a runner or a usable directory. No input is silently replaced. */
 export function configurationIssue(env: Environment): Text | undefined {
+  if (env.executor === 'runner' && env.launchFrom === 'runner' && env.runnerOs === 'windows')
+    return { en: 'Windows automatic client execution requires private startup-file ACL support. Choose a Linux or macOS creating client for this walkthrough.', zh: 'Windows 自动客户端执行需要私有启动文件的 ACL 支持。此教程请选择 Linux 或 macOS 作为启动客户端。' }
   if (env.executor === 'runner' && env.runnerOs === 'windows')
     return { en: 'Windows runner enrollment is not supported yet. Choose a Linux or macOS executor for this walkthrough.', zh: '暂不支持 Windows runner 注册。此教程请选择 Linux 或 macOS executor。' }
-  if (env.executor === 'runner' && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(env.runnerName))
+  if (env.executor === 'runner' && env.launchFrom === 'host' && !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(env.runnerName))
     return { en: 'Use a runner name of 1–63 lowercase letters, digits, or hyphens.', zh: 'runner 名称需为 1–63 个小写字母、数字或连字符，且首尾不能是连字符。' }
   if (env.executor !== 'container' && (!env.workspace.trim() || /[\r\n\0]/.test(env.workspace)))
     return { en: 'Enter a project directory on the executor, without line breaks.', zh: '填写 executor 上的项目目录，不要包含换行。' }
@@ -190,51 +194,55 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
 
   steps.push({ id: 'daemon', machine: 'host', terminal: host,
     title: { en: 'Start and reach the control daemon', zh: '启动控制 daemon 并确认连接' },
-    text: { en: 'Install a user service on the control host, with systemd or launchd available. Select local for the following management commands. For an existing service, replace the install line with needy daemon service install --replace --now. Replacement applies the current configuration and stops active runs.', zh: '在控制主机上安装用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。已有服务时，把安装命令替换为 needy daemon service install --replace --now。替换会应用当前配置，并停止正在运行的 run。' },
+    text: { en: 'Install a user service on the control host, with systemd or launchd available. Select local for the following management commands. For an existing service, replace the install line with needy daemon service install --replace --now. Replacement restarts control with the current configuration. Use run stop to end an invocation.', zh: '在控制主机上安装用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。已有服务时，把安装命令替换为 needy daemon service install --replace --now。替换会应用当前配置并重启控制服务。需要结束某个 run 时，使用 run stop。' },
     code: `needy config use local\n${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\n" : ''}needy daemon service install --now\nneedy daemon service status\nneedy runner ls`,
     expected: { en: 'The service reports ready. The runner table appears without a client bearer or an address export.', zh: '服务状态为 ready，无需客户端令牌或地址环境变量即可列出 runner。' } })
 
   if (env.executor === 'runner') {
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the executor machine', zh: '准备执行命令的机器' },
-      text: { en: 'Install needy and your project tools here. A native runner needs no actor images.', zh: '在这里安装 needy 和项目工具，native runner 不需要 actor 镜像。' },
+      text: { en: 'Install needy and your project tools here. Native execution needs no actor images on this machine.', zh: '在这里安装 needy 和项目工具。这台机器上的 native 执行不需要 actor 镜像。' },
       code: INSTALL_NEEDY,
       expected: { en: 'The executor has needy and its project tools. Use the account that will serve commands.', zh: '执行机器已安装 needy 和项目工具。使用将要执行命令的账号。' } },
     { id: 'workspace', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the project on the executor', zh: '在执行机器上准备项目目录' },
-      text: { en: 'Use the same account for this directory and runner serve. Use an existing project, or create this empty demo directory. Creating it on the control host will not create it here.', zh: '目录和 runner serve 使用同一账号。可填写已有项目，或创建这个空演示目录。在控制主机创建目录不会在这里创建它。' },
+      text: fromRunner
+        ? { en: 'Use the same account for this directory and run create. The automatic holder inherits that account. Use an existing project, or create this empty demo directory here.', zh: '项目目录和 run create 使用同一账号，自动启动的 holder 继承该账号。可使用已有项目，或在这里创建这个空演示目录。' }
+        : { en: 'Use the same account for this directory and runner serve. Use an existing project, or create this empty demo directory. Creating it on the control host will not create it here.', zh: '目录和 runner serve 使用同一账号。可填写已有项目，或创建这个空演示目录。在控制主机创建目录不会在这里创建它。' },
       code: `mkdir -p ${shellPath(env.workspace)}\n${workspaceProbe(env.workspace)}`,
       expected: { en: 'The identity and HOME belong to the executor account, and pwd prints the project path. Stop if any check fails.', zh: '身份与 HOME 属于执行账号，pwd 输出项目路径。任一检查失败时先停止后续步骤。' } },
     { id: 'tunnel', machine: 'runner', terminal: { en: 'Executor machine · a separate tunnel terminal', zh: 'executor 机器 · 另开的隧道终端' },
       title: { en: 'Open one tunnel to the control host', zh: '建立一条到控制主机的隧道' },
       text: { en: 'Replace user@example.com with the actor host’s SSH destination. Keep this tunnel open.', zh: '把 user@example.com 换成 actor 宿主机的 SSH 地址，保持这个隧道开启。' },
       code: 'ssh -N -o ExitOnForwardFailure=yes -L 7400:127.0.0.1:7400 user@example.com',
-      expected: { en: 'The connection stays open. Reuse it instead of opening another tunnel on port 7400.', zh: '连接保持开启。复用这条连接，不要再占用一次本地 7400 端口。' } },
-    { id: 'token', machine: 'host', terminal: host,
-      title: { en: 'Create a runner invitation', zh: '创建 runner 邀请码' },
-      text: { en: 'Use this code only to enroll the executor. A runner saves its own credential. An optional client context uses a separate client invitation to manage runs.', zh: '此邀请码只用于注册 executor。runner 保存自己的凭据。可选的客户端 context 使用单独的客户端邀请码来管理 run。' },
-      code: 'needy runner invite --ttl 1h --roles executor' },
-    { id: 'paste-token', machine: 'runner', terminal: remote,
-      title: { en: 'Enroll the executor once', zh: '完成一次 executor 注册' },
-      text: { en: 'Run this command. Paste the invitation code at its hidden prompt. Enrollment saves the runner credential and returns.', zh: '执行命令后，在隐藏输入提示中粘贴邀请码。注册会保存 runner 凭据并返回。' },
-      code: `needy --address tcp://127.0.0.1:7400 runner join ${runner} --roles executor` },
-    { id: 'runner', machine: 'runner', terminal: { en: 'Executor · separate runner terminal', zh: '执行机器 · 单独的 runner 终端' },
-      title: { en: 'Start the enrolled runner', zh: '启动已注册的 runner' },
-      text: { en: 'Keep this process running as the executor account, not with sudo. Native commands inherit its permissions. Client pairing below does not change this identity. The current release requires this persistent runner; execution inside the launching CLI is not implemented.', zh: '以执行账号持续运行，不要使用 sudo。native 命令继承它的权限，下方客户端配对不会改变这个身份。当前版本需要持续运行此 runner，尚未实现由启动 CLI 自身承接执行。' },
-      code: 'export PATH="$HOME/.local/bin:$PATH"\nneedy runner serve' },
-    { id: 'check-runner', machine: 'host', terminal: host,
-      title: { en: 'Check which machine joined', zh: '确认加入的是哪台机器' },
-      text: { en: 'This probe runs through the actual serving runner. Compare its identity, HOME and project path with the executor setup step. A missing directory here is the same condition that prevents the workspace mount.', zh: '通过实际接任务的 runner 探测。将身份、HOME、项目路径与执行机器的准备步骤对照。这里缺少目录，就会导致后面的 workspace 挂载失败。' },
-      code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace))}`,
-      expected: { en: `The runner is online, reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}, and the directory checks succeed under the intended account.`, zh: `runner 为 online，系统为 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}，目录检查在预期账号下通过。` } })
+      expected: { en: 'The connection stays open. Reuse it instead of opening another tunnel on port 7400.', zh: '连接保持开启。复用这条连接，不要再占用一次本地 7400 端口。' } })
+    if (!fromRunner) {
+      steps.push({ id: 'token', machine: 'host', terminal: host,
+        title: { en: 'Create a runner invitation', zh: '创建 runner 邀请码' },
+        text: { en: 'Use this code only to enroll the executor. A runner saves its own credential. An optional client context uses a separate client invitation to manage runs.', zh: '此邀请码只用于注册 executor。runner 保存自己的凭据。可选的客户端 context 使用单独的客户端邀请码来管理 run。' },
+        code: 'needy runner invite --ttl 1h --roles executor' },
+      { id: 'paste-token', machine: 'runner', terminal: remote,
+        title: { en: 'Enroll the executor once', zh: '完成一次 executor 注册' },
+        text: { en: 'Run this command. Paste the invitation code at its hidden prompt. Enrollment saves the runner credential and returns.', zh: '执行命令后，在隐藏输入提示中粘贴邀请码。注册会保存 runner 凭据并返回。' },
+        code: `needy --address tcp://127.0.0.1:7400 runner join ${runner} --roles executor` },
+      { id: 'runner', machine: 'runner', terminal: { en: 'Executor · separate runner terminal', zh: '执行机器 · 单独的 runner 终端' },
+        title: { en: 'Start the enrolled runner', zh: '启动已注册的 runner' },
+        text: { en: 'Keep this process running as the executor account, not with sudo. Native commands inherit its permissions. This named runner serves work when you create from the control host. Changing the client context does not change its OS account.', zh: '以执行账号持续运行，不要使用 sudo。native 命令继承它的权限。从控制主机创建 run 时，由此具名 runner 接收执行任务。切换客户端 context 不会改变它的系统账号。' },
+        code: 'export PATH="$HOME/.local/bin:$PATH"\nneedy runner serve' },
+      { id: 'check-runner', machine: 'host', terminal: host,
+        title: { en: 'Check which machine joined', zh: '确认加入的是哪台机器' },
+        text: { en: 'This probe runs through the actual serving runner. Compare its identity, HOME and project path with the executor setup step. A missing directory here is the same condition that prevents the workspace mount.', zh: '通过实际接任务的 runner 探测。将身份、HOME、项目路径与执行机器的准备步骤对照。这里缺少目录，就会导致后面的 workspace 挂载失败。' },
+        code: `needy runner ls\nneedy proc exec -T -n --runner ${runner} -- sh -c ${quote(workspaceProbe(env.workspace))}`,
+        expected: { en: `The runner is online, reports ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}, and the directory checks succeed under the intended account.`, zh: `runner 为 online，系统为 ${env.runnerOs === 'mac' ? 'Darwin' : 'Linux'}，目录检查在预期账号下通过。` } })
+    }
     if (fromRunner) {
       steps.push({ id: 'client-invite', machine: 'host', terminal: host,
         title: { en: 'Authorize a control client on the executor', zh: '授权执行机器上的控制客户端' },
-        text: { en: 'Create a separate client invitation. This grants run/process access, not administrator access. The runner invitation cannot be reused here.', zh: '创建独立的客户端邀请码，授予 run/process 权限，不授予管理权限。不能重复使用 runner 邀请码。' },
+        text: { en: 'Create a client invitation for the executor computer. This grants run/process access, not administrator access. This workflow needs no runner enrollment.', zh: '为执行机器创建客户端邀请码，授予 run/process 权限，不授予管理权限。此流程不需要注册 runner。' },
         code: 'needy client invite --name executor-cli',
       }, { id: 'client-pair', machine: 'runner', terminal: remote,
         title: { en: 'Pair and select the control connection', zh: '配对并选择控制连接' },
-        text: { en: 'Reuse the open SSH tunnel. Paste the client invitation at the hidden prompt. Keep the runner terminal running; pairing gives this CLI control access, not a new execution identity. For an existing context, select and check it instead of pairing again.', zh: '复用已开启的 SSH 隧道，在隐藏提示中粘贴客户端邀请码。保持 runner 终端运行；配对只授予此 CLI 控制权限，不会创建新的执行身份。已有 context 时直接选择并检查，不必再次配对。' },
+        text: { en: 'Reuse the open SSH tunnel. Paste the client invitation at the hidden prompt. Pairing grants control access; execution uses the invoking CLI account. An automatic holder survives viewer detach. For an existing context, select and check it instead of pairing again.', zh: '复用已开启的 SSH 隧道，在隐藏提示中粘贴客户端邀请码。配对授予控制访问权限，执行使用启动 CLI 的账号。自动启动的 holder 在终端分离后继续运行。已有 context 时选择并检查即可，不必再次配对。' },
         code: 'needy --address tcp://127.0.0.1:7400 config context pair control\nneedy config use control\nneedy config context check control\nneedy run ls',
       })
     }
@@ -272,7 +280,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   const project = env.executor === 'container' ? '~/workspace' : env.workspace
   profile.actor.workspace.from = `executor:${target}:${project}`
   profile.executors = { [target]: env.executor === 'runner'
-    ? { runner: env.runnerName, driver: 'native' }
+    ? { runner: fromRunner ? { client: true } : env.runnerName, driver: 'native' }
     : { driver: env.executor === 'container' ? 'linux-container' : 'native' } }
   profile.commands = [{ match: env.routing === 'all' ? '**' : '{bash,sh,dash,zsh} **', to: target }]
   profile.unknown = env.routing === 'all' ? target : 'actor'
@@ -285,8 +293,10 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     expected: { en: `${name}: ${driver}, ${program}, executor ${target}.`, zh: `${name}：${driver}，入口 ${program}，executor 为 ${target}。` } },
   { id: 'start', machine: launchMachine, terminal: launchTerminal,
     title: { en: `Start ${PROGRAMS.find(p => p.id === program)!.name}`, zh: `启动 ${PROGRAMS.find(p => p.id === program)!.name}` },
-    text: { en: 'Profile check inspects configuration, placement and host capabilities; --cmd predicts routing and does not execute pwd or verify the workspace. Complete the workspace probe first, then start. Keep the runner and tunnel open. The actor terminal appears in this terminal.', zh: 'profile check 检查配置、调度和宿主机能力；--cmd 预测路由，不会执行 pwd 或验证 workspace。先完成目录探测再启动，保持 runner 和隧道开启。actor 终端会出现在当前终端。' },
-    code: `needy config profile check ${name} --mode control --cmd 'bash -c "pwd"'\nneedy run create -it --profile ${name}` })
+    text: fromRunner
+      ? { en: 'Static profile check inspects configuration and predicts routing; it does not execute pwd or verify the workspace. Complete the local workspace probe first. Creation binds the automatic holder to this invoking account. Keep the SSH tunnel open. The actor terminal appears here.', zh: '静态 profile check 检查配置并预测路由，不会执行 pwd 或验证 workspace。先完成本机目录探测。创建时会把自动启动的 holder 绑定到当前启动账号。保持 SSH 隧道开启，actor 终端会在这里打开。' }
+      : { en: 'Profile check inspects configuration, placement and host capabilities; --cmd predicts routing and does not execute pwd or verify the workspace. Complete the workspace probe first, then start. Keep any persistent runner and SSH tunnel open. The actor terminal appears here.', zh: 'profile check 检查配置、调度和宿主机能力；--cmd 预测路由，不会执行 pwd 或验证 workspace。先完成目录探测再启动。若使用持久 runner 和 SSH 隧道，保持它们开启。actor 终端会在这里打开。' },
+    code: `needy config profile check ${name} --mode ${fromRunner ? 'static' : 'control'} --cmd 'bash -c "pwd"'\nneedy run create -it -f ~/.config/needy/profiles/${name}.yaml` })
   if (program === 'bash') {
     steps.push({ id: 'observe', machine: 'actor', terminal: { en: 'Inside the new bash', zh: '在刚进入的 bash 内' },
       title: { en: 'Compare the entrypoint and child shell', zh: '对比入口和子 shell 的执行位置' },

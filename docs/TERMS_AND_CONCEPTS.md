@@ -4,6 +4,10 @@ The working vocabulary for Needy. Design notes, code names, proto fields and
 CLI output use these terms. Terms marked **provisional** are design terms that
 may still change; do not stabilize them in public APIs yet.
 
+Entries labeled **approved contract** describe required behavior from the
+[client execution and actor lifecycle spec](ai/references/architecture/2026-11-15-client-execution-and-actor-lifecycle-spec.md).
+Their implementation and acceptance remain pending; they are not support claims.
+
 Background: [actor and executor separation](ai/references/architecture/2026-11-09-actor-executor-separation-design.md).
 
 ## Roles
@@ -15,6 +19,10 @@ container on a host without KVM, or one Virtualization.framework VM on an
 Apple silicon Mac, built from a recipe. The program's view of the world, including the recipe identity,
 lives here. Actors are stateless: a read-only root and a throwaway writable
 layer.
+
+Stateless describes where durable data belongs; it does not mean a live
+program has no memory or terminal state. Rebuilding an actor after its
+environment is lost is different from reconnecting to the original process.
 
 *Avoid*: harness layer, caller, shallow layer.
 
@@ -47,6 +55,14 @@ uptime offset (the guest, the host, or nobody: a gap), and its transport
 
 *Avoid*: actor runtime (the name before 2026-11-12); "driver" alone for the
 driving program.
+
+### Runtime holder
+
+The protected local process that owns actor driver handles and native executor
+processes independently of control management. A control restart reconnects to
+its stable identity and saved bindings. A PID alone does not prove ownership.
+Viewer loss and control loss leave held work alive. Explicit run stop ends it.
+See the [implementation evidence and limits](ai/references/architecture/2026-11-15-actor-holder-implementation-evidence.md).
 
 ### Executor driver
 
@@ -172,22 +188,29 @@ ended this way.
 
 ### Reconciliation
 
-What a control plane does with what it finds. When a runner connects it
+What a control plane does with what it finds. The following describes the
+current implementation, before the approved restart-survival change. When a
+runner connects it
 **reports** the processes of runs it still runs; the control plane
 **claims** those of live runs that hold an executor on it and tells it to
-end the others. When a control plane starts, it loads from `state.db` the
-runs it left open: it does not adopt their actors, so each ends `failed`
-(`the control plane restarted; the actor was lost`), or `stopped` if it was
-stopping; it ends a still-running actor VM and removes their control-host
-containers, and waits for runners to report the instances the runs held
-there.
+end the others. When a control plane starts, it loads open invocations from `state.db`.
+It adopts the original actor only after the protected runtime holder proves
+its identity. It reconnects saved executor handles without replacing work.
+If ownership cannot be proved, it records failure or lost instances and
+cleans up verified leftovers. See the
+[implementation evidence and limits](ai/references/architecture/2026-11-15-actor-holder-implementation-evidence.md).
+
+The **approved contract** instead requires recovering management of the same
+surviving actor and driving program, using stable identity and protected
+holder access. A PID alone is insufficient. Actual runtime loss can still
+end work; replacement actors are new invocations. See the
+[lifecycle design](ai/references/architecture/2026-11-15-actor-survival-and-history-design.md).
 
 ### Lost instance
 
 An instance of a run that nobody reported after the control plane
 restarted: no runner reported it within the wait (60 s), or it was one of
-the control host's own native executors, whose processes a killed daemon
-leaves unrecorded. Whether it still runs is unknown; `run ls` marks it
+a native executor whose protected holder identity cannot be recovered. Whether it still runs is unknown; `run ls` marks it
 `(lost)`. The runner's own grace period still ends its processes.
 
 ### Runner selector
@@ -198,6 +221,28 @@ the instance needs and every label. Without one, the actor or executor runs on t
 itself. The control plane resolves selectors when a run is created
 (**scheduling**); a selector that names no connected runner, or labels that
 fit several, is an error naming the candidates.
+
+An **approved contract** adds explicit client execution alongside these
+selectors. An omitted selector retains its control-host meaning; a registered
+runner name must not be guessed to represent the creating client.
+
+### Client executor (approved contract)
+
+A logical executor explicitly bound to the execution capability supplied by
+the creating invocation. Its holder inherits the invoking OS account. Attach
+from another client or a connection-context change does not replace that
+binding. Missing capability fails without falling back to the daemon, a
+privileged runner or another client. One invocation can bind several logical
+executors to its holder while keeping existing instance and pool policy.
+
+### Execution holder (approved contract)
+
+The protected local owner of work and its required process, terminal, driver
+and per-run service channels across viewer loss or control restart. Client
+execution retains its same-account holder automatically, without manual
+runner enrollment or `runner serve`. Work lifetime determines holder lifetime;
+actual holder loss is distinct from losing a viewer. It does not become an
+unrestricted shared runner resource.
 
 ### Local runner
 
@@ -275,12 +320,13 @@ not current behavior; see the
 A program that calls the control plane on behalf of a person or a tool: the
 CLI on another machine, a script. A **paired** client holds its own **client
 token**, is listed (`needy pair ls`) and can be revoked (`needy pair revoke
-ID`); the trace names it `client:NAME`. A client drives runs (create,
-list, stop, exec, attach, kill, `ps`, `fs cp`, reports and logs) but does not
-administer the control plane: creating or revoking join tokens, rotating or
-removing runners, creating pairing codes and revoking clients need the control
-token. The
-CLI keeps one token per control plane endpoint in `credentials.json` in its
+ID`); the trace names it `client:NAME`. A client with the `runs` grant drives
+runs (create, list, stop, exec, attach, kill, `ps`, `fs cp`, reports and logs).
+The `admin` grant also permits client and runner administration. These grants
+are server authority, not a local OS account or a creator-only ACL. The
+[access protocol](ai/references/cli/2026-11-15-configuration-authority-and-lifecycle-discussion.md#protocol-identity-and-os-account)
+records current source evidence. The CLI keeps one token per control plane
+endpoint in `credentials.json` in its
 config directory (`$XDG_CONFIG_HOME/needy`, mode 0600) and presents it to that
 endpoint; `NEEDY_TOKEN` overrides it. The endpoint paired last is the
 CLI's default control plane; `--endpoint` or `NEEDY_ENDPOINT` names another.
@@ -291,6 +337,12 @@ H`, `exec:ssh -W 127.0.0.1:7400 HOST`); a runner's `--join` takes the same
 forms. The control plane stores only the token's hash. A client's name is a DNS
 label that no other client that is not
 revoked holds.
+
+Authenticated clients retain existing role grants and daemon-wide visibility
+under the **approved contract**. This slice adds no human-account model,
+creator ACL or fine-grained RBAC; creator audit facts do not establish
+creator isolation. Protocol identity remains distinct from the local OS
+account used by an execution holder.
 
 *Avoid*: user, account. Needy has no users; a client is a credential with a
 name.
@@ -305,7 +357,9 @@ change that choice. Proposed `needy config context pair` and `needy config use`
 commands obtain a credential and select a connection, while `client invite` authorizes a client
 on the server. Its authority is recorded by the server, not self-declared in
 the context. Proposed `needy config context` commands manage these records;
-they are distinct from task profiles and execution contexts. See the
+they are distinct from task profiles and execution contexts. Under the
+**approved contract**, changing a connection context never changes an
+existing execution binding, OS account or workspace location. See the
 [context design](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md).
 
 ### Execution context (proposed)
@@ -344,11 +398,18 @@ runner's machine without a run, and a run whose actor only waits serves
 `needy exec --run` (see
 [Runners and runs](ai/references/architecture/2026-11-10-runner-and-run-design.md)).
 
-A run is `creating` while it acquires its executors, copies files in and
-starts its actor, then `running`. It ends `stopped` (after `stopping`, by
+One run records one actor invocation, not each child exec or each attached
+client connection. A daemon can manage several independent actor invocations
+at once. A terminal attachment can end while its actor continues. The
+**approved contract** requires viewer loss and control restart to preserve
+surviving work, with no automatic rerun of uncertain commands. Current
+reconciliation does not implement that adoption behavior.
+
+Current state transitions: a run is `creating` while it acquires its
+executors, copies files in and starts its actor, then `running`. It ends `stopped` (after `stopping`, by
 `needy run stop`), `finished` (its actor's driving program exited, once the actor ended too) or
 `failed` (its create failed, its actor's VM exited before the driving
-program did, or the control plane restarted and lost its actor, with the
+program did, or its original actor or runtime holder was lost, with the
 reason). The first of these end states stays: stopping a
 finished or failed run releases its executors but keeps its state. A
 **graceful stop** (the default of `needy run stop`) ends a running driving
@@ -374,6 +435,18 @@ actor without one goes from `configured` to `exited`. The trace records
 `actor.start`, `actor.config`, `actor.ready` and `actor.vm.exit`.
 
 *Avoid*: session (the earlier name), rollout.
+
+### History (provisional)
+
+Durable records of actor invocations and their execs: what was requested and
+what result was observed. They remain useful after the live environment is
+gone. History lookup, terminal replay and starting again do not by themselves
+restore a process. Keep existing trace/report storage under the approved
+contract.
+
+NOTICE: history formats, synchronization and additional secret collection are
+not part of this slice; the owner deferred their redesign until a separately
+approved contract.
 
 ### Lifecycle
 
@@ -405,6 +478,17 @@ A declarative YAML description of one run: which recipes to use, executors,
 command rules, file mappings, both networks and chaos. `--profile NAME`
 (no path separator, no `.yaml`) is `profiles/NAME.yaml` in the CLI's config
 directory.
+
+The invoking client reads and resolves the profile and submits its contents.
+A run keeps the submitted configuration; editing the source file affects a
+later run, not the existing one. A profile describes requested behavior and
+resources; it is not itself a grant to use a host account or executor.
+
+The **approved contract** adds `run create -f PATH` as a profile-input alias
+and temporary actor image, workspace, environment-entry and entry-command
+overrides. They change only the submitted snapshot, never the source file.
+Trailing `--` arguments retain their append meaning. Validate the final
+profile before remote side effects.
 
 *Avoid*: config.
 
@@ -505,6 +589,16 @@ its base ABI; `needy image ls` shows the rest. A directory without one is
 not an image: `needy image pull` or `needy image build` writes one.
 
 ## Routing
+
+### Mesh
+
+The application graph of actors, executors and accepted execution bindings,
+coordinated by Needy's control role. Under the **approved contract**, this
+means application connectivity, not a VPN or direct network connections
+between every pair of participants. It adds neither multi-actor runs nor new
+instance-sharing semantics. See the
+[topology design](ai/references/architecture/2026-11-15-topology-and-daemon-responsibilities-design.md)
+for current source observations and implementation limits.
 
 ### Placement
 

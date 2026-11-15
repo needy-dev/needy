@@ -178,10 +178,9 @@ chaos:
     slow-sleep: { exec: "sleep *", delay: 1ms }
 "#;
 
-/// A profile the daemon refuses when it creates the run: its default
-/// executor does not exist.
-const BROKEN_PROFILE: &str =
-  "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker }\ndefault_executor: missing-executor\n";
+/// A locally valid profile the daemon cannot schedule: its actor runner
+/// has not joined. Static profile errors are rejected before submission.
+const BROKEN_PROFILE: &str = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker, runner: missing-executor }\n";
 
 fn create_run(home: &Home, profile: &str) -> String {
   let profile = home.write("profile.yaml", profile);
@@ -660,7 +659,7 @@ fn run_ls_shows_released_executors_and_why_a_run_failed() {
   );
   assert_eq!(rows[2][1..3], ["broken", "failed"]);
   let exit = rows[2].last().unwrap();
-  assert!(exit.starts_with("invalid profile: ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
+  assert!(exit.starts_with("actor: ") && exit.ends_with('…') && exit.chars().count() <= 49, "{:?}", rows[2]);
 }
 
 #[test]
@@ -1483,50 +1482,64 @@ fn terminate_twice(mut daemon: Child) -> (Duration, Output) {
 
 // ROOT CAUSE:
 //
-// If a second SIGTERM came while the control daemon shut down, it was
-// ignored, because the signal handlers stayed installed after the first
-// signal and nothing listened for another.
-//
-// Before the fix, the daemon waited out its grace period for open streams
-// and the shutdown, then exited 0.
-// The fix keeps the first signal graceful and makes a second one exit at
-// once, non-zero, naming the runs it did not clean up.
+// The control daemon previously owned actor and native-process shutdown, so
+// SIGTERM waited for their stop grace and a second signal forced cleanup.
+// A runtime holder now owns them: the first SIGTERM must return promptly
+// without ending or replacing the invocation. Explicit stop still reclaims it.
 #[test]
-fn a_second_sigterm_makes_the_control_daemon_exit_at_once() {
+fn a_first_sigterm_exits_control_promptly_and_preserves_its_invocation() {
   let home = Home::new();
-  let daemon = spawn_daemon(&home, "control");
-  // An actor whose VM ignores SIGTERM keeps the run's stop, and so the
-  // graceful shutdown, busy for the VM's stop grace period.
-  let firecracker = home.path().join("image").join("firecracker");
-  needy_common::testing::write_executable(
-    &firecracker,
-    "#!/bin/sh\ntrap '' TERM\ntouch \"$(dirname \"$3\")/trapped\"\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n",
-  )
-  .unwrap();
+  let daemon = spawn_recording_control(&home, true);
+  let starts = home.path().join("actor-starts");
   let run = create_run(&home, NATIVE_PROFILE);
+  let actor = wait_for_fixture_pid(&starts);
   let (mut attached, sleep) = attach_sleep(&home, &["run", "exec", &run]);
+  let _processes = FixtureProcesses(vec![starts.clone(), home.path().join("sleep.pid")]);
+  let before = home.run(&["proc", "ls", "--run", &run, "-o", "json"]);
+  assert!(before.status.success(), "{}", stderr(&before));
+  let before: Vec<serde_json::Value> = serde_json::from_slice(&before.stdout).unwrap();
+  let process = before.iter().find(|p| p["pid"] == sleep).expect("the native process is listed")["id"].clone();
 
-  // The VM ignores SIGTERM once it says so.
-  let trapped = home.path().join("state").join("runs").join(&run).join("trapped");
-  let deadline = Instant::now() + Duration::from_secs(20);
-  while !trapped.exists() {
-    assert!(Instant::now() < deadline, "the stand-in VM did not start");
-    std::thread::sleep(Duration::from_millis(20));
+  let started = Instant::now();
+  kill(daemon.id(), "TERM");
+  let output = daemon_exit(daemon);
+  let elapsed = started.elapsed();
+  // The viewer owns neither the actor nor the native process.
+  if attached.try_wait().unwrap().is_none() {
+    attached.kill().unwrap();
   }
-  let (elapsed, output) = terminate_twice(daemon);
-  attached.kill().ok();
   attached.wait().unwrap();
-  // A forced exit may leave the sleep behind. The run's stop, which closed
-  // the sleep's stream to the executor, may have hung it up already, so the
-  // status of a `kill` that finds no process is irrelevant.
-  let _ = Command::new("kill").args(["-KILL", &sleep.to_string()]).stderr(Stdio::null()).status();
+  let actor_survived = !gone_now(actor);
+  let native_survived = !gone_now(sleep);
+  let management_removed = !home.path().join("run/daemon.sock").exists();
+  let native_socket_retained = home.path().join("run/local.sock").exists();
 
-  assert!(elapsed < Duration::from_secs(2), "the daemon took {elapsed:?} to exit after the second SIGTERM");
-  assert_eq!(output.status.code(), Some(1));
-  assert!(stderr(&output).contains(&run), "the exit names the run it left: {}", stderr(&output));
-  // Even a forced exit removes the daemon's own sockets.
-  assert!(!home.path().join("run").join("daemon.sock").exists(), "daemon.sock is left behind");
-  assert!(!home.path().join("run").join("local.sock").exists(), "local.sock is left behind");
+  let _restarted = Daemon {
+    child: spawn_recording_control(&home, true),
+  };
+  let listed = home.run(&["run", "ls", "-o", "json"]);
+  let after = home.run(&["proc", "ls", "--run", &run, "-o", "json"]);
+  let actor_starts = std::fs::read_to_string(&starts).unwrap();
+  let stopped = home.run(&["run", "stop", &run, "--now"]);
+  let actor_ended = gone(actor);
+  let native_ended = gone(sleep);
+
+  assert!(elapsed < Duration::from_secs(2), "control took {elapsed:?} after its first SIGTERM");
+  assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+  assert!(management_removed, "management must remove its own socket");
+  assert!(native_socket_retained, "the holder must retain the live native service socket");
+  assert!(actor_survived && native_survived, "management shutdown ended the original actor or native process");
+  assert!(listed.status.success(), "{}", stderr(&listed));
+  let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout).unwrap();
+  let row = rows.iter().find(|r| r["id"] == run).expect("the invocation is recovered");
+  assert_eq!(row["state"], "running");
+  assert!(after.status.success(), "{}", stderr(&after));
+  let rows: Vec<serde_json::Value> = serde_json::from_slice(&after.stdout).unwrap();
+  let row = rows.iter().find(|p| p["id"] == process).expect("the original native process is recovered");
+  assert_eq!((row["pid"].as_u64(), row["state"].as_str()), (Some(u64::from(sleep)), Some("running")));
+  assert_eq!(actor_starts.lines().collect::<Vec<_>>(), [actor.to_string()], "recovery must not start another actor");
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  assert!(actor_ended && native_ended, "explicit stop must reclaim the original actor and native process");
 }
 
 #[test]
@@ -1581,7 +1594,13 @@ fn a_control_daemon_removes_its_sockets_when_it_exits_at_sigterm() {
 
   assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
   assert!(!run.join("daemon.sock").exists(), "daemon.sock is left behind");
-  assert!(!run.join("local.sock").exists(), "local.sock is left behind");
+  // The management lease ends first; its idle holder removes local.sock
+  // on the next idle check. A holder with live work retains that socket.
+  let deadline = Instant::now() + Duration::from_secs(5);
+  while run.join("local.sock").exists() && Instant::now() < deadline {
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  assert!(!run.join("local.sock").exists(), "the idle runtime holder left local.sock behind");
 }
 
 #[test]
@@ -2981,43 +3000,122 @@ fn gone(pid: u32) -> bool {
   false
 }
 
+// ROOT CAUSE:
+//
+// A control restart formerly failed every open run and ended the processes
+// reported by its runner. The protected runtime holder now proves actor
+// continuity; recovery must preserve the same invocation and process identity.
 #[test]
-fn a_control_plane_killed_during_a_run_fails_it_at_restart_and_its_runner_ends_the_runs_processes() {
+fn a_control_plane_crash_recovers_the_original_actor_and_runner_process() {
   let control = Home::new();
-  let mut daemon = Daemon::start(&control);
+  let mut daemon = Daemon {
+    child: spawn_recording_control(&control, false),
+  };
+  let starts = control.path().join("actor-starts");
   let machine = Home::new();
   let _runner = connected_runner(&machine, &control);
   let run = create_run(&control, RUNNER_PROFILE);
+  let actor = wait_for_fixture_pid(&starts);
   let pid_file = machine.path().join("sleep.pid");
-  let script = format!("echo $$ > {}; exec sleep 300", pid_file.display());
-  detach(&control, &run, &["sh", "-c", &script]);
-  let deadline = Instant::now() + Duration::from_secs(20);
-  let pid = loop {
-    if let Ok(pid) = std::fs::read_to_string(&pid_file).unwrap_or_default().trim().parse::<u32>() {
-      break pid;
-    }
-    assert!(Instant::now() < deadline, "the detached process did not start");
-    std::thread::sleep(Duration::from_millis(50));
-  };
+  let _processes = FixtureProcesses(vec![starts.clone(), pid_file.clone()]);
+  let script = format!("echo $$ > {}; exec sleep 300", shell_words::quote(&pid_file.display().to_string()));
+  let process = detach(&control, &run, &["sh", "-c", &script]);
+  let pid = wait_for_fixture_pid(&pid_file);
 
-  // SIGKILL: the control plane ends nothing on its way out.
+  // SIGKILL gives management no opportunity to perform shutdown work.
   daemon.child.kill().unwrap();
   daemon.child.wait().unwrap();
-  let still_running = !gone_now(pid);
-  // The killed daemon left its socket, which `Daemon::start` waits for.
-  std::fs::remove_file(control.path().join("run").join("daemon.sock")).unwrap();
-  let _restarted = Daemon::start(&control);
-  let ended = gone(pid);
+  let actor_survived = !gone_now(actor);
+  let process_survived = !gone_now(pid);
+  // Remove only the dead management listener; the holder still owns local.sock.
+  std::fs::remove_file(control.path().join("run/daemon.sock")).unwrap();
+  let _restarted = Daemon {
+    child: spawn_recording_control(&control, false),
+  };
+  let deadline = Instant::now() + Duration::from_secs(20);
+  let recovered = loop {
+    let listed = control.run(&["proc", "ls", "--run", &run, "-o", "json"]);
+    if listed.status.success() {
+      let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout).unwrap();
+      if let Some(row) = rows.iter().find(|p| p["id"] == process) {
+        break row.clone();
+      }
+    }
+    assert!(Instant::now() < deadline, "the original runner process was not recovered: {}", stderr(&listed));
+    std::thread::sleep(Duration::from_millis(50));
+  };
   let listed = control.run(&["run", "ls", "-o", "json"]);
   let table = control.run(&["run", "ls"]);
+  let actor_starts = std::fs::read_to_string(&starts).unwrap();
+  let stopped = control.run(&["run", "stop", &run, "--now"]);
+  let actor_ended = gone(actor);
+  let process_ended = gone(pid);
 
-  assert!(still_running, "the runner ended the run's process as soon as the control plane died");
-  assert!(ended, "process {pid} outlived its run across a control plane restart");
-  let rows: serde_json::Value = serde_json::from_str(&stdout(&listed)).unwrap();
-  let row = rows.as_array().unwrap().iter().find(|r| r["id"] == run.as_str()).expect("the run is listed after the restart");
-  assert_eq!(row["state"], "failed");
-  assert_eq!(row["failure"], "the control plane restarted; the actor was lost");
-  assert!(stdout(&table).contains("failed"), "{}", stdout(&table));
+  assert!(actor_survived && process_survived, "control loss ended the original actor or runner process");
+  assert_eq!((recovered["pid"].as_u64(), recovered["state"].as_str()), (Some(u64::from(pid)), Some("running")));
+  assert!(listed.status.success(), "{}", stderr(&listed));
+  let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout).unwrap();
+  let row = rows.iter().find(|r| r["id"] == run).expect("the run is listed after restart");
+  assert_eq!(row["state"], "running");
+  assert_eq!(row["failure"], serde_json::Value::Null);
+  assert!(stdout(&table).contains("running"), "{}", stdout(&table));
+  assert_eq!(actor_starts.lines().collect::<Vec<_>>(), [actor.to_string()], "recovery must not start another actor");
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  assert!(actor_ended && process_ended, "explicit stop must end the recovered actor and runner process");
+}
+
+/// Keeps the recording actor fixture installed before both creation and
+/// reconciliation, so an accidental replacement also increments its start log.
+fn spawn_recording_control(home: &Home, ignore_term: bool) -> Child {
+  let image_args = stand_in_actor(home);
+  record_actor_starts(home, ignore_term);
+  let child = home.needy().args(["daemon", "serve"]).args(image_args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let socket = home.path().join("run/daemon.sock");
+  let deadline = Instant::now() + Duration::from_secs(20);
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
+    assert!(Instant::now() < deadline, "control did not publish readiness with the recording actor fixture");
+    std::thread::sleep(Duration::from_millis(20));
+  }
+  child
+}
+
+/// A stand-in records each actual OS start, independently of control records.
+fn record_actor_starts(home: &Home, ignore_term: bool) {
+  let starts = home.path().join("actor-starts");
+  let trap = if ignore_term { "trap '' TERM\n" } else { "" };
+  let script = format!(
+    "#!/bin/sh\n{trap}printf '%s\\n' \"$$\" >> {}\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n",
+    shell_words::quote(&starts.display().to_string())
+  );
+  needy_common::testing::write_executable(&home.path().join("image/firecracker"), &script).unwrap();
+}
+
+fn wait_for_fixture_pid(path: &Path) -> u32 {
+  let deadline = Instant::now() + Duration::from_secs(20);
+  loop {
+    if let Some(pid) = std::fs::read_to_string(path).unwrap_or_default().lines().next().and_then(|line| line.trim().parse().ok()) {
+      return pid;
+    }
+    assert!(Instant::now() < deadline, "the fixture did not record its process identity");
+    std::thread::sleep(Duration::from_millis(20));
+  }
+}
+
+/// Last-resort cleanup if an assertion fails before public explicit stop.
+struct FixtureProcesses(Vec<PathBuf>);
+impl Drop for FixtureProcesses {
+  fn drop(&mut self) {
+    for path in &self.0 {
+      for pid in std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|line| line.trim().parse::<u32>().ok()) {
+        if !gone_now(pid) {
+          // The fixture can have exited between the liveness probe and kill.
+          if let Err(error) = Command::new("kill").args(["-KILL", &pid.to_string()]).stderr(Stdio::null()).status() {
+            eprintln!("cannot clean up fixture process: {error}");
+          }
+        }
+      }
+    }
+  }
 }
 
 /// Whether process `pid` is gone now.
@@ -3576,4 +3674,196 @@ fn run_execution_keeps_every_word_after_the_separator_in_argv() {
   assert_eq!(subcommand.stdout, b".\n");
   let missing_separator = home.run(&["run", "exec", "demo", "echo", "hi"]);
   assert_eq!(missing_separator.status.code(), Some(2));
+}
+
+#[test]
+fn client_execution_automatically_uses_creating_account_and_cleans_up() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("client.yaml", "actor: {driver: linux-firecracker}\nexecutors:\n  workstation: {driver: native, runner: {client: true}, workspace: '~'}\ncommands:\n  - {match: '**', to: workstation}\n");
+  let created = home.run(&["run", "create", "-f", profile.to_str().unwrap()]);
+  assert!(created.status.success(), "{}", stderr(&created));
+  let run = String::from_utf8(created.stdout).unwrap().trim().to_string();
+  let output = home.run(&["run", "exec", &run, "--", "id", "-u"]);
+  assert!(output.status.success(), "{}", stderr(&output));
+  assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), unsafe { libc::getuid() }.to_string());
+  let shared = home.run(&["runner", "ls", "-o", "json"]);
+  assert!(shared.status.success(), "{}", stderr(&shared));
+  assert_eq!(serde_json::from_slice::<serde_json::Value>(&shared.stdout).unwrap(), serde_json::json!([]));
+  let stopped = home.run(&["run", "stop", &run, "--now"]);
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  let holders = home.path().join("run/client-executions");
+  let deadline = Instant::now() + Duration::from_secs(12);
+  while holders.read_dir().unwrap().next().is_some() && Instant::now() < deadline {
+    std::thread::sleep(Duration::from_millis(50));
+  }
+  assert!(holders.read_dir().unwrap().next().is_none(), "run stop must reclaim its helper");
+}
+
+#[test]
+fn local_creation_reads_fresh_inheritance_and_overrides_only_the_snapshot() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let base = home.write("base.yaml", "actor: {driver: linux-firecracker, command: 'sh -l', env: {BASE: first, KEEP: inherited}}\n");
+  let source = "extends: base.yaml\nactor: {env: {CHILD: present}}\n";
+  let profile = home.write("local.yaml", source);
+  let create = |extra: &[&str]| {
+    let mut args = vec!["run", "create", "-f", profile.to_str().unwrap()];
+    args.extend_from_slice(extra);
+    let output = home.run(&args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let run = stdout(&output).trim().to_string();
+    let snapshot = std::fs::read_to_string(home.path().join("state/runs").join(&run).join("profile.yaml")).unwrap();
+    (run, serde_yaml::from_str::<serde_yaml::Value>(&snapshot).unwrap())
+  };
+  let (first, initial) = create(&[]);
+  assert_eq!(initial["actor"]["env"]["BASE"], "first");
+  std::fs::write(&base, "actor: {driver: linux-firecracker, command: 'sh -l', env: {BASE: edited, KEEP: inherited}}\n").unwrap();
+  let (second, changed) = create(&[
+    "--workspace",
+    "~/work",
+    "--env",
+    "BASE=temporary",
+    "--entry-command",
+    "printf 'two words'",
+    "--",
+    "appended",
+  ]);
+  assert_eq!(changed["actor"]["env"]["BASE"], "temporary");
+  assert_eq!(changed["actor"]["env"]["KEEP"], "inherited");
+  assert_eq!(changed["actor"]["env"]["CHILD"], "present");
+  assert_eq!(changed["actor"]["workspace"]["path"], "~/work");
+  assert_eq!(changed["actor"]["command"], serde_yaml::to_value(["printf", "two words"]).unwrap());
+  assert_eq!(std::fs::read_to_string(&profile).unwrap(), source);
+  let (third, fresh) = create(&[]);
+  assert_eq!(fresh["actor"]["env"]["BASE"], "edited");
+  for run in [first, second, third] {
+    assert!(home.run(&["run", "stop", &run, "--now"]).status.success());
+  }
+}
+
+#[test]
+fn simultaneous_client_invocations_do_not_share_a_group_pool_binding() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("client.yaml", "actor: {driver: linux-firecracker}\nexecutors:\n  workstation: {driver: native, runner: {client: true}, key: '{group}'}\ncommands:\n  - {match: '**', to: workstation}\n");
+  let create = || {
+    let output = home.run(&[
+      "run",
+      "create",
+      "-f",
+      profile.to_str().unwrap(),
+      "--group",
+      "same",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    stdout(&output).trim().to_owned()
+  };
+  let first = create();
+  let second = create();
+  let parent = |run: &str| {
+    let output = home.run(&[
+      "run",
+      "exec",
+      run,
+      "--",
+      "sh",
+      "-c",
+      "printf '%s' \"$PPID\"",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    stdout(&output)
+  };
+  let first_holder = parent(&first);
+  let second_holder = parent(&second);
+  assert_ne!(first_holder, second_holder, "creation capabilities must bind independent process holders");
+  assert!(home.run(&["run", "stop", &first, "--now"]).status.success());
+  assert_eq!(parent(&second), second_holder, "stopping another invocation must not replace this holder");
+  assert!(home.run(&["run", "stop", &second, "--now"]).status.success());
+}
+
+#[path = "client_execution/lost_create_reply.rs"]
+mod lost_create_reply;
+
+// ROOT CAUSE:
+//
+// Profile-owned copy-in and mirror-out bypass the routing relay and used to
+// send an empty run ID. The private creating-client holder correctly refused
+// those unbound tar/mkdir requests. File operations must retain their invocation.
+#[test]
+fn client_file_mappings_copy_and_mirror_with_their_invocation_identity() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let source = home.path().join("seed");
+  let project = home.path().join("client-project");
+  let output = project.join("out");
+  let mirror = home.path().join("mirrored");
+  std::fs::create_dir_all(&source).unwrap();
+  std::fs::create_dir_all(&output).unwrap();
+  let seed = b"seed\0\xffbytes\n";
+  std::fs::write(source.join("seed.bin"), seed).unwrap();
+  let profile = serde_json::json!({
+    "actor": {"driver": "linux-firecracker"},
+    "executors": {"workstation": {"driver": "native", "runner": {"client": true}}},
+    "commands": [{"match": "**", "to": "workstation"}],
+    "files": {
+      "seed": {"mode": "copy-in", "from": format!("host:{}", source.display()), "to": format!("executor:workstation:{}/in", project.display())},
+      "result": {"mode": "mirror-out", "from": format!("executor:workstation:{}", output.display()), "to": format!("host:{}", mirror.display())},
+    },
+  });
+  let profile = home.write("client-files.yaml", &profile.to_string());
+  let created = home.run(&["run", "create", "-f", profile.to_str().unwrap()]);
+  let holders = home.path().join("run/client-executions");
+  let wait_for_holder_cleanup = || {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while holders.read_dir().unwrap().next().is_some() && Instant::now() < deadline {
+      std::thread::sleep(Duration::from_millis(50));
+    }
+    holders.read_dir().unwrap().next().is_none()
+  };
+  if !created.status.success() {
+    // A refused creation already rolled its run back. Keep management alive
+    // until its private helper observes that outcome and exits.
+    assert!(wait_for_holder_cleanup(), "a refused creation left its execution helper running");
+  }
+  assert!(created.status.success(), "copy-in must reach the bound client: {}", stderr(&created));
+  let run = stdout(&created).trim().to_string();
+  let checks = (|| -> anyhow::Result<()> {
+    let copied = home.run(&[
+      "run",
+      "exec",
+      &run,
+      "--",
+      "cat",
+      project.join("in/seed.bin").to_str().unwrap(),
+    ]);
+    anyhow::ensure!(copied.status.success(), "cannot read copied client bytes: {}", stderr(&copied));
+    anyhow::ensure!(copied.stdout == seed, "copy-in changed binary contents");
+    let written = home.run(&[
+      "run",
+      "exec",
+      &run,
+      "--",
+      "sh",
+      "-c",
+      "printf 'mirror\\000\\377bytes\\n' > \"$1\"",
+      "sh",
+      output.join("result.bin").to_str().unwrap(),
+    ]);
+    anyhow::ensure!(written.status.success(), "cannot write the client result: {}", stderr(&written));
+    let listed = home.run(&["proc", "ls", "--all", "-o", "json"]);
+    anyhow::ensure!(listed.status.success(), "cannot inspect transfer processes: {}", stderr(&listed));
+    let processes: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout)?;
+    anyhow::ensure!(processes.iter().any(|p| p["argv"][0] == "tar"), "copy-in tar was not listed");
+    anyhow::ensure!(processes.iter().all(|p| p["run"] == run), "a profile file operation escaped invocation ownership");
+    Ok(())
+  })();
+  // Stop even when a byte or ownership assertion failed. Executor mirror-out
+  // precedes release; --now only skips the actor's graceful guest teardown.
+  let stopped = home.run(&["run", "stop", &run, "--now"]);
+  let cleaned = wait_for_holder_cleanup();
+  assert!(stopped.status.success(), "{}", stderr(&stopped));
+  assert!(cleaned, "explicit stop must reclaim the client holder and its processes");
+  checks.unwrap();
+  assert_eq!(std::fs::read(mirror.join("result.bin")).unwrap(), b"mirror\0\xffbytes\n");
 }

@@ -222,8 +222,27 @@ async fn boot(container: bool) -> Result<()> {
       tracing::warn!("mirror-out {}: {e:#}", copy.name);
     }
   }
-  if let Err(status) = client.guest().report_exit(ReportExitRequest { code, signal }).await {
-    tracing::warn!("cannot report the driving program's exit: {}", status.message());
+  // Reporting an exit is idempotent and never executes the program again.
+  // Keep its real result in init until replacement control acknowledges it.
+  loop {
+    match client
+      .guest()
+      .report_exit(ReportExitRequest {
+        code,
+        signal: signal.clone(),
+      })
+      .await
+    {
+      Ok(_) => break,
+      Err(status) if matches!(status.code(), tonic::Code::Unavailable | tonic::Code::Unknown | tonic::Code::Cancelled) => {
+        tracing::debug!("control is unavailable; retaining the program's exit: {}", status.message());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+      }
+      Err(status) => {
+        tracing::warn!("cannot report the driving program's exit: {}", status.message());
+        break;
+      }
+    }
   }
   // Detach FUSE mounts before the streams behind them close. A container
   // has none; its runtime detaches its host-side mounts.

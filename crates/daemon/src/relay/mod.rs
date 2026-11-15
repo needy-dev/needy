@@ -1,5 +1,5 @@
 //! The exec relay, through `api-server`'s `Processes` trait: places a
-//! command, takes a slot on its instance, opens the upstream exec stream
+//! command, forwards its resolved capacity policy, opens the upstream exec stream
 //! there, and relays both ways through the stream filters installed for the
 //! run. A run's relays are its tasks and stop with it; a relay
 //! outside any run is the daemon's.
@@ -25,7 +25,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-use crate::pool::{Instance, Slot};
+use crate::pool::Instance;
 use crate::run::{self, Run};
 use crate::{Daemon, actor};
 use crate::{routing, store};
@@ -166,8 +166,23 @@ impl Daemon {
     }
     match name {
       "" | "local" => Ok(self.local.clone()),
-      name => self.pool.named(name).await,
+      name => {
+        let instance = self.pool.named(name).await?;
+        if let Some(runner) = instance.on_runner() {
+          self.require_shared_runner(runner).await?;
+        }
+        Ok(instance)
+      }
     }
+  }
+
+  /// Private client holders are selected by their invocation's binding,
+  /// never by a transport name supplied to a standalone command.
+  async fn require_shared_runner(&self, runner: &str) -> Result<(), ControlError> {
+    if self.state.client_execution(runner).await.map_err(|error| crate::runners::control_error(error, false))?.is_some() {
+      return Err(ControlError::Invalid("client execution holders are available only through their bound run".into()));
+    }
+    Ok(())
   }
 
   /// A connected runner's machine. A runner that is online (`runner ls`)
@@ -176,6 +191,7 @@ impl Daemon {
   /// within which an online runner dials; any other that is not connected
   /// fails at once.
   async fn runner_instance(&self, runner: &str) -> Result<Arc<Instance>, ControlError> {
+    self.require_shared_runner(runner).await?;
     if self.links.get(runner).is_none()
       && !(self.runner_online(runner).await && self.links.connected(runner, self.config.heartbeat_interval).await.is_some())
     {
@@ -381,7 +397,6 @@ impl Processes for Daemon {
         )
       }
     };
-    let slot = relay.instance.slot().await?;
     let (out_tx, out_rx) = mpsc::channel(64);
     for event in decided {
       out_tx.send(Ok(ExecOutput::Trace(event))).await.map_err(|_| ControlError::Internal("exec output channel closed".into()))?;
@@ -392,23 +407,48 @@ impl Processes for Daemon {
       (Some(_), Upstream::Start(spec)) if routing::unmapped(&relay.instance, &spec.cwd) => Some(spec.cwd.clone()),
       _ => None,
     };
-    let upstream = match upstream {
-      Upstream::Start(spec) => ExecStream::start(executor, domain::proto_exec_start(spec)).await,
-      Upstream::Attach {
-        process,
-        replay,
-        window,
-        read_only,
-      } => {
-        let attach = ExecAttach {
-          process_id: process,
+    let open = async {
+      match upstream {
+        Upstream::Start(spec) => {
+          let start = domain::proto_exec_start(spec);
+          match relay.instance.capacity() {
+            Some(capacity) => {
+              ExecStream::start_limited(
+                executor,
+                needy_api_client::proto::v1::LimitedExecStart {
+                  start: Some(start),
+                  capacity: Some(capacity),
+                },
+              )
+              .await
+            }
+            None => ExecStream::start(executor, start).await,
+          }
+        }
+        Upstream::Attach {
+          process,
           replay,
-          window: window.map(domain::proto_window),
+          window,
           read_only,
-          run_id: String::new(),
-        };
-        ExecStream::attach(executor, attach).await
+        } => {
+          let attach = ExecAttach {
+            process_id: process,
+            replay,
+            window: window.map(domain::proto_window),
+            read_only,
+            run_id: String::new(),
+          };
+          ExecStream::attach(executor, attach).await
+        }
       }
+    };
+    let upstream = match &run {
+      Some(run) => tokio::select! {
+        biased;
+        () = run.cancel.cancelled() => Err(needy_api_client::Error::Ended { reason: Some("run stopped while opening its executor stream".into()) }),
+        result = open => result,
+      },
+      None => open.await,
     }
     .map_err(relayed)
     .map_err(|error| match error {
@@ -450,7 +490,7 @@ impl Processes for Daemon {
     let cancel = cancel.clone();
     tasks.spawn(async move {
       let ended = out_tx.clone();
-      if cancel.run_until_cancelled(relay.run(daemon.clone(), upstream, slot, out_tx)).await.is_none() {
+      if cancel.run_until_cancelled(relay.run(daemon.clone(), upstream, out_tx)).await.is_none() {
         // The run stopped or the daemon is shutting down before the
         // process exited; the caller learns why before the stream closes.
         // NOTICE: `try_send`, so a caller that reads nothing cannot hold up
@@ -478,7 +518,11 @@ impl Processes for Daemon {
         Err(_) => {
           let mut all = vec![self.local.clone()];
           all.extend(self.pool.instances().await);
-          all.extend(self.links.names().iter().map(|runner| Instance::runner(runner, &self.links)));
+          for runner in self.links.names() {
+            if self.state.client_execution(&runner).await.map_err(|error| crate::runners::control_error(error, false))?.is_none() {
+              all.push(Instance::runner(&runner, &self.links));
+            }
+          }
           all
         }
       }
@@ -671,11 +715,9 @@ impl Relay {
     daemon.advance_process(run, process, store::ProcessState::Exited, Some(exit.clone()), now_ms()).await;
   }
 
-  /// Relays the process's output to the caller until it exits. The slot is
-  /// held until then: a detached process keeps it after the caller leaves,
-  /// so the stream is drained without a caller.
-  async fn run(self, daemon: Daemon, mut upstream: ExecStream, slot: Slot, out_tx: Sender) {
-    let _slot = slot;
+  /// Relays output while a viewer remains, or drains a detached process.
+  /// Its execution capacity belongs to the process host, not this stream.
+  async fn run(self, daemon: Daemon, mut upstream: ExecStream, out_tx: Sender) {
     let started_ms = now_ms();
     let mut process_id = String::new();
     let mut client_gone = false;

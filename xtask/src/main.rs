@@ -38,7 +38,8 @@ enum Task {
   /// modes, run endings, file mappings, chaos, network and users, each cell
   /// against its own non-root control daemon.
   #[cfg(feature = "run")]
-  E2e(e2e::Args),
+  // The matrix options are large; do not add their inline size to every task.
+  E2e(Box<e2e::Args>),
   /// A scripted OpenAI-compatible model server: it answers a coding agent
   /// with one shell tool call, then with the call's output, so the agent's
   /// loop runs without an account.
@@ -57,7 +58,7 @@ fn main() -> Result<()> {
     Task::Tui(args) => tui::main(args),
     #[cfg(feature = "run")]
     Task::E2e(args) => {
-      let code = e2e::main(args)?;
+      let code = e2e::main(*args)?;
       std::process::exit(code);
     }
     #[cfg(feature = "mock-model")]

@@ -37,3 +37,30 @@ fn a_failed_command_reports_its_error_output_or_its_exit() {
   assert_eq!(with_stderr.to_string(), "tar: nope: Cannot open");
   assert_eq!(silent.to_string(), "killed by SIGKILL");
 }
+
+// A network failure alone cannot prove whether a dispatched command ran.
+#[test]
+fn unavailable_is_not_proof_that_a_command_was_not_started() {
+  let ambiguous = super::Error::from(tonic::Status::unavailable("response lost"));
+  assert!(!ambiguous.not_started());
+  let confirmed = super::Error::from(crate::diagnostic::with_status(
+    tonic::Status::unavailable("wait deadline expired"),
+    needy_api_proto::v1::ErrorDiagnostic {
+      reason: "process.not_started".into(),
+      facts: Default::default(),
+    },
+  ));
+  assert!(confirmed.not_started());
+}
+
+#[test]
+fn a_closed_invocation_can_confirm_that_a_late_command_never_started() {
+  let confirmed = super::Error::from(crate::diagnostic::with_status(
+    tonic::Status::failed_precondition("the invocation ended"),
+    needy_api_proto::v1::ErrorDiagnostic {
+      reason: "process.not_started".into(),
+      facts: Default::default(),
+    },
+  ));
+  assert!(confirmed.not_started());
+}

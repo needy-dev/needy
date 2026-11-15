@@ -38,6 +38,11 @@ impl State {
     Self(Mutex::new(RunState::Creating))
   }
 
+  /// Reconstitutes the persisted state of an invocation whose holder was verified.
+  pub fn restore(state: RunState) -> Self {
+    Self(Mutex::new(state))
+  }
+
   pub fn get(&self) -> RunState {
     *self.lock()
   }

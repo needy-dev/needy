@@ -163,9 +163,9 @@ pub enum End {
   Stop,
   /// `needy run stop --now`, when this needy has it.
   StopNow,
-  /// The control daemon is killed with SIGKILL and started again on the
-  /// same state: the restarted control plane reconciles the run.
-  DaemonKill,
+  /// The actual actor VM/container is forcibly ended while control remains
+  /// available; control loss belongs to the lifecycle continuity journey.
+  RuntimeKill,
 }
 
 impl End {
@@ -174,7 +174,7 @@ impl End {
       End::Exit => "exit",
       End::Stop => "stop",
       End::StopNow => "stop-now",
-      End::DaemonKill => "daemon-kill",
+      End::RuntimeKill => "runtime-kill",
     }
   }
 }
@@ -295,6 +295,29 @@ impl RunnerAt {
   }
 }
 
+/// Where the invocation that supplies execution runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientAt {
+  Local,
+  Remote,
+}
+
+/// The real resource and process lifetime boundaries, independent of a viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+  Continuity,
+  ActorLoss,
+}
+
+impl Lifecycle {
+  fn name(self) -> &'static str {
+    match self {
+      Self::Continuity => "continuity",
+      Self::ActorLoss => "actor-loss",
+    }
+  }
+}
+
 /// What a cell exercises. Each scenario fixes the dimensions it does not
 /// vary itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,6 +327,10 @@ pub enum Scenario {
   /// Routing to a native executor on a runner that joined the control
   /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
+  /// Public CLI creation supplies a same-account native execution holder.
+  ClientExecution(ClientAt),
+  /// The original driving program across viewer/control loss, or actual runtime loss.
+  Lifecycle(Lifecycle),
   /// Copy-in from the host into the actor, nested and single-level; mirror-out
   /// from the actor with and without a filter.
   ActorFiles,
@@ -375,6 +402,7 @@ impl Cell {
     let driver = self.driver.name();
     let executor = self.executor.map(Executor::name).unwrap_or("none");
     match self.scenario {
+      Scenario::Lifecycle(journey) => format!("{driver}/lifecycle/{}", journey.name()),
       Scenario::ActorFiles => format!("{driver}/actor-files/end={}", self.end.name()),
       Scenario::ExecutorFiles => format!("{driver}/executor-files/executor={executor},end={}", self.end.name()),
       Scenario::Workspace(Workspace::Executor(e)) => format!("{driver}/workspace/from=executor-{}", e.name()),
@@ -387,6 +415,13 @@ impl Cell {
       Scenario::FakeAgent => format!("{driver}/fake-agent"),
       Scenario::Runner(RunnerAt::Local(transport)) => format!("{driver}/runner/at=local,transport={}", transport.name()),
       Scenario::Runner(at) => format!("{driver}/runner/at={}", at.name()),
+      Scenario::ClientExecution(at) => format!(
+        "{driver}/client-execution/at={}",
+        match at {
+          ClientAt::Local => "local",
+          ClientAt::Remote => "remote",
+        }
+      ),
       Scenario::Tui(i) => format!("{driver}/tui/{}", super::tui::cases().get(i).map(|c| c.name).unwrap_or("?")),
       Scenario::HostExec => format!("{driver}/exec"),
       Scenario::HostCopy => format!("{driver}/fs-cp"),
@@ -414,6 +449,10 @@ impl Cell {
       Scenario::FakeAgent => vec![
         "copy-in host->actor nested (filtered)",
         "mirror-out actor->host filtered",
+      ],
+      Scenario::ClientExecution(_) => vec![
+        "client workspace mount",
+        "actor and routed-command writes on creating client",
       ],
       Scenario::Runner(_) => vec![],
       Scenario::HostCopy => vec!["fs cp host->executor nested", "fs cp executor->host"],
@@ -458,7 +497,7 @@ impl Cell {
   /// Whether the actor's workspace is mounted from an executor, which a
   /// `linux-container` actor does with sshfs on the host.
   pub fn mounts_workspace(&self) -> bool {
-    matches!(self.scenario, Scenario::Workspace(Workspace::Executor(_)) | Scenario::Chaos(Fault::File))
+    matches!(self.scenario, Scenario::Workspace(Workspace::Executor(_)) | Scenario::Chaos(Fault::File) | Scenario::ClientExecution(_))
   }
 }
 
@@ -480,14 +519,14 @@ pub fn cells() -> Vec<Cell> {
   ];
   for driver in Driver::ACTORS {
     let cell = |scenario| Cell::new(driver, scenario);
-    for end in [End::Exit, End::Stop, End::StopNow, End::DaemonKill] {
+    for end in [End::Exit, End::Stop, End::StopNow, End::RuntimeKill] {
       cells.push(Cell {
         end,
         ..cell(Scenario::ActorFiles)
       });
     }
     for executor in [Executor::Native, Executor::Container] {
-      for end in [End::Exit, End::Stop, End::DaemonKill] {
+      for end in [End::Exit, End::Stop, End::RuntimeKill] {
         cells.push(Cell {
           end,
           executor: Some(executor),
@@ -549,6 +588,25 @@ pub fn cells() -> Vec<Cell> {
       cells.push(cell(Scenario::Runner(RunnerAt::Local(transport))));
     }
     cells.push(cell(Scenario::Runner(RunnerAt::Windows)));
+    for at in [ClientAt::Local, ClientAt::Remote] {
+      cells.push(Cell {
+        terminal: Terminal::Later,
+        end: End::Stop,
+        ..cell(Scenario::ClientExecution(at))
+      });
+    }
+    // NOTICE: lifecycle acceptance starts with the authorized Linux
+    // Firecracker/runc hosts. Add macOS/runsc cells with their real resource
+    // identity/loss probes when those acceptance hosts are scheduled.
+    if matches!(driver, Driver::Firecracker | Driver::Container(Oci::Runc)) {
+      for journey in [Lifecycle::Continuity, Lifecycle::ActorLoss] {
+        cells.push(Cell {
+          terminal: Terminal::Later,
+          end: End::Stop,
+          ..cell(Scenario::Lifecycle(journey))
+        });
+      }
+    }
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -582,6 +640,38 @@ mod tests {
   use super::*;
 
   #[test]
+  fn real_actor_lifecycle_cells_cover_restart_and_loss_on_linux() {
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["lifecycle".into()], &[])).collect();
+    assert_eq!(mine.len(), 4, "Firecracker and runc each need continuity and actual-loss acceptance");
+    for driver in ["linux-firecracker", "linux-container.runc"] {
+      for journey in ["continuity", "actor-loss"] {
+        let expected = format!("{driver}/lifecycle/{journey}");
+        let cell = mine.iter().find(|cell| cell.id() == expected).unwrap_or_else(|| panic!("missing {expected}"));
+        assert_eq!(cell.platform(), Some(Platform::Linux));
+        assert_eq!(cell.terminal, Terminal::Later);
+        assert_eq!(cell.executor, Some(Executor::Native));
+        assert!(!cell.root, "lifecycle acceptance must use a non-root daemon");
+      }
+    }
+  }
+
+  #[test]
+  fn client_execution_is_selectable_without_enabling_runner_or_restart_cells() {
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["client-execution".into()], &[])).collect();
+    assert_eq!(mine.len(), Driver::ACTORS.len() * 2);
+    for driver in Driver::ACTORS {
+      for at in [ClientAt::Local, ClientAt::Remote] {
+        let cell = mine.iter().find(|cell| cell.driver == driver && cell.scenario == Scenario::ClientExecution(at)).unwrap();
+        assert_eq!(cell.end, End::Stop);
+        assert!(cell.mounts_workspace());
+      }
+    }
+    let remote: Vec<_> = mine.iter().filter(|cell| selected(&cell.id(), &["**/client-execution/at=remote".into()], &[])).collect();
+    assert_eq!(remote.len(), Driver::ACTORS.len());
+    assert!(remote.iter().all(|cell| cell.scenario == Scenario::ClientExecution(ClientAt::Remote)));
+  }
+
+  #[test]
   fn ids_are_unique() {
     let cells = cells();
     let mut ids: Vec<String> = cells.iter().map(Cell::id).collect();
@@ -596,7 +686,7 @@ mod tests {
     let cells = cells();
     for driver in Driver::ACTORS {
       let mine: Vec<&Cell> = cells.iter().filter(|c| c.driver == driver).collect();
-      for end in [End::Exit, End::Stop, End::StopNow, End::DaemonKill] {
+      for end in [End::Exit, End::Stop, End::StopNow, End::RuntimeKill] {
         assert!(mine.iter().any(|c| c.end == end), "{} lacks end {}", driver.name(), end.name());
       }
       for terminal in [Terminal::None, Terminal::Later, Terminal::Now] {

@@ -1,6 +1,7 @@
 //! Machine identity: placeholders filled from the seed, SMBIOS, PCI IDs,
 //! chassis numbers, and the check that the identity names one vendor.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -11,7 +12,7 @@ use needy_config::validate::Finding;
 use super::PerRun;
 
 /// SMBIOS tables of the VM. Every value is already filled from the seed.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Smbios {
   pub sys_vendor: Option<String>,
   pub product_name: Option<String>,
@@ -33,7 +34,7 @@ pub struct Smbios {
 }
 
 /// A PCI vendor, device and revision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PciId {
   pub vendor: u16,
   pub device: u16,

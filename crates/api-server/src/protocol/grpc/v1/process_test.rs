@@ -187,3 +187,24 @@ async fn a_client_lists_one_runner_s_processes() {
 
   assert_eq!(served.fake.calls(), [r#"list "" on runner mac"#]);
 }
+
+#[tokio::test]
+async fn a_public_client_cannot_supply_process_owner_capacity_policy() {
+  let served = serve(Caller::Operator).await;
+  let error = ExecStream::start_limited(
+    &served.client,
+    needy_api_proto::v1::LimitedExecStart {
+      start: Some(start(&["true"])),
+      capacity: Some(needy_api_proto::v1::ExecutorCapacity {
+        key: "forged".into(),
+        max_procs: 100,
+        on_full: needy_api_proto::v1::CapacityOnFull::Wait.into(),
+      }),
+    },
+  )
+  .await
+  .err()
+  .expect("the lower-level request cannot cross the public control boundary");
+  assert_eq!(error.kind(), Kind::Invalid);
+  assert!(served.fake.calls().is_empty(), "public policy must never reach execution");
+}

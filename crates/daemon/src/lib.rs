@@ -37,6 +37,8 @@ pub mod capabilities;
 #[cfg(unix)]
 pub mod discovery;
 pub mod executor;
+#[cfg(unix)]
+pub mod holder;
 pub mod runner;
 
 #[cfg(unix)]
@@ -95,10 +97,6 @@ use needy_core::types::RunState;
 #[cfg(unix)]
 use needy_core_executor::driver::{self, LinuxContainer, Native};
 #[cfg(unix)]
-use needy_core_executor::process::Host;
-#[cfg(unix)]
-use needy_core_executor::service::ExecutorService;
-#[cfg(unix)]
 use needy_trace::sink::sqlite::Store;
 #[cfg(unix)]
 use tokio_util::sync::CancellationToken;
@@ -112,8 +110,11 @@ use crate::run::Registry;
 
 #[cfg(unix)]
 /// Where the control daemon keeps its state and finds its images.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
+  /// Executable that implements the local `daemon holder` entry point.
+  /// The composition layer supplies it; an embedding process need not be the CLI.
+  pub holder_executable: PathBuf,
   /// `state.db`, `trace.db` and the runs' directories.
   pub state_dir: PathBuf,
   /// The local executor's socket.
@@ -203,8 +204,10 @@ pub struct Daemon {
   pub(crate) runner_hosts: Arc<Mutex<HashMap<String, RunnerHost>>>,
   /// This machine, always available as the `local` executor.
   pub(crate) local: Arc<Instance>,
-  /// The local executor's processes.
-  host: Host,
+  /// The protected local process and actor owner.
+  pub(crate) holder: holder::Client,
+  /// Control cancellation must not be interpreted as an explicit run stop.
+  pub(crate) suspending: Arc<AtomicBool>,
   /// The instance each process the daemon has seen runs on, for `attach`
   /// and `kill`, and who started it, for `ps`.
   // TODO(persistence): this map grows until the daemon exits. `state.db`
@@ -252,31 +255,9 @@ impl Daemon {
     let tasks = TaskTracker::new();
     let cancel = CancellationToken::new();
 
-    // This machine is always available as the `local` executor.
-    let host = Host::default();
+    // The holder, rather than this control instance, owns the native host.
+    let holder = holder::Client::connect(&config).await?;
     let local_sock = config.runtime_dir.join("local.sock");
-    let service = ExecutorService {
-      host: host.clone(),
-      name: "local".into(),
-    };
-    let health = Health {
-      instance_id: uuid::Uuid::new_v4().to_string(),
-      role: "executor",
-    };
-    // A socket that cannot bind, such as a path over `sun_path`, fails
-    // start-up here with its path.
-    let local_server = match Server::new(health, Caller::Operator).process_service(service).bind(&[Listen::Unix(local_sock.clone())]).await {
-      Err(e @ needy_api_server::server::Error::InUse(_)) => {
-        return Err(anyhow::Error::new(e).context(format!("another daemon uses the runtime directory {}", config.runtime_dir.display())));
-      }
-      bound => bound?,
-    };
-    let stop = cancel.clone();
-    tasks.spawn(async move {
-      if let Err(e) = local_server.serve(stop).await {
-        tracing::error!("local executor: {e:#}");
-      }
-    });
     let local_client = driver::connect(&format!("unix:{}", local_sock.display())).await?;
     let native = Arc::new(Native::new(local_client));
     let container = match LinuxContainer::new(driver::linux_container::Options {
@@ -302,7 +283,8 @@ impl Daemon {
       state,
       links,
       runner_hosts: Arc::default(),
-      host,
+      holder,
+      suspending: Arc::default(),
       processes: Arc::default(),
       tasks,
       creates: TaskTracker::new(),
@@ -313,7 +295,13 @@ impl Daemon {
       cleanup_incomplete: Arc::default(),
       shutdown_started: Arc::default(),
     };
-    daemon.reconcile_open_runs().await.context("cannot reconcile the runs in state.db")?;
+    if let Err(error) = daemon.reconcile_open_runs().await {
+      // A failed activation can already own guest listeners and watches.
+      // Stop only this control instance, preserving the original holder and
+      // durable stop intent before releasing discovery for another retry.
+      daemon.suspend_control().await;
+      return Err(error.context("cannot reconcile the runs in state.db"));
+    }
     Ok(daemon)
   }
 
@@ -327,7 +315,7 @@ impl Daemon {
     let ended = termination
       .unless_forced(async {
         let served = self.serve_until(listen, token, termination.stop()).await;
-        self.shutdown().await;
+        self.suspend_control().await;
         if self.cleanup_incomplete.load(Ordering::SeqCst) {
           return Err(
             IncompleteShutdown {
@@ -351,18 +339,8 @@ impl Daemon {
         } else {
           format!("exited at a second termination signal; these runs were not cleaned up: {}", left.join(", "))
         };
-        // The control socket went with the dropped shutdown. The local
-        // executor serves in a task, which the process exit ends without
-        // dropping, so its socket is removed here while it still serves:
-        // nobody else can have bound it then. Once `cancel` is cancelled
-        // that server stops and removes the file itself.
-        let local_sock = self.config.runtime_dir.join("local.sock");
-        if !self.cancel.is_cancelled()
-          && let Err(e) = std::fs::remove_file(&local_sock)
-          && e.kind() != std::io::ErrorKind::NotFound
-        {
-          tracing::warn!("cannot remove {}: {e}", local_sock.display());
-        }
+        // The protected holder and its native socket still own the surviving
+        // work. Even a forced control exit must not unlink their listener.
         self.discovery.retract();
         tracing::error!("{message}");
         bail!(message)
@@ -398,7 +376,7 @@ impl Daemon {
     tokio::select! {
       result = &mut serving => result?,
       () = stop.cancelled() => {
-        self.stop_runs().await;
+        self.suspend_control().await;
         self.links.close_all();
         server_stop.cancel();
         serving.await?;
@@ -420,6 +398,52 @@ impl Daemon {
     Server::new(health, Caller::Operator).token(token).runs(api.clone()).processes(api.clone()).runners(api.clone()).clients(api)
   }
 
+  /// Stops management without ending admitted invocations. The holder keeps
+  /// their processes and driver channels; the next control adopts its verified
+  /// identity. `shutdown` remains the explicit full teardown for embedders.
+  pub async fn suspend_control(&self) {
+    if self.suspending.swap(true, Ordering::SeqCst) {
+      return;
+    }
+    self.shutting_down.store(true, Ordering::SeqCst);
+    self.creates.close();
+    // Let an admitted create finish before closing its control-side services.
+    // A crash during creation is reconciled from the holder and snapshot.
+    self.creates.wait().await;
+    for run in self.runs.live() {
+      if let Err(error) = self.snapshot_run(&run).await {
+        tracing::warn!("cannot snapshot run {}: {error:#}", run.id);
+      }
+      run.trace.flush().await;
+    }
+    self.cancel.cancel();
+    self.holder.disconnect();
+    self.links.close_all();
+    self.tasks.close();
+    for run in self.runs.live() {
+      run.tasks.close();
+    }
+    // A server's graceful drain is bounded: a vanished viewer must not hold
+    // a management restart forever. Tasks own no held OS runtime resources.
+    let drained = async {
+      for run in self.runs.live() {
+        run.tasks.wait().await;
+      }
+      self.tasks.wait().await;
+    };
+    if tokio::time::timeout(Duration::from_secs(10), drained).await.is_err() {
+      tracing::warn!("control task drain exceeded 10s; runtime resources remain held");
+    }
+    // Drain the events emitted while relays and services ended before a new
+    // control instance reads the next durable sequence.
+    for run in self.runs.live() {
+      run.trace.flush().await;
+    }
+    if let Err(error) = self.discovery.finish(true) {
+      tracing::error!("cannot close control discovery: {error:#}");
+    }
+  }
+
   /// Unwinds the runs being created, stops every other run in the
   /// order they were created, then the daemon's own tasks and the local
   /// executor's processes, and waits for them.
@@ -432,7 +456,9 @@ impl Daemon {
     let elapsed = self.shutdown_started.get_or_init(std::time::Instant::now).elapsed();
     let remaining = Duration::from_secs(60).saturating_sub(elapsed);
     if tokio::time::timeout(remaining, async {
-      self.host.shutdown().await;
+      if let Err(error) = self.holder.shutdown().await {
+        tracing::warn!("cannot stop the runtime holder: {error:#}");
+      }
       self.tasks.wait().await;
     })
     .await

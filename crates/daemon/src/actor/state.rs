@@ -54,6 +54,11 @@ impl std::fmt::Display for Refused {
 }
 
 impl State {
+  /// Reconstitutes the observed state of a verified surviving actor.
+  pub fn restore(state: Option<ActorState>) -> Self {
+    Self(watch::channel(state).0)
+  }
+
   pub fn get(&self) -> Option<ActorState> {
     *self.0.borrow()
   }

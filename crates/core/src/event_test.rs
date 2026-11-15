@@ -26,14 +26,17 @@ fn every_kind() -> Vec<Event> {
       recipe_time: Some("20261112-010203".into()),
     }),
     Event::RunStop(RunStop {
+      ended: false,
       by: Some(Principal::Operator),
       actor: None,
     }),
     Event::RunStop(RunStop {
+      ended: false,
       by: None,
       actor: Some(ActorStop::Graceful),
     }),
     Event::RunStop(RunStop {
+      ended: false,
       by: None,
       actor: Some(ActorStop::Forced {
         reason: "asked to stop at once".into(),
@@ -204,8 +207,8 @@ fn payloads_are_plain_json_objects() {
 }
 
 #[test]
-fn a_run_stop_carries_no_attributes() {
-  assert_eq!(Event::RunStop(RunStop::default()).payload(), "{}");
+fn a_cleanup_stop_records_that_it_did_not_establish_the_terminal_state() {
+  assert_eq!(Event::RunStop(RunStop::default()).payload(), r#"{"ended":false}"#);
 }
 
 #[test]
@@ -252,18 +255,19 @@ fn an_exec_start_without_a_term_fallback_has_no_such_key() {
 }
 
 // Version 6 renamed `runtime` to `driver` without compatibility (the drivers
-// design): rows of an earlier version, or of a later one, are refused with
-// the version instead of a payload error about a field.
+// design): rows outside the retained schema range are refused with the
+// version instead of a payload error about a field.
 #[test]
 fn a_payload_of_another_version_is_refused() {
   assert_eq!(
-    Event::decode("run.stop", SCHEMA_VERSION, "{}").unwrap(),
+    Event::decode("run.stop", SCHEMA_VERSION, r#"{"ended":false}"#).unwrap(),
     Event::RunStop(RunStop {
+      ended: false,
       by: None,
       actor: None
     })
   );
-  for version in [1, SCHEMA_VERSION - 1, SCHEMA_VERSION + 1] {
+  for version in [1, 9, SCHEMA_VERSION + 1] {
     assert!(matches!(Event::decode("run.stop", version, "{}"), Err(DecodeError::Version { .. })), "{version}");
   }
 }
@@ -271,10 +275,11 @@ fn a_payload_of_another_version_is_refused() {
 #[test]
 fn a_principal_is_one_string_in_the_payload() {
   let stop = Event::RunStop(RunStop {
+    ended: false,
     by: Some(Principal::Client("laptop".into())),
     actor: None,
   });
-  assert_eq!(stop.payload(), r#"{"by":"client:laptop"}"#);
+  assert_eq!(stop.payload(), r#"{"by":"client:laptop","ended":false}"#);
   assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION, r#"{"by":"someone"}"#), Err(DecodeError::Payload { .. })));
 }
 
@@ -285,12 +290,36 @@ fn a_principal_is_one_string_in_the_payload() {
 // starting at 1 while the build reads only the current version.
 //
 // Before the fix, the message contradicted itself for versions inside 1..9.
-// The fix names the one version the build reads.
+// The fix named the one version the build read. Schema 11 retains schema 10,
+// so the message must now name that exact supported range.
 #[test]
-fn a_refused_schema_version_names_the_only_version_this_build_reads() {
-  let error = Event::decode("run.stop", SCHEMA_VERSION - 1, "{}").unwrap_err().to_string();
+fn a_refused_schema_version_names_the_supported_range() {
+  let error = Event::decode("run.stop", 9, "{}").unwrap_err().to_string();
+  assert_eq!(error, format!("event schema version 9 is not one this build reads; it reads versions 10 through {SCHEMA_VERSION}"));
+}
+
+#[test]
+fn stop_completion_requires_an_explicit_ownership_fact_in_schema_11() {
+  assert!(matches!(Event::decode("run.stop", SCHEMA_VERSION, "{}"), Err(DecodeError::Payload { .. })));
+  assert!(matches!(Event::decode("run.stop", 9, r#"{"actor":null}"#), Err(DecodeError::Version { .. })));
+  let event = Event::RunStop(RunStop {
+    ended: true,
+    ..Default::default()
+  });
+  assert_eq!(Event::decode("run.stop", SCHEMA_VERSION, &event.payload()).unwrap(), event);
+}
+
+#[test]
+fn schema_10_history_keeps_its_original_stop_and_event_meaning() {
+  let stop = Event::decode("run.stop", 10, r#"{"by":"operator","actor":{"how":"graceful"}}"#).unwrap();
   assert_eq!(
-    error,
-    format!("event schema version {} is not one this build reads; it reads version {SCHEMA_VERSION} only", SCHEMA_VERSION - 1)
+    stop,
+    Event::RunStop(RunStop {
+      ended: false,
+      by: Some(Principal::Operator),
+      actor: Some(ActorStop::Graceful)
+    })
   );
+  assert_eq!(Event::decode("run.stop", 10, "{}").unwrap(), Event::RunStop(RunStop::default()));
+  assert_eq!(Event::decode("trace.gap", 10, r#"{"dropped":6}"#).unwrap(), Event::TraceGap(TraceGap { dropped: 6 }));
 }

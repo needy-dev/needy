@@ -119,9 +119,9 @@ struct Tally {
   /// with `run ls`.
   // NOTICE: an actor exit that lands while a stop is under way, as a
   // graceful stop's does, is recorded before `run.stop`; a `run.stop` with
-  // `actor` says the stop ended the running actor, so it makes the run
-  // `stopped` as the daemon says. Without `actor` (an actor that ended
-  // first) the first end stays.
+  // `actor` or `ended` says the stop established the terminal state, so it
+  // makes the run `stopped`. Recovery may have already observed actor exit
+  // while completing accepted stop intent, without a new ActorStop outcome.
   state: Option<RunState>,
   actor_exit: Option<ActorExit>,
   /// Why the run failed.
@@ -180,9 +180,9 @@ impl Tally {
         self.state.get_or_insert(RunState::Running);
       }
       Event::RunStop(stop) => {
-        if stop.actor.is_some() {
-          // The stop ended the running actor: its exit, recorded first, was
-          // the stop's doing.
+        if stop.ended || stop.actor.is_some() {
+          // This accepted stop owns the terminal state, including when its
+          // actor exit was observed before recovery completed the stop.
           self.ended = Some(time_ms);
           self.state = Some(RunState::Stopped);
         } else {

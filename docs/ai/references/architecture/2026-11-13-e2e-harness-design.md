@@ -34,7 +34,7 @@ workaround, as a failure or as not covered: never as a footnote.
 ```sh
 cargo xtask e2e                       # every cell this host can run
 cargo xtask e2e --list                # the cells, and why some cannot run here
-cargo xtask e2e --only macos-vz/ --skip end=daemon-kill --parallel 4
+cargo xtask e2e --only macos-vz/ --skip end=runtime-kill --parallel 4
 cargo xtask e2e -o json > e2e.json    # one JSON document
 cargo xtask e2e --clean               # remove the images and the work directory it built
 ```
@@ -124,7 +124,7 @@ prints it; `matrix::tests` keep its coverage.
 | --- | --- |
 | Actor driver | `linux-firecracker`, `linux-container.runc`, `linux-container.runsc`, `macos-vz`, `macos-apple-container`; `none` for the cells without an actor |
 | Terminal | none, `-t` (attach later, detach, attach again), `-it` |
-| How the run ends | the program exits, `run stop`, `run stop --now` (once it exists), daemon SIGKILL and restart (reconcile) |
+| How the run ends | the program exits, `run stop`, `run stop --now` (once it exists), actual actor VM/container loss |
 | File mappings | copy-in host→actor nested (`~/.config/e2e/nested/seed/`, filtered) and single-level (`~/single/`); mirror-out actor→host with and without a filter; the same three from and to an executor; the workspace from a native executor, from a container executor, and from the host (copied in) |
 | Chaos | one fault per domain with its effect observed by the program (exec: exit 7 with stderr, and SIGSEGV; file: `EIO` on `open`; net: refused, reset, a 503 on a service; sensor: an overheat at 2 s), and `needy chaos add` at run time |
 | Network | an allowed host, a denied host, a service |
@@ -140,8 +140,8 @@ prints it; `matrix::tests` keep its coverage.
 
 | Scenario | Cells | Fixed dimensions |
 | --- | --- | --- |
-| `actor-files` | `end=exit`, `end=stop`, `end=stop-now`, `end=daemon-kill` | native executor none; terminal none |
-| `executor-files` | `executor=native|linux-container` × `end=exit|stop|daemon-kill` | terminal none |
+| `actor-files` | `end=exit`, `end=stop`, `end=stop-now`, `end=runtime-kill` | native executor none; terminal none |
+| `executor-files` | `executor=native|linux-container` × `end=exit|stop|runtime-kill` | terminal none |
 | `workspace` | `from=executor-native`, `from=executor-linux-container`, `from=host` | |
 | `routing` | one | native executor, a `deny` rule |
 | `chaos` | `fault=exec`, `file`, `net`, `sensor` (not for `macos-apple-container`, whose README row is ❌), `chaos-add` | |
@@ -150,6 +150,7 @@ prints it; `matrix::tests` keep its coverage.
 | `terminal` | `mode=t`, `mode=it` | |
 | `fake-agent` | one | `-t`, `run stop`, nested config, routed shells |
 | `runner` | `at=local,transport=direct|ssh-l|idle-proxy|cloudflare`, `at=windows` | a native executor on a runner; for `at=local`, the workspace from it |
+| `lifecycle` | `continuity`, `actor-loss` on Firecracker and runc | `-t`, native executor, non-root control |
 | `tui` | one per TUI case | `-it` |
 
 And two cells without an actor: `none/exec` (`needy exec`: exit codes,
@@ -269,7 +270,7 @@ Per scenario:
   server saw the request.
 - **Run and actor state** in `run ls`: `running` with the actor `configured`
   or `ready` while live (`ready` for `-t`, after detaching too); `finished`
-  with the exit code, `stopped`, or `failed` naming the restart after a
+  with the exit code, `stopped`, or `failed` naming actual actor loss after a
   reconcile; an ended run's actor `exited` or none; a stopped or failed run's
   executors released or lost.
 - **Runners**: the runner joins and is online with `executor(native)` in
@@ -313,6 +314,36 @@ agents' pinned releases and compiles nothing. From it the harness makes this
 host's VM image (`needy image build --from`, into the work directory's
 `images/`, which each cell's data directory links to) or loads it into
 Apple's `container`.
+
+## Lifecycle acceptance added on 2026-11-15
+
+`linux-firecracker/lifecycle/continuity` and
+`linux-container.runc/lifecycle/continuity` keep one stateful driving program.
+They detach and attach repeatedly, terminate a viewer, and interrupt a foreground child.
+They replace the actual control child after SIGTERM and SIGKILL.
+
+The assertions compare the driving PID, retained shell memory, and a single start marker.
+They also compare the original VM process identity or container ID, PID, and start time.
+An already-dispatched native command must retain its PID and advance its heartbeat.
+Its side-effect file must contain one start, and its interrupted proxy must report outcome unknown.
+Explicit stop must end the original runtime and native process.
+
+The corresponding `lifecycle/actor-loss` cells terminate the actual runtime resource.
+They require failed history, an `actor.vm.exit` event, and no replacement `actor.start`.
+
+The former `end=daemon-kill` dimension is `end=runtime-kill`.
+It kills the actor resource while control stays available.
+Actor mirror-out cannot run after abrupt actor loss.
+Executor mirror-out still runs when its executor and control survive.
+Control crash belongs to the continuity journey and does not end the invocation.
+
+Every cell explicitly stops its tracked live invocations before stopping control.
+The existing resource and socket checks still report leaks before fallback cleanup.
+The new matrix tests establish cell selection only; they are not live acceptance evidence.
+
+The results that follow retain their original 2026-11-13 IDs and behavior.
+Their `daemon-kill` failures describe the implementation before protected holders.
+Use the current lifecycle contract and new harness cells for present behavior.
 
 ## Results
 

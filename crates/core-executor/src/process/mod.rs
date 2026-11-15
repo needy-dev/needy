@@ -6,6 +6,7 @@
 //! buffer ([`Proc`]), so a client may disconnect and attach again. A finished
 //! process stays listed for the host's retention period, then expires.
 
+mod capacity;
 mod pipes;
 mod proc;
 mod pty;
@@ -18,7 +19,7 @@ mod platform;
 #[path = "platform/windows.rs"]
 mod platform;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -27,6 +28,7 @@ pub use needy_common::process::Exit;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+pub(crate) use capacity::Capacity;
 pub use proc::{Client, Live, Proc, Subscriber, Subscription};
 
 /// How long a finished process stays in [`Host::list`] and can be attached.
@@ -65,6 +67,14 @@ pub enum Error {
   Terminal(String),
   #[error("the host is shutting down")]
   ShuttingDown,
+  #[error("the invocation ended; command was not started")]
+  RunEnded,
+  #[error("executor is full")]
+  Full,
+  #[error("executor capacity key is empty or its limit is unsupported")]
+  InvalidCapacity,
+  #[error("executor capacity changed while its processes or admissions are still active")]
+  CapacityChanged,
 }
 
 impl Error {
@@ -156,6 +166,11 @@ pub struct Host {
 
 struct Inner {
   procs: Mutex<HashMap<String, Arc<Proc>>>,
+  /// Held through spawn+table insertion and through end_run's snapshot.
+  /// Tombstones live as long as the host: a delayed task must never revive a
+  /// finished invocation even after its process replay records expired.
+  ended_runs: Mutex<HashSet<String>>,
+  capacity: capacity::Limits,
   retention: Duration,
   /// Every task the host's processes and streams run on.
   tasks: TaskTracker,
@@ -174,6 +189,8 @@ impl Host {
     Self {
       inner: Arc::new(Inner {
         procs: Mutex::new(HashMap::new()),
+        ended_runs: Mutex::new(HashSet::new()),
+        capacity: Default::default(),
         retention,
         tasks: TaskTracker::new(),
         cancel: CancellationToken::new(),
@@ -193,8 +210,35 @@ impl Host {
     all
   }
 
+  /// Admission and its permit belong to this host, including when the
+  /// response carrying Started never reaches control. Dropping a pending
+  /// admission starts nothing; spawn rechecks invocation termination atomically.
+  pub(crate) async fn spawn_with_capacity(&self, spec: Spec, capacity: Option<Capacity>) -> Result<Arc<Proc>, Error> {
+    let permit = match capacity {
+      Some(policy) => Some(tokio::select! {
+        biased;
+        () = self.inner.cancel.cancelled() => return Err(Error::ShuttingDown),
+        permit = self.inner.capacity.reserve(policy) => permit?,
+      }),
+      None => None,
+    };
+    let process = self.spawn(spec)?;
+    if let Some(permit) = permit {
+      let process = process.clone();
+      self.inner.tasks.spawn(async move {
+        process.wait().await;
+        drop(permit);
+      });
+    }
+    Ok(process)
+  }
+
   /// Starts a process. Its tasks belong to the host, not to the caller.
   pub fn spawn(&self, mut spec: Spec) -> Result<Arc<Proc>, Error> {
+    let ended = self.inner.ended_runs.lock().unwrap_or_else(|e| e.into_inner());
+    if !spec.run_id.is_empty() && ended.contains(&spec.run_id) {
+      return Err(Error::RunEnded);
+    }
     let Some(asked) = spec.argv.first().filter(|program| !program.is_empty()).cloned() else {
       return Err(Error::EmptyCommand);
     };
@@ -221,7 +265,17 @@ impl Host {
     // path the caller asked for.
     let proc = spawned.map_err(|error| error.naming(asked))?;
     self.table().insert(proc.id.clone(), proc.clone());
+    drop(ended);
     Ok(proc)
+  }
+
+  /// Seals an invocation against late starts and returns its running
+  /// processes under the same admission lock as spawn. The caller sends the
+  /// stop signal and waits for these processes according to its stop policy.
+  pub fn end_run(&self, run: &str) -> Vec<Arc<Proc>> {
+    let mut ended = self.inner.ended_runs.lock().unwrap_or_else(|e| e.into_inner());
+    ended.insert(run.to_owned());
+    self.list().into_iter().filter(|p| p.run_id == run && p.exit().is_none()).collect()
   }
 
   /// Kills every running process and waits for the host's tasks to end.

@@ -11,6 +11,7 @@
 //! ended runs are listed from there, also after a restart, and a restarted
 //! control plane reconciles the runs it finds open (`crate::reconcile`).
 
+mod recovery;
 pub mod state;
 pub mod stop;
 
@@ -67,7 +68,7 @@ pub struct Run {
   pub profile_name: String,
   pub profile: Profile,
   /// The profile as the client resolved it, kept in `state.db`.
-  profile_yaml: String,
+  pub(crate) profile_yaml: String,
   pub created_ms: i64,
   pub dir: PathBuf,
   pub state: State,
@@ -488,7 +489,13 @@ impl Daemon {
   /// Creates a run; a failure is kept as a failed run and recorded
   /// as `run.fail`.
   async fn create_run(&self, request: NewRun) -> Result<Arc<Run>> {
-    let id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let id = if request.client_execution.is_empty() {
+      uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+    } else {
+      let invocation = self.state.client_execution_invocation(&request.client_execution).await?;
+      self.state.bind_client_execution(&request.client_execution, &invocation, now_ms()).await?;
+      invocation
+    };
     let created_ms = now_ms();
     // The run's directory is private; the trace's JSONL sink would
     // otherwise create it first.
@@ -508,7 +515,19 @@ impl Daemon {
     };
     self.runs.insert(run.clone());
     self.save_run(&run).await;
-    let provisioned = self.provision(&run).await.and_then(|()| unwinding(&run));
+    let bound = async {
+      let client_selected = run.profile.executors.values().any(|e| matches!(e.runner, Some(needy_config::profile::RunnerSelector::Client)));
+      if client_selected {
+        if request.client_execution.is_empty() {
+          bail!("client execution capability is required");
+        }
+      } else if !request.client_execution.is_empty() {
+        bail!("a client execution capability was supplied but no executor selects the creating client");
+      }
+      self.provision(&run).await
+    }
+    .await;
+    let provisioned = bound.and_then(|()| unwinding(&run));
     if let Err(error) = provisioned {
       self.rollback(&run, &request, &error).await;
       return Err(error);
@@ -622,10 +641,25 @@ impl Daemon {
     };
     actor::check_host(self, run).await?;
     files::check_host_paths(run)?;
+    let client_holder = self.state.client_execution_for_run(&run.id).await?;
+    // NOTICE: this bounds initial helper startup only. A bound executor's
+    // disconnection deadline during commands belongs to the exec policy.
+    if let Some(holder) = &client_holder
+      && self.links.connected(holder, std::time::Duration::from_secs(10)).await.is_none()
+    {
+      bail!("client execution holder is not connected; no control-host fallback is allowed");
+    }
     let mut sites = Vec::new();
     for (exec_name, config) in &run.profile.executors {
-      let placement = schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
-        .with_context(|| format!("executor {exec_name}"))?;
+      let placement = if matches!(config.runner, Some(needy_config::profile::RunnerSelector::Client)) {
+        if config.driver != needy_config::profile::ExecutorDriver::Native {
+          bail!("executor {exec_name}: client execution supports native executors; remote container creation is not supported");
+        }
+        Placement::Runner(client_holder.clone().context("client execution capability is required")?)
+      } else {
+        schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
+          .with_context(|| format!("executor {exec_name}"))?
+      };
       let site = self.site(&placement, config.driver).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
       sites.push(site);
     }
@@ -640,7 +674,12 @@ impl Daemon {
       ]);
       let spec = Spec {
         name: exec_name.clone(),
-        key: format!("{exec_name}@{key}"),
+        // A creation capability is an account binding, so a profile/group
+        // key cannot share its instance with another creation's holder.
+        key: match (&config.runner, &client_holder) {
+          (Some(needy_config::profile::RunnerSelector::Client), Some(holder)) => format!("{exec_name}@{key}@{holder}"),
+          _ => format!("{exec_name}@{key}"),
+        },
         run: run.id.clone(),
         config: config.clone(),
         base: run.profile.base_dir.clone(),
@@ -757,6 +796,27 @@ impl Daemon {
     if stopping {
       self.save_run(run).await;
     }
+    self.complete_stop(run, by, mode, stopping).await
+  }
+
+  /// Completes a stop admitted by an earlier control instance. Its durable
+  /// `stopping` state remains authoritative throughout recovery; this path
+  /// never reopens the invocation to work or attempts a running transition.
+  pub(crate) async fn resume_stop(&self, run: &Arc<Run>) -> Result<Option<ActorStop>, ControlError> {
+    if run.state.get() != RunState::Stopping {
+      return Err(ControlError::Failed(format!("run {} has no accepted stop to resume", run.id)));
+    }
+    self.complete_stop(run, None, StopMode::Now, true).await
+  }
+
+  /// The common completion after fresh stop admission or restored intent.
+  async fn complete_stop(
+    &self,
+    run: &Arc<Run>,
+    by: Option<Principal>,
+    mode: StopMode,
+    stopping: bool,
+  ) -> Result<Option<ActorStop>, ControlError> {
     let actor = if stopping {
       self.end_actor(run, mode).await
     } else {
@@ -773,6 +833,7 @@ impl Daemon {
     }
     self.release_executors(run).await;
     run.emit(&Event::RunStop(RunStop {
+      ended: stopping,
       by,
       actor: actor.clone(),
     }));
@@ -845,8 +906,17 @@ impl Daemon {
       asked.push(executor);
       match instance.on_runner() {
         Some(runner) => self.end_on_runner(&run.id, runner).await,
-        None => self.end_on_control_host(run, instance).await,
+        None => {
+          self.end_on_control_host(&run.id, instance).await;
+        }
       }
+    }
+    // Closing this private link makes an online holder reconnect and learn
+    // its invocation ended, even when no user processes remain on it.
+    match self.state.client_execution_for_run(&run.id).await {
+      Ok(Some(holder)) => self.links.close(&holder),
+      Ok(None) => {}
+      Err(error) => tracing::warn!("run {}: cannot read its client holder for cleanup: {error}", run.id),
     }
     for instance in instances.values() {
       self.advance_instance(&run.id, &store::executor_instance(&run.id, &instance.name), InstanceState::Released, now_ms()).await;
@@ -855,17 +925,25 @@ impl Daemon {
   }
 
   /// Kills the run's processes on an executor of the control host, which
-  /// does not know runs: by listing them and killing each.
-  async fn end_on_control_host(&self, run: &Run, instance: &Instance) {
+  /// does not know runs: by listing them and killing each. Returns whether
+  /// admission closure and every requested process cleanup succeeded.
+  pub(crate) async fn end_on_control_host(&self, run: &str, instance: &Instance) -> bool {
+    let mut completed = true;
+    if instance.handle.driver == "native"
+      && let Err(error) = self.holder.end_run(run).await
+    {
+      tracing::warn!("run {}: cannot close native process admission: {error:#}", run);
+      completed = false;
+    }
     let request = ListProcessesRequest {
-      run_id: run.id.clone(),
+      run_id: run.to_owned(),
       ..Default::default()
     };
     let processes = match instance.handle.executor.list_processes(request).await {
       Ok(list) => list.processes,
       Err(status) => {
-        tracing::warn!("run {}: cannot list its processes on executor {}: {}", run.id, instance.name, status.message());
-        return;
+        tracing::warn!("run {}: cannot list its processes on executor {}: {}", run, instance.name, status.message());
+        return false;
       }
     };
     let mut ended = Vec::new();
@@ -879,11 +957,13 @@ impl Daemon {
       match instance.handle.executor.kill_process(kill).await {
         Ok(()) => ended.push(process.process_id.clone()),
         Err(status) => {
-          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run.id, process.process_id, instance.name, status.message())
+          completed = false;
+          tracing::warn!("run {}: cannot end process {} on executor {}: {}", run, process.process_id, instance.name, status.message())
         }
       }
     }
     self.record_ended(&processes, &ended).await;
+    completed
   }
 
   /// Writes run `run` as it stands now to `state.db`.
@@ -907,6 +987,10 @@ impl Daemon {
   /// Starts the trace of run `id` with the sinks `config` selects; the
   /// default sinks when the profile could not be read.
   fn run_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
+    self.run_trace_at(id, config, 0)
+  }
+
+  fn run_trace_at(&self, id: &str, config: Option<&needy_config::profile::Trace>, next_seq: u64) -> Dispatch {
     let default = needy_config::profile::Trace::default();
     let config = config.unwrap_or(&default);
     let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
@@ -924,7 +1008,7 @@ impl Daemon {
         }
       }
     }
-    Dispatch::new(
+    Dispatch::resume(
       id,
       sinks,
       needy_trace::Options {
@@ -932,6 +1016,7 @@ impl Daemon {
         version: event::SCHEMA_VERSION,
         timing: config.timing,
       },
+      next_seq,
     )
   }
 }
@@ -987,6 +1072,20 @@ fn load_profile(id: &str, request: &NewRun) -> Result<Profile> {
 
 #[async_trait::async_trait]
 impl Runs for Daemon {
+  async fn prepare_client_execution(
+    &self,
+    host: needy_api_server::control::RunnerHost,
+  ) -> Result<needy_api_server::control::ClientExecution, ControlError> {
+    self.admit_work()?;
+    let (holder, run, capability) = self.state.prepare_client_execution(now_ms()).await.map_err(|e| failed(e.into()))?;
+    self.runner_hosts.lock().unwrap_or_else(|e| e.into_inner()).insert(holder.clone(), host);
+    Ok(needy_api_server::control::ClientExecution {
+      run,
+      holder,
+      capability: capability.into_string(),
+    })
+  }
+
   async fn create(&self, request: NewRun) -> Result<RunInfo, ControlError> {
     // Shutdown waits for creates in progress to end or unwind.
     let run = self

@@ -566,6 +566,7 @@ fn a_failed_file_transfer_is_a_finding() {
     at(
       3_000,
       Event::RunStop(RunStop {
+        ended: false,
         by: None,
         actor: None,
       }),
@@ -642,6 +643,7 @@ fn attributed_run() -> Vec<Recorded> {
     at(
       2_000,
       Event::RunStop(RunStop {
+        ended: false,
         by: by(Principal::Operator),
         actor: None,
       }),
@@ -681,6 +683,7 @@ fn stopped_while_running(how: ActorStop) -> Vec<Recorded> {
     at(
       2_500,
       Event::RunStop(RunStop {
+        ended: false,
         by: by(Principal::Operator),
         actor: Some(how),
       }),
@@ -793,4 +796,54 @@ fn a_kernel_routed_actors_report_has_no_shim_note() {
 
   assert!(!human(&run).contains("container actor"), "{}", human(&run));
   assert!(!render("7f3a", &run, Level::Summary, Format::Markdown).contains("container actor"));
+}
+
+// ROOT CAUSE:
+// A resumed accepted stop may observe the cached actor VM exit after control
+// returns. The actor is already gone, so RunStop.actor is None; the report
+// used to retain its inferred failed state while durable run state was stopped.
+#[test]
+fn completing_an_accepted_stop_after_actor_exit_reports_stopped() {
+  let events = vec![
+    create(1_000),
+    at(
+      2_000,
+      Event::ActorVmExit(ActorVmExit {
+        code: None,
+        signal: Some("SIGKILL".into()),
+        error: None,
+      }),
+    ),
+    at(
+      3_000,
+      Event::RunStop(RunStop {
+        ended: true,
+        ..Default::default()
+      }),
+    ),
+  ];
+  let rendered = render("7f3a", &events, Level::Summary, Format::Json);
+  let summary: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+  assert_eq!(summary["state"], "stopped");
+  assert!(summary["actor_stop"].is_null(), "a recovered stop must not invent a graceful or forced outcome");
+}
+
+#[test]
+fn a_schema_10_history_still_renders_its_original_result() {
+  let frames = [
+    (1_000, "run.create", r#"{"name":"demo","group":"demo","profile":"bash","executors":[]}"#),
+    (2_000, "actor.exit", r#"{"code":0,"signal":null}"#),
+    (3_000, "run.stop", r#"{"by":"operator"}"#),
+  ];
+  let records = frames
+    .into_iter()
+    .map(|(time_ms, kind, payload)| Recorded {
+      time_ms,
+      event: Event::decode(kind, 10, payload).unwrap(),
+    })
+    .collect::<Vec<_>>();
+  let report = render("7f3a", &records, Level::Summary, Format::Json);
+  let summary: serde_json::Value = serde_json::from_str(&report).unwrap();
+  assert_eq!(summary["state"], "finished");
+  assert_eq!(summary["actor_exit"]["code"], 0);
 }

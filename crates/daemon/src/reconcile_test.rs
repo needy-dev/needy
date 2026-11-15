@@ -254,7 +254,7 @@ async fn a_restarted_control_plane_fails_a_running_run_ends_its_vm_and_marks_unr
   .await;
 
   assert_eq!(failed.state, RunState::Failed);
-  assert_eq!(failed.failure.as_deref(), Some("the control plane restarted; the actor was lost"));
+  assert_eq!(failed.failure.as_deref(), Some("the original runtime holder or actor was lost; continuity could not be verified"));
   use std::os::unix::process::ExitStatusExt;
   assert_eq!(vm_exit.and_then(|exit| exit.signal()), Some(libc::SIGKILL), "the leftover VM was killed");
   let state = |instances: &[InstanceRecord], name: &str| instances.iter().find(|i| i.name == name).unwrap().state;
@@ -382,4 +382,163 @@ fn exited_within(child: &mut std::process::Child, bound: Duration) -> Option<std
   child.kill().unwrap();
   child.wait().unwrap();
   None
+}
+
+// ROOT CAUSE:
+//
+// Control and the process holder shared cancellation, so a management
+// restart destroyed the actor and its native executor processes. Recovery
+// must adopt the same protected holder without starting either again.
+#[tokio::test]
+async fn a_control_restart_preserves_the_actor_and_native_process() {
+  const PROFILE: &str = r#"
+actor: { driver: linux-firecracker }
+executors:
+  here: { driver: native }
+commands:
+  - { match: "**", to: here }
+"#;
+  let started = testing::daemon().await;
+  let run = Runs::create(&started.daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+  let (_, pid) = testing::detached_sleep(&started.daemon, &run.id).await;
+  let before = Runs::events(&started.daemon, &run.id).await.unwrap();
+  let actor = before.events.iter().find(|event| event.kind == "actor.start").unwrap().payload.clone();
+
+  let started = testing::restart(started).await;
+
+  assert!(testing::running(pid), "control restart ended the native process");
+  assert_eq!(Runs::get(&started.daemon, &run.id).await.unwrap().state, RunState::Running);
+  let after = Runs::events(&started.daemon, &run.id).await.unwrap();
+  let starts: Vec<_> = after.events.iter().filter(|event| event.kind == "actor.start").collect();
+  assert_eq!(starts.len(), 1, "recovery must never start a replacement actor");
+  assert_eq!(starts[0].payload, actor);
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(testing::ended(pid).await, "explicit stop must end the original native process");
+  started.daemon.shutdown().await;
+}
+
+// Control loss ends the caller's stream with an unknown outcome; it must not
+// turn that transport event into a kill of an already-dispatched process.
+#[tokio::test]
+async fn an_attached_native_process_survives_a_control_restart_without_reexecution() {
+  use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes};
+  use tokio_stream::StreamExt as _;
+  let started = testing::daemon().await;
+  let profile = "actor: { driver: linux-firecracker }\nexecutors:\n  here: { driver: native }\ncommands:\n  - { match: \"**\", to: here }\n";
+  let run = Runs::create(&started.daemon, new_run(profile, started.dir.path())).await.unwrap();
+  let mut output = Processes::exec(
+    &started.daemon,
+    ExecOpen::Start(ExecSpec {
+      argv: vec!["sleep".into(), "300".into()],
+      cwd: String::new(),
+      env: Default::default(),
+      clear_env: false,
+      tty: None,
+      detach: false,
+      run: run.id.clone(),
+      executor: String::new(),
+      runner: String::new(),
+      no_stdin: true,
+      origin: needy_core::types::Origin::Cli,
+      search_path_if_missing: false,
+      by: None,
+    }),
+    Box::pin(tokio_stream::pending()),
+  )
+  .await
+  .unwrap();
+  let process = loop {
+    if let Some(Ok(ExecOutput::Started(process))) = output.next().await {
+      break process;
+    }
+  };
+
+  let started = testing::restart(started).await;
+  drop(output);
+
+  assert!(testing::running(process.pid), "closing the old control stream killed the owned process");
+  let processes = Processes::list(&started.daemon, &run.id, "").await.unwrap();
+  assert!(processes.iter().any(|current| current.process == process.process && current.pid == process.pid && current.running));
+  let events = Runs::events(&started.daemon, &run.id).await.unwrap();
+  assert_eq!(events.events.iter().filter(|event| event.kind == "exec.start").count(), 1);
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(testing::ended(process.pid).await);
+  let events = Runs::events(&started.daemon, &run.id).await.unwrap();
+  assert!(events.events.windows(2).all(|pair| pair[0].seq < pair[1].seq), "trace numbering restarted");
+  started.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_reported_program_exit_survives_control_restart_before_the_actor_exits() {
+  use needy_api_server::control::Guest;
+  let started = testing::daemon().await;
+  let profile = "actor: { driver: linux-firecracker }\nexecutors:\n  here: { driver: native }\ncommands:\n  - { match: \"**\", to: here }\n";
+  let run = Runs::create(&started.daemon, new_run(profile, started.dir.path())).await.unwrap();
+  Guest::exit(
+    &started.daemon,
+    &run.id,
+    Exit {
+      code: Some(42),
+      signal: String::new(),
+    },
+  )
+  .await
+  .unwrap();
+  let started = testing::restart(started).await;
+  assert_eq!(
+    Runs::get(&started.daemon, &run.id).await.unwrap().actor_exit,
+    Some(Exit {
+      code: Some(42),
+      signal: String::new()
+    })
+  );
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  started.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_live_holder_with_a_damaged_private_credential_is_not_replaced() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let started = testing::daemon().await;
+  let profile = "actor: { driver: linux-firecracker }\nexecutors:\n  here: { driver: native }\ncommands:\n  - { match: \"**\", to: here }\n";
+  let run = Runs::create(&started.daemon, new_run(profile, started.dir.path())).await.unwrap();
+  let (_, pid) = testing::detached_sleep(&started.daemon, &run.id).await;
+  let config = (*started.daemon.config).clone();
+  let path = config.runtime_dir.join("holder.json");
+  assert_eq!(std::fs::metadata(&config.runtime_dir).unwrap().permissions().mode() & 0o777, 0o700);
+  for file in [
+    &path,
+    &config.runtime_dir.join("holder-config.json"),
+    &started.daemon.run_dir(&run.id).join("control-snapshot.json"),
+  ] {
+    assert_eq!(std::fs::metadata(file).unwrap().permissions().mode() & 0o777, 0o600);
+  }
+  let original = std::fs::read(&path).unwrap();
+  started.daemon.suspend_control().await;
+  let mut damaged: serde_json::Value = serde_json::from_slice(&original).unwrap();
+  damaged["token"] = "invalid-credential".into();
+  std::fs::write(&path, serde_json::to_vec(&damaged).unwrap()).unwrap();
+
+  let error = match crate::Daemon::start(config.clone()).await {
+    Ok(_) => panic!("a damaged credential admitted a replacement holder"),
+    Err(error) => error,
+  };
+  assert!(format!("{error:#}").contains("could not be authenticated"), "{error:#}");
+  assert!(testing::running(pid), "failed authentication destroyed retained work");
+
+  std::fs::write(&path, original).unwrap();
+  let daemon = crate::Daemon::start(config).await.unwrap();
+  assert_eq!(Runs::get(&daemon, &run.id).await.unwrap().state, RunState::Running);
+  Runs::stop(&daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(testing::ended(pid).await);
+  daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_idle_holder_ends_after_control_disconnects() {
+  let started = testing::daemon().await;
+  let socket = started.daemon.config.runtime_dir.join("holder.sock");
+  assert!(socket.exists());
+  started.daemon.suspend_control().await;
+  eventually("the idle holder released its protected socket", async || !socket.exists()).await;
 }

@@ -6,6 +6,8 @@ mod service;
 pub use runner::{RunnerArgs, join_runner, run_runner};
 
 use crate::cli::Context;
+#[cfg(unix)]
+use anyhow::Context as _;
 use anyhow::Result;
 
 #[derive(clap::Args)]
@@ -37,6 +39,9 @@ impl Args {
 enum Command {
   /// Serve the control plane in the foreground.
   Serve(ServeArgs),
+  /// Own local actor and process resources independently of control.
+  #[command(hide = true)]
+  Holder(HolderArgs),
   /// Serve standalone executor processes on this machine.
   Executor(ExecutorArgs),
   /// Manage this machine's control service.
@@ -65,6 +70,12 @@ struct ServeArgs {
 }
 
 #[derive(clap::Args)]
+struct HolderArgs {
+  #[arg(long)]
+  config_file: std::path::PathBuf,
+}
+
+#[derive(clap::Args)]
 struct ExecutorArgs {
   #[arg(long)]
   listen: String,
@@ -81,6 +92,13 @@ struct ExecutorArgs {
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   match args.command {
     Command::Serve(args) => serve(args, ctx).await,
+    #[cfg(unix)]
+    Command::Holder(args) => {
+      needy_daemon::holder::serve_file(&args.config_file).await?;
+      Ok(0)
+    }
+    #[cfg(not(unix))]
+    Command::Holder(_) => anyhow::bail!("runtime holders require Unix"),
     Command::Executor(args) => {
       let token = match args.token_file {
         Some(path) => Some(crate::configuration::read_secret(&path)?),
@@ -132,6 +150,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   }
   let settings = effective.daemon;
   let config = needy_daemon::Config {
+    holder_executable: std::env::current_exe().context("cannot locate the runtime holder executable")?,
     guest_disks: paths.guest_disks(),
     vm_images: paths.images(),
     actor_image: args.actor_image.or(settings.actor_image).unwrap_or_else(|| paths.base_image()),

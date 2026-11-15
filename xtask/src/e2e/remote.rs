@@ -42,7 +42,7 @@ use super::{Args, Format};
 /// Checks that `dir` is a directory the harness may replace on a remote
 /// host: under its home (relative) or an absolute path at least two levels
 /// deep, without `..`.
-fn checked_dir(dir: &str) -> Result<&str> {
+pub(super) fn checked_dir(dir: &str) -> Result<&str> {
   let parts: Vec<&str> = dir.trim_start_matches('/').split('/').collect();
   let bad = dir.is_empty()
     || dir.starts_with('~')
@@ -55,7 +55,7 @@ fn checked_dir(dir: &str) -> Result<&str> {
 }
 
 /// `--only`, `--skip` and the other options a remote harness repeats.
-fn forwarded(args: &Args, only: &[String], skip: &[String], parallel: usize) -> Vec<String> {
+pub(super) fn forwarded(args: &Args, only: &[String], skip: &[String], parallel: usize) -> Vec<String> {
   let mut out = Vec::new();
   for p in only {
     out.extend(["--only".to_string(), p.clone()]);
@@ -74,6 +74,20 @@ fn forwarded(args: &Args, only: &[String], skip: &[String], parallel: usize) -> 
   }
   if args.keep {
     out.push("--keep".into());
+  }
+  if let Some(host) = &args.client_host {
+    out.extend([
+      "--client-host".into(),
+      host.clone(),
+      "--client-platform".into(),
+      match args.client_platform {
+        super::ClientPlatform::Unix => "unix",
+        super::ClientPlatform::Windows => "windows",
+      }
+      .into(),
+      "--client-dir".into(),
+      args.client_dir.clone(),
+    ]);
   }
   if args.services {
     out.push("--services".into());
@@ -95,7 +109,7 @@ fn remote(host: &str, script: &str) -> Result<(i32, Vec<u8>)> {
 }
 
 /// Ships `HEAD` to `host:DIR/src`.
-fn ship(root: &Path, host: &str, dir: &str) -> Result<()> {
+pub(super) fn ship(root: &Path, host: &str, dir: &str) -> Result<()> {
   let dirty = Command::new("git").current_dir(root).args(["status", "--porcelain", "--untracked-files=no"]).output()?;
   if !dirty.stdout.is_empty() {
     eprintln!("e2e: uncommitted changes are not shipped; {host} runs HEAD");
@@ -115,6 +129,43 @@ fn ship(root: &Path, host: &str, dir: &str) -> Result<()> {
 mod tests {
   use super::*;
   use clap::Parser as _;
+
+  #[test]
+  fn remote_client_acceptance_keeps_target_platform_scratch_and_selection() {
+    let crate::Task::E2e(args) = crate::Cli::try_parse_from([
+      "xtask",
+      "e2e",
+      "--client-host",
+      "client.example.com",
+      "--client-platform",
+      "windows",
+      "--client-dir",
+      "client-fixture",
+      "--only",
+      "linux-container.runc/client-execution/at=remote",
+      "--skip",
+      "at=local",
+    ])
+    .unwrap()
+    .task
+    else {
+      panic!("expected e2e task");
+    };
+    let forwarded = forwarded(&args, &args.only, &args.skip, args.parallel);
+    for pair in [
+      ["--client-host", "client.example.com"],
+      ["--client-platform", "windows"],
+      ["--client-dir", "client-fixture"],
+      ["--only", "linux-container.runc/client-execution/at=remote"],
+      ["--skip", "at=local"],
+    ] {
+      assert!(forwarded.windows(2).any(|args| args == pair), "missing {pair:?}: {forwarded:?}");
+    }
+    let crate::Task::E2e(args) = crate::Cli::try_parse_from(["xtask", "e2e"]).unwrap().task else {
+      panic!("expected e2e task");
+    };
+    assert!(!super::forwarded(&args, &args.only, &args.skip, args.parallel).iter().any(|arg| arg == "--client-host"));
+  }
 
   #[test]
   fn remote_service_acceptance_retains_its_explicit_opt_in() {
@@ -138,7 +189,7 @@ mod tests {
 
 /// `cargo xtask ARGS` in `dir/src` on a build host. A non-interactive ssh
 /// shell may not have cargo on PATH; rustup's env file puts it there.
-fn cargo_xtask(dir: &str, args: &[String]) -> String {
+pub(super) fn cargo_xtask(dir: &str, args: &[String]) -> String {
   format!("cd {dir}/src && {{ [ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; true; }} && cargo xtask {}", shell_words::join(args))
 }
 

@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use needy_api_server::control::ControlError;
 use needy_config::profile::{self, OnFull};
 use needy_core_executor::driver::{self, Driver, LinuxContainer, Native, Spec, sftp_command};
-use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::OnceCell;
 
 use crate::link::{Links, RunnerExecutor};
 
@@ -38,13 +38,27 @@ pub struct Instance {
   /// the home of the user the daemon or runner runs as for a `native` one.
   /// Empty when unknown, and `~` then stays as written.
   pub home: String,
-  slots: Option<Arc<Semaphore>>,
+  max_procs: Option<u32>,
   on_full: OnFull,
   refs: AtomicUsize,
 }
 
-/// A command's hold on an instance's slot; dropping it frees the slot.
-pub type Slot = Option<OwnedSemaphorePermit>;
+/// A control instance's saved view of a held executor. Restoration reconnects
+/// the saved handle; it does not create a replacement execution environment.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Saved {
+  pub name: String,
+  pub key: String,
+  pub driver: String,
+  pub id: String,
+  pub sftp: Vec<String>,
+  pub workspace: String,
+  pub path_map: BTreeMap<String, String>,
+  pub home: String,
+  /// The first acquisition's resolved policy, independent of restore order.
+  pub max_procs: Option<u32>,
+  pub on_full: OnFull,
+}
 
 impl Instance {
   /// This machine, through the daemon's in-process executor. It is never
@@ -57,7 +71,7 @@ impl Instance {
       driver: Some(native.clone()),
       path_map: BTreeMap::new(),
       home: String::new(),
-      slots: None,
+      max_procs: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
@@ -70,11 +84,11 @@ impl Instance {
       name: runner.to_string(),
       key: String::new(),
       // No run mounts a workspace from it.
-      handle: runner_handle(runner, links, Vec::new(), String::new()),
+      handle: runner_handle(runner, links, Vec::new(), String::new(), std::time::Duration::ZERO),
       driver: None,
       path_map: BTreeMap::new(),
       home: String::new(),
-      slots: None,
+      max_procs: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
@@ -96,10 +110,25 @@ impl Instance {
       driver: None,
       path_map: BTreeMap::new(),
       home: String::new(),
-      slots: None,
+      max_procs: None,
       on_full: OnFull::Wait,
       refs: AtomicUsize::new(1),
     })
+  }
+
+  pub(crate) fn saved(&self) -> Saved {
+    Saved {
+      name: self.name.clone(),
+      key: self.key.clone(),
+      driver: self.handle.driver.into(),
+      id: self.handle.id.clone(),
+      sftp: self.handle.sftp.clone(),
+      workspace: self.handle.workspace.clone(),
+      path_map: self.path_map.clone(),
+      home: self.home.clone(),
+      max_procs: self.max_procs,
+      on_full: self.on_full,
+    }
   }
 
   /// `path`, a path on the executor's side, with a leading `~` expanded to
@@ -114,17 +143,20 @@ impl Instance {
     (self.handle.driver == RUNNER).then_some(self.handle.id.as_str())
   }
 
-  /// Takes a slot for one command. A full instance refuses the command with
-  /// `on_full: reject` and makes it wait otherwise.
-  pub async fn slot(&self) -> Result<Slot, ControlError> {
-    let Some(slots) = &self.slots else {
-      return Ok(None);
-    };
-    let permit = match self.on_full {
-      OnFull::Reject => slots.clone().try_acquire_owned().map_err(|_| ControlError::Exhausted("executor is full".into()))?,
-      OnFull::Wait => slots.clone().acquire_owned().await.map_err(|_| ControlError::Unavailable("executor closed".into()))?,
-    };
-    Ok(Some(permit))
+  /// Only the resolved instance supplies capacity to an executor service.
+  /// The process owner keeps its permits through stream/control loss, so
+  /// recovery reconnects to occupancy rather than recreating a semaphore.
+  pub(crate) fn capacity(&self) -> Option<needy_api_client::proto::v1::ExecutorCapacity> {
+    use needy_api_client::proto::v1::{CapacityOnFull, ExecutorCapacity};
+    self.max_procs.map(|max_procs| ExecutorCapacity {
+      key: self.key.clone(),
+      max_procs,
+      on_full: match self.on_full {
+        OnFull::Wait => CapacityOnFull::Wait,
+        OnFull::Reject => CapacityOnFull::Reject,
+      }
+      .into(),
+    })
   }
 }
 
@@ -132,10 +164,17 @@ impl Instance {
 const RUNNER: &str = "runner";
 
 /// A runner's own process space, reached over its streams.
-fn runner_handle(runner: &str, links: &Arc<Links>, sftp: Vec<String>, workspace: String) -> driver::Instance {
+fn runner_handle(
+  runner: &str,
+  links: &Arc<Links>,
+  sftp: Vec<String>,
+  workspace: String,
+  unavailable_timeout: std::time::Duration,
+) -> driver::Instance {
   let executor = RunnerExecutor {
     runner: runner.to_string(),
     links: links.clone(),
+    unavailable_timeout,
   };
   driver::Instance {
     driver: RUNNER,
@@ -238,7 +277,7 @@ impl Pool {
       // home of the user the runner runs as.
       (profile::ExecutorDriver::Native, Site::Runner { name, os, home }) => {
         let workspace = driver::expand_home(&spec.config.workspace.clone().unwrap_or_default(), home);
-        (runner_handle(name, &self.links, sftp_command(os), workspace), None, home.clone())
+        (runner_handle(name, &self.links, sftp_command(os), workspace, spec.config.unavailable_timeout.into()), None, home.clone())
       }
       // TODO(runner-docker): a runner creating containers itself (create and
       // destroy tasks on its control stream, execs relayed to the
@@ -256,11 +295,56 @@ impl Pool {
       driver,
       path_map: spec.config.path_map.iter().map(|(from, to)| (from.clone(), driver::expand_home(to, &home))).collect(),
       home,
-      slots: spec.config.max_procs.map(|n| Arc::new(Semaphore::new(n as usize))),
+      max_procs: spec.config.max_procs,
       on_full: spec.config.on_full,
       // Each acquire counts itself under the pool's lock.
       refs: AtomicUsize::new(0),
     }))
+  }
+
+  /// Restores one invocation's hold while retaining key sharing and reference
+  /// counts. A missing service fails recovery instead of starting replacement work.
+  pub(crate) async fn restore(&self, saved: Saved, config: &profile::Executor) -> Result<Arc<Instance>> {
+    let cell = self.lock().entry(saved.key.clone()).or_default().clone();
+    let instance = cell
+      .get_or_try_init(|| async {
+        let (mut handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match saved.driver.as_str() {
+          "native" => (self.native.machine(), Some(self.native.clone())),
+          "runner" => {
+            (runner_handle(&saved.id, &self.links, saved.sftp.clone(), saved.workspace.clone(), config.unavailable_timeout.into()), None)
+          }
+          "linux-container" => {
+            let driver = self.container.as_ref().context("the original container executor's engine is unavailable")?;
+            (driver.reconnect(&saved.id, saved.sftp.clone(), saved.workspace.clone()).await?, Some(driver.clone()))
+          }
+          _ => bail!("executor {} has an unknown saved driver", saved.name),
+        };
+        if handle.id != saved.id {
+          bail!("executor {} changed identity", saved.name);
+        }
+        handle.workspace = saved.workspace.clone();
+        handle.sftp = saved.sftp.clone();
+        Ok::<_, anyhow::Error>(Arc::new(Instance {
+          name: saved.name.clone(),
+          key: saved.key.clone(),
+          handle,
+          driver,
+          path_map: saved.path_map.clone(),
+          home: saved.home.clone(),
+          max_procs: saved.max_procs,
+          on_full: saved.on_full,
+          refs: AtomicUsize::new(0),
+        }))
+      })
+      .await?;
+    if instance.handle.id != saved.id || instance.handle.driver != saved.driver {
+      bail!("executor pool key names a different surviving instance");
+    }
+    if instance.max_procs != saved.max_procs || instance.on_full != saved.on_full {
+      bail!("executor pool key has inconsistent saved capacity policy");
+    }
+    instance.refs.fetch_add(1, Ordering::SeqCst);
+    Ok(instance.clone())
   }
 
   /// Gives back one hold on `instance`; the last one destroys it.

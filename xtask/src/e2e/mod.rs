@@ -15,11 +15,17 @@
 #[cfg(unix)]
 mod checks;
 #[cfg(unix)]
+mod client;
+#[cfg(unix)]
+mod controller;
+#[cfg(unix)]
 mod env;
 #[cfg(unix)]
 mod host;
 #[cfg(unix)]
 mod invariants;
+#[cfg(unix)]
+mod lifecycle;
 #[cfg(unix)]
 mod matrix;
 #[cfg(unix)]
@@ -119,9 +125,36 @@ pub struct Args {
   /// `runner/at=windows` cells as a runner.
   #[arg(long, value_name = "SSH")]
   windows_runner: Option<String>,
+  /// Run the client-execution journey with this machine as client/executor
+  /// and HOST as the Linux actor/control host. Only outbound SSH is needed.
+  #[arg(long, value_name = "SSH", conflicts_with_all = ["remote", "hosts", "client_host"])]
+  actor_host: Option<String>,
+  /// Run the actor-host harness as this prepared Linux account when SSH logs
+  /// in as root. Requires an absolute --remote-dir owned by that account.
+  #[arg(long, requires = "actor_host", value_name = "USER")]
+  actor_user: Option<String>,
+  /// Internal supervised channel used by --actor-host; not a product API.
+  #[arg(long, hide = true)]
+  client_callback: bool,
+  /// A creating client over SSH. It builds this commit and supplies native
+  /// execution to client-execution/at=remote cells through a reverse forward.
+  #[arg(long, value_name = "SSH")]
+  client_host: Option<String>,
+  /// The remote client's operating system; Unix includes Linux and macOS.
+  #[arg(long, value_enum, default_value = "unix", requires = "client_host")]
+  client_platform: ClientPlatform,
+  /// A scratch directory name under the remote client's home.
+  #[arg(long, default_value = "needy-client-e2e")]
+  client_dir: String,
   /// The harness's directory on the Windows runner, under its home.
   #[arg(long, value_name = "NAME", default_value = "needy-e2e")]
   windows_dir: String,
+}
+
+#[derive(Debug, clap::ValueEnum, Clone, Copy, PartialEq, Eq)]
+pub enum ClientPlatform {
+  Unix,
+  Windows,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +196,9 @@ mod run {
   pub fn main(args: Args) -> Result<i32> {
     let root = workspace_root();
     let work = args.work_dir.clone().unwrap_or_else(|| root.join(".tmp").join("e2e"));
+    if let Some(host) = &args.actor_host {
+      return super::controller::run(&root, host, &args);
+    }
     if let Some(file) = &args.hosts {
       return remote::run_hosts(&root, file, &args);
     }
@@ -191,6 +227,7 @@ mod run {
     let selected: Vec<Cell> = all
       .into_iter()
       .filter(|c| c.scenario != matrix::Scenario::Service || args.services)
+      .filter(|c| !args.client_callback || c.scenario == matrix::Scenario::ClientExecution(matrix::ClientAt::Remote))
       .filter(|c| matrix::selected(&c.id(), &args.only, &args.skip))
       .collect();
     if selected.is_empty() {
@@ -235,11 +272,32 @@ mod run {
       })),
       None => None,
     };
+    let wants_client =
+      selected.iter().any(|c| c.scenario == matrix::Scenario::ClientExecution(matrix::ClientAt::Remote) && c.elsewhere(here).is_none());
+    let client = args.client_host.as_ref().map(|ssh| {
+      let remote = super::client::Remote {
+        ssh: ssh.clone(),
+        dir: args.client_dir.clone(),
+        platform: args.client_platform,
+      };
+      if wants_client && !args.list {
+        super::client::prepare(&root, &remote).map_err(|e| super::client::SetupError::Unavailable(format!("{e:#}")))?;
+        if remote.platform == super::ClientPlatform::Windows {
+          return Err(match super::client::windows_preflight(&remote) {
+            Ok(reason) => super::client::SetupError::Unavailable(reason),
+            Err(error) => super::client::SetupError::Failed(format!("{error:#}")),
+          });
+        }
+      }
+      Ok(remote)
+    });
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let transports = super::transport::Settings::load(&work)?;
     let ctx = Ctx {
       transports,
       windows,
+      client,
+      client_callback: args.client_callback,
       needy,
       host,
       keep: args.keep,
@@ -284,7 +342,7 @@ mod run {
   }
 
   /// Builds this tree's `needy` (debug) and returns its path.
-  fn build_needy(root: &Path) -> Result<PathBuf> {
+  pub(super) fn build_needy(root: &Path) -> Result<PathBuf> {
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     eprintln!("e2e: building needy from this tree");
     // NOTICE: a target directory of its own: xtask's features unify
@@ -317,6 +375,23 @@ mod run {
       && let Some(reason) = ctx.transports.blocker(transport)
     {
       return Some((Status::NotCovered, format!("transport {}: {reason}", transport.name())));
+    }
+    if cell.scenario == matrix::Scenario::ClientExecution(matrix::ClientAt::Remote) && cell.elsewhere(here).is_none() && !ctx.client_callback
+    {
+      match &ctx.client {
+        None => return Some((Status::NotCovered, "no creating client: pass --client-host SSH".into())),
+        Some(Err(error)) => {
+          return Some((
+            if error.failed() {
+              Status::Fail
+            } else {
+              Status::NotCovered
+            },
+            error.reason().into(),
+          ));
+        }
+        Some(Ok(_)) => {}
+      }
     }
     let host = &ctx.host;
     if let Some(reason) = cell.elsewhere(here) {
@@ -396,7 +471,10 @@ mod run {
       }
     };
     let ran = (|| -> Result<()> {
-      if cell.scenario == matrix::Scenario::Runner(matrix::RunnerAt::Windows) {
+      if matches!(
+        cell.scenario,
+        matrix::Scenario::Runner(matrix::RunnerAt::Windows) | matrix::Scenario::ClientExecution(matrix::ClientAt::Remote)
+      ) {
         // A free loopback port, for the remote runner's tunnel back here.
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         env.tcp = Some(port);

@@ -156,7 +156,13 @@ impl Guest for Daemon {
 
   async fn exit(&self, run: &str, exit: Exit) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
+    if run.actor_exit().as_ref() == Some(&exit) {
+      return Ok(());
+    }
     run.set_actor_exit(exit.clone());
+    // The guest may retry an idempotent exit report across control loss.
+    // Persist before acknowledging: VM shutdown can follow immediately.
+    self.save_run(&run).await;
     run.emit(&Event::ActorExit(ActorExit {
       code: exit.code,
       signal: (!exit.signal.is_empty()).then_some(exit.signal),

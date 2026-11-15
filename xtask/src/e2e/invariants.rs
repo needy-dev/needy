@@ -92,6 +92,24 @@ fn find_sockets(dir: &Path) -> Vec<std::path::PathBuf> {
 /// no socket. What is found is reported and then removed, so the next cell
 /// starts clean.
 pub fn after(env: &mut CellEnv, checks: &mut Checks) {
+  // Management termination is no longer a run stop. Reclaim owned work
+  // through the public run API while control and runner streams still serve.
+  for id in env.runs.clone() {
+    match super::runs::row(env, &id) {
+      Ok(row) if matches!(super::runs::state(&row), "running" | "finished") => match env.needy(&["run", "stop", &id], env.ctx.timeout) {
+        Ok(out) => {
+          checks.check(format!("cleanup explicitly stops invocation {id}"), out.ok(), out.brief());
+        }
+        Err(error) => {
+          checks.check(format!("cleanup explicitly stops invocation {id}"), false, format!("{error:#}"));
+        }
+      },
+      Ok(_) => {}
+      Err(error) => {
+        checks.check(format!("cleanup can inspect invocation {id}"), false, format!("{error:#}"));
+      }
+    }
+  }
   if let Err(e) = env.stop_daemon() {
     checks.check("the daemon stops on SIGTERM", false, e);
   }

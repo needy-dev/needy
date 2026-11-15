@@ -46,8 +46,12 @@ impl super::Manager for Manager {
     .iter()
     .map(|(key, path)| format!("<key>{key}</key><string>{}</string>", xml(&path.to_string_lossy())))
     .collect::<String>();
+    // Source: https://github.com/apple-oss-distributions/launchd/blob/launchd-842.92.1/man/launchd.plist.5
+    // Reference: launchd.plist(5), AbandonProcessGroup.
+    // NOTICE: a control job ending must leave its runtime holder and actors
+    // running; explicit run stop reclaims the work they own.
     Ok(format!(
-      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>daemon</string><string>serve</string></array>{account}<key>WorkingDirectory</key><string>/</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string>{engine}{directories}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ExitTimeOut</key><integer>65</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>\n",
+      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!-- {} -->\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>{LABEL}</string><key>ProgramArguments</key><array><string>{}</string><string>--config</string><string>{}</string><string>daemon</string><string>serve</string></array>{account}<key>WorkingDirectory</key><string>/</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string>{engine}{directories}</dict><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>AbandonProcessGroup</key><true/><key>ExitTimeOut</key><integer>65</integer><key>StandardOutPath</key><string>{}</string><key>StandardErrorPath</key><string>{}</string></dict></plist>\n",
       super::MARKER,
       xml(&registration.executable.to_string_lossy()),
       xml(&registration.snapshot.to_string_lossy()),

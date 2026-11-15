@@ -69,10 +69,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl Dispatch {
   /// Starts the worker of `run` on the current Tokio runtime.
   pub fn new(run: impl Into<String>, sinks: Vec<Box<dyn Sink>>, options: Options) -> Self {
+    Self::resume(run, sinks, options, 0)
+  }
+
+  /// Continues an existing run after its previous producer stopped. The
+  /// caller must supply the next durable sequence and prevent two producers
+  /// from writing the same run concurrently.
+  pub fn resume(run: impl Into<String>, sinks: Vec<Box<dyn Sink>>, options: Options, next_seq: u64) -> Self {
     let run = run.into();
     let (tx, rx) = mpsc::channel(options.capacity.max(1));
     let shared = Arc::new(Shared {
-      counters: Mutex::new(Counters::default()),
+      counters: Mutex::new(Counters {
+        seq: next_seq,
+        dropped: 0,
+      }),
       #[cfg(feature = "timing")]
       timing: options.timing.then(Default::default),
     });

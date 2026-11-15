@@ -277,9 +277,31 @@ impl Engine for Docker {
   }
 
   async fn wait(&self, name: &str) -> Result<i64, Error> {
-    let options = WaitContainerOptionsBuilder::default().condition("not-running").build();
-    let mut waited = self.0.wait_container(name, Some(options));
-    exit_code(name, waited.next().await)
+    loop {
+      let options = WaitContainerOptionsBuilder::default().condition("not-running").build();
+      let mut waited = self.0.wait_container(name, Some(options));
+      let error = match exit_code(name, waited.next().await) {
+        Ok(code) => return Ok(code),
+        Err(error) => error,
+      };
+      // A runtime service restart can sever the wait while its container
+      // survives. Probe that exact resource; never replace it or infer an
+      // exit from a transport failure. Cancellation drops this wait future.
+      match self.0.inspect_container(name, None).await {
+        Ok(container) => match container.state {
+          Some(state) if state.running == Some(true) => {}
+          Some(state) => return state.exit_code.ok_or(error),
+          None => return Err(error),
+        },
+        Err(BollardError::DockerResponseServerError {
+          status_code: 404,
+          message,
+        }) => return Err(Error::NotFound(message)),
+        Err(probe) => tracing::debug!("cannot yet verify container {name} after its wait disconnected: {probe}"),
+      }
+      // This bounds reconnect pressure, not the lifetime of surviving work.
+      tokio::time::sleep(Duration::from_millis(200)).await;
+    }
   }
 
   async fn stop(&self, name: &str, grace: Duration) -> Result<(), Error> {

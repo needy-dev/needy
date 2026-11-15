@@ -191,6 +191,9 @@ impl Runners for Daemon {
   }
 
   async fn heartbeat(&self, runner: &str, mut reported: RunnerReport) -> Result<Beat> {
+    if !self.state.client_execution_active(runner, now_ms()).await.map_err(|e| control_error(e, false))? {
+      return Err(ControlError::Unauthenticated("client execution invocation ended or reservation expired".into()));
+    }
     let host = reported.host.take();
     let credential = self.state.heartbeat(runner, report(reported), now_ms()).await.map_err(|error| control_error(error, true))?;
     // Only an accepted heartbeat tells the control plane about a machine.
@@ -211,7 +214,13 @@ impl Runners for Daemon {
   async fn runners(&self) -> Result<Vec<RunnerInfo>> {
     let now = now_ms();
     let runners = self.state.runners().await.map_err(|error| control_error(error, false))?;
-    Ok(runners.into_iter().map(|r| self.runner_info(r, now)).collect())
+    let mut shared = Vec::new();
+    for runner in runners {
+      if self.state.client_execution(&runner.name).await.map_err(|e| control_error(e, false))?.is_none() {
+        shared.push(self.runner_info(runner, now));
+      }
+    }
+    Ok(shared)
   }
 
   async fn rotate(&self, runner: &str) -> Result<()> {
@@ -233,7 +242,13 @@ impl Runners for Daemon {
       return Ok(Credential::Other);
     }
     Ok(match self.state.authenticate(token).await {
-      Ok(Some(name)) => Credential::Runner(name),
+      Ok(Some(name)) => {
+        if self.state.client_execution_active(&name, now_ms()).await.map_err(|e| control_error(e, false))? {
+          Credential::Runner(name)
+        } else {
+          Credential::Refused
+        }
+      }
       Ok(None) => Credential::Refused,
       Err(e) => {
         tracing::error!("state.db: cannot check a runner credential: {e:#}");

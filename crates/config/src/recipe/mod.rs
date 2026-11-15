@@ -47,7 +47,7 @@ pub struct Recipe {
 
 /// One part of a machine's identity, as a recipe requires it of the actor
 /// runtime (see the container actor runtime design's Identity table).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentityField {
   Hostname,

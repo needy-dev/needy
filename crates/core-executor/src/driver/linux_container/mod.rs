@@ -163,6 +163,20 @@ impl LinuxContainer {
     }
   }
 
+  /// Reconnects to the existing instance's process service. Recovery never
+  /// calls create/start or replaces a container when its service is missing.
+  pub async fn reconnect(&self, name: &str, sftp: Vec<String>, workspace: String) -> Result<Instance, Error> {
+    let endpoint = socket_dir(&self.options, name).join("executor.sock");
+    let client = connect(&format!("unix:{}", endpoint.display())).await?;
+    Ok(Instance {
+      driver: "linux-container",
+      id: name.into(),
+      executor: Arc::new(client),
+      sftp,
+      workspace,
+    })
+  }
+
   /// Removes the container `name` and its socket's directory, as
   /// `destroy` does, without a handle: for a container a control daemon
   /// that restarted finds in its records. A container that is gone already

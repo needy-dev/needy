@@ -53,6 +53,27 @@ message ExecStart {
   reserved 10;
 }
 
+// Control supplies this request after resolving its pooled instance. The
+// public control adapter rejects this lower-level process-owner message.
+message LimitedExecStart {
+  ExecStart start = 1;
+  ExecutorCapacity capacity = 2;
+}
+
+// Admission policy carried to the process owner, whose permits follow actual
+// child lifetime even when its control connection disappears.
+message ExecutorCapacity {
+  string key = 1;
+  uint32 max_procs = 2;
+  CapacityOnFull on_full = 3;
+}
+
+enum CapacityOnFull {
+  CAPACITY_ON_FULL_UNSPECIFIED = 0;
+  CAPACITY_ON_FULL_WAIT = 1;
+  CAPACITY_ON_FULL_REJECT = 2;
+}
+
 // Who started an exec. It decides whether the daemon applies the run's rules
 // and how the trace and the report count the process.
 enum Origin {
@@ -100,6 +121,9 @@ message ExecRequest {
     // The client leaves without ending the process: it may close the
     // stream, and the process keeps running as if started with `detach`.
     bool detach = 7;
+    // A limited start is a distinct variant so older services reject it
+    // before spawning, instead of silently ignoring an additive policy field.
+    LimitedExecStart limited_start = 8;
   }
 }
 

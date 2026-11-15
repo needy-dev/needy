@@ -382,3 +382,127 @@ async fn a_removed_runner_loses_its_control_stream_and_stops() {
   assert!(error.starts_with("the control plane refused this runner's credential"), "{error}");
   assert_eq!(exec.to_string(), "runner mac is not connected");
 }
+
+// ROOT CAUSE:
+// A disconnected run executor returned a transport failure without proving
+// whether work was dispatched. Callers need an explicit no-start guarantee
+// before retrying; an expired pre-dispatch wait must never queue late work.
+#[tokio::test]
+async fn an_offline_run_executor_expires_without_dispatching_the_command() {
+  use needy_api_server::control::Runs;
+  let setup = Setup::start().await;
+  let profile = r#"
+actor: { driver: linux-firecracker }
+executors:
+  project: { runner: mac, unavailable_timeout: 100ms }
+commands: [{ match: "**", to: project }]
+"#;
+  let run = Runs::create(setup.served.daemon(), testing::new_run(profile, setup.served.dir())).await.unwrap();
+  setup.proxy.down();
+  eventually("the runner disconnects", async || setup.served.daemon().links.get("mac").is_none()).await;
+  let marker = setup.served.dir().join("must-not-execute");
+  let client = setup.client();
+  let error = ExecStream::start(
+    &client,
+    ExecStart {
+      run_id: run.id.clone(),
+      origin: Origin::Cli.into(),
+      argv: vec!["touch".into(), marker.to_string_lossy().into_owned()],
+      no_stdin: true,
+      ..Default::default()
+    },
+  )
+  .await
+  .err()
+  .expect("offline work must be refused");
+  assert_eq!(error.kind(), Kind::Unavailable, "{error}");
+  let diagnostic = error.diagnostic().expect("no-start evidence");
+  assert_eq!(diagnostic.reason, "process.not_started");
+  assert_eq!(diagnostic.facts.get("executor").map(String::as_str), Some("project"));
+  assert!(error.to_string().contains("not started"));
+  setup.proxy.restore();
+  setup.connected().await;
+  let output =
+    ExecStream::start(&client, on_runner("mac", &["test", "!", "-e", marker.to_str().unwrap()])).await.unwrap().run(None).await.unwrap();
+  assert_eq!(output.exit.code, Some(0), "expired work executed after reconnect");
+}
+
+#[tokio::test]
+async fn a_run_executor_reconnecting_before_its_deadline_starts_once() {
+  use needy_api_server::control::Runs;
+  let setup = Setup::start().await;
+  let profile = r#"
+actor: { driver: linux-firecracker }
+executors:
+  project: { runner: mac, unavailable_timeout: 5s }
+commands: [{ match: "**", to: project }]
+"#;
+  let run = Runs::create(setup.served.daemon(), testing::new_run(profile, setup.served.dir())).await.unwrap();
+  setup.proxy.down();
+  eventually("the runner disconnects", async || setup.served.daemon().links.get("mac").is_none()).await;
+  let client = setup.client();
+  let pending = tokio::spawn(async move {
+    ExecStream::start(
+      &client,
+      ExecStart {
+        run_id: run.id,
+        origin: Origin::Cli.into(),
+        argv: vec!["printf".into(), "executed-once".into()],
+        no_stdin: true,
+        ..Default::default()
+      },
+    )
+    .await
+    .unwrap()
+    .run(None)
+    .await
+    .unwrap()
+  });
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  assert!(!pending.is_finished(), "disconnected executor should be waited for");
+  setup.proxy.restore();
+  let output = tokio::time::timeout(Duration::from_secs(10), pending).await.unwrap().unwrap();
+  assert_eq!(output.stdout, b"executed-once");
+  assert_eq!(output.exit.code, Some(0));
+}
+
+// Stopping an invocation must cancel its pre-dispatch wait, rather than
+// leave an RPC that can send work when its executor reconnects later.
+#[tokio::test]
+async fn stopping_a_run_cancels_a_pending_executor_connection() {
+  use needy_api_server::control::{Runs, StopMode};
+  let setup = Setup::start().await;
+  let profile = r#"
+actor: { driver: linux-firecracker }
+executors:
+  project: { runner: mac, unavailable_timeout: 30s }
+commands: [{ match: "**", to: project }]
+"#;
+  let run = Runs::create(setup.served.daemon(), testing::new_run(profile, setup.served.dir())).await.unwrap();
+  setup.proxy.down();
+  eventually("the runner disconnects", async || setup.served.daemon().links.get("mac").is_none()).await;
+  let client = setup.client();
+  let id = run.id.clone();
+  let pending = tokio::spawn(async move {
+    ExecStream::start(
+      &client,
+      ExecStart {
+        run_id: id,
+        origin: Origin::Cli.into(),
+        argv: vec!["true".into()],
+        no_stdin: true,
+        ..Default::default()
+      },
+    )
+    .await
+    .err()
+    .expect("stopped invocation must not execute")
+  });
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  assert!(!pending.is_finished());
+  Runs::stop(setup.served.daemon(), &run.id, needy_core::types::Principal::Operator, StopMode::Now).await.unwrap();
+  let error = tokio::time::timeout(Duration::from_secs(2), pending).await.expect("stop left the command waiting for reconnection").unwrap();
+  assert_eq!(error.kind(), Kind::Unavailable);
+  setup.proxy.restore();
+  setup.connected().await;
+}

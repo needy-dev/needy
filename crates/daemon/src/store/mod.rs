@@ -9,6 +9,7 @@
 //!
 //! Schema changes go through [`migration`]; do not issue DDL anywhere else.
 
+mod client_execution;
 mod clients;
 mod entity;
 pub mod lifecycle;

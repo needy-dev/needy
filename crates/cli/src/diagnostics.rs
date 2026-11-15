@@ -174,6 +174,8 @@ pub fn render_in(error: &anyhow::Error, format: Format, context: Option<&crate::
   }
   if diagnostic.reason == "process.outcome_unknown" {
     diagnostic.completion = Some("unknown");
+  } else if diagnostic.reason == "process.not_started" {
+    diagnostic.completion = Some("not_started");
   }
   if let Some(summary) = advice(&diagnostic.reason) {
     diagnostic.checks = vec![check(summary)];
@@ -305,6 +307,7 @@ fn advice(reason: &str) -> Option<&'static str> {
     "executor.authentication_failed" => {
       "Ask the operator to inspect the executor credential and control-plane configuration; client pairing does not repair executor access."
     }
+    "process.not_started" => "Inspect the invocation and selected executor before retrying; this command was not started.",
     "process.cwd_invalid" => "Inspect the working directory, workspace and path map on the execution machine.",
     "process.start_failed" => "Inspect the executable and permissions on the execution machine.",
     "process.terminal_failed" => "Inspect terminal support on the execution machine, or explicitly select pipes with -T.",

@@ -42,3 +42,14 @@ fn launchd_status_hints_name_the_domain_and_keep_log_paths_copyable() {
   assert_eq!(command_line(&system.status_command(&registration)), "launchctl print system/dev.needy.control");
   assert_eq!(command_line(&user.logs(&registration, true, 100)), "tail -n 100 -f 'state with spaces/service.log'");
 }
+
+// A detached child session remains in a systemd cgroup / launchd job's
+// process tree. The manager must stop control without killing its holder.
+#[test]
+fn service_definitions_preserve_the_runtime_holder_when_control_stops() {
+  let registration = registration();
+  let unit = systemd::Manager::new(Scope::User).render(&registration).unwrap();
+  assert!(unit.lines().any(|line| line == "KillMode=process"));
+  let plist = launchd::Manager::new(Scope::User).render(&registration).unwrap();
+  assert!(plist.contains("<key>AbandonProcessGroup</key><true/>"));
+}

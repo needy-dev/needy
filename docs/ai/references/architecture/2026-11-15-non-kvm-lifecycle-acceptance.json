@@ -1,0 +1,60 @@
+{
+  "capture_date": "2026-11-15",
+  "source": "3738a3ea6ae0aaed7ad270471179eb11dc0bfcf4",
+  "production_source": "9e26e70457ca2dec7ec3bd0c37c74a9ebf0dd14d",
+  "host": {
+    "role": "Linux container actor and native creating client",
+    "architecture": "x86_64",
+    "kvm_device_present": false,
+    "daemon_account": "non-root",
+    "fuse_device_access": true
+  },
+  "asset_delivery": "Canonical e2e export; required binary and actor archive digests matched between build and run hosts.",
+  "asset_sha256": {
+    "needy": "ed8be0b207b84fbc67c673ea453880c1b68d2c239bcbf6ce9b0c7d8089bd160a",
+    "xtask": "f1fc09c1cd59dab2b47ab67e799b67fa3221fea514f6ae7e246369cee2299dbd",
+    "actor_archive": "c1737bb3762d6f3ffe77c068df9d042630d1535f4100852603c50bcfe4b04729"
+  },
+  "transport_records": [
+    "The first complete-export transfer timed out before any run-host cell started.",
+    "The retry completed required artifacts; its optional executor-container-image transfer was stopped. All selected cells use native executors.",
+    "The original static e2e harness ran all five selected cells with --no-prepare after loading the verified actor archive. No runtime feature or privilege check was bypassed."
+  ],
+  "command_with_private_values_replaced": "/home/user/acceptance/work/bin/xtask e2e --needy /home/user/acceptance/work/bin/needy --work-dir /home/user/acceptance/work --no-prepare --parallel 2 --only linux-container.runc/client-execution/at=local --only linux-container.runc/lifecycle/continuity --only linux-container.runc/lifecycle/actor-loss --only linux-container.runc/actor-files/end=runtime-kill --only linux-container.runc/executor-files/executor=native,end=runtime-kill -o json",
+  "cells": [
+    {
+      "id": "linux-container.runc/actor-files/end=runtime-kill",
+      "status": "pass",
+      "checks": 50,
+      "duration_ms": 3178
+    },
+    {
+      "id": "linux-container.runc/executor-files/executor=native,end=runtime-kill",
+      "status": "pass",
+      "checks": 53,
+      "duration_ms": 3181
+    },
+    {
+      "id": "linux-container.runc/client-execution/at=local",
+      "status": "pass",
+      "checks": 42,
+      "duration_ms": 7387
+    },
+    {
+      "id": "linux-container.runc/lifecycle/continuity",
+      "status": "pass",
+      "checks": 39,
+      "duration_ms": 8242
+    },
+    {
+      "id": "linux-container.runc/lifecycle/actor-loss",
+      "status": "pass",
+      "checks": 17,
+      "duration_ms": 3182
+    }
+  ],
+  "total_cells": 5,
+  "total_checks": 201,
+  "raw_report_sha256": "bb1c43c1771c8ddeebb75c1ea693a9ce4a9476b378b49c4091a378ec8abc5989",
+  "sanitization": "Host aliases, account names, paths, invocation IDs, credentials, and raw output are omitted. Hosts are described only by role and architecture."
+}

@@ -49,6 +49,10 @@ pub struct Ctx {
   pub timeout: Duration,
   /// The Windows runner (`--windows-runner`), or why it is not there.
   pub windows: Option<Result<super::windows::Windows, String>>,
+  /// The creating client on another machine, or its preparation failure.
+  pub client: Option<Result<super::client::Remote, super::client::SetupError>>,
+  /// A local orchestrator serves creating-client operations over SSH stdio.
+  pub client_callback: bool,
   /// The local settings of the transports that need outside machines.
   pub transports: super::transport::Settings,
 }
@@ -218,6 +222,7 @@ impl<'a> CellEnv<'a> {
   /// Starts this cell's control daemon as the harness's own user and waits
   /// until it answers.
   pub fn start_daemon(&mut self) -> Result<()> {
+    anyhow::ensure!(self.daemon.is_none(), "this cell already owns a control child");
     // The VM images the harness built from container images (the TUI
     // cells' agents image) are where the daemon looks for a profile's
     // `actor.image`: its data directory's `images`.
@@ -296,6 +301,18 @@ impl<'a> CellEnv<'a> {
     Ok(())
   }
 
+  /// Replaces the actual control child, preserving the cell's runners and
+  /// runtime resources. The exit comes from the owned child handle, never a
+  /// proxy connection or a PID discovered from outside this fixture.
+  pub fn restart_control(&mut self, signal: Signal) -> Result<()> {
+    match signal {
+      Signal::SIGTERM => self.stop_control().map_err(anyhow::Error::msg)?,
+      Signal::SIGKILL => self.kill_daemon()?,
+      _ => bail!("control restart accepts SIGTERM or SIGKILL only"),
+    }
+    self.start_daemon()
+  }
+
   /// Enrolls a runner on this host through `join`, then serves its saved
   /// enrollment with directories of its own and the transport environment.
   pub fn start_local_runner(&mut self, token: &str, name: &str, join: &str, env: &[(String, String)]) -> Result<()> {
@@ -372,6 +389,11 @@ impl<'a> CellEnv<'a> {
   /// runners stop first.
   pub fn stop_daemon(&mut self) -> Result<(), String> {
     self.stop_runners();
+    self.stop_control()
+  }
+
+  /// Ends only management; used by restart journeys that retain runners.
+  fn stop_control(&mut self) -> Result<(), String> {
     let Some(mut child) = self.daemon.take() else {
       return Ok(());
     };

@@ -49,6 +49,8 @@ pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
     Scenario::Terminal => terminal(env, cell, checks),
     Scenario::FakeAgent => fake_agent(env, cell, checks),
     Scenario::Runner(at) => runner(env, cell, at, checks),
+    Scenario::ClientExecution(at) => super::client::run(env, cell, at, checks),
+    Scenario::Lifecycle(journey) => super::lifecycle::run(env, cell, journey, checks),
     Scenario::Tui(i) => tui(env, cell, i, checks),
     Scenario::HostExec => host_exec(env, checks),
     Scenario::HostCopy => host_copy(env, checks),
@@ -70,7 +72,7 @@ fn home(cell: &Cell) -> (String, String) {
 }
 
 /// The profile's `actor`, running `script` under `sh`.
-fn actor(cell: &Cell, script: &str) -> Value {
+pub(super) fn actor(cell: &Cell, script: &str) -> Value {
   let command = json!(["/bin/sh", "-c", format!("{PRELUDE}\n{script}")]);
   match cell.driver {
     Driver::Firecracker | Driver::Vz => json!({ "driver": cell.driver.profile_name(), "command": command }),
@@ -220,25 +222,19 @@ echo "E2E out-written=yes"
     // expected; see the design note's decisions.
     return Ok(());
   }
-  if cell.end == End::DaemonKill {
-    defer_crash_mirror_out(checks);
+  if cell.end == End::RuntimeKill {
+    // The actual actor vanished before init could pack its mirror-out.
+    // A control restart alone no longer exercises this loss boundary.
+    checks.check(
+      "abrupt actor loss does not invent successful mirror-out",
+      !out.join("all/keep.txt").exists() && !out.join("filtered/keep.txt").exists(),
+      "actor output was not copied back",
+    );
     return Ok(());
   }
   mirrored(checks, &out.join("all"), "actor mirror-out", false);
   mirrored(checks, &out.join("filtered"), "actor mirror-out filtered", true);
   Ok(())
-}
-
-/// The mirror-outs of a run whose control plane was killed are deferred:
-/// the restarted control plane fails the run (`check_ended` asserts that)
-/// and mirrors nothing out, since the actor and the executors were lost
-/// with it.
-// TODO(graceful-shutdown): mirror-out after a control-plane crash is the
-// deferred item D1, keeping runs alive across a control-plane restart
-// (`TODO(graceful-shutdown)` in `Daemon::shutdown`). When runs survive a
-// restart, these cells assert `mirrored` again, as every other end does.
-fn defer_crash_mirror_out(checks: &mut Checks) {
-  checks.defer("deferred: D1 (runs do not survive a control-plane crash)");
 }
 
 /// Checks the owner `USER:GROUP` of `path`; a group of `*` is any group.
@@ -379,10 +375,8 @@ print("E2E xout-written=yes")
   }
   checks.eq("executor copy-in nested: the filter excludes secret.txt", Some(Stat::Absent), console.stat("xstat", "cfg/a/b/seed/secret.txt"));
   checks.eq("executor copy-in nested: the filter excludes cache/", Some(Stat::Absent), console.stat("xstat", "cfg/a/b/seed/cache"));
-  if cell.end == End::DaemonKill {
-    defer_crash_mirror_out(checks);
-    return Ok(());
-  }
+  // Actor loss leaves this executor and control available: their normal
+  // end cleanup must still mirror the executor files back.
   mirrored(checks, &out.join("xall"), "executor mirror-out", false);
   mirrored(checks, &out.join("xfiltered"), "executor mirror-out filtered", true);
   Ok(())

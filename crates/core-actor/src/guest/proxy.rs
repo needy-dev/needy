@@ -83,7 +83,13 @@ pub(super) fn run(invocation: Invocation) -> ! {
 /// Prints a message as the routed command's error output, worded like
 /// `needy exec`'s.
 fn message(message: impl std::fmt::Display) {
-  eprintln!("needy: {message}");
+  target_message("needy", message);
+}
+
+/// Only Needy's diagnostics gain a target prefix. The process relay copies
+/// the target program's stderr unchanged.
+fn target_message(target: &str, message: impl std::fmt::Display) {
+  eprintln!("{target}: {message}");
 }
 
 async fn proxy(invocation: Invocation) -> Result<i32> {
@@ -125,6 +131,7 @@ async fn proxy(invocation: Invocation) -> Result<i32> {
   }
   let mut pass: HashMap<String, String> = PASS_ENV.iter().filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone()))).collect();
   pass.extend(decision.env);
+  let target = decision.target.clone();
   let start = ExecStart {
     argv: if decision.argv.is_empty() {
       args
@@ -149,12 +156,18 @@ async fn proxy(invocation: Invocation) -> Result<i32> {
   };
   let stream = match ExecStream::start(&client, start).await {
     Ok(stream) => stream,
-    Err(error) => match refused(error.kind()) {
+    Err(error) => match refused(&error) {
       Some(code) => {
-        message(&error);
+        target_message(&target, &error);
+        if code == signals::ENDED {
+          target_message(&target, "the command outcome is unknown; it was not retried");
+        }
         return Ok(code);
       }
-      None => return Err(error.into()),
+      None => {
+        target_message(&target, &error);
+        return Ok(126);
+      }
     },
   };
   // Detach belongs to the outer run client. A routed child must report its
@@ -166,18 +179,29 @@ async fn proxy(invocation: Invocation) -> Result<i32> {
   };
   let exit = match relay::run(stream, options).await {
     Ok(relay::Ended::Exited(exit)) => exit,
-    Ok(relay::Ended::Detached { .. }) => anyhow::bail!("the routed command detached without a detach request"),
+    Ok(relay::Ended::Detached { .. }) => {
+      target_message(&target, "the routed command detached without a detach request; the command outcome is unknown");
+      return Ok(signals::ENDED);
+    }
     // The command's status is unknown; the parent sees 255, not success.
     Err(error) if error.ended() => {
-      message(&error);
+      target_message(&target, &error);
       return Ok(signals::ENDED);
     }
     // A second SIGTERM or SIGHUP: the proxy leaves like a shell's child.
     Err(relay::Error::Terminated(signal)) => return Ok(128 + signals::number(signal).unwrap_or(1)),
-    Err(error) => return Err(error.into()),
+    Err(relay::Error::Client(error)) if matches!(error.kind(), Kind::Unavailable | Kind::Other) => {
+      target_message(&target, &error);
+      target_message(&target, "the command outcome is unknown; it was not retried");
+      return Ok(signals::ENDED);
+    }
+    Err(error) => {
+      target_message(&target, &error);
+      return Ok(126);
+    }
   };
   if let Some(code) = signals::unrepresentable(&exit) {
-    message(signals::out_of_range_message(code));
+    target_message(&target, signals::out_of_range_message(code));
   }
   if exit.code.is_some() {
     return Ok(signals::shell_code(&exit));
@@ -239,12 +263,17 @@ fn command(path: &str, args: &[String]) -> Vec<String> {
 }
 
 /// The exit code for a start the daemon refused, like `needy exec`'s and a
-/// shell's: 126 when a rule or an injected fault refuses the command, 127
-/// when it cannot start. Other errors are the proxy's own.
-fn refused(kind: Kind) -> Option<i32> {
-  match kind {
+/// shell's: 126 for a policy refusal, 127 for a program start failure, 125
+/// for confirmed no-start, and 255 for an uncertain transport outcome.
+fn refused(error: &needy_api_client::Error) -> Option<i32> {
+  if error.not_started() {
+    return Some(125);
+  }
+  match error.kind() {
     Kind::Denied => Some(126),
     Kind::Failed => Some(127),
+    // A transport failure after dispatch may have lost only the response.
+    Kind::Unavailable | Kind::Ended | Kind::Other => Some(signals::ENDED),
     _ => None,
   }
 }

@@ -36,6 +36,9 @@ pub struct Executor {
   pub on_full: OnFull,
   pub max_instances: Option<u32>,
   pub idle_timeout: Option<Duration>,
+  /// Maximum pre-dispatch wait for a disconnected executor. Expiry proves
+  /// the command was not sent; dispatched work is never retried.
+  pub unavailable_timeout: Duration,
 }
 
 impl Default for Executor {
@@ -52,6 +55,7 @@ impl Default for Executor {
       on_full: OnFull::Wait,
       max_instances: None,
       idle_timeout: None,
+      unavailable_timeout: Duration::from_secs(10),
     }
   }
 }
@@ -97,7 +101,7 @@ impl fmt::Display for ExecutorDriver {
 // (owner decision, 2026-11-11): it waited like `wait`, since a second
 // instance per key needs `max_instances`, which is not built. A profile that
 // still names it is refused by serde's message naming `wait` and `reject`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnFull {
   #[default]

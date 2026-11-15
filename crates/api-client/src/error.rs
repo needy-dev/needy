@@ -97,6 +97,12 @@ pub enum Kind {
 }
 
 impl Error {
+  /// The producer confirms that this command was not started. A lost
+  /// connection or missing start acknowledgement alone is not such proof.
+  pub fn not_started(&self) -> bool {
+    self.diagnostic().is_some_and(|value| value.reason == "process.not_started")
+  }
+
   /// Bounded producer facts, when available; the original cause stays intact.
   pub fn diagnostic(&self) -> Option<needy_api_proto::v1::ErrorDiagnostic> {
     let value = match self {
@@ -153,7 +159,8 @@ impl Error {
     }
   }
 
-  /// Whether retrying the same call may succeed: the server is not up yet.
+  /// Whether transport recovery may succeed. This is used for readiness
+  /// probes; it does not authorize replaying a mutating request.
   pub fn is_transient(&self) -> bool {
     self.kind() == Kind::Unavailable
   }

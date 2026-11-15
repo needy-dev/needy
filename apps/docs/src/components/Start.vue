@@ -137,14 +137,16 @@ const EXEC: Choice<Exec>[] = [
         <div :class="CHOICES" role="group" :aria-label="tr({ en: 'Runner OS', zh: 'runner 系统' })">
           <button v-for="c in (['mac', 'linux', 'windows'] as const)" :key="c" type="button" :class="CHOICE" :data-state="env.runnerOs === c ? 'on' : 'off'" :aria-pressed="env.runnerOs === c" @click="env.runnerOs = c">{{ c === 'mac' ? 'macOS' : c === 'linux' ? 'Linux' : 'Windows' }}</button>
         </div>
-        <span :class="ASIDE">{{ tr({ en: 'Windows enrollment is not supported by this guide yet. Choose Linux or macOS for the complete setup.', zh: '此向导尚不支持 Windows 注册。完整配置流程请选择 Linux 或 macOS。' }) }}</span>
-        <label class="flex flex-col gap-[8px] text-[13px] text-muted">{{ tr({ en: 'Runner name (use the existing name when already enrolled)', zh: 'Runner 名称（已加入时使用已有名称）' }) }}<input v-model="env.runnerName" :class="INPUT" autocomplete="off" spellcheck="false"></label>
+        <span :class="ASIDE">{{ tr(clientOnExecutor
+          ? { en: 'Automatic Windows client execution awaits private startup-file ACL support. Choose Linux or macOS for this workflow.', zh: 'Windows 自动客户端执行尚待私有启动文件的 ACL 支持。此流程请选择 Linux 或 macOS。' }
+          : { en: 'Windows enrollment is not supported by this guide yet. Choose Linux or macOS for the complete setup.', zh: '此向导尚不支持 Windows 注册。完整配置流程请选择 Linux 或 macOS。' }) }}</span>
+        <label v-if="!clientOnExecutor" class="flex flex-col gap-[8px] text-[13px] text-muted">{{ tr({ en: 'Runner name (use the existing name when already enrolled)', zh: 'Runner 名称（已加入时使用已有名称）' }) }}<input v-model="env.runnerName" :class="INPUT" autocomplete="off" spellcheck="false"></label>
       </div>
       <div v-if="env.executor === 'runner'" :class="Q">
         <span :class="ASK">{{ tr({ en: 'Where will you start and use the program?', zh: '你会在哪里启动和使用程序？' }) }}</span>
         <div :class="CHOICES" role="group" :aria-label="tr({ en: 'Launch location', zh: '启动位置' })">
-          <button type="button" :class="CHOICE" :data-state="env.launchFrom === 'runner' ? 'on' : 'off'" :aria-pressed="env.launchFrom === 'runner'" @click="env.launchFrom = 'runner'">{{ tr({ en: 'On the executor computer', zh: '在执行命令的电脑上' }) }}</button>
-          <button type="button" :class="CHOICE" :data-state="env.launchFrom === 'host' ? 'on' : 'off'" :aria-pressed="env.launchFrom === 'host'" @click="env.launchFrom = 'host'">{{ tr({ en: 'On the control host', zh: '在控制主机上' }) }}</button>
+          <button type="button" :class="CHOICE" :data-state="env.launchFrom === 'runner' ? 'on' : 'off'" :aria-pressed="env.launchFrom === 'runner'" @click="env.launchFrom = 'runner'">{{ tr({ en: 'On the executor computer · automatic client execution', zh: '在执行命令的电脑上 · 自动客户端执行' }) }}</button>
+          <button type="button" :class="CHOICE" :data-state="env.launchFrom === 'host' ? 'on' : 'off'" :aria-pressed="env.launchFrom === 'host'" @click="env.launchFrom = 'host'">{{ tr({ en: 'On the control host · persistent runner', zh: '在控制主机上 · 持久 runner' }) }}</button>
         </div>
       </div>
       <div v-if="dockerNeeded" :class="Q">
@@ -161,7 +163,9 @@ const EXEC: Choice<Exec>[] = [
         </div>
       </details>
       <p class="m-0 text-[15px] text-ink-2">{{ tr({ en: 'Your actor driver:', zh: '你的 actor driver：' }) }} <code>{{ driver }}</code></p>
-      <p class="m-0 text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'Each colored label names where to run a step. Hover or focus it for details. Use a separate terminal for the SSH tunnel and the persistent runner.', zh: '每个颜色标签说明该步骤在哪里运行。悬停或用键盘聚焦可查看说明。SSH 隧道和持续运行的 runner 各用一个单独的终端。' }) }}</p>
+      <p class="m-0 text-[13px] text-muted leading-[1.7]">{{ tr(clientOnExecutor
+        ? { en: 'Each colored label names where to run a step. Hover or focus it for details. Keep the SSH tunnel in a separate terminal. Client execution starts automatically under the account that runs create.', zh: '每个颜色标签说明步骤在哪里运行。悬停或用键盘聚焦可查看说明。SSH 隧道使用单独终端。客户端执行自动启动，使用运行 create 的账号。' }
+        : { en: 'Each colored label names where to run a step. Hover or focus it for details. Use a separate terminal for the SSH tunnel and any persistent runner.', zh: '每个颜色标签说明该步骤在哪里运行。悬停或用键盘聚焦可查看说明。SSH 隧道和持久 runner 各用一个单独的终端。' }) }}</p>
       <a href="https://github.com/needy-dev/needy#one-command-from-your-laptop" class="text-[13px] text-ink-2">{{ tr({ en: 'Client access and source builds ↗', zh: '客户端连接与源码构建 ↗' }) }}</a>
     </div>
 
@@ -180,9 +184,11 @@ const EXEC: Choice<Exec>[] = [
           <SetupLocation v-else machine="host" :env="env" :terminal="{ en: env.executor === 'container' ? 'Executor container on the control host' : 'Native executor on the control host', zh: env.executor === 'container' ? '控制主机上的执行容器' : '控制主机上的 native executor' }" />
         </div>
         <p class="mb-0 mt-[12px] text-[13px] text-ink-2 leading-[1.7]">{{ tr(clientOnExecutor
-          ? { en: 'Save the profile and run create on the executor computer. The interactive Linux actor terminal opens there. Child commands return to the registered executor account.', zh: '在执行机器上保存 profile 并运行 run create。Linux actor 的交互终端会在这里打开，子命令返回已注册的执行账号。' }
+          ? { en: 'Save the profile and run create -f on the executor computer. The interactive Linux actor terminal opens there. Child commands use the invoking CLI account through its automatic holder.', zh: '在执行机器上保存 profile 并运行 run create -f。Linux actor 交互终端在这里打开。子命令通过自动启动的 holder 使用启动 CLI 的账号执行。' }
           : { en: 'Save the profile and run create on the control host. The interactive actor terminal opens in that shell.', zh: '在控制主机保存 profile 并运行 run create。actor 交互终端在那个 shell 中打开。' }) }}</p>
-        <p v-if="env.executor === 'runner'" class="mb-0 mt-[8px] text-[13px] text-muted leading-[1.7]">{{ tr({ en: 'This is the current persistent-runner workflow. A client that hosts execution only for its own invocation is not implemented yet.', zh: '这是当前的持久 runner 流程。仅为自身这次启动承接执行的客户端模式尚未实现。' }) }}</p>
+        <p v-if="env.executor === 'runner'" class="mb-0 mt-[8px] text-[13px] text-muted leading-[1.7]">{{ tr(clientOnExecutor
+          ? { en: 'The profile explicitly selects runner: {client: true}. No runner invitation, join, or serve command is needed. Attaching later keeps the original execution binding.', zh: 'profile 显式选择 runner: {client: true}，不需要 runner 邀请、注册或 serve 命令。之后重新接入终端仍使用原执行绑定。' }
+          : { en: 'The profile names a persistent runner. Native commands use the account that serves it, regardless of the client context.', zh: 'profile 指定具名持久 runner。native 命令使用运行该服务的账号，不随客户端 context 改变。' }) }}</p>
       </div>
       <p v-if="issue" role="alert" class="m-0 text-[14px] text-fault">{{ tr(issue) }}</p>
       <ol v-else class="m-0 flex list-none flex-col gap-[36px] p-0">
@@ -211,7 +217,8 @@ const EXEC: Choice<Exec>[] = [
         <summary class="cursor-pointer">{{ tr({ en: 'Capture limits and verification status', zh: '捕获范围与验证情况' }) }}</summary>
         <p>{{ tr({ en: 'Container capture covers image shims. New unshimmed programs can stay in the actor. Builtins stay in their shell.', zh: '容器捕获覆盖镜像内的 shims，新增且未经过 shim 的程序可能留在 actor；内建命令仍在各自 shell 内执行。' }) }}</p>
         <p>{{ tr({ en: 'The entrypoint stays in Linux even with a Mac actor host. HTTP/HTTPS hosts are allowed. Agent approval policies stay unchanged.', zh: 'actor 宿主机是 Mac 时，入口也仍在 Linux actor 中运行。示例允许 HTTP/HTTPS 域名，不改变 agent 自己的审批策略。' }) }}</p>
-        <p>{{ tr({ en: 'The Linux-container to Mac path has live-probe evidence. Other combinations have configuration checks; fresh installation and authenticated tool calls remain unverified.', zh: 'Linux 容器到 Mac 的路径有现场探测记录。其他组合只做配置检查，全新安装和登录后的工具调用仍待验证。' }) }}</p>
+        <p>{{ tr({ en: 'Automatic client execution has automated CLI and process-service evidence. Existing Linux-container to Mac live probes used a persistent runner. Fresh installation and authenticated tool calls remain unverified.', zh: '自动客户端执行有 CLI 与进程服务的自动化测试证据。已有 Linux 容器到 Mac 的现场探测使用持久 runner。全新安装与登录后的工具调用仍待验证。' }) }}</p>
+        <a href="https://github.com/needy-dev/needy/blob/main/docs/ai/references/cli/2026-11-15-client-execution-usage.md#automated-evidence" class="text-ink-2">{{ tr({ en: 'Client execution evidence ↗', zh: '客户端执行证据 ↗' }) }}</a>
         <a href="https://github.com/needy-dev/needy/blob/main/docs/ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md#onboarding-evidence" class="text-ink-2">{{ tr({ en: 'Verification record ↗', zh: '验证记录 ↗' }) }}</a>
       </details>
     </div>
