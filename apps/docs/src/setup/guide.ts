@@ -79,11 +79,8 @@ export function locations(env: Environment): Record<Machine, { name: Text, descr
 }
 
 const PROFILES: Record<Program, string> = { bash, claude, opencode }
-// Sources: distro package indexes (mutable, retrieved 2026-11-15):
-// https://packages.ubuntu.com/noble/sshfs
-// https://packages.fedoraproject.org/pkgs/fuse-sshfs/fuse-sshfs/fedora-43.html
-// https://archlinux.org/packages/extra/x86_64/sshfs/
-// Reference: README.md#workspace-mount-prerequisites includes helper file lists.
+// Package source metadata and helper file lists:
+// docs/ai/references/cli/2026-11-15-workspace-mount-package-sources-note.md
 const INSTALL: Record<PackageManager, string> = {
   apt: 'sudo apt-get update\nsudo apt-get install -y sshfs fuse3',
   dnf: 'sudo dnf install -y fuse-sshfs fuse3',
