@@ -124,6 +124,16 @@ The existing execution-selection test caught stdout contamination from a newly a
 Mutation acknowledgements now use stderr; the unchanged child-JSON assertion passes.
 No hardware-backed actor, container image, native service-manager operation, or real image build was run for these UI changes.
 
+CI also exposed a terminal-fixture error: when `TERM` was unset, indicatif
+correctly hid animation, but the pairing assertion expected a spinner.
+The failure was reproduced locally with both `TERM` and `NO_COLOR` unset.
+The PTY fixture now declares `TERM=xterm-256color` and still inherits
+`NO_COLOR`; the progress-before-success assertion remains mandatory when
+color is enabled. No production terminal policy changed for this correction.
+After the correction, `env -u NO_COLOR -u TERM cargo test --locked --workspace --no-fail-fast`
+passed all 1107 tests with default test parallelism. The explicit
+`NO_COLOR=1` pairing check, CLI Clippy, formatting, and whitespace checks also passed.
+
 An earlier default-parallel run failed the unchanged
 `process::tests::a_terminal_process_sees_a_terminal_and_its_signal_death` test because it collected empty PTY output.
 The isolated test and final workspace run passed. This is an intermittent-test follow-up candidate; no executor implementation was changed.

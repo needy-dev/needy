@@ -2099,6 +2099,10 @@ fn on_terminal_with(
       None => command.env_remove(name),
     }
   }
+  // A PTY alone does not describe terminal capabilities. In CI, TERM can be
+  // unset, which makes indicatif correctly hide progress. Give this terminal
+  // fixture a known capability while preserving NO_COLOR for opt-out checks.
+  command.env("TERM", "xterm-256color");
   let mut child = pair.slave.spawn_command(command).unwrap();
   drop(pair.slave);
   let mut reader = pair.master.try_clone_reader().unwrap();
@@ -3306,12 +3310,10 @@ fn client_pair_accepts_the_guides_global_address_and_reports_the_written_file() 
   let styled = format!("{style}Paired successfully!{style:#}");
   if std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()) {
     assert!(text.contains(&styled), "{text}");
-    if std::env::var_os("TERM").is_none_or(|value| value != "dumb") {
-      let waiting = text.find("Pairing with control service").expect("terminal pairing must show waiting feedback");
-      let completed = text.find("Paired successfully!").unwrap();
-      assert!(waiting < completed, "{text}");
-      assert!(!text[completed..].contains("Pairing with control service"), "progress must finish before confirmation: {text}");
-    }
+    let waiting = text.find("Pairing with control service").unwrap_or_else(|| panic!("terminal pairing must show waiting feedback: {text}"));
+    let completed = text.find("Paired successfully!").unwrap();
+    assert!(waiting < completed, "{text}");
+    assert!(!text[completed..].contains("Pairing with control service"), "progress must finish before confirmation: {text}");
   } else {
     assert!(!text.contains('\u{1b}'), "{text}");
   }
