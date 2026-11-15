@@ -130,7 +130,14 @@ impl Term {
   /// its driving program are outside this pseudo-terminal's child lifetime.
   pub fn kill(&mut self) -> Result<()> {
     anyhow::ensure!(self.child.try_wait()?.is_none(), "the viewer exited before the requested termination");
-    self.child.kill().context("cannot terminate the viewer")
+    let pid =
+      i32::try_from(self.child.process_id().context("the viewer has no process ID")?).context("the viewer process ID is out of range")?;
+    anyhow::ensure!(pid > 0, "the viewer process ID must be positive");
+    // Source: https://github.com/wezterm/wezterm/blob/f8921727a11b9f8b073e8c24821d72fd41283500/pty/src/lib.rs#L340-L372
+    // Reference: https://docs.rs/portable-pty/0.9.0/portable_pty/trait.ChildKiller.html#tymethod.kill
+    // NOTICE: portable-pty sends SIGHUP first, which the CLI forwards to the
+    // driving program. A crash must end this viewer without forwarding a signal.
+    nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), nix::sys::signal::Signal::SIGKILL).context("cannot terminate the viewer")
   }
 
   /// Waits for the program to exit and returns its exit code; kills it
@@ -157,5 +164,47 @@ impl Drop for Term {
     if matches!(self.child.try_wait(), Ok(None)) {
       let _ = self.child.kill();
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  struct Fixture(std::path::PathBuf);
+
+  impl Fixture {
+    fn new() -> Self {
+      let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+      let path = std::env::temp_dir().join(format!("needy-viewer-crash-{}-{suffix}", std::process::id()));
+      std::fs::create_dir(&path).unwrap();
+      Self(path)
+    }
+  }
+
+  impl Drop for Fixture {
+    fn drop(&mut self) {
+      if let Err(error) = std::fs::remove_dir_all(&self.0) {
+        eprintln!("cannot remove the viewer-crash test fixture: {error}");
+      }
+    }
+  }
+
+  // ROOT CAUSE:
+  //
+  // If a viewer was terminated through portable-pty's kill operation, it
+  // received SIGHUP before SIGKILL and could forward that signal to the
+  // driving program. A viewer crash must give it no chance to signal work.
+  #[test]
+  fn killing_a_viewer_does_not_deliver_a_catchable_signal() {
+    let fixture = Fixture::new();
+    let program = "trap 'printf caught > hangup; exit 0' HUP; printf 'READY\\n'; while IFS= read -r line; do :; done";
+    let mut term = Term::spawn(Path::new("sh"), &["-c", program], &[], &fixture.0).unwrap();
+    term.expect("READY", Duration::from_secs(5)).unwrap();
+
+    term.kill().unwrap();
+    term.wait(Duration::from_secs(5)).unwrap();
+
+    assert!(!fixture.0.join("hangup").exists(), "the viewer handled a signal before its simulated crash");
   }
 }
