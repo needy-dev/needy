@@ -35,7 +35,7 @@ TUI fidelity (2026-11-13; the matrix and its evidence are in
 
 | ID | Gap | Where | Kind | Status |
 | --- | --- | --- | --- | --- |
-| G11 | The driving program had no `COLORTERM`, so pi, opencode and Claude Code drew in 256 colors | `core-actor` `guest/init/program.rs` | *fix* | fixed: `COLORTERM=truecolor`, as herdr sets for its panes |
+| G11 | The driving program had no `COLORTERM`, so pi, opencode drew in 256 colors | `core-actor` `guest/init/program.rs` | *fix* | fixed: `COLORTERM=truecolor`, as herdr sets for its panes |
 | G12 | Detaching (or a killed client) left modes on in the shell: modifyOtherKeys, color scheme reports (2031), cursor shape and color, autowrap off, SGR pixel and X10 mouse | `relay/terminal.rs` restore | *fix* | fixed: the restore turns them off too, as herdr's does |
 | G13 | A redraw did not carry modifyOtherKeys, color scheme reports, autowrap off or the cursor color | `process/screen.rs` | *fix* | fixed: the model tracks them, the reset clears them and the redraw sets them again |
 | G14 | A TUI started with no client terminal attached waits for its DA1 answer until its own timeout | `process/screen.rs` | *fix* | fixed: the executor answers DA1 and DSR 5 from the model, as it answers DSR 6 |

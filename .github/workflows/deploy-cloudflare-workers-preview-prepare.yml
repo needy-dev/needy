@@ -15,7 +15,6 @@ on:
       - '**/docs/**/*.md'
       - '**/README*.md'
       - '**/AGENTS.md'
-      - '**/CLAUDE.md'
       - 'DESIGN.md'
       - 'LICENSE'
 

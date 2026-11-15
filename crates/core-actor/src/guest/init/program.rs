@@ -105,7 +105,7 @@ fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> 
     ("TERM", "xterm-256color".into()),
     // The model keeps 24-bit colors and draws them again for a client that
     // attaches; without COLORTERM, programs that pick their palette from it
-    // (pi, opencode, Claude Code) draw in 256 colors. herdr sets the same
+    // (pi, opencode) draw in 256 colors. herdr sets the same
     // for each pane it runs.
     // Source: https://github.com/herdrdev/herdr/blob/ee5bfb5041bb3e4a49d591c72308aae3c81ecdde/src/pane.rs#L100-L108
     // (`apply_pane_terminal_env`: TERM=xterm-256color, COLORTERM=truecolor).

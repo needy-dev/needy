@@ -555,6 +555,6 @@ Made on the spot, as the brief allowed:
   `remote.rs`): the build host would need its own ssh access to the runner.
 - A cell that runs its daemon as root, should a feature genuinely need one
   (`TODO(e2e-root)`).
-- More TUI cases (pi, opencode, Claude Code, herdr) and more of the
+- More TUI cases (pi, opencode, herdr) and more of the
   fidelity matrix's paths as cells; Codex alone already covers the start,
   resize and detach path on every driver.

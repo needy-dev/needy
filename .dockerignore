@@ -1,6 +1,5 @@
 target
 bin
 .git
-.claude
 .agents
 .tmp

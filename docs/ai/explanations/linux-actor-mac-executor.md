@@ -1,6 +1,6 @@
 # Run a Linux program with Mac tools
 
-Start bash, Claude Code, or OpenCode in a Linux container. Send captured child
+Start bash or OpenCode in a Linux container. Send captured child
 processes to a Mac. Both machines see the same project files.
 
 **Evidence level: live probe.** The entrypoint, Mac shell, shared directory,
@@ -14,7 +14,6 @@ This walkthrough is a documentation draft, not a platform support statement.
 | Start with | What you can observe | Complete profile |
 | --- | --- | --- |
 | [bash](#bash) | Linux builtins and Mac child processes | [bash.yaml](../../../examples/linux-mac/bash.yaml) |
-| [Claude Code](#claude-code) | Claude in Linux, tool commands on the Mac | [claude.yaml](../../../examples/linux-mac/claude.yaml) |
 | [OpenCode](#opencode) | OpenCode in Linux, tool commands on the Mac | [opencode.yaml](../../../examples/linux-mac/opencode.yaml) |
 
 Complete the common steps first. Then save the profile for your entrypoint.
@@ -215,28 +214,6 @@ If a Mac-only tool does not exist in the actor, run it in the child shell:
 bash -c 'xcodebuild -version'
 ```
 
-### Claude Code
-
-Build the agent image on the **Linux server**, from the checkout root:
-
-```sh
-needy_release=$(needy --version | awk '{print $2}')
-docker build --build-arg BASE="ghcr.io/needy-dev/needy-actor:v${needy_release}" \
-  -t needy-agents:latest examples/agents
-mkdir -p ~/needy-state/claude-mac
-chmod 700 ~/needy-state/claude-mac
-cp examples/linux-mac/claude.yaml ~/.config/needy/profiles/claude-mac.yaml
-needy config profile check claude-mac --mode control --cmd 'bash -c "uname -s"'
-needy run create -it --profile claude-mac
-```
-
-Complete Claude's first-start prompts. For login, open the printed URL in
-your browser and return the code when requested. You can use `/login` inside
-Claude. See the [agent login guide](../../../examples/agents/README.md#first-start-and-login).
-
-The Linux server keeps the mapped state in `~/needy-state/claude-mac/` after
-normal shutdown.
-
 ### OpenCode
 
 The released actor base already contains OpenCode.
@@ -255,7 +232,7 @@ its login. Data, configuration, and interface state have separate mapped directo
 
 ## Check an agent tool call
 
-After login, send this prompt to Claude or OpenCode:
+After login, send this prompt to OpenCode:
 
 > Create needy-check.txt with the text "shared workspace check" using your
 > file editor. Then run uname -s and cat needy-check.txt with your shell tool.

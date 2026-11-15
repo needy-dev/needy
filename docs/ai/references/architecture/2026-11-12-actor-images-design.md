@@ -23,7 +23,7 @@ a container image every program on `PATH` as a hard link too). So:
 
 - the image must be rebuilt for every needy version, and a prebuilt image
   works only with the needy it was built with;
-- a user who wants another program in the actor (pi, Claude Code, Codex,
+- a user who wants another program in the actor (pi, Codex,
   herdr) must rebuild needy's whole image from needy's checkout.
 
 The goal: the actor image no longer has to match the needy version, and users
@@ -35,7 +35,7 @@ can run any agent in an actor.
 | --- | --- |
 | D1 | **Inject the guest `needy` at start.** The image is a stable base: the kernel with `binfmt_needy`, the rootfs, a boot stub and a shim stub. The daemon brings its own guest `needy` to every actor it starts: a read-only bind mount of one file for the container drivers, a small read-only disk for the VM drivers. The stubs are tiny static binaries with no needy dependencies; their interface is the **base ABI**, whose version the image records and the daemon checks. |
 | D2 | **Custom actor images** are OCI images `FROM ghcr.io/needy-dev/needy-actor` that add tools, for all four drivers; `needy image build --from <OCI ref>` turns one into a VM rootfs. |
-| D3 | **`examples/agents/`**: one Dockerfile (node LTS, pi, Claude Code native, Codex musl, herdr) and a profile per agent, with routing, an allowlist, credential copy-in and mirror-out, or `upstream` + `inject`. |
+| D3 | **`examples/agents/`**: one Dockerfile (node LTS, pi, Codex musl, herdr) and a profile per agent, with routing, an allowlist, credential copy-in and mirror-out, or `upstream` + `inject`. |
 | D4 | **`needy image pull/ls/build/rm`** with per-driver directories `images/<driver>/` holding a `manifest.json` (version, driver, arch, base_abi, source, sha256). `pull` fetches only the base. VM images are not downloaded automatically: a missing one gives the exact command; container images are pulled automatically. Integrity is the sha256 plus `actions/attest-build-provenance`. `needy build` becomes `needy image build`, without an alias. Remote runners pull by hand (a TODO). |
 
 ## Terms
@@ -325,13 +325,12 @@ API key in `actor.env`, which also lives in the actor.
 [`examples/agents/`](../../../../examples/agents/README.md) holds:
 
 - **One Dockerfile** `FROM needy-actor:latest` (`--build-arg BASE=` names a
-  released base). It adds Node.js 26.13.1 (the LTS line), pi 1.5.2, Claude
-  Code 2.1.311 (the native build), Codex 0.167.2 (the static musl
-  package) and herdr 0.9.5. opencode is in the base already. Each download
+  released base). It adds Node.js 26.13.1 (the LTS line), pi 1.5.2,
+  Codex 0.167.2 (the static musl package) and herdr 0.9.5. opencode is in the base already. Each download
   is pinned and checked against the release's checksum, with its source
   and the retrieval date in a comment. The last step is
   `RUN ["/.needy/shim-image"]`.
-- **One profile per agent**: `claude.yaml`, `codex.yaml`, `pi.yaml`,
+- **One profile per agent**: `codex.yaml`, `pi.yaml`,
   `opencode.yaml` and `herdr.yaml`. Each one sets `actor.image:
   needy-agents`, a workspace from the `build` executor
   (`executor:build:~/workspace`), rules that send `bash`, `sh`, `dash` and
@@ -342,10 +341,10 @@ API key in `actor.env`, which also lives in the actor.
   key variable in an `actor.env` comment. The profiles use
   `linux-firecracker`. The README shows the short `extends` profile for the
   other three drivers.
-- **herdr** runs the other four in panes. Its profile repeats their
+- **herdr** runs the other three in panes. Its profile repeats their
   environment, hosts and mappings, because a child's list replaces its
   parent's list. A shell is routed only `when: { under:
-  "{claude,codex,pi,opencode} **" }`, so herdr's pane shells stay in the
+  "{codex,pi,opencode} **" }`, so herdr's pane shells stay in the
   actor, where the agents are installed.
 - **A README** explains how to build the image for each driver, the
   sign-in flow that works from an actor, where the credentials go and why
@@ -658,13 +657,6 @@ build the base with 'needy image build --linux-container' and set
   `libatomic1`, which the base does not have. The image also adds `fd-find`
   (pi accepts `fdfind`, and otherwise downloads fd from GitHub at its first
   start) and `jq`.
-- **Claude Code comes from its release bucket, not the installer.** The
-  native installer's `claude install` writes into the building user's
-  home, which a VM actor hides under its tmpfs. The image downloads the
-  binary that the installer downloads,
-  `downloads.claude.ai/claude-code-releases/<version>/<platform>/claude`,
-  checked against that version's `manifest.json`. The image uses the
-  stable channel (2.1.311). The latest channel was 2.1.322.
 - **Codex is the release's package, not the bare binary.** The bare
   `codex-<target>.tar.gz` started as a driving program, but in a herdr pane
   it stopped with "this CLI has no complete local package". The image
@@ -687,9 +679,7 @@ build the base with 'needy image build --linux-container' and set
   stay in the actor. The identity probes stay in the actor, as in
   `examples/opencode`.
 - **Updates, telemetry and side downloads are off, not allowed.** For
-  Claude Code: `DISABLE_UPDATES`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`
-  and `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL` (without them
-  the first start asked `downloads.claude.ai` and `github.com`). For Codex:
+  Codex:
   `check_for_update_on_startup=false` and `analytics.enabled=false` on the
   command line. For pi: `PI_SKIP_VERSION_CHECK` and `PI_TELEMETRY=0`. For
   opencode: `OPENCODE_DISABLE_AUTOUPDATE`. pi still asks `pi.dev` at the
@@ -698,8 +688,6 @@ build the base with 'needy image build --linux-container' and set
 - **Codex runs with `--sandbox danger-full-access`.** Its commands leave the
   actor for the executor, so its Linux sandbox would wrap only the actor's
   side of each exec. Approvals stay at Codex's default.
-- **`CLAUDE_CONFIG_DIR=/home/agent/.claude`**, so `.claude.json` (onboarding,
-  account and the approval of an API key) is in the one mapped directory.
 - **Filters are on copy-in** (superseded on 2026-11-13: the daemon now filters mirror-outs, and the filters are back on them). The actor's mirror-out packs its directory
   without the mapping's filter (`mirror_out` in
   `crates/core-actor/src/guest/init/files.rs`: `pack(&root, &[])`). The
@@ -1007,17 +995,15 @@ Each piece, as it was written:
 
 | Piece | Host | Command | Result |
 | --- | --- | --- | --- |
-| Image, arm64 | Mac | `docker build -t needy-agents:step3 examples/agents` | each checksum `OK`; in the image `node --version` `v26.13.1`, `pi --version` `1.5.2`, `claude --version` `2.1.311 (Claude Code)`, `codex --version` `codex-cli 0.167.2`, `herdr --version` `herdr 0.9.5`, `opencode --version` `1.19.5`; `/usr/local/bin/claude` has the proxy's inode, and the real programs are in `/.needy/real/usr/local/bin/` |
+| Image, arm64 | Mac | `docker build -t needy-agents:step3 examples/agents` | each checksum `OK`; in the image `node --version` `v26.13.1`, `pi --version` `1.5.2`, `codex --version` `codex-cli 0.167.2`, `herdr --version` `herdr 0.9.5`, `opencode --version` `1.19.5`; the real programs are in `/.needy/real/usr/local/bin/` |
 | Image, amd64 | Linux KVM host | `docker build --build-arg BASE=needy-actor:step3 -t needy-agents:step3 examples/agents`, then the same `--version`s | the same versions, `uname -m` `x86_64` |
 | Image, first tries | Mac | the first builds | **failed first**: Node.js's arm64 `node` needs `libatomic.so.1` (added `libatomic1`); pi downloaded fd from GitHub, refused by the gateway (added `fd-find`); the bare Codex binary refused to start in a herdr pane (switched to the package) |
 | VM images | both | `needy image build --from needy-agents:step3` | `macos-vz/needy-agents_step3-6a348e749936` (1.6 GiB), `linux-firecracker/needy-agents_step3-6a348e749936`; `profile check` of every profile prints `actor image: needy-agents:step3, as the VM image ... (base ABI 1)` |
-| Claude Code sign-in | Mac, `macos-vz` | `claude.yaml` without a key, the subscription choice | the `https://claude.com/cai/oauth/authorize?...` URL with `redirect_uri=https://platform.claude.com/oauth/code/callback` and `Paste code here if prompted >` |
 | Codex sign-in | Mac, `macos-vz` | `codex.yaml`, **Sign in with Device Code** | `https://auth.openai.com/codex/device` and a one-time code, from `auth.openai.com` through the gateway |
 | pi sign-in | Mac, `macos-vz` | `/login` in `pi.yaml` | the method menu: `Sign in with an account`, `Sign in with an API key` |
-| Claude Code hosts | Mac, `macos-vz` | `needy report` of the first runs | denied `downloads.claude.ai` and `github.com`; with `DISABLE_UPDATES` and `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL` none |
 | opencode copy-in | Mac, `macos-vz` | `opencode.yaml` mapping `~/.local/share/opencode` | **failed first**: `EACCES: permission denied, mkdir '/home/agent/.local/state'` (copy-in left `~/.local` root's); mapping `~/.local` starts it |
-| Login persistence | Mac, `macos-vz` | a run that exited, then a second run | the second Claude Code run skipped the theme, key and onboarding screens; Codex's `auth.json` came back; a Codex run stopped with `needy run stop` before it exited saved nothing |
-| Pane routing | Mac, `macos-vz` | `herdr.yaml`; in the first pane `uname -s`, `curl` to every allowed host and to `example.com`, then each agent's `!` command | the pane prints `Linux` (the actor); every allowed host answers (200, or 403/404/421 from the host itself); `example.com` `000` (refused, `network denied: example.com`); `!uname -s` in claude, pi, codex and opencode prints `Darwin` (the Mac executor) |
+| Login persistence | Mac, `macos-vz` | a run that exited, then a second run | Codex's `auth.json` came back; a Codex run stopped with `needy run stop` before it exited saved nothing |
+| Pane routing | Mac, `macos-vz` | `herdr.yaml`; in the first pane `uname -s`, `curl` to every allowed host and to `example.com`, then each agent's `!` command | the pane prints `Linux` (the actor); every allowed host answers (200, or 403/404/421 from the host itself); `example.com` `000` (refused, `network denied: example.com`); `!uname -s` in pi, codex and opencode prints `Darwin` (the Mac executor) |
 
 End to end, from this slice's tree, each agent's profile on one
 driver per platform, with fresh scratch credential directories. Each run
@@ -1026,11 +1012,10 @@ prompt `say hello`, and the agent's exit.
 
 | Profile | `macos-vz` (Mac, native executor) | `linux-firecracker` (Linux KVM host, `linux-container` executor) |
 | --- | --- | --- |
-| `claude.yaml` | Pass: TUI, `routed-Darwin` in `/private/tmp/...`, `Invalid API key` (401 from `api.anthropic.com`); report `bash on build 3`, `sh on build 1`; network `api.anthropic.com`, `platform.claude.com`; no denied host; `.claude.json`, `projects/` and `settings.json` mirrored out | Pass: the same, `routed-Linux`; report `routed to build 4` |
 | `codex.yaml` | Pass: TUI after `Detected OPENAI_API_KEY`, `routed-Darwin`, `401 Unauthorized: Incorrect API key provided` from `api.openai.com/v1/responses`; report `bash on build 3`; network `api.openai.com`, `chatgpt.com`; denied `github.com`, `api.github.com`, `raw.githubusercontent.com`, `files.openai.com` (left out); `auth.json` mirrored out | Pass: the same, `routed-Linux` |
-| `pi.yaml` | Pass: TUI, `routed-Darwin`, `Error: 401 ... invalid x-api-key`; report `bash on build 1`; network `api.anthropic.com`, `pi.dev`; no denied host; `agent/` mirrored out | Pass: the same, `routed-Linux` |
-| `opencode.yaml` | Pass: TUI, `routed-Darwin`, `invalid x-api-key`; report `bash on build 1`; network `registry.npmjs.org`, `api.anthropic.com`, `models.opencode.ai`; no denied host; `share/opencode` and `state/opencode` mirrored out | Pass: the same, `routed-Linux` |
-| `herdr.yaml` | Pass: pane `pane-Linux`; `claude-routed-Darwin`, `pi-routed-Darwin`, `codex-routed-Darwin` from agents in a pane; report `routed to build 8`, `kept on actor 7`; denied `herdr.dev`, `example.com` (the probe), `raw.githubusercontent.com` and `ab.chatgpt.com` (Codex in a pane, started without the profile's `analytics.enabled=false`) | Pass: the same pane and routing counts |
+| `pi.yaml` | Pass: TUI, `routed-Darwin`, `Error: 401 ... invalid x-api-key`; report `bash on build 1`; network `pi.dev`; no denied host; `agent/` mirrored out | Pass: the same, `routed-Linux` |
+| `opencode.yaml` | Pass: TUI, `routed-Darwin`, `invalid x-api-key`; report `bash on build 1`; network `registry.npmjs.org`, `models.opencode.ai`; no denied host; `share/opencode` and `state/opencode` mirrored out | Pass: the same, `routed-Linux` |
+| `herdr.yaml` | Pass: pane `pane-Linux`; `pi-routed-Darwin`, `codex-routed-Darwin` from agents in a pane; report `routed to build 8`, `kept on actor 7`; denied `herdr.dev`, `example.com` (the probe), `raw.githubusercontent.com` and `ab.chatgpt.com` (Codex in a pane, started without the profile's `analytics.enabled=false`) | Pass: the same pane and routing counts |
 
 **Not as hoped**:
 
@@ -1043,8 +1028,8 @@ prompt `say hello`, and the agent's exit.
   agent profiles on `linux-container`, and on `macos-apple-container`
   (not tried), are unverified.
 - **The authenticated path is unverified.** No check logged in, so the
-  token exchange and refresh hosts (`platform.claude.com` for Claude
-  Code, `auth.openai.com` for Codex), the subscription model APIs
+  token exchange and refresh hosts (`auth.openai.com` for Codex),
+  the subscription model APIs
   (`chatgpt.com` for a ChatGPT plan), a tool call that the model starts,
   and the persistence of a real login are untested. The hosts that a
   logged-in session needs and the profiles leave out are unknown.

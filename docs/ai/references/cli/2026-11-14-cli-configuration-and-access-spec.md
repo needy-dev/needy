@@ -1104,7 +1104,7 @@ They are not claims that the target CLI or access redesign has shipped.
 | --- | --- | --- |
 | P1, TCP address continuity | TCP-only daemon setup omitted endpoint/credential on later commands. The local-actor/remote-executor wizard branch could bypass pairing and still invoke later commands | One consistent listener-to-client route and identity, with shell-local versus saved values distinguished |
 | P1, copy block crosses machines | Pairing/join snippets mixed control and executor commands; a Mac used as client and runner could open the same tunnel twice | One copy action per machine/terminal/credential role; one reused route; install Needy on each participating machine |
-| P1, selected environment discarded | Final agent step used a fixed Claude/Firecracker/container example despite earlier driver/runner answers | Preserve selected driving program, actor driver, executor, network, state, and project path throughout the generated walkthrough |
+| P1, selected environment discarded | Final agent step used a fixed agent/Firecracker/container example despite earlier driver/runner answers | Preserve selected driving program, actor driver, executor, network, state, and project path throughout the generated walkthrough |
 | P1, workspace incomplete | Executor workspace alone did not supply actor mount and path map; a zero-exit profile check could still warn about cwd mapping | Use actor workspace derivation; create executor directory first; explain each machine's home and prove shared visibility |
 | P1, generic OpenCode entry used an experiment | Local-model setup and fixed prompt appeared as generic interactive onboarding | Keep the model-service experiment separate and state prerequisites; use the generic scenario by default |
 | P2, stale release instructions | README/wizard said source-only although release v0.0.3 assets existed | Separate release installation from source builds; keep guest/image ABI and image names consistent |
@@ -1125,7 +1125,7 @@ Historical source/live observations:
   VM archives. Asset presence did not verify every install channel.
 - Live probes used a Linux x86_64 control host and Apple-silicon native runner.
   They observed Linux entrypoint, Mac child shell, shared file access, tool
-  version queries, and Claude/OpenCode interface startup. They did not verify
+  version queries, and OpenCode interface startup. They did not verify
   provider login or authenticated model-driven tool calls.
 
 Capture and permission explanations remain required: the driving program starts
@@ -1149,7 +1149,7 @@ mock models, and authenticated tools have distinct evidence levels.
 
 ### Historical documentation draft evidence — 2026-11-13
 
-The uncommitted documentation draft added bash/Claude/OpenCode entry links,
+The uncommitted documentation draft added bash/OpenCode entry links,
 folded older README reference material, a Linux-to-Mac walkthrough, canonical
 profiles, and Studio defaults. It changed no CLI, daemon, capture, or live-host
 configuration. The public examples allowed HTTP/HTTPS hosts and preserved

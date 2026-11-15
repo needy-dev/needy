@@ -4,7 +4,7 @@ Status: verified, 2026-11-13. Bug fixes G11–G14 of
 [Terminals, attach and the interactive actor](2026-11-10-terminal-attach-design.md);
 G15 and G16 stay open on purpose.
 
-The question: do full-screen agent TUIs (opencode, pi, Claude Code, Codex,
+The question: do full-screen agent TUIs (opencode, pi, Codex,
 herdr) behave through needy as they do on a local terminal? The answer
 comes from a harness that plays the outer terminal, runs each TUI directly
 and through each needy path, and compares what a person would see.
@@ -117,35 +117,32 @@ text, cursor, colors, wide cells or modes at any snap.
 
 | TUI | Behavior | Before | After |
 | --- | --- | --- | --- |
-| all five | typing, wide characters (中文) and emoji (🙂) | equal text, cursor and wide cells | equal |
-| all five | Enter, arrows, Home/End, Escape, alt-b, ctrl-c | equal | equal |
-| all five | bracketed paste of three lines | equal: bracketed exactly when the TUI asked | equal |
+| all tested TUIs | typing, wide characters (中文) and emoji (🙂) | equal text, cursor and wide cells | equal |
+| all tested TUIs | Enter, arrows, Home/End, Escape, alt-b, ctrl-c | equal | equal |
+| all tested TUIs | bracketed paste of three lines | equal: bracketed exactly when the TUI asked | equal |
 | opencode, pi, herdr | mouse click and wheel (they turn SGR any-motion on) | delivered, equal | equal |
-| all five | resize 30x100 → 40x120 → 20x70 (`create`, `attach`) | equal | equal |
-| all five | terminal queries with a client attached | all answered by the client's terminal, through needy; none lost | same |
-| pi, opencode, Claude Code | 24-bit color | none: 256 colors, Claude Code also picks another default theme | equal (G11) |
+| all tested TUIs | resize 30x100 → 40x120 → 20x70 (`create`, `attach`) | equal | equal |
+| all tested TUIs | terminal queries with a client attached | all answered by the client's terminal, through needy; none lost | same |
+| pi, opencode | 24-bit color | none: 256 colors | equal (G11) |
 | Codex | 24-bit color | its 5 tinted cells drawn in 256 colors | equal (G11) |
 | herdr | start, typing, paste in a pane | equal but for its pane shell's prompt and the title (hostname): the actor's `.bashrc`, not needy | same |
-| all five | exit and the terminal after it | nothing left on (`left_on` empty); Claude Code 2.1.311 does not exit on ctrl-c ctrl-c on its first-start screen in any path, `direct` included | same |
-| Claude Code | detach (ctrl-]): shell after it | modifyOtherKeys and color scheme reports left on | nothing left (G12) |
+| all tested TUIs | exit and the terminal after it | nothing left on (`left_on` empty) | same |
 | opencode | detach | color scheme reports, cursor shape (blinking block) and cursor color left | nothing left (G12) |
 | pi, herdr | detach | color scheme reports and autowrap off left | nothing left (G12) |
 | Codex | detach | nothing left | same |
-| Claude Code | `run attach` redraw | modifyOtherKeys and color scheme reports missing | equal (G13) |
 | opencode | `run attach` redraw | color scheme reports and cursor color missing | equal (G13) |
 | pi, herdr | `run attach` redraw | color scheme reports and autowrap off missing | equal (G13) |
-| all five | read-only viewer | as `attach`, until the typing client resizes: the viewer keeps its own size, by design (G6) | same |
-| all five | `background` (no client terminal at start) | the queries about the terminal unanswered: no kitty keyboard (Claude Code, opencode), modifyOtherKeys instead (pi, opencode), no focus events (opencode), default colors (Codex) | DA1 answered (G14); the rest unchanged (G15) |
-| all five | `exec -t` | equal | equal |
+| all tested TUIs | read-only viewer | as `attach`, until the typing client resizes: the viewer keeps its own size, by design (G6) | same |
+| all tested TUIs | `background` (no client terminal at start) | the queries about the terminal unanswered: no kitty keyboard (opencode), modifyOtherKeys instead (pi, opencode), no focus events (opencode), default colors (Codex) | DA1 answered (G14); the rest unchanged (G15) |
+| all tested TUIs | `exec -t` | equal | equal |
 | pi, opencode | ctrl-z | the TUI leaves its screen and stays suspended | same (G16) |
-| Claude Code, Codex | ctrl-z | nothing happens (in a shell they suspend) | same (G16) |
+| Codex | ctrl-z | nothing happens (in a shell they suspend) | same (G16) |
 | herdr | ctrl-z | a key for the pane, as directly | same |
 
 Read every TUI's queries in the reports: opencode asks the most (DA1,
 XTVERSION, XTGETTCAP, DECRQM 1004/1016/2004/2026/2027/2031, the kitty
 flags, OSC 4/10/11/12, CPR, XTWINOPS 14), herdr asks OSC 4 for all 256
-colors, Claude Code asks DA1, XTVERSION, the kitty flags, DECRQM 2026/1016
-and XTWINOPS 16. None hung without answers (`--answers none` directly):
+colors. None hung without answers (`--answers none` directly):
 each started within its normal time, without the features the answers
 would have enabled; Codex drew about 0.5–1 s later.
 
@@ -213,15 +210,12 @@ Each has a `ROOT CAUSE` regression test; each test failed before its fix.
 | --- | --- | --- |
 | Apple silicon Mac, `macos-vz` | whole matrix, before and after | as the table |
 | Apple silicon Mac, `macos-apple-container` | whole matrix, after | as `macos-vz` after |
-| Linux KVM host (x86_64), `linux-firecracker` | whole matrix, after (`exec` rerun after a harness fix that passes `IMAGE` to it) | as `macos-vz` after: `create` and `attach` equal for pi, Codex and Claude Code, opencode's random tip line, herdr's prompt and title; nothing left on after a detach |
+| Linux KVM host (x86_64), `linux-firecracker` | whole matrix, after (`exec` rerun after a harness fix that passes `IMAGE` to it) | as `macos-vz` after: `create` and `attach` equal for pi, Codex, opencode's random tip line, herdr's prompt and title; nothing left on after a detach |
 | Linux KVM host, `linux-container` | started with a daemon that is not root | not verified: the host has no `sshfs`, which the workspace mount needs, and installing it needs root |
 
 On `macos-apple-container`, a first run hit the copy-in ownership bug
 fixed meanwhile on `main` (`f804539`: opencode's `EACCES ... mkdir
-'/home/agent/.local/state'`); opencode and Claude Code ran again after the
-rebase, as the table. A Claude Code run sometimes ended at "Unable to
-connect to Anthropic services" before its first screen; those runs were
-repeated.
+'/home/agent/.local/state'`); opencode ran again after the rebase, as the table.
 
 `make check` and `make test` pass on the Mac and on the Linux KVM host.
 The relay change is shared code; Windows is covered by CI's build, Clippy

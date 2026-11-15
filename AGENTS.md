@@ -182,7 +182,7 @@ expect — a field, an enum variant, a branch, an algorithm stage, an API
 surface, a fallback path, or any other surface that has been considered and
 intentionally left out for the current slice — leave a `TODO:` or `NOTICE:`
 marker at the type or call site where the deferral lives. The goal is to
-make intent visible: a future reader (Codex, Claude, the owner, a reviewer)
+make intent visible: a future reader (Codex, the owner, a reviewer)
 must be able to tell *not yet, on purpose* apart from *forgot to write it*.
 A missing marker forces the next reader to guess and frequently produces
 unwanted scope expansion when an agent treats the absence as a gap.
@@ -378,7 +378,7 @@ Use this root-cause block format in regression tests when relevant:
 
 ## Agent Skills
 
-Repository skills live in `.agents/skills/`; `.claude/skills` links to it.
+Repository skills live in `.agents/skills/`.
 Use `use-buf` and `use-buf-plugins` when changing `proto/` or Buf configuration.
 Use `create-pr` when preparing or updating PRs, or auditing specified revisions
 for caller-visible changes.

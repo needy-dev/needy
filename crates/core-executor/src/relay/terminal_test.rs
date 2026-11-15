@@ -21,7 +21,7 @@ fn the_alternate_screen_is_left_only_when_the_program_is_on_it() {
 // mouse reports or autowrap off, the shell after it kept them, because the
 // restore undid only the alternate screen and the input modes.
 //
-// Before the fix, detaching from Claude Code left modifyOtherKeys and color
+// Before the fix, detaching from a TUI left modifyOtherKeys and color
 // scheme reports on, from opencode its cursor shape and color, from pi
 // autowrap off (the TUI matrix's `detach` path).
 // The fix turns those off too, as herdr's restore of its own terminal does.

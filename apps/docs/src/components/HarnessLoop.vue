@@ -13,13 +13,11 @@ import Icon from '../kit/Icon.vue'
  */
 
 const HARNESSES: Array<{ icon: IconName, name: string }> = [
-  { icon: 'lobe-icons:claudecode-color', name: 'Claude Code' },
   { icon: 'lobe-icons:codex-color', name: 'Codex' },
   { icon: 'lobe-icons:opencode', name: 'opencode' },
   { icon: 'lobe-icons:geminicli-color', name: 'Gemini CLI' },
 ]
 const MODELS: Array<{ icon: IconName, name: string }> = [
-  { icon: 'lobe-icons:claude-color', name: 'Claude' },
   { icon: 'lobe-icons:openai', name: 'OpenAI' },
   { icon: 'lobe-icons:deepseek-color', name: 'DeepSeek' },
   { icon: 'lobe-icons:qwen-color', name: 'Qwen' },

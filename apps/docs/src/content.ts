@@ -99,8 +99,8 @@ export const SECTIONS: Record<string, Section> = {
     title: { en: 'Needy runs the harness apart from the work', zh: '把 harness 和干活的地方分开' },
     body: [
       {
-        en: 'Agent harnesses such as Claude Code, Codex and opencode do two very different jobs in one process. They talk to a model, and they run whatever the model asks for: `cargo test`, `npm install`, `xcodebuild`. The first job mostly waits on the network. The second needs CPU, disk, a toolchain, and some care about what it is allowed to touch.',
-        zh: 'Claude Code、Codex、opencode 这些 agent harness，其实在一个进程里同时干着两件事：一边跟模型聊，一边把模型让它跑的命令都跑了，比如 `cargo test`、`npm install`、`xcodebuild`。聊天这件事很轻，大部分时间都在等网络；跑命令就不一样了，要 CPU、要磁盘、要工具链，还得有人看着它别乱动东西。',
+        en: 'Agent harnesses such as Codex and opencode do two very different jobs in one process. They talk to a model, and they run whatever the model asks for: `cargo test`, `npm install`, `xcodebuild`. The first job mostly waits on the network. The second needs CPU, disk, a toolchain, and some care about what it is allowed to touch.',
+        zh: 'Codex、opencode 这些 agent harness，其实在一个进程里同时干着两件事：一边跟模型聊，一边把模型让它跑的命令都跑了，比如 `cargo test`、`npm install`、`xcodebuild`。聊天这件事很轻，大部分时间都在等网络；跑命令就不一样了，要 CPU、要磁盘、要工具链，还得有人看着它别乱动东西。',
       },
       {
         en: 'Needy splits the two. The harness runs in a small sandbox we call the actor. Each command it starts is caught, checked against your rules, and run on an executor, which can be a container, a microVM or a real Mac. The harness itself does not need to change.',

@@ -4,7 +4,6 @@
 
 export const ICON_NAMES = [
   // Agent harnesses and models, from @proj-airi/lobe-icons.
-  'lobe-icons:claudecode-color',
   'lobe-icons:codex-color',
   'lobe-icons:opencode',
   'lobe-icons:geminicli-color',
@@ -12,7 +11,6 @@ export const ICON_NAMES = [
   'lobe-icons:deepseek-color',
   'lobe-icons:qwen-color',
   'lobe-icons:openai',
-  'lobe-icons:claude-color',
   'logos:docker-icon',
   'logos:linux-tux',
   'logos:apple',

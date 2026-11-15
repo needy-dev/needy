@@ -3,6 +3,5 @@
 /.env.local
 *.test
 /target/
-/.claude/worktrees/
 /.tmp/
 examples/*/out/

@@ -42,7 +42,7 @@ async fn the_process_socket_belongs_to_the_daemon_and_only_the_daemon() {
 // the terminal model both keep 24-bit colors, because init cleared the
 // environment and set TERM but not COLORTERM.
 //
-// Before the fix, pi, opencode and Claude Code drew no 24-bit color in an
+// Before the fix, pi, opencode drew no 24-bit color in an
 // actor (the TUI matrix's `create` path against `docker run -it`).
 // The fix keeps COLORTERM=truecolor, which a profile's `actor.env` can
 // still override.

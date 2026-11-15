@@ -50,7 +50,7 @@ this table records the terms as agreed on 2026-11-09.
 | --- | --- | --- |
 | **actor** | The side that runs the driving program: an agent harness, a test suite or an acceptance script. Usually one microVM. The program's view of the world, including its recipe identity, lives here. | harness layer, caller, shallow layer |
 | **executor** | An environment where routed operations take effect: a container, microVM, pod or real device such as a Mac. The executor layer is the set of executors bound to a session. | runner, worker, needy client, target |
-| **harness** | One kind of driving program: an agent loop such as Claude Code, Codex or an agent-written replacement. | — |
+| **harness** | One kind of driving program: an agent loop such as Codex or an agent-written replacement. | — |
 | **daemon** | The control plane: lifecycle of actors and executors, routing rules, both network gateways and the trace. | server |
 | **CLI** | The `needy` command. Its `Client` struct only talks to the daemon. | — |
 | **recipe** | A declarative description of one machine: image, kernel, CPU, memory, firmware, devices and network identity. Built by `needy build`. | persona |

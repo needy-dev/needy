@@ -7,7 +7,6 @@ named `mac` runs on the Mac. The project lives in the Mac's `~/needy-demo`.
 | Profile | Linux entrypoint | Captured child processes |
 | --- | --- | --- |
 | [bash.yaml](bash.yaml) | bash | Mac |
-| [claude.yaml](claude.yaml) | Claude Code | Mac |
 | [opencode.yaml](opencode.yaml) | OpenCode | Mac |
 
 The website reads these files directly. `actor.workspace` derives both the

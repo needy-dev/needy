@@ -20,7 +20,7 @@
 # image (`needy image build --from IMAGE`); a set IMAGE is also the actor's
 # image in the profiles this writes. DRIVER is the actor's
 # driver: macos-vz, macos-apple-container, linux-firecracker or
-# linux-container. TUIs are opencode pi claude codex herdr. The profiles
+# linux-container. TUIs are opencode pi codex herdr. The profiles
 # this writes start each run from an empty login directory and mirror it out
 # under OUT/state, so no real login is read or written.
 set -u
@@ -30,7 +30,7 @@ out=${1:?usage: matrix.sh OUT [TUI...]}
 shift
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
-tuis=${*:-opencode pi claude codex herdr}
+tuis=${*:-opencode pi codex herdr}
 NEEDY=${NEEDY:-$root/bin/needy}
 XTASK=${XTASK:-$root/target/debug/xtask}
 DRIVER=${DRIVER:?set DRIVER to the actor driver}
@@ -42,10 +42,9 @@ mkdir -p "$workspace" "$out/profiles" "$out/state/empty"
 # the baseline runs the program as the actor does.
 direct_env() {
   case $1 in
-    claude) echo "CLAUDE_CONFIG_DIR=/home/agent/.claude DISABLE_UPDATES=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1" ;;
     pi) echo "PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0" ;;
     opencode) echo "OPENCODE_DISABLE_AUTOUPDATE=1" ;;
-    herdr) echo "CLAUDE_CONFIG_DIR=/home/agent/.claude DISABLE_UPDATES=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1 PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 OPENCODE_DISABLE_AUTOUPDATE=1" ;;
+    herdr) echo "PI_SKIP_VERSION_CHECK=1 PI_TELEMETRY=0 OPENCODE_DISABLE_AUTOUPDATE=1" ;;
   esac
 }
 direct_args() {
@@ -75,7 +74,7 @@ profile() {
     # mirrors it out to a directory of its own: a TUI's first-start screens
     # stay the same in every path, and no ~/needy-state is read or written.
     local agents=$1
-    [ "$1" = herdr ] && agents="claude codex pi opencode"
+    [ "$1" = herdr ] && agents="codex pi opencode"
     echo "files:"
     for agent in $agents; do
       printf '  %s-in: { from: "host:%s/" }\n  %s-out: { to: "host:%s/{run}-%s/" }\n' \

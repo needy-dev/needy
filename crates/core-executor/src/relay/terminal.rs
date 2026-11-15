@@ -175,7 +175,7 @@ fn write_restore(out: &mut impl Write, alternate: bool) -> std::io::Result<()> {
   out.write_all(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?1004l")?;
   // NOTICE: what TUIs also turn on and undo only when they exit themselves,
   // so a detach or a killed client left it on in the shell (the TUI
-  // matrix's `detach` path: Claude Code's modifyOtherKeys and color scheme
+  // matrix's `detach` path: a TUI's modifyOtherKeys and color scheme
   // reports, opencode's cursor shape and color, pi's autowrap off): SGR
   // pixel and X10 mouse (1016, 9), color scheme reports (2031), autowrap
   // (7, on), modifyOtherKeys (`CSI > 4 m` resets it to the terminal's

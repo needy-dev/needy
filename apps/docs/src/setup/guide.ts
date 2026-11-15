@@ -3,10 +3,9 @@ import type { Text } from '../i18n'
 import { parse, stringify } from 'yaml'
 
 import bash from '../../../../examples/linux-mac/bash.yaml?raw'
-import claude from '../../../../examples/linux-mac/claude.yaml?raw'
 import opencode from '../../../../examples/linux-mac/opencode.yaml?raw'
 
-export type Program = 'bash' | 'claude' | 'opencode'
+export type Program = 'bash' | 'opencode'
 export type Os = 'linux' | 'mac'
 export type Executor = 'container' | 'native' | 'runner'
 export type Machine = 'host' | 'runner' | 'actor'
@@ -44,7 +43,6 @@ export interface Step {
 
 export const PROGRAMS: Array<{ id: Program, name: string }> = [
   { id: 'bash', name: 'bash' },
-  { id: 'claude', name: 'Claude Code' },
   { id: 'opencode', name: 'OpenCode' },
 ]
 
@@ -78,7 +76,7 @@ export function locations(env: Environment): Record<Machine, { name: Text, descr
   }
 }
 
-const PROFILES: Record<Program, string> = { bash, claude, opencode }
+const PROFILES: Record<Program, string> = { bash, opencode }
 // Package source metadata and helper file lists:
 // docs/ai/references/cli/2026-11-15-workspace-mount-package-sources-note.md
 const INSTALL: Record<PackageManager, string> = {
@@ -95,8 +93,8 @@ export function actorDriver(env: Environment): string {
   return env.kvm ? 'linux-firecracker' : 'linux-container'
 }
 
-export function needsDocker(program: Program, env: Environment): boolean {
-  return actorDriver(env) === 'linux-container' || env.executor === 'container' || program === 'claude'
+export function needsDocker(_program: Program, env: Environment): boolean {
+  return actorDriver(env) === 'linux-container' || env.executor === 'container'
 }
 
 /** Rejects values that cannot name a runner or a usable directory. No input is silently replaced. */
@@ -184,21 +182,6 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
       ? '\nneedy_release=$(needy --version | awk \'{print $2}\')\ndocker pull "ghcr.io/needy-dev/needy-executor:v${needy_release}"' : ''}`,
   })
 
-  if (program === 'claude') {
-    const build = [
-      'git clone https://github.com/needy-dev/needy', 'cd needy',
-      'needy_release=$(needy --version | awk \'{print $2}\')',
-      'docker build --build-arg BASE="ghcr.io/needy-dev/needy-actor:v${needy_release}" -t needy-agents:latest examples/agents',
-    ]
-    if (vm)
-      build.push('needy image build --from needy-agents:latest')
-    if (driver === 'macos-apple-container')
-      build.push('docker save needy-agents:latest -o needy-agents.tar', 'container image load --input needy-agents.tar')
-    steps.push({ id: 'image', machine: 'host', terminal: host,
-      title: { en: 'Build and prepare the Claude image', zh: '构建并准备 Claude 镜像' },
-      text: { en: 'The selected driver uses this image. If you already have a checkout, enter it instead of cloning again.', zh: '所选 driver 会使用这份镜像。已有源码目录时，进入该目录，不必再次 clone。' }, code: build.join('\n') })
-  }
-
   steps.push({ id: 'daemon', machine: 'host', terminal: host,
     title: { en: 'Start and reach the control daemon', zh: '启动控制 daemon 并确认连接' },
     text: { en: 'Install a user service on the control host, with systemd or launchd available. Select local for the following management commands. For an existing service, replace the install line with needy daemon service install --replace --now. Replacement restarts control with the current configuration. Use run stop to end an invocation.', zh: '在控制主机上安装用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。已有服务时，把安装命令替换为 needy daemon service install --replace --now。替换会应用当前配置并重启控制服务。需要结束某个 run 时，使用 run stop。' },
@@ -282,7 +265,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
 
   if (program !== 'bash') {
     const dir = `~/needy-state/${name}`
-    const paths = program === 'claude' ? dir : `${dir}/{data,config,state}`
+    const paths = `${dir}/{data,config,state}`
     steps.push({ id: 'state', machine: 'host', terminal: host,
       title: { en: 'Create the program’s persistent directories', zh: '创建程序的持久目录' },
       text: { en: 'These host paths belong to the actor host, even when its executor is elsewhere.', zh: '这些 host 路径属于 actor 宿主机，即使命令在另一台机器上执行。' },
@@ -299,10 +282,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     profile.actor.container = { oci_runtime: 'runc' }
   else
     delete profile.actor.container
-  if (program === 'claude')
-    profile.actor.image = 'needy-agents:latest'
-  else
-    delete profile.actor.image
+  delete profile.actor.image
   const project = env.executor === 'container' ? '~/workspace' : env.workspace
   profile.actor.workspace.from = `executor:${target}:${project}`
   profile.executors = { [target]: env.executor === 'runner'
@@ -332,10 +312,8 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
   else {
     steps.push({ id: 'login', machine: 'actor', terminal: { en: 'Inside the program, not the host shell', zh: '在程序界面内，不是在宿主机 shell 内' },
       title: { en: 'Connect your model provider', zh: '登录模型服务' },
-      text: program === 'claude'
-        ? { en: 'Complete the first-start prompts. Open the printed login URL and return the code when requested.', zh: '完成首次启动向导，在浏览器打开输出的登录地址，按提示把验证码填回终端。' }
-        : { en: 'Choose a provider, then complete its API-key or device-code login.', zh: '选择模型服务，按提示填写 API key 或完成设备码登录。' },
-      code: program === 'claude' ? '/login' : '/connect' },
+      text: { en: 'Choose a provider, then complete its API-key or device-code login.', zh: '选择模型服务，按提示填写 API key 或完成设备码登录。' },
+      code: '/connect' },
     { id: 'observe', machine: 'actor', terminal: { en: 'In the agent conversation', zh: '在 agent 对话内' },
       title: { en: 'Check a tool call and shared file', zh: '验证工具调用和共享文件' },
       text: { en: 'Check the actual tool output and the file on the selected executor.', zh: '查看实际工具输出，并在所选 executor 上查看同一份文件。' },

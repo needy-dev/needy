@@ -52,8 +52,8 @@ fn redraw_restores_focus_keyboard_flags_and_title() {
 
 // ROOT CAUSE:
 //
-// If a TUI turned on xterm's modifyOtherKeys or color scheme reports
-// (Claude Code), turned autowrap off (pi, herdr) or set the cursor color
+// If a TUI turned on xterm's modifyOtherKeys or color scheme reports,
+// turned autowrap off (pi, herdr) or set the cursor color
 // (opencode), a client that attached later did not get it, because the
 // model tracked none of them, and a redraw for a program that had undone
 // them left the client's own setting as it was.

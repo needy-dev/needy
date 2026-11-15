@@ -32,7 +32,7 @@ new folder, one row to [`ai/references/INDEX.md`](ai/references/INDEX.md).
 
 ## Tutorials
 
-- [Linux bash, Claude Code, or OpenCode with Mac tools](ai/explanations/linux-actor-mac-executor.md):
+- [Linux bash or OpenCode with Mac tools](ai/explanations/linux-actor-mac-executor.md):
   one walkthrough, with a machine and terminal for every step.
 - [Complete Linux-to-Mac profiles](../examples/linux-mac): the website uses these same files.
 - [Installation and other drivers](../README.md#install).

@@ -747,7 +747,7 @@ mount keys ([rclone filtering](https://rclone.org/filtering/),
 | --- | --- | --- | --- |
 | `copy-in` | Host → actor or executor | Run start | `.agents/`, `AGENTS.md`, Codex configuration |
 | `mount` | Live view; the executor holds the data | During the run | The workspace |
-| `mirror-out` | Actor or executor → host | Continuously or at the end | `~/.codex/sessions`, `~/.claude/projects` |
+| `mirror-out` | Actor or executor → host | Continuously or at the end | `~/.codex/sessions` |
 
 ```yaml
 files:

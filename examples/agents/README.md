@@ -1,16 +1,15 @@
 # Coding agents in an actor
 
-One actor image with five coding agents, and one profile for each agent. The
+One actor image with four coding agents, and one profile for each agent. The
 agent runs in the actor. Every shell it starts goes to the `build` executor,
 which holds the workspace, so all the commands the agent runs go there too.
 
 | Profile | Agent | Version in the image |
 | --- | --- | --- |
-| [`claude.yaml`](claude.yaml) | Claude Code (native build) | 2.1.311 |
 | [`codex.yaml`](codex.yaml) | Codex (static musl package) | 0.167.2 |
 | [`pi.yaml`](pi.yaml) | pi (`@earendil-works/pi-coding-agent`, on Node.js 26.13.1) | 1.5.2 |
 | [`opencode.yaml`](opencode.yaml) | opencode (in needy's base image) | 1.19.5 |
-| [`herdr.yaml`](herdr.yaml) | herdr, which runs the other four in panes | 0.9.5 |
+| [`herdr.yaml`](herdr.yaml) | herdr, which runs the other three in panes | 0.9.5 |
 
 The [`Dockerfile`](Dockerfile) pins each download to one release and
 checks its checksum. Each pin has a comment that names its source.
@@ -40,11 +39,11 @@ Then do the step for your driver:
 
 Each profile uses `linux-firecracker` and a `linux-container` executor. For
 another driver, write a short profile that extends the agent's profile,
-for example `~/.config/needy/profiles/claude.yaml`:
+for example `~/.config/needy/profiles/codex.yaml`:
 
 ```yaml
 # Linux without KVM
-extends: /path/to/needy/examples/agents/claude.yaml
+extends: /path/to/needy/examples/agents/codex.yaml
 actor:
   driver: linux-container
   container: { oci_runtime: runc }
@@ -53,7 +52,7 @@ actor:
 ```yaml
 # Apple silicon Mac: the executor is the Mac itself, as in examples/macos-vz.
 # mkdir -p /tmp/needy-agents first.
-extends: /path/to/needy/examples/agents/claude.yaml
+extends: /path/to/needy/examples/agents/codex.yaml
 actor:
   driver: macos-vz                       # or macos-apple-container
   workspace: { from: "executor:build:/tmp/needy-agents" }
@@ -70,8 +69,8 @@ Make the directory that keeps the agent's login and settings, then start
 the agent:
 
 ```sh
-mkdir -p ~/needy-state/claude
-needy run create -it --profile examples/agents/claude.yaml
+mkdir -p ~/needy-state/codex
+needy run create -it --profile examples/agents/codex.yaml
 ```
 
 The actor cannot receive a browser's callback to its own `localhost`. Use
@@ -79,14 +78,13 @@ the sign-in flow that does not need it:
 
 | Agent | Sign-in that works from an actor |
 | --- | --- |
-| Claude Code | `/login`, then a subscription or Console account. Open the URL it shows on any machine. Then paste the code that the page shows at `Paste code here if prompted`. `claude setup-token` on another machine gives a token for `CLAUDE_CODE_OAUTH_TOKEN`. |
 | Codex | **Sign in with Device Code** (or `codex login --device-auth`). Open `https://auth.openai.com/codex/device` on any machine and type the code. First, enable device code sign-in in the ChatGPT security settings. The default **Sign in with ChatGPT** waits for a callback on `localhost:1455` and does not finish. |
 | pi | `/login`, then a provider. If a subscription's browser sign-in cannot call back, paste the final redirect URL or the code when pi asks. GitHub Copilot uses a device code. |
 | opencode | `/connect` (or `opencode auth login`). Paste an API key, or use a device code for GitHub Copilot. A browser sign-in that calls back to `localhost` does not finish. |
 | herdr | herdr needs no login. Log in to each agent in a pane, as above. |
 
 An API key can replace the login. Each profile names the variable in an
-`actor.env` comment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...). Put it in
+`actor.env` comment (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, ...). Put it in
 a private profile that extends the example, not in a shared file.
 
 ## Where credentials go
@@ -97,7 +95,6 @@ back to the host:
 
 | Agent | Host | Actor |
 | --- | --- | --- |
-| Claude Code | `~/needy-state/claude/` | `~/.claude/` (`CLAUDE_CONFIG_DIR`, so `.claude.json` is there too) |
 | Codex | `~/needy-state/codex/` | `~/.codex/` |
 | pi | `~/needy-state/pi/` | `~/.pi/agent/` |
 | opencode | `~/needy-state/opencode/` | `~/.local/share/opencode/` |
@@ -131,7 +128,6 @@ without them:
 
 | Agent | Denied, and left out |
 | --- | --- |
-| Claude Code | None, when `DISABLE_UPDATES` and `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL` are set. Without them: `downloads.claude.ai` and `github.com`. |
 | Codex | `github.com`, `api.github.com`, `raw.githubusercontent.com`, `files.openai.com` |
 | herdr | `herdr.dev` (version and agent-manifest checks) |
 
@@ -144,7 +140,7 @@ so a host that only an authenticated session uses can be missing. If so,
 ## herdr
 
 [`herdr.yaml`](herdr.yaml) starts herdr. Its panes run shells in the
-actor, so `claude`, `codex`, `pi` and `opencode` start there. A shell that
+actor, so `codex`, `pi` and `opencode` start there. A shell that
 one of these agents starts goes to the executor (a rule with `when.under`).
 The profile repeats the other profiles' environment, hosts and credential
 mappings, because `extends` takes only one parent, and a child's list

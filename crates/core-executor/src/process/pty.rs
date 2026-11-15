@@ -62,7 +62,7 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
   // TODO(job-control): the child leads its own session, and its parent (this
   // host) is in another one, so its process group is orphaned and the
   // kernel discards the SIGTSTP a TUI sends its group to suspend itself on
-  // ctrl-z (pi, opencode, Claude Code, Codex): the TUI leaves its screen and
+  // ctrl-z (pi, opencode, Codex): the TUI leaves its screen and
   // waits for a SIGCONT nobody sends. With no shell to return to, the
   // useful behavior is tmux's, which continues a stopped pane process at
   // once; that needs a job-control parent inside the terminal's session, a

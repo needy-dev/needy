@@ -1,4 +1,4 @@
-# The agents image: needy's base image plus Node.js, pi, Claude Code, Codex
+# The agents image: needy's base image plus Node.js, pi, Codex
 # and herdr (opencode is in the base already), for the profiles next to this
 # file. Build it for this machine's architecture (linux/amd64 on a Linux
 # host, linux/arm64 on Apple silicon):
@@ -73,28 +73,6 @@ RUN set -eu; \
     npm install -g --ignore-scripts --no-audit --no-fund /tmp/pi.tgz; \
     rm -rf /tmp/pi.tgz /root/.npm; \
     pi --version
-
-# Claude Code, the native build (a single binary that needs no Node.js), on
-# the stable channel. It is what the official installer
-# (https://claude.ai/install.sh) downloads, without the installer's
-# `claude install` step, which writes into the building user's home.
-# Source: https://downloads.claude.ai/claude-code-releases/2.1.311/manifest.json
-# (`platforms.linux-x64.checksum`, `platforms.linux-arm64.checksum`; build
-# commit e7d3b8365a0ffbe2f5dd032feb28e9fd9c7de025, 2026-10-26)
-# Reference: https://code.claude.com/docs/en/setup
-ARG CLAUDE_VERSION=2.1.311
-ARG CLAUDE_SHA256_AMD64=86dc1fcc69498159eaf15f446613e847010f9036bfbbdffd4c49350be8489ada
-ARG CLAUDE_SHA256_ARM64=2e2496c9a8065df93acb0fca2d341f59a6b8777649b2e025ab8c9bcd5eef61f3
-RUN set -eu; \
-    case "$TARGETARCH" in \
-      amd64) platform=linux-x64; sum=$CLAUDE_SHA256_AMD64 ;; \
-      arm64) platform=linux-arm64; sum=$CLAUDE_SHA256_ARM64 ;; \
-      *) echo "unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL -o /usr/local/bin/claude "https://downloads.claude.ai/claude-code-releases/${CLAUDE_VERSION}/${platform}/claude"; \
-    echo "$sum  /usr/local/bin/claude" | sha256sum -c -; \
-    chmod 0755 /usr/local/bin/claude; \
-    DISABLE_AUTOUPDATER=1 claude --version
 
 # Codex, the static musl build, as the release's package: the codex binary
 # with its helpers (codex-code-mode-host, codex-exec-server, rg, bwrap) and

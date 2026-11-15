@@ -1,5 +1,5 @@
 # herdr in an actor, from the agents image (Dockerfile here): a terminal
-# workspace whose panes run the other agents (claude, codex, pi, opencode).
+# workspace whose panes run the other agents (codex, pi, opencode).
 # The panes' own shells stay in the actor, where the agents are; the shells
 # an agent starts, and so every command it runs, go to the `build`
 # executor, which holds the workspace.
@@ -8,17 +8,17 @@
 #   docker build -t needy-agents examples/agents       # container drivers: that is all
 #   needy image build --from needy-agents               # VM drivers too, again after each rebuild
 # Then, once, the directories the logins are kept in:
-#   mkdir -p ~/needy-state/{claude,codex,pi,opencode}
+#   mkdir -p ~/needy-state/{codex,pi,opencode}
 #   needy run create -it --profile examples/agents/herdr.yaml
 #
 # Log in to each agent in a pane as its own profile says. Detaching herdr
 # (ctrl+b q) ends its client, the driving program, and so the run; use
 # needy's own detach (ctrl-]) to leave the run going.
 #
-# NOTICE: this profile repeats what the four agent profiles set instead of
+# NOTICE: this profile repeats what the three agent profiles set instead of
 # extending them: `extends` takes one parent, and a child's list (such as
 # `actor.network.allow` or `run_files`) replaces its parent's, so the union
-# of four profiles cannot be built from them.
+# of three profiles cannot be built from them.
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
@@ -27,21 +27,16 @@ actor:
   workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command: [herdr]
   env:
-    # As claude.yaml, codex.yaml (which passes its settings on the command
-    # line, so a pane runs `codex --sandbox danger-full-access`), pi.yaml
-    # and opencode.yaml.
-    CLAUDE_CONFIG_DIR: /home/agent/.claude
-    DISABLE_UPDATES: "1"
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-    CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1"
+    # As pi.yaml and opencode.yaml. Codex passes settings on the command
+    # line, so a pane runs `codex --sandbox danger-full-access`.
     PI_SKIP_VERSION_CHECK: "1"
     PI_TELEMETRY: "0"
     OPENCODE_DISABLE_AUTOUPDATE: "1"
   network:
-    # The union of the four agent profiles' hosts. herdr's own version and
+    # The union of the three agent profiles' hosts. herdr's own version and
     # agent-manifest checks go to herdr.dev, which is left out: they are
     # refused, and herdr goes on with the manifests it bundles.
-    allow: [pi.dev, api.anthropic.com, claude.ai, claude.com, platform.claude.com,
+    allow: [pi.dev,
             api.openai.com, auth.openai.com, chatgpt.com,
             github.com, api.github.com, api.individual.githubcopilot.com,
             openrouter.ai, opencode.ai, "*.opencode.ai", models.dev, "*.models.dev",
@@ -54,7 +49,7 @@ commands:
   # A shell an agent starts (its tool calls) goes to the executor. pi sets
   # its process title to `pi`, so it is matched by that name too.
   - match: "{bash,sh,dash,zsh} **"
-    when: { under: "{claude,codex,pi,opencode} **" }
+    when: { under: "{codex,pi,opencode} **" }
     to: build
   # herdr's panes, and any other shell, stay in the actor, where the agents
   # are installed.
@@ -64,14 +59,8 @@ commands:
   - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
     to: actor
 
-# The four agent profiles' mappings.
+# The three agent profiles' mappings.
 files:
-  claude-in: { mode: copy-in, from: "host:~/needy-state/claude/", to: "actor:~/.claude/" }
-  claude-out:
-    mode: mirror-out
-    from: "actor:~/.claude/"
-    to: "host:~/needy-state/claude/"
-    filter: ["- /shell-snapshots/**", "- /downloads/**", "+ **"]
   codex-in: { mode: copy-in, from: "host:~/needy-state/codex/", to: "actor:~/.codex/" }
   codex-out:
     mode: mirror-out
@@ -90,4 +79,4 @@ files:
     from: "actor:~/.local/share/opencode/"
     to: "host:~/needy-state/opencode/"
     filter: ["- /bin/**", "- /log/**", "+ **"]
-run_files: [claude-in, claude-out, codex-in, codex-out, pi-in, pi-out, opencode-in, opencode-out]
+run_files: [codex-in, codex-out, pi-in, pi-out, opencode-in, opencode-out]

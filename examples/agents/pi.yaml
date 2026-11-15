@@ -28,23 +28,21 @@ actor:
     PI_SKIP_VERSION_CHECK: "1"
     PI_TELEMETRY: "0"
     # Without a subscription login: a provider's API key (pi reads
-    # ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, ...; see pi's
+    # OPENAI_API_KEY, OPENROUTER_API_KEY, ...; see pi's
     # docs/providers.md). It then lives in the actor (needy has no header
     # injection yet, `TODO(mitm)`) and in the run's stored profile, so set
     # it in a private profile that `extends:` this one, never in a shared
     # file:
-    # ANTHROPIC_API_KEY: sk-ant-...
+    # OPENAI_API_KEY: <api-key>
   network:
     # The providers pi signs in to, from the endpoints in pi 1.5.2's bundle
-    # (dist/bundle in the npm package): Anthropic (api.anthropic.com, and
-    # claude.ai and platform.claude.com for a Claude subscription), OpenAI
-    # (api.openai.com, and auth.openai.com and chatgpt.com for a ChatGPT
-    # plan), GitHub Copilot (github.com, api.github.com and
+    # (dist/bundle in the npm package): OpenAI (api.openai.com, and
+    # auth.openai.com and chatgpt.com for a ChatGPT plan), GitHub Copilot (github.com, api.github.com and
     # api.individual.githubcopilot.com), OpenRouter and OpenCode Zen; and
     # pi.dev, which pi asks at start even with the version check off, and
     # whose /oauth documents some sign-ins use. Add another provider's host
     # here; `needy run report` lists denied hosts.
-    allow: [pi.dev, api.anthropic.com, claude.ai, platform.claude.com,
+    allow: [pi.dev,
             api.openai.com, auth.openai.com, chatgpt.com,
             github.com, api.github.com, api.individual.githubcopilot.com,
             openrouter.ai, opencode.ai]

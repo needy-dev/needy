@@ -26,20 +26,20 @@ actor:
     # The image's binary is pinned, and the root file system is read-only.
     OPENCODE_DISABLE_AUTOUPDATE: "1"
     # Without /connect: a provider's API key (opencode reads
-    # ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, ...). It then
+    # OPENAI_API_KEY, OPENROUTER_API_KEY, ...). It then
     # lives in the actor (needy has no header injection yet, `TODO(mitm)`)
     # and in the run's stored profile, so set it in a private profile that
     # `extends:` this one, never in a shared file:
-    # ANTHROPIC_API_KEY: sk-ant-...
+    # OPENAI_API_KEY: <api-key>
   network:
     # opencode.ai: OpenCode Zen and the config schema; models.dev: the model
     # catalog; registry.npmjs.org: the provider packages opencode installs
-    # when it first uses a provider; then the providers' APIs: Anthropic,
-    # OpenAI, OpenRouter and GitHub Copilot (github.com and api.github.com
+    # when it first uses a provider; then the providers' APIs: OpenAI,
+    # OpenRouter and GitHub Copilot (github.com and api.github.com
     # for its device sign-in). Add another provider's host here;
     # `needy run report` lists denied hosts.
     allow: [opencode.ai, "*.opencode.ai", models.dev, "*.models.dev", registry.npmjs.org,
-            api.anthropic.com, api.openai.com, openrouter.ai,
+            api.openai.com, openrouter.ai,
             github.com, api.github.com, api.individual.githubcopilot.com]
 
 executors:

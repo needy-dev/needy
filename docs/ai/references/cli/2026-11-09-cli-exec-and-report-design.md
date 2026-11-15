@@ -554,7 +554,7 @@ the daemon refuses such a database and says to move it away. The
 OpenTelemetry sink is not implemented.
 
 **Mirrored files.** Session directories that a profile mirrors out of the actor,
-such as `~/.codex/sessions` or `~/.claude/projects`, are stored with the trace.
+such as `~/.codex/sessions`, are stored with the trace.
 Together they show what the model saw and what actually happened.
 
 ## `needy report`

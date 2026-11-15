@@ -45,10 +45,9 @@ terminal, project directory, and expected result at every step.
 | Your task | Start here |
 | --- | --- |
 | Explore Linux bash with Mac child processes | [bash → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#bash) |
-| Run Claude Code in Linux with Mac tools | [Claude Code → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#claude-code) |
 | Run OpenCode in Linux with Mac tools | [OpenCode → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#opencode) |
 
-These three examples use a Linux Docker host and a Mac native runner:
+These two examples use a Linux Docker host and a Mac native runner:
 
 | Linux server | Mac |
 | --- | --- |
@@ -64,7 +63,7 @@ The website and Profile Studio read these same examples.
 2. Start the control daemon on Linux and verify local management discovery.
 3. Start one SSH tunnel and enroll the runner on the Mac.
 4. Mount the Mac project directory and save the selected profile.
-5. Start bash, Claude, or OpenCode. Check a real command and the shared files.
+5. Start bash or OpenCode. Check a real command and the shared files.
 
 The entrypoint stays in Linux. These profiles send captured child processes
 to the Mac. Shell builtins stay in their shell; built-in file editors use the
@@ -749,7 +748,7 @@ connections explicitly with `needy config context pair`.
 
 | Profile | Shows |
 | --- | --- |
-| [`examples/linux-mac`](examples/linux-mac) | Linux bash, Claude Code, or OpenCode with a shared project and child processes on a Mac |
+| [`examples/linux-mac`](examples/linux-mac) | Linux bash or OpenCode with a shared project and child processes on a Mac |
 | [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model as the service `http://model.needy`, shells in a container |
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
 | [`examples/smoke`](examples/smoke/profile.yaml) | Routing, the shared workspace and identity probes |
@@ -758,7 +757,7 @@ connections explicitly with `needy config context pair`.
 | [`examples/macos-vz`](examples/macos-vz/profile.yaml) | The smoke test in a `macos-vz` actor, routing by absolute path |
 | [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml) | The smoke and chaos tests in Apple's `container` |
 | [`examples/custom-image`](examples/custom-image/profile.yaml) | An actor image `FROM` needy's base with jq added, on every driver |
-| [`examples/agents`](examples/agents/README.md) | pi, Claude Code, Codex, opencode and herdr in an actor: one image, a profile each, their logins kept across runs |
+| [`examples/agents`](examples/agents/README.md) | pi, Codex, opencode and herdr in an actor: one image, a profile each, their logins kept across runs |
 | [`examples/local`](examples/local/profile.yaml) | This machine as a native executor: copy-in, mirror-out, chaos and the trace |
 | [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy proc exec`, with an actor that only waits |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
@@ -901,8 +900,7 @@ Thank you to their authors.
 - [rclone](https://rclone.org/filtering/), [Mutagen](https://mutagen.io/) and
   [Lima mounts](https://lima-vm.io/docs/config/mount/): file mapping and
   filters.
-- [Codex](https://github.com/openai/codex/pull/7127) and
-  [Claude Code](https://code.claude.com/docs/en/permissions) permission rules:
+- [Codex](https://github.com/openai/codex/pull/7127) permission rules:
   matching shell commands.
 - [macstab chaos-testing-libraries](https://github.com/macstab/macstab-chaos-testing-libraries):
   rule-based syscall fault injection.
@@ -926,7 +924,6 @@ Thank you to their authors.
   [fake-uname](https://github.com/brenkem/fake-uname) and
   [fakehostname](https://github.com/dtcooper/fakehostname).
 - Agent sandboxes and policy:
-  [Anthropic sandbox-runtime](https://github.com/anthropics/sandbox-runtime),
   [E2B](https://e2b.dev/), [Modal](https://modal.com/),
   [AgentSentinel](https://github.com/abhinandanpandey-in/agentsentinel) and
   [safe-agent](https://github.com/TurboRx/safe-agent).
