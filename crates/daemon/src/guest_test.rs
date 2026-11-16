@@ -73,6 +73,43 @@ async fn run_arguments_are_appended_to_the_profiles_driving_program() {
   assert_eq!(config.command, ["opencode", "--continue", "a b"]);
 }
 
+// ROOT CAUSE:
+//
+// If a profile named no recipe hostname, every VM actor had the same
+// hostname, because init only sets a recipe's and the kernel keeps its
+// built-in default otherwise (`sandbox-vm` on macos-vz, `(none)` on
+// Firecracker). A harness that tells writers apart by host, such as Kimi
+// Code's session locks (pid and hostname), took another actor's lock for one
+// of its own host whose process had died, and took it over.
+//
+// Before the fix, the guest was told an empty hostname.
+// The fix names each actor after its run when its recipe gives no hostname.
+#[tokio::test]
+async fn actors_without_a_recipe_hostname_get_one_named_after_their_run() {
+  let started = testing::daemon().await;
+  let first = Runs::create(&started.daemon, new_run(NO_MOUNT, started.dir.path())).await.unwrap();
+  let second = Runs::create(&started.daemon, new_run(NO_MOUNT, started.dir.path())).await.unwrap();
+
+  let first_host = Guest::config(&started.daemon, &first.id).await.unwrap().hostname;
+  let second_host = Guest::config(&started.daemon, &second.id).await.unwrap().hostname;
+
+  assert_eq!(first_host, format!("needy-{}", first.id));
+  assert_eq!(second_host, format!("needy-{}", second.id));
+  assert_ne!(first_host, second_host);
+}
+
+#[tokio::test]
+async fn a_recipe_hostname_is_the_actors_hostname() {
+  let started = testing::daemon().await;
+  let profile = NO_MOUNT
+    .replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, recipe: builtin:dell-optiplex-ubuntu-24.04 }");
+  let created = Runs::create(&started.daemon, new_run(&profile, started.dir.path())).await.unwrap();
+
+  let hostname = Guest::config(&started.daemon, &created.id).await.unwrap().hostname;
+
+  assert!(hostname.starts_with("optiplex-"), "{hostname}");
+}
+
 // A container actor's init gives its process socket to these IDs, so a
 // daemon that is not root can connect to its driving program's terminal.
 #[tokio::test]

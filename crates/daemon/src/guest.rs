@@ -104,7 +104,13 @@ impl Guest for Daemon {
         gid: user.gid,
       },
       route_names,
-      hostname: recipe.and_then(|r| r.hostname.clone()).unwrap_or_default(),
+      // NOTICE: without a recipe hostname a VM kept its kernel's
+      // CONFIG_DEFAULT_HOSTNAME, the same in every actor (`sandbox-vm` in
+      // images/kernel/containerization-arm64.config, `(none)` in
+      // images/kernel/firecracker-6.18.config), so programs that tell hosts
+      // apart by name, such as session locks that record pid and hostname,
+      // took one actor's process for another's. The run ID is unique.
+      hostname: recipe.and_then(|r| r.hostname.clone()).unwrap_or_else(|| format!("needy-{}", run.id)),
       uptime_offset_secs: recipe.map(|r| r.uptime_offset_secs).unwrap_or(0),
       mounts,
       command: run.actor_command.clone(),
