@@ -268,9 +268,9 @@ COPY --from=stubs /out/base-abi /base-abi
 # needs: no systemd (a container's `systemd-detect-virt` would name the
 # container anyway). sshfs is there for Apple's `container`, whose actor
 # mounts the workspace inside (a Mac has no FUSE for the host side); a Docker
-# container actor's runtime mounts it on the host. Its last step turns every
-# program on PATH into a shim
-# (images/container/shim.sh).
+# container actor's runtime mounts it on the host. Its last step shims the
+# shells in place (images/container/shim.sh); the guest needy reaches every
+# other program through the trampolines it makes at each start.
 # It builds for x86_64 (Docker on Linux) and arm64 (Apple's `container` on
 # Apple silicon, `--platform linux/arm64`).
 FROM ubuntu:24.04 AS container-root

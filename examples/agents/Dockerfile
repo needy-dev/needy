@@ -123,7 +123,10 @@ RUN set -eu; \
     chmod 0755 /usr/local/bin/herdr; \
     herdr --version
 
-# Last: make the programs this image added shims too, so a container
-# actor's rules can route them. The VM drivers do not need it (their kernel
-# catches every exec), and `needy image build --from` puts the real programs back.
+# Last: keep the shells shimmed in place, in case a package added or upgraded
+# one, so a container actor routes them by their absolute paths too. The
+# other programs this image added are routed through the trampolines a
+# container actor makes when it starts. The VM drivers do not need it (their
+# kernel catches every exec), and `needy image build --from` puts the real
+# programs back.
 RUN ["/.needy/shim-image"]

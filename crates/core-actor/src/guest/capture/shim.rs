@@ -1,16 +1,25 @@
-//! Build-time shims, the capture of a container actor (`linux-container`,
-//! `macos-apple-container`).
+//! Shims, the capture of a container actor (`linux-container`,
+//! `macos-apple-container`), in two placements of the shim stub
+//! (`/.needy/proxy`, `images/stub/shim.c`):
 //!
-//! The container actor image's shim stage (`images/container/shim.sh`)
-//! copies every executable on the image's `PATH` to `/.needy/real/<path>`
-//! and replaces it with a hard link to the shim stub (`/.needy/proxy`,
-//! `images/stub/shim.c`). The stub hands the exec to the guest needy with
-//! the path it was started through (its `/proc/self/exe`, the link), from
-//! which a shim finds the program it stands for, and runs the real one with
-//! the caller's argv, `argv[0]` included, so programs that behave by their
-//! name (busybox, `python3`) see the name they were called by. Only a name
-//! on the run's route list, for the route's user, goes to the proxy, which
-//! asks the daemon.
+//! - **Trampolines**: init hard-links a copy of the stub into
+//!   [`TRAMPOLINE_DIR`], first on the driving program's `PATH`, once per
+//!   program on [`SYSTEM_PATH`] ([`trampolines`]). The real program stays at
+//!   its own path, so a program that finds its files from its own path, or
+//!   a tool that reads a program file, behaves as without needy.
+//! - **In-place shims**: the image's shim stage (`images/container/shim.sh`)
+//!   copies each listed program (the shells by default) to
+//!   `/.needy/real/<path>` and replaces it with a hard link to the stub, so
+//!   calls by absolute path (`/bin/bash`) and `#!` interpreters are caught
+//!   too. A program that is an in-place shim gets no trampoline.
+//!
+//! The stub hands the exec to the guest needy with the path it was started
+//! through (its `/proc/self/exe`, the link), from which a shim finds the
+//! program it stands for ([`real`]), and runs the real one with the caller's
+//! argv, `argv[0]` included, so programs that behave by their name (busybox,
+//! `python3`) see the name they were called by. Only a name on the run's
+//! route list, for the route's user, goes to the proxy, which asks the
+//! daemon.
 //!
 //! Init turns routing on by writing [`ROUTE_FILE`] after its setup, as it
 //! sets the kernel module's parameters in a VM ([`super::binfmt`]); until
@@ -18,19 +27,34 @@
 //! through their real paths, so needy's own helpers are never routed, as
 //! the kernel guarantees in a VM.
 //!
-//! See `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
+//! See `docs/ai/references/architecture/2026-11-16-container-trampolines-design.md`
+//! and `docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md`.
 
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use super::Route;
-use crate::contract::{NEEDY_DIR, REAL};
+use crate::contract::{NEEDY_DIR, PROXY, REAL};
 use crate::guest::{Stub, proxy};
 
 /// Turns routing on: the route's user and names, which init writes once it
 /// set the actor up.
 pub const ROUTE_FILE: &str = "/run/needy/route";
+/// The trampolines' directory, a tmpfs, first on the driving program's
+/// `PATH` in a container.
+pub const TRAMPOLINE_DIR: &str = "/run/needy/shims";
+/// The stub's copy in [`TRAMPOLINE_DIR`] that the trampolines are hard
+/// links to: a hard link cannot cross from the root file system to the
+/// tmpfs.
+const TRAMPOLINE_STUB: &str = ".stub";
+/// The actor's own programs, searched before the stubs.
+// Source: https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19
+// (`defaultUnixPathEnv`, the PATH a container gets) and Debian's root PATH,
+// https://sources.debian.org/src/base-files/13.8%2Bdeb13u7/share/profile/#L5
+// Reference: https://github.com/systemd/systemd/blob/v257/src/basic/path-util.h#L23
+// (`DEFAULT_PATH_COMPAT`, the same string).
+pub const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// The real program the shim at `exe` stands for, or `None` when `exe` is
 /// not a shim. needy's own files in `/.needy` never are.
@@ -38,8 +62,105 @@ pub fn real(exe: &Path) -> Option<PathBuf> {
   if exe.starts_with(NEEDY_DIR) {
     return None;
   }
+  if exe.parent() == Some(Path::new(TRAMPOLINE_DIR)) {
+    return behind_trampoline(exe, &search_dirs(SYSTEM_PATH), Path::new(PROXY));
+  }
   let real = Path::new(REAL).join(exe.strip_prefix("/").ok()?);
   (real.is_symlink() || real.exists()).then_some(real)
+}
+
+/// The program a trampoline stands for: the first program of its name in
+/// `search`, at its own path, as a `PATH` lookup without the trampolines
+/// finds it. An in-place shim has no trampoline, so it is never the answer.
+fn behind_trampoline(exe: &Path, search: &[PathBuf], stub: &Path) -> Option<PathBuf> {
+  let name = exe.file_name()?;
+  search.iter().map(|dir| dir.join(name)).find(|path| is_program(path) && !is_stub(path, stub))
+}
+
+/// The directories of a `PATH` value, in order.
+fn search_dirs(path: &str) -> Vec<PathBuf> {
+  path.split(':').filter(|dir| !dir.is_empty()).map(PathBuf::from).collect()
+}
+
+/// Whether `path` is an executable file, through its links.
+fn is_program(path: &Path) -> bool {
+  use std::os::unix::fs::PermissionsExt;
+  std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `path` is the shim stub `stub`: a hard link to it, or a copy of
+/// it, as an image `FROM` the base has (see `images/container/shim.sh`'s
+/// `is_proxy`).
+fn is_stub(path: &Path, stub: &Path) -> bool {
+  use std::os::unix::fs::MetadataExt;
+  let (Ok(a), Ok(b)) = (std::fs::metadata(path), std::fs::metadata(stub)) else {
+    return false;
+  };
+  if (a.dev(), a.ino()) == (b.dev(), b.ino()) {
+    return true;
+  }
+  // Sizes first: reading every program on PATH would read the whole image.
+  a.len() == b.len() && std::fs::read(path).ok() == std::fs::read(stub).ok()
+}
+
+/// Makes a trampoline in [`TRAMPOLINE_DIR`] for every program on
+/// [`SYSTEM_PATH`] that is not an in-place shim, and returns how many.
+/// Init calls it before it turns routing on, so until then a trampoline
+/// runs its real program.
+pub fn trampolines() -> std::io::Result<usize> {
+  trampolines_in(Path::new(TRAMPOLINE_DIR), &search_dirs(SYSTEM_PATH), Path::new(PROXY))
+}
+
+/// [`trampolines`] in `dir`, for the programs in `search`, linked to a copy
+/// of `stub`. The first program of a name in `search` order is the one a
+/// `PATH` lookup finds; an in-place shim of that name takes its place, so
+/// the name gets no trampoline and the lookup reaches the shim.
+fn trampolines_in(dir: &Path, search: &[PathBuf], stub: &Path) -> std::io::Result<usize> {
+  use std::os::unix::fs::PermissionsExt;
+  std::fs::create_dir_all(dir)?;
+  let copy = dir.join(TRAMPOLINE_STUB);
+  if !copy.exists() {
+    // Copied beside and renamed: an exec of a file open for writing fails
+    // with `ETXTBSY`.
+    let staged = dir.join(format!("{TRAMPOLINE_STUB}.new"));
+    std::fs::copy(stub, &staged)?;
+    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
+    std::fs::rename(&staged, &copy)?;
+  }
+  let mut seen = std::collections::HashSet::new();
+  let mut made = 0;
+  let mut visited = std::collections::HashSet::new();
+  for search_dir in search {
+    // `/bin` is `usr/bin` on merged-/usr systems: each directory once.
+    let Ok(physical) = std::fs::canonicalize(search_dir) else {
+      continue;
+    };
+    if !visited.insert(physical) {
+      continue;
+    }
+    let Ok(entries) = std::fs::read_dir(search_dir) else {
+      continue;
+    };
+    let mut names: Vec<OsString> = entries.filter_map(|e| e.ok()).map(|e| e.file_name()).collect();
+    names.sort();
+    for name in names {
+      let path = search_dir.join(&name);
+      // A lookup passes over what it cannot run.
+      if !is_program(&path) || !seen.insert(name.clone()) || name.as_bytes().starts_with(b".") {
+        continue;
+      }
+      if is_stub(&path, stub) {
+        continue;
+      }
+      let trampoline = dir.join(&name);
+      if trampoline.symlink_metadata().is_ok() {
+        continue;
+      }
+      std::fs::hard_link(&copy, &trampoline)?;
+      made += 1;
+    }
+  }
+  Ok(made)
 }
 
 // The route file's format; what a route routes is the capture's (`super`).
@@ -117,7 +238,14 @@ pub fn main(stub: Stub) -> ! {
   let route = std::fs::read_to_string(ROUTE_FILE).ok().and_then(|text| Route::parse(&text));
   let argv0 = args.first().map(|a| a.to_string_lossy().into_owned()).unwrap_or_default();
   let uid = nix::unistd::getuid().as_raw();
-  let routed = route.is_some_and(|route| route.routes(uid, &names(&execfn, &exe, &argv0)));
+  // An in-place shim's path is the end of the caller's link chain already;
+  // a trampoline's program is at the end of its real program's.
+  let program = if exe.parent() == Some(Path::new(TRAMPOLINE_DIR)) {
+    std::fs::canonicalize(&real).unwrap_or_else(|_| real.clone())
+  } else {
+    exe.clone()
+  };
+  let routed = route.is_some_and(|route| route.routes(uid, &names(&execfn, &program, &argv0)));
   if !routed {
     exec(&real, &args);
   }

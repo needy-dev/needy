@@ -17,9 +17,11 @@
 //!
 //! In a container, the engine starts the boot stub as PID 1, the daemon's
 //! channels are Unix sockets bind-mounted at [`CHANNELS`], and routing is by
-//! build-time shims (see [`capture::shim`]): every program on the image's
-//! `PATH` is a link to the shim stub, which hands over to this binary, which
-//! runs the real program from `/.needy/real` unless the run routes it.
+//! shims (see [`capture::shim`]): trampolines that init makes on `PATH`, and
+//! the shells shimmed in place when the image was built, are links to the
+//! shim stub, which hands over to this binary, which runs the real program
+//! (at its own path, or from `/.needy/real` for an in-place shim) unless the
+//! run routes it.
 //!
 //! The paths and ports are the guest's side of [`crate::contract`].
 //!

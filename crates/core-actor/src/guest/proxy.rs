@@ -17,6 +17,7 @@ use needy_api_proto::v1::{Ancestor, DecideRequest, ExecFault, ExecStart, Origin}
 use needy_core_executor::{relay, signals};
 use nix::sys::signal::{SigHandler, Signal};
 
+use super::capture::shim::TRAMPOLINE_DIR;
 use super::init::STUB_DIR;
 
 /// Environment the actor passes to routed commands when rules do not.
@@ -247,13 +248,16 @@ async fn fault_exit(fault: ExecFault) -> i32 {
 
 /// The command the actor asked for: `args` with argv[0] replaced by the path
 /// the original `execve` named, so the executor can run the same program.
-/// A route stub stands for a program the actor does not have; its path means
-/// nothing elsewhere, so the command keeps the stub's bare name, as the user
-/// typed it, and the executor finds the program on its own PATH.
+/// A route stub stands for a program the actor does not have, and a
+/// trampoline is only reached through a `PATH` lookup; their paths mean
+/// nothing elsewhere, so the command keeps the bare name, as the user typed
+/// it, and the executor finds the program on its own PATH.
 fn command(path: &str, args: &[String]) -> Vec<String> {
-  let program = match Path::new(path).strip_prefix(STUB_DIR) {
-    Ok(name) if name.components().count() == 1 => name.to_string_lossy().into_owned(),
-    _ => path.to_string(),
+  let bare =
+    [STUB_DIR, TRAMPOLINE_DIR].iter().find_map(|dir| Path::new(path).strip_prefix(dir).ok().filter(|name| name.components().count() == 1));
+  let program = match bare {
+    Some(name) => name.to_string_lossy().into_owned(),
+    None => path.to_string(),
   };
   let mut argv = args.to_vec();
   if let Some(first) = argv.first_mut() {

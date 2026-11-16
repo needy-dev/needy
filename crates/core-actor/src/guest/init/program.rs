@@ -28,7 +28,6 @@ use tonic::{Request, Response, Status, Streaming};
 
 use super::identity;
 use super::network::GATEWAY_LISTEN;
-use super::stubs::{STUB_DIR, SYSTEM_PATH};
 
 /// Runs the driving program until it exits, or a graceful stop ends it.
 pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, home: &str) -> Result<ExitStatus> {
@@ -40,7 +39,7 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
   let proxy = format!("http://{GATEWAY_LISTEN}");
   // In a container the program's file may be a shim; its real file starts
   // it, so the driving program itself is never routed.
-  let mut command = match crate::guest::capture::shim::resolve(&config.command[0], &format!("{SYSTEM_PATH}:{STUB_DIR}")) {
+  let mut command = match crate::guest::capture::shim::resolve(&config.command[0], &super::stubs::search_path()) {
     Some(real) => {
       let mut command = tokio::process::Command::new(real);
       command.arg0(&config.command[0]);
@@ -55,7 +54,7 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
     .env("USER", &user.name)
     .env("LOGNAME", &user.name)
     .env("SHELL", "/bin/bash")
-    .env("PATH", format!("{SYSTEM_PATH}:{STUB_DIR}"))
+    .env("PATH", super::stubs::search_path())
     .env("TERM", "xterm-256color")
     .env("COLORTERM", "truecolor")
     .env("LANG", "C.UTF-8")
@@ -99,7 +98,7 @@ fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> 
     ("USER", user.name.clone()),
     ("LOGNAME", user.name.clone()),
     ("SHELL", "/bin/bash".into()),
-    ("PATH", format!("{SYSTEM_PATH}:{STUB_DIR}")),
+    ("PATH", super::stubs::search_path()),
     // The program draws for the terminal model, not for each client's
     // terminal (see the terminal note's G10).
     ("TERM", "xterm-256color".into()),

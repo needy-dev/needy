@@ -57,6 +57,15 @@ fn a_command_routed_through_a_stub_keeps_its_bare_name() {
   assert_eq!(argv, strings(&["python3", "-c", "print(1)"]));
 }
 
+// A container actor reaches a program through its trampoline only by a
+// `PATH` lookup, so the caller named it by its bare name.
+#[test]
+fn a_command_routed_through_a_trampoline_keeps_its_bare_name() {
+  let argv = command("/run/needy/shims/git", &strings(&["git", "status"]));
+
+  assert_eq!(argv, strings(&["git", "status"]));
+}
+
 #[test]
 fn a_command_the_actor_has_keeps_the_path_it_ran() {
   let argv = command("/usr/bin/git", &strings(&["git", "status"]));

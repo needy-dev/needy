@@ -518,6 +518,8 @@ python3 -c "import sys; sys.exit(7)"; echo "E2E routed-rc=$?"
 if [ -e {marker} ]; then echo "E2E actor-marker=True"; else echo "E2E actor-marker=False"; fi
 rm -rf /tmp/e2e-deny-probe; echo "E2E denied-rc=$?"
 /bin/sh -c "exit 5"; echo "E2E local-sh-rc=$?"
+echo "E2E self-path=$(readlink /proc/self/exe)"
+echo "E2E ldd-glibc=$(grep -c 'GNU C Library' /usr/bin/ldd)"
 exit 4"#,
     marker = marker.display(),
   );
@@ -542,6 +544,14 @@ exit 4"#,
   checks.value(&console, "actor-marker", "False");
   checks.value(&console, "denied-rc", "126");
   checks.value(&console, "local-sh-rc", "5");
+  // A local program runs at its own path and is its own file, so programs
+  // that find their files from their path (npm's global prefix) or read a
+  // program file (npm's libc check reads `/usr/bin/ldd`) work: in a
+  // container actor, only the shells are shims in place (see the
+  // trampolines design, 2026-11-16-container-trampolines-design.md).
+  checks.value(&console, "self-path", "/usr/bin/readlink");
+  let ldd = console.value("ldd-glibc").and_then(|n| n.parse::<u32>().ok());
+  checks.check("/usr/bin/ldd is the real ldd", ldd.is_some_and(|n| n > 0), format!("GNU C Library lines: {ldd:?}"));
   let report = runs::report(env, &id)?;
   checks.eq("report: python3 routed to x twice", 2, runs::routed_to(&report, X));
   checks.eq("report: one denied command", Some(1), report["commands"]["denied"].as_u64());

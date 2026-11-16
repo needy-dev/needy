@@ -12,13 +12,16 @@
 ARG BASE=needy-actor:latest
 FROM ${BASE}
 
-# The base's programs are shims, which run their real programs unrouted
+# The base's shells are shims, which run their real programs unrouted
 # while an image builds, so `RUN` works as on any Ubuntu image.
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends jq \
  && rm -rf /var/lib/apt/lists/*
 
-# Last: make the programs this image added shims too, so a container
-# actor's rules can route them. The VM drivers do not need it (their kernel
-# catches every exec), and `needy image build --from` puts the real programs back.
+# Last: keep the shells shimmed in place, in case a package added or upgraded
+# one, so a container actor routes them by their absolute paths too. The
+# other programs this image added are routed through the trampolines a
+# container actor makes when it starts. The VM drivers do not need it (their
+# kernel catches every exec), and `needy image build --from` puts the real
+# programs back.
 RUN ["/.needy/shim-image"]

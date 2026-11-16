@@ -766,11 +766,11 @@ fn the_report_names_what_ran_the_actor() {
 #[test]
 fn a_container_actors_report_says_what_its_routing_leaves_out() {
   let report = human(&container_run());
-  assert!(report.contains("programs created at run time and run directly stayed in the actor"), "{report}");
+  assert!(report.contains("or created at run time and run directly, stayed in the actor"), "{report}");
 
   let report = render("7f3a", &container_run(), Level::Summary, Format::Markdown);
   assert!(report.contains("The actor ran in `linux-container (runsc)`."), "{report}");
-  assert!(report.contains("A container actor routes only the programs its image had when it was built"), "{report}");
+  assert!(report.contains("A container actor routes the programs on its PATH by the names they are called by"), "{report}");
 
   assert!(!human(&actor_run()).contains("container actor"), "a run without the driver says nothing of it");
 }
@@ -782,10 +782,10 @@ fn a_container_actors_report_says_what_its_routing_leaves_out() {
 fn an_apple_container_actors_report_says_what_its_shim_routing_leaves_out() {
   let run = started_run("macos-apple-container", Some(Capture::Shims));
 
-  assert!(human(&run).contains("programs created at run time and run directly stayed in the actor"), "{}", human(&run));
+  assert!(human(&run).contains("or created at run time and run directly, stayed in the actor"), "{}", human(&run));
   let report = render("7f3a", &run, Level::Summary, Format::Markdown);
   assert!(report.contains("The actor ran in `macos-apple-container`."), "{report}");
-  assert!(report.contains("A container actor routes only the programs its image had when it was built"), "{report}");
+  assert!(report.contains("A container actor routes the programs on its PATH by the names they are called by"), "{report}");
   let json: serde_json::Value = serde_json::from_str(&render("7f3a", &run, Level::Summary, Format::Json)).unwrap();
   assert_eq!(json["actor_capture"], "shims");
 }

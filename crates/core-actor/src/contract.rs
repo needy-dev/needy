@@ -50,8 +50,8 @@ pub const NEEDY_DIR: &str = "/.needy";
 pub const INIT: &str = "/.needy/init";
 /// The shim stub (`images/stub/shim.c`), which a caught exec is handed to.
 /// `binfmt_needy`'s `proxy` parameter has the same default
-/// (`images/kernel/binfmt_needy.c`); in a container image every program on
-/// `PATH` is a hard link to it.
+/// (`images/kernel/binfmt_needy.c`); in a container actor the in-place shims
+/// (the shells) are hard links to it, and the trampolines to a copy of it.
 pub const PROXY: &str = "/.needy/proxy";
 /// The guest needy, which the daemon injects when an actor starts: an empty
 /// placeholder in the base image.
@@ -67,7 +67,7 @@ pub const STUB_EXECFN: &str = "NEEDY_STUB_EXECFN";
 /// The base ABI version of the image, as text, in its root file system.
 pub const BASE_ABI: &str = "/.needy/base-abi";
 /// Where a container actor image's shim stage (`images/container/shim.sh`)
-/// keeps the real programs, by their original paths.
+/// keeps the real programs of its in-place shims, by their original paths.
 pub const REAL: &str = "/.needy/real";
 
 /// The channels directory in the actor's directory `dir`.

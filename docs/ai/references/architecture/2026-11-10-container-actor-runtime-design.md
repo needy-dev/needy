@@ -120,6 +120,12 @@ the VM's file sharing. So each runtime returns its transport:
 
 ### Exec routing with build-time shims
 
+> **Changed 2026-11-16:** only the shells are shimmed in place now; every
+> other program is reached through a trampoline on `PATH` that init makes at
+> each start, and runs at its own path. See the
+> [trampolines design](2026-11-16-container-trampolines-design.md). The text
+> below describes the shim step as it was built on 2026-11-10.
+
 Without a kernel module, routing uses shims, the way toolchain managers such as
 [proto](https://moonrepo.dev/docs/proto) dispatch tools: every program is a
 link to one dispatcher that reads `argv[0]`. needy builds the container actor
