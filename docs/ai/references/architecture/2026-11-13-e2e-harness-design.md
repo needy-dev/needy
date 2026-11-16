@@ -51,10 +51,14 @@ cargo xtask e2e --clean               # remove the images and the work directory
   `.tmp/e2e/` (git-ignored): `needy` (debug, in `target/e2e`), the guest needy
   (`images/Dockerfile`'s `guest` target, as `make guest`), the base VM image of
   this host's VM driver (`needy image build --out`), the container actor image
-  and the executor image, tagged `needy-e2e-actor:latest` and
-  `needy-e2e-executor:latest` so it never replaces an image someone built by
-  hand. A content hash of the inputs skips what is current; `--no-prepare`
-  reuses what is there.
+  and the executor image, named `needy-e2e-actor` and `needy-e2e-executor`
+  so it never replaces an image someone built by hand, and tagged with the
+  checkout's directory name (`needy-e2e-actor:needy`; `src` for a shipped
+  tree) so two checkouts on one host never use each other's images (changed
+  2026-11-17; before, every checkout tagged `latest`, and a worktree's run
+  booted the images another checkout had built last, since each checkout's
+  freshness stamps cannot see the other's builds). A content hash of the
+  inputs skips what is current; `--no-prepare` reuses what is there.
 - A failed cell keeps its daemon log, profiles and consoles under
   `.tmp/e2e/results/TIME/CELL/`; `--keep` keeps every cell's directory.
 
@@ -308,7 +312,7 @@ background start, `exec -t`) stay with `xtask/tui/matrix.sh` (`NOTICE` in
 `tui.rs`).
 
 The agents image is `examples/agents/Dockerfile` (embedded in the harness)
-on the harness's actor image, tagged `needy-e2e-agents:latest`, built on
+on the harness's actor image, `needy-e2e-agents` with the checkout's tag, built on
 every host that runs a TUI cell, run hosts included: it downloads the
 agents' pinned releases and compiles nothing. From it the harness makes this
 host's VM image (`needy image build --from`, into the work directory's
@@ -515,7 +519,7 @@ Made on the spot, as the brief allowed:
   control-plane crash)`, never passed (`Checks::defer`,
   `TODO(graceful-shutdown)` in `scenarios.rs`).
 - **A run host rebuilds its executor image instead of receiving it** when it
-  has one already: `FROM needy-e2e-executor:latest` with this commit's static
+  has one already: `FROM needy-e2e-executor:src` with this commit's static
   needy copied in, which compiles nothing. Every commit changes only that
   layer, and sending the whole image through this machine's uplink took most
   of a run. The base VM image is sent only when its sources' hash changed

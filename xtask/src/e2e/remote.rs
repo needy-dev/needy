@@ -354,9 +354,13 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
   let exporting = |b: &Host| hosts.iter().any(|h| h.role == Role::Run && h.from.as_deref() == Some(b.name.as_str()));
 
   if args.clean {
+    let shipped = super::host::Images::shipped();
     for h in &hosts {
       let result = match h.role {
-        Role::Local => super::host::clean(&args.work_dir.clone().unwrap_or_else(|| root.join(".tmp").join("e2e"))),
+        Role::Local => super::host::clean(
+          &args.work_dir.clone().unwrap_or_else(|| root.join(".tmp").join("e2e")),
+          &super::host::Images::of_checkout(root),
+        ),
         Role::Build => ship(root, &h.ssh, &h.dir)
           .and_then(|()| {
             remote(
@@ -373,17 +377,10 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
             )
           })
           .and_then(|_| remote(&h.ssh, &format!("rm -rf {}", h.dir)).map(|_| ())),
-        Role::Run => remote(
-          &h.ssh,
-          &format!(
-            "docker image rm {} {} {} 2>/dev/null; rm -rf {}",
-            super::host::AGENTS_IMAGE,
-            super::host::ACTOR_IMAGE,
-            super::host::EXECUTOR_IMAGE,
-            h.dir
-          ),
-        )
-        .map(|_| ()),
+        Role::Run => {
+          remote(&h.ssh, &format!("docker image rm {} {} {} 2>/dev/null; rm -rf {}", shipped.agents, shipped.actor, shipped.executor, h.dir))
+            .map(|_| ())
+        }
         Role::Runner => Ok(()),
       };
       if let Err(e) = result {
@@ -543,13 +540,14 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
 /// Whether the run host has an executor image of the harness, whatever its
 /// ID.
 fn executor_present(run: &Host) -> Result<bool> {
-  let (code, _) = remote(&run.ssh, &format!("docker image inspect {} >/dev/null 2>&1", super::host::EXECUTOR_IMAGE))?;
+  let (code, _) = remote(&run.ssh, &format!("docker image inspect {} >/dev/null 2>&1", super::host::Images::shipped().executor))?;
   Ok(code == 0)
 }
 
 /// Streams `build`'s export into `run`'s work directory, loads the
 /// container images there, and gives the directory to the test user.
 fn fetch(build: &Host, run: &Host) -> Result<()> {
+  let shipped = super::host::Images::shipped();
   let arch = |h: &Host| remote(&h.ssh, "uname -m").map(|(_, out)| String::from_utf8_lossy(&out).trim().to_string());
   let (theirs, ours) = (arch(build)?, arch(run)?);
   if theirs != ours {
@@ -561,8 +559,7 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
     &run.ssh,
     &format!(
       "docker image inspect --format '{{{{.Id}}}}' {} {} 2>/dev/null; [ -e /dev/kvm ] && echo kvm; true",
-      super::host::ACTOR_IMAGE,
-      super::host::EXECUTOR_IMAGE
+      shipped.actor, shipped.executor
     ),
   )?;
   let have = String::from_utf8_lossy(&have).to_string();
@@ -621,7 +618,7 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
   );
   if rebuild_executor {
     // The run host's executor image with this commit's needy in it.
-    let image = super::host::EXECUTOR_IMAGE;
+    let image = &shipped.executor;
     script.push_str(&format!(
       " && mkdir -p {work}/executor && cp {work}/bin/needy {work}/executor/needy \
        && printf 'FROM {image}\\nUSER root\\nCOPY needy /usr/local/bin/needy\\nUSER agent\\n' > {work}/executor/Dockerfile \

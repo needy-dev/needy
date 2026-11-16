@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use nix::sys::signal::Signal;
 
-use super::host::{EXECUTOR_IMAGE, Host};
+use super::host::Host;
 use super::proc::{self, Output};
 use super::runs::tail as runs_tail;
 use super::term::Term;
@@ -249,7 +249,10 @@ impl<'a> CellEnv<'a> {
       args.extend(["--guest-needy".into(), guest.display().to_string()]);
     }
     if self.ctx.host.container_executor.is_ok() {
-      args.extend(["--executor-image".into(), EXECUTOR_IMAGE.into()]);
+      args.extend([
+        "--executor-image".into(),
+        self.ctx.host.image_names.executor.clone(),
+      ]);
     }
     if let Some(image) = &self.ctx.host.vm_image {
       args.extend(["--actor-image".into(), image.display().to_string()]);
