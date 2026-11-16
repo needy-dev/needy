@@ -14,14 +14,69 @@ use sha2::{Digest, Sha256};
 use super::matrix::{Driver, Oci, Platform};
 use super::proc;
 
-/// The container images the harness builds and the profiles name. Their
-/// own names, so a harness run never replaces the `needy-actor:latest` or
-/// `needy-executor:latest` someone built by hand.
-pub const ACTOR_IMAGE: &str = "needy-e2e-actor:latest";
-pub const EXECUTOR_IMAGE: &str = "needy-e2e-executor:latest";
-/// The agents image of the TUI cells: `examples/agents`, built on
-/// [`ACTOR_IMAGE`].
-pub const AGENTS_IMAGE: &str = "needy-e2e-agents:latest";
+/// The container images the harness builds and the profiles name: their own
+/// repositories, so a harness run never replaces the `needy-actor:latest`
+/// or `needy-executor:latest` someone built by hand, tagged with the name of
+/// the checkout they are built from.
+///
+/// One tag per checkout: two checkouts (a worktree beside the main one)
+/// never use each other's images, which the freshness stamps in each one's
+/// work directory cannot see, and the engine keeps one set per checkout, not
+/// one per change. Two checkouts in directories of the same name still share
+/// a set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Images {
+  pub actor: String,
+  pub executor: String,
+  /// The agents image of the TUI cells: `examples/agents`, built on
+  /// `actor`.
+  pub agents: String,
+}
+
+impl Images {
+  /// The images of the checkout at `root`, as `workspace_root` finds it.
+  pub fn of_checkout(root: &Path) -> Self {
+    Self::tagged(&root.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())
+  }
+
+  /// The images of a tree `remote::ship` shipped to `DIR/src`: a build host
+  /// builds its harness there, and a run host runs that harness, so both
+  /// find this checkout name.
+  pub fn shipped() -> Self {
+    Self::tagged("src")
+  }
+
+  fn tagged(name: &str) -> Self {
+    let tag = tag(name);
+    Self {
+      actor: format!("needy-e2e-actor:{tag}"),
+      executor: format!("needy-e2e-executor:{tag}"),
+      agents: format!("needy-e2e-agents:{tag}"),
+    }
+  }
+}
+
+/// `name` as an image tag: letters, digits, `_`, `.` and `-`, starting with
+/// a letter, digit or `_`, at most 128 characters.
+// Reference: https://github.com/distribution/reference/blob/v0.6.0/regexp.go#L84-L86
+// (`tag = [\w][\w.-]{0,127}`).
+fn tag(name: &str) -> String {
+  let mut tag: String = name
+    .chars()
+    .map(|c| {
+      if c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-') {
+        c
+      } else {
+        '-'
+      }
+    })
+    .collect();
+  if !tag.starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_') {
+    tag.insert(0, '_');
+  }
+  tag.truncate(128);
+  tag
+}
 
 /// `examples/agents/Dockerfile`, in the harness, so a host without a
 /// checkout (a run host) builds the agents image too. It copies nothing
@@ -35,6 +90,8 @@ const BUILD: Duration = Duration::from_secs(3600);
 pub struct Host {
   /// The harness's (and so every daemon's) effective user.
   pub euid: u32,
+  /// The container images the harness builds for this checkout.
+  pub image_names: Images,
   /// Each actor driver of the matrix: available, or why not.
   pub drivers: BTreeMap<Driver, Result<(), String>>,
   /// `executor(linux-container)` with the harness's executor image.
@@ -155,6 +212,8 @@ const IMAGE_SOURCES: &[&str] = &["images"];
 /// image and the executor image. Then probes the host. Every failure ends
 /// up as the reason of the cells that needed the missing piece.
 pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool, notes: &mut Notes) -> Result<Host> {
+  let image_names = Images::of_checkout(root);
+  let (actor_ref, executor_ref) = (image_names.actor.as_str(), image_names.executor.as_str());
   let skip = mode != Prepare::Build;
   // Listing builds nothing and judges nothing it would build.
   let listing = mode == Prepare::Skip;
@@ -255,13 +314,13 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
   // `container` on a Mac.
   let mut actor_image: BTreeMap<ActorDriver, Result<(), String>> = BTreeMap::new();
   if platform == Platform::Linux && engine_answers.is_ok() {
-    let result = if listing || (fresh("actor-container", &image_hash) && image_present(ACTOR_IMAGE)) {
+    let result = if listing || (fresh("actor-container", &image_hash) && image_present(actor_ref)) {
       Ok(())
     } else if skip {
-      image_present(ACTOR_IMAGE).then_some(()).ok_or_else(|| format!("--no-prepare and {ACTOR_IMAGE} is not in the engine"))
+      image_present(actor_ref).then_some(()).ok_or_else(|| format!("--no-prepare and {actor_ref} is not in the engine"))
     } else {
       needs_docker("the container actor image").and_then(|()| {
-        eprintln!("e2e: building {ACTOR_IMAGE}");
+        eprintln!("e2e: building {actor_ref}");
         let mut command = docker(root);
         command.args([
           "build",
@@ -270,7 +329,7 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
           "--target",
           "actor-container",
           "-t",
-          ACTOR_IMAGE,
+          actor_ref,
           ".",
         ]);
         built(command, "the container actor image").and_then(|()| stamp("actor-container", &image_hash).map_err(|e| e.to_string()))
@@ -279,13 +338,13 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
     actor_image.insert(ActorDriver::LinuxContainer, result);
   }
   if platform == Platform::Macos && could.get(&ActorDriver::MacosAppleContainer).is_some_and(Result::is_ok) {
-    let result = if listing || (fresh("actor-apple-container", &image_hash) && apple_image_present(ACTOR_IMAGE)) {
+    let result = if listing || (fresh("actor-apple-container", &image_hash) && apple_image_present(actor_ref)) {
       Ok(())
     } else if skip {
-      apple_image_present(ACTOR_IMAGE).then_some(()).ok_or_else(|| format!("--no-prepare and {ACTOR_IMAGE} is not in Apple's container"))
+      apple_image_present(actor_ref).then_some(()).ok_or_else(|| format!("--no-prepare and {actor_ref} is not in Apple's container"))
     } else {
       needs_docker("the container actor image").and_then(|()| {
-        eprintln!("e2e: building {ACTOR_IMAGE} for Apple's container");
+        eprintln!("e2e: building {actor_ref} for Apple's container");
         let mut command = docker(root);
         command.args([
           "build",
@@ -296,13 +355,13 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
           "--target",
           "actor-container",
           "-t",
-          ACTOR_IMAGE,
+          actor_ref,
           ".",
         ]);
         built(command, "the container actor image")?;
         let archive = work.join("actor-image.tar");
         let mut save = docker(root);
-        save.args(["save", ACTOR_IMAGE, "-o"]).arg(&archive);
+        save.args(["save", actor_ref, "-o"]).arg(&archive);
         built(save, "the container actor image's archive")?;
         let mut load = Command::new("container");
         load.args(["image", "load", "--input"]).arg(&archive);
@@ -319,13 +378,13 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
 
   // The executor image, on Linux, where container executors run.
   let executor_image = if platform == Platform::Linux {
-    if listing || (fresh("executor", &needy_hash) && image_present(EXECUTOR_IMAGE)) {
+    if listing || (fresh("executor", &needy_hash) && image_present(executor_ref)) {
       Ok(())
     } else if skip {
-      image_present(EXECUTOR_IMAGE).then_some(()).ok_or_else(|| format!("--no-prepare and {EXECUTOR_IMAGE} is not in the engine"))
+      image_present(executor_ref).then_some(()).ok_or_else(|| format!("--no-prepare and {executor_ref} is not in the engine"))
     } else {
       needs_docker("the executor image").and_then(|()| {
-        eprintln!("e2e: building {EXECUTOR_IMAGE} from this tree");
+        eprintln!("e2e: building {executor_ref} from this tree");
         let mut command = docker(root);
         command.args([
           "build",
@@ -334,7 +393,7 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
           "--target",
           "executor",
           "-t",
-          EXECUTOR_IMAGE,
+          executor_ref,
           ".",
         ]);
         built(command, "the executor image").and_then(|()| stamp("executor", &needy_hash).map_err(|e| e.to_string()))
@@ -347,7 +406,7 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
   // The TUI cells' agents image, when any runs: built on every host, a
   // run host included, since it only downloads the agents' releases.
   let agents = if tui && !listing {
-    agents(root, work, needy, vm_image.as_deref(), &could, &needs_docker)
+    agents(&image_names, root, work, needy, vm_image.as_deref(), &could, &needs_docker)
   } else {
     BTreeMap::new()
   };
@@ -408,6 +467,7 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
     notes.0.push("`needy run stop` has no --now in this tree: the stop-now cells are not covered".into());
   }
   Ok(Host {
+    image_names: image_names.clone(),
     euid: nix::unistd::geteuid().as_raw(),
     drivers,
     container_executor,
@@ -421,12 +481,13 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
   })
 }
 
-/// Builds the agents image (`examples/agents/Dockerfile` on
-/// [`ACTOR_IMAGE`]) when it is missing or stale, and from it what each
+/// Builds the agents image (`examples/agents/Dockerfile` on the actor
+/// image of `names`) when it is missing or stale, and from it what each
 /// actor driver of this host boots: the image itself for `linux-container`,
 /// a VM image for `linux-firecracker` and `macos-vz`, the image in Apple's
 /// store for `macos-apple-container`. Returns each driver's result.
 fn agents(
+  names: &Images,
   root: &Path,
   work: &Path,
   needy: &Path,
@@ -434,6 +495,7 @@ fn agents(
   could: &BTreeMap<ActorDriver, Result<(), String>>,
   needs_docker: &dyn Fn(&str) -> Result<(), String>,
 ) -> BTreeMap<Driver, Result<(), String>> {
+  let (actor_ref, agents_ref) = (names.actor.as_str(), names.agents.as_str());
   let platform = Platform::this();
   // A run host has no checkout: its builds run in the work directory.
   let cwd = if root.join("images").exists() {
@@ -451,20 +513,20 @@ fn agents(
     needs_docker("the agents image")?;
     // The base in the engine: a Mac keeps its actor image in Apple's store,
     // so the engine may lack it.
-    if !image_present(ACTOR_IMAGE) {
-      eprintln!("e2e: building {ACTOR_IMAGE} for the agents image");
+    if !image_present(actor_ref) {
+      eprintln!("e2e: building {actor_ref} for the agents image");
       let mut command = docker(cwd);
       command.args(["build", "-f", "images/Dockerfile"]);
       if arm {
         command.args(["--platform", "linux/arm64"]);
       }
-      command.args(["--target", "actor-container", "-t", ACTOR_IMAGE, "."]);
+      command.args(["--target", "actor-container", "-t", actor_ref, "."]);
       built(command, "the container actor image")?;
     }
-    let base = image_id(ACTOR_IMAGE).ok_or_else(|| format!("{ACTOR_IMAGE} is not in the engine"))?;
+    let base = image_id(actor_ref).ok_or_else(|| format!("{actor_ref} is not in the engine"))?;
     let hash = format!("{}-{base}", hex(&Sha256::digest(AGENTS_DOCKERFILE.as_bytes())));
-    if !(fresh("agents", &hash) && image_present(AGENTS_IMAGE)) {
-      eprintln!("e2e: building {AGENTS_IMAGE} from examples/agents");
+    if !(fresh("agents", &hash) && image_present(agents_ref)) {
+      eprintln!("e2e: building {agents_ref} from examples/agents");
       let context = work.join("agents");
       std::fs::create_dir_all(&context).map_err(|e| e.to_string())?;
       std::fs::write(context.join("Dockerfile"), AGENTS_DOCKERFILE).map_err(|e| e.to_string())?;
@@ -476,15 +538,15 @@ fn agents(
       command
         .args([
           "--build-arg",
-          &format!("BASE={ACTOR_IMAGE}"),
+          &format!("BASE={actor_ref}"),
           "-t",
-          AGENTS_IMAGE,
+          agents_ref,
         ])
         .arg(&context);
       built(command, "the agents image")?;
       stamp("agents", &hash)?;
     }
-    image_id(AGENTS_IMAGE).ok_or_else(|| format!("{AGENTS_IMAGE} is not in the engine"))
+    image_id(agents_ref).ok_or_else(|| format!("{agents_ref} is not in the engine"))
   })();
   let mut out = BTreeMap::new();
   for driver in Driver::ACTORS {
@@ -503,12 +565,12 @@ fn agents(
       Driver::Firecracker | Driver::Vz => {
         could.get(&profile_driver).cloned().unwrap_or_else(|| Err("not probed".into()))?;
         let base = vm_image.filter(|b| b.join("manifest.json").exists()).ok_or("no base VM image to take the kernel from")?;
-        let dir = needy_core_actor::image::vm::dir_of(&work.join("images"), profile_driver, AGENTS_IMAGE);
+        let dir = needy_core_actor::image::vm::dir_of(&work.join("images"), profile_driver, agents_ref);
         let name = format!("agents-vm-{}", profile_driver.as_str());
         if !(fresh(&name, &id) && dir.join("manifest.json").exists()) {
-          eprintln!("e2e: building the {} VM image of {AGENTS_IMAGE}", profile_driver.as_str());
+          eprintln!("e2e: building the {} VM image of {agents_ref}", profile_driver.as_str());
           let mut command = Command::new(needy);
-          command.current_dir(cwd).args(["image", "build", "--from", AGENTS_IMAGE, "--base"]).arg(base).arg("--out").arg(&dir);
+          command.current_dir(cwd).args(["image", "build", "--from", agents_ref, "--base"]).arg(base).arg("--out").arg(&dir);
           built(command, "the agents VM image")?;
           stamp(&name, &id)?;
         }
@@ -516,11 +578,11 @@ fn agents(
       }
       Driver::AppleContainer => {
         could.get(&profile_driver).cloned().unwrap_or_else(|| Err("not probed".into()))?;
-        if !(fresh("agents-apple", &id) && apple_image_present(AGENTS_IMAGE)) {
-          eprintln!("e2e: loading {AGENTS_IMAGE} into Apple's container");
+        if !(fresh("agents-apple", &id) && apple_image_present(agents_ref)) {
+          eprintln!("e2e: loading {agents_ref} into Apple's container");
           let archive = work.join("agents-image.tar");
           let mut save = docker(cwd);
-          save.args(["save", AGENTS_IMAGE, "-o"]).arg(&archive);
+          save.args(["save", agents_ref, "-o"]).arg(&archive);
           built(save, "the agents image's archive")?;
           let mut load = Command::new("container");
           load.args(["image", "load", "--input"]).arg(&archive);
@@ -614,6 +676,7 @@ fn allows_other() -> bool {
 /// under `images/`, and `containers/ID.tar` for the container actor and
 /// executor images.
 pub fn export(root: &Path, host: &Host, out: &Path) -> Result<()> {
+  let (actor_ref, executor_ref) = (host.image_names.actor.as_str(), host.image_names.executor.as_str());
   // An earlier export's images would be offered again under names this one
   // does not write.
   for stale in ["containers", "images", "images.hash"] {
@@ -663,7 +726,7 @@ pub fn export(root: &Path, host: &Host, out: &Path) -> Result<()> {
   // image already is not sent it again.
   let containers = out.join("containers");
   std::fs::create_dir_all(&containers)?;
-  for (role, image) in [("actor", ACTOR_IMAGE), ("executor", EXECUTOR_IMAGE)] {
+  for (role, image) in [("actor", actor_ref), ("executor", executor_ref)] {
     let Some(id) = image_id(image) else {
       continue;
     };
@@ -677,9 +740,10 @@ pub fn export(root: &Path, host: &Host, out: &Path) -> Result<()> {
 
 /// Removes what the harness built: its container images and work
 /// directory. Leaves everything else alone.
-pub fn clean(work: &Path) -> Result<()> {
+/// Removes `names` and the work directory `work`.
+pub fn clean(work: &Path, names: &Images) -> Result<()> {
   if proc::on_path("docker") {
-    for image in [AGENTS_IMAGE, ACTOR_IMAGE, EXECUTOR_IMAGE] {
+    for image in [&names.agents, &names.actor, &names.executor] {
       if image_present(image) {
         let out = proc::simple("docker", &["image", "rm", image], Duration::from_secs(120))?;
         if !out.ok() {
@@ -689,7 +753,7 @@ pub fn clean(work: &Path) -> Result<()> {
       }
     }
   }
-  for image in [AGENTS_IMAGE, ACTOR_IMAGE] {
+  for image in [&names.agents, &names.actor] {
     if proc::on_path("container") && apple_image_present(image) {
       let out = proc::simple("container", &["image", "delete", image], Duration::from_secs(120))?;
       if !out.ok() {
@@ -704,3 +768,7 @@ pub fn clean(work: &Path) -> Result<()> {
   }
   Ok(())
 }
+
+#[cfg(test)]
+#[path = "host_test.rs"]
+mod tests;

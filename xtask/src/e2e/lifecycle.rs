@@ -59,7 +59,7 @@ done
 pub fn run(env: &mut CellEnv, cell: &Cell, journey: Lifecycle, checks: &mut Checks) -> Result<()> {
   let workspace = env.mkdir("lifecycle-native", 0o700)?;
   let (name, uid) = cell.user.account();
-  let mut actor = scenarios::actor(cell, PROGRAM);
+  let mut actor = scenarios::actor(&env.ctx.host.image_names, cell, PROGRAM);
   // Also mark the host process argv, so existing leftover detection can
   // report and reclaim this owned child if the product fails its stop.
   actor["env"] = json!({ "E2E_LIFECYCLE_MARKER": workspace });

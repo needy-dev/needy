@@ -27,7 +27,6 @@ use serde_json::{Value, json};
 
 use super::checks::Checks;
 use super::env::CellEnv;
-use super::host::AGENTS_IMAGE;
 use super::matrix::{Cell, Driver, End};
 use super::runs::{self, check_ended};
 
@@ -136,7 +135,7 @@ pub fn run(env: &mut CellEnv, cell: &Cell, case: &Case, checks: &mut Checks) -> 
   direct.extend([
     "--entrypoint".to_string(),
     real_program(case.command[0]),
-    AGENTS_IMAGE.into(),
+    env.ctx.host.image_names.agents.clone(),
   ]);
   direct.extend(case.command[1..].iter().map(|a| a.to_string()));
   let quit = format!("key {}\nexit 30", case.quit.join(" "));
@@ -155,7 +154,7 @@ pub fn run(env: &mut CellEnv, cell: &Cell, case: &Case, checks: &mut Checks) -> 
   // The same through needy, ending with a detach.
   let mut actor = json!({
     "driver": cell.driver.profile_name(),
-    "image": AGENTS_IMAGE,
+    "image": env.ctx.host.image_names.agents,
     "command": case.command,
     "env": case.env.iter().map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<String, Value>>(),
     "network": { "allow": case.allow },

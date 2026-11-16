@@ -206,7 +206,7 @@ mod run {
       return remote::run(&root, host, &args);
     }
     if args.clean {
-      host::clean(&work)?;
+      host::clean(&work, &host::Images::of_checkout(&root))?;
       return Ok(0);
     }
     if let Some(docker) = host::docker_host() {

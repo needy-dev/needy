@@ -22,11 +22,13 @@ pub fn run(env: &mut CellEnv, cell: &Cell, at: ClientAt, checks: &mut Checks) ->
   ensure!(expected["uid"] != 0, "client execution acceptance requires a non-root invoking account");
   let mut ids = Vec::new();
   let mut holder_pids = Vec::new();
+  // The context outlives the closure's borrow of `env`.
+  let ctx = env.ctx;
   let result = (|| -> Result<()> {
     for (index, label) in ["first", "second"].into_iter().enumerate() {
       client.write(&format!("{label}/project-id"), label)?;
       let base = format!("{}/{label}", client.root);
-      let profile = profile(cell, &base);
+      let profile = profile(&ctx.host.image_names, cell, &base);
       let text = serde_json::to_string_pretty(&profile)?;
       client.write("profile.yaml", &text)?;
       let out = client.invoke(
@@ -159,14 +161,14 @@ pub fn run(env: &mut CellEnv, cell: &Cell, at: ClientAt, checks: &mut Checks) ->
   result
 }
 
-fn profile(cell: &Cell, source: &str) -> Value {
+fn profile(images: &super::super::host::Images, cell: &Cell, source: &str) -> Value {
   let (name, uid) = cell.user.account();
   let probe = "import os,json,pathlib,sys; p=pathlib.Path(\"project-id\").read_text(); pathlib.Path(\"effect\").write_text(p); print(\"E2E client-probe=\"+json.dumps(dict(uid=os.getuid(),gid=os.getgid(),home=os.environ[\"HOME\"],cwd=os.getcwd(),project=p,holder=os.getppid(),platform=os.uname().sysname))); sys.exit(7)";
   let script = format!(
     "echo \"E2E create-env=$E2E_CREATE\"\necho \"E2E mounted-project=$(cat project-id)\"\nprintf actor > actor-effect\necho E2E-CLIENT-READY\nwhile [ ! -f trigger ]; do sleep 1; done\npython3 -c {}\necho \"E2E routed-rc=$?\"\necho E2E-CLIENT-PROBED\nwhile :; do sleep 1; done",
     shell_words::quote(probe),
   );
-  let actor = super::super::scenarios::actor(cell, &script);
+  let actor = super::super::scenarios::actor(images, cell, &script);
   let mut profile = json!({
     "user": { "name": name, "uid": uid, "gid": uid },
     "actor": actor,

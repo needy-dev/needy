@@ -22,7 +22,7 @@ use serde_json::{Value, json};
 
 use super::checks::{Checks, Console, Stat};
 use super::env::CellEnv;
-use super::host::ACTOR_IMAGE;
+use super::host::Images;
 use super::matrix::{Cell, Driver, End, Executor, Fault, Net, RunnerAt, Scenario, Terminal, Workspace};
 use super::runs::{self, check_ended, end_run};
 use super::transport::{Link, PROXY_IDLE};
@@ -71,18 +71,19 @@ fn home(cell: &Cell) -> (String, String) {
   (format!("/home/{name}"), format!("{name}:{name}"))
 }
 
-/// The profile's `actor`, running `script` under `sh`.
-pub(super) fn actor(cell: &Cell, script: &str) -> Value {
+/// The profile's `actor`, running `script` under `sh`, with the harness's
+/// actor image of `images` for the container drivers.
+pub(super) fn actor(images: &Images, cell: &Cell, script: &str) -> Value {
   let command = json!(["/bin/sh", "-c", format!("{PRELUDE}\n{script}")]);
   match cell.driver {
     Driver::Firecracker | Driver::Vz => json!({ "driver": cell.driver.profile_name(), "command": command }),
     Driver::Container(oci) => json!({
       "driver": "linux-container",
       "container": { "oci_runtime": oci.name() },
-      "image": ACTOR_IMAGE,
+      "image": images.actor,
       "command": command,
     }),
-    Driver::AppleContainer => json!({ "driver": "macos-apple-container", "image": ACTOR_IMAGE, "command": command }),
+    Driver::AppleContainer => json!({ "driver": "macos-apple-container", "image": images.actor, "command": command }),
     Driver::Host => json!({}),
   }
 }
@@ -170,7 +171,7 @@ echo "E2E out-written=yes"
   let seed_spec = format!("host:{}/", seed.display());
   let profile = json!({
     "user": user(cell),
-    "actor": actor(cell, &script),
+    "actor": actor(&env.ctx.host.image_names, cell, &script),
     "files": {
       "in-nested": { "mode": "copy-in", "from": seed_spec, "to": "actor:~/.config/e2e/nested/seed/", "filter": SEED_FILTER },
       "in-single": { "mode": "copy-in", "from": seed_spec, "to": "actor:~/single/" },
@@ -344,7 +345,7 @@ print("E2E xout-written=yes")
   let seed_spec = format!("host:{}/", seed.display());
   let profile = json!({
     "user": user(cell),
-    "actor": actor(cell, &script),
+    "actor": actor(&env.ctx.host.image_names, cell, &script),
     "executors": { X: block },
     "commands": [{ "match": "python3 **", "to": X }],
     "files": {
@@ -441,7 +442,7 @@ exit 0"#,
       );
       profile["executors"] = json!({ X: block });
       profile["commands"] = json!([{ "match": "python3 **", "to": X }]);
-      profile["actor"] = actor(cell, &script);
+      profile["actor"] = actor(&env.ctx.host.image_names, cell, &script);
       profile["actor"]["workspace"] = json!({ "path": "~/workspace", "from": format!("executor:{X}:{base}"), "writable": true });
     }
     Workspace::Host => {
@@ -455,7 +456,7 @@ e2e_stat {ws} {ws}/a.txt {ws}/bin/tool.sh {ws}/deep {ws}/deep/x/y.txt
 if echo local > {ws}/new.txt; then echo "E2E writable=yes"; else echo "E2E writable=no"; fi
 exit 0"#
       );
-      profile["actor"] = actor(cell, &script);
+      profile["actor"] = actor(&env.ctx.host.image_names, cell, &script);
       profile["actor"]["workspace"] =
         json!({ "path": "~/workspace", "from": format!("host:{}", env.path("fx/ws").display()), "writable": true });
     }
@@ -522,7 +523,7 @@ exit 4"#,
   );
   let profile = json!({
     "user": user(cell),
-    "actor": actor(cell, &script),
+    "actor": actor(&env.ctx.host.image_names, cell, &script),
     "executors": { X: block },
     "commands": [
       { "match": "python3 **", "to": X },
@@ -639,7 +640,7 @@ exit 0"#
         .to_string()
     }
   };
-  profile["actor"] = actor(cell, &script);
+  profile["actor"] = actor(&env.ctx.host.image_names, cell, &script);
   if fault == Fault::File {
     profile["actor"]["workspace"] =
       json!({ "path": "~/workspace", "from": format!("executor:{X}:{}", env.path("xw").display()), "writable": true });
@@ -813,7 +814,7 @@ exit 0"#
 exit 0"#
     }
   };
-  let mut actor = actor(cell, script);
+  let mut actor = actor(&env.ctx.host.image_names, cell, script);
   actor["network"] = json!({ "allow": ["example.com"], "services": { "svc": { "url": format!("http://127.0.0.1:{}", svc.port) } } });
   let profile = env.profile(&json!({ "user": user(cell), "actor": actor }))?;
   let id = runs::create(env, &profile, &[])?;
@@ -870,7 +871,7 @@ exit 0"#
   );
   let profile = json!({
     "user": user(cell),
-    "actor": actor(cell, &script),
+    "actor": actor(&env.ctx.host.image_names, cell, &script),
     "executors": { X: block },
     "commands": [{ "match": "python3 **", "to": X }],
   });
@@ -926,7 +927,7 @@ const STEP: Duration = Duration::from_secs(60);
 const DETACH: &str = "\x1d";
 
 fn terminal(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
-  let profile = env.profile(&json!({ "user": user(cell), "actor": actor(cell, TERMINAL_PROGRAM) }))?;
+  let profile = env.profile(&json!({ "user": user(cell), "actor": actor(&env.ctx.host.image_names, cell, TERMINAL_PROGRAM) }))?;
   let profile = profile.display().to_string();
   match cell.terminal {
     Terminal::Now => {
@@ -1013,7 +1014,7 @@ e2e_wait"#
   let filter = ["- /cache/**", "+ **"];
   let profile = json!({
     "user": user(cell),
-    "actor": actor(cell, &script),
+    "actor": actor(&env.ctx.host.image_names, cell, &script),
     "executors": { X: block },
     "commands": [{ "match": "bash **", "to": X }],
     "files": {
@@ -1198,7 +1199,7 @@ exit 0"#,
   };
   let mut profile = json!({
     "user": user(cell),
-    "actor": actor(cell, &script),
+    "actor": actor(&env.ctx.host.image_names, cell, &script),
     "executors": { X: block },
     "commands": [{ "match": rule, "to": X }],
   });
