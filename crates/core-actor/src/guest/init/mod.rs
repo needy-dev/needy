@@ -8,7 +8,8 @@
 //! mounts, the home directory, the hostname, the identity files and the
 //! workspace mounts from the host, so init skips them, reaches the gateway
 //! and serves the terminal on the bind-mounted sockets, turns routing on
-//! for the shims, and exits instead of rebooting, which ends the container.
+//! for the shims (making the trampolines first), and exits instead of
+//! rebooting, which ends the container.
 //!
 //! Init logs to the console (the VM's serial port, the container's stderr),
 //! which `needy run logs` prints.
@@ -173,6 +174,12 @@ async fn boot(container: bool) -> Result<()> {
   };
   tokio::spawn(network::forward_gateway(gateway));
   stubs::create(&config.route_names, container);
+  if container {
+    match super::capture::shim::trampolines() {
+      Ok(made) => tracing::debug!("{made} trampolines in {}", super::capture::shim::TRAMPOLINE_DIR),
+      Err(e) => tracing::warn!("cannot make the trampolines; programs other than the in-place shims are not routed: {e}"),
+    }
+  }
   for copy in &config.copy_in {
     if let Err(e) = files::copy_in(&client, &copy.name, &copy.path, &home, user.uid, user.gid).await {
       tracing::warn!("copy-in {}: {e:#}", copy.name);

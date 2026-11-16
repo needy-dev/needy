@@ -225,6 +225,12 @@ check` shows them (`TODO(actor-images)`: step 4's `manifest.json` replaces
 
 ### Shims for added programs
 
+> **Changed 2026-11-16:** a custom image no longer needs its last step to
+> make its added programs routable: a container actor reaches them through
+> trampolines it makes at start, and the step keeps only the shells shimmed
+> in place. See the [trampolines design](2026-11-16-container-trampolines-design.md).
+> The text below describes the step as it was built on 2026-11-13.
+
 The base image keeps the shim step as **`/.needy/shim-image`** (the script
 `images/container/shim.sh`, which was only bind-mounted for its one step
 before), and a custom image runs it as its last step. Without arguments it

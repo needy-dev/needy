@@ -1,23 +1,34 @@
 #!/bin/sh
-# Build-time shims, the last step of a container actor image (see
-# docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md,
+# Build-time shims in place, the last step of a container actor image (see
+# docs/ai/references/architecture/2026-11-16-container-trampolines-design.md,
+# which changed docs/ai/references/architecture/2026-11-10-container-actor-runtime-design.md,
 # "Exec routing with build-time shims", and
 # docs/ai/references/architecture/2026-11-12-actor-images-design.md).
 #
-# Every executable in the given PATH directories is copied to
+# Only the programs named in NEEDY_SHIM_NAMES (space-separated; the shells
+# by default) are shimmed in place: the programs called by their absolute
+# path or named by `#!` lines, which a trampoline on PATH cannot catch.
+# Every other program stays at its own path; the guest needy reaches it
+# through the trampolines init makes at each start.
+#
+# A listed executable in the given PATH directories is copied to
 # /.needy/real/<its path> and replaced by a hard link to the proxy (the shim
 # stub, images/stub/shim.c), which hands the exec to the guest needy with the
 # path of the link it was started through; the guest needy runs the real
 # program with the caller's argv (argv[0] included), and asks the daemon only
-# for the names a run routes. A link to a program in another directory
-# becomes a shim too, whose real program is a link to that program; a link to
-# a program in a shimmed directory stays a link, since its target is a shim.
+# for the names a run routes. A listed link to a program in another
+# directory becomes a shim too, whose real program is a link to that
+# program; a link to a program in a shimmed directory stays a link, since
+# its target is a shim or a real program in place.
 #
 # The base image keeps this script as /.needy/shim-image. An image `FROM` the
-# base runs it as its last step (`RUN ["/.needy/shim-image"]`), so that the
-# programs it added are shims too. It may run any number of times: a program
-# that is a shim already is left as it is, and one that replaced a shim (a
-# package upgrade) becomes the new real program.
+# base may run it as its last step (`RUN ["/.needy/shim-image"]`) to keep its
+# shells shimmed after it installed or upgraded one. It may run any number of
+# times and converges on the list: a listed program that is a shim already
+# is left as it is, one that replaced a shim (a package upgrade) becomes the
+# new real program, and a shim whose name is no longer listed (an image built
+# by an earlier step, which shimmed every program) gets its real program
+# back at its own path.
 #
 # Usage: shim.sh [ROOT PROXY DIR...]
 #   ROOT   the image's root: empty in the image, a directory in tests
@@ -36,10 +47,15 @@
 set -eu
 # NOTICE: the default directories are Docker's default container PATH,
 # https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19 (as
-# `SYSTEM_PATH` in crates/core-actor/src/guest/init/stubs.rs).
+# `SYSTEM_PATH` in crates/core-actor/src/guest/capture/shim.rs).
 if [ $# -eq 0 ]; then
   set -- "" /.needy/proxy /usr/local/sbin /usr/local/bin /usr/sbin /usr/bin /sbin /bin
 fi
+# The shells, which programs run by their absolute paths: pi's bash tool runs
+# `/bin/bash` before it looks on PATH,
+# https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/src/utils/shell.ts#L128-L133
+# and `#!/bin/sh` names its interpreter by path.
+names=" ${NEEDY_SHIM_NAMES-sh bash dash zsh} "
 if [ -n "$1" ]; then
   root=$(cd "$1" && pwd -P)
 else
@@ -65,6 +81,14 @@ done
 shimmed() {
   case " $dirs " in
     *" $(dirname "$1") "*) return 0 ;;
+  esac
+  return 1
+}
+
+# Whether the file name of $1 is listed, to be shimmed in place.
+listed() {
+  case "$names" in
+    *" ${1##*/} "*) return 0 ;;
   esac
   return 1
 }
@@ -99,8 +123,18 @@ trap 'rm -rf "$aside"' EXIT
 for dir in $dirs; do
   for file in "$dir"/*; do
     path=${file#"$root"}
-    # A shim already: its real program is in place.
+    # A shim already: its real program is in place. One no longer listed
+    # gets it back at its own path; replaced, not written through, since
+    # the shim is a hard link to the proxy.
     if [ ! -L "$file" ] && [ -f "$file" ] && is_proxy "$file"; then
+      if ! listed "$file" && { [ -L "$real$path" ] || [ -f "$real$path" ]; }; then
+        rm -f "$file"
+        cp -a "$real$path" "$file"
+        rm -f "$real$path"
+      fi
+      continue
+    fi
+    if ! listed "$file"; then
       continue
     fi
     if [ -L "$file" ]; then

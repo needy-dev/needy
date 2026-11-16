@@ -94,11 +94,13 @@ snap back
 /// The snaps a cell compares.
 const SNAPS: &[&str] = &["start", "grown", "back"];
 
-/// The program's path in the agents image when no needy runs it: the
-/// image's programs are the shims a container actor routes, and the real
-/// ones are under `/.needy/real` (`xtask/tui/direct.sh`).
+/// The program's path in the agents image when no needy runs it: only the
+/// image's shells are shims in place, whose real programs are under
+/// `/.needy/real`; every other program is at its own path
+/// (`xtask/tui/direct.sh`, and the trampolines design,
+/// `docs/ai/references/architecture/2026-11-16-container-trampolines-design.md`).
 fn real_program(program: &str) -> String {
-  format!("/.needy/real/usr/local/bin/{program}")
+  format!("/usr/local/bin/{program}")
 }
 
 pub fn run(env: &mut CellEnv, cell: &Cell, case: &Case, checks: &mut Checks) -> Result<()> {

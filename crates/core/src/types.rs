@@ -47,8 +47,10 @@ pub enum Outcome {
 pub enum Capture {
   /// The guest kernel's `binfmt_needy`: every exec, by any path.
   Kernel,
-  /// Shims made when the container image was built: a program created at
-  /// run time and run directly is not caught (`profile check` warns).
+  /// Shims: trampolines on `PATH` made when the actor starts, and the
+  /// shells shimmed in place when the image was built. A program run by
+  /// another absolute path, or created at run time and run directly, is not
+  /// caught (`profile check` warns).
   Shims,
   // TODO(macos-native): `FencedShims` (shims in a Seatbelt fence) comes with
   // the `macos-native` driver, if the owner productizes it.

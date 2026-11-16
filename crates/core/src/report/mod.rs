@@ -338,9 +338,11 @@ pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> St
 }
 
 /// What shim routing ([`Capture::Shims`], a container actor's) leaves out:
-/// its shims are made when its image is built.
-pub(crate) const SHIM_ROUTING: &str = "A container actor routes only the programs its image had when it was built; \
-  programs created at run time and run directly stayed in the actor without a trace event.";
+/// its trampolines catch programs called by name, and its in-place shims
+/// only the shells by their paths.
+pub(crate) const SHIM_ROUTING: &str = "A container actor routes the programs on its PATH by the names they are called by, \
+  and its shells by any path; programs run by another absolute path, or created at run time and run directly, \
+  stayed in the actor without a trace event.";
 
 /// What the human and JSON reports show: one run's outcome and counts.
 /// Its JSON form is `needy report -o json`; the CLI note lists its fields.

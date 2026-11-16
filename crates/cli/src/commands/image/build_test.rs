@@ -145,11 +145,26 @@ fn image_root(dir: &Path, files: &[(&str, &str, u32)], links: &[(&str, &str)]) -
 }
 
 /// Runs `images/container/shim.sh` on `root` with the PATH directories
-/// `/usr/local/bin`, `/usr/bin` and `/bin`.
+/// `/usr/local/bin`, `/usr/bin` and `/bin`, and its default list of
+/// programs to shim in place.
 fn shim(root: &Path) {
+  run_shim(root, None);
+}
+
+/// [`shim`] with `names` (space-separated) as the programs to shim in place
+/// (`NEEDY_SHIM_NAMES`).
+fn shim_listed(root: &Path, names: &str) {
+  run_shim(root, Some(names));
+}
+
+fn run_shim(root: &Path, names: Option<&str>) {
   let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/container/shim.sh");
-  let status =
-    std::process::Command::new("sh").arg(script).arg(root).args(["/.needy/proxy", "/usr/local/bin", "/usr/bin", "/bin"]).status().unwrap();
+  let mut command = std::process::Command::new("sh");
+  command.arg(script).arg(root).args(["/.needy/proxy", "/usr/local/bin", "/usr/bin", "/bin"]).env_remove("NEEDY_SHIM_NAMES");
+  if let Some(names) = names {
+    command.env("NEEDY_SHIM_NAMES", names);
+  }
+  let status = command.status().unwrap();
   assert!(status.success(), "shim.sh: {status}");
 }
 
@@ -163,7 +178,7 @@ fn the_shim_stage_moves_each_program_to_needy_real_and_links_the_proxy_in_its_pl
   let dir = tempfile::tempdir().unwrap();
   let root = image_root(dir.path(), &[("usr/bin/tool", "#!/bin/sh\necho tool\n", 0o755)], &[]);
 
-  shim(&root);
+  shim_listed(&root, "tool");
 
   let real = root.join(".needy/real/usr/bin/tool");
   assert_eq!(std::fs::read_to_string(&real).unwrap(), "#!/bin/sh\necho tool\n");
@@ -176,7 +191,7 @@ fn the_shim_stage_shims_a_directory_reached_through_a_link_once() {
   let dir = tempfile::tempdir().unwrap();
   let root = image_root(dir.path(), &[("usr/bin/tool", "tool", 0o755)], &[]);
 
-  shim(&root);
+  shim_listed(&root, "tool");
 
   // `/bin` is `usr/bin`: no `/.needy/real/bin`, and the proxy is not copied
   // as a real program on a second pass.
@@ -202,7 +217,7 @@ fn a_link_to_a_shimmed_program_stays_a_link() {
   let dir = tempfile::tempdir().unwrap();
   let root = image_root(dir.path(), &[("usr/bin/python3.12", "py", 0o755)], &[("usr/bin/python3", "python3.12")]);
 
-  shim(&root);
+  shim_listed(&root, "python3 python3.12");
 
   assert_eq!(std::fs::read_link(root.join("usr/bin/python3")).unwrap(), Path::new("python3.12"));
   assert!(!root.join(".needy/real/usr/bin/python3").exists());
@@ -213,7 +228,7 @@ fn a_link_to_a_program_elsewhere_becomes_a_shim_whose_real_program_is_that_link(
   let dir = tempfile::tempdir().unwrap();
   let root = image_root(dir.path(), &[("usr/lib/tool/bin/tool", "tool", 0o755)], &[("usr/bin/tool", "../lib/tool/bin/tool")]);
 
-  shim(&root);
+  shim_listed(&root, "tool");
 
   assert!(same_file(&root.join("usr/bin/tool"), &root.join(".needy/proxy")), "usr/bin/tool is not the proxy");
   assert_eq!(std::fs::read_link(root.join(".needy/real/usr/bin/tool")).unwrap(), Path::new("/usr/lib/tool/bin/tool"));
@@ -232,12 +247,12 @@ fn a_link_to_a_program_elsewhere_becomes_a_shim_whose_real_program_is_that_link(
 fn a_second_run_shims_the_added_programs_and_keeps_the_real_ones() {
   let dir = tempfile::tempdir().unwrap();
   let root = image_root(dir.path(), &[("usr/bin/tool", "tool", 0o755)], &[("usr/bin/tool-link", "tool")]);
-  shim(&root);
+  shim_listed(&root, "tool tool-link jq");
   std::fs::create_dir_all(root.join("usr/local/bin")).unwrap();
   std::fs::write(root.join("usr/local/bin/jq"), "jq").unwrap();
   std::fs::set_permissions(root.join("usr/local/bin/jq"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-  shim(&root);
+  shim_listed(&root, "tool tool-link jq");
 
   assert_eq!(std::fs::read_to_string(root.join(".needy/real/usr/bin/tool")).unwrap(), "tool");
   assert_eq!(std::fs::read_to_string(root.join(".needy/real/usr/local/bin/jq")).unwrap(), "jq");
@@ -251,18 +266,83 @@ fn a_program_that_replaced_a_shim_becomes_the_real_one() {
   // shim.
   let dir = tempfile::tempdir().unwrap();
   let root = image_root(dir.path(), &[("usr/lib/tool", "old", 0o755)], &[("usr/bin/tool", "../lib/tool")]);
-  shim(&root);
+  shim_listed(&root, "tool");
   std::fs::remove_file(root.join("usr/bin/tool")).unwrap();
   std::fs::write(root.join("usr/bin/tool"), "new").unwrap();
   std::fs::set_permissions(root.join("usr/bin/tool"), std::fs::Permissions::from_mode(0o755)).unwrap();
 
-  shim(&root);
+  shim_listed(&root, "tool");
 
   let real = root.join(".needy/real/usr/bin/tool");
   assert!(!real.is_symlink(), "the old real program, a link, was written through");
   assert_eq!(std::fs::read_to_string(&real).unwrap(), "new");
   assert_eq!(std::fs::read_to_string(root.join("usr/lib/tool")).unwrap(), "old");
   assert!(same_file(&root.join("usr/bin/tool"), &root.join(".needy/proxy")), "usr/bin/tool is not the proxy");
+}
+
+// ROOT CAUSE:
+//
+// If a container actor image's programs were all shims, a program that finds
+// its files from its own path, or a tool that reads a program file, broke,
+// because every real program ran from `/.needy/real` and every file on
+// `PATH` was the shim stub: Node.js took `/.needy/real/usr/local` for npm's
+// global prefix, and npm read `/usr/bin/ldd` as text to tell glibc from musl
+// and found neither (seen 2026-11-16 installing Claude Code in an image
+// `FROM` `needy-agents`).
+//
+// Before the fix, the shim step shimmed every program on `PATH` in place.
+// The fix shims only the shells in place; the guest needy reaches every other
+// program through a trampoline on `PATH`, and it runs at its own path.
+#[test]
+fn the_shim_stage_shims_only_the_shells_in_place_by_default() {
+  let dir = tempfile::tempdir().unwrap();
+  let ldd = "#!/bin/bash\n# GNU C Library ldd\n";
+  let root = image_root(
+    dir.path(),
+    &[
+      ("usr/local/bin/node", "node", 0o755),
+      ("usr/bin/ldd", ldd, 0o755),
+      ("usr/bin/bash", "bash", 0o755),
+      ("usr/bin/dash", "dash", 0o755),
+    ],
+    &[("usr/bin/sh", "dash")],
+  );
+
+  shim(&root);
+
+  assert_eq!(std::fs::read_to_string(root.join("usr/local/bin/node")).unwrap(), "node");
+  assert_eq!(std::fs::read_to_string(root.join("usr/bin/ldd")).unwrap(), ldd);
+  assert!(!root.join(".needy/real/usr/local/bin/node").exists());
+  assert!(!root.join(".needy/real/usr/bin/ldd").exists());
+  assert!(same_file(&root.join("usr/bin/bash"), &root.join(".needy/proxy")), "usr/bin/bash is not the proxy");
+  assert!(same_file(&root.join("usr/bin/dash"), &root.join(".needy/proxy")), "usr/bin/dash is not the proxy");
+  assert_eq!(std::fs::read_link(root.join("usr/bin/sh")).unwrap(), Path::new("dash"));
+}
+
+// An image built with an earlier shim step has every program in place; a
+// later step with the default list must put the others back.
+#[test]
+fn a_shim_whose_name_is_no_longer_listed_gets_its_real_program_back() {
+  let dir = tempfile::tempdir().unwrap();
+  let root = image_root(
+    dir.path(),
+    &[
+      ("usr/bin/tool", "tool", 0o755),
+      ("usr/bin/bash", "bash", 0o755),
+      ("usr/lib/other/bin/other", "other", 0o755),
+    ],
+    &[("usr/bin/other", "../lib/other/bin/other")],
+  );
+  shim_listed(&root, "tool bash other");
+
+  shim(&root);
+
+  assert_eq!(std::fs::read_to_string(root.join("usr/bin/tool")).unwrap(), "tool");
+  assert!(!same_file(&root.join("usr/bin/tool"), &root.join(".needy/proxy")), "usr/bin/tool is still the proxy");
+  assert!(!root.join(".needy/real/usr/bin/tool").exists());
+  assert_eq!(std::fs::read_link(root.join("usr/bin/other")).unwrap(), Path::new("/usr/lib/other/bin/other"));
+  assert!(!root.join(".needy/real/usr/bin/other").exists());
+  assert!(same_file(&root.join("usr/bin/bash"), &root.join(".needy/proxy")), "usr/bin/bash is not the proxy");
 }
 
 #[test]

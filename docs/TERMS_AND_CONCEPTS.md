@@ -557,9 +557,10 @@ by the daemon itself).
 ### Custom actor image
 
 An OCI image `FROM` a base image that adds programs (an agent CLI, node,
-jq). Its last step is `RUN ["/.needy/shim-image"]`, which makes the
-programs it added shims, so a container actor can route them; it inherits
-the base's `needy.base-abi` label. For the VM drivers, `needy image build --from`
+jq). A container actor routes the programs it added through trampolines;
+its last step, `RUN ["/.needy/shim-image"]`, keeps the shells shimmed in
+place after a package added or upgraded one. It inherits the base's
+`needy.base-abi` label. For the VM drivers, `needy image build --from`
 turns it into a VM image: its root file system with the real programs put
 back over the shims, and the base's kernel.
 
@@ -584,8 +585,9 @@ In a VM it mounts the guest disk and binds the guest needy over
 ### Shim stub
 
 `/.needy/proxy` in a base image, a tiny static C program: the program the
-kernel's `binfmt_needy` hands a routed exec to, and in a container image the
-file every program on `PATH` is a hard link to. It runs `/.needy/needy` with
+kernel's `binfmt_needy` hands a routed exec to, and in a container actor
+the file every shim is a hard link to (an in-place shim to it, a trampoline
+to its copy on a tmpfs). It runs `/.needy/needy` with
 the caller's argv, its own path (`NEEDY_STUB_EXE`) and the exec's path
 (`NEEDY_STUB_EXECFN`). While no guest needy is injected (an image build), a
 shim runs its real program instead, unrouted.
@@ -652,13 +654,26 @@ program, or an exec fault without a pattern, makes it `*`, every exec.
 
 ### Shim
 
-In a container actor, a hard link to `/.needy/proxy` (the shim stub) in
-place of each program that was on the image's `PATH` when the image was
-built (the base image's shim step, and a custom image's `/.needy/shim-image`
-as its last step); the real program is at `/.needy/real/<path>`. Through the stub the
-guest needy runs the real program with the caller's argv, or hands the exec
-to the proxy when the run routes its name. Programs created after the build
-and run directly are not routed.
+In a container actor, a link to the shim stub through which the guest
+needy sees an exec: it runs the real program with the caller's argv, or
+hands the exec to the proxy when the run routes its name. Two placements
+(see the [trampolines design](ai/references/architecture/2026-11-16-container-trampolines-design.md)):
+
+- a **trampoline**, `/run/needy/shims/<name>`, which init makes at each
+  start for every program on the system `PATH`, first on the driving
+  program's `PATH`; the real program runs at its own path;
+- an **in-place shim**, which the image's shim step puts at the program's
+  own path for the shells (`NEEDY_SHIM_NAMES`, `sh bash dash zsh` by
+  default), so calls by absolute path and `#!` interpreters are caught too;
+  the real program is at `/.needy/real/<path>`.
+
+A program run by another absolute path, or created while the actor runs
+and run directly, is not routed.
+
+### Trampoline
+
+A container actor's shim on `PATH`; see [Shim](#shim). The term is pixi's,
+whose global tools dispatch the same way.
 
 ### Proxy
 

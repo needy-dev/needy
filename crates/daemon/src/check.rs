@@ -67,9 +67,10 @@ async fn unreachable(url: &str) -> Option<String> {
 }
 
 /// What an actor whose driver catches execs with shims does not route.
-const CONTAINER_ROUTING_GAP: &str = "actor: a container actor routes by shims made when its image was built: a program \
-  created at run time (installed with pip or npm, or compiled in the workspace) and run directly stays in the actor \
-  whatever the rules say; programs on the image's PATH, and scripts through their interpreters, are routed";
+const CONTAINER_ROUTING_GAP: &str = "actor: a container actor routes by shims: the programs on its PATH when it starts, \
+  called by name, and its shells (sh, bash, dash, zsh) by any path, with scripts through their interpreters, are \
+  routed; a program run by another absolute path (/usr/bin/python3), or created while it runs (installed with pip or \
+  npm, or compiled in the workspace) and run directly, stays in the actor whatever the rules say";
 
 /// Whether any of `profile`'s rules or exec faults applies to a command in
 /// the actor.

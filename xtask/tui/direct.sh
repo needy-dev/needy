@@ -5,16 +5,16 @@
 # person would run it on a local terminal. `--init` keeps the program from
 # being PID 1, which ignores the signals it sends itself to exit or stop.
 #
-# The image's programs are the shims a container actor routes; the real
-# ones are under /.needy/real, which PATH puts first, since no needy is
-# injected here. IMAGE overrides the image (needy-agents by default);
+# The image's shells are shims in place; their real programs are under
+# /.needy/real, which PATH puts first, since no needy is injected here.
+# Every other program is at its own path. IMAGE overrides the image (needy-agents by default);
 # NEEDY_TUI_ENV names more variables to pass in (a profile's actor.env).
 set -eu
 program=$1
 shift
 case $program in
   /*) entrypoint=$program ;;
-  *) entrypoint=/.needy/real/usr/local/bin/$program ;;
+  *) entrypoint=/usr/local/bin/$program ;;
 esac
 pass=""
 for name in ${NEEDY_TUI_ENV:-}; do pass="$pass -e $name"; done

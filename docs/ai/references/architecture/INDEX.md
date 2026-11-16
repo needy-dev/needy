@@ -32,3 +32,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-16 | [Where a run's data lives (pending)](2026-11-16-data-placement-design.md) | design |
 | 2026-11-16 | [Agent state on live mounts: Codex in concurrent VM actors](2026-11-16-agent-state-on-live-mounts-evidence.md) | evidence |
 | 2026-11-16 | [Agent state in the actor, merged back at stop: spikes](2026-11-16-agent-state-merge-spike-evidence.md) | evidence |
+| 2026-11-16 | [Container capture: trampolines on PATH, shells in place](2026-11-16-container-trampolines-design.md) | design |
