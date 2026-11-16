@@ -1107,7 +1107,19 @@ impl Runs for Daemon {
   }
 
   async fn stop(&self, id: &str, by: Principal, mode: StopMode) -> Result<Option<ActorStop>, ControlError> {
-    let run = self.runs.find(id)?;
+    let run = match self.runs.find(id) {
+      Ok(run) => run,
+      // A stop removes the run from the live runs, but `run ls` still lists
+      // it from `state.db`: stopping it again has nothing left to end.
+      Err(ControlError::NotFound(_)) => {
+        let info = self.runs.find_info(id).await?;
+        if matches!(info.state, RunState::Stopped | RunState::Finished | RunState::Failed) {
+          return Ok(None);
+        }
+        return Err(no_such_run());
+      }
+      Err(e) => return Err(e),
+    };
     self.stop_run(&run, Some(by), mode).await
   }
 

@@ -34,12 +34,14 @@ async fn a_created_run_runs_on_its_executor_until_stopped() {
   let listed = Runs::list(daemon).await.unwrap();
   assert_eq!(listed.len(), 1);
   assert_eq!(listed[0].state, RunState::Stopped);
+  // Owner decision, 2026-11-16: stopping an ended run again succeeds and
+  // ends no actor, as `daemon service stop` of a stopped service does.
   assert!(
     matches!(
       Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default()).await,
-      Err(ControlError::NotFound(_))
+      Ok(None)
     ),
-    "a stopped run is not stopped again"
+    "a stopped run stops again without ending anything"
   );
 }
 

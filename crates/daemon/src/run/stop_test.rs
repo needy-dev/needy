@@ -216,3 +216,37 @@ async fn daemon_shutdown_waits_for_the_actors_mirror_out() {
   let stop = stop_event(started.dir.path(), &created.id).await;
   assert!(stop.contains(r#""actor":{"how":"graceful"}"#), "{stop}");
 }
+
+// ROOT CAUSE:
+//
+// If a run that had been stopped was stopped again, the stop failed with
+// `no such run`, because a stop looked only at the live runs and the first
+// stop had removed it from them, while `run ls` still listed it from
+// `state.db` (the e2e harness's cleanup stops every run it lists as running
+// or finished, and failed on the runner cells, whose scenario stops its run
+// itself).
+//
+// Before the fix, the second stop was `NotFound`.
+// The fix makes a stop of an ended run succeed: it has no actor to end.
+#[tokio::test]
+async fn stopping_a_stopped_run_again_succeeds_and_ends_no_actor() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let host = started.dir.path().join("out");
+  let created = Runs::create(daemon, new_run(&profile(&host), started.dir.path())).await.unwrap();
+  Runs::stop(daemon, &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+
+  let again = Runs::stop(daemon, &created.id, Principal::Operator, StopMode::Now).await;
+
+  assert!(matches!(again, Ok(None)), "{again:?}");
+  assert_eq!(Runs::get(daemon, &created.id).await.unwrap().state, RunState::Stopped);
+}
+
+#[tokio::test]
+async fn stopping_a_run_that_never_existed_is_not_found() {
+  let started = testing::daemon().await;
+
+  let stopped = Runs::stop(&started.daemon, "no-such-run", Principal::Operator, StopMode::Now).await;
+
+  assert!(matches!(stopped, Err(needy_api_server::control::ControlError::NotFound(_))), "{stopped:?}");
+}
