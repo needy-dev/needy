@@ -1,11 +1,9 @@
 # Where a run's data lives
 
-Status: **pending design**, proposed 2026-11-16. The owner agreed with the
-direction on 2026-11-16: user data stays with the account that started the
-run, and needy keeps the directories it owns under XDG base directories.
-Nothing in this note is approved for implementation, and nothing is
-implemented. The [open questions](#open-questions) need the owner's
-decisions first. Names marked *provisional* are not stable.
+Status: **design, every open question decided** (2026-11-17); not yet
+implemented. Proposed 2026-11-16: user data stays with the account that
+started the run, and needy keeps the directories it owns under XDG base
+directories. Names marked *provisional* are not stable.
 
 Independent of the [environments design](2026-11-16-environments-and-snapshots-design.md);
 either can land first.
@@ -86,46 +84,60 @@ Guards:
 - The run's output always names the workspace: machine, path, writable or
   not.
 
-> **Open question 1.** Which client executor is the default workspace's
+> **Decided 2026-11-17: the current folder when it can be reached, else an
+> error.** When the commands run on the machine `needy run create` runs on
+> (a native executor there, or a local container that can bind it), the
+> workspace is the current folder, passed through to the actor; when they
+> run on a remote executor, the folder is on the wrong machine and
+> `run create` fails and asks for `workspace.from` with a path on that
+> machine. Nothing is copied: the workspace is passed through, one copy on
+> the executor. The question was:
+> Which client executor is the default workspace's
 > when a profile has several, and is a profile with none but with an
 > executor on the client's own machine a case to handle?
 
-## Agent state
+## Agent state: generic file mappings that merge back
+
+Decided with the owner on 2026-11-17: needy has **no agent-specific state
+concept**. An agent's login and sessions are files that are copied in when a
+run starts and brought back when it ends, which `files` mappings already
+express; what is new is how they come back (a merge, below) and that a
+feature may declare them. The earlier `actor.state` proposal is dropped.
 
 ```yaml
-actor:
-  state:
-    pi: { path: ~/.pi/agent, filter: ["- /bin/**", "+ **"] }
-    codex: ~/.codex
+files:
+  pi:
+    mode: copy-in
+    from: "host:~/.local/share/needy/state/pi/"     # the store (see below)
+    to: "actor:~/.pi/agent/"
+    back: merge                                     # new (provisional): merged back at the end
+    rules: { newest: [auth.json], ignore: ["bin/**"] }
 ```
 
-One entry per named state: the path in the actor and an optional filter.
-`profile::load` derives its copy-in from it, as it derives the workspace's
-mappings from `actor.workspace` today (`crates/config/src/profile/workspace.rs`);
-what comes back is not a mirror-out but a merge
-([below](#two-runs-one-state-seed-then-merge)), which is new daemon work.
-The thirteen lines above become one.
+- **`back: merge`** (*provisional*) replaces a separate mirror-out for
+  such a mapping: at the end the actor's copy is merged into the source
+  three-way ([below](#two-runs-one-state-seed-then-merge)), with the
+  mapping's rules. A plain `copy-in` and a plain `mirror-out` keep their
+  meaning.
+- **Features declare mappings** (decided 2026-11-17): a feature may carry
+  mappings with their rules (`customizations.needy.files` in its
+  `devcontainer-feature.json`, the specification's place for a tool's own
+  properties), so a profile using needy's pi feature writes none. A
+  profile's mapping of the same name replaces the feature's.
+- A mapping's store path is the profile's (or the feature's) to name;
+  `$XDG_DATA_HOME/needy/state/<name>/` (*provisional*) is the convention
+  needy's features use, which needy creates when it is missing, since it is
+  needy's own directory.
 
-Where it is stored:
+Where the store is:
 
 | Step | Store | Needs |
 | --- | --- | --- |
-| target | the client's `$XDG_DATA_HOME/needy/state/<name>/` (*provisional*), copied in and mirrored out through the client's holder | a client-side file transfer, which `TODO(runner-files)` waits for |
-| interim (open question 2) | the control host's needy data directory, created by the daemon before `check_host_paths` | nothing new |
+| target | the client's directory, copied in and merged back through the client's holder | a client-side file transfer, which `TODO(runner-files)` waits for |
+| interim (decided 2026-11-17, ships first) | the control host's needy data directory, created by the daemon before `check_host_paths` | nothing new |
 
 The profile is the same for both, so moving from the interim store to the
 target changes no profile.
-
-A state name is global for the account: `herdr` can name `pi`, `codex` and
-`opencode`, and gets their logins without repeating their mappings.
-
-`needy state ls` and `needy state rm NAME` (*provisional*) list and remove
-states; removing one is how a login is dropped.
-
-> **Open question 3.** May a feature declare its state
-> (`customizations.needy.state` in its `devcontainer-feature.json`, the
-> specification's place for a tool's own properties), so that a profile
-> using the pi feature needs no `state` entry at all?
 
 ### Two runs, one state: seed, then merge
 
@@ -183,6 +195,12 @@ then carries the same identity.
 
 ## Managed workspaces
 
+> **Deferred 2026-11-17 by the owner:** the current folder covers the
+> common case and `workspace.from` names any other. `TODO(workspaces)`: a
+> named folder needy keeps on an executor, for work without a project
+> folder (scratch tasks, RL batches), waits for a case that needs it. The
+> rest of this section is the deferred proposal.
+
 ```yaml
 actor:
   workspace: { path: ~/workspace, name: demo }
@@ -194,7 +212,7 @@ account the executor runs as, *provisional*). The executor creates it,
 since it is the needy process on that machine and knows its own data
 directory; nothing has to be predicted from elsewhere.
 
-> **Open question 5.** A managed workspace's lifetime: kept by name until
+> **Deferred with managed workspaces (see above).** It asked: a managed workspace's lifetime: kept by name until
 > `needy workspace rm`, or removed with its run as an executor instance
 > keyed `{run}` is?
 
@@ -224,26 +242,20 @@ Existing directories are from `crates/cli/src/paths.rs`; new entries are
 
 ## Open questions
 
-1. The default workspace's executor when a profile has several client
-   executors, or none.
-2. Ship the interim state store on the control host first, or wait for the
-   client-side transfer?
-3. Features that declare their state, with its merge rules.
-4. ~~Two runs and one state~~: decided, seed then merge (see above).
-5. A managed workspace's lifetime.
+All decided on 2026-11-17: the default workspace (the current folder when
+reachable), the interim store (the control host first), features that
+declare their mappings (yes), two runs and one store (seed, then merge),
+managed workspaces (deferred).
 
 ## Slices
 
 In order; each needs the owner's approval when it starts.
 
-1. **`actor.state`** with seed and merge: the file rules (`ignore`,
-   `append`, `newest`, `keep`), the lock on the store, keeping an unmerged
-   run's state; stored on the control host (interim, after open question
-   2), with `needy state ls` and `rm`. `examples/agents` uses it for Codex,
-   pi and opencode.
+1. **Merging mappings back** (`back: merge` with `ignore`, `append`,
+   `newest` and `keep`): the lock on the store, keeping an unmerged run's
+   state, the interim store on the control host. `examples/agents` uses it
+   for Codex, pi and opencode.
 2. **The SQLite row merge**, and its first harness (opencode).
-3. **The current directory as the default workspace** with a client
-   executor, with the guards above.
-4. **Managed workspaces** on executors.
-5. **The client-side store** for state, after the client-side file
-   transfer of `TODO(runner-files)`.
+3. **The current folder as the default workspace**, with the guards above.
+4. **The client-side store**, after the client-side file transfer of
+   `TODO(runner-files)`.
