@@ -91,8 +91,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - run: shellcheck --shell=sh install/install.sh
-      - run: shellcheck scripts/render-homebrew-formula scripts/tests/render-homebrew-formula
+      - run: shellcheck scripts/render-homebrew-formula scripts/tests/render-homebrew-formula scripts/tests/install
       - run: scripts/tests/render-homebrew-formula
+      - run: scripts/tests/install
 
   proto:
     name: proto

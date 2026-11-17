@@ -220,12 +220,23 @@ describe('environment wizard', () => {
     const control = steps.find(step => step.id === 'daemon')!
     expect(control.terminal.zh).toContain('控制主机 · SSH 终端')
     expect(control.code).toContain('needy config set daemon.listen')
-    expect(control.code).toContain('needy daemon service install --now')
+    // The install script already started the service; the listener needs a replacement.
+    expect(control.code).toContain('needy daemon service install --replace --now')
     expect(control.code).toContain('needy config use local')
-    expect(control.text.en).toContain('needy daemon service install --replace --now')
+    expect(control.text.en).toContain('needy daemon service install --now')
+    expect(steps.find(step => step.id === 'install')?.code).toContain('install.sh | sh')
+    expect(steps.find(step => step.id === 'runner-install')?.code).toContain('install.sh | NEEDY_NO_DAEMON=1 sh')
     expect(steps.find(step => step.id === 'token')?.text.en).toContain('client context')
     expect(control.code).not.toContain('NEEDY_TOKEN')
     expect(control.code).not.toContain('NEEDY_ENDPOINT')
+  })
+
+  // A second plain install of the service the install script started would be
+  // refused as already installed, so the step only checks it.
+  it('checks the daemon the install script started without installing it again', () => {
+    const control = guide('bash', DEFAULT_ENVIRONMENT).find(step => step.id === 'daemon')!
+    expect(control.code).toContain('needy daemon service status')
+    expect(control.code).not.toContain('needy daemon service install')
   })
 
   it('changes package and shell-only routing instructions with the answers', () => {

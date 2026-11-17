@@ -6,6 +6,9 @@
 # Environment:
 #   NEEDY_VERSION       Release tag, for example v0.0.2 [default: latest]
 #   NEEDY_INSTALL_DIR   Install directory [default: $HOME/.local/bin]
+#   NEEDY_NO_DAEMON     Set to 1 to leave the control daemon alone, for
+#                       example on a machine that is only a runner
+#                       [default: install and start the user service]
 #   NEEDY_DOWNLOAD_BASE Test hook: a URL that serves the release assets
 #                       directly (for example a local HTTP server over a
 #                       workflow run's artifacts). It replaces the GitHub
@@ -108,5 +111,30 @@ case ":$PATH:" in
   *":$install_dir:"*) ;;
   *) printf 'Add %s to PATH to run needy from any terminal.\n' "$install_dir" >&2 ;;
 esac
+
+# Like a container engine's package, the install leaves the control daemon
+# installed as a user service and running. A reinstall replaces the service,
+# so it runs the needy just installed with the current configuration;
+# replacing stops the old daemon and its active runs first.
+# NOTICE(install-daemon): a service manager that refuses (no systemd user
+# manager, no launchd GUI session over SSH) does not fail the install: the
+# binary is in place and the warning names the command to retry.
+needy=$install_dir/needy
+if [ "${NEEDY_NO_DAEMON:-}" = 1 ]; then
+  printf 'Start the control daemon with "needy daemon service install --now".\n' >&2
+else
+  if "$needy" daemon service status --output json 2>/dev/null | grep -q '"state": "not-installed"'; then
+    service='daemon service install --now'
+  else
+    service='daemon service install --replace --now'
+  fi
+  # shellcheck disable=SC2086 # $service is a fixed list of words.
+  if "$needy" $service >&2; then
+    printf 'The control daemon is running; see "needy daemon service status".\n' >&2
+  else
+    printf 'warning: needy is installed, but its control daemon did not start. Retry with "needy %s",\n' "$service" >&2
+    printf 'or run "needy daemon serve" in a terminal, see https://github.com/needy-dev/needy#start-the-control-daemon\n' >&2
+  fi
+fi
 printf 'Next: pull the actor images for the drivers this machine has with "needy image pull",\n' >&2
-printf 'then start a control daemon and pick a profile, see https://github.com/needy-dev/needy#getting-started\n' >&2
+printf 'then pick a profile, see https://github.com/needy-dev/needy#getting-started\n' >&2

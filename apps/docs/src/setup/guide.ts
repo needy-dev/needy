@@ -84,7 +84,11 @@ const INSTALL: Record<PackageManager, string> = {
   dnf: 'sudo dnf install -y fuse-sshfs fuse3',
   pacman: 'sudo pacman -S --noconfirm sshfs fuse3',
 }
-const INSTALL_NEEDY = 'curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh\nexport PATH="$HOME/.local/bin:$PATH"\nneedy --version'
+// The install script also installs and starts the control daemon as a user
+// service; a machine that is only a runner opts out with NEEDY_NO_DAEMON=1.
+function installNeedy(daemon: boolean): string {
+  return `curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | ${daemon ? '' : 'NEEDY_NO_DAEMON=1 '}sh\nexport PATH="$HOME/.local/bin:$PATH"\nneedy --version`
+}
 
 /** The actor driver selected by the host's capabilities, not by the entrypoint. */
 export function actorDriver(env: Environment): string {
@@ -178,14 +182,16 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     id: 'install', machine: 'host', terminal: host,
     title: { en: 'Install needy and the selected base image', zh: '安装 needy 和所选 driver 的基础镜像' },
     text: { en: 'These steps use a released needy. The README reference covers source builds.', zh: '这里使用发布版 needy。源码构建仍可查阅 README 参考部分。' },
-    code: `${INSTALL_NEEDY}\nneedy image pull --driver ${driver}${env.executor === 'container' && driver !== 'linux-container'
+    code: `${installNeedy(true)}\nneedy image pull --driver ${driver}${env.executor === 'container' && driver !== 'linux-container'
       ? '\nneedy_release=$(needy --version | awk \'{print $2}\')\ndocker pull "ghcr.io/needy-dev/needy-executor:v${needy_release}"' : ''}`,
   })
 
   steps.push({ id: 'daemon', machine: 'host', terminal: host,
-    title: { en: 'Start and reach the control daemon', zh: '启动控制 daemon 并确认连接' },
-    text: { en: 'Install a user service on the control host, with systemd or launchd available. Select local for the following management commands. For an existing service, replace the install line with needy daemon service install --replace --now. Replacement restarts control with the current configuration. Use run stop to end an invocation.', zh: '在控制主机上安装用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。已有服务时，把安装命令替换为 needy daemon service install --replace --now。替换会应用当前配置并重启控制服务。需要结束某个 run 时，使用 run stop。' },
-    code: `needy config use local\n${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\n" : ''}needy daemon service install --now\nneedy daemon service status\nneedy runner ls`,
+    title: { en: 'Reach the control daemon', zh: '确认控制 daemon 可以连接' },
+    text: env.executor === 'runner'
+      ? { en: 'The install script started a user service on the control host, with systemd or launchd available. Select local for the following management commands. Replacing the service applies the listener: it restarts control with the current configuration. If the script warned that the daemon did not start, use needy daemon service install --now instead. Use run stop to end an invocation.', zh: '安装脚本已在控制主机上安装并启动用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。替换服务会应用监听地址：它按当前配置重启控制服务。如果脚本警告 daemon 未能启动，改用 needy daemon service install --now。需要结束某个 run 时，使用 run stop。' }
+      : { en: 'The install script started a user service on the control host, with systemd or launchd available. Select local for the following management commands. If the script warned that the daemon did not start, run needy daemon service install --now first. Use run stop to end an invocation.', zh: '安装脚本已在控制主机上安装并启动用户服务，需要可用的 systemd 用户管理器或 launchd。选择 local，让后续管理命令连接本机。如果脚本警告 daemon 未能启动，先执行 needy daemon service install --now。需要结束某个 run 时，使用 run stop。' },
+    code: `needy config use local\n${env.executor === 'runner' ? "needy config set daemon.listen '[tcp://127.0.0.1:7400]'\nneedy daemon service install --replace --now\n" : ''}needy daemon service status\nneedy runner ls`,
     expected: { en: 'The service reports ready. The runner table appears without a client bearer or an address export.', zh: '服务状态为 ready，无需客户端令牌或地址环境变量即可列出 runner。' } })
 
   if (env.executor !== 'container') {
@@ -211,7 +217,7 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     steps.push({ id: 'runner-install', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the executor machine', zh: '准备执行命令的机器' },
       text: { en: 'Install needy and your project tools here. Native execution needs no actor images on this machine.', zh: '在这里安装 needy 和项目工具。这台机器上的 native 执行不需要 actor 镜像。' },
-      code: INSTALL_NEEDY,
+      code: installNeedy(false),
       expected: { en: 'The executor has needy and its project tools. Use the account that will serve commands.', zh: '执行机器已安装 needy 和项目工具。使用将要执行命令的账号。' } },
     { id: 'workspace', machine: 'runner', terminal: remote,
       title: { en: 'Prepare the project on the executor', zh: '在执行机器上准备项目目录' },
