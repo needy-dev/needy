@@ -61,8 +61,10 @@ mode: at the start of a run its store is copied into a per-run copy on the
 host, which the actor uses live; when the run ends, however it ends, the
 per-run copy is **merged back** into the store, three-way and one run at a
 time, with an `on-conflict` choice for the few files where both sides
-changed, and SQLite databases merged row by row. Concurrent runs of one
-agent keep each other's sessions, a stale copy never overwrites a fresh
+changed. needy itself knows no file format: a format that needs more (a
+harness's SQLite sessions, say) gets a **merge driver** that the harness's
+feature supplies, as git's merge drivers work, run in a sandbox. Concurrent
+runs of one agent keep each other's sessions, a stale copy never overwrites a fresh
 one, and a hard stop loses nothing. A feature may declare the mappings its
 harness needs, so a profile using needy's agent features writes none.
 
@@ -151,39 +153,42 @@ commands can reach it.
 60. As a user, I want a file only one run changed to be taken from that run, so that a token refresh in one run is never lost to another.
 61. As a user, I want a file two runs both changed to follow the mapping's `on-conflict` choice (keep the store's, take the run's, or merge lines), and otherwise to keep the store's and report the run's, so that I never lose a change silently.
 62. As a user, I want conflicting copies kept by needy outside the store and named in `needy run report`, so that my agent never loads a conflict copy as real state.
-63. As a user of a harness that keeps sessions in SQLite, I want its databases recognised and merged row by row without writing a rule, so that sessions from concurrent runs all appear in the next one.
-64. As a user, I want caches and logs left out of syncing with the mapping's ordinary `filter`, so that I learn no second exclusion syntax.
-65. As a user, I want a run stopped with `--now`, crashed, or ended while the store was unreachable to lose nothing, its changes merged later, so that a hard stop does not lose a login.
-66. As a user, I want a pending merge for a store done before any new run of that store is seeded, so that a new run never starts from stale state.
-67. As a user, I want to use a second account of an agent by pointing a run at another store, so that work and personal logins stay apart.
-68. As a feature author, I want to declare my harness's synced files and their conflict choices in the feature, so that every profile using the feature gets them right.
-69. As a user, I want a mapping in my profile to replace a feature's mapping of the same name, and two mappings claiming one actor path to be an error, so that overrides are explicit.
-70. As a user, I want plain `copy-in` and `mirror-out` to keep their meaning, so that existing profiles behave as before.
-71. As a user, I want a store under needy's own data directory to be created when it is missing, so that I never `mkdir` for needy.
-72. As a user, I want `needy run report` to say where a store is (which machine and account), so that I know where my logins live.
+63. As a user of a harness that keeps sessions in SQLite, I want its feature's merge driver to merge the databases, so that sessions from concurrent runs all appear in the next one, without needy knowing SQLite.
+64. As a feature author, I want to supply a merge driver for my harness's files (given the seed, the run's copy and the store's current state as three trees), so that a format needy does not know merges correctly.
+65. As a user, I want a merge driver to run in a sandbox started from the run's image, never on the host, so that a feature's code cannot touch my machine.
+66. As a user, I want a failing merge driver to leave the store's files as they were and keep the run's, reported, so that a broken driver loses nothing.
+67. As a user, I want caches and logs left out of syncing with the mapping's ordinary `filter`, so that I learn no second exclusion syntax.
+68. As a user, I want a run stopped with `--now`, crashed, or ended while the store was unreachable to lose nothing, its changes merged later, so that a hard stop does not lose a login.
+69. As a user, I want a pending merge for a store done before any new run of that store is seeded, so that a new run never starts from stale state.
+70. As a user, I want to use a second account of an agent by pointing a run at another store, so that work and personal logins stay apart.
+71. As a feature author, I want to declare my harness's synced files and their conflict choices in the feature, so that every profile using the feature gets them right.
+72. As a user, I want a mapping in my profile to replace a feature's mapping of the same name, and two mappings claiming one actor path to be an error, so that overrides are explicit.
+73. As a user, I want plain `copy-in` and `mirror-out` to keep their meaning, so that existing profiles behave as before.
+74. As a user, I want a store under needy's own data directory to be created when it is missing, so that I never `mkdir` for needy.
+75. As a user, I want `needy run report` to say where a store is (which machine and account), so that I know where my logins live.
 
 ### Hooks
 
-73. As a user, I want a `start` hook that runs in every run after the workspace and synced files are in place and before the driving program, so that I can prepare a task.
-74. As a user, I want a failing `start` hook to fail the run before the driving program starts, so that a broken setup is obvious.
-75. As a user, I want a `stop` hook that runs before synced files are merged back, so that a harness can flush what it writes late.
-76. As a user, I want a failing `stop` hook recorded and the merge still done, so that state is not lost to a hook.
-77. As a user, I want hooks to run as my user in the workspace with the profile's rules applied, so that they behave like anything else the agent runs.
-78. As a user, I want features' hooks to run before mine, in layer order, so that a feature's setup comes first.
+76. As a user, I want a `start` hook that runs in every run after the workspace and synced files are in place and before the driving program, so that I can prepare a task.
+77. As a user, I want a failing `start` hook to fail the run before the driving program starts, so that a broken setup is obvious.
+78. As a user, I want a `stop` hook that runs before synced files are merged back, so that a harness can flush what it writes late.
+79. As a user, I want a failing `stop` hook recorded and the merge still done, so that state is not lost to a hook.
+80. As a user, I want hooks to run as my user in the workspace with the profile's rules applied, so that they behave like anything else the agent runs.
+81. As a user, I want features' hooks to run before mine, in layer order, so that a feature's setup comes first.
 
 ### Reinforcement-learning style use
 
-79. As a harness author running many short runs, I want setup cached in layers rather than repeated per run, so that each run starts fast.
-80. As a harness author, I want to name the environment of my episodes by snapshot digest, so that a batch is reproducible.
-81. As a harness author, I want variants that differ in one layer to share every layer before it, so that a matrix of images is cheap.
+82. As a harness author running many short runs, I want setup cached in layers rather than repeated per run, so that each run starts fast.
+83. As a harness author, I want to name the environment of my episodes by snapshot digest, so that a batch is reproducible.
+84. As a harness author, I want variants that differ in one layer to share every layer before it, so that a matrix of images is cheap.
 
 ### Operating needy
 
-82. As a maintainer, I want the base ABI unchanged, so that every base image of version 1 keeps working with this needy.
-83. As a maintainer, I want images built by the earlier shim step and plain image references to keep working, so that nobody must rebuild to upgrade needy.
-84. As a maintainer, I want build steps, commits and merges recorded as trace events, so that `needy run report` and `needy image log` can explain them.
-85. As a maintainer, I want built layers in needy's cache directory and commits, stores and pending merges in its data directory, so that the cache alone is safe to delete.
-86. As a maintainer, I want layers that a running run, a lockfile or a commit history names never evicted, so that cleaning up never breaks a run or an image.
+85. As a maintainer, I want the base ABI unchanged, so that every base image of version 1 keeps working with this needy.
+86. As a maintainer, I want images built by the earlier shim step and plain image references to keep working, so that nobody must rebuild to upgrade needy.
+87. As a maintainer, I want build steps, commits and merges recorded as trace events, so that `needy run report` and `needy image log` can explain them.
+88. As a maintainer, I want built layers in needy's cache directory and commits, stores and pending merges in its data directory, so that the cache alone is safe to delete.
+89. As a maintainer, I want layers that a running run, a lockfile or a commit history names never evicted, so that cleaning up never breaks a run or an image.
 
 ## Implementation Decisions
 
@@ -226,8 +231,9 @@ commands can reach it.
 - A recipe's `os.image` is removed; using it is an error naming `root:`
   (E2). The two built-in recipes that set it change with it.
 - `files` mappings gain `mode: sync` with an optional `on-conflict` map
-  from globs to `store`, `run` or `lines`. Exclusions use the existing
-  `filter`. SQLite databases need no rule. Two mappings claiming one actor
+  from globs to `store`, `run`, `lines` (text, append-only) or a merge
+  driver (`{ driver: COMMAND }`, provisional). Exclusions use the existing
+  `filter`. needy knows no file format. Two mappings claiming one actor
   path are an error; a mapping name declared by two features is an error
   unless the profile defines that name; a profile's mapping replaces a
   feature's of the same name.
@@ -366,13 +372,21 @@ commands can reach it.
   a time per store, three-way per entry against the run's seed. Only-run
   changes are taken. For an entry both sides changed, the mapping's
   `on-conflict` choice applies (`store`, `run`, or `lines` for append-only
-  files); without one, the store's copy stays and the run's is kept by
-  needy, per run, outside the store, and reported. SQLite databases,
-  recognised by their header, are read through SQLite (so a write-ahead log
-  is replayed) and merged three-way per row by primary key through one
-  connection to the store's copy; their `-wal` and `-shm` files are never
-  merged as files; a table keyed by an autoincrement integer is reported as
-  needing an adapter, not merged.
+  text); without one, the store's copy stays and the run's is kept by
+  needy, per run, outside the store, and reported.
+- **Merge drivers.** A glob whose `on-conflict` names a driver is merged by
+  it, not by needy: needy hands the driver every file the glob matches as
+  three trees (the seed, the run's copy, the store's current state), so it
+  also handles side files such as a database's write-ahead log, and takes
+  back the merged files for the store. needy's own merge skips the files a
+  driver claims. A driver is a command a feature ships (a mapping a feature
+  declares names it); it runs in a short merge session booted from the
+  run's snapshot, with no routing and no network, so a feature's code never
+  runs on the host and has its harness's own tools and versions. A driver
+  that fails leaves the store's files unchanged, keeps the run's, and is
+  reported. needy's opencode feature ships an SQLite row-merge driver (three
+  way per row by primary key; tables keyed by an autoincrement integer are
+  reported, not merged), which the merge spike showed works.
 - A merge that cannot run yet stays pending. Pending merges for a store run
   at daemon start and before any run of that store is seeded, under the
   same lock. A seed and a per-run copy are removed after their merge.
@@ -438,8 +452,9 @@ The four seams, highest first (agreed with the owner on 2026-11-17):
    (content addressing, cache keys, materializing, opaque directories
    expanded to whiteouts, commit collapse and rollback, garbage collection
    that keeps named layers) and the three-way merge (each `on-conflict`
-   choice, the SQLite row merge with a write-ahead log present, the
-   autoincrement refusal), on temporary directories. Prior art: the
+   choice, the merge-driver handoff of three trees and the files it
+   claims), on temporary directories. The opencode feature's SQLite driver
+   is tested as that feature's own code, with a write-ahead log present. Prior art: the
    trampoline tests and the shim step tests, which run on Linux in a
    container where the code is Linux-only.
 
@@ -462,7 +477,9 @@ Linux hosts, and end to end through the harness.
 - The client's machine as a store before the client-side file transfer
   exists (`TODO(runner-files)`).
 - A key-level merge of JSON application-state files (`TODO(state-merge)`).
-- Adapters for SQLite tables keyed by autoincrement integers.
+- Any file format in needy's core; formats are merge drivers that features
+  ship. SQLite tables keyed by autoincrement integers, in the opencode
+  driver.
 - Extended attributes and file capabilities in layers (`TODO(images)`).
 - Building on Apple's `container`.
 - Memory snapshots for fast reset.
@@ -487,7 +504,7 @@ evidence recorded.
 | 6 | Built-in profiles and images; `image log`, `image export` | 5 |
 | I1 | The installers start the daemon (C1) | nothing |
 | M1 | Sync mappings: per-run copies on the host, seeds, the three-way file merge with `on-conflict`, the lock, pending merges, the interim store | nothing |
-| M2 | The SQLite row merge | M1 |
+| M2 | Merge drivers: the merge session, the three-tree handoff; needy's opencode feature ships its SQLite driver | M1, and 3 for the feature |
 | M3 | The current folder as the default workspace (the CLI sends its folder) | nothing |
 | M4 | Features declaring sync mappings | 3, M1 |
 
@@ -532,8 +549,11 @@ evidence recorded.
   and kept as one commit layer with a history (owner, 2026-11-17).
 - A commit whose base changed is applied with a warning, not refused.
 - `actor.state` and `back: merge` are replaced by `mode: sync` with
-  `on-conflict`; `ignore` is the mapping's `filter`; SQLite is detected, not
-  declared; conflict copies stay outside the store (owner, 2026-11-17).
+  `on-conflict`; `ignore` is the mapping's `filter`; conflict copies stay
+  outside the store (owner, 2026-11-17).
+- needy's core knows no file format: the SQLite row merge moves out of it
+  into a merge driver that a feature ships, run in a sandbox booted from
+  the run's image, given three trees (owner, 2026-11-17).
 - A sync mapping's per-run copy lives on the host, so a hard stop loses
   nothing (owner, 2026-11-17); the data placement design had accepted that
   loss for `--now`.
@@ -557,8 +577,11 @@ evidence recorded.
 - An edit session's upper layer is in guest memory in slice 1.
 - Firecracker on x86_64 may cap the number of block devices below a long
   image's layer count (slice 1 measures it).
-- The SQLite merge depends on each harness's schema; a schema change between
-  harness versions can make a merge refuse, which is reported, not hidden.
+- A merge driver depends on its harness's format; a format change between
+  harness versions can make it fail, which leaves the store unchanged and
+  is reported, not hidden.
+- A conflict a driver handles costs a short merge session; many concurrent
+  runs of a SQLite harness pay it once per run end.
 - A per-run copy of agent state over the pass-through mount is slower than a
   local disk for harnesses that write their state often; the e2e `sync`
   scenario measures it.
