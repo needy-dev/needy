@@ -155,8 +155,8 @@ commands can reach it.
 62. As a user, I want conflicting copies kept by needy outside the store and named in `needy run report`, so that my agent never loads a conflict copy as real state.
 63. As a user of a harness that keeps sessions in SQLite, I want its feature's merge driver to merge the databases, so that sessions from concurrent runs all appear in the next one, without needy knowing SQLite.
 64. As a feature author, I want to supply a merge driver for my harness's files (given the seed, the run's copy and the store's current state as three trees), so that a format needy does not know merges correctly.
-65. As a user, I want a merge driver to run in a sandbox started from the run's image, never on the host, so that a feature's code cannot touch my machine.
-66. As a user, I want a failing merge driver to leave the store's files as they were and keep the run's, reported, so that a broken driver loses nothing.
+65. As a user, I want a merge driver to run in an actor, never on the host: in the run's own actor at a normal end, or in a short merge session from the run's image when that actor is gone, so that a feature's code cannot touch my machine and a normal end costs no extra boot.
+66. As a user, I want a failing or hanging merge driver (it has a time limit) to leave the store's files as they were and keep the run's, reported, so that a broken driver loses nothing and never holds up a run's end.
 67. As a user, I want caches and logs left out of syncing with the mapping's ordinary `filter`, so that I learn no second exclusion syntax.
 68. As a user, I want a run stopped with `--now`, crashed, or ended while the store was unreachable to lose nothing, its changes merged later, so that a hard stop does not lose a login.
 69. As a user, I want a pending merge for a store done before any new run of that store is seeded, so that a new run never starts from stale state.
@@ -380,11 +380,18 @@ commands can reach it.
   also handles side files such as a database's write-ahead log, and takes
   back the merged files for the store. needy's own merge skips the files a
   driver claims. A driver is a command a feature ships (a mapping a feature
-  declares names it); it runs in a short merge session booted from the
-  run's snapshot, with no routing and no network, so a feature's code never
-  runs on the host and has its harness's own tools and versions. A driver
-  that fails leaves the store's files unchanged, keeps the run's, and is
-  reported. needy's opencode feature ships an SQLite row-merge driver (three
+  declares names it). It runs inside an actor, never on the host, so a
+  feature's code has its harness's own tools and versions:
+  - at a normal end, in the run's own actor, after the driving program and
+    the `stop` hook and before the actor shuts down, with routing and
+    network turned off for it, and the three trees passed through as the
+    workspace is;
+  - when the run's actor is gone (a `--now` stop, a crash, a store that was
+    unreachable), in a short merge session booted from the run's snapshot,
+    with no routing and no network.
+  The daemon holds the store's lock while the driver runs. A driver that
+  fails or exceeds its time limit leaves the store's files unchanged, keeps
+  the run's, and is reported. needy's opencode feature ships an SQLite row-merge driver (three
   way per row by primary key; tables keyed by an autoincrement integer are
   reported, not merged), which the merge spike showed works.
 - A merge that cannot run yet stays pending. Pending merges for a store run
@@ -504,7 +511,7 @@ evidence recorded.
 | 6 | Built-in profiles and images; `image log`, `image export` | 5 |
 | I1 | The installers start the daemon (C1) | nothing |
 | M1 | Sync mappings: per-run copies on the host, seeds, the three-way file merge with `on-conflict`, the lock, pending merges, the interim store | nothing |
-| M2 | Merge drivers: the merge session, the three-tree handoff; needy's opencode feature ships its SQLite driver | M1, and 3 for the feature |
+| M2 | Merge drivers: in the run's own actor at a normal end (routing and network off, a time limit), in a merge session otherwise; the three-tree handoff; needy's opencode feature ships its SQLite driver | M1, and 3 for the feature |
 | M3 | The current folder as the default workspace (the CLI sends its folder) | nothing |
 | M4 | Features declaring sync mappings | 3, M1 |
 
@@ -552,8 +559,9 @@ evidence recorded.
   `on-conflict`; `ignore` is the mapping's `filter`; conflict copies stay
   outside the store (owner, 2026-11-17).
 - needy's core knows no file format: the SQLite row merge moves out of it
-  into a merge driver that a feature ships, run in a sandbox booted from
-  the run's image, given three trees (owner, 2026-11-17).
+  into a merge driver that a feature ships, given three trees, run in the
+  run's own actor at a normal end and in a merge session booted from the
+  run's image when that actor is gone (owner, 2026-11-17).
 - A sync mapping's per-run copy lives on the host, so a hard stop loses
   nothing (owner, 2026-11-17); the data placement design had accepted that
   loss for `--now`.
@@ -580,8 +588,8 @@ evidence recorded.
 - A merge driver depends on its harness's format; a format change between
   harness versions can make it fail, which leaves the store unchanged and
   is reported, not hidden.
-- A conflict a driver handles costs a short merge session; many concurrent
-  runs of a SQLite harness pay it once per run end.
+- A driver after a hard stop or a crash costs a short merge session; a
+  normal end runs it in the run's own actor at no extra boot.
 - A per-run copy of agent state over the pass-through mount is slower than a
   local disk for harnesses that write their state often; the e2e `sync`
   scenario measures it.
