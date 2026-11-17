@@ -19,7 +19,7 @@ use serde::Deserialize;
 pub use actor::{Actor, ActorDriver, BUILT_CONTAINER_IMAGE, CONTAINER_IMAGE, ContainerActor, Limits, OciRuntime, Workspace};
 pub use chaos::{Chaos, FILE_ERRNOS, Fault, FaultDomain, FileMatch, NetMatch, Readings, SIGNALS, valid_name as valid_fault_name};
 pub use executor::{ContainerBuild, ContainerExecutor, Cpus, Device, Executor, ExecutorDriver, Gpus, MemorySwap, Mount, OnFull, Ulimit};
-pub use files::{FileMapping, FileMode, Files, MirrorWhen, Side};
+pub use files::{FileMapping, FileMode, Files, MirrorWhen, OnConflict, Side};
 pub use network::{ActorNetwork, NetworkPolicy, SERVICE_DOMAIN, Service, service_host};
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
 pub use runner::{LabelMatch, RunnerSelector};

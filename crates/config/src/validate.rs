@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use crate::profile::{Actions, ActorDriver, ContainerActor, ExecutorDriver, Profile, Side, UnknownPolicy};
+use crate::profile::{Actions, ActorDriver, ContainerActor, ExecutorDriver, FileMode, Profile, Side, UnknownPolicy};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Severity {
@@ -122,8 +122,52 @@ pub fn profile(profile: &Profile) -> Vec<Finding> {
         findings.push(Finding::error(format!("files.{name}.{end} names unknown executor {exec:?}")));
       }
     }
+    match (mapping.mode, &mapping.from, &mapping.to) {
+      (FileMode::Sync, Side::Host(_), Side::Actor(_)) => {}
+      (FileMode::Sync, _, _) => {
+        findings.push(Finding::error(format!("files.{name}: a sync mapping goes from its store `host:PATH` to `actor:PATH`")))
+      }
+      (_, _, _) if !mapping.on_conflict.is_empty() => {
+        findings.push(Finding::error(format!("files.{name}: on-conflict is for `mode: sync` mappings")));
+      }
+      _ => {}
+    }
   }
+  claimed_twice(profile, &mut findings);
   findings
+}
+
+/// Two mappings that put files at one actor path, one of them a sync
+/// mapping: the actor would see only one of them, and a sync mapping's
+/// per-run copy would merge back what another mapping put there.
+// NOTICE: the spec makes any two mappings claiming one actor path an error
+// (2026-11-17-images-and-run-data-spec.md, "Configuration"); this checks
+// only pairs with a sync mapping, so profiles that load today keep loading.
+// REVIEW: whether two copy-ins or mounts at one path become errors too is
+// the owner's call.
+fn claimed_twice(profile: &Profile, findings: &mut Vec<Finding>) {
+  let target = |mapping: &crate::profile::FileMapping| match (&mapping.mode, &mapping.to) {
+    (FileMode::CopyIn | FileMode::Mount | FileMode::Sync, Side::Actor(path)) => Some(trim(path).to_string()),
+    _ => None,
+  };
+  for (name, mapping) in &profile.files.mappings {
+    let Some(path) = target(mapping).filter(|_| mapping.mode == FileMode::Sync) else {
+      continue;
+    };
+    for (other, theirs) in &profile.files.mappings {
+      if other != name && target(theirs).as_deref() == Some(path.as_str()) && (theirs.mode != FileMode::Sync || other < name) {
+        findings.push(Finding::error(format!("files.{name} and files.{other} both claim {path} in the actor")));
+      }
+    }
+  }
+}
+
+/// `path` without trailing slashes, except the root.
+fn trim(path: &str) -> &str {
+  match path.trim_end_matches('/') {
+    "" => path,
+    trimmed => trimmed,
+  }
 }
 
 /// What is wrong with a service named `name` that forwards to `url`, if
