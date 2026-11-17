@@ -51,6 +51,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       holder_executable: env!("CARGO_BIN_EXE_needy").into(),
       state_dir: home.path().join("state"),
       runtime_dir: home.path().join("runtime"),
+      data_dir: home.path().join("data"),
       actor_image: home.path().join("image"),
       vm_images: home.path().join("images"),
       kvm: home.path().join("kvm"),

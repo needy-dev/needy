@@ -17,10 +17,12 @@ use tokio_stream::wrappers::WatchStream;
 use crate::run::{Run, route_list};
 use crate::{Daemon, actor, files};
 
-/// The workspace mounts of `run` as its actor's init is told them.
-fn mounts(run: &Run) -> Vec<GuestMount> {
+/// The workspace mounts of `run` and its per-run copies, as its actor's
+/// init is told them.
+fn mounts(daemon: &Daemon, run: &Run) -> Vec<GuestMount> {
   actor::mounts(run)
     .into_iter()
+    .chain(crate::sync::mounts(daemon, run))
     .map(|m| GuestMount {
       target: m.target,
       executor: m.executor,
@@ -47,7 +49,7 @@ impl Guest for Daemon {
     let profile = &run.profile;
     let user = &profile.user;
     let home = format!("/home/{}", user.name);
-    let mounts = mounts(&run);
+    let mounts = mounts(self, &run);
     // The workspace, else the home directory: init mounts a fresh home, so
     // nothing else is sure to exist.
     let cwd = profile.actor.workspace.as_ref().map_or(home, |w| w.path.clone());

@@ -315,7 +315,12 @@ impl Processes for Daemon {
           }
           id => Some(self.runs.find_open(id).await?),
         };
+        let mount = run.as_ref().and_then(|run| crate::sync::mount_instance(self, run, &spec));
+        let synced = mount.is_some();
         let (instance, decided) = match &run {
+          // A mount of a per-run copy runs on this machine, not on one of
+          // the run's executors.
+          Some(_) if let Some(instance) = mount => (instance?, Vec::new()),
           Some(run) => match routing::place(run, &mut spec).await? {
             (routing::Placed::Run(instance), decided) => (instance, decided),
             (routing::Placed::Fault(fault), decided) => return Ok(faulted(run, fault, decided)),
@@ -334,7 +339,14 @@ impl Processes for Daemon {
           by: spec.by.clone(),
           argv: spec.argv.clone(),
           detach: Arc::new(AtomicBool::new(spec.detach)),
-          filter: run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd)),
+          filter: if synced {
+            // The control host's `sftp-server` serves every path this
+            // daemon's account can reach; the jail keeps the mount in its
+            // per-run copy.
+            Some(Arc::new(needy_core::intercept::file::jail::Jail::new(&spec.cwd)) as Arc<dyn StreamFilter>)
+          } else {
+            run.as_ref().and_then(|s| filter::install(s, origin, &spec.cwd))
+          },
           timers: run.as_ref().map(|run| Timers {
             tasks: run.tasks.clone(),
             cancel: run.cancel.clone(),

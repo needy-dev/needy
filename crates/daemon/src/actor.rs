@@ -170,7 +170,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   // itself; a VM's init, or an Apple `container` actor's, does it inside.
   let mounts = match facets.workspace {
     Side::Guest => Vec::new(),
-    Side::Host => mounts(run),
+    Side::Host => mounts(run).into_iter().chain(crate::sync::mounts(daemon, run)).collect(),
   };
   daemon.snapshot_run(run).await?;
   let vm = match daemon

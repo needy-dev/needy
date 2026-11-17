@@ -18,7 +18,7 @@ use crate::run::Run;
 /// A profile path on the host: `{run}` is the run's ID, `~` the
 /// user's home directory, and a relative path resolves against the
 /// profile's directory.
-fn host_path(run: &Run, path: &str) -> PathBuf {
+pub(crate) fn host_path(run: &Run, path: &str) -> PathBuf {
   let path = path.replace("{run}", &run.id);
   let path = needy_core_executor::driver::expand_home(&path, &needy_core_executor::driver::home());
   if Path::new(&path).is_absolute() {

@@ -648,6 +648,14 @@ A copy-in / mirror-out pair is how state such as a login survives stateless
 actors. A `filter` (rclone-style rules, first match wins) applies on the
 control host, where it packs a copy-in and where it unpacks a mirror-out.
 
+A `mode: sync` mapping (`from: "host:STORE"`, `to: "actor:PATH"`) does the
+same for several runs at once and survives `run stop --now`: each run works
+on its own copy of the store, merged back three-way when it ends, with an
+`on-conflict` map (`store`, `run`, `lines`) for files both changed; `needy
+report` lists the stores, conflicts and pending merges. See
+[Sync mapping](docs/TERMS_AND_CONCEPTS.md#sync-mapping). Unit and in-process
+daemon tests only so far; not yet verified end to end on a real actor.
+
 ### Network
 
 The actor has no network of its own: everything goes through the gateway on

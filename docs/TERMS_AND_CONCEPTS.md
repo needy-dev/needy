@@ -787,7 +787,24 @@ the actor's home).
 ### File mapping
 
 A named profile entry that moves files: **copy-in** at run start,
-**mount** for a live view, **mirror-out** back to the host.
+**mount** for a live view, **mirror-out** back to the host, or **sync**
+(below).
+
+### Sync mapping
+
+A file mapping in `mode: sync` (approved contract,
+[images and run data spec](ai/references/architecture/2026-11-17-images-and-run-data-spec.md#sync-mappings)):
+its **store** (`from: host:PATH`, a directory on the control host) is copied
+into a **per-run copy** in needy's data directory, which the actor uses live
+at `to`, and the **seed** (the store as it was copied) is kept. When the run
+ends, however it ends, the per-run copy is **merged back** into the store
+three-way against the seed, under an exclusive lock on the store, one run at
+a time: an entry only the run changed is taken; one both changed follows the
+mapping's `on-conflict` choice (`store`, `run` or `lines`), and otherwise the
+store keeps its copy, the run's is kept outside the store and `needy report`
+names it as a **conflict**. A merge that cannot run stays **pending** and runs
+when the daemon starts or before the store is next seeded. Merge drivers are
+not implemented yet (`TODO(merge-drivers)`).
 
 ### Sidecar
 
