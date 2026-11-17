@@ -28,6 +28,8 @@ object.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# A layer's canonical form in the layer store (`image::store`) is a tar archive.
+tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -61,7 +63,6 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 needy-common = { workspace = true, features = ["testing"] }
-tar.workspace = true
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true
 tonic.workspace = true

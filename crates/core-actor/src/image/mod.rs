@@ -10,9 +10,12 @@
 //!   driver checks an image records before it starts an actor from it.
 //! - [`manifest`]: what a VM image is and where it came from, in its
 //!   directory.
+//! - [`store`]: the layer store: an image's layers, snapshots and commits,
+//!   and the layer disks the VM drivers boot a snapshot from.
 
 pub mod base;
 pub mod container;
 pub mod guest;
 pub mod manifest;
+pub mod store;
 pub mod vm;

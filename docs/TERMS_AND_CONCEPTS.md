@@ -628,6 +628,27 @@ ID) and the SHA-256 of the archive it was unpacked from. The VM drivers read
 its base ABI; `needy image ls` shows the rest. A directory without one is
 not an image: `needy image pull` or `needy image build` writes one.
 
+### Layer store (provisional)
+
+Where the daemon keeps an image's layers
+(`needy-core-actor`'s `image::store`; see the
+[images and run data spec](ai/references/architecture/2026-11-17-images-and-run-data-spec.md#the-layer-store-new-deep-module)).
+A layer is kept in one form, an OCI layer archive, and named by its
+digest. A **snapshot** is a stack of layers named by the digest of the
+stack. An image's **commits** (hand edits) collapse into one commit layer
+with a history to roll back through. Built layers, snapshots and layer
+disks are cache; commit layers and their history are data. Nothing calls
+it yet (slice 1 of the spec wires it).
+
+### Layer disk (provisional)
+
+A layer as a read-only SquashFS disk a VM driver attaches after the guest
+disk: the layer's tree under `root/`, and its digest in a marker file,
+`needy-layer`, by which the guest needy finds it whatever the attach order.
+Deletions are overlayfs whiteouts; an opaque directory is written as
+whiteouts of what it hides below, since the disk carries no extended
+attributes.
+
 ## Routing
 
 ### Mesh
