@@ -60,3 +60,29 @@ fn shadow_gets_a_locked_entry_unless_the_name_has_one() {
   let with_bob = "root:*:19000:0:99999:7:::\nbob:$6$x:19000:0:99999:7:::\n";
   assert_eq!(shadow(with_bob, &BOB), with_bob);
 }
+
+// The run's user keeps the groups an image put it in, such as those Dev
+// Container features create (`nvm`, `python`, `pipx`), so they are read from
+// the member lists of the group file.
+#[test]
+fn a_users_supplementary_groups_are_the_groups_that_list_it() {
+  let text = "root:x:0:\nagent:x:1000:\nnvm:x:999:agent\npython:x:998:other,agent\nother:x:997:other\nself:x:1000:agent\n";
+  let user = Account {
+    name: "agent",
+    uid: 1000,
+    gid: 1000,
+  };
+
+  assert_eq!(supplementary_groups(text, &user), [999, 998]);
+}
+
+#[test]
+fn a_user_no_group_lists_has_no_supplementary_groups() {
+  let user = Account {
+    name: "agent",
+    uid: 1000,
+    gid: 1000,
+  };
+
+  assert_eq!(supplementary_groups("agent:x:1000:\nnvm:x:999:\n", &user), Vec::<u32>::new());
+}
