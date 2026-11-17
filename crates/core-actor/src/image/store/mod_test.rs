@@ -96,7 +96,10 @@ fn disk_tree(path: &Path) -> BTreeMap<String, String> {
       backhand::InnerNode::CharacterDevice(device) => format!("char:{}", device.device_number),
       _ => "other".to_string(),
     };
-    tree.insert(node.fullpath.display().to_string(), what);
+    // The disk's own separator, whatever the host's (`\` on Windows).
+    let parts: Vec<_> =
+      node.fullpath.components().filter_map(|part| part.as_os_str().to_str().filter(|part| *part != "/" && *part != "\\")).collect();
+    tree.insert(format!("/{}", parts.join("/")), what);
   }
   tree
 }
