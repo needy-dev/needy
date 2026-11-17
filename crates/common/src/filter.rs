@@ -15,20 +15,28 @@ pub fn filter_allows(filter: &[String], rel_path: &str) -> bool {
       Some(("-", rest)) => (false, rest.trim()),
       _ => continue,
     };
-    let mut pattern = pattern.to_string();
-    if pattern.ends_with('/') {
-      pattern.push_str("**");
-    }
-    let matched = if let Some(anchored) = pattern.strip_prefix('/') {
-      glob_match(anchored, rel)
-    } else {
-      glob_match(&pattern, rel) || rel.match_indices('/').any(|(i, _)| glob_match(&pattern, &rel[i + 1..]))
-    };
-    if matched {
+    if matches(pattern, rel) {
       return include;
     }
   }
   true
+}
+
+/// Whether `pattern` matches the relative path `rel` as a filter rule's
+/// pattern does: a leading `/` anchors at the root, otherwise the pattern
+/// may match at any directory level, and a trailing `/` matches a directory
+/// and its contents.
+pub fn matches(pattern: &str, rel: &str) -> bool {
+  let rel = rel.trim_start_matches('/');
+  let mut pattern = pattern.to_string();
+  if pattern.ends_with('/') {
+    pattern.push_str("**");
+  }
+  if let Some(anchored) = pattern.strip_prefix('/') {
+    glob_match(anchored, rel)
+  } else {
+    glob_match(&pattern, rel) || rel.match_indices('/').any(|(i, _)| glob_match(&pattern, &rel[i + 1..]))
+  }
 }
 
 #[cfg(test)]
