@@ -10,6 +10,13 @@ fn argv(s: &str) -> Vec<String> {
   s.split_whitespace().map(str::to_string).collect()
 }
 
+fn store() -> Store {
+  Store {
+    path: "/home/user/.local/share/needy/files/pi".into(),
+    account: "user".into(),
+  }
+}
+
 /// One event of every kind.
 fn every_kind() -> Vec<Event> {
   vec![
@@ -84,6 +91,24 @@ fn every_kind() -> Vec<Event> {
       name: "out".into(),
       transfer: Transfer::MirrorOut,
       reason: "permission denied".into(),
+    }),
+    Event::FilesSync(FilesSync {
+      name: "pi".into(),
+      store: store(),
+      entries: 4,
+    }),
+    Event::FilesMerge(FilesMerge {
+      name: "pi".into(),
+      store: store(),
+      taken: 2,
+      resolved: 1,
+      conflicts: vec!["installation_id".into()],
+      kept: Some("/home/user/.local/share/needy/conflicts/abc/pi".into()),
+    }),
+    Event::FilesMergePending(FilesMergePending {
+      name: "pi".into(),
+      store: store(),
+      reason: "the store is unreachable".into(),
     }),
     Event::ExecDecide(ExecDecide {
       argv: argv("git status"),

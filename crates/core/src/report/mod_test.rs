@@ -847,3 +847,118 @@ fn a_schema_10_history_still_renders_its_original_result() {
   assert_eq!(summary["state"], "finished");
   assert_eq!(summary["actor_exit"]["code"], 0);
 }
+
+fn pi_store() -> Store {
+  Store {
+    path: "/home/user/.local/share/needy/files/pi".into(),
+    account: "user".into(),
+  }
+}
+
+fn synced(time_ms: i64) -> Recorded {
+  at(
+    time_ms,
+    Event::FilesSync(FilesSync {
+      name: "pi".into(),
+      store: pi_store(),
+      entries: 3,
+    }),
+  )
+}
+
+fn merged(time_ms: i64, conflicts: &[&str]) -> Recorded {
+  at(
+    time_ms,
+    Event::FilesMerge(FilesMerge {
+      name: "pi".into(),
+      store: pi_store(),
+      taken: 2,
+      resolved: 1,
+      conflicts: conflicts.iter().map(|c| c.to_string()).collect(),
+      kept: (!conflicts.is_empty()).then(|| "/home/user/.local/share/needy/conflicts/7f3a/pi".into()),
+    }),
+  )
+}
+
+fn pending(time_ms: i64) -> Recorded {
+  at(
+    time_ms,
+    Event::FilesMergePending(FilesMergePending {
+      name: "pi".into(),
+      store: pi_store(),
+      reason: "cannot lock the store".into(),
+    }),
+  )
+}
+
+#[test]
+fn a_sync_mappings_store_and_its_merge_are_reported() {
+  let events = vec![
+    create(1_000),
+    synced(1_100),
+    merged(3_000, &[]),
+    at(3_100, Event::RunStop(RunStop::default())),
+  ];
+
+  let human = human(&events);
+  let markdown = render("7f3a", &events, Level::Summary, Format::Markdown);
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &events, Level::Summary, Format::Json)).unwrap();
+
+  assert!(
+    human.contains(
+      "\nSynced files\n  pi  merged: 2 taken, 1 resolved, no conflicts; store /home/user/.local/share/needy/files/pi on the control host, account user\n"
+    ),
+    "{human}"
+  );
+  assert!(human.ends_with("\nNo findings.\n"), "{human}");
+  assert!(markdown.contains("## Synced files\n"), "{markdown}");
+  assert!(
+    markdown.contains("| `pi` | merged | 2 | 1 | 0 | `/home/user/.local/share/needy/files/pi` (control host, account `user`) |"),
+    "{markdown}"
+  );
+  assert_eq!(json["synced"][0]["merge"], "merged");
+  assert_eq!(json["synced"][0]["store"], "/home/user/.local/share/needy/files/pi");
+  assert_eq!(json["synced"][0]["account"], "user");
+}
+
+#[test]
+fn a_merge_conflict_is_a_finding_that_says_where_the_runs_copies_are() {
+  let events = vec![
+    create(1_000),
+    synced(1_100),
+    merged(3_000, &["installation_id", "a/b.json"]),
+  ];
+
+  let human = human(&events);
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &events, Level::Summary, Format::Json)).unwrap();
+
+  assert!(
+    human.contains(
+      "  sync pi: 2 conflicts kept the store's copies; the run's are in /home/user/.local/share/needy/conflicts/7f3a/pi: installation_id, a/b.json\n"
+    ),
+    "{human}"
+  );
+  assert_eq!(json["findings"][0]["kind"], "sync_conflict");
+  assert_eq!(json["synced"][0]["conflicts"], serde_json::json!(["installation_id", "a/b.json"]));
+}
+
+#[test]
+fn a_pending_merge_is_a_finding_until_a_later_merge() {
+  let waiting = vec![create(1_000), synced(1_100), pending(3_000)];
+  let done = vec![
+    create(1_000),
+    synced(1_100),
+    pending(3_000),
+    merged(9_000, &[]),
+  ];
+
+  let human = human(&waiting);
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &waiting, Level::Summary, Format::Json)).unwrap();
+  let later: serde_json::Value = serde_json::from_str(&render("7f3a", &done, Level::Summary, Format::Json)).unwrap();
+
+  assert!(human.contains("  sync pi: merge pending: cannot lock the store\n"), "{human}");
+  assert_eq!(json["synced"][0]["merge"], "pending");
+  assert_eq!(json["findings"][0]["kind"], "merge_pending");
+  assert_eq!(later["synced"][0]["merge"], "merged");
+  assert_eq!(later["findings"], serde_json::json!([]));
+}
