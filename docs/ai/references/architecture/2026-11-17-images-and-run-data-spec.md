@@ -78,7 +78,7 @@ commands can reach it.
 
 1. As a new user, I want installing needy to leave its daemon running, so that I do not have to learn about services before my first run.
 2. As a new user on Linux, I want the one-time host setup (sshfs, fuse) stated once, so that I know the only manual step.
-3. As a new user, I want `needy run create -it --profile builtin:pi` to work in a fresh install, so that I can try an agent without cloning the repository.
+3. As a new user, I want `needy run create -it --profile builtin:pi` to work in a fresh install, so that I can try an agent without cloning the repository; a built-in profile carries its image definition inline (needy ships no built-in images).
 4. As a user of a VM driver, I want a missing base VM image to be pulled by `run create`, with the same checks `needy image pull` makes, so that my first run does not fail on a missing download.
 5. As a user who prepares machines ahead of time, I want `needy image pull` to keep working, so that I can pull before going offline or update a base deliberately.
 6. As a user, I want `run create` to build an image's missing layers by itself and show progress, so that I never run a separate build first.
@@ -94,9 +94,9 @@ commands can reach it.
 13. As a user, I want a local feature directory to work like a published one, so that I can develop my own feature next to my project.
 14. As a user, I want `actor.image` to keep accepting an image reference, so that images I built by hand keep working.
 15. As a user, I want a path in `actor.image` that does not exist to be an error, not a registry pull, so that a typo is reported as a typo.
-16. As a user, I want to name an image file by path or as `builtin:NAME`, or write the definition inline in my profile, so that I can keep images where I like.
-17. As a user, I want an image to `extends` another and add layers after the parent's, so that I can add one tool to a built-in image without copying its list.
-18. As a user, I want a child layer that names the same feature as a parent layer (same reference, any tag) to replace it in place, so that I can bump one version of a built-in image.
+16. As a user, I want to name an image file by path, or write the definition inline in my profile, so that I can keep images where I like.
+17. As a user, I want an image file to `extends` another of mine and add layers after the parent's, so that variants of my images share one base description.
+18. As a user, I want a child layer that names the same feature as a parent layer (same reference, any tag) to replace it in place, so that I can bump one version of a parent image.
 19. As a user, I want hooks to append along `extends` too, so that a parent's setup still runs.
 20. As a user, I want a lockfile written next to my image file on first resolution, so that every host and every later build resolves the same feature versions.
 21. As a user, I want changing a layer to rebuild only that layer and the ones after it, so that a version bump is fast.
@@ -219,10 +219,17 @@ commands can reach it.
 
 - `actor.image` is decided by its syntax, not by what exists: a string that
   starts with `./`, `../` or `/`, or ends in `.yaml`, is a path to an image
-  file and must exist; `builtin:NAME` is a built-in image; a map is an inline
-  definition; any other string is an image reference, as today.
+  file and must exist; a map is an inline definition; any other string is
+  an image reference, as today. needy ships **no built-in images**: a
+  `builtin:` string in `actor.image` is an error that suggests a feature
+  layer (owner, 2026-11-17). Agents are features, and `builtin:` names only
+  recipes and profiles.
+- A definition without `root:` uses needy's **default root**, a plain
+  distribution image pinned by digest with its provenance, to which needy
+  adds its own layer and the sshfs feature (E8) like any root. It is a
+  default, not a named image.
 - An image file is its own document kind, loaded with the one merge model:
-  `extends`, `builtin:`, unknown keys are errors. An inline definition in a
+  `extends` names another image file by path; unknown keys are errors. An inline definition in a
   profile merges along the profile's `extends` with the image rules below.
 - The merge model gains keyed append: `layers` and each `hooks.*` list
   append along `extends` (parent first); a child layer whose feature
@@ -415,8 +422,9 @@ commands can reach it.
 
 - New in slice 1: `needy image edit [IMAGE] [--profile P]`, `needy image
   build [IMAGE] [--profile P]`, `needy image rollback [IMAGE] [--profile P]
-  [@N]`. `IMAGE` is an image file path or `builtin:NAME` (provisional);
-  `--profile` names the image a profile uses, inline definitions included.
+  [@N]`. `IMAGE` is an image file path (provisional); `--profile` names the
+  image a profile uses, inline definitions included, built-in profiles'
+  too.
 - Later: `needy image log` and `needy image export` (`TODO(images)`).
 - Changed: `needy run create` builds and pulls what it needs; `needy run
   report` lists merge conflicts, pending merges, stores and the snapshot
@@ -507,8 +515,8 @@ evidence recorded.
 | 2 | The same for the container drivers (engine commit, export and load; Apple's store) | 1 |
 | 3 | Features as layers: references, options, order, `containerEnv` and `PATH`, refusals, the lockfile's features, the user in the image, needy's sshfs feature, building and pulling in `run create` | 1, and 2 for hosts without a VM driver |
 | 4 | Hooks (`start`, `stop`) | 3 |
-| 5 | The needy layer on any root; `builtin:minimal`; needy's agents as features; `examples/agents` moves to them | 3 |
-| 6 | Built-in profiles and images; `image log`, `image export` | 5 |
+| 5 | The needy layer on any root; the default root; needy's agents as features; `examples/agents` moves to them | 3 |
+| 6 | Built-in profiles, each with its image inline; `image log`, `image export` | 5 |
 | I1 | The installers start the daemon (C1) | nothing |
 | M1 | Sync mappings: per-run copies on the host, seeds, the three-way file merge with `on-conflict`, the lock, pending merges, the interim store | nothing |
 | M2 | Merge drivers: in the run's own actor at a normal end (routing and network off, a time limit), in a merge session otherwise; the three-tree handoff; needy's opencode feature ships its SQLite driver | M1, and 3 for the feature |
@@ -566,6 +574,10 @@ evidence recorded.
   nothing (owner, 2026-11-17); the data placement design had accepted that
   loss for `--now`.
 - The workspace default has no home or `/` guard (owner, 2026-11-17).
+- needy ships no built-in images (no `builtin:agents`, no
+  `builtin:minimal`): agents are features, a definition without `root:` gets
+  a pinned default root, and getting started without a clone goes through
+  built-in profiles that carry their image inline (owner, 2026-11-17).
 - The `attach` hook is deferred; "the same feature" means the same
   reference without its tag (owner, 2026-11-17).
 - Slice 1 ships `image edit`, `build` and `rollback`; `log` and `export`
