@@ -92,9 +92,9 @@ a needy actor find and use what they installed?
    the driving program is started through `Command::uid`/`gid`, which also
    leaves them empty. Every image that puts the user in extra groups loses
    them at run time; features rely on it (`nvm` is a group-writable setgid
-   directory). A fix (initializing the user's groups from the group
-   database before dropping to the user) is a separate bug fix with its own
-   reproduction test.
+   directory). Fixed separately, with its own reproduction test, in
+   [#23](https://github.com/needy-dev/needy/pull/23): init now gives the
+   driving program the groups whose member lists name the user.
 
 ## Not checked
 
