@@ -1,5 +1,10 @@
 # Where a run's data lives
 
+> **Superseded in part, 2026-11-17:** the
+> [images and run data spec](2026-11-17-images-and-run-data-spec.md) is the
+> contract to implement; where it differs from this note, the spec holds
+> (see its "Changes from the designs").
+
 Status: **design, every open question decided** (2026-11-17); not yet
 implemented. Proposed 2026-11-16: user data stays with the account that
 started the run, and needy keeps the directories it owns under XDG base

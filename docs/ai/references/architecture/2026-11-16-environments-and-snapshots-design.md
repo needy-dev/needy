@@ -1,5 +1,10 @@
 # Images as layers
 
+> **Superseded in part, 2026-11-17:** the
+> [images and run data spec](2026-11-17-images-and-run-data-spec.md) is the
+> contract to implement; where it differs from this note, the spec holds
+> (see its "Changes from the designs").
+
 > **Renamed 2026-11-17 (E0):** what this note calls an *environment* is an
 > **image definition**: `actor.image` takes an image reference, as today, or
 > a definition (`root` plus `layers`) that needy builds and caches. "Image
