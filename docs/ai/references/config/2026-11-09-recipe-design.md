@@ -1,5 +1,11 @@
 # Recipes
 
+> **Migration notice (2026-11-18)**: `os.image` is removed (E2 in the
+> [images and run data spec](../architecture/2026-11-17-images-and-run-data-spec.md)):
+> a recipe describes a machine's identity only, and loading one with
+> `os.image` is an error that names an image definition's `root:` in
+> `actor.image`. The examples below keep the field as they were written.
+
 > **Migration notice (2026-11-13)**: `needy build` is now `needy image
 > build`, with the same flags, and a VM image records its base ABI in
 > `manifest.json` instead of a `base-abi` file (step 4 of the

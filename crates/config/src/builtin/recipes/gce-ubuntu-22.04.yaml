@@ -51,7 +51,6 @@ cpu:
 # 2 vCPUs and 8 GB.
 memory: 8GiB
 os:
-  image: ubuntu:22.04
   kernel:
     # Source: https://launchpad.net/ubuntu/+source/linux-gcp-6.5/6.5.0-1020.20~22.04.1
     # and its amd64 build, https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/28152459

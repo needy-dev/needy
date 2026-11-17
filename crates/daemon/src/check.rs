@@ -94,14 +94,26 @@ impl Daemon {
       Ok(placement) => {
         if let Some(refusal) = self.actor_refusal(&placement) {
           check.findings.push(error(format!("actor: {refusal}")));
-        } else if let Ok(driver) = crate::actor::driver_for(self, &profile.actor) {
-          // A driver this daemon lacks is already a finding of
-          // `validate::profile`.
-          check.actor_image = driver.image();
-          match self.unusable_host(&placement, driver.as_ref()).await {
-            Some(missing) => check.findings.push(error(format!("actor: {missing}"))),
-            // The image is there and records this needy's base ABI.
-            None => check.actor_base_abi = Some(needy_core_actor::image::base::ABI),
+        } else {
+          match crate::actor::driver_for(self, &profile.actor) {
+            Ok(driver) => {
+              check.actor_image = driver.image();
+              match self.unusable_host(&placement, driver.as_ref()).await {
+                Some(missing) => check.findings.push(error(format!("actor: {missing}"))),
+                // The image is there and records this needy's base ABI.
+                None => check.actor_base_abi = Some(needy_core_actor::image::base::ABI),
+              }
+            }
+            // TODO(images): the drivers' table refuses an image definition
+            // until runs build them (step 7 of the images slice 1 plan);
+            // `validate::profile` accepts one, so the refusal is a finding
+            // here.
+            Err(e) if matches!(profile.actor.image, Some(needy_config::image::Image::Definition(_))) => {
+              check.findings.push(error(format!("actor: {e}")));
+            }
+            // A driver this daemon lacks is already a finding of
+            // `validate::profile`.
+            Err(_) => {}
           }
         }
         check.actor = Some(placement);

@@ -115,7 +115,6 @@ pub struct CompiledRecipe {
   pub network_mac: Option<String>,
   pub interface: Option<String>,
   pub metadata: Option<serde_json::Value>,
-  pub os_image: Option<String>,
   /// The identity fields the actor must present (`required:`).
   pub required: Vec<needy_config::recipe::IdentityField>,
   // Validation findings belong to admission and were logged there; the
@@ -228,7 +227,6 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, run: &PerRun) -> CompiledRecipe
     network_mac,
     interface: recipe.network.interface.clone(),
     metadata,
-    os_image: recipe.os.image.clone(),
     required: recipe.required.clone(),
     findings,
   }

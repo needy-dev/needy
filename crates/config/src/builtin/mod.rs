@@ -21,5 +21,8 @@ pub(crate) fn find(kind: Kind, name: &str) -> Option<&'static str> {
     // NOTICE: there are no built-in profiles; `builtin:` in a profile's
     // `extends` names none until one is added here.
     Kind::Profile => None,
+    // NOTICE: needy ships no built-in images (owner decision, 2026-11-17,
+    // in the images and run data spec): agents are features.
+    Kind::Image => None,
   }
 }

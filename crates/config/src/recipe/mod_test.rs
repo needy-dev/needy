@@ -72,7 +72,6 @@ devices:
   assert_eq!(r.cpu.hypervisor, Some(Hypervisor::Visible));
   assert_eq!(r.cpu.features.hide, ["avx_vnni"]);
   assert_eq!(r.memory.map(|m| m.mib()), Some(16384));
-  assert_eq!(r.os.image.as_deref(), Some("ubuntu:22.04"));
   assert_eq!(r.os.kernel.release.as_deref(), Some("6.5.0-1020-gcp"));
   assert_eq!(r.os.kernel.build.user.as_deref(), Some("buildd"));
   assert_eq!(r.os.kernel.build.host.as_deref(), Some("builder"));
@@ -123,4 +122,17 @@ fn bad_values_are_rejected() {
 
   let err = load_text("cpu: { hypervisor: shown }").unwrap_err().to_string();
   assert!(err.contains("unknown variant `shown`"), "{err}");
+}
+
+#[test]
+fn os_image_is_removed_in_favour_of_an_image_definitions_root() {
+  let err = load_text("os: { image: ubuntu:24.04 }").unwrap_err().to_string();
+
+  assert!(err.contains("os.image: "), "{err}");
+  assert!(err.contains("`root:`"), "{err}");
+
+  let dir = tempfile::tempdir().unwrap();
+  std::fs::write(dir.path().join("old.recipe.yaml"), "os: { image: ubuntu:24.04 }\n").unwrap();
+  let err = resolve(&Source::file(dir.path().join("old.recipe.yaml"))).unwrap_err().to_string();
+  assert!(err.contains("os.image: "), "{err}");
 }

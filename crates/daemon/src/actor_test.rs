@@ -310,6 +310,26 @@ commands:
   assert!(message.contains("this host has no usable KVM"), "{message}");
 }
 
+// An image definition loads and validates before needy can build one
+// (step 1 of the images slice 1 plan), so a create refuses it at once
+// instead of booting the base image without its layers.
+#[tokio::test]
+async fn an_actor_on_an_image_definition_fails_the_create_until_images_are_built() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  fake_image(&started.dir.path().join("image"), LONG_RUNNING);
+  let profile = "actor: { driver: linux-firecracker, image: { root: example.com/root:1, layers: [{ run: echo one }] } }\n";
+
+  let Err(needy_api_server::control::ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, started.dir.path())).await
+  else {
+    panic!("a create of an image definition must fail");
+  };
+
+  assert!(message.contains("needy does not build image definitions yet"), "{message}");
+  let listed = Runs::list(daemon).await.unwrap();
+  assert!(!run_dir(&started, &listed[0].id).join("firecracker.pid").exists(), "firecracker was started");
+}
+
 // ROOT CAUSE:
 //
 // If `run attach` reached a macos-vz actor before its guest served the process

@@ -63,7 +63,6 @@ fn compiles_gce_recipe() {
   assert!(c.network_mac.as_deref().unwrap().starts_with("42:01:0a:80:00:"));
   assert_eq!(c.interface.as_deref(), Some("ens4"));
   assert_eq!(c.metadata.as_ref().unwrap()["provider"], "gce");
-  assert_eq!(c.os_image.as_deref(), Some("ubuntu:22.04"));
   assert_eq!(c.kernel_build_env["KERNELRELEASE"], "6.5.0-1020-gcp");
   assert_eq!(c.kernel_build_env["KBUILD_BUILD_USER"], "buildd");
 
