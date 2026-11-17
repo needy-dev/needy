@@ -28,8 +28,9 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-15 | [Client execution and lifecycle integration](2026-11-15-client-lifecycle-integration-evidence.md) | integration evidence |
 | 2026-11-15 | [Client lifecycle acceptance record](2026-11-15-client-lifecycle-acceptance.json) | sanitized results: 12 cells, 486 checks |
 | 2026-11-15 | [Lifecycle acceptance without KVM](2026-11-15-non-kvm-lifecycle-acceptance.json) | separate non-root runc host: 5 cells, 201 checks |
-| 2026-11-16 | [Environments as layers (pending)](2026-11-16-environments-and-snapshots-design.md) | design |
-| 2026-11-16 | [Where a run's data lives (pending)](2026-11-16-data-placement-design.md) | design |
+| 2026-11-16 | [Images as layers (decided, not implemented)](2026-11-16-environments-and-snapshots-design.md) | design |
+| 2026-11-16 | [Where a run's data lives (decided, not implemented)](2026-11-16-data-placement-design.md) | design |
 | 2026-11-16 | [Agent state on live mounts: Codex in concurrent VM actors](2026-11-16-agent-state-on-live-mounts-evidence.md) | evidence |
 | 2026-11-16 | [Agent state in the actor, merged back at stop: spikes](2026-11-16-agent-state-merge-spike-evidence.md) | evidence |
 | 2026-11-16 | [Container capture: trampolines on PATH, shells in place](2026-11-16-container-trampolines-design.md) | design |
+| 2026-11-17 | [Image definitions, edit sessions and merged run data (approved contract)](2026-11-17-images-and-run-data-spec.md) | spec |

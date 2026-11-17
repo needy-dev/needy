@@ -1,6 +1,18 @@
-# Environments as layers
+# Images as layers
 
-Status: **pending design**, proposed 2026-11-16. Direction agreed with the
+> **Superseded in part, 2026-11-17:** the
+> [images and run data spec](2026-11-17-images-and-run-data-spec.md) is the
+> contract to implement; where it differs from this note, the spec holds
+> (see its "Changes from the designs").
+
+> **Renamed 2026-11-17 (E0):** what this note calls an *environment* is an
+> **image definition**: `actor.image` takes an image reference, as today, or
+> a definition (`root` plus `layers`) that needy builds and caches. "Image
+> definition" is meant wherever the text below says "environment"; the file
+> keeps its name so links to it stay valid.
+
+Status: **design, every open question decided** (2026-11-17); not yet
+implemented. Proposed 2026-11-16. Direction agreed with the
 owner on 2026-11-16: needy keeps its own configuration (it does not read
 `devcontainer.json`), an environment is written directly as a list of
 **layers**, and the toolchains the Dev Container ecosystem already packages
@@ -19,6 +31,17 @@ marked *provisional* are not stable.
 | B2 | Build steps run as root without restriction. These privileges and B1 exist at build time only. |
 | C1 | Installing needy activates its daemon, as Docker and containerd packages do: the installer runs the service installation (`needy daemon service install --now`), so no separate step starts it. |
 | C2 | `sshfs` and `fuse3` stay a one-time host prerequisite on Linux. |
+| E0 | (2026-11-17) The concept is an **image definition**, not an "environment" (which read as environment variables): `actor.image` takes a reference (`needy-agents`), a `builtin:NAME` or a path to an image file, or an inline definition. |
+| E1 | (2026-11-17) Along `extends`, `layers` and `hooks.*` **append**: the parent's first, then the child's. A child layer that names the same feature reference as a parent layer replaces it in place (a version bump). Needs an append rule in `crates/config/src/merge.rs`. |
+| E2 | (2026-11-17) A recipe's `os.image` is **removed**; the image definition's `root` replaces it. Recipes describe identity only; `os.image` becomes an unknown key, an error that names `root:`. |
+| E3 | (2026-11-17) A feature that declares an `entrypoint` is **refused** for now (5 of the 28 official features at `devcontainers/features@b6877129` do: docker-in-docker and docker-outside-of-docker, refused anyway for privileged mode and mounts, and sshd, nix and desktop-lite). `TODO(images)` marks it; revisit when a needed feature has one. |
+| E6 | (2026-11-17) Layers are **flattened on every edit commit**: an edit session produces one layer over its base. |
+| E7 | (2026-11-17) `snapshot` layers stay **local**; an edited image is shared through `needy image export`. No registry push of layers. |
+| E8 | (2026-11-17) A root without `sshfs` gets **needy's sshfs feature** added before the user's layers, so any Debian, Ubuntu, Alpine or Fedora root mounts a workspace. |
+| E9 | (2026-11-17) **D4 is reversed for the base only:** a VM driver's `run create` pulls a missing base image with the same SHA-256 checks. `needy image pull` stays, for pulling ahead of time, going offline and updating a base. |
+| E10 | (2026-11-17) Executors accept image definitions too, **in a later slice**; actors first. `TODO(images)` marks the executor schema. |
+| E11 | (2026-11-17) An image for `macos-apple-container` is written as an OCI archive and loaded with `container image load`. |
+| A3 | (2026-11-17) The profile's user (name, UID, GID) is part of the environment: it exists in the root before the first layer and is in every cache key, so a different UID is a different environment. Open question 4, option A. |
 
 ## Why
 
@@ -83,7 +106,7 @@ has no lifecycle hooks.
 
 | Term | Meaning |
 | --- | --- |
-| **environment** | The software an actor runs on: a root, layers and hooks. Separate from the recipe, which is the machine's identity. It resolves to a snapshot. |
+| **image definition** | The software an actor runs on: a root, layers and hooks, which needy builds and caches; what `actor.image` takes besides a reference. Separate from the recipe, which is the machine's identity. It resolves to a snapshot. (Called *environment* in the rest of this note, E0.) |
 | **root** | The OCI image an environment starts from. |
 | **layer** | One entry of an environment, and the file-system diff it produces (an overlayfs upper directory, convertible to an OCI layer). Kinds: `feature`, `run`, `snapshot`. |
 | **feature** | A Dev Container feature, as its specification defines it: a directory with `devcontainer-feature.json` and `install.sh`, distributed as an OCI artifact. Third-party name, kept. |
@@ -95,12 +118,13 @@ has no lifecycle hooks.
 
 ## Configuration
 
-A profile names an environment as it names a recipe (`actor.recipe` in
-`crates/config/src/profile/actor.rs`): `builtin:NAME`, a path relative to
-the profile, or inline.
+A profile names an image definition in `actor.image` (E0): an image
+reference as today, `builtin:NAME`, a path relative to the profile (as
+`actor.recipe` takes one, `crates/config/src/profile/actor.rs`), or an inline
+definition.
 
 ```yaml
-# agents.env.yaml (provisional file name)
+# agents.image.yaml (provisional file name)
 extends: builtin:minimal
 root: ubuntu:24.04
 layers:
@@ -122,7 +146,7 @@ hooks:
 ```yaml
 # profile
 actor:
-  environment: agents.env.yaml    # or builtin:agents, or an inline map
+  image: agents.image.yaml        # or builtin:agents, an inline map, or a reference such as needy-agents
   command: [pi]
 ```
 
@@ -135,18 +159,19 @@ actor:
 `root:` is an OCI image; `build: { context, dockerfile, target, args }`
 (the shape of `ContainerBuild` in `crates/config/src/profile/executor.rs`)
 builds one with an engine and BuildKit, as `needy image build --from` does
-today. `actor.environment` and `actor.image` exclude each other;
-`actor.image` stays for images built by hand.
+today. A string that is neither `builtin:` nor a path to a file stays an
+image reference, so `actor.image: needy-agents` keeps working for images
+built by hand.
 
 A layer may carry `env:` for what it adds to the environment.
 
-> **Open question 1.** In `extends`, a child's list replaces its parent's
+> **Decided 2026-11-17 (E1, append).** The question was: In `extends`, a child's list replaces its parent's
 > (`crates/config/src/merge.rs`); only a profile's `commands` and
 > `resolvers` are prepended. A child environment usually adds layers after
 > its parent's. Add an *append* rule for `layers` and `hooks.*`, or keep
 > replacement and let a child repeat its parent's list?
 
-> **Open question 2.** A recipe already has `os.image`, "the OCI image the
+> **Decided 2026-11-17 (E2, `os.image` is removed).** The question was: A recipe already has `os.image`, "the OCI image the
 > rootfs is built from" (`crates/config/src/recipe/kernel.rs`). It is
 > compiled into `os_image` (`crates/core/src/recipe/mod.rs:231`) but nothing
 > reads it. Does the environment's `root` replace it, or does `os.image`
@@ -189,7 +214,7 @@ run; slice 0 below runs them.
 | `devcontainer-feature.json` property | needy |
 | --- | --- |
 | `options`, `dependsOn`, `installsAfter` | as above |
-| `containerEnv` | **applied** to the environment, in layer order, with `${VAR}` expanded against the environment so far. The official features need it: `node` installs under `/usr/local/share/nvm` and adds `PATH: /usr/local/share/nvm/current/bin:${PATH}`, and `python` does the same |
+| `containerEnv` | **applied** to the environment, in layer order, with `${VAR}` expanded against the environment so far. The official features need it: `node` installs under `/usr/local/share/nvm` and adds `PATH: /usr/local/share/nvm/current/bin:${PATH}`, and `python` does the same. The resulting `PATH` is the one a container actor's trampolines cover ([shims and `PATH`](#shims-and-path)) |
 | `onCreateCommand` | a `run` layer after the feature |
 | `updateContentCommand`, `postCreateCommand`, `postStartCommand` | the `start` hook, before the environment's own |
 | `postAttachCommand` | the `attach` hook |
@@ -221,7 +246,7 @@ today:
 - built with the user under another UID than a later profile's, the files
   belong to a UID that is someone else at run time.
 
-> **Open question 4.** Make the user (name, UID, GID) part of the
+> **Decided 2026-11-17 (A3): option A.** The question was: make the user (name, UID, GID) part of the
 > environment: needy creates it in the root before the first layer and it
 > is in every cache key, so a different UID is a different environment
 > (A); build with a fixed user and remap ownership at run time (B); or let
@@ -311,7 +336,7 @@ Overlayfs and OCI layers express deletions differently (a 0/0 character
 device against a `.wh.` file); the conversion between the two is one
 component module, with tests in both directions.
 
-> **Open question 6.** A long chain of layers costs one disk per layer in a
+> **Decided 2026-11-17 (E6, on every edit commit).** The question was: A long chain of layers costs one disk per layer in a
 > VM. Flatten past a limit (merge the oldest layers into one), or flatten
 > on every edit commit? Recommendation: flatten automatically above a
 > fixed count; the count is a `NOTICE` with its measured reason.
@@ -339,19 +364,44 @@ each one.
 A `snapshot` layer is not reproducible from text; `needy image log` shows
 its commands so that it can be turned into a `run` layer later.
 
-> **Open question 7.** Where `snapshot` layers live for sharing: only in
+> **Decided 2026-11-17 (E7, local only; share by export).** The question was: Where `snapshot` layers live for sharing: only in
 > the local data directory, or pushed to a registry as OCI layers so an
 > environment file with them works on another host?
 
-### Shims
+### Shims and `PATH`
+
+Changed 2026-11-17, after the
+[trampolines](2026-11-16-container-trampolines-design.md) (#21) landed; this
+section first said needy runs the shim step whenever it commits a layer.
 
 The VM drivers catch every exec in the kernel and need no shims. A
-container actor routes only shims, so needy runs the shim step when it
-commits a layer, over the programs that layer added on the environment's
-`PATH`, as its `containerEnv` made it (the official `node` feature's
-programs are under `/usr/local/share/nvm/current/bin`, outside Docker's
-default `PATH`). It can no longer be left out (today's
-`/.needy/shim-image`).
+container actor routes through trampolines that init makes at each start,
+and through the shells shimmed in place. So committing a layer runs no shim
+step, and a layer that adds a program needs nothing for it to be routed,
+**provided the program is on the `PATH` the trampolines are made over**.
+
+Today that `PATH` is fixed: init makes trampolines over `SYSTEM_PATH`
+(`crates/core-actor/src/guest/capture/shim.rs`) and gives the driving
+program `SYSTEM_PATH` plus the route stubs (`search_path` in
+`crates/core-actor/src/guest/init/stubs.rs`). Features put programs
+elsewhere and add the directory through `containerEnv`: the official `node`
+feature's are under `/usr/local/share/nvm/current/bin`
+(`PATH: /usr/local/share/nvm/current/bin:${PATH}`). With the fixed `PATH`, a
+container actor would neither find nor route them. So:
+
+- **The environment's `PATH`**, `containerEnv` applied in layer order with
+  `${PATH}` expanded (see [what a feature may declare](#what-a-feature-may-declare)),
+  starting from `SYSTEM_PATH`, is the driving program's `PATH`, after the
+  trampolines and before the route stubs.
+- **Trampolines are made over that `PATH`**, not over `SYSTEM_PATH` alone;
+  the daemon sends it in the guest's configuration. `TODO(environments)`:
+  `GetConfigResponse` has no such field yet; adding it is part of the
+  slice that applies features (slice 3).
+- **In-place shims** stay the shells' only. A layer that installs or
+  upgrades a shell gets the shim step run over it when it is committed, so
+  `/bin/bash` stays shimmed; nothing else is shimmed at commit.
+- **`profile.actor.env.PATH`**, when a profile sets it, replaces the
+  environment's, as a profile's `env` overrides the environment's today.
 
 ### Runs and digests
 
@@ -386,7 +436,7 @@ The kernel stays needy's: the VM drivers' base keeps `vmlinux` or `Image`,
 Firecracker and the initramfs. The base ABI check moves from "the image's
 label" to "the needy layer needy added", which needy always knows.
 
-> **Open question 8.** A root without `sshfs` cannot mount a workspace.
+> **Decided 2026-11-17 (E8, add needy's sshfs feature).** The question was: A root without `sshfs` cannot mount a workspace.
 > Add a needy feature for it when it is missing, or refuse the root?
 
 ## Automation
@@ -395,8 +445,9 @@ label" to "the needy layer needy added", which needy always knows.
   base (kernel, Firecracker or initramfs), the root image, features. This
   reverses D4 of the
   [actor images design](2026-11-12-actor-images-design.md#owner-decisions-2026-11-12)
-  ("VM images are not downloaded automatically") and needs the owner's
-  word. Integrity stays as `needy image pull` checks it today.
+  ("VM images are not downloaded automatically") for the base, as the owner
+  decided (E9); `needy image pull` stays. Integrity stays as `needy image
+  pull` checks it today.
 - **Built-in profiles and environments**, embedded as built-in recipes are
   (`crates/config/src/builtin/`), so `needy run create --profile builtin:pi`
   works without a clone.
@@ -418,19 +469,8 @@ label" to "the needy layer needy added", which needy always knows.
 
 ## Open questions
 
-1. Append `layers` and `hooks.*` along `extends`, or replace?
-2. The environment's `root` and the recipe's unread `os.image`.
-3. Feature `entrypoint`: refuse, or run before the driving program?
-4. The user at build time: part of the environment, or remapped?
-5. ~~Network policy for build steps~~: decided, B1.
-6. Flatten long layer chains: when?
-7. Sharing `snapshot` layers: local only, or through a registry?
-8. A root without `sshfs`: add a feature or refuse?
-9. Reverse D4 (pull VM images on demand)?
-10. Executors: should a `linux-container` executor take an `environment`
-    too, so the project's toolchain is built the same way?
-11. Apple's `container` store: load snapshots as OCI archives (`container
-    image load`), which works today, or wait for a better path?
+All decided on 2026-11-17; see [owner decisions](#owner-decisions-2026-11-16)
+(E0 to E11, A3, B1).
 
 ## Slices
 
@@ -451,7 +491,7 @@ In order; each needs the owner's approval when it starts.
 4. **Lifecycle hooks** at run time, with the features' hooks.
 5. **The needy layer on any root**, and `builtin:minimal`; needy's agents
    become features; `examples/agents` uses them.
-6. **Automation**: pull on demand (after open question 9), built-in
+6. **Automation**: pull on demand (E9), built-in
    profiles and environments.
 
 Slice 5 comes after 3 so that the examples keep working.
