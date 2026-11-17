@@ -122,73 +122,75 @@ commands can reach it.
 38. As a user, I want my commits recorded by needy in the image's lockfile, never in the file I wrote, so that my comments and layout stay mine.
 39. As a user, I want all my commits kept as one layer on top of the built layers, so that many edits never slow an actor's boot and built layers stay shared.
 40. As a user, I want `needy image rollback` to undo my last commit, and to go back further, so that a bad edit is one command to undo.
-41. As a user, I want my commits stored as my data, not as cache, so that clearing needy's cache never destroys a hand edit.
-42. As a user, I want my commits kept when a layer below them changes (a version bump, a lockfile update, a different UID), applied on the new base with a warning that names them, so that an upgrade does not throw my edits away.
-43. As a user, I want only one edit session per image at a time, so that two edits never fight over one image.
-44. As a user, I want `needy image log` to show each layer (a feature's reference, resolved version and options; a script's first line; a commit's commands) and the hosts each reached, so that a hand-made change stays explainable.
-45. As a user, I want `needy image export` to write an OCI image, so that I can share an edited image with someone else.
+41. As a user, I want every program my edit session ran recorded with the commit, from the first release of `image edit`, so that a hand-made change stays explainable even before `image log` exists.
+42. As a user, I want a commit to print the commands it recorded as a `run:` layer I can paste into my profile, so that what I tried by hand becomes a reproducible layer in one step.
+43. As a user, I want my commits stored as my data, not as cache, so that clearing needy's cache never destroys a hand edit.
+44. As a user, I want my commits kept when a layer below them changes (a version bump, a lockfile update, a different UID), applied on the new base with a warning that names them, so that an upgrade does not throw my edits away.
+45. As a user, I want only one edit session per image at a time, so that two edits never fight over one image.
+46. As a user, I want `needy image log` to show each layer (a feature's reference, resolved version and options; a script's first line; a commit's commands) and the hosts each reached, so that a hand-made change stays explainable.
+47. As a user, I want `needy image export` to write an OCI image, so that I can share an edited image with someone else.
 
 ### Running
 
-46. As a user, I want every run to boot the same immutable snapshot and lose its own changes to the image when it ends, so that runs stay disposable.
-47. As a harness author, I want a run to record the digest of the snapshot it booted, in its stored profile and its trace, so that two runs with one digest are known to have had the same file system.
-48. As a user, I want image definitions to work on `linux-firecracker`, `macos-vz`, `linux-container` and `macos-apple-container`, so that switching drivers changes one line.
-49. As a user of `macos-apple-container`, I want a built image loaded into Apple's store for me, so that I never `docker save` by hand.
-50. As a user of a container actor, I want my image's shells to stay routed by their absolute paths, so that harnesses that run `/bin/bash` stay routed.
-51. As a user, I want two runs of an image that is still building to wait for one build, so that nothing is built twice.
-52. As a user, I want running runs to keep the snapshot they booted while I edit or roll back, so that a change never pulls the floor from under a run.
+48. As a user, I want every run to boot the same immutable snapshot and lose its own changes to the image when it ends, so that runs stay disposable.
+49. As a harness author, I want a run to record the digest of the snapshot it booted, in its stored profile and its trace, so that two runs with one digest are known to have had the same file system.
+50. As a user, I want image definitions to work on `linux-firecracker`, `macos-vz`, `linux-container` and `macos-apple-container`, so that switching drivers changes one line.
+51. As a user of `macos-apple-container`, I want a built image loaded into Apple's store for me, so that I never `docker save` by hand.
+52. As a user of a container actor, I want my image's shells to stay routed by their absolute paths, so that harnesses that run `/bin/bash` stay routed.
+53. As a user, I want two runs of an image that is still building to wait for one build, so that nothing is built twice.
+54. As a user, I want running runs to keep the snapshot they booted while I edit or roll back, so that a change never pulls the floor from under a run.
 
 ### Workspace
 
-53. As a user, I want the folder I run `needy run create` in to be the workspace when the machine running the commands can reach it, so that the common case needs no configuration.
-54. As a user, I want the workspace passed through live, with one copy on the executor, so that the agent's own file edits and its routed commands always see the same files.
-55. As a user whose commands run on a remote executor, I want `run create` to fail and ask for `workspace.from` with a path on that machine, so that needy never silently works on the wrong folder.
-56. As a user, I want the run's output to say which machine and folder the workspace is, so that I can check it at a glance.
+55. As a user, I want the folder I run `needy run create` in to be the workspace when the machine running the commands can reach it, so that the common case needs no configuration.
+56. As a user, I want the workspace passed through live, with one copy on the executor, so that the agent's own file edits and its routed commands always see the same files.
+57. As a user whose commands run on a remote executor, I want `run create` to fail and ask for `workspace.from` with a path on that machine, so that needy never silently works on the wrong folder.
+58. As a user, I want the run's output to say which machine and folder the workspace is, so that I can check it at a glance.
 
 ### Agent state and other synced files
 
-57. As a user, I want my agent's login to persist across runs without writing any mapping, when I use needy's agent features, so that I log in once.
-58. As a user, I want to run several sessions of one agent at once, so that I work the way I do on my own machine.
-59. As a user, I want each run's changes merged back when it ends, one run at a time, so that concurrent runs do not overwrite each other.
-60. As a user, I want a file only one run changed to be taken from that run, so that a token refresh in one run is never lost to another.
-61. As a user, I want a file two runs both changed to follow the mapping's `on-conflict` choice (keep the store's, take the run's, or merge lines), and otherwise to keep the store's and report the run's, so that I never lose a change silently.
-62. As a user, I want conflicting copies kept by needy outside the store and named in `needy run report`, so that my agent never loads a conflict copy as real state.
-63. As a user of a harness that keeps sessions in SQLite, I want its feature's merge driver to merge the databases, so that sessions from concurrent runs all appear in the next one, without needy knowing SQLite.
-64. As a feature author, I want to supply a merge driver for my harness's files (given the seed, the run's copy and the store's current state as three trees), so that a format needy does not know merges correctly.
-65. As a user, I want a merge driver to run in an actor, never on the host: in the run's own actor at a normal end, or in a short merge session from the run's image when that actor is gone, so that a feature's code cannot touch my machine and a normal end costs no extra boot.
-66. As a user, I want a failing or hanging merge driver (it has a time limit) to leave the store's files as they were and keep the run's, reported, so that a broken driver loses nothing and never holds up a run's end.
-67. As a user, I want caches and logs left out of syncing with the mapping's ordinary `filter`, so that I learn no second exclusion syntax.
-68. As a user, I want a run stopped with `--now`, crashed, or ended while the store was unreachable to lose nothing, its changes merged later, so that a hard stop does not lose a login.
-69. As a user, I want a pending merge for a store done before any new run of that store is seeded, so that a new run never starts from stale state.
-70. As a user, I want to use a second account of an agent by pointing a run at another store, so that work and personal logins stay apart.
-71. As a feature author, I want to declare my harness's synced files and their conflict choices in the feature, so that every profile using the feature gets them right.
-72. As a user, I want a mapping in my profile to replace a feature's mapping of the same name, and two mappings claiming one actor path to be an error, so that overrides are explicit.
-73. As a user, I want plain `copy-in` and `mirror-out` to keep their meaning, so that existing profiles behave as before.
-74. As a user, I want a store under needy's own data directory to be created when it is missing, so that I never `mkdir` for needy.
-75. As a user, I want `needy run report` to say where a store is (which machine and account), so that I know where my logins live.
+59. As a user, I want my agent's login to persist across runs without writing any mapping, when I use needy's agent features, so that I log in once.
+60. As a user, I want to run several sessions of one agent at once, so that I work the way I do on my own machine.
+61. As a user, I want each run's changes merged back when it ends, one run at a time, so that concurrent runs do not overwrite each other.
+62. As a user, I want a file only one run changed to be taken from that run, so that a token refresh in one run is never lost to another.
+63. As a user, I want a file two runs both changed to follow the mapping's `on-conflict` choice (keep the store's, take the run's, or merge lines), and otherwise to keep the store's and report the run's, so that I never lose a change silently.
+64. As a user, I want conflicting copies kept by needy outside the store and named in `needy run report`, so that my agent never loads a conflict copy as real state.
+65. As a user of a harness that keeps sessions in SQLite, I want its feature's merge driver to merge the databases, so that sessions from concurrent runs all appear in the next one, without needy knowing SQLite.
+66. As a feature author, I want to supply a merge driver for my harness's files (given the seed, the run's copy and the store's current state as three trees), so that a format needy does not know merges correctly.
+67. As a user, I want a merge driver to run in an actor, never on the host: in the run's own actor at a normal end, or in a short merge session from the run's image when that actor is gone, so that a feature's code cannot touch my machine and a normal end costs no extra boot.
+68. As a user, I want a failing or hanging merge driver (it has a time limit) to leave the store's files as they were and keep the run's, reported, so that a broken driver loses nothing and never holds up a run's end.
+69. As a user, I want caches and logs left out of syncing with the mapping's ordinary `filter`, so that I learn no second exclusion syntax.
+70. As a user, I want a run stopped with `--now`, crashed, or ended while the store was unreachable to lose nothing, its changes merged later, so that a hard stop does not lose a login.
+71. As a user, I want a pending merge for a store done before any new run of that store is seeded, so that a new run never starts from stale state.
+72. As a user, I want to use a second account of an agent by pointing a run at another store, so that work and personal logins stay apart.
+73. As a feature author, I want to declare my harness's synced files and their conflict choices in the feature, so that every profile using the feature gets them right.
+74. As a user, I want a mapping in my profile to replace a feature's mapping of the same name, and two mappings claiming one actor path to be an error, so that overrides are explicit.
+75. As a user, I want plain `copy-in` and `mirror-out` to keep their meaning, so that existing profiles behave as before.
+76. As a user, I want a store under needy's own data directory to be created when it is missing, so that I never `mkdir` for needy.
+77. As a user, I want `needy run report` to say where a store is (which machine and account), so that I know where my logins live.
 
 ### Hooks
 
-76. As a user, I want a `start` hook that runs in every run after the workspace and synced files are in place and before the driving program, so that I can prepare a task.
-77. As a user, I want a failing `start` hook to fail the run before the driving program starts, so that a broken setup is obvious.
-78. As a user, I want a `stop` hook that runs before synced files are merged back, so that a harness can flush what it writes late.
-79. As a user, I want a failing `stop` hook recorded and the merge still done, so that state is not lost to a hook.
-80. As a user, I want hooks to run as my user in the workspace with the profile's rules applied, so that they behave like anything else the agent runs.
-81. As a user, I want features' hooks to run before mine, in layer order, so that a feature's setup comes first.
+78. As a user, I want a `start` hook that runs in every run after the workspace and synced files are in place and before the driving program, so that I can prepare a task.
+79. As a user, I want a failing `start` hook to fail the run before the driving program starts, so that a broken setup is obvious.
+80. As a user, I want a `stop` hook that runs before synced files are merged back, so that a harness can flush what it writes late.
+81. As a user, I want a failing `stop` hook recorded and the merge still done, so that state is not lost to a hook.
+82. As a user, I want hooks to run as my user in the workspace with the profile's rules applied, so that they behave like anything else the agent runs.
+83. As a user, I want features' hooks to run before mine, in layer order, so that a feature's setup comes first.
 
 ### Reinforcement-learning style use
 
-82. As a harness author running many short runs, I want setup cached in layers rather than repeated per run, so that each run starts fast.
-83. As a harness author, I want to name the environment of my episodes by snapshot digest, so that a batch is reproducible.
-84. As a harness author, I want variants that differ in one layer to share every layer before it, so that a matrix of images is cheap.
+84. As a harness author running many short runs, I want setup cached in layers rather than repeated per run, so that each run starts fast.
+85. As a harness author, I want to name the environment of my episodes by snapshot digest, so that a batch is reproducible.
+86. As a harness author, I want variants that differ in one layer to share every layer before it, so that a matrix of images is cheap.
 
 ### Operating needy
 
-85. As a maintainer, I want the base ABI unchanged, so that every base image of version 1 keeps working with this needy.
-86. As a maintainer, I want images built by the earlier shim step and plain image references to keep working, so that nobody must rebuild to upgrade needy.
-87. As a maintainer, I want build steps, commits and merges recorded as trace events, so that `needy run report` and `needy image log` can explain them.
-88. As a maintainer, I want built layers in needy's cache directory and commits, stores and pending merges in its data directory, so that the cache alone is safe to delete.
-89. As a maintainer, I want layers that a running run, a lockfile or a commit history names never evicted, so that cleaning up never breaks a run or an image.
+87. As a maintainer, I want the base ABI unchanged, so that every base image of version 1 keeps working with this needy.
+88. As a maintainer, I want images built by the earlier shim step and plain image references to keep working, so that nobody must rebuild to upgrade needy.
+89. As a maintainer, I want build steps, commits and merges recorded as trace events, so that `needy run report` and `needy image log` can explain them.
+90. As a maintainer, I want built layers in needy's cache directory and commits, stores and pending merges in its data directory, so that the cache alone is safe to delete.
+91. As a maintainer, I want layers that a running run, a lockfile or a commit history names never evicted, so that cleaning up never breaks a run or an image.
 
 ## Implementation Decisions
 
@@ -318,6 +320,18 @@ commands can reach it.
   lockfile by the CLI, which owns the user's files; the image file is never
   rewritten. Rollback moves the lockfile's commit pointer back. Runs keep
   the snapshot they booted.
+- **Recording an edit session.** The trace records only execs the daemon
+  decides, and an edit session routes nothing, so an edit session routes
+  every exec (the route list `*`) and the daemon decides every one to run
+  in the actor: each is decided and traced, and behaves as unrouted. This
+  records the programs the session started, with their arguments and
+  working directory, not shell builtins (`cd`, `export`, assignments), so
+  the record explains a commit; it does not promise to replay it. The
+  record is kept with the commit's history from slice 1 on.
+- **A commit's `run:` snippet.** When a commit is made, the CLI prints the
+  recorded commands as a `run:` layer the user can paste into an image
+  definition, so a change tried by hand becomes a declared layer; the user
+  can then roll the commit back.
 
 ### Booting a snapshot
 
@@ -511,7 +525,7 @@ evidence recorded.
 | # | Slice | Depends on |
 | --- | --- | --- |
 | 0 | Evidence: run the official `common-utils`, `git`, `node` and `python` features by hand in an actor; no product code | nothing |
-| 1 | Snapshots and hand edits on the VM drivers: the layer store, layer disks with markers, stacking in the guest init, the session primitive, streaming upload, `image edit`, `image build`, `image rollback`, commits in the lockfile; layers of kind `run` only | 0 |
+| 1 | Snapshots and hand edits on the VM drivers: the layer store, layer disks with markers, stacking in the guest init, the session primitive, streaming upload, `image edit` (recording its commands, printing a commit's `run:` snippet), `image build`, `image rollback`, commits in the lockfile; layers of kind `run` only | 0 |
 | 2 | The same for the container drivers (engine commit, export and load; Apple's store) | 1 |
 | 3 | Features as layers: references, options, order, `containerEnv` and `PATH`, refusals, the lockfile's features, the user in the image, needy's sshfs feature, building and pulling in `run create` | 1, and 2 for hosts without a VM driver |
 | 4 | Hooks (`start`, `stop`) | 3 |
@@ -582,6 +596,9 @@ evidence recorded.
   reference without its tag (owner, 2026-11-17).
 - Slice 1 ships `image edit`, `build` and `rollback`; `log` and `export`
   move to a later slice (owner, 2026-11-17).
+- An edit session records its commands by deciding every exec as local
+  (the trace records only decided execs), from slice 1 on, and a commit
+  prints them as a `run:` snippet (owner, 2026-11-17).
 - From the codebase review: the boot disk stays needy's base and a user's
   root is a lower layer; layer disks are found by a marker, not by order;
   opaque directories become whiteouts; layers stream to the daemon;
