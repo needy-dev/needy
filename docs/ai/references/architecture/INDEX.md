@@ -34,3 +34,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-16 | [Agent state in the actor, merged back at stop: spikes](2026-11-16-agent-state-merge-spike-evidence.md) | evidence |
 | 2026-11-16 | [Container capture: trampolines on PATH, shells in place](2026-11-16-container-trampolines-design.md) | design |
 | 2026-11-17 | [Image definitions, edit sessions and merged run data (approved contract)](2026-11-17-images-and-run-data-spec.md) | spec |
+| 2026-11-17 | [Slice 0: official Dev Container features on needy's base](2026-11-17-features-on-needy-base-evidence.md) | evidence |
