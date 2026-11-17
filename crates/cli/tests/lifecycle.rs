@@ -57,6 +57,19 @@ fn starting_an_uninstalled_service_reports_installation_guidance() {
   assert!(!home.path().join("config/services").exists(), "inspection must not create an installation");
 }
 
+// install/install.sh decides between `install --now` and
+// `install --replace --now` by matching this exact line of the JSON status,
+// so a change to its shape must change the script too.
+#[test]
+fn an_uninstalled_service_reports_the_status_line_the_install_script_matches() {
+  let home = Home::new();
+  let output = home.command().args(["daemon", "service", "status", "--output", "json"]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+  let stdout = String::from_utf8(output.stdout).unwrap();
+  assert!(stdout.lines().any(|line| line.trim() == r#""state": "not-installed","#), "{stdout}");
+  assert!(!home.path().join("config/services").exists(), "inspection must not create an installation");
+}
+
 #[tokio::test]
 async fn network_control_keeps_private_management_discovery_and_cleans_its_record() {
   let home = Home::new();

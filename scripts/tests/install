@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Checks install/install.sh's daemon step: a fresh install installs and starts
+# the user control service, a reinstall replaces it, NEEDY_NO_DAEMON skips
+# it, and a service manager that refuses leaves the binary installed with a
+# warning. The archive holds a stand-in `needy`, a shell script that records
+# its arguments, served through NEEDY_DOWNLOAD_BASE as file:// URLs; no real
+# service manager is touched.
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "$0")/../.." && pwd -P)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# The stand-in answers `--version`, logs every other call, and reports the
+# service state that FAKE_SERVICE_STATE names, in the shape of
+# `needy daemon service status --output json`.
+mkdir "$work/payload"
+cat > "$work/payload/needy" <<'SH'
+#!/bin/sh
+case "$*" in
+  --version) echo 'needy 0.0.0'; exit 0 ;;
+esac
+printf '%s\n' "$*" >> "$FAKE_NEEDY_LOG"
+case "$*" in
+  'daemon service status --output json')
+    printf '[\n  {\n    "state": "%s"\n  }\n]\n' "$FAKE_SERVICE_STATE"
+    ;;
+  'daemon service install'*)
+    [ -z "${FAKE_SERVICE_FAIL:-}" ] || { echo 'error: cannot contact the selected service manager' >&2; exit 1; }
+    ;;
+esac
+SH
+chmod 0755 "$work/payload/needy"
+
+# install.sh picks the archive from uname; publish it under every name the
+# script can choose so the test runs on any host.
+mkdir "$work/release"
+for arch in aarch64 x86_64; do
+  for platform in apple-darwin unknown-linux-musl; do
+    archive=needy-$arch-$platform.tar.gz
+    tar -czf "$work/release/$archive" -C "$work/payload" needy
+    if command -v sha256sum >/dev/null 2>&1; then
+      sha256sum "$work/release/$archive" | awk '{ print $1 }' > "$work/release/$archive.sha256"
+    else
+      shasum -a 256 "$work/release/$archive" | awk '{ print $1 }' > "$work/release/$archive.sha256"
+    fi
+  done
+done
+
+# Runs install.sh into a fresh directory; the remaining arguments are extra
+# environment assignments. Sets `log`, `stderr` and `bin` for the checks.
+install_with() {
+  local name=$1
+  shift
+  bin=$work/$name/bin
+  log=$work/$name/calls
+  stderr=$work/$name/stderr
+  mkdir -p "$work/$name"
+  : > "$log"
+  if ! env NEEDY_DOWNLOAD_BASE="file://$work/release" NEEDY_INSTALL_DIR="$bin" \
+    FAKE_NEEDY_LOG="$log" FAKE_SERVICE_STATE=not-installed "$@" \
+    sh "$repo_root/install/install.sh" 2> "$stderr"; then
+    cat "$stderr" >&2
+    echo "$name: install.sh failed" >&2
+    exit 1
+  fi
+  [[ -x $bin/needy ]] || {
+    echo "$name: needy was not installed" >&2
+    exit 1
+  }
+}
+
+expect_calls() {
+  local name=$1
+  local expected=$2
+  if [[ $(cat "$log") != "$expected" ]]; then
+    printf '%s: unexpected needy calls\nexpected:\n%s\ngot:\n%s\n' "$name" "$expected" "$(cat "$log")" >&2
+    exit 1
+  fi
+}
+
+install_with fresh
+expect_calls fresh $'daemon service status --output json\ndaemon service install --now'
+
+install_with reinstall FAKE_SERVICE_STATE=ready
+expect_calls reinstall $'daemon service status --output json\ndaemon service install --replace --now'
+
+install_with opt-out NEEDY_NO_DAEMON=1
+expect_calls opt-out ''
+grep -q 'needy daemon service install --now' "$stderr" || {
+  echo "opt-out: install.sh did not name the command that starts the daemon" >&2
+  exit 1
+}
+
+install_with refused FAKE_SERVICE_FAIL=1
+expect_calls refused $'daemon service status --output json\ndaemon service install --now'
+grep -q '^warning: .*daemon' "$stderr" || {
+  echo "refused: install.sh did not warn that the daemon is not running" >&2
+  exit 1
+}
+
+echo "install: ok"

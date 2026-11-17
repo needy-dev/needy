@@ -94,6 +94,7 @@ It looks for `needy-linux-<arch>` next to its executable (or takes
 ```sh
 brew install needy-dev/tap/needy
 needy --version
+needy daemon service install --now   # Homebrew does not start services itself
 ```
 
 Alternatively, without [Homebrew](https://brew.sh/):
@@ -102,7 +103,8 @@ Alternatively, without [Homebrew](https://brew.sh/):
 curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
 ```
 
-Both install the guest needy next to `needy` on Apple silicon.
+Both install the guest needy next to `needy` on Apple silicon. The script
+also [starts the control daemon](#start-the-control-daemon).
 
 #### Linux
 
@@ -117,6 +119,13 @@ needy --version
 > release or the install directory (default: `~/.local/bin`). `latest` is the
 > newest release that is not a prerelease. The Linux build is static, so it
 > runs on any distribution.
+>
+> The script then installs and starts the control daemon as a user service
+> (`needy daemon service install --now`), or replaces the one already there
+> (`--replace --now`), which stops its active runs. If the service manager
+> refuses, needy stays installed and the script prints a warning. Set
+> `NEEDY_NO_DAEMON=1` to skip this step, for example on a machine that is
+> only a runner.
 
 #### Windows
 
@@ -249,9 +258,11 @@ See the [Linux actor / Mac executor walkthrough](docs/ai/explanations/linux-acto
 #### Uninstall
 
 Use the commands that match how you installed needy. They keep needy's
-state and data directories.
+state and data directories. Remove the control service first, while `needy`
+is still there to stop it:
 
 ```sh
+needy daemon service uninstall                            # if a service is installed
 brew uninstall needy                                      # Homebrew
 rm -f ~/.local/bin/needy ~/.local/bin/needy-linux-*       # install script
 proto uninstall needy && proto plugin remove needy --from global   # proto
@@ -263,12 +274,19 @@ from `PATH`.
 
 ### Start the control daemon
 
-Install a user service on a Linux systemd host or a Mac with launchd:
+The install script has already installed and started a user service on a
+Linux systemd host or a Mac with launchd; check it:
+
+```sh
+needy daemon service status
+needy runner ls
+```
+
+After a Homebrew install, an install with `NEEDY_NO_DAEMON=1`, or when the
+script warned that the daemon did not start, install it yourself:
 
 ```sh
 needy daemon service install --now
-needy daemon service status
-needy runner ls
 ```
 
 Local commands discover the private management socket. No client pairing or
@@ -293,15 +311,19 @@ still needs access to the binary, images, KVM device, or container engine it use
 The [service installation reference](docs/ai/references/cli/2026-11-14-installation-feedback-evidence.md)
 lists the scope and permission boundaries.
 
-For remote runners or clients, configure an additional listener before installation:
+For remote runners or clients, configure an additional listener, then replace
+the service so it takes the new snapshot (use `install --now` where none is
+installed yet):
 
 ```sh
 needy config set daemon.listen '[tcp://127.0.0.1:7400]'
-needy daemon service install --now
+needy daemon service install --replace --now
 ```
 
-If the service is already installed, use `install --replace --now` to update
-its configuration snapshot. Remote machines use registered credentials through
+`install --replace --now` updates an installed service's configuration
+snapshot and restarts it; it is also what the install script runs on an
+upgrade. After `brew upgrade needy`, run it to move the service to the new
+version. Remote machines use registered credentials through
 an SSH tunnel. The network listener keeps the local management socket.
 
 For development or an external supervisor, use foreground serving:

@@ -57,10 +57,10 @@ const STEPS: StartStep[] = [
   {
     ms: 2600,
     phase: 1,
-    lines: [{ text: 'needy daemon service install --now', kind: 'cmd' }, { text: '# publishes a private local management socket', kind: 'dim' }],
+    lines: [{ text: 'needy daemon service status', kind: 'cmd' }, { text: '# the install script started it; a private local management socket', kind: 'dim' }],
     lit: [],
     up: ['daemon'],
-    caption: 'Start a control daemon on the machine that runs actors.',
+    caption: 'The control daemon runs on the machine that runs actors.',
   },
   {
     ms: 4600,

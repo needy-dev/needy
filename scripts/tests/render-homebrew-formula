@@ -54,6 +54,23 @@ class Needy < Formula
     bin.install "needy-linux-aarch64" if File.exist?("needy-linux-aarch64")
   end
 
+  # NOTICE(homebrew-service): no `service do` block. brew services would run
+  # a second launchd job beside needy's own (`dev.needy.control`), without
+  # AbandonProcessGroup, so stopping it would kill the actors a run still
+  # owns. post_install cannot start needy's service either: it runs in
+  # Homebrew's sandbox, which denies ~/Library/LaunchAgents. The caveats name
+  # the command instead; the install script runs it itself.
+  # Source: https://github.com/Homebrew/brew/blob/785949e709ce098f2182182afcdc90e3060809ca/Library/Homebrew/formula_installer.rb#L1533-L1555
+  # Reference: https://docs.brew.sh/Formula-Cookbook#service-files
+  def caveats
+    <<~EOS
+      To start the needy control daemon now and at login:
+        needy daemon service install --now
+      After upgrading needy, restart the daemon on the new version:
+        needy daemon service install --replace --now
+    EOS
+  end
+
   test do
     assert_equal "needy 0.0.2", shell_output("#{bin}/needy --version").strip
   end

@@ -77,10 +77,12 @@ No KVM or recipe is required for this container example.
 
 ## 2. Prepare the Mac
 
-In the **Mac runner terminal**, install needy and create the project directory:
+In the **Mac runner terminal**, install needy and create the project directory.
+This Mac is only a runner, so `NEEDY_NO_DAEMON=1` keeps the install script
+from starting a control daemon here:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | NEEDY_NO_DAEMON=1 sh
 export PATH="$HOME/.local/bin:$PATH"
 needy --version
 mkdir -p ~/needy-demo
@@ -108,20 +110,23 @@ different `PATH`.
 
 ## 3. Start the control daemon
 
-In the **Linux setup terminal**, configure the network listener and install a user service:
+The install script in step 1 installed and started the control daemon as a
+user service. In the **Linux setup terminal**, configure the network listener
+and replace the service so it takes the listener:
 
 ```sh
 needy config use local
 needy config set daemon.listen '[tcp://127.0.0.1:7400]'
-needy daemon service install --now
+needy daemon service install --replace --now
 needy daemon service status
 needy runner ls
 ```
 
 The user systemd manager must be available. Local administration uses the
 private management socket, so no bearer or address export is required.
-If an owned service already exists, use `install --replace --now` to update it.
 Replacement stops the service and active runs before applying the new snapshot.
+If the install script warned that the daemon did not start, use
+`install --now` instead of `install --replace --now`.
 For development without a service manager, run `needy daemon serve --listen tcp://127.0.0.1:7400` in a separate foreground terminal.
 
 ## 4. Open one tunnel

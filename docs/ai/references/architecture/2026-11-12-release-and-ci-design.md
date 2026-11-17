@@ -24,7 +24,7 @@ request cancels the older run; runs on `main` are never cancelled.
 | `rust macos-15` | macOS arm64 | the same without `fmt` (it does not depend on the platform) |
 | `rust windows-2025` | Windows x86_64 | the same without `fmt` |
 | `proto` | Linux | `buf lint`, `buf format --diff --exit-code`, `buf generate`, then fails if `crates/api-proto/src/gen` differs from the commit |
-| `release tooling` | Linux | ShellCheck on `install/install.sh` and the Homebrew scripts, then `scripts/tests/render-homebrew-formula` (see [Install channels](#install-channels)) |
+| `release tooling` | Linux | ShellCheck on `install/install.sh`, the Homebrew scripts and the script tests, then `scripts/tests/render-homebrew-formula` and `scripts/tests/install` (see [Install channels](#install-channels)) |
 
 - On Linux and macOS the `rust` job also runs `cargo xtask e2e --only none/`:
   the end-to-end cells without an actor (`needy exec` and `needy fs cp`
@@ -191,6 +191,15 @@ Windows has no script; the README links the `.zip` under
   (`sha256sum`, else `shasum -a 256`) and refuses on a mismatch before it
   unpacks anything. It then runs the unpacked `needy --version` and installs
   `needy` and any `needy-linux-*` with mode 0755.
+- Then starts the control daemon, as a container engine's package does
+  (spec slice I1): when `needy daemon service status --output json` reports
+  `"state": "not-installed"` it runs `needy daemon service install --now`,
+  otherwise `install --replace --now`, which moves an installed service to
+  the needy just installed and stops its active runs.
+  `NOTICE(install-daemon)`: a service manager that refuses (no systemd user
+  manager, no launchd GUI session) only prints a warning with the command
+  to retry; the binary stays installed. `NEEDY_NO_DAEMON=1` (provisional
+  name) skips the step, for a machine that is only a runner.
 - Ends with the `PATH` hint and a pointer to the README's Getting started.
 - `NOTICE(install-url)`: there is no domain yet, so the script is served
   from `https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh`.
@@ -201,7 +210,10 @@ Windows has no script; the README links the `.zip` under
 - Test hook: `NEEDY_DOWNLOAD_BASE` replaces the release URL with any URL
   that serves the assets directly, such as a local HTTP server over a
   workflow run's artifacts. It is how the script was verified without a
-  release.
+  release. `scripts/tests/install` serves an archive holding a stand-in
+  `needy` through `file://` URLs and checks the daemon step's calls: a fresh
+  install, a reinstall, `NEEDY_NO_DAEMON=1` and a refusing manager. The
+  `lifecycle` CLI test pins the status line the script matches.
 
 ### proto plugin
 
@@ -233,6 +245,13 @@ file.
   LICENSE has no version notice and GitHub reports the deprecated SPDX id
   `AGPL-3.0`, which Homebrew does not accept; the owner should confirm
   `-only` over `-or-later`.
+- No `service do` block (`NOTICE(homebrew-service)` in the formula): brew
+  services would run a second launchd job beside `dev.needy.control`
+  without `AbandonProcessGroup`, so stopping it would kill a run's actors,
+  and `post_install` runs in Homebrew's sandbox, which cannot write
+  `~/Library/LaunchAgents`. The formula's caveats name
+  `needy daemon service install --now`, and `--replace --now` after an
+  upgrade.
 - `scripts/tests/render-homebrew-formula` compares the output with an
   expected formula and checks the refusals (split checksum, invalid checksum,
   prerelease tag, no output left behind, readable mode). `check.yml`'s
