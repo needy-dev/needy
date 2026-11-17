@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::files::Side;
 use super::network::ActorNetwork;
 use super::runner::RunnerSelector;
+use crate::image::Image;
 use crate::value::Words;
 
 // NOTICE: `driver` is required and has no default, so `Actor` has no
@@ -20,13 +21,14 @@ use crate::value::Words;
 pub struct Actor {
   /// What runs the actor.
   pub driver: ActorDriver,
-  /// The actor image, an OCI image reference, for every driver: the
-  /// container drivers run it, the VM drivers boot the VM image `needy
-  /// image build --from` made of it. Without it the container drivers run
-  /// [`CONTAINER_IMAGE`] and the VM drivers boot the daemon's base VM image
-  /// (`needy image pull`).
+  /// The actor image, for every driver, decided by its syntax: an OCI image
+  /// reference (the container drivers run it, the VM drivers boot the VM
+  /// image `needy image build --from` made of it), or an image definition,
+  /// inline or from an image file (see [`crate::image`]). Without it the
+  /// container drivers run [`CONTAINER_IMAGE`] and the VM drivers boot the
+  /// daemon's base VM image (`needy image pull`).
   #[serde(default)]
-  pub image: Option<String>,
+  pub image: Option<Image>,
   /// The runner the actor runs on; the control host itself when absent.
   #[serde(default)]
   pub runner: Option<RunnerSelector>,
@@ -114,9 +116,20 @@ pub struct ContainerActor {
 }
 
 impl Actor {
-  /// The image a container driver runs: `image`, else [`CONTAINER_IMAGE`].
+  /// The OCI image reference `image` names, when it names one rather than a
+  /// definition.
+  pub fn image_reference(&self) -> Option<&str> {
+    match &self.image {
+      Some(Image::Reference(reference)) => Some(reference),
+      Some(Image::Definition(_)) | None => None,
+    }
+  }
+
+  /// The image a container driver runs: `image`'s reference, else
+  /// [`CONTAINER_IMAGE`]. An image definition has no image to run until it
+  /// is built; the drivers' table refuses one before a driver asks.
   pub fn container_image(&self) -> String {
-    self.image.clone().unwrap_or_else(|| CONTAINER_IMAGE.into())
+    self.image_reference().unwrap_or(CONTAINER_IMAGE).to_string()
   }
 }
 

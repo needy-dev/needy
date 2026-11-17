@@ -259,10 +259,24 @@ pub struct Host {
 /// The driver of `actor` (a profile's `actor:`) on `host`.
 #[cfg(unix)]
 pub fn new(host: &Host, actor: &Actor) -> Result<Box<dyn Driver>, Error> {
+  // TODO(images): an image definition loads and validates, but no driver
+  // boots one until a run builds its layers and boots the snapshot: step 7
+  // of the slice 1 plan for the VM drivers
+  // (`docs/ai/references/architecture/2026-11-17-images-slice-1-plan.md`),
+  // slice 2 of the images and run data spec for the container drivers.
+  // Until then it is refused here, the one place every driver is made,
+  // rather than booting the base image without its layers.
+  if let Some(needy_config::image::Image::Definition(_)) = &actor.image {
+    return Err(Error::Unsupported(
+      "needy does not build image definitions yet: name an OCI image reference in `actor.image`, \
+       or install what the definition's layers would in an image you build"
+        .into(),
+    ));
+  }
   Ok(match actor.driver {
-    ActorDriver::LinuxFirecracker => Box::new(linux_firecracker::LinuxFirecracker::on(host, actor.image.as_deref())),
+    ActorDriver::LinuxFirecracker => Box::new(linux_firecracker::LinuxFirecracker::on(host, actor.image_reference())),
     ActorDriver::LinuxContainer => Box::new(linux_container::LinuxContainer::of(actor)?),
-    ActorDriver::MacosVz => Box::new(macos_vz::MacosVz::on(host, actor.image.as_deref())),
+    ActorDriver::MacosVz => Box::new(macos_vz::MacosVz::on(host, actor.image_reference())),
     ActorDriver::MacosAppleContainer => Box::new(macos_apple_container::MacosAppleContainer::of(actor)),
   })
 }

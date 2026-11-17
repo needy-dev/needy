@@ -26,7 +26,7 @@ pub use runner::{LabelMatch, RunnerSelector};
 pub use trace::{Trace, TraceSink};
 pub use workspace::{WORKSPACE, WORKSPACE_OUT};
 
-use crate::{Error, Kind, Source, merge, source};
+use crate::{Error, Kind, Source, image, merge, source};
 
 /// One run: machines, routing rules, networks, files and chaos.
 // NOTICE: no container-level `#[serde(default)]`: `actor` is required, since
@@ -100,15 +100,21 @@ impl User {
   }
 }
 
-/// A profile's rules are evaluated child first.
+/// A profile's rules are evaluated child first; an inline image
+/// definition's layers append as an image file's do.
 const MERGE: merge::Rules = merge::Rules {
   prepend: &["commands", "resolvers"],
+  append: &[merge::Append {
+    path: &["actor", "image", "layers"],
+    key: image::same_feature,
+  }],
 };
 
 /// Reads a profile and its `extends` chain.
 pub fn load(source: &Source) -> Result<Profile, Error> {
-  let document = source::read_chain(source, Kind::Profile, &MERGE)?;
+  let mut document = source::read_chain(source, Kind::Profile, &MERGE)?;
   refuse_removed(&document, source)?;
+  image::inline(&mut document, &source.base_dir())?;
   let mut profile: Profile = source::deserialize(document, Kind::Profile, source)?;
   profile.base_dir = source.base_dir();
   // `~` means the profile user's home, known only after the whole chain
@@ -139,8 +145,9 @@ pub fn load(source: &Source) -> Result<Profile, Error> {
 /// the daemon reads no path on the client's machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-  /// The profile with its `extends` chain merged and its relative host
-  /// paths made absolute.
+  /// The profile with its `extends` chain merged, its relative host paths
+  /// made absolute and an image file in `actor.image` replaced by its
+  /// definition.
   pub yaml: String,
   /// The actor's recipe with its `extends` chain merged, when `actor.recipe`
   /// names a file; a built-in recipe is the daemon's own.
@@ -162,6 +169,7 @@ pub fn resolve(source: &Source) -> Result<Resolved, Error> {
   let mut document = source::read_chain(source, Kind::Profile, &MERGE)?;
   refuse_removed(&document, source)?;
   let base = source.base_dir();
+  image::inline(&mut document, &base)?;
   absolute_host_paths(&mut document, &base);
   let profile: Profile = source::deserialize(document.clone(), Kind::Profile, source)?;
   let recipe_yaml = match &profile.actor.recipe {

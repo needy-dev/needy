@@ -746,7 +746,9 @@ strings, devices, hostname (`instance-{time}`), and which identity fields are `r
 kernel options. `linux-container` takes `actor.container.oci_runtime`.
 `actor.image: REF` runs your own image `FROM` needy's base on every driver
 (`needy image build --from REF` for the VM drivers); see
-[`examples/custom-image`](examples/custom-image/Dockerfile).
+[`examples/custom-image`](examples/custom-image/Dockerfile). `actor.image`
+also takes an image definition (a root and `run` layers, inline or as a
+path to an image file); needy checks one but does not build it yet.
 
 ### Environment and data
 

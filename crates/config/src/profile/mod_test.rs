@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use super::*;
+use crate::image::Image;
 use crate::value::Glob;
 
 fn load_text(yaml: &str) -> Result<Profile, crate::Error> {
@@ -192,10 +193,127 @@ fn the_actor_image_is_one_field_for_every_driver_with_the_container_base_by_defa
   let named = load_text("actor: { driver: macos-vz, image: example.com/agent:1 }\n").unwrap();
   let unnamed = load_text("actor: { driver: linux-container, container: { oci_runtime: runc } }\n").unwrap();
 
-  assert_eq!(named.actor.image.as_deref(), Some("example.com/agent:1"));
+  assert_eq!(named.actor.image, Some(Image::Reference("example.com/agent:1".into())));
+  assert_eq!(named.actor.image_reference(), Some("example.com/agent:1"));
   assert_eq!(named.actor.container_image(), "example.com/agent:1");
   assert_eq!(unnamed.actor.image, None);
   assert_eq!(unnamed.actor.container_image(), CONTAINER_IMAGE);
+}
+
+fn definition(profile: &Profile) -> &crate::image::Definition {
+  match &profile.actor.image {
+    Some(Image::Definition(definition)) => definition,
+    other => panic!("not a definition: {other:?}"),
+  }
+}
+
+fn run(script: &str) -> crate::image::Layer {
+  crate::image::Layer::Run(script.into())
+}
+
+#[test]
+fn an_inline_image_definition_is_a_map() {
+  let p = load_text("actor: { driver: macos-vz, image: { root: example.com/root:1, layers: [{ run: one }], env: { A: a } } }\n").unwrap();
+
+  let image = definition(&p);
+  assert_eq!(image.root.as_deref(), Some("example.com/root:1"));
+  assert_eq!(image.layers, [run("one")]);
+  assert_eq!(image.env["A"], "a");
+  assert_eq!(p.actor.image_reference(), None);
+}
+
+#[test]
+fn an_image_path_names_an_image_file_next_to_the_profile_with_its_extends() {
+  let dir = files(&[
+    ("images/base.image.yaml", "root: example.com/root:1\nlayers: [{ run: one }]\n"),
+    ("images/agents.image.yaml", "extends: base.image.yaml\nlayers: [{ run: two }]\n"),
+    ("p/profile.yaml", "actor: { driver: macos-vz, image: ../images/agents.image.yaml }\n"),
+  ]);
+
+  let p = load(&Source::file(dir.path().join("p/profile.yaml"))).unwrap();
+
+  let image = definition(&p);
+  assert_eq!(image.root.as_deref(), Some("example.com/root:1"));
+  assert_eq!(image.layers, [run("one"), run("two")]);
+}
+
+#[test]
+fn an_image_path_that_does_not_exist_is_an_error_not_a_reference() {
+  // A string that starts with `./`, `../` or `/`, or ends in `.yaml`, is a
+  // path whatever exists, so a typo is reported as a typo, not pulled.
+  for (image, file) in [
+    ("./agents.image.yaml", "agents.image.yaml"),
+    ("../agents", "../agents"),
+    ("agents.yaml", "agents.yaml"),
+  ] {
+    let dir = files(&[("p/profile.yaml", &format!("actor: {{ driver: macos-vz, image: {image} }}\n"))]);
+
+    let err = load(&Source::file(dir.path().join("p/profile.yaml"))).unwrap_err().to_string();
+
+    let expected = dir.path().join("p").join(file);
+    assert_eq!(err, format!("cannot read image {}", expected.display()), "{image}");
+  }
+  // An absolute path is read as it is.
+  let err = load_text("actor: { driver: macos-vz, image: /nonexistent/needy/agents.image.yaml }\n").unwrap_err().to_string();
+  assert_eq!(err, "cannot read image /nonexistent/needy/agents.image.yaml");
+}
+
+#[test]
+fn an_invalid_image_file_names_the_image_file() {
+  let dir = files(&[
+    ("agents.image.yaml", "layers: [{ ru: one }]\n"),
+    ("profile.yaml", "actor: { driver: macos-vz, image: ./agents.image.yaml }\n"),
+  ]);
+
+  let err = load(&Source::file(dir.path().join("profile.yaml"))).unwrap_err().to_string();
+
+  let file = dir.path().join("agents.image.yaml");
+  assert!(err.starts_with(&format!("invalid image {}: layers[0].ru: unknown field `ru`", file.display())), "{err}");
+}
+
+#[test]
+fn a_built_in_image_is_refused_with_a_hint() {
+  let err = load_text("actor: { driver: macos-vz, image: builtin:agents }\n").unwrap_err().to_string();
+
+  assert!(err.contains("actor.image: needy ships no built-in images"), "{err}");
+}
+
+#[test]
+fn an_inline_definition_appends_its_layers_along_the_profiles_extends() {
+  let dir = files(&[
+    ("base.yaml", "actor: { driver: macos-vz, image: { root: example.com/root:1, layers: [{ run: one }], env: { A: a } } }\n"),
+    ("child.yaml", "extends: base.yaml\nactor: { image: { layers: [{ run: two }], env: { B: b } } }\n"),
+  ]);
+
+  let p = load(&Source::file(dir.path().join("child.yaml"))).unwrap();
+
+  let image = definition(&p);
+  assert_eq!(image.root.as_deref(), Some("example.com/root:1"));
+  assert_eq!(image.layers, [run("one"), run("two")]);
+  assert_eq!((image.env["A"].as_str(), image.env["B"].as_str()), ("a", "b"));
+}
+
+#[test]
+fn an_inline_definition_refuses_feature_layers_and_unknown_keys() {
+  let err = load_text("actor: { driver: macos-vz, image: { layers: [{ feature: ./features/x }] } }\n").unwrap_err().to_string();
+  assert!(err.contains("actor.image.layers[0]: `feature` layers come with slice 3"), "{err}");
+
+  let err = load_text("actor: { driver: macos-vz, image: { rooot: example.com/root:1 } }\n").unwrap_err().to_string();
+  assert!(err.contains("actor.image.rooot: unknown field `rooot`"), "{err}");
+}
+
+#[test]
+fn a_resolved_profile_carries_its_image_file_inline() {
+  let dir = files(&[
+    ("agents.image.yaml", "root: example.com/root:1\nlayers: [{ run: one }]\n"),
+    ("profile.yaml", "actor: { driver: macos-vz, image: ./agents.image.yaml }\n"),
+  ]);
+
+  let resolved = resolve(&Source::file(dir.path().join("profile.yaml"))).unwrap();
+
+  // The daemon reads no path on the client's machine.
+  let p = load(&Source::text(resolved.yaml, "/elsewhere")).unwrap();
+  assert_eq!(definition(&p).layers, [run("one")]);
 }
 
 #[test]

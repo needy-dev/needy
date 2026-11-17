@@ -1,5 +1,5 @@
-//! The operating system a recipe presents: rootfs image, kernel identity,
-//! hostname and uptime.
+//! The operating system a recipe presents: kernel identity, hostname and
+//! uptime. The software an actor runs is its image's, not the recipe's.
 
 use serde::Deserialize;
 
@@ -7,9 +7,11 @@ use crate::value::{Duration, Template};
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+// NOTICE: `image` was removed (E2 in the images and run data spec,
+// `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`):
+// an image definition's `root:` names it, and `recipe::load` refuses
+// `os.image` naming `root:`.
 pub struct Os {
-  /// The OCI image the rootfs is built from.
-  pub image: Option<String>,
   pub kernel: Kernel,
   /// `{hash}` derives from the run seed.
   pub hostname: Option<Template>,

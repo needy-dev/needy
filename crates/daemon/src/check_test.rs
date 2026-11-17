@@ -100,6 +100,16 @@ async fn a_field_the_recipe_requires_and_a_container_cannot_present_is_an_error(
 }
 
 #[tokio::test]
+async fn an_image_definition_is_an_error_until_images_are_built() {
+  let served = control().await;
+
+  let check = check(&served, "actor: { driver: linux-firecracker, image: { layers: [{ run: echo one }] } }").await;
+
+  let messages = messages(&check);
+  assert!(messages.iter().any(|m| m.starts_with("error: actor: needy does not build image definitions yet")), "{messages:?}");
+}
+
+#[tokio::test]
 async fn the_recipe_is_checked_against_the_cpu_of_the_runner_the_actor_is_scheduled_on() {
   let served = control().await;
   let _kvm = runner(&served, "kvm", "actor(linux-firecracker) executor(linux-container,native)", &[("kvm", "")]).await;

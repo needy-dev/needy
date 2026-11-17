@@ -4,6 +4,7 @@
 //! - [`source`]: where a document comes from (a file, `builtin:NAME` or text)
 //!   and its `extends` chain.
 //! - [`profile`] and [`recipe`]: the task schemas and `load`.
+//! - [`image`]: image definitions, inline in a profile or in image files.
 //! - [`global`]: versioned client configuration and typed daemon defaults.
 //! - [`validate`]: cross-references inside a loaded profile, as findings.
 //! - [`value`]: values users write, such as durations and sizes.
@@ -13,6 +14,7 @@
 
 pub mod builtin;
 pub mod global;
+pub mod image;
 mod merge;
 pub mod profile;
 pub mod recipe;
@@ -30,6 +32,7 @@ pub use source::Source;
 pub enum Kind {
   Profile,
   Recipe,
+  Image,
 }
 
 impl fmt::Display for Kind {
@@ -37,11 +40,12 @@ impl fmt::Display for Kind {
     f.write_str(match self {
       Self::Profile => "profile",
       Self::Recipe => "recipe",
+      Self::Image => "image",
     })
   }
 }
 
-/// Why a profile or recipe could not be loaded.
+/// Why a profile, recipe or image file could not be loaded.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
   #[error("cannot read {kind} {}", path.display())]

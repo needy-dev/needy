@@ -83,11 +83,15 @@ impl IdentityField {
 }
 
 /// Recipes declare no prepend lists; every list replaces the parent's.
-const MERGE: merge::Rules = merge::Rules { prepend: &[] };
+const MERGE: merge::Rules = merge::Rules {
+  prepend: &[],
+  append: &[],
+};
 
 /// Reads a recipe and its `extends` chain.
 pub fn load(source: &Source) -> Result<Recipe, Error> {
   let document = source::read_chain(source, Kind::Recipe, &MERGE)?;
+  refuse_removed(&document, source)?;
   let mut recipe: Recipe = source::deserialize(document, Kind::Recipe, source)?;
   recipe.base_dir = source.base_dir();
   Ok(recipe)
@@ -99,6 +103,7 @@ pub fn load(source: &Source) -> Result<Recipe, Error> {
 // machine; see `profile::resolve`.
 pub fn resolve(source: &Source) -> Result<String, Error> {
   let mut document = source::read_chain(source, Kind::Recipe, &MERGE)?;
+  refuse_removed(&document, source)?;
   if let Some(serde_yaml::Value::String(file)) =
     document.get_mut("network").and_then(|n| n.get_mut("metadata")).and_then(|m| m.get_mut("file"))
   {
@@ -106,6 +111,24 @@ pub fn resolve(source: &Source) -> Result<String, Error> {
   }
   let _: Recipe = source::deserialize(document.clone(), Kind::Recipe, source)?;
   source::serialize(&document, Kind::Recipe, source)
+}
+
+/// Refuses `os.image`, naming what replaces it, instead of the bare
+/// "unknown field" a removed key would get.
+// NOTICE: no compatibility, as with a profile's removed keys: a recipe
+// describes a machine's identity only, so the image is never taken from it.
+fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), Error> {
+  if document.get("os").and_then(|os| os.get("image")).is_none() {
+    return Ok(());
+  }
+  Err(Error::Invalid {
+    kind: Kind::Recipe,
+    origin: source.to_string(),
+    path: "os.image".into(),
+    message: "recipes no longer name an image: name it as `root:` of an image definition in the profile's `actor.image` \
+              (or name an image reference in `actor.image`)"
+      .into(),
+  })
 }
 
 #[cfg(test)]

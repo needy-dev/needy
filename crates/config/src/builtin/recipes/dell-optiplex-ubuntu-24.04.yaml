@@ -17,7 +17,6 @@ cpu:
   topology: { cores: 4, threads_per_core: 2 }
 memory: 16GiB
 os:
-  image: ubuntu:24.04
   kernel:
     # Source: https://launchpad.net/ubuntu/+source/linux/6.8.0-49.49 and its
     # amd64 build, https://launchpad.net/~canonical-kernel-team/+archive/ubuntu/ppa2/+build/29233125

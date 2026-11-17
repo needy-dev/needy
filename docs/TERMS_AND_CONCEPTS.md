@@ -519,8 +519,9 @@ A named, reusable block of rule actions inside a profile, applied with `use:`.
 
 ### Recipe
 
-A declarative YAML description of one machine: image, kernel, CPU, memory,
-firmware, devices and network identity. `needy image build --recipe` builds
+A declarative YAML description of one machine: kernel, CPU, memory,
+firmware, devices and network identity. The software the machine runs is
+its actor image's, not the recipe's: `os.image` is removed and refused. `needy image build --recipe` builds
 an actor kernel with its kernel options. Built-in
 recipes are referenced as `builtin:NAME`.
 
@@ -547,12 +548,28 @@ each actor starts.
 ### Actor image
 
 What a profile's `actor.image` names for every driver: an OCI image
-reference. The container drivers run that image; the VM drivers boot the VM
+reference, or an [image definition](#image-definition-provisional). The
+container drivers run that image; the VM drivers boot the VM
 image `needy image build --from REF` made of it, found by the same
 reference. Without `actor.image`, the container drivers run the release's
 base image `ghcr.io/needy-dev/needy-actor:v<version>` (pulled when missing)
 and the VM drivers the base VM image (`needy image pull`; never downloaded
 by the daemon itself).
+
+### Image definition (provisional)
+
+The software an actor runs on, written instead of a Dockerfile: a `root`
+(an OCI image reference), an ordered list of **layers** built over it, and
+`env`. `actor.image` takes one inline (a map), or from an **image file** by
+path (a string that starts with `./`, `../` or `/`, or ends in `.yaml`,
+which must exist); any other string is an image reference. An image file
+is its own document kind with `extends`: along `extends`, `layers` append
+(the parent's first), and a child `feature` layer replaces a parent's of
+the same reference, ignoring the tag, in place. needy ships no built-in
+images. A layer is of kind `run` (a script run as root); `feature` layers
+and hooks come with later slices. needy loads and checks definitions but
+does not build them yet, so a run of one is refused. See the
+[images and run data spec](ai/references/architecture/2026-11-17-images-and-run-data-spec.md).
 
 ### Custom actor image
 
