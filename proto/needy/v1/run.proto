@@ -65,6 +65,12 @@ message CreateRunRequest {
   bool wait_for_attach = 10;
   // Single-use capability for executors selecting {client: true}.
   string client_execution = 11;
+  // The directory `needy run create` runs in, on the creating client's
+  // machine. It is the run's workspace when the profile sets no
+  // `actor.workspace` and the executor that runs the commands can reach it;
+  // when that executor cannot, the create fails. Empty: no default
+  // workspace, as before the field existed.
+  string client_dir = 12;
 
   // The client's profile directory, which the daemon cannot read when it
   // runs on another machine.
@@ -109,8 +115,29 @@ message Run {
   // Where the run's actor stands. Unspecified before it starts, and for a
   // run the control plane lists from its database after the run ended.
   ActorState actor_state = 12;
+  // The actor's workspace. Unset when the actor has none (it starts in its
+  // home directory), and for a run the control plane lists from its
+  // database after the run ended.
+  RunWorkspace workspace = 13;
 
   reserved 4;
+}
+
+// Where a run's workspace is: its directory in the actor, and where its
+// files come from.
+message RunWorkspace {
+  // The directory in the actor, the driving program's working directory.
+  string path = 1;
+  // The executor whose directory the actor sees live. Empty when the files
+  // were copied in from the control host, or for a fresh directory.
+  string executor = 2;
+  // The directory the files come from: on the executor's machine (for a
+  // `linux-container` executor, the host directory it binds when it names
+  // one), or on the control host when `executor` is empty. Empty for a
+  // fresh directory in the actor.
+  string source = 3;
+  // The actor may change the files.
+  bool writable = 4;
 }
 
 // A run's life cycle. The first terminal state (stopped, finished or

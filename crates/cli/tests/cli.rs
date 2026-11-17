@@ -209,6 +209,30 @@ fn exec_fault_exits_with_its_code_and_writes_its_stderr() {
   assert_eq!(stderr(&output), "curl: (7) Failed to connect to example.com port 80\n");
 }
 
+// The images and run data spec's "Workspace default": the folder `run
+// create` runs in is the workspace, and the run's output names it.
+#[test]
+fn run_create_on_the_control_host_works_in_its_folder_and_names_it() {
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let folder = home.path().join("project");
+  std::fs::create_dir(&folder).unwrap();
+  let profile = home.write("profile.yaml", NATIVE_PROFILE);
+
+  let output = home.needy().current_dir(&folder).args(["run", "create", "--profile", profile.to_str().unwrap()]).output().unwrap();
+
+  assert!(output.status.success(), "run create: {}", stderr(&output));
+  // The CLI's current directory has its symbolic links resolved (`/var` is
+  // `/private/var` on macOS).
+  let folder = folder.canonicalize().unwrap();
+  assert!(
+    stderr(&output)
+      .contains(&format!("workspace /home/agent/workspace: live from {} on the control host (executor here)", folder.display())),
+    "{}",
+    stderr(&output)
+  );
+}
+
 #[test]
 fn chaos_add_ls_and_rm_change_a_live_run_s_faults() {
   let home = Home::new();
@@ -2984,8 +3008,10 @@ fn process_execution_cannot_combine_a_runner_with_a_run_selector() {
 }
 
 /// A run whose commands all go to runner `mac`.
+// The runner is another machine than the CLI's, so the folder `run create`
+// runs in cannot be the workspace: the actor gets a fresh one.
 const RUNNER_PROFILE: &str = r#"
-actor: { driver: linux-firecracker }
+actor: { driver: linux-firecracker, workspace: { path: ~/workspace } }
 executors:
   mac: { runner: mac }
 commands:
@@ -3810,6 +3836,24 @@ fn network_administrators_manage_clients_while_runs_only_clients_are_denied() {
   assert!(as_client(&laptop, &endpoint, &["runner", "ls"]).status.success());
 }
 
+// User story 57 of the images and run data spec: commands on an executor
+// of another machine than the client's fail the create, asking for
+// `workspace.from`, rather than work on the wrong folder.
+#[test]
+fn a_paired_clients_folder_cannot_be_a_control_host_executors_workspace() {
+  let control = Home::new();
+  let (_daemon, endpoint) = spawn_control_on_tcp(&control);
+  let laptop = Home::new();
+  let code = pairing_code(&control, &endpoint, "laptop");
+  assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
+  let profile = laptop.write("profile.yaml", NATIVE_PROFILE);
+
+  let created = as_client(&laptop, &endpoint, &["run", "create", "--profile", profile.to_str().unwrap()]);
+
+  assert!(!created.status.success());
+  assert!(stderr(&created).contains("workspace.from"), "{}", stderr(&created));
+}
+
 // ROOT CAUSE:
 //
 // If the host was loaded, `run logs -f` printed nothing, because the test
@@ -3830,7 +3874,13 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   let laptop = Home::new();
   let code = pairing_code(&control, &endpoint, "laptop");
   assert!(pair_context(&laptop, &endpoint, "remote", &code).status.success());
-  let profile = laptop.write("review.profile.yaml", NATIVE_PROFILE);
+  // A paired client is not on the control host, so the folder it creates
+  // the run in cannot be the workspace: the actor gets a fresh one.
+  let profile = laptop.write(
+    "review.profile.yaml",
+    &NATIVE_PROFILE
+      .replace("actor: { driver: linux-firecracker }", "actor: { driver: linux-firecracker, workspace: { path: ~/workspace } }"),
+  );
   let created = as_client(&laptop, &endpoint, &["run", "create", "--profile", profile.to_str().unwrap()]);
   assert!(created.status.success(), "{}", stderr(&created));
   let run = stdout(&created).trim().to_string();

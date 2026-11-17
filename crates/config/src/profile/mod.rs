@@ -24,7 +24,7 @@ pub use network::{ActorNetwork, NetworkPolicy, SERVICE_DOMAIN, Service, service_
 pub use rules::{Actions, ArgOps, EnvOps, Resolver, Rule, UnknownPolicy, When};
 pub use runner::{LabelMatch, RunnerSelector};
 pub use trace::{Trace, TraceSink};
-pub use workspace::{WORKSPACE, WORKSPACE_OUT};
+pub use workspace::{WORKSPACE, WORKSPACE_OUT, set as set_workspace};
 
 use crate::{Error, Kind, Source, image, merge, source};
 

@@ -744,7 +744,11 @@ The directory the work operates on, set in one place, `actor.workspace`: its
 `path` in the actor (the driving program's working directory), `from` (an
 executor's directory mounted live, a host directory copied in, or nothing for
 a fresh directory in the actor) and `writable`. needy derives the mount and
-the executor's path map from it.
+the executor's path map from it. Without `actor.workspace`, the **default
+workspace** is the folder `needy run create` runs in, passed through live at
+`~/workspace` when the executor that runs the commands can reach it, else the
+create fails and asks for `workspace.from` (a profile without executors keeps
+the actor's home).
 
 ### File mapping
 

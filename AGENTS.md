@@ -21,7 +21,8 @@ Dependencies point downward; a crate never depends on one above it.
   executor is created), `check` (`profile check` through the control plane),
   `routing` (the exec domain's adapter: it runs the `exec.decide` chain and
   applies path maps), `relay` (exec streams, and the file domain's stream
-  filters on them), `files` (copy-in, mirror-out), `actor` and `guest` (a run's
+  filters on them), `files` (copy-in, mirror-out), `workspace` (the default
+  workspace, the folder `run create` runs in), `actor` and `guest` (a run's
   VM, gateway and guest API), `runners` (the runner registry) over `store`
   (`state.db`, SeaORM, separate from `trace.db`), and the `executor` and
   `runner` roles. It implements

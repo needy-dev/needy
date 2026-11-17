@@ -163,3 +163,42 @@ fn create_accepts_local_file_and_temporary_overrides() {
   assert_eq!(profile, PathBuf::from("profile.yaml"));
   assert_eq!(args, ["extra"]);
 }
+
+fn workspace(executor: &str, source: &str, writable: bool) -> v1::RunWorkspace {
+  v1::RunWorkspace {
+    path: "/home/agent/workspace".into(),
+    executor: executor.into(),
+    source: source.into(),
+    writable,
+  }
+}
+
+fn profile(executors: &str) -> needy_config::profile::Profile {
+  let yaml = format!("actor: {{ driver: linux-firecracker }}\nexecutors:\n{executors}");
+  needy_config::profile::load(&needy_config::Source::text(yaml, "/base")).unwrap()
+}
+
+#[test]
+fn run_create_names_the_machine_and_folder_of_its_workspace() {
+  let client = profile("  here: { driver: native, runner: { client: true } }\n");
+  let control = profile("  here: { driver: native }\n");
+  let runner = profile("  here: { driver: native, runner: mac }\n");
+
+  assert_eq!(
+    workspace_line(&workspace("here", "/Users/user/project", true), &client),
+    "workspace /home/agent/workspace: live from /Users/user/project on this machine (executor here)"
+  );
+  assert_eq!(
+    workspace_line(&workspace("here", "/home/user/project", false), &control),
+    "workspace /home/agent/workspace: live from /home/user/project on the control host (executor here), read-only"
+  );
+  assert_eq!(
+    workspace_line(&workspace("here", "/srv/ws", true), &runner),
+    "workspace /home/agent/workspace: live from /srv/ws on runner mac (executor here)"
+  );
+  assert_eq!(
+    workspace_line(&workspace("", "/home/user/seed", false), &control),
+    "workspace /home/agent/workspace: copied from /home/user/seed on the control host, read-only"
+  );
+  assert_eq!(workspace_line(&workspace("", "", true), &control), "workspace /home/agent/workspace: a fresh directory in the actor");
+}

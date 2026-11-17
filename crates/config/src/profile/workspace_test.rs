@@ -166,3 +166,58 @@ fn actor_cwd_is_an_unknown_field() {
   let err = error("actor: { driver: linux-firecracker, cwd: /tmp }\n");
   assert!(err.contains("actor") && err.contains("unknown field `cwd`"), "{err}");
 }
+
+const NO_WORKSPACE: &str = r#"
+user: { name: dev }
+actor: { driver: linux-firecracker }
+executors:
+  build: { driver: native }
+"#;
+
+fn set(yaml: &str, workspace: crate::profile::Workspace) -> Result<Profile, crate::Error> {
+  let source = Source::text(yaml, "/base");
+  let mut profile = load(&source)?;
+  crate::profile::set_workspace(&mut profile, workspace, &source)?;
+  Ok(profile)
+}
+
+fn from_build(path: &str) -> crate::profile::Workspace {
+  crate::profile::Workspace {
+    path: "~/workspace".into(),
+    from: Some(Side::Executor {
+      name: "build".into(),
+      path: path.into(),
+    }),
+    writable: true,
+  }
+}
+
+// The daemon's default workspace (the folder `run create` runs in) is
+// derived here as a written one is, so both get the same mount and path map.
+#[test]
+fn a_workspace_set_after_loading_derives_what_a_written_one_does() {
+  let set = set(NO_WORKSPACE, from_build("/srv/project/")).unwrap();
+  let written = load_text(&NO_WORKSPACE.replace(
+    "actor: { driver: linux-firecracker }",
+    "actor: { driver: linux-firecracker, workspace: { path: ~/workspace, from: \"executor:build:/srv/project/\", writable: true } }",
+  ))
+  .unwrap();
+
+  assert_eq!(set.files.mappings, written.files.mappings);
+  assert_eq!(set.executors, written.executors);
+  assert_eq!(set.actor.workspace, written.actor.workspace);
+  assert_eq!(set.executors["build"].path_map["/home/dev/workspace"], "/srv/project");
+}
+
+#[test]
+fn a_workspace_is_not_set_over_a_written_one() {
+  let error = set(EXECUTOR, from_build("/srv/other")).unwrap_err().to_string();
+  assert!(error.contains("actor.workspace"), "{error}");
+}
+
+#[test]
+fn a_set_workspace_refuses_a_mapping_the_profile_writes() {
+  let yaml = format!("{NO_WORKSPACE}files:\n  workspace: {{ mode: copy-in, from: \"host:/tmp/x\", to: \"actor:~/x\" }}\n");
+  let error = set(&yaml, from_build("/srv/project")).unwrap_err().to_string();
+  assert!(error.contains("files.workspace"), "{error}");
+}
