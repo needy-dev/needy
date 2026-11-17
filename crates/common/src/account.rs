@@ -64,6 +64,28 @@ pub fn group(text: &str, user: &Account<'_>) -> String {
   rewrite(text, &user.group_entry(), |fields| fields[0] == user.name || fields.get(2) == Some(&gid.as_str()))
 }
 
+/// The IDs of the groups in `text` (a group file) whose member lists name
+/// `user`, in file order, without its own group: the supplementary groups a
+/// program started as the user gets, as `initgroups(3)` reads them.
+// Reference: https://man7.org/linux/man-pages/man5/group.5.html
+// (`group_name:password:GID:user_list`, the list comma-separated).
+pub fn supplementary_groups(text: &str, user: &Account<'_>) -> Vec<u32> {
+  let mut groups = Vec::new();
+  for line in text.lines() {
+    let fields: Vec<&str> = line.split(':').collect();
+    let [_, _, gid, members] = fields[..] else {
+      continue;
+    };
+    let Ok(gid) = gid.parse::<u32>() else {
+      continue;
+    };
+    if gid != user.gid && !groups.contains(&gid) && members.split(',').any(|m| m.trim() == user.name) {
+      groups.push(gid);
+    }
+  }
+  groups
+}
+
 /// `text` with a locked shadow entry for the user in place of any with its
 /// name. An existing entry for the name is kept as it is, since shadow has
 /// no ID to disagree with.

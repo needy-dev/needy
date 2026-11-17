@@ -58,3 +58,57 @@ fn the_driving_program_is_told_its_terminal_draws_24_bit_color() {
   };
   assert_eq!(colorterm(&config).as_deref(), Some("24bit"));
 }
+
+// ROOT CAUSE:
+//
+// If an image put the run's user in groups besides its own (Dev Container
+// features add it to `nvm`, `python` and `pipx`), the driving program had
+// none of them, because init cleared the supplementary groups when it
+// switched to the user (`setgroups(&[])`, and `Command::uid`, which does the
+// same), so a group-writable directory such as nvm's was not writable.
+//
+// Before the fix, the program's `Groups:` were empty.
+// The fix gives it the groups whose member lists name the user.
+#[test]
+fn a_program_started_as_the_user_keeps_its_supplementary_groups() {
+  // SAFETY: `geteuid` cannot fail.
+  if unsafe { libc::geteuid() } != 0 {
+    eprintln!("skipped: switching to another user needs root (the guest tests run as root on Linux)");
+    return;
+  }
+  let groups = [
+    nix::unistd::Gid::from_raw(4242),
+    nix::unistd::Gid::from_raw(4243),
+  ];
+  let mut command = std::process::Command::new("/bin/sh");
+  command.args(["-c", "grep '^Groups:' /proc/self/status"]);
+  // SAFETY: `switch_user` makes only async-signal-safe calls.
+  unsafe {
+    use std::os::unix::process::CommandExt;
+    command.pre_exec(move || switch_user(nix::unistd::Uid::from_raw(4241), nix::unistd::Gid::from_raw(4241), &groups).map_err(Into::into));
+  }
+
+  let out = command.output().unwrap();
+
+  let status = String::from_utf8_lossy(&out.stdout);
+  assert!(out.status.success(), "{status} {}", String::from_utf8_lossy(&out.stderr));
+  let listed: Vec<&str> = status.trim_start_matches("Groups:").split_whitespace().collect();
+  assert_eq!(listed, ["4242", "4243"], "{status}");
+}
+
+#[test]
+fn as_user_takes_the_supplementary_groups_before_the_gate() {
+  let args: Vec<String> = ["1000", "1000", "999,998", "", "--", "/bin/true"].iter().map(|a| a.to_string()).collect();
+
+  let parsed = parse_as_user(&args).unwrap();
+
+  assert_eq!(
+    parsed.groups,
+    [
+      nix::unistd::Gid::from_raw(999),
+      nix::unistd::Gid::from_raw(998)
+    ]
+  );
+  assert_eq!(parsed.gate, "");
+  assert_eq!(parsed.program, "/bin/true");
+}

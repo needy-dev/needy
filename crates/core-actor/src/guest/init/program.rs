@@ -72,12 +72,17 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
     } else {
       config.cwd.clone()
     })
-    .stdin(Stdio::null())
-    .uid(user.uid)
-    .gid(user.gid);
-  // SAFETY: `setsid` is async-signal-safe and allocates nothing.
+    .stdin(Stdio::null());
+  // NOTICE: the user is switched to in `pre_exec`, not with `Command::uid`
+  // and `gid`: std clears the supplementary groups when it drops from root
+  // and runs `pre_exec` only after `setuid`, when they can no longer be set.
+  let (uid, gid) = (nix::unistd::Uid::from_raw(user.uid), nix::unistd::Gid::from_raw(user.gid));
+  let groups = user_groups(&user);
+  // SAFETY: `switch_user` and `setsid` are async-signal-safe and allocate
+  // nothing; `groups` was built before the fork.
   unsafe {
-    command.pre_exec(|| {
+    command.pre_exec(move || {
+      switch_user(uid, gid, &groups)?;
       nix::unistd::setsid()?;
       Ok(())
     });
@@ -168,6 +173,7 @@ pub(super) async fn run_on_terminal(
     AS_USER.into(),
     user.uid.to_string(),
     user.gid.to_string(),
+    user_groups(&user).iter().map(|g| g.to_string()).collect::<Vec<_>>().join(","),
     gate_path,
     "--".into(),
   ];
@@ -337,42 +343,94 @@ impl ProcessService for TerminalService {
 }
 
 /// The argument that makes init, started as a plain process, switch to a
-/// user and run a program: `init --as-user UID GID GATE -- PROGRAM ARGS…`.
+/// user and run a program: `init --as-user UID GID GROUPS GATE -- PROGRAM
+/// ARGS…`, `GROUPS` the supplementary group IDs, comma-separated.
 pub(super) const AS_USER: &str = "--as-user";
+
+/// The supplementary groups of the run's user, from the group file init
+/// already wrote for it (`account::apply`); none when it cannot be read.
+fn user_groups(user: &needy_api_proto::v1::GuestUser) -> Vec<nix::unistd::Gid> {
+  let account = needy_common::account::Account {
+    name: &user.name,
+    uid: user.uid,
+    gid: user.gid,
+  };
+  match std::fs::read_to_string("/etc/group") {
+    Ok(text) => needy_common::account::supplementary_groups(&text, &account).into_iter().map(nix::unistd::Gid::from_raw).collect(),
+    Err(e) => {
+      tracing::warn!("cannot read /etc/group; the program gets no supplementary groups: {e}");
+      Vec::new()
+    }
+  }
+}
+
+/// Switches this process to `uid` with its group `gid` and the
+/// supplementary `groups`. The order matters: the groups and the group while
+/// still root, then the user. Only async-signal-safe calls, so it may run
+/// in `pre_exec`.
+fn switch_user(uid: nix::unistd::Uid, gid: nix::unistd::Gid, groups: &[nix::unistd::Gid]) -> nix::Result<()> {
+  nix::unistd::setgroups(groups)?;
+  nix::unistd::setgid(gid)?;
+  nix::unistd::setuid(uid)
+}
+
+/// `init --as-user`'s arguments after `--as-user`.
+#[derive(Debug)]
+struct AsUser<'a> {
+  uid: nix::unistd::Uid,
+  gid: nix::unistd::Gid,
+  groups: Vec<nix::unistd::Gid>,
+  gate: &'a str,
+  program: &'a str,
+  /// The program's argv, its name first.
+  argv: &'a [String],
+}
+
+fn parse_as_user(args: &[String]) -> Result<AsUser<'_>> {
+  let usage = || anyhow::anyhow!("usage: init {AS_USER} UID GID GROUPS GATE -- PROGRAM [ARGS]");
+  let [uid, gid, groups, gate, dashes, program, ..] = args else {
+    return Err(usage());
+  };
+  if dashes != "--" {
+    return Err(usage());
+  }
+  let groups = groups
+    .split(',')
+    .filter(|g| !g.is_empty())
+    .map(|g| g.parse().map(nix::unistd::Gid::from_raw).context("a supplementary group"))
+    .collect::<Result<_>>()?;
+  Ok(AsUser {
+    uid: nix::unistd::Uid::from_raw(uid.parse().context("uid")?),
+    gid: nix::unistd::Gid::from_raw(gid.parse().context("gid")?),
+    groups,
+    gate,
+    program,
+    argv: &args[5..],
+  })
+}
 
 /// Switches to the user `args` name and runs the program after `--`; it
 /// returns only when that fails.
 pub(super) fn as_user(args: &[String]) -> anyhow::Error {
   let switch = || -> Result<std::convert::Infallible> {
-    let [uid, gid, gate, dashes, program, ..] = args else {
-      bail!("usage: init {AS_USER} UID GID GATE -- PROGRAM [ARGS]");
-    };
-    if dashes != "--" {
-      bail!("usage: init {AS_USER} UID GID GATE -- PROGRAM [ARGS]");
-    }
-    if !gate.is_empty() {
+    let parsed = parse_as_user(args)?;
+    if !parsed.gate.is_empty() {
       use std::io::Read;
-      let mut gate = std::os::unix::net::UnixStream::connect(gate).context("cannot connect to the start gate")?;
+      let mut gate = std::os::unix::net::UnixStream::connect(parsed.gate).context("cannot connect to the start gate")?;
       let mut ready = [0];
       gate.read_exact(&mut ready).context("the start gate ended before an attach subscribed")?;
     }
-    let uid = nix::unistd::Uid::from_raw(uid.parse().context("uid")?);
-    let gid = nix::unistd::Gid::from_raw(gid.parse().context("gid")?);
-    // The order matters: groups and the group while still root, then the
-    // user, as `std::process::Command::uid` does.
-    nix::unistd::setgroups(&[]).context("setgroups")?;
-    nix::unistd::setgid(gid).context("setgid")?;
-    nix::unistd::setuid(uid).context("setuid")?;
-    let argv: Vec<std::ffi::CString> = args[4..].iter().map(|a| std::ffi::CString::new(a.as_str())).collect::<Result<_, _>>()?;
+    switch_user(parsed.uid, parsed.gid, &parsed.groups).context("cannot switch to the user")?;
+    let argv: Vec<std::ffi::CString> = parsed.argv.iter().map(|a| std::ffi::CString::new(a.as_str())).collect::<Result<_, _>>()?;
     // In a container the program's file may be a shim; its real file
     // starts it, so the driving program itself is never routed.
     let search = std::env::var("PATH").unwrap_or_default();
-    if let Some(real) = crate::guest::capture::shim::resolve(program, &search) {
+    if let Some(real) = crate::guest::capture::shim::resolve(parsed.program, &search) {
       use std::os::unix::ffi::OsStrExt;
       let real = std::ffi::CString::new(real.as_os_str().as_bytes())?;
       return Ok(nix::unistd::execv(&real, &argv)?);
     }
-    let program = std::ffi::CString::new(program.as_str())?;
+    let program = std::ffi::CString::new(parsed.program)?;
     Ok(nix::unistd::execvp(&program, &argv)?)
   };
   match switch() {
