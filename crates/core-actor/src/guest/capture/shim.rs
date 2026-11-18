@@ -48,13 +48,9 @@ pub const TRAMPOLINE_DIR: &str = "/run/needy/shims";
 /// links to: a hard link cannot cross from the root file system to the
 /// tmpfs.
 const TRAMPOLINE_STUB: &str = ".stub";
-/// The actor's own programs, searched before the stubs.
-// Source: https://github.com/moby/moby/blob/v28.5.1/oci/defaults.go#L19
-// (`defaultUnixPathEnv`, the PATH a container gets) and Debian's root PATH,
-// https://sources.debian.org/src/base-files/13.8%2Bdeb13u7/share/profile/#L5
-// Reference: https://github.com/systemd/systemd/blob/v257/src/basic/path-util.h#L23
-// (`DEFAULT_PATH_COMPAT`, the same string).
-pub const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+/// The actor's own programs, searched before the stubs. Defined with the
+/// build plan, whose image `PATH` starts from it; its provenance is there.
+pub use needy_core::image::SYSTEM_PATH;
 
 /// The real program the shim at `exe` stands for, or `None` when `exe` is
 /// not a shim. needy's own files in `/.needy` never are.

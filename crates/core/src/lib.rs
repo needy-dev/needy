@@ -6,6 +6,8 @@
 //!   profile and the command context, so a run can be replayed; a recipe
 //!   compiles to one machine's identity for a host and seed.
 //! - [`pattern`]: command patterns, shared by rules, resolvers and chaos.
+//! - [`image`]: an image definition's build plan (steps, cache keys, the
+//!   image's `env` and `PATH`).
 //! - [`chaos`]: deterministic fault injection.
 //! - [`network`]: a network's policy at its gateway (allowlist, header
 //!   injection).
@@ -18,6 +20,7 @@
 
 pub mod chaos;
 pub mod event;
+pub mod image;
 pub mod intercept;
 pub mod network;
 pub mod pattern;
