@@ -16,6 +16,10 @@ needy-config.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
+# Build plan cache keys.
+sha2.workspace = true
+# `${PATH}` in an image's `env`.
+shellexpand.workspace = true
 humantime.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

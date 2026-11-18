@@ -571,6 +571,19 @@ and hooks come with later slices. needy loads and checks definitions but
 does not build them yet, so a run of one is refused. See the
 [images and run data spec](ai/references/architecture/2026-11-17-images-and-run-data-spec.md).
 
+### Build plan (provisional)
+
+What building an image definition takes, worked out without IO from the
+definition, the root's digest and the profile's user (`needy-core`'s
+`image::plan`): the profile's user created in the root, one **step** per
+layer in order, the image's commit layer on top, and the image's `env` and
+`PATH` (`${PATH}` in `env` expands to the system `PATH`). Each step has a
+**cache key**, the digest of its parent's key and its input (a `run`
+script); the first parent is the root's digest with the user (name, UID,
+GID), so another root or user is another image, a changed layer changes
+its key and every key above it, and a layer built under a key is reused.
+Nothing builds a plan yet.
+
 ### Custom actor image
 
 An OCI image `FROM` a base image that adds programs (an agent CLI, node,
