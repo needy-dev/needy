@@ -22,7 +22,7 @@ use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
   ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunFaults, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started,
-  StopMode, StoredEvent, Target, WindowSize,
+  StopMode, StoredEvent, Target, UpperLayer, WindowSize,
 };
 
 /// A request field with no domain meaning.
@@ -729,6 +729,16 @@ pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
         name: f.name,
       })
       .collect(),
+    layers: config.layers.into_iter().map(|digest| v1::GuestLayer { digest }).collect(),
+    image_path: config.image_path,
+    session: Some(v1::GuestSession {
+      upper: match config.session.upper {
+        UpperLayer::Disposable => v1::UpperLayer::Disposable,
+        UpperLayer::Kept => v1::UpperLayer::Kept,
+      }
+      .into(),
+      routing: config.session.routing,
+    }),
   }
 }
 

@@ -62,10 +62,11 @@ rebuilt together. See the [automated and live-probe evidence](../cli/2026-11-11-
 | | `Decide` | unary | Where a command runs and how it is rewritten. The actor's proxy calls it with the command's ancestry |
 | `ProcessService` | `Exec` | bidirectional stream | Start (`ExecStart`) or attach (`ExecAttach`), then stdin, signals and resizes; responses carry `event`, `started`, output, `exited` or `error` |
 | | `ListProcesses`, `KillProcess` | unary | The process table, of a run or a runner (`runner`); a signal by name |
-| `GuestService` | `GetConfig` | unary | The actor's configuration: user, routed names, identity, mounts, driving program, files, hwmon faults |
+| `GuestService` | `GetConfig` | unary | The actor's configuration: user, routed names, identity, mounts, driving program, files, hwmon faults; the layers to stack (digests, lowest first), the image's `PATH` and the session's settings (upper layer disposable or kept, routing on or off) |
 | | `PushEvents` | client stream | Events observed inside the actor, such as an injected hwmon fault |
 | | `ReportExit` | unary | The driving program's exit |
 | | `FetchFiles`, `PushFiles` | server / client stream | Tar archives for copy-in and mirror-out |
+| | `PushLayer` | client stream | A kept upper layer's tar archive at a session's end, passed on as it arrives; only a stream whose last message sets `last` is whole |
 | `RunnerService` | `CreateJoinToken` | unary | A join token: TTL, uses, allowed roles, labels. Its secret is in the response only |
 | | `ListJoinTokens`, `RevokeJoinToken` | unary | Every join token with its state (`valid`, `expired`, `used-up`, `revoked`), without secrets |
 | | `Join` | unary | Join token, name, roles, labels → the runner's credential (once) and the heartbeat interval. Needs no bearer token |

@@ -1,11 +1,12 @@
 //! The actor's side of its run, through `api-server`'s `Guest` trait:
 //! the configuration its init asks for at boot, the events it observes, the
-//! driving program's exit, and the archives of its copy-in and mirror-out
-//! mappings.
+//! driving program's exit, the archives of its copy-in and mirror-out
+//! mappings, and the upper layer a session keeps.
 
 use futures_util::StreamExt as _;
 use needy_api_server::control::{
-  ControlError, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser,
+  Chunks, ControlError, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser,
+  UpperLayer,
 };
 use needy_common::process::Exit;
 use needy_config::profile::{FaultDomain, FileMode, Side};
@@ -82,6 +83,7 @@ impl Guest for Daemon {
       })
       .collect();
     let recipe = run.recipe.as_ref();
+    let boot = run.boot();
     // The run's exec faults now, also those `needy chaos add` added
     // before the actor asked.
     let routed = run.route_names();
@@ -138,6 +140,13 @@ impl Guest for Daemon {
       wait_for_attach: run.wait_for_attach,
       daemon_uid: daemon_user().0,
       daemon_gid: daemon_user().1,
+      // TODO(images): the layer list is for the VM drivers, which attach a
+      // disk per layer (slice 1, step 6). A container driver boots its
+      // snapshot as an engine image instead (slice 2); when it does, its
+      // facets should clear the list, as they clear the mounts below.
+      layers: boot.snapshot.map(|s| s.layers.iter().map(ToString::to_string).collect()).unwrap_or_default(),
+      image_path: boot.path,
+      session: boot.session,
     };
     let in_guest = Some(Presenter::Guest);
     if facets.workspace != Presenter::Guest {
@@ -191,6 +200,21 @@ impl Guest for Daemon {
     files::push(&run, name, archive).await
   }
 
+  /// Keeps the session's upper layer as `upper.tar` in the run's directory
+  /// for the layer store, written as it arrives.
+  async fn push_layer(&self, run: &str, archive: Chunks) -> Result<(), ControlError> {
+    let run = self.runs.find(run)?;
+    if run.boot().session.upper != UpperLayer::Kept {
+      return Err(ControlError::Failed(format!("run {}'s session keeps no upper layer", run.id)));
+    }
+    // TODO(images): slice 1, step 7 puts the archive in the layer store
+    // (`needy_core_actor::image::store::Store::put` or `commit`) when the
+    // session ends, and removes this file.
+    keep_upper(&run.dir.join(UPPER_LAYER), archive)
+      .await
+      .map_err(|e| ControlError::Failed(format!("run {}: keeping the upper layer: {e:#}", run.id)))
+  }
+
   /// The route list now and each change, and a graceful stop once `run
   /// stop` asks for one, until the run or its actor ends: init holds it for
   /// the actor's life.
@@ -216,6 +240,36 @@ impl Guest for Daemon {
       }
     };
     Ok(Box::pin(futures_util::stream::select(routes, stop).take_until(ended)))
+  }
+}
+
+/// The upper layer a session kept, in its run's directory.
+pub(crate) const UPPER_LAYER: &str = "upper.tar";
+
+/// Writes `archive` to `path` as it arrives. The file appears only once the
+/// whole archive is in, so a broken upload leaves the previous one, or
+/// none.
+async fn keep_upper(path: &std::path::Path, mut archive: Chunks) -> anyhow::Result<()> {
+  use tokio::io::AsyncWriteExt as _;
+  let partial = path.with_extension("tar.partial");
+  let mut file = tokio::fs::File::create(&partial).await?;
+  let written = async {
+    while let Some(part) = archive.next().await {
+      file.write_all(&part?).await?;
+    }
+    file.sync_all().await?;
+    anyhow::Ok(())
+  }
+  .await;
+  drop(file);
+  match written {
+    Ok(()) => Ok(tokio::fs::rename(&partial, path).await?),
+    Err(e) => {
+      if let Err(removed) = tokio::fs::remove_file(&partial).await {
+        tracing::warn!("cannot remove {}: {removed}", partial.display());
+      }
+      Err(e)
+    }
   }
 }
 

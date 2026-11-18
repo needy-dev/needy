@@ -1,7 +1,7 @@
 use needy_api_proto::v1::guest_service_control_response::Message;
 use needy_api_proto::v1::{
-  FetchFilesRequest, GetConfigRequest, GracefulStop, GuestServiceControlRequest, PushEventsRequest, PushFilesRequest, ReportExitRequest,
-  RouteList, TraceEvent,
+  FetchFilesRequest, GetConfigRequest, GracefulStop, GuestServiceControlRequest, GuestSession, PushEventsRequest, PushFilesRequest,
+  PushLayerRequest, ReportExitRequest, RouteList, TraceEvent, UpperLayer,
 };
 use needy_core::event::{Event, RunStop, SCHEMA_VERSION};
 use tonic::Code;
@@ -35,6 +35,30 @@ async fn the_actor_gets_its_run_s_configuration() {
   assert_eq!(config.user.map(|u| (u.name, u.uid)), Some(("agent".into(), 1000)));
   assert_eq!(config.mounts[0].target, "/home/agent/workspace");
   assert_eq!(config.gateway_port, 7001);
+}
+
+#[tokio::test]
+async fn the_actor_is_told_its_layers_image_path_and_session() {
+  let served = serve(actor()).await;
+
+  let config = served.client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+
+  let layers: Vec<_> = config.layers.into_iter().map(|l| l.digest).collect();
+  assert_eq!(
+    layers,
+    [
+      format!("sha256:{}", "a".repeat(64)),
+      format!("sha256:{}", "b".repeat(64))
+    ]
+  );
+  assert_eq!(config.image_path, "/usr/local/bin:/usr/bin");
+  assert_eq!(
+    config.session,
+    Some(GuestSession {
+      upper: UpperLayer::Kept.into(),
+      routing: false,
+    })
+  );
 }
 
 fn pushed(version: u32) -> PushEventsRequest {
@@ -131,6 +155,80 @@ async fn mirror_out_chunks_are_joined_under_the_first_name() {
 
   let pushed = served.fake.pushed.lock().unwrap();
   assert_eq!(*pushed, [("s-actor".to_string(), "out".to_string(), b"abcd".to_vec())]);
+}
+
+#[tokio::test]
+async fn an_upper_layer_is_streamed_in_parts_of_at_most_one_mebibyte() {
+  let served = serve(actor()).await;
+  let archive: Vec<u8> = (0..(3 << 20) + 5).map(|i| (i % 251) as u8).collect();
+  let ended = served.fake.layer_ended.notified();
+
+  needy_api_client::guest::push_layer(&served.client, std::io::Cursor::new(archive.clone())).await.unwrap();
+  ended.await;
+
+  let layers = served.fake.layers.lock().unwrap();
+  let (run, parts, error) = &layers[0];
+  assert_eq!(run, "s-actor");
+  assert_eq!(*error, None);
+  assert!(parts.len() >= 4 && parts.iter().all(|p| p.len() <= 1 << 20), "{} parts", parts.len());
+  assert_eq!(parts.concat(), archive);
+}
+
+/// Reads `good` bytes, then fails.
+struct Failing {
+  good: usize,
+}
+
+impl tokio::io::AsyncRead for Failing {
+  fn poll_read(
+    mut self: std::pin::Pin<&mut Self>,
+    _: &mut std::task::Context<'_>,
+    buf: &mut tokio::io::ReadBuf<'_>,
+  ) -> std::task::Poll<std::io::Result<()>> {
+    if self.good == 0 {
+      return std::task::Poll::Ready(Err(std::io::Error::other("disk gone")));
+    }
+    let n = self.good.min(buf.remaining());
+    buf.put_slice(&vec![b'x'; n]);
+    self.good -= n;
+    std::task::Poll::Ready(Ok(()))
+  }
+}
+
+// A client stream's end carries no error: when the guest's read fails, its
+// request stream just ends. Without the marked last part, the daemon would
+// take the truncated archive for a whole one.
+#[tokio::test]
+async fn an_upper_layer_whose_read_fails_reaches_the_daemon_as_a_broken_upload() {
+  let served = serve(actor()).await;
+  let ended = served.fake.layer_ended.notified();
+
+  // More than the client buffers, so the call is under way when the read
+  // fails.
+  let error = needy_api_client::guest::push_layer(&served.client, Failing { good: 8 << 20 }).await.unwrap_err();
+  tokio::time::timeout(std::time::Duration::from_secs(10), ended).await.unwrap();
+
+  assert!(matches!(error, needy_api_client::Error::Read(_)), "{error}");
+  let layers = served.fake.layers.lock().unwrap();
+  let (_, _, error) = &layers[0];
+  // Ended, or reset as the call is dropped: broken either way.
+  assert!(
+    matches!(error.as_deref(), Some(e) if e == "the layer upload ended before its last part" || e.starts_with("the layer upload broke: ")),
+    "{error:?}"
+  );
+}
+
+#[tokio::test]
+async fn the_control_socket_serves_no_layer_upload() {
+  let served = serve(Caller::Operator).await;
+
+  let parts = [PushLayerRequest {
+    data: b"x".to_vec(),
+    last: true,
+  }];
+  let status = served.client.guest().push_layer(tokio_stream::iter(parts)).await.unwrap_err();
+
+  assert_eq!(status.code(), Code::PermissionDenied);
 }
 
 #[tokio::test]

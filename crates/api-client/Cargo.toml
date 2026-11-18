@@ -18,6 +18,7 @@ shell-words.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
+tokio-util = { workspace = true, features = ["io"] }
 tonic = { workspace = true, features = ["transport", "tls-ring", "tls-native-roots"] }
 tower = { workspace = true, features = ["util"] }
 tracing.workspace = true

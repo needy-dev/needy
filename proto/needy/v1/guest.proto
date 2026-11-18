@@ -15,6 +15,10 @@ service GuestService {
   rpc FetchFiles(FetchFilesRequest) returns (stream FetchFilesResponse);
   // A tar archive for a mirror-out mapping; the first message names it.
   rpc PushFiles(stream PushFilesRequest) returns (PushFilesResponse);
+  // A tar archive of the session's upper layer, streamed when a session
+  // that keeps it (`GuestSession.upper`) ends. Unlike `PushFiles` it is
+  // never held whole: a layer can be hundreds of megabytes.
+  rpc PushLayer(stream PushLayerRequest) returns (PushLayerResponse);
   // What the daemon tells a running actor's init as it happens, on the one
   // stream init holds for the actor's life; it ends with the run. Every
   // daemon-to-init message is a case of `GuestServiceControlResponse`
@@ -79,6 +83,52 @@ message PushFilesRequest {
 
 message PushFilesResponse {}
 
+message PushLayerRequest {
+  // The next part of the archive.
+  bytes data = 1;
+  // Set on the last message only. An upload whose stream ends without it
+  // is broken, whatever ended it, and the daemon keeps nothing of it: a
+  // guest whose read fails cannot end a stream as anything but whole.
+  bool last = 2;
+}
+
+message PushLayerResponse {}
+
+// One layer init stacks over the base. Its disk is found by the marker it
+// carries (`needy-layer` at the disk's root), not by attach order.
+message GuestLayer {
+  // `sha256:<64 hex digits>`, as the disk's marker names it.
+  string digest = 1;
+}
+
+// What happens to a session's upper layer, the writable tmpfs over its
+// layers.
+enum UpperLayer {
+  UPPER_LAYER_UNSPECIFIED = 0;
+  // Gone with the actor: a run's.
+  UPPER_LAYER_DISPOSABLE = 1;
+  // Archived and streamed with `PushLayer` when the session ends, after
+  // the driving program exits and before its exit is reported: a build
+  // step's or an edit session's.
+  UPPER_LAYER_KEPT = 2;
+}
+
+// The settings of the session an actor is: a run, a build step or an edit
+// session (provisional names). An unset session is a run's.
+//
+// NOTICE: the session's ending (commit or discard) is not a setting here.
+// The guest does the same for both: it streams a kept upper layer, and the
+// daemon commits it or discards it (a failed build step, an edit the user
+// throws away). A kept layer the daemon will discard is still streamed;
+// TODO(images): tell the guest the ending, on `Control`, if that transfer
+// shows up in an edit session's time.
+message GuestSession {
+  UpperLayer upper = 1;
+  // Off: init hands no exec to the proxy, whatever the route list says (a
+  // build step).
+  bool routing = 2;
+}
+
 message GuestUser {
   string name = 1;
   uint32 uid = 2;
@@ -131,6 +181,16 @@ message GetConfigResponse {
   // channels), it gives the socket to them, mode 0600.
   uint32 daemon_uid = 18;
   uint32 daemon_gid = 19;
+  // The layers init stacks over the base, lowest first: the root's
+  // layers, the needy layer, the built layers and the commit layer. Empty
+  // boots the base alone.
+  repeated GuestLayer layers = 20;
+  // The image's `PATH`: init writes it under `/run/needy`, and it goes
+  // after the trampolines and before the route stubs. Empty for none. It
+  // is kept out of `env`, whose `PATH` would replace the driving program's
+  // whole; a profile's `actor.env.PATH` replaces this one.
+  string image_path = 21;
+  GuestSession session = 22;
 }
 
 // An event observed inside the actor. The listener the guest calls is bound to

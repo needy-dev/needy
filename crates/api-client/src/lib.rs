@@ -13,6 +13,8 @@
 //! - [`exec`]: exec streams: start or attach, input, events, run to
 //!   completion.
 //! - [`files`]: tar archives over exec streams, to and from an executor.
+//! - [`guest`]: the actor's uploads to its daemon that are streamed as
+//!   they are read: a session's upper layer.
 //! - [`error`]: errors, with the server's status mapped to a [`Kind`].
 
 mod command;
@@ -20,6 +22,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod exec;
 pub mod files;
+pub mod guest;
 pub mod ready;
 
 use std::pin::Pin;

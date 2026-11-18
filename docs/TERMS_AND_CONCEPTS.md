@@ -662,6 +662,16 @@ Deletions are overlayfs whiteouts; an opaque directory is written as
 whiteouts of what it hides below, since the disk carries no extended
 attributes.
 
+### Session (provisional)
+
+An internal primitive: an actor booted from a snapshot with three settings,
+its **upper layer** (disposable, or kept and streamed to the daemon when the
+session ends), **routing** (on or off) and its **ending** (the daemon
+commits a kept upper layer or discards it). A run, a build step and an edit
+session are its uses; users see only runs, `image build` and `image edit`.
+The guest configuration carries the upper layer and routing; the ending is
+the daemon's. Not the earlier name of a run (see Run).
+
 ## Routing
 
 ### Mesh

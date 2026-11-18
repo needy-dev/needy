@@ -568,7 +568,53 @@ pub struct GuestConfig {
   /// service a container actor's init binds on a Unix socket.
   pub daemon_uid: u32,
   pub daemon_gid: u32,
+  /// The digests (`sha256:<hex>`) of the layers init stacks over the base,
+  /// lowest first; each layer disk's marker names one. Empty boots the
+  /// base alone.
+  pub layers: Vec<String>,
+  /// The image's `PATH`, kept out of [`GuestConfig::env`]: it goes between
+  /// the trampolines and the route stubs rather than replacing the driving
+  /// program's `PATH`. Empty for none.
+  pub image_path: String,
+  pub session: GuestSession,
 }
+
+/// The settings of the session an actor is: a run, a build step or an edit
+/// session (provisional). The default is a run's.
+///
+/// NOTICE: a session's ending (commit or discard) is the daemon's, not the
+/// guest's: the guest streams a kept upper layer either way (see
+/// `GuestSession` in `proto/needy/v1/guest.proto`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GuestSession {
+  pub upper: UpperLayer,
+  /// Off: init hands no exec to the proxy, whatever the route list says.
+  pub routing: bool,
+}
+
+impl Default for GuestSession {
+  fn default() -> Self {
+    Self {
+      upper: UpperLayer::Disposable,
+      routing: true,
+    }
+  }
+}
+
+/// What happens to a session's upper layer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum UpperLayer {
+  /// Gone with the actor.
+  #[default]
+  Disposable,
+  /// Archived and streamed with [`Guest::push_layer`] when the session
+  /// ends.
+  Kept,
+}
+
+/// The parts of an archive as the guest streams them; an error ends the
+/// stream.
+pub type Chunks = Pin<Box<dyn Stream<Item = Result<Vec<u8>>> + Send>>;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct GuestUser {
@@ -632,6 +678,9 @@ pub trait Guest: Send + Sync + 'static {
   async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>>;
   /// A mirror-out mapping's archive.
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()>;
+  /// The session's upper layer, a tar archive streamed as it is read, for
+  /// a session whose upper layer is [`UpperLayer::Kept`].
+  async fn push_layer(&self, run: &str, archive: Chunks) -> Result<()>;
   /// What init is told while the actor runs: the route list now and at
   /// each change, and a graceful stop when `run stop` asks for one. Init
   /// holds it for the actor's life; it ends when the run or the actor does.
