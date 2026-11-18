@@ -69,6 +69,11 @@ pub struct FileMapping {
   /// Propagate deletions to the host.
   #[serde(default)]
   pub delete: bool,
+  /// A sync mapping's choices for an entry both the run and the store
+  /// changed, by pattern (as a `filter` rule's pattern matches), in the
+  /// order written: the first that matches applies.
+  #[serde(default, rename = "on-conflict", deserialize_with = "on_conflict")]
+  pub on_conflict: Vec<(String, OnConflict)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -77,6 +82,79 @@ pub enum FileMode {
   CopyIn,
   Mount,
   MirrorOut,
+  /// The store (`from: host:PATH`) is copied into a per-run copy the actor
+  /// uses live at `to`, and merged back three-way when the run ends.
+  Sync,
+}
+
+/// What resolves an entry of a sync mapping that both the run and the store
+/// changed since the run was seeded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConflict {
+  /// Keep the store's copy.
+  Store,
+  /// Take the run's copy.
+  Run,
+  /// Append the lines the run appended (append-only text).
+  Lines,
+  // TODO(merge-drivers): `{ driver: COMMAND }`, a merge driver a feature
+  // ships, is slice M2 of 2026-11-17-images-and-run-data-spec.md; until
+  // then loading refuses it (`on_conflict`).
+}
+
+/// Reads `on-conflict`, a map from patterns to choices, keeping the order
+/// it is written in: the first matching pattern applies.
+fn on_conflict<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, OnConflict)>, D::Error> {
+  struct Choices;
+  impl<'de> Visitor<'de> for Choices {
+    type Value = Vec<(String, OnConflict)>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.write_str("a map from patterns to `store`, `run` or `lines`")
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+      Ok(Vec::new())
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+      let mut choices = Vec::new();
+      while let Some(pattern) = map.next_key::<String>()? {
+        choices.push((pattern, map.next_value::<OnConflict>()?));
+      }
+      Ok(choices)
+    }
+  }
+  d.deserialize_map(Choices)
+}
+
+impl<'de> Deserialize<'de> for OnConflict {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    struct Choice;
+    impl<'de> Visitor<'de> for Choice {
+      type Value = OnConflict;
+
+      fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("`store`, `run` or `lines`")
+      }
+
+      fn visit_str<E: de::Error>(self, v: &str) -> Result<OnConflict, E> {
+        match v {
+          "store" => Ok(OnConflict::Store),
+          "run" => Ok(OnConflict::Run),
+          "lines" => Ok(OnConflict::Lines),
+          other => Err(E::custom(format!("unknown on-conflict choice {other:?}: use `store`, `run` or `lines`"))),
+        }
+      }
+
+      fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<OnConflict, A::Error> {
+        Err(de::Error::custom(
+          "merge drivers are not supported yet (`{ driver: ... }`); use `store`, `run` or `lines`, or leave the pattern out to keep the store's copy and report the run's",
+        ))
+      }
+    }
+    d.deserialize_any(Choice)
+  }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -134,3 +212,7 @@ impl<'de> Deserialize<'de> for Side {
     Side::parse(&String::deserialize(d)?).map_err(de::Error::custom)
   }
 }
+
+#[cfg(test)]
+#[path = "files_test.rs"]
+mod tests;

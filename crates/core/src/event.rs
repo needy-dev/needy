@@ -26,7 +26,8 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// `actor`, how a stop ended a running actor. Version 11 adds `run.stop`
 /// `ended`, distinguishing completion of accepted stop intent after recovery
 /// from cleanup of an invocation that had already finished or failed.
-pub const SCHEMA_VERSION: u32 = 11;
+/// Version 12 adds `files.sync`, `files.merge` and `files.merge_pending`.
+pub const SCHEMA_VERSION: u32 = 12;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -44,6 +45,8 @@ pub const SCHEMA_VERSION: u32 = 11;
 // `actor`); traces of 9 are refused by the same rule. Version 11 adds the
 // required stop-ownership fact `ended`. Version 10 remains readable through
 // StopV10: missing ownership stays false, preserving that version's semantics.
+// Version 12 only adds kinds, so traces of 10 and 11 still read: they have
+// none of the new kinds.
 // No older versions are added to this narrowly versioned historical boundary.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
@@ -138,6 +141,12 @@ events! {
   FilesMirrorOut(FilesMirrorOut) = "files.mirror_out",
   /// A copy-in or mirror-out failed.
   FilesFail(FilesFail) = "files.fail",
+  /// A sync mapping's store was copied into the run's per-run copy.
+  FilesSync(FilesSync) = "files.sync",
+  /// A sync mapping's per-run copy was merged back into its store.
+  FilesMerge(FilesMerge) = "files.merge",
+  /// A sync mapping's merge could not run; it stays pending and runs later.
+  FilesMergePending(FilesMergePending) = "files.merge_pending",
   ExecDecide(ExecDecide) = "exec.decide",
   ExecStart(ExecStart) = "exec.start",
   ExecExit(ExecExit) = "exec.exit",
@@ -375,6 +384,54 @@ pub struct FilesFail {
   /// The mapping's name.
   pub name: String,
   pub transfer: Transfer,
+  pub reason: String,
+}
+
+/// Where a sync mapping's store is: a directory on the control host, read
+/// and written as the account the control daemon runs as.
+// TODO(runner-files): a store on the client's machine waits for the
+// client-side file transfer; it adds the machine to this record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Store {
+  pub path: String,
+  /// The account the control daemon runs as.
+  pub account: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesSync {
+  /// The mapping's name.
+  pub name: String,
+  pub store: Store,
+  /// Entries copied into the per-run copy.
+  pub entries: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesMerge {
+  /// The mapping's name.
+  pub name: String,
+  pub store: Store,
+  /// Entries taken from the run: changed, added or removed only by it.
+  pub taken: u64,
+  /// Entries both sides changed that the mapping's `on-conflict` resolved.
+  pub resolved: u64,
+  /// Entries both sides changed and nothing resolved, by their path in the
+  /// store: the store kept its copy.
+  pub conflicts: Vec<String>,
+  /// Where needy keeps the run's copies of `conflicts`, outside the store.
+  pub kept: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilesMergePending {
+  /// The mapping's name.
+  pub name: String,
+  pub store: Store,
   pub reason: String,
 }
 

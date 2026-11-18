@@ -96,6 +96,7 @@ pub(super) fn derive(profile: &mut Profile, source: &Source) -> Result<(), Error
           writable: workspace.writable,
           when: MirrorWhen::End,
           delete: false,
+          on_conflict: Vec::new(),
         },
       )?;
     }
@@ -112,6 +113,7 @@ pub(super) fn derive(profile: &mut Profile, source: &Source) -> Result<(), Error
           writable: false,
           when: MirrorWhen::End,
           delete: false,
+          on_conflict: Vec::new(),
         },
       )?;
       if workspace.writable {
@@ -128,6 +130,7 @@ pub(super) fn derive(profile: &mut Profile, source: &Source) -> Result<(), Error
             writable: false,
             when: MirrorWhen::End,
             delete: false,
+            on_conflict: Vec::new(),
           },
         )?;
       }

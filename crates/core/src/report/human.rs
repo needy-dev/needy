@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use anstyle::{AnsiColor, Style};
 
-use super::{FindingKind, Summary, actor_stop, duration, ms, network_name, truncate};
+use super::{FindingKind, MergeState, Summary, actor_stop, duration, ms, network_name, truncate};
 use crate::event::ActorExit;
 use crate::types::{Capture, RunState};
 
@@ -168,6 +168,27 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
     aligned(out, "  ", &rows);
   }
 
+  if !s.synced.is_empty() {
+    let rows: Vec<(String, String)> = s
+      .synced
+      .iter()
+      .map(|synced| {
+        let conflicts = match synced.conflicts.len() {
+          0 => "no conflicts".to_string(),
+          1 => "1 conflict".to_string(),
+          n => format!("{n} conflicts"),
+        };
+        let merge = match synced.merge {
+          MergeState::Merged => format!("merged: {} taken, {} resolved, {conflicts}", synced.taken, synced.resolved),
+          state => state.as_str().to_string(),
+        };
+        (synced.name.clone(), format!("{merge}; store {} on the control host, account {}", synced.store, synced.account))
+      })
+      .collect();
+    writeln!(out, "\nSynced files")?;
+    aligned(out, "  ", &rows);
+  }
+
   if s.findings.is_empty() {
     writeln!(out, "\nNo findings.")?;
   } else {
@@ -176,7 +197,11 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
       let message = match finding.kind {
         FindingKind::RunFailed | FindingKind::FilesFailed => paint(&finding.message, FAILURE, color),
         FindingKind::Faults | FindingKind::ChaosChanged => paint(&finding.message, FAULT, color),
-        FindingKind::Probing | FindingKind::DeniedCommand | FindingKind::DeniedNetwork => finding.message.clone(),
+        FindingKind::Probing
+        | FindingKind::DeniedCommand
+        | FindingKind::DeniedNetwork
+        | FindingKind::SyncConflict
+        | FindingKind::MergePending => finding.message.clone(),
       };
       writeln!(out, "  {message}")?;
     }

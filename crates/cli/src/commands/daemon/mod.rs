@@ -155,6 +155,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     vm_images: paths.images(),
     actor_image: args.actor_image.or(settings.actor_image).unwrap_or_else(|| paths.base_image()),
     state_dir: paths.state,
+    data_dir: paths.data.clone(),
     runtime_dir: paths.runtime,
     kvm: args.kvm.unwrap_or_else(|| needy_core_actor::driver::linux_firecracker::KVM.into()),
     guest_needy: args.guest_needy.or(settings.guest_needy),

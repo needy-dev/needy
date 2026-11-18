@@ -72,6 +72,8 @@ mod schedule;
 #[cfg(unix)]
 mod store;
 #[cfg(unix)]
+mod sync;
+#[cfg(unix)]
 mod workspace;
 
 #[cfg(all(test, unix))]
@@ -121,6 +123,10 @@ pub struct Config {
   pub state_dir: PathBuf,
   /// The local executor's socket.
   pub runtime_dir: PathBuf,
+  /// needy's data directory (`$XDG_DATA_HOME/needy`): sync mappings'
+  /// per-run copies, their seeds and the run copies of conflicts, and the
+  /// stores needy's features name by convention, under `files/`.
+  pub data_dir: PathBuf,
   /// The base VM image a VM driver boots for a profile without
   /// `actor.image`: `vmlinux`, `rootfs.ext4` and `firecracker`, or the
   /// `macos-vz` files, with their `manifest.json` (`needy image pull`;
@@ -304,6 +310,9 @@ impl Daemon {
       daemon.suspend_control().await;
       return Err(error.context("cannot reconcile the runs in state.db"));
     }
+    // After reconciling, so every run a previous daemon left is ended or
+    // listed again.
+    sync::drain(&daemon).await;
     Ok(daemon)
   }
 

@@ -5,6 +5,8 @@
 //! before the interception domains, after the stream it filters rather than
 //! the domain it decides.
 
+pub mod jail;
+
 use std::sync::Arc;
 use std::time::Duration;
 

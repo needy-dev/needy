@@ -11,7 +11,7 @@ use std::fmt::Write;
 use needy_config::profile::FaultDomain;
 use serde::Serialize;
 
-use crate::event::{ActorExit, ActorStop, Event, HookTiming, Recorded, Transfer};
+use crate::event::{ActorExit, ActorStop, Event, HookTiming, Recorded, Store, Transfer};
 use crate::pattern::basename;
 use crate::types::{Capture, Network, Origin, Outcome, Placement, Principal, RunState};
 
@@ -96,6 +96,12 @@ fn actor_stop(how: &ActorStop) -> String {
   }
 }
 
+/// `s` with its first letter in upper case.
+fn capitalize(s: &str) -> String {
+  let mut chars = s.chars();
+  chars.next().map(|first| first.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
 fn truncate(s: &str, n: usize) -> String {
   if s.chars().count() <= n {
     return s.to_string();
@@ -164,6 +170,8 @@ struct Tally {
   /// Copy-ins and mirror-outs that failed: the mapping's transfer, name
   /// and why.
   files_failed: Vec<(Transfer, String, String)>,
+  /// Sync mappings by name: their stores and merges.
+  synced: BTreeMap<String, Synced>,
   /// Faults added or removed while the run ran, in order: `+NAME` or
   /// `-NAME`.
   chaos_changes: Vec<String>,
@@ -269,6 +277,25 @@ impl Tally {
       Event::NetConnect(connect) => self.count_host(connect.network, &connect.host),
       Event::NetDeny(deny) => self.net_denials.push((deny.host.clone(), deny.network)),
       Event::FilesFail(fail) => self.files_failed.push((fail.transfer, fail.name.clone(), fail.reason.clone())),
+      Event::FilesSync(sync) => {
+        self.sync(&sync.name, &sync.store);
+      }
+      Event::FilesMerge(merge) => {
+        let synced = self.sync(&merge.name, &merge.store);
+        synced.merge = MergeState::Merged;
+        synced.taken = merge.taken;
+        synced.resolved = merge.resolved;
+        synced.conflicts = merge.conflicts.clone();
+        synced.kept = merge.kept.clone();
+        synced.reason = None;
+      }
+      // A merge that runs later, as one pending at a daemon start does,
+      // records its `files.merge` after this, which replaces it.
+      Event::FilesMergePending(pending) => {
+        let synced = self.sync(&pending.name, &pending.store);
+        synced.merge = MergeState::Pending;
+        synced.reason = Some(pending.reason.clone());
+      }
       Event::ChaosAdd(add) => self.chaos_changes.push(format!("+{} ({})", add.name, add.fault.domain())),
       Event::ChaosRemove(remove) => self.chaos_changes.push(format!("-{}", remove.name)),
       Event::ActorStart(start) => {
@@ -299,6 +326,24 @@ impl Tally {
       self.ended = Some(time_ms);
       self.state = Some(state);
     }
+  }
+
+  /// The sync mapping `name`, with its store as the latest event names it.
+  fn sync(&mut self, name: &str, store: &Store) -> &mut Synced {
+    let synced = self.synced.entry(name.to_string()).or_insert_with(|| Synced {
+      name: name.to_string(),
+      store: String::new(),
+      account: String::new(),
+      merge: MergeState::Unmerged,
+      taken: 0,
+      resolved: 0,
+      conflicts: Vec::new(),
+      kept: None,
+      reason: None,
+    });
+    synced.store.clone_from(&store.path);
+    synced.account.clone_from(&store.account);
+    synced
   }
 
   fn count_host(&mut self, network: Network, host: &str) {
@@ -392,6 +437,9 @@ pub struct Summary {
   /// ...), from `trace.timing`; empty unless the profile set
   /// `trace.timing`.
   pub latency: Vec<HookLatency>,
+  /// The run's sync mappings: where each store is and how its merge went.
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  pub synced: Vec<Synced>,
   pub findings: Vec<Finding>,
   /// The event timeline, at the detailed level only.
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -481,6 +529,70 @@ fn ms(us: u64) -> String {
   }
 }
 
+/// One sync mapping of the run.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Synced {
+  pub name: String,
+  /// The store's directory, on the control host.
+  pub store: String,
+  /// The account the control daemon reads and writes the store as.
+  pub account: String,
+  pub merge: MergeState,
+  /// Entries the merge took from the run.
+  pub taken: u64,
+  /// Entries both sides changed that `on-conflict` resolved.
+  pub resolved: u64,
+  /// Entries both sides changed that nothing resolved; the store kept its
+  /// copies.
+  pub conflicts: Vec<String>,
+  /// Where needy keeps the run's copies of `conflicts`.
+  pub kept: Option<String>,
+  /// Why a pending merge could not run.
+  pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeState {
+  /// Merged into its store.
+  Merged,
+  /// The merge could not run; it runs before the store is next seeded.
+  Pending,
+  /// Neither yet: the run has not ended, or its trace stops before.
+  Unmerged,
+}
+
+impl MergeState {
+  pub(super) fn as_str(self) -> &'static str {
+    match self {
+      Self::Merged => "merged",
+      Self::Pending => "pending",
+      Self::Unmerged => "not merged yet",
+    }
+  }
+}
+
+/// A sync mapping's finding: its conflicts, or its pending merge.
+fn sync_finding(synced: &Synced) -> Option<(FindingKind, String)> {
+  if synced.merge == MergeState::Pending {
+    return Some((FindingKind::MergePending, format!("sync {}: merge pending: {}", synced.name, synced.reason.as_deref().unwrap_or("-"))));
+  }
+  if synced.conflicts.is_empty() {
+    return None;
+  }
+  let count = synced.conflicts.len();
+  let noun = if count == 1 { "conflict" } else { "conflicts" };
+  Some((
+    FindingKind::SyncConflict,
+    format!(
+      "sync {}: {count} {noun} kept the store's copies; the run's are in {}: {}",
+      synced.name,
+      synced.kept.as_deref().unwrap_or("-"),
+      synced.conflicts.join(", ")
+    ),
+  ))
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Finding {
   pub kind: FindingKind,
@@ -501,6 +613,10 @@ pub enum FindingKind {
   Faults,
   /// Faults `needy chaos` added or removed while the run ran.
   ChaosChanged,
+  /// A sync mapping's merge left entries both sides changed in conflict.
+  SyncConflict,
+  /// A sync mapping's merge could not run yet.
+  MergePending,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -542,6 +658,9 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
   }
   if t.faults > 0 {
     find(FindingKind::Faults, format!("injected faults: {} ({})", t.faults, top(&t.fault_names, TOP)));
+  }
+  for (kind, message) in t.synced.values().filter_map(sync_finding) {
+    find(kind, message);
   }
   if !t.chaos_changes.is_empty() {
     find(FindingKind::ChaosChanged, format!("chaos changed while running: {}", t.chaos_changes.join(", ")));
@@ -610,6 +729,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     slowest_commands: slowest.into_iter().take(3).map(|(ms, command)| SlowCommand { command, ms }).collect(),
     network,
     latency: latency(t),
+    synced: t.synced.values().cloned().collect(),
     findings,
     events: (level == Level::Detailed).then(|| {
       events
@@ -724,6 +844,10 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
     any = true;
     writeln!(out, "- ℹ️ Injected faults: {} ({})", t.faults, top(&t.fault_names, TOP))?;
   }
+  for (_, message) in t.synced.values().filter_map(sync_finding) {
+    any = true;
+    writeln!(out, "- ⚠️ {}", capitalize(&message))?;
+  }
   if !t.chaos_changes.is_empty() {
     any = true;
     writeln!(out, "- ℹ️ Chaos changed while running: {}", t.chaos_changes.join(", "))?;
@@ -749,6 +873,24 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
   }
   if !any {
     writeln!(out, "- No activity.")?;
+  }
+  if !t.synced.is_empty() {
+    writeln!(out, "\n## Synced files\n")?;
+    writeln!(out, "| Mapping | Merge | Taken | Resolved | Conflicts | Store |")?;
+    writeln!(out, "| --- | --- | --- | --- | --- | --- |")?;
+    for s in t.synced.values() {
+      writeln!(
+        out,
+        "| `{}` | {} | {} | {} | {} | `{}` (control host, account `{}`) |",
+        s.name,
+        s.merge.as_str(),
+        s.taken,
+        s.resolved,
+        s.conflicts.len(),
+        s.store,
+        s.account
+      )?;
+    }
   }
   let hooks = latency(t);
   if !hooks.is_empty() {

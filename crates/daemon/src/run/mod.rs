@@ -645,6 +645,7 @@ impl Daemon {
     };
     actor::check_host(self, run).await?;
     files::check_host_paths(run)?;
+    crate::sync::check(self, run)?;
     let client_holder = self.state.client_execution_for_run(&run.id).await?;
     // NOTICE: this bounds initial helper startup only. A bound executor's
     // disconnection deadline during commands belongs to the exec policy.
@@ -706,6 +707,8 @@ impl Daemon {
     unwinding(run)?;
     files::copy_in(run).await?;
     unwinding(run)?;
+    crate::sync::seed(self, run).await?;
+    unwinding(run)?;
     actor::start(self, run).await?;
     Ok(())
   }
@@ -720,6 +723,7 @@ impl Daemon {
     run.tasks.close();
     run.tasks.wait().await;
     self.release_executors(run).await;
+    crate::sync::end(self, run).await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
     self.runs.end(&run.id);
     let actor_runner = lock(&run.actor_runner).clone();
@@ -779,6 +783,7 @@ impl Daemon {
     self.save_run(run).await;
     files::mirror_out(run).await;
     self.release_executors(run).await;
+    crate::sync::end(self, run).await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
   }
 
@@ -836,6 +841,7 @@ impl Daemon {
       tracing::warn!("run {}: {refused}", run.id);
     }
     self.release_executors(run).await;
+    crate::sync::end(self, run).await;
     run.emit(&Event::RunStop(RunStop {
       ended: stopping,
       by,
@@ -994,7 +1000,7 @@ impl Daemon {
     self.run_trace_at(id, config, 0)
   }
 
-  fn run_trace_at(&self, id: &str, config: Option<&needy_config::profile::Trace>, next_seq: u64) -> Dispatch {
+  pub(crate) fn run_trace_at(&self, id: &str, config: Option<&needy_config::profile::Trace>, next_seq: u64) -> Dispatch {
     let default = needy_config::profile::Trace::default();
     let config = config.unwrap_or(&default);
     let mut sinks: Vec<Box<dyn Sink>> = Vec::new();
