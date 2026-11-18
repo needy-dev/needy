@@ -27,6 +27,8 @@ pub struct Fake {
   pub events: Mutex<Vec<(String, i64, Event)>>,
   pub exits: Mutex<Vec<(String, Exit)>>,
   pub pushed: Mutex<Vec<(String, String, Vec<u8>)>>,
+  /// The runs it was asked to create, as the adapter passed them.
+  pub created: Mutex<Vec<NewRun>>,
 }
 
 impl Fake {
@@ -59,6 +61,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     failure: None,
     tty: false,
     actor: None,
+    workspace: None,
   }
 }
 
@@ -69,7 +72,19 @@ impl Runs for Fake {
       Some(Principal::Operator) | None => self.call(format!("create {}", request.profile_name)),
       Some(by) => self.call(format!("create {} by {by}", request.profile_name)),
     }
-    Ok(info("s1", &request.name))
+    let mut created = info("s1", &request.name);
+    // A run created from a folder works in it, from an executor named
+    // `here`.
+    if !request.client_dir.is_empty() {
+      created.workspace = Some(RunWorkspace {
+        path: "/home/agent/workspace".into(),
+        executor: "here".into(),
+        source: request.client_dir.clone(),
+        writable: true,
+      });
+    }
+    self.created.lock().unwrap().push(request);
+    Ok(created)
   }
 
   async fn get(&self, id: &str) -> Result<RunInfo> {

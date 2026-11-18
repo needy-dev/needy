@@ -356,6 +356,9 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     }),
     wait_for_attach: request.wait_for_attach,
     client_execution: request.client_execution,
+    client_dir: request.client_dir,
+    // The adapter sets where the client is; the wire does not say.
+    on_control_host: false,
   })
 }
 
@@ -444,6 +447,12 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
     tty: run.tty,
     failure: run.failure.unwrap_or_default(),
     actor_state: proto_actor_state(run.actor).into(),
+    workspace: run.workspace.map(|w| v1::RunWorkspace {
+      path: w.path,
+      executor: w.executor,
+      source: w.source,
+      writable: w.writable,
+    }),
   }
 }
 

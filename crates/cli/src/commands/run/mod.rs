@@ -328,6 +328,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           tty: tty.then(relay::window),
           wait_for_attach: interactive,
           client_execution: holder.as_ref().map(|h| h.capability.clone()).unwrap_or_default(),
+          client_dir: client_dir()?,
         })
         .await
         .map_err(fail)?
@@ -335,6 +336,9 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .run
         .unwrap_or_default();
       progress.finish();
+      if let Some(workspace) = &run.workspace {
+        output::message(workspace_line(workspace, &loaded));
+      }
       if interactive {
         // Keep the run ID out of the driving program's terminal output.
         output::message(format!("run {}", run.run_id));
@@ -403,6 +407,40 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     }
   }
   Ok(0)
+}
+
+/// The folder `run create` runs in, which the control plane makes the
+/// workspace of a profile that names none.
+fn client_dir() -> Result<String> {
+  let dir = std::env::current_dir().context("cannot read the current folder")?;
+  match dir.to_str() {
+    Some(dir) => Ok(dir.to_string()),
+    None => bail!("the current folder {} is not UTF-8, which a workspace must be; set actor.workspace", dir.display()),
+  }
+}
+
+/// Where a run's workspace is, in one line: its directory in the actor and
+/// the machine and folder its files come from.
+fn workspace_line(workspace: &v1::RunWorkspace, profile: &needy_config::profile::Profile) -> String {
+  use needy_config::profile::RunnerSelector;
+  let from = if !workspace.executor.is_empty() {
+    let machine = match profile.executors.get(&workspace.executor).and_then(|e| e.runner.as_ref()) {
+      Some(RunnerSelector::Client) => "this machine".to_string(),
+      Some(runner) => runner.to_string(),
+      None => "the control host".to_string(),
+    };
+    format!("live from {} on {machine} (executor {})", workspace.source, workspace.executor)
+  } else if !workspace.source.is_empty() {
+    format!("copied from {} on the control host", workspace.source)
+  } else {
+    "a fresh directory in the actor".to_string()
+  };
+  let access = if workspace.writable {
+    ""
+  } else {
+    ", read-only"
+  };
+  format!("workspace {}: {from}{access}", workspace.path)
 }
 
 /// Connects the local terminal to a run through the ordinary process relay.

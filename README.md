@@ -609,6 +609,15 @@ actor:
 in the actor, the control host's home on `host:`, and the executor's own home
 on an executor side.
 
+Without `actor.workspace`, the workspace is the folder `needy run create`
+runs in, mounted live at `~/workspace`, when the executor that runs the
+commands (`default_executor`, else the only one) can reach it: a native
+executor of the creating client (`runner: { client: true }`), or a native or
+`linux-container` executor on the control host when the CLI runs there too
+(it reaches the daemon over a Unix socket). Any other executor fails the
+create and asks for `workspace.from`. A profile without executors keeps the
+actor's home. `run create` prints where the workspace is.
+
 ### Files
 
 Named mappings move other files between the control host (`host:`), the actor

@@ -211,6 +211,7 @@ impl Run {
       failure: lock(&self.failure).clone(),
       tty: self.tty.is_some(),
       actor: self.actor.get(),
+      workspace: crate::workspace::describe(&self.profile),
     }
   }
 
@@ -427,6 +428,9 @@ impl Registry {
       // NOTICE: `state.db` does not keep the actor's state either: an ended
       // run's actor exited, and a reconciled run's was lost.
       actor: None,
+      // NOTICE: nor its workspace, which a client reads when it creates
+      // the run.
+      workspace: None,
     })
   }
 
@@ -1056,7 +1060,9 @@ fn unwinding(run: &Run) -> Result<()> {
 // would have them resolve against the daemon's working directory; no base
 // directory is set, so they stay relative and fail visibly.
 fn load_profile(id: &str, request: &NewRun) -> Result<Profile> {
-  let profile = needy_config::profile::load(&Source::text(request.profile_yaml.clone(), PathBuf::new()))?;
+  let source = Source::text(request.profile_yaml.clone(), PathBuf::new());
+  let mut profile = needy_config::profile::load(&source)?;
+  crate::workspace::default(&mut profile, &request.client_dir, request.on_control_host, &source)?;
   let findings = validate::profile(&profile);
   for finding in findings.iter().filter(|f| f.severity == Severity::Warning) {
     tracing::warn!("run {id}: profile {finding}");

@@ -160,6 +160,14 @@ pub struct NewRun {
   pub wait_for_attach: bool,
   /// One-use execution capability supplied by the creating client.
   pub client_execution: String,
+  /// The directory `needy run create` runs in, on the creating client's
+  /// machine: the workspace of a profile that names none. Empty when the
+  /// client sent none.
+  pub client_dir: String,
+  /// The creating client runs on the control host: its request arrived on
+  /// one of the control host's Unix sockets. The adapter sets it; the wire
+  /// does not say.
+  pub on_control_host: bool,
 }
 
 impl std::fmt::Debug for NewRun {
@@ -199,6 +207,24 @@ pub struct RunInfo {
   /// Where its actor stands; `None` before the actor starts, and for a run
   /// listed from `state.db` after it ended.
   pub actor: Option<ActorState>,
+  /// The actor's workspace; `None` when it has none, and for a run listed
+  /// from `state.db` after it ended.
+  pub workspace: Option<RunWorkspace>,
+}
+
+/// Where a run's workspace is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunWorkspace {
+  /// The directory in the actor.
+  pub path: String,
+  /// The executor whose directory the actor sees live; empty when the
+  /// files are copied in from the control host, or for a fresh directory.
+  pub executor: String,
+  /// Where the files come from: a directory on the executor's machine, or
+  /// on the control host when `executor` is empty; empty for a fresh
+  /// directory.
+  pub source: String,
+  pub writable: bool,
 }
 
 /// Where a routed command runs and how it is rewritten.

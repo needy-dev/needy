@@ -329,3 +329,36 @@ async fn an_actor_cannot_read_run_events() {
 
   assert_eq!(refused.code(), Code::PermissionDenied);
 }
+
+// The daemon decides whether a create's folder can be the workspace by
+// where the client is; only a Unix socket says it is on the control host.
+#[tokio::test]
+async fn a_create_on_a_unix_socket_comes_from_the_control_host_with_its_folder() {
+  let served = serve(Caller::Operator).await;
+  let request = CreateRunRequest {
+    client_dir: "/home/user/project".into(),
+    ..create()
+  };
+
+  let run = served.client.runs().create_run(request).await.unwrap().into_inner().run.unwrap();
+
+  let created = served.fake.created.lock().unwrap().clone();
+  assert_eq!(created.len(), 1);
+  assert_eq!(created[0].client_dir, "/home/user/project");
+  assert_eq!(created[0].on_control_host, cfg!(unix));
+  let workspace = run.workspace.unwrap();
+  assert_eq!(
+    (workspace.path.as_str(), workspace.executor.as_str(), workspace.source.as_str(), workspace.writable),
+    ("/home/agent/workspace", "here", "/home/user/project", true)
+  );
+}
+
+#[tokio::test]
+async fn a_create_over_tcp_is_not_known_to_come_from_the_control_host() {
+  let served = crate::testing::serve_tcp(Caller::Operator, None).await;
+
+  served.client.runs().create_run(create()).await.unwrap();
+
+  let created = served.fake.created.lock().unwrap().clone();
+  assert!(!created[0].on_control_host);
+}

@@ -1215,6 +1215,11 @@ exit 0"#,
   });
   if let Some(base) = &workspace {
     profile["actor"]["workspace"] = json!({ "path": "~/workspace", "from": format!("executor:{X}:{}", base.display()), "writable": true });
+  } else {
+    // The runner is another machine than the CLI's, so the folder the
+    // harness creates the run in cannot be the default workspace; the
+    // actor keeps working in its home.
+    profile["actor"]["workspace"] = json!({ "path": "~" });
   }
   let profile = env.profile(&profile)?;
   let id = runs::create(env, &profile, &[])?;

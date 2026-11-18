@@ -71,6 +71,8 @@ mod runners;
 mod schedule;
 #[cfg(unix)]
 mod store;
+#[cfg(unix)]
+mod workspace;
 
 #[cfg(all(test, unix))]
 mod testing;

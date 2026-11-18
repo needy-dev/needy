@@ -5,7 +5,7 @@
 //! (`actor.cwd`, a `files` mount and `path_map`), and they had to agree.
 
 use super::files::{FileMapping, FileMode, MirrorWhen, Side};
-use super::{ExecutorDriver, Profile};
+use super::{ExecutorDriver, Profile, Workspace};
 use crate::{Error, Kind, Source};
 
 /// The name of the file mapping an `actor.workspace` derives: a mount from
@@ -143,6 +143,23 @@ pub(super) fn derive(profile: &mut Profile, source: &Source) -> Result<(), Error
     }
   }
   Ok(())
+}
+
+/// Makes `workspace` the workspace of a loaded `profile` that names none,
+/// and derives its file mappings and path map as [`super::load`] derives a
+/// written `actor.workspace`. The control daemon's default workspace, the
+/// folder `needy run create` runs in, is known only when a run is created.
+pub fn set(profile: &mut Profile, workspace: Workspace, source: &Source) -> Result<(), Error> {
+  if profile.actor.workspace.is_some() {
+    return Err(Error::Invalid {
+      kind: Kind::Profile,
+      origin: source.to_string(),
+      path: "actor.workspace".into(),
+      message: "the profile names its workspace already".into(),
+    });
+  }
+  profile.actor.workspace = Some(workspace);
+  derive(profile, source)
 }
 
 /// Adds a derived mapping, refusing a mapping of that name the profile

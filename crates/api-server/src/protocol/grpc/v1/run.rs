@@ -36,6 +36,23 @@ impl<S> Adapter<S> {
   }
 }
 
+/// Whether `request` arrived on a Unix socket, which only a client on the
+/// control host's own machine can connect to.
+// NOTICE: a loopback TCP connection does not count: a tunnel that ends on
+// the control host (`ssh -L`) arrives on loopback from another machine.
+// A Unix socket forwarded from another machine (`ssh -L` of a socket path)
+// still counts; that client is told it is local.
+#[cfg(unix)]
+fn arrived_on_unix_socket<T>(request: &Request<T>) -> bool {
+  request.extensions().get::<tonic::transport::server::UdsConnectInfo>().is_some()
+}
+
+/// Without Unix sockets, no client is known to be on the control host.
+#[cfg(not(unix))]
+fn arrived_on_unix_socket<T>(_request: &Request<T>) -> bool {
+  false
+}
+
 #[tonic::async_trait]
 impl<S: Runs> RunService for Adapter<S> {
   async fn prepare_client_execution(
@@ -54,8 +71,10 @@ impl<S: Runs> RunService for Adapter<S> {
 
   async fn create_run(&self, request: Request<CreateRunRequest>) -> Result<Response<CreateRunResponse>, Status> {
     let caller = self.operator(&request, "actors cannot create runs")?;
+    let on_control_host = arrived_on_unix_socket(&request);
     let mut request = domain::new_run(request.into_inner()).map_err(ControlError::from)?;
     request.by = Some(caller.principal());
+    request.on_control_host = on_control_host;
     let run = self.runs.create(request).await?;
     Ok(Response::new(CreateRunResponse {
       run: Some(domain::proto_run(run)),

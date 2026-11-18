@@ -1291,6 +1291,13 @@ pub struct CreateRunRequest {
     /// Single-use capability for executors selecting {client: true}.
     #[prost(string, tag="11")]
     pub client_execution: ::prost::alloc::string::String,
+    /// The directory `needy run create` runs in, on the creating client's
+    /// machine. It is the run's workspace when the profile sets no
+    /// `actor.workspace` and the executor that runs the commands can reach it;
+    /// when that executor cannot, the create fails. Empty: no default
+    /// workspace, as before the field existed.
+    #[prost(string, tag="12")]
+    pub client_dir: ::prost::alloc::string::String,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
@@ -1342,6 +1349,32 @@ pub struct Run {
     /// run the control plane lists from its database after the run ended.
     #[prost(enumeration="ActorState", tag="12")]
     pub actor_state: i32,
+    /// The actor's workspace. Unset when the actor has none (it starts in its
+    /// home directory), and for a run the control plane lists from its
+    /// database after the run ended.
+    #[prost(message, optional, tag="13")]
+    pub workspace: ::core::option::Option<RunWorkspace>,
+}
+/// Where a run's workspace is: its directory in the actor, and where its
+/// files come from.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunWorkspace {
+    /// The directory in the actor, the driving program's working directory.
+    #[prost(string, tag="1")]
+    pub path: ::prost::alloc::string::String,
+    /// The executor whose directory the actor sees live. Empty when the files
+    /// were copied in from the control host, or for a fresh directory.
+    #[prost(string, tag="2")]
+    pub executor: ::prost::alloc::string::String,
+    /// The directory the files come from: on the executor's machine (for a
+    /// `linux-container` executor, the host directory it binds when it names
+    /// one), or on the control host when `executor` is empty. Empty for a
+    /// fresh directory in the actor.
+    #[prost(string, tag="3")]
+    pub source: ::prost::alloc::string::String,
+    /// The actor may change the files.
+    #[prost(bool, tag="4")]
+    pub writable: bool,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRunResponse {
