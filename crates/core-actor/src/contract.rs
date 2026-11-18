@@ -70,6 +70,15 @@ pub const BASE_ABI: &str = "/.needy/base-abi";
 /// keeps the real programs of its in-place shims, by their original paths.
 pub const REAL: &str = "/.needy/real";
 
+/// A layer disk (`crate::image::store`): the file at its root that names the
+/// layer's digest (`sha256:<hex>` and a newline), which the guest reads
+/// after it mounts the disk, so no contract depends on the order the disks
+/// are attached in; and the directory with the layer's tree, which the
+/// guest stacks. Provisional names; the daemon and the guest needy of one
+/// version agree on them, not the base ABI.
+pub const LAYER_MARKER: &str = "needy-layer";
+pub const LAYER_ROOT: &str = "root";
+
 /// The channels directory in the actor's directory `dir`.
 pub fn channels_dir(dir: &Path) -> PathBuf {
   dir.join("channels")
