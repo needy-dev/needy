@@ -181,3 +181,23 @@ cleanup. `rustfmt` and `git diff --check` passed.
 
 These fixes preserve the intended holder continuity across control restarts.
 The real-actor evidence limits above still apply.
+
+
+## PR revalidation against updated main
+
+The fixes were rebased onto `7f70a4da45d26a26eac55d7ae74eb4cc043050e2`.
+Automated validation at code revision
+`bd74ee08a90ed5d13df1095e6987f326142bf68c` passed:
+
+- `cargo test --workspace --locked`: **1,247 passed, zero failed, zero ignored**
+  across 33 test groups. The larger count includes tests added on main after
+  the initial investigation checkpoint.
+- `cargo clippy --locked --workspace --all-targets -- -D warnings` passed.
+- `cargo fmt --all -- --check` and the PR diff whitespace check passed.
+- Process inspection after this full run found zero needy executables from
+  the checkout and zero system zombies.
+
+The following documentation-only commit records this validation; it does not
+change the tested implementation. This remains automated stand-in-actor and
+native-executor evidence on macOS Apple silicon, with the real-actor limits
+listed above.
