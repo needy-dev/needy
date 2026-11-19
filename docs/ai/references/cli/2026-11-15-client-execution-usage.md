@@ -161,6 +161,10 @@ labels identify the invoking CLI account in English and Chinese.
 - [Lost create reply](../../../../crates/cli/tests/client_execution/lost_create_reply.rs):
   the real daemon admits the run, the response fails, and the holder still
   executes through that run.
+- [Lifecycle regressions](../../../../crates/cli/tests/cli/lifecycle.rs): fixture
+  teardown, startup timeout, detached host cleanup, and creating-CLI child reaping.
+- [Stop regressions](../../../../crates/daemon/src/run/stop_test.rs): overlapping
+  requests and caller cancellation preserve one accepted cleanup operation.
 - [Daemon domain tests](../../../../crates/daemon/src/run/mod_test.rs): missing
   capability refusal and rejection of capability reuse.
 - [Process-service tests](../../../../crates/core-executor/src/service_test.rs):

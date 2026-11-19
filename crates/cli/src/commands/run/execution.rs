@@ -1,10 +1,6 @@
 //! Automatic client execution holder. A detached child inherits this process's
 //! OS account; control credentials never confer authority to become another user.
 
-#[cfg(all(test, unix))]
-#[path = "execution/leak_test.rs"]
-mod leak_test;
-
 use crate::{cli::Context, connection::Resolved};
 use anyhow::{Context as _, Result};
 use needy_api_client::Client;

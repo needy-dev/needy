@@ -6,8 +6,8 @@
 #[path = "cli/processes.rs"]
 mod processes;
 
-#[path = "cli/process_leaks.rs"]
-mod process_leaks;
+#[path = "cli/lifecycle.rs"]
+mod lifecycle;
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -135,10 +135,10 @@ fn static_elf() -> Vec<u8> {
   elf
 }
 
-/// A child awaiting readiness before ownership is transferred to its caller.
-struct StartingChild(Option<Child>);
+/// Owns a test subprocess until its handle is transferred or the scope ends.
+struct ChildGuard(Option<Child>);
 
-impl Drop for StartingChild {
+impl Drop for ChildGuard {
   fn drop(&mut self) {
     if let Some(child) = &mut self.0 {
       if child.try_wait().expect("inspect starting child").is_none()
@@ -217,17 +217,8 @@ impl Daemon {
     // A stop reply may precede the client's next heartbeat. Keep control
     // alive until helpers have observed ended admission. A killed helper can
     // leave a directory, so observe processes rather than directory existence.
-    let holders = self.home.join("run/client-executions");
     let deadline = Instant::now() + Duration::from_secs(12);
-    loop {
-      let processes = Command::new("ps").args(["-axo", "command="]).output()?;
-      ensure!(processes.status.success(), "cannot inspect fixture helper processes");
-      let alive = String::from_utf8(processes.stdout)?
-        .lines()
-        .any(|line| line.contains("run execution-holder --startup-file") && line.contains(holders.to_str().expect("fixture path is UTF-8")));
-      if !alive {
-        break;
-      }
+    while processes::list(&self.home)?.iter().any(|p| p.kind == "execution-holder") {
       ensure!(Instant::now() < deadline, "client execution holders did not exit during fixture cleanup");
       std::thread::sleep(Duration::from_millis(20));
     }
@@ -1338,7 +1329,7 @@ fn spawn_daemon(home: &Home, mode: &str) -> Child {
     ]);
   }
   let daemon = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
-  let mut pending = StartingChild(Some(daemon));
+  let mut pending = ChildGuard(Some(daemon));
   let deadline = Instant::now() + Duration::from_secs(20);
   while std::os::unix::net::UnixStream::connect(&socket).is_err() || (mode == "control" && !home.path().join("run/control.json").exists()) {
     assert!(pending.0.as_mut().unwrap().try_wait().unwrap().is_none(), "daemon exited before readiness");
@@ -3195,7 +3186,7 @@ fn spawn_recording_control(home: &Home, ignore_term: bool) -> Child {
   let image_args = stand_in_actor(home);
   record_actor_starts(home, ignore_term);
   let child = home.needy().args(["daemon", "serve"]).args(image_args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-  let mut pending = StartingChild(Some(child));
+  let mut pending = ChildGuard(Some(child));
   let socket = home.path().join("run/daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
   while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
