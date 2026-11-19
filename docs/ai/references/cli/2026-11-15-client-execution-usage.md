@@ -113,6 +113,11 @@ implementation; history alone cannot restore a lost process.
 Use `needy --context actor-host run stop RUN` to end the invocation. Use
 `--now` to skip the actor's graceful stop and mirror-out. Run completion or
 explicit stop invalidates holder admission and reclaims its local helper.
+
+Overlapping stop requests wait for the accepted cleanup. Retrying after cleanup
+succeeds without running it again. A disconnected caller does not cancel an
+accepted stop. A later `--now` joins an already running graceful stop; it does
+not shorten that stop's accepted grace period.
 Missing client execution never selects the daemon's account or another client.
 
 ## Executor capacity

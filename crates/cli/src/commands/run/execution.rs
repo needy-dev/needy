@@ -1,6 +1,10 @@
 //! Automatic client execution holder. A detached child inherits this process's
 //! OS account; control credentials never confer authority to become another user.
 
+#[cfg(all(test, unix))]
+#[path = "execution/leak_test.rs"]
+mod leak_test;
+
 use crate::{cli::Context, connection::Resolved};
 use anyhow::{Context as _, Result};
 use needy_api_client::Client;
@@ -27,7 +31,15 @@ impl Holder {
   pub fn keep(&mut self) {
     // std::process::Child has no kill-on-drop. The holder now belongs to the
     // invocation; its protected startup directory is reclaimed by the child.
-    self.child.take();
+    // Transfer wait ownership independently of the CLI's attach lifetime.
+    // Keeping work alive must not leave an exited child without a waiter.
+    if let Some(mut child) = self.child.take() {
+      std::thread::spawn(move || {
+        if let Err(error) = child.wait() {
+          tracing::warn!("cannot reap the client execution holder: {error}");
+        }
+      });
+    }
     self.kept = true;
   }
 }
