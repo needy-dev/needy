@@ -209,6 +209,7 @@ impl Daemon {
       }),
       actor: actor::state::State::restore(observed_actor),
       stop_request: Default::default(),
+      stop_complete: Default::default(),
       actor_command: snapshot.command,
       tty: snapshot.tty.map(|(rows, cols)| needy_api_server::control::WindowSize { rows, cols }),
       terminal: tokio::sync::OnceCell::new(),

@@ -3,6 +3,12 @@
 
 #![cfg(unix)]
 
+#[path = "cli/processes.rs"]
+mod processes;
+
+#[path = "cli/lifecycle.rs"]
+mod lifecycle;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -27,26 +33,7 @@ impl Home {
 
   /// `needy` with only this home's directories in its environment.
   fn needy(&self) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_needy"));
-    for name in [
-      "NEEDY_ENDPOINT",
-      "NEEDY_EXECUTION_CONTEXT",
-      "NEEDY_TOKEN",
-      "NEEDY_RUN",
-      "XDG_CONFIG_HOME",
-      "XDG_STATE_HOME",
-      "XDG_DATA_HOME",
-      "XDG_RUNTIME_DIR",
-    ] {
-      command.env_remove(name);
-    }
-    command
-      .env("NEEDY_CONFIG_DIR", self.path().join("config"))
-      .env("NEEDY_STATE_DIR", self.path().join("state"))
-      .env("NEEDY_DATA_DIR", self.path().join("data"))
-      .env("NEEDY_RUNTIME_DIR", self.path().join("run"))
-      .stdin(Stdio::null());
-    command
+    needy_at(self.path())
   }
 
   fn run(&self, args: &[&str]) -> Output {
@@ -58,6 +45,30 @@ impl Home {
     std::fs::write(&path, text).unwrap();
     path
   }
+}
+
+/// Construct a CLI command without reading another test or the user's home.
+fn needy_at(home: &Path) -> Command {
+  let mut command = Command::new(env!("CARGO_BIN_EXE_needy"));
+  for name in [
+    "NEEDY_ENDPOINT",
+    "NEEDY_EXECUTION_CONTEXT",
+    "NEEDY_TOKEN",
+    "NEEDY_RUN",
+    "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+  ] {
+    command.env_remove(name);
+  }
+  command
+    .env("NEEDY_CONFIG_DIR", home.join("config"))
+    .env("NEEDY_STATE_DIR", home.join("state"))
+    .env("NEEDY_DATA_DIR", home.join("data"))
+    .env("NEEDY_RUNTIME_DIR", home.join("run"))
+    .stdin(Stdio::null());
+  command
 }
 
 /// The arguments that give a control daemon a stand-in actor: an image
@@ -124,32 +135,124 @@ fn static_elf() -> Vec<u8> {
   elf
 }
 
-/// A control daemon on the home's default socket, stopped on drop.
+/// Owns a test subprocess until its handle is transferred or the scope ends.
+struct ChildGuard(Option<Child>);
+
+impl Drop for ChildGuard {
+  fn drop(&mut self) {
+    if let Some(child) = &mut self.0 {
+      if child.try_wait().expect("inspect starting child").is_none()
+        && let Err(error) = child.kill()
+      {
+        eprintln!("cannot stop starting child: {error}");
+      }
+      child.wait().expect("reap starting child");
+    }
+  }
+}
+
+/// A control daemon on the home's default socket, with its work stopped on drop.
 struct Daemon {
   child: Child,
+  home: PathBuf,
 }
 
 impl Daemon {
+  /// Own the child before any readiness assertion can unwind.
+  fn new(home: &Home, child: Child) -> Self {
+    Self {
+      child,
+      home: home.path().to_path_buf(),
+    }
+  }
+
   fn start(home: &Home) -> Self {
     let child =
       home.needy().args(["daemon", "serve"]).args(stand_in_actor(home)).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let socket = home.path().join("run").join("daemon.sock");
+
+    let mut daemon = Self::new(home, child);
+    daemon.wait_ready();
+    daemon
+  }
+
+  fn wait_ready(&mut self) {
+    let socket = self.home.join("run").join("daemon.sock");
     let deadline = Instant::now() + Duration::from_secs(20);
     // Publication follows health and reconciliation; a listening socket alone
     // does not mean local discovery is ready for a command.
-    while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
+    while std::os::unix::net::UnixStream::connect(&socket).is_err() || !self.home.join("run/control.json").exists() {
+      assert!(self.child.try_wait().unwrap().is_none(), "the daemon exited before readiness");
       assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
       std::thread::sleep(Duration::from_millis(50));
     }
-    Self { child }
+  }
+
+  fn stop_work(&self) -> anyhow::Result<()> {
+    use anyhow::{Context as _, ensure};
+    let address = format!("unix:{}", self.home.join("run/daemon.sock").display());
+    // A partially started control may never publish a listener. Its child
+    // still gets killed/reaped by Drop; do not run discovery against it.
+    if std::os::unix::net::UnixStream::connect(self.home.join("run/daemon.sock")).is_err() {
+      return Ok(());
+    }
+    let invoke = |args: &[&str]| needy_at(&self.home).args(["--address", &address]).args(args).output();
+    let listed = invoke(&["run", "ls", "-o", "json"])?;
+    ensure!(listed.status.success(), "cannot list fixture runs: {}", stderr(&listed));
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout)?;
+    for row in rows {
+      let id = row["id"].as_str().context("run row has no id")?;
+      let stopped = invoke(&["run", "stop", "--now", id])?;
+      ensure!(stopped.status.success(), "cannot stop fixture run: {}", stderr(&stopped));
+    }
+    // Standalone native processes belong to this fixture as well. They have
+    // no run to stop, so end any that the test left detached on the host.
+    let listed = invoke(&["proc", "ls", "--all", "-o", "json"])?;
+    ensure!(listed.status.success(), "cannot list fixture processes: {}", stderr(&listed));
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout)?;
+    for row in rows.iter().filter(|row| row["state"] == "running") {
+      let id = row["id"].as_str().context("process row has no id")?;
+      let killed = invoke(&["proc", "kill", "-s", "SIGKILL", id])?;
+      ensure!(killed.status.success(), "cannot end fixture process: {}", stderr(&killed));
+    }
+    // A stop reply may precede the client's next heartbeat. Keep control
+    // alive until helpers have observed ended admission. A killed helper can
+    // leave a directory, so observe processes rather than directory existence.
+    let deadline = Instant::now() + Duration::from_secs(12);
+    while processes::list(&self.home)?.iter().any(|p| p.kind == "execution-holder") {
+      ensure!(Instant::now() < deadline, "client execution holders did not exit during fixture cleanup");
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    Ok(())
   }
 }
 
 impl Drop for Daemon {
   fn drop(&mut self) {
-    // The test is over; a daemon that already exited needs no kill.
-    if self.child.kill().is_ok() {
-      self.child.wait().unwrap();
+    // Explicit crash/restart tests already reap control and intentionally
+    // retain its work. A live test fixture instead owns full cleanup.
+    if self.child.try_wait().expect("inspect fixture control").is_some() {
+      return;
+    }
+    let cleanup = self.stop_work();
+    if let Err(error) = self.child.kill() {
+      eprintln!("cannot kill fixture control: {error}");
+    }
+    self.child.wait().expect("reap fixture control");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while self.home.join("run/local.sock").exists() && Instant::now() < deadline {
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    let cleanup = cleanup.and_then(|()| {
+      anyhow::ensure!(!self.home.join("run/local.sock").exists(), "runtime holder did not exit during fixture cleanup");
+      Ok(())
+    });
+    if let Err(error) = cleanup {
+      // Never double-panic while unwinding the assertion that caused teardown.
+      if std::thread::panicking() {
+        eprintln!("fixture cleanup failed: {error:#}");
+      } else {
+        panic!("fixture cleanup failed: {error:#}");
+      }
     }
   }
 }
@@ -1115,7 +1218,7 @@ fn an_immediately_exiting_interactive_actor_returns_its_output_and_exit() {
     .stderr(Stdio::null())
     .spawn()
     .unwrap();
-  let _daemon = Daemon { child };
+  let _daemon = Daemon::new(&home, child);
   let socket = home.path().join("run/daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(10);
   while std::os::unix::net::UnixStream::connect(&socket).is_err() {
@@ -1226,12 +1329,14 @@ fn spawn_daemon(home: &Home, mode: &str) -> Child {
     ]);
   }
   let daemon = command.stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+  let mut pending = ChildGuard(Some(daemon));
   let deadline = Instant::now() + Duration::from_secs(20);
   while std::os::unix::net::UnixStream::connect(&socket).is_err() || (mode == "control" && !home.path().join("run/control.json").exists()) {
+    assert!(pending.0.as_mut().unwrap().try_wait().unwrap().is_none(), "daemon exited before readiness");
     assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
     std::thread::sleep(Duration::from_millis(50));
   }
-  daemon
+  pending.0.take().unwrap()
 }
 
 /// A `sleep 300` run through `needy <exec>` and attached: an open stream,
@@ -1539,9 +1644,7 @@ fn a_first_sigterm_exits_control_promptly_and_preserves_its_invocation() {
   let management_removed = !home.path().join("run/daemon.sock").exists();
   let native_socket_retained = home.path().join("run/local.sock").exists();
 
-  let _restarted = Daemon {
-    child: spawn_recording_control(&home, true),
-  };
+  let _restarted = Daemon::new(&home, spawn_recording_control(&home, true));
   let listed = home.run(&["run", "ls", "-o", "json"]);
   let after = home.run(&["proc", "ls", "--run", &run, "-o", "json"]);
   let actor_starts = std::fs::read_to_string(&starts).unwrap();
@@ -2029,14 +2132,9 @@ fn the_daemons_directories_and_sockets_are_private_under_a_permissive_umask() {
     };
   }
   let child = command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-  let socket = home.path().join("run").join("daemon.sock");
-  let deadline = Instant::now() + Duration::from_secs(20);
-  // Wait for discovery publication as well as socket admission.
-  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
-    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
-    std::thread::sleep(Duration::from_millis(50));
-  }
-  let _daemon = Daemon { child };
+  let mut daemon = Daemon::new(&home, child);
+  daemon.wait_ready();
+  let _daemon = daemon;
   let run = create_run(&home, NATIVE_PROFILE);
 
   let state = home.path().join("state");
@@ -2072,14 +2170,9 @@ fn run_create_sends_a_profile_with_a_relative_parent_and_recipe() {
     .stderr(Stdio::null())
     .spawn()
     .unwrap();
-  let socket = home.path().join("run").join("daemon.sock");
-  let deadline = Instant::now() + Duration::from_secs(20);
-  // Wait for discovery publication as well as socket admission.
-  while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
-    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
-    std::thread::sleep(Duration::from_millis(50));
-  }
-  let _daemon = Daemon { child };
+  let mut daemon = Daemon::new(&home, child);
+  daemon.wait_ready();
+  let _daemon = daemon;
   std::fs::create_dir_all(home.path().join("p")).unwrap();
   home.write("p/base.yaml", NATIVE_PROFILE);
   home.write("p/gce.recipe.yaml", "extends: builtin:gce-ubuntu-22.04\n");
@@ -2495,14 +2588,9 @@ fn spawn_control_with_fast_heartbeats(home: &Home) -> Daemon {
     .stderr(Stdio::null())
     .spawn()
     .unwrap();
-  let socket = home.path().join("run").join("daemon.sock");
-  let deadline = Instant::now() + Duration::from_secs(20);
-  // Wait for discovery publication as well as socket admission.
-  while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
-    assert!(Instant::now() < deadline, "the daemon did not listen on {}", socket.display());
-    std::thread::sleep(Duration::from_millis(50));
-  }
-  Daemon { child }
+  let mut daemon = Daemon::new(home, child);
+  daemon.wait_ready();
+  daemon
 }
 
 /// Enroll once, then start a runner from its independent saved credential.
@@ -2838,9 +2926,10 @@ struct RunnerDaemon(Child);
 impl Drop for RunnerDaemon {
   fn drop(&mut self) {
     // The test is over; a runner that already exited needs no kill.
-    if self.0.kill().is_ok() {
-      self.0.wait().unwrap();
+    if let Err(error) = self.0.kill() {
+      eprintln!("cannot kill fixture runner (it may have exited): {error}");
     }
+    self.0.wait().unwrap();
   }
 }
 
@@ -3039,9 +3128,7 @@ fn gone(pid: u32) -> bool {
 #[test]
 fn a_control_plane_crash_recovers_the_original_actor_and_runner_process() {
   let control = Home::new();
-  let mut daemon = Daemon {
-    child: spawn_recording_control(&control, false),
-  };
+  let mut daemon = Daemon::new(&control, spawn_recording_control(&control, false));
   let starts = control.path().join("actor-starts");
   let machine = Home::new();
   let _runner = connected_runner(&machine, &control);
@@ -3060,9 +3147,7 @@ fn a_control_plane_crash_recovers_the_original_actor_and_runner_process() {
   let process_survived = !gone_now(pid);
   // Remove only the dead management listener; the holder still owns local.sock.
   std::fs::remove_file(control.path().join("run/daemon.sock")).unwrap();
-  let _restarted = Daemon {
-    child: spawn_recording_control(&control, false),
-  };
+  let _restarted = Daemon::new(&control, spawn_recording_control(&control, false));
   let deadline = Instant::now() + Duration::from_secs(20);
   let recovered = loop {
     let listed = control.run(&["proc", "ls", "--run", &run, "-o", "json"]);
@@ -3101,13 +3186,15 @@ fn spawn_recording_control(home: &Home, ignore_term: bool) -> Child {
   let image_args = stand_in_actor(home);
   record_actor_starts(home, ignore_term);
   let child = home.needy().args(["daemon", "serve"]).args(image_args).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+  let mut pending = ChildGuard(Some(child));
   let socket = home.path().join("run/daemon.sock");
   let deadline = Instant::now() + Duration::from_secs(20);
   while std::os::unix::net::UnixStream::connect(&socket).is_err() || !home.path().join("run/control.json").exists() {
+    assert!(pending.0.as_mut().unwrap().try_wait().unwrap().is_none(), "control exited before readiness");
     assert!(Instant::now() < deadline, "control did not publish readiness with the recording actor fixture");
     std::thread::sleep(Duration::from_millis(20));
   }
-  child
+  pending.0.take().unwrap()
 }
 
 /// A stand-in records each actual OS start, independently of control records.
@@ -3172,7 +3259,7 @@ fn gone_now(pid: u32) -> bool {
 /// private management socket. The local operator needs no bearer.
 fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
   use std::io::BufRead as _;
-  let mut child = home
+  let child = home
     .needy()
     .args(["daemon", "serve", "-v", "--listen", "tcp://127.0.0.1:0"])
     .args(stand_in_actor(home))
@@ -3180,9 +3267,10 @@ fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
     .stderr(Stdio::piped())
     .spawn()
     .unwrap();
+  let mut daemon = Daemon::new(home, child);
   // The log is read to its end on another thread, so the daemon never
   // blocks on a full pipe, and the bound below holds if it logs nothing.
-  let log = std::io::BufReader::new(child.stderr.take().unwrap());
+  let log = std::io::BufReader::new(daemon.child.stderr.take().unwrap());
   let (lines, read) = std::sync::mpsc::channel();
   std::thread::spawn(move || {
     for line in log.lines().map_while(Result::ok) {
@@ -3191,7 +3279,6 @@ fn spawn_control_on_tcp(home: &Home) -> (Daemon, String) {
       let _ = lines.send(line);
     }
   });
-  let daemon = Daemon { child };
   let deadline = Instant::now() + Duration::from_secs(20);
   let mut seen = Vec::new();
   let listen = loop {

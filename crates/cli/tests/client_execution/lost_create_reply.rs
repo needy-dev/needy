@@ -45,6 +45,7 @@ where
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
   let home = Home::new();
+  let _cleanup = processes::Cleanup(home.path().to_path_buf());
   stand_in_actor(&home);
   let daemon = Arc::new(
     needy_daemon::Daemon::start(needy_daemon::Config {
@@ -124,6 +125,15 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
   assert!(output.status.success(), "a lost response must not kill the bound holder: {}", stderr(&output));
   assert_eq!(stdout(&output), "survived");
   daemon.stop(&runs[0].id, needy_core::types::Principal::Operator, StopMode::Now).await.unwrap();
+  // A stop reply does not acknowledge client-helper exit. Keep the control
+  // transport available until the helper learns ended admission; otherwise
+  // it reconnects forever after this test deletes its state directory.
+  let helpers = home.path().join("run/client-executions");
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
+  while helpers.read_dir().unwrap().next().is_some() {
+    assert!(tokio::time::Instant::now() < deadline, "the client helper did not exit before control teardown");
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
   daemon.shutdown().await;
   stop.0.send(true).unwrap();
   serving.await.unwrap().unwrap();

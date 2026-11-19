@@ -113,6 +113,11 @@ implementation; history alone cannot restore a lost process.
 Use `needy --context actor-host run stop RUN` to end the invocation. Use
 `--now` to skip the actor's graceful stop and mirror-out. Run completion or
 explicit stop invalidates holder admission and reclaims its local helper.
+
+Overlapping stop requests wait for the accepted cleanup. Retrying after cleanup
+succeeds without running it again. A disconnected caller does not cancel an
+accepted stop. A later `--now` joins an already running graceful stop; it does
+not shorten that stop's accepted grace period.
 Missing client execution never selects the daemon's account or another client.
 
 ## Executor capacity
@@ -156,6 +161,10 @@ labels identify the invoking CLI account in English and Chinese.
 - [Lost create reply](../../../../crates/cli/tests/client_execution/lost_create_reply.rs):
   the real daemon admits the run, the response fails, and the holder still
   executes through that run.
+- [Lifecycle regressions](../../../../crates/cli/tests/cli/lifecycle.rs): fixture
+  teardown, startup timeout, detached host cleanup, and creating-CLI child reaping.
+- [Stop regressions](../../../../crates/daemon/src/run/stop_test.rs): overlapping
+  requests and caller cancellation preserve one accepted cleanup operation.
 - [Daemon domain tests](../../../../crates/daemon/src/run/mod_test.rs): missing
   capability refusal and rejection of capability reuse.
 - [Process-service tests](../../../../crates/core-executor/src/service_test.rs):

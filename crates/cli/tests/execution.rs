@@ -46,9 +46,10 @@ impl Daemon {
 
 impl Drop for Daemon {
   fn drop(&mut self) {
-    if self.0.kill().is_ok() {
-      self.0.wait().unwrap();
+    if let Err(error) = self.0.kill() {
+      eprintln!("cannot kill fixture daemon (it may have exited): {error}");
     }
+    self.0.wait().unwrap();
   }
 }
 

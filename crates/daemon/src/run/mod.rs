@@ -76,6 +76,8 @@ pub struct Run {
   pub actor: actor::state::State,
   /// A graceful stop its actor's guest waits for.
   pub stop_request: stop::StopRequest,
+  /// Serializes cleanup and records completion independently of terminal state.
+  stop_complete: tokio::sync::Mutex<bool>,
   /// The actor's driving program.
   pub actor_command: Vec<String>,
   /// The driving program's terminal size at the start; `None` runs it
@@ -607,6 +609,7 @@ impl Daemon {
       terminal: tokio::sync::OnceCell::new(),
       actor: Default::default(),
       stop_request: Default::default(),
+      stop_complete: Default::default(),
       recipe,
       trace,
       executors: Mutex::new(BTreeMap::new()),
@@ -791,9 +794,42 @@ impl Daemon {
   /// tasks, mirror-out, its executors, its trace. `by` is who asked; `None`
   /// when the control plane stops it on its own, as at shutdown. Returns how
   /// the stop ended a running actor.
+  /// [`Runs::stop`] enters here; [`Self::complete_stop`] persists the result
+  /// and releases resources once, while overlapping callers wait.
   pub(crate) async fn stop_run(&self, run: &Arc<Run>, by: Option<Principal>, mode: StopMode) -> Result<Option<ActorStop>, ControlError> {
+    // The caller may disappear at any await, including halfway through
+    // releasing an executor. Keep admitted cleanup on the daemon's tracker.
+    let daemon = self.clone();
+    let run = run.clone();
+    self
+      .tasks
+      .spawn(async move { daemon.stop_owned(&run, by, mode).await })
+      .await
+      .map_err(|error| ControlError::Failed(format!("stop task failed: {error}")))?
+  }
+
+  /// The daemon-owned stop task serializes cleanup with other callers and recovery.
+  async fn stop_owned(&self, run: &Arc<Run>, by: Option<Principal>, mode: StopMode) -> Result<Option<ActorStop>, ControlError> {
+    // Hold ownership through persistence and executor release, not just the
+    // state transition. A waiter may retain an Arc after runs.end removes it.
+    // TODO: Escalating an in-progress graceful stop with --now needs separate
+    // stop-intent coordination; revisit when the owner requests that slice.
+    let mut complete = run.stop_complete.lock().await;
+    if *complete {
+      return Ok(None);
+    }
     let stopping = match run.state.advance(RunState::Stopping) {
       Ok(_) => true,
+      Err(Refused {
+        from: RunState::Stopped,
+        ..
+      }) => false,
+      // No other stop owns the lock. Continue any accepted cleanup checkpoint
+      // instead of reopening work (recovery normally uses resume_stop).
+      Err(Refused {
+        from: RunState::Stopping,
+        ..
+      }) => true,
       // The actor finished or failed first and that state stays; ending
       // released its executors already.
       Err(Refused {
@@ -805,17 +841,25 @@ impl Daemon {
     if stopping {
       self.save_run(run).await;
     }
-    self.complete_stop(run, by, mode, stopping).await
+    let result = self.complete_stop(run, by, mode, stopping).await;
+    *complete = result.is_ok();
+    result
   }
 
   /// Completes a stop admitted by an earlier control instance. Its durable
   /// `stopping` state remains authoritative throughout recovery; this path
   /// never reopens the invocation to work or attempts a running transition.
   pub(crate) async fn resume_stop(&self, run: &Arc<Run>) -> Result<Option<ActorStop>, ControlError> {
+    let mut complete = run.stop_complete.lock().await;
+    if *complete {
+      return Ok(None);
+    }
     if run.state.get() != RunState::Stopping {
       return Err(ControlError::Failed(format!("run {} has no accepted stop to resume", run.id)));
     }
-    self.complete_stop(run, None, StopMode::Now, true).await
+    let result = self.complete_stop(run, None, StopMode::Now, true).await;
+    *complete = result.is_ok();
+    result
   }
 
   /// The common completion after fresh stop admission or restored intent.

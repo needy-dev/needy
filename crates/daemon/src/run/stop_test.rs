@@ -54,6 +54,99 @@ async fn stop_event(dir: &Path, id: &str) -> String {
 }
 
 // ROOT CAUSE:
+// A second stop reached a live Stopping run and attempted Stopping -> Stopping.
+// Before the fix it failed instead of waiting for the one cleanup owner.
+#[tokio::test]
+async fn overlapping_stops_wait_for_one_cleanup_and_emit_one_stop() {
+  let started = testing::daemon().await;
+  let daemon = started.daemon.clone();
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
+  let created = Runs::create(&daemon, new_run("actor: { driver: linux-firecracker }", started.dir.path())).await.unwrap();
+  let guest = tokio::spawn({
+    let (daemon, id) = (daemon.clone(), created.id.clone());
+    async move { wait_stop(&daemon, &id).await.unwrap() }
+  });
+  guest_waits(&daemon, &created.id).await;
+  let first = tokio::spawn({
+    let (daemon, id) = (daemon.clone(), created.id.clone());
+    async move {
+      Runs::stop(
+        &daemon,
+        &id,
+        Principal::Operator,
+        StopMode::Graceful {
+          grace: Duration::from_secs(4),
+        },
+      )
+      .await
+    }
+  });
+  assert_eq!(guest.await.unwrap(), Duration::from_secs(4));
+  let mut second = tokio::spawn({
+    let (daemon, id) = (daemon.clone(), created.id.clone());
+    async move { Runs::stop(&daemon, &id, Principal::Operator, StopMode::Now).await }
+  });
+  let returned = tokio::time::timeout(Duration::from_millis(50), &mut second).await.ok();
+  let returned_early = returned.is_some();
+  testing::exit_actor(&daemon, started.dir.path(), &created.id).await;
+  assert_eq!(first.await.unwrap().unwrap(), Some(ActorStop::Graceful));
+  let second = match returned {
+    Some(result) => result,
+    None => second.await,
+  };
+  assert!(!returned_early, "overlapping stop returned before cleanup finished: {second:?}");
+  assert_eq!(second.unwrap().unwrap(), None);
+  let trace = needy_trace::sink::sqlite::load(&started.dir.path().join("state/trace.db"), &created.id).await.unwrap();
+  assert_eq!(trace.events.iter().filter(|event| event.kind == "run.stop").count(), 1);
+}
+
+// Losing the request future must not cancel cleanup at an arbitrary await.
+// Its daemon-owned task continues, and a retry joins the same cleanup.
+#[tokio::test]
+async fn a_stop_after_its_previous_caller_was_cancelled_finishes_cleanup() {
+  let started = testing::daemon().await;
+  let daemon = started.daemon.clone();
+  fake_image(&started.dir.path().join("image"), testing::REBOOTS_AFTER_EXIT);
+  let created = Runs::create(&daemon, new_run("actor: { driver: linux-firecracker }", started.dir.path())).await.unwrap();
+  let guest = tokio::spawn({
+    let (daemon, id) = (daemon.clone(), created.id.clone());
+    async move { wait_stop(&daemon, &id).await.unwrap() }
+  });
+  guest_waits(&daemon, &created.id).await;
+  let first = tokio::spawn({
+    let (daemon, id) = (daemon.clone(), created.id.clone());
+    async move {
+      Runs::stop(
+        &daemon,
+        &id,
+        Principal::Operator,
+        StopMode::Graceful {
+          grace: Duration::from_secs(4),
+        },
+      )
+      .await
+    }
+  });
+  guest.await.unwrap();
+  first.abort();
+  assert!(first.await.unwrap_err().is_cancelled());
+  assert_eq!(Runs::get(&daemon, &created.id).await.unwrap().state, RunState::Stopping);
+  let second = tokio::spawn({
+    let (daemon, id) = (daemon.clone(), created.id.clone());
+    async move { Runs::stop(&daemon, &id, Principal::Operator, StopMode::Now).await }
+  });
+  testing::exit_actor(&daemon, started.dir.path(), &created.id).await;
+  second.await.unwrap().unwrap();
+  assert_eq!(Runs::get(&daemon, &created.id).await.unwrap().state, RunState::Stopped);
+  let trace = needy_trace::sink::sqlite::load(&started.dir.path().join("state/trace.db"), &created.id).await.unwrap();
+  assert_eq!(trace.events.iter().filter(|event| event.kind == "run.stop").count(), 1);
+  assert!(
+    stop_event(started.dir.path(), &created.id).await.contains(r#""how":"graceful""#),
+    "retry replaced the admitted stop instead of joining it"
+  );
+}
+
+// ROOT CAUSE:
 //
 // If a run whose driving program still ran was stopped with `needy run
 // stop`, the files its actor mirrors out, such as an agent's login, never
