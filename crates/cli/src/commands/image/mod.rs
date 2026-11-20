@@ -24,10 +24,13 @@ use needy_config::profile::ActorDriver;
 use crate::cli::Context;
 
 mod build;
+mod edit;
+pub(crate) mod lockfile;
 mod ls;
 mod progress;
 mod pull;
 mod rm;
+mod rollback;
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -35,6 +38,20 @@ pub struct Args {
   command: Command,
 }
 
+impl Args {
+  /// Whether this `image` subcommand talks to the control daemon (and
+  /// therefore accepts `--context`/`--address`).
+  pub fn allows_selection(&self) -> bool {
+    match &self.command {
+      Command::Edit(_) | Command::Rollback(_) => true,
+      Command::Build(args) => args.is_definition_build(),
+      Command::Pull(_) | Command::Ls(_) | Command::Rm(_) => false,
+    }
+  }
+}
+
+// TODO(images): `image log` and `image export` come with slice 6 of the images
+// and run data spec.
 #[derive(Subcommand)]
 enum Command {
   /// Download the base images of this needy's release.
@@ -49,12 +66,14 @@ enum Command {
   /// The VM images in needy's data directory, and the needy container
   /// images the engine and Apple's `container` have.
   Ls(ls::Args),
-  /// Build a base image from a needy checkout, or a VM image from an OCI image.
-  ///
-  /// The base VM image of this host's VM driver (and with flags the
-  /// container images) from a needy checkout, or with --from the VM image of
-  /// an OCI image FROM the container base.
+  /// Build an image definition, a base image from a needy checkout, or a VM
+  /// image from an OCI image (`--from`).
   Build(build::Args),
+  /// Open an interactive writable shell in an image definition and commit
+  /// changes to its lockfile on exit.
+  Edit(edit::Args),
+  /// Roll back an image's commit pointer in its lockfile.
+  Rollback(rollback::Args),
   /// Remove VM images and old guest disks.
   ///
   /// With --guest-disks, the guest disks of guest binaries no longer in use.
@@ -67,6 +86,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Pull(args) => pull::run(args, ctx).await,
     Command::Ls(args) => ls::run(args, ctx).await,
     Command::Build(args) => build::run(args, ctx).await,
+    Command::Edit(args) => edit::run(args, ctx).await,
+    Command::Rollback(args) => rollback::run(args, ctx).await,
     Command::Rm(args) => rm::run(args, ctx).await,
   }
 }

@@ -346,6 +346,21 @@ const TERMINAL_WAIT: Duration = Duration::from_secs(60);
 /// it while the run runs. The actor is ready from then on.
 pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, ControlError> {
   let channels = channels(daemon, run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
+  let client = connect_terminal(&channels, &run.cancel, &format!("run {}", run.id)).await?;
+  if advance(run, ActorState::Ready) {
+    run.emit(&Event::ActorReady(ActorReady {}));
+  }
+  Ok(Instance::actor(&run.id, Arc::new(client)))
+}
+
+/// Connects to an actor's process service on `channels.terminal`, waiting
+/// until it answers ([`answers`]) or `cancel` fires. Shared by runs and
+/// interactive image edit sessions.
+pub(crate) async fn connect_terminal(
+  channels: &Channels,
+  cancel: &CancellationToken,
+  label: &str,
+) -> Result<needy_api_client::Client, ControlError> {
   let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
   loop {
     type Connecting<'a> =
@@ -362,24 +377,19 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
     // the first answer: a peer that accepts but never answers must not hold
     // `run attach`.
     let connected = tokio::select! {
-      () = run.cancel.cancelled() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
+      () = cancel.cancelled() => return Err(ControlError::Unavailable(format!("{label} stopped while waiting for its terminal"))),
       connected = tokio::time::timeout_at(deadline, connect) => {
-        connected.map_err(|_| ControlError::Unavailable(format!("timed out waiting for the terminal of run {}", run.id)))?
+        connected.map_err(|_| ControlError::Unavailable(format!("timed out waiting for the terminal of {label}")))?
       }
     };
     let error = match connected {
-      Ok(client) => {
-        if advance(run, ActorState::Ready) {
-          run.emit(&Event::ActorReady(ActorReady {}));
-        }
-        return Ok(Instance::actor(&run.id, Arc::new(client)));
-      }
+      Ok(client) => return Ok(client),
       Err(e) => e,
     };
-    if tokio::time::Instant::now() >= deadline || run.cancel.is_cancelled() {
-      return Err(ControlError::Unavailable(format!("the actor of run {} does not serve its terminal: {error}", run.id)));
+    if tokio::time::Instant::now() >= deadline || cancel.is_cancelled() {
+      return Err(ControlError::Unavailable(format!("the actor of {label} does not serve its terminal: {error}")));
     }
-    tracing::debug!("run {}: the actor's terminal is not served yet: {error}", run.id);
+    tracing::debug!("{label}: the actor's terminal is not served yet: {error}");
     tokio::time::sleep(Duration::from_millis(200)).await;
   }
 }

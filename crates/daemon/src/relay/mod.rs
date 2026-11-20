@@ -204,8 +204,18 @@ impl Daemon {
   }
 
   /// The driving program of run `id`'s actor, on its terminal: the
-  /// process the actor's process service runs.
+  /// process the actor's process service runs. Also resolves active image
+  /// edit sessions by their session ID.
   async fn driving_program(&self, id: &str) -> Result<(String, Known), ControlError> {
+    if let Some(session) = self.images.edit_session(id) {
+      let instance = session.terminal().await?;
+      let listed = instance.handle.executor.list_processes(ListProcessesRequest::default()).await.map_err(|s| relayed(s.into()))?;
+      let Some(process) = listed.processes.into_iter().find(|p| p.tty) else {
+        return Err(ControlError::Unavailable(format!("edit session {id} serves no terminal")));
+      };
+      let known = self.sighted(&process.process_id, &instance, None, None).await;
+      return Ok((process.process_id, known));
+    }
     let run = self.runs.find_open(id).await?;
     if run.tty.is_none() {
       return Err(

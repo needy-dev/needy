@@ -31,6 +31,7 @@ use std::time::Duration;
 use needy_api_proto::v1::client_service_client::ClientServiceClient;
 use needy_api_proto::v1::guest_service_client::GuestServiceClient;
 use needy_api_proto::v1::health_service_client::HealthServiceClient;
+use needy_api_proto::v1::image_service_client::ImageServiceClient;
 use needy_api_proto::v1::process_service_client::ProcessServiceClient;
 use needy_api_proto::v1::run_service_client::RunServiceClient;
 use needy_api_proto::v1::runner_service_client::RunnerServiceClient;
@@ -171,6 +172,10 @@ impl Client {
 
   pub fn runs(&self) -> RunServiceClient<Service> {
     RunServiceClient::new(self.service())
+  }
+
+  pub fn images(&self) -> ImageServiceClient<Service> {
+    ImageServiceClient::new(self.service())
   }
 
   pub fn runners(&self) -> RunnerServiceClient<Service> {

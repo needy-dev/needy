@@ -405,3 +405,297 @@ executors:
   stop.cancel();
   responder.await.unwrap();
 }
+
+const IMAGE_DEF_YAML: &str = r#"
+root: example.com/root:1
+env:
+  PATH: /opt/tools/bin:${PATH}
+layers:
+  - run: echo build-step-1
+"#;
+
+#[tokio::test]
+async fn image_build_builds_layers_and_returns_snapshot_digest() {
+  use needy_api_server::control::{ImageBuild, Images};
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  let first = tokio::time::timeout(
+    Duration::from_secs(20),
+    Images::build(
+      daemon,
+      ImageBuild {
+        image_yaml: IMAGE_DEF_YAML.into(),
+        driver: "linux-firecracker".into(),
+        user: None,
+        commit: None,
+      },
+    ),
+  )
+  .await
+  .unwrap()
+  .unwrap();
+
+  assert!(first.snapshot.starts_with("sha256:"), "{}", first.snapshot);
+  assert!(!first.commit_rebased);
+  assert_eq!(first.steps.len(), 1);
+  assert!(!first.steps[0].cached);
+  assert_eq!(sessions.load(Ordering::SeqCst), 1);
+
+  // Second build reuses cache.
+  let second = Images::build(
+    daemon,
+    ImageBuild {
+      image_yaml: IMAGE_DEF_YAML.into(),
+      driver: "linux-firecracker".into(),
+      user: None,
+      commit: None,
+    },
+  )
+  .await
+  .unwrap();
+  assert_eq!(second.snapshot, first.snapshot);
+  assert!(second.steps[0].cached);
+  assert_eq!(sessions.load(Ordering::SeqCst), 1);
+
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_concurrent_and_rolls_back() {
+  use needy_api_client::proto::v1::DecideRequest;
+  use needy_api_server::control::{ImageEditStart, ImageRollback, Images};
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  // Image definition with no `run:` layers so start_edit boots directly into
+  // the interactive edit session without build steps.
+  let empty_image_yaml = "root: example.com/root:1\n";
+
+  let edit1 = Images::start_edit(
+    daemon,
+    ImageEditStart {
+      image_name: "test-agent-image".into(),
+      image_yaml: empty_image_yaml.into(),
+      driver: "linux-firecracker".into(),
+      user: None,
+      commit: None,
+      tty: None,
+      wait_for_attach: false,
+    },
+  )
+  .await
+  .unwrap();
+  assert!(!edit1.commit_rebased);
+
+  // Concurrent edit on the same image must be refused.
+  let concurrent = Images::start_edit(
+    daemon,
+    ImageEditStart {
+      image_name: "test-agent-image".into(),
+      image_yaml: empty_image_yaml.into(),
+      driver: "linux-firecracker".into(),
+      user: None,
+      commit: None,
+      tty: None,
+      wait_for_attach: false,
+    },
+  )
+  .await;
+  assert!(matches!(concurrent, Err(ControlError::Failed(ref msg)) if msg.contains("already running")), "{concurrent:?}");
+
+  // Act as the edit session's guest: connect to v.sock_7000, verify config,
+  // call Decide for two commands (must be decided local!), push upper.tar, exit 0.
+  let session_dir = started.dir.path().join("state/sessions").join(&edit1.session_id);
+  let sock = session_dir.join("v.sock_7000");
+  for _ in 0..100 {
+    if sock.exists() {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let client = needy_api_client::Client::connect(&format!("unix:{}", sock.display())).await.unwrap();
+  let cfg = client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+  assert_eq!(cfg.route_names, ["*"]);
+  let sess = cfg.session.unwrap();
+  assert_eq!(sess.upper(), ProtoUpperLayer::Kept);
+  assert!(sess.routing);
+
+  let d1 = client
+    .runs()
+    .decide(DecideRequest {
+      run_id: edit1.session_id.clone(),
+      argv: vec!["apt-get".into(), "install".into(), "-y".into(), "jq".into()],
+      cwd: "/".into(),
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  assert_eq!(d1.target, "actor");
+
+  let d2 = client
+    .runs()
+    .decide(DecideRequest {
+      run_id: edit1.session_id.clone(),
+      argv: vec!["touch".into(), "marker".into()],
+      cwd: "/opt".into(),
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  assert_eq!(d2.target, "actor");
+
+  let upper1 = tar_with_file("edit1.txt", "first\n");
+  needy_api_client::guest::push_layer(&client, std::io::Cursor::new(upper1)).await.unwrap();
+  client
+    .guest()
+    .report_exit(ReportExitRequest {
+      code: Some(0),
+      signal: String::new(),
+    })
+    .await
+    .unwrap();
+  std::fs::write(session_dir.join("done"), "").unwrap();
+
+  let finished1 =
+    tokio::time::timeout(Duration::from_secs(10), Images::finish_edit(daemon, &edit1.session_id, false)).await.unwrap().unwrap();
+  let commit1 = finished1.commit.expect("clean edit session must produce a commit");
+  assert_eq!(finished1.commands.len(), 2);
+  assert_eq!(finished1.commands[0].argv, ["apt-get", "install", "-y", "jq"]);
+  assert_eq!(finished1.commands[1].cwd, "/opt");
+
+  // Second edit stacked on commit1, then rollback 1 step -> commit1, then 1 more -> None.
+  let edit2 = Images::start_edit(
+    daemon,
+    ImageEditStart {
+      image_name: "test-agent-image".into(),
+      image_yaml: empty_image_yaml.into(),
+      driver: "linux-firecracker".into(),
+      user: None,
+      commit: Some(commit1.clone()),
+      tty: None,
+      wait_for_attach: false,
+    },
+  )
+  .await
+  .unwrap();
+  let session_dir2 = started.dir.path().join("state/sessions").join(&edit2.session_id);
+  let sock2 = session_dir2.join("v.sock_7000");
+  for _ in 0..100 {
+    if sock2.exists() {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let client2 = needy_api_client::Client::connect(&format!("unix:{}", sock2.display())).await.unwrap();
+  let cfg2 = client2.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+  assert_eq!(cfg2.layers.len(), 1);
+  assert_eq!(cfg2.layers[0].digest, commit1.layer.to_string());
+  let upper2 = tar_with_file("edit2.txt", "second\n");
+  needy_api_client::guest::push_layer(&client2, std::io::Cursor::new(upper2)).await.unwrap();
+  client2
+    .guest()
+    .report_exit(ReportExitRequest {
+      code: Some(0),
+      signal: String::new(),
+    })
+    .await
+    .unwrap();
+  std::fs::write(session_dir2.join("done"), "").unwrap();
+
+  let finished2 =
+    tokio::time::timeout(Duration::from_secs(10), Images::finish_edit(daemon, &edit2.session_id, false)).await.unwrap().unwrap();
+  let commit2 = finished2.commit.expect("second edit must produce a commit");
+  assert_ne!(commit2.layer, commit1.layer);
+
+  // Roll back 1 step from commit2 -> commit1.
+  let rolled1 = Images::rollback(
+    daemon,
+    ImageRollback {
+      image_name: "test-agent-image".into(),
+      from_layer: commit2.layer.to_string(),
+      steps: 1,
+    },
+  )
+  .await
+  .unwrap();
+  assert_eq!(rolled1.layer.as_deref(), Some(commit1.layer.to_string().as_str()));
+
+  // Roll back 2 steps from commit2 -> None (before first commit).
+  let rolled2 = Images::rollback(
+    daemon,
+    ImageRollback {
+      image_name: "test-agent-image".into(),
+      from_layer: commit2.layer.to_string(),
+      steps: 2,
+    },
+  )
+  .await
+  .unwrap();
+  assert_eq!(rolled2.layer, None);
+}
+
+#[tokio::test]
+async fn run_create_with_lockfile_commit_stacks_commit_layer_and_reports_rebase() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+
+  let profile = r#"
+actor:
+  driver: linux-firecracker
+  image:
+    root: example.com/root:1
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native }
+"#;
+
+  // Store a commit layer in the daemon's layer store.
+  let commit_layer =
+    daemon.images.store.commit("test-img", None, std::io::Cursor::new(tar_with_file("hand.txt", "edited\n")), Vec::new()).unwrap();
+  let root = crate::image::root_digest(daemon).await.unwrap();
+  let def = needy_config::image::Definition {
+    root: Some("example.com/root:1".into()),
+    ..Default::default()
+  };
+  let expected_top = needy_core::image::plan(&def, &root, &needy_config::profile::User::default(), None).top().clone();
+  let commit_digest = needy_core::image::Digest::parse(&commit_layer.to_string()).unwrap();
+
+  // Matching base -> commit_rebased == false, commit layer stacked on top.
+  let mut req = new_run(profile, started.dir.path());
+  req.image_commit = Some(needy_core::image::Commit {
+    layer: commit_digest.clone(),
+    base: expected_top,
+  });
+  let created = Runs::create(daemon, req).await.unwrap();
+  assert!(!created.commit_rebased);
+  let cfg = Guest::config(daemon, &created.id).await.unwrap();
+  assert_eq!(cfg.layers, [commit_layer.to_string()]);
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+
+  // Different base -> commit_rebased == true, commit layer still stacked on top.
+  let stale_base = needy_core::image::Digest::parse(&format!("sha256:{}", "0".repeat(64))).unwrap();
+  let mut req_rebased = new_run(profile, started.dir.path());
+  req_rebased.image_commit = Some(needy_core::image::Commit {
+    layer: commit_digest,
+    base: stale_base,
+  });
+  let rebased = Runs::create(daemon, req_rebased).await.unwrap();
+  assert!(rebased.commit_rebased);
+  let cfg2 = Guest::config(daemon, &rebased.id).await.unwrap();
+  assert_eq!(cfg2.layers, [commit_layer.to_string()]);
+  Runs::stop(daemon, &rebased.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+}

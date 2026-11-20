@@ -185,8 +185,11 @@ fn stdout_closed(error: &anyhow::Error) -> bool {
 
 fn dispatch(cli: Cli) -> Result<i32> {
   let remote = cli.selected_context.is_some() || cli.address.is_some() || cli.credential_file.is_some();
-  if remote && matches!(&cli.command, Command::Daemon(_) | Command::Image(_)) {
+  if remote && matches!(&cli.command, Command::Daemon(_)) {
     anyhow::bail!("this operation is local; remove --context/--address and use its local options");
+  }
+  if remote && matches!(&cli.command, Command::Image(args) if !args.allows_selection()) {
+    anyhow::bail!("this image operation is local; remove --context/--address and use its local options");
   }
   if remote && matches!(&cli.command, Command::Config(args) if !args.allows_selection()) {
     anyhow::bail!("this configuration operation is local; remove --context/--address");

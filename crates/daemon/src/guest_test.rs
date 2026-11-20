@@ -145,6 +145,7 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
     path: "/usr/local/bin:/usr/bin:/bin".into(),
     env: Default::default(),
     session: GuestSession::default(),
+    commit_rebased: false,
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();

@@ -133,6 +133,12 @@ pub fn load(source: &Source) -> Result<Definition, Error> {
   source::deserialize(document, Kind::Image, source)
 }
 
+/// Reads an image file and its `extends` chain into self-contained YAML.
+pub fn resolve(source: &Source) -> Result<String, Error> {
+  let document = read(source)?;
+  source::serialize(&document, Kind::Image, source)
+}
+
 /// An image file and its `extends` chain as one merged document, checked to
 /// be a definition.
 fn read(source: &Source) -> Result<Value, Error> {
@@ -152,17 +158,19 @@ pub fn is_file(image: &str) -> bool {
 /// file's merged definition, so the profile carries its image inline: a
 /// daemon then reads no path on the client's machine. A relative path
 /// resolves against `base`, a leading `~` against the reader's home.
-pub(crate) fn inline(profile: &mut Value, base: &Path) -> Result<(), Error> {
+/// Returns the resolved image file path when `actor.image` named one.
+pub(crate) fn inline(profile: &mut Value, base: &Path) -> Result<Option<PathBuf>, Error> {
   let Some(image) = profile.get_mut("actor").and_then(|actor| actor.get_mut("image")) else {
-    return Ok(());
+    return Ok(None);
   };
   let Some(path) = image.as_str().filter(|path| is_file(path)) else {
-    return Ok(());
+    return Ok(None);
   };
   let path = shellexpand::tilde(path);
   let path = path.strip_prefix("./").unwrap_or(&path);
-  *image = read(&Source::File(base.join(PathBuf::from(path))))?;
-  Ok(())
+  let resolved = base.join(PathBuf::from(path));
+  *image = read(&Source::File(resolved.clone()))?;
+  Ok(Some(resolved))
 }
 
 // `actor.image` is a reference or a definition by its form: a string or a

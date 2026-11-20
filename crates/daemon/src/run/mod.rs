@@ -113,6 +113,8 @@ pub struct Run {
   created_by: Option<Principal>,
   /// What its actor boots of its image, as `Guest::config` tells init.
   boot: Mutex<Boot>,
+  /// Optional commit layer from the image's lockfile, passed by the CLI.
+  pub image_commit: Option<needy_core::image::Commit>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -231,6 +233,7 @@ impl Run {
       actor: self.actor.get(),
       workspace: crate::workspace::describe(&self.profile),
       snapshot: self.boot().snapshot.map(|s| s.digest.to_string()),
+      commit_rebased: self.boot().commit_rebased,
     }
   }
 
@@ -451,6 +454,7 @@ impl Registry {
       // the run.
       workspace: None,
       snapshot: record.snapshot,
+      commit_rebased: false,
     })
   }
 
@@ -488,6 +492,8 @@ pub struct Boot {
   /// `profile.actor.env` overrides it.
   pub env: BTreeMap<String, String>,
   pub session: GuestSession,
+  /// True when the lockfile's commit layer was applied on a changed base.
+  pub commit_rebased: bool,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -657,6 +663,7 @@ impl Daemon {
       actor_runner: Mutex::new(None),
       created_by: request.by.clone(),
       boot: Mutex::default(),
+      image_commit: request.image_commit.clone(),
       tasks: TaskTracker::new(),
       cancel,
     }))

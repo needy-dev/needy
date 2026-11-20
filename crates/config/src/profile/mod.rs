@@ -152,6 +152,9 @@ pub struct Resolved {
   /// The actor's recipe with its `extends` chain merged, when `actor.recipe`
   /// names a file; a built-in recipe is the daemon's own.
   pub recipe_yaml: Option<String>,
+  /// The image file path `actor.image` named before it was inlined, when it
+  /// named a file rather than an inline definition or OCI reference.
+  pub image_file: Option<PathBuf>,
 }
 
 /// Reads a profile, its `extends` chain and the recipe file it names into a
@@ -169,7 +172,7 @@ pub fn resolve(source: &Source) -> Result<Resolved, Error> {
   let mut document = source::read_chain(source, Kind::Profile, &MERGE)?;
   refuse_removed(&document, source)?;
   let base = source.base_dir();
-  image::inline(&mut document, &base)?;
+  let image_file = image::inline(&mut document, &base)?;
   absolute_host_paths(&mut document, &base);
   let profile: Profile = source::deserialize(document.clone(), Kind::Profile, source)?;
   let recipe_yaml = match &profile.actor.recipe {
@@ -182,6 +185,7 @@ pub fn resolve(source: &Source) -> Result<Resolved, Error> {
   Ok(Resolved {
     yaml: source::serialize(&document, Kind::Profile, source)?,
     recipe_yaml,
+    image_file,
   })
 }
 

@@ -168,6 +168,9 @@ pub struct NewRun {
   /// one of the control host's Unix sockets. The adapter sets it; the wire
   /// does not say.
   pub on_control_host: bool,
+  /// Optional commit layer from the image's lockfile, stacked on top of the
+  /// image definition's built layers.
+  pub image_commit: Option<needy_core::image::Commit>,
 }
 
 impl std::fmt::Debug for NewRun {
@@ -213,6 +216,8 @@ pub struct RunInfo {
   /// The digest (`sha256:<hex>`) of the image snapshot the actor booted;
   /// `None` when booting the base image alone or an OCI reference.
   pub snapshot: Option<String>,
+  /// True when the lockfile's commit layer was applied on a changed base.
+  pub commit_rebased: bool,
 }
 
 /// Where a run's workspace is.
@@ -931,4 +936,105 @@ pub trait Clients: Send + Sync + 'static {
   /// token that is not the control token. Backend failures are errors;
   /// invalid credentials are `Credential::Refused`.
   async fn credential(&self, token: &str) -> Result<Credential>;
+}
+
+// --------------------------------------------------------------- images
+
+/// A request to build an image definition's layers and return its snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageBuild {
+  /// Self-contained image definition YAML (its `extends` chain merged).
+  pub image_yaml: String,
+  /// Actor driver name; empty selects this host's VM driver.
+  pub driver: String,
+  /// Profile user for build plan cache keys; `None` uses the default user.
+  pub user: Option<needy_config::profile::User>,
+  /// Optional commit layer from the image's lockfile, stacked on top.
+  pub commit: Option<needy_core::image::Commit>,
+}
+
+/// One step of an image build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildStepOutcome {
+  pub key: String,
+  pub layer: String,
+  pub cached: bool,
+  pub ms: u64,
+}
+
+/// Result of [`Images::build`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBuildResult {
+  pub snapshot: String,
+  pub commit_rebased: bool,
+  pub steps: Vec<BuildStepOutcome>,
+}
+
+/// A request to start an interactive edit session for an image.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageEditStart {
+  /// Stable identifier for the image (per-image edit lock and commit history key).
+  pub image_name: String,
+  /// Self-contained image definition YAML (its `extends` chain merged).
+  pub image_yaml: String,
+  /// Actor driver name; empty selects this host's VM driver.
+  pub driver: String,
+  /// Profile user for build plan cache keys; `None` uses the default user.
+  pub user: Option<needy_config::profile::User>,
+  /// Current commit from the image's lockfile, if any.
+  pub commit: Option<needy_core::image::Commit>,
+  /// Terminal size for the interactive shell.
+  pub tty: Option<WindowSize>,
+  /// Wait for the client to attach its terminal before starting the shell.
+  pub wait_for_attach: bool,
+}
+
+/// Result of [`Images::start_edit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageEditStarted {
+  pub session_id: String,
+  pub commit_rebased: bool,
+}
+
+/// One program an edit session executed, as decided by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedCommand {
+  pub argv: Vec<String>,
+  pub cwd: String,
+}
+
+/// Result of [`Images::finish_edit`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageEditFinished {
+  /// The new commit, or `None` if the session exited non-zero, was aborted,
+  /// or uploaded no upper layer.
+  pub commit: Option<needy_core::image::Commit>,
+  /// Programs executed during the edit session, in order.
+  pub commands: Vec<RecordedCommand>,
+  /// The shell's exit status, if reported.
+  pub exit: Option<Exit>,
+}
+
+/// A request to step an image's commit pointer back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRollback {
+  pub image_name: String,
+  pub from_layer: String,
+  pub steps: u32,
+}
+
+/// Result of [`Images::rollback`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageRollbackResult {
+  /// Target commit layer digest, or `None` when rolled back past the first commit.
+  pub layer: Option<String>,
+}
+
+/// Building image definitions, interactive edit sessions, and commit rollback.
+#[async_trait::async_trait]
+pub trait Images: Send + Sync + 'static {
+  async fn build(&self, request: ImageBuild) -> Result<ImageBuildResult>;
+  async fn start_edit(&self, request: ImageEditStart) -> Result<ImageEditStarted>;
+  async fn finish_edit(&self, session_id: &str, abort: bool) -> Result<ImageEditFinished>;
+  async fn rollback(&self, request: ImageRollback) -> Result<ImageRollbackResult>;
 }

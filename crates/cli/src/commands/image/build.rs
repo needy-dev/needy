@@ -21,13 +21,16 @@ use bollard::Docker;
 use bollard::models::{BuildInfo, BuildInfoAux};
 use bollard::query_parameters::{BuildImageOptions, BuilderVersion, ImageBuildOutput};
 use futures_util::StreamExt;
+use needy_api_client::proto::v1::BuildImageRequest;
 use needy_config::Source;
+use needy_config::profile::ActorDriver;
 use needy_config::validate::Severity;
 use needy_core::recipe::PerRun;
 use needy_core_actor::image::manifest::{self, Manifest};
 
+use super::lockfile::{self, LockCommit};
 use crate::cli::Context;
-use crate::output;
+use crate::output::{self, outln};
 
 mod from;
 
@@ -36,6 +39,28 @@ const FAILED_STEP_LINES: usize = 30;
 
 #[derive(clap::Args)]
 pub struct Args {
+  /// Path to an image definition file (`.yaml`) to build through the daemon.
+  #[arg(
+    value_name = "IMAGE",
+    conflicts_with_all = ["profile", "from", "recipe", "out", "executor", "linux_container", "macos_apple_container"]
+  )]
+  pub image: Option<PathBuf>,
+  /// Build the image definition used by this profile (`actor.image`) through
+  /// the daemon.
+  #[arg(
+    short = 'f',
+    long,
+    conflicts_with_all = ["image", "from", "recipe", "out", "executor", "linux_container", "macos_apple_container"]
+  )]
+  pub profile: Option<PathBuf>,
+  /// Actor driver to build an image definition for (defaults to this host's VM
+  /// driver when building an image file directly).
+  #[arg(
+    long,
+    value_parser = super::driver,
+    conflicts_with_all = ["from", "recipe", "out", "executor", "linux_container", "macos_apple_container"]
+  )]
+  pub driver: Option<ActorDriver>,
   /// Recipe whose kernel options the actor image is built with: a path, or
   /// `builtin:NAME`.
   #[arg(long)]
@@ -76,7 +101,18 @@ pub struct Args {
   base: Option<PathBuf>,
 }
 
+impl Args {
+  /// Whether this `image build` targets an image definition through the
+  /// control daemon (and therefore supports `--context`/`--address`).
+  pub fn is_definition_build(&self) -> bool {
+    self.image.is_some() || self.profile.is_some()
+  }
+}
+
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
+  if args.is_definition_build() {
+    return run_definition_build(args, ctx).await;
+  }
   let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
   if let Some(reference) = &args.from {
     let paths = ctx.paths()?;
@@ -148,6 +184,36 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     )
     .await?;
   }
+  Ok(0)
+}
+
+/// Resolves an image definition (or profile's `actor.image`) and builds its
+/// layers through the control daemon.
+async fn run_definition_build(args: Args, ctx: &Context) -> Result<i32> {
+  let fail = needy_api_client::Error::from;
+  let target = lockfile::resolve_target(args.image.as_deref(), args.profile.as_deref(), args.driver, ctx)?;
+  let lock = lockfile::read(&target.lockfile)?;
+  let commit = lock.commit.as_ref().map(LockCommit::to_proto).transpose()?;
+
+  let progress = output::Progress::new(ctx.connection_feedback(), "Building image");
+  let connection = ctx.connect().await?;
+  let built = connection
+    .images()
+    .build_image(BuildImageRequest {
+      image_yaml: target.image_yaml,
+      driver: target.driver,
+      user: target.user,
+      commit,
+    })
+    .await
+    .map_err(fail)?
+    .into_inner();
+  progress.finish();
+
+  if built.commit_rebased {
+    output::message(format_args!("warning: commit layer in {} was applied on a changed base", target.lockfile.display()));
+  }
+  outln!("{}", built.snapshot)?;
   Ok(0)
 }
 
