@@ -21,6 +21,7 @@ pub struct Paths {
   pub data: PathBuf,
   /// Built image layers, snapshot records and materialized disks:
   /// `$XDG_CACHE_HOME/needy`, or `NEEDY_CACHE_DIR`.
+  #[cfg_attr(not(unix), allow(dead_code))]
   pub cache: PathBuf,
   /// Sockets: `$XDG_RUNTIME_DIR/needy`, the state directory where there is
   /// none (macOS), or `NEEDY_RUNTIME_DIR`.
