@@ -71,6 +71,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     tty: false,
     actor: None,
     workspace: None,
+    snapshot: None,
   }
 }
 

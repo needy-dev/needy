@@ -16,6 +16,7 @@ impl MigratorTrait for Migrator {
       Box::new(Drivers),
       Box::new(ClientAccess),
       Box::new(ClientExecutions),
+      Box::new(RunSnapshot),
     ]
   }
 }
@@ -447,5 +448,25 @@ impl MigrationTrait for ClientExecutions {
   }
   async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
     manager.drop_table(Table::drop().table(Alias::new("client_executions")).to_owned()).await
+  }
+}
+
+/// The digest of the image snapshot a run's actor booted, when it booted one.
+struct RunSnapshot;
+
+impl MigrationName for RunSnapshot {
+  fn name(&self) -> &str {
+    "m20261120_000010_run_snapshot"
+  }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RunSnapshot {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.alter_table(Table::alter().table(Runs::Table).add_column(ColumnDef::new(Alias::new("snapshot")).text()).to_owned()).await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.alter_table(Table::alter().table(Runs::Table).drop_column(Alias::new("snapshot")).to_owned()).await
   }
 }

@@ -54,6 +54,8 @@ mod files;
 #[cfg(unix)]
 mod guest;
 #[cfg(unix)]
+mod image;
+#[cfg(unix)]
 mod link;
 #[cfg(unix)]
 mod pool;
@@ -124,9 +126,13 @@ pub struct Config {
   /// The local executor's socket.
   pub runtime_dir: PathBuf,
   /// needy's data directory (`$XDG_DATA_HOME/needy`): sync mappings'
-  /// per-run copies, their seeds and the run copies of conflicts, and the
-  /// stores needy's features name by convention, under `files/`.
+  /// per-run copies, their seeds and the run copies of conflicts, the
+  /// stores needy's features name by convention under `files/`, and
+  /// image commit layers and histories.
   pub data_dir: PathBuf,
+  /// needy's cache directory (`$XDG_CACHE_HOME/needy`): built image layers,
+  /// snapshot records, materialized SquashFS disks, and cache-key mappings.
+  pub cache_dir: PathBuf,
   /// The base VM image a VM driver boots for a profile without
   /// `actor.image`: `vmlinux`, `rootfs.ext4` and `firecracker`, or the
   /// `macos-vz` files, with their `manifest.json` (`needy image pull`;
@@ -202,6 +208,8 @@ pub struct Daemon {
   /// `state.db`: the runner registry, and runs with their instances and
   /// processes.
   pub(crate) state: store::Store,
+  /// Image layer store, cache-key index, and single-flight build table.
+  pub(crate) images: Arc<image::Images>,
   pub(crate) runs: Arc<Registry>,
   pub(crate) pool: Arc<Pool>,
   /// The runners whose control streams are open.
@@ -280,6 +288,7 @@ impl Daemon {
       }
     };
     let links: Arc<link::Links> = Arc::default();
+    let images = Arc::new(image::Images::new(&config.cache_dir, &config.data_dir));
     let daemon = Self {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, container, links.clone())),
@@ -287,6 +296,7 @@ impl Daemon {
       instance_id,
       discovery,
       traces,
+      images,
       runs: Arc::new(Registry::new(state.clone())),
       state,
       links,

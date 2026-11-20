@@ -240,6 +240,12 @@ impl Store {
     self.store(layer, &self.cache.join("layers"))
   }
 
+  /// Whether a layer with `digest` is stored (in either the cache or the
+  /// data directory).
+  pub fn has_layer(&self, digest: &Digest) -> bool {
+    self.layer(digest).is_ok()
+  }
+
   /// Records the stack `layers`, lowest first, as a snapshot. Every layer
   /// must be stored.
   pub fn snapshot(&self, layers: &[Digest]) -> Result<Snapshot> {

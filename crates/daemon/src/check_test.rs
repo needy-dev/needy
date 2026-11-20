@@ -100,13 +100,19 @@ async fn a_field_the_recipe_requires_and_a_container_cannot_present_is_an_error(
 }
 
 #[tokio::test]
-async fn an_image_definition_is_an_error_until_images_are_built() {
+async fn an_image_definition_is_accepted_on_vm_drivers_and_refused_on_container_drivers() {
   let served = control().await;
 
-  let check = check(&served, "actor: { driver: linux-firecracker, image: { layers: [{ run: echo one }] } }").await;
+  let vm = check(&served, "actor: { driver: linux-firecracker, image: { layers: [{ run: echo one }] } }").await;
+  assert!(messages(&vm).is_empty(), "{:?}", messages(&vm));
 
-  let messages = messages(&check);
-  assert!(messages.iter().any(|m| m.starts_with("error: actor: needy does not build image definitions yet")), "{messages:?}");
+  let container =
+    check(&served, "actor: { driver: linux-container, container: { oci_runtime: runc }, image: { layers: [{ run: echo one }] } }").await;
+  let messages = messages(&container);
+  assert!(
+    messages.iter().any(|m| m.starts_with("error: actor: needy does not build image definitions for linux-container yet")),
+    "{messages:?}"
+  );
 }
 
 #[tokio::test]

@@ -233,11 +233,14 @@ impl Daemon {
       failure: Mutex::new(record.failure.clone()),
       actor_runner: Mutex::new(record.actor_runner.clone()),
       created_by: None,
-      // TODO(images): a recovered run boots its base alone until slice 1,
-      // step 7 records the snapshot in the run record and restores it here;
-      // an adopted actor booted already, so only a restart of it would
-      // notice.
-      boot: Mutex::default(),
+      boot: Mutex::new(super::Boot {
+        snapshot: record
+          .snapshot
+          .as_deref()
+          .and_then(|digest| digest.parse().ok())
+          .and_then(|digest| self.images.store.resolve(&digest).ok()),
+        ..super::Boot::default()
+      }),
       tasks: TaskTracker::new(),
       cancel: self.cancel.child_token(),
     });

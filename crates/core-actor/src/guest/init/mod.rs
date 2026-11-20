@@ -180,18 +180,28 @@ async fn boot(container: bool) -> Result<()> {
     tracing::warn!("cannot write {}: {e}", super::capture::shim::PATH_FILE);
   }
   let user = config.user.clone().unwrap_or_default();
-  let home = format!("/home/{}", user.name);
+  let is_root = user.uid == 0 && user.name == "root";
+  let home = if is_root {
+    "/root".to_string()
+  } else {
+    format!("/home/{}", user.name)
+  };
   // A container's home is a tmpfs its runtime mounted; the daemon sends a
   // container no hostname, sensors or mounts, which its runtime set up.
-  if !container {
+  // A root session (such as an image build step) keeps `/root` and `/etc`
+  // on the overlayfs upper layer without tmpfs/bind-mount overrides so
+  // package managers can update `/etc/passwd` and `/etc/group`.
+  if !container && !is_root {
     mounts::home(&home, user.uid, user.gid);
   }
   // Before anything runs as the user, so every program sees the same name.
-  account::apply(&needy_common::account::Account {
-    name: &user.name,
-    uid: user.uid,
-    gid: user.gid,
-  });
+  if !is_root {
+    account::apply(&needy_common::account::Account {
+      name: &user.name,
+      uid: user.uid,
+      gid: user.gid,
+    });
+  }
   identity::apply(&config);
   for m in &config.mounts {
     let mount = crate::sshfs::Mount {

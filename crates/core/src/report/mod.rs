@@ -117,6 +117,7 @@ struct Tally {
   /// Per-hook latency from `trace.timing`, merged across its payloads.
   latency: BTreeMap<String, HookTiming>,
   profile: Option<String>,
+  snapshot: Option<String>,
   created: Option<i64>,
   /// The first end: an actor exit, a stop or a failure.
   ended: Option<i64>,
@@ -183,6 +184,7 @@ impl Tally {
     match event {
       Event::RunCreate(create) => {
         self.profile = Some(create.profile.clone());
+        self.snapshot = create.snapshot.clone();
         self.created = Some(time_ms);
         self.started_by = create.by.clone();
         self.state.get_or_insert(RunState::Running);
@@ -302,7 +304,12 @@ impl Tally {
         self.actor_driver = start.driver.clone();
         self.actor_capture = start.capture;
       }
-      Event::ActorReady(_) | Event::ExecKill(_) | Event::FilesCopyIn(_) | Event::FilesMirrorOut(_) | Event::NetError(_) => {}
+      Event::ActorReady(_)
+      | Event::ExecKill(_)
+      | Event::FilesCopyIn(_)
+      | Event::FilesMirrorOut(_)
+      | Event::ImageBuildStep(_)
+      | Event::NetError(_) => {}
       Event::TraceTiming(timing) => {
         for (hook, sample) in &timing.hooks {
           let merged = self.latency.entry(hook.clone()).or_insert(HookTiming {
@@ -395,6 +402,10 @@ pub(crate) const SHIM_ROUTING: &str = "A container actor routes the programs on 
 pub struct Summary {
   pub run: String,
   pub profile: Option<String>,
+  /// The digest (`sha256:<hex>`) of the image snapshot the actor booted;
+  /// `None` when booting the base image alone or an OCI reference.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub snapshot: Option<String>,
   /// `None` for a trace without a `run.create`.
   pub state: Option<RunState>,
   /// From the create to the first end, or to the last event.
@@ -697,6 +708,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
   Summary {
     run: id.to_string(),
     profile: t.profile.clone(),
+    snapshot: t.snapshot.clone(),
     state: t.state,
     duration_ms: (ended - created).max(0),
     actor_exit: t.actor_exit.clone(),
@@ -765,6 +777,9 @@ fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, leve
     )?;
   }
   writeln!(out, "## Overview\n")?;
+  if let Some(snapshot) = &t.snapshot {
+    writeln!(out, "Snapshot: `{snapshot}`.\n")?;
+  }
   let by = |principal: &Option<Principal>| principal.as_ref().map_or("-".to_string(), Principal::to_string);
   if t.started_by.is_some() || t.stopped_by.is_some() {
     write!(out, "Started by `{}`, stopped by `{}`", by(&t.started_by), by(&t.stopped_by))?;

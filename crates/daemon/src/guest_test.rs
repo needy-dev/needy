@@ -143,6 +143,7 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
     }),
     layer_disks: Vec::new(),
     path: "/usr/local/bin:/usr/bin:/bin".into(),
+    env: Default::default(),
     session: GuestSession::default(),
   });
 

@@ -1442,6 +1442,10 @@ pub struct Run {
     /// database after the run ended.
     #[prost(message, optional, tag="13")]
     pub workspace: ::core::option::Option<RunWorkspace>,
+    /// The digest (`sha256:<hex>`) of the image snapshot the actor booted.
+    /// Empty when booting the base image alone or an OCI reference.
+    #[prost(string, tag="14")]
+    pub snapshot: ::prost::alloc::string::String,
 }
 /// Where a run's workspace is: its directory in the actor, and where its
 /// files come from.

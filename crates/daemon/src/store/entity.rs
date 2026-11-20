@@ -95,6 +95,9 @@ pub mod run {
     pub failure: Option<String>,
     /// The runner the actor was placed on; `None` for the control host.
     pub actor_runner: Option<String>,
+    /// The digest (`sha256:<hex>`) of the image snapshot the actor booted;
+    /// `None` when booting the base image alone or an OCI reference.
+    pub snapshot: Option<String>,
   }
 
   #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

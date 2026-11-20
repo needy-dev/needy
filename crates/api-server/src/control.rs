@@ -210,6 +210,9 @@ pub struct RunInfo {
   /// The actor's workspace; `None` when it has none, and for a run listed
   /// from `state.db` after it ended.
   pub workspace: Option<RunWorkspace>,
+  /// The digest (`sha256:<hex>`) of the image snapshot the actor booted;
+  /// `None` when booting the base image alone or an OCI reference.
+  pub snapshot: Option<String>,
 }
 
 /// Where a run's workspace is.
