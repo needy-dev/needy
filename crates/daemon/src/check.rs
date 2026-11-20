@@ -104,10 +104,9 @@ impl Daemon {
                 None => check.actor_base_abi = Some(needy_core_actor::image::base::ABI),
               }
             }
-            // TODO(images): the drivers' table refuses an image definition
-            // until runs build them (step 7 of the images slice 1 plan);
-            // `validate::profile` accepts one, so the refusal is a finding
-            // here.
+            // TODO(images): container drivers refuse image definitions until
+            // slice 2 of the images and run data spec; `validate::profile`
+            // accepts one, so the refusal is a finding here.
             Err(e) if matches!(profile.actor.image, Some(needy_config::image::Image::Definition(_))) => {
               check.findings.push(error(format!("actor: {e}")));
             }

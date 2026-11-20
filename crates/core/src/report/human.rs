@@ -78,6 +78,9 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
   if let Some(driver) = &s.actor_driver {
     head.push(("Actor".into(), driver.clone()));
   }
+  if let Some(snapshot) = &s.snapshot {
+    head.push(("Snapshot".into(), snapshot.clone()));
+  }
   if let Some(by) = &s.started_by {
     head.push(("Started by".into(), by.clone()));
   }

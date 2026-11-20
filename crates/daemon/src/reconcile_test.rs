@@ -214,6 +214,7 @@ async fn left_by_a_killed_control_plane(state_dir: &std::path::Path, vm: &std::p
     actor_exit: None,
     failure: None,
     actor_runner: None,
+    snapshot: None,
   };
   store.save_run(&run).await.unwrap();
   let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "linux-firecracker");
@@ -299,6 +300,7 @@ async fn a_restarted_control_plane_ends_a_leftover_macos_vz_actors_vfkit() {
     actor_exit: None,
     failure: None,
     actor_runner: None,
+    snapshot: None,
   };
   store.save_run(&run).await.unwrap();
   let mut actor = instance("r1", actor_instance("r1"), "actor", InstanceKind::Actor, None, "macos-vz");
@@ -355,6 +357,7 @@ async fn a_run_that_was_stopping_when_the_control_plane_died_ends_stopped() {
     }),
     failure: None,
     actor_runner: None,
+    snapshot: None,
   };
   store.save_run(&stopping).await.unwrap();
   drop(store);

@@ -25,6 +25,7 @@ fn record(id: &str, state: RunState) -> RunRecord {
     actor_exit: None,
     failure: None,
     actor_runner: Some("kvm".into()),
+    snapshot: Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
   }
 }
 

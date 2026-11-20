@@ -100,6 +100,9 @@ impl Guest for Daemon {
     // made it itself, and what a driver does not present at all (Apple's
     // `container`'s sensors and uptime offset) is a gap `profile check`
     // reports.
+    // Image `env` applies first; `profile.actor.env` overrides it.
+    let mut env: std::collections::HashMap<String, String> = boot.env.into_iter().collect();
+    env.extend(profile.actor.env.clone());
     let mut config = GuestConfig {
       run: run.id.clone(),
       user: GuestUser {
@@ -118,7 +121,7 @@ impl Guest for Daemon {
       uptime_offset_secs: recipe.map(|r| r.uptime_offset_secs).unwrap_or(0),
       mounts,
       command: run.actor_command.clone(),
-      env: profile.actor.env.clone().into_iter().collect(),
+      env,
       cwd,
       gateway_port: channels.gateway_port,
       sensors: recipe
@@ -249,7 +252,7 @@ pub(crate) const UPPER_LAYER: &str = "upper.tar";
 /// Writes `archive` to `path` as it arrives. The file appears only once the
 /// whole archive is in, so a broken upload leaves the previous one, or
 /// none.
-async fn keep_upper(path: &std::path::Path, mut archive: Chunks) -> anyhow::Result<()> {
+pub(crate) async fn keep_upper(path: &std::path::Path, mut archive: Chunks) -> anyhow::Result<()> {
   use tokio::io::AsyncWriteExt as _;
   let partial = path.with_extension("tar.partial");
   let mut file = tokio::fs::File::create(&partial).await?;

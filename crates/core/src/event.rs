@@ -27,7 +27,8 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// `ended`, distinguishing completion of accepted stop intent after recovery
 /// from cleanup of an invocation that had already finished or failed.
 /// Version 12 adds `files.sync`, `files.merge` and `files.merge_pending`.
-pub const SCHEMA_VERSION: u32 = 12;
+/// Version 13 adds `run.create`'s `snapshot` and `image.build.step`.
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -46,7 +47,9 @@ pub const SCHEMA_VERSION: u32 = 12;
 // required stop-ownership fact `ended`. Version 10 remains readable through
 // StopV10: missing ownership stays false, preserving that version's semantics.
 // Version 12 only adds kinds, so traces of 10 and 11 still read: they have
-// none of the new kinds.
+// none of the new kinds. Version 13 only adds an optional field
+// (`run.create`'s `snapshot`) and a new kind (`image.build.step`), so
+// traces of 10 through 12 still read.
 // No older versions are added to this narrowly versioned historical boundary.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
@@ -126,6 +129,8 @@ events! {
   RunStop(RunStop) = "run.stop",
   /// Creating the run failed; whatever it had acquired is released.
   RunFail(RunFail) = "run.fail",
+  /// One layer step of an image build: built in a session or reused from cache.
+  ImageBuildStep(ImageBuildStep) = "image.build.step",
   /// The actor's VM started.
   ActorStart(ActorStart) = "actor.start",
   /// The actor's VM process exited.
@@ -223,6 +228,27 @@ pub struct RunCreate {
   /// and in traces before version 5.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub recipe_time: Option<String>,
+  /// The digest (`sha256:<hex>`) of the image snapshot the actor booted;
+  /// `None` when booting the base image alone or an OCI reference, and in
+  /// traces before version 13.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub snapshot: Option<String>,
+}
+
+/// One layer step of an image build: built in a session or reused from cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageBuildStep {
+  /// The step's cache key (`sha256:<hex>`).
+  pub key: String,
+  /// The resulting layer's digest (`sha256:<hex>`).
+  pub layer: String,
+  /// The `run` script that produced the layer.
+  pub script: String,
+  /// Whether the layer was reused from cache instead of built.
+  pub cached: bool,
+  /// Wall time in milliseconds; 0 when cached.
+  pub ms: u64,
 }
 
 /// An executor instance a run uses.

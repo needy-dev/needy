@@ -8,10 +8,6 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use etcetera::BaseStrategy;
 
-// TODO(config): the build cache (`$XDG_CACHE_HOME/needy`) has no reader yet.
-// Add it when `needy image build` keeps a cache. The config directory holds the
-// versioned client document and named profiles; state/data/runtime are resolved
-// independently of a client document override.
 #[derive(Debug, Clone)]
 pub struct Paths {
   /// The global document and profiles by name:
@@ -21,8 +17,12 @@ pub struct Paths {
   /// `trace.db`, runs and the daemon log: `$XDG_STATE_HOME/needy`, or
   /// `NEEDY_STATE_DIR`.
   pub state: PathBuf,
-  /// Images: `$XDG_DATA_HOME/needy`, or `NEEDY_DATA_DIR`.
+  /// Images and commits: `$XDG_DATA_HOME/needy`, or `NEEDY_DATA_DIR`.
   pub data: PathBuf,
+  /// Built image layers, snapshot records and materialized disks:
+  /// `$XDG_CACHE_HOME/needy`, or `NEEDY_CACHE_DIR`.
+  #[cfg_attr(not(unix), allow(dead_code))]
+  pub cache: PathBuf,
   /// Sockets: `$XDG_RUNTIME_DIR/needy`, the state directory where there is
   /// none (macOS), or `NEEDY_RUNTIME_DIR`.
   pub runtime: PathBuf,
@@ -32,6 +32,7 @@ impl Paths {
   pub fn resolve() -> Result<Self> {
     let base = etcetera::choose_base_strategy().context("cannot find the home directory; set NEEDY_STATE_DIR and NEEDY_DATA_DIR")?;
     let data = dir("NEEDY_DATA_DIR").unwrap_or_else(|| base.data_dir().join("needy"));
+    let cache = dir("NEEDY_CACHE_DIR").unwrap_or_else(|| base.cache_dir().join("needy"));
     let config = dir("NEEDY_CONFIG_DIR").unwrap_or_else(|| base.config_dir().join("needy"));
     // Windows has no state directory; its data directory is per user too.
     let state = dir("NEEDY_STATE_DIR").unwrap_or_else(|| base.state_dir().unwrap_or_else(|| base.data_dir()).join("needy"));
@@ -41,6 +42,7 @@ impl Paths {
       configuration_file: None,
       state,
       data,
+      cache,
       runtime,
     })
   }

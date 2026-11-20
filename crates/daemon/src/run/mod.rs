@@ -166,11 +166,6 @@ impl Run {
 
   /// Sets what the run's actor boots, before the actor asks for its
   /// configuration.
-  // TODO(images): nothing calls it outside tests yet. Slice 1, step 7 (see
-  // 2026-11-17-images-slice-1-plan.md) resolves `actor.image` to a snapshot
-  // and its build plan at `run create`, sets it here, and records the
-  // snapshot's digest in the run record and the trace.
-  #[cfg_attr(not(test), allow(dead_code))]
   pub(crate) fn set_boot(&self, boot: Boot) {
     *lock(&self.boot) = boot;
   }
@@ -213,6 +208,7 @@ impl Run {
       actor_exit: self.actor_exit(),
       failure: lock(&self.failure).clone(),
       actor_runner: lock(&self.actor_runner).clone(),
+      snapshot: self.boot().snapshot.map(|s| s.digest.to_string()),
     }
   }
 
@@ -234,6 +230,7 @@ impl Run {
       tty: self.tty.is_some(),
       actor: self.actor.get(),
       workspace: crate::workspace::describe(&self.profile),
+      snapshot: self.boot().snapshot.map(|s| s.digest.to_string()),
     }
   }
 
@@ -453,6 +450,7 @@ impl Registry {
       // NOTICE: nor its workspace, which a client reads when it creates
       // the run.
       workspace: None,
+      snapshot: record.snapshot,
     })
   }
 
@@ -472,9 +470,9 @@ fn stored(error: store::Error) -> ControlError {
   ControlError::Internal(format!("cannot read the runs: {error}"))
 }
 
-/// What a run's actor boots of its image (provisional): the snapshot's
-/// layers over needy's base, the materialized layer disks for the VM
-/// drivers, the image's `PATH`, and the session the actor is. The default
+/// What a run's actor boots of its image: the snapshot's layers over needy's
+/// base, the materialized layer disks for the VM drivers, the image's `PATH`,
+/// its `env` (without `PATH`), and the session the actor is. The default
 /// boots the base alone, as a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Boot {
@@ -483,11 +481,12 @@ pub struct Boot {
   /// The materialized layer disks of `snapshot`, lowest first
   /// (`needy_core_actor::image::store::Store::materialize`), passed to a VM
   /// driver's `Start::layer_disks`.
-  // TODO(images): slice 1, step 7 materializes `snapshot` from the layer
-  // store during `run create` and populates this list before `actor::start`.
   pub layer_disks: Vec<LayerDisk>,
   /// The image's `PATH` (`needy_core::image::Plan::path`); empty for none.
   pub path: String,
+  /// The image's environment (`needy_core::image::Plan::env`), without `PATH`;
+  /// `profile.actor.env` overrides it.
+  pub env: BTreeMap<String, String>,
   pub session: GuestSession,
 }
 
@@ -689,6 +688,8 @@ impl Daemon {
     actor::check_host(self, run).await?;
     files::check_host_paths(run)?;
     crate::sync::check(self, run)?;
+    unwinding(run)?;
+    crate::image::prepare(self, run).await?;
     let client_holder = self.state.client_execution_for_run(&run.id).await?;
     // NOTICE: this bounds initial helper startup only. A bound executor's
     // disconnection deadline during commands belongs to the exec policy.
@@ -746,6 +747,7 @@ impl Daemon {
       executors: executor_refs(&run.executors()),
       by: run.created_by.clone(),
       recipe_time: run.recipe.as_ref().map(|recipe| recipe.time.clone()),
+      snapshot: run.boot().snapshot.map(|s| s.digest.to_string()),
     }));
     unwinding(run)?;
     files::copy_in(run).await?;
@@ -804,6 +806,7 @@ impl Daemon {
       actor_exit: None,
       failure: Some(format!("{error:#}")),
       actor_runner,
+      snapshot: None,
     };
     if let Err(e) = self.state.save_run(&record).await {
       tracing::warn!("run {id}: cannot write it to state.db: {e:#}");

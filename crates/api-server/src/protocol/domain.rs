@@ -453,6 +453,7 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
       source: w.source,
       writable: w.writable,
     }),
+    snapshot: run.snapshot.unwrap_or_default(),
   }
 }
 

@@ -32,6 +32,9 @@ pub struct RunRecord {
   pub failure: Option<String>,
   /// The runner the actor was placed on; `None` for the control host.
   pub actor_runner: Option<String>,
+  /// The digest (`sha256:<hex>`) of the image snapshot the actor booted;
+  /// `None` when booting the base image alone or an OCI reference.
+  pub snapshot: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
@@ -109,6 +112,7 @@ impl Store {
       actor_exit_signal: record.actor_exit.as_ref().map(|e| e.signal.clone()),
       failure: record.failure.clone(),
       actor_runner: record.actor_runner.clone(),
+      snapshot: record.snapshot.clone(),
     };
     let update: Vec<run::Column> = run::Column::iter().filter(|c| !matches!(c, run::Column::Id)).collect();
     run::Entity::insert(row.into_active_model())
@@ -305,6 +309,7 @@ fn run_of(row: run::Model) -> Result<RunRecord> {
     updated_ms: row.updated_ms,
     failure: row.failure,
     actor_runner: row.actor_runner,
+    snapshot: row.snapshot,
   })
 }
 

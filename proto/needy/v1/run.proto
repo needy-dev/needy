@@ -119,6 +119,9 @@ message Run {
   // home directory), and for a run the control plane lists from its
   // database after the run ended.
   RunWorkspace workspace = 13;
+  // The digest (`sha256:<hex>`) of the image snapshot the actor booted.
+  // Empty when booting the base image alone or an OCI reference.
+  string snapshot = 14;
 
   reserved 4;
 }

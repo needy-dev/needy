@@ -31,6 +31,14 @@ fn every_kind() -> Vec<Event> {
       }],
       by: Some(Principal::Client("laptop".into())),
       recipe_time: Some("20261112-010203".into()),
+      snapshot: Some("sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into()),
+    }),
+    Event::ImageBuildStep(ImageBuildStep {
+      key: "sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+      layer: "sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+      script: "echo hello".into(),
+      cached: false,
+      ms: 420,
     }),
     Event::RunStop(RunStop {
       ended: false,
