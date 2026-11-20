@@ -36,7 +36,7 @@ use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_actor::driver;
-use needy_core_actor::image::store::Snapshot;
+use needy_core_actor::image::store::{LayerDisk, Snapshot};
 use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
@@ -456,7 +456,7 @@ impl Registry {
     })
   }
 
-  fn insert(&self, run: Arc<Run>) {
+  pub(crate) fn insert(&self, run: Arc<Run>) {
     lock(&self.live).push(run);
   }
 
@@ -473,12 +473,19 @@ fn stored(error: store::Error) -> ControlError {
 }
 
 /// What a run's actor boots of its image (provisional): the snapshot's
-/// layers over needy's base, the image's `PATH`, and the session the actor
-/// is. The default boots the base alone, as a run.
+/// layers over needy's base, the materialized layer disks for the VM
+/// drivers, the image's `PATH`, and the session the actor is. The default
+/// boots the base alone, as a run.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Boot {
   /// `None` boots the base alone.
   pub snapshot: Option<Snapshot>,
+  /// The materialized layer disks of `snapshot`, lowest first
+  /// (`needy_core_actor::image::store::Store::materialize`), passed to a VM
+  /// driver's `Start::layer_disks`.
+  // TODO(images): slice 1, step 7 materializes `snapshot` from the layer
+  // store during `run create` and populates this list before `actor::start`.
+  pub layer_disks: Vec<LayerDisk>,
   /// The image's `PATH` (`needy_core::image::Plan::path`); empty for none.
   pub path: String,
   pub session: GuestSession,
@@ -583,7 +590,7 @@ impl Daemon {
 
   /// The run before it acquires anything: its directory, profile and
   /// recipe.
-  fn prepare(&self, id: &str, request: &NewRun, profile: Profile, created_ms: i64, trace: Dispatch) -> Result<Arc<Run>> {
+  pub(crate) fn prepare(&self, id: &str, request: &NewRun, profile: Profile, created_ms: i64, trace: Dispatch) -> Result<Arc<Run>> {
     let dir = self.run_dir(id);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
     std::fs::write(dir.join("profile.yaml"), &request.profile_yaml)?;
@@ -1073,7 +1080,7 @@ impl Daemon {
 
   /// Starts the trace of run `id` with the sinks `config` selects; the
   /// default sinks when the profile could not be read.
-  fn run_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
+  pub(crate) fn run_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {
     self.run_trace_at(id, config, 0)
   }
 

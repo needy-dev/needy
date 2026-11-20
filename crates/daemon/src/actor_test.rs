@@ -536,3 +536,62 @@ async fn an_actor_without_a_usable_guest_needy_fails_the_create_at_once() {
   assert_eq!(listed[0].state, RunState::Failed);
   assert!(!run_dir(&started, &listed[0].id).join("vm.json").exists(), "the VM was configured");
 }
+
+#[tokio::test]
+async fn a_vm_actor_attaches_its_snapshots_materialized_layer_disks_in_order() {
+  use needy_api_server::control::Guest;
+  use needy_core_actor::image::store::Store;
+  let started = testing::daemon().await;
+  fake_image(&started.dir.path().join("image"), LONG_RUNNING);
+
+  let store = Store::new(started.dir.path().join("cache"), started.dir.path().join("data"));
+  let pack_layer = |name: &str, content: &str| {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(name), content).unwrap();
+    let archive = needy_common::archive::pack(dir.path(), &[]).unwrap();
+    store.put(archive.as_slice()).unwrap()
+  };
+  let lower = pack_layer("lower.txt", "lower\n");
+  let upper = pack_layer("upper.txt", "upper\n");
+  let snapshot = store.snapshot(&[lower, upper]).unwrap();
+  let disks = store.materialize(&snapshot).unwrap();
+
+  let request = new_run(PROFILE, started.dir.path());
+  let profile = needy_config::profile::load(&needy_config::Source::text(&request.profile_yaml, PathBuf::new())).unwrap();
+  let trace = started.daemon.run_trace("0123456789ab", Some(&profile.trace));
+  let run = started.daemon.prepare("0123456789ab", &request, profile, needy_common::time::now_ms(), trace).unwrap();
+  run.set_boot(crate::run::Boot {
+    snapshot: Some(snapshot),
+    layer_disks: disks.clone(),
+    ..crate::run::Boot::default()
+  });
+  started.daemon.runs.insert(run.clone());
+  started.daemon.save_run(&run).await;
+
+  super::start(&started.daemon, &run).await.unwrap();
+  run.state.advance(RunState::Running).unwrap();
+  firecracker_pid(&run.dir).await;
+
+  let config: serde_json::Value = serde_json::from_slice(&std::fs::read(run.dir.join("vm.json")).unwrap()).unwrap();
+  let drives = config["drives"].as_array().unwrap();
+  assert_eq!(drives.len(), 4, "{drives:?}");
+  assert_eq!(drives[0]["drive_id"], "rootfs");
+  assert_eq!(drives[0]["is_root_device"], true);
+  assert_eq!(drives[0]["is_read_only"], true);
+  assert_eq!(drives[1]["drive_id"], "needy");
+  assert_eq!(drives[1]["is_root_device"], false);
+  assert_eq!(drives[1]["is_read_only"], true);
+  for (i, disk) in disks.iter().enumerate() {
+    let drive = &drives[2 + i];
+    assert_eq!(drive["drive_id"], format!("layer-{i}"));
+    assert_eq!(drive["path_on_host"], disk.path.to_string_lossy().as_ref());
+    assert_eq!(drive["is_root_device"], false);
+    assert_eq!(drive["is_read_only"], true);
+    assert_eq!(&std::fs::read(&disk.path).unwrap()[..4], b"hsqs");
+  }
+  let guest = Guest::config(&started.daemon, &run.id).await.unwrap();
+  assert_eq!(guest.layers, [lower.to_string(), upper.to_string()]);
+  Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::default())
+    .await
+    .unwrap();
+}

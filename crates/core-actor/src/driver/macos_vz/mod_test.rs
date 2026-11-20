@@ -18,7 +18,7 @@ fn gce(extra: &str) -> CompiledRecipe {
 }
 
 fn launch(recipe: Option<&CompiledRecipe>) -> Launch {
-  Launch::new(&Image::new(Path::new(IMAGE)), Path::new(VFKIT), Path::new(DIR), Path::new(DISK), recipe)
+  Launch::new(&Image::new(Path::new(IMAGE)), Path::new(VFKIT), Path::new(DIR), Path::new(DISK), &[], recipe)
 }
 
 #[test]
@@ -197,7 +197,7 @@ async fn stop_ends_a_vm_that_ignores_sigterm_after_the_grace() {
   let vfkit = dir.path().join("vfkit");
   std::fs::write(&vfkit, "#!/bin/sh\ntrap '' TERM\necho vfkit started\nwhile :; do sleep 1; done\n").unwrap();
   std::fs::set_permissions(&vfkit, <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755)).unwrap();
-  let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), &dir.path().join("needy.squashfs"), None);
+  let launch = Launch::new(&Image::new(dir.path()), &vfkit, dir.path(), &dir.path().join("needy.squashfs"), &[], None);
   let mut vm = Vm::start(&launch).unwrap();
   let log = crate::driver::log(dir.path());
   for _ in 0..100 {
@@ -227,4 +227,26 @@ async fn detection_needs_apple_silicon_macos() {
   };
 
   assert_eq!(detect(&host).await.unwrap_err(), "Virtualization.framework actors run on macOS on Apple silicon only");
+}
+
+#[test]
+fn layer_disks_are_attached_read_only_in_order_after_the_guest_disk() {
+  let layers = vec![
+    PathBuf::from("/Users/user/.cache/needy/disks/sha256-aaaa.squashfs"),
+    PathBuf::from("/Users/user/.cache/needy/disks/sha256-bbbb.squashfs"),
+  ];
+
+  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(VFKIT), Path::new(DIR), Path::new(DISK), &layers, None);
+
+  let devices: Vec<&str> = launch.args.windows(2).filter(|w| w[0] == "--device").map(|w| w[1].as_str()).collect();
+  assert_eq!(
+    devices[..5],
+    [
+      "virtio-blk,path=/Users/user/.local/share/needy/actor/rootfs.ext4,readonly",
+      "virtio-blk,path=/Users/user/.local/share/needy/guest/0123456789abcdef.squashfs,readonly",
+      "virtio-blk,path=/Users/user/.cache/needy/disks/sha256-aaaa.squashfs,readonly",
+      "virtio-blk,path=/Users/user/.cache/needy/disks/sha256-bbbb.squashfs,readonly",
+      "virtio-serial,logFilePath=/dev/stdout",
+    ]
+  );
 }

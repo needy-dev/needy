@@ -5,10 +5,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use needy_config::profile::ActorDriver;
 use needy_core::recipe::{CompiledRecipe, VmIdentity};
 use serde_json::json;
 
-use super::{Image, vsock};
+use super::{Error, Image, vsock};
 
 /// The guest's vsock context ID; the host is always 2.
 // Source: https://github.com/torvalds/linux/blob/v6.18/include/uapi/linux/vm_sockets.h#L126-L131 (`VMADDR_CID_HOST`
@@ -27,6 +28,39 @@ const GUEST_CID: u32 = 3;
 // Reference: https://docs.kernel.org/6.18/admin-guide/kernel-parameters.html
 const BOOT_ARGS: &str = "console=ttyS0 reboot=k panic=1 root=/dev/vda ro init=/.needy/init quiet loglevel=4";
 
+/// Legacy IRQs (GSIs 5..=23) Firecracker allocates to virtio-mmio devices
+/// on x86_64.
+// Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/arch/x86_64/layout.rs#L28-L32
+// (`GSI_LEGACY_START = 5`, `GSI_LEGACY_END = 23`, `GSI_LEGACY_NUM = 19`).
+const MMIO_IRQS: usize = 19;
+
+/// Device slots on Firecracker's single PCI segment (`0..32`).
+// Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/devices/pci/pci_segment.rs#L41
+// and https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/devices/pci/pci_segment.rs#L464-L478
+// (`pci_irq_slots: [u8; 32]`; slot 0 is the root bridge).
+const PCI_SLOTS: usize = 32;
+
+/// Virtio devices every needy Firecracker VM attaches before any layer
+/// disks: `rootfs`, `needy` (guest disk) and `vsock`.
+const BASE_VIRTIO_DEVICES: usize = 3;
+
+/// Maximum layer disks Firecracker can attach for `recipe`: bounded by
+/// x86_64 legacy IRQs under MMIO (`19 - 3 = 16`), or by PCI segment slots
+/// when `--enable-pci` is used (32 minus the root bridge, optional ISA
+/// bridge from `images/firecracker/needy.patch`, and 3 base virtio devices).
+// NOTICE: derived from Firecracker v1.17.0 (`MMIO_IRQS`, `PCI_SLOTS`);
+// live host measurement of Firecracker's x86_64 device limit is recorded at
+// the end of slice 1 (`2026-11-17-images-slice-1-plan.md`).
+pub fn max_layer_disks(recipe: Option<&CompiledRecipe>) -> usize {
+  match recipe {
+    Some(r) if r.identity.has_pci() => {
+      let bridges = 1 + usize::from(r.identity.pci_isa_bridge.is_some());
+      PCI_SLOTS - bridges - BASE_VIRTIO_DEVICES
+    }
+    _ => MMIO_IRQS - BASE_VIRTIO_DEVICES,
+  }
+}
+
 /// How one VM starts: Firecracker's configuration, arguments and
 /// environment.
 #[derive(Debug, Clone, PartialEq)]
@@ -44,10 +78,23 @@ pub struct Launch {
 }
 
 impl Launch {
-  /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one.
-  pub fn new(image: &Image, dir: &Path, guest_disk: &Path, recipe: Option<&CompiledRecipe>) -> Self {
+  /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one, with
+  /// `layer_disks` attached read-only after the root and guest disks.
+  pub fn new(image: &Image, dir: &Path, guest_disk: &Path, layer_disks: &[PathBuf], recipe: Option<&CompiledRecipe>) -> Result<Self, Error> {
     let (vcpus, mem_mib) = crate::driver::size(recipe);
     let pci = recipe.is_some_and(|r| r.identity.has_pci());
+    let max = max_layer_disks(recipe);
+    if layer_disks.len() > max {
+      let transport = if pci {
+        "32 PCI slots"
+      } else {
+        "19 x86_64 legacy MMIO IRQs"
+      };
+      return Err(Error::driver(
+        ActorDriver::LinuxFirecracker,
+        format!("image has {} layer disks, but linux-firecracker supports at most {max} ({transport})", layer_disks.len()),
+      ));
+    }
     let mut boot_args = BOOT_ARGS.to_string();
     if !pci {
       boot_args.push_str(" pci=off");
@@ -56,18 +103,27 @@ impl Launch {
     // reach Firecracker's configuration at all; it is passed lossily and
     // Firecracker reports the file it cannot open.
     let path = |p: &Path| p.to_string_lossy().into_owned();
+    // The root file system is `/dev/vda`, the guest disk `/dev/vdb` (base
+    // ABI), and each layer disk follows in order: Firecracker keeps the root
+    // device first and the others in their order here, and attaches them in
+    // that order.
+    // Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/vmm_config/drive.rs#L96-L131
+    // (`BlockBuilder`: "at most one root block device and it would be the
+    // first in the list", `push_front`).
+    let mut drives = Vec::with_capacity(2 + layer_disks.len());
+    drives.push(json!({"drive_id": "rootfs", "path_on_host": path(&image.rootfs), "is_root_device": true, "is_read_only": true}));
+    drives.push(json!({"drive_id": "needy", "path_on_host": path(guest_disk), "is_root_device": false, "is_read_only": true}));
+    for (i, disk) in layer_disks.iter().enumerate() {
+      drives.push(json!({
+        "drive_id": format!("layer-{i}"),
+        "path_on_host": path(disk),
+        "is_root_device": false,
+        "is_read_only": true,
+      }));
+    }
     let mut config = json!({
       "boot-source": {"kernel_image_path": path(&image.kernel), "boot_args": boot_args},
-      // The root file system is `/dev/vda`, the guest disk `/dev/vdb` (base
-      // ABI): Firecracker keeps the root device first and the others in their
-      // order here, and attaches them in that order.
-      // Source: https://github.com/firecracker-microvm/firecracker/blob/95f868c8e345b1cc8faccd1a3c910b4989dc3f58/src/vmm/src/vmm_config/drive.rs#L96-L131
-      // (`BlockBuilder`: "at most one root block device and it would be the
-      // first in the list", `push_front`).
-      "drives": [
-        {"drive_id": "rootfs", "path_on_host": path(&image.rootfs), "is_root_device": true, "is_read_only": true},
-        {"drive_id": "needy", "path_on_host": path(guest_disk), "is_root_device": false, "is_read_only": true},
-      ],
+      "drives": drives,
       "machine-config": {"vcpu_count": vcpus, "mem_size_mib": mem_mib},
       "vsock": {"guest_cid": GUEST_CID, "uds_path": path(&vsock(dir))},
     });
@@ -89,7 +145,7 @@ impl Launch {
     if pci {
       args.push("--enable-pci".into());
     }
-    Self {
+    Ok(Self {
       image: image.clone(),
       dir: dir.to_path_buf(),
       vcpus,
@@ -97,7 +153,7 @@ impl Launch {
       config,
       args,
       env: recipe.map(|r| identity_env(&r.identity)).unwrap_or_default(),
-    }
+    })
   }
 }
 

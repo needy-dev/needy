@@ -20,7 +20,7 @@ fn gce(extra: &str) -> CompiledRecipe {
 
 #[test]
 fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
-  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), None);
+  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], None).unwrap();
 
   assert_eq!((launch.vcpus, launch.mem_mib), (2, 2048));
   assert_eq!(
@@ -61,7 +61,7 @@ fn a_vm_without_a_recipe_has_two_vcpus_and_no_pci_bus() {
 fn a_recipe_with_pci_bridges_sizes_the_vm_and_enables_pci() {
   let recipe = gce("");
 
-  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe));
+  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap();
 
   assert_eq!((launch.vcpus, launch.mem_mib), (2, 8192));
   assert_eq!(
@@ -85,7 +85,7 @@ fn a_recipe_with_pci_bridges_sizes_the_vm_and_enables_pci() {
 fn the_firecracker_environment_carries_the_recipe_identity() {
   let recipe = gce("cpu: { hypervisor: hidden }");
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap().env;
 
   assert_eq!(env["NEEDY_BRAND_STRING"], "Intel(R) Xeon(R) CPU @ 2.80GHz");
   assert_eq!(env["NEEDY_HIDE_HYPERVISOR"], "1");
@@ -139,7 +139,7 @@ fn every_smbios_key_needy_sends_is_one_the_patched_firecracker_reads() {
   let defaults = patch_smbios_defaults();
   assert!(defaults.contains_key("product_serial"), "{defaults:?}");
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap().env;
   let sent = smbios_keys(&env["NEEDY_SMBIOS"]);
 
   let unread: Vec<_> = sent.keys().filter(|key| !defaults.contains_key(*key)).collect();
@@ -207,7 +207,7 @@ fn the_gce_identity_sends_the_system_uuid_as_board_asset_tag() {
   let recipe = gce("");
   let uuid = recipe.identity.smbios.as_ref().unwrap().uuid.clone();
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap().env;
 
   assert_eq!(smbios_keys(&env["NEEDY_SMBIOS"])["board_asset_tag"], uuid.to_ascii_uppercase());
 }
@@ -217,7 +217,7 @@ fn a_dell_identity_sends_no_google_value() {
   let recipe = needy_config::recipe::load(&Source::builtin("dell-optiplex-ubuntu-24.04")).unwrap();
   let recipe = needy_core::recipe::compile(&recipe, &HostInfo::default(), &needy_core::recipe::PerRun::at(7, 0));
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap().env;
   let sent = smbios_keys(&env["NEEDY_SMBIOS"]);
 
   assert!(sent.values().all(|v| !v.contains("Google")), "{sent:?}");
@@ -229,7 +229,7 @@ fn a_dell_identity_sends_no_google_value() {
 fn a_visible_hypervisor_sets_no_hide_variable() {
   let recipe = gce("");
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap().env;
 
   assert!(!env.contains_key("NEEDY_HIDE_HYPERVISOR"), "{env:?}");
 }
@@ -248,7 +248,7 @@ fn smbios_values_cannot_end_a_field_early() {
     ..gce("")
   };
 
-  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), Some(&recipe)).env;
+  let env = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &[], Some(&recipe)).unwrap().env;
 
   assert_eq!(
     env["NEEDY_SMBIOS"],
@@ -259,7 +259,7 @@ fn smbios_values_cannot_end_a_field_early() {
 #[test]
 fn a_missing_image_file_is_named_in_the_error() {
   let dir = tempfile::tempdir().unwrap();
-  let launch = Launch::new(&Image::new(dir.path()), dir.path(), &dir.path().join("needy.squashfs"), None);
+  let launch = Launch::new(&Image::new(dir.path()), dir.path(), &dir.path().join("needy.squashfs"), &[], None).unwrap();
 
   let Err(error) = Vm::start(&launch) else {
     panic!("a VM started without an image");
@@ -296,7 +296,7 @@ async fn stop_terminates_firecracker() {
   use std::os::unix::process::ExitStatusExt;
   let dir = tempfile::tempdir().unwrap();
   let image = fake_image(dir.path(), "exec sleep 300");
-  let mut vm = Vm::start(&Launch::new(&image, dir.path(), &dir.path().join("needy.squashfs"), None)).unwrap();
+  let mut vm = Vm::start(&Launch::new(&image, dir.path(), &dir.path().join("needy.squashfs"), &[], None).unwrap()).unwrap();
 
   let status = vm.stop(std::time::Duration::from_secs(10)).await.unwrap();
 
@@ -310,7 +310,7 @@ async fn stop_kills_a_firecracker_that_ignores_sigterm() {
   let dir = tempfile::tempdir().unwrap();
   let ready = dir.path().join("ready");
   let image = fake_image(dir.path(), &format!("trap '' TERM; touch {}; while :; do sleep 0.1; done", ready.display()));
-  let mut vm = Vm::start(&Launch::new(&image, dir.path(), &dir.path().join("needy.squashfs"), None)).unwrap();
+  let mut vm = Vm::start(&Launch::new(&image, dir.path(), &dir.path().join("needy.squashfs"), &[], None).unwrap()).unwrap();
   // The trap must be in place before the signal.
   while !ready.exists() {
     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -364,4 +364,68 @@ fn detection_needs_linux() {
   };
 
   assert_eq!(detect(&host).unwrap_err(), "Firecracker runs on Linux only");
+}
+
+#[test]
+fn layer_disks_are_attached_read_only_in_order_after_the_guest_disk() {
+  let layers = vec![
+    PathBuf::from("/home/user/.cache/needy/disks/sha256-aaaa.squashfs"),
+    PathBuf::from("/home/user/.cache/needy/disks/sha256-bbbb.squashfs"),
+  ];
+
+  let launch = Launch::new(&Image::new(Path::new(IMAGE)), Path::new(DIR), Path::new(DISK), &layers, None).unwrap();
+
+  assert_eq!(
+    launch.config["drives"],
+    json!([
+      {
+        "drive_id": "rootfs",
+        "path_on_host": "/home/user/.local/share/needy/actor/rootfs.ext4",
+        "is_root_device": true,
+        "is_read_only": true,
+      },
+      {
+        "drive_id": "needy",
+        "path_on_host": "/home/user/.local/share/needy/guest/0123456789abcdef.squashfs",
+        "is_root_device": false,
+        "is_read_only": true,
+      },
+      {
+        "drive_id": "layer-0",
+        "path_on_host": "/home/user/.cache/needy/disks/sha256-aaaa.squashfs",
+        "is_root_device": false,
+        "is_read_only": true,
+      },
+      {
+        "drive_id": "layer-1",
+        "path_on_host": "/home/user/.cache/needy/disks/sha256-bbbb.squashfs",
+        "is_root_device": false,
+        "is_read_only": true,
+      },
+    ])
+  );
+}
+
+#[test]
+fn too_many_layer_disks_for_firecrackers_device_limit_are_refused() {
+  let disks = |count| (0..count).map(|i| PathBuf::from(format!("/home/user/.cache/needy/disks/layer-{i}.squashfs"))).collect::<Vec<_>>();
+  let image = Image::new(Path::new(IMAGE));
+
+  assert_eq!(config::max_layer_disks(None), 16);
+  assert!(Launch::new(&image, Path::new(DIR), Path::new(DISK), &disks(16), None).is_ok());
+  let mmio_error = Launch::new(&image, Path::new(DIR), Path::new(DISK), &disks(17), None).unwrap_err();
+  assert!(
+    matches!(&mmio_error, Error::Driver { driver: ActorDriver::LinuxFirecracker, message } if message.contains("17") && message.contains("16")),
+    "{mmio_error:?}"
+  );
+
+  // A GCE recipe enables PCI with both a root bridge and an ISA bridge.
+  let recipe = gce("");
+  assert_eq!(config::max_layer_disks(Some(&recipe)), 27);
+  assert!(Launch::new(&image, Path::new(DIR), Path::new(DISK), &disks(27), Some(&recipe)).is_ok());
+  let pci_error = Launch::new(&image, Path::new(DIR), Path::new(DISK), &disks(28), Some(&recipe)).unwrap_err();
+  assert!(
+    matches!(&pci_error, Error::Driver { driver: ActorDriver::LinuxFirecracker, message } if message.contains("28") && message.contains("27")),
+    "{pci_error:?}"
+  );
 }

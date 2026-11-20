@@ -58,6 +58,8 @@ pub(crate) struct Actor {
   pub recipe: Option<needy_core::recipe::CompiledRecipe>,
   pub mounts: Vec<needy_core_actor::driver::HostMount>,
   pub guest: PathBuf,
+  #[serde(default)]
+  pub layer_disks: Vec<PathBuf>,
 }
 
 // NOTICE: these local metadata messages contain a compiled recipe and mount

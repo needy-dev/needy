@@ -484,6 +484,13 @@ impl Driver for MacosAppleContainer {
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
+    // TODO(images): container drivers boot a snapshot as an assembled OCI
+    // image loaded into Apple's store in slice 2 of the images and run data
+    // spec, not as VM layer disks; refuse non-empty layer disks so nothing
+    // silently boots without them.
+    if !start.layer_disks.is_empty() {
+      return Err(Error::Unsupported("macos-apple-container actors do not attach VM layer disks; container snapshots are slice 2".into()));
+    }
     let launch = self.launch(start);
     // A container left by an earlier daemon would block the name.
     self.end_leftover(start.run).await;
