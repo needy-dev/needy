@@ -172,6 +172,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     Side::Guest => Vec::new(),
     Side::Host => mounts(run).into_iter().chain(crate::sync::mounts(daemon, run)).collect(),
   };
+  let layer_disks = run.boot().layer_disks.into_iter().map(|disk| disk.path).collect();
   daemon.snapshot_run(run).await?;
   let vm = match daemon
     .holder
@@ -183,6 +184,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
       recipe: run.recipe.clone(),
       mounts,
       guest,
+      layer_disks,
     })
     .await
   {

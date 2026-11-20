@@ -380,6 +380,11 @@ pub struct Start<'a> {
   /// `crate::contract::GUEST`, already checked
   /// (`crate::image::guest::check`).
   pub guest: &'a Path,
+  /// The read-only layer disks of the snapshot the actor boots, lowest
+  /// first, for the VM drivers to attach after the guest disk
+  /// (`crate::image::store::Store::materialize`). Empty when booting the
+  /// base image alone.
+  pub layer_disks: &'a [PathBuf],
 }
 
 /// Something of a recipe's identity, or of the machine an actor presents,

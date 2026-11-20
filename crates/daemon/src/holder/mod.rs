@@ -454,6 +454,7 @@ impl Owner {
         user: &profile.user,
         mounts: &actor.mounts,
         guest: &actor.guest,
+        layer_disks: &actor.layer_disks,
       })
       .await
     {

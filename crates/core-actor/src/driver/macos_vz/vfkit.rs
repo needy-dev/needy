@@ -64,11 +64,12 @@ pub struct Launch {
 }
 
 impl Launch {
-  /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one.
+  /// The VM for `recipe`, or a plain 2 vCPU, 2 GiB VM without one, with
+  /// `layer_disks` attached read-only after the root and guest disks.
   // NOTICE: vfkit splits a `--device` value at every comma, so a path with a
   // comma cannot be given; vfkit reports the option it cannot parse,
   // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/config/virtio.go#L181-L183.
-  pub fn new(image: &Image, vfkit: &Path, dir: &Path, guest_disk: &Path, recipe: Option<&CompiledRecipe>) -> Self {
+  pub fn new(image: &Image, vfkit: &Path, dir: &Path, guest_disk: &Path, layer_disks: &[PathBuf], recipe: Option<&CompiledRecipe>) -> Self {
     let (vcpus, mem_mib) = crate::driver::size(recipe);
     let path = |p: &Path| p.to_string_lossy().into_owned();
     let mut args = vec![
@@ -86,6 +87,12 @@ impl Launch {
       // gives them, and vfkit keeps the order of its `--device` options.
       "--device".into(),
       format!("virtio-blk,path={},readonly", path(guest_disk)),
+    ];
+    for disk in layer_disks {
+      args.push("--device".into());
+      args.push(format!("virtio-blk,path={},readonly", path(disk)));
+    }
+    args.extend([
       // NOTICE: vfkit opens a log file without appending (`append: false`,
       // https://github.com/crc-org/vfkit/blob/v0.6.4/pkg/vf/virtio.go#L283),
       // which would write over its own messages in the same file; through
@@ -95,7 +102,7 @@ impl Launch {
       "virtio-serial,logFilePath=/dev/stdout".into(),
       "--device".into(),
       "virtio-rng".into(),
-    ];
+    ]);
     // The guest dials the daemon's sockets on these ports; vfkit listens on
     // the process socket for the daemon and connects to the guest's port.
     for (port, socket, mode) in [

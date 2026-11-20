@@ -168,7 +168,7 @@ impl Driver for MacosVz {
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
     let disk = crate::driver::guest_disk(start.guest, &self.guest_disks).await?;
-    let launch = Launch::new(&self.image, &self.vfkit, start.dir, &disk, start.recipe);
+    let launch = Launch::new(&self.image, &self.vfkit, start.dir, &disk, start.layer_disks, start.recipe);
     Ok(Box::new(Vm::start(&launch)?))
   }
 

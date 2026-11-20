@@ -102,6 +102,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     user,
     mounts: &[],
     guest: Path::new("/Users/user/.local/bin/needy-linux-aarch64"),
+    layer_disks: &[],
   }
 }
 
@@ -450,4 +451,22 @@ async fn an_image_archive_is_loaded_into_the_image_store() {
   let (runtime, _) = runtime_failing(&[("image", "load")]);
   let error = runtime.load(Path::new("/tmp/needy-actor.tar")).await.unwrap_err().to_string();
   assert_eq!(error, "`container image load` failed: Error: not found");
+}
+
+#[tokio::test]
+async fn non_empty_layer_disks_are_refused_until_slice_2() {
+  let dir = tempfile::tempdir().unwrap();
+  let (runtime, _) = runtime(Fake::default());
+  let user = User::default();
+  let disks = [std::path::PathBuf::from(
+    "/Users/user/.cache/needy/disks/sha256-aaaa.squashfs",
+  )];
+  let mut req = start(dir.path(), &user, None);
+  req.layer_disks = &disks;
+
+  let Err(error) = runtime.start(&req).await else {
+    panic!("macos-apple-container must refuse VM layer disks");
+  };
+
+  assert!(matches!(&error, Error::Unsupported(msg) if msg.contains("slice 2")), "{error:?}");
 }

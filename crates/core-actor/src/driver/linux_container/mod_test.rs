@@ -191,6 +191,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     user,
     mounts: &[],
     guest: Path::new(GUEST_NEEDY),
+    layer_disks: &[],
   }
 }
 
@@ -545,4 +546,22 @@ async fn a_host_that_is_not_linux_has_no_linux_container_actors_whatever_its_eng
   let refused = detect(&engine::Probe::default()).await.unwrap_err();
 
   assert!(refused.starts_with("linux-container actors run on Linux hosts only"), "{refused}");
+}
+
+#[tokio::test]
+async fn non_empty_layer_disks_are_refused_until_slice_2() {
+  let dir = tempfile::tempdir().unwrap();
+  let (container, _) = runtime(Fake::default(), OciRuntime::Runc);
+  let user = User::default();
+  let disks = [PathBuf::from(
+    "/home/user/.cache/needy/disks/sha256-aaaa.squashfs",
+  )];
+  let mut req = start(dir.path(), &user, None);
+  req.layer_disks = &disks;
+
+  let Err(error) = container.start(&req).await else {
+    panic!("linux-container must refuse VM layer disks");
+  };
+
+  assert!(matches!(&error, Error::Unsupported(msg) if msg.contains("slice 2")), "{error:?}");
 }
