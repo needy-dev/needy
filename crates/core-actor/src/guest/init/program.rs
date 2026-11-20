@@ -37,9 +37,10 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
   let user = config.user.clone().unwrap_or_default();
   identity::offset_uptime(config.uptime_offset_secs);
   let proxy = format!("http://{GATEWAY_LISTEN}");
+  let search = super::stubs::search_path(&config.image_path);
   // In a container the program's file may be a shim; its real file starts
   // it, so the driving program itself is never routed.
-  let mut command = match crate::guest::capture::shim::resolve(&config.command[0], &super::stubs::search_path()) {
+  let mut command = match crate::guest::capture::shim::resolve(&config.command[0], &search) {
     Some(real) => {
       let mut command = tokio::process::Command::new(real);
       command.arg0(&config.command[0]);
@@ -54,7 +55,7 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
     .env("USER", &user.name)
     .env("LOGNAME", &user.name)
     .env("SHELL", "/bin/bash")
-    .env("PATH", super::stubs::search_path())
+    .env("PATH", &search)
     .env("TERM", "xterm-256color")
     .env("COLORTERM", "truecolor")
     .env("LANG", "C.UTF-8")
@@ -103,7 +104,7 @@ fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> 
     ("USER", user.name.clone()),
     ("LOGNAME", user.name.clone()),
     ("SHELL", "/bin/bash".into()),
-    ("PATH", super::stubs::search_path()),
+    ("PATH", super::stubs::search_path(&config.image_path)),
     // The program draws for the terminal model, not for each client's
     // terminal (see the terminal note's G10).
     ("TERM", "xterm-256color".into()),

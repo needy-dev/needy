@@ -206,3 +206,17 @@ fn making_the_trampolines_again_keeps_them() {
   assert_eq!(trampolines_in(&trampolines, &search, &stub).unwrap(), 0);
   assert!(same_file(&trampolines.join("tool"), &trampolines.join(TRAMPOLINE_STUB)));
 }
+
+#[test]
+fn image_path_file_round_trips_and_falls_back_to_system_path() {
+  let dir = tempfile::tempdir().unwrap();
+  let file = dir.path().join("needy/path");
+
+  assert_eq!(read_path_from(&file), SYSTEM_PATH);
+
+  write_path_to(&file, "/opt/node/bin:/usr/bin").unwrap();
+  assert_eq!(read_path_from(&file), "/opt/node/bin:/usr/bin");
+
+  write_path_to(&file, "   ").unwrap();
+  assert_eq!(read_path_from(&file), SYSTEM_PATH);
+}

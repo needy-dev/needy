@@ -22,6 +22,7 @@ mod account;
 mod control;
 mod files;
 mod identity;
+mod layers;
 mod mounts;
 mod network;
 mod program;
@@ -35,7 +36,30 @@ pub(super) use stubs::STUB_DIR;
 use std::time::Duration;
 
 use anyhow::Result;
-use needy_api_proto::v1::{GetConfigRequest, ReportExitRequest};
+use needy_api_proto::v1::{GetConfigRequest, GetConfigResponse, ReportExitRequest, UpperLayer};
+
+/// Resolved session settings from `GetConfigResponse.session`. An unset
+/// session is a normal run: disposable upper layer, routing enabled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Session {
+  keep_upper: bool,
+  routing: bool,
+}
+
+impl Session {
+  fn from_config(config: &GetConfigResponse) -> Self {
+    match config.session {
+      Some(session) => Self {
+        keep_upper: session.upper() == UpperLayer::Kept,
+        routing: session.routing,
+      },
+      None => Self {
+        keep_upper: false,
+        routing: true,
+      },
+    }
+  }
+}
 
 pub(super) fn main() -> ! {
   // Init started again by itself as a plain process (not PID 1) only
@@ -141,6 +165,20 @@ async fn boot(container: bool) -> Result<()> {
 
   let client = super::daemon().await?;
   let config = client.guest().get_config(GetConfigRequest {}).await.map_err(needy_api_client::Error::from)?.into_inner();
+  let session = Session::from_config(&config);
+  // Stack layer disks (or a writable overlay over the base alone when the
+  // session keeps its upper layer) before setting up home, account, and
+  // identity so they apply to the new root.
+  let stacked = if !container && (!config.layers.is_empty() || session.keep_upper) {
+    Some(layers::stack(&config.layers)?)
+  } else {
+    None
+  };
+  if !config.image_path.is_empty()
+    && let Err(e) = super::capture::shim::write_path(&config.image_path)
+  {
+    tracing::warn!("cannot write {}: {e}", super::capture::shim::PATH_FILE);
+  }
   let user = config.user.clone().unwrap_or_default();
   let home = format!("/home/{}", user.name);
   // A container's home is a tmpfs its runtime mounted; the daemon sends a
@@ -173,11 +211,13 @@ async fn boot(container: bool) -> Result<()> {
     network::Gateway::Vsock(config.gateway_port)
   };
   tokio::spawn(network::forward_gateway(gateway));
-  stubs::create(&config.route_names, container);
-  if container {
-    match super::capture::shim::trampolines() {
-      Ok(made) => tracing::debug!("{made} trampolines in {}", super::capture::shim::TRAMPOLINE_DIR),
-      Err(e) => tracing::warn!("cannot make the trampolines; programs other than the in-place shims are not routed: {e}"),
+  if session.routing {
+    stubs::create(&config.route_names, &config.image_path, container);
+    if container {
+      match super::capture::shim::trampolines() {
+        Ok(made) => tracing::debug!("{made} trampolines in {}", super::capture::shim::TRAMPOLINE_DIR),
+        Err(e) => tracing::warn!("cannot make the trampolines; programs other than the in-place shims are not routed: {e}"),
+      }
     }
   }
   for copy in &config.copy_in {
@@ -189,15 +229,17 @@ async fn boot(container: bool) -> Result<()> {
   files::working_directory(&config.cwd, &home, user.uid, user.gid);
   identity::schedule_faults(&client, &config);
   // Route only after setup so init's own helpers stay local.
-  let route = super::capture::Route {
-    uid: user.uid,
-    names: config.route_names.clone(),
-  };
-  super::capture::enable(&route, container);
+  if session.routing {
+    let route = super::capture::Route {
+      uid: user.uid,
+      names: config.route_names.clone(),
+    };
+    super::capture::enable(&route, container);
+  }
   // `needy chaos add` and `rm` may change the route list while the program
   // runs, and `run stop` may ask for a graceful stop.
   let (stop, stops) = tokio::sync::watch::channel(None);
-  tokio::spawn(control::follow(client.clone(), user.uid, container, stop));
+  tokio::spawn(control::follow(client.clone(), user.uid, config.image_path.clone(), session.routing, container, stop));
 
   let driven = match &config.tty {
     Some(window) => {
@@ -229,6 +271,11 @@ async fn boot(container: bool) -> Result<()> {
       tracing::warn!("mirror-out {}: {e:#}", copy.name);
     }
   }
+  if session.keep_upper
+    && let Some(stacked) = &stacked
+  {
+    stacked.push(&client).await?;
+  }
   // Reporting an exit is idempotent and never executes the program again.
   // Keep its real result in init until replacement control acknowledges it.
   loop {
@@ -255,4 +302,32 @@ async fn boot(container: bool) -> Result<()> {
   // has none; its runtime detaches its host-side mounts.
   mounts::detach(config.mounts.iter().map(|m| m.target.as_str()));
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use needy_api_proto::v1::{GetConfigResponse, GuestSession, UpperLayer};
+
+  use super::Session;
+
+  #[test]
+  fn unset_session_defaults_to_disposable_and_routed() {
+    let session = Session::from_config(&GetConfigResponse::default());
+    assert!(!session.keep_upper);
+    assert!(session.routing);
+  }
+
+  #[test]
+  fn session_honors_kept_upper_and_disabled_routing() {
+    let config = GetConfigResponse {
+      session: Some(GuestSession {
+        upper: UpperLayer::Kept.into(),
+        routing: false,
+      }),
+      ..GetConfigResponse::default()
+    };
+    let session = Session::from_config(&config);
+    assert!(session.keep_upper);
+    assert!(!session.routing);
+  }
 }
