@@ -588,6 +588,46 @@ pub struct PushFilesRequest {
 pub struct PushFilesResponse {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PushLayerRequest {
+    /// The next part of the archive.
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+    /// Set on the last message only. An upload whose stream ends without it
+    /// is broken, whatever ended it, and the daemon keeps nothing of it: a
+    /// guest whose read fails cannot end a stream as anything but whole.
+    #[prost(bool, tag="2")]
+    pub last: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PushLayerResponse {
+}
+/// One layer init stacks over the base. Its disk is found by the marker it
+/// carries (`needy-layer` at the disk's root), not by attach order.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestLayer {
+    /// `sha256:<64 hex digits>`, as the disk's marker names it.
+    #[prost(string, tag="1")]
+    pub digest: ::prost::alloc::string::String,
+}
+/// The settings of the session an actor is: a run, a build step or an edit
+/// session (provisional names). An unset session is a run's.
+///
+/// NOTICE: the session's ending (commit or discard) is not a setting here.
+/// The guest does the same for both: it streams a kept upper layer, and the
+/// daemon commits it or discards it (a failed build step, an edit the user
+/// throws away). A kept layer the daemon will discard is still streamed;
+/// TODO(images): tell the guest the ending, on `Control`, if that transfer
+/// shows up in an edit session's time.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GuestSession {
+    #[prost(enumeration="UpperLayer", tag="1")]
+    pub upper: i32,
+    /// Off: init hands no exec to the proxy, whatever the route list says (a
+    /// build step).
+    #[prost(bool, tag="2")]
+    pub routing: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GuestUser {
     #[prost(string, tag="1")]
     pub name: ::prost::alloc::string::String,
@@ -670,6 +710,19 @@ pub struct GetConfigResponse {
     pub daemon_uid: u32,
     #[prost(uint32, tag="19")]
     pub daemon_gid: u32,
+    /// The layers init stacks over the base, lowest first: the root's
+    /// layers, the needy layer, the built layers and the commit layer. Empty
+    /// boots the base alone.
+    #[prost(message, repeated, tag="20")]
+    pub layers: ::prost::alloc::vec::Vec<GuestLayer>,
+    /// The image's `PATH`: init writes it under `/run/needy`, and it goes
+    /// after the trampolines and before the route stubs. Empty for none. It
+    /// is kept out of `env`, whose `PATH` would replace the driving program's
+    /// whole; a profile's `actor.env.PATH` replaces this one.
+    #[prost(string, tag="21")]
+    pub image_path: ::prost::alloc::string::String,
+    #[prost(message, optional, tag="22")]
+    pub session: ::core::option::Option<GuestSession>,
 }
 /// An event observed inside the actor. The listener the guest calls is bound to
 /// its run, so the event names none.
@@ -705,6 +758,41 @@ pub struct ReportExitRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReportExitResponse {
+}
+/// What happens to a session's upper layer, the writable tmpfs over its
+/// layers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum UpperLayer {
+    Unspecified = 0,
+    /// Gone with the actor: a run's.
+    Disposable = 1,
+    /// Archived and streamed with `PushLayer` when the session ends, after
+    /// the driving program exits and before its exit is reported: a build
+    /// step's or an edit session's.
+    Kept = 2,
+}
+impl UpperLayer {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "UPPER_LAYER_UNSPECIFIED",
+            Self::Disposable => "UPPER_LAYER_DISPOSABLE",
+            Self::Kept => "UPPER_LAYER_KEPT",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "UPPER_LAYER_UNSPECIFIED" => Some(Self::Unspecified),
+            "UPPER_LAYER_DISPOSABLE" => Some(Self::Disposable),
+            "UPPER_LAYER_KEPT" => Some(Self::Kept),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct CheckRequest {

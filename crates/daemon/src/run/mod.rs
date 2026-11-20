@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use anyhow::{Context, Result, bail};
 use needy_api_client::proto::v1::{KillProcessRequest, ListProcessesRequest};
 use needy_api_server::control::{
-  ControlError, FaultAdded, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunFaults, RunInfo, Runs, StopMode, StoredEvent,
+  ControlError, FaultAdded, GuestSession, Logs, NewRun, ProfileCheck, ProfileToCheck, Route, RunEvents, RunFaults, RunInfo, Runs, StopMode,
+  StoredEvent,
 };
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
@@ -35,6 +36,7 @@ use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_actor::driver;
+use needy_core_actor::image::store::Snapshot;
 use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
@@ -109,6 +111,8 @@ pub struct Run {
   actor_runner: Mutex<Option<String>>,
   /// Who asked for the run, as `run.create` records it.
   created_by: Option<Principal>,
+  /// What its actor boots of its image, as `Guest::config` tells init.
+  boot: Mutex<Boot>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -153,6 +157,22 @@ impl Run {
       *routes = names;
       changed
     });
+  }
+
+  /// What the run's actor boots of its image.
+  pub fn boot(&self) -> Boot {
+    lock(&self.boot).clone()
+  }
+
+  /// Sets what the run's actor boots, before the actor asks for its
+  /// configuration.
+  // TODO(images): nothing calls it outside tests yet. Slice 1, step 7 (see
+  // 2026-11-17-images-slice-1-plan.md) resolves `actor.image` to a snapshot
+  // and its build plan at `run create`, sets it here, and records the
+  // snapshot's digest in the run record and the trace.
+  #[cfg_attr(not(test), allow(dead_code))]
+  pub(crate) fn set_boot(&self, boot: Boot) {
+    *lock(&self.boot) = boot;
   }
 
   /// Records how the actor's driving program ended.
@@ -452,6 +472,18 @@ fn stored(error: store::Error) -> ControlError {
   ControlError::Internal(format!("cannot read the runs: {error}"))
 }
 
+/// What a run's actor boots of its image (provisional): the snapshot's
+/// layers over needy's base, the image's `PATH`, and the session the actor
+/// is. The default boots the base alone, as a run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Boot {
+  /// `None` boots the base alone.
+  pub snapshot: Option<Snapshot>,
+  /// The image's `PATH` (`needy_core::image::Plan::path`); empty for none.
+  pub path: String,
+  pub session: GuestSession,
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
   // NOTICE: the lists change by one push or retain, so a panic elsewhere
   // leaves them whole.
@@ -618,6 +650,7 @@ impl Daemon {
       failure: Mutex::new(None),
       actor_runner: Mutex::new(None),
       created_by: request.by.clone(),
+      boot: Mutex::default(),
       tasks: TaskTracker::new(),
       cancel,
     }))

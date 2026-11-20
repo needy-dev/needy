@@ -19,6 +19,10 @@ use crate::protocol::grpc::v1::health::Health;
 use crate::server::{Listen, Server};
 use needy_api_proto::v1;
 
+/// An upper layer pushed to the fake: the run, the parts as they arrived,
+/// and the error that ended the stream, if one did.
+pub type PushedLayer = (String, Vec<Vec<u8>>, Option<String>);
+
 #[derive(Default)]
 pub struct Fake {
   /// What the fake was asked, one line per call.
@@ -27,6 +31,11 @@ pub struct Fake {
   pub events: Mutex<Vec<(String, i64, Event)>>,
   pub exits: Mutex<Vec<(String, Exit)>>,
   pub pushed: Mutex<Vec<(String, String, Vec<u8>)>>,
+  /// The upper layers pushed: the run, the parts as they arrived, and the
+  /// error that ended the stream, if one did.
+  pub layers: Mutex<Vec<PushedLayer>>,
+  /// Notified once a layer upload has ended.
+  pub layer_ended: tokio::sync::Notify,
   /// The runs it was asked to create, as the adapter passed them.
   pub created: Mutex<Vec<NewRun>>,
 }
@@ -338,6 +347,15 @@ impl Guest for Fake {
         sftp_command: vec!["sftp-server".into()],
       }],
       gateway_port: 7001,
+      layers: vec![
+        format!("sha256:{}", "a".repeat(64)),
+        format!("sha256:{}", "b".repeat(64)),
+      ],
+      image_path: "/usr/local/bin:/usr/bin".into(),
+      session: GuestSession {
+        upper: UpperLayer::Kept,
+        routing: false,
+      },
       ..Default::default()
     })
   }
@@ -361,6 +379,23 @@ impl Guest for Fake {
 
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()> {
     self.pushed.lock().unwrap().push((run.into(), name.into(), archive));
+    Ok(())
+  }
+
+  async fn push_layer(&self, run: &str, mut archive: Chunks) -> Result<()> {
+    let mut parts = Vec::new();
+    let mut ended = None;
+    while let Some(part) = archive.next().await {
+      match part {
+        Ok(part) => parts.push(part),
+        Err(e) => {
+          ended = Some(e.to_string());
+          break;
+        }
+      }
+    }
+    self.layers.lock().unwrap().push((run.into(), parts, ended));
+    self.layer_ended.notify_one();
     Ok(())
   }
 

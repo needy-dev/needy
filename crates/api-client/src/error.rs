@@ -55,6 +55,10 @@ pub enum Error {
   /// error output.
   #[error("{}", failed(.exit, .stderr))]
   Failed { exit: Exit, stderr: String },
+  /// What the caller streams could not be read, such as an archive the
+  /// guest uploads; the call was cancelled.
+  #[error("reading what to send: {0}")]
+  Read(#[source] std::io::Error),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -155,7 +159,7 @@ impl Error {
       Self::InvalidEndpoint(_) | Self::InvalidToken | Self::IdentityMismatch { .. } => Kind::Invalid,
       Self::Failed { .. } => Kind::Failed,
       Self::Ended { .. } => Kind::Ended,
-      Self::Remote(_) | Self::RemoteDiagnostic { .. } | Self::Closed => Kind::Other,
+      Self::Remote(_) | Self::RemoteDiagnostic { .. } | Self::Closed | Self::Read(_) => Kind::Other,
     }
   }
 
