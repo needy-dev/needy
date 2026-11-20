@@ -36,3 +36,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-17 | [Image definitions, hand edits and merged run data (approved contract)](2026-11-17-images-and-run-data-spec.md) | spec |
 | 2026-11-17 | [Slice 0: official Dev Container features on needy's base](2026-11-17-features-on-needy-base-evidence.md) | evidence |
 | 2026-11-17 | [Slice 1 plan: snapshots and hand edits on the VM drivers](2026-11-17-images-slice-1-plan.md) | plan |
+| 2026-11-21 | [Slice 1: snapshots and hand edits on VM drivers](2026-11-21-images-slice-1-evidence.md) | evidence |

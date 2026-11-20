@@ -157,6 +157,7 @@ impl<'a> CellEnv<'a> {
       ("NEEDY_RUNTIME_DIR".to_string(), self.runtime().display().to_string()),
       ("NEEDY_CONFIG_DIR".to_string(), self.dir.join("c").display().to_string()),
       ("NEEDY_DATA_DIR".to_string(), self.dir.join("d").display().to_string()),
+      ("NEEDY_CACHE_DIR".to_string(), self.dir.join("k").display().to_string()),
       // Logs are files the harness reads back, not a terminal.
       ("NO_COLOR".to_string(), "1".to_string()),
     ];

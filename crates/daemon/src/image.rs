@@ -12,7 +12,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 use needy_api_server::control::{
@@ -60,6 +60,16 @@ type FlightResult = std::result::Result<LayerDigest, String>;
 /// Result broadcast when an interactive edit session finishes.
 type EditOutcomeResult = std::result::Result<ImageEditFinished, String>;
 
+/// Cached SHA-256 of a locally built base `rootfs.ext4`, invalidated when the
+/// file's path, length, or modification time changes.
+#[derive(Debug, Clone)]
+struct CachedRootDigest {
+  path: PathBuf,
+  len: u64,
+  modified: Option<SystemTime>,
+  digest: PlanDigest,
+}
+
 /// The daemon's layer store, cache-key index, single-flight build table, and
 /// active interactive edit sessions.
 pub struct Images {
@@ -77,6 +87,10 @@ pub struct Images {
   /// Live edit sessions keyed by session ID, for terminal attach and
   /// `FinishImageEdit`.
   edits: Mutex<HashMap<String, Arc<EditSession>>>,
+  /// Cached SHA-256 of a locally built base `rootfs.ext4` (which has no
+  /// `manifest.sha256`), so repeated `run create` / `image build` calls do not
+  /// re-hash hundreds of megabytes on every invocation.
+  root_digest_cache: Mutex<Option<CachedRootDigest>>,
 }
 
 /// A running interactive edit session.
@@ -128,6 +142,7 @@ impl Images {
       in_flight: Mutex::default(),
       active_edits: Mutex::default(),
       edits: Mutex::default(),
+      root_digest_cache: Mutex::default(),
     }
   }
 
@@ -1065,6 +1080,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
 // comes with slice 5 of the images and run data spec.
 pub(crate) async fn root_digest(daemon: &Daemon) -> Result<PlanDigest> {
   let dir = daemon.config.actor_image.clone();
+  let images = daemon.images.clone();
   tokio::task::spawn_blocking(move || -> Result<PlanDigest> {
     if let Some(manifest) = manifest::read(&dir)?
       && let Some(sha256) = manifest.sha256
@@ -1073,11 +1089,28 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<PlanDigest> {
       return Ok(digest);
     }
     let rootfs = dir.join("rootfs.ext4");
+    let meta = std::fs::metadata(&rootfs).with_context(|| format!("cannot stat {} to hash base rootfs", rootfs.display()))?;
+    let len = meta.len();
+    let modified = meta.modified().ok();
+    if let Some(cached) = images.root_digest_cache.lock().unwrap_or_else(|p| p.into_inner()).as_ref()
+      && cached.path == rootfs
+      && cached.len == len
+      && cached.modified == modified
+    {
+      return Ok(cached.digest.clone());
+    }
     let mut file = std::fs::File::open(&rootfs).with_context(|| format!("cannot open {} to hash base rootfs", rootfs.display()))?;
     let mut hasher = sha2::Sha256::new();
     std::io::copy(&mut file, &mut hasher).with_context(|| format!("cannot hash {}", rootfs.display()))?;
     let text = format!("sha256:{:x}", hasher.finalize());
-    PlanDigest::parse(&text).map_err(anyhow::Error::from)
+    let digest = PlanDigest::parse(&text)?;
+    *images.root_digest_cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(CachedRootDigest {
+      path: rootfs,
+      len,
+      modified,
+      digest: digest.clone(),
+    });
+    Ok(digest)
   })
   .await
   .context("hashing base VM image panicked")?
