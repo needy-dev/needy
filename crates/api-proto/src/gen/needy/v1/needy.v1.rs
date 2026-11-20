@@ -810,6 +810,149 @@ pub struct CheckResponse {
     #[prost(string, tag="4")]
     pub platform: ::prost::alloc::string::String,
 }
+/// An image's commit layer from its lockfile: the layer holding hand edits
+/// and the plan top cache key it was made on.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImageCommit {
+    /// The commit layer's digest (`sha256:<hex>`).
+    #[prost(string, tag="1")]
+    pub layer: ::prost::alloc::string::String,
+    /// The base plan top key (`sha256:<hex>`) the commit was made on.
+    #[prost(string, tag="2")]
+    pub base: ::prost::alloc::string::String,
+}
+/// The profile user that enters an image build plan's cache keys.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ImageUser {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(uint32, tag="2")]
+    pub uid: u32,
+    #[prost(uint32, tag="3")]
+    pub gid: u32,
+}
+/// One program an edit session executed, as decided by the daemon.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RecordedCommand {
+    #[prost(string, repeated, tag="1")]
+    pub argv: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    #[prost(string, tag="2")]
+    pub cwd: ::prost::alloc::string::String,
+}
+/// One step of an image build.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BuildStepResult {
+    #[prost(string, tag="1")]
+    pub key: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub layer: ::prost::alloc::string::String,
+    #[prost(bool, tag="3")]
+    pub cached: bool,
+    #[prost(uint64, tag="4")]
+    pub ms: u64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BuildImageRequest {
+    /// Self-contained image definition as YAML (its `extends` chain merged).
+    #[prost(string, tag="1")]
+    pub image_yaml: ::prost::alloc::string::String,
+    /// Actor driver name (`linux-firecracker`, `macos-vz`); empty picks this
+    /// host's VM driver.
+    #[prost(string, tag="2")]
+    pub driver: ::prost::alloc::string::String,
+    /// Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+    #[prost(message, optional, tag="3")]
+    pub user: ::core::option::Option<ImageUser>,
+    /// Optional commit layer from the image's lockfile, stacked on top.
+    #[prost(message, optional, tag="4")]
+    pub commit: ::core::option::Option<ImageCommit>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BuildImageResponse {
+    /// The resulting snapshot digest (`sha256:<hex>`).
+    #[prost(string, tag="1")]
+    pub snapshot: ::prost::alloc::string::String,
+    /// True when `commit` was made on another base and applied on the new one.
+    #[prost(bool, tag="2")]
+    pub commit_rebased: bool,
+    #[prost(message, repeated, tag="3")]
+    pub steps: ::prost::alloc::vec::Vec<BuildStepResult>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartImageEditRequest {
+    /// Stable identifier for the image, used for the per-image edit lock and
+    /// commit history key in the layer store.
+    #[prost(string, tag="1")]
+    pub image_name: ::prost::alloc::string::String,
+    /// Self-contained image definition as YAML (its `extends` chain merged).
+    #[prost(string, tag="2")]
+    pub image_yaml: ::prost::alloc::string::String,
+    /// Actor driver name (`linux-firecracker`, `macos-vz`); empty picks this
+    /// host's VM driver.
+    #[prost(string, tag="3")]
+    pub driver: ::prost::alloc::string::String,
+    /// Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+    #[prost(message, optional, tag="4")]
+    pub user: ::core::option::Option<ImageUser>,
+    /// Current commit from the image's lockfile, if any.
+    #[prost(message, optional, tag="5")]
+    pub commit: ::core::option::Option<ImageCommit>,
+    /// Terminal size for the interactive shell.
+    #[prost(message, optional, tag="6")]
+    pub tty: ::core::option::Option<WindowSize>,
+    /// Wait for the client to attach its terminal before starting the shell.
+    #[prost(bool, tag="7")]
+    pub wait_for_attach: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartImageEditResponse {
+    /// The edit session ID; pass to ExecAttach.run_id and FinishImageEditRequest.
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    /// True when the parent commit was applied on a changed base.
+    #[prost(bool, tag="2")]
+    pub commit_rebased: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FinishImageEditRequest {
+    #[prost(string, tag="1")]
+    pub session_id: ::prost::alloc::string::String,
+    /// Stop the edit session without committing its upper layer.
+    #[prost(bool, tag="2")]
+    pub abort: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FinishImageEditResponse {
+    /// The new commit (`layer` and `base`), unset if the session exited
+    /// non-zero, was aborted, or uploaded no upper layer.
+    #[prost(message, optional, tag="1")]
+    pub commit: ::core::option::Option<ImageCommit>,
+    /// Programs the edit session ran, in order.
+    #[prost(message, repeated, tag="2")]
+    pub commands: ::prost::alloc::vec::Vec<RecordedCommand>,
+    /// The interactive shell's exit status, if reported.
+    #[prost(message, optional, tag="3")]
+    pub exit: ::core::option::Option<ExecExited>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RollbackImageRequest {
+    /// Stable identifier for the image, as passed to StartImageEdit.
+    #[prost(string, tag="1")]
+    pub image_name: ::prost::alloc::string::String,
+    /// Current commit layer digest (`sha256:<hex>`) from the lockfile.
+    #[prost(string, tag="2")]
+    pub from_layer: ::prost::alloc::string::String,
+    /// Number of commits to roll back (must be >= 1).
+    #[prost(uint32, tag="3")]
+    pub steps: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RollbackImageResponse {
+    /// Target commit layer digest (`sha256:<hex>`), or empty when rolled back
+    /// past the first commit.
+    #[prost(string, tag="1")]
+    pub layer: ::prost::alloc::string::String,
+}
 /// What a runner can host: each role with its drivers. A role with none is a
 /// role it does not hold.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1386,6 +1529,10 @@ pub struct CreateRunRequest {
     /// workspace, as before the field existed.
     #[prost(string, tag="12")]
     pub client_dir: ::prost::alloc::string::String,
+    /// Optional commit layer from the image's lockfile, stacked on top of the
+    /// image definition's built layers.
+    #[prost(message, optional, tag="13")]
+    pub image_commit: ::core::option::Option<ImageCommit>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
@@ -1446,6 +1593,9 @@ pub struct Run {
     /// Empty when booting the base image alone or an OCI reference.
     #[prost(string, tag="14")]
     pub snapshot: ::prost::alloc::string::String,
+    /// True when the lockfile's commit layer was applied on a changed base.
+    #[prost(bool, tag="15")]
+    pub commit_rebased: bool,
 }
 /// Where a run's workspace is: its directory in the actor, and where its
 /// files come from.

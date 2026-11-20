@@ -6,6 +6,7 @@
 pub mod client;
 pub mod guest;
 pub mod health;
+pub mod image;
 pub mod process;
 pub mod run;
 pub mod runner;

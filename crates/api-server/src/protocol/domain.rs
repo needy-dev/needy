@@ -20,7 +20,8 @@ use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
 
 use crate::control::{
-  ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
+  ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, ImageBuild, ImageBuildResult, ImageEditFinished, ImageEditStart,
+  ImageEditStarted, ImageRollback, ImageRollbackResult, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
   ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunFaults, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started,
   StopMode, StoredEvent, Target, UpperLayer, WindowSize,
 };
@@ -36,6 +37,8 @@ pub enum Error {
   Missing(&'static str),
   #[error("{0}")]
   Contradicts(&'static str),
+  #[error("{0}")]
+  Invalid(String),
 }
 
 /// The origin an `ExecStart` names.
@@ -359,6 +362,7 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     client_dir: request.client_dir,
     // The adapter sets where the client is; the wire does not say.
     on_control_host: false,
+    image_commit: request.image_commit.map(image_commit).transpose()?,
   })
 }
 
@@ -454,6 +458,7 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
       writable: w.writable,
     }),
     snapshot: run.snapshot.unwrap_or_default(),
+    commit_rebased: run.commit_rebased,
   }
 }
 
@@ -781,4 +786,122 @@ pub fn proto_diagnostic(value: crate::control::Diagnostic) -> Option<v1::ErrorDi
     reason: value.reason,
     facts: value.facts.into_iter().collect(),
   })
+}
+
+// --------------------------------------------------------------- images
+
+pub fn image_commit(commit: v1::ImageCommit) -> Result<needy_core::image::Commit, Error> {
+  let layer = needy_core::image::Digest::parse(&commit.layer).map_err(|e| Error::Invalid(format!("image commit layer: {e}")))?;
+  let base = needy_core::image::Digest::parse(&commit.base).map_err(|e| Error::Invalid(format!("image commit base: {e}")))?;
+  Ok(needy_core::image::Commit { layer, base })
+}
+
+pub fn proto_image_commit(commit: needy_core::image::Commit) -> v1::ImageCommit {
+  v1::ImageCommit {
+    layer: commit.layer.to_string(),
+    base: commit.base.to_string(),
+  }
+}
+
+fn image_user(user: v1::ImageUser) -> needy_config::profile::User {
+  needy_config::profile::User {
+    name: user.name,
+    uid: user.uid,
+    gid: user.gid,
+  }
+}
+
+pub fn image_build(request: v1::BuildImageRequest) -> Result<ImageBuild, Error> {
+  if request.image_yaml.trim().is_empty() {
+    return Err(Error::Missing("image definition"));
+  }
+  Ok(ImageBuild {
+    image_yaml: request.image_yaml,
+    driver: request.driver,
+    user: request.user.map(image_user),
+    commit: request.commit.map(image_commit).transpose()?,
+  })
+}
+
+pub fn proto_image_build(result: ImageBuildResult) -> v1::BuildImageResponse {
+  v1::BuildImageResponse {
+    snapshot: result.snapshot,
+    commit_rebased: result.commit_rebased,
+    steps: result
+      .steps
+      .into_iter()
+      .map(|s| v1::BuildStepResult {
+        key: s.key,
+        layer: s.layer,
+        cached: s.cached,
+        ms: s.ms,
+      })
+      .collect(),
+  }
+}
+
+pub fn image_edit_start(request: v1::StartImageEditRequest) -> Result<ImageEditStart, Error> {
+  if request.image_name.trim().is_empty() {
+    return Err(Error::Missing("image name"));
+  }
+  if request.image_yaml.trim().is_empty() {
+    return Err(Error::Missing("image definition"));
+  }
+  Ok(ImageEditStart {
+    image_name: request.image_name,
+    image_yaml: request.image_yaml,
+    driver: request.driver,
+    user: request.user.map(image_user),
+    commit: request.commit.map(image_commit).transpose()?,
+    tty: request.tty.map(|w| WindowSize {
+      rows: w.rows,
+      cols: w.cols,
+    }),
+    wait_for_attach: request.wait_for_attach,
+  })
+}
+
+pub fn proto_image_edit_started(started: ImageEditStarted) -> v1::StartImageEditResponse {
+  v1::StartImageEditResponse {
+    session_id: started.session_id,
+    commit_rebased: started.commit_rebased,
+  }
+}
+
+pub fn proto_image_edit_finished(finished: ImageEditFinished) -> v1::FinishImageEditResponse {
+  v1::FinishImageEditResponse {
+    commit: finished.commit.map(proto_image_commit),
+    commands: finished
+      .commands
+      .into_iter()
+      .map(|c| v1::RecordedCommand {
+        argv: c.argv,
+        cwd: c.cwd,
+      })
+      .collect(),
+    exit: finished.exit.map(proto_exit),
+  }
+}
+
+pub fn image_rollback(request: v1::RollbackImageRequest) -> Result<ImageRollback, Error> {
+  if request.image_name.trim().is_empty() {
+    return Err(Error::Missing("image name"));
+  }
+  if request.from_layer.trim().is_empty() {
+    return Err(Error::Missing("current commit layer"));
+  }
+  if request.steps == 0 {
+    return Err(Error::Invalid("rollback steps must be at least 1".into()));
+  }
+  Ok(ImageRollback {
+    image_name: request.image_name,
+    from_layer: request.from_layer,
+    steps: request.steps,
+  })
+}
+
+pub fn proto_image_rollback(result: ImageRollbackResult) -> v1::RollbackImageResponse {
+  v1::RollbackImageResponse {
+    layer: result.layer.unwrap_or_default(),
+  }
 }

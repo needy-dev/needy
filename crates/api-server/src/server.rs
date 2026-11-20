@@ -11,15 +11,16 @@ use std::time::Duration;
 use needy_api_proto::v1::client_service_server::ClientServiceServer;
 use needy_api_proto::v1::guest_service_server::GuestServiceServer;
 use needy_api_proto::v1::health_service_server::HealthServiceServer;
+use needy_api_proto::v1::image_service_server::ImageServiceServer;
 use needy_api_proto::v1::process_service_server::{ProcessService, ProcessServiceServer};
 use needy_api_proto::v1::run_service_server::RunServiceServer;
 use needy_api_proto::v1::runner_service_server::RunnerServiceServer;
 use tokio_util::sync::CancellationToken;
 use tonic::service::Routes;
 
-use crate::control::{Caller, Clients, Guest, Processes, Runners, Runs};
+use crate::control::{Caller, Clients, Guest, Images, Processes, Runners, Runs};
 use crate::middleware::authentication::{AuthLayer, Credentials, Token};
-use crate::protocol::grpc::v1::{client, guest, health::Health, process, run, runner};
+use crate::protocol::grpc::v1::{client, guest, health::Health, image, process, run, runner};
 
 // NOTICE: once cancelled, a server stops accepting and lets open calls
 // finish; an attached exec stream may never finish, so it gets 5 s.
@@ -134,6 +135,12 @@ impl Server {
   pub fn runs<S: Runs>(mut self, runs: Arc<S>) -> Self {
     let caller = self.caller.clone();
     self.routes = self.routes.add_service(RunServiceServer::new(run::Adapter { runs, caller }));
+    self
+  }
+
+  pub fn images<I: Images>(mut self, images: Arc<I>) -> Self {
+    let caller = self.caller.clone();
+    self.routes = self.routes.add_service(ImageServiceServer::new(image::Adapter { images, caller }));
     self
   }
 

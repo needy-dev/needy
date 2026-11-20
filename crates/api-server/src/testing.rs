@@ -72,6 +72,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     actor: None,
     workspace: None,
     snapshot: None,
+    commit_rebased: false,
   }
 }
 

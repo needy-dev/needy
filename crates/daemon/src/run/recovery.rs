@@ -233,6 +233,7 @@ impl Daemon {
       failure: Mutex::new(record.failure.clone()),
       actor_runner: Mutex::new(record.actor_runner.clone()),
       created_by: None,
+      image_commit: None,
       boot: Mutex::new(super::Boot {
         snapshot: record
           .snapshot

@@ -1,0 +1,131 @@
+// EXPERIMENTAL / UNSTABLE
+syntax = "proto3";
+
+package needy.v1;
+
+import "needy/v1/process.proto";
+
+// ImageService builds image definitions, runs interactive edit sessions,
+// and rolls back image commits on the control daemon's layer store.
+service ImageService {
+  // Resolve and build an image definition's layers, stacking any commit
+  // layer on top, and return the resulting snapshot digest.
+  rpc BuildImage(BuildImageRequest) returns (BuildImageResponse);
+  // Start an interactive edit session for an image. Only one edit session
+  // may run per image at a time. The caller attaches its terminal with
+  // ProcessService.Exec(ExecAttach { run_id: session_id }), then calls
+  // FinishImageEdit to obtain the committed layer and recorded commands.
+  rpc StartImageEdit(StartImageEditRequest) returns (StartImageEditResponse);
+  // Wait for an edit session to finish (or abort it without committing)
+  // and return the resulting commit and recorded commands.
+  rpc FinishImageEdit(FinishImageEditRequest) returns (FinishImageEditResponse);
+  // Step an image's commit pointer back by `steps` commits in its history.
+  rpc RollbackImage(RollbackImageRequest) returns (RollbackImageResponse);
+}
+
+// An image's commit layer from its lockfile: the layer holding hand edits
+// and the plan top cache key it was made on.
+message ImageCommit {
+  // The commit layer's digest (`sha256:<hex>`).
+  string layer = 1;
+  // The base plan top key (`sha256:<hex>`) the commit was made on.
+  string base = 2;
+}
+
+// The profile user that enters an image build plan's cache keys.
+message ImageUser {
+  string name = 1;
+  uint32 uid = 2;
+  uint32 gid = 3;
+}
+
+// One program an edit session executed, as decided by the daemon.
+message RecordedCommand {
+  repeated string argv = 1;
+  string cwd = 2;
+}
+
+// One step of an image build.
+message BuildStepResult {
+  string key = 1;
+  string layer = 2;
+  bool cached = 3;
+  uint64 ms = 4;
+}
+
+message BuildImageRequest {
+  // Self-contained image definition as YAML (its `extends` chain merged).
+  string image_yaml = 1;
+  // Actor driver name (`linux-firecracker`, `macos-vz`); empty picks this
+  // host's VM driver.
+  string driver = 2;
+  // Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+  ImageUser user = 3;
+  // Optional commit layer from the image's lockfile, stacked on top.
+  ImageCommit commit = 4;
+}
+
+message BuildImageResponse {
+  // The resulting snapshot digest (`sha256:<hex>`).
+  string snapshot = 1;
+  // True when `commit` was made on another base and applied on the new one.
+  bool commit_rebased = 2;
+  repeated BuildStepResult steps = 3;
+}
+
+message StartImageEditRequest {
+  // Stable identifier for the image, used for the per-image edit lock and
+  // commit history key in the layer store.
+  string image_name = 1;
+  // Self-contained image definition as YAML (its `extends` chain merged).
+  string image_yaml = 2;
+  // Actor driver name (`linux-firecracker`, `macos-vz`); empty picks this
+  // host's VM driver.
+  string driver = 3;
+  // Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+  ImageUser user = 4;
+  // Current commit from the image's lockfile, if any.
+  ImageCommit commit = 5;
+  // Terminal size for the interactive shell.
+  WindowSize tty = 6;
+  // Wait for the client to attach its terminal before starting the shell.
+  bool wait_for_attach = 7;
+}
+
+message StartImageEditResponse {
+  // The edit session ID; pass to ExecAttach.run_id and FinishImageEditRequest.
+  string session_id = 1;
+  // True when the parent commit was applied on a changed base.
+  bool commit_rebased = 2;
+}
+
+message FinishImageEditRequest {
+  string session_id = 1;
+  // Stop the edit session without committing its upper layer.
+  bool abort = 2;
+}
+
+message FinishImageEditResponse {
+  // The new commit (`layer` and `base`), unset if the session exited
+  // non-zero, was aborted, or uploaded no upper layer.
+  ImageCommit commit = 1;
+  // Programs the edit session ran, in order.
+  repeated RecordedCommand commands = 2;
+  // The interactive shell's exit status, if reported.
+  ExecExited exit = 3;
+}
+
+message RollbackImageRequest {
+  // Stable identifier for the image, as passed to StartImageEdit.
+  string image_name = 1;
+  // Current commit layer digest (`sha256:<hex>`) from the lockfile.
+  string from_layer = 2;
+  // Number of commits to roll back (must be >= 1).
+  uint32 steps = 3;
+}
+
+message RollbackImageResponse {
+  // Target commit layer digest (`sha256:<hex>`), or empty when rolled back
+  // past the first commit.
+  string layer = 1;
+}

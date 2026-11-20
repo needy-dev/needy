@@ -39,6 +39,7 @@ pub(super) fn resolve(path: &Path, overrides: Overrides) -> Result<profile::Reso
   let resolved = profile::resolve(&Source::file(path))?;
   let mut document: Value = serde_yaml::from_str(&resolved.yaml)?;
   let actor = &mut document["actor"];
+  let image_overridden = overrides.image.is_some();
   if let Some(image) = overrides.image {
     actor["image"] = image.into();
   }
@@ -66,6 +67,9 @@ pub(super) fn resolve(path: &Path, overrides: Overrides) -> Result<profile::Reso
   let source = Source::text(serde_yaml::to_string(&document)?, path.parent().unwrap_or(Path::new("")).to_path_buf());
   let mut snapshot = profile::resolve(&source)?;
   snapshot.recipe_yaml = resolved.recipe_yaml;
+  if !image_overridden {
+    snapshot.image_file = resolved.image_file;
+  }
   let loaded = profile::load(&Source::text(snapshot.yaml.clone(), path.parent().unwrap_or(Path::new("")).to_path_buf()))?;
   let errors: Vec<_> = needy_config::validate::profile(&loaded)
     .into_iter()

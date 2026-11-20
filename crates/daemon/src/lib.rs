@@ -416,7 +416,13 @@ impl Daemon {
       instance_id: self.instance_id.clone(),
       role: "control",
     };
-    Server::new(health, Caller::Operator).token(token).runs(api.clone()).processes(api.clone()).runners(api.clone()).clients(api)
+    Server::new(health, Caller::Operator)
+      .token(token)
+      .runs(api.clone())
+      .images(api.clone())
+      .processes(api.clone())
+      .runners(api.clone())
+      .clients(api)
   }
 
   /// Stops management without ending admitted invocations. The holder keeps

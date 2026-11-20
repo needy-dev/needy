@@ -303,6 +303,21 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       let selection = crate::connection::resolve(ctx)?;
       let connection = selection.connect().await?;
       let loaded = needy_config::profile::load(&needy_config::Source::text(resolved.yaml.clone(), PathBuf::new()))?;
+      let lockfile_path = if matches!(loaded.actor.image, Some(needy_config::image::Image::Definition(_))) {
+        let source_path = match &resolved.image_file {
+          Some(file) => std::fs::canonicalize(file).unwrap_or_else(|_| file.clone()),
+          None => path.clone(),
+        };
+        Some(super::image::lockfile::path_for(&source_path))
+      } else {
+        None
+      };
+      let image_commit = match &lockfile_path {
+        Some(lock_path) => {
+          super::image::lockfile::read(lock_path)?.commit.as_ref().map(super::image::lockfile::LockCommit::to_proto).transpose()?
+        }
+        None => None,
+      };
       let needs_client = loaded.executors.values().any(|e| matches!(e.runner, Some(needy_config::profile::RunnerSelector::Client)));
       let mut holder = if needs_client {
         progress.message("Preparing client execution");
@@ -329,6 +344,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           wait_for_attach: interactive,
           client_execution: holder.as_ref().map(|h| h.capability.clone()).unwrap_or_default(),
           client_dir: client_dir()?,
+          image_commit,
         })
         .await
         .map_err(fail)?
@@ -336,6 +352,10 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .run
         .unwrap_or_default();
       progress.finish();
+      if run.commit_rebased {
+        let lock_display = lockfile_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "image lockfile".into());
+        output::message(format_args!("warning: commit layer in {lock_display} was applied on a changed base"));
+      }
       if let Some(workspace) = &run.workspace {
         output::message(workspace_line(workspace, &loaded));
       }

@@ -4,6 +4,7 @@ syntax = "proto3";
 package needy.v1;
 
 import "needy/v1/diagnostic.proto";
+import "needy/v1/image.proto";
 import "needy/v1/process.proto";
 import "needy/v1/runner.proto";
 
@@ -71,6 +72,9 @@ message CreateRunRequest {
   // when that executor cannot, the create fails. Empty: no default
   // workspace, as before the field existed.
   string client_dir = 12;
+  // Optional commit layer from the image's lockfile, stacked on top of the
+  // image definition's built layers.
+  ImageCommit image_commit = 13;
 
   // The client's profile directory, which the daemon cannot read when it
   // runs on another machine.
@@ -122,6 +126,8 @@ message Run {
   // The digest (`sha256:<hex>`) of the image snapshot the actor booted.
   // Empty when booting the base image alone or an OCI reference.
   string snapshot = 14;
+  // True when the lockfile's commit layer was applied on a changed base.
+  bool commit_rebased = 15;
 
   reserved 4;
 }
