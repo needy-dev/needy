@@ -23,6 +23,8 @@ mod env;
 #[cfg(unix)]
 mod host;
 #[cfg(unix)]
+mod image;
+#[cfg(unix)]
 mod invariants;
 #[cfg(unix)]
 mod lifecycle;

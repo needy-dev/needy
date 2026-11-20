@@ -324,6 +324,9 @@ impl Lifecycle {
 pub enum Scenario {
   /// Opt-in user service lifecycle on this platform manager.
   Service,
+  /// Image definitions (`run:` layers, `env`/`PATH`), `image build`, `image edit`,
+  /// lockfile commits, and `image rollback`.
+  Image,
   /// Routing to a native executor on a runner that joined the control
   /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
@@ -381,7 +384,12 @@ impl Cell {
     // Scenarios that route somewhere route to a native executor unless the
     // cell says otherwise; the others have none.
     let executor = match scenario {
-      Scenario::Service | Scenario::Terminal | Scenario::Tui(_) | Scenario::Network(_) | Scenario::Workspace(Workspace::Host) => None,
+      Scenario::Service
+      | Scenario::Image
+      | Scenario::Terminal
+      | Scenario::Tui(_)
+      | Scenario::Network(_)
+      | Scenario::Workspace(Workspace::Host) => None,
       Scenario::Chaos(Fault::Net | Fault::Sensor) => None,
       _ => Some(Executor::Native),
     };
@@ -426,6 +434,7 @@ impl Cell {
       Scenario::HostExec => format!("{driver}/exec"),
       Scenario::HostCopy => format!("{driver}/fs-cp"),
       Scenario::Service => format!("{driver}/service/user"),
+      Scenario::Image => format!("{driver}/image"),
     }
   }
 
@@ -607,6 +616,12 @@ pub fn cells() -> Vec<Cell> {
         });
       }
     }
+    // TODO(images): container drivers (`linux-container`, `macos-apple-container`)
+    // gain image definitions and the `image` e2e scenario in slice 2 of the
+    // images and run data spec.
+    if matches!(driver, Driver::Firecracker | Driver::Vz) {
+      cells.push(cell(Scenario::Image));
+    }
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -669,6 +684,14 @@ mod tests {
     let remote: Vec<_> = mine.iter().filter(|cell| selected(&cell.id(), &["**/client-execution/at=remote".into()], &[])).collect();
     assert_eq!(remote.len(), Driver::ACTORS.len());
     assert!(remote.iter().all(|cell| cell.scenario == Scenario::ClientExecution(ClientAt::Remote)));
+  }
+
+  #[test]
+  fn image_cells_cover_vm_drivers() {
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["image".into()], &[])).collect();
+    let ids: Vec<String> = mine.iter().map(Cell::id).collect();
+    assert_eq!(ids, vec!["linux-firecracker/image", "macos-vz/image"]);
+    assert!(mine.iter().all(|cell| cell.executor.is_none() && !cell.root));
   }
 
   #[test]

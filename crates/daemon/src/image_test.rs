@@ -699,3 +699,27 @@ executors:
   assert_eq!(cfg2.layers, [commit_layer.to_string()]);
   Runs::stop(daemon, &rebased.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
 }
+
+// ROOT CAUSE:
+//
+// If a locally built base VM image had no `manifest.sha256`, `root_digest`
+// hashed the entire `rootfs.ext4` (hundreds of MiB) on every `run create`,
+// `image build`, and `image edit`, adding ~17 s per call in debug builds.
+//
+// Before the fix, every call re-read and hashed `rootfs.ext4` from scratch.
+// The fix caches the digest in `Images` keyed by `(path, len, modified)` and
+// recomputes it when the file changes.
+#[tokio::test]
+async fn root_digest_caches_unhashed_rootfs_and_invalidates_on_change() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+
+  let first = crate::image::root_digest(daemon).await.unwrap();
+  let second = crate::image::root_digest(daemon).await.unwrap();
+  assert_eq!(first, second);
+
+  // Replace rootfs.ext4 with different length -> cache must invalidate.
+  std::fs::write(daemon.config.actor_image.join("rootfs.ext4"), b"updated-rootfs-contents").unwrap();
+  let third = crate::image::root_digest(daemon).await.unwrap();
+  assert_ne!(first, third);
+}
