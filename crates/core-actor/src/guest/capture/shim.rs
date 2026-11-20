@@ -41,6 +41,9 @@ use crate::guest::{Stub, proxy};
 /// Turns routing on: the route's user and names, which init writes once it
 /// set the actor up.
 pub const ROUTE_FILE: &str = "/run/needy/route";
+/// The image's `PATH`, written by init under `/run/needy` so trampolines
+/// find their real programs on it at exec time.
+pub const PATH_FILE: &str = "/run/needy/path";
 /// The trampolines' directory, a tmpfs, first on the driving program's
 /// `PATH` in a container.
 pub const TRAMPOLINE_DIR: &str = "/run/needy/shims";
@@ -52,6 +55,36 @@ const TRAMPOLINE_STUB: &str = ".stub";
 /// build plan, whose image `PATH` starts from it; its provenance is there.
 pub use needy_core::image::SYSTEM_PATH;
 
+/// Writes the image's `PATH` to [`PATH_FILE`], readable by every user and
+/// writable by init only, so trampolines find their real programs on it.
+pub fn write_path(path: &str) -> std::io::Result<()> {
+  write_path_to(Path::new(PATH_FILE), path)
+}
+
+fn write_path_to(file: &Path, path: &str) -> std::io::Result<()> {
+  use std::os::unix::fs::PermissionsExt;
+  if let Some(dir) = file.parent() {
+    std::fs::create_dir_all(dir)?;
+  }
+  let staged = file.with_extension("new");
+  std::fs::write(&staged, path)?;
+  std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o644))?;
+  std::fs::rename(&staged, file)
+}
+
+/// The image's `PATH` from [`PATH_FILE`], falling back to [`SYSTEM_PATH`]
+/// when the file is absent or empty.
+pub fn image_path() -> String {
+  read_path_from(Path::new(PATH_FILE))
+}
+
+fn read_path_from(file: &Path) -> String {
+  match std::fs::read_to_string(file) {
+    Ok(text) if !text.trim().is_empty() => text.trim().to_string(),
+    _ => SYSTEM_PATH.to_string(),
+  }
+}
+
 /// The real program the shim at `exe` stands for, or `None` when `exe` is
 /// not a shim. needy's own files in `/.needy` never are.
 pub fn real(exe: &Path) -> Option<PathBuf> {
@@ -59,7 +92,8 @@ pub fn real(exe: &Path) -> Option<PathBuf> {
     return None;
   }
   if exe.parent() == Some(Path::new(TRAMPOLINE_DIR)) {
-    return behind_trampoline(exe, &search_dirs(SYSTEM_PATH), Path::new(PROXY));
+    let path = image_path();
+    return behind_trampoline(exe, &search_dirs(&path), Path::new(PROXY));
   }
   let real = Path::new(REAL).join(exe.strip_prefix("/").ok()?);
   (real.is_symlink() || real.exists()).then_some(real)
@@ -100,11 +134,12 @@ fn is_stub(path: &Path, stub: &Path) -> bool {
 }
 
 /// Makes a trampoline in [`TRAMPOLINE_DIR`] for every program on
-/// [`SYSTEM_PATH`] that is not an in-place shim, and returns how many.
-/// Init calls it before it turns routing on, so until then a trampoline
-/// runs its real program.
+/// [`image_path`] that is not an in-place shim, and returns how many.
+/// Init calls it after writing [`PATH_FILE`] and before it turns routing
+/// on, so until then a trampoline runs its real program.
 pub fn trampolines() -> std::io::Result<usize> {
-  trampolines_in(Path::new(TRAMPOLINE_DIR), &search_dirs(SYSTEM_PATH), Path::new(PROXY))
+  let path = image_path();
+  trampolines_in(Path::new(TRAMPOLINE_DIR), &search_dirs(&path), Path::new(PROXY))
 }
 
 /// [`trampolines`] in `dir`, for the programs in `search`, linked to a copy

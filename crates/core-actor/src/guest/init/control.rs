@@ -14,10 +14,18 @@ use super::stubs;
 use crate::guest::capture::{self, Route};
 
 /// Follows the daemon's control stream until it ends with the run, applying
-/// each route list for user `uid` and passing a graceful stop to `stops`. A
-/// control gap retains the current route list and driving program, then
-/// reconnects the lifecycle stream so a later stop still reaches init.
-pub(super) async fn follow(client: Client, uid: u32, container: bool, stops: tokio::sync::watch::Sender<Option<Duration>>) {
+/// each route list for user `uid` (when `routing` is enabled) and passing a
+/// graceful stop to `stops`. A control gap retains the current route list
+/// and driving program, then reconnects the lifecycle stream so a later
+/// stop still reaches init.
+pub(super) async fn follow(
+  client: Client,
+  uid: u32,
+  image_path: String,
+  routing: bool,
+  container: bool,
+  stops: tokio::sync::watch::Sender<Option<Duration>>,
+) {
   loop {
     let mut stream = match client.guest().control(GuestServiceControlRequest {}).await {
       Ok(response) => response.into_inner(),
@@ -30,13 +38,20 @@ pub(super) async fn follow(client: Client, uid: u32, container: bool, stops: tok
     loop {
       match stream.message().await {
         Ok(Some(control)) => match control.message {
-          Some(Message::Routes(list)) => apply(
-            Route {
-              uid,
-              names: list.names,
-            },
-            container,
-          ),
+          Some(Message::Routes(list)) => {
+            if routing {
+              apply(
+                Route {
+                  uid,
+                  names: list.names,
+                },
+                &image_path,
+                container,
+              );
+            } else {
+              tracing::debug!("routing is disabled for this session; ignoring route list update");
+            }
+          }
           Some(Message::Stop(stop)) => {
             stops.send_replace(Some(Duration::from_millis(u64::try_from(stop.grace_ms).unwrap_or(0))));
           }
@@ -59,8 +74,8 @@ pub(super) async fn follow(client: Client, uid: u32, container: bool, stops: tok
 
 /// Routes `route` from now on: stubs first, so a newly routed command the
 /// actor lacks exists by the time the capture routes it.
-fn apply(route: Route, container: bool) {
+fn apply(route: Route, image_path: &str, container: bool) {
   tracing::info!("route list: {}", route.names.join(","));
-  stubs::create(&route.names, container);
+  stubs::create(&route.names, image_path, container);
   capture::enable(&route, container);
 }

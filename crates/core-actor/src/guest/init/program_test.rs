@@ -112,3 +112,21 @@ fn as_user_takes_the_supplementary_groups_before_the_gate() {
   assert_eq!(parsed.gate, "");
   assert_eq!(parsed.program, "/bin/true");
 }
+
+#[test]
+fn the_driving_program_gets_image_path_and_actor_env_path_replaces_it() {
+  let path = |config: &GetConfigResponse| environment(config, "/home/user").into_iter().rev().find(|(k, _)| k == "PATH").map(|(_, v)| v);
+
+  let with_image = GetConfigResponse {
+    image_path: "/opt/node/bin:/usr/bin".into(),
+    ..GetConfigResponse::default()
+  };
+  assert!(path(&with_image).unwrap().ends_with("/opt/node/bin:/usr/bin:/run/needy/bin"), "{:?}", path(&with_image));
+
+  let overridden = GetConfigResponse {
+    image_path: "/opt/node/bin:/usr/bin".into(),
+    env: [("PATH".to_string(), "/custom/bin".to_string())].into(),
+    ..GetConfigResponse::default()
+  };
+  assert_eq!(path(&overridden).as_deref(), Some("/custom/bin"));
+}

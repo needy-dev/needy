@@ -19,9 +19,9 @@ fn a_stub_that_exists_is_left_alone_when_the_route_list_comes_again() {
   let dir = tempfile::tempdir().unwrap();
   let names = vec!["needy-test-routed".to_string()];
 
-  create_in(dir.path(), &names, false);
+  create_in(dir.path(), &names, "", false);
   let first = std::fs::metadata(dir.path().join("needy-test-routed")).unwrap();
-  create_in(dir.path(), &names, false);
+  create_in(dir.path(), &names, "", false);
   let second = std::fs::metadata(dir.path().join("needy-test-routed")).unwrap();
 
   assert_eq!(first.ino(), second.ino());
@@ -35,8 +35,30 @@ fn a_stub_that_exists_is_left_alone_when_the_route_list_comes_again() {
 fn a_container_stub_links_to_the_proxy() {
   let dir = tempfile::tempdir().unwrap();
 
-  create_in(dir.path(), &["needy-test-routed".to_string()], true);
-  create_in(dir.path(), &["needy-test-routed".to_string()], true);
+  create_in(dir.path(), &["needy-test-routed".to_string()], "", true);
+  create_in(dir.path(), &["needy-test-routed".to_string()], "", true);
 
   assert_eq!(std::fs::read_link(dir.path().join("needy-test-routed")).unwrap(), Path::new(PROXY));
+}
+
+#[test]
+fn search_path_places_image_path_between_trampolines_and_stubs() {
+  assert_eq!(search_path_for("", false), format!("{SYSTEM_PATH}:{STUB_DIR}"));
+  assert_eq!(search_path_for("", true), format!("{TRAMPOLINE_DIR}:{SYSTEM_PATH}:{STUB_DIR}"));
+  assert_eq!(search_path_for("/opt/tool/bin:/usr/bin", false), format!("/opt/tool/bin:/usr/bin:{STUB_DIR}"));
+  assert_eq!(search_path_for("/opt/tool/bin:/usr/bin", true), format!("{TRAMPOLINE_DIR}:/opt/tool/bin:/usr/bin:{STUB_DIR}"));
+}
+
+#[test]
+fn stubs_skip_commands_present_on_image_path() {
+  let dir = tempfile::tempdir().unwrap();
+  let stubs = dir.path().join("stubs");
+  let bin = dir.path().join("opt-bin");
+  std::fs::create_dir_all(&bin).unwrap();
+  std::fs::write(bin.join("present-tool"), b"#!/bin/sh\n").unwrap();
+
+  create_in(&stubs, &["present-tool".into(), "missing-tool".into()], &bin.to_string_lossy(), false);
+
+  assert!(!stubs.join("present-tool").exists());
+  assert!(stubs.join("missing-tool").exists());
 }
