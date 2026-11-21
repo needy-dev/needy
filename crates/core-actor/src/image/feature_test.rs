@@ -377,9 +377,26 @@ fn all_embedded_builtin_features_are_valid_and_pack_executable_install_sh() {
   let pi_files = &pi_meta.customizations.needy.unwrap().files;
   assert_eq!(pi_files["pi"].path, "~/.pi/agent");
 
-  let opencode_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:opencode").unwrap().metadata_json).unwrap();
+  let opencode_builtin = builtin("builtin:opencode").unwrap();
+  let opencode_meta = needy_core::image::FeatureMetadata::parse(opencode_builtin.metadata_json).unwrap();
   let opencode_files = &opencode_meta.customizations.needy.unwrap().files;
   assert_eq!(opencode_files["opencode"].path, "~/.local/share/opencode");
+  assert_eq!(
+    opencode_files["opencode"].on_conflict,
+    vec![("opencode.db*".to_string(), needy_config::profile::OnConflict::Driver("needy-merge-sqlite".into()))]
+  );
+  let opencode_archive = opencode_builtin.archive().unwrap();
+  let mut opencode_tar = tar::Archive::new(opencode_archive.as_slice());
+  let mut saw_driver_exec = false;
+  for entry in opencode_tar.entries().unwrap() {
+    let entry = entry.unwrap();
+    if entry.path().unwrap() == Path::new("needy-merge-sqlite") {
+      let mode = entry.header().mode().unwrap();
+      assert_eq!(mode & 0o111, 0o111, "needy-merge-sqlite must be executable, got {mode:#o}");
+      saw_driver_exec = true;
+    }
+  }
+  assert!(saw_driver_exec, "builtin:opencode archive must bundle executable needy-merge-sqlite");
 
   assert!(builtin("builtin:nonexistent").is_none());
 }

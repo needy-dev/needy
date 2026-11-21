@@ -268,17 +268,21 @@ pub struct BuiltinFeature {
   pub metadata_json: &'static str,
   /// POSIX `install.sh` script.
   pub install_sh: &'static str,
+  /// Additional files bundled alongside `install.sh` as `(name, mode, bytes)`.
+  pub extra_files: &'static [(&'static str, u32, &'static [u8])],
 }
 
 impl BuiltinFeature {
   /// Packs this built-in feature into an uncompressed tar archive containing
-  /// `devcontainer-feature.json` and an executable `install.sh`.
+  /// `devcontainer-feature.json`, an executable `install.sh`, and any
+  /// `extra_files`.
   pub fn archive(&self) -> Result<Vec<u8>> {
     let mut tar = tar::Builder::new(Vec::new());
-    for (name, mode, content) in [
+    let base = [
       (METADATA_FILE, 0o644u32, self.metadata_json.as_bytes()),
       ("install.sh", 0o755u32, self.install_sh.as_bytes()),
-    ] {
+    ];
+    for &(name, mode, content) in base.iter().chain(self.extra_files.iter()) {
       let mut header = tar::Header::new_gnu();
       header.set_size(content.len() as u64);
       header.set_mode(mode);
@@ -290,12 +294,21 @@ impl BuiltinFeature {
     tar.into_inner().map_err(|e| Error::InvalidArchive(format!("cannot finalize built-in feature `{}`: {e}", self.reference)))
   }
 
-  /// Content digest of this built-in feature's metadata and install script.
+  /// Content digest of this built-in feature's metadata, install script, and
+  /// bundled extra files.
   pub fn digest(&self) -> Digest {
     let mut bytes = Vec::with_capacity(self.metadata_json.len() + self.install_sh.len() + 1);
     bytes.extend_from_slice(self.metadata_json.as_bytes());
     bytes.push(0);
     bytes.extend_from_slice(self.install_sh.as_bytes());
+    for &(name, mode, content) in self.extra_files {
+      bytes.push(0);
+      bytes.extend_from_slice(name.as_bytes());
+      bytes.push(0);
+      bytes.extend_from_slice(&mode.to_le_bytes());
+      bytes.push(0);
+      bytes.extend_from_slice(content);
+    }
     Digest::of(&bytes)
   }
 }
@@ -307,26 +320,31 @@ const BUILTINS: &[BuiltinFeature] = &[
     reference: "builtin:sshfs",
     metadata_json: include_str!("../../../../features/sshfs/devcontainer-feature.json"),
     install_sh: include_str!("../../../../features/sshfs/install.sh"),
+    extra_files: &[],
   },
   BuiltinFeature {
     reference: "builtin:codex",
     metadata_json: include_str!("../../../../features/codex/devcontainer-feature.json"),
     install_sh: include_str!("../../../../features/codex/install.sh"),
+    extra_files: &[],
   },
   BuiltinFeature {
     reference: "builtin:pi",
     metadata_json: include_str!("../../../../features/pi/devcontainer-feature.json"),
     install_sh: include_str!("../../../../features/pi/install.sh"),
+    extra_files: &[],
   },
   BuiltinFeature {
     reference: "builtin:opencode",
     metadata_json: include_str!("../../../../features/opencode/devcontainer-feature.json"),
     install_sh: include_str!("../../../../features/opencode/install.sh"),
+    extra_files: &[("needy-merge-sqlite", 0o755, include_bytes!("../../../../features/opencode/needy-merge-sqlite"))],
   },
   BuiltinFeature {
     reference: "builtin:herdr",
     metadata_json: include_str!("../../../../features/herdr/devcontainer-feature.json"),
     install_sh: include_str!("../../../../features/herdr/install.sh"),
+    extra_files: &[],
   },
 ];
 

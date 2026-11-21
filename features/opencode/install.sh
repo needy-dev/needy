@@ -28,6 +28,12 @@ curl -fsSL "https://github.com/sst/opencode/releases/download/v${VERSION}/openco
   | tar -xz -C /usr/local/bin opencode
 chmod 0755 /usr/local/bin/opencode
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+if [ -f "${SCRIPT_DIR}/needy-merge-sqlite" ]; then
+  cp "${SCRIPT_DIR}/needy-merge-sqlite" /usr/local/bin/needy-merge-sqlite
+  chmod 0755 /usr/local/bin/needy-merge-sqlite
+fi
+
 if [ -n "${_REMOTE_USER:-}" ] && [ -n "${_REMOTE_USER_HOME:-}" ] && [ "$_REMOTE_USER" != "root" ]; then
   mkdir -p "${_REMOTE_USER_HOME}/.local/share/opencode"
   chown -R "${_REMOTE_USER}:${_REMOTE_USER}" "${_REMOTE_USER_HOME}/.local" 2>/dev/null || true
