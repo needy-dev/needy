@@ -158,6 +158,8 @@ impl<'a> CellEnv<'a> {
       ("NEEDY_CONFIG_DIR".to_string(), self.dir.join("c").display().to_string()),
       ("NEEDY_DATA_DIR".to_string(), self.dir.join("d").display().to_string()),
       ("NEEDY_CACHE_DIR".to_string(), self.dir.join("k").display().to_string()),
+      // Keep e2e cells offline: never auto-pull release archives from GitHub.
+      ("NEEDY_DOWNLOAD_BASE".to_string(), "http://127.0.0.1:1".to_string()),
       // Logs are files the harness reads back, not a terminal.
       ("NO_COLOR".to_string(), "1".to_string()),
     ];
@@ -449,5 +451,49 @@ impl Drop for CellEnv<'_> {
       let _ = child.wait();
       DAEMONS.lock().map(|mut d| d.retain(|p| *p != pid)).ok();
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::collections::BTreeMap;
+
+  use super::*;
+  use crate::e2e::host::Images;
+
+  #[test]
+  fn cell_env_sets_offline_download_base_guard() {
+    let ctx = Ctx {
+      needy: PathBuf::from("/usr/bin/true"),
+      host: Host {
+        euid: 1000,
+        image_names: Images::shipped(),
+        drivers: BTreeMap::new(),
+        container_executor: Err("test".into()),
+        host_sshfs: Err("test".into()),
+        guest: Err("test".into()),
+        vm_image: None,
+        images: None,
+        agents: BTreeMap::new(),
+        stop_now: false,
+        docker_host: None,
+      },
+      keep: false,
+      results: PathBuf::from("/tmp"),
+      timeout: Duration::from_secs(5),
+      windows: None,
+      client: None,
+      client_callback: false,
+      transports: Default::default(),
+    };
+    let cell = CellEnv::new(&ctx).unwrap();
+    let dir = cell.dir.clone();
+    let vars = cell.env();
+    drop(cell);
+    let _ = std::fs::remove_dir_all(dir);
+    assert!(
+      vars.iter().any(|(k, v)| k == "NEEDY_DOWNLOAD_BASE" && v == "http://127.0.0.1:1"),
+      "CellEnv::env() must set NEEDY_DOWNLOAD_BASE=http://127.0.0.1:1: {vars:?}"
+    );
   }
 }

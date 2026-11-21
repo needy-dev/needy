@@ -752,14 +752,52 @@ pub fn clean(work: &Path, names: &Images) -> Result<()> {
         eprintln!("e2e: removed {image}");
       }
     }
-  }
-  for image in [&names.agents, &names.actor] {
-    if proc::on_path("container") && apple_image_present(image) {
-      let out = proc::simple("container", &["image", "delete", image], Duration::from_secs(120))?;
-      if !out.ok() {
-        bail!("cannot remove {image} from Apple's container: {}", out.brief());
+    if let Ok(out) = proc::simple(
+      "docker",
+      &[
+        "images",
+        "--format",
+        "{{.Repository}}:{{.Tag}}",
+        "--filter",
+        "reference=needy-snapshot:*",
+      ],
+      Duration::from_secs(30),
+    ) && out.ok()
+    {
+      for image in out.stdout.lines().map(str::trim).filter(|l| l.starts_with("needy-snapshot:")) {
+        let removed = proc::simple("docker", &["image", "rm", image], Duration::from_secs(120))?;
+        if !removed.ok() {
+          bail!("cannot remove {image}: {}", removed.brief());
+        }
+        eprintln!("e2e: removed {image}");
       }
-      eprintln!("e2e: removed {image} from Apple's container");
+    }
+  }
+  if proc::on_path("container") {
+    for image in [&names.agents, &names.actor] {
+      if apple_image_present(image) {
+        let out = proc::simple("container", &["image", "delete", image], Duration::from_secs(120))?;
+        if !out.ok() {
+          bail!("cannot remove {image} from Apple's container: {}", out.brief());
+        }
+        eprintln!("e2e: removed {image} from Apple's container");
+      }
+    }
+    if let Ok(out) = proc::simple("container", &["image", "list", "--format", "json"], Duration::from_secs(30))
+      && out.ok()
+      && let Ok(serde_json::Value::Array(items)) = serde_json::from_str::<serde_json::Value>(&out.stdout)
+    {
+      for image in items
+        .iter()
+        .filter_map(|item| item.pointer("/configuration/name").or_else(|| item.get("reference")).and_then(|v| v.as_str()))
+        .filter(|name| name.starts_with("needy-snapshot:"))
+      {
+        let removed = proc::simple("container", &["image", "delete", image], Duration::from_secs(120))?;
+        if !removed.ok() {
+          bail!("cannot remove {image} from Apple's container: {}", removed.brief());
+        }
+        eprintln!("e2e: removed {image} from Apple's container");
+      }
     }
   }
   if work.exists() {

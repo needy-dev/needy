@@ -24,6 +24,8 @@ fn needy(home: &Path) -> Command {
   ] {
     command.env(variable, home.join(directory));
   }
+  // Keep tests offline: never auto-pull release archives from GitHub.
+  command.env("NEEDY_DOWNLOAD_BASE", "http://127.0.0.1:1");
   command.stdin(Stdio::null());
   command
 }
