@@ -28,7 +28,7 @@ mod edit;
 pub(crate) mod lockfile;
 mod ls;
 mod progress;
-mod pull;
+pub(crate) mod pull;
 mod rm;
 mod rollback;
 

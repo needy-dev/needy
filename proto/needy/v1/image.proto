@@ -63,6 +63,9 @@ message BuildImageRequest {
   ImageUser user = 3;
   // Optional commit layer from the image's lockfile, stacked on top.
   ImageCommit commit = 4;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 5;
 }
 
 message BuildImageResponse {
@@ -71,6 +74,9 @@ message BuildImageResponse {
   // True when `commit` was made on another base and applied on the new one.
   bool commit_rebased = 2;
   repeated BuildStepResult steps = 3;
+  // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+  // CLI to record in the image's lockfile.
+  map<string, string> resolved_features = 4;
 }
 
 message StartImageEditRequest {
@@ -90,6 +96,9 @@ message StartImageEditRequest {
   WindowSize tty = 6;
   // Wait for the client to attach its terminal before starting the shell.
   bool wait_for_attach = 7;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 8;
 }
 
 message StartImageEditResponse {
@@ -97,6 +106,9 @@ message StartImageEditResponse {
   string session_id = 1;
   // True when the parent commit was applied on a changed base.
   bool commit_rebased = 2;
+  // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+  // CLI to record in the image's lockfile.
+  map<string, string> resolved_features = 3;
 }
 
 message FinishImageEditRequest {

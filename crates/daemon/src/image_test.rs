@@ -107,6 +107,23 @@ fn spawn_build_responder(
             let config = client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
             configs_task.lock().unwrap().push(config.clone());
 
+            // Exercise copy_in (e.g. staged Dev Container feature archive) if present.
+            for copy in &config.copy_in {
+              let mut stream = client
+                .guest()
+                .fetch_files(needy_api_client::proto::v1::FetchFilesRequest {
+                  name: copy.name.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+              let mut archive = Vec::new();
+              while let Some(chunk) = stream.message().await.unwrap() {
+                archive.extend(chunk.data);
+              }
+              assert!(!archive.is_empty(), "staged copy_in archive `{}` must be non-empty", copy.name);
+            }
+
             let (gate, entered, exit_code, console_output) = {
               let b = behavior_task.lock().unwrap();
               (b.gate.clone(), b.entered.clone(), b.exit_code, b.console_output.clone())
@@ -436,6 +453,7 @@ async fn image_build_builds_layers_and_returns_snapshot_digest() {
         driver: "linux-firecracker".into(),
         user: None,
         commit: None,
+        pinned_features: Default::default(),
       },
     ),
   )
@@ -457,6 +475,7 @@ async fn image_build_builds_layers_and_returns_snapshot_digest() {
       driver: "linux-firecracker".into(),
       user: None,
       commit: None,
+      pinned_features: Default::default(),
     },
   )
   .await
@@ -493,6 +512,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
       commit: None,
       tty: None,
       wait_for_attach: false,
+      pinned_features: Default::default(),
     },
   )
   .await
@@ -510,6 +530,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
       commit: None,
       tty: None,
       wait_for_attach: false,
+      pinned_features: Default::default(),
     },
   )
   .await;
@@ -588,6 +609,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
       commit: Some(commit1.clone()),
       tty: None,
       wait_for_attach: false,
+      pinned_features: Default::default(),
     },
   )
   .await
@@ -1307,6 +1329,7 @@ async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_
         driver: "linux-container".into(),
         user: None,
         commit: None,
+        pinned_features: Default::default(),
       },
     ),
   )
@@ -1346,6 +1369,7 @@ async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_
       commit: None,
       tty: None,
       wait_for_attach: false,
+      pinned_features: Default::default(),
     },
   )
   .await
@@ -1361,4 +1385,359 @@ async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_
   assert_eq!(finished.commands[0].argv, ["touch", "/etc/edited"]);
   assert_eq!(engine.committed.lock().unwrap().len(), 3);
   assert_eq!(engine.removed_images.lock().unwrap().len(), 3);
+}
+
+// ------------------------------------------------------------ feature builds
+
+struct MockFeatureArtifact {
+  repo: String,
+  tag: String,
+  manifest_bytes: Vec<u8>,
+  manifest_digest: needy_core::image::Digest,
+  blob_digest: needy_core::image::Digest,
+  blob_bytes: Vec<u8>,
+}
+
+fn make_feature_artifact(repo: &str, tag: &str, metadata_json: &str, install_sh: &str) -> MockFeatureArtifact {
+  let mut tar = tar::Builder::new(Vec::new());
+  for (name, content) in [
+    ("devcontainer-feature.json", metadata_json.as_bytes()),
+    ("install.sh", install_sh.as_bytes()),
+  ] {
+    let mut header = tar::Header::new_gnu();
+    header.set_size(content.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    tar.append_data(&mut header, name, content).unwrap();
+  }
+  let blob_bytes = tar.into_inner().unwrap();
+  let blob_digest = needy_core::image::Digest::of(&blob_bytes);
+  let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "config": {
+      "mediaType": "application/vnd.devcontainers",
+      "digest": needy_core::image::Digest::of(b"{}").to_string(),
+      "size": 2
+    },
+    "layers": [
+      {
+        "mediaType": "application/vnd.devcontainers.layer.v1+tar",
+        "digest": blob_digest.to_string(),
+        "size": blob_bytes.len()
+      }
+    ]
+  }))
+  .unwrap();
+  let manifest_digest = needy_core::image::Digest::of(&manifest_bytes);
+  MockFeatureArtifact {
+    repo: repo.to_string(),
+    tag: tag.to_string(),
+    manifest_bytes,
+    manifest_digest,
+    blob_digest,
+    blob_bytes,
+  }
+}
+
+/// Spawns a local HTTP/1.1 mock OCI registry serving multiple feature
+/// repositories and counting every incoming HTTP request.
+async fn spawn_feature_registry(artifacts: Vec<MockFeatureArtifact>) -> (String, Arc<AtomicUsize>) {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let addr = listener.local_addr().unwrap();
+  let base_url = format!("http://{addr}");
+  let requests = Arc::new(AtomicUsize::new(0));
+  let requests_bg = requests.clone();
+  let artifacts = Arc::new(artifacts);
+
+  tokio::spawn(async move {
+    while let Ok((mut stream, _)) = listener.accept().await {
+      let requests = requests_bg.clone();
+      let artifacts = artifacts.clone();
+      tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+          match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+          }
+        }
+        requests.fetch_add(1, Ordering::SeqCst);
+
+        let raw = String::from_utf8_lossy(&buf);
+        let target = raw.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("/");
+
+        let mut response = ("404 Not Found", String::new(), b"not found".to_vec());
+        for a in artifacts.iter() {
+          let manifest_tag = format!("/v2/{}/manifests/{}", a.repo, a.tag);
+          let manifest_digest = format!("/v2/{}/manifests/{}", a.repo, a.manifest_digest);
+          let blob_path = format!("/v2/{}/blobs/{}", a.repo, a.blob_digest);
+          if target == manifest_tag || target == manifest_digest {
+            response = (
+              "200 OK",
+              format!("Content-Type: application/vnd.oci.image.manifest.v1+json\r\nDocker-Content-Digest: {}\r\n", a.manifest_digest),
+              a.manifest_bytes.clone(),
+            );
+            break;
+          } else if target == blob_path {
+            response = ("200 OK", "Content-Type: application/vnd.devcontainers.layer.v1+tar\r\n".to_string(), a.blob_bytes.clone());
+            break;
+          }
+        }
+
+        let (status, headers, body) = response;
+        let head = format!("HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        if stream.write_all(head.as_bytes()).await.is_ok() {
+          let _ = stream.write_all(&body).await;
+        }
+      });
+    }
+  });
+
+  (base_url, requests)
+}
+
+#[tokio::test]
+async fn feature_layer_with_depends_on_fetches_executes_in_order_merges_env_and_returns_resolved_features() {
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let common = make_feature_artifact(
+    "devcontainers/features/common",
+    "1",
+    r#"{
+      "id": "common",
+      "version": "1.0.0",
+      "options": {
+        "greeting": { "type": "string", "default": "hello" }
+      },
+      "containerEnv": {
+        "COMMON_DIR": "/opt/common",
+        "PATH": "${COMMON_DIR}/bin:${PATH}"
+      }
+    }"#,
+    "#!/bin/sh\necho installing common\n",
+  );
+  let node = make_feature_artifact(
+    "devcontainers/features/node",
+    "1",
+    r#"{
+      "id": "node",
+      "version": "1.5.0",
+      "options": {
+        "version": { "type": "string", "default": "lts" },
+        "node-gyp-dependencies": { "type": "boolean", "default": true }
+      },
+      "dependsOn": {
+        "ghcr.io/devcontainers/features/common:1": { "greeting": "hi" }
+      },
+      "containerEnv": {
+        "NODE_HOME": "/usr/local/share/nvm",
+        "PATH": "${NODE_HOME}/bin:${PATH}"
+      }
+    }"#,
+    "#!/bin/sh\necho installing node\n",
+  );
+  let common_digest = common.manifest_digest.to_string();
+  let node_digest = node.manifest_digest.to_string();
+
+  let (base_url, requests) = spawn_feature_registry(vec![common, node]).await;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let feature_store = FeatureStore::new(&daemon.config.cache_dir).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  daemon.images.set_feature_store(feature_store);
+
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (sessions, build_configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  let profile = r#"
+actor:
+  driver: linux-firecracker
+  image:
+    root: example.com/root:1
+    layers:
+      - feature: ghcr.io/devcontainers/features/node:1
+        with:
+          version: "22"
+user: { name: dev, uid: 1001, gid: 1001 }
+executors:
+  here: { driver: native }
+commands:
+  - { match: "**", to: here }
+"#;
+
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(profile, started.dir.path())))
+    .await
+    .expect("run create with feature timed out")
+    .unwrap();
+
+  // Both features ran as build steps, in dependency order (`common` then `node`).
+  assert_eq!(sessions.load(Ordering::SeqCst), 2);
+  assert!(requests.load(Ordering::SeqCst) > 0);
+  let configs = build_configs.lock().unwrap().clone();
+  assert_eq!(configs.len(), 2);
+
+  // Step 0 (`common`): runs as root, stages feature archive via copy_in,
+  // exports _REMOTE_USER=dev, _REMOTE_USER_HOME=/home/dev, _CONTAINER_USER=root,
+  // _CONTAINER_USER_HOME=/root, and sanitized option GREETING=hi.
+  assert_eq!(configs[0].user.as_ref().map(|u| (u.name.as_str(), u.uid, u.gid)), Some(("root", 0, 0)));
+  assert_eq!(configs[0].env.get("_REMOTE_USER").map(String::as_str), Some("dev"));
+  assert_eq!(configs[0].env.get("_REMOTE_USER_HOME").map(String::as_str), Some("/home/dev"));
+  assert_eq!(configs[0].env.get("_CONTAINER_USER").map(String::as_str), Some("root"));
+  assert_eq!(configs[0].env.get("_CONTAINER_USER_HOME").map(String::as_str), Some("/root"));
+  assert_eq!(configs[0].env.get("GREETING").map(String::as_str), Some("hi"));
+  assert!(
+    configs[0].copy_in.iter().any(|c| c.path == "/tmp/needy-feature"),
+    "feature build step must stage archive via copy_in: {:?}",
+    configs[0].copy_in
+  );
+
+  // Step 1 (`node`): stacked on step 0, exports VERSION=22 and default NODE_GYP_DEPENDENCIES=true.
+  assert_eq!(configs[1].layers.len(), 1);
+  assert_eq!(configs[1].env.get("VERSION").map(String::as_str), Some("22"));
+  assert_eq!(configs[1].env.get("NODE_GYP_DEPENDENCIES").map(String::as_str), Some("true"));
+  assert_eq!(configs[1].env.get("_REMOTE_USER").map(String::as_str), Some("dev"));
+
+  // RunInfo returns resolved canonical_ref -> digest for both features.
+  assert_eq!(created.resolved_features.get("ghcr.io/devcontainers/features/common").map(String::as_str), Some(common_digest.as_str()));
+  assert_eq!(created.resolved_features.get("ghcr.io/devcontainers/features/node").map(String::as_str), Some(node_digest.as_str()));
+
+  // Final actor receives merged containerEnv and PATH from both features in order.
+  let guest_cfg = Guest::config(daemon, &created.id).await.unwrap();
+  assert_eq!(guest_cfg.env.get("COMMON_DIR").map(String::as_str), Some("/opt/common"));
+  assert_eq!(guest_cfg.env.get("NODE_HOME").map(String::as_str), Some("/usr/local/share/nvm"));
+  assert_eq!(guest_cfg.image_path, format!("/usr/local/share/nvm/bin:/opt/common/bin:{}", needy_core::image::SYSTEM_PATH));
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn second_build_with_pinned_features_makes_zero_registry_requests_and_zero_rebuilds() {
+  use needy_api_server::control::{ImageBuild, Images};
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let git_feature =
+    make_feature_artifact("devcontainers/features/git", "1", r#"{"id":"git","version":"1.3.0"}"#, "#!/bin/sh\necho installing git\n");
+  let git_digest = git_feature.manifest_digest.to_string();
+  let (base_url, requests) = spawn_feature_registry(vec![git_feature]).await;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let feature_store = FeatureStore::new(&daemon.config.cache_dir).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  daemon.images.set_feature_store(feature_store);
+
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  let image_yaml = "root: example.com/root:1\nlayers:\n  - feature: ghcr.io/devcontainers/features/git:1\n";
+
+  let first = tokio::time::timeout(
+    Duration::from_secs(20),
+    Images::build(
+      daemon,
+      ImageBuild {
+        image_yaml: image_yaml.into(),
+        driver: "linux-firecracker".into(),
+        user: None,
+        commit: None,
+        pinned_features: Default::default(),
+      },
+    ),
+  )
+  .await
+  .expect("first feature build timed out")
+  .unwrap();
+
+  assert_eq!(sessions.load(Ordering::SeqCst), 1);
+  assert_eq!(first.resolved_features.get("ghcr.io/devcontainers/features/git").map(String::as_str), Some(git_digest.as_str()));
+
+  // Reset HTTP request counter and rebuild with pinned_features from the first build.
+  requests.store(0, Ordering::SeqCst);
+  let second = tokio::time::timeout(
+    Duration::from_secs(20),
+    Images::build(
+      daemon,
+      ImageBuild {
+        image_yaml: image_yaml.into(),
+        driver: "linux-firecracker".into(),
+        user: None,
+        commit: None,
+        pinned_features: first.resolved_features.clone(),
+      },
+    ),
+  )
+  .await
+  .expect("second pinned feature build timed out")
+  .unwrap();
+
+  assert_eq!(requests.load(Ordering::SeqCst), 0, "pinned build must make zero registry HTTP requests");
+  assert_eq!(sessions.load(Ordering::SeqCst), 1, "pinned build must reuse cached layer with zero rebuilds");
+  assert_eq!(second.snapshot, first.snapshot);
+  assert!(second.steps[0].cached);
+
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn privileged_feature_is_refused_before_starting_any_actor() {
+  use needy_api_server::control::{ImageBuild, Images};
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let priv_feature = make_feature_artifact(
+    "example/features/docker-in-docker",
+    "1",
+    r#"{"id":"docker-in-docker","version":"1.0.0","privileged":true}"#,
+    "#!/bin/sh\nexit 0\n",
+  );
+  let (base_url, _requests) = spawn_feature_registry(vec![priv_feature]).await;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let feature_store = FeatureStore::new(&daemon.config.cache_dir).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  daemon.images.set_feature_store(feature_store);
+
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (sessions, _configs, responder) = spawn_build_responder(started_log.clone(), behavior, stop.clone());
+
+  let image_yaml = "root: example.com/root:1\nlayers:\n  - feature: ghcr.io/example/features/docker-in-docker:1\n";
+
+  let err = Images::build(
+    daemon,
+    ImageBuild {
+      image_yaml: image_yaml.into(),
+      driver: "linux-firecracker".into(),
+      user: None,
+      commit: None,
+      pinned_features: Default::default(),
+    },
+  )
+  .await
+  .expect_err("privileged feature must be refused");
+
+  let msg = err.to_string();
+  assert!(msg.contains("privileged"), "error must name the refused property: {msg}");
+  assert!(msg.contains("docker-in-docker"), "error must name the feature: {msg}");
+  assert_eq!(sessions.load(Ordering::SeqCst), 0, "no actor/build session may start for a refused feature");
+  assert!(!started_log.exists(), "no VM process may be spawned for a refused feature");
+
+  stop.cancel();
+  responder.await.unwrap();
 }

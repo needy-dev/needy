@@ -7,7 +7,7 @@
 //! See `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`
 //! ("Resolving and planning a build", "The layer store", "Building and editing").
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,24 +17,25 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt as _;
 use needy_api_server::control::{
-  BuildStepOutcome, Caller, Chunks, ControlError, FaultAdded, Guest, GuestConfig, GuestControls, GuestSession, GuestUser, ImageBuild,
-  ImageBuildResult, ImageEditFinished, ImageEditStart, ImageEditStarted, ImageRollback, ImageRollbackResult, Images as ImagesTrait, Logs,
-  NewRun, ProfileCheck, ProfileToCheck, RecordedCommand, Route, RunEvents, RunFaults, RunInfo, Runs, StopMode, Target, UpperLayer,
-  WindowSize,
+  BuildStepOutcome, Caller, Chunks, ControlError, FaultAdded, Guest, GuestConfig, GuestControls, GuestCopy, GuestSession, GuestUser,
+  ImageBuild, ImageBuildResult, ImageEditFinished, ImageEditStart, ImageEditStarted, ImageRollback, ImageRollbackResult,
+  Images as ImagesTrait, Logs, NewRun, ProfileCheck, ProfileToCheck, RecordedCommand, Route, RunEvents, RunFaults, RunInfo, Runs, StopMode,
+  Target, UpperLayer, WindowSize,
 };
 use needy_api_server::{Health, Listen, Server};
 use needy_common::process::Exit;
-use needy_config::image::{Definition, Image};
+use needy_config::image::{Definition, Image, Layer};
 use needy_config::profile::{ActorDriver, CONTAINER_IMAGE, OciRuntime, User};
 use needy_config::value::Glob;
 use needy_core::event::{ActorStop, Event, ExecDecide, ImageBuildStep};
-use needy_core::image::{Commit as PlanCommit, Digest, Input, Plan, Step};
+use needy_core::image::{Commit as PlanCommit, Digest, FeatureMetadata, Input, Plan, ResolvedFeature, Step};
 use needy_core::intercept::exec::ExecContext;
 use needy_core::network::Policy;
 use needy_core::types::{Network, Origin, Outcome, Placement, Principal};
 use needy_core_actor::driver;
 use needy_core_actor::driver::linux_container::LinuxContainer;
 use needy_core_actor::driver::macos_apple_container::MacosAppleContainer;
+use needy_core_actor::image::feature::{FeatureStore, FetchedFeature, Reference as FeatureReference};
 use needy_core_actor::image::manifest;
 use needy_core_actor::image::store::{
   Command as StoreCommand, Error as StoreError, LayerDisk, Snapshot, Store, extract_top_layer, snapshot_tag,
@@ -83,6 +84,8 @@ struct CachedRootDigest {
 pub struct Images {
   /// The content-addressed layer and snapshot store.
   pub store: Store,
+  /// OCI Dev Container feature fetcher and content-addressed cache.
+  features: Mutex<FeatureStore>,
   /// Maps `needy_core::image::Digest` cache keys to built layer digests
   /// (`sha256-<hex>` files containing `sha256:<layer-hex>\n`).
   keys_dir: PathBuf,
@@ -149,8 +152,10 @@ impl Images {
     let data = data_dir.join("image-store");
     let keys_dir = cache.join("keys");
     let base_oci_dir = cache.join("base-oci");
+    let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store");
     Self {
       store: Store::new(cache, data),
+      features: Mutex::new(features),
       keys_dir,
       base_oci_dir,
       backends,
@@ -159,6 +164,16 @@ impl Images {
       edits: Mutex::default(),
       root_digest_cache: Mutex::default(),
     }
+  }
+
+  /// Replaces the feature store (for tests pointing at a local mock OCI registry).
+  #[cfg(test)]
+  pub(crate) fn set_feature_store(&self, store: FeatureStore) {
+    *self.features.lock().unwrap_or_else(|p| p.into_inner()) = store;
+  }
+
+  fn feature_store(&self) -> FeatureStore {
+    self.features.lock().unwrap_or_else(|p| p.into_inner()).clone()
   }
 
   /// Container runtime boundaries used by container actor drivers and image
@@ -230,6 +245,8 @@ impl Images {
     daemon: &Daemon,
     builder: ActorDriver,
     base_container_image: &str,
+    profile_user: &User,
+    fetched_features: &BTreeMap<Digest, FetchedFeature>,
     trace: &Dispatch,
     cancel: &CancellationToken,
     built_below: &[Digest],
@@ -290,7 +307,8 @@ impl Images {
         };
 
         let started = Instant::now();
-        let built = self.build_step(daemon, builder, base_container_image, trace, cancel, built_below, step).await;
+        let built =
+          self.build_step(daemon, builder, base_container_image, profile_user, fetched_features, trace, cancel, built_below, step).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match built {
           Ok(layer) => {
@@ -316,16 +334,34 @@ impl Images {
     daemon: &Daemon,
     builder: ActorDriver,
     base_container_image: &str,
+    profile_user: &User,
+    fetched_features: &BTreeMap<Digest, FetchedFeature>,
     trace: &Dispatch,
     cancel: &CancellationToken,
     built_below: &[Digest],
     step: &Step,
   ) -> Result<Digest> {
-    let script = match &step.input {
-      Input::Run(script) => script,
-      Input::Feature { reference, .. } => {
-        // TODO(images): execute Dev Container feature `install.sh` in Slice 3 Step 3.
-        bail!("building `feature` layer `{reference}` is not yet implemented in the daemon (Slice 3 Step 3)");
+    let (step_label, command, env, copy_in) = match &step.input {
+      Input::Run(script) => (script.clone(), vec!["sh".into(), "-c".into(), script.clone()], BTreeMap::new(), Vec::new()),
+      Input::Feature {
+        reference,
+        digest,
+        env,
+      } => {
+        let fetched = fetched_features
+          .get(digest)
+          .ok_or_else(|| anyhow!("resolved feature `{reference}` ({digest}) is missing its cached archive"))?
+          .clone();
+        let tar_bytes =
+          tokio::task::spawn_blocking(move || fetched.uncompressed_tar()).await.context("reading cached feature archive panicked")??;
+        let step_env = feature_install_env(profile_user, env);
+        let wrapper = feature_install_script(profile_user, env);
+        (
+          format!("feature: {reference}"),
+          vec!["sh".into(), "-c".into(), wrapper],
+          step_env,
+          vec![("needy-feature".to_string(), "/tmp/needy-feature".to_string(), tar_bytes)],
+        )
       }
     };
     let (snapshot, layer_disks, snapshot_image) = if built_below.is_empty() {
@@ -363,9 +399,10 @@ impl Images {
         uid: 0,
         gid: 0,
       },
-      command: vec!["sh".into(), "-c".into(), script.clone()],
+      command,
       cwd: "/".into(),
-      env: BTreeMap::new(),
+      env,
+      copy_in,
       route_names: Vec::new(),
       session: GuestSession {
         upper: UpperLayer::Kept,
@@ -386,19 +423,19 @@ impl Images {
         code: Some(0),
         signal,
       }) if signal.is_empty() => {
-        outcome.layer.ok_or_else(|| anyhow!("build step `{}` exited 0 without uploading an upper layer", first_line(script)))
+        outcome.layer.ok_or_else(|| anyhow!("build step `{}` exited 0 without uploading an upper layer", first_line(&step_label)))
       }
       Some(Exit {
         code: Some(code),
         signal,
       }) if signal.is_empty() => {
-        bail!(format_build_failure(script, &format!("exited with code {code}"), &outcome.console))
+        bail!(format_build_failure(&step_label, &format!("exited with code {code}"), &outcome.console))
       }
       Some(Exit { signal, .. }) if !signal.is_empty() => {
-        bail!(format_build_failure(script, &format!("was killed by {signal}"), &outcome.console))
+        bail!(format_build_failure(&step_label, &format!("was killed by {signal}"), &outcome.console))
       }
       _ => {
-        bail!(format_build_failure(script, "exited before reporting its status", &outcome.console))
+        bail!(format_build_failure(&step_label, "exited before reporting its status", &outcome.console))
       }
     }
   }
@@ -427,6 +464,9 @@ pub struct SessionSpec {
   pub cwd: String,
   /// Environment variables passed to the session command.
   pub env: BTreeMap<String, String>,
+  /// Uncompressed tar archives staged into the session via `Guest::fetch_files`
+  /// as `(name, guest_path, tar_bytes)`.
+  pub copy_in: Vec<(String, String, Vec<u8>)>,
   /// Command names the kernel routes; `*` routes every exec.
   pub route_names: Vec<String>,
   /// Session settings (upper layer disposition and exec routing).
@@ -485,9 +525,11 @@ async fn run_session_in(
   let tasks = TaskTracker::new();
 
   let guest_config = build_guest_config(session_id, &channels, spec.clone_parts());
+  let copy_in_archives: HashMap<String, Vec<u8>> = spec.copy_in.into_iter().map(|(name, _, bytes)| (name, bytes)).collect();
   let upper_setting = guest_config.session.upper;
   let guest_service = Arc::new(SessionGuest {
     config: guest_config,
+    copy_in_archives,
     dir: dir.to_path_buf(),
     trace: spec.trace.clone(),
     exit: Mutex::new(None),
@@ -609,11 +651,13 @@ async fn run_container_session_in(
   let tasks = TaskTracker::new();
 
   let mut guest_config = build_guest_config(session_id, &channels, spec.clone_parts());
+  let copy_in_archives: HashMap<String, Vec<u8>> = spec.copy_in.into_iter().map(|(name, _, bytes)| (name, bytes)).collect();
   // Container sessions boot an assembled OCI image, not VM layer disks.
   guest_config.layers.clear();
   let upper_setting = guest_config.session.upper;
   let guest_service = Arc::new(SessionGuest {
     config: guest_config,
+    copy_in_archives,
     dir: dir.to_path_buf(),
     trace: spec.trace.clone(),
     exit: Mutex::new(None),
@@ -722,27 +766,109 @@ struct ResolvedImage {
   layer_disks: Vec<LayerDisk>,
   snapshot_image: Option<String>,
   steps: Vec<BuildStepOutcome>,
+  resolved_features: BTreeMap<String, String>,
 }
 
-/// Plans `definition`, builds any missing `run` steps under single-flight
-/// deduplication on the host's builder driver (VM driver when available, else
-/// `linux-container` on Linux; never Apple's `container`), stacks `commit` on
-/// top if present, and materializes the snapshot for `target_driver`.
+/// All Dev Container features resolved for an image definition (direct layers
+/// plus transitive `dependsOn` entries).
+struct ResolvedFeatures {
+  /// Keyed by raw feature reference as written in the definition or `dependsOn`,
+  /// for `needy_core::image::plan`.
+  by_ref: BTreeMap<String, ResolvedFeature>,
+  /// Cached feature artifacts keyed by manifest digest, for `build_step`.
+  fetched: BTreeMap<Digest, FetchedFeature>,
+  /// Canonical feature reference (`registry/repository`) -> `sha256:<hex>`
+  /// digest, returned to the CLI for `<file>.lock`.
+  resolved_digests: BTreeMap<String, String>,
+}
+
+/// Fetches all `Layer::Feature` entries in `definition` and their transitive
+/// `dependsOn` references until fixed point, honoring `pinned_features` from
+/// the lockfile so pinned cached features make zero HTTP requests.
+async fn resolve_features(
+  store: &FeatureStore,
+  definition: &Definition,
+  pinned_features: &BTreeMap<String, String>,
+) -> Result<ResolvedFeatures> {
+  let mut queue: VecDeque<String> = definition
+    .layers
+    .iter()
+    .filter_map(|layer| match layer {
+      Layer::Feature { reference, .. } => Some(reference.clone()),
+      Layer::Run(_) => None,
+    })
+    .collect();
+
+  let mut by_ref: BTreeMap<String, ResolvedFeature> = BTreeMap::new();
+  let mut fetched: BTreeMap<Digest, FetchedFeature> = BTreeMap::new();
+  let mut resolved_digests: BTreeMap<String, String> = BTreeMap::new();
+  // Cycle guard on canonical references in case a `dependsOn` cycle uses
+  // different tags for the same feature; `needy_core::image::plan` still
+  // reports the cycle error cleanly.
+  let mut expanded_canonical: HashSet<String> = HashSet::new();
+
+  while let Some(raw_ref) = queue.pop_front() {
+    if by_ref.contains_key(&raw_ref) {
+      continue;
+    }
+    let oci_ref = FeatureReference::parse(&raw_ref).with_context(|| format!("invalid feature reference `{raw_ref}`"))?;
+    let canonical = oci_ref.canonical();
+    let artifact = match pinned_features.get(&canonical) {
+      Some(pinned_str) => {
+        let pinned_digest = Digest::parse(pinned_str).with_context(|| format!("invalid pinned digest for feature `{canonical}`"))?;
+        store
+          .fetch_pinned(&oci_ref, &pinned_digest)
+          .await
+          .with_context(|| format!("fetching pinned feature `{raw_ref}` ({pinned_digest})"))?
+      }
+      None => store.fetch(&oci_ref).await.with_context(|| format!("fetching feature `{raw_ref}`"))?,
+    };
+    let metadata =
+      FeatureMetadata::parse(&artifact.metadata_json).with_context(|| format!("parsing devcontainer-feature.json for `{raw_ref}`"))?;
+
+    if expanded_canonical.insert(canonical.clone()) {
+      for dep_ref in metadata.depends_on.keys() {
+        if !by_ref.contains_key(dep_ref) {
+          queue.push_back(dep_ref.clone());
+        }
+      }
+    }
+
+    resolved_digests.insert(canonical, artifact.digest.to_string());
+    let digest = artifact.digest;
+    fetched.insert(digest, artifact);
+    by_ref.insert(raw_ref, ResolvedFeature { digest, metadata });
+  }
+
+  Ok(ResolvedFeatures {
+    by_ref,
+    fetched,
+    resolved_digests,
+  })
+}
+
+/// Plans `definition`, builds any missing `run` or `feature` steps under
+/// single-flight deduplication on the host's builder driver (VM driver when
+/// available, else `linux-container` on Linux; never Apple's `container`),
+/// stacks `commit` on top if present, and materializes the snapshot for
+/// `target_driver`.
+#[allow(clippy::too_many_arguments)]
 async fn build_image_plan(
   daemon: &Daemon,
   definition: &Definition,
   target_driver: ActorDriver,
   user: &User,
   commit: Option<&PlanCommit>,
+  pinned_features: &BTreeMap<String, String>,
   trace: &Dispatch,
   cancel: &CancellationToken,
 ) -> Result<ResolvedImage> {
   let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
   let builder = select_builder_driver(daemon, target_driver).await;
   let root = root_digest_for(daemon, builder, base_container_image).await?;
-  // TODO(images): resolve feature layers (OCI, tarball, local) before planning
-  // in Slice 3 Step 3; until then pass an empty feature map.
-  let plan = needy_core::image::plan(definition, &root, user, commit, &BTreeMap::new())?;
+  let feature_store = daemon.images.feature_store();
+  let resolved_features = resolve_features(&feature_store, definition, pinned_features).await?;
+  let plan = needy_core::image::plan(definition, &root, user, commit, &resolved_features.by_ref)?;
   let mut layers = Vec::with_capacity(plan.steps.len() + usize::from(plan.commit.is_some()));
   let mut steps = Vec::with_capacity(plan.steps.len());
 
@@ -750,18 +876,18 @@ async fn build_image_plan(
     if cancel.is_cancelled() {
       bail!("the daemon shut down while building the image");
     }
-    let (layer, cached, ms) = daemon.images.resolve_step(daemon, builder, base_container_image, trace, cancel, &layers, step).await?;
-    let script = match &step.input {
-      Input::Run(script) => script,
-      Input::Feature { reference, .. } => {
-        // TODO(images): execute Dev Container feature `install.sh` in Slice 3 Step 3.
-        bail!("building `feature` layer `{reference}` is not yet implemented in the daemon (Slice 3 Step 3)");
-      }
+    let (layer, cached, ms) = daemon
+      .images
+      .resolve_step(daemon, builder, base_container_image, user, &resolved_features.fetched, trace, cancel, &layers, step)
+      .await?;
+    let step_label = match &step.input {
+      Input::Run(script) => script.clone(),
+      Input::Feature { reference, .. } => format!("feature: {reference}"),
     };
     let event = Event::ImageBuildStep(ImageBuildStep {
       key: step.key.to_string(),
       layer: layer.to_string(),
-      script: script.clone(),
+      script: step_label,
       cached,
       ms,
     });
@@ -816,6 +942,7 @@ async fn build_image_plan(
     layer_disks,
     snapshot_image,
     steps,
+    resolved_features: resolved_features.resolved_digests,
   })
 }
 
@@ -832,9 +959,17 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
   let Some(Image::Definition(definition)) = &run.profile.actor.image else {
     return Ok(());
   };
-  let resolved =
-    build_image_plan(daemon, definition, run.profile.actor.driver, &run.profile.user, run.image_commit.as_ref(), &run.trace, &run.cancel)
-      .await?;
+  let resolved = build_image_plan(
+    daemon,
+    definition,
+    run.profile.actor.driver,
+    &run.profile.user,
+    run.image_commit.as_ref(),
+    &run.pinned_features,
+    &run.trace,
+    &run.cancel,
+  )
+  .await?;
 
   let commit_rebased = resolved.plan.commit_rebased();
   run.set_boot(Boot {
@@ -845,6 +980,7 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
     env: resolved.plan.env,
     session: GuestSession::default(),
     commit_rebased,
+    resolved_features: resolved.resolved_features,
   });
   Ok(())
 }
@@ -872,14 +1008,16 @@ impl ImagesTrait for Daemon {
         timing: false,
       },
     );
-    let resolved = build_image_plan(self, &definition, target_driver, &user, request.commit.as_ref(), &trace, &self.cancel)
-      .await
-      .map_err(crate::failed)?;
+    let resolved =
+      build_image_plan(self, &definition, target_driver, &user, request.commit.as_ref(), &request.pinned_features, &trace, &self.cancel)
+        .await
+        .map_err(crate::failed)?;
 
     Ok(ImageBuildResult {
       snapshot: resolved.snapshot.digest.to_string(),
       commit_rebased: resolved.plan.commit_rebased(),
       steps: resolved.steps,
+      resolved_features: resolved.resolved_features,
     })
   }
 
@@ -911,10 +1049,13 @@ impl ImagesTrait for Daemon {
     // image in Docker when falling back to `linux-container` on a Linux host
     // without a VM driver).
     let resolved =
-      build_image_plan(self, &definition, builder, &user, request.commit.as_ref(), &trace, &self.cancel).await.map_err(crate::failed)?;
+      build_image_plan(self, &definition, builder, &user, request.commit.as_ref(), &request.pinned_features, &trace, &self.cancel)
+        .await
+        .map_err(crate::failed)?;
 
     let base_top = *resolved.plan.top();
     let commit_rebased = resolved.plan.commit_rebased();
+    let resolved_features = resolved.resolved_features;
     let parent_layer: Option<Digest> = request.commit.as_ref().map(|c| c.layer);
 
     let dir = self.config.state_dir.join("sessions").join(&session_id);
@@ -984,6 +1125,7 @@ impl ImagesTrait for Daemon {
 
     let guest_service = Arc::new(SessionGuest {
       config: guest_config,
+      copy_in_archives: HashMap::new(),
       dir: dir.clone(),
       trace: trace.clone(),
       exit: Mutex::new(None),
@@ -1223,6 +1365,7 @@ impl ImagesTrait for Daemon {
     Ok(ImageEditStarted {
       session_id,
       commit_rebased,
+      resolved_features,
     })
   }
 
@@ -1569,6 +1712,7 @@ struct GuestConfigParts {
   command: Vec<String>,
   cwd: String,
   env: BTreeMap<String, String>,
+  copy_in: Vec<GuestCopy>,
   route_names: Vec<String>,
   session: GuestSession,
   tty: Option<WindowSize>,
@@ -1589,6 +1733,14 @@ impl SessionSpec {
       command: self.command.clone(),
       cwd: self.cwd.clone(),
       env: self.env.clone(),
+      copy_in: self
+        .copy_in
+        .iter()
+        .map(|(name, path, _)| GuestCopy {
+          name: name.clone(),
+          path: path.clone(),
+        })
+        .collect(),
       route_names: self.route_names.clone(),
       session: self.session,
       tty: self.tty,
@@ -1614,7 +1766,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     cwd: parts.cwd,
     gateway_port: channels.gateway_port,
     sensors: Vec::new(),
-    copy_in: Vec::new(),
+    copy_in: parts.copy_in,
     mirror_out: Vec::new(),
     sensor_faults: Vec::new(),
     tty: parts.tty,
@@ -1693,6 +1845,7 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
 /// What `GuestService` serves to an image session's guest init.
 struct SessionGuest {
   config: GuestConfig,
+  copy_in_archives: HashMap<String, Vec<u8>>,
   dir: PathBuf,
   trace: Dispatch,
   exit: Mutex<Option<Exit>>,
@@ -1721,8 +1874,12 @@ impl Guest for SessionGuest {
     Ok(())
   }
 
-  async fn fetch_files(&self, _run: &str, _name: &str) -> Result<Vec<u8>, ControlError> {
-    Err(ControlError::Failed("file transfers are not supported in image sessions".into()))
+  async fn fetch_files(&self, _run: &str, name: &str) -> Result<Vec<u8>, ControlError> {
+    self
+      .copy_in_archives
+      .get(name)
+      .cloned()
+      .ok_or_else(|| ControlError::NotFound(format!("no staged files named {name:?} in this image session")))
   }
 
   async fn push_files(&self, _run: &str, _name: &str, _archive: Vec<u8>) -> Result<(), ControlError> {
@@ -1826,6 +1983,92 @@ fn cleanup_session_dir(dir: &Path) {
   {
     tracing::warn!("cannot remove session directory {}: {e}", dir.display());
   }
+}
+
+fn sh_quote(value: &str) -> String {
+  format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+fn user_home_dir(user: &User) -> String {
+  if user.uid == 0 && user.name == "root" {
+    "/root".to_string()
+  } else {
+    format!("/home/{}", user.name)
+  }
+}
+
+/// Builds the environment passed to a Dev Container feature's `install.sh`
+/// session: the sanitized option variables plus `_REMOTE_USER`,
+/// `_REMOTE_USER_HOME`, `_CONTAINER_USER`, and `_CONTAINER_USER_HOME`.
+// Reference: https://containers.dev/implementors/features/#user-env-var (retrieved 2026-11-21)
+fn feature_install_env(profile_user: &User, options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+  let mut env = options.clone();
+  env.insert("_REMOTE_USER".into(), profile_user.name.clone());
+  env.insert("_REMOTE_USER_HOME".into(), user_home_dir(profile_user));
+  env.insert("_CONTAINER_USER".into(), "root".into());
+  env.insert("_CONTAINER_USER_HOME".into(), "/root".into());
+  env
+}
+
+/// Builds the POSIX `sh -c` wrapper that ensures `profile_user` exists (A3),
+/// writes and sources `devcontainer-features.env`, executes `./install.sh`
+/// inside `/tmp/needy-feature`, and removes `/tmp/needy-feature` afterwards so
+/// staging files do not leak into the committed layer.
+fn feature_install_script(profile_user: &User, options: &BTreeMap<String, String>) -> String {
+  let home = user_home_dir(profile_user);
+  let q_name = sh_quote(&profile_user.name);
+  let q_home = sh_quote(&home);
+  let mut env_file = String::new();
+  for (key, value) in options {
+    env_file.push_str(key);
+    env_file.push('=');
+    env_file.push_str(&sh_quote(value));
+    env_file.push('\n');
+  }
+  let q_env_file = sh_quote(&env_file);
+  format!(
+    r#"set -eu
+if [ {uid} -ne 0 ]; then
+  if ! grep -q "^{raw_name}:" /etc/group 2>/dev/null; then
+    if command -v groupadd >/dev/null 2>&1; then
+      groupadd -g {gid} {q_name} 2>/dev/null || true
+    elif command -v addgroup >/dev/null 2>&1; then
+      addgroup -g {gid} {q_name} 2>/dev/null || true
+    else
+      printf '%s:x:%s:\n' {q_name} {gid} >> /etc/group
+    fi
+  fi
+  if ! id -u {q_name} >/dev/null 2>&1; then
+    if command -v useradd >/dev/null 2>&1; then
+      useradd -m -u {uid} -g {gid} -d {q_home} -s /bin/sh {q_name} 2>/dev/null || true
+    elif command -v adduser >/dev/null 2>&1; then
+      adduser -D -u {uid} -G {q_name} -h {q_home} -s /bin/sh {q_name} 2>/dev/null || true
+    else
+      printf '%s:x:%s:%s::%s:/bin/sh\n' {q_name} {uid} {gid} {q_home} >> /etc/passwd
+    fi
+  fi
+  mkdir -p {q_home}
+  chown {uid}:{gid} {q_home}
+fi
+cd /tmp/needy-feature
+printf '%s' {q_env_file} > devcontainer-features.env
+set -a
+. ./devcontainer-features.env
+set +a
+chmod +x ./install.sh
+status=0
+sh ./install.sh || status=$?
+cd /
+rm -rf /tmp/needy-feature
+exit "$status"
+"#,
+    uid = profile_user.uid,
+    gid = profile_user.gid,
+    raw_name = profile_user.name,
+    q_name = q_name,
+    q_home = q_home,
+    q_env_file = q_env_file,
+  )
 }
 
 fn first_line(script: &str) -> &str {

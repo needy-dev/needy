@@ -363,6 +363,7 @@ pub fn new_run(request: v1::CreateRunRequest) -> Result<NewRun, Error> {
     // The adapter sets where the client is; the wire does not say.
     on_control_host: false,
     image_commit: request.image_commit.map(image_commit).transpose()?,
+    pinned_features: pinned_features(request.pinned_features)?,
   })
 }
 
@@ -459,6 +460,7 @@ pub fn proto_run(run: RunInfo) -> v1::Run {
     }),
     snapshot: run.snapshot.unwrap_or_default(),
     commit_rebased: run.commit_rebased,
+    resolved_features: run.resolved_features.into_iter().collect(),
   }
 }
 
@@ -811,6 +813,18 @@ fn image_user(user: v1::ImageUser) -> needy_config::profile::User {
   }
 }
 
+fn pinned_features(raw: std::collections::HashMap<String, String>) -> Result<BTreeMap<String, String>, Error> {
+  let mut out = BTreeMap::new();
+  for (reference, digest) in raw {
+    if reference.trim().is_empty() {
+      return Err(Error::Invalid("pinned feature reference cannot be empty".into()));
+    }
+    needy_core::image::Digest::parse(&digest).map_err(|e| Error::Invalid(format!("pinned feature `{reference}` digest: {e}")))?;
+    out.insert(reference, digest);
+  }
+  Ok(out)
+}
+
 pub fn image_build(request: v1::BuildImageRequest) -> Result<ImageBuild, Error> {
   if request.image_yaml.trim().is_empty() {
     return Err(Error::Missing("image definition"));
@@ -820,6 +834,7 @@ pub fn image_build(request: v1::BuildImageRequest) -> Result<ImageBuild, Error> 
     driver: request.driver,
     user: request.user.map(image_user),
     commit: request.commit.map(image_commit).transpose()?,
+    pinned_features: pinned_features(request.pinned_features)?,
   })
 }
 
@@ -837,6 +852,7 @@ pub fn proto_image_build(result: ImageBuildResult) -> v1::BuildImageResponse {
         ms: s.ms,
       })
       .collect(),
+    resolved_features: result.resolved_features.into_iter().collect(),
   }
 }
 
@@ -858,6 +874,7 @@ pub fn image_edit_start(request: v1::StartImageEditRequest) -> Result<ImageEditS
       cols: w.cols,
     }),
     wait_for_attach: request.wait_for_attach,
+    pinned_features: pinned_features(request.pinned_features)?,
   })
 }
 
@@ -865,6 +882,7 @@ pub fn proto_image_edit_started(started: ImageEditStarted) -> v1::StartImageEdit
   v1::StartImageEditResponse {
     session_id: started.session_id,
     commit_rebased: started.commit_rebased,
+    resolved_features: started.resolved_features.into_iter().collect(),
   }
 }
 

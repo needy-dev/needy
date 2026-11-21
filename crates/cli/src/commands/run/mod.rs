@@ -312,12 +312,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       } else {
         None
       };
-      let image_commit = match &lockfile_path {
-        Some(lock_path) => {
-          super::image::lockfile::read(lock_path)?.commit.as_ref().map(super::image::lockfile::LockCommit::to_proto).transpose()?
-        }
-        None => None,
+      let mut lock = match &lockfile_path {
+        Some(lock_path) => super::image::lockfile::read(lock_path)?,
+        None => Default::default(),
       };
+      let image_commit = lock.commit.as_ref().map(super::image::lockfile::LockCommit::to_proto).transpose()?;
+      let pinned_features = lock.features.clone().into_iter().collect();
+      if selection.context.as_deref() == Some("local") && loaded.actor.runner.is_none() {
+        super::image::pull::ensure_vm_base(loaded.actor.driver, ctx).await;
+      }
       let needs_client = loaded.executors.values().any(|e| matches!(e.runner, Some(needy_config::profile::RunnerSelector::Client)));
       let mut holder = if needs_client {
         progress.message("Preparing client execution");
@@ -345,6 +348,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           client_execution: holder.as_ref().map(|h| h.capability.clone()).unwrap_or_default(),
           client_dir: client_dir()?,
           image_commit,
+          pinned_features,
         })
         .await
         .map_err(fail)?
@@ -352,6 +356,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .run
         .unwrap_or_default();
       progress.finish();
+      if let Some(lock_path) = &lockfile_path {
+        let resolved_features: std::collections::BTreeMap<String, String> = run.resolved_features.into_iter().collect();
+        if !resolved_features.is_empty() && resolved_features != lock.features {
+          lock.features = resolved_features;
+          super::image::lockfile::write(lock_path, &lock)?;
+        }
+      }
       if run.commit_rebased {
         let lock_display = lockfile_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "image lockfile".into());
         output::message(format_args!("warning: commit layer in {lock_display} was applied on a changed base"));

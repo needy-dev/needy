@@ -851,7 +851,7 @@ pub struct BuildStepResult {
     #[prost(uint64, tag="4")]
     pub ms: u64,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BuildImageRequest {
     /// Self-contained image definition as YAML (its `extends` chain merged).
     #[prost(string, tag="1")]
@@ -866,6 +866,10 @@ pub struct BuildImageRequest {
     /// Optional commit layer from the image's lockfile, stacked on top.
     #[prost(message, optional, tag="4")]
     pub commit: ::core::option::Option<ImageCommit>,
+    /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+    /// image's lockfile.
+    #[prost(map="string, string", tag="5")]
+    pub pinned_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BuildImageResponse {
@@ -877,8 +881,12 @@ pub struct BuildImageResponse {
     pub commit_rebased: bool,
     #[prost(message, repeated, tag="3")]
     pub steps: ::prost::alloc::vec::Vec<BuildStepResult>,
+    /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+    /// CLI to record in the image's lockfile.
+    #[prost(map="string, string", tag="4")]
+    pub resolved_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StartImageEditRequest {
     /// Stable identifier for the image, used for the per-image edit lock and
     /// commit history key in the layer store.
@@ -903,8 +911,12 @@ pub struct StartImageEditRequest {
     /// Wait for the client to attach its terminal before starting the shell.
     #[prost(bool, tag="7")]
     pub wait_for_attach: bool,
+    /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+    /// image's lockfile.
+    #[prost(map="string, string", tag="8")]
+    pub pinned_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct StartImageEditResponse {
     /// The edit session ID; pass to ExecAttach.run_id and FinishImageEditRequest.
     #[prost(string, tag="1")]
@@ -912,6 +924,10 @@ pub struct StartImageEditResponse {
     /// True when the parent commit was applied on a changed base.
     #[prost(bool, tag="2")]
     pub commit_rebased: bool,
+    /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+    /// CLI to record in the image's lockfile.
+    #[prost(map="string, string", tag="3")]
+    pub resolved_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct FinishImageEditRequest {
@@ -1493,7 +1509,7 @@ impl RunnerStatus {
         }
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRunRequest {
     /// Profile as YAML text, self-contained: its `extends` chain merged and its
     /// host paths absolute. The daemon reads no path on the client's machine.
@@ -1538,6 +1554,10 @@ pub struct CreateRunRequest {
     /// image definition's built layers.
     #[prost(message, optional, tag="13")]
     pub image_commit: ::core::option::Option<ImageCommit>,
+    /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+    /// image's lockfile.
+    #[prost(map="string, string", tag="14")]
+    pub pinned_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
@@ -1601,6 +1621,10 @@ pub struct Run {
     /// True when the lockfile's commit layer was applied on a changed base.
     #[prost(bool, tag="15")]
     pub commit_rebased: bool,
+    /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+    /// CLI to record in the image's lockfile.
+    #[prost(map="string, string", tag="16")]
+    pub resolved_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
 }
 /// Where a run's workspace is: its directory in the actor, and where its
 /// files come from.

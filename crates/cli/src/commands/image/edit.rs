@@ -53,11 +53,18 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       commit,
       tty: window,
       wait_for_attach: true,
+      pinned_features: lock.features.clone().into_iter().collect(),
     })
     .await
     .map_err(fail)?
     .into_inner();
   progress.finish();
+
+  let resolved_features: std::collections::BTreeMap<String, String> = started.resolved_features.into_iter().collect();
+  if !resolved_features.is_empty() && resolved_features != lock.features {
+    lock.features = resolved_features;
+    lockfile::write(&target.lockfile, &lock)?;
+  }
 
   if started.commit_rebased {
     output::message(format_args!("warning: commit layer in {} was applied on a changed base", target.lockfile.display()));

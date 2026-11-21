@@ -301,3 +301,30 @@ async fn corrupt_blob_sha256_fails_cleanly_and_leaves_no_partial_cache() {
     assert!(entries.is_empty(), "expected no partial cache files, found {entries:?}");
   }
 }
+
+#[test]
+fn builtin_sshfs_has_valid_metadata_passes_check_allowed_and_packs_install_sh() {
+  let feature = builtin_sshfs();
+  assert_eq!(feature.reference, "builtin:sshfs");
+  let metadata = needy_core::image::FeatureMetadata::parse(feature.metadata_json).unwrap();
+  assert_eq!(metadata.id, "sshfs");
+  metadata.check_allowed(feature.reference).unwrap();
+
+  let archive = feature.archive().unwrap();
+  let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
+  let mut saw_meta = false;
+  let mut install_sh = String::new();
+  for entry in tar.entries().unwrap() {
+    let mut entry = entry.unwrap();
+    let path = entry.path().unwrap().to_path_buf();
+    if path == Path::new("devcontainer-feature.json") {
+      saw_meta = true;
+    } else if path == Path::new("install.sh") {
+      entry.read_to_string(&mut install_sh).unwrap();
+    }
+  }
+  assert!(saw_meta, "archive must contain devcontainer-feature.json");
+  assert!(install_sh.contains("command -v sshfs"), "install.sh must check for existing sshfs: {install_sh}");
+  assert!(install_sh.contains("apt-get"), "install.sh must support apt-get: {install_sh}");
+  assert!(install_sh.contains("apk"), "install.sh must support apk: {install_sh}");
+}

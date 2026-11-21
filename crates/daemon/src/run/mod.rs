@@ -115,6 +115,9 @@ pub struct Run {
   boot: Mutex<Boot>,
   /// Optional commit layer from the image's lockfile, passed by the CLI.
   pub image_commit: Option<needy_core::image::Commit>,
+  /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  /// image's lockfile, passed by the CLI.
+  pub pinned_features: BTreeMap<String, String>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -234,6 +237,7 @@ impl Run {
       workspace: crate::workspace::describe(&self.profile),
       snapshot: self.boot().snapshot.map(|s| s.digest.to_string()),
       commit_rebased: self.boot().commit_rebased,
+      resolved_features: self.boot().resolved_features,
     }
   }
 
@@ -455,6 +459,7 @@ impl Registry {
       workspace: None,
       snapshot: record.snapshot,
       commit_rebased: false,
+      resolved_features: BTreeMap::new(),
     })
   }
 
@@ -499,6 +504,9 @@ pub struct Boot {
   pub session: GuestSession,
   /// True when the lockfile's commit layer was applied on a changed base.
   pub commit_rebased: bool,
+  /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
+  /// to record in the image's lockfile.
+  pub resolved_features: BTreeMap<String, String>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -669,6 +677,7 @@ impl Daemon {
       created_by: request.by.clone(),
       boot: Mutex::default(),
       image_commit: request.image_commit.clone(),
+      pinned_features: request.pinned_features.clone(),
       tasks: TaskTracker::new(),
       cancel,
     }))

@@ -192,8 +192,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
 async fn run_definition_build(args: Args, ctx: &Context) -> Result<i32> {
   let fail = needy_api_client::Error::from;
   let target = lockfile::resolve_target(args.image.as_deref(), args.profile.as_deref(), args.driver, ctx)?;
-  let lock = lockfile::read(&target.lockfile)?;
+  let mut lock = lockfile::read(&target.lockfile)?;
   let commit = lock.commit.as_ref().map(LockCommit::to_proto).transpose()?;
+
+  let driver = if target.driver.is_empty() {
+    needy_core_actor::image::vm::host_driver()
+  } else {
+    ActorDriver::ALL.into_iter().find(|d| d.as_str() == target.driver).unwrap_or_else(needy_core_actor::image::vm::host_driver)
+  };
+  super::pull::ensure_vm_base(driver, ctx).await;
 
   let progress = output::Progress::new(ctx.connection_feedback(), "Building image");
   let connection = ctx.connect().await?;
@@ -204,11 +211,18 @@ async fn run_definition_build(args: Args, ctx: &Context) -> Result<i32> {
       driver: target.driver,
       user: target.user,
       commit,
+      pinned_features: lock.features.clone().into_iter().collect(),
     })
     .await
     .map_err(fail)?
     .into_inner();
   progress.finish();
+
+  let resolved_features: std::collections::BTreeMap<String, String> = built.resolved_features.into_iter().collect();
+  if !resolved_features.is_empty() && resolved_features != lock.features {
+    lock.features = resolved_features;
+    lockfile::write(&target.lockfile, &lock)?;
+  }
 
   if built.commit_rebased {
     output::message(format_args!("warning: commit layer in {} was applied on a changed base", target.lockfile.display()));

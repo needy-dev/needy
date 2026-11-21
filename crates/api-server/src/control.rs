@@ -171,6 +171,9 @@ pub struct NewRun {
   /// Optional commit layer from the image's lockfile, stacked on top of the
   /// image definition's built layers.
   pub image_commit: Option<needy_core::image::Commit>,
+  /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  /// image's lockfile.
+  pub pinned_features: BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for NewRun {
@@ -218,6 +221,9 @@ pub struct RunInfo {
   pub snapshot: Option<String>,
   /// True when the lockfile's commit layer was applied on a changed base.
   pub commit_rebased: bool,
+  /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
+  /// to record in the image's lockfile.
+  pub resolved_features: BTreeMap<String, String>,
 }
 
 /// Where a run's workspace is.
@@ -951,6 +957,9 @@ pub struct ImageBuild {
   pub user: Option<needy_config::profile::User>,
   /// Optional commit layer from the image's lockfile, stacked on top.
   pub commit: Option<needy_core::image::Commit>,
+  /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  /// image's lockfile.
+  pub pinned_features: BTreeMap<String, String>,
 }
 
 /// One step of an image build.
@@ -968,6 +977,9 @@ pub struct ImageBuildResult {
   pub snapshot: String,
   pub commit_rebased: bool,
   pub steps: Vec<BuildStepOutcome>,
+  /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
+  /// to record in the image's lockfile.
+  pub resolved_features: BTreeMap<String, String>,
 }
 
 /// A request to start an interactive edit session for an image.
@@ -987,6 +999,9 @@ pub struct ImageEditStart {
   pub tty: Option<WindowSize>,
   /// Wait for the client to attach its terminal before starting the shell.
   pub wait_for_attach: bool,
+  /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  /// image's lockfile.
+  pub pinned_features: BTreeMap<String, String>,
 }
 
 /// Result of [`Images::start_edit`].
@@ -994,6 +1009,9 @@ pub struct ImageEditStart {
 pub struct ImageEditStarted {
   pub session_id: String,
   pub commit_rebased: bool,
+  /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
+  /// to record in the image's lockfile.
+  pub resolved_features: BTreeMap<String, String>,
 }
 
 /// One program an edit session executed, as decided by the daemon.
