@@ -271,6 +271,7 @@ fn commits_collapse_into_one_layer_and_keep_their_history() {
     .commit(
       "image",
       None,
+      Some(&base),
       edit(Archive::new().dir("etc").file("etc/a", "1").file("etc/b", "1").hardlink("etc/c", "etc/a")).as_slice(),
       commands("one"),
     )
@@ -279,6 +280,7 @@ fn commits_collapse_into_one_layer_and_keep_their_history() {
     .commit(
       "image",
       Some(&first),
+      Some(&base),
       edit(Archive::new().dir("etc").overlay_whiteout("etc/a").overlay_whiteout("etc/base").file("etc/b", "2").overlay_opaque("srv"))
         .as_slice(),
       commands("two"),
@@ -304,12 +306,15 @@ fn commits_collapse_into_one_layer_and_keep_their_history() {
     ])
   );
   let history = store.history("image").unwrap();
-  assert_eq!(history.iter().map(|commit| (commit.layer, commit.parent)).collect::<Vec<_>>(), vec![(first, None), (second, Some(first))]);
+  assert_eq!(
+    history.iter().map(|commit| (commit.layer, commit.parent, commit.base)).collect::<Vec<_>>(),
+    vec![(first, None, Some(base)), (second, Some(first), Some(base))]
+  );
   assert_eq!(history[1].commands, commands("two"));
   assert!(store.history("another image").unwrap().is_empty());
   // A commit's parent must be one of the image's commits.
   let stranger = put(&store, Archive::new().file("x", "x"));
-  assert!(matches!(store.commit("image", Some(&stranger), edit(Archive::new()).as_slice(), vec![]), Err(Error::UnknownCommit { .. })));
+  assert!(matches!(store.commit("image", Some(&stranger), None, edit(Archive::new()).as_slice(), vec![]), Err(Error::UnknownCommit { .. })));
 }
 
 #[test]
@@ -317,12 +322,16 @@ fn rollback_walks_back_the_commits_an_image_made() {
   let dir = tempfile::tempdir().unwrap();
   let store = store(dir.path());
   let edit = |content: &str| Archive::new().file("f", content).bytes();
-  let first = store.commit("image", None, edit("1").as_slice(), vec![]).unwrap();
-  let second = store.commit("image", Some(&first), edit("2").as_slice(), vec![]).unwrap();
-  let third = store.commit("image", Some(&second), edit("3").as_slice(), vec![]).unwrap();
+  let base1 = Digest::of(b"base-1");
+  let base2 = Digest::of(b"base-2");
+  let first = store.commit("image", None, Some(&base1), edit("1").as_slice(), vec![]).unwrap();
+  let second = store.commit("image", Some(&first), Some(&base2), edit("2").as_slice(), vec![]).unwrap();
+  let third = store.commit("image", Some(&second), Some(&base2), edit("3").as_slice(), vec![]).unwrap();
 
-  assert_eq!(store.rollback("image", &third, 1).unwrap(), Some(second));
-  assert_eq!(store.rollback("image", &third, 2).unwrap(), Some(first));
+  let back1 = store.rollback("image", &third, 1).unwrap().unwrap();
+  assert_eq!((back1.layer, back1.base), (second, Some(base2)));
+  let back2 = store.rollback("image", &third, 2).unwrap().unwrap();
+  assert_eq!((back2.layer, back2.base), (first, Some(base1)));
   assert_eq!(store.rollback("image", &third, 3).unwrap(), None, "back past the first commit: no commit layer");
   assert!(matches!(
     store.rollback("image", &third, 4),
@@ -334,10 +343,34 @@ fn rollback_walks_back_the_commits_an_image_made() {
   ));
   assert!(matches!(store.rollback("other", &third, 1), Err(Error::UnknownCommit { .. })));
   // A rolled-back commit stays in the history and can still be booted.
-  let after = store.commit("image", Some(&first), edit("4").as_slice(), vec![]).unwrap();
-  assert_eq!(store.rollback("image", &after, 1).unwrap(), Some(first));
+  let after = store.commit("image", Some(&first), Some(&base1), edit("4").as_slice(), vec![]).unwrap();
+  let back_after = store.rollback("image", &after, 1).unwrap().unwrap();
+  assert_eq!((back_after.layer, back_after.base), (first, Some(base1)));
   let disks = store.materialize(&store.snapshot(&[third]).unwrap()).unwrap();
   assert_eq!(layer_tree(&disks[0]), tree(&[("/f", "file:3")]));
+}
+
+#[test]
+fn rollback_reads_legacy_history_without_base_field() {
+  let dir = tempfile::tempdir().unwrap();
+  let store = store(dir.path());
+  let first = store.commit("legacy", None, None, Archive::new().file("f", "1").bytes().as_slice(), vec![]).unwrap();
+  let second = store.commit("legacy", Some(&first), None, Archive::new().file("f", "2").bytes().as_slice(), vec![]).unwrap();
+
+  // Overwrite history.json without the optional `base` field to simulate a
+  // store written before base persistence landed.
+  let legacy_json = serde_json::json!({
+    "image": "legacy",
+    "commits": [
+      { "layer": first.to_string(), "parent": null, "commands": [], "time_ms": 1 },
+      { "layer": second.to_string(), "parent": first.to_string(), "commands": [], "time_ms": 2 }
+    ]
+  });
+  std::fs::write(store.history_path("legacy"), serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+
+  let rolled = store.rollback("legacy", &second, 1).unwrap().unwrap();
+  assert_eq!(rolled.layer, first);
+  assert_eq!(rolled.base, None);
 }
 
 #[test]
@@ -348,7 +381,7 @@ fn garbage_collection_keeps_named_layers_and_every_commit() {
   let built = put(&store, Archive::new().file("built", "built"));
   let unused = put(&store, Archive::new().file("unused", "unused"));
   let named = put(&store, Archive::new().file("named", "named"));
-  let commit = store.commit("image", None, Archive::new().file("edit", "edit").bytes().as_slice(), vec![]).unwrap();
+  let commit = store.commit("image", None, None, Archive::new().file("edit", "edit").bytes().as_slice(), vec![]).unwrap();
   let booted = store.snapshot(&[base, built, commit]).unwrap();
   let disks = store.materialize(&booted).unwrap();
   let dropped = store.snapshot(&[unused]).unwrap();
@@ -378,8 +411,8 @@ fn a_directory_an_edit_puts_back_over_a_removed_one_still_hides_what_was_below()
   let dir = tempfile::tempdir().unwrap();
   let store = store(dir.path());
   let base = put(&store, Archive::new().dir("srv").file("srv/old", "base"));
-  let first = store.commit("image", None, Archive::new().overlay_whiteout("srv").bytes().as_slice(), vec![]).unwrap();
-  let second = store.commit("image", Some(&first), Archive::new().dir("srv").file("srv/new", "2").bytes().as_slice(), vec![]).unwrap();
+  let first = store.commit("image", None, None, Archive::new().overlay_whiteout("srv").bytes().as_slice(), vec![]).unwrap();
+  let second = store.commit("image", Some(&first), None, Archive::new().dir("srv").file("srv/new", "2").bytes().as_slice(), vec![]).unwrap();
 
   let disks = store.materialize(&store.snapshot(&[base, second]).unwrap()).unwrap();
 
@@ -391,4 +424,88 @@ fn a_directory_an_edit_puts_back_over_a_removed_one_still_hides_what_was_below()
       ("/srv/old", "whiteout")
     ])
   );
+}
+
+#[test]
+fn materialize_auto_flattens_lower_layers_above_threshold_and_caches_result() {
+  let dir = tempfile::tempdir().unwrap();
+  let store = store(dir.path());
+
+  // 10 layers: with MAX_UNFLATTENED_LAYERS == 8, layers 0..3 collapse into
+  // disk 0, and layers 3..10 stay individual (disks 1..8).
+  let l0 = put(
+    &store,
+    Archive::new()
+      .dir("etc")
+      .file("etc/kept", "v0")
+      .file("etc/overwritten", "v0")
+      .file("etc/deleted", "v0")
+      .dir("opt")
+      .file("opt/old", "v0")
+      .dir("var")
+      .file("var/from_lower", "v0"),
+  );
+  let l1 = put(&store, Archive::new().dir("etc").file("etc/overwritten", "v1").file("etc/.wh.deleted", "").file("etc/.wh.from_base", ""));
+  let l2 = put(&store, Archive::new().dir("opt").file("opt/.wh..wh..opq", "").file("opt/fresh", "v2"));
+  let l3 = put(&store, Archive::new().file("l3", "3"));
+  let l4 = put(&store, Archive::new().file("l4", "4"));
+  let l5 = put(&store, Archive::new().file("l5", "5"));
+  let l6 = put(&store, Archive::new().file("l6", "6"));
+  let l7 = put(&store, Archive::new().file("l7", "7"));
+  let l8 = put(&store, Archive::new().dir("var").file("var/.wh..wh..opq", "").file("var/from_upper", "8"));
+  let l9 = put(&store, Archive::new().file("l9", "9"));
+
+  let layers = vec![l0, l1, l2, l3, l4, l5, l6, l7, l8, l9];
+  assert!(layers.len() > MAX_UNFLATTENED_LAYERS);
+  let snapshot = store.snapshot(&layers).unwrap();
+
+  let disks = store.materialize(&snapshot).unwrap();
+  assert_eq!(disks.len(), MAX_UNFLATTENED_LAYERS);
+
+  // Disk 0 holds the collapsed prefix (l0..l3) and carries its marker.
+  let prefix_digest = stack_digest(&layers[..3]);
+  assert_eq!(disks[0].digest, prefix_digest);
+  let marker = disk_tree(&disks[0].path).remove(&format!("/{}", crate::contract::LAYER_MARKER)).unwrap();
+  assert_eq!(marker, format!("file:{prefix_digest}\n"));
+  assert_eq!(
+    layer_tree(&disks[0]),
+    tree(&[
+      ("/etc", "dir"),
+      ("/etc/deleted", "whiteout"),
+      ("/etc/from_base", "whiteout"),
+      ("/etc/kept", "file:v0"),
+      ("/etc/overwritten", "file:v1"),
+      ("/opt", "dir"),
+      ("/opt/fresh", "file:v2"),
+      ("/var", "dir"),
+      ("/var/from_lower", "file:v0"),
+    ])
+  );
+
+  // Upper layers 3..10 remain individual disks with their own digests.
+  let upper_digests: Vec<_> = disks[1..].iter().map(|d| d.digest).collect();
+  assert_eq!(upper_digests, layers[3..]);
+  // Layer 8 (at disks[6]) made `/var` opaque, so it must white out `/var/from_lower`
+  // from the collapsed lower prefix!
+  assert_eq!(
+    layer_tree(&disks[6]),
+    tree(&[
+      ("/var", "dir"),
+      ("/var/from_lower", "whiteout"),
+      ("/var/from_upper", "file:8"),
+    ])
+  );
+
+  // Second materialization is a cache hit (same paths and untouched flattened disk).
+  let flat_mtime = std::fs::metadata(&disks[0].path).unwrap().modified().unwrap();
+  let disks_again = store.materialize(&snapshot).unwrap();
+  assert_eq!(disks_again, disks);
+  assert_eq!(std::fs::metadata(&disks[0].path).unwrap().modified().unwrap(), flat_mtime);
+
+  // Garbage collection preserves the flattened disk while the snapshot is kept,
+  // and removes it once nothing keeps the snapshot.
+  store.collect(&[snapshot.digest]).unwrap();
+  assert!(disks[0].path.exists(), "kept snapshot must preserve its cached flattened disk");
+  store.collect(&[]).unwrap();
+  assert!(!disks[0].path.exists(), "unreferenced flattened disk must be collected");
 }

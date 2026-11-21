@@ -1028,6 +1028,10 @@ pub struct ImageRollback {
 pub struct ImageRollbackResult {
   /// Target commit layer digest, or `None` when rolled back past the first commit.
   pub layer: Option<String>,
+  /// Original base plan top digest the target commit was made on, or `None`
+  /// when rolled back past the first commit or when the commit predates base
+  /// persistence.
+  pub base: Option<String>,
 }
 
 /// Building image definitions, interactive edit sessions, and commit rollback.

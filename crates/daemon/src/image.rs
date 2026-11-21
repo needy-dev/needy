@@ -28,7 +28,7 @@ use needy_config::image::{Definition, Image};
 use needy_config::profile::{ActorDriver, CONTAINER_IMAGE, OciRuntime, User};
 use needy_config::value::Glob;
 use needy_core::event::{ActorStop, Event, ExecDecide, ImageBuildStep};
-use needy_core::image::{Commit as PlanCommit, Digest as PlanDigest, Input, Plan, Step};
+use needy_core::image::{Commit as PlanCommit, Digest, Input, Plan, Step};
 use needy_core::intercept::exec::ExecContext;
 use needy_core::network::Policy;
 use needy_core::types::{Network, Origin, Outcome, Placement, Principal};
@@ -37,7 +37,7 @@ use needy_core_actor::driver::linux_container::LinuxContainer;
 use needy_core_actor::driver::macos_apple_container::MacosAppleContainer;
 use needy_core_actor::image::manifest;
 use needy_core_actor::image::store::{
-  Command as StoreCommand, Digest as LayerDigest, Error as StoreError, LayerDisk, Snapshot, Store, extract_top_layer, snapshot_tag,
+  Command as StoreCommand, Error as StoreError, LayerDisk, Snapshot, Store, extract_top_layer, snapshot_tag,
 };
 use needy_core_actor::sidecar::gateway;
 use needy_core_executor::engine::{self, Engine};
@@ -63,7 +63,7 @@ const SESSION_STOP_GRACE: Duration = Duration::from_secs(3);
 const FAILURE_LOG_LINES: usize = 20;
 
 /// Result broadcast to waiters sharing an in-flight build for one cache key.
-type FlightResult = std::result::Result<LayerDigest, String>;
+type FlightResult = std::result::Result<Digest, String>;
 
 /// Result broadcast when an interactive edit session finishes.
 type EditOutcomeResult = std::result::Result<ImageEditFinished, String>;
@@ -75,7 +75,7 @@ struct CachedRootDigest {
   path: PathBuf,
   len: u64,
   modified: Option<SystemTime>,
-  digest: PlanDigest,
+  digest: Digest,
 }
 
 /// The daemon's layer store, cache-key index, single-flight build table, and
@@ -92,7 +92,7 @@ pub struct Images {
   backends: ContainerBackends,
   /// In-flight builds keyed by step cache key, so concurrent `run create`s
   /// build each missing cache key once and wait for the same result.
-  in_flight: Mutex<HashMap<PlanDigest, watch::Receiver<Option<FlightResult>>>>,
+  in_flight: Mutex<HashMap<Digest, watch::Receiver<Option<FlightResult>>>>,
   /// Image names with an active edit session: enforces one edit session per
   /// image at a time.
   active_edits: Mutex<HashSet<String>>,
@@ -186,14 +186,14 @@ impl Images {
 
   /// Looks up a previously built layer for cache key `key`, verifying that the
   /// layer archive is still present in the store.
-  fn lookup_cached(&self, key: &PlanDigest) -> Result<Option<LayerDigest>> {
+  fn lookup_cached(&self, key: &Digest) -> Result<Option<Digest>> {
     let path = self.key_path(key);
     let text = match std::fs::read_to_string(&path) {
       Ok(text) => text,
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
       Err(e) => return Err(e).with_context(|| format!("cannot read cache key {}", path.display())),
     };
-    let Ok(digest) = text.trim().parse::<LayerDigest>() else {
+    let Ok(digest) = text.trim().parse::<Digest>() else {
       tracing::warn!("ignoring malformed cache key entry {}", path.display());
       return Ok(None);
     };
@@ -205,7 +205,7 @@ impl Images {
   }
 
   /// Atomically records that cache key `key` produced `layer`.
-  fn record_cached(&self, key: &PlanDigest, layer: &LayerDigest) -> Result<()> {
+  fn record_cached(&self, key: &Digest, layer: &Digest) -> Result<()> {
     std::fs::create_dir_all(&self.keys_dir).with_context(|| format!("cannot create {}", self.keys_dir.display()))?;
     let path = self.key_path(key);
     let staged = self.keys_dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
@@ -218,7 +218,7 @@ impl Images {
     Ok(())
   }
 
-  fn key_path(&self, key: &PlanDigest) -> PathBuf {
+  fn key_path(&self, key: &Digest) -> PathBuf {
     self.keys_dir.join(key.to_string().replace(':', "-"))
   }
 
@@ -232,9 +232,9 @@ impl Images {
     base_container_image: &str,
     trace: &Dispatch,
     cancel: &CancellationToken,
-    built_below: &[LayerDigest],
+    built_below: &[Digest],
     step: &Step,
-  ) -> Result<(LayerDigest, bool, u64)> {
+  ) -> Result<(Digest, bool, u64)> {
     if let Some(layer) = self.lookup_cached(&step.key)? {
       return Ok((layer, true, 0));
     }
@@ -242,7 +242,7 @@ impl Images {
     enum Role {
       Leader(watch::Sender<Option<FlightResult>>),
       Waiter(watch::Receiver<Option<FlightResult>>),
-      Cached(LayerDigest),
+      Cached(Digest),
     }
 
     let role = {
@@ -253,7 +253,7 @@ impl Images {
         Role::Waiter(rx.clone())
       } else {
         let (tx, rx) = watch::channel(None);
-        in_flight.insert(step.key.clone(), rx);
+        in_flight.insert(step.key, rx);
         Role::Leader(tx)
       }
     };
@@ -277,7 +277,7 @@ impl Images {
         // Ensure the in-flight entry is removed even if this future is dropped.
         struct Guard {
           images: Arc<Images>,
-          key: PlanDigest,
+          key: Digest,
         }
         impl Drop for Guard {
           fn drop(&mut self) {
@@ -286,7 +286,7 @@ impl Images {
         }
         let _guard = Guard {
           images: self.clone(),
-          key: step.key.clone(),
+          key: step.key,
         };
 
         let started = Instant::now();
@@ -318,9 +318,9 @@ impl Images {
     base_container_image: &str,
     trace: &Dispatch,
     cancel: &CancellationToken,
-    built_below: &[LayerDigest],
+    built_below: &[Digest],
     step: &Step,
-  ) -> Result<LayerDigest> {
+  ) -> Result<Digest> {
     let Input::Run(script) = &step.input;
     let (snapshot, layer_disks, snapshot_image) = if built_below.is_empty() {
       (None, Vec::new(), None)
@@ -442,7 +442,7 @@ pub struct SessionOutcome {
   pub exit: Option<Exit>,
   /// The stored layer digest when `session.upper == UpperLayer::Kept` and the
   /// session uploaded an upper layer after exiting cleanly.
-  pub layer: Option<LayerDigest>,
+  pub layer: Option<Digest>,
   /// The actor's console log (may be empty).
   pub console: String,
 }
@@ -562,7 +562,7 @@ async fn run_session_in(
     let upper = dir.join(UPPER_LAYER);
     if upper.exists() {
       let store = daemon.images.store.clone();
-      let digest = tokio::task::spawn_blocking(move || -> Result<LayerDigest> {
+      let digest = tokio::task::spawn_blocking(move || -> Result<Digest> {
         let file = std::fs::File::open(&upper).with_context(|| format!("cannot open {}", upper.display()))?;
         Ok(store.put(file)?)
       })
@@ -762,15 +762,13 @@ async fn build_image_plan(
   }
 
   if let Some(commit) = &plan.commit {
-    let commit_layer: LayerDigest =
-      commit.layer.to_string().parse().with_context(|| format!("invalid commit layer digest {}", commit.layer))?;
-    if !daemon.images.store.has_layer(&commit_layer) {
+    if !daemon.images.store.has_layer(&commit.layer) {
       bail!(
         "commit layer {} from the image lockfile is not in this daemon's layer store; roll it back or remove it from the lockfile",
         commit.layer
       );
     }
-    layers.push(commit_layer);
+    layers.push(commit.layer);
   }
 
   let store = daemon.images.store.clone();
@@ -901,12 +899,9 @@ impl ImagesTrait for Daemon {
     let resolved =
       build_image_plan(self, &definition, builder, &user, request.commit.as_ref(), &trace, &self.cancel).await.map_err(crate::failed)?;
 
-    let base_top = resolved.plan.top().clone();
+    let base_top = *resolved.plan.top();
     let commit_rebased = resolved.plan.commit_rebased();
-    let parent_layer: Option<LayerDigest> = match &request.commit {
-      Some(c) => Some(c.layer.to_string().parse().map_err(|e| ControlError::Invalid(format!("invalid commit layer {}: {e}", c.layer)))?),
-      None => None,
-    };
+    let parent_layer: Option<Digest> = request.commit.as_ref().map(|c| c.layer);
 
     let dir = self.config.state_dir.join("sessions").join(&session_id);
     needy_api_server::create_private_dir(&dir).with_context(|| format!("cannot create {}", dir.display())).map_err(crate::failed)?;
@@ -964,7 +959,7 @@ impl ImagesTrait for Daemon {
       layers: if is_container_builder {
         Vec::new()
       } else {
-        resolved.snapshot.layers.iter().map(ToString::to_string).collect()
+        resolved.layer_disks.iter().map(|disk| disk.digest.to_string()).collect()
       },
       image_path: resolved.plan.path,
       session: GuestSession {
@@ -1166,9 +1161,9 @@ impl ImagesTrait for Daemon {
           EditRuntime::Vm(_) => {
             let upper = dir.join(UPPER_LAYER);
             if succeeded && upper.exists() {
-              let committed = tokio::task::spawn_blocking(move || -> Result<LayerDigest> {
+              let committed = tokio::task::spawn_blocking(move || -> Result<Digest> {
                 let file = std::fs::File::open(&upper).with_context(|| format!("cannot open {}", upper.display()))?;
-                Ok(store.commit(&image_name, parent_layer.as_ref(), file, recorded)?)
+                Ok(store.commit(&image_name, parent_layer.as_ref(), Some(&base_top), file, recorded)?)
               })
               .await;
               finish_commit(committed, &id_for_task, base_top, recorded_out, exit)
@@ -1186,9 +1181,9 @@ impl ImagesTrait for Daemon {
               container.remove().await;
               match exported {
                 Ok(committed_tar) => {
-                  let committed = tokio::task::spawn_blocking(move || -> Result<LayerDigest> {
+                  let committed = tokio::task::spawn_blocking(move || -> Result<Digest> {
                     let top = extract_top_layer(&committed_tar)?;
-                    Ok(store.commit(&image_name, parent_layer.as_ref(), top, recorded)?)
+                    Ok(store.commit(&image_name, parent_layer.as_ref(), Some(&base_top), top, recorded)?)
                   })
                   .await;
                   finish_commit(committed, &id_for_task, base_top, recorded_out, exit)
@@ -1244,7 +1239,7 @@ impl ImagesTrait for Daemon {
     if self.images.active_edits.lock().unwrap_or_else(|p| p.into_inner()).contains(&request.image_name) {
       return Err(ControlError::Failed(format!("cannot roll back image {}: an edit session is running", request.image_name)));
     }
-    let from: LayerDigest =
+    let from: Digest =
       request.from_layer.parse().map_err(|e| ControlError::Invalid(format!("invalid commit layer {}: {e}", request.from_layer)))?;
     let store = self.images.store.clone();
     let image_name = request.image_name;
@@ -1258,30 +1253,28 @@ impl ImagesTrait for Daemon {
         StoreError::Io { .. } => ControlError::Failed(e.to_string()),
       })?;
     Ok(ImageRollbackResult {
-      layer: target.map(|d| d.to_string()),
+      layer: target.as_ref().map(|c| c.layer.to_string()),
+      base: target.and_then(|c| c.base).map(|d| d.to_string()),
     })
   }
 }
 
 fn finish_commit(
-  committed: std::result::Result<Result<LayerDigest>, tokio::task::JoinError>,
+  committed: std::result::Result<Result<Digest>, tokio::task::JoinError>,
   session_id: &str,
-  base_top: PlanDigest,
+  base_top: Digest,
   commands: Vec<RecordedCommand>,
   exit: Option<Exit>,
 ) -> EditOutcomeResult {
   match committed {
-    Ok(Ok(layer)) => match PlanDigest::parse(&layer.to_string()) {
-      Ok(layer) => Ok(ImageEditFinished {
-        commit: Some(PlanCommit {
-          layer,
-          base: base_top,
-        }),
-        commands,
-        exit,
+    Ok(Ok(layer)) => Ok(ImageEditFinished {
+      commit: Some(PlanCommit {
+        layer,
+        base: base_top,
       }),
-      Err(e) => Err(format!("committed layer digest invalid: {e}")),
-    },
+      commands,
+      exit,
+    }),
     Ok(Err(e)) => Err(format!("committing edit session {session_id}: {e:#}")),
     Err(e) => Err(format!("committing edit session {session_id} panicked: {e}")),
   }
@@ -1482,7 +1475,7 @@ fn sanitize_image_id(id: &str) -> String {
     })
     .collect();
   if cleaned.is_empty() || cleaned.starts_with('.') {
-    LayerDigest::of(id.as_bytes()).to_string().replace(':', "-")
+    Digest::of(id.as_bytes()).to_string().replace(':', "-")
   } else {
     cleaned
   }
@@ -1556,7 +1549,7 @@ fn serve_session_gateway(
 }
 
 struct GuestConfigParts {
-  snapshot: Option<Snapshot>,
+  layer_digests: Vec<String>,
   image_path: String,
   user: User,
   command: Vec<String>,
@@ -1570,8 +1563,13 @@ struct GuestConfigParts {
 
 impl SessionSpec {
   fn clone_parts(&self) -> GuestConfigParts {
+    let layer_digests = if !self.layer_disks.is_empty() {
+      self.layer_disks.iter().map(|disk| disk.digest.to_string()).collect()
+    } else {
+      self.snapshot.as_ref().map(|s| s.layers.iter().map(ToString::to_string).collect()).unwrap_or_default()
+    };
     GuestConfigParts {
-      snapshot: self.snapshot.clone(),
+      layer_digests,
       image_path: self.image_path.clone(),
       user: self.user.clone(),
       command: self.command.clone(),
@@ -1610,7 +1608,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     wait_for_attach: parts.wait_for_attach,
     daemon_uid: daemon_uid(),
     daemon_gid: daemon_gid(),
-    layers: parts.snapshot.as_ref().map(|s| s.layers.iter().map(ToString::to_string).collect()).unwrap_or_default(),
+    layers: parts.layer_digests,
     image_path: parts.image_path,
     session: parts.session,
   }
@@ -1619,7 +1617,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
 /// Computes the root digest for `builder`: the base VM image's digest for VM
 /// builders, or the base container image's ID for `linux-container` builders
 /// on Linux hosts without a VM driver.
-async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_image: &str) -> Result<PlanDigest> {
+async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_image: &str) -> Result<Digest> {
   if builder == ActorDriver::LinuxContainer {
     let engine = daemon.images.backends().engine.clone();
     let inspected = engine
@@ -1627,10 +1625,7 @@ async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_i
       .await
       .with_context(|| format!("inspecting container base image {base_container_image}"))?
       .ok_or_else(|| anyhow!("container actor image {base_container_image} is not in the engine"))?;
-    return match PlanDigest::parse(&inspected.id) {
-      Ok(digest) => Ok(digest),
-      Err(_) => Ok(PlanDigest::parse(&LayerDigest::of(inspected.id.as_bytes()).to_string())?),
-    };
+    return Ok(Digest::parse(&inspected.id).unwrap_or_else(|_| Digest::of(inspected.id.as_bytes())));
   }
   root_digest(daemon).await
 }
@@ -1644,13 +1639,13 @@ async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_i
 /// (locally built images and test fixtures).
 // TODO(images): resolving an OCI `definition.root` to its own lower layers
 // comes with slice 5 of the images and run data spec.
-pub(crate) async fn root_digest(daemon: &Daemon) -> Result<PlanDigest> {
+pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
   let dir = daemon.config.actor_image.clone();
   let images = daemon.images.clone();
-  tokio::task::spawn_blocking(move || -> Result<PlanDigest> {
+  tokio::task::spawn_blocking(move || -> Result<Digest> {
     if let Some(manifest) = manifest::read(&dir)?
       && let Some(sha256) = manifest.sha256
-      && let Ok(digest) = PlanDigest::parse(&format!("sha256:{sha256}"))
+      && let Ok(digest) = Digest::parse(&format!("sha256:{sha256}"))
     {
       return Ok(digest);
     }
@@ -1663,18 +1658,17 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<PlanDigest> {
       && cached.len == len
       && cached.modified == modified
     {
-      return Ok(cached.digest.clone());
+      return Ok(cached.digest);
     }
     let mut file = std::fs::File::open(&rootfs).with_context(|| format!("cannot open {} to hash base rootfs", rootfs.display()))?;
     let mut hasher = sha2::Sha256::new();
     std::io::copy(&mut file, &mut hasher).with_context(|| format!("cannot hash {}", rootfs.display()))?;
-    let text = format!("sha256:{:x}", hasher.finalize());
-    let digest = PlanDigest::parse(&text)?;
+    let digest = Digest::from_bytes(hasher.finalize().into());
     *images.root_digest_cache.lock().unwrap_or_else(|p| p.into_inner()) = Some(CachedRootDigest {
       path: rootfs,
       len,
       modified,
-      digest: digest.clone(),
+      digest,
     });
     Ok(digest)
   })

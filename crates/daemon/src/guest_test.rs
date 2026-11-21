@@ -164,6 +164,38 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
 }
 
 #[tokio::test]
+async fn the_guest_receives_materialized_layer_disk_digests_when_flattened() {
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(NO_MOUNT, started.dir.path())).await.unwrap();
+  let (l0, l1, l2, flat) = (layer("l0"), layer("l1"), layer("l2"), layer("flat-l0-l1"));
+  started.daemon.runs.find(&created.id).unwrap().set_boot(Boot {
+    snapshot: Some(Snapshot {
+      digest: layer("stack"),
+      layers: vec![l0, l1, l2],
+    }),
+    layer_disks: vec![
+      needy_core_actor::image::store::LayerDisk {
+        digest: flat,
+        path: started.dir.path().join("flat.squashfs"),
+      },
+      needy_core_actor::image::store::LayerDisk {
+        digest: l2,
+        path: started.dir.path().join("l2.squashfs"),
+      },
+    ],
+    snapshot_image: None,
+    path: "/usr/bin:/bin".into(),
+    env: Default::default(),
+    session: GuestSession::default(),
+    commit_rebased: false,
+  });
+
+  let config = Guest::config(&started.daemon, &created.id).await.unwrap();
+
+  assert_eq!(config.layers, [flat.to_string(), l2.to_string()]);
+}
+
+#[tokio::test]
 async fn a_run_without_a_snapshot_boots_the_base_alone_as_a_run() {
   let started = testing::daemon().await;
   let created = Runs::create(&started.daemon, new_run(NO_MOUNT, started.dir.path())).await.unwrap();

@@ -128,4 +128,8 @@ message RollbackImageResponse {
   // Target commit layer digest (`sha256:<hex>`), or empty when rolled back
   // past the first commit.
   string layer = 1;
+  // Original base plan top key (`sha256:<hex>`) the target commit was made on,
+  // or empty when rolled back past the first commit or when the commit record
+  // predates base persistence.
+  string base = 2;
 }

@@ -32,15 +32,24 @@ mod collapse;
 mod disk;
 mod oci;
 
+pub use needy_core::image::Digest;
 pub use oci::{extract_top_layer, snapshot_tag};
 
 use std::collections::HashSet;
 use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use sha2::Digest as _;
+
+/// Maximum number of individual SquashFS layer disks [`Store::materialize`]
+/// returns for a VM snapshot before collapsing the lower prefix into one disk.
+// NOTICE: measured 8-layer `macos-vz` boot overhead is +84 ms, and Firecracker
+// caps virtio-mmio block devices at 16 (leaving room for rootfs, guest disk,
+// and identity disks). Keeping the top `MAX_UNFLATTENED_LAYERS - 1` layers
+// individual lets the top edit commit and recent layers swap without repacking
+// the collapsed lower disk.
+pub const MAX_UNFLATTENED_LAYERS: usize = 8;
 
 /// What the store refused or could not do.
 #[derive(Debug, thiserror::Error)]
@@ -79,75 +88,14 @@ fn io(context: impl fmt::Display) -> impl FnOnce(std::io::Error) -> Error {
   }
 }
 
-/// A SHA-256 digest: of a layer's canonical archive, or of a snapshot's
-/// stack. Written `sha256:<64 hex digits>`, as OCI writes digests.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Digest([u8; 32]);
-
-impl Digest {
-  /// The digest of `bytes`.
-  pub fn of(bytes: &[u8]) -> Self {
-    Self(sha2::Sha256::digest(bytes).into())
-  }
-
-  fn hex(&self) -> String {
-    use std::fmt::Write as _;
-    self.0.iter().fold(String::with_capacity(64), |mut hex, byte| {
-      // NOTICE: writing to a `String` cannot fail.
-      let _ = write!(hex, "{byte:02x}");
-      hex
-    })
-  }
-
-  /// The name of this digest's files in the store: `sha256-<hex>`, since a
-  /// `:` is not portable in file names.
-  fn stem(&self) -> String {
-    format!("sha256-{}", self.hex())
-  }
-
-  fn from_stem(stem: &str) -> Option<Self> {
-    stem.strip_prefix("sha256-").and_then(|hex| format!("sha256:{hex}").parse().ok())
-  }
+/// The name of this digest's files in the store: `sha256-<hex>`, since a
+/// `:` is not portable in file names.
+fn stem(digest: &Digest) -> String {
+  format!("sha256-{}", digest.hex())
 }
 
-impl fmt::Display for Digest {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "sha256:{}", self.hex())
-  }
-}
-
-impl fmt::Debug for Digest {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    fmt::Display::fmt(self, f)
-  }
-}
-
-impl FromStr for Digest {
-  type Err = Error;
-
-  fn from_str(text: &str) -> Result<Self> {
-    let invalid = || Error::Invalid(format!("{text:?} is not a digest (sha256:<64 hex digits>)"));
-    let hex = text.strip_prefix("sha256:").filter(|hex| hex.len() == 64).ok_or_else(invalid)?;
-    let mut bytes = [0; 32];
-    for (byte, pair) in bytes.iter_mut().zip(hex.as_bytes().chunks(2)) {
-      let pair = std::str::from_utf8(pair).map_err(|_| invalid())?;
-      *byte = u8::from_str_radix(pair, 16).map_err(|_| invalid())?;
-    }
-    Ok(Self(bytes))
-  }
-}
-
-impl serde::Serialize for Digest {
-  fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-    serializer.collect_str(self)
-  }
-}
-
-impl<'de> serde::Deserialize<'de> for Digest {
-  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
-    let text = String::deserialize(deserializer)?;
-    text.parse().map_err(serde::de::Error::custom)
-  }
+fn from_stem(stem: &str) -> Option<Digest> {
+  stem.strip_prefix("sha256-").and_then(|hex| Digest::parse(&format!("sha256:{hex}")).ok())
 }
 
 /// A stack of layers, lowest first, named by the digest of the stack: what
@@ -187,12 +135,16 @@ impl Command {
 }
 
 /// One commit of an image: the commit layer it made, which holds every
-/// commit before it too, the commit it was made on, and what its session
-/// ran.
+/// commit before it too, the commit it was made on, the build plan top key it
+/// was made on, and what its session ran.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Commit {
   pub layer: Digest,
   pub parent: Option<Digest>,
+  /// The build plan top digest (`Plan::top`) this commit was made on, if
+  /// recorded (absent in histories written before base persistence).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub base: Option<Digest>,
   pub commands: Vec<Command>,
   /// When it was made, in milliseconds since the Unix epoch.
   pub time_ms: i64,
@@ -287,10 +239,16 @@ impl Store {
     serde_json::from_slice(&json).map_err(|e| Error::Invalid(format!("{}: {e}", path.display())))
   }
 
-  /// The disks a VM driver attaches to boot `snapshot`, one per layer, in
-  /// the snapshot's order. Each is made the first time it is asked for and
-  /// reused after. A layer with opaque directories gets a disk per stack
-  /// below it, since the whiteouts it is given depend on what is below.
+  /// The disks a VM driver attaches to boot `snapshot`, in the snapshot's
+  /// order. Each is made the first time it is asked for and reused after.
+  ///
+  /// When `snapshot.layers.len() > MAX_UNFLATTENED_LAYERS`, the lower prefix
+  /// (`0..layers.len() - (MAX_UNFLATTENED_LAYERS - 1)`) is collapsed into a
+  /// single cached SquashFS disk keyed by the prefix's stack digest, leaving
+  /// the top `MAX_UNFLATTENED_LAYERS - 1` layers individual so the returned
+  /// disk count never exceeds [`MAX_UNFLATTENED_LAYERS`]. A layer with opaque
+  /// directories gets a disk per stack below it, since the whiteouts it is
+  /// given depend on what is below.
   pub fn materialize(&self, snapshot: &Snapshot) -> Result<Vec<LayerDisk>> {
     let dir = self.cache.join("disks");
     let indexes = snapshot.layers.iter().map(|digest| archive::Index::read(&self.layer(digest)?)).collect::<Result<Vec<_>>>()?;
@@ -298,12 +256,39 @@ impl Store {
     // needs it.
     let needed = indexes.iter().rposition(disk::hides_below).unwrap_or(0);
     let mut below = disk::Below::default();
-    let mut disks = Vec::with_capacity(snapshot.layers.len());
-    for (at, (digest, index)) in snapshot.layers.iter().zip(&indexes).enumerate() {
+
+    let (start_at, mut disks) = if snapshot.layers.len() > MAX_UNFLATTENED_LAYERS {
+      let prefix_len = snapshot.layers.len() - (MAX_UNFLATTENED_LAYERS - 1);
+      let prefix_digest = stack_digest(&snapshot.layers[..prefix_len]);
+      let path = dir.join(format!("{}-flat.squashfs", stem(&prefix_digest)));
+      if !path.exists() {
+        let mut merged = indexes[0].clone();
+        for upper in &indexes[1..prefix_len] {
+          merged = collapse::collapse(&merged, upper)?;
+        }
+        std::fs::create_dir_all(&dir).map_err(io(dir.display()))?;
+        disk::write(&merged, &prefix_digest, &disk::Below::default(), &path)?;
+      }
+      if needed >= prefix_len {
+        for index in &indexes[..prefix_len] {
+          below.stack(index);
+        }
+      }
+      let mut disks = Vec::with_capacity(MAX_UNFLATTENED_LAYERS);
+      disks.push(LayerDisk {
+        digest: prefix_digest,
+        path,
+      });
+      (prefix_len, disks)
+    } else {
+      (0, Vec::with_capacity(snapshot.layers.len()))
+    };
+
+    for (at, (digest, index)) in snapshot.layers.iter().zip(&indexes).enumerate().skip(start_at) {
       let name = if disk::hides_below(index) {
-        format!("{}-on-{}.squashfs", digest.stem(), &stack_digest(&snapshot.layers[..at]).hex()[..16])
+        format!("{}-on-{}.squashfs", stem(digest), &stack_digest(&snapshot.layers[..at]).hex()[..16])
       } else {
-        format!("{}.squashfs", digest.stem())
+        format!("{}.squashfs", stem(digest))
       };
       let path = dir.join(name);
       if !path.exists() {
@@ -346,7 +331,14 @@ impl Store {
   // NOTICE: the daemon does not run `collect` while a commit is being made:
   // the new commit layer is stored before the history names it, and
   // `collect` removes a commit layer no history names.
-  pub fn commit(&self, image: &str, parent: Option<&Digest>, upper: impl Read, commands: Vec<Command>) -> Result<Digest> {
+  pub fn commit(
+    &self,
+    image: &str,
+    parent: Option<&Digest>,
+    base: Option<&Digest>,
+    upper: impl Read,
+    commands: Vec<Command>,
+  ) -> Result<Digest> {
     let mut history = self.read_history(image)?;
     let layers = self.data.join("layers");
     let layer = match parent {
@@ -376,6 +368,7 @@ impl Store {
     history.commits.push(Commit {
       layer,
       parent: parent.copied(),
+      base: base.copied(),
       commands,
       time_ms: needy_common::time::now_ms(),
     });
@@ -389,19 +382,19 @@ impl Store {
     Ok(self.read_history(image)?.commits)
   }
 
-  /// The commit layer `image` has `steps` commits before its commit `from`:
+  /// The commit record `image` has `steps` commits before its commit `from`:
   /// `None` when that is before its first commit. The history keeps every
   /// commit, so a rolled-back one can still be booted.
-  pub fn rollback(&self, image: &str, from: &Digest, steps: usize) -> Result<Option<Digest>> {
+  pub fn rollback(&self, image: &str, from: &Digest, steps: usize) -> Result<Option<Commit>> {
     let history = self.read_history(image)?;
     let find = |layer: &Digest| history.commits.iter().rev().find(|commit| commit.layer == *layer);
     let mut at = find(from).ok_or_else(|| Error::UnknownCommit {
       image: image.to_string(),
       digest: *from,
     })?;
-    let mut chain = vec![at.layer];
+    let mut chain = vec![at];
     while let Some(parent) = at.parent.as_ref().and_then(find) {
-      chain.push(parent.layer);
+      chain.push(parent);
       at = parent;
     }
     if steps > chain.len() {
@@ -411,7 +404,7 @@ impl Store {
         available: chain.len(),
       });
     }
-    Ok(chain.get(steps).copied())
+    Ok(chain.get(steps).copied().cloned())
   }
 
   /// Removes the built layers, snapshot records and disks that neither
@@ -425,7 +418,13 @@ impl Store {
     let mut kept: HashSet<Digest> = keep.iter().copied().collect();
     for digest in keep {
       match self.resolve(digest) {
-        Ok(snapshot) => kept.extend(snapshot.layers),
+        Ok(snapshot) => {
+          if snapshot.layers.len() > MAX_UNFLATTENED_LAYERS {
+            let prefix_len = snapshot.layers.len() - (MAX_UNFLATTENED_LAYERS - 1);
+            kept.insert(stack_digest(&snapshot.layers[..prefix_len]));
+          }
+          kept.extend(snapshot.layers);
+        }
         Err(Error::Missing(_)) => {}
         Err(e) => return Err(e),
       }
@@ -455,7 +454,7 @@ impl Store {
   /// The archive of a stored layer: a built layer in the cache, or a commit
   /// layer in the data directory.
   fn layer(&self, digest: &Digest) -> Result<PathBuf> {
-    let name = format!("{}.tar", digest.stem());
+    let name = format!("{}.tar", stem(digest));
     [
       self.cache.join("layers").join(&name),
       self.data.join("layers").join(&name),
@@ -482,8 +481,8 @@ impl Store {
     let Hashing { mut inner, hasher } = out;
     inner.flush().map_err(io(staged.path().display()))?;
     drop(inner);
-    let digest = Digest(hasher.finalize().into());
-    let path = dir.join(format!("{}.tar", digest.stem()));
+    let digest = Digest::from_bytes(hasher.finalize().into());
+    let path = dir.join(format!("{}.tar", stem(&digest)));
     if !path.exists() {
       staged.persist(&path).map_err(|e| io(path.display())(e.error))?;
     }
@@ -491,7 +490,7 @@ impl Store {
   }
 
   fn snapshot_path(&self, digest: &Digest) -> PathBuf {
-    self.cache.join("snapshots").join(format!("{}.json", digest.stem()))
+    self.cache.join("snapshots").join(format!("{}.json", stem(digest)))
   }
 
   /// An image's history file, in a directory named by the digest of its
@@ -551,9 +550,9 @@ fn stored(dir: &Path) -> Result<Vec<(PathBuf, Digest)>> {
   let mut files = Vec::new();
   for entry in entries {
     let path = entry.map_err(io(dir.display()))?.path();
-    // `sha256-<hex>.tar`, `.json`, `.squashfs`, or a disk's
+    // `sha256-<hex>.tar`, `.json`, `.squashfs`, `-flat.squashfs`, or a disk's
     // `sha256-<hex>-on-<stack>.squashfs`.
-    let digest = path.file_name().and_then(|name| name.to_str()).and_then(|name| name.get(..7 + 64)).and_then(Digest::from_stem);
+    let digest = path.file_name().and_then(|name| name.to_str()).and_then(|name| name.get(..7 + 64)).and_then(from_stem);
     if let Some(digest) = digest {
       files.push((path, digest));
     }

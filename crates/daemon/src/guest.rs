@@ -145,8 +145,13 @@ impl Guest for Daemon {
       daemon_gid: daemon_user().1,
       // Container snapshots are already assembled into the OCI image booted by
       // the container driver, so the guest init does not stack VM layer disks.
+      // For VM drivers, use the materialized layer disk digests (which may
+      // auto-flatten lower layers above `MAX_UNFLATTENED_LAYERS`) so guest
+      // `init`'s `needy-layer` marker matching aligns with attached disks.
       layers: if boot.snapshot_image.is_some() {
         Vec::new()
+      } else if !boot.layer_disks.is_empty() {
+        boot.layer_disks.iter().map(|disk| disk.digest.to_string()).collect()
       } else {
         boot.snapshot.map(|s| s.layers.iter().map(ToString::to_string).collect()).unwrap_or_default()
       },

@@ -14,13 +14,21 @@ fn definition(scripts: &[&str]) -> Definition {
 }
 
 fn keys(plan: &Plan) -> Vec<Digest> {
-  plan.steps.iter().map(|step| step.key.clone()).collect()
+  plan.steps.iter().map(|step| step.key).collect()
 }
 
 #[test]
 fn a_digest_is_sha256_and_64_lowercase_hex_digits() {
   let text = format!("sha256:{}", "ab".repeat(32));
-  assert_eq!(Digest::parse(&text).unwrap().to_string(), text);
+  let parsed = Digest::parse(&text).unwrap();
+  assert_eq!(parsed.to_string(), text);
+  assert_eq!(text.parse::<Digest>().unwrap(), parsed);
+  assert_eq!(parsed.as_bytes(), &[0xab; 32]);
+  assert_eq!(Digest::from_bytes([0xab; 32]), parsed);
+  assert_eq!(parsed.hex(), "ab".repeat(32));
+  let json = serde_json::to_string(&parsed).unwrap();
+  assert_eq!(json, format!("\"{text}\""));
+  assert_eq!(serde_json::from_str::<Digest>(&json).unwrap(), parsed);
   for bad in [
     "ab".repeat(32),
     format!("sha512:{}", "ab".repeat(32)),
@@ -166,7 +174,7 @@ fn without_a_commit_there_is_no_commit_layer() {
 
 #[test]
 fn a_commit_made_on_the_top_is_not_rebased() {
-  let top = plan(&definition(&["one"]), &digest('a'), &User::default(), None).top().clone();
+  let top = *plan(&definition(&["one"]), &digest('a'), &User::default(), None).top();
   let commit = Commit {
     layer: digest('c'),
     base: top,
@@ -180,7 +188,7 @@ fn a_commit_made_on_the_top_is_not_rebased() {
 // as such (owner decision, 2026-11-17, in the images and run data spec).
 #[test]
 fn a_commit_made_on_another_base_stays_on_top_and_is_rebased() {
-  let old = plan(&definition(&["one"]), &digest('a'), &User::default(), None).top().clone();
+  let old = *plan(&definition(&["one"]), &digest('a'), &User::default(), None).top();
   let commit = Commit {
     layer: digest('c'),
     base: old,

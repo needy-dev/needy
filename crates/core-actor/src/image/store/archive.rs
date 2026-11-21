@@ -105,7 +105,7 @@ impl Read for Span {
 /// A layer, by path relative to its root: its entries, the paths its
 /// whiteouts remove from the layers below, and its opaque directories,
 /// whose contents in the layers below it hides.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Index {
   pub entries: BTreeMap<PathBuf, Entry>,
   pub whiteouts: BTreeSet<PathBuf>,

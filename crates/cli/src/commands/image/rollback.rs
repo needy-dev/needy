@@ -80,9 +80,14 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     lockfile::write(&target.lockfile, &lock)?;
     output::message(format_args!("image rollback: cleared commit layer in {} (back to built layers)", target.lockfile.display()));
   } else {
+    let base = if rolled.base.is_empty() {
+      current.base
+    } else {
+      rolled.base
+    };
     lock.commit = Some(lockfile::LockCommit {
       layer: rolled.layer.clone(),
-      base: current.base,
+      base,
     });
     lockfile::write(&target.lockfile, &lock)?;
     output::message(format_args!("image rollback: {} -> {} (lockfile {})", steps, rolled.layer, target.lockfile.display()));

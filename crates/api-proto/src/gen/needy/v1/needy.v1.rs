@@ -952,6 +952,11 @@ pub struct RollbackImageResponse {
     /// past the first commit.
     #[prost(string, tag="1")]
     pub layer: ::prost::alloc::string::String,
+    /// Original base plan top key (`sha256:<hex>`) the target commit was made on,
+    /// or empty when rolled back past the first commit or when the commit record
+    /// predates base persistence.
+    #[prost(string, tag="2")]
+    pub base: ::prost::alloc::string::String,
 }
 /// What a runner can host: each role with its drivers. A role with none is a
 /// role it does not hold.

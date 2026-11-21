@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::str::FromStr;
 
 use needy_config::image::{Definition, Layer};
 use needy_config::profile::User;
@@ -23,9 +24,9 @@ use sha2::{Digest as _, Sha256};
 pub const SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// A SHA-256 content digest written as OCI writes one, `sha256:<hex>`: a
-/// root's, a layer's, or a cache key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Digest(String);
+/// root's, a layer's, a snapshot's, or a cache key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Digest([u8; 32]);
 
 /// Text that is not a `sha256:` digest of 64 lowercase hex digits.
 #[derive(Debug, thiserror::Error)]
@@ -43,18 +44,78 @@ impl Digest {
     if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
       return Err(InvalidDigest(text.into()));
     }
-    Ok(Self(text.into()))
+    let mut bytes = [0u8; 32];
+    let (pairs, _) = hex.as_bytes().as_chunks::<2>();
+    for (byte, &[hi, lo]) in bytes.iter_mut().zip(pairs) {
+      *byte = (hex_nibble(hi) << 4) | hex_nibble(lo);
+    }
+    Ok(Self(bytes))
   }
 
   /// The digest of `content`.
-  fn of(content: &[u8]) -> Self {
-    Self(format!("sha256:{:x}", Sha256::digest(content)))
+  pub fn of(content: &[u8]) -> Self {
+    Self(Sha256::digest(content).into())
+  }
+
+  /// Constructs a digest directly from its 32 raw SHA-256 bytes.
+  pub fn from_bytes(bytes: [u8; 32]) -> Self {
+    Self(bytes)
+  }
+
+  /// The 32 raw SHA-256 bytes.
+  pub fn as_bytes(&self) -> &[u8; 32] {
+    &self.0
+  }
+
+  /// The 64 lowercase hex digits, without the `sha256:` prefix.
+  pub fn hex(&self) -> String {
+    use std::fmt::Write as _;
+    self.0.iter().fold(String::with_capacity(64), |mut hex, byte| {
+      // NOTICE: writing to a `String` cannot fail.
+      let _ = write!(hex, "{byte:02x}");
+      hex
+    })
+  }
+}
+
+fn hex_nibble(byte: u8) -> u8 {
+  match byte {
+    b'0'..=b'9' => byte - b'0',
+    b'a'..=b'f' => byte - b'a' + 10,
+    _ => unreachable!("validated lowercase hex above"),
   }
 }
 
 impl fmt::Display for Digest {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str(&self.0)
+    write!(f, "sha256:{}", self.hex())
+  }
+}
+
+impl fmt::Debug for Digest {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fmt::Display::fmt(self, f)
+  }
+}
+
+impl FromStr for Digest {
+  type Err = InvalidDigest;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    Self::parse(text)
+  }
+}
+
+impl serde::Serialize for Digest {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(self)
+  }
+}
+
+impl<'de> serde::Deserialize<'de> for Digest {
+  fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    Self::parse(&text).map_err(serde::de::Error::custom)
   }
 }
 
@@ -148,10 +209,10 @@ impl Plan {
 // input of the steps above it, and enters their keys.
 pub fn plan(definition: &Definition, root: &Digest, user: &User, commit: Option<&Commit>) -> Plan {
   let base = key(&json!({
-    "root": root.0,
+    "root": root.to_string(),
     "user": { "name": user.name, "uid": user.uid, "gid": user.gid },
   }));
-  let mut parent = base.clone();
+  let mut parent = base;
   let steps = definition
     .layers
     .iter()
@@ -159,16 +220,13 @@ pub fn plan(definition: &Definition, root: &Digest, user: &User, commit: Option<
       let (input, resolved) = match layer {
         Layer::Run(script) => (Input::Run(script.clone()), json!({ "run": script })),
       };
-      parent = key(&json!({ "parent": parent.0, "input": resolved }));
-      Step {
-        input,
-        key: parent.clone(),
-      }
+      parent = key(&json!({ "parent": parent.to_string(), "input": resolved }));
+      Step { input, key: parent }
     })
     .collect();
   let (path, env) = environment(&definition.env);
   Plan {
-    root: root.clone(),
+    root: *root,
     user: user.clone(),
     base,
     steps,
