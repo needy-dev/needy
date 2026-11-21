@@ -461,3 +461,75 @@ fn driver_staging_and_applying_replaces_claimed_files_and_cleans_stale_side_file
   assert!(!f.store.join("opencode.db-wal").exists(), "stale -wal side file must be removed");
   assert_eq!(read(&f.store, "other.txt").as_deref(), Some("untouched"));
 }
+
+#[test]
+fn on_conflict_lines_streams_large_append_and_is_idempotent_on_retry() {
+  let f = Fixture::new();
+  // Larger than two 64 KiB comparison chunks so streaming prefix checks span multiple reads.
+  let seed_body = "line-seed-0123456789abcdef\n".repeat(6000);
+  assert!(seed_body.len() > 2 * COMPARE_CHUNK);
+  let store_body = format!("{seed_body}from-store\n");
+  let run_body = format!("{seed_body}from-run-1\nfrom-run-2\n");
+
+  write(&f.seed, "history.jsonl", &seed_body);
+  write(&f.store, "history.jsonl", &store_body);
+  write(&f.run, "history.jsonl", &run_body);
+
+  let policy = on_conflict("history.jsonl", Choice::Lines);
+  let outcome = f.merge(&policy);
+  let expected = format!("{seed_body}from-store\nfrom-run-1\nfrom-run-2\n");
+  assert_eq!(read(&f.store, "history.jsonl").as_deref(), Some(expected.as_str()));
+  assert_eq!(outcome.changes, vec![change("history.jsonl", Action::Resolved(Choice::Lines))]);
+
+  // Crash-retry idempotency: ends_with check sees the appended tail and does not duplicate it.
+  let retry = f.merge(&policy);
+  assert_eq!(read(&f.store, "history.jsonl").as_deref(), Some(expected.as_str()));
+  assert_eq!(retry.changes, vec![change("history.jsonl", Action::Resolved(Choice::Lines))]);
+}
+
+#[test]
+fn on_conflict_lines_detects_non_prefix_change_in_large_file() {
+  let f = Fixture::new();
+  let seed_body = "a".repeat(2 * COMPARE_CHUNK + 128) + "\n";
+  let mut run_bytes = seed_body.clone().into_bytes();
+  // Mutate a byte past the first 64 KiB chunk.
+  run_bytes[COMPARE_CHUNK + 17] = b'X';
+  let mut run_body = String::from_utf8(run_bytes).unwrap();
+  run_body.push_str("appended\n");
+  let store_body = format!("{seed_body}store-line\n");
+
+  write(&f.seed, "history.jsonl", &seed_body);
+  write(&f.run, "history.jsonl", &run_body);
+  write(&f.store, "history.jsonl", &store_body);
+
+  let outcome = f.merge(&on_conflict("history.jsonl", Choice::Lines));
+  assert_eq!(outcome.changes, vec![change("history.jsonl", Action::Conflict)]);
+  assert_eq!(read(&f.store, "history.jsonl").as_deref(), Some(store_body.as_str()));
+  assert_eq!(read(&f.aside, "history.jsonl").as_deref(), Some(run_body.as_str()));
+}
+
+#[test]
+fn on_conflict_lines_handles_missing_seed_and_empty_store() {
+  let f = Fixture::new();
+  write(&f.run, "log.jsonl", "from-run\n");
+  write(&f.store, "log.jsonl", "");
+
+  let outcome = f.merge(&on_conflict("log.jsonl", Choice::Lines));
+  assert_eq!(outcome.changes, vec![change("log.jsonl", Action::Resolved(Choice::Lines))]);
+  assert_eq!(read(&f.store, "log.jsonl").as_deref(), Some("from-run\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn same_content_matches_hard_linked_files() {
+  let dir = tempfile::tempdir().unwrap();
+  let a = dir.path().join("a");
+  let b = dir.path().join("b");
+  std::fs::write(&a, "shared-content").unwrap();
+  std::fs::hard_link(&a, &b).unwrap();
+
+  let mut scratch = CompareScratch::default();
+  assert!(same_content(&a, &b, &mut scratch).unwrap());
+  // Hard-link fast path must not even allocate scratch buffers.
+  assert!(scratch.a.is_empty());
+}

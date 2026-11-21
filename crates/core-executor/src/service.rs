@@ -78,11 +78,11 @@ fn stream_process(
           break;
         }
       };
-      match payload {
-        Some(exec_request::Payload::Stdin(bytes)) => client.send(Input::Stdin(bytes)),
-        Some(exec_request::Payload::StdinEof(_)) => client.send(Input::Eof),
-        Some(exec_request::Payload::Signal(sig)) => client.send(Input::Signal(sig)),
-        Some(exec_request::Payload::Resize(size)) => client.send(Input::Resize(clamp(size.rows), clamp(size.cols))),
+      let send = match payload {
+        Some(exec_request::Payload::Stdin(bytes)) => Some(Input::Stdin(bytes)),
+        Some(exec_request::Payload::StdinEof(_)) => Some(Input::Eof),
+        Some(exec_request::Payload::Signal(sig)) => Some(Input::Signal(sig)),
+        Some(exec_request::Payload::Resize(size)) => Some(Input::Resize(clamp(size.rows), clamp(size.cols))),
         Some(exec_request::Payload::Detach(_)) => {
           detach_input.store(true, Ordering::SeqCst);
           let detached = ExecResponse {
@@ -94,9 +94,16 @@ fn stream_process(
           if ack.send(Ok(detached)).await.is_err() {
             tracing::debug!("process {}: the client left before its detach was answered", input_proc.id);
           }
+          None
         }
         // A second start or attach on one stream has no meaning.
-        Some(exec_request::Payload::Start(_) | exec_request::Payload::LimitedStart(_) | exec_request::Payload::Attach(_)) | None => {}
+        Some(exec_request::Payload::Start(_) | exec_request::Payload::LimitedStart(_) | exec_request::Payload::Attach(_)) | None => None,
+      };
+      if let Some(input) = send {
+        tokio::select! {
+          () = client.send(input) => {}
+          () = input_cancel.cancelled() => break,
+        }
       }
     }
   });

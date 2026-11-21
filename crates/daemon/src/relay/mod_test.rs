@@ -702,3 +702,35 @@ async fn recovery_retains_the_first_acquired_shared_instance_capacity_policy() {
   assert!(matches!(overlapping, Err(ControlError::Exhausted(_))), "recovery must retain the acquired instance's limit and reject policy");
   assert!(testing::ended(pid).await);
 }
+
+#[tokio::test]
+async fn stopping_a_run_evicts_its_processes_from_the_daemon_table() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let run = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap();
+
+  let run_outputs = daemon.exec(ExecOpen::Start(spec(&["echo", "in-run"], &run.id, "")), attached()).await.unwrap();
+  let (run_stdout, run_exit) = finish(run_outputs).await;
+  assert_eq!(run_stdout, "in-run\n");
+  assert_eq!(run_exit.unwrap().code, Some(0));
+
+  let standalone_outputs = daemon.exec(ExecOpen::Start(spec(&["echo", "outside"], "", "local")), attached()).await.unwrap();
+  let (standalone_stdout, standalone_exit) = finish(standalone_outputs).await;
+  assert_eq!(standalone_stdout, "outside\n");
+  assert_eq!(standalone_exit.unwrap().code, Some(0));
+
+  {
+    let processes = daemon.processes.lock().unwrap();
+    assert!(processes.values().any(|k| k.run.as_deref() == Some(run.id.as_str())));
+    assert!(processes.values().any(|k| k.run.is_none()));
+  }
+
+  Runs::stop(daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+
+  let processes = daemon.processes.lock().unwrap();
+  assert!(
+    !processes.values().any(|k| k.run.as_deref() == Some(run.id.as_str())),
+    "stopped run's processes must be evicted from Daemon::processes"
+  );
+  assert!(processes.values().any(|k| k.run.is_none()), "processes outside the stopped run must remain");
+}

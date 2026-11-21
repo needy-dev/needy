@@ -802,6 +802,7 @@ impl Daemon {
     crate::sync::end(self, run).await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
     self.runs.end(&run.id);
+    self.evict_run_processes(&run.id);
     let actor_runner = lock(&run.actor_runner).clone();
     self.record_failure(&run.id, request, run.created_ms, &run.trace, error, actor_runner).await;
   }
@@ -862,6 +863,7 @@ impl Daemon {
     self.release_executors(run).await;
     crate::sync::end(self, run).await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
+    self.evict_run_processes(&run.id);
   }
 
   /// Stops a running or finished run: its actor as `mode` says, then its
@@ -971,6 +973,7 @@ impl Daemon {
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
     self.save_run(run).await;
     self.runs.end(&run.id);
+    self.evict_run_processes(&run.id);
     Ok(actor)
   }
 

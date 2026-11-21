@@ -237,10 +237,11 @@ pub struct Daemon {
   pub(crate) suspending: Arc<AtomicBool>,
   /// The instance each process the daemon has seen runs on, for `attach`
   /// and `kill`, and who started it, for `ps`.
-  // TODO(persistence): this map grows until the daemon exits. `state.db`
-  // records the processes of runs (slice 6 of the runners-and-runs design)
-  // but not the instances `attach` and `kill` reach them through, nor
-  // processes outside runs; pruning it waits for an owner decision.
+  // TODO(persistence): standalone processes outside runs remain in this map
+  // until the daemon exits; `state.db` records only runs' processes, and
+  // pruning standalone entries waits for an owner decision. Run-scoped
+  // entries are evicted when their run completes cleanup
+  // (`Daemon::evict_run_processes`).
   pub(crate) processes: Arc<Mutex<HashMap<String, relay::Known>>>,
   /// The daemon's own tasks: the local executor and the relays of commands
   /// outside any run.

@@ -26,6 +26,9 @@ const REPLAY_BYTES: usize = 256 * 1024;
 /// dropped (pipes).
 const SUBSCRIBER_QUEUE: usize = 64;
 
+/// Input messages queued for a process before callers experience backpressure.
+const INPUT_QUEUE: usize = 64;
+
 pub struct Proc {
   pub id: String,
   pub argv: Vec<String>,
@@ -35,7 +38,7 @@ pub struct Proc {
   pub run_id: String,
   /// The terminal type the executor set instead of the client's.
   pub term_fallback: Option<TermFallback>,
-  input: mpsc::UnboundedSender<Input>,
+  input: mpsc::Sender<Input>,
   /// The replay buffer, the terminal model and the subscribers, under one
   /// lock so a new subscriber's snapshot and its first live event never
   /// overlap. Shared with each terminal viewer's [`Live`], which takes its
@@ -108,8 +111,9 @@ pub struct Client {
 impl Client {
   /// Sends input as this client: typing makes it the size's owner; a resize
   /// is kept as its size and applied while it owns the size. A read-only
-  /// client's input is dropped.
-  pub fn send(&self, input: Input) {
+  /// client's input is dropped. Awaits capacity on the bounded input queue
+  /// so upstream streams feel backpressure.
+  pub async fn send(&self, input: Input) {
     if self.read_only {
       tracing::debug!("process {}: input from a read-only client refused", self.proc.id);
       return;
@@ -133,10 +137,10 @@ impl Client {
       seats.resize()
     };
     if let Some((rows, cols)) = resize {
-      self.proc.send(Input::Resize(rows, cols));
+      self.proc.send_input(Input::Resize(rows, cols)).await;
     }
     if !matches!(input, Input::Resize(..)) {
-      self.proc.send(input);
+      self.proc.send_input(input).await;
     }
   }
 }
@@ -287,14 +291,14 @@ impl Subscription {
 
 /// The parts of a new process its tasks own: the input queue and the exit.
 pub(super) struct Ends {
-  pub input: mpsc::UnboundedReceiver<Input>,
+  pub input: mpsc::Receiver<Input>,
   pub exit: watch::Sender<Option<Exit>>,
 }
 
 impl Proc {
   pub(super) fn new(spec: &Spec, pid: i64, tty: bool, term_fallback: Option<TermFallback>) -> (Arc<Self>, Ends) {
     let screen = spec.tty.filter(|_| tty).map(Screen::new);
-    let (input, input_rx) = mpsc::unbounded_channel();
+    let (input, input_rx) = mpsc::channel(INPUT_QUEUE);
     let (exit_tx, exited) = watch::channel(None);
     let proc = Arc::new(Self {
       id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
@@ -333,8 +337,9 @@ impl Proc {
     (proc, ends)
   }
 
-  /// Sends stdin, end of input or a resize to the process, or delivers a
-  /// signal to its process group.
+  /// Sends stdin, end of input or a resize to the process without blocking,
+  /// or delivers a signal to its process group immediately. Use
+  /// [`Proc::send_input`] when streaming stdin so backpressure applies.
   pub fn send(&self, input: Input) {
     if let Input::Signal(name) = &input {
       // The first signal is the one that ends the process where signals
@@ -343,7 +348,28 @@ impl Proc {
       platform::signal_group(self.pid, name);
       return;
     }
-    if self.input.send(input).is_err() {
+    match self.input.try_send(input) {
+      Ok(()) => {}
+      Err(TrySendError::Closed(_)) => {
+        // The input task ends with the process; late input has nowhere to go.
+        tracing::debug!("process {}: input after the process ended", self.id);
+      }
+      Err(TrySendError::Full(_)) => {
+        tracing::debug!("process {}: non-blocking input dropped because the queue is full", self.id);
+      }
+    }
+  }
+
+  /// Sends stdin, end of input or a resize to the process, waiting for room
+  /// in the bounded input queue so callers feel backpressure; signals are
+  /// delivered to the process group immediately.
+  pub async fn send_input(&self, input: Input) {
+    if let Input::Signal(name) = &input {
+      self.signalled.get_or_init(|| name.clone());
+      platform::signal_group(self.pid, name);
+      return;
+    }
+    if self.input.send(input).await.is_err() {
       // The input task ends with the process; late input has nowhere to go.
       tracing::debug!("process {}: input after the process ended", self.id);
     }
