@@ -626,6 +626,29 @@ impl Engine for Fake {
     self.record(format!("download {name} {path}"));
     Ok(None)
   }
+
+  async fn commit_container(&self, container: &str, repo: &str, tag: &str) -> Result<String, engine::Error> {
+    self.record(format!("commit {container} {repo}:{tag}"));
+    Ok(format!("sha256:committed-{container}"))
+  }
+
+  fn export_image(&self, image: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
+    self.record(format!("export {image}"));
+    Box::pin(futures_util::stream::empty())
+  }
+
+  async fn load_image(
+    &self,
+    _tar: futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>>,
+  ) -> Result<(), engine::Error> {
+    self.record("load".into());
+    Ok(())
+  }
+
+  async fn remove_image(&self, image: &str) -> Result<(), engine::Error> {
+    self.record(format!("remove_image {image}"));
+    Ok(())
+  }
 }
 
 #[cfg(unix)]

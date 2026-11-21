@@ -1,6 +1,7 @@
 //! Apple's `container` CLI, the boundary the `macos-apple-container` driver
 //! drives: the trait tests stand in for, and the CLI as a child process.
 
+use std::path::Path;
 use std::process::ExitStatus;
 
 use crate::driver::Error;
@@ -25,6 +26,24 @@ pub trait Cli: Send + Sync {
   /// Starts `container ARGS` without input, its stdout and stderr written to
   /// `log`.
   fn spawn(&self, args: &[String], log: std::fs::File) -> Result<Box<dyn Process>, Error>;
+  /// Loads an OCI-compatible image tar archive at `archive` into Apple's
+  /// `container` image store (`container image load --input <archive>`).
+  // Source: `container image load --help` with `container` 1.7.1 on an Apple
+  // silicon Mac (2026-11-21): `USAGE: container image load [--input <input>]
+  // [--force] [--debug]`, `-i, --input <input> Path to the image tar archive`.
+  async fn load_image(&self, archive: &Path) -> Result<(), Error> {
+    let args = vec![
+      "image".into(),
+      "load".into(),
+      "--input".into(),
+      archive.display().to_string(),
+    ];
+    let loaded = self.output(&args).await?;
+    if !loaded.success {
+      return Err(super::refused(format!("`container image load` failed: {}", super::first_line(&loaded))));
+    }
+    Ok(())
+  }
 }
 
 /// A started CLI process.

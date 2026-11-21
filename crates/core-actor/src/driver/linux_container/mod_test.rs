@@ -106,6 +106,29 @@ impl Engine for Fake {
     archive.append_data(&mut header, "passwd", text).unwrap();
     Ok(Some(archive.into_inner().unwrap()))
   }
+
+  async fn commit_container(&self, container: &str, repo: &str, tag: &str) -> Result<String, EngineError> {
+    self.record(format!("commit {container} {repo}:{tag}"));
+    Ok(format!("sha256:committed-{container}"))
+  }
+
+  fn export_image(&self, image: &str) -> BoxStream<'static, Result<bytes::Bytes, EngineError>> {
+    self.record(format!("export {image}"));
+    futures_util::stream::empty().boxed()
+  }
+
+  async fn load_image(&self, mut tar: BoxStream<'static, Result<bytes::Bytes, EngineError>>) -> Result<(), EngineError> {
+    while let Some(chunk) = tar.next().await {
+      chunk?;
+    }
+    self.record("load".into());
+    Ok(())
+  }
+
+  async fn remove_image(&self, image: &str) -> Result<(), EngineError> {
+    self.record(format!("remove_image {image}"));
+    Ok(())
+  }
 }
 
 /// The image's `/etc/passwd` in [`Fake`].

@@ -454,6 +454,21 @@ async fn an_image_archive_is_loaded_into_the_image_store() {
 }
 
 #[tokio::test]
+async fn cli_load_image_invokes_container_image_load_with_input_path() {
+  let fake = Fake::default();
+
+  fake.load_image(Path::new("/tmp/snapshot.tar")).await.unwrap();
+  assert_eq!(fake.calls(), ["image load --input /tmp/snapshot.tar"]);
+
+  let failing = Fake {
+    failing: vec![("image", "load")],
+    ..Default::default()
+  };
+  let error = failing.load_image(Path::new("/tmp/snapshot.tar")).await.unwrap_err().to_string();
+  assert_eq!(error, "`container image load` failed: Error: not found");
+}
+
+#[tokio::test]
 async fn non_empty_layer_disks_are_refused_until_slice_2() {
   let dir = tempfile::tempdir().unwrap();
   let (runtime, _) = runtime(Fake::default());
