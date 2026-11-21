@@ -67,6 +67,8 @@ fn needy_at(home: &Path) -> Command {
     .env("NEEDY_STATE_DIR", home.join("state"))
     .env("NEEDY_DATA_DIR", home.join("data"))
     .env("NEEDY_RUNTIME_DIR", home.join("run"))
+    // Keep tests offline: never auto-pull release archives from GitHub.
+    .env("NEEDY_DOWNLOAD_BASE", "http://127.0.0.1:1")
     .stdin(Stdio::null());
   command
 }
@@ -89,6 +91,13 @@ fn stand_in_actor(home: &Home) -> Vec<String> {
   let firecracker = image.join("firecracker");
   let script = "#!/bin/sh\necho boot\necho hello from the actor\nwhile kill -0 $PPID 2>/dev/null; do sleep 0.05; done\n";
   needy_common::testing::write_executable(&firecracker, script).unwrap();
+  // Register the stand-in image in the local base slot too so `needy run
+  // create`'s `ensure_vm_base` sees it as present and skips auto-pulling.
+  let base = home.path().join("data/images/linux-firecracker/base");
+  std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+  if base.symlink_metadata().is_err() {
+    std::os::unix::fs::symlink(&image, &base).unwrap();
+  }
   let kvm = home.path().join("kvm");
   std::fs::write(&kvm, "").unwrap();
   let guest = home.path().join("needy-linux");

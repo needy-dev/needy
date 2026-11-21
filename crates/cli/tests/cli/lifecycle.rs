@@ -120,3 +120,51 @@ fn interactive_create_reaps_its_execution_holder_while_attached() {
   }
   assert!(creator.try_wait().unwrap().is_none(), "helper must be reaped while its creating CLI is still alive");
 }
+
+// ROOT CAUSE:
+//
+// If `CARGO_PKG_VERSION` matched a published GitHub release, every CLI test
+// calling `needy run create` against `stand_in_actor` downloaded and extracted
+// the release VM archive from GitHub before creating the run, because
+// `stand_in_actor` wrote its image to `<home>/image` rather than
+// `<home>/data/images/linux-firecracker/base` and `needy_at` left
+// `NEEDY_DOWNLOAD_BASE` unset.
+//
+// Before the fix, parallel test runs saturated bandwidth and disk I/O, causing
+// `interactive_create_reaps_its_execution_holder_while_attached` to exceed its
+// 20 s `wait_for_fixture_pid` deadline.
+// The fix links the stand-in image into `data/images/linux-firecracker/base`
+// and points `needy_at`'s `NEEDY_DOWNLOAD_BASE` at a refusing loopback port so
+// `cli` tests never auto-pull from the network.
+#[test]
+fn stand_in_actor_does_not_auto_pull_a_release_archive() {
+  use std::net::TcpListener;
+  use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+  };
+
+  let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+  let address = listener.local_addr().unwrap();
+  let requests = Arc::new(AtomicUsize::new(0));
+  let seen = requests.clone();
+  std::thread::spawn(move || {
+    for stream in listener.incoming().flatten() {
+      seen.fetch_add(1, Ordering::SeqCst);
+      drop(stream);
+    }
+  });
+
+  let home = Home::new();
+  let _daemon = Daemon::start(&home);
+  let profile = home.write("profile.yaml", NATIVE_PROFILE);
+  let output = home
+    .needy()
+    .env("NEEDY_DOWNLOAD_BASE", format!("http://{address}"))
+    .args(["run", "create", "--profile", profile.to_str().unwrap()])
+    .output()
+    .unwrap();
+
+  assert!(output.status.success(), "run create: {}", stderr(&output));
+  assert_eq!(requests.load(Ordering::SeqCst), 0, "run create against stand_in_actor must not auto-pull");
+}
