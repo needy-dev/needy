@@ -380,3 +380,84 @@ fn a_taken_file_keeps_the_runs_permissions() {
   let mode = std::fs::metadata(f.store.join("bin/tool")).unwrap().permissions().mode();
   assert_eq!(mode & 0o777, 0o755);
 }
+
+#[test]
+fn files_matching_a_driver_rule_are_skipped_and_returned_as_driver_claims() {
+  let f = Fixture::new();
+  f.seeded("opencode.db", "seed-db");
+  write(&f.run, "opencode.db", "run-db");
+  write(&f.run, "opencode.db-wal", "run-wal");
+  write(&f.store, "opencode.db", "store-db");
+  write(&f.store, "opencode.db-shm", "store-shm");
+  write(&f.run, "notes.txt", "normal-file");
+
+  let policy = on_conflict("opencode.db*", Choice::Driver("needy-merge-sqlite".into()));
+  let outcome = f.merge(&policy);
+
+  // Non-matching files merge normally.
+  assert_eq!(read(&f.store, "notes.txt").as_deref(), Some("normal-file"));
+  assert_eq!(outcome.changes, vec![change("notes.txt", Action::Taken)]);
+  // Claimed files are untouched in store and not put in aside.
+  assert_eq!(read(&f.store, "opencode.db").as_deref(), Some("store-db"));
+  assert!(!f.store.join("opencode.db-wal").exists());
+  assert!(!f.aside.exists());
+  // All matching files across all three trees (including side files) are claimed.
+  assert_eq!(
+    outcome.driver_claims,
+    vec![DriverClaim {
+      driver: "needy-merge-sqlite".into(),
+      paths: vec![
+        "opencode.db".into(),
+        "opencode.db-shm".into(),
+        "opencode.db-wal".into(),
+      ],
+    }]
+  );
+}
+
+#[test]
+fn driver_claimed_files_untouched_by_the_run_produce_no_claim() {
+  let f = Fixture::new();
+  f.seeded("opencode.db", "same");
+  write(&f.store, "opencode.db", "store-updated");
+
+  let policy = on_conflict("opencode.db*", Choice::Driver("needy-merge-sqlite".into()));
+  let outcome = f.merge(&policy);
+
+  assert_eq!(read(&f.store, "opencode.db").as_deref(), Some("store-updated"));
+  assert!(outcome.driver_claims.is_empty());
+}
+
+#[test]
+fn driver_staging_and_applying_replaces_claimed_files_and_cleans_stale_side_files() {
+  let f = Fixture::new();
+  f.seeded("opencode.db", "seed-db");
+  write(&f.run, "opencode.db", "run-db");
+  write(&f.run, "opencode.db-wal", "run-wal");
+  write(&f.store, "opencode.db", "store-db");
+  write(&f.store, "opencode.db-wal", "store-wal");
+  write(&f.store, "other.txt", "untouched");
+
+  let claimed = vec!["opencode.db".to_string(), "opencode.db-wal".to_string()];
+  let staging = tempfile::tempdir().unwrap();
+  let trees = Trees {
+    seed: &f.seed,
+    run: &f.run,
+    store: &f.store,
+  };
+  stage_driver_trees(trees, &claimed, staging.path()).unwrap();
+
+  assert_eq!(read(&staging.path().join("seed"), "opencode.db").as_deref(), Some("seed-db"));
+  assert_eq!(read(&staging.path().join("run"), "opencode.db-wal").as_deref(), Some("run-wal"));
+  assert_eq!(read(&staging.path().join("store"), "opencode.db-wal").as_deref(), Some("store-wal"));
+  assert!(!staging.path().join("store/other.txt").exists());
+
+  // Simulate driver writing checkpointed opencode.db (no -wal) into out/.
+  let out = staging.path().join("out");
+  write(&out, "opencode.db", "merged-db");
+  apply_driver_output(&out, &f.store, &claimed).unwrap();
+
+  assert_eq!(read(&f.store, "opencode.db").as_deref(), Some("merged-db"));
+  assert!(!f.store.join("opencode.db-wal").exists(), "stale -wal side file must be removed");
+  assert_eq!(read(&f.store, "other.txt").as_deref(), Some("untouched"));
+}

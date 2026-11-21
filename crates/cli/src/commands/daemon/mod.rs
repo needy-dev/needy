@@ -168,6 +168,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     local_runner: args.local_runner.or(settings.local_runner),
     report_wait: needy_daemon::REPORT_WAIT,
     mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
+    merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
   };
   match needy_daemon::guest_needy(&config) {
     Ok(guest) => tracing::info!("actors get the guest needy {}", guest.display()),

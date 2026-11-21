@@ -260,3 +260,260 @@ async fn the_control_host_serves_an_actor_only_the_mounts_of_its_per_run_copies(
   assert!(matches!(other_program, Err(ControlError::Denied { .. })), "{:?}", other_program.err());
   stop(&started.daemon, &id).await;
 }
+
+/// A stand-in Firecracker that logs every started VM directory (`state/runs/`
+/// or `state/sessions/`) to `started_log` and waits until `<dir>/done` appears
+/// or its parent exits.
+fn merge_session_driver_script(started_log: &Path) -> String {
+  format!(
+    r#"dir=$(dirname "$3")
+touch "$dir/v.sock"
+echo "$dir" >> "{}"
+while [ ! -e "$dir/done" ] && kill -0 $PPID 2>/dev/null; do sleep 0.02; done"#,
+    started_log.display()
+  )
+}
+
+#[derive(Clone)]
+enum MergeResponderMode {
+  /// Fetches `seed`, `run`, `store`, verifies them, pushes `merged_content` as
+  /// `opencode.db` in `out`, and exits 0.
+  Succeed { merged_content: String },
+  /// Exits with the given non-zero code without pushing `out`.
+  Exit(i32),
+  /// Never finishes (for timeout tests).
+  Hang,
+}
+
+type ObservedConfigs = std::sync::Arc<std::sync::Mutex<Vec<needy_api_client::proto::v1::GetConfigResponse>>>;
+type ObservedTrees = std::sync::Arc<std::sync::Mutex<Vec<(String, String, String)>>>;
+
+/// Drives merge sessions started under `state/sessions/` and returns the
+/// observed `GetConfigResponse`s and fetched `(seed, run, store)` file maps.
+fn spawn_merge_responder(
+  started_log: PathBuf,
+  mode: MergeResponderMode,
+  stop: tokio_util::sync::CancellationToken,
+) -> (ObservedConfigs, ObservedTrees, tokio::task::JoinHandle<()>) {
+  use needy_api_client::proto::v1::{FetchFilesRequest, GetConfigRequest, PushFilesRequest, ReportExitRequest};
+  let configs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+  let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+  let configs_bg = configs.clone();
+  let observed_bg = observed.clone();
+
+  let handle = tokio::spawn(async move {
+    let mut seen = std::collections::HashSet::new();
+    while !stop.is_cancelled() {
+      if let Ok(text) = std::fs::read_to_string(&started_log) {
+        for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+          let dir = PathBuf::from(line);
+          if !seen.insert(dir.clone()) {
+            continue;
+          }
+          if !dir.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "sessions") {
+            continue;
+          }
+          let configs_task = configs_bg.clone();
+          let observed_task = observed_bg.clone();
+          let mode_task = mode.clone();
+          tokio::spawn(async move {
+            let sock = dir.join("v.sock_7000");
+            let endpoint = format!("unix:{}", sock.display());
+            let client = needy_api_client::Client::connect(&endpoint).await.unwrap();
+            let config = client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+            configs_task.lock().unwrap().push(config.clone());
+
+            // Fetch seed, run, store archives and record opencode.db from each.
+            let mut fetched = std::collections::HashMap::new();
+            for copy in &config.copy_in {
+              let mut stream = client
+                .guest()
+                .fetch_files(FetchFilesRequest {
+                  name: copy.name.clone(),
+                })
+                .await
+                .unwrap()
+                .into_inner();
+              let mut archive = Vec::new();
+              while let Some(chunk) = stream.message().await.unwrap() {
+                archive.extend(chunk.data);
+              }
+              let tmp = tempfile::tempdir().unwrap();
+              needy_common::archive::unpack(&archive, tmp.path(), &[]).unwrap();
+              let db = std::fs::read_to_string(tmp.path().join("opencode.db")).unwrap_or_default();
+              fetched.insert(copy.name.clone(), db);
+            }
+            observed_task.lock().unwrap().push((
+              fetched.get("seed").cloned().unwrap_or_default(),
+              fetched.get("run").cloned().unwrap_or_default(),
+              fetched.get("store").cloned().unwrap_or_default(),
+            ));
+
+            match mode_task {
+              MergeResponderMode::Hang => {
+                // Leave the VM running until the daemon's timeout cancels it.
+                return;
+              }
+              MergeResponderMode::Exit(code) => {
+                let _ = client
+                  .guest()
+                  .report_exit(ReportExitRequest {
+                    code: Some(code),
+                    signal: String::new(),
+                  })
+                  .await;
+              }
+              MergeResponderMode::Succeed { merged_content } => {
+                let out_tmp = tempfile::tempdir().unwrap();
+                std::fs::write(out_tmp.path().join("opencode.db"), merged_content).unwrap();
+                let archive = needy_common::archive::pack(out_tmp.path(), &[]).unwrap();
+                client
+                  .guest()
+                  .push_files(tokio_stream::iter(vec![PushFilesRequest {
+                    name: "out".into(),
+                    data: archive,
+                  }]))
+                  .await
+                  .unwrap();
+                client
+                  .guest()
+                  .report_exit(ReportExitRequest {
+                    code: Some(0),
+                    signal: String::new(),
+                  })
+                  .await
+                  .unwrap();
+              }
+            }
+            let _ = std::fs::write(dir.join("done"), "");
+          });
+        }
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+  });
+  (configs, observed, handle)
+}
+
+#[tokio::test]
+async fn a_merge_driver_receives_three_trees_in_an_actor_session_and_updates_the_store() {
+  use needy_api_client::proto::v1::UpperLayer as ProtoUpperLayer;
+
+  let started = testing::daemon().await;
+  let (dir, data) = (started.dir.path(), started.dir.path().join("data"));
+  let started_log = dir.join("started.log");
+  testing::fake_image(&dir.join("image"), &merge_session_driver_script(&started_log));
+
+  let store = dir.join("store");
+  write(&store, "opencode.db", "seed-db");
+  write(&store, "opencode.db-wal", "seed-wal");
+  write(&store, "notes.txt", "seed-note");
+
+  let cancel = tokio_util::sync::CancellationToken::new();
+  let (configs, observed, responder) = spawn_merge_responder(
+    started_log,
+    MergeResponderMode::Succeed {
+      merged_content: "merged-db".into(),
+    },
+    cancel.clone(),
+  );
+
+  let id = create(&started.daemon, dir, &profile(&store, "\"opencode.db*\": { driver: needy-merge-sqlite }")).await;
+  write(&copy(&data, &id), "opencode.db", "run-db");
+  write(&copy(&data, &id), "opencode.db-wal", "run-wal");
+  write(&copy(&data, &id), "notes.txt", "run-note");
+  write(&store, "opencode.db", "store-db");
+  write(&store, "opencode.db-wal", "store-wal");
+
+  stop(&started.daemon, &id).await;
+  cancel.cancel();
+  let _ = responder.await;
+
+  // Store got merged db, stale -wal was removed, and non-driver file merged normally.
+  assert_eq!(read(&store, "opencode.db").as_deref(), Some("merged-db"));
+  assert!(!store.join("opencode.db-wal").exists(), "stale -wal side file must be cleaned up");
+  assert_eq!(read(&store, "notes.txt").as_deref(), Some("run-note"));
+
+  // Driver session ran with routing off, disposable upper layer, and received all three trees.
+  let cfgs = configs.lock().unwrap().clone();
+  assert_eq!(cfgs.len(), 1);
+  let sess = cfgs[0].session.unwrap();
+  assert!(!sess.routing);
+  assert_eq!(sess.upper(), ProtoUpperLayer::Disposable);
+  assert!(cfgs[0].command.iter().any(|arg| arg.contains("needy-merge-sqlite")));
+  assert_eq!(observed.lock().unwrap().as_slice(), &[("seed-db".into(), "run-db".into(), "store-db".into())]);
+
+  let json = summary(dir, &id).await;
+  assert_eq!(json["synced"][0]["merge"], "merged");
+  assert_eq!(json["synced"][0]["conflicts"], serde_json::json!([]));
+  assert_eq!(json["findings"], serde_json::json!([]));
+}
+
+#[tokio::test]
+async fn a_failing_merge_driver_leaves_the_store_unchanged_and_reports_a_conflict() {
+  let started = testing::daemon().await;
+  let (dir, data) = (started.dir.path(), started.dir.path().join("data"));
+  let started_log = dir.join("started.log");
+  testing::fake_image(&dir.join("image"), &merge_session_driver_script(&started_log));
+
+  let store = dir.join("store");
+  write(&store, "opencode.db", "seed-db");
+
+  let cancel = tokio_util::sync::CancellationToken::new();
+  let (_configs, _observed, responder) = spawn_merge_responder(started_log, MergeResponderMode::Exit(1), cancel.clone());
+
+  let id = create(&started.daemon, dir, &profile(&store, "\"opencode.db*\": { driver: needy-merge-sqlite }")).await;
+  write(&copy(&data, &id), "opencode.db", "run-db");
+  write(&copy(&data, &id), "opencode.db-wal", "run-wal");
+  write(&store, "opencode.db", "store-db");
+
+  stop(&started.daemon, &id).await;
+  cancel.cancel();
+  let _ = responder.await;
+
+  assert_eq!(read(&store, "opencode.db").as_deref(), Some("store-db"), "store must remain unchanged on driver failure");
+  let kept = data.join("conflicts").join(&id).join("pi");
+  assert_eq!(read(&kept, "opencode.db").as_deref(), Some("run-db"));
+  assert_eq!(read(&kept, "opencode.db-wal").as_deref(), Some("run-wal"));
+
+  let json = summary(dir, &id).await;
+  assert_eq!(json["synced"][0]["merge"], "merged");
+  assert_eq!(json["synced"][0]["conflicts"], serde_json::json!(["opencode.db", "opencode.db-wal"]));
+  assert_eq!(json["synced"][0]["kept"], kept.display().to_string());
+  assert_eq!(json["findings"][0]["kind"], "sync_conflict");
+}
+
+#[tokio::test]
+async fn a_timed_out_merge_driver_leaves_the_store_unchanged_and_reports_a_conflict() {
+  let started = testing::daemon_with(|config| {
+    config.merge_driver_timeout = std::time::Duration::from_millis(250);
+  })
+  .await;
+  let (dir, data) = (started.dir.path(), started.dir.path().join("data"));
+  let started_log = dir.join("started.log");
+  testing::fake_image(&dir.join("image"), &merge_session_driver_script(&started_log));
+
+  let store = dir.join("store");
+  write(&store, "opencode.db", "seed-db");
+
+  let cancel = tokio_util::sync::CancellationToken::new();
+  let (_configs, _observed, responder) = spawn_merge_responder(started_log, MergeResponderMode::Hang, cancel.clone());
+
+  let id = create(&started.daemon, dir, &profile(&store, "\"opencode.db*\": { driver: needy-merge-sqlite }")).await;
+  write(&copy(&data, &id), "opencode.db", "run-db");
+  write(&store, "opencode.db", "store-db");
+
+  tokio::time::timeout(std::time::Duration::from_secs(10), stop(&started.daemon, &id))
+    .await
+    .expect("timed-out merge driver must not hang stop");
+  cancel.cancel();
+  let _ = responder.await;
+
+  assert_eq!(read(&store, "opencode.db").as_deref(), Some("store-db"));
+  let kept = data.join("conflicts").join(&id).join("pi");
+  assert_eq!(read(&kept, "opencode.db").as_deref(), Some("run-db"));
+
+  let json = summary(dir, &id).await;
+  assert_eq!(json["synced"][0]["conflicts"], serde_json::json!(["opencode.db"]));
+  assert_eq!(json["findings"][0]["kind"], "sync_conflict");
+}
