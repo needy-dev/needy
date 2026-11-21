@@ -88,7 +88,7 @@ pub(super) fn materialize(
 ) -> Result<PathBuf> {
   let base = BaseArchive::open(base_image_tar)?;
   let cache_key = Digest::of(format!("{snapshot_digest}\n{}\n{tag}\n", base.config_digest).as_bytes());
-  let out_path = oci_dir.join(format!("{}-on-{}.tar", snapshot_digest.stem(), &cache_key.hex()[..16]));
+  let out_path = oci_dir.join(format!("{}-on-{}.tar", super::stem(&snapshot_digest), &cache_key.hex()[..16]));
   if out_path.exists() {
     return Ok(out_path);
   }
@@ -415,7 +415,7 @@ fn ensure_base_diff_ids<'a>(base: &BaseArchive, config: &'a mut serde_json::Valu
       let mut reader = open_layer_reader(&base.path, span)?;
       let mut hasher = sha2::Sha256::new();
       std::io::copy(&mut reader, &mut hasher).map_err(io(base.path.display()))?;
-      let digest = Digest(hasher.finalize().into());
+      let digest = Digest::from_bytes(hasher.finalize().into());
       arr.push(serde_json::Value::String(digest.to_string()));
     }
   }
@@ -662,7 +662,7 @@ fn hash_and_probe_span(archive: &Path, span: TarSpan) -> Result<(Digest, bool)> 
     hasher.update(&buf[..n]);
   }
   let is_gzip = first_len == 2 && first == GZIP_MAGIC;
-  Ok((Digest(hasher.finalize().into()), is_gzip))
+  Ok((Digest::from_bytes(hasher.finalize().into()), is_gzip))
 }
 
 fn read_span(archive: &Path, span: TarSpan) -> Result<Vec<u8>> {

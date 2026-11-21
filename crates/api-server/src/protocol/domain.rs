@@ -903,5 +903,6 @@ pub fn image_rollback(request: v1::RollbackImageRequest) -> Result<ImageRollback
 pub fn proto_image_rollback(result: ImageRollbackResult) -> v1::RollbackImageResponse {
   v1::RollbackImageResponse {
     layer: result.layer.unwrap_or_default(),
+    base: result.base.unwrap_or_default(),
   }
 }

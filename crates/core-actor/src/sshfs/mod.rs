@@ -16,8 +16,55 @@ mod stream;
 #[cfg(target_os = "linux")]
 pub use linux::{Mount, detach, mount};
 
+/// Creates `target` and any missing parent directories, setting ownership of
+/// only the newly created directories to `uid`:`gid`.
+///
+/// Pre-existing ancestor directories are left untouched so system directories
+/// (such as `/home`, `/mnt`, or `/var`) never have their ownership altered.
+#[cfg(unix)]
+fn create_mount_target(target: &std::path::Path, uid: u32, gid: u32) -> anyhow::Result<()> {
+  use anyhow::Context as _;
+  create_mount_target_with(target, |dir| match std::os::unix::fs::chown(dir, Some(uid), Some(gid)) {
+    Ok(()) => Ok(()),
+    // NOTICE: a non-root daemon mounting on the host for a `linux-container`
+    // actor cannot `chown` to another profile UID; inside a VM guest `init`
+    // runs as root so `chown` succeeds.
+    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+      tracing::debug!("cannot chown newly created mount dir {} to {uid}:{gid}: {e}", dir.display());
+      Ok(())
+    }
+    Err(e) => Err(e).with_context(|| format!("cannot chown {} to {uid}:{gid}", dir.display())),
+  })
+}
+
+#[cfg(unix)]
+fn create_mount_target_with(
+  target: &std::path::Path,
+  mut on_created: impl FnMut(&std::path::Path) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+  use anyhow::Context as _;
+  let mut missing = Vec::new();
+  let mut cursor = target;
+  while !cursor.exists() {
+    missing.push(cursor.to_path_buf());
+    match cursor.parent() {
+      Some(parent) if !parent.as_os_str().is_empty() && parent != cursor => cursor = parent,
+      _ => break,
+    }
+  }
+  for dir in missing.into_iter().rev() {
+    match std::fs::create_dir(&dir) {
+      Ok(()) => on_created(&dir)?,
+      Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+      Err(e) => return Err(e).with_context(|| format!("cannot create {}", dir.display())),
+    }
+  }
+  Ok(())
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
+  use std::path::Path;
   use std::process::Stdio;
   use std::sync::Arc;
   use std::time::Duration;
@@ -28,7 +75,7 @@ mod linux {
   use needy_api_client::{Client, Executor};
   use needy_api_proto::v1::{ExecStart, Origin};
 
-  use super::stream;
+  use super::{create_mount_target, stream};
 
   /// An executor directory to mount.
   #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,7 +96,7 @@ mod linux {
   // the mount (sshfs exits once it is detached, which ends the stream, or the
   // stream stays lost past its window); they have no owner of their own.
   pub async fn mount(client: &Client, m: &Mount, uid: u32, gid: u32) -> Result<()> {
-    std::fs::create_dir_all(&m.target).with_context(|| format!("cannot create {}", m.target))?;
+    create_mount_target(Path::new(&m.target), uid, gid)?;
     let mut options = format!("passive,allow_other,uid={uid},gid={gid},idmap=none,cache=yes,kernel_cache,attr_timeout=1,entry_timeout=1");
     if !m.writable {
       options.push_str(",ro");
@@ -120,5 +167,78 @@ mod linux {
       }
       Err(e) => Err(anyhow::anyhow!("cannot detach {target}: {e}")),
     }
+  }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use std::os::unix::fs::MetadataExt as _;
+  use std::path::PathBuf;
+
+  use super::{create_mount_target, create_mount_target_with};
+
+  // ROOT CAUSE:
+  //
+  // Guest `init` runs as root (PID 1) and previously called
+  // `std::fs::create_dir_all(&m.target)` before mounting `sshfs`. If
+  // `m.target` had missing parent directories (e.g. `~/.pi` for `~/.pi/agent`),
+  // they were created owned by `root:root`, causing `Permission denied` when
+  // the run's non-root user wrote sibling files inside `~/.pi`.
+  //
+  // Before the fix, newly created ancestor directories stayed owned by root.
+  // The fix creates missing directories one component at a time and chowns
+  // only the newly created directories to the target `uid:gid`, leaving
+  // pre-existing ancestors untouched.
+  #[test]
+  fn create_mount_target_chowns_only_newly_created_directories() {
+    let root = tempfile::tempdir().unwrap();
+    let existing_home = root.path().join("home/agent");
+    std::fs::create_dir_all(&existing_home).unwrap();
+    let target = existing_home.join(".pi/agent");
+
+    let mut chowned: Vec<PathBuf> = Vec::new();
+    create_mount_target_with(&target, |dir| {
+      chowned.push(dir.to_path_buf());
+      Ok(())
+    })
+    .unwrap();
+
+    assert!(target.is_dir());
+    assert_eq!(chowned, vec![existing_home.join(".pi"), existing_home.join(".pi/agent")]);
+
+    // A second call when everything already exists touches nothing.
+    let mut second = Vec::new();
+    create_mount_target_with(&target, |dir| {
+      second.push(dir.to_path_buf());
+      Ok(())
+    })
+    .unwrap();
+    assert!(second.is_empty());
+  }
+
+  #[test]
+  fn create_mount_target_sets_uid_gid_on_newly_created_ancestors() {
+    let root = tempfile::tempdir().unwrap();
+    let existing = root.path().join("existing");
+    std::fs::create_dir_all(&existing).unwrap();
+    let existing_meta = std::fs::metadata(&existing).unwrap();
+    let target = existing.join(".pi/agent");
+
+    // When running as root (e.g. inside the Linux test container), verify real
+    // chown to a distinct non-root uid:gid while leaving `existing` root-owned.
+    let (want_uid, want_gid) = if existing_meta.uid() == 0 {
+      (1234, 5678)
+    } else {
+      (existing_meta.uid(), existing_meta.gid())
+    };
+
+    create_mount_target(&target, want_uid, want_gid).unwrap();
+
+    let parent_meta = std::fs::metadata(existing.join(".pi")).unwrap();
+    let target_meta = std::fs::metadata(&target).unwrap();
+    let existing_after = std::fs::metadata(&existing).unwrap();
+    assert_eq!((parent_meta.uid(), parent_meta.gid()), (want_uid, want_gid));
+    assert_eq!((target_meta.uid(), target_meta.gid()), (want_uid, want_gid));
+    assert_eq!((existing_after.uid(), existing_after.gid()), (existing_meta.uid(), existing_meta.gid()));
   }
 }

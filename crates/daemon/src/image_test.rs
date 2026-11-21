@@ -621,7 +621,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
   let commit2 = finished2.commit.expect("second edit must produce a commit");
   assert_ne!(commit2.layer, commit1.layer);
 
-  // Roll back 1 step from commit2 -> commit1.
+  // Roll back 1 step from commit2 -> commit1, restoring commit1's original base.
   let rolled1 = Images::rollback(
     daemon,
     ImageRollback {
@@ -633,6 +633,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
   .await
   .unwrap();
   assert_eq!(rolled1.layer.as_deref(), Some(commit1.layer.to_string().as_str()));
+  assert_eq!(rolled1.base.as_deref(), Some(commit1.base.to_string().as_str()));
 
   // Roll back 2 steps from commit2 -> None (before first commit).
   let rolled2 = Images::rollback(
@@ -646,6 +647,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
   .await
   .unwrap();
   assert_eq!(rolled2.layer, None);
+  assert_eq!(rolled2.base, None);
 }
 
 #[tokio::test]
@@ -665,19 +667,18 @@ executors:
 
   // Store a commit layer in the daemon's layer store.
   let commit_layer =
-    daemon.images.store.commit("test-img", None, std::io::Cursor::new(tar_with_file("hand.txt", "edited\n")), Vec::new()).unwrap();
+    daemon.images.store.commit("test-img", None, None, std::io::Cursor::new(tar_with_file("hand.txt", "edited\n")), Vec::new()).unwrap();
   let root = crate::image::root_digest(daemon).await.unwrap();
   let def = needy_config::image::Definition {
     root: Some("example.com/root:1".into()),
     ..Default::default()
   };
-  let expected_top = needy_core::image::plan(&def, &root, &needy_config::profile::User::default(), None).top().clone();
-  let commit_digest = needy_core::image::Digest::parse(&commit_layer.to_string()).unwrap();
+  let expected_top = *needy_core::image::plan(&def, &root, &needy_config::profile::User::default(), None).top();
 
   // Matching base -> commit_rebased == false, commit layer stacked on top.
   let mut req = new_run(profile, started.dir.path());
   req.image_commit = Some(needy_core::image::Commit {
-    layer: commit_digest.clone(),
+    layer: commit_layer,
     base: expected_top,
   });
   let created = Runs::create(daemon, req).await.unwrap();
@@ -690,7 +691,7 @@ executors:
   let stale_base = needy_core::image::Digest::parse(&format!("sha256:{}", "0".repeat(64))).unwrap();
   let mut req_rebased = new_run(profile, started.dir.path());
   req_rebased.image_commit = Some(needy_core::image::Commit {
-    layer: commit_digest,
+    layer: commit_layer,
     base: stale_base,
   });
   let rebased = Runs::create(daemon, req_rebased).await.unwrap();
