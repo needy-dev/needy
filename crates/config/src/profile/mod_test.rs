@@ -298,9 +298,15 @@ fn an_inline_definition_appends_its_layers_along_the_profiles_extends() {
 }
 
 #[test]
-fn an_inline_definition_refuses_feature_layers_and_unknown_keys() {
-  let err = load_text("actor: { driver: macos-vz, image: { layers: [{ feature: ./features/x }] } }\n").unwrap_err().to_string();
-  assert!(err.contains("actor.image.layers[0]: `feature` layers come with slice 3"), "{err}");
+fn an_inline_definition_accepts_feature_layers_and_refuses_unknown_keys() {
+  let p = load_text("actor: { driver: macos-vz, image: { layers: [{ feature: ./features/x, with: { debug: true } }] } }\n").unwrap();
+  assert_eq!(
+    definition(&p).layers,
+    [crate::image::Layer::Feature {
+      reference: "./features/x".into(),
+      options: std::collections::BTreeMap::from([("debug".into(), crate::image::FeatureOption::Bool(true))]),
+    }]
+  );
 
   let err = load_text("actor: { driver: macos-vz, image: { rooot: example.com/root:1 } }\n").unwrap_err().to_string();
   assert!(err.contains("actor.image.rooot: unknown field `rooot`"), "{err}");

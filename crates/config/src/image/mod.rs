@@ -46,15 +46,112 @@ pub struct Definition {
 }
 
 /// One entry of a definition's `layers`.
-// TODO(images): the `feature` kind (a Dev Container feature by reference,
-// with its options under `with:`) comes with slice 3 of the images and run
-// data spec; until then `RawLayer` refuses it with a message naming the
-// slice, so nothing accepts a layer it cannot build.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawLayer")]
 pub enum Layer {
   /// A shell script run by `sh -c` as root, like a Dockerfile `RUN`.
   Run(String),
+  /// A Dev Container feature by reference (OCI reference, `https:` tarball, or
+  /// local directory), with optional `with:` option values.
+  Feature {
+    /// The feature reference as written (e.g. `ghcr.io/devcontainers/features/node:1`).
+    reference: String,
+    /// Option values passed under `with:`.
+    options: BTreeMap<String, FeatureOption>,
+  },
+}
+
+/// A Dev Container feature option value under `with:` (string, boolean, or
+/// integer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeatureOption {
+  String(String),
+  Bool(bool),
+  Int(i64),
+}
+
+impl fmt::Display for FeatureOption {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match self {
+      Self::String(value) => f.write_str(value),
+      Self::Bool(value) => write!(f, "{value}"),
+      Self::Int(value) => write!(f, "{value}"),
+    }
+  }
+}
+
+impl From<&str> for FeatureOption {
+  fn from(value: &str) -> Self {
+    Self::String(value.to_string())
+  }
+}
+
+impl From<String> for FeatureOption {
+  fn from(value: String) -> Self {
+    Self::String(value)
+  }
+}
+
+impl From<bool> for FeatureOption {
+  fn from(value: bool) -> Self {
+    Self::Bool(value)
+  }
+}
+
+impl From<i64> for FeatureOption {
+  fn from(value: i64) -> Self {
+    Self::Int(value)
+  }
+}
+
+impl serde::Serialize for FeatureOption {
+  fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    match self {
+      Self::String(value) => serializer.serialize_str(value),
+      Self::Bool(value) => serializer.serialize_bool(*value),
+      Self::Int(value) => serializer.serialize_i64(*value),
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for FeatureOption {
+  fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+    deserializer.deserialize_any(FeatureOptionVisitor)
+  }
+}
+
+struct FeatureOptionVisitor;
+
+impl<'de> Visitor<'de> for FeatureOptionVisitor {
+  type Value = FeatureOption;
+
+  fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    f.write_str("a string, boolean, or integer feature option value")
+  }
+
+  fn visit_str<E: de::Error>(self, value: &str) -> Result<FeatureOption, E> {
+    Ok(FeatureOption::String(value.to_string()))
+  }
+
+  fn visit_string<E: de::Error>(self, value: String) -> Result<FeatureOption, E> {
+    Ok(FeatureOption::String(value))
+  }
+
+  fn visit_bool<E: de::Error>(self, value: bool) -> Result<FeatureOption, E> {
+    Ok(FeatureOption::Bool(value))
+  }
+
+  fn visit_i64<E: de::Error>(self, value: i64) -> Result<FeatureOption, E> {
+    Ok(FeatureOption::Int(value))
+  }
+
+  fn visit_u64<E: de::Error>(self, value: u64) -> Result<FeatureOption, E> {
+    i64::try_from(value).map(FeatureOption::Int).map_err(|_| E::custom(format!("feature option integer {value} is out of range")))
+  }
+
+  fn visit_f64<E: de::Error>(self, value: f64) -> Result<FeatureOption, E> {
+    Err(E::custom(format!("feature option value {value} is a floating-point number; quote decimal versions as strings (e.g. \"{value}\")")))
+  }
 }
 
 /// A layer as written, before its kind is decided.
@@ -67,7 +164,7 @@ struct RawLayer {
   feature: Option<String>,
   /// A feature's options.
   #[serde(default)]
-  with: Option<Value>,
+  with: Option<BTreeMap<String, FeatureOption>>,
 }
 
 impl TryFrom<RawLayer> for Layer {
@@ -81,17 +178,28 @@ impl TryFrom<RawLayer> for Layer {
         ..
       } => Err("a layer is one of `run` or `feature`, not both".into()),
       RawLayer {
-        feature: Some(feature),
+        run: Some(_),
+        with: Some(_),
         ..
-      } => Err(format!(
-        "`feature` layers come with slice 3 of the images spec (features as layers), so {feature} cannot be built yet; \
-         install it with a `run` layer until then"
-      )),
+      } => Err("`with` sets a `feature` layer's options".into()),
+      RawLayer {
+        feature: Some(reference),
+        with,
+        ..
+      } => {
+        if reference.trim().is_empty() {
+          return Err("`feature` reference cannot be empty".into());
+        }
+        Ok(Self::Feature {
+          reference,
+          options: with.unwrap_or_default(),
+        })
+      }
       RawLayer { with: Some(_), .. } => Err("`with` sets a `feature` layer's options".into()),
       RawLayer {
         run: Some(script), ..
       } => Ok(Self::Run(script)),
-      RawLayer { .. } => Err("a layer needs `run`".into()),
+      RawLayer { .. } => Err("a layer needs `run` or `feature`".into()),
     }
   }
 }
@@ -118,7 +226,7 @@ pub(crate) fn same_feature(layer: &Value) -> Option<String> {
 // workspace has none, and a local feature directory (`./features/x`) is not
 // an OCI reference. A tag is the text after the last `:` of the last path
 // segment, so a registry's port (`localhost:5000/x`) stays.
-fn untagged(reference: &str) -> &str {
+pub fn untagged(reference: &str) -> &str {
   let reference = reference.split_once('@').map_or(reference, |(name, _)| name);
   let segment = reference.rfind('/').map_or(0, |slash| slash + 1);
   match reference[segment..].rfind(':') {
