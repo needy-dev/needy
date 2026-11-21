@@ -16,12 +16,26 @@
 // exchange (such as `ghcr.io` and Docker Hub) until private feature registries
 // are requested.
 
+use std::collections::HashMap;
 use std::fmt;
-use std::io::{Read as _, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 pub use needy_core::image::Digest;
 use serde::Deserialize;
+use sha2::Digest as _;
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::watch;
+
+/// Default Bearer token cache TTL when the token server omits `expires_in`.
+// Reference: https://distribution.github.io/distribution/spec/auth/token/ (retrieved 2026-11-21)
+const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(60);
+
+/// Safety margin subtracted from a token's `expires_in` so cached tokens are
+/// refreshed before they expire mid-request.
+const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(5);
 
 /// `Accept` header sent when pulling an OCI feature manifest.
 // Source: https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md#pulling-manifests
@@ -374,6 +388,83 @@ pub fn builtin_sshfs() -> BuiltinFeature {
   builtin("builtin:sshfs").expect("builtin:sshfs is embedded")
 }
 
+#[derive(Debug, Clone)]
+struct CachedToken {
+  token: String,
+  expires_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+enum SharedError {
+  InvalidReference(String, String),
+  Auth(String),
+  Registry {
+    status: u16,
+    url: String,
+    body: String,
+  },
+  InvalidManifest(String),
+  DigestMismatch {
+    what: &'static str,
+    expected: Digest,
+    actual: Digest,
+  },
+  InvalidArchive(String),
+  Other(String),
+}
+
+impl SharedError {
+  fn from_error(err: &Error) -> Self {
+    match err {
+      Error::InvalidReference(r, reason) => Self::InvalidReference(r.clone(), reason.clone()),
+      Error::Auth(msg) => Self::Auth(msg.clone()),
+      Error::Registry { status, url, body } => Self::Registry {
+        status: *status,
+        url: url.clone(),
+        body: body.clone(),
+      },
+      Error::InvalidManifest(msg) => Self::InvalidManifest(msg.clone()),
+      Error::DigestMismatch {
+        what,
+        expected,
+        actual,
+      } => Self::DigestMismatch {
+        what,
+        expected: *expected,
+        actual: *actual,
+      },
+      Error::InvalidArchive(msg) => Self::InvalidArchive(msg.clone()),
+      Error::Http { .. } | Error::Io { .. } => Self::Other(err.to_string()),
+    }
+  }
+
+  fn into_error(self) -> Error {
+    match self {
+      Self::InvalidReference(r, reason) => Error::InvalidReference(r, reason),
+      Self::Auth(msg) => Error::Auth(msg),
+      Self::Registry { status, url, body } => Error::Registry { status, url, body },
+      Self::InvalidManifest(msg) => Error::InvalidManifest(msg),
+      Self::DigestMismatch {
+        what,
+        expected,
+        actual,
+      } => Error::DigestMismatch {
+        what,
+        expected,
+        actual,
+      },
+      Self::InvalidArchive(msg) => Error::InvalidArchive(msg),
+      Self::Other(context) => Error::Io {
+        context,
+        source: std::io::Error::other("in-flight feature fetch failed"),
+      },
+    }
+  }
+}
+
+type FeatureFlightResult = std::result::Result<FetchedFeature, SharedError>;
+type FeatureFlightMap = HashMap<String, watch::Receiver<Option<FeatureFlightResult>>>;
+
 /// Fetches Dev Container feature artifacts over OCI Distribution v2 and caches
 /// them under `cache_dir/features/sha256-<manifest-hex>/`.
 #[derive(Debug, Clone)]
@@ -382,6 +473,9 @@ pub struct FeatureStore {
   client: reqwest::Client,
   scheme: String,
   base_url: Option<String>,
+  in_flight: Arc<Mutex<FeatureFlightMap>>,
+  token_cache: Arc<Mutex<HashMap<BearerChallenge, CachedToken>>>,
+  repo_challenges: Arc<Mutex<HashMap<(String, String), BearerChallenge>>>,
 }
 
 impl FeatureStore {
@@ -398,6 +492,9 @@ impl FeatureStore {
       client,
       scheme: "https".to_string(),
       base_url: None,
+      in_flight: Arc::default(),
+      token_cache: Arc::default(),
+      repo_challenges: Arc::default(),
     })
   }
 
@@ -451,7 +548,8 @@ impl FeatureStore {
   }
 
   /// Fetches `reference` (or returns it from cache when pinned by digest and
-  /// already present).
+  /// already present). Concurrent fetches for the same reference share one
+  /// in-flight download.
   pub async fn fetch(&self, reference: &Reference) -> Result<FetchedFeature> {
     if let Some(pinned) = reference.digest()
       && let Some(cached) = self.get_cached(&pinned)?
@@ -460,10 +558,78 @@ impl FeatureStore {
     }
 
     let base = self.registry_base(reference);
-    let manifest_url = format!("{base}/v2/{}/manifests/{}", reference.repository, reference.target_segment());
-    let mut bearer_token: Option<String> = None;
+    let flight_key = format!("{base}/v2/{}/manifests/{}", reference.repository, reference.target_segment());
 
-    let manifest_resp = self.get_with_auth(&manifest_url, Some(MANIFEST_ACCEPT), &mut bearer_token).await?;
+    enum Role {
+      Leader(watch::Sender<Option<FeatureFlightResult>>),
+      Waiter(watch::Receiver<Option<FeatureFlightResult>>),
+      Cached(FetchedFeature),
+    }
+
+    let role = {
+      let mut in_flight = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+      if let Some(pinned) = reference.digest()
+        && let Some(cached) = self.get_cached(&pinned)?
+      {
+        Role::Cached(cached)
+      } else if let Some(rx) = in_flight.get(&flight_key) {
+        Role::Waiter(rx.clone())
+      } else {
+        let (tx, rx) = watch::channel(None);
+        in_flight.insert(flight_key.clone(), rx);
+        Role::Leader(tx)
+      }
+    };
+
+    match role {
+      Role::Cached(cached) => Ok(cached),
+      Role::Waiter(mut rx) => {
+        let result = rx
+          .wait_for(Option::is_some)
+          .await
+          .map_err(|_| Error::Io {
+            context: format!("in-flight feature fetch for {reference} ended without a result"),
+            source: std::io::Error::other("in-flight feature fetch cancelled"),
+          })?
+          .clone()
+          .expect("wait_for guarantees Some");
+        result.map_err(SharedError::into_error)
+      }
+      Role::Leader(tx) => {
+        struct Guard {
+          in_flight: Arc<Mutex<FeatureFlightMap>>,
+          key: String,
+        }
+        impl Drop for Guard {
+          fn drop(&mut self) {
+            self.in_flight.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.key);
+          }
+        }
+        let _guard = Guard {
+          in_flight: self.in_flight.clone(),
+          key: flight_key,
+        };
+
+        let fetched = self.fetch_uncached(reference, &base).await;
+        match &fetched {
+          Ok(feature) => {
+            let _ = tx.send(Some(Ok(feature.clone())));
+          }
+          Err(err) => {
+            let _ = tx.send(Some(Err(SharedError::from_error(err))));
+          }
+        }
+        fetched
+      }
+    }
+  }
+
+  async fn fetch_uncached(&self, reference: &Reference, base: &str) -> Result<FetchedFeature> {
+    let manifest_url = format!("{base}/v2/{}/manifests/{}", reference.repository, reference.target_segment());
+    let repo_key = (base.to_string(), reference.repository.clone());
+    let mut bearer_token = self.cached_token_for_repo(&repo_key);
+
+    let manifest_resp = self.get_with_auth(&manifest_url, Some(MANIFEST_ACCEPT), &repo_key, &mut bearer_token).await?;
     let manifest_bytes = manifest_resp.bytes().await.map_err(|source| Error::Http {
       url: manifest_url.clone(),
       source,
@@ -491,14 +657,38 @@ impl FeatureStore {
       Digest::parse(&layer.digest).map_err(|e| Error::InvalidManifest(format!("invalid layer digest {}: {e}", layer.digest)))?;
 
     let blob_url = format!("{base}/v2/{}/blobs/{layer_digest}", reference.repository);
-    let blob_resp = self.get_with_auth(&blob_url, None, &mut bearer_token).await?;
-    let blob_bytes = blob_resp.bytes().await.map_err(|source| Error::Http {
+    let mut blob_resp = self.get_with_auth(&blob_url, None, &repo_key, &mut bearer_token).await?;
+
+    let features_dir = self.cache_dir.join("features");
+    tokio::fs::create_dir_all(&features_dir).await.map_err(io(features_dir.display()))?;
+    let features_dir_for_stage = features_dir.clone();
+    let staged = tokio::task::spawn_blocking(move || {
+      tempfile::Builder::new().prefix(".feature-").tempdir_in(&features_dir_for_stage).map_err(io(features_dir_for_stage.display()))
+    })
+    .await
+    .map_err(|e| Error::Io {
+      context: format!("creating feature staging directory panicked: {e}"),
+      source: std::io::Error::other(e.to_string()),
+    })??;
+
+    let staged_archive = staged.path().join(ARCHIVE_FILE);
+    let mut archive_file = tokio::fs::File::create(&staged_archive).await.map_err(io(staged_archive.display()))?;
+    let mut hasher = sha2::Sha256::new();
+    while let Some(chunk) = blob_resp.chunk().await.map_err(|source| Error::Http {
       url: blob_url.clone(),
       source,
-    })?;
+    })? {
+      hasher.update(&chunk);
+      archive_file.write_all(&chunk).await.map_err(io(staged_archive.display()))?;
+    }
+    archive_file.flush().await.map_err(io(staged_archive.display()))?;
+    archive_file.sync_all().await.map_err(io(staged_archive.display()))?;
+    drop(archive_file);
 
-    let actual_blob_digest = Digest::of(&blob_bytes);
+    let actual_blob_digest = Digest::from_bytes(hasher.finalize().into());
     if actual_blob_digest != layer_digest {
+      // Dropping `staged` removes the temporary staging directory cleanly.
+      drop(staged);
       return Err(Error::DigestMismatch {
         what: "feature blob",
         expected: layer_digest,
@@ -506,8 +696,33 @@ impl FeatureStore {
       });
     }
 
-    let metadata_json = extract_metadata_json(&blob_bytes)?;
-    self.cache_atomically(&manifest_digest, &blob_bytes, &metadata_json)
+    let target_dir = self.entry_dir(&manifest_digest);
+    tokio::task::spawn_blocking(move || {
+      let metadata_json = extract_metadata_from_file(&staged_archive)?;
+      let staged_metadata = staged.path().join(METADATA_FILE);
+      write_and_sync(&staged_metadata, metadata_json.as_bytes())?;
+
+      let staged_path = staged.keep();
+      if let Err(err) = std::fs::rename(&staged_path, &target_dir) {
+        // Best-effort cleanup of the unused staging directory; the primary
+        // error (or concurrent cache hit below) takes precedence.
+        let _ = std::fs::remove_dir_all(&staged_path);
+        if !(target_dir.join(ARCHIVE_FILE).is_file() && target_dir.join(METADATA_FILE).is_file()) {
+          return Err(io(target_dir.display())(err));
+        }
+      }
+
+      Ok(FetchedFeature {
+        digest: manifest_digest,
+        metadata_json,
+        archive_path: target_dir.join(ARCHIVE_FILE),
+      })
+    })
+    .await
+    .map_err(|e| Error::Io {
+      context: format!("caching feature archive panicked: {e}"),
+      source: std::io::Error::other(e.to_string()),
+    })?
   }
 
   /// Materializes an embedded built-in feature (`builtin:<id>`) into the local
@@ -546,7 +761,31 @@ impl FeatureStore {
     }
   }
 
-  async fn get_with_auth(&self, url: &str, accept: Option<&str>, token: &mut Option<String>) -> Result<reqwest::Response> {
+  fn cached_token_for_repo(&self, repo_key: &(String, String)) -> Option<String> {
+    let challenge = self.repo_challenges.lock().unwrap_or_else(|p| p.into_inner()).get(repo_key).cloned()?;
+    self.cached_token(&challenge)
+  }
+
+  fn cached_token(&self, challenge: &BearerChallenge) -> Option<String> {
+    let mut cache = self.token_cache.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Instant::now();
+    if let Some(entry) = cache.get(challenge) {
+      if entry.expires_at > now {
+        return Some(entry.token.clone());
+      }
+      cache.remove(challenge);
+    }
+    None
+  }
+
+  async fn get_with_auth(
+    &self,
+    url: &str,
+    accept: Option<&str>,
+    repo_key: &(String, String),
+    token: &mut Option<String>,
+  ) -> Result<reqwest::Response> {
+    let sent_token = token.is_some();
     let response = self.send_get(url, accept, token.as_deref()).await?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
       let header = response
@@ -555,7 +794,16 @@ impl FeatureStore {
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| Error::Auth(format!("HTTP 401 from {url} without WWW-Authenticate header")))?;
       let challenge = parse_bearer_challenge(header)?;
-      let exchanged = self.exchange_bearer_token(&challenge).await?;
+      // If we already presented a token and got 401, evict any cached entry
+      // for this challenge and force a fresh exchange.
+      if sent_token {
+        self.token_cache.lock().unwrap_or_else(|p| p.into_inner()).remove(&challenge);
+      }
+      let exchanged = match self.cached_token(&challenge) {
+        Some(cached) => cached,
+        None => self.exchange_bearer_token(&challenge).await?,
+      };
+      self.repo_challenges.lock().unwrap_or_else(|p| p.into_inner()).insert(repo_key.clone(), challenge);
       *token = Some(exchanged);
       let retry = self.send_get(url, accept, token.as_deref()).await?;
       return ensure_success(url, retry).await;
@@ -601,11 +849,25 @@ impl FeatureStore {
     })?;
     let parsed: TokenResponse =
       serde_json::from_slice(&body).map_err(|e| Error::Auth(format!("cannot parse token JSON from {url_str}: {e}")))?;
-    parsed
+    let token = parsed
       .token
       .filter(|t| !t.is_empty())
       .or_else(|| parsed.access_token.filter(|t| !t.is_empty()))
-      .ok_or_else(|| Error::Auth(format!("token response from {url_str} contained neither `token` nor `access_token`")))
+      .ok_or_else(|| Error::Auth(format!("token response from {url_str} contained neither `token` nor `access_token`")))?;
+    let ttl = match parsed.expires_in {
+      Some(secs) => Duration::from_secs(secs).saturating_sub(TOKEN_EXPIRY_MARGIN),
+      None => DEFAULT_TOKEN_TTL,
+    };
+    if !ttl.is_zero() {
+      self.token_cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
+        challenge.clone(),
+        CachedToken {
+          token: token.clone(),
+          expires_at: Instant::now() + ttl,
+        },
+      );
+    }
+    Ok(token)
   }
 
   fn cache_atomically(&self, digest: &Digest, blob_bytes: &[u8], metadata_json: &str) -> Result<FetchedFeature> {
@@ -690,9 +952,10 @@ fn select_feature_layer(manifest: &OciManifest) -> Result<&OciDescriptor> {
 struct TokenResponse {
   token: Option<String>,
   access_token: Option<String>,
+  expires_in: Option<u64>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 struct BearerChallenge {
   realm: String,
   service: Option<String>,
@@ -791,13 +1054,19 @@ fn parse_bearer_challenge(header: &str) -> Result<BearerChallenge> {
 }
 
 /// Extracts and validates `devcontainer-feature.json` from a Dev Container
-/// feature tarball (uncompressed or gzip-compressed).
-fn extract_metadata_json(blob_bytes: &[u8]) -> Result<String> {
+/// feature tarball file (uncompressed or gzip-compressed) without loading the
+/// entire blob into memory.
+fn extract_metadata_from_file(path: &Path) -> Result<String> {
+  let mut file = std::fs::File::open(path).map_err(io(path.display()))?;
+  let mut magic = [0u8; 2];
+  let read = file.read(&mut magic).map_err(io(path.display()))?;
+  file.seek(SeekFrom::Start(0)).map_err(io(path.display()))?;
+  let reader = std::io::BufReader::new(file);
   // Gzip magic bytes (`0x1f 0x8b`, RFC 1952 section 2.3.1).
-  if blob_bytes.len() >= 2 && blob_bytes[0] == 0x1f && blob_bytes[1] == 0x8b {
-    extract_metadata_from_reader(flate2::read::GzDecoder::new(blob_bytes))
+  if read == 2 && magic == [0x1f, 0x8b] {
+    extract_metadata_from_reader(flate2::read::GzDecoder::new(reader))
   } else {
-    extract_metadata_from_reader(blob_bytes)
+    extract_metadata_from_reader(reader)
   }
 }
 

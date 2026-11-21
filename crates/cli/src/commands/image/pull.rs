@@ -159,6 +159,47 @@ async fn detected() -> Result<Detected> {
   })
 }
 
+/// Whether the base VM image files for `driver` are present and valid at
+/// `base_dir`.
+fn vm_base_present(base_dir: &Path, driver: ActorDriver) -> bool {
+  match driver {
+    ActorDriver::MacosVz => vm::MacosVz::new(base_dir).check().is_ok(),
+    ActorDriver::LinuxFirecracker => vm::LinuxFirecracker::new(base_dir).check().is_ok(),
+    _ => true,
+  }
+}
+
+/// Whether `driver`'s installed base VM image already matches `expected_sha256`
+/// and passes manifest and driver checks.
+fn is_vm_base_up_to_date(images: &Path, driver: ActorDriver, expected_sha256: &str) -> bool {
+  let target = vm::base_dir(images, driver);
+  let Ok(Some(manifest)) = manifest::read(&target) else {
+    return false;
+  };
+  manifest.sha256.as_deref() == Some(expected_sha256) && check(&manifest, Some(driver)).is_ok() && vm_base_present(&target, driver)
+}
+
+/// Acquires an exclusive advisory file lock on `<images>/.pull-<driver>.lock`
+/// so concurrent CLI invocations serialize VM base pulls for the same driver.
+async fn lock_vm_pull(images: &Path, driver: ActorDriver) -> Result<std::fs::File> {
+  let images = images.to_path_buf();
+  tokio::task::spawn_blocking(move || -> Result<std::fs::File> {
+    std::fs::create_dir_all(&images).with_context(|| format!("cannot create {}", images.display()))?;
+    let lock_path = images.join(format!(".pull-{driver}.lock"));
+    let file = std::fs::OpenOptions::new()
+      .create(true)
+      .read(true)
+      .write(true)
+      .truncate(false)
+      .open(&lock_path)
+      .with_context(|| format!("cannot open {}", lock_path.display()))?;
+    file.lock().with_context(|| format!("cannot lock {}", lock_path.display()))?;
+    Ok(file)
+  })
+  .await
+  .context("acquiring VM image pull lock panicked")?
+}
+
 /// Ensures the base VM image for `driver` is present on this local host
 /// (decision E9 in `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`).
 ///
@@ -179,12 +220,18 @@ pub(crate) async fn ensure_vm_base(driver: ActorDriver, ctx: &Context) {
   };
   let images = paths.images();
   let base_dir = vm::base_dir(&images, driver);
-  let present = match driver {
-    ActorDriver::MacosVz => vm::MacosVz::new(&base_dir).check().is_ok(),
-    ActorDriver::LinuxFirecracker => vm::LinuxFirecracker::new(&base_dir).check().is_ok(),
-    _ => true,
+  if vm_base_present(&base_dir, driver) {
+    return;
+  }
+
+  let _lock = match lock_vm_pull(&images, driver).await {
+    Ok(lock) => lock,
+    Err(e) => {
+      output::message(format_args!("note: could not lock base {driver} image pull: {e:#}"));
+      return;
+    }
   };
-  if present {
+  if vm_base_present(&base_dir, driver) {
     return;
   }
 
@@ -194,7 +241,7 @@ pub(crate) async fn ensure_vm_base(driver: ActorDriver, ctx: &Context) {
     return;
   };
   output::message(format_args!("base {driver} VM image is missing; pulling release v{version}"));
-  match pull_vm(&client, &images, driver, version, &assets(version), feedback).await {
+  match pull_vm_locked(&client, &images, driver, version, &assets(version), feedback).await {
     Ok(dir) => {
       let _ = progress::complete(
         feedback,
@@ -232,12 +279,30 @@ async fn pull_vm(
   assets: &str,
   feedback: bool,
 ) -> Result<PathBuf> {
+  let _lock = lock_vm_pull(images, driver).await?;
+  pull_vm_locked(client, images, driver, version, assets, feedback).await
+}
+
+/// Inner implementation of [`pull_vm`]; caller must hold `<images>/.pull-<driver>.lock`.
+async fn pull_vm_locked(
+  client: &reqwest::Client,
+  images: &Path,
+  driver: ActorDriver,
+  version: &str,
+  assets: &str,
+  feedback: bool,
+) -> Result<PathBuf> {
   let name = archive_name(driver);
   let tag = format!("v{version}");
   let url = format!("{assets}/{name}");
   let checksum = output::Progress::new(feedback, format!("Fetching checksum for {name}"));
   let expected = expected_sha256(client, &format!("{url}.sha256"), version, &name).await?;
   checksum.finish();
+  if is_vm_base_up_to_date(images, driver, &expected) {
+    let target = vm::base_dir(images, driver);
+    progress::phase(feedback, format_args!("image pull: {driver} image is already up to date (sha256 {expected})"));
+    return Ok(target);
+  }
   std::fs::create_dir_all(images).with_context(|| format!("cannot create {}", images.display()))?;
   let archive = images.join(format!(".needy-pull-{}.tar.gz", uuid::Uuid::new_v4()));
   let installed = async {

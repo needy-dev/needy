@@ -201,3 +201,39 @@ fn the_guest_disk_is_squashfs_with_needy_at_its_root_and_is_made_once_per_binary
   let other = write(dir.path(), "other", &elf(elf::EM_AARCH64, None, 0));
   assert_ne!(disk(&other, &cache).unwrap(), made);
 }
+
+#[test]
+fn guest_disk_caches_by_metadata_and_invalidates_on_change_or_missing_disk() {
+  use std::io::Read as _;
+  let dir = tempfile::tempdir().unwrap();
+  let binary = write(dir.path(), "needy-linux-x86_64", &elf(elf::EM_X86_64, None, 0));
+  let cache = dir.path().join("guest");
+
+  let first = disk(&binary, &cache).unwrap();
+  let mtime = std::fs::metadata(&first).unwrap().modified().unwrap();
+  let second = disk(&binary, &cache).unwrap();
+  assert_eq!(first, second);
+  assert_eq!(std::fs::metadata(&second).unwrap().modified().unwrap(), mtime);
+
+  // Removing the cached disk file invalidates the in-memory entry and rebuilds it.
+  std::fs::remove_file(&first).unwrap();
+  let rebuilt = disk(&binary, &cache).unwrap();
+  assert_eq!(rebuilt, first);
+  assert!(rebuilt.exists());
+
+  // Changing the binary's size/content invalidates the cache and produces a new disk.
+  let mut updated = elf(elf::EM_X86_64, None, 0);
+  updated.extend_from_slice(b"extra-payload-bytes");
+  std::fs::write(&binary, &updated).unwrap();
+  let third = disk(&binary, &cache).unwrap();
+  assert_ne!(third, first);
+
+  let fs = backhand::FilesystemReader::from_reader(std::io::Cursor::new(std::fs::read(&third).unwrap())).unwrap();
+  let node = fs.files().find(|n| n.fullpath == Path::new("/needy")).unwrap();
+  let backhand::InnerNode::File(file) = &node.inner else {
+    unreachable!()
+  };
+  let mut content = Vec::new();
+  fs.file(file).reader().read_to_end(&mut content).unwrap();
+  assert_eq!(content, updated);
+}
