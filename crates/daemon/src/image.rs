@@ -15,6 +15,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::StreamExt as _;
 use needy_api_server::control::{
   BuildStepOutcome, Caller, Chunks, ControlError, FaultAdded, Guest, GuestConfig, GuestControls, GuestSession, GuestUser, ImageBuild,
   ImageBuildResult, ImageEditFinished, ImageEditStart, ImageEditStarted, ImageRollback, ImageRollbackResult, Images as ImagesTrait, Logs,
@@ -24,7 +25,7 @@ use needy_api_server::control::{
 use needy_api_server::{Health, Listen, Server};
 use needy_common::process::Exit;
 use needy_config::image::{Definition, Image};
-use needy_config::profile::{ActorDriver, User};
+use needy_config::profile::{ActorDriver, CONTAINER_IMAGE, OciRuntime, User};
 use needy_config::value::Glob;
 use needy_core::event::{ActorStop, Event, ExecDecide, ImageBuildStep};
 use needy_core::image::{Commit as PlanCommit, Digest as PlanDigest, Input, Plan, Step};
@@ -32,16 +33,23 @@ use needy_core::intercept::exec::ExecContext;
 use needy_core::network::Policy;
 use needy_core::types::{Network, Origin, Outcome, Placement, Principal};
 use needy_core_actor::driver;
+use needy_core_actor::driver::linux_container::LinuxContainer;
+use needy_core_actor::driver::macos_apple_container::MacosAppleContainer;
 use needy_core_actor::image::manifest;
-use needy_core_actor::image::store::{Command as StoreCommand, Digest as LayerDigest, Error as StoreError, LayerDisk, Snapshot, Store};
+use needy_core_actor::image::store::{
+  Command as StoreCommand, Digest as LayerDigest, Error as StoreError, LayerDisk, Snapshot, Store, extract_top_layer, snapshot_tag,
+};
 use needy_core_actor::sidecar::gateway;
+use needy_core_executor::engine::{self, Engine};
 use needy_trace::Dispatch;
 use sha2::Digest as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::guest::{UPPER_LAYER, keep_upper};
+use crate::holder::ContainerBackends;
 use crate::pool::Instance;
 use crate::run::{Boot, Run};
 use crate::{Daemon, actor};
@@ -78,6 +86,10 @@ pub struct Images {
   /// Maps `needy_core::image::Digest` cache keys to built layer digests
   /// (`sha256-<hex>` files containing `sha256:<layer-hex>\n`).
   keys_dir: PathBuf,
+  /// Cached exported base OCI image tars keyed by base image ID.
+  base_oci_dir: PathBuf,
+  /// Container runtime boundaries (Docker-compatible engine and Apple's `container` CLI).
+  backends: ContainerBackends,
   /// In-flight builds keyed by step cache key, so concurrent `run create`s
   /// build each missing cache key once and wait for the same result.
   in_flight: Mutex<HashMap<PlanDigest, watch::Receiver<Option<FlightResult>>>>,
@@ -132,18 +144,27 @@ impl Drop for EditLockGuard {
 impl Images {
   /// Opens the layer store under `cache_dir` (built layers, disks, snapshots,
   /// cache keys) and `data_dir` (commit layers and commit history).
-  pub fn new(cache_dir: &Path, data_dir: &Path) -> Self {
+  pub(crate) fn with_backends(cache_dir: &Path, data_dir: &Path, backends: ContainerBackends) -> Self {
     let cache = cache_dir.join("image-store");
     let data = data_dir.join("image-store");
     let keys_dir = cache.join("keys");
+    let base_oci_dir = cache.join("base-oci");
     Self {
       store: Store::new(cache, data),
       keys_dir,
+      base_oci_dir,
+      backends,
       in_flight: Mutex::default(),
       active_edits: Mutex::default(),
       edits: Mutex::default(),
       root_digest_cache: Mutex::default(),
     }
+  }
+
+  /// Container runtime boundaries used by container actor drivers and image
+  /// materialization.
+  pub(crate) fn backends(&self) -> &ContainerBackends {
+    &self.backends
   }
 
   /// Looks up an active interactive edit session by its session ID.
@@ -203,10 +224,12 @@ impl Images {
 
   /// Resolves one build step under single-flight deduplication: returns
   /// `(layer_digest, cached, elapsed_ms)`.
+  #[allow(clippy::too_many_arguments)]
   async fn resolve_step(
     self: &Arc<Self>,
     daemon: &Daemon,
-    driver: ActorDriver,
+    builder: ActorDriver,
+    base_container_image: &str,
     trace: &Dispatch,
     cancel: &CancellationToken,
     built_below: &[LayerDigest],
@@ -267,7 +290,7 @@ impl Images {
         };
 
         let started = Instant::now();
-        let built = self.build_step(daemon, driver, trace, cancel, built_below, step).await;
+        let built = self.build_step(daemon, builder, base_container_image, trace, cancel, built_below, step).await;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         match built {
           Ok(layer) => {
@@ -285,35 +308,47 @@ impl Images {
     }
   }
 
-  /// Runs a single build step in a fresh VM session on top of `built_below`.
+  /// Runs a single build step in a fresh VM or container session on top of
+  /// `built_below`.
+  #[allow(clippy::too_many_arguments)]
   async fn build_step(
     &self,
     daemon: &Daemon,
-    driver: ActorDriver,
+    builder: ActorDriver,
+    base_container_image: &str,
     trace: &Dispatch,
     cancel: &CancellationToken,
     built_below: &[LayerDigest],
     step: &Step,
   ) -> Result<LayerDigest> {
     let Input::Run(script) = &step.input;
-    let (snapshot, layer_disks) = if built_below.is_empty() {
-      (None, Vec::new())
+    let (snapshot, layer_disks, snapshot_image) = if built_below.is_empty() {
+      (None, Vec::new(), None)
+    } else if builder == ActorDriver::LinuxContainer {
+      let store = self.store.clone();
+      let layers = built_below.to_vec();
+      let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting parent layers panicked")??;
+      let tag = materialize_for_linux_container(daemon, &snapshot, base_container_image).await?;
+      (Some(snapshot), Vec::new(), Some(tag))
     } else {
       let store = self.store.clone();
       let layers = built_below.to_vec();
-      tokio::task::spawn_blocking(move || -> Result<_> {
+      let (snapshot, disks) = tokio::task::spawn_blocking(move || -> Result<_> {
         let snapshot = store.snapshot(&layers)?;
         let disks = store.materialize(&snapshot)?;
-        Ok((Some(snapshot), disks))
+        Ok((snapshot, disks))
       })
       .await
-      .context("materializing parent layers panicked")??
+      .context("materializing parent layers panicked")??;
+      (Some(snapshot), disks, None)
     };
 
     let spec = SessionSpec {
-      driver,
+      driver: builder,
+      base_container_image: Some(base_container_image.to_string()),
       snapshot,
       layer_disks,
+      snapshot_image,
       image_path: String::new(),
       // Spec ("Building and editing"): build steps run as root with routing
       // off and network open and traced through the gateway.
@@ -366,12 +401,16 @@ impl Images {
 /// Configuration for an actor session (a build step, or an interactive edit
 /// session).
 pub struct SessionSpec {
-  /// Which VM driver to boot.
+  /// Which driver to boot (`linux-firecracker`, `macos-vz`, or `linux-container`).
   pub driver: ActorDriver,
+  /// Base container image reference when `driver == ActorDriver::LinuxContainer`.
+  pub base_container_image: Option<String>,
   /// The layers stacked below the session's upper layer, lowest first.
   pub snapshot: Option<Snapshot>,
-  /// Materialized SquashFS layer disks of `snapshot`, lowest first.
+  /// Materialized SquashFS layer disks of `snapshot`, lowest first (VM drivers).
   pub layer_disks: Vec<LayerDisk>,
+  /// Materialized OCI snapshot tag (container driver).
+  pub snapshot_image: Option<String>,
   /// The image's `PATH`; empty uses the default system `PATH`.
   pub image_path: String,
   /// The user the session command runs as.
@@ -427,7 +466,10 @@ async fn run_session_in(
   spec: SessionSpec,
   cancel: CancellationToken,
 ) -> Result<SessionOutcome> {
-  let profile_yaml = session_profile_yaml(spec.driver, &spec.user);
+  if spec.driver == ActorDriver::LinuxContainer {
+    return run_container_session_in(daemon, session_id, dir, spec, cancel).await;
+  }
+  let profile_yaml = session_profile_yaml(spec.driver, &spec.user, None);
   let session_profile = needy_config::profile::load(&needy_config::Source::text(profile_yaml.clone(), PathBuf::new()))?;
   let driver = driver::new(&actor::host(daemon), &session_profile.actor)?;
   let channels = driver.channels(dir);
@@ -464,7 +506,7 @@ async fn run_session_in(
   });
 
   // Serve gateway on `cg.sock`.
-  serve_session_gateway(dir, spec.network, spec.trace, session_cancel.clone(), &tasks)?;
+  serve_session_gateway(&dir.join("cg.sock"), spec.network, spec.trace, session_cancel.clone(), &tasks, false)?;
 
   let layer_disks = spec.layer_disks.into_iter().map(|d| d.path).collect();
   let mut vm = match daemon
@@ -478,6 +520,7 @@ async fn run_session_in(
       mounts: Vec::new(),
       guest: guest_bin,
       layer_disks,
+      snapshot_image: None,
     })
     .await
   {
@@ -540,28 +583,157 @@ async fn run_session_in(
   })
 }
 
-/// Resolved plan, built/cached layers (including any commit layer), and
-/// materialized snapshot disks.
+/// Runs a build step in a writable `linux-container` session (used on Linux
+/// hosts without a VM driver), committing the stopped container's upper layer
+/// into the layer store on clean exit.
+async fn run_container_session_in(
+  daemon: &Daemon,
+  session_id: &str,
+  dir: &Path,
+  spec: SessionSpec,
+  cancel: CancellationToken,
+) -> Result<SessionOutcome> {
+  let engine = daemon.images.backends().engine.clone();
+  let base_image = spec.base_container_image.as_deref().unwrap_or(CONTAINER_IMAGE).to_string();
+  let container_driver = LinuxContainer::with_engine(OciRuntime::Runc, base_image, engine.clone());
+  let channels = driver::Driver::channels(&container_driver, dir);
+  let guest_bin = actor::guest_needy(&daemon.config)?;
+
+  let session_cancel = cancel.child_token();
+  let tasks = TaskTracker::new();
+
+  let mut guest_config = build_guest_config(session_id, &channels, spec.clone_parts());
+  // Container sessions boot an assembled OCI image, not VM layer disks.
+  guest_config.layers.clear();
+  let upper_setting = guest_config.session.upper;
+  let guest_service = Arc::new(SessionGuest {
+    config: guest_config,
+    dir: dir.to_path_buf(),
+    trace: spec.trace.clone(),
+    exit: Mutex::new(None),
+    cancel: session_cancel.clone(),
+  });
+
+  let driver::Endpoint::Unix(guest_sock) = &channels.guest;
+  let driver::Endpoint::Unix(gateway_sock) = &channels.gateway;
+  if let Some(parent) = guest_sock.parent() {
+    needy_api_server::create_private_dir(parent).with_context(|| format!("cannot create {}", parent.display()))?;
+  }
+
+  let health = Health {
+    instance_id: uuid::Uuid::new_v4().to_string(),
+    role: "control",
+  };
+  let caller = Caller::Actor {
+    run: session_id.to_string(),
+  };
+  let guest_listener = Server::new(health, caller).guest(guest_service.clone()).bind(&[Listen::Unix(guest_sock.clone())]).await?;
+  open_socket_permissions(guest_sock)?;
+  let stop_guest = session_cancel.clone();
+  let id_for_log = session_id.to_string();
+  tasks.spawn(async move {
+    if let Err(e) = guest_listener.serve(stop_guest).await {
+      tracing::error!("session {id_for_log}: guest listener: {e:#}");
+    }
+  });
+
+  serve_session_gateway(gateway_sock, spec.network, spec.trace, session_cancel.clone(), &tasks, true)?;
+
+  let start_req = driver::Start {
+    run: session_id,
+    dir,
+    recipe: None,
+    user: &spec.user,
+    mounts: &[],
+    guest: &guest_bin,
+    layer_disks: &[],
+    snapshot_image: spec.snapshot_image.as_deref(),
+  };
+  let mut container = match container_driver.start_session(&start_req).await {
+    Ok(container) => container,
+    Err(e) => {
+      session_cancel.cancel();
+      tasks.close();
+      tasks.wait().await;
+      return Err(e.into());
+    }
+  };
+
+  let waited = tokio::select! {
+    waited = container.wait() => waited,
+    () = cancel.cancelled() => {
+      if let Err(e) = container.stop(SESSION_STOP_GRACE).await {
+        tracing::warn!("session {session_id}: cannot stop container {}: {e}", container.pid());
+      }
+      container.remove().await;
+      session_cancel.cancel();
+      tasks.close();
+      tasks.wait().await;
+      bail!("image session {session_id} was cancelled");
+    }
+  };
+
+  session_cancel.cancel();
+  tasks.close();
+  tasks.wait().await;
+
+  let console = std::fs::read_to_string(driver::log(dir)).unwrap_or_default();
+  if let Err(e) = waited {
+    container.remove().await;
+    bail!("waiting for image session {session_id} failed: {e}");
+  }
+
+  let exit = guest_service.exit();
+  let succeeded = matches!(&exit, Some(Exit { code: Some(0), signal }) if signal.is_empty());
+  let layer = if upper_setting == UpperLayer::Kept && succeeded {
+    let committed = commit_container_to_file(&engine, container.container_name(), dir).await;
+    container.remove().await;
+    let committed_tar = committed?;
+    let store = daemon.images.store.clone();
+    let digest = tokio::task::spawn_blocking(move || store.put_from_image_export(&committed_tar))
+      .await
+      .context("storing committed container layer panicked")??;
+    Some(digest)
+  } else {
+    container.remove().await;
+    None
+  };
+
+  Ok(SessionOutcome {
+    exit,
+    layer,
+    console,
+  })
+}
+
+/// Resolved plan, builder driver, built/cached layers (including any commit
+/// layer), and materialized snapshot (layer disks for VM drivers, or an OCI
+/// image tag for container drivers).
 struct ResolvedImage {
+  builder: ActorDriver,
   plan: Plan,
   snapshot: Snapshot,
   layer_disks: Vec<LayerDisk>,
+  snapshot_image: Option<String>,
   steps: Vec<BuildStepOutcome>,
 }
 
-/// Plans `definition` over the daemon's base VM image, builds any missing
-/// `run` steps under single-flight deduplication, stacks `commit` on top if
-/// present, and materializes the snapshot's SquashFS disks.
+/// Plans `definition`, builds any missing `run` steps under single-flight
+/// deduplication on the host's builder driver (VM driver when available, else
+/// `linux-container` on Linux; never Apple's `container`), stacks `commit` on
+/// top if present, and materializes the snapshot for `target_driver`.
 async fn build_image_plan(
   daemon: &Daemon,
   definition: &Definition,
-  driver: ActorDriver,
+  target_driver: ActorDriver,
   user: &User,
   commit: Option<&PlanCommit>,
   trace: &Dispatch,
   cancel: &CancellationToken,
 ) -> Result<ResolvedImage> {
-  let root = root_digest(daemon).await?;
+  let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
+  let builder = select_builder_driver(daemon, target_driver).await;
+  let root = root_digest_for(daemon, builder, base_container_image).await?;
   let plan = needy_core::image::plan(definition, &root, user, commit);
   let mut layers = Vec::with_capacity(plan.steps.len() + usize::from(plan.commit.is_some()));
   let mut steps = Vec::with_capacity(plan.steps.len());
@@ -570,7 +742,7 @@ async fn build_image_plan(
     if cancel.is_cancelled() {
       bail!("the daemon shut down while building the image");
     }
-    let (layer, cached, ms) = daemon.images.resolve_step(daemon, driver, trace, cancel, &layers, step).await?;
+    let (layer, cached, ms) = daemon.images.resolve_step(daemon, builder, base_container_image, trace, cancel, &layers, step).await?;
     let Input::Run(script) = &step.input;
     let event = Event::ImageBuildStep(ImageBuildStep {
       key: step.key.to_string(),
@@ -602,26 +774,44 @@ async fn build_image_plan(
   }
 
   let store = daemon.images.store.clone();
-  let (snapshot, layer_disks) = tokio::task::spawn_blocking(move || -> Result<_> {
-    let snapshot = store.snapshot(&layers)?;
-    let disks = store.materialize(&snapshot)?;
-    Ok((snapshot, disks))
-  })
-  .await
-  .context("materializing snapshot panicked")??;
+  let (snapshot, layer_disks, snapshot_image) = match target_driver {
+    ActorDriver::LinuxFirecracker | ActorDriver::MacosVz => {
+      let (snapshot, disks) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let snapshot = store.snapshot(&layers)?;
+        let disks = store.materialize(&snapshot)?;
+        Ok((snapshot, disks))
+      })
+      .await
+      .context("materializing snapshot panicked")??;
+      (snapshot, disks, None)
+    }
+    ActorDriver::LinuxContainer => {
+      let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting layers panicked")??;
+      let tag = materialize_for_linux_container(daemon, &snapshot, base_container_image).await?;
+      (snapshot, Vec::new(), Some(tag))
+    }
+    ActorDriver::MacosAppleContainer => {
+      let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting layers panicked")??;
+      let tag = materialize_for_apple_container(daemon, &snapshot, base_container_image).await?;
+      (snapshot, Vec::new(), Some(tag))
+    }
+  };
 
   Ok(ResolvedImage {
+    builder,
     plan,
     snapshot,
     layer_disks,
+    snapshot_image,
     steps,
   })
 }
 
 /// Resolves `run`'s `actor.image` when it is an [`Image::Definition`]: builds
 /// any missing `run` layers, stacks any lockfile commit on top, materializes
-/// the resulting snapshot, and installs it on `run` via [`Run::set_boot`].
-/// No-op when `actor.image` is absent or an OCI image reference.
+/// the resulting snapshot for the run's driver, and installs it on `run` via
+/// [`Run::set_boot`]. No-op when `actor.image` is absent or an OCI image
+/// reference.
 // TODO(images): auto-pulling a missing base VM image on `run create` comes
 // with slice 3 of the images and run data spec ("Slices"); until then
 // `actor::check_host` fails before this runs with the `needy image pull`
@@ -638,6 +828,7 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
   run.set_boot(Boot {
     snapshot: Some(resolved.snapshot),
     layer_disks: resolved.layer_disks,
+    snapshot_image: resolved.snapshot_image,
     path: resolved.plan.path,
     env: resolved.plan.env,
     session: GuestSession::default(),
@@ -651,9 +842,14 @@ impl ImagesTrait for Daemon {
   async fn build(&self, request: ImageBuild) -> Result<ImageBuildResult, ControlError> {
     self.admit_work()?;
     let definition = parse_definition(&request.image_yaml)?;
-    let driver = parse_driver(&request.driver)?;
+    let target_driver = parse_driver(&request.driver)?;
     let user = request.user.unwrap_or_default();
-    check_driver_host(self, driver).await?;
+    let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
+    let builder = select_builder_driver(self, target_driver).await;
+    check_driver_host(self, builder, base_container_image).await?;
+    if target_driver != builder {
+      check_driver_host(self, target_driver, base_container_image).await?;
+    }
 
     let trace = Dispatch::new(
       "image-build",
@@ -664,8 +860,9 @@ impl ImagesTrait for Daemon {
         timing: false,
       },
     );
-    let resolved =
-      build_image_plan(self, &definition, driver, &user, request.commit.as_ref(), &trace, &self.cancel).await.map_err(crate::failed)?;
+    let resolved = build_image_plan(self, &definition, target_driver, &user, request.commit.as_ref(), &trace, &self.cancel)
+      .await
+      .map_err(crate::failed)?;
 
     Ok(ImageBuildResult {
       snapshot: resolved.snapshot.digest.to_string(),
@@ -677,9 +874,11 @@ impl ImagesTrait for Daemon {
   async fn start_edit(&self, request: ImageEditStart) -> Result<ImageEditStarted, ControlError> {
     self.admit_work()?;
     let definition = parse_definition(&request.image_yaml)?;
-    let driver = parse_driver(&request.driver)?;
+    let target_driver = parse_driver(&request.driver)?;
     let user = request.user.unwrap_or_default();
-    check_driver_host(self, driver).await?;
+    let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
+    let builder = select_builder_driver(self, target_driver).await;
+    check_driver_host(self, builder, base_container_image).await?;
 
     // Enforce one edit session per image at a time. The guard stays alive
     // inside the background watcher task until the edit session ends.
@@ -696,8 +895,11 @@ impl ImagesTrait for Daemon {
       },
     );
 
+    // Build and materialize for the builder driver (VM layer disks, or an OCI
+    // image in Docker when falling back to `linux-container` on a Linux host
+    // without a VM driver).
     let resolved =
-      build_image_plan(self, &definition, driver, &user, request.commit.as_ref(), &trace, &self.cancel).await.map_err(crate::failed)?;
+      build_image_plan(self, &definition, builder, &user, request.commit.as_ref(), &trace, &self.cancel).await.map_err(crate::failed)?;
 
     let base_top = resolved.plan.top().clone();
     let commit_rebased = resolved.plan.commit_rebased();
@@ -714,16 +916,23 @@ impl ImagesTrait for Daemon {
       uid: 0,
       gid: 0,
     };
-    let profile_yaml = session_profile_yaml(driver, &root_user);
-    let session_profile =
-      needy_config::profile::load(&needy_config::Source::text(profile_yaml.clone(), PathBuf::new())).map_err(|e| crate::failed(e.into()))?;
-    let actor_driver = driver::new(&actor::host(self), &session_profile.actor).map_err(|e| crate::failed(e.into()))?;
-    let channels = actor_driver.channels(&dir);
     let guest_bin = actor::guest_needy(&self.config).map_err(crate::failed)?;
 
     let session_cancel = self.cancel.child_token();
     let tasks = TaskTracker::new();
     let commands: Arc<Mutex<Vec<StoreCommand>>> = Arc::default();
+
+    let is_container_builder = resolved.builder == ActorDriver::LinuxContainer;
+    let (channels, profile_yaml) = if is_container_builder {
+      let drv = LinuxContainer::with_engine(OciRuntime::Runc, base_container_image.to_string(), self.images.backends().engine.clone());
+      (driver::Driver::channels(&drv, &dir), String::new())
+    } else {
+      let profile_yaml = session_profile_yaml(resolved.builder, &root_user, None);
+      let session_profile = needy_config::profile::load(&needy_config::Source::text(profile_yaml.clone(), PathBuf::new()))
+        .map_err(|e| crate::failed(e.into()))?;
+      let actor_driver = driver::new(&actor::host(self), &session_profile.actor).map_err(|e| crate::failed(e.into()))?;
+      (actor_driver.channels(&dir), profile_yaml)
+    };
 
     // Spec ("Recording an edit session"): route every exec (`*`) and decide
     // every one as local (`Target::Actor`) so each program is traced and
@@ -752,7 +961,11 @@ impl ImagesTrait for Daemon {
       wait_for_attach: request.wait_for_attach,
       daemon_uid: daemon_uid(),
       daemon_gid: daemon_gid(),
-      layers: resolved.snapshot.layers.iter().map(ToString::to_string).collect(),
+      layers: if is_container_builder {
+        Vec::new()
+      } else {
+        resolved.snapshot.layers.iter().map(ToString::to_string).collect()
+      },
       image_path: resolved.plan.path,
       session: GuestSession {
         upper: UpperLayer::Kept,
@@ -772,7 +985,20 @@ impl ImagesTrait for Daemon {
       trace: trace.clone(),
     });
 
-    // Serve GuestService AND RunService (for Decide) on `cu.sock`.
+    let (guest_sock, gateway_sock) = if is_container_builder {
+      let driver::Endpoint::Unix(g) = &channels.guest;
+      let driver::Endpoint::Unix(gw) = &channels.gateway;
+      if let Some(parent) = g.parent() {
+        needy_api_server::create_private_dir(parent)
+          .with_context(|| format!("cannot create {}", parent.display()))
+          .map_err(crate::failed)?;
+      }
+      (g.clone(), gw.clone())
+    } else {
+      (dir.join("cu.sock"), dir.join("cg.sock"))
+    };
+
+    // Serve GuestService AND RunService (for Decide).
     let health = Health {
       instance_id: uuid::Uuid::new_v4().to_string(),
       role: "control",
@@ -783,9 +1009,12 @@ impl ImagesTrait for Daemon {
     let guest_listener = Server::new(health, caller)
       .guest(guest_service.clone())
       .runs(runs_service)
-      .bind(&[Listen::Unix(dir.join("cu.sock"))])
+      .bind(&[Listen::Unix(guest_sock.clone())])
       .await
       .map_err(|e| crate::failed(e.into()))?;
+    if is_container_builder {
+      open_socket_permissions(&guest_sock).map_err(crate::failed)?;
+    }
     let stop_guest = session_cancel.clone();
     let id_for_log = session_id.clone();
     tasks.spawn(async move {
@@ -798,7 +1027,7 @@ impl ImagesTrait for Daemon {
       allow: vec![Glob::new("*")],
       services: BTreeMap::new(),
     };
-    if let Err(e) = serve_session_gateway(&dir, network, trace, session_cancel.clone(), &tasks) {
+    if let Err(e) = serve_session_gateway(&gateway_sock, network, trace, session_cancel.clone(), &tasks, is_container_builder) {
       session_cancel.cancel();
       tasks.close();
       tasks.wait().await;
@@ -806,28 +1035,62 @@ impl ImagesTrait for Daemon {
       return Err(crate::failed(e));
     }
 
-    let layer_disks = resolved.layer_disks.into_iter().map(|d| d.path).collect();
-    let mut vm = match self
-      .holder
-      .start(crate::holder::Actor {
-        run: session_id.clone(),
-        dir: dir.clone(),
-        host: actor::host(self),
-        profile_yaml,
+    enum EditRuntime {
+      Vm(Box<dyn driver::Running>),
+      Container {
+        container: needy_core_actor::driver::linux_container::SessionContainer,
+        engine: Arc<dyn Engine>,
+      },
+    }
+
+    let mut runtime = if is_container_builder {
+      let engine = self.images.backends().engine.clone();
+      let container_driver = LinuxContainer::with_engine(OciRuntime::Runc, base_container_image.to_string(), engine.clone());
+      let start_req = driver::Start {
+        run: &session_id,
+        dir: &dir,
         recipe: None,
-        mounts: Vec::new(),
-        guest: guest_bin,
-        layer_disks,
-      })
-      .await
-    {
-      Ok(vm) => vm,
-      Err(e) => {
-        session_cancel.cancel();
-        tasks.close();
-        tasks.wait().await;
-        cleanup_session_dir(&dir);
-        return Err(crate::failed(e));
+        user: &root_user,
+        mounts: &[],
+        guest: &guest_bin,
+        layer_disks: &[],
+        snapshot_image: resolved.snapshot_image.as_deref(),
+      };
+      match container_driver.start_session(&start_req).await {
+        Ok(container) => EditRuntime::Container { container, engine },
+        Err(e) => {
+          session_cancel.cancel();
+          tasks.close();
+          tasks.wait().await;
+          cleanup_session_dir(&dir);
+          return Err(crate::failed(e.into()));
+        }
+      }
+    } else {
+      let layer_disks = resolved.layer_disks.into_iter().map(|d| d.path).collect();
+      match self
+        .holder
+        .start(crate::holder::Actor {
+          run: session_id.clone(),
+          dir: dir.clone(),
+          host: actor::host(self),
+          profile_yaml,
+          recipe: None,
+          mounts: Vec::new(),
+          guest: guest_bin,
+          layer_disks,
+          snapshot_image: None,
+        })
+        .await
+      {
+        Ok(vm) => EditRuntime::Vm(vm),
+        Err(e) => {
+          session_cancel.cancel();
+          tasks.close();
+          tasks.wait().await;
+          cleanup_session_dir(&dir);
+          return Err(crate::failed(e));
+        }
       }
     };
 
@@ -848,14 +1111,25 @@ impl ImagesTrait for Daemon {
     let id_for_task = session_id.clone();
     self.tasks.spawn(async move {
       let _lock_guard = lock_guard;
-      let waited = tokio::select! {
-        waited = vm.wait() => Some(waited),
-        () = session_cancel.cancelled() => {
-          if let Err(e) = vm.stop(SESSION_STOP_GRACE).await {
-            tracing::warn!("edit session {id_for_task}: cannot stop VM {}: {e}", vm.pid());
+      let waited = match &mut runtime {
+        EditRuntime::Vm(vm) => tokio::select! {
+          waited = vm.wait() => Some(waited),
+          () = session_cancel.cancelled() => {
+            if let Err(e) = vm.stop(SESSION_STOP_GRACE).await {
+              tracing::warn!("edit session {id_for_task}: cannot stop VM {}: {e}", vm.pid());
+            }
+            None
           }
-          None
-        }
+        },
+        EditRuntime::Container { container, .. } => tokio::select! {
+          waited = container.wait() => Some(waited),
+          () = session_cancel.cancelled() => {
+            if let Err(e) = container.stop(SESSION_STOP_GRACE).await {
+              tracing::warn!("edit session {id_for_task}: cannot stop container {}: {e}", container.pid());
+            }
+            None
+          }
+        },
       };
 
       session_cancel.cancel();
@@ -872,44 +1146,64 @@ impl ImagesTrait for Daemon {
         .collect();
 
       let outcome = if aborted.load(Ordering::SeqCst) {
+        if let EditRuntime::Container { container, .. } = &runtime {
+          container.remove().await;
+        }
         Ok(ImageEditFinished {
           commit: None,
           commands: recorded_out,
           exit: None,
         })
       } else if let Some(Err(e)) = waited {
+        if let EditRuntime::Container { container, .. } = &runtime {
+          container.remove().await;
+        }
         Err(format!("waiting for edit session {id_for_task} failed: {e}"))
       } else {
         let exit = guest_service.exit();
         let succeeded = matches!(&exit, Some(Exit { code: Some(0), signal }) if signal.is_empty());
-        let upper = dir.join(UPPER_LAYER);
-        if succeeded && upper.exists() {
-          let committed = tokio::task::spawn_blocking(move || -> Result<LayerDigest> {
-            let file = std::fs::File::open(&upper).with_context(|| format!("cannot open {}", upper.display()))?;
-            Ok(store.commit(&image_name, parent_layer.as_ref(), file, recorded)?)
-          })
-          .await;
-          match committed {
-            Ok(Ok(layer)) => match PlanDigest::parse(&layer.to_string()) {
-              Ok(layer) => Ok(ImageEditFinished {
-                commit: Some(PlanCommit {
-                  layer,
-                  base: base_top,
-                }),
+        match &runtime {
+          EditRuntime::Vm(_) => {
+            let upper = dir.join(UPPER_LAYER);
+            if succeeded && upper.exists() {
+              let committed = tokio::task::spawn_blocking(move || -> Result<LayerDigest> {
+                let file = std::fs::File::open(&upper).with_context(|| format!("cannot open {}", upper.display()))?;
+                Ok(store.commit(&image_name, parent_layer.as_ref(), file, recorded)?)
+              })
+              .await;
+              finish_commit(committed, &id_for_task, base_top, recorded_out, exit)
+            } else {
+              Ok(ImageEditFinished {
+                commit: None,
                 commands: recorded_out,
                 exit,
-              }),
-              Err(e) => Err(format!("committed layer digest invalid: {e}")),
-            },
-            Ok(Err(e)) => Err(format!("committing edit session {id_for_task}: {e:#}")),
-            Err(e) => Err(format!("committing edit session {id_for_task} panicked: {e}")),
+              })
+            }
           }
-        } else {
-          Ok(ImageEditFinished {
-            commit: None,
-            commands: recorded_out,
-            exit,
-          })
+          EditRuntime::Container { container, engine } => {
+            if succeeded {
+              let exported = commit_container_to_file(engine, container.container_name(), &dir).await;
+              container.remove().await;
+              match exported {
+                Ok(committed_tar) => {
+                  let committed = tokio::task::spawn_blocking(move || -> Result<LayerDigest> {
+                    let top = extract_top_layer(&committed_tar)?;
+                    Ok(store.commit(&image_name, parent_layer.as_ref(), top, recorded)?)
+                  })
+                  .await;
+                  finish_commit(committed, &id_for_task, base_top, recorded_out, exit)
+                }
+                Err(e) => Err(format!("committing edit session {id_for_task}: {e:#}")),
+              }
+            } else {
+              container.remove().await;
+              Ok(ImageEditFinished {
+                commit: None,
+                commands: recorded_out,
+                exit,
+              })
+            }
+          }
         }
       };
 
@@ -969,6 +1263,242 @@ impl ImagesTrait for Daemon {
   }
 }
 
+fn finish_commit(
+  committed: std::result::Result<Result<LayerDigest>, tokio::task::JoinError>,
+  session_id: &str,
+  base_top: PlanDigest,
+  commands: Vec<RecordedCommand>,
+  exit: Option<Exit>,
+) -> EditOutcomeResult {
+  match committed {
+    Ok(Ok(layer)) => match PlanDigest::parse(&layer.to_string()) {
+      Ok(layer) => Ok(ImageEditFinished {
+        commit: Some(PlanCommit {
+          layer,
+          base: base_top,
+        }),
+        commands,
+        exit,
+      }),
+      Err(e) => Err(format!("committed layer digest invalid: {e}")),
+    },
+    Ok(Err(e)) => Err(format!("committing edit session {session_id}: {e:#}")),
+    Err(e) => Err(format!("committing edit session {session_id} panicked: {e}")),
+  }
+}
+
+/// Selects the driver that runs image build steps and interactive edit
+/// sessions (spec: "Building and editing").
+///
+/// Prefers the host's VM driver (`macos-vz` on Apple silicon,
+/// `linux-firecracker` on Linux with KVM). On a Linux host without a usable VM
+/// driver, falls back to `linux-container`. Apple's `container` is never used
+/// to build.
+async fn select_builder_driver(daemon: &Daemon, target: ActorDriver) -> ActorDriver {
+  match target {
+    ActorDriver::MacosVz => ActorDriver::MacosVz,
+    ActorDriver::LinuxFirecracker => {
+      if check_vm_available(daemon, ActorDriver::LinuxFirecracker).await {
+        ActorDriver::LinuxFirecracker
+      } else {
+        ActorDriver::LinuxContainer
+      }
+    }
+    ActorDriver::MacosAppleContainer => {
+      if check_vm_available(daemon, ActorDriver::MacosVz).await {
+        ActorDriver::MacosVz
+      } else if check_vm_available(daemon, ActorDriver::LinuxFirecracker).await {
+        ActorDriver::LinuxFirecracker
+      } else {
+        ActorDriver::MacosVz
+      }
+    }
+    ActorDriver::LinuxContainer => {
+      if check_vm_available(daemon, ActorDriver::LinuxFirecracker).await {
+        ActorDriver::LinuxFirecracker
+      } else if check_vm_available(daemon, ActorDriver::MacosVz).await {
+        ActorDriver::MacosVz
+      } else {
+        ActorDriver::LinuxContainer
+      }
+    }
+  }
+}
+
+async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
+  let profile_yaml = session_profile_yaml(driver, &User::default(), None);
+  let Ok(profile) = needy_config::profile::load(&needy_config::Source::text(profile_yaml, PathBuf::new())) else {
+    return false;
+  };
+  let Ok(drv) = driver::new(&actor::host(daemon), &profile.actor) else {
+    return false;
+  };
+  drv.check_host().await.is_ok()
+}
+
+/// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`
+/// into the Docker-compatible engine if not already present.
+async fn materialize_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
+  let engine = daemon.images.backends().engine.clone();
+  let inspected = engine
+    .inspect_image(base_image)
+    .await
+    .with_context(|| format!("inspecting container base image {base_image}"))?
+    .ok_or_else(|| anyhow!("container actor image {base_image} is not in the engine"))?;
+
+  let base_tar = daemon.images.base_oci_dir.join(format!("{}.tar", sanitize_image_id(&inspected.id)));
+  if !base_tar.exists() {
+    write_stream_atomic(&base_tar, engine.export_image(base_image))
+      .await
+      .with_context(|| format!("exporting base container image {base_image}"))?;
+  }
+
+  let tag = snapshot_tag(&snapshot.digest);
+  let store = daemon.images.store.clone();
+  let snapshot_owned = snapshot.clone();
+  let base_tar_owned = base_tar.clone();
+  let tag_for_build = tag.clone();
+  let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar_owned, &tag_for_build))
+    .await
+    .context("materializing container snapshot panicked")??;
+
+  if engine.inspect_image(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
+    let stream = stream_file(&oci_tar).await?;
+    engine.load_image(stream).await.with_context(|| format!("loading snapshot image {tag} into the engine"))?;
+  }
+  Ok(tag)
+}
+
+/// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`
+/// into Apple's `container` image store if not already present.
+async fn materialize_for_apple_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
+  let apple = MacosAppleContainer::with_cli(base_image.to_string(), daemon.images.backends().apple_cli.clone());
+  let id = apple
+    .image_id(base_image)
+    .await
+    .with_context(|| format!("inspecting Apple container base image {base_image}"))?
+    .ok_or_else(|| anyhow!("container actor image {base_image} is not in Apple's container store"))?;
+
+  let base_tar = daemon.images.base_oci_dir.join(format!("apple-{}.tar", sanitize_image_id(&id)));
+  if !base_tar.exists() {
+    tokio::fs::create_dir_all(&daemon.images.base_oci_dir)
+      .await
+      .with_context(|| format!("cannot create {}", daemon.images.base_oci_dir.display()))?;
+    let staged = daemon.images.base_oci_dir.join(format!(".save-{}.tar", uuid::Uuid::new_v4()));
+    if let Err(e) = apple.save(&staged).await {
+      let _ = tokio::fs::remove_file(&staged).await;
+      return Err(e).with_context(|| format!("saving base image {base_image} from Apple's container store"));
+    }
+    if !base_tar.exists() {
+      tokio::fs::rename(&staged, &base_tar).await.with_context(|| format!("cannot persist {}", base_tar.display()))?;
+    } else {
+      let _ = tokio::fs::remove_file(&staged).await;
+    }
+  }
+
+  let tag = snapshot_tag(&snapshot.digest);
+  let store = daemon.images.store.clone();
+  let snapshot_owned = snapshot.clone();
+  let base_tar_owned = base_tar.clone();
+  let tag_for_build = tag.clone();
+  let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar_owned, &tag_for_build))
+    .await
+    .context("materializing container snapshot panicked")??;
+
+  if apple.image_id(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
+    apple.load(&oci_tar).await.with_context(|| format!("loading snapshot image {tag} into Apple's container store"))?;
+  }
+  Ok(tag)
+}
+
+/// Commits `container_name` to a temporary image, exports it to `dir/committed.tar`,
+/// and always removes the temporary image afterwards.
+async fn commit_container_to_file(engine: &Arc<dyn Engine>, container_name: &str, dir: &Path) -> Result<PathBuf> {
+  let temp_repo = "needy-session-commit";
+  let temp_tag = container_name;
+  let temp_ref = format!("{temp_repo}:{temp_tag}");
+  engine.commit_container(container_name, temp_repo, temp_tag).await.with_context(|| format!("committing container {container_name}"))?;
+  let committed_tar = dir.join("committed.tar");
+  let exported = write_stream_atomic(&committed_tar, engine.export_image(&temp_ref))
+    .await
+    .with_context(|| format!("exporting committed image {temp_ref}"));
+  if let Err(e) = engine.remove_image(&temp_ref).await {
+    tracing::warn!("cannot remove temporary committed image {temp_ref}: {e}");
+  }
+  exported?;
+  Ok(committed_tar)
+}
+
+async fn write_stream_atomic(
+  dest: &Path,
+  mut stream: futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, engine::Error>>,
+) -> Result<()> {
+  let dir = dest.parent().ok_or_else(|| anyhow!("{} has no parent directory", dest.display()))?;
+  tokio::fs::create_dir_all(dir).await.with_context(|| format!("cannot create {}", dir.display()))?;
+  let staged = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+  let write_result = async {
+    let mut file = tokio::fs::File::create(&staged).await.with_context(|| format!("cannot create {}", staged.display()))?;
+    while let Some(chunk) = stream.next().await {
+      let bytes = chunk.map_err(|e| anyhow!("{e}"))?;
+      file.write_all(&bytes).await.with_context(|| format!("cannot write {}", staged.display()))?;
+    }
+    file.flush().await.with_context(|| format!("cannot flush {}", staged.display()))?;
+    Ok::<(), anyhow::Error>(())
+  }
+  .await;
+  if let Err(e) = write_result {
+    let _ = tokio::fs::remove_file(&staged).await;
+    return Err(e);
+  }
+  if !dest.exists() {
+    tokio::fs::rename(&staged, dest).await.with_context(|| format!("cannot persist {}", dest.display()))?;
+  } else {
+    let _ = tokio::fs::remove_file(&staged).await;
+  }
+  Ok(())
+}
+
+async fn stream_file(path: &Path) -> Result<futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, engine::Error>>> {
+  let file = tokio::fs::File::open(path).await.with_context(|| format!("cannot open {}", path.display()))?;
+  let stream = futures_util::stream::try_unfold((file, vec![0u8; 64 * 1024]), |(mut file, mut buf)| async move {
+    let n = file.read(&mut buf).await.map_err(|e| engine::Error::Refused(e.to_string()))?;
+    if n == 0 {
+      Ok(None)
+    } else {
+      let chunk = bytes::Bytes::copy_from_slice(&buf[..n]);
+      Ok(Some((chunk, (file, buf))))
+    }
+  });
+  Ok(stream.boxed())
+}
+
+fn sanitize_image_id(id: &str) -> String {
+  let cleaned: String = id
+    .chars()
+    .map(|c| match c {
+      ':' => '-',
+      c if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') => c,
+      _ => '_',
+    })
+    .collect();
+  if cleaned.is_empty() || cleaned.starts_with('.') {
+    LayerDigest::of(id.as_bytes()).to_string().replace(':', "-")
+  } else {
+    cleaned
+  }
+}
+
+fn open_socket_permissions(path: &Path) -> Result<()> {
+  use std::os::unix::fs::PermissionsExt;
+  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))
+    .with_context(|| format!("cannot open permissions on {}", path.display()))?;
+  if let Some(dir) = path.parent() {
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755))
+      .with_context(|| format!("cannot open permissions on {}", dir.display()))?;
+  }
+  Ok(())
+}
+
 fn parse_definition(yaml: &str) -> Result<Definition, ControlError> {
   needy_config::image::load(&needy_config::Source::text(yaml.to_string(), PathBuf::new()))
     .map_err(|e| ControlError::Invalid(format!("invalid image definition: {e}")))
@@ -981,27 +1511,44 @@ fn parse_driver(name: &str) -> Result<ActorDriver, ControlError> {
   ActorDriver::ALL.into_iter().find(|d| d.as_str() == name).ok_or_else(|| ControlError::Invalid(format!("{name:?} is not an actor driver")))
 }
 
-async fn check_driver_host(daemon: &Daemon, driver: ActorDriver) -> Result<(), ControlError> {
-  let profile_yaml = session_profile_yaml(driver, &User::default());
+async fn check_driver_host(daemon: &Daemon, driver: ActorDriver, base_container_image: &str) -> Result<(), ControlError> {
+  let container_image = matches!(driver, ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer).then_some(base_container_image);
+  let profile_yaml = session_profile_yaml(driver, &User::default(), container_image);
   let profile =
     needy_config::profile::load(&needy_config::Source::text(profile_yaml, PathBuf::new())).map_err(|e| crate::failed(e.into()))?;
-  let drv = driver::new(&actor::host(daemon), &profile.actor).map_err(|e| crate::failed(e.into()))?;
+  let drv = actor::driver_for(daemon, &profile.actor).map_err(crate::failed)?;
   drv.check_host().await.map_err(|e| crate::failed(e.into()))?;
   actor::guest_needy(&daemon.config).map_err(crate::failed)?;
   Ok(())
 }
 
-fn session_profile_yaml(driver: ActorDriver, user: &User) -> String {
-  format!("actor:\n  driver: {}\nuser:\n  name: {}\n  uid: {}\n  gid: {}\n", driver.as_str(), user.name, user.uid, user.gid,)
+fn session_profile_yaml(driver: ActorDriver, user: &User, container_image: Option<&str>) -> String {
+  let mut yaml = format!("actor:\n  driver: {}\n", driver.as_str());
+  if driver == ActorDriver::LinuxContainer {
+    yaml.push_str("  container:\n    oci_runtime: runc\n");
+  }
+  if let Some(image) = container_image {
+    yaml.push_str(&format!("  image: {image:?}\n"));
+  }
+  yaml.push_str(&format!("user:\n  name: {}\n  uid: {}\n  gid: {}\n", user.name, user.uid, user.gid));
+  yaml
 }
 
-fn serve_session_gateway(dir: &Path, network: Policy, trace: Dispatch, cancel: CancellationToken, tasks: &TaskTracker) -> Result<()> {
-  let gw_path = dir.join("cg.sock");
+fn serve_session_gateway(
+  gw_path: &Path,
+  network: Policy,
+  trace: Dispatch,
+  cancel: CancellationToken,
+  tasks: &TaskTracker,
+  open_socket: bool,
+) -> Result<()> {
   let gw = Arc::new(gateway::Gateway::new(network, trace, Network::Actor, None, cancel));
-  let gw_listener = tokio::net::UnixListener::bind(&gw_path).with_context(|| format!("cannot listen on {}", gw_path.display()))?;
-  {
+  let gw_listener = tokio::net::UnixListener::bind(gw_path).with_context(|| format!("cannot listen on {}", gw_path.display()))?;
+  if open_socket {
+    open_socket_permissions(gw_path)?;
+  } else {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&gw_path, std::fs::Permissions::from_mode(0o600))
+    std::fs::set_permissions(gw_path, std::fs::Permissions::from_mode(0o600))
       .with_context(|| format!("cannot restrict {}", gw_path.display()))?;
   }
   tasks.spawn(gw.run(tokio_stream::wrappers::UnixListenerStream::new(gw_listener)));
@@ -1067,6 +1614,25 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     image_path: parts.image_path,
     session: parts.session,
   }
+}
+
+/// Computes the root digest for `builder`: the base VM image's digest for VM
+/// builders, or the base container image's ID for `linux-container` builders
+/// on Linux hosts without a VM driver.
+async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_image: &str) -> Result<PlanDigest> {
+  if builder == ActorDriver::LinuxContainer {
+    let engine = daemon.images.backends().engine.clone();
+    let inspected = engine
+      .inspect_image(base_container_image)
+      .await
+      .with_context(|| format!("inspecting container base image {base_container_image}"))?
+      .ok_or_else(|| anyhow!("container actor image {base_container_image} is not in the engine"))?;
+    return match PlanDigest::parse(&inspected.id) {
+      Ok(digest) => Ok(digest),
+      Err(_) => Ok(PlanDigest::parse(&LayerDigest::of(inspected.id.as_bytes()).to_string())?),
+    };
+  }
+  root_digest(daemon).await
 }
 
 /// Computes the root digest for the base VM image configured on `daemon`.

@@ -125,11 +125,14 @@ impl Actor {
     }
   }
 
-  /// The image a container driver runs: `image`'s reference, else
-  /// [`CONTAINER_IMAGE`]. An image definition has no image to run until it
-  /// is built; the drivers' table refuses one before a driver asks.
+  /// The base image a container driver runs: `image`'s reference, an image
+  /// definition's `root` when set, else [`CONTAINER_IMAGE`].
   pub fn container_image(&self) -> String {
-    self.image_reference().unwrap_or(CONTAINER_IMAGE).to_string()
+    match &self.image {
+      Some(Image::Reference(reference)) => reference.clone(),
+      Some(Image::Definition(definition)) => definition.root.clone().unwrap_or_else(|| CONTAINER_IMAGE.to_string()),
+      None => CONTAINER_IMAGE.to_string(),
+    }
   }
 }
 

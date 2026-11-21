@@ -484,8 +484,13 @@ pub struct Boot {
   pub snapshot: Option<Snapshot>,
   /// The materialized layer disks of `snapshot`, lowest first
   /// (`needy_core_actor::image::store::Store::materialize`), passed to a VM
-  /// driver's `Start::layer_disks`.
+  /// driver's `Start::layer_disks`. Empty for container drivers.
   pub layer_disks: Vec<LayerDisk>,
+  /// The assembled OCI image tag of `snapshot` loaded into the container
+  /// engine or Apple's store (`needy_core_actor::image::store::snapshot_tag`),
+  /// passed to a container driver's `Start::snapshot_image`. `None` for VM
+  /// drivers or runs without an image definition.
+  pub snapshot_image: Option<String>,
   /// The image's `PATH` (`needy_core::image::Plan::path`); empty for none.
   pub path: String,
   /// The image's environment (`needy_core::image::Plan::env`), without `PATH`;

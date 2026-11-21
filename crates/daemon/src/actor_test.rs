@@ -310,23 +310,6 @@ commands:
   assert!(message.contains("this host has no usable KVM"), "{message}");
 }
 
-// Container drivers do not build image definitions until slice 2 of the
-// images and run data spec, so a create on a container driver refuses one
-// at once instead of starting a container without its layers.
-#[tokio::test]
-async fn a_container_actor_on_an_image_definition_fails_the_create_until_slice_2() {
-  let started = testing::daemon().await;
-  let daemon = &started.daemon;
-  let profile = "actor: { driver: linux-container, container: { oci_runtime: runc }, image: { root: example.com/root:1, layers: [{ run: echo one }] } }\n";
-
-  let Err(needy_api_server::control::ControlError::Failed(message)) = Runs::create(daemon, new_run(profile, started.dir.path())).await
-  else {
-    panic!("a container actor create of an image definition must fail");
-  };
-
-  assert!(message.contains("needy does not build image definitions for linux-container yet"), "{message}");
-}
-
 // ROOT CAUSE:
 //
 // If `run attach` reached a macos-vz actor before its guest served the process

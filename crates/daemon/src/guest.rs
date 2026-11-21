@@ -143,11 +143,13 @@ impl Guest for Daemon {
       wait_for_attach: run.wait_for_attach,
       daemon_uid: daemon_user().0,
       daemon_gid: daemon_user().1,
-      // TODO(images): the layer list is for the VM drivers, which attach a
-      // disk per layer (slice 1, step 6). A container driver boots its
-      // snapshot as an engine image instead (slice 2); when it does, its
-      // facets should clear the list, as they clear the mounts below.
-      layers: boot.snapshot.map(|s| s.layers.iter().map(ToString::to_string).collect()).unwrap_or_default(),
+      // Container snapshots are already assembled into the OCI image booted by
+      // the container driver, so the guest init does not stack VM layer disks.
+      layers: if boot.snapshot_image.is_some() {
+        Vec::new()
+      } else {
+        boot.snapshot.map(|s| s.layers.iter().map(ToString::to_string).collect()).unwrap_or_default()
+      },
       image_path: boot.path,
       session: boot.session,
     };

@@ -616,12 +616,7 @@ pub fn cells() -> Vec<Cell> {
         });
       }
     }
-    // TODO(images): container drivers (`linux-container`, `macos-apple-container`)
-    // gain image definitions and the `image` e2e scenario in slice 2 of the
-    // images and run data spec.
-    if matches!(driver, Driver::Firecracker | Driver::Vz) {
-      cells.push(cell(Scenario::Image));
-    }
+    cells.push(cell(Scenario::Image));
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -687,10 +682,19 @@ mod tests {
   }
 
   #[test]
-  fn image_cells_cover_vm_drivers() {
+  fn image_cells_cover_vm_and_container_drivers() {
     let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["image".into()], &[])).collect();
     let ids: Vec<String> = mine.iter().map(Cell::id).collect();
-    assert_eq!(ids, vec!["linux-firecracker/image", "macos-vz/image"]);
+    assert_eq!(
+      ids,
+      vec![
+        "linux-firecracker/image",
+        "linux-container.runc/image",
+        "linux-container.runsc/image",
+        "macos-vz/image",
+        "macos-apple-container/image",
+      ]
+    );
     assert!(mine.iter().all(|cell| cell.executor.is_none() && !cell.root));
   }
 

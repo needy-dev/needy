@@ -215,6 +215,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     mounts: &[],
     guest: Path::new(GUEST_NEEDY),
     layer_disks: &[],
+    snapshot_image: None,
   }
 }
 
@@ -572,7 +573,7 @@ async fn a_host_that_is_not_linux_has_no_linux_container_actors_whatever_its_eng
 }
 
 #[tokio::test]
-async fn non_empty_layer_disks_are_refused_until_slice_2() {
+async fn non_empty_layer_disks_are_refused() {
   let dir = tempfile::tempdir().unwrap();
   let (container, _) = runtime(Fake::default(), OciRuntime::Runc);
   let user = User::default();
@@ -586,5 +587,65 @@ async fn non_empty_layer_disks_are_refused_until_slice_2() {
     panic!("linux-container must refuse VM layer disks");
   };
 
-  assert!(matches!(&error, Error::Unsupported(msg) if msg.contains("slice 2")), "{error:?}");
+  assert!(matches!(&error, Error::Unsupported(msg) if msg.contains("assembled OCI images")), "{error:?}");
+}
+
+#[tokio::test]
+async fn snapshot_image_overrides_base_image_on_start() {
+  let dir = tempfile::tempdir().unwrap();
+  let (container, fake) = runtime(Fake::default(), OciRuntime::Runc);
+  let user = User::default();
+  let tag = "needy-snapshot:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  let mut req = start(dir.path(), &user, None);
+  req.snapshot_image = Some(tag);
+
+  let mut started = container.start(&req).await.unwrap();
+  let _ = started.wait().await.unwrap();
+
+  let bodies = fake.bodies.lock().unwrap();
+  // Both the account-download scratch container and the actor container use the snapshot tag.
+  assert!(bodies.len() >= 2, "{bodies:?}");
+  for body in bodies.iter() {
+    assert_eq!(body.image.as_deref(), Some(tag));
+  }
+}
+
+#[tokio::test]
+async fn start_session_boots_writable_rootfs_and_keeps_container_until_removed() {
+  let dir = tempfile::tempdir().unwrap();
+  let (container, fake) = runtime(Fake::default(), OciRuntime::Runc);
+  let user = User {
+    name: "root".into(),
+    uid: 0,
+    gid: 0,
+  };
+  let tag = "needy-snapshot:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  let mut req = start(dir.path(), &user, None);
+  req.snapshot_image = Some(tag);
+
+  let mut session = container.start_session(&req).await.unwrap();
+  let status = session.wait().await.unwrap();
+  assert!(status.success());
+
+  let bodies = fake.bodies.lock().unwrap().clone();
+  assert_eq!(bodies.len(), 1);
+  assert_eq!(bodies[0].image.as_deref(), Some(tag));
+  let host_config = bodies[0].host_config.as_ref().unwrap();
+  assert_eq!(host_config.readonly_rootfs, Some(false));
+  let tmpfs = host_config.tmpfs.as_ref().unwrap();
+  assert!(!tmpfs.contains_key("/root"), "root home must remain writable on the container upper layer: {tmpfs:?}");
+
+  // Wait alone must not remove the container so the caller can commit it first.
+  assert_eq!(
+    fake.calls(),
+    [
+      "remove needy-actor-0123456789ab",
+      "create needy-actor-0123456789ab",
+      "start needy-actor-0123456789ab",
+      "wait needy-actor-0123456789ab",
+    ]
+  );
+
+  session.remove().await;
+  assert_eq!(fake.calls().last().map(String::as_str), Some("remove needy-actor-0123456789ab"));
 }

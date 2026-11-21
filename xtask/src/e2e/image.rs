@@ -1,6 +1,6 @@
 //! The `image` scenario: `run:` layers, `env` / `PATH`, `image build`,
 //! `image edit` (with lockfile commit and `run:` snippet), and `image rollback`
-//! on VM drivers.
+//! on VM and container drivers.
 
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use serde_json::json;
 
 use super::checks::Checks;
 use super::env::CellEnv;
-use super::matrix::{Cell, End};
+use super::matrix::{Cell, Driver, End};
 use super::runs::{self, check_ended, end_run};
 
 const BUILD: Duration = Duration::from_secs(180);
@@ -17,17 +17,23 @@ const STEP: Duration = Duration::from_secs(120);
 
 pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
   let (name, id) = cell.user.account();
-  let image_yaml = r#"layers:
+  let root_line = match cell.driver {
+    Driver::Container(_) | Driver::AppleContainer => format!("root: {}\n", env.ctx.host.image_names.actor),
+    Driver::Firecracker | Driver::Vz | Driver::Host => String::new(),
+  };
+  let image_yaml = format!(
+    r#"{root_line}layers:
   - run: |
       mkdir -p /opt/e2e-bin
       printf '#!/bin/sh\necho "e2e-layer-ok"\n' > /opt/e2e-bin/e2e-layer-tool
       chmod 755 /opt/e2e-bin/e2e-layer-tool
       echo "declared-layer" > /etc/e2e-layer.txt
 env:
-  PATH: "/opt/e2e-bin:${PATH}"
+  PATH: "/opt/e2e-bin:${{PATH}}"
   E2E_LAYER_ENV: "from-image"
-"#;
-  let image_path = env.file("test-image.yaml", image_yaml, 0o644)?;
+"#
+  );
+  let image_path = env.file("test-image.yaml", &image_yaml, 0o644)?;
   let lockfile = image_path.with_file_name("test-image.yaml.lock");
 
   let script = r#"
@@ -40,13 +46,17 @@ echo "E2E edit-tool=$(e2e-edit-tool 2>/dev/null || echo absent)"
 exit 0
 "#;
 
+  let mut actor = json!({
+    "driver": cell.driver.profile_name(),
+    "image": "./test-image.yaml",
+    "command": ["/bin/sh", "-c", script],
+  });
+  if let Driver::Container(oci) = cell.driver {
+    actor["container"] = json!({ "oci_runtime": oci.name() });
+  }
   let profile = env.profile(&json!({
     "user": { "name": name, "uid": id, "gid": id },
-    "actor": {
-      "driver": cell.driver.profile_name(),
-      "image": "./test-image.yaml",
-      "command": ["/bin/sh", "-c", script],
-    },
+    "actor": actor,
   }))?;
   let profile_str = profile.display().to_string();
 

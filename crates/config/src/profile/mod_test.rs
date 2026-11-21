@@ -220,6 +220,10 @@ fn an_inline_image_definition_is_a_map() {
   assert_eq!(image.layers, [run("one")]);
   assert_eq!(image.env["A"], "a");
   assert_eq!(p.actor.image_reference(), None);
+  assert_eq!(p.actor.container_image(), "example.com/root:1");
+
+  let without_root = load_text("actor: { driver: macos-vz, image: { layers: [{ run: one }] } }\n").unwrap();
+  assert_eq!(without_root.actor.container_image(), CONTAINER_IMAGE);
 }
 
 #[test]

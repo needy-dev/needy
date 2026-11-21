@@ -257,6 +257,10 @@ impl Daemon {
   /// executor, and reconciles the runs a previous control plane left open
   /// (`reconcile`).
   pub async fn start(config: Config) -> Result<Self> {
+    Self::start_with_backends(config, holder::ContainerBackends::default()).await
+  }
+
+  pub(crate) async fn start_with_backends(config: Config, backends: holder::ContainerBackends) -> Result<Self> {
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
     }
@@ -272,7 +276,7 @@ impl Daemon {
     let cancel = CancellationToken::new();
 
     // The holder, rather than this control instance, owns the native host.
-    let holder = holder::Client::connect(&config).await?;
+    let holder = holder::Client::connect_with_backends(&config, backends.clone()).await?;
     let local_sock = config.runtime_dir.join("local.sock");
     let local_client = driver::connect(&format!("unix:{}", local_sock.display())).await?;
     let native = Arc::new(Native::new(local_client));
@@ -288,7 +292,7 @@ impl Daemon {
       }
     };
     let links: Arc<link::Links> = Arc::default();
-    let images = Arc::new(image::Images::new(&config.cache_dir, &config.data_dir));
+    let images = Arc::new(image::Images::with_backends(&config.cache_dir, &config.data_dir, backends));
     let daemon = Self {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, container, links.clone())),

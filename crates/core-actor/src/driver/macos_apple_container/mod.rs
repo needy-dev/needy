@@ -36,7 +36,7 @@ use needy_core::types::Capture;
 
 mod cli;
 
-pub use cli::{Cli, Output, PROGRAM, Process};
+pub use cli::{Cli, Output, PROGRAM, Process, default_cli};
 
 use crate::contract::{CHANNELS, GATEWAY_SOCKET, GUEST, GUEST_SOCKET, INIT, PROCESS_SOCKET, channels_dir};
 use crate::driver::{Channels, Driver, Endpoint, Error, Facets, Gap, Identity, Leftover, Running, Side, Start, Terminal, Transport};
@@ -154,6 +154,30 @@ impl MacosAppleContainer {
     self.cli.load_image(archive).await
   }
 
+  /// Saves this driver's image from Apple's `container` image store as an
+  /// OCI-compatible tar archive at `archive`.
+  pub async fn save(&self, archive: &Path) -> Result<(), Error> {
+    self.cli.save_image(&self.image, archive).await
+  }
+
+  /// Returns an identifier for `image` in Apple's `container` image store, or
+  /// `None` when the store does not have it.
+  // NOTICE: `container image inspect` prints a JSON array whose first element
+  // carries `id` (and `variants`). Observed with `container` 1.7.1; falls
+  // back to hashing the inspect JSON if `id` is absent so the cache key is
+  // always deterministic and non-empty.
+  pub async fn image_id(&self, image: &str) -> Result<Option<String>, Error> {
+    let inspected = self.run(&["image", "inspect", image]).await?;
+    if !inspected.success {
+      return Ok(None);
+    }
+    let id = serde_json::from_str::<serde_json::Value>(&inspected.stdout)
+      .ok()
+      .and_then(|v| v.pointer("/0/id").and_then(|id| id.as_str()).filter(|s| !s.is_empty()).map(String::from))
+      .unwrap_or_else(|| crate::image::store::Digest::of(inspected.stdout.as_bytes()).to_string());
+    Ok(Some(id))
+  }
+
   /// Pulls the image into Apple's `container` image store (`container image
   /// pull`), for linux/arm64 on Apple silicon.
   pub async fn pull(&self) -> Result<(), Error> {
@@ -257,7 +281,7 @@ impl MacosAppleContainer {
     // TODO(macos-apple-container-kernel): a needy-built arm64 kernel (`-k`) with
     // `binfmt_needy`, the fake sensors and DMI is a separate approved slice;
     // until it lands the actor runs Apple's default kernel.
-    args.push(self.image.clone());
+    args.push(start.snapshot_image.unwrap_or(&self.image).to_string());
     Launch {
       name,
       args,
@@ -479,12 +503,8 @@ impl Driver for MacosAppleContainer {
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
-    // TODO(images): container drivers boot a snapshot as an assembled OCI
-    // image loaded into Apple's store in slice 2 of the images and run data
-    // spec, not as VM layer disks; refuse non-empty layer disks so nothing
-    // silently boots without them.
     if !start.layer_disks.is_empty() {
-      return Err(Error::Unsupported("macos-apple-container actors do not attach VM layer disks; container snapshots are slice 2".into()));
+      return Err(Error::Unsupported("macos-apple-container actors boot snapshots as assembled OCI images, not VM layer disks".into()));
     }
     let launch = self.launch(start);
     // A container left by an earlier daemon would block the name.
