@@ -509,3 +509,54 @@ fn materialize_auto_flattens_lower_layers_above_threshold_and_caches_result() {
   store.collect(&[]).unwrap();
   assert!(!disks[0].path.exists(), "unreferenced flattened disk must be collected");
 }
+
+#[test]
+fn materialize_reuses_cached_disks_without_rereading_layer_tars() {
+  let dir = tempfile::tempdir().unwrap();
+  let store = store(dir.path());
+
+  // Build > MAX_UNFLATTENED_LAYERS layers including an opaque upper layer so
+  // all three disk naming forms (`-flat.squashfs`, `.squashfs`, `-on-*.squashfs`)
+  // are exercised on the cache-hit fast path.
+  let mut layers = Vec::new();
+  layers.push(put(&store, Archive::new().dir("var").file("var/old", "0")));
+  for i in 1..=MAX_UNFLATTENED_LAYERS {
+    layers.push(put(&store, Archive::new().file(&format!("f{i}"), &i.to_string())));
+  }
+  layers.push(put(&store, Archive::new().dir("var").file("var/.wh..wh..opq", "").file("var/new", "top")));
+  let snapshot = store.snapshot(&layers).unwrap();
+
+  let first = store.materialize(&snapshot).unwrap();
+  assert_eq!(first.len(), MAX_UNFLATTENED_LAYERS);
+
+  // Overwrite every cached layer tar with invalid bytes; a cache-hit
+  // `materialize` must return the existing disks without calling `Index::read`.
+  for digest in &layers {
+    let tar_path = store.layer(digest).unwrap();
+    std::fs::write(&tar_path, b"not-a-valid-tar").unwrap();
+  }
+
+  let second = store.materialize(&snapshot).unwrap();
+  assert_eq!(second, first);
+}
+
+#[test]
+fn materialize_partial_miss_reads_only_missing_non_opaque_layer_tar() {
+  let dir = tempfile::tempdir().unwrap();
+  let store = store(dir.path());
+
+  let lower = put(&store, Archive::new().file("lower", "a"));
+  let upper = put(&store, Archive::new().file("upper", "b"));
+  let snapshot = store.snapshot(&[lower, upper]).unwrap();
+
+  let first = store.materialize(&snapshot).unwrap();
+  // Corrupt the cached lower layer tar and remove only the upper layer's disk.
+  std::fs::write(store.layer(&lower).unwrap(), b"not-a-valid-tar").unwrap();
+  std::fs::remove_file(&first[1].path).unwrap();
+
+  // Because `upper` does not hide lower entries, `materialize` must rebuild
+  // only `upper`'s disk without parsing `lower`'s tar.
+  let second = store.materialize(&snapshot).unwrap();
+  assert_eq!(second, first);
+  assert_eq!(layer_tree(&second[1]), tree(&[("/upper", "file:b")]));
+}

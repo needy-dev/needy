@@ -74,6 +74,89 @@ type FlightResult = std::result::Result<Digest, String>;
 /// Result broadcast when an interactive edit session finishes.
 type EditOutcomeResult = std::result::Result<ImageEditFinished, String>;
 
+type FlightOutcome<V> = std::result::Result<V, String>;
+type FlightMap<K, V> = HashMap<K, watch::Receiver<Option<FlightOutcome<V>>>>;
+
+/// Generic async single-flight deduplication table: concurrent callers for the
+/// same key share one leader execution and receive a clone of its result.
+struct SingleFlight<K, V> {
+  in_flight: Arc<Mutex<FlightMap<K, V>>>,
+}
+
+impl<K, V> Default for SingleFlight<K, V> {
+  fn default() -> Self {
+    Self {
+      in_flight: Arc::default(),
+    }
+  }
+}
+
+impl<K, V> SingleFlight<K, V>
+where
+  K: Eq + std::hash::Hash + Clone,
+  V: Clone,
+{
+  async fn run<F, Fut>(&self, key: K, work: F) -> Result<V>
+  where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<V>>,
+  {
+    enum Role<V> {
+      Leader(watch::Sender<Option<std::result::Result<V, String>>>),
+      Waiter(watch::Receiver<Option<std::result::Result<V, String>>>),
+    }
+
+    let role = {
+      let mut map = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+      if let Some(rx) = map.get(&key) {
+        Role::Waiter(rx.clone())
+      } else {
+        let (tx, rx) = watch::channel(None);
+        map.insert(key.clone(), rx);
+        Role::Leader(tx)
+      }
+    };
+
+    match role {
+      Role::Waiter(mut rx) => {
+        let result = rx
+          .wait_for(Option::is_some)
+          .await
+          .map_err(|_| anyhow!("in-flight image operation ended without a result"))?
+          .clone()
+          .expect("wait_for guarantees Some");
+        result.map_err(|msg| anyhow!(msg))
+      }
+      Role::Leader(tx) => {
+        struct Guard<K: Eq + std::hash::Hash, V> {
+          in_flight: Arc<Mutex<FlightMap<K, V>>>,
+          key: K,
+        }
+        impl<K: Eq + std::hash::Hash, V> Drop for Guard<K, V> {
+          fn drop(&mut self) {
+            self.in_flight.lock().unwrap_or_else(|p| p.into_inner()).remove(&self.key);
+          }
+        }
+        let _guard = Guard {
+          in_flight: self.in_flight.clone(),
+          key,
+        };
+
+        match work().await {
+          Ok(val) => {
+            let _ = tx.send(Some(Ok(val.clone())));
+            Ok(val)
+          }
+          Err(err) => {
+            let _ = tx.send(Some(Err(format!("{err:#}"))));
+            Err(err)
+          }
+        }
+      }
+    }
+  }
+}
+
 /// Cached SHA-256 of a locally built base `rootfs.ext4`, invalidated when the
 /// file's path, length, or modification time changes.
 #[derive(Debug, Clone)]
@@ -101,6 +184,10 @@ pub struct Images {
   /// In-flight builds keyed by step cache key, so concurrent `run create`s
   /// build each missing cache key once and wait for the same result.
   in_flight: Mutex<HashMap<Digest, watch::Receiver<Option<FlightResult>>>>,
+  /// In-flight base container image exports into `base-oci/`.
+  base_export_flight: SingleFlight<String, PathBuf>,
+  /// In-flight container snapshot materializations and runtime loads.
+  materialize_flight: SingleFlight<String, String>,
   /// Image names with an active edit session: enforces one edit session per
   /// image at a time.
   active_edits: Mutex<HashSet<String>>,
@@ -165,6 +252,8 @@ impl Images {
       base_oci_dir,
       backends,
       in_flight: Mutex::default(),
+      base_export_flight: SingleFlight::default(),
+      materialize_flight: SingleFlight::default(),
       active_edits: Mutex::default(),
       edits: Mutex::default(),
       root_digest_cache: Mutex::default(),
@@ -369,14 +458,17 @@ impl Images {
         )
       }
     };
-    let (snapshot, layer_disks, snapshot_image) = if built_below.is_empty() {
-      (None, Vec::new(), None)
+    let (snapshot, layer_disks, snapshot_image, cleanup_snapshot_tag) = if built_below.is_empty() {
+      (None, Vec::new(), None, None)
     } else if builder == ActorDriver::LinuxContainer {
       let store = self.store.clone();
       let layers = built_below.to_vec();
       let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting parent layers panicked")??;
+      let expected_tag = snapshot_tag(&snapshot.digest);
+      let existed = daemon.images.backends().engine.inspect_image(&expected_tag).await.ok().flatten().is_some();
       let tag = materialize_for_linux_container(daemon, &snapshot, base_container_image).await?;
-      (Some(snapshot), Vec::new(), Some(tag))
+      let cleanup = (!existed).then(|| tag.clone());
+      (Some(snapshot), Vec::new(), Some(tag), cleanup)
     } else {
       let store = self.store.clone();
       let layers = built_below.to_vec();
@@ -387,7 +479,7 @@ impl Images {
       })
       .await
       .context("materializing parent layers panicked")??;
-      (Some(snapshot), disks, None)
+      (Some(snapshot), disks, None, None)
     };
 
     let spec = SessionSpec {
@@ -423,7 +515,13 @@ impl Images {
       trace: trace.clone(),
     };
 
-    let outcome = run_session(daemon, spec, cancel.clone()).await?;
+    let session_result = run_session(daemon, spec, cancel.clone()).await;
+    if let Some(temp_tag) = cleanup_snapshot_tag
+      && let Err(e) = daemon.images.backends().engine.remove_image(&temp_tag).await
+    {
+      tracing::warn!("cannot remove temporary intermediate snapshot image {temp_tag}: {e}");
+    }
+    let outcome = session_result?;
     match outcome.exit {
       Some(Exit {
         code: Some(0),
@@ -877,13 +975,23 @@ async fn resolve_features(
   })
 }
 
+/// Resolved plan, builder driver, and recorded snapshot before driver-specific
+/// materialization (VM SquashFS disks or container runtime image load).
+struct ResolvedSnapshot {
+  builder: ActorDriver,
+  plan: Plan,
+  snapshot: Snapshot,
+  steps: Vec<BuildStepOutcome>,
+  resolved_features: BTreeMap<String, String>,
+}
+
 /// Plans `definition`, builds any missing `run` or `feature` steps under
 /// single-flight deduplication on the host's builder driver (VM driver when
 /// available, else `linux-container` on Linux; never Apple's `container`),
-/// stacks `commit` on top if present, and materializes the snapshot for
-/// `target_driver`.
+/// stacks `commit` on top if present, and records the resulting [`Snapshot`]
+/// without materializing driver-specific boot artifacts.
 #[allow(clippy::too_many_arguments)]
-async fn build_image_plan(
+async fn resolve_image_snapshot(
   daemon: &Daemon,
   definition: &Definition,
   target_driver: ActorDriver,
@@ -892,7 +1000,7 @@ async fn build_image_plan(
   pinned_features: &BTreeMap<String, String>,
   trace: &Dispatch,
   cancel: &CancellationToken,
-) -> Result<ResolvedImage> {
+) -> Result<ResolvedSnapshot> {
   let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
   let builder = select_builder_driver(daemon, target_driver).await;
   let root = root_digest_for(daemon, builder, base_container_image).await?;
@@ -942,37 +1050,60 @@ async fn build_image_plan(
   }
 
   let store = daemon.images.store.clone();
-  let (snapshot, layer_disks, snapshot_image) = match target_driver {
+  let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting layers panicked")??;
+
+  Ok(ResolvedSnapshot {
+    builder,
+    plan,
+    snapshot,
+    steps,
+    resolved_features: resolved_features.resolved_digests,
+  })
+}
+
+/// Plans `definition`, builds any missing `run` or `feature` steps under
+/// single-flight deduplication on the host's builder driver, stacks `commit`
+/// on top if present, and materializes the snapshot for `target_driver`.
+#[allow(clippy::too_many_arguments)]
+async fn build_image_plan(
+  daemon: &Daemon,
+  definition: &Definition,
+  target_driver: ActorDriver,
+  user: &User,
+  commit: Option<&PlanCommit>,
+  pinned_features: &BTreeMap<String, String>,
+  trace: &Dispatch,
+  cancel: &CancellationToken,
+) -> Result<ResolvedImage> {
+  let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
+  let resolved = resolve_image_snapshot(daemon, definition, target_driver, user, commit, pinned_features, trace, cancel).await?;
+
+  let store = daemon.images.store.clone();
+  let (layer_disks, snapshot_image) = match target_driver {
     ActorDriver::LinuxFirecracker | ActorDriver::MacosVz => {
-      let (snapshot, disks) = tokio::task::spawn_blocking(move || -> Result<_> {
-        let snapshot = store.snapshot(&layers)?;
-        let disks = store.materialize(&snapshot)?;
-        Ok((snapshot, disks))
-      })
-      .await
-      .context("materializing snapshot panicked")??;
-      (snapshot, disks, None)
+      let snapshot_owned = resolved.snapshot.clone();
+      let disks =
+        tokio::task::spawn_blocking(move || store.materialize(&snapshot_owned)).await.context("materializing snapshot panicked")??;
+      (disks, None)
     }
     ActorDriver::LinuxContainer => {
-      let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting layers panicked")??;
-      let tag = materialize_for_linux_container(daemon, &snapshot, base_container_image).await?;
-      (snapshot, Vec::new(), Some(tag))
+      let tag = materialize_for_linux_container(daemon, &resolved.snapshot, base_container_image).await?;
+      (Vec::new(), Some(tag))
     }
     ActorDriver::MacosAppleContainer => {
-      let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting layers panicked")??;
-      let tag = materialize_for_apple_container(daemon, &snapshot, base_container_image).await?;
-      (snapshot, Vec::new(), Some(tag))
+      let tag = materialize_for_apple_container(daemon, &resolved.snapshot, base_container_image).await?;
+      (Vec::new(), Some(tag))
     }
   };
 
   Ok(ResolvedImage {
-    builder,
-    plan,
-    snapshot,
+    builder: resolved.builder,
+    plan: resolved.plan,
+    snapshot: resolved.snapshot,
     layer_disks,
     snapshot_image,
-    steps,
-    resolved_features: resolved_features.resolved_digests,
+    steps: resolved.steps,
+    resolved_features: resolved.resolved_features,
   })
 }
 
@@ -1512,10 +1643,18 @@ impl ImagesTrait for Daemon {
         timing: false,
       },
     );
-    let resolved =
-      build_image_plan(self, &definition, target_driver, &user, request.commit.as_ref(), &request.pinned_features, &trace, &self.cancel)
-        .await
-        .map_err(crate::failed)?;
+    let resolved = resolve_image_snapshot(
+      self,
+      &definition,
+      target_driver,
+      &user,
+      request.commit.as_ref(),
+      &request.pinned_features,
+      &trace,
+      &self.cancel,
+    )
+    .await
+    .map_err(crate::failed)?;
 
     let tag = request.tag.unwrap_or_else(|| snapshot_tag(&resolved.snapshot.digest));
     let tar_path = match target_driver {
@@ -1609,10 +1748,9 @@ async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
   drv.check_host().await.is_ok()
 }
 
-/// Materializes `snapshot` on top of `base_image` as a `docker load` / OCI tar
-/// tagged as `tag` without loading it into the engine.
-async fn export_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str, tag: &str) -> Result<PathBuf> {
-  let engine = daemon.images.backends().engine.clone();
+/// Ensures `base_image` is present in `engine` (pulling if absent) and exports
+/// it once into `base-oci/` under single-flight deduplication.
+async fn export_linux_base_tar(daemon: &Daemon, engine: &Arc<dyn Engine>, base_image: &str) -> Result<PathBuf> {
   let inspected = match engine.inspect_image(base_image).await.with_context(|| format!("inspecting container base image {base_image}"))? {
     Some(info) => info,
     None => {
@@ -1624,12 +1762,67 @@ async fn export_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_i
         .ok_or_else(|| anyhow!("container actor image {base_image} is still missing after pull"))?
     }
   };
-  let base_tar = daemon.images.base_oci_dir.join(format!("{}.tar", sanitize_image_id(&inspected.id)));
-  if !base_tar.exists() {
-    write_stream_atomic(&base_tar, engine.export_image(base_image))
-      .await
-      .with_context(|| format!("exporting base container image {base_image}"))?;
+  let sanitized = sanitize_image_id(&inspected.id);
+  let base_tar = daemon.images.base_oci_dir.join(format!("{sanitized}.tar"));
+  if base_tar.exists() {
+    return Ok(base_tar);
   }
+  daemon
+    .images
+    .base_export_flight
+    .run(format!("linux:{sanitized}"), || async {
+      if !base_tar.exists() {
+        write_stream_atomic(&base_tar, engine.export_image(base_image))
+          .await
+          .with_context(|| format!("exporting base container image {base_image}"))?;
+      }
+      Ok(base_tar.clone())
+    })
+    .await
+}
+
+/// Ensures `base_image` from Apple's container store is saved once into
+/// `base-oci/` under single-flight deduplication.
+async fn export_apple_base_tar(daemon: &Daemon, apple: &MacosAppleContainer, base_image: &str) -> Result<PathBuf> {
+  let id = apple
+    .image_id(base_image)
+    .await
+    .with_context(|| format!("inspecting Apple container base image {base_image}"))?
+    .ok_or_else(|| anyhow!("container actor image {base_image} is not in Apple's container store"))?;
+  let sanitized = sanitize_image_id(&id);
+  let base_tar = daemon.images.base_oci_dir.join(format!("apple-{sanitized}.tar"));
+  if base_tar.exists() {
+    return Ok(base_tar);
+  }
+  daemon
+    .images
+    .base_export_flight
+    .run(format!("apple:{sanitized}"), || async {
+      if !base_tar.exists() {
+        tokio::fs::create_dir_all(&daemon.images.base_oci_dir)
+          .await
+          .with_context(|| format!("cannot create {}", daemon.images.base_oci_dir.display()))?;
+        let staged = daemon.images.base_oci_dir.join(format!(".save-{}.tar", uuid::Uuid::new_v4()));
+        if let Err(e) = apple.save(&staged).await {
+          let _ = tokio::fs::remove_file(&staged).await;
+          return Err(e).with_context(|| format!("saving base image {base_image} from Apple's container store"));
+        }
+        if !base_tar.exists() {
+          tokio::fs::rename(&staged, &base_tar).await.with_context(|| format!("cannot persist {}", base_tar.display()))?;
+        } else {
+          let _ = tokio::fs::remove_file(&staged).await;
+        }
+      }
+      Ok(base_tar.clone())
+    })
+    .await
+}
+
+/// Materializes `snapshot` on top of `base_image` as a `docker load` / OCI tar
+/// tagged as `tag` without loading it into the engine.
+async fn export_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str, tag: &str) -> Result<PathBuf> {
+  let engine = daemon.images.backends().engine.clone();
+  let base_tar = export_linux_base_tar(daemon, &engine, base_image).await?;
   let store = daemon.images.store.clone();
   let snapshot_owned = snapshot.clone();
   let tag_owned = tag.to_string();
@@ -1643,27 +1836,7 @@ async fn export_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_i
 /// as a `docker load` / OCI tar tagged as `tag` without loading it back.
 async fn export_for_apple_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str, tag: &str) -> Result<PathBuf> {
   let apple = MacosAppleContainer::with_cli(base_image.to_string(), daemon.images.backends().apple_cli.clone());
-  let id = apple
-    .image_id(base_image)
-    .await
-    .with_context(|| format!("inspecting Apple container base image {base_image}"))?
-    .ok_or_else(|| anyhow!("container actor image {base_image} is not in Apple's container store"))?;
-  let base_tar = daemon.images.base_oci_dir.join(format!("apple-{}.tar", sanitize_image_id(&id)));
-  if !base_tar.exists() {
-    tokio::fs::create_dir_all(&daemon.images.base_oci_dir)
-      .await
-      .with_context(|| format!("cannot create {}", daemon.images.base_oci_dir.display()))?;
-    let staged = daemon.images.base_oci_dir.join(format!(".save-{}.tar", uuid::Uuid::new_v4()));
-    if let Err(e) = apple.save(&staged).await {
-      let _ = tokio::fs::remove_file(&staged).await;
-      return Err(e).with_context(|| format!("saving base image {base_image} from Apple's container store"));
-    }
-    if !base_tar.exists() {
-      tokio::fs::rename(&staged, &base_tar).await.with_context(|| format!("cannot persist {}", base_tar.display()))?;
-    } else {
-      let _ = tokio::fs::remove_file(&staged).await;
-    }
-  }
+  let base_tar = export_apple_base_tar(daemon, &apple, base_image).await?;
   let store = daemon.images.store.clone();
   let snapshot_owned = snapshot.clone();
   let tag_owned = tag.to_string();
@@ -1693,81 +1866,71 @@ async fn stream_export_file(path: &Path) -> Result<Chunks> {
 /// first when absent from the engine.
 pub(crate) async fn materialize_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
   let engine = daemon.images.backends().engine.clone();
-  let inspected = match engine.inspect_image(base_image).await.with_context(|| format!("inspecting container base image {base_image}"))? {
-    Some(info) => info,
-    None => {
-      engine.pull(base_image).await.with_context(|| format!("pulling container base image {base_image}"))?;
-      engine
-        .inspect_image(base_image)
-        .await
-        .with_context(|| format!("inspecting pulled container base image {base_image}"))?
-        .ok_or_else(|| anyhow!("container actor image {base_image} is still missing after pull"))?
-    }
-  };
-
-  let base_tar = daemon.images.base_oci_dir.join(format!("{}.tar", sanitize_image_id(&inspected.id)));
-  if !base_tar.exists() {
-    write_stream_atomic(&base_tar, engine.export_image(base_image))
-      .await
-      .with_context(|| format!("exporting base container image {base_image}"))?;
-  }
-
   let tag = snapshot_tag(&snapshot.digest);
-  let store = daemon.images.store.clone();
-  let snapshot_owned = snapshot.clone();
-  let base_tar_owned = base_tar.clone();
-  let tag_for_build = tag.clone();
-  let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar_owned, &tag_for_build))
-    .await
-    .context("materializing container snapshot panicked")??;
-
-  if engine.inspect_image(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
-    let stream = stream_file(&oci_tar).await?;
-    engine.load_image(stream).await.with_context(|| format!("loading snapshot image {tag} into the engine"))?;
+  // Short-circuit before exporting the base image or assembling an OCI tar
+  // when the snapshot tag is already loaded in the engine.
+  if !snapshot.layers.is_empty() && engine.inspect_image(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_some() {
+    return Ok(tag);
   }
-  Ok(tag)
+
+  daemon
+    .images
+    .materialize_flight
+    .run(format!("linux:{base_image}:{tag}"), || async {
+      if !snapshot.layers.is_empty()
+        && engine.inspect_image(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_some()
+      {
+        return Ok(tag.clone());
+      }
+
+      let base_tar = export_linux_base_tar(daemon, &engine, base_image).await?;
+      let store = daemon.images.store.clone();
+      let snapshot_owned = snapshot.clone();
+      let tag_for_build = tag.clone();
+      let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar, &tag_for_build))
+        .await
+        .context("materializing container snapshot panicked")??;
+
+      if engine.inspect_image(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
+        let stream = stream_file(&oci_tar).await?;
+        engine.load_image(stream).await.with_context(|| format!("loading snapshot image {tag} into the engine"))?;
+      }
+      Ok(tag.clone())
+    })
+    .await
 }
 
 /// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`
 /// into Apple's `container` image store if not already present.
 async fn materialize_for_apple_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
   let apple = MacosAppleContainer::with_cli(base_image.to_string(), daemon.images.backends().apple_cli.clone());
-  let id = apple
-    .image_id(base_image)
-    .await
-    .with_context(|| format!("inspecting Apple container base image {base_image}"))?
-    .ok_or_else(|| anyhow!("container actor image {base_image} is not in Apple's container store"))?;
-
-  let base_tar = daemon.images.base_oci_dir.join(format!("apple-{}.tar", sanitize_image_id(&id)));
-  if !base_tar.exists() {
-    tokio::fs::create_dir_all(&daemon.images.base_oci_dir)
-      .await
-      .with_context(|| format!("cannot create {}", daemon.images.base_oci_dir.display()))?;
-    let staged = daemon.images.base_oci_dir.join(format!(".save-{}.tar", uuid::Uuid::new_v4()));
-    if let Err(e) = apple.save(&staged).await {
-      let _ = tokio::fs::remove_file(&staged).await;
-      return Err(e).with_context(|| format!("saving base image {base_image} from Apple's container store"));
-    }
-    if !base_tar.exists() {
-      tokio::fs::rename(&staged, &base_tar).await.with_context(|| format!("cannot persist {}", base_tar.display()))?;
-    } else {
-      let _ = tokio::fs::remove_file(&staged).await;
-    }
-  }
-
   let tag = snapshot_tag(&snapshot.digest);
-  let store = daemon.images.store.clone();
-  let snapshot_owned = snapshot.clone();
-  let base_tar_owned = base_tar.clone();
-  let tag_for_build = tag.clone();
-  let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar_owned, &tag_for_build))
-    .await
-    .context("materializing container snapshot panicked")??;
-
-  if apple.image_id(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
-    apple.load(&oci_tar).await.with_context(|| format!("loading snapshot image {tag} into Apple's container store"))?;
+  if !snapshot.layers.is_empty() && apple.image_id(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_some() {
+    return Ok(tag);
   }
-  Ok(tag)
+
+  daemon
+    .images
+    .materialize_flight
+    .run(format!("apple:{base_image}:{tag}"), || async {
+      if !snapshot.layers.is_empty() && apple.image_id(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_some() {
+        return Ok(tag.clone());
+      }
+
+      let base_tar = export_apple_base_tar(daemon, &apple, base_image).await?;
+      let store = daemon.images.store.clone();
+      let snapshot_owned = snapshot.clone();
+      let tag_for_build = tag.clone();
+      let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar, &tag_for_build))
+        .await
+        .context("materializing container snapshot panicked")??;
+
+      if apple.image_id(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
+        apple.load(&oci_tar).await.with_context(|| format!("loading snapshot image {tag} into Apple's container store"))?;
+      }
+      Ok(tag.clone())
+    })
+    .await
 }
 
 /// Commits `container_name` to a temporary image, exports it to `dir/committed.tar`,

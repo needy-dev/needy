@@ -1340,22 +1340,19 @@ async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_
   assert_eq!(built.steps.len(), 2);
   assert!(!built.steps[0].cached);
   assert!(!built.steps[1].cached);
-  // Both build sessions were committed, their temporary images removed, and
-  // their containers removed.
+  // Both build sessions were committed, their temporary commit images AND the
+  // intermediate `built_below` snapshot tag for step 2 were removed.
   let commits = engine.committed.lock().unwrap().clone();
   assert_eq!(commits.len(), 2, "{commits:?}");
-  let removed_imgs = engine.removed_images.lock().unwrap().clone();
-  assert_eq!(removed_imgs, vec![commits[0].1.clone(), commits[1].1.clone()]);
-  // Every build container ran with a writable rootfs (`readonly_rootfs == false`).
   let created = engine.created.lock().unwrap().clone();
   assert_eq!(created.len(), 2);
+  let intermediate_tag = created[1].1.image.clone().expect("step 2 snapshot tag");
+  assert!(intermediate_tag.starts_with("needy-snapshot:"), "step 2 must boot from step 1's materialized snapshot image: {intermediate_tag}");
+  let removed_imgs = engine.removed_images.lock().unwrap().clone();
+  assert_eq!(removed_imgs, vec![commits[0].1.clone(), commits[1].1.clone(), intermediate_tag]);
+  // Every build container ran with a writable rootfs (`readonly_rootfs == false`).
   assert_eq!(created[0].1.image.as_deref(), Some("needy-actor:latest"));
   assert_eq!(created[0].1.host_config.as_ref().unwrap().readonly_rootfs, Some(false));
-  assert!(
-    created[1].1.image.as_deref().is_some_and(|i| i.starts_with("needy-snapshot:")),
-    "step 2 must boot from step 1's materialized snapshot image: {:?}",
-    created[1].1.image
-  );
 
   // Interactive edit session also runs on `linux-container` fallback, records
   // commands, commits the top layer, and cleans up the temporary image.
@@ -1384,7 +1381,7 @@ async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_
   assert_eq!(finished.commands.len(), 1);
   assert_eq!(finished.commands[0].argv, ["touch", "/etc/edited"]);
   assert_eq!(engine.committed.lock().unwrap().len(), 3);
-  assert_eq!(engine.removed_images.lock().unwrap().len(), 3);
+  assert_eq!(engine.removed_images.lock().unwrap().len(), 4);
 }
 
 // ------------------------------------------------------------ feature builds
@@ -2317,4 +2314,116 @@ async fn image_export_streams_valid_oci_docker_archive() {
   assert!(names.contains("index.json"), "missing index.json: {names:?}");
   assert!(names.contains("manifest.json"), "missing manifest.json: {names:?}");
   assert!(manifest_json.contains("example.com/exported:1"), "tag missing from manifest.json: {manifest_json}");
+
+  // Exporting for a VM driver must not wastefully materialize SquashFS disks.
+  let disks_dir = daemon.config.cache_dir.join("image-store/disks");
+  let disk_count = if disks_dir.exists() {
+    std::fs::read_dir(&disks_dir).unwrap().count()
+  } else {
+    0
+  };
+  assert_eq!(disk_count, 0, "VM image export must not materialize SquashFS disks");
+}
+
+#[tokio::test]
+async fn materialize_for_linux_container_cache_hit_skips_base_export_and_load() {
+  let engine = FakeContainerEngine::new("needy-actor:latest", None);
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+
+  let layer = daemon.images.store.put(std::io::Cursor::new(tar_with_file("hello.txt", "world\n"))).unwrap();
+  let snapshot = daemon.images.store.snapshot(&[layer]).unwrap();
+  let expected_tag = needy_core_actor::image::store::snapshot_tag(&snapshot.digest);
+
+  // Pre-seed the snapshot tag directly in the container engine without any
+  // cached `base-oci/` tar.
+  let preloaded_image = needy_core_executor::engine::Image {
+    id: format!("sha256:{}", "d".repeat(64)),
+    os: "linux".into(),
+    architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
+    labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+  };
+  engine.images.lock().unwrap().insert(expected_tag.clone(), (preloaded_image, Vec::new()));
+
+  let tag = super::materialize_for_linux_container(daemon, &snapshot, "needy-actor:latest").await.unwrap();
+  assert_eq!(tag, expected_tag);
+  assert!(engine.exported.lock().unwrap().is_empty(), "cache hit must not export base image");
+  assert!(engine.loaded.lock().unwrap().is_empty(), "cache hit must not load snapshot image");
+}
+
+#[tokio::test]
+async fn materialize_for_linux_container_single_flight_deduplicates_concurrent_calls() {
+  let engine = FakeContainerEngine::new("needy-actor:latest", None);
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+
+  let layer = daemon.images.store.put(std::io::Cursor::new(tar_with_file("concurrent.txt", "ok\n"))).unwrap();
+  let snapshot = daemon.images.store.snapshot(&[layer]).unwrap();
+  let expected_tag = needy_core_actor::image::store::snapshot_tag(&snapshot.digest);
+
+  let mut handles = Vec::new();
+  for _ in 0..4 {
+    let daemon = daemon.clone();
+    let snapshot = snapshot.clone();
+    handles.push(tokio::spawn(async move { super::materialize_for_linux_container(&daemon, &snapshot, "needy-actor:latest").await }));
+  }
+  for handle in handles {
+    assert_eq!(handle.await.unwrap().unwrap(), expected_tag);
+  }
+  assert_eq!(engine.exported.lock().unwrap().len(), 1, "base image must be exported once");
+  assert_eq!(engine.loaded.lock().unwrap().len(), 1, "snapshot must be loaded once");
+}
+
+#[tokio::test]
+async fn image_export_for_linux_container_does_not_load_snapshot_into_engine() {
+  use futures_util::StreamExt as _;
+  use needy_api_server::control::{ImageExport, Images as _};
+
+  let engine = FakeContainerEngine::new("needy-actor:latest", None);
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (_sessions, _configs, responder) = spawn_build_responder(started_log.clone(), behavior, stop.clone());
+
+  let mut stream = tokio::time::timeout(
+    Duration::from_secs(20),
+    daemon.export(ImageExport {
+      image_yaml: "root: needy-actor:latest\nlayers:\n  - run: echo export-container\n".into(),
+      driver: "linux-container".into(),
+      user: None,
+      commit: None,
+      pinned_features: Default::default(),
+      tag: Some("example.com/exported-container:1".into()),
+    }),
+  )
+  .await
+  .expect("container image export timed out")
+  .unwrap();
+
+  let mut bytes = Vec::new();
+  while let Some(chunk) = stream.next().await {
+    bytes.extend_from_slice(&chunk.unwrap());
+  }
+  stop.cancel();
+  responder.abort();
+
+  assert!(!bytes.is_empty());
+  assert_eq!(repo_tag_from_tar(&bytes), "example.com/exported-container:1");
+  assert!(engine.loaded.lock().unwrap().is_empty(), "container export must not load snapshot into the engine");
 }

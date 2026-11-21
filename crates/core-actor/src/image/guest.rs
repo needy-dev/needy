@@ -6,10 +6,25 @@
 //!
 //! See `docs/ai/references/architecture/2026-11-12-actor-images-design.md`.
 
+use std::collections::HashMap;
+use std::io::{Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::SystemTime;
 
 use object::elf;
 use object::read::elf::{Dyn, FileHeader, ProgramHeader};
+
+/// Cached guest disk lookup keyed by `(binary_path, cache_dir)`, invalidated
+/// when the binary's size or mtime changes or the disk file is removed.
+#[derive(Debug, Clone)]
+struct CachedDisk {
+  len: u64,
+  modified: Option<SystemTime>,
+  path: PathBuf,
+}
+
+static DISK_CACHE: OnceLock<Mutex<HashMap<(PathBuf, PathBuf), CachedDisk>>> = OnceLock::new();
 
 /// What [`find`] and [`check`] refused.
 #[derive(Debug, thiserror::Error)]
@@ -158,27 +173,60 @@ pub fn check(path: &Path, arch: &str) -> Result<(), Error> {
 // guest's ([`disk_name`]).
 pub fn disk(binary: &Path, cache: &Path) -> Result<PathBuf, Error> {
   use sha2::Digest as _;
-  let bytes = std::fs::read(binary).map_err(|e| Error::Refused {
+  let meta = std::fs::metadata(binary).map_err(|e| Error::Refused {
     path: binary.to_path_buf(),
     why: format!("cannot be read: {e}"),
   })?;
-  let path = cache.join(disk_name(&sha2::Sha256::digest(&bytes)));
-  if path.exists() {
-    return Ok(path);
+  let len = meta.len();
+  let modified = meta.modified().ok();
+  let cache_key = (binary.to_path_buf(), cache.to_path_buf());
+  let disk_cache = DISK_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+  if let Some(cached) = disk_cache.lock().unwrap_or_else(|p| p.into_inner()).get(&cache_key)
+    && cached.len == len
+    && cached.modified == modified
+    && cached.path.exists()
+  {
+    return Ok(cached.path.clone());
   }
-  let failed = |message: String| Error::Disk {
-    path: path.clone(),
-    message,
-  };
-  std::fs::create_dir_all(cache).map_err(|e| failed(format!("cannot create {}: {e}", cache.display())))?;
-  let mut staged = tempfile::NamedTempFile::new_in(cache).map_err(|e| failed(e.to_string()))?;
-  let mut fs = backhand::FilesystemWriter::default();
-  let gzip = backhand::FilesystemCompressor::new(backhand::compression::Compressor::Gzip, None).map_err(|e| failed(e.to_string()))?;
-  fs.set_compressor(gzip);
-  fs.set_root_mode(0o755);
-  fs.push_file(std::io::Cursor::new(bytes), "needy", backhand::NodeHeader::new(0o755, 0, 0, 0)).map_err(|e| failed(e.to_string()))?;
-  fs.write(staged.as_file_mut()).map_err(|e| failed(e.to_string()))?;
-  staged.persist(&path).map_err(|e| failed(e.to_string()))?;
+
+  let mut file = std::fs::File::open(binary).map_err(|e| Error::Refused {
+    path: binary.to_path_buf(),
+    why: format!("cannot be read: {e}"),
+  })?;
+  let mut hasher = sha2::Sha256::new();
+  std::io::copy(&mut file, &mut hasher).map_err(|e| Error::Refused {
+    path: binary.to_path_buf(),
+    why: format!("cannot be read: {e}"),
+  })?;
+  let path = cache.join(disk_name(&hasher.finalize()));
+  if !path.exists() {
+    let failed = |message: String| Error::Disk {
+      path: path.clone(),
+      message,
+    };
+    file.seek(SeekFrom::Start(0)).map_err(|e| Error::Refused {
+      path: binary.to_path_buf(),
+      why: format!("cannot be read: {e}"),
+    })?;
+    std::fs::create_dir_all(cache).map_err(|e| failed(format!("cannot create {}: {e}", cache.display())))?;
+    let mut staged = tempfile::NamedTempFile::new_in(cache).map_err(|e| failed(e.to_string()))?;
+    let mut fs = backhand::FilesystemWriter::default();
+    let gzip = backhand::FilesystemCompressor::new(backhand::compression::Compressor::Gzip, None).map_err(|e| failed(e.to_string()))?;
+    fs.set_compressor(gzip);
+    fs.set_root_mode(0o755);
+    fs.push_file(file, "needy", backhand::NodeHeader::new(0o755, 0, 0, 0)).map_err(|e| failed(e.to_string()))?;
+    fs.write(staged.as_file_mut()).map_err(|e| failed(e.to_string()))?;
+    staged.persist(&path).map_err(|e| failed(e.to_string()))?;
+  }
+
+  disk_cache.lock().unwrap_or_else(|p| p.into_inner()).insert(
+    cache_key,
+    CachedDisk {
+      len,
+      modified,
+      path: path.clone(),
+    },
+  );
   Ok(path)
 }
 

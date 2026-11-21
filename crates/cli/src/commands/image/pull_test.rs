@@ -78,10 +78,13 @@ fn client() -> reqwest::Client {
   reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
-/// The entries of `dir`, by name, sorted.
+/// The entries of `dir`, by name, sorted (excluding `.pull-*.lock` files).
 fn entries(dir: &Path) -> Vec<String> {
-  let mut names: Vec<String> =
-    std::fs::read_dir(dir).unwrap().map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+  let mut names: Vec<String> = std::fs::read_dir(dir)
+    .unwrap()
+    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+    .filter(|name| !(name.starts_with(".pull-") && name.ends_with(".lock")))
+    .collect();
   names.sort();
   names
 }
@@ -252,4 +255,91 @@ async fn a_newer_pull_replaces_the_older_image_whole() {
   assert_eq!(std::fs::read(dir.join("vmlinux")).unwrap(), b"kernel 2");
   assert!(!dir.join("left-over").exists());
   assert_eq!(entries(&images.path().join("linux-firecracker")), ["base"], "the older image is gone");
+}
+
+/// Serves `files` over HTTP on loopback and records every requested path.
+async fn serve_counting(files: Vec<(String, Vec<u8>)>) -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  let requested = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+  let requested_bg = requested.clone();
+  tokio::spawn(async move {
+    while let Ok((mut stream, _)) = listener.accept().await {
+      let files = files.clone();
+      let requested = requested_bg.clone();
+      tokio::spawn(async move {
+        let mut request = Vec::new();
+        let mut buffer = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+          match stream.read(&mut buffer).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => request.extend_from_slice(&buffer[..read]),
+          }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let path = request.split_whitespace().nth(1).unwrap_or("/").trim_start_matches('/').to_string();
+        requested.lock().unwrap().push(path.clone());
+        let (status, body) = match files.iter().find(|(name, _)| *name == path) {
+          Some((_, body)) => ("200 OK", body.clone()),
+          None => ("404 Not Found", b"Not Found".to_vec()),
+        };
+        let head = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+        if stream.write_all(head.as_bytes()).await.is_ok() {
+          let _ = stream.write_all(&body).await;
+        }
+      });
+    }
+  });
+  (format!("http://{address}"), requested)
+}
+
+#[tokio::test]
+async fn pull_vm_skips_archive_download_when_installed_sha256_matches() {
+  let images = tempfile::tempdir().unwrap();
+  let packed = firecracker_archive(base::ABI);
+  let digest = sha256(&packed);
+  let name = "needy-actor-linux-firecracker-x86_64.tar.gz";
+  let (assets, requested) = serve_counting(vec![
+    (name.into(), packed),
+    (format!("{name}.sha256"), format!("{digest}\n").into_bytes()),
+  ])
+  .await;
+
+  let first = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets, false).await.unwrap();
+  let second = pull_vm(&client(), images.path(), ActorDriver::LinuxFirecracker, "0.0.9", &assets, false).await.unwrap();
+
+  assert_eq!(first, second);
+  let paths = requested.lock().unwrap().clone();
+  let archive_downloads = paths.iter().filter(|p| p.as_str() == name).count();
+  let checksum_fetches = paths.iter().filter(|p| p.as_str() == format!("{name}.sha256")).count();
+  assert_eq!(checksum_fetches, 2, "each pull checks the remote sha256: {paths:?}");
+  assert_eq!(archive_downloads, 1, "second pull must skip downloading the archive when sha256 matches: {paths:?}");
+}
+
+#[tokio::test]
+async fn concurrent_pull_vm_serializes_and_downloads_archive_once() {
+  let images = tempfile::tempdir().unwrap();
+  let packed = firecracker_archive(base::ABI);
+  let digest = sha256(&packed);
+  let name = "needy-actor-linux-firecracker-x86_64.tar.gz";
+  let (assets, requested) = serve_counting(vec![
+    (name.into(), packed),
+    (format!("{name}.sha256"), format!("{digest}\n").into_bytes()),
+  ])
+  .await;
+
+  let dir1 = images.path().to_path_buf();
+  let dir2 = images.path().to_path_buf();
+  let assets1 = assets.clone();
+  let assets2 = assets.clone();
+  let c1 = client();
+  let c2 = client();
+  let (r1, r2) = tokio::join!(
+    pull_vm(&c1, &dir1, ActorDriver::LinuxFirecracker, "0.0.9", &assets1, false),
+    pull_vm(&c2, &dir2, ActorDriver::LinuxFirecracker, "0.0.9", &assets2, false),
+  );
+  assert_eq!(r1.unwrap(), r2.unwrap());
+  let paths = requested.lock().unwrap().clone();
+  let archive_downloads = paths.iter().filter(|p| p.as_str() == name).count();
+  assert_eq!(archive_downloads, 1, "advisory pull lock must serialize concurrent pulls so archive is downloaded once: {paths:?}");
 }

@@ -251,52 +251,124 @@ impl Store {
   /// given depend on what is below.
   pub fn materialize(&self, snapshot: &Snapshot) -> Result<Vec<LayerDisk>> {
     let dir = self.cache.join("disks");
-    let indexes = snapshot.layers.iter().map(|digest| archive::Index::read(&self.layer(digest)?)).collect::<Result<Vec<_>>>()?;
-    // What the layers below show is tracked only as far as a layer that
-    // needs it.
-    let needed = indexes.iter().rposition(disk::hides_below).unwrap_or(0);
-    let mut below = disk::Below::default();
-
-    let (start_at, mut disks) = if snapshot.layers.len() > MAX_UNFLATTENED_LAYERS {
+    let (start_at, flat_spec) = if snapshot.layers.len() > MAX_UNFLATTENED_LAYERS {
       let prefix_len = snapshot.layers.len() - (MAX_UNFLATTENED_LAYERS - 1);
       let prefix_digest = stack_digest(&snapshot.layers[..prefix_len]);
       let path = dir.join(format!("{}-flat.squashfs", stem(&prefix_digest)));
-      if !path.exists() {
-        let mut merged = indexes[0].clone();
-        for upper in &indexes[1..prefix_len] {
-          merged = collapse::collapse(&merged, upper)?;
+      (prefix_len, Some((prefix_digest, path)))
+    } else {
+      (0, None)
+    };
+
+    // Probe cached disks before parsing any layer tar archives: a layer's
+    // `hides_below` property is a pure function of its content, so a layer
+    // produces either `<stem>.squashfs` or `<stem>-on-<stack>.squashfs`, never
+    // both.
+    let flat_hit = flat_spec.as_ref().is_none_or(|(_, path)| path.exists());
+    let mut cached_upper: Vec<Option<PathBuf>> = Vec::with_capacity(snapshot.layers.len() - start_at);
+    let mut all_upper_hit = true;
+    for (at, digest) in snapshot.layers.iter().enumerate().skip(start_at) {
+      let plain = dir.join(format!("{}.squashfs", stem(digest)));
+      let found = if plain.exists() {
+        Some(plain)
+      } else {
+        let on_stack = dir.join(format!("{}-on-{}.squashfs", stem(digest), &stack_digest(&snapshot.layers[..at]).hex()[..16]));
+        on_stack.exists().then_some(on_stack)
+      };
+      if found.is_none() {
+        all_upper_hit = false;
+      }
+      cached_upper.push(found);
+    }
+
+    if flat_hit && all_upper_hit {
+      let mut disks = Vec::with_capacity(usize::from(flat_spec.is_some()) + cached_upper.len());
+      if let Some((digest, path)) = flat_spec {
+        disks.push(LayerDisk { digest, path });
+      }
+      for (digest, path) in snapshot.layers.iter().skip(start_at).zip(cached_upper) {
+        disks.push(LayerDisk {
+          digest: *digest,
+          path: path.expect("all_upper_hit guarantees Some"),
+        });
+      }
+      return Ok(disks);
+    }
+
+    // Lazily read layer tar indexes only for layers whose disk is missing,
+    // plus lower layers needed to collapse a missing prefix or expand whiteouts
+    // for a missing opaque layer.
+    let mut indexes: Vec<Option<archive::Index>> = vec![None; snapshot.layers.len()];
+    let load_index = |indexes: &mut [Option<archive::Index>], idx: usize| -> Result<()> {
+      if indexes[idx].is_none() {
+        indexes[idx] = Some(archive::Index::read(&self.layer(&snapshot.layers[idx])?)?);
+      }
+      Ok(())
+    };
+
+    let mut disks = Vec::with_capacity(usize::from(flat_spec.is_some()) + cached_upper.len());
+    if let Some((prefix_digest, path)) = flat_spec {
+      if !flat_hit {
+        for i in 0..start_at {
+          load_index(&mut indexes, i)?;
+        }
+        let mut merged = indexes[0].as_ref().expect("loaded above").clone();
+        for upper in &indexes[1..start_at] {
+          merged = collapse::collapse(&merged, upper.as_ref().expect("loaded above"))?;
         }
         std::fs::create_dir_all(&dir).map_err(io(dir.display()))?;
         disk::write(&merged, &prefix_digest, &disk::Below::default(), &path)?;
       }
-      if needed >= prefix_len {
-        for index in &indexes[..prefix_len] {
-          below.stack(index);
-        }
-      }
-      let mut disks = Vec::with_capacity(MAX_UNFLATTENED_LAYERS);
       disks.push(LayerDisk {
         digest: prefix_digest,
         path,
       });
-      (prefix_len, disks)
-    } else {
-      (0, Vec::with_capacity(snapshot.layers.len()))
-    };
+    }
 
-    for (at, (digest, index)) in snapshot.layers.iter().zip(&indexes).enumerate().skip(start_at) {
-      let name = if disk::hides_below(index) {
-        format!("{}-on-{}.squashfs", stem(digest), &stack_digest(&snapshot.layers[..at]).hex()[..16])
-      } else {
-        format!("{}.squashfs", stem(digest))
-      };
-      let path = dir.join(name);
-      if !path.exists() {
-        std::fs::create_dir_all(&dir).map_err(io(dir.display()))?;
-        disk::write(index, digest, &below, &path)?;
+    // Load missing upper layers to determine whether any of them hides lower
+    // entries (and thus requires stacking `below` up to that position).
+    let mut needed: Option<usize> = None;
+    for (offset, cached) in cached_upper.iter().enumerate() {
+      if cached.is_none() {
+        let at = start_at + offset;
+        load_index(&mut indexes, at)?;
+        if disk::hides_below(indexes[at].as_ref().expect("loaded above")) {
+          needed = Some(at);
+        }
       }
-      if at < needed {
-        below.stack(index);
+    }
+
+    let mut below = disk::Below::default();
+    if needed.is_some() {
+      for i in 0..start_at {
+        load_index(&mut indexes, i)?;
+        below.stack(indexes[i].as_ref().expect("loaded above"));
+      }
+    }
+
+    for (offset, cached) in cached_upper.into_iter().enumerate() {
+      let at = start_at + offset;
+      let digest = &snapshot.layers[at];
+      let path = match cached {
+        Some(path) => path,
+        None => {
+          let index = indexes[at].as_ref().expect("missing upper layer loaded above");
+          let name = if disk::hides_below(index) {
+            format!("{}-on-{}.squashfs", stem(digest), &stack_digest(&snapshot.layers[..at]).hex()[..16])
+          } else {
+            format!("{}.squashfs", stem(digest))
+          };
+          let path = dir.join(name);
+          if !path.exists() {
+            std::fs::create_dir_all(&dir).map_err(io(dir.display()))?;
+            disk::write(index, digest, &below, &path)?;
+          }
+          path
+        }
+      };
+      if needed.is_some_and(|max| at < max) {
+        load_index(&mut indexes, at)?;
+        below.stack(indexes[at].as_ref().expect("loaded above"));
       }
       disks.push(LayerDisk {
         digest: *digest,
