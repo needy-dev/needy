@@ -5,6 +5,7 @@
 //! profile YAML. See `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`
 //! ("Building and editing", "A commit's `run:` snippet").
 
+use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -21,14 +22,23 @@ use crate::cli::Context;
 const LOCKFILE_HEADER: &str = "# Managed by needy. Do not edit by hand.\n";
 
 /// What an image lockfile records.
-// TODO(images): feature lock entries (resolved versions and digests) come with
-// slice 3 of the images and run data spec.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Lockfile {
   /// The image's current commit layer and the base cache key it was made on.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub commit: Option<LockCommit>,
+  /// Pinned OCI feature digests (`sha256:...`) keyed by canonical feature
+  /// reference (registry/repository without tag or digest).
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub features: BTreeMap<String, String>,
+}
+
+impl Lockfile {
+  /// Whether this lockfile has neither a commit nor any pinned features.
+  pub fn is_empty(&self) -> bool {
+    self.commit.is_none() && self.features.is_empty()
+  }
 }
 
 /// One commit entry in a lockfile.
@@ -81,7 +91,7 @@ pub(crate) fn read(path: &Path) -> Result<Lockfile> {
 /// Atomically writes `lock` to `path`. Removes `path` when `lock` has no
 /// entries (for example after rolling back past the first commit).
 pub(crate) fn write(path: &Path, lock: &Lockfile) -> Result<()> {
-  if lock.commit.is_none() {
+  if lock.is_empty() {
     match std::fs::remove_file(path) {
       Ok(()) => return Ok(()),
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),

@@ -26,6 +26,8 @@ needy-core.workspace = true
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 object.workspace = true
+# OCI Distribution v2 client for Dev Container feature artifacts (`image::feature`).
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -34,6 +34,7 @@ fn lockfile_round_trip_and_removal_when_empty() {
       layer: digest('a'),
       base: digest('b'),
     }),
+    ..Default::default()
   };
   write(&lock_path, &lock).unwrap();
   assert!(lock_path.exists());
@@ -44,6 +45,63 @@ fn lockfile_round_trip_and_removal_when_empty() {
   // Writing an empty lockfile removes the file.
   write(&lock_path, &Lockfile::default()).unwrap();
   assert!(!lock_path.exists());
+}
+
+#[test]
+fn lockfile_round_trips_commit_and_features_and_preserves_features_when_commit_cleared() {
+  let dir = tempfile::tempdir().unwrap();
+  let lock_path = dir.path().join("agent.yaml.lock");
+
+  let mut features = std::collections::BTreeMap::new();
+  features.insert("ghcr.io/devcontainers/features/git".into(), digest('c'));
+  features.insert("ghcr.io/devcontainers/features/node".into(), digest('d'));
+
+  let mut lock = Lockfile {
+    commit: Some(LockCommit {
+      layer: digest('a'),
+      base: digest('b'),
+    }),
+    features,
+  };
+  assert!(!lock.is_empty());
+
+  write(&lock_path, &lock).unwrap();
+  assert!(lock_path.exists());
+  assert_eq!(read(&lock_path).unwrap(), lock);
+
+  // Clearing `commit` (as `image rollback` does past the first commit) keeps
+  // the lockfile on disk while `features` is non-empty.
+  lock.commit = None;
+  assert!(!lock.is_empty());
+  write(&lock_path, &lock).unwrap();
+  assert!(lock_path.exists(), "lockfile must remain when features are pinned");
+  assert_eq!(read(&lock_path).unwrap(), lock);
+
+  // Removing `features` as well makes the lockfile empty and deletes the file.
+  lock.features.clear();
+  assert!(lock.is_empty());
+  write(&lock_path, &lock).unwrap();
+  assert!(!lock_path.exists(), "empty lockfile must be deleted");
+}
+
+#[test]
+fn lockfile_reads_legacy_commit_only_yaml_backward_compatibly() {
+  let dir = tempfile::tempdir().unwrap();
+  let lock_path = dir.path().join("legacy.yaml.lock");
+  let legacy = format!("# Managed by needy. Do not edit by hand.\ncommit:\n  layer: {}\n  base: {}\n", digest('1'), digest('2'));
+  std::fs::write(&lock_path, legacy).unwrap();
+
+  let parsed = read(&lock_path).unwrap();
+  assert_eq!(
+    parsed,
+    Lockfile {
+      commit: Some(LockCommit {
+        layer: digest('1'),
+        base: digest('2'),
+      }),
+      features: std::collections::BTreeMap::new(),
+    }
+  );
 }
 
 #[test]
