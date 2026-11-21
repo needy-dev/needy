@@ -12,7 +12,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use needy_config::image::{Definition, FeatureOption, Hooks, Layer, untagged};
-use needy_config::profile::{OnConflict, User};
+use needy_config::profile::{BUILT_CONTAINER_IMAGE, CONTAINER_IMAGE, OnConflict, User};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
@@ -20,6 +20,37 @@ pub use self::feature::{
   FeatureCustomizations, FeatureError, FeatureFileSpec, FeatureMetadata, LifecycleCommand, LifecycleEntry, NeedyCustomizations, OptionSpec,
   sanitize_option_name,
 };
+pub use needy_config::image::DEFAULT_ROOT;
+
+/// Reference name for needy's built-in `sshfs` Dev Container feature (decision
+/// E8 in `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`).
+pub const BUILTIN_SSHFS: &str = "builtin:sshfs";
+
+/// Whether `root` names needy's own base actor image (which already includes
+/// `sshfs` and the `/.needy` layer).
+pub fn is_needy_base_image(root: &str) -> bool {
+  let name = untagged(root);
+  root == CONTAINER_IMAGE || root == BUILT_CONTAINER_IMAGE || name == "needy-actor" || name == "ghcr.io/needy-dev/needy-actor"
+}
+
+/// Whether `definition` names a custom OCI root (different from needy's own
+/// base image) and does not already include an `sshfs` feature layer, so
+/// [`BUILTIN_SSHFS`] must be prepended as its first layer (decision E8).
+pub fn needs_sshfs(definition: &Definition) -> bool {
+  let Some(root) = definition.root.as_deref() else {
+    return false;
+  };
+  if is_needy_base_image(root) {
+    return false;
+  }
+  !definition.layers.iter().any(|layer| match layer {
+    Layer::Feature { reference, .. } => {
+      let id = untagged(reference);
+      id == BUILTIN_SSHFS || id.ends_with("/sshfs")
+    }
+    Layer::Run(_) => false,
+  })
+}
 
 /// The `PATH` an actor's own programs are found on before an image adds to
 /// it; the image's `PATH` starts from it.
@@ -131,6 +162,9 @@ impl<'de> serde::Deserialize<'de> for Digest {
 /// and the environment of the image's programs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
+  /// The resolved OCI root image reference (`definition.root` when set, else
+  /// [`DEFAULT_ROOT`]).
+  pub root_image: String,
   /// The root's digest, as resolution gave it.
   pub root: Digest,
   /// The profile's user, created in the root before the first step (A3 in
@@ -305,7 +339,19 @@ pub fn plan(
   commit: Option<&Commit>,
   features: &BTreeMap<String, ResolvedFeature>,
 ) -> Result<Plan, PlanError> {
-  let resolved_layers = resolve_layers(&definition.layers, features)?;
+  let effective_layers: Vec<Layer>;
+  let layers = if needs_sshfs(definition) {
+    effective_layers = std::iter::once(Layer::Feature {
+      reference: BUILTIN_SSHFS.to_string(),
+      options: BTreeMap::new(),
+    })
+    .chain(definition.layers.iter().cloned())
+    .collect();
+    &effective_layers[..]
+  } else {
+    &definition.layers[..]
+  };
+  let resolved_layers = resolve_layers(layers, features)?;
   check_installs_after(&resolved_layers)?;
 
   let base = key(&json!({
@@ -359,6 +405,7 @@ pub fn plan(
   hooks.stop.extend(definition.hooks.stop.iter().cloned());
 
   Ok(Plan {
+    root_image: definition.effective_root().to_string(),
     root: *root,
     user: user.clone(),
     base,

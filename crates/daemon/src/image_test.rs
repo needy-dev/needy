@@ -18,7 +18,7 @@ actor:
     SHARED: from-profile
     PROFILE_ONLY: yes
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
     env:
       PATH: /opt/tools/bin:${PATH}
       SHARED: from-image
@@ -321,7 +321,7 @@ async fn concurrent_run_creates_share_one_build_session_per_cache_key() {
 actor:
   driver: linux-firecracker
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
     layers:
       - run: echo shared-step
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -379,7 +379,7 @@ async fn a_failing_build_step_fails_run_create_with_output_and_does_not_cache() 
 actor:
   driver: linux-firecracker
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
     layers:
       - run: apt-get install -y nonexistent-pkg
 user: { name: agent, uid: 1000, gid: 1000 }
@@ -424,7 +424,7 @@ executors:
 }
 
 const IMAGE_DEF_YAML: &str = r#"
-root: example.com/root:1
+root: needy-actor:latest
 env:
   PATH: /opt/tools/bin:${PATH}
 layers:
@@ -500,7 +500,7 @@ async fn image_edit_routes_all_execs_local_records_commands_commits_refuses_conc
 
   // Image definition with no `run:` layers so start_edit boots directly into
   // the interactive edit session without build steps.
-  let empty_image_yaml = "root: example.com/root:1\n";
+  let empty_image_yaml = "root: needy-actor:latest\n";
 
   let edit1 = Images::start_edit(
     daemon,
@@ -681,7 +681,7 @@ async fn run_create_with_lockfile_commit_stacks_commit_layer_and_reports_rebase(
 actor:
   driver: linux-firecracker
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
 user: { name: agent, uid: 1000, gid: 1000 }
 executors:
   here: { driver: native }
@@ -692,7 +692,7 @@ executors:
     daemon.images.store.commit("test-img", None, None, std::io::Cursor::new(tar_with_file("hand.txt", "edited\n")), Vec::new()).unwrap();
   let root = crate::image::root_digest(daemon).await.unwrap();
   let def = needy_config::image::Definition {
-    root: Some("example.com/root:1".into()),
+    root: Some("needy-actor:latest".into()),
     ..Default::default()
   };
   let expected_top =
@@ -1561,7 +1561,7 @@ async fn feature_layer_with_depends_on_fetches_executes_in_order_merges_env_and_
 actor:
   driver: linux-firecracker
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
     layers:
       - feature: ghcr.io/devcontainers/features/node:1
         with:
@@ -1642,7 +1642,7 @@ async fn second_build_with_pinned_features_makes_zero_registry_requests_and_zero
   let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
   let (sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
 
-  let image_yaml = "root: example.com/root:1\nlayers:\n  - feature: ghcr.io/devcontainers/features/git:1\n";
+  let image_yaml = "root: needy-actor:latest\nlayers:\n  - feature: ghcr.io/devcontainers/features/git:1\n";
 
   let first = tokio::time::timeout(
     Duration::from_secs(20),
@@ -1717,7 +1717,7 @@ async fn privileged_feature_is_refused_before_starting_any_actor() {
   let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
   let (sessions, _configs, responder) = spawn_build_responder(started_log.clone(), behavior, stop.clone());
 
-  let image_yaml = "root: example.com/root:1\nlayers:\n  - feature: ghcr.io/example/features/docker-in-docker:1\n";
+  let image_yaml = "root: needy-actor:latest\nlayers:\n  - feature: ghcr.io/example/features/docker-in-docker:1\n";
 
   let err = Images::build(
     daemon,
@@ -1768,7 +1768,7 @@ async fn guest_config_receives_merged_hooks_for_runs_and_empty_hooks_for_build_a
   let (_sessions, configs, responder) = spawn_build_responder(started_log.clone(), behavior, stop.clone());
 
   let image_yaml = r#"
-root: example.com/root:1
+root: needy-actor:latest
 layers:
   - feature: ghcr.io/example/features/hooks:1
 hooks:
@@ -1900,7 +1900,7 @@ async fn feature_declared_sync_mapping_seeds_mounts_merges_and_appears_in_report
 actor:
   driver: linux-firecracker
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
     layers:
       - feature: ghcr.io/example/features/opencode:1
 user: { name: dev, uid: 1001, gid: 1001 }
@@ -2015,7 +2015,7 @@ async fn profile_explicit_file_mapping_overrides_feature_declared_sync_mapping()
 actor:
   driver: linux-firecracker
   image:
-    root: example.com/root:1
+    root: needy-actor:latest
     layers:
       - feature: ghcr.io/example/features/opencode:1
 user: {{ name: dev, uid: 1001, gid: 1001 }}
@@ -2108,4 +2108,82 @@ fn format_build_failure_collapses_carriage_returns_and_bounds_message_size() {
   let bounded = super::format_build_failure("feature: example/node:1", "exited with code 1", &huge);
   assert!(bounded.ends_with("last-line"), "tail must be preserved: {bounded}");
   assert!(bounded.len() <= super::FAILURE_LOG_MAX_BYTES + 256, "huge console line must be bounded: {} bytes", bounded.len());
+}
+
+#[tokio::test]
+async fn resolve_features_resolves_builtin_agent_and_custom_root_sshfs_without_network() {
+  use needy_core::image::{BUILTIN_SSHFS, Input};
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let cache = tempfile::tempdir().unwrap();
+  // Point at an unreachable loopback port so any unexpected HTTP request fails immediately.
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url("http://127.0.0.1:1");
+
+  let def: needy_config::image::Definition = needy_config::image::load(&needy_config::Source::text(
+    r#"
+root: debian:bookworm-slim
+layers:
+  - feature: builtin:codex
+  - feature: builtin:pi
+"#,
+    PathBuf::new(),
+  ))
+  .unwrap();
+
+  let resolved = super::resolve_features(&store, &def, &std::collections::BTreeMap::new()).await.unwrap();
+  assert!(resolved.by_ref.contains_key(BUILTIN_SSHFS), "custom root must resolve builtin:sshfs");
+  assert!(resolved.by_ref.contains_key("builtin:codex"));
+  assert!(resolved.by_ref.contains_key("builtin:pi"));
+  assert!(resolved.resolved_digests.contains_key("builtin:codex"));
+
+  let root = needy_core::image::Digest::of(b"debian:bookworm-slim");
+  let user = needy_config::profile::User::default();
+  let plan = needy_core::image::plan(&def, &root, &user, None, &resolved.by_ref).unwrap();
+  assert_eq!(plan.steps.len(), 3);
+  assert!(matches!(&plan.steps[0].input, Input::Feature { reference, .. } if reference == BUILTIN_SSHFS));
+  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "builtin:codex"));
+  assert!(matches!(&plan.steps[2].input, Input::Feature { reference, .. } if reference == "builtin:pi"));
+
+  let sync_paths: Vec<&str> = plan.sync_files.iter().map(|s| s.path.as_str()).collect();
+  assert!(sync_paths.contains(&"/home/agent/.codex"), "{sync_paths:?}");
+  assert!(sync_paths.contains(&"/home/agent/.pi/agent"), "{sync_paths:?}");
+}
+
+#[test]
+fn migrated_example_agent_profiles_load_validate_and_use_builtin_agent_features() {
+  let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
+  let cases = [
+    ("examples/agents/codex.yaml", vec!["builtin:codex"]),
+    ("examples/agents/pi.yaml", vec!["builtin:pi"]),
+    ("examples/agents/opencode.yaml", vec!["builtin:opencode"]),
+    (
+      "examples/agents/herdr.yaml",
+      vec![
+        "builtin:codex",
+        "builtin:pi",
+        "builtin:opencode",
+        "builtin:herdr",
+      ],
+    ),
+  ];
+
+  for (rel, expected_features) in cases {
+    let path = root.join(rel);
+    let profile =
+      needy_config::profile::load(&needy_config::Source::file(path.clone())).unwrap_or_else(|e| panic!("failed to load {rel}: {e}"));
+    let findings = needy_config::validate::profile(&profile);
+    assert!(findings.is_empty(), "validation findings for {rel}: {findings:?}");
+    let Some(needy_config::image::Image::Definition(def)) = &profile.actor.image else {
+      panic!("{rel} must use an inline image definition");
+    };
+    let actual: Vec<&str> = def
+      .layers
+      .iter()
+      .filter_map(|l| match l {
+        needy_config::image::Layer::Feature { reference, .. } => Some(reference.as_str()),
+        needy_config::image::Layer::Run(_) => None,
+      })
+      .collect();
+    assert_eq!(actual, expected_features, "unexpected feature layers in {rel}");
+  }
 }

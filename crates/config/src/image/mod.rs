@@ -27,15 +27,22 @@ pub enum Image {
   Definition(Definition),
 }
 
+/// The pinned default OCI root image used when an image definition omits `root:`.
+/// Matches the base distribution used by needy's own actor images in
+/// `images/Dockerfile`.
+// Source: `images/Dockerfile` (`FROM ubuntu:24.04 AS actor-root` and `container-root`)
+// Reference: https://hub.docker.com/_/ubuntu (Ubuntu 24.04 LTS "Noble Numbat")
+pub const DEFAULT_ROOT: &str = "ubuntu:24.04";
+
 /// An image definition: a root and the layers built over it, in order.
 // TODO(images): `root` takes an image reference only; the Dockerfile build
-// form (`build:`, as executors' `container.build` has it) and the default
-// root of a definition without `root:` come with slice 5 of the images and
-// run data spec.
+// form (`build:`, as executors' `container.build` has it) is deferred until
+// requested.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Definition {
-  /// The OCI image the layers are built over.
+  /// The OCI image the layers are built over. When absent, [`DEFAULT_ROOT`]
+  /// is used.
   pub root: Option<String>,
   /// Built in order over the root. Along `extends` the parent's come first.
   pub layers: Vec<Layer>,
@@ -44,6 +51,14 @@ pub struct Definition {
   /// Lifecycle hooks run in every run of this image. Along `extends` the
   /// parent's come first.
   pub hooks: Hooks,
+}
+
+impl Definition {
+  /// The OCI root image for this definition: its explicit `root` when set,
+  /// otherwise [`DEFAULT_ROOT`].
+  pub fn effective_root(&self) -> &str {
+    self.root.as_deref().unwrap_or(DEFAULT_ROOT)
+  }
 }
 
 /// Lifecycle hooks declared on an image definition: `start` runs before the
@@ -287,11 +302,15 @@ pub(crate) fn same_feature(layer: &Value) -> Option<String> {
 
 /// `reference` without its `:TAG` or `@DIGEST`.
 // NOTICE: written by hand rather than with an OCI reference parser: the
-// workspace has none, and a local feature directory (`./features/x`) is not
-// an OCI reference. A tag is the text after the last `:` of the last path
-// segment, so a registry's port (`localhost:5000/x`) stays.
+// workspace has none, and a local feature directory (`./features/x`) or
+// built-in feature (`builtin:codex`) is not an OCI reference. A tag is the
+// text after the last `:` of the last path segment, so a registry's port
+// (`localhost:5000/x`) stays; `builtin:<name>` has no tag.
 pub fn untagged(reference: &str) -> &str {
   let reference = reference.split_once('@').map_or(reference, |(name, _)| name);
+  if reference.starts_with("builtin:") {
+    return reference;
+  }
   let segment = reference.rfind('/').map_or(0, |slash| slash + 1);
   match reference[segment..].rfind(':') {
     Some(colon) => &reference[..segment + colon],

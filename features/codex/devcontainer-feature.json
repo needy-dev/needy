@@ -1,0 +1,23 @@
+{
+  "id": "codex",
+  "version": "1.0.0",
+  "name": "Codex",
+  "description": "Installs OpenAI Codex CLI (static musl package) and configures needy sync for ~/.codex.",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "0.167.2",
+      "description": "Codex release version to install (without leading rust-v)."
+    }
+  },
+  "customizations": {
+    "needy": {
+      "files": {
+        "codex": {
+          "path": "~/.codex",
+          "filter": ["- /tmp/**", "- /.tmp/**", "- /log/**", "+ **"]
+        }
+      }
+    }
+  }
+}

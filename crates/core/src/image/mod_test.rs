@@ -7,7 +7,7 @@ fn digest(byte: char) -> Digest {
 
 fn definition(scripts: &[&str]) -> Definition {
   Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: scripts.iter().map(|script| Layer::Run(script.to_string())).collect(),
     env: BTreeMap::new(),
     hooks: Default::default(),
@@ -236,13 +236,13 @@ fn feature_steps_include_digest_and_sanitized_options_in_cache_key() {
     }
   }"#;
   let def_default = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer("ghcr.io/devcontainers/features/node:1", &[])],
     env: BTreeMap::new(),
     ..Default::default()
   };
   let def_v22 = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer(
       "ghcr.io/devcontainers/features/node:1",
       &[("version", FeatureOption::from("22"))],
@@ -251,7 +251,7 @@ fn feature_steps_include_digest_and_sanitized_options_in_cache_key() {
     ..Default::default()
   };
   let def_tag_v1_2 = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer(
       "ghcr.io/devcontainers/features/node:1.2",
       &[],
@@ -305,7 +305,7 @@ fn depends_on_inserts_dependencies_before_dependents_recursively_without_duplica
   ]);
 
   let def = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![
       feature_layer("ghcr.io/example/features/app:1", &[]),
       Layer::Run("echo done".into()),
@@ -340,7 +340,7 @@ fn depends_on_inserts_dependencies_before_dependents_recursively_without_duplica
 
   // When `base` is already listed before `app`, it is not duplicated.
   let def_explicit = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![
       feature_layer("ghcr.io/example/features/base:1", &[]),
       feature_layer("ghcr.io/example/features/app:1", &[]),
@@ -359,7 +359,7 @@ fn depends_on_cycle_returns_error_naming_cycle() {
     ("ghcr.io/example/features/b:1".into(), resolved('2', r#"{ "id": "b", "dependsOn": { "ghcr.io/example/features/a:1": {} } }"#)),
   ]);
   let def = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer("ghcr.io/example/features/a:1", &[])],
     env: BTreeMap::new(),
     ..Default::default()
@@ -383,7 +383,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
 
   // Valid order: common-utils before node.
   let valid = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![
       feature_layer("ghcr.io/devcontainers/features/common-utils:2", &[]),
       feature_layer("ghcr.io/devcontainers/features/node:1", &[]),
@@ -395,7 +395,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
 
   // Soft constraint: node alone (common-utils absent) is valid.
   let alone = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer("ghcr.io/devcontainers/features/node:1", &[])],
     env: BTreeMap::new(),
     ..Default::default()
@@ -404,7 +404,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
 
   // Contradiction: node listed before common-utils -> error naming both.
   let reversed = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![
       feature_layer("ghcr.io/devcontainers/features/node:1", &[]),
       feature_layer("ghcr.io/devcontainers/features/common-utils:2", &[]),
@@ -449,7 +449,7 @@ fn container_env_expands_in_layer_order_and_merges_with_image_env() {
   ]);
 
   let def = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![
       feature_layer("ghcr.io/devcontainers/features/node:1", &[]),
       feature_layer("ghcr.io/devcontainers/features/python:1", &[]),
@@ -477,7 +477,7 @@ fn container_env_expands_in_layer_order_and_merges_with_image_env() {
 #[test]
 fn plan_refuses_missing_or_disallowed_feature() {
   let def = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer("ghcr.io/example/features/dind:1", &[])],
     env: BTreeMap::new(),
     ..Default::default()
@@ -511,7 +511,7 @@ fn hooks_collect_features_in_resolved_layer_order_before_image_hooks_without_aff
   ]);
 
   let def_no_hooks = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer("ghcr.io/example/features/app:1", &[])],
     env: BTreeMap::new(),
     hooks: needy_config::image::Hooks::default(),
@@ -587,7 +587,7 @@ fn collects_feature_sync_files_in_resolved_layer_order_with_expanded_home() {
   ]);
 
   let def = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![feature_layer("ghcr.io/example/features/opencode:1", &[])],
     env: BTreeMap::new(),
     hooks: Default::default(),
@@ -636,7 +636,7 @@ fn rejects_two_features_claiming_same_actor_path_or_mapping_name() {
     ),
   ]);
   let def = Definition {
-    root: Some("example.com/root:1".into()),
+    root: None,
     layers: vec![
       feature_layer("ghcr.io/example/features/one:1", &[]),
       feature_layer("ghcr.io/example/features/two:1", &[]),
@@ -664,4 +664,62 @@ fn rejects_two_features_claiming_same_actor_path_or_mapping_name() {
   assert!(err.contains("state"), "{err}");
   assert!(err.contains("ghcr.io/example/features/one:1"), "{err}");
   assert!(err.contains("ghcr.io/example/features/two:1"), "{err}");
+}
+
+#[test]
+fn plan_uses_default_root_when_root_is_omitted() {
+  let def = Definition {
+    root: None,
+    layers: vec![Layer::Run("echo hi".into())],
+    env: BTreeMap::new(),
+    hooks: Default::default(),
+  };
+  let p = plan(&def, &digest('a'), &User::default(), None, &no_features()).unwrap();
+  assert_eq!(p.root_image, DEFAULT_ROOT);
+  assert_eq!(p.steps.len(), 1);
+}
+
+#[test]
+fn custom_root_prepends_builtin_sshfs_without_duplicating_when_already_listed() {
+  let features = BTreeMap::from([(BUILTIN_SSHFS.to_string(), resolved('5', r#"{ "id": "sshfs", "version": "1.0.0" }"#))]);
+
+  // Custom root without sshfs gets `builtin:sshfs` prepended as step 0.
+  let custom = Definition {
+    root: Some("debian:bookworm-slim".into()),
+    layers: vec![Layer::Run("echo hi".into())],
+    env: BTreeMap::new(),
+    hooks: Default::default(),
+  };
+  assert!(needs_sshfs(&custom));
+  let p = plan(&custom, &digest('a'), &User::default(), None, &features).unwrap();
+  assert_eq!(p.root_image, "debian:bookworm-slim");
+  assert_eq!(p.steps.len(), 2);
+  assert!(matches!(&p.steps[0].input, Input::Feature { reference, .. } if reference == BUILTIN_SSHFS));
+  assert_eq!(p.steps[1].input, Input::Run("echo hi".into()));
+
+  // Custom root that already lists `builtin:sshfs` does not duplicate it.
+  let explicit = Definition {
+    root: Some("debian:bookworm-slim".into()),
+    layers: vec![
+      feature_layer(BUILTIN_SSHFS, &[]),
+      Layer::Run("echo hi".into()),
+    ],
+    env: BTreeMap::new(),
+    hooks: Default::default(),
+  };
+  assert!(!needs_sshfs(&explicit));
+  let p_explicit = plan(&explicit, &digest('a'), &User::default(), None, &features).unwrap();
+  assert_eq!(p_explicit.steps.len(), 2);
+  assert_eq!(p_explicit.steps[0].key, p.steps[0].key);
+
+  // Needy's own base image does not prepend `builtin:sshfs`.
+  let base = Definition {
+    root: Some(needy_config::profile::BUILT_CONTAINER_IMAGE.into()),
+    layers: vec![Layer::Run("echo hi".into())],
+    env: BTreeMap::new(),
+    hooks: Default::default(),
+  };
+  assert!(!needs_sshfs(&base));
+  let p_base = plan(&base, &digest('a'), &User::default(), None, &no_features()).unwrap();
+  assert_eq!(p_base.steps.len(), 1);
 }

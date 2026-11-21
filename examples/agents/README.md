@@ -1,39 +1,39 @@
 # Coding agents in an actor
 
-One actor image with four coding agents, and one profile for each agent. The
-agent runs in the actor. Every shell it starts goes to the `build` executor,
-which holds the workspace, so all the commands the agent runs go there too.
+Four coding agents packaged as Dev Container features under [`features/`](../../features/),
+with one profile per agent. Each profile declares an inline `actor.image`
+definition using needy's built-in feature references (`builtin:<agent>`), so
+`needy run create` builds and caches the feature layers automatically without a
+separate `docker build` step.
 
-| Profile | Agent | Version in the image |
-| --- | --- | --- |
-| [`codex.yaml`](codex.yaml) | Codex (static musl package) | 0.167.2 |
-| [`pi.yaml`](pi.yaml) | pi (`@earendil-works/pi-coding-agent`, on Node.js 26.13.1) | 1.5.2 |
-| [`opencode.yaml`](opencode.yaml) | opencode (in needy's base image) | 1.19.5 |
-| [`herdr.yaml`](herdr.yaml) | herdr, which runs the other three in panes | 0.9.5 |
+The agent runs in the actor. Every shell it starts goes to the `build`
+executor, which holds the workspace, so all the commands the agent runs go
+there too.
 
-The [`Dockerfile`](Dockerfile) pins each download to one release and
-checks its checksum. Each pin has a comment that names its source.
+| Profile | Feature | Default version | Synced state directory |
+| --- | --- | --- | --- |
+| [`codex.yaml`](codex.yaml) | `builtin:codex` ([`features/codex/`](../../features/codex/)) | 0.167.2 | `~/.codex` |
+| [`pi.yaml`](pi.yaml) | `builtin:pi` ([`features/pi/`](../../features/pi/)) | 1.5.2 (Node.js 26.13.1) | `~/.pi/agent` |
+| [`opencode.yaml`](opencode.yaml) | `builtin:opencode` ([`features/opencode/`](../../features/opencode/)) | 1.19.5 | `~/.local/share/opencode` |
+| [`herdr.yaml`](herdr.yaml) | `builtin:herdr` ([`features/herdr/`](../../features/herdr/)) + the three above | 0.9.5 | all three above |
 
-## Build the image
+Each feature's `install.sh` pins its default download to one release and checks
+its checksum (with provenance comments). Passing `with: { version: "..." }` on
+the layer installs another release.
 
-Build the image on the host where its actors run, so that it has the
-host's architecture. The image is `FROM` needy's base image:
-`needy-actor:latest` from `needy image build --linux-container`, or
-the released base for your needy:
+## Start an agent
+
+Start any profile directly; needy pulls the base image if missing, builds each
+feature layer once in a disposable session, and caches it by content key:
 
 ```sh
-docker build -t needy-agents examples/agents
-# or, without a needy checkout:
-docker build --build-arg BASE=ghcr.io/needy-dev/needy-actor:v<version> -t needy-agents examples/agents
+needy run create -it --profile examples/agents/codex.yaml
 ```
 
-Then do the step for your driver:
-
-| Driver | Step |
-| --- | --- |
-| `linux-container` | None. The engine runs `needy-agents`. |
-| `linux-firecracker`, `macos-vz` | `needy image pull` once for the base VM image. Then run `needy image build --from needy-agents`, and run it again each time you rebuild the image. |
-| `macos-apple-container` | `docker save needy-agents -o needy-agents.tar && container image load --input needy-agents.tar` |
+To stack an agent feature on a custom OCI root (for example
+`debian:bookworm-slim`), add `root:` to `actor.image`; needy automatically
+prepends `builtin:sshfs` as the first layer when the root is not needy's own
+base image.
 
 ## Pick the driver
 
@@ -65,14 +65,6 @@ directory. On Linux they run in a container.
 
 ## First start and login
 
-Make the directory that keeps the agent's login and settings, then start
-the agent:
-
-```sh
-mkdir -p ~/needy-state/codex
-needy run create -it --profile examples/agents/codex.yaml
-```
-
 The actor cannot receive a browser's callback to its own `localhost`. Use
 the sign-in flow that does not need it:
 
@@ -89,27 +81,28 @@ a private profile that extends the example, not in a shared file.
 
 ## Where credentials go
 
-When the run starts, needy copies the host directory into the actor. When
-the agent exits, or `needy run stop` ends it, needy mirrors the directory
-back to the host:
+Each agent feature declares its state directory under
+`customizations.needy.files` in `devcontainer-feature.json`. Needy
+automatically creates a per-run copy from `<data_dir>/files/<agent>`, mounts it
+into the actor, and three-way merges changes back into the store when the run
+ends:
 
-| Agent | Host | Actor |
+| Agent | Store (`<data_dir>/files/...`) | Actor |
 | --- | --- | --- |
-| Codex | `~/needy-state/codex/` | `~/.codex/` |
-| pi | `~/needy-state/pi/` | `~/.pi/agent/` |
-| opencode | `~/needy-state/opencode/` | `~/.local/share/opencode/` |
+| Codex | `files/codex` | `~/.codex` |
+| pi | `files/pi` | `~/.pi/agent` |
+| opencode | `files/opencode` | `~/.local/share/opencode` |
+
+To override the store location for a specific account or project, declare a
+`mode: sync` mapping for the same actor path in your own profile.
 
 Read these points before you log in:
 
-- `needy run stop --now` kills the actor without its mirror-out, so a
-  login made in that run is lost.
 - **The credentials are in the actor.** The agent, and any program it
   runs in the actor, can read them. needy cannot inject a credential into
   HTTPS requests yet (`TODO(mitm)`). An API key in `actor.env` is in the
   actor's environment, and also in the run's `profile.yaml` in needy's
   state directory.
-- Deleting a file in the actor does not delete it on the host (`delete:
-  false`). To log out, delete the host file as well.
 
 ## Find missing hosts
 
@@ -131,20 +124,12 @@ without them:
 | Codex | `github.com`, `api.github.com`, `raw.githubusercontent.com`, `files.openai.com` |
 | herdr | `herdr.dev` (version and agent-manifest checks) |
 
-The profiles include the API and sign-in hosts. The tests did not log in
-(see the verification in the
-[actor images design](../../docs/ai/references/architecture/2026-11-12-actor-images-design.md#step-3-checks)),
-so a host that only an authenticated session uses can be missing. If so,
-`needy run report` shows it.
-
 ## herdr
 
-[`herdr.yaml`](herdr.yaml) starts herdr. Its panes run shells in the
-actor, so `codex`, `pi` and `opencode` start there. A shell that
+[`herdr.yaml`](herdr.yaml) starts herdr with `builtin:codex`, `builtin:pi`,
+`builtin:opencode`, and `builtin:herdr` stacked in one image. Its panes run
+shells in the actor, so `codex`, `pi` and `opencode` start there. A shell that
 one of these agents starts goes to the executor (a rule with `when.under`).
-The profile repeats the other profiles' environment, hosts and credential
-mappings, because `extends` takes only one parent, and a child's list
-replaces its parent's list.
 
 When herdr's client exits (ctrl+b q), the run ends. Use ctrl-] to detach
 from needy and leave the run going.

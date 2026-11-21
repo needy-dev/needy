@@ -231,3 +231,21 @@ fn an_image_file_extends_no_built_in() {
 
   assert_eq!(err, "image (text in /base): no built-in image named \"agents\"");
 }
+
+#[test]
+fn untagged_preserves_builtin_feature_references() {
+  assert_eq!(untagged("builtin:sshfs"), "builtin:sshfs");
+  assert_eq!(untagged("builtin:codex"), "builtin:codex");
+  assert_eq!(untagged("builtin:pi"), "builtin:pi");
+  assert_eq!(untagged("builtin:codex@sha256:abc"), "builtin:codex");
+}
+
+#[test]
+fn effective_root_defaults_to_pinned_default_root() {
+  let without_root = load_text("layers: []\n").unwrap();
+  assert_eq!(without_root.root, None);
+  assert_eq!(without_root.effective_root(), DEFAULT_ROOT);
+
+  let with_root = load_text("root: debian:bookworm-slim\n").unwrap();
+  assert_eq!(with_root.effective_root(), "debian:bookworm-slim");
+}

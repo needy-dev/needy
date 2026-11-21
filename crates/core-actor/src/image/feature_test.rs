@@ -328,3 +328,72 @@ fn builtin_sshfs_has_valid_metadata_passes_check_allowed_and_packs_install_sh() 
   assert!(install_sh.contains("apt-get"), "install.sh must support apt-get: {install_sh}");
   assert!(install_sh.contains("apk"), "install.sh must support apk: {install_sh}");
 }
+
+#[test]
+fn all_embedded_builtin_features_are_valid_and_pack_executable_install_sh() {
+  let expected_refs = [
+    "builtin:sshfs",
+    "builtin:codex",
+    "builtin:pi",
+    "builtin:opencode",
+    "builtin:herdr",
+  ];
+  let all = all_builtins();
+  let actual_refs: Vec<&str> = all.iter().map(|f| f.reference).collect();
+  assert_eq!(actual_refs, expected_refs);
+
+  for reference in expected_refs {
+    let feature = builtin(reference).unwrap_or_else(|| panic!("missing builtin feature {reference}"));
+    assert_eq!(feature.reference, reference);
+    let metadata =
+      needy_core::image::FeatureMetadata::parse(feature.metadata_json).unwrap_or_else(|e| panic!("invalid metadata for {reference}: {e}"));
+    metadata.check_allowed(reference).unwrap_or_else(|e| panic!("check_allowed failed for {reference}: {e}"));
+
+    let archive = feature.archive().unwrap();
+    let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
+    let mut saw_meta = false;
+    let mut saw_install_exec = false;
+    for entry in tar.entries().unwrap() {
+      let entry = entry.unwrap();
+      let path = entry.path().unwrap().to_path_buf();
+      if path == Path::new("devcontainer-feature.json") {
+        saw_meta = true;
+      } else if path == Path::new("install.sh") {
+        let mode = entry.header().mode().unwrap();
+        assert_eq!(mode & 0o111, 0o111, "install.sh in {reference} must be executable, got {mode:#o}");
+        saw_install_exec = true;
+      }
+    }
+    assert!(saw_meta, "{reference} archive must contain devcontainer-feature.json");
+    assert!(saw_install_exec, "{reference} archive must contain executable install.sh");
+  }
+
+  // Agent features declare sync mappings for their state directories.
+  let codex_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:codex").unwrap().metadata_json).unwrap();
+  let codex_files = &codex_meta.customizations.needy.unwrap().files;
+  assert_eq!(codex_files["codex"].path, "~/.codex");
+
+  let pi_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:pi").unwrap().metadata_json).unwrap();
+  let pi_files = &pi_meta.customizations.needy.unwrap().files;
+  assert_eq!(pi_files["pi"].path, "~/.pi/agent");
+
+  let opencode_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:opencode").unwrap().metadata_json).unwrap();
+  let opencode_files = &opencode_meta.customizations.needy.unwrap().files;
+  assert_eq!(opencode_files["opencode"].path, "~/.local/share/opencode");
+
+  assert!(builtin("builtin:nonexistent").is_none());
+}
+
+#[test]
+fn feature_store_fetch_builtin_caches_without_network() {
+  let cache = tempfile::tempdir().unwrap();
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap();
+  let fetched = store.fetch_builtin("builtin:codex").unwrap();
+  assert_eq!(fetched.digest, builtin("builtin:codex").unwrap().digest());
+  assert!(fetched.archive_path.is_file());
+  let meta = needy_core::image::FeatureMetadata::parse(&fetched.metadata_json).unwrap();
+  assert_eq!(meta.id, "codex");
+
+  // Unknown builtin reference fails with InvalidReference.
+  assert!(matches!(store.fetch_builtin("builtin:unknown"), Err(Error::InvalidReference(_, _))));
+}
