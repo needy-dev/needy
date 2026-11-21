@@ -76,6 +76,31 @@ pub fn extract_top_layer(image_tar: &Path) -> Result<Box<dyn Read + Send>> {
   open_layer_reader(image_tar, span)
 }
 
+/// Ensures the materialized container image config carries needy's
+/// `needy.base-abi` label and `/.needy/init` entrypoint when absent on an
+/// arbitrary OCI root image.
+// TODO(images): injecting the static musl `/.needy/{init,proxy}` stubs layer
+// into arbitrary non-needy OCI container roots (built from `images/stub/` in
+// `images/Dockerfile`) is deferred until release artifacts bundle those stubs
+// alongside the guest needy binary.
+fn ensure_needy_container_config(config: &mut serde_json::Value) {
+  let Some(root) = config.as_object_mut() else {
+    return;
+  };
+  let cfg = root.entry("config").or_insert_with(|| serde_json::json!({}));
+  let Some(cfg_obj) = cfg.as_object_mut() else {
+    return;
+  };
+  let labels = cfg_obj.entry("Labels").or_insert_with(|| serde_json::json!({}));
+  if let Some(labels_obj) = labels.as_object_mut() {
+    labels_obj.entry(crate::image::base::LABEL).or_insert_with(|| serde_json::Value::String(crate::image::base::ABI.to_string()));
+  }
+  let missing_entrypoint = cfg_obj.get("Entrypoint").and_then(serde_json::Value::as_array).is_none_or(|arr| arr.is_empty());
+  if missing_entrypoint {
+    cfg_obj.insert("Entrypoint".to_string(), serde_json::json!([crate::contract::INIT]));
+  }
+}
+
 /// Assembles a `docker load` / `container image load`-compatible archive for
 /// `snapshot_digest` and `layers` on top of `base_image_tar`, tagged as `tag`,
 /// cached under `oci_dir`.
@@ -97,6 +122,7 @@ pub(super) fn materialize(
   let shim_layer = synthesize_shim_layer(&base, &indexes)?;
 
   let mut config = base.config_json.clone();
+  ensure_needy_container_config(&mut config);
   let diff_ids = ensure_base_diff_ids(&base, &mut config)?;
   for (digest, _) in layers {
     diff_ids.push(serde_json::Value::String(digest.to_string()));

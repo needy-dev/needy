@@ -1,0 +1,26 @@
+{
+  "id": "opencode",
+  "version": "1.0.0",
+  "name": "opencode",
+  "description": "Installs opencode and configures needy sync for ~/.local/share/opencode.",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "1.19.5",
+      "description": "opencode release version to install (without leading v)."
+    }
+  },
+  "containerEnv": {
+    "OPENCODE_DISABLE_AUTOUPDATE": "1"
+  },
+  "customizations": {
+    "needy": {
+      "files": {
+        "opencode": {
+          "path": "~/.local/share/opencode",
+          "filter": ["- /bin/**", "- /log/**", "+ **"]
+        }
+      }
+    }
+  }
+}

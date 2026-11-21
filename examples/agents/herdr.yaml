@@ -1,37 +1,30 @@
-# herdr in an actor, from the agents image (Dockerfile here): a terminal
-# workspace whose panes run the other agents (codex, pi, opencode).
-# The panes' own shells stay in the actor, where the agents are; the shells
-# an agent starts, and so every command it runs, go to the `build`
-# executor, which holds the workspace.
+# herdr in an actor, built from needy's agent features (`builtin:codex`,
+# `builtin:pi`, `builtin:opencode`, `builtin:herdr`): a terminal workspace
+# whose panes run the other agents. The panes' own shells stay in the actor,
+# where the agents are; the shells an agent starts, and so every command it
+# runs, go to the `build` executor, which holds the workspace.
 #
-# Build the image once per host (README.md has every driver):
-#   docker build -t needy-agents examples/agents       # container drivers: that is all
-#   needy image build --from needy-agents               # VM drivers too, again after each rebuild
-# Then, once, the directories the logins are kept in:
-#   mkdir -p ~/needy-state/{codex,pi,opencode}
+# Start herdr directly (needy builds and caches each feature layer once):
 #   needy run create -it --profile examples/agents/herdr.yaml
 #
-# Log in to each agent in a pane as its own profile says. Detaching herdr
-# (ctrl+b q) ends its client, the driving program, and so the run; use
-# needy's own detach (ctrl-]) to leave the run going.
-#
-# NOTICE: this profile repeats what the three agent profiles set instead of
-# extending them: `extends` takes one parent, and a child's list (such as
-# `actor.network.allow` or `run_files`) replaces its parent's, so the union
-# of three profiles cannot be built from them.
+# Log in to each agent in a pane as its own profile says. Each agent feature
+# sets its own environment variables and automatically syncs its state
+# directory (`~/.codex`, `~/.pi/agent`, `~/.local/share/opencode`) with needy's
+# `<data_dir>/files/<agent>` store. Detaching herdr (ctrl+b q) ends its client,
+# the driving program, and so the run; use needy's own detach (ctrl-]) to leave
+# the run going.
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
   driver: linux-firecracker
-  image: needy-agents
+  image:
+    layers:
+      - feature: builtin:codex
+      - feature: builtin:pi
+      - feature: builtin:opencode
+      - feature: builtin:herdr
   workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command: [herdr]
-  env:
-    # As pi.yaml and opencode.yaml. Codex passes settings on the command
-    # line, so a pane runs `codex --sandbox danger-full-access`.
-    PI_SKIP_VERSION_CHECK: "1"
-    PI_TELEMETRY: "0"
-    OPENCODE_DISABLE_AUTOUPDATE: "1"
   network:
     # The union of the three agent profiles' hosts. herdr's own version and
     # agent-manifest checks go to herdr.dev, which is left out: they are
@@ -58,25 +51,3 @@ commands:
   # Identity probes stay on the actor's recipe.
   - match: "{uname,lscpu,hostname,nproc,free,uptime} **"
     to: actor
-
-# The three agent profiles' mappings.
-files:
-  codex-in: { mode: copy-in, from: "host:~/needy-state/codex/", to: "actor:~/.codex/" }
-  codex-out:
-    mode: mirror-out
-    from: "actor:~/.codex/"
-    to: "host:~/needy-state/codex/"
-    filter: ["- /tmp/**", "- /.tmp/**", "- /log/**", "+ **"]
-  pi-in: { mode: copy-in, from: "host:~/needy-state/pi/", to: "actor:~/.pi/agent/" }
-  pi-out:
-    mode: mirror-out
-    from: "actor:~/.pi/agent/"
-    to: "host:~/needy-state/pi/"
-    filter: ["- /bin/**", "+ **"]
-  opencode-in: { mode: copy-in, from: "host:~/needy-state/opencode/", to: "actor:~/.local/share/opencode/" }
-  opencode-out:
-    mode: mirror-out
-    from: "actor:~/.local/share/opencode/"
-    to: "host:~/needy-state/opencode/"
-    filter: ["- /bin/**", "- /log/**", "+ **"]
-run_files: [codex-in, codex-out, pi-in, pi-out, opencode-in, opencode-out]

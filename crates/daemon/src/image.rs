@@ -787,22 +787,25 @@ struct ResolvedFeatures {
   resolved_digests: BTreeMap<String, String>,
 }
 
-/// Fetches all `Layer::Feature` entries in `definition` and their transitive
-/// `dependsOn` references until fixed point, honoring `pinned_features` from
-/// the lockfile so pinned cached features make zero HTTP requests.
+/// Fetches all `Layer::Feature` entries in `definition` (plus `builtin:sshfs`
+/// when `definition` names a custom root without `sshfs`, per decision E8) and
+/// their transitive `dependsOn` references until fixed point, honoring
+/// `pinned_features` from the lockfile so pinned cached features and built-in
+/// features make zero HTTP requests.
 async fn resolve_features(
   store: &FeatureStore,
   definition: &Definition,
   pinned_features: &BTreeMap<String, String>,
 ) -> Result<ResolvedFeatures> {
-  let mut queue: VecDeque<String> = definition
-    .layers
-    .iter()
-    .filter_map(|layer| match layer {
-      Layer::Feature { reference, .. } => Some(reference.clone()),
-      Layer::Run(_) => None,
-    })
-    .collect();
+  let mut queue: VecDeque<String> = VecDeque::new();
+  if needy_core::image::needs_sshfs(definition) {
+    queue.push_back(needy_core::image::BUILTIN_SSHFS.to_string());
+  }
+  for layer in &definition.layers {
+    if let Layer::Feature { reference, .. } = layer {
+      queue.push_back(reference.clone());
+    }
+  }
 
   let mut by_ref: BTreeMap<String, ResolvedFeature> = BTreeMap::new();
   let mut fetched: BTreeMap<Digest, FetchedFeature> = BTreeMap::new();
@@ -816,17 +819,24 @@ async fn resolve_features(
     if by_ref.contains_key(&raw_ref) {
       continue;
     }
-    let oci_ref = FeatureReference::parse(&raw_ref).with_context(|| format!("invalid feature reference `{raw_ref}`"))?;
-    let canonical = oci_ref.canonical();
-    let artifact = match pinned_features.get(&canonical) {
-      Some(pinned_str) => {
-        let pinned_digest = Digest::parse(pinned_str).with_context(|| format!("invalid pinned digest for feature `{canonical}`"))?;
-        store
-          .fetch_pinned(&oci_ref, &pinned_digest)
-          .await
-          .with_context(|| format!("fetching pinned feature `{raw_ref}` ({pinned_digest})"))?
-      }
-      None => store.fetch(&oci_ref).await.with_context(|| format!("fetching feature `{raw_ref}`"))?,
+    let (canonical, artifact) = if needy_core_actor::image::feature::is_builtin_ref(&raw_ref) {
+      let canonical = needy_config::image::untagged(&raw_ref).to_string();
+      let artifact = store.fetch_builtin(&raw_ref).with_context(|| format!("resolving built-in feature `{raw_ref}`"))?;
+      (canonical, artifact)
+    } else {
+      let oci_ref = FeatureReference::parse(&raw_ref).with_context(|| format!("invalid feature reference `{raw_ref}`"))?;
+      let canonical = oci_ref.canonical();
+      let artifact = match pinned_features.get(&canonical) {
+        Some(pinned_str) => {
+          let pinned_digest = Digest::parse(pinned_str).with_context(|| format!("invalid pinned digest for feature `{canonical}`"))?;
+          store
+            .fetch_pinned(&oci_ref, &pinned_digest)
+            .await
+            .with_context(|| format!("fetching pinned feature `{raw_ref}` ({pinned_digest})"))?
+        }
+        None => store.fetch(&oci_ref).await.with_context(|| format!("fetching feature `{raw_ref}`"))?,
+      };
+      (canonical, artifact)
     };
     let metadata =
       FeatureMetadata::parse(&artifact.metadata_json).with_context(|| format!("parsing devcontainer-feature.json for `{raw_ref}`"))?;
@@ -1498,14 +1508,21 @@ async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
 }
 
 /// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`
-/// into the Docker-compatible engine if not already present.
+/// into the Docker-compatible engine if not already present, pulling `base_image`
+/// first when absent from the engine.
 async fn materialize_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
   let engine = daemon.images.backends().engine.clone();
-  let inspected = engine
-    .inspect_image(base_image)
-    .await
-    .with_context(|| format!("inspecting container base image {base_image}"))?
-    .ok_or_else(|| anyhow!("container actor image {base_image} is not in the engine"))?;
+  let inspected = match engine.inspect_image(base_image).await.with_context(|| format!("inspecting container base image {base_image}"))? {
+    Some(info) => info,
+    None => {
+      engine.pull(base_image).await.with_context(|| format!("pulling container base image {base_image}"))?;
+      engine
+        .inspect_image(base_image)
+        .await
+        .with_context(|| format!("inspecting pulled container base image {base_image}"))?
+        .ok_or_else(|| anyhow!("container actor image {base_image} is still missing after pull"))?
+    }
+  };
 
   let base_tar = daemon.images.base_oci_dir.join(format!("{}.tar", sanitize_image_id(&inspected.id)));
   if !base_tar.exists() {

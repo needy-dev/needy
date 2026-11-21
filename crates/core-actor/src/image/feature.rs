@@ -300,46 +300,60 @@ impl BuiltinFeature {
   }
 }
 
+/// Embedded built-in Dev Container features shipped with needy so `builtin:<id>`
+/// references work offline without an external OCI registry or repository clone.
+const BUILTINS: &[BuiltinFeature] = &[
+  BuiltinFeature {
+    reference: "builtin:sshfs",
+    metadata_json: include_str!("../../../../features/sshfs/devcontainer-feature.json"),
+    install_sh: include_str!("../../../../features/sshfs/install.sh"),
+  },
+  BuiltinFeature {
+    reference: "builtin:codex",
+    metadata_json: include_str!("../../../../features/codex/devcontainer-feature.json"),
+    install_sh: include_str!("../../../../features/codex/install.sh"),
+  },
+  BuiltinFeature {
+    reference: "builtin:pi",
+    metadata_json: include_str!("../../../../features/pi/devcontainer-feature.json"),
+    install_sh: include_str!("../../../../features/pi/install.sh"),
+  },
+  BuiltinFeature {
+    reference: "builtin:opencode",
+    metadata_json: include_str!("../../../../features/opencode/devcontainer-feature.json"),
+    install_sh: include_str!("../../../../features/opencode/install.sh"),
+  },
+  BuiltinFeature {
+    reference: "builtin:herdr",
+    metadata_json: include_str!("../../../../features/herdr/devcontainer-feature.json"),
+    install_sh: include_str!("../../../../features/herdr/install.sh"),
+  },
+];
+
+/// Returns whether `reference` names a built-in needy feature (`builtin:<id>`).
+pub fn is_builtin_ref(reference: &str) -> bool {
+  reference.starts_with("builtin:")
+}
+
+/// Returns all built-in Dev Container features embedded in needy.
+pub fn all_builtins() -> &'static [BuiltinFeature] {
+  BUILTINS
+}
+
+/// Looks up an embedded built-in Dev Container feature by reference (for
+/// example `builtin:sshfs`, `builtin:codex`, `builtin:pi`, `builtin:opencode`,
+/// `builtin:herdr`).
+pub fn builtin(reference: &str) -> Option<BuiltinFeature> {
+  let untagged = reference.split_once('@').map_or(reference, |(name, _)| name);
+  BUILTINS.iter().find(|f| f.reference == untagged).cloned()
+}
+
 /// Needy's built-in `sshfs` Dev Container feature (decision E8 in
 /// `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`):
 /// checks `command -v sshfs` and installs `sshfs` via the root's package
 /// manager when absent.
-// TODO(images): Slice 5 auto-prepends `builtin_sshfs()` as the first layer on
-// arbitrary non-needy roots that lack `sshfs`; in Slice 3 the helper is
-// packaged and validated ready for Slice 5.
 pub fn builtin_sshfs() -> BuiltinFeature {
-  BuiltinFeature {
-    reference: "builtin:sshfs",
-    metadata_json: r#"{
-  "id": "sshfs",
-  "version": "1.0.0",
-  "name": "SSHFS",
-  "description": "Installs sshfs when absent so needy can mount host workspaces and synced directories into the actor."
-}"#,
-    install_sh: r#"#!/bin/sh
-set -eu
-if command -v sshfs >/dev/null 2>&1; then
-  exit 0
-fi
-if command -v apt-get >/dev/null 2>&1; then
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends sshfs fuse3 || apt-get install -y --no-install-recommends sshfs fuse
-  rm -rf /var/lib/apt/lists/*
-elif command -v apk >/dev/null 2>&1; then
-  apk add --no-cache sshfs fuse3 || apk add --no-cache sshfs fuse
-elif command -v dnf >/dev/null 2>&1; then
-  dnf install -y fuse-sshfs
-  dnf clean all
-elif command -v yum >/dev/null 2>&1; then
-  yum install -y fuse-sshfs
-  yum clean all
-else
-  echo "builtin:sshfs: no supported package manager (apt-get, apk, dnf, yum) found to install sshfs" >&2
-  exit 1
-fi
-"#,
-  }
+  builtin("builtin:sshfs").expect("builtin:sshfs is embedded")
 }
 
 /// Fetches Dev Container feature artifacts over OCI Distribution v2 and caches
@@ -476,6 +490,21 @@ impl FeatureStore {
 
     let metadata_json = extract_metadata_json(&blob_bytes)?;
     self.cache_atomically(&manifest_digest, &blob_bytes, &metadata_json)
+  }
+
+  /// Materializes an embedded built-in feature (`builtin:<id>`) into the local
+  /// cache with zero network requests.
+  pub fn fetch_builtin(&self, reference: &str) -> Result<FetchedFeature> {
+    let feature = builtin(reference).ok_or_else(|| {
+      let known: Vec<&str> = BUILTINS.iter().map(|b| b.reference).collect();
+      Error::InvalidReference(reference.to_string(), format!("unknown built-in feature; available: {}", known.join(", ")))
+    })?;
+    let digest = feature.digest();
+    if let Some(cached) = self.get_cached(&digest)? {
+      return Ok(cached);
+    }
+    let archive = feature.archive()?;
+    self.cache_atomically(&digest, &archive, feature.metadata_json)
   }
 
   /// Fetches `reference` pinned to `pinned` (from a lockfile), hitting the

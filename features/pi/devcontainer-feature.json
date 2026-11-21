@@ -1,0 +1,30 @@
+{
+  "id": "pi",
+  "version": "1.0.0",
+  "name": "pi",
+  "description": "Installs the pi coding agent (@earendil-works/pi-coding-agent) with Node.js when absent and configures needy sync for ~/.pi/agent.",
+  "options": {
+    "version": {
+      "type": "string",
+      "default": "1.5.2",
+      "description": "pi coding agent npm package version to install."
+    }
+  },
+  "containerEnv": {
+    "PI_SKIP_VERSION_CHECK": "1",
+    "PI_TELEMETRY": "0"
+  },
+  "installsAfter": [
+    "ghcr.io/devcontainers/features/node"
+  ],
+  "customizations": {
+    "needy": {
+      "files": {
+        "pi": {
+          "path": "~/.pi/agent",
+          "filter": ["- /bin/**", "+ **"]
+        }
+      }
+    }
+  }
+}

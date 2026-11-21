@@ -1,0 +1,6 @@
+{
+  "id": "sshfs",
+  "version": "1.0.0",
+  "name": "SSHFS",
+  "description": "Installs sshfs when absent so needy can mount host workspaces and synced directories into the actor."
+}
