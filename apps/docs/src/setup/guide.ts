@@ -3,7 +3,6 @@ import type { Text } from '../i18n'
 import { parse, stringify } from 'yaml'
 
 import bash from '../../../../examples/linux-mac/bash.yaml?raw'
-import opencode from '../../../../examples/linux-mac/opencode.yaml?raw'
 
 export type Program = 'bash' | 'opencode'
 export type Os = 'linux' | 'mac'
@@ -76,7 +75,7 @@ export function locations(env: Environment): Record<Machine, { name: Text, descr
   }
 }
 
-const PROFILES: Record<Program, string> = { bash, opencode }
+const PROFILES: Record<'bash', string> = { bash }
 // Package source metadata and helper file lists:
 // docs/ai/references/cli/2026-11-15-workspace-mount-package-sources-note.md
 const INSTALL: Record<PackageManager, string> = {
@@ -111,10 +110,10 @@ export function configurationIssue(env: Environment): Text | undefined {
     return { en: 'Use a runner name of 1–63 lowercase letters, digits, or hyphens.', zh: 'runner 名称需为 1–63 个小写字母、数字或连字符，且首尾不能是连字符。' }
   if (env.executor !== 'container' && (!env.workspace.trim() || /[\r\n\0]/.test(env.workspace)))
     return { en: 'Enter a project directory on the executor, without line breaks.', zh: '填写 executor 上的项目目录，不要包含换行。' }
-  // NOTICE: client-current-directory binding is not implemented. Relative
-  // paths would depend on the submitted profile's base, not this form.
+  // NOTICE: explicit `actor.workspace.from` paths must be absolute or `~/...`;
+  // omitting `actor.workspace` mounts the invoking client's current directory live.
   if (env.executor !== 'container' && !(env.workspace.startsWith('/') || env.workspace === '~' || env.workspace.startsWith('~/')))
-    return { en: 'Use an absolute executor path or ~/path. The client current directory is not bound automatically.', zh: '请使用执行机器上的绝对路径或 ~/路径，不会自动绑定客户端当前目录。' }
+    return { en: 'Use an absolute executor path or ~/path (or omit actor.workspace in your profile to mount the current directory).', zh: '请使用执行机器上的绝对路径或 ~/路径（或在 profile 中省略 actor.workspace 以自动挂载当前目录）。' }
   return undefined
 }
 
@@ -180,10 +179,9 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
     expected: { en: `The host is ready for ${driver}. Start Docker first if its application is not running.`, zh: `宿主机具备 ${driver} 的前提；Docker 应用未运行时，先启动它。` },
   }, {
     id: 'install', machine: 'host', terminal: host,
-    title: { en: 'Install needy and the selected base image', zh: '安装 needy 和所选 driver 的基础镜像' },
-    text: { en: 'These steps use a released needy. The README reference covers source builds.', zh: '这里使用发布版 needy。源码构建仍可查阅 README 参考部分。' },
-    code: `${installNeedy(true)}\nneedy image pull --driver ${driver}${env.executor === 'container' && driver !== 'linux-container'
-      ? '\nneedy_release=$(needy --version | awk \'{print $2}\')\ndocker pull "ghcr.io/needy-dev/needy-executor:v${needy_release}"' : ''}`,
+    title: { en: 'Install needy', zh: '安装 needy' },
+    text: { en: 'These steps use a released needy. Local runs pull the release’s base images automatically (use needy image pull for offline setups). The README reference covers source builds.', zh: '这里使用发布版 needy。本机运行会自动拉取发布版基础镜像（离线环境可使用 needy image pull）。源码构建仍可查阅 README 参考部分。' },
+    code: installNeedy(true),
   })
 
   steps.push({ id: 'daemon', machine: 'host', terminal: host,
@@ -269,34 +267,48 @@ export function guide(program: Program, env: Environment = DEFAULT_ENVIRONMENT):
       code: `mkdir -p ${shellPath(env.workspace)}` })
   }
 
-  if (program !== 'bash') {
-    const dir = `~/needy-state/${name}`
-    const paths = `${dir}/{data,config,state}`
-    steps.push({ id: 'state', machine: 'host', terminal: host,
-      title: { en: 'Create the program’s persistent directories', zh: '创建程序的持久目录' },
-      text: { en: 'These host paths belong to the actor host, even when its executor is elsewhere.', zh: '这些 host 路径属于 actor 宿主机，即使命令在另一台机器上执行。' },
-      code: `mkdir -p ${paths}\nchmod 700 ${dir}${program === 'opencode' ? ` ${paths}` : ''}` })
-  }
-
-  const profile = parse(PROFILES[program])
-  for (const mapping of Object.values(profile.files ?? {}) as Array<{ from: string, to: string }>) {
-    mapping.from = mapping.from.replace(`${program}-mac`, name)
-    mapping.to = mapping.to.replace(`${program}-mac`, name)
-  }
-  profile.actor.driver = driver
-  if (driver === 'linux-container')
-    profile.actor.container = { oci_runtime: 'runc' }
-  else
-    delete profile.actor.container
-  delete profile.actor.image
   const project = env.executor === 'container' ? '~/workspace' : env.workspace
-  profile.actor.workspace.from = `executor:${target}:${project}`
-  profile.executors = { [target]: env.executor === 'runner'
-    ? { runner: fromRunner ? { client: true } : env.runnerName, driver: 'native' }
-    : { driver: env.executor === 'container' ? 'linux-container' : 'native' } }
-  profile.commands = [{ match: env.routing === 'all' ? '**' : '{bash,sh,dash,zsh} **', to: target }]
-  profile.unknown = env.routing === 'all' ? target : 'actor'
-  const yaml = '# Generated from examples/linux-mac for the selected environment.\n# Container capture covers image shims, not new unshimmed programs.\n' + stringify(profile, { lineWidth: 0 })
+  const profile: Record<string, any> = program === 'opencode'
+    ? {
+        extends: 'builtin:opencode',
+        actor: {
+          driver,
+          ...(driver === 'linux-container' ? { container: { oci_runtime: 'runc' } } : {}),
+          command: ['opencode'],
+          workspace: {
+            path: '~/workspace',
+            from: `executor:${target}:${project}`,
+            writable: true,
+          },
+        },
+        executors: {
+          [target]: env.executor === 'runner'
+            ? { runner: fromRunner ? { client: true } : env.runnerName, driver: 'native' }
+            : { driver: env.executor === 'container' ? 'linux-container' : 'native' },
+        },
+        commands: [{ match: env.routing === 'all' ? '**' : '{bash,sh,dash,zsh} **', to: target }],
+        unknown: env.routing === 'all' ? target : 'actor',
+      }
+    : (() => {
+        const parsed = parse(PROFILES[program])
+        parsed.actor.driver = driver
+        if (driver === 'linux-container')
+          parsed.actor.container = { oci_runtime: 'runc' }
+        else
+          delete parsed.actor.container
+        delete parsed.actor.image
+        parsed.actor.workspace.from = `executor:${target}:${project}`
+        parsed.executors = { [target]: env.executor === 'runner'
+          ? { runner: fromRunner ? { client: true } : env.runnerName, driver: 'native' }
+          : { driver: env.executor === 'container' ? 'linux-container' : 'native' } }
+        parsed.commands = [{ match: env.routing === 'all' ? '**' : '{bash,sh,dash,zsh} **', to: target }]
+        parsed.unknown = env.routing === 'all' ? target : 'actor'
+        return parsed
+      })()
+  const header = program === 'opencode'
+    ? '# Extends builtin:opencode (auto-builds the opencode feature and syncs ~/.local/share/opencode).\n# Container capture covers image shims, not new unshimmed programs.\n'
+    : '# Generated from examples/linux-mac for the selected environment.\n# Container capture covers image shims, not new unshimmed programs.\n'
+  const yaml = header + stringify(profile, { lineWidth: 0 })
   steps.push({ id: 'profile', machine: launchMachine, terminal: launchTerminal,
     title: { en: 'Save the selected profile', zh: '保存按选择生成的 profile' },
     text: { en: 'Save this profile where you will run needy run create. The CLI sends its resolved contents to the control daemon. Executor workspace paths still belong to the selected executor; host file paths belong to the control host.', zh: '保存在将要执行 needy run create 的机器上。CLI 会把解析后的内容发送给控制 daemon。executor 的 workspace 路径仍属于所选执行机器，host 文件路径仍属于控制主机。' },

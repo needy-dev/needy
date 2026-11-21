@@ -199,12 +199,13 @@ describe('environment wizard', () => {
         expect(saved.machine).toBe(executor === 'runner' ? 'runner' : 'host')
         expect(saved.code).toContain(`profiles/${id}-demo.yaml`)
         expect(steps.find(step => step.id === 'start')?.code).toContain(`-f ~/.config/needy/profiles/${id}-demo.yaml`)
-        expect(steps.find(step => step.id === 'install')?.code).toContain(`needy image pull --driver ${host.driver}`)
+        expect(steps.find(step => step.id === 'install')?.code).not.toContain('needy image pull')
         expect(check(saved.profile!).findings.filter(f => f.severity === 'error')).toEqual([])
         expect(steps.some(step => step.id === 'tunnel')).toBe(executor === 'runner')
-        if (id !== 'bash') {
-          expect(steps.find(step => step.id === 'state')?.code).toContain(`~/needy-state/${id}-demo`)
-          expect(saved.profile).not.toContain(`${id}-mac`)
+        if (id === 'opencode') {
+          expect(profile.extends).toBe('builtin:opencode')
+          expect(steps.some(step => step.id === 'state')).toBe(false)
+          expect(saved.profile).not.toContain('needy-state')
         }
       })
     }
@@ -247,9 +248,12 @@ describe('environment wizard', () => {
     expect(profile.unknown).toBe('actor')
   })
 
-  it('prepares the container executor image separately from a VM actor image', () => {
+  it('omits manual image pulls because local runs pull release base images automatically', () => {
     const steps = guide('bash')
-    expect(steps.find(step => step.id === 'install')?.code).toContain('ghcr.io/needy-dev/needy-executor:v${needy_release}')
+    const install = steps.find(step => step.id === 'install')!
+    expect(install.code).not.toContain('needy image pull')
+    expect(install.code).not.toContain('docker pull')
+    expect(install.text.en).toContain('automatically')
   })
 
   // Windows enrollment cannot yet persist private credentials. A complete
@@ -272,6 +276,9 @@ describe('environment wizard', () => {
     expect(configurationIssue(env)).toBeDefined()
     expect(guide('bash', env)).toEqual([])
     expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '' })).toBeDefined()
-    expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '.' })).toBeDefined()
+    const relativeIssue = configurationIssue({ ...env, runnerName: 'valid', workspace: '.' })
+    expect(relativeIssue).toBeDefined()
+    expect(relativeIssue?.en).not.toContain('not bound automatically')
+    expect(relativeIssue?.en).toContain('omit actor.workspace')
   })
 })

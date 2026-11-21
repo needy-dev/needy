@@ -46,13 +46,12 @@ const STEPS: StartStep[] = [
     lines: [
       // The README's Linux install line, its path elided to fit the terminal.
       { text: 'curl -fsSL https://raw.githubusercontent.com/…/install/install.sh | sh', kind: 'cmd' },
-      { text: '# installs `needy` and the guest needy it brings into actors', kind: 'dim' },
-      { text: 'needy image pull', kind: 'cmd' },
-      { text: '# the base VM image and the executor image of this release', kind: 'dim' },
+      { text: '# installs `needy`, the guest needy, and starts the control daemon', kind: 'dim' },
+      { text: '# base images pull automatically on first local run (e.g. `needy run create -it --profile builtin:opencode`)', kind: 'dim' },
     ],
     lit: [],
-    up: [],
-    caption: 'Install needy, and pull the images of its release.',
+    up: ['daemon'],
+    caption: 'Install needy: the script starts the daemon, and local runs pull base images automatically.',
   },
   {
     ms: 2600,
