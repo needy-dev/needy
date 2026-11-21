@@ -673,7 +673,8 @@ executors:
     root: Some("example.com/root:1".into()),
     ..Default::default()
   };
-  let expected_top = *needy_core::image::plan(&def, &root, &needy_config::profile::User::default(), None).top();
+  let expected_top =
+    *needy_core::image::plan(&def, &root, &needy_config::profile::User::default(), None, &std::collections::BTreeMap::new()).unwrap().top();
 
   // Matching base -> commit_rebased == false, commit layer stacked on top.
   let mut req = new_run(profile, started.dir.path());

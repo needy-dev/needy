@@ -133,7 +133,9 @@ fn format_run_snippet_emits_valid_yaml_layer_with_cwd_and_quoting() {
   // Must parse back as a valid `needy_config::image::Layer` list.
   let layers: Vec<needy_config::image::Layer> = serde_yaml::from_str(&snippet).unwrap();
   assert_eq!(layers.len(), 1);
-  let needy_config::image::Layer::Run(script) = &layers[0];
+  let needy_config::image::Layer::Run(script) = &layers[0] else {
+    panic!("expected run layer, got {:?}", layers[0]);
+  };
   assert!(script.contains("apt-get update"), "{script}");
   assert!(script.contains("cd '/opt/my dir'"), "{script}");
 }

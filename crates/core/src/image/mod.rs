@@ -1,18 +1,22 @@
 //! The build plan of an image definition: what to build over a root, in
 //! which order, under which cache keys, and the environment the image's
-//! programs get. No IO: the root is resolved to a digest elsewhere, and
+//! programs get. No IO: the root and features are resolved elsewhere, and
 //! building, storing and booting the steps belong to the daemon and the
 //! layer store. See "Resolving and planning a build" in
 //! `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`.
 
-use std::collections::BTreeMap;
+pub mod feature;
+
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
-use needy_config::image::{Definition, Layer};
+use needy_config::image::{Definition, FeatureOption, Layer, untagged};
 use needy_config::profile::User;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+
+pub use self::feature::{FeatureError, FeatureMetadata, OptionSpec, sanitize_option_name};
 
 /// The `PATH` an actor's own programs are found on before an image adds to
 /// it; the image's `PATH` starts from it.
@@ -156,13 +160,43 @@ pub struct Step {
 }
 
 /// A step's resolved input.
-// TODO(images): the `feature` input (a feature's digest and its options)
-// comes with slice 3 of the images and run data spec, with the feature
-// layers `needy-config` refuses until then.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
   /// A shell script run by `sh -c` as root.
   Run(String),
+  /// A Dev Container feature installed by its `install.sh` as root.
+  Feature {
+    /// The feature reference as written (e.g. `ghcr.io/devcontainers/features/node:1`).
+    reference: String,
+    /// The resolved content digest of the feature artifact.
+    digest: Digest,
+    /// Sanitized option environment variables (with defaults filled in),
+    /// written to `devcontainer-features.env`.
+    env: BTreeMap<String, String>,
+  },
+}
+
+/// A resolved Dev Container feature ready for build planning: its content
+/// digest and parsed `devcontainer-feature.json` metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFeature {
+  /// The content digest of the resolved feature artifact.
+  pub digest: Digest,
+  /// Parsed `devcontainer-feature.json` metadata.
+  pub metadata: FeatureMetadata,
+}
+
+/// Errors that can prevent an image definition from being planned.
+#[derive(Debug, thiserror::Error)]
+pub enum PlanError {
+  #[error("feature `{reference}` was not resolved before planning")]
+  MissingFeature { reference: String },
+  #[error(transparent)]
+  RefusedFeature(#[from] FeatureError),
+  #[error("feature `dependsOn` cycle detected: {cycle}")]
+  DependencyCycle { cycle: String },
+  #[error("feature `{feature}` declares `installsAfter` `{after}`, which appears after it in the layer order")]
+  InstallsAfterViolation { feature: String, after: String },
 }
 
 /// An image's commit layer as its lockfile records it: the layer that holds
@@ -194,8 +228,18 @@ impl Plan {
   }
 }
 
-/// Plans `definition` over the root `root` for `user`, with the image's
-/// commit layer, if it has one, on top.
+enum ResolvedLayer<'a> {
+  Run(String),
+  Feature {
+    reference: String,
+    resolved: &'a ResolvedFeature,
+    options: BTreeMap<String, FeatureOption>,
+  },
+}
+
+/// Plans `definition` over the root `root` for `user`, with the resolved
+/// Dev Container `features` and the image's commit layer, if it has one, on
+/// top.
 ///
 /// A step's key is the digest of its parent's key and its input, so a
 /// changed layer changes its key and every key above it, and appending a
@@ -205,35 +249,172 @@ impl Plan {
 // built under it. Builds are not reproducible (timestamps, downloads), so a
 // key over built content would be known only after the parent was built,
 // and the plan could not name a whole image's keys before building.
-// TODO(images): with `containerEnv` (slice 3), a feature's environment is an
-// input of the steps above it, and enters their keys.
-pub fn plan(definition: &Definition, root: &Digest, user: &User, commit: Option<&Commit>) -> Plan {
+// NOTICE: a feature's `containerEnv` comes from `devcontainer-feature.json`
+// inside the feature artifact, so changing it changes the feature's digest
+// and therefore its key and every step's key above it.
+pub fn plan(
+  definition: &Definition,
+  root: &Digest,
+  user: &User,
+  commit: Option<&Commit>,
+  features: &BTreeMap<String, ResolvedFeature>,
+) -> Result<Plan, PlanError> {
+  let resolved_layers = resolve_layers(&definition.layers, features)?;
+  check_installs_after(&resolved_layers)?;
+
   let base = key(&json!({
     "root": root.to_string(),
     "user": { "name": user.name, "uid": user.uid, "gid": user.gid },
   }));
   let mut parent = base;
-  let steps = definition
-    .layers
-    .iter()
-    .map(|layer| {
-      let (input, resolved) = match layer {
-        Layer::Run(script) => (Input::Run(script.clone()), json!({ "run": script })),
-      };
-      parent = key(&json!({ "parent": parent.to_string(), "input": resolved }));
-      Step { input, key: parent }
-    })
-    .collect();
-  let (path, env) = environment(&definition.env);
-  Plan {
+  let mut steps = Vec::with_capacity(resolved_layers.len());
+  let mut acc_env = BTreeMap::from([("PATH".to_string(), SYSTEM_PATH.to_string())]);
+
+  for layer in resolved_layers {
+    let (input, resolved_input) = match layer {
+      ResolvedLayer::Run(script) => {
+        let resolved_input = json!({ "run": script });
+        (Input::Run(script), resolved_input)
+      }
+      ResolvedLayer::Feature {
+        reference,
+        resolved,
+        options,
+      } => {
+        apply_env(&mut acc_env, &resolved.metadata.container_env);
+        let env = resolved.metadata.resolve_options(&options);
+        let resolved_input = json!({
+          "feature": {
+            "digest": resolved.digest.to_string(),
+            "env": env,
+          }
+        });
+        (
+          Input::Feature {
+            reference,
+            digest: resolved.digest,
+            env,
+          },
+          resolved_input,
+        )
+      }
+    };
+    parent = key(&json!({ "parent": parent.to_string(), "input": resolved_input }));
+    steps.push(Step { input, key: parent });
+  }
+
+  apply_env(&mut acc_env, &definition.env);
+  let path = acc_env.remove("PATH").unwrap_or_else(|| SYSTEM_PATH.into());
+
+  Ok(Plan {
     root: *root,
     user: user.clone(),
     base,
     steps,
     commit: commit.cloned(),
-    env,
+    env: acc_env,
     path,
+  })
+}
+
+/// Expands `layers` by inserting `dependsOn` features before their dependents
+/// recursively, rejecting missing features, refused properties, and cycles.
+fn resolve_layers<'a>(layers: &[Layer], features: &'a BTreeMap<String, ResolvedFeature>) -> Result<Vec<ResolvedLayer<'a>>, PlanError> {
+  let mut out = Vec::with_capacity(layers.len());
+  let mut visiting = Vec::new();
+  let mut emitted = HashSet::new();
+
+  for layer in layers {
+    match layer {
+      Layer::Run(script) => out.push(ResolvedLayer::Run(script.clone())),
+      Layer::Feature { reference, options } => {
+        resolve_feature(reference, options, features, &mut visiting, &mut emitted, &mut out)?;
+      }
+    }
   }
+  Ok(out)
+}
+
+fn resolve_feature<'a>(
+  reference: &str,
+  options: &BTreeMap<String, FeatureOption>,
+  features: &'a BTreeMap<String, ResolvedFeature>,
+  visiting: &mut Vec<String>,
+  emitted: &mut HashSet<String>,
+  out: &mut Vec<ResolvedLayer<'a>>,
+) -> Result<(), PlanError> {
+  let id_key = untagged(reference).to_string();
+  if emitted.contains(&id_key) {
+    return Ok(());
+  }
+  if let Some(pos) = visiting.iter().position(|entry| entry == &id_key) {
+    let mut cycle: Vec<&str> = visiting[pos..].iter().map(String::as_str).collect();
+    cycle.push(&id_key);
+    return Err(PlanError::DependencyCycle {
+      cycle: cycle.join(" -> "),
+    });
+  }
+
+  let resolved = features.get(reference).ok_or_else(|| PlanError::MissingFeature {
+    reference: reference.to_string(),
+  })?;
+  resolved.metadata.check_allowed(reference)?;
+
+  visiting.push(id_key.clone());
+  for (dep_ref, dep_options) in &resolved.metadata.depends_on {
+    resolve_feature(dep_ref, dep_options, features, visiting, emitted, out)?;
+  }
+  visiting.pop();
+
+  if emitted.insert(id_key) {
+    out.push(ResolvedLayer::Feature {
+      reference: reference.to_string(),
+      resolved,
+      options: options.clone(),
+    });
+  }
+  Ok(())
+}
+
+/// Checks every feature's `installsAfter` entries against the resolved layer
+/// order; a contradiction between two present features is an error naming both.
+fn check_installs_after(layers: &[ResolvedLayer<'_>]) -> Result<(), PlanError> {
+  let positions: Vec<(usize, &str, &str)> = layers
+    .iter()
+    .enumerate()
+    .filter_map(|(idx, layer)| match layer {
+      ResolvedLayer::Feature {
+        reference,
+        resolved,
+        ..
+      } => Some((idx, untagged(reference), resolved.metadata.id.as_str())),
+      ResolvedLayer::Run(_) => None,
+    })
+    .collect();
+
+  for (idx, layer) in layers.iter().enumerate() {
+    let ResolvedLayer::Feature {
+      reference,
+      resolved,
+      ..
+    } = layer
+    else {
+      continue;
+    };
+    for after in &resolved.metadata.installs_after {
+      let after_untagged = untagged(after);
+      if let Some((other_idx, _, _)) =
+        positions.iter().find(|(_, pos_untagged, pos_id)| *pos_untagged == after_untagged || *pos_id == after.as_str())
+        && *other_idx > idx
+      {
+        return Err(PlanError::InstallsAfterViolation {
+          feature: reference.clone(),
+          after: after.clone(),
+        });
+      }
+    }
+  }
+  Ok(())
 }
 
 /// The key of a step's resolved input. JSON keeps the fields apart, so no
@@ -242,20 +423,24 @@ fn key(input: &serde_json::Value) -> Digest {
   Digest::of(input.to_string().as_bytes())
 }
 
-/// The image's `PATH` and the rest of its environment. `$PATH` and
-/// `${PATH}` in a value expand to [`SYSTEM_PATH`], so `PATH:
-/// /opt/tool/bin:${PATH}` adds a directory before it; other variables are
-/// left as written, for the program that reads them.
-// TODO(images): with `containerEnv` (slice 3), the environment is built in
-// layer order and a value expands against the environment so far, not only
-// against `PATH`.
-fn environment(env: &BTreeMap<String, String>) -> (String, BTreeMap<String, String>) {
-  let expand = |value: &str| shellexpand::env_with_context_no_errors(value, |name| (name == "PATH").then_some(SYSTEM_PATH)).into_owned();
-  let mut env: BTreeMap<_, _> = env.iter().map(|(name, value)| (name.clone(), expand(value))).collect();
-  let path = env.remove("PATH").unwrap_or_else(|| SYSTEM_PATH.into());
-  (path, env)
+/// Applies `entries` onto `acc`, expanding `$VAR` and `${VAR}` against the
+/// environment accumulated so far and leaving unknown variables as written.
+/// Non-`PATH` entries are applied before `PATH` so `PATH` can reference
+/// variables declared alongside it in the same `containerEnv` or `env` map.
+fn apply_env(acc: &mut BTreeMap<String, String>, entries: &BTreeMap<String, String>) {
+  for (name, value) in entries {
+    if name == "PATH" {
+      continue;
+    }
+    let expanded = shellexpand::env_with_context_no_errors(value, |var| acc.get(var).map(String::as_str)).into_owned();
+    acc.insert(name.clone(), expanded);
+  }
+  if let Some(value) = entries.get("PATH") {
+    let expanded = shellexpand::env_with_context_no_errors(value, |var| acc.get(var).map(String::as_str)).into_owned();
+    acc.insert("PATH".to_string(), expanded);
+  }
 }
 
 #[cfg(test)]
-#[path = "image_test.rs"]
+#[path = "mod_test.rs"]
 mod tests;

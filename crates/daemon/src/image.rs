@@ -321,7 +321,13 @@ impl Images {
     built_below: &[Digest],
     step: &Step,
   ) -> Result<Digest> {
-    let Input::Run(script) = &step.input;
+    let script = match &step.input {
+      Input::Run(script) => script,
+      Input::Feature { reference, .. } => {
+        // TODO(images): execute Dev Container feature `install.sh` in Slice 3 Step 3.
+        bail!("building `feature` layer `{reference}` is not yet implemented in the daemon (Slice 3 Step 3)");
+      }
+    };
     let (snapshot, layer_disks, snapshot_image) = if built_below.is_empty() {
       (None, Vec::new(), None)
     } else if builder == ActorDriver::LinuxContainer {
@@ -734,7 +740,9 @@ async fn build_image_plan(
   let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
   let builder = select_builder_driver(daemon, target_driver).await;
   let root = root_digest_for(daemon, builder, base_container_image).await?;
-  let plan = needy_core::image::plan(definition, &root, user, commit);
+  // TODO(images): resolve feature layers (OCI, tarball, local) before planning
+  // in Slice 3 Step 3; until then pass an empty feature map.
+  let plan = needy_core::image::plan(definition, &root, user, commit, &BTreeMap::new())?;
   let mut layers = Vec::with_capacity(plan.steps.len() + usize::from(plan.commit.is_some()));
   let mut steps = Vec::with_capacity(plan.steps.len());
 
@@ -743,7 +751,13 @@ async fn build_image_plan(
       bail!("the daemon shut down while building the image");
     }
     let (layer, cached, ms) = daemon.images.resolve_step(daemon, builder, base_container_image, trace, cancel, &layers, step).await?;
-    let Input::Run(script) = &step.input;
+    let script = match &step.input {
+      Input::Run(script) => script,
+      Input::Feature { reference, .. } => {
+        // TODO(images): execute Dev Container feature `install.sh` in Slice 3 Step 3.
+        bail!("building `feature` layer `{reference}` is not yet implemented in the daemon (Slice 3 Step 3)");
+      }
+    };
     let event = Event::ImageBuildStep(ImageBuildStep {
       key: step.key.to_string(),
       layer: layer.to_string(),

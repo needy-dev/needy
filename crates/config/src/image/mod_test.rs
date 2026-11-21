@@ -71,29 +71,84 @@ fn a_child_can_drop_its_parents_layers_with_null() {
 }
 
 #[test]
-fn a_feature_layer_is_refused_until_features_are_layers() {
-  let err = load_text("layers: [{ feature: ghcr.io/devcontainers/features/node:1 }]\n").unwrap_err().to_string();
+fn a_feature_layer_parses_with_string_bool_and_integer_options() {
+  let image = load_text(
+    r#"
+root: example.com/root:1
+layers:
+  - feature: ghcr.io/devcontainers/features/node:1
+    with:
+      version: "22"
+      nodeGypDependencies: true
+      nvmVersion: 2
+  - feature: ./features/local
+"#,
+  )
+  .unwrap();
 
-  assert!(err.contains("layers[0]: "), "{err}");
-  assert!(err.contains("`feature` layers come with slice 3"), "{err}");
-  assert!(err.contains("ghcr.io/devcontainers/features/node:1"), "{err}");
+  assert_eq!(
+    image.layers,
+    [
+      Layer::Feature {
+        reference: "ghcr.io/devcontainers/features/node:1".into(),
+        options: BTreeMap::from([
+          ("nodeGypDependencies".into(), FeatureOption::Bool(true)),
+          ("nvmVersion".into(), FeatureOption::Int(2)),
+          ("version".into(), FeatureOption::String("22".into())),
+        ]),
+      },
+      Layer::Feature {
+        reference: "./features/local".into(),
+        options: BTreeMap::new(),
+      },
+    ]
+  );
 }
 
 #[test]
 fn a_child_feature_of_the_same_reference_replaces_the_parents_in_place() {
-  // The refusal names the feature it saw and where: the child's `node:2`
-  // took the place of the parent's `node:1`, ahead of the parent's `run`
-  // layer, instead of being appended after it.
   let dir = files(&[
-    ("base.image.yaml", "layers:\n  - feature: ghcr.io/devcontainers/features/node:1\n  - run: one\n"),
-    ("child.image.yaml", "extends: base.image.yaml\nlayers:\n  - feature: ghcr.io/devcontainers/features/node:2\n"),
+    (
+      "base.image.yaml",
+      "layers:\n  - feature: ghcr.io/devcontainers/features/node:1\n    with: { version: \"20\" }\n  - run: one\n  - feature: ghcr.io/devcontainers/features/git@sha256:aaaa\n",
+    ),
+    (
+      "child.image.yaml",
+      "extends: base.image.yaml\nlayers:\n  - feature: ghcr.io/devcontainers/features/node:2\n    with: { version: \"22\" }\n  - feature: ghcr.io/devcontainers/features/git:1\n  - feature: ghcr.io/devcontainers/features/python:1\n",
+    ),
   ]);
 
-  let err = load(&Source::file(dir.path().join("child.image.yaml"))).unwrap_err().to_string();
+  let image = load(&Source::file(dir.path().join("child.image.yaml"))).unwrap();
 
-  assert!(err.contains("layers[0]: "), "{err}");
-  assert!(err.contains("node:2"), "{err}");
-  assert!(!err.contains("node:1"), "{err}");
+  assert_eq!(
+    image.layers,
+    [
+      Layer::Feature {
+        reference: "ghcr.io/devcontainers/features/node:2".into(),
+        options: BTreeMap::from([("version".into(), FeatureOption::String("22".into()))]),
+      },
+      run("one"),
+      Layer::Feature {
+        reference: "ghcr.io/devcontainers/features/git:1".into(),
+        options: BTreeMap::new(),
+      },
+      Layer::Feature {
+        reference: "ghcr.io/devcontainers/features/python:1".into(),
+        options: BTreeMap::new(),
+      },
+    ]
+  );
+}
+
+#[test]
+fn untagged_strips_tag_and_digest_while_keeping_registry_port() {
+  assert_eq!(untagged("ghcr.io/devcontainers/features/node:1"), "ghcr.io/devcontainers/features/node");
+  assert_eq!(untagged("ghcr.io/devcontainers/features/node:1.2.3"), "ghcr.io/devcontainers/features/node");
+  assert_eq!(untagged("ghcr.io/devcontainers/features/node@sha256:abcd"), "ghcr.io/devcontainers/features/node");
+  assert_eq!(untagged("ghcr.io/devcontainers/features/node:1@sha256:abcd"), "ghcr.io/devcontainers/features/node");
+  assert_eq!(untagged("localhost:5000/features/node:1"), "localhost:5000/features/node");
+  assert_eq!(untagged("localhost:5000/features/node"), "localhost:5000/features/node");
+  assert_eq!(untagged("./features/x"), "./features/x");
 }
 
 #[test]
@@ -102,10 +157,19 @@ fn a_layer_is_one_kind() {
   assert!(err.contains("layers[0].env: unknown field `env`"), "{err}");
 
   let err = load_text("layers: [{}]\n").unwrap_err().to_string();
-  assert!(err.contains("layers[0]: a layer needs `run`"), "{err}");
+  assert!(err.contains("layers[0]: a layer needs `run` or `feature`"), "{err}");
 
   let err = load_text("layers: [{ run: one, feature: ./features/x }]\n").unwrap_err().to_string();
   assert!(err.contains("layers[0]: a layer is one of `run` or `feature`"), "{err}");
+
+  let err = load_text("layers: [{ run: one, with: { version: \"1\" } }]\n").unwrap_err().to_string();
+  assert!(err.contains("layers[0]: `with` sets a `feature` layer's options"), "{err}");
+
+  let err = load_text("layers: [{ feature: \"\" }]\n").unwrap_err().to_string();
+  assert!(err.contains("layers[0]: `feature` reference cannot be empty"), "{err}");
+
+  let err = load_text("layers: [{ feature: ./features/x, with: { version: 3.12 } }]\n").unwrap_err().to_string();
+  assert!(err.contains("layers[0].with.version"), "{err}");
 }
 
 #[test]
