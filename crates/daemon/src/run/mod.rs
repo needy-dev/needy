@@ -507,6 +507,10 @@ pub struct Boot {
   /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
   /// to record in the image's lockfile.
   pub resolved_features: BTreeMap<String, String>,
+  /// Lifecycle `start` hooks (`needy_core::image::Plan::hooks.start`).
+  pub start_hooks: Vec<String>,
+  /// Lifecycle `stop` hooks (`needy_core::image::Plan::hooks.stop`).
+  pub stop_hooks: Vec<String>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

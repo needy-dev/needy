@@ -723,6 +723,14 @@ pub struct GetConfigResponse {
     pub image_path: ::prost::alloc::string::String,
     #[prost(message, optional, tag="22")]
     pub session: ::core::option::Option<GuestSession>,
+    /// Shell commands run in order as the run's user in `cwd` after setup and
+    /// routing are enabled, before the driving program starts.
+    #[prost(string, repeated, tag="23")]
+    pub start_hooks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Shell commands run in order as the run's user in `cwd` after the driving
+    /// program exits (or on graceful stop), before mirror-out and sync merges.
+    #[prost(string, repeated, tag="24")]
+    pub stop_hooks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// An event observed inside the actor. The listener the guest calls is bound to
 /// its run, so the event names none.

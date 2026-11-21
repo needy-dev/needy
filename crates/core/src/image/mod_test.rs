@@ -10,6 +10,7 @@ fn definition(scripts: &[&str]) -> Definition {
     root: Some("example.com/root:1".into()),
     layers: scripts.iter().map(|script| Layer::Run(script.to_string())).collect(),
     env: BTreeMap::new(),
+    hooks: Default::default(),
   }
 }
 
@@ -238,6 +239,7 @@ fn feature_steps_include_digest_and_sanitized_options_in_cache_key() {
     root: Some("example.com/root:1".into()),
     layers: vec![feature_layer("ghcr.io/devcontainers/features/node:1", &[])],
     env: BTreeMap::new(),
+    ..Default::default()
   };
   let def_v22 = Definition {
     root: Some("example.com/root:1".into()),
@@ -246,6 +248,7 @@ fn feature_steps_include_digest_and_sanitized_options_in_cache_key() {
       &[("version", FeatureOption::from("22"))],
     )],
     env: BTreeMap::new(),
+    ..Default::default()
   };
   let def_tag_v1_2 = Definition {
     root: Some("example.com/root:1".into()),
@@ -254,6 +257,7 @@ fn feature_steps_include_digest_and_sanitized_options_in_cache_key() {
       &[],
     )],
     env: BTreeMap::new(),
+    ..Default::default()
   };
 
   let features_a = BTreeMap::from([
@@ -307,6 +311,7 @@ fn depends_on_inserts_dependencies_before_dependents_recursively_without_duplica
       Layer::Run("echo done".into()),
     ],
     env: BTreeMap::new(),
+    ..Default::default()
   };
 
   let p = plan(&def, &digest('a'), &User::default(), None, &features).unwrap();
@@ -341,6 +346,7 @@ fn depends_on_inserts_dependencies_before_dependents_recursively_without_duplica
       feature_layer("ghcr.io/example/features/app:1", &[]),
     ],
     env: BTreeMap::new(),
+    ..Default::default()
   };
   let p2 = plan(&def_explicit, &digest('a'), &User::default(), None, &features).unwrap();
   assert_eq!(p2.steps.len(), 3);
@@ -356,6 +362,7 @@ fn depends_on_cycle_returns_error_naming_cycle() {
     root: Some("example.com/root:1".into()),
     layers: vec![feature_layer("ghcr.io/example/features/a:1", &[])],
     env: BTreeMap::new(),
+    ..Default::default()
   };
 
   let err = plan(&def, &digest('a'), &User::default(), None, &features).unwrap_err().to_string();
@@ -382,6 +389,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
       feature_layer("ghcr.io/devcontainers/features/node:1", &[]),
     ],
     env: BTreeMap::new(),
+    ..Default::default()
   };
   plan(&valid, &digest('a'), &User::default(), None, &features).unwrap();
 
@@ -390,6 +398,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
     root: Some("example.com/root:1".into()),
     layers: vec![feature_layer("ghcr.io/devcontainers/features/node:1", &[])],
     env: BTreeMap::new(),
+    ..Default::default()
   };
   plan(&alone, &digest('a'), &User::default(), None, &features).unwrap();
 
@@ -401,6 +410,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
       feature_layer("ghcr.io/devcontainers/features/common-utils:2", &[]),
     ],
     env: BTreeMap::new(),
+    ..Default::default()
   };
   let err = plan(&reversed, &digest('a'), &User::default(), None, &features).unwrap_err().to_string();
   assert!(err.contains("ghcr.io/devcontainers/features/node:1"), "{err}");
@@ -449,6 +459,7 @@ fn container_env_expands_in_layer_order_and_merges_with_image_env() {
       ("NODE_REF".into(), "${NVM_DIR}/versions".into()),
       ("KEEP_UNKNOWN".into(), "${HOME}/bin".into()),
     ]),
+    ..Default::default()
   };
 
   let p = plan(&def, &digest('a'), &User::default(), None, &features).unwrap();
@@ -469,6 +480,7 @@ fn plan_refuses_missing_or_disallowed_feature() {
     root: Some("example.com/root:1".into()),
     layers: vec![feature_layer("ghcr.io/example/features/dind:1", &[])],
     env: BTreeMap::new(),
+    ..Default::default()
   };
 
   let err = plan(&def, &digest('a'), &User::default(), None, &no_features()).unwrap_err().to_string();
@@ -478,4 +490,50 @@ fn plan_refuses_missing_or_disallowed_feature() {
   let err = plan(&def, &digest('a'), &User::default(), None, &features).unwrap_err().to_string();
   assert!(err.contains("ghcr.io/example/features/dind:1"), "{err}");
   assert!(err.contains("privileged"), "{err}");
+}
+
+#[test]
+fn hooks_collect_features_in_resolved_layer_order_before_image_hooks_without_affecting_keys() {
+  let features = BTreeMap::from([
+    ("ghcr.io/example/features/dep:1".into(), resolved('1', r#"{ "id": "dep", "postStartCommand": "dep-start" }"#)),
+    (
+      "ghcr.io/example/features/app:1".into(),
+      resolved(
+        '2',
+        r#"{
+          "id": "app",
+          "dependsOn": { "ghcr.io/example/features/dep:1": {} },
+          "postCreateCommand": "app-create",
+          "postStartCommand": ["app-start", "--fast"]
+        }"#,
+      ),
+    ),
+  ]);
+
+  let def_no_hooks = Definition {
+    root: Some("example.com/root:1".into()),
+    layers: vec![feature_layer("ghcr.io/example/features/app:1", &[])],
+    env: BTreeMap::new(),
+    hooks: needy_config::image::Hooks::default(),
+  };
+  let mut def_with_hooks = def_no_hooks.clone();
+  def_with_hooks.hooks = needy_config::image::Hooks {
+    start: vec!["image-start".into()],
+    stop: vec!["image-stop".into()],
+  };
+
+  let p_no_hooks = plan(&def_no_hooks, &digest('a'), &User::default(), None, &features).unwrap();
+  let p_with_hooks = plan(&def_with_hooks, &digest('a'), &User::default(), None, &features).unwrap();
+
+  assert_eq!(keys(&p_no_hooks), keys(&p_with_hooks));
+  assert_eq!(
+    p_with_hooks.hooks.start,
+    [
+      "dep-start",
+      "app-create",
+      "'app-start' '--fast'",
+      "image-start",
+    ]
+  );
+  assert_eq!(p_with_hooks.hooks.stop, ["image-stop"]);
 }

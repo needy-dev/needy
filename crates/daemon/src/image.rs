@@ -981,6 +981,8 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
     session: GuestSession::default(),
     commit_rebased,
     resolved_features: resolved.resolved_features,
+    start_hooks: resolved.plan.hooks.start,
+    stop_hooks: resolved.plan.hooks.stop,
   });
   Ok(())
 }
@@ -1121,6 +1123,9 @@ impl ImagesTrait for Daemon {
         upper: UpperLayer::Kept,
         routing: true,
       },
+      // Lifecycle hooks run only for normal runs, never in edit sessions.
+      start_hooks: Vec::new(),
+      stop_hooks: Vec::new(),
     };
 
     let guest_service = Arc::new(SessionGuest {
@@ -1777,6 +1782,9 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     layers: parts.layer_digests,
     image_path: parts.image_path,
     session: parts.session,
+    // Lifecycle hooks run only for normal runs, never in build sessions.
+    start_hooks: Vec::new(),
+    stop_hooks: Vec::new(),
   }
 }
 

@@ -591,6 +591,14 @@ pub struct GuestConfig {
   /// program's `PATH`. Empty for none.
   pub image_path: String,
   pub session: GuestSession,
+  /// Shell commands run in order as the run's user in `cwd` after setup and
+  /// routing are enabled, before the driving program starts. Empty for build
+  /// and edit sessions.
+  pub start_hooks: Vec<String>,
+  /// Shell commands run in order as the run's user in `cwd` after the driving
+  /// program exits (or on graceful stop), before mirror-out and sync merges.
+  /// Empty for build and edit sessions.
+  pub stop_hooks: Vec<String>,
 }
 
 /// The settings of the session an actor is: a run, a build step or an edit

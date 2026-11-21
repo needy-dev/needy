@@ -157,6 +157,8 @@ impl Guest for Daemon {
       },
       image_path: boot.path,
       session: boot.session,
+      start_hooks: boot.start_hooks,
+      stop_hooks: boot.stop_hooks,
     };
     let in_guest = Some(Presenter::Guest);
     if facets.workspace != Presenter::Guest {

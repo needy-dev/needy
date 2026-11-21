@@ -191,6 +191,12 @@ message GetConfigResponse {
   // whole; a profile's `actor.env.PATH` replaces this one.
   string image_path = 21;
   GuestSession session = 22;
+  // Shell commands run in order as the run's user in `cwd` after setup and
+  // routing are enabled, before the driving program starts.
+  repeated string start_hooks = 23;
+  // Shell commands run in order as the run's user in `cwd` after the driving
+  // program exits (or on graceful stop), before mirror-out and sync merges.
+  repeated string stop_hooks = 24;
 }
 
 // An event observed inside the actor. The listener the guest calls is bound to
