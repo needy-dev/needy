@@ -2051,3 +2051,61 @@ commands:
   stop.cancel();
   responder.await.unwrap();
 }
+
+// ROOT CAUSE:
+//
+// If a Dev Container feature's `install.sh` uses a bash shebang
+// (`#!/usr/bin/env bash` or `#!/bin/bash`, as official features like
+// `ghcr.io/devcontainers/features/node:1` do) and bash syntax such as
+// parameter substitution, running `sh ./install.sh` failed under Debian's
+// dash `/bin/sh` with `Bad substitution` (exit 2) because `sh` ignored the
+// script's `#!` interpreter.
+//
+// Before the fix, `feature_install_script` did `chmod +x ./install.sh` and
+// then ran `sh ./install.sh || status=$?`.
+// The fix executes `./install.sh || status=$?` directly so the kernel honors
+// the feature script's shebang (and POSIX `sh` still falls back to `/bin/sh`
+// when no shebang is present).
+#[test]
+fn feature_install_script_executes_install_sh_directly_to_honor_shebang() {
+  let user = needy_config::profile::User {
+    name: "agent".into(),
+    uid: 1000,
+    gid: 1000,
+  };
+  let script = super::feature_install_script(&user, &std::collections::BTreeMap::new());
+  assert!(
+    script.contains("\n./install.sh || status=$?\n"),
+    "wrapper must execute `./install.sh` directly so its #! shebang is honored:\n{script}"
+  );
+  assert!(!script.contains("sh ./install.sh"), "wrapper must not force `/bin/sh` over a feature's shebang:\n{script}");
+}
+
+// ROOT CAUSE:
+//
+// If a failing build step (such as a Dev Container feature running `curl`)
+// emitted carriage-return (`\r`) progress output or very long console lines,
+// `format_build_failure` included the raw lines unbounded in the gRPC
+// `FAILED_PRECONDITION` status message. After percent-encoding into the HTTP/2
+// `grpc-message` trailer, the header exceeded h2's 16 KiB
+// `MAX_HEADER_LIST_SIZE`, causing the client to fail with an opaque
+// `h2 protocol error: http2 error` instead of the build step's real error.
+//
+// Before the fix, `format_build_failure` neither collapsed `\r` progress
+// updates nor capped the byte length of the console tail.
+// The fix keeps only the final `\r` segment per line and caps the console tail
+// to `FAILURE_LOG_MAX_BYTES`.
+#[test]
+fn format_build_failure_collapses_carriage_returns_and_bounds_message_size() {
+  let progress = format!("{}final progress line\nactual error\n", "### 12.3%\r".repeat(3000));
+  let msg = super::format_build_failure("feature: example/node:1", "exited with code 1", &progress);
+  assert!(msg.contains("final progress line"), "expected final progress segment: {msg}");
+  assert!(msg.contains("actual error"), "expected error line: {msg}");
+  assert!(!msg.contains('\r'), "carriage returns must be collapsed: {msg}");
+  assert!(msg.len() <= super::FAILURE_LOG_MAX_BYTES + 256, "message too large for grpc-message trailer: {} bytes", msg.len());
+
+  let huge = format!("{}\nlast-line\n", "x".repeat(20_000));
+  let bounded = super::format_build_failure("feature: example/node:1", "exited with code 1", &huge);
+  assert!(bounded.ends_with("last-line"), "tail must be preserved: {bounded}");
+  assert!(bounded.len() <= super::FAILURE_LOG_MAX_BYTES + 256, "huge console line must be bounded: {} bytes", bounded.len());
+}
