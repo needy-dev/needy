@@ -12,6 +12,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 backhand.workspace = true
 bytes.workspace = true
+flate2.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
