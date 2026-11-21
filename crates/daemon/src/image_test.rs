@@ -723,3 +723,640 @@ async fn root_digest_caches_unhashed_rootfs_and_invalidates_on_change() {
   let third = crate::image::root_digest(daemon).await.unwrap();
   assert_ne!(first, third);
 }
+
+/// Builds a minimal valid Docker-save (`manifest.json`) image archive with the
+/// given layers (each layer is a slice of `(path, content)` pairs).
+fn fake_oci_image_tar(tag: &str, layers: &[&[(&str, &[u8])]]) -> Vec<u8> {
+  use sha2::Digest as _;
+  let mut layer_tars: Vec<(String, Vec<u8>)> = Vec::new();
+  for files in layers {
+    let mut builder = tar::Builder::new(Vec::new());
+    for (path, bytes) in *files {
+      let mut header = tar::Header::new_gnu();
+      header.set_entry_type(tar::EntryType::Regular);
+      header.set_mode(0o755);
+      header.set_uid(0);
+      header.set_gid(0);
+      header.set_mtime(0);
+      header.set_size(bytes.len() as u64);
+      header.set_cksum();
+      builder.append_data(&mut header, path, *bytes).unwrap();
+    }
+    let bytes = builder.into_inner().unwrap();
+    let digest = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+    layer_tars.push((digest, bytes));
+  }
+
+  let diff_ids: Vec<String> = layer_tars.iter().map(|(d, _)| d.clone()).collect();
+  let config_json = serde_json::json!({
+    "architecture": needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()),
+    "os": "linux",
+    "rootfs": { "type": "layers", "diff_ids": diff_ids },
+    "config": { "Labels": { "needy.base-abi": "1" } },
+  });
+  let config_bytes = serde_json::to_vec(&config_json).unwrap();
+  let config_hex = format!("{:x}", sha2::Sha256::digest(&config_bytes));
+  let config_path = format!("blobs/sha256/{config_hex}");
+
+  let layer_paths: Vec<String> = layer_tars.iter().map(|(d, _)| format!("blobs/sha256/{}", d.strip_prefix("sha256:").unwrap())).collect();
+  let manifest_json = serde_json::json!([{
+    "Config": config_path,
+    "RepoTags": [tag],
+    "Layers": layer_paths,
+  }]);
+  let manifest_bytes = serde_json::to_vec(&manifest_json).unwrap();
+
+  let mut archive = tar::Builder::new(Vec::new());
+  let append = |archive: &mut tar::Builder<Vec<u8>>, name: &str, bytes: &[u8]| {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_mode(0o644);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_size(bytes.len() as u64);
+    header.set_cksum();
+    archive.append_data(&mut header, name, bytes).unwrap();
+  };
+  append(&mut archive, "manifest.json", &manifest_bytes);
+  append(&mut archive, &config_path, &config_bytes);
+  for (path, (_, bytes)) in layer_paths.iter().zip(&layer_tars) {
+    append(&mut archive, path, bytes);
+  }
+  archive.into_inner().unwrap()
+}
+
+/// Extracts `RepoTags[0]` from a Docker-save / hybrid OCI tar archive.
+fn repo_tag_from_tar(bytes: &[u8]) -> String {
+  use std::io::Read as _;
+  let mut archive = tar::Archive::new(std::io::Cursor::new(bytes));
+  for entry in archive.entries().unwrap() {
+    let mut entry = entry.unwrap();
+    if entry.path().unwrap().to_string_lossy() == "manifest.json" {
+      let mut json = Vec::new();
+      entry.read_to_end(&mut json).unwrap();
+      let v: serde_json::Value = serde_json::from_slice(&json).unwrap();
+      return v[0]["RepoTags"][0].as_str().unwrap().to_string();
+    }
+  }
+  panic!("manifest.json not found in loaded OCI archive");
+}
+
+type OnContainerStart =
+  Arc<dyn Fn(String, needy_core_executor::engine::models::ContainerCreateBody, tokio::sync::watch::Sender<bool>) + Send + Sync>;
+
+struct FakeContainerEngine {
+  images: std::sync::Mutex<std::collections::HashMap<String, (needy_core_executor::engine::Image, Vec<u8>)>>,
+  created: std::sync::Mutex<Vec<(String, needy_core_executor::engine::models::ContainerCreateBody)>>,
+  exported: std::sync::Mutex<Vec<String>>,
+  loaded: std::sync::Mutex<Vec<String>>,
+  committed: std::sync::Mutex<Vec<(String, String)>>,
+  removed_images: std::sync::Mutex<Vec<String>>,
+  removed_containers: std::sync::Mutex<Vec<String>>,
+  wait_gates: std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+  on_start: Option<OnContainerStart>,
+  base_tar: Vec<u8>,
+}
+
+impl FakeContainerEngine {
+  fn new(base_tag: &str, on_start: Option<OnContainerStart>) -> Arc<Self> {
+    let base_tar = fake_oci_image_tar(base_tag, &[&[(".needy/proxy", b"fake-proxy")]]);
+    let image = needy_core_executor::engine::Image {
+      id: format!("sha256:{}", "a".repeat(64)),
+      os: "linux".into(),
+      architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
+      labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+    };
+    let mut images = std::collections::HashMap::new();
+    images.insert(base_tag.to_string(), (image, base_tar.clone()));
+    Arc::new(Self {
+      images: std::sync::Mutex::new(images),
+      created: Default::default(),
+      exported: Default::default(),
+      loaded: Default::default(),
+      committed: Default::default(),
+      removed_images: Default::default(),
+      removed_containers: Default::default(),
+      wait_gates: Default::default(),
+      on_start,
+      base_tar,
+    })
+  }
+}
+
+#[async_trait::async_trait]
+impl needy_core_executor::engine::Engine for FakeContainerEngine {
+  async fn runtimes(&self) -> std::result::Result<std::collections::BTreeMap<String, Vec<String>>, needy_core_executor::engine::Error> {
+    Ok(std::collections::BTreeMap::from([("runc".into(), Vec::new())]))
+  }
+
+  async fn inspect_image(
+    &self,
+    image: &str,
+  ) -> std::result::Result<Option<needy_core_executor::engine::Image>, needy_core_executor::engine::Error> {
+    Ok(self.images.lock().unwrap().get(image).map(|(img, _)| img.clone()))
+  }
+
+  fn pull_progress(
+    &self,
+    image: &str,
+  ) -> futures_util::stream::BoxStream<
+    'static,
+    std::result::Result<needy_core_executor::engine::models::CreateImageInfo, needy_core_executor::engine::Error>,
+  > {
+    use futures_util::StreamExt as _;
+    futures_util::stream::iter([Err(needy_core_executor::engine::Error::NotFound(
+      image.into(),
+    ))])
+    .boxed()
+  }
+
+  async fn create(
+    &self,
+    name: &str,
+    body: needy_core_executor::engine::models::ContainerCreateBody,
+  ) -> std::result::Result<(), needy_core_executor::engine::Error> {
+    self.created.lock().unwrap().push((name.to_string(), body));
+    let (tx, _) = tokio::sync::watch::channel(false);
+    self.wait_gates.lock().unwrap().insert(name.to_string(), tx);
+    Ok(())
+  }
+
+  async fn start(&self, name: &str) -> std::result::Result<u32, needy_core_executor::engine::Error> {
+    let gate = self.wait_gates.lock().unwrap().get(name).cloned().unwrap();
+    let body = self.created.lock().unwrap().iter().rev().find(|(n, _)| n == name).unwrap().1.clone();
+    if let Some(cb) = &self.on_start {
+      cb(name.to_string(), body, gate);
+    }
+    Ok(4242)
+  }
+
+  fn logs(
+    &self,
+    _name: &str,
+  ) -> futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, needy_core_executor::engine::Error>> {
+    use futures_util::StreamExt as _;
+    futures_util::stream::empty().boxed()
+  }
+
+  async fn wait(&self, name: &str) -> std::result::Result<i64, needy_core_executor::engine::Error> {
+    let rx = self.wait_gates.lock().unwrap().get(name).map(|tx| tx.subscribe());
+    if let Some(mut rx) = rx {
+      let _ = rx.wait_for(|done| *done).await;
+    }
+    Ok(0)
+  }
+
+  async fn stop(&self, name: &str, _grace: Duration) -> std::result::Result<(), needy_core_executor::engine::Error> {
+    if let Some(gate) = self.wait_gates.lock().unwrap().get(name) {
+      gate.send_replace(true);
+    }
+    Ok(())
+  }
+
+  async fn remove(&self, name: &str) -> std::result::Result<(), needy_core_executor::engine::Error> {
+    self.removed_containers.lock().unwrap().push(name.to_string());
+    if let Some(gate) = self.wait_gates.lock().unwrap().get(name) {
+      gate.send_replace(true);
+    }
+    Ok(())
+  }
+
+  async fn download(&self, _name: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, needy_core_executor::engine::Error> {
+    if path != "/etc/passwd" {
+      return Ok(None);
+    }
+    let text = b"root:x:0:0:root:/root:/bin/sh\nagent:x:1000:1000::/home/agent:/bin/sh\n";
+    let mut archive = tar::Builder::new(Vec::new());
+    let mut header = tar::Header::new_gnu();
+    header.set_size(text.len() as u64);
+    header.set_mode(0o644);
+    header.set_cksum();
+    archive.append_data(&mut header, "passwd", &text[..]).unwrap();
+    Ok(Some(archive.into_inner().unwrap()))
+  }
+
+  async fn commit_container(
+    &self,
+    container: &str,
+    repo: &str,
+    tag: &str,
+  ) -> std::result::Result<String, needy_core_executor::engine::Error> {
+    let full = format!("{repo}:{tag}");
+    self.committed.lock().unwrap().push((container.to_string(), full.clone()));
+    let committed_tar = fake_oci_image_tar(
+      &full,
+      &[
+        &[(".needy/proxy", b"fake-proxy")],
+        &[("etc/committed.txt", format!("committed-from-{container}\n").as_bytes())],
+      ],
+    );
+    let image = needy_core_executor::engine::Image {
+      id: format!("sha256:{}", "c".repeat(64)),
+      os: "linux".into(),
+      architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
+      labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+    };
+    self.images.lock().unwrap().insert(full, (image, committed_tar));
+    Ok(format!("sha256:{}", "c".repeat(64)))
+  }
+
+  fn export_image(
+    &self,
+    image: &str,
+  ) -> futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, needy_core_executor::engine::Error>> {
+    use futures_util::StreamExt as _;
+    self.exported.lock().unwrap().push(image.to_string());
+    let bytes = self.images.lock().unwrap().get(image).map(|(_, tar)| tar.clone()).unwrap_or_else(|| self.base_tar.clone());
+    futures_util::stream::iter([Ok(bytes::Bytes::from(bytes))]).boxed()
+  }
+
+  async fn load_image(
+    &self,
+    mut tar: futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, needy_core_executor::engine::Error>>,
+  ) -> std::result::Result<(), needy_core_executor::engine::Error> {
+    use futures_util::StreamExt as _;
+    let mut all = Vec::new();
+    while let Some(chunk) = tar.next().await {
+      all.extend_from_slice(&chunk?);
+    }
+    let tag = repo_tag_from_tar(&all);
+    self.loaded.lock().unwrap().push(tag.clone());
+    let image = needy_core_executor::engine::Image {
+      id: format!("sha256:{}", "b".repeat(64)),
+      os: "linux".into(),
+      architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
+      labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+    };
+    self.images.lock().unwrap().insert(tag, (image, all));
+    Ok(())
+  }
+
+  async fn remove_image(&self, image: &str) -> std::result::Result<(), needy_core_executor::engine::Error> {
+    self.removed_images.lock().unwrap().push(image.to_string());
+    self.images.lock().unwrap().remove(image);
+    Ok(())
+  }
+}
+
+struct FakeAppleCli {
+  images: std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+  saved: std::sync::Mutex<Vec<String>>,
+  loaded: std::sync::Mutex<Vec<String>>,
+  spawned_args: std::sync::Mutex<Vec<Vec<String>>>,
+  wait_gates: std::sync::Mutex<std::collections::HashMap<String, tokio::sync::watch::Sender<bool>>>,
+}
+
+impl FakeAppleCli {
+  fn new(base_tag: &str) -> Arc<Self> {
+    let base_tar = fake_oci_image_tar(base_tag, &[&[(".needy/proxy", b"fake-proxy")]]);
+    let mut images = std::collections::HashMap::new();
+    images.insert(base_tag.to_string(), base_tar);
+    Arc::new(Self {
+      images: std::sync::Mutex::new(images),
+      saved: Default::default(),
+      loaded: Default::default(),
+      spawned_args: Default::default(),
+      wait_gates: Default::default(),
+    })
+  }
+}
+
+struct ParkedAppleProcess(tokio::sync::watch::Sender<bool>);
+
+#[async_trait::async_trait]
+impl needy_core_actor::driver::macos_apple_container::Process for ParkedAppleProcess {
+  fn id(&self) -> u32 {
+    5151
+  }
+  async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    use std::os::unix::process::ExitStatusExt as _;
+    let mut rx = self.0.subscribe();
+    let _ = rx.wait_for(|done| *done).await;
+    Ok(std::process::ExitStatus::from_raw(0))
+  }
+  fn kill(&mut self) -> std::io::Result<()> {
+    self.0.send_replace(true);
+    Ok(())
+  }
+}
+
+#[async_trait::async_trait]
+impl needy_core_actor::driver::macos_apple_container::Cli for FakeAppleCli {
+  async fn output(
+    &self,
+    args: &[String],
+  ) -> std::result::Result<needy_core_actor::driver::macos_apple_container::Output, needy_core_actor::driver::Error> {
+    use needy_core_actor::driver::macos_apple_container::Output;
+    let slice: Vec<&str> = args.iter().map(String::as_str).collect();
+    match slice.as_slice() {
+      ["system", "status"] => Ok(Output {
+        success: true,
+        stdout: String::new(),
+        stderr: String::new(),
+      }),
+      ["delete", "--force", name] | ["stop", "--time", _, name] => {
+        if let Some(tx) = self.wait_gates.lock().unwrap().get(*name) {
+          tx.send_replace(true);
+        }
+        Ok(Output {
+          success: true,
+          stdout: String::new(),
+          stderr: String::new(),
+        })
+      }
+      ["image", "inspect", image] => {
+        if self.images.lock().unwrap().contains_key(*image) {
+          Ok(Output {
+            success: true,
+            stdout: format!(
+              r#"[{{"configuration": {{"name": "{image}"}}, "id": "applebase001", "variants": [{{"config": {{"architecture": "arm64", "os": "linux", "config": {{"Labels": {{"needy.base-abi": "1"}}}}}}}}]}}]"#
+            ),
+            stderr: String::new(),
+          })
+        } else {
+          Ok(Output {
+            success: false,
+            stdout: String::new(),
+            stderr: "Error: not found\n".into(),
+          })
+        }
+      }
+      ["image", "save", "--output", path, image] => {
+        let tar = self.images.lock().unwrap().get(*image).cloned().unwrap();
+        std::fs::write(path, tar).unwrap();
+        self.saved.lock().unwrap().push((*image).to_string());
+        Ok(Output {
+          success: true,
+          stdout: String::new(),
+          stderr: String::new(),
+        })
+      }
+      ["image", "load", "--input", path] => {
+        let bytes = std::fs::read(path).unwrap();
+        let tag = repo_tag_from_tar(&bytes);
+        self.images.lock().unwrap().insert(tag.clone(), bytes);
+        self.loaded.lock().unwrap().push(tag);
+        Ok(Output {
+          success: true,
+          stdout: String::new(),
+          stderr: String::new(),
+        })
+      }
+      other => panic!("unexpected Apple container CLI call: {other:?}"),
+    }
+  }
+
+  fn spawn(
+    &self,
+    args: &[String],
+    _log: std::fs::File,
+  ) -> std::result::Result<Box<dyn needy_core_actor::driver::macos_apple_container::Process>, needy_core_actor::driver::Error> {
+    self.spawned_args.lock().unwrap().push(args.to_vec());
+    let (tx, _) = tokio::sync::watch::channel(false);
+    if let Some(name) = args.windows(2).find(|w| w[0] == "--name").map(|w| w[1].clone()) {
+      self.wait_gates.lock().unwrap().insert(name, tx.clone());
+    }
+    Ok(Box::new(ParkedAppleProcess(tx)))
+  }
+}
+
+#[tokio::test]
+async fn run_create_on_linux_container_materializes_loads_and_boots_snapshot_image() {
+  let engine = FakeContainerEngine::new("needy-actor:latest", None);
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  let profile = r#"
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }
+  image:
+    root: needy-actor:latest
+    layers:
+      - run: echo container-step
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native }
+"#;
+
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(profile, started.dir.path())))
+    .await
+    .expect("run create timed out")
+    .unwrap();
+
+  assert_eq!(sessions.load(Ordering::SeqCst), 1, "build step ran on the host's VM builder");
+  let snapshot = created.snapshot.clone().expect("snapshot digest recorded");
+  let expected_tag = format!("needy-snapshot:{}", snapshot.strip_prefix("sha256:").unwrap());
+
+  assert_eq!(*engine.exported.lock().unwrap(), vec!["needy-actor:latest"]);
+  assert_eq!(*engine.loaded.lock().unwrap(), vec![expected_tag.clone()]);
+
+  let actor_body = engine
+    .created
+    .lock()
+    .unwrap()
+    .iter()
+    .find(|(name, _)| name == &format!("needy-actor-{}", created.id))
+    .expect("actor container created")
+    .1
+    .clone();
+  assert_eq!(actor_body.image.as_deref(), Some(expected_tag.as_str()));
+
+  // Container runs boot the assembled OCI image, so GuestConfig.layers is empty.
+  let guest_cfg = Guest::config(daemon, &created.id).await.unwrap();
+  assert!(guest_cfg.layers.is_empty(), "{:?}", guest_cfg.layers);
+
+  // Second create reuses cached base export and already-loaded snapshot tag.
+  let second =
+    tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(profile, started.dir.path()))).await.unwrap().unwrap();
+  assert_eq!(second.snapshot, created.snapshot);
+  assert_eq!(engine.exported.lock().unwrap().len(), 1, "base export must be cached");
+  assert_eq!(engine.loaded.lock().unwrap().len(), 1, "already-loaded snapshot must not be reloaded");
+
+  for id in [&created.id, &second.id] {
+    Runs::stop(daemon, id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  }
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn run_create_on_macos_apple_container_saves_base_materializes_loads_and_boots_snapshot_image() {
+  let apple_cli = FakeAppleCli::new("needy-actor:latest");
+  let backends = crate::holder::ContainerBackends {
+    engine: needy_core_executor::engine::local(),
+    apple_cli: apple_cli.clone(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  let profile = r#"
+actor:
+  driver: macos-apple-container
+  image:
+    root: needy-actor:latest
+    layers:
+      - run: echo apple-step
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native }
+"#;
+
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(profile, started.dir.path())))
+    .await
+    .expect("run create timed out")
+    .unwrap();
+
+  assert_eq!(sessions.load(Ordering::SeqCst), 1, "Apple's container is never used to build");
+  let snapshot = created.snapshot.clone().expect("snapshot digest recorded");
+  let expected_tag = format!("needy-snapshot:{}", snapshot.strip_prefix("sha256:").unwrap());
+
+  assert_eq!(*apple_cli.saved.lock().unwrap(), vec!["needy-actor:latest"]);
+  assert_eq!(*apple_cli.loaded.lock().unwrap(), vec![expected_tag.clone()]);
+
+  let spawned = apple_cli.spawned_args.lock().unwrap().clone();
+  assert_eq!(spawned.len(), 1);
+  assert_eq!(spawned[0].last().map(String::as_str), Some(expected_tag.as_str()));
+
+  let guest_cfg = Guest::config(daemon, &created.id).await.unwrap();
+  assert!(guest_cfg.layers.is_empty(), "{:?}", guest_cfg.layers);
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_up_temp_image() {
+  use needy_api_client::proto::v1::DecideRequest;
+  use needy_api_server::control::{ImageBuild, ImageEditStart, Images};
+
+  // Simulate each container session's guest connecting to its bind-mounted
+  // `channels/guest.sock`, fetching config, (for edit sessions) calling Decide,
+  // reporting exit 0, and unblocking `wait()`.
+  let on_start: OnContainerStart = Arc::new(|name, body, gate| {
+    tokio::spawn(async move {
+      let binds = body.host_config.and_then(|hc| hc.binds).unwrap_or_default();
+      let channels_host = binds.iter().find_map(|b| b.strip_suffix(":/.needy/channels")).expect("channels bind mount missing").to_string();
+      let sock = PathBuf::from(channels_host).join("guest.sock");
+      let client = needy_api_client::Client::connect(&format!("unix:{}", sock.display())).await.unwrap();
+      let cfg = client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+      assert!(cfg.layers.is_empty(), "container sessions boot OCI images, not VM layer disks");
+      if name.starts_with("needy-actor-e-") {
+        client
+          .runs()
+          .decide(DecideRequest {
+            argv: vec!["touch".into(), "/etc/edited".into()],
+            cwd: "/".into(),
+            ..Default::default()
+          })
+          .await
+          .unwrap();
+      }
+      client
+        .guest()
+        .report_exit(ReportExitRequest {
+          code: Some(0),
+          signal: String::new(),
+        })
+        .await
+        .unwrap();
+      gate.send_replace(true);
+    });
+  });
+
+  let engine = FakeContainerEngine::new("needy-actor:latest", Some(on_start));
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |config| {
+    // Remove the fake KVM device so no VM driver is available and the daemon
+    // falls back to `linux-container` for builds and edit sessions.
+    std::fs::remove_file(&config.kvm).unwrap();
+  })
+  .await;
+  let daemon = &started.daemon;
+
+  let image_yaml = "root: needy-actor:latest\nlayers:\n  - run: echo step-1\n  - run: echo step-2\n";
+  let built = tokio::time::timeout(
+    Duration::from_secs(20),
+    Images::build(
+      daemon,
+      ImageBuild {
+        image_yaml: image_yaml.into(),
+        driver: "linux-container".into(),
+        user: None,
+        commit: None,
+      },
+    ),
+  )
+  .await
+  .expect("container build timed out")
+  .unwrap();
+
+  assert_eq!(built.steps.len(), 2);
+  assert!(!built.steps[0].cached);
+  assert!(!built.steps[1].cached);
+  // Both build sessions were committed, their temporary images removed, and
+  // their containers removed.
+  let commits = engine.committed.lock().unwrap().clone();
+  assert_eq!(commits.len(), 2, "{commits:?}");
+  let removed_imgs = engine.removed_images.lock().unwrap().clone();
+  assert_eq!(removed_imgs, vec![commits[0].1.clone(), commits[1].1.clone()]);
+  // Every build container ran with a writable rootfs (`readonly_rootfs == false`).
+  let created = engine.created.lock().unwrap().clone();
+  assert_eq!(created.len(), 2);
+  assert_eq!(created[0].1.image.as_deref(), Some("needy-actor:latest"));
+  assert_eq!(created[0].1.host_config.as_ref().unwrap().readonly_rootfs, Some(false));
+  assert!(
+    created[1].1.image.as_deref().is_some_and(|i| i.starts_with("needy-snapshot:")),
+    "step 2 must boot from step 1's materialized snapshot image: {:?}",
+    created[1].1.image
+  );
+
+  // Interactive edit session also runs on `linux-container` fallback, records
+  // commands, commits the top layer, and cleans up the temporary image.
+  let edit = Images::start_edit(
+    daemon,
+    ImageEditStart {
+      image_name: "fallback-img".into(),
+      image_yaml: image_yaml.into(),
+      driver: "linux-container".into(),
+      user: None,
+      commit: None,
+      tty: None,
+      wait_for_attach: false,
+    },
+  )
+  .await
+  .unwrap();
+
+  let finished = tokio::time::timeout(Duration::from_secs(20), Images::finish_edit(daemon, &edit.session_id, false))
+    .await
+    .expect("container edit timed out")
+    .unwrap();
+  let commit = finished.commit.expect("container edit must produce a commit");
+  assert!(daemon.images.store.has_layer(&commit.layer.to_string().parse().unwrap()));
+  assert_eq!(finished.commands.len(), 1);
+  assert_eq!(finished.commands[0].argv, ["touch", "/etc/edited"]);
+  assert_eq!(engine.committed.lock().unwrap().len(), 3);
+  assert_eq!(engine.removed_images.lock().unwrap().len(), 3);
+}

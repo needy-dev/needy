@@ -103,6 +103,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     mounts: &[],
     guest: Path::new("/Users/user/.local/bin/needy-linux-aarch64"),
     layer_disks: &[],
+    snapshot_image: None,
   }
 }
 
@@ -469,7 +470,40 @@ async fn cli_load_image_invokes_container_image_load_with_input_path() {
 }
 
 #[tokio::test]
-async fn non_empty_layer_disks_are_refused_until_slice_2() {
+async fn cli_save_image_invokes_container_image_save_with_output_path() {
+  let (runtime, fake) = runtime(Fake::default());
+
+  runtime.save(Path::new("/tmp/base.tar")).await.unwrap();
+  assert_eq!(fake.calls(), ["image save --output /tmp/base.tar needy-actor:latest"]);
+
+  let (failing, _) = runtime_failing(&[("image", "save")]);
+  let error = failing.save(Path::new("/tmp/base.tar")).await.unwrap_err().to_string();
+  assert_eq!(error, "`container image save needy-actor:latest` failed: Error: not found");
+}
+
+#[tokio::test]
+async fn image_id_reads_id_from_inspect_and_returns_none_when_missing() {
+  let (runtime, _) = runtime(Fake::default());
+  assert_eq!(runtime.image_id("needy-actor:latest").await.unwrap().as_deref(), Some("61dd3504fadd"));
+
+  let (missing, _) = runtime_failing(&[("image", "inspect")]);
+  assert_eq!(missing.image_id("needy-snapshot:absent").await.unwrap(), None);
+}
+
+#[test]
+fn snapshot_image_overrides_base_image_in_launch() {
+  let (runtime, _) = runtime(Fake::default());
+  let user = User::default();
+  let tag = "needy-snapshot:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  let mut req = start(Path::new("/r"), &user, None);
+  req.snapshot_image = Some(tag);
+
+  let launch = runtime.launch(&req);
+  assert_eq!(launch.args.last().map(String::as_str), Some(tag));
+}
+
+#[tokio::test]
+async fn non_empty_layer_disks_are_refused() {
   let dir = tempfile::tempdir().unwrap();
   let (runtime, _) = runtime(Fake::default());
   let user = User::default();
@@ -483,5 +517,5 @@ async fn non_empty_layer_disks_are_refused_until_slice_2() {
     panic!("macos-apple-container must refuse VM layer disks");
   };
 
-  assert!(matches!(&error, Error::Unsupported(msg) if msg.contains("slice 2")), "{error:?}");
+  assert!(matches!(&error, Error::Unsupported(msg) if msg.contains("assembled OCI images")), "{error:?}");
 }

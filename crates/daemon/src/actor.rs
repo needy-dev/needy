@@ -58,9 +58,10 @@ pub fn guest_needy(config: &crate::Config) -> Result<std::path::PathBuf> {
 
 /// The driver that runs this host's actors as `actor` (a profile's
 /// `actor:`) says: the only place the daemon picks an actor driver, through
-/// the drivers' table (`needy_core_actor::driver::new`).
+/// the drivers' table (`needy_core_actor::driver::new`), injecting the
+/// daemon's container runtime boundaries for container drivers.
 pub fn driver_for(daemon: &Daemon, actor: &needy_config::profile::Actor) -> Result<Box<dyn Driver>> {
-  Ok(driver::new(&host(daemon), actor)?)
+  Ok(crate::holder::driver_with_backends(&host(daemon), actor, daemon.images.backends())?)
 }
 
 /// Where the daemon and `run`'s actor meet, as its driver names them.
@@ -172,7 +173,8 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
     Side::Guest => Vec::new(),
     Side::Host => mounts(run).into_iter().chain(crate::sync::mounts(daemon, run)).collect(),
   };
-  let layer_disks = run.boot().layer_disks.into_iter().map(|disk| disk.path).collect();
+  let boot = run.boot();
+  let layer_disks = boot.layer_disks.into_iter().map(|disk| disk.path).collect();
   daemon.snapshot_run(run).await?;
   let vm = match daemon
     .holder
@@ -185,6 +187,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
       mounts,
       guest,
       layer_disks,
+      snapshot_image: boot.snapshot_image,
     })
     .await
   {

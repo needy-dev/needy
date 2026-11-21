@@ -44,6 +44,24 @@ pub(crate) struct Client {
   lease: Arc<std::sync::Mutex<Option<UnixStream>>>,
 }
 
+/// Container runtime boundaries used by the holder when starting container
+/// actors. Defaults to this machine's local engine and `container` CLI; tests
+/// substitute fakes at these real external boundaries.
+#[derive(Clone)]
+pub(crate) struct ContainerBackends {
+  pub engine: Arc<dyn needy_core_executor::engine::Engine>,
+  pub apple_cli: Arc<dyn needy_core_actor::driver::macos_apple_container::Cli>,
+}
+
+impl Default for ContainerBackends {
+  fn default() -> Self {
+    Self {
+      engine: needy_core_executor::engine::local(),
+      apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+    }
+  }
+}
+
 impl Client {
   pub(crate) fn id(&self) -> &str {
     &self.record.instance
@@ -51,7 +69,7 @@ impl Client {
 
   /// Reconnects to a verified holder, or starts a new one. A newly started
   /// holder has a different identity; run adoption rejects the old identity.
-  pub(crate) async fn connect(config: &crate::Config) -> Result<Self> {
+  pub(crate) async fn connect_with_backends(config: &crate::Config, backends: ContainerBackends) -> Result<Self> {
     needy_api_server::create_private_dir(&config.runtime_dir)?;
     check_directory(&config.runtime_dir)?;
     if let Ok(record) = read_record(&config.runtime_dir) {
@@ -93,13 +111,14 @@ impl Client {
     {
       let config = config.clone();
       tokio::spawn(async move {
-        if let Err(error) = serve(config).await {
+        if let Err(error) = serve_with_backends(config, backends).await {
           tracing::error!("runtime holder: {error:#}");
         }
       });
     }
     #[cfg(not(test))]
     {
+      let _ = backends;
       let mut command = std::process::Command::new(&config.holder_executable);
       command.args(["daemon", "holder", "--config-file"]).arg(&launch);
       command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
@@ -271,6 +290,7 @@ struct Owner {
   actors: Mutex<HashMap<String, Arc<Held>>>,
   controls: AtomicUsize,
   host: Host,
+  backends: ContainerBackends,
   tasks: TaskTracker,
   cancel: CancellationToken,
 }
@@ -279,10 +299,10 @@ struct Owner {
 /// produced by control; it is never a profile or a management API input.
 pub async fn serve_file(path: &Path) -> Result<()> {
   let config = serde_json::from_reader(private_file(path, false)?)?;
-  serve(config).await
+  serve_with_backends(config, ContainerBackends::default()).await
 }
 
-async fn serve(config: crate::Config) -> Result<()> {
+async fn serve_with_backends(config: crate::Config, backends: ContainerBackends) -> Result<()> {
   check_directory(&config.runtime_dir)?;
   let lock = private_file(&config.runtime_dir.join("holder.lock"), true)?;
   lock.try_lock().context("another runtime holder owns this directory")?;
@@ -299,6 +319,7 @@ async fn serve(config: crate::Config) -> Result<()> {
     actors: Default::default(),
     controls: AtomicUsize::new(0),
     host: host.clone(),
+    backends,
     tasks: TaskTracker::new(),
     cancel: CancellationToken::new(),
   });
@@ -436,7 +457,7 @@ impl Owner {
       bail!("this invocation already has an actor; it cannot be started again");
     }
     let profile = needy_config::profile::load(&needy_config::Source::text(actor.profile_yaml.clone(), PathBuf::new()))?;
-    let driver = driver::new(&actor.host, &profile.actor)?;
+    let driver = driver_with_backends(&actor.host, &profile.actor, &self.backends)?;
     let channels = driver.channels(&actor.dir);
     let cancel = self.cancel.child_token();
     let proxies = [
@@ -455,6 +476,7 @@ impl Owner {
         mounts: &actor.mounts,
         guest: &actor.guest,
         layer_disks: &actor.layer_disks,
+        snapshot_image: actor.snapshot_image.as_deref(),
       })
       .await
     {
@@ -489,6 +511,30 @@ impl Owner {
       held.cancel.cancel();
     });
     Ok(info)
+  }
+}
+
+/// Builds the actor driver for `actor` on `host`, injecting `backends` for the
+/// container drivers.
+pub(crate) fn driver_with_backends(
+  host: &driver::Host,
+  actor: &needy_config::profile::Actor,
+  backends: &ContainerBackends,
+) -> Result<Box<dyn driver::Driver>, driver::Error> {
+  match actor.driver {
+    needy_config::profile::ActorDriver::LinuxContainer => {
+      let Some(needy_config::profile::ContainerActor {
+        oci_runtime: Some(oci_runtime),
+      }) = &actor.container
+      else {
+        return Err(driver::Error::Unsupported("actor.container.oci_runtime is missing".into()));
+      };
+      Ok(Box::new(driver::linux_container::LinuxContainer::with_engine(*oci_runtime, actor.container_image(), backends.engine.clone())))
+    }
+    needy_config::profile::ActorDriver::MacosAppleContainer => {
+      Ok(Box::new(driver::macos_apple_container::MacosAppleContainer::with_cli(actor.container_image(), backends.apple_cli.clone())))
+    }
+    _ => driver::new(host, actor),
   }
 }
 

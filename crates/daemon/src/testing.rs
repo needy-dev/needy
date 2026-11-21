@@ -74,6 +74,14 @@ pub async fn daemon_with(adjust: impl FnOnce(&mut Config)) -> Started {
 /// A control daemon as [`daemon_with`] makes it, in `dir`, whose `state`
 /// directory a test may have written already.
 pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Started {
+  daemon_in_with_backends(dir, crate::holder::ContainerBackends::default(), adjust).await
+}
+
+pub(crate) async fn daemon_in_with_backends(
+  dir: TempDir,
+  backends: crate::holder::ContainerBackends,
+  adjust: impl FnOnce(&mut Config),
+) -> Started {
   // A stand-in KVM device: a file the daemon can open for reading and
   // writing. A test removes it to stand for a host without KVM.
   let kvm = dir.path().join("kvm");
@@ -99,7 +107,7 @@ pub async fn daemon_in(dir: TempDir, adjust: impl FnOnce(&mut Config)) -> Starte
     mirror_out_wait: crate::MIRROR_OUT_WAIT,
   };
   adjust(&mut config);
-  let daemon = Daemon::start(config).await.unwrap();
+  let daemon = Daemon::start_with_backends(config, backends).await.unwrap();
   Started { daemon, dir }
 }
 

@@ -213,8 +213,9 @@ impl LinuxContainer {
     // Docker refuses more CPUs than the host has; the recipe's count still
     // shows where the identity files present it.
     let host_cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    let image = start.snapshot_image.unwrap_or(&self.image);
     let body = ContainerCreateBody {
-      image: Some(self.image.clone()),
+      image: Some(image.to_string()),
       entrypoint: Some(vec![INIT.into()]),
       cmd: Some(Vec::new()),
       // Init sets the actor up as root and runs the driving program as the
@@ -240,6 +241,76 @@ impl LinuxContainer {
       vcpus,
       mem_mib,
     }
+  }
+
+  /// Starts a writable container session (for image build steps and
+  /// interactive edit sessions when this host has no VM driver).
+  ///
+  /// Unlike [`Driver::start`], the container's root filesystem stays writable,
+  /// `/etc/passwd` and `/etc/group` are not bind-mounted over the image,
+  /// `/root` is not shadowed by a tmpfs, and the stopped container is kept on
+  /// exit so the caller can commit its upper layer before calling
+  /// [`SessionContainer::remove`].
+  pub async fn start_session(&self, start: &Start<'_>) -> Result<SessionContainer, Error> {
+    if !start.layer_disks.is_empty() {
+      return Err(Error::Unsupported("linux-container sessions boot snapshots as assembled OCI images, not VM layer disks".into()));
+    }
+    let (vcpus, mem_mib) = crate::driver::size(start.recipe);
+    let tmpfs = HashMap::from([
+      ("/tmp".to_string(), "rw,exec,nosuid,nodev,mode=1777".to_string()),
+      ("/var/tmp".to_string(), "rw,exec,nosuid,nodev,mode=1777".to_string()),
+      ("/run".to_string(), "rw,exec,nosuid,nodev,mode=755".to_string()),
+    ]);
+    let binds = vec![
+      format!("{}:{CHANNELS}", channels_dir(start.dir).display()),
+      format!("{}:{GUEST}:ro", start.guest.display()),
+    ];
+    let host_cpus = std::thread::available_parallelism().map_or(1, |n| n.get() as u32);
+    let image = start.snapshot_image.unwrap_or(&self.image);
+    let container_name = name(start.run);
+    let body = ContainerCreateBody {
+      image: Some(image.to_string()),
+      entrypoint: Some(vec![INIT.into()]),
+      cmd: Some(Vec::new()),
+      user: Some("0:0".into()),
+      labels: Some(engine::labels(start.run, "actor")),
+      host_config: Some(HostConfig {
+        runtime: Some(self.oci_runtime.as_str().into()),
+        network_mode: Some("none".into()),
+        readonly_rootfs: Some(false),
+        tmpfs: Some(tmpfs),
+        binds: Some(binds),
+        nano_cpus: Some(i64::from(vcpus.min(host_cpus)) * 1_000_000_000),
+        memory: Some(i64::from(mem_mib) << 20),
+        ..Default::default()
+      }),
+      ..Default::default()
+    };
+    let started = async {
+      self.engine.remove(&container_name).await.map_err(engine_error)?;
+      self.engine.create(&container_name, body).await.map_err(engine_error)?;
+      let log = crate::driver::log(start.dir);
+      let file = tokio::fs::File::create(&log).await.map_err(|source| Error::Write { path: log, source })?;
+      let pid = self.engine.start(&container_name).await.map_err(engine_error)?;
+      Ok::<_, Error>((pid, file))
+    };
+    let (pid, file) = match started.await {
+      Ok(started) => started,
+      Err(e) => {
+        if let Err(removed) = self.engine.remove(&container_name).await {
+          tracing::warn!("cannot remove {container_name} after a failed session start: {removed}");
+        }
+        return Err(e);
+      }
+    };
+    let log = tokio::spawn(copy_log(self.engine.logs(&container_name), file));
+    Ok(SessionContainer {
+      name: container_name,
+      engine: self.engine.clone(),
+      pid,
+      log: Some(log),
+      ended: None,
+    })
   }
 
   /// Mounts each of `mounts` on this machine in the actor's directory `dir`,
@@ -404,12 +475,8 @@ impl Driver for LinuxContainer {
   }
 
   async fn start(&self, start: &Start<'_>) -> Result<Box<dyn Running>, Error> {
-    // TODO(images): container drivers boot a snapshot as an assembled OCI
-    // image in slice 2 of the images and run data spec, not as VM layer
-    // disks; refuse non-empty layer disks so nothing silently boots without
-    // them.
     if !start.layer_disks.is_empty() {
-      return Err(Error::Unsupported("linux-container actors do not attach VM layer disks; container snapshots are slice 2".into()));
+      return Err(Error::Unsupported("linux-container actors boot snapshots as assembled OCI images, not VM layer disks".into()));
     }
     let user = start.user;
     let host = identity::Host::read(Path::new("/"));
@@ -422,8 +489,9 @@ impl Driver for LinuxContainer {
       uid: user.uid,
       gid: user.gid,
     };
+    let image = start.snapshot_image.unwrap_or(&self.image);
     let scratch = format!("{}-account", name(start.run));
-    let accounts = needy_core_executor::account::binds(self.engine.as_ref(), &self.image, &scratch, &start.dir.join("account"), &account)
+    let accounts = needy_core_executor::account::binds(self.engine.as_ref(), image, &scratch, &start.dir.join("account"), &account)
       .await
       .map_err(engine_error)?;
     binds.extend(accounts);
@@ -573,6 +641,72 @@ impl Running for Started {
       }
     };
     Ok(self.finish(code).await)
+  }
+}
+
+/// A running writable container session (build step or interactive edit).
+/// Unlike [`Started`], exiting does not remove the container so the caller can
+/// commit its filesystem changes before calling [`SessionContainer::remove`].
+pub struct SessionContainer {
+  name: String,
+  engine: Arc<dyn Engine>,
+  pid: u32,
+  log: Option<tokio::task::JoinHandle<()>>,
+  ended: Option<ExitStatus>,
+}
+
+impl SessionContainer {
+  pub fn container_name(&self) -> &str {
+    &self.name
+  }
+
+  pub fn pid(&self) -> u32 {
+    self.pid
+  }
+
+  async fn drain_log(&mut self, code: i64) -> ExitStatus {
+    if let Some(status) = self.ended {
+      return status;
+    }
+    if let Some(log) = self.log.take()
+      && tokio::time::timeout(Duration::from_secs(2), log).await.is_err()
+    {
+      tracing::debug!("{}: the session log did not end within 2 s", self.name);
+    }
+    let status = exit_status(code);
+    self.ended = Some(status);
+    status
+  }
+
+  pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+    if let Some(status) = self.ended {
+      return Ok(status);
+    }
+    let code = self.engine.wait(&self.name).await.map_err(std::io::Error::other)?;
+    Ok(self.drain_log(code).await)
+  }
+
+  pub async fn stop(&mut self, grace: Duration) -> std::io::Result<ExitStatus> {
+    if let Some(status) = self.ended {
+      return Ok(status);
+    }
+    if let Err(e) = self.engine.stop(&self.name, grace).await {
+      tracing::warn!("cannot stop {}: {e}", self.name);
+    }
+    let code = match self.engine.wait(&self.name).await {
+      Ok(code) => code,
+      Err(e) => {
+        tracing::warn!("cannot wait for {}: {e}", self.name);
+        137
+      }
+    };
+    Ok(self.drain_log(code).await)
+  }
+
+  pub async fn remove(&self) {
+    if let Err(e) = self.engine.remove(&self.name).await {
+      tracing::warn!("cannot remove {}: {e}", self.name);
+    }
   }
 }
 

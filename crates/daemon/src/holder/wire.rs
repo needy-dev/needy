@@ -60,6 +60,8 @@ pub(crate) struct Actor {
   pub guest: PathBuf,
   #[serde(default)]
   pub layer_disks: Vec<PathBuf>,
+  #[serde(default)]
+  pub snapshot_image: Option<String>,
 }
 
 // NOTICE: these local metadata messages contain a compiled recipe and mount

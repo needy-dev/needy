@@ -259,19 +259,6 @@ pub struct Host {
 /// The driver of `actor` (a profile's `actor:`) on `host`.
 #[cfg(unix)]
 pub fn new(host: &Host, actor: &Actor) -> Result<Box<dyn Driver>, Error> {
-  // TODO(images): image definitions on the container drivers come with
-  // slice 2 of the images and run data spec (engine commit, export and
-  // load; Apple's store). VM drivers (`linux-firecracker`, `macos-vz`) boot
-  // the base VM image and attach the snapshot's materialized layer disks.
-  if let Some(needy_config::image::Image::Definition(_)) = &actor.image
-    && matches!(actor.driver, ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer)
-  {
-    return Err(Error::Unsupported(format!(
-      "needy does not build image definitions for {} yet (slice 2 of the images spec): \
-       use a VM driver (`linux-firecracker` or `macos-vz`), or name an OCI image reference in `actor.image`",
-      actor.driver
-    )));
-  }
   Ok(match actor.driver {
     ActorDriver::LinuxFirecracker => Box::new(linux_firecracker::LinuxFirecracker::on(host, actor.image_reference())),
     ActorDriver::LinuxContainer => Box::new(linux_container::LinuxContainer::of(actor)?),
@@ -382,8 +369,12 @@ pub struct Start<'a> {
   /// The read-only layer disks of the snapshot the actor boots, lowest
   /// first, for the VM drivers to attach after the guest disk
   /// (`crate::image::store::Store::materialize`). Empty when booting the
-  /// base image alone.
+  /// base image alone or a container snapshot.
   pub layer_disks: &'a [PathBuf],
+  /// The assembled OCI image tag of the snapshot the actor boots, for
+  /// container drivers (`crate::image::store::snapshot_tag`). `None` boots
+  /// the driver's configured image.
+  pub snapshot_image: Option<&'a str>,
 }
 
 /// Something of a recipe's identity, or of the machine an actor presents,

@@ -44,6 +44,31 @@ pub trait Cli: Send + Sync {
     }
     Ok(())
   }
+  /// Saves `image` from Apple's `container` image store as an OCI-compatible
+  /// tar archive at `archive` (`container image save --output <archive> <image>`).
+  // Source: `container image save --help` with `container` 1.7.1 on an Apple
+  // silicon Mac (2026-11-21): `USAGE: container image save [--arch <arch>]
+  // [--os <os>] [--output <output>] [--platform <platform>] [--debug]
+  // <references> ...`, `-o, --output <output> Pathname for the saved image`.
+  async fn save_image(&self, image: &str, archive: &Path) -> Result<(), Error> {
+    let args = vec![
+      "image".into(),
+      "save".into(),
+      "--output".into(),
+      archive.display().to_string(),
+      image.to_string(),
+    ];
+    let saved = self.output(&args).await?;
+    if !saved.success {
+      return Err(super::refused(format!("`container image save {image}` failed: {}", super::first_line(&saved))));
+    }
+    Ok(())
+  }
+}
+
+/// The default CLI implementation backed by the `container` executable on `PATH`.
+pub fn default_cli() -> std::sync::Arc<dyn Cli> {
+  std::sync::Arc::new(Command)
 }
 
 /// A started CLI process.
