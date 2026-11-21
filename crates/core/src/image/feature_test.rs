@@ -120,3 +120,41 @@ fn allows_init_and_empty_refusal_fields() {
   assert!(meta.init);
   meta.check_allowed("ghcr.io/devcontainers/features/common-utils:2").unwrap();
 }
+
+#[test]
+fn parses_lifecycle_hooks_in_string_array_and_object_forms() {
+  let json = r#"{
+    "id": "demo",
+    "onCreateCommand": "echo build-only",
+    "updateContentCommand": "echo update",
+    "postCreateCommand": ["echo", "hello world", "it's ok"],
+    "postStartCommand": {
+      "b-second": ["service", "start"],
+      "a-first": "echo first"
+    },
+    "postAttachCommand": "echo attach"
+  }"#;
+
+  let meta = FeatureMetadata::parse(json).unwrap();
+  assert_eq!(
+    meta.start_hooks(),
+    [
+      "echo update",
+      "'echo' 'hello world' 'it'\\''s ok'",
+      "echo first",
+      "'service' 'start'",
+    ]
+  );
+}
+
+#[test]
+fn empty_lifecycle_hooks_produce_no_start_hooks() {
+  let json = r#"{
+    "id": "empty-hooks",
+    "postCreateCommand": [],
+    "postStartCommand": {}
+  }"#;
+
+  let meta = FeatureMetadata::parse(json).unwrap();
+  assert!(meta.start_hooks().is_empty());
+}

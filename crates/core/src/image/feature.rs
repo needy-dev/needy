@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use needy_config::image::FeatureOption;
+use needy_config::image::{FeatureOption, shell_join};
 use serde::Deserialize;
 
 /// Errors parsing or validating a Dev Container feature's metadata.
@@ -27,9 +27,6 @@ pub enum FeatureError {
 /// Parsed `devcontainer-feature.json` metadata for a Dev Container feature.
 // Source: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainer-features.md
 // (retrieved 2026-11-16; see `docs/ai/references/architecture/2026-11-16-environments-and-snapshots-design.md#sources`).
-// TODO(images): lifecycle hooks (`onCreateCommand`, `updateContentCommand`,
-// `postCreateCommand`, `postStartCommand`, `postAttachCommand`) come with
-// slice 4 of the images and run data spec.
 // TODO(images): `customizations.needy.files` (feature-declared sync mappings)
 // comes with M4 of the images and run data spec.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -73,6 +70,77 @@ pub struct FeatureMetadata {
   /// Ignored: needy's own init is PID 1 in every actor.
   #[serde(default)]
   pub init: bool,
+  /// Prebuild-time creation hook (`onCreateCommand`).
+  // TODO(images): `onCreateCommand` is a prebuild-time hook (analogue to a
+  // `run` layer in `2026-11-16-environments-and-snapshots-design.md`); running
+  // it as a cached build step is deferred until a feature requires it.
+  #[serde(rename = "onCreateCommand", default)]
+  pub on_create_command: Option<LifecycleCommand>,
+  /// Mapped to needy's `start` hook (runs before `postCreateCommand` and
+  /// `postStartCommand`).
+  #[serde(rename = "updateContentCommand", default)]
+  pub update_content_command: Option<LifecycleCommand>,
+  /// Mapped to needy's `start` hook.
+  #[serde(rename = "postCreateCommand", default)]
+  pub post_create_command: Option<LifecycleCommand>,
+  /// Mapped to needy's `start` hook.
+  #[serde(rename = "postStartCommand", default)]
+  pub post_start_command: Option<LifecycleCommand>,
+  /// Attach-time hook (`postAttachCommand`).
+  // TODO(images): `attach` hook is deferred until a case needs it, see
+  // `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`.
+  #[serde(rename = "postAttachCommand", default)]
+  pub post_attach_command: Option<LifecycleCommand>,
+}
+
+/// A Dev Container lifecycle command in `devcontainer-feature.json`: a shell
+/// string, an argv array, or an object map of named commands (each a string or
+/// argv array).
+// Source: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainer-features.md
+// Reference: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainerjson-reference.md#lifecycle-scripts
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum LifecycleCommand {
+  /// A shell command string executed via `sh -c`.
+  Shell(String),
+  /// An argv array executed directly (shell-quoted for `sh -c`).
+  Argv(Vec<String>),
+  /// Named commands; flattened in deterministic key order.
+  // NOTICE: Dev Container specifies parallel execution for object-form hooks;
+  // needy runs hooks sequentially in sorted key order for deterministic logs
+  // and routing traces.
+  Map(BTreeMap<String, LifecycleEntry>),
+}
+
+/// One value in an object-form Dev Container lifecycle command.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum LifecycleEntry {
+  Shell(String),
+  Argv(Vec<String>),
+}
+
+impl LifecycleEntry {
+  fn to_shell(&self) -> Option<String> {
+    match self {
+      Self::Shell(cmd) if !cmd.is_empty() => Some(cmd.clone()),
+      Self::Shell(_) => None,
+      Self::Argv(argv) if !argv.is_empty() => Some(shell_join(argv)),
+      Self::Argv(_) => None,
+    }
+  }
+}
+
+impl LifecycleCommand {
+  /// Converts this lifecycle command into zero or more POSIX `sh -c` command
+  /// strings in deterministic order.
+  pub fn to_shell_commands(&self) -> Vec<String> {
+    match self {
+      Self::Shell(cmd) => (!cmd.is_empty()).then(|| cmd.clone()).into_iter().collect(),
+      Self::Argv(argv) => (!argv.is_empty()).then(|| shell_join(argv)).into_iter().collect(),
+      Self::Map(entries) => entries.values().filter_map(LifecycleEntry::to_shell).collect(),
+    }
+  }
 }
 
 /// One option entry under `options` in `devcontainer-feature.json`.
@@ -150,6 +218,24 @@ impl FeatureMetadata {
       env.insert(sanitize_option_name(name), value.to_string());
     }
     env
+  }
+
+  /// Lifecycle commands mapped to needy's `start` hook, in Dev Container
+  /// lifecycle order: `updateContentCommand`, `postCreateCommand`,
+  /// `postStartCommand`.
+  pub fn start_hooks(&self) -> Vec<String> {
+    let mut hooks = Vec::new();
+    for cmd in [
+      &self.update_content_command,
+      &self.post_create_command,
+      &self.post_start_command,
+    ]
+    .into_iter()
+    .flatten()
+    {
+      hooks.extend(cmd.to_shell_commands());
+    }
+    hooks
   }
 }
 

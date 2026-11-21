@@ -173,13 +173,56 @@ fn a_layer_is_one_kind() {
 }
 
 #[test]
+fn hooks_parse_strings_and_argv_arrays() {
+  let image = load_text(
+    r#"
+root: example.com/root:1
+hooks:
+  start:
+    - ./prepare.sh
+    - ["git", "config", "user.name", "Agent Smith"]
+  stop:
+    - ./flush.sh
+    - ["sync", "it's done"]
+"#,
+  )
+  .unwrap();
+
+  assert_eq!(image.hooks.start, ["./prepare.sh", "'git' 'config' 'user.name' 'Agent Smith'",]);
+  assert_eq!(image.hooks.stop, ["./flush.sh", "'sync' 'it'\\''s done'"]);
+}
+
+#[test]
+fn hooks_append_along_extends_parent_first_and_null_clears_them() {
+  let dir = files(&[
+    ("base.image.yaml", "hooks:\n  start: [base-1, base-2]\n  stop: [stop-1]\n"),
+    ("child.image.yaml", "extends: base.image.yaml\nhooks:\n  start: [child-1]\n  stop: [stop-2]\n"),
+    ("cleared.image.yaml", "extends: base.image.yaml\nhooks:\n  start: null\n"),
+  ]);
+
+  let child = load(&Source::file(dir.path().join("child.image.yaml"))).unwrap();
+  assert_eq!(child.hooks.start, ["base-1", "base-2", "child-1"]);
+  assert_eq!(child.hooks.stop, ["stop-1", "stop-2"]);
+
+  let cleared = load(&Source::file(dir.path().join("cleared.image.yaml"))).unwrap();
+  assert!(cleared.hooks.start.is_empty());
+  assert_eq!(cleared.hooks.stop, ["stop-1"]);
+}
+
+#[test]
+fn empty_hook_argv_array_is_rejected() {
+  let err = load_text("hooks: { start: [[]] }\n").unwrap_err().to_string();
+  assert!(err.contains("empty"), "{err}");
+}
+
+#[test]
 fn unknown_keys_are_errors() {
   let err = load_text("rooot: example.com/root:1\n").unwrap_err().to_string();
   assert!(err.contains("unknown field `rooot`"), "{err}");
 
-  // Hooks come with slice 4; until then they are unknown keys.
-  let err = load_text("hooks: { start: [./prepare.sh] }\n").unwrap_err().to_string();
-  assert!(err.contains("unknown field `hooks`"), "{err}");
+  // `attach` hook is deferred; until then it is an unknown key.
+  let err = load_text("hooks: { attach: [./welcome.sh] }\n").unwrap_err().to_string();
+  assert!(err.contains("unknown field `attach`"), "{err}");
 }
 
 #[test]

@@ -101,13 +101,23 @@ impl User {
 }
 
 /// A profile's rules are evaluated child first; an inline image
-/// definition's layers append as an image file's do.
+/// definition's layers and hooks append as an image file's do.
 const MERGE: merge::Rules = merge::Rules {
   prepend: &["commands", "resolvers"],
-  append: &[merge::Append {
-    path: &["actor", "image", "layers"],
-    key: image::same_feature,
-  }],
+  append: &[
+    merge::Append {
+      path: &["actor", "image", "layers"],
+      key: image::same_feature,
+    },
+    merge::Append {
+      path: &["actor", "image", "hooks", "start"],
+      key: image::no_key,
+    },
+    merge::Append {
+      path: &["actor", "image", "hooks", "stop"],
+      key: image::no_key,
+    },
+  ],
 };
 
 /// Reads a profile and its `extends` chain.

@@ -747,6 +747,8 @@ pub fn proto_guest_config(config: GuestConfig) -> v1::GetConfigResponse {
       .into(),
       routing: config.session.routing,
     }),
+    start_hooks: config.start_hooks,
+    stop_hooks: config.stop_hooks,
   }
 }
 

@@ -11,12 +11,12 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 
-use needy_config::image::{Definition, FeatureOption, Layer, untagged};
+use needy_config::image::{Definition, FeatureOption, Hooks, Layer, untagged};
 use needy_config::profile::User;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-pub use self::feature::{FeatureError, FeatureMetadata, OptionSpec, sanitize_option_name};
+pub use self::feature::{FeatureError, FeatureMetadata, LifecycleCommand, LifecycleEntry, OptionSpec, sanitize_option_name};
 
 /// The `PATH` an actor's own programs are found on before an image adds to
 /// it; the image's `PATH` starts from it.
@@ -147,6 +147,9 @@ pub struct Plan {
   /// the trampolines and the route stubs of the driving program's `PATH`
   /// rather than replacing it whole.
   pub path: String,
+  /// Lifecycle hooks for runs of this image: features' hooks first in resolved
+  /// layer order, followed by the image definition's hooks.
+  pub hooks: Hooks,
 }
 
 /// One layer to build.
@@ -269,6 +272,7 @@ pub fn plan(
   let mut parent = base;
   let mut steps = Vec::with_capacity(resolved_layers.len());
   let mut acc_env = BTreeMap::from([("PATH".to_string(), SYSTEM_PATH.to_string())]);
+  let mut hooks = Hooks::default();
 
   for layer in resolved_layers {
     let (input, resolved_input) = match layer {
@@ -282,6 +286,7 @@ pub fn plan(
         options,
       } => {
         apply_env(&mut acc_env, &resolved.metadata.container_env);
+        hooks.start.extend(resolved.metadata.start_hooks());
         let env = resolved.metadata.resolve_options(&options);
         let resolved_input = json!({
           "feature": {
@@ -305,6 +310,8 @@ pub fn plan(
 
   apply_env(&mut acc_env, &definition.env);
   let path = acc_env.remove("PATH").unwrap_or_else(|| SYSTEM_PATH.into());
+  hooks.start.extend(definition.hooks.start.iter().cloned());
+  hooks.stop.extend(definition.hooks.stop.iter().cloned());
 
   Ok(Plan {
     root: *root,
@@ -314,6 +321,7 @@ pub fn plan(
     commit: commit.cloned(),
     env: acc_env,
     path,
+    hooks,
   })
 }
 

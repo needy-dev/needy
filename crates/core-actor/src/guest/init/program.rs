@@ -95,6 +95,74 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
   Ok(child.wait().await?)
 }
 
+/// Runs one lifecycle hook (`sh -c <script>`) as the run's user in `cwd` with
+/// the actor's environment and `PATH`.
+async fn run_hook(stops: Option<&super::stop::Stops>, config: &GetConfigResponse, home: &str, script: &str) -> Result<ExitStatus> {
+  let user = config.user.clone().unwrap_or_default();
+  let search = super::stubs::search_path(&config.image_path);
+  let mut command = match crate::guest::capture::shim::resolve("/bin/sh", &search) {
+    Some(real) => {
+      let mut command = tokio::process::Command::new(real);
+      command.arg0("/bin/sh");
+      command
+    }
+    None => tokio::process::Command::new("/bin/sh"),
+  };
+  command
+    .args(["-c", script])
+    .env_clear()
+    .envs(environment(config, home))
+    .current_dir(if config.cwd.is_empty() {
+      home.to_string()
+    } else {
+      config.cwd.clone()
+    })
+    .stdin(Stdio::null());
+  let (uid, gid) = (nix::unistd::Uid::from_raw(user.uid), nix::unistd::Gid::from_raw(user.gid));
+  let groups = user_groups(&user);
+  // SAFETY: `switch_user` and `setsid` are async-signal-safe and allocate
+  // nothing; `groups` was built before the fork.
+  unsafe {
+    command.pre_exec(move || {
+      switch_user(uid, gid, &groups)?;
+      nix::unistd::setsid()?;
+      Ok(())
+    });
+  }
+  let mut child = command.spawn().with_context(|| format!("cannot start hook `{script}`"))?;
+  let group = child.id().unwrap_or(0);
+  let _stop = stops.map(|stops| super::stop::watch(stops, move |signal| super::stop::signal_group(group, signal)));
+  Ok(child.wait().await?)
+}
+
+/// Runs `config.start_hooks` in order before the driving program starts.
+/// Returns an error on the first hook that fails to start or exits non-zero,
+/// failing the run before the driving program starts.
+pub(super) async fn run_start_hooks(stops: &super::stop::Stops, config: &GetConfigResponse, home: &str) -> Result<()> {
+  for hook in &config.start_hooks {
+    tracing::info!("running start hook: {hook}");
+    let status = run_hook(Some(stops), config, home, hook).await.with_context(|| format!("start hook `{hook}` failed"))?;
+    if !status.success() {
+      bail!("start hook `{hook}` failed ({status})");
+    }
+  }
+  Ok(())
+}
+
+/// Runs `config.stop_hooks` in order after the driving program exits (or on
+/// graceful stop), before mirror-out and sync merges. A failing hook is logged
+/// as a warning so remaining stop hooks and cleanup still proceed.
+pub(super) async fn run_stop_hooks(config: &GetConfigResponse, home: &str) {
+  for hook in &config.stop_hooks {
+    tracing::info!("running stop hook: {hook}");
+    match run_hook(None, config, home, hook).await {
+      Ok(status) if status.success() => {}
+      Ok(status) => tracing::warn!("stop hook `{hook}` failed ({status})"),
+      Err(e) => tracing::warn!("stop hook `{hook}` failed: {e:#}"),
+    }
+  }
+}
+
 /// The driving program's environment, as [`run`] sets it.
 fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> {
   let user = config.user.clone().unwrap_or_default();

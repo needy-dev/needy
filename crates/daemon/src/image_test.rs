@@ -1741,3 +1741,106 @@ async fn privileged_feature_is_refused_before_starting_any_actor() {
   stop.cancel();
   responder.await.unwrap();
 }
+
+#[tokio::test]
+async fn guest_config_receives_merged_hooks_for_runs_and_empty_hooks_for_build_and_edit_sessions() {
+  use needy_api_server::control::{Guest, ImageEditStart, Images, Runs, StopMode};
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let hook_feature = make_feature_artifact(
+    "example/features/hooks",
+    "1",
+    r#"{"id":"hooks","version":"1.0.0","postCreateCommand":"feature-create","postStartCommand":["feature-start","--ok"]}"#,
+    "#!/bin/sh\nexit 0\n",
+  );
+  let (base_url, _requests) = spawn_feature_registry(vec![hook_feature]).await;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let feature_store = FeatureStore::new(&daemon.config.cache_dir).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  daemon.images.set_feature_store(feature_store);
+
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (_sessions, configs, responder) = spawn_build_responder(started_log.clone(), behavior, stop.clone());
+
+  let image_yaml = r#"
+root: example.com/root:1
+layers:
+  - feature: ghcr.io/example/features/hooks:1
+hooks:
+  start:
+    - image-start
+  stop:
+    - image-stop
+"#;
+  let profile = format!(
+    "actor:\n  driver: linux-firecracker\n  image:\n{}\nuser: {{ name: agent, uid: 1000, gid: 1000 }}\nexecutors:\n  here: {{ driver: native }}\n",
+    image_yaml.lines().map(|l| format!("    {l}")).collect::<Vec<_>>().join("\n")
+  );
+
+  // Creating a normal run builds the feature (a build session) and prepares the run.
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(&profile, started.dir.path())))
+    .await
+    .expect("run create with hooks timed out")
+    .unwrap();
+
+  // Build session must have received empty hooks.
+  {
+    let seen = configs.lock().unwrap();
+    assert!(!seen.is_empty(), "expected at least one build session GetConfig");
+    for build_cfg in seen.iter() {
+      assert!(build_cfg.start_hooks.is_empty(), "build session must not run start_hooks: {:?}", build_cfg.start_hooks);
+      assert!(build_cfg.stop_hooks.is_empty(), "build session must not run stop_hooks: {:?}", build_cfg.stop_hooks);
+    }
+  }
+
+  // Normal run's Guest::config receives feature hooks first, then image hooks.
+  let run_cfg = Guest::config(daemon, &created.id).await.unwrap();
+  assert_eq!(run_cfg.start_hooks, ["feature-create", "'feature-start' '--ok'", "image-start"]);
+  assert_eq!(run_cfg.stop_hooks, ["image-stop"]);
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, StopMode::Now).await.unwrap();
+
+  // Edit session on the same image must receive empty hooks.
+  configs.lock().unwrap().clear();
+  let edit = tokio::time::timeout(
+    Duration::from_secs(20),
+    Images::start_edit(
+      daemon,
+      ImageEditStart {
+        image_name: "hooks-img".into(),
+        image_yaml: image_yaml.into(),
+        driver: "linux-firecracker".into(),
+        user: None,
+        commit: None,
+        tty: None,
+        wait_for_attach: false,
+        pinned_features: Default::default(),
+      },
+    ),
+  )
+  .await
+  .expect("start_edit timed out")
+  .unwrap();
+
+  let _ = tokio::time::timeout(Duration::from_secs(20), Images::finish_edit(daemon, &edit.session_id, false))
+    .await
+    .expect("finish_edit timed out")
+    .unwrap();
+
+  {
+    let seen = configs.lock().unwrap();
+    assert!(!seen.is_empty(), "expected edit session GetConfig");
+    for edit_cfg in seen.iter() {
+      assert!(edit_cfg.start_hooks.is_empty(), "edit session must not run start_hooks: {:?}", edit_cfg.start_hooks);
+      assert!(edit_cfg.stop_hooks.is_empty(), "edit session must not run stop_hooks: {:?}", edit_cfg.stop_hooks);
+    }
+  }
+
+  stop.cancel();
+  responder.await.unwrap();
+}

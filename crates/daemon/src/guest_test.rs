@@ -148,12 +148,16 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
     session: GuestSession::default(),
     commit_rebased: false,
     resolved_features: Default::default(),
+    start_hooks: vec!["./start.sh".into()],
+    stop_hooks: vec!["./stop.sh".into()],
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();
 
   assert_eq!(config.layers, [root.to_string(), built.to_string()]);
   assert_eq!(config.image_path, "/usr/local/bin:/usr/bin:/bin");
+  assert_eq!(config.start_hooks, ["./start.sh"]);
+  assert_eq!(config.stop_hooks, ["./stop.sh"]);
   assert!(!config.env.contains_key("PATH"), "{:?}", config.env);
   assert_eq!(
     config.session,
@@ -190,6 +194,8 @@ async fn the_guest_receives_materialized_layer_disk_digests_when_flattened() {
     session: GuestSession::default(),
     commit_rebased: false,
     resolved_features: Default::default(),
+    start_hooks: Vec::new(),
+    stop_hooks: Vec::new(),
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();

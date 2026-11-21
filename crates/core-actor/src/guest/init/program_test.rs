@@ -130,3 +130,66 @@ fn the_driving_program_gets_image_path_and_actor_env_path_replaces_it() {
   };
   assert_eq!(path(&overridden).as_deref(), Some("/custom/bin"));
 }
+
+#[tokio::test]
+async fn start_and_stop_hooks_run_in_order_as_user_in_cwd_with_failure_semantics() {
+  // SAFETY: `geteuid` cannot fail.
+  if unsafe { libc::geteuid() } != 0 {
+    eprintln!("skipped: switching to another user needs root (the guest tests run as root on Linux)");
+    return;
+  }
+  use std::os::unix::fs::PermissionsExt;
+
+  let dir = tempfile::tempdir().unwrap();
+  // Make the workspace writable by our test uid/gid (4241:4241).
+  std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+  let cwd = dir.path().to_string_lossy().into_owned();
+  let log = dir.path().join("order.log");
+  let log_path = log.to_string_lossy().into_owned();
+
+  let config = GetConfigResponse {
+    user: Some(needy_api_proto::v1::GuestUser {
+      name: "hookuser".into(),
+      uid: 4241,
+      gid: 4241,
+    }),
+    cwd: cwd.clone(),
+    env: [("HOOK_MARKER".into(), "from-env".into())].into(),
+    image_path: "/opt/custom/bin:/usr/bin:/bin".into(),
+    start_hooks: vec![
+      format!("printf 'start1:%s:%s:%s:%s\\n' \"$(id -u)\" \"$(id -g)\" \"$(pwd)\" \"$HOOK_MARKER\" >> '{log_path}'"),
+      format!("printf 'start2:%s\\n' \"$PATH\" >> '{log_path}'"),
+    ],
+    stop_hooks: vec![
+      format!("printf 'stop1\\n' >> '{log_path}'"),
+      "exit 7".into(),
+      format!("printf 'stop2-after-failure\\n' >> '{log_path}'"),
+    ],
+    ..GetConfigResponse::default()
+  };
+
+  let (_tx, stops) = tokio::sync::watch::channel(None);
+  run_start_hooks(&stops, &config, &cwd).await.unwrap();
+  run_stop_hooks(&config, &cwd).await;
+
+  let lines: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+  assert_eq!(lines[0], format!("start1:4241:4241:{cwd}:from-env"));
+  assert!(lines[1].starts_with("start2:") && lines[1].contains("/opt/custom/bin"), "{:?}", lines[1]);
+  assert_eq!(lines[2], "stop1");
+  assert_eq!(lines[3], "stop2-after-failure");
+
+  // A failing start hook returns an error and stops subsequent start hooks.
+  let fail_log = dir.path().join("fail.log");
+  let fail_path = fail_log.to_string_lossy().into_owned();
+  let failing = GetConfigResponse {
+    start_hooks: vec![
+      format!("printf 'first\\n' >> '{fail_path}'"),
+      "exit 42".into(),
+      format!("printf 'never\\n' >> '{fail_path}'"),
+    ],
+    ..config
+  };
+  let err = run_start_hooks(&stops, &failing, &cwd).await.unwrap_err().to_string();
+  assert!(err.contains("exit 42"), "{err}");
+  assert_eq!(std::fs::read_to_string(&fail_log).unwrap(), "first\n");
+}

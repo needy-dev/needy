@@ -32,8 +32,6 @@ pub enum Image {
 // form (`build:`, as executors' `container.build` has it) and the default
 // root of a definition without `root:` come with slice 5 of the images and
 // run data spec.
-// TODO(images): `hooks` (`start`, `stop`, appending along `extends`) come
-// with slice 4 of the spec; until then `hooks` is an unknown key.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Definition {
@@ -43,6 +41,57 @@ pub struct Definition {
   pub layers: Vec<Layer>,
   /// The environment of the image's programs.
   pub env: BTreeMap<String, String>,
+  /// Lifecycle hooks run in every run of this image. Along `extends` the
+  /// parent's come first.
+  pub hooks: Hooks,
+}
+
+/// Lifecycle hooks declared on an image definition: `start` runs before the
+/// driving program; `stop` runs when the driving program ends (or on graceful
+/// stop), before mirror-outs and sync merges.
+// TODO(images): `attach` hook is deferred until a case needs it, see
+// `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Hooks {
+  /// Shell commands run in order before the driving program starts.
+  #[serde(deserialize_with = "deserialize_hook_list")]
+  pub start: Vec<String>,
+  /// Shell commands run in order after the driving program exits (or on
+  /// graceful stop), before mirror-outs and sync merges.
+  #[serde(deserialize_with = "deserialize_hook_list")]
+  pub stop: Vec<String>,
+}
+
+/// One entry in a `hooks.start` or `hooks.stop` list: either a shell command
+/// string run by `sh -c`, or a non-empty argv array shell-quoted for `sh -c`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawHookCommand {
+  Shell(String),
+  Argv(Vec<String>),
+}
+
+/// Shell-quotes `argv` into a POSIX `sh -c` command string.
+pub fn shell_join(argv: &[String]) -> String {
+  argv.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" ")
+}
+
+fn deserialize_hook_list<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+  let raw: Vec<RawHookCommand> = Vec::deserialize(deserializer)?;
+  let mut out = Vec::with_capacity(raw.len());
+  for entry in raw {
+    match entry {
+      RawHookCommand::Shell(cmd) => out.push(cmd),
+      RawHookCommand::Argv(argv) => {
+        if argv.is_empty() {
+          return Err(de::Error::custom("hook argv array cannot be empty"));
+        }
+        out.push(shell_join(&argv));
+      }
+    }
+  }
+  Ok(out)
 }
 
 /// One entry of a definition's `layers`.
@@ -204,14 +253,29 @@ impl TryFrom<RawLayer> for Layer {
   }
 }
 
-/// Image files append their layers along `extends`.
+/// Image files append their layers and lifecycle hooks along `extends`.
 const MERGE: merge::Rules = merge::Rules {
   prepend: &[],
-  append: &[merge::Append {
-    path: &["layers"],
-    key: same_feature,
-  }],
+  append: &[
+    merge::Append {
+      path: &["layers"],
+      key: same_feature,
+    },
+    merge::Append {
+      path: &["hooks", "start"],
+      key: no_key,
+    },
+    merge::Append {
+      path: &["hooks", "stop"],
+      key: no_key,
+    },
+  ],
 };
+
+/// Unkeyed append: entries never replace parent entries in place.
+pub(crate) fn no_key(_: &Value) -> Option<String> {
+  None
+}
 
 /// What makes two layers the same along `extends`: the same feature
 /// reference without its tag, so a child layer that names a parent's feature

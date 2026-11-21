@@ -251,6 +251,13 @@ async fn boot(container: bool) -> Result<()> {
   let (stop, stops) = tokio::sync::watch::channel(None);
   tokio::spawn(control::follow(client.clone(), user.uid, config.image_path.clone(), session.routing, container, stop));
 
+  // Lifecycle `start` hooks run after workspace/sync mounts, copy-in, and
+  // routing are active, and before the driving program starts.
+  if let Err(e) = program::run_start_hooks(&stops, &config, &home).await {
+    mounts::detach(config.mounts.iter().map(|m| m.target.as_str()));
+    return Err(e);
+  }
+
   let driven = match &config.tty {
     Some(window) => {
       let size = (u16::try_from(window.rows).unwrap_or(u16::MAX), u16::try_from(window.cols).unwrap_or(u16::MAX));
@@ -276,6 +283,9 @@ async fn boot(container: bool) -> Result<()> {
       (Some(127), String::new())
     }
   };
+  // Lifecycle `stop` hooks run after the driving program ends (or on graceful
+  // stop) and before mirror-out and host sync merges.
+  program::run_stop_hooks(&config, &home).await;
   for copy in &config.mirror_out {
     if let Err(e) = files::mirror_out(&client, &copy.name, &copy.path).await {
       tracing::warn!("mirror-out {}: {e:#}", copy.name);
