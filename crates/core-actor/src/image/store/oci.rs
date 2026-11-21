@@ -489,7 +489,7 @@ fn synthesize_shim_layer(base: &BaseArchive, indexes: &[Index]) -> Result<Option
   }
 
   let proxy = proxy_bytes.expect("loaded above");
-  let real_root = Path::new(REAL.trim_start_matches('/'));
+  let real_root: PathBuf = REAL.trim_start_matches('/').split('/').collect();
   let mut builder = tar::Builder::new(Vec::new());
   let mut created_dirs: BTreeSet<PathBuf> = BTreeSet::new();
 
@@ -550,10 +550,11 @@ fn ensure_parent_dirs<W: Write>(builder: &mut tar::Builder<W>, created: &mut BTr
 /// Finds `/.needy/proxy` bytes, checking snapshot layers top-down first and
 /// then base image layers top-down.
 fn find_proxy_bytes(base: &BaseArchive, indexes: &[Index]) -> Result<Vec<u8>> {
-  let proxy_rel = Path::new(PROXY.trim_start_matches('/'));
+  let proxy_str = PROXY.trim_start_matches('/');
+  let proxy_rel: PathBuf = proxy_str.split('/').collect();
   for index in indexes.iter().rev() {
-    if index.entries.contains_key(proxy_rel)
-      && let Kind::File(data) = index.resolve(proxy_rel)?.kind
+    if index.entries.contains_key(&proxy_rel)
+      && let Kind::File(data) = index.resolve(&proxy_rel)?.kind
     {
       let mut bytes = Vec::with_capacity(data.size as usize);
       data.reader().read_to_end(&mut bytes).map_err(io("reading /.needy/proxy from layer"))?;
@@ -561,7 +562,6 @@ fn find_proxy_bytes(base: &BaseArchive, indexes: &[Index]) -> Result<Vec<u8>> {
     }
   }
 
-  let proxy_str = proxy_rel.to_string_lossy();
   for layer_path in base.layer_paths.iter().rev() {
     let span = base.span(layer_path)?;
     let reader = open_layer_reader(&base.path, span)?;
@@ -573,7 +573,7 @@ fn find_proxy_bytes(base: &BaseArchive, indexes: &[Index]) -> Result<Vec<u8>> {
         continue;
       }
       let raw = entry.path().map_err(failed)?;
-      if normalize_tar_path(&raw).as_deref() == Some(proxy_str.as_ref()) {
+      if normalize_tar_path(&raw).as_deref() == Some(proxy_str) {
         let mut bytes = Vec::new();
         entry.read_to_end(&mut bytes).map_err(failed)?;
         return Ok(bytes);
@@ -591,10 +591,10 @@ fn is_shim_candidate(path: &Path) -> bool {
   if !SHIM_NAMES.contains(&name) {
     return false;
   }
-  let Some(parent) = path.parent().and_then(|p| p.to_str()) else {
+  let Some(parent) = path.parent().and_then(normalize_tar_path) else {
     return false;
   };
-  SHIM_DIRS.contains(&parent)
+  SHIM_DIRS.contains(&parent.as_str())
 }
 
 /// Whether a symlink at `shell_path` pointing to `target` resolves inside one
@@ -602,23 +602,29 @@ fn is_shim_candidate(path: &Path) -> bool {
 /// symlink alone, because its target is already a shim or real program in a
 /// shimmed directory).
 fn symlink_stays_in_shim_dirs(shell_path: &Path, target: &Path) -> bool {
-  let combined = if target.is_absolute() {
+  // Container symlinks are POSIX paths: check `Component::RootDir` rather than
+  // `Path::is_absolute` so `/opt/...` is treated as absolute on Windows too.
+  let is_posix_abs = matches!(target.components().next(), Some(Component::RootDir));
+  let combined = if is_posix_abs {
     target.to_path_buf()
   } else {
     shell_path.parent().unwrap_or(Path::new("")).join(target)
   };
-  let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+  let mut parts: Vec<String> = Vec::new();
   for component in combined.components() {
     match component {
-      Component::Normal(part) => parts.push(part),
+      Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
       Component::ParentDir => {
         parts.pop();
       }
       Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
     }
   }
-  let resolved: PathBuf = parts.into_iter().collect();
-  resolved.parent().and_then(|p| p.to_str()).is_some_and(|dir| SHIM_DIRS.contains(&dir))
+  if parts.len() < 2 {
+    return false;
+  }
+  let parent = parts[..parts.len() - 1].join("/");
+  SHIM_DIRS.contains(&parent.as_str())
 }
 
 fn open_layer_reader(archive: &Path, span: TarSpan) -> Result<Box<dyn Read + Send>> {
