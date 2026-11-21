@@ -29,8 +29,8 @@ describe('environment wizard', () => {
     expect(steps.some(step => ['token', 'paste-token', 'runner', 'check-runner'].includes(step.id))).toBe(false)
     expect(steps.find(step => step.id === 'client-pair')?.text.en).toContain('invoking CLI account')
     expect(steps.find(step => step.id === 'workspace')?.text.en).toContain('run create')
-    expect(steps.find(step => step.id === 'start')?.code).toContain('--mode static')
-    expect(steps.find(step => step.id === 'start')?.code).toContain('-f ~/.config/needy/profiles/bash-demo.yaml')
+    expect(steps.find(step => step.id === 'start')?.code).toBe('needy run create -it -f ~/.config/needy/profiles/bash-demo.yaml')
+    expect(steps.find(step => step.id === 'start')?.code).not.toContain('profile check')
     expect(locations(env).runner.description.en).toContain('invoking CLI account')
     expect(locations(env).runner.description.en).not.toContain('runner serve')
   })
@@ -51,73 +51,45 @@ describe('environment wizard', () => {
     expect(guide('bash', env)).toEqual([])
   })
 
-  // ROOT CAUSE:
-  //
-  // If an existing installation lacked fusermount3 in PATH, setup did not
-  // detect it before the non-root daemon tried to detach a workspace mount.
-  // The guide must locate installation and checks on the mounting host.
   it.each([
     ['apt', 'sudo apt-get install -y sshfs fuse3'],
     ['dnf', 'sudo dnf install -y fuse-sshfs fuse3'],
     ['pacman', 'sudo pacman -S --noconfirm sshfs fuse3'],
-  ] as const)('prepares both mount helpers on the Linux container actor host with %s', (pm, install) => {
+  ] as const)('installs mount helpers without diagnostic boilerplate on Linux container host with %s', (pm, install) => {
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, kvm: false, executor: 'runner', pm })
     const prepare = steps.find(step => step.id === 'prepare')!
     expect(prepare.machine).toBe('host')
     expect(prepare.code).toContain(install)
-    expect(prepare.code).toContain('command -v sshfs && command -v fusermount3')
     expect(prepare.code).toContain('user_allow_other')
-    expect(prepare.code).toContain('test -r /dev/fuse && test -w /dev/fuse')
-    expect(prepare.text.en).toContain('daemon account')
+    expect(prepare.code).not.toMatch(/docker info|command -v|test -r|\bid\b/)
     expect(prepare.text.en).toContain('actor host')
     expect(steps.indexOf(prepare)).toBeLessThan(steps.findIndex(step => step.id === 'daemon'))
     expect(steps.find(step => step.id === 'runner-install')?.code).not.toContain('sshfs')
   })
 
-  it('keeps FUSE inside VM images and checks the Mac SFTP server as the executor account', () => {
-    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, os: 'mac', executor: 'runner', runnerOs: 'mac' })
-    expect(steps.find(step => step.id === 'prepare')?.code).not.toMatch(/sshfs|fusermount3|fuse\.conf/)
-    const sftp = steps.find(step => step.id === 'prepare-sftp')!
-    expect(sftp.machine).toBe('runner')
-    expect(sftp.text.en).toContain('macFUSE')
-    expect(sftp.text.en).toContain('executor account')
-    expect(sftp.code).toBe('id\ntest -x /usr/libexec/sftp-server')
-    expect(steps.indexOf(sftp)).toBeLessThan(steps.findIndex(step => step.id === 'workspace'))
+  it('skips the prepare step when Linux Firecracker already has Docker and omits diagnostic checks', () => {
+    expect(guide('bash', DEFAULT_ENVIRONMENT).some(step => step.id === 'prepare')).toBe(false)
+    const noDocker = guide('bash', { ...DEFAULT_ENVIRONMENT, docker: false }).find(step => step.id === 'prepare')!
+    expect(noDocker.code).toContain('https://get.docker.com')
+    expect(noDocker.code).not.toMatch(/docker info|test -r \/dev\/kvm/)
   })
 
-  it('checks Linux native SFTP on the executor without assuming the actor host package manager', () => {
-    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', runnerOs: 'linux', pm: 'dnf' })
-    const sftp = steps.find(step => step.id === 'prepare-sftp')!
-    expect(sftp.machine).toBe('runner')
-    expect(sftp.text.en).toContain('openssh-sftp-server')
-    expect(sftp.code).not.toContain('dnf')
-    expect(sftp.code).toBe('id\ntest -x /usr/lib/openssh/sftp-server')
-  })
-
-  it('checks a local native workspace source as the daemon account and leaves container sources to their image', () => {
-    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'native' })
-    const sftp = steps.find(step => step.id === 'prepare-sftp')!
-    expect(sftp.machine).toBe('host')
-    expect(sftp.text.en).toContain('daemon account')
-    expect(sftp.code).toBe('id\ntest -x /usr/lib/openssh/sftp-server')
+  it('omits prepare-sftp across all executor modes because run create reports missing sftp-server', () => {
+    expect(guide('bash', { ...DEFAULT_ENVIRONMENT, os: 'mac', executor: 'runner', runnerOs: 'mac' }).some(step => step.id === 'prepare-sftp')).toBe(false)
+    expect(guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', runnerOs: 'linux', pm: 'dnf' }).some(step => step.id === 'prepare-sftp')).toBe(false)
+    expect(guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'native' }).some(step => step.id === 'prepare-sftp')).toBe(false)
     expect(guide('bash').some(step => step.id === 'prepare-sftp')).toBe(false)
   })
 
-  // ROOT CAUSE:
-  //
-  // If installation was reused, workspace preparation was easy to skip
-  // because it was part of the install step; readiness checked only uname.
-  // Before the fix, the guide offered no serving-account directory probe.
-  // The fix verifies the source directory before the actor mounts it.
-  it('verifies the remote workspace through the serving runner before mounting it', () => {
+  it('uses clean workspace setup and runner ls without diagnostic shell probes', () => {
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner', launchFrom: 'host', workspace: '~/my project' })
-    const workspace = steps.find(step => step.id === 'workspace')
-    expect(workspace?.machine).toBe('runner')
-    expect(workspace?.code).toContain('test -d')
-    const probe = steps.find(step => step.id === 'check-runner')!
-    expect(probe.code).toContain('test -d')
-    expect(probe.code).toContain('id')
-    expect(steps.indexOf(probe)).toBeLessThan(steps.findIndex(step => step.id === 'start'))
+    const workspace = steps.find(step => step.id === 'workspace')!
+    expect(workspace.machine).toBe('runner')
+    expect(workspace.code).toBe('mkdir -p "$HOME"/\'my project\' && cd "$HOME"/\'my project\'')
+    expect(workspace.code).not.toMatch(/test -d|uname -s|\bid\b|printf/)
+    const checkRunner = steps.find(step => step.id === 'check-runner')!
+    expect(checkRunner.code).toBe('needy runner ls')
+    expect(steps.indexOf(checkRunner)).toBeLessThan(steps.findIndex(step => step.id === 'start'))
   })
 
   it('includes client authorization and launches from the executor when selected', () => {
@@ -138,35 +110,19 @@ describe('environment wizard', () => {
     expect(steps.some(step => step.id === 'client-pair')).toBe(false)
   })
 
-  // The two shells deliberately have different HOME values. Expanding the
-  // runner path in the control shell would inspect the wrong machine's home.
-  it('fails a missing-directory probe and expands quoted paths only on the executor', () => {
+  it('creates quoted workspace paths without executing shell substitutions', () => {
     const root = mkdtempSync(join(tmpdir(), 'needy-guide-'))
     try {
-      const control = join(root, 'control')
       const executor = join(root, 'executor')
-      mkdirSync(control)
       mkdirSync(executor)
       const path = "~/my 'project' $(touch unwanted)"
       const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'runner', launchFrom: 'host', workspace: path })
-      const probe = steps.find(step => step.id === 'check-runner')!.code!
-      // Replace only the external execution boundary. The generated shell
-      // quoting and the executor's sh -c body execute unchanged.
-      const dispatch = `needy() {
-        if [ "$1" = runner ]; then return 0; fi
-        while [ "$1" != -- ]; do shift; done
-        shift
-        HOME="$EXECUTOR_HOME" "$@"
-      }\n${probe}`
-      const run = (script: string, home: string) => spawnSync('sh', ['-c', script], {
-        cwd: root, env: { ...process.env, HOME: home, EXECUTOR_HOME: executor }, encoding: 'utf8',
+      const script = steps.find(step => step.id === 'workspace')!.code!
+      const result = spawnSync('sh', ['-c', script], {
+        cwd: root, env: { ...process.env, HOME: executor }, encoding: 'utf8',
       })
-      expect(run(dispatch, control).status).not.toBe(0)
-      expect(run(steps.find(step => step.id === 'workspace')!.code!, executor).status).toBe(0)
-      const checked = run(dispatch, control)
-      expect(checked.status).toBe(0)
-      expect(checked.stdout).toContain(join(executor, path.slice(2)))
-      expect(existsSync(join(control, path.slice(2)))).toBe(false)
+      expect(result.status).toBe(0)
+      expect(existsSync(join(executor, path.slice(2)))).toBe(true)
       expect(existsSync(join(root, 'unwanted'))).toBe(false)
     }
     finally {
@@ -181,34 +137,81 @@ describe('environment wizard', () => {
       it.each(PROGRAMS)(`${host.driver}, ${executor}: keeps $name and the selected environment throughout`, ({ id }) => {
         const env = { ...DEFAULT_ENVIRONMENT, ...host, executor, runnerName: 'workstation', workspace: '~/my project' }
         const steps = guide(id, env)
-        const saved = steps.find(step => step.profile)!
-        const profile = parse(saved.profile!)
         const target = executor === 'runner' ? 'remote' : executor === 'native' ? 'here' : 'build'
+        const useBuiltin = id === 'opencode' && host.driver === 'linux-firecracker' && executor === 'container'
 
         expect(actorDriver(env)).toBe(host.driver)
-        expect(profile.actor.command).toEqual([id])
+        expect(steps.find(step => step.id === 'install')?.code).not.toContain('needy image pull')
+        expect(steps.find(step => step.id === 'start')?.code).not.toContain('profile check')
+        expect(steps.some(step => step.id === 'tunnel')).toBe(executor === 'runner')
+
+        if (useBuiltin) {
+          expect(steps.some(step => step.id === 'profile')).toBe(false)
+          expect(steps.find(step => step.id === 'start')?.code).toBe('needy run create -it --profile builtin:opencode')
+          return
+        }
+
+        const saved = steps.find(step => step.profile)!
+        const profile = parse(saved.profile!)
         expect(profile.actor.driver).toBe(host.driver)
         expect(profile.actor.container).toEqual(host.driver === 'linux-container' ? { oci_runtime: 'runc' } : undefined)
-        expect(profile.executors).toEqual({ [target]: executor === 'runner'
-          ? { runner: { client: true }, driver: 'native' }
-          : { driver: executor === 'container' ? 'linux-container' : 'native' } })
-        expect(profile.actor.workspace.from).toBe(`executor:${target}:${executor === 'container' ? '~/workspace' : '~/my project'}`)
-        expect(profile.actor.workspace.writable).toBe(true)
-        expect(profile.commands).toEqual([{ match: '**', to: target }])
-        expect(profile.unknown).toBe(target)
         expect(saved.machine).toBe(executor === 'runner' ? 'runner' : 'host')
         expect(saved.code).toContain(`profiles/${id}-demo.yaml`)
-        expect(steps.find(step => step.id === 'start')?.code).toContain(`-f ~/.config/needy/profiles/${id}-demo.yaml`)
-        expect(steps.find(step => step.id === 'install')?.code).toContain(`needy image pull --driver ${host.driver}`)
+        expect(steps.find(step => step.id === 'start')?.code).toBe(`needy run create -it -f ~/.config/needy/profiles/${id}-demo.yaml`)
         expect(check(saved.profile!).findings.filter(f => f.severity === 'error')).toEqual([])
-        expect(steps.some(step => step.id === 'tunnel')).toBe(executor === 'runner')
-        if (id !== 'bash') {
-          expect(steps.find(step => step.id === 'state')?.code).toContain(`~/needy-state/${id}-demo`)
-          expect(saved.profile).not.toContain(`${id}-mac`)
+
+        if (id === 'opencode') {
+          expect(profile.extends).toBe('builtin:opencode')
+          expect(profile.actor.command).toBeUndefined()
+          expect(steps.some(step => step.id === 'state')).toBe(false)
+          expect(saved.profile).not.toContain('needy-state')
+          if (executor === 'container') {
+            expect(profile.executors).toBeUndefined()
+            expect(profile.actor.workspace).toBeUndefined()
+          }
+          else {
+            expect(profile.executors).toEqual({ [target]: executor === 'runner'
+              ? { runner: { client: true }, driver: 'native' }
+              : { driver: 'native' } })
+            expect(profile.actor.workspace.from).toBe(`executor:${target}:~/my project`)
+            expect(profile.actor.workspace.writable).toBe(true)
+            expect(profile.commands).toEqual([{ match: '**', to: target }])
+            expect(profile.unknown).toBe(target)
+          }
+        }
+        else {
+          expect(profile.actor.command).toEqual([id])
+          expect(profile.executors).toEqual({ [target]: executor === 'runner'
+            ? { runner: { client: true }, driver: 'native' }
+            : { driver: executor === 'container' ? 'linux-container' : 'native' } })
+          expect(profile.actor.workspace.from).toBe(`executor:${target}:${executor === 'container' ? '~/workspace' : '~/my project'}`)
+          expect(profile.actor.workspace.writable).toBe(true)
+          expect(profile.commands).toEqual([{ match: '**', to: target }])
+          expect(profile.unknown).toBe(target)
         }
       })
     }
   }
+
+  it('mentions Cloudflare Tunnel as a non-SSH option in the tunnel step', () => {
+    const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner' })
+    const tunnel = steps.find(step => step.id === 'tunnel')!
+    expect(tunnel.code).toBe('ssh -N -o ExitOnForwardFailure=yes -L 7400:127.0.0.1:7400 user@example.com')
+    expect(tunnel.text.en).toContain('cloudflared access tcp --hostname needy.example.com --url 127.0.0.1:7400')
+    expect(tunnel.text.en).toContain('https://needy.example.com')
+    expect(tunnel.text.en).toContain('http2Origin: true')
+    expect(tunnel.text.zh).toContain('cloudflared access tcp --hostname needy.example.com --url 127.0.0.1:7400')
+  })
+
+  it('generalizes the login step instead of presenting /connect as the only login flow', () => {
+    const steps = guide('opencode', DEFAULT_ENVIRONMENT)
+    const login = steps.find(step => step.id === 'login')!
+    expect(login.code).toBeUndefined()
+    expect(login.text.en).toContain('interactive login console')
+    expect(login.text.en).toContain('/connect')
+    expect(login.text.zh).toContain('交互式登录控制台')
+    expect(login.text.zh).toContain('/connect')
+  })
 
   it('keeps local management, hidden enrollment, and the single tunnel in their terminal contexts', () => {
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, where: 'server', executor: 'runner', launchFrom: 'host' })
@@ -247,9 +250,12 @@ describe('environment wizard', () => {
     expect(profile.unknown).toBe('actor')
   })
 
-  it('prepares the container executor image separately from a VM actor image', () => {
+  it('omits manual image pulls because local runs pull release base images automatically', () => {
     const steps = guide('bash')
-    expect(steps.find(step => step.id === 'install')?.code).toContain('ghcr.io/needy-dev/needy-executor:v${needy_release}')
+    const install = steps.find(step => step.id === 'install')!
+    expect(install.code).not.toContain('needy image pull')
+    expect(install.code).not.toContain('docker pull')
+    expect(install.text.en).toContain('automatically')
   })
 
   // Windows enrollment cannot yet persist private credentials. A complete
@@ -263,7 +269,7 @@ describe('environment wizard', () => {
   it('quotes user project paths without executing shell substitutions', () => {
     const workspace = "~/a 'project' $(touch unwanted)"
     const steps = guide('bash', { ...DEFAULT_ENVIRONMENT, executor: 'native', workspace })
-    expect(steps.find(step => step.id === 'workspace')?.code).toBe('mkdir -p "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\'')
+    expect(steps.find(step => step.id === 'workspace')?.code).toBe('mkdir -p "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\' && cd "$HOME"/\'a \'\\\'\'project\'\\\'\' $(touch unwanted)\'')
     expect(parse(steps.find(step => step.profile)!.profile!).actor.workspace.from).toBe(`executor:here:${workspace}`)
   })
 
@@ -272,6 +278,9 @@ describe('environment wizard', () => {
     expect(configurationIssue(env)).toBeDefined()
     expect(guide('bash', env)).toEqual([])
     expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '' })).toBeDefined()
-    expect(configurationIssue({ ...env, runnerName: 'valid', workspace: '.' })).toBeDefined()
+    const relativeIssue = configurationIssue({ ...env, runnerName: 'valid', workspace: '.' })
+    expect(relativeIssue).toBeDefined()
+    expect(relativeIssue?.en).not.toContain('not bound automatically')
+    expect(relativeIssue?.en).toContain('omit actor.workspace')
   })
 })

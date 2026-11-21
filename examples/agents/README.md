@@ -1,21 +1,22 @@
 # Coding agents in an actor
 
-Four coding agents packaged as Dev Container features under [`features/`](../../features/),
-with one profile per agent. Each profile declares an inline `actor.image`
-definition using needy's built-in feature references (`builtin:<agent>`), so
-`needy run create` builds and caches the feature layers automatically without a
-separate `docker build` step.
+Four coding agents are built into needy as ready-to-use profiles
+(`builtin:codex`, `builtin:opencode`, `builtin:pi`, `builtin:herdr`) backed by
+Dev Container features under [`features/`](../../features/). No repository
+clone or `docker build` step is needed: `needy run create` pulls the base image
+if missing, builds each feature layer once in a disposable session, and caches
+it by content key.
 
 The agent runs in the actor. Every shell it starts goes to the `build`
 executor, which holds the workspace, so all the commands the agent runs go
 there too.
 
-| Profile | Feature | Default version | Synced state directory |
-| --- | --- | --- | --- |
-| [`codex.yaml`](codex.yaml) | `builtin:codex` ([`features/codex/`](../../features/codex/)) | 0.167.2 | `~/.codex` |
-| [`pi.yaml`](pi.yaml) | `builtin:pi` ([`features/pi/`](../../features/pi/)) | 1.5.2 (Node.js 26.13.1) | `~/.pi/agent` |
-| [`opencode.yaml`](opencode.yaml) | `builtin:opencode` ([`features/opencode/`](../../features/opencode/)) | 1.19.5 | `~/.local/share/opencode` |
-| [`herdr.yaml`](herdr.yaml) | `builtin:herdr` ([`features/herdr/`](../../features/herdr/)) + the three above | 0.9.5 | all three above |
+| Built-in profile | Example file | Feature | Default version | Synced state directory |
+| --- | --- | --- | --- | --- |
+| `builtin:codex` | [`codex.yaml`](codex.yaml) | `builtin:codex` ([`features/codex/`](../../features/codex/)) | 0.167.2 | `~/.codex` |
+| `builtin:pi` | [`pi.yaml`](pi.yaml) | `builtin:pi` ([`features/pi/`](../../features/pi/)) | 1.5.2 (Node.js 26.13.1) | `~/.pi/agent` |
+| `builtin:opencode` | [`opencode.yaml`](opencode.yaml) | `builtin:opencode` ([`features/opencode/`](../../features/opencode/)) | 1.19.5 | `~/.local/share/opencode` |
+| `builtin:herdr` | [`herdr.yaml`](herdr.yaml) | `builtin:herdr` ([`features/herdr/`](../../features/herdr/)) + the three above | 0.9.5 | all three above |
 
 Each feature's `install.sh` pins its default download to one release and checks
 its checksum (with provenance comments). Passing `with: { version: "..." }` on
@@ -23,11 +24,11 @@ the layer installs another release.
 
 ## Start an agent
 
-Start any profile directly; needy pulls the base image if missing, builds each
-feature layer once in a disposable session, and caches it by content key:
+On Linux with KVM and Docker, start any built-in profile directly:
 
 ```sh
-needy run create -it --profile examples/agents/codex.yaml
+needy run create -it --profile builtin:opencode
+# also: builtin:codex, builtin:pi, builtin:herdr
 ```
 
 To stack an agent feature on a custom OCI root (for example
@@ -37,13 +38,13 @@ base image.
 
 ## Pick the driver
 
-Each profile uses `linux-firecracker` and a `linux-container` executor. For
-another driver, write a short profile that extends the agent's profile,
-for example `~/.config/needy/profiles/codex.yaml`:
+The built-in profiles default to `linux-firecracker` and a `linux-container`
+executor. For another driver, write a short profile that extends `builtin:<agent>`
+(no repo checkout required), for example `~/.config/needy/profiles/opencode.yaml`:
 
 ```yaml
-# Linux without KVM
-extends: /path/to/needy/examples/agents/codex.yaml
+# Linux without KVM (requires SSHFS and FUSE 3 on the actor host)
+extends: builtin:opencode
 actor:
   driver: linux-container
   container: { oci_runtime: runc }
@@ -52,10 +53,10 @@ actor:
 ```yaml
 # Apple silicon Mac: the executor is the Mac itself, as in examples/macos-vz.
 # mkdir -p /tmp/needy-agents first.
-extends: /path/to/needy/examples/agents/codex.yaml
+extends: builtin:opencode
 actor:
   driver: macos-vz                       # or macos-apple-container
-  workspace: { from: "executor:build:/tmp/needy-agents" }
+  workspace: { path: ~/workspace, from: "executor:build:/tmp/needy-agents", writable: true }
 executors:
   build: { driver: native }
 ```
@@ -77,7 +78,7 @@ the sign-in flow that does not need it:
 
 An API key can replace the login. Each profile names the variable in an
 `actor.env` comment (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, ...). Put it in
-a private profile that extends the example, not in a shared file.
+a private profile that `extends: builtin:<agent>`, not in a shared file.
 
 ## Where credentials go
 
@@ -85,7 +86,7 @@ Each agent feature declares its state directory under
 `customizations.needy.files` in `devcontainer-feature.json`. Needy
 automatically creates a per-run copy from `<data_dir>/files/<agent>`, mounts it
 into the actor, and three-way merges changes back into the store when the run
-ends:
+ends (with a SQLite row-merge driver for OpenCode's database):
 
 | Agent | Store (`<data_dir>/files/...`) | Actor |
 | --- | --- | --- |
@@ -126,19 +127,21 @@ without them:
 
 ## herdr
 
-[`herdr.yaml`](herdr.yaml) starts herdr with `builtin:codex`, `builtin:pi`,
-`builtin:opencode`, and `builtin:herdr` stacked in one image. Its panes run
-shells in the actor, so `codex`, `pi` and `opencode` start there. A shell that
-one of these agents starts goes to the executor (a rule with `when.under`).
+`builtin:herdr` ([`herdr.yaml`](herdr.yaml)) starts herdr with `builtin:codex`,
+`builtin:pi`, `builtin:opencode`, and `builtin:herdr` stacked in one image. Its
+panes run shells in the actor, so `codex`, `pi` and `opencode` start there. A
+shell that one of these agents starts goes to the executor (a rule with
+`when.under`).
 
 When herdr's client exits (ctrl+b q), the run ends. Use ctrl-] to detach
 from needy and leave the run going.
 
 ## The workspace
 
-The workspace starts empty, in the executor's `~/workspace`. The agent can
-clone a repository there with its own tools. You can also copy files in
-with `needy fs cp ./src build:/home/agent/workspace`. The `build`
-executor belongs to the run (`key: "{run}"`). To keep the work on a
-directory you choose, use the Mac's directory (above), or a `native`
-executor with a `workspace:` of your own.
+The built-in profiles set `actor.workspace` to an empty directory in the
+`build` container's `~/workspace`. The agent can clone a repository there with
+its own tools, or you can copy files in with
+`needy fs cp ./src build:/home/agent/workspace`. To mount the directory you run
+`needy run create` in live at `~/workspace`, omit `actor.workspace` in a custom
+profile; or point `actor.workspace.from` at a directory on a `native` executor
+(as in the macOS example above).

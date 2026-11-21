@@ -22,12 +22,11 @@ work takes effect.
 ## Table of Contents
 
 - [Getting started](#getting-started)
-  - [Install](#install)
-  - [Start the control daemon](#start-the-control-daemon)
-  - [Pick a profile](#pick-a-profile)
-  - [Run it](#run-it)
-  - [One command from your laptop](#one-command-from-your-laptop)
-  - [Add machines](#add-machines)
+  - [1. Install](#1-install)
+  - [2. Run a coding agent](#2-run-a-coding-agent)
+  - [3. Inspect and customize](#3-inspect-and-customize)
+  - [Multi-machine setup](#multi-machine-setup)
+  - [Other install methods and prerequisites](#other-install-methods-and-prerequisites)
 - [Actor drivers](#actor-drivers)
 - [Configuration](#configuration)
 - [Examples](#examples)
@@ -39,43 +38,170 @@ work takes effect.
 
 ## Getting started
 
-Choose what you want to run. Each walkthrough identifies the machine,
-terminal, project directory, and expected result at every step.
+### 1. Install
 
-| Your task | Start here |
-| --- | --- |
-| Explore Linux bash with Mac child processes | [bash → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#bash) |
-| Run OpenCode in Linux with Mac tools | [OpenCode → Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md#opencode) |
+**Linux** (installs `needy` and starts the control daemon user service):
 
-These two examples use a Linux Docker host and a Mac native runner:
+```sh
+curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
+```
 
-| Linux server | Mac |
-| --- | --- |
-| Control daemon and your program in an actor | Runner, toolchain, and project files |
-| Starts runs from its setup terminal | Keeps one SSH tunnel and one runner process open |
-| Mounts the shared project into the actor | Keeps the project in `~/needy-demo` |
+**Apple silicon macOS** (installs `needy`, the guest needy, and `vfkit`, then starts the daemon):
 
-Start with the [common setup](docs/ai/explanations/linux-actor-mac-executor.md#where-things-run).
-Then save one complete [example profile](examples/linux-mac).
-The website and Profile Studio read these same examples.
+```sh
+brew install needy-dev/tap/needy vfkit
+needy daemon service install --now
+```
 
-1. Install needy on both machines. Only the actor host needs actor images.
-2. Start the control daemon on Linux and verify local management discovery.
-3. Start one SSH tunnel and enroll the runner on the Mac.
-4. Mount the Mac project directory and save the selected profile.
-5. Start bash or OpenCode. Check a real command and the shared files.
+(Need `proto`, Windows, source builds, or `NEEDY_NO_DAEMON=1`? See [Other install methods and prerequisites](#other-install-methods-and-prerequisites).)
 
-The entrypoint stays in Linux. These profiles send captured child processes
-to the Mac. Shell builtins stay in their shell; built-in file editors use the
-shared mount. Container capture has [limits](#actor-drivers).
+### 2. Run a coding agent
 
-### Install
+On **Linux with KVM and Docker**, start a built-in coding agent directly — no
+repo clone or manual image pull required:
 
-Released binaries and images are available from [GitHub Releases](https://github.com/needy-dev/needy/releases).
-Use a release for the walkthroughs. Build from source when developing needy.
-`needy image build` needs a checkout of the image sources.
+```sh
+needy run create -it --profile builtin:opencode
+```
 
-#### From source
+Needy also ships `builtin:codex`, `builtin:pi`, and `builtin:herdr`. On the
+first local run, needy automatically pulls the release's base VM image, builds
+and caches the agent's Dev Container feature layers, and mounts a persistent
+sync store for its login and session state (with a SQLite row-merge driver for
+OpenCode's database).
+
+The `builtin:*` profiles set `actor.workspace` to an empty container workspace
+(`~/workspace` on the `build` executor). In your own profile, omit
+`actor.workspace` to mount the directory `needy run create` runs in live at
+`~/workspace` (see [Workspace](#workspace)).
+
+<details>
+<summary><b>Apple silicon Mac</b> (<code>macos-vz</code> actor + <code>native</code> executor)</summary>
+
+Save `~/.config/needy/profiles/opencode.yaml`:
+
+```yaml
+extends: builtin:opencode
+actor:
+  driver: macos-vz
+  workspace: { path: ~/workspace, from: "executor:build:/tmp/needy-demo", writable: true }
+executors:
+  build: { driver: native }
+```
+
+```sh
+mkdir -p /tmp/needy-demo
+needy run create -it --profile opencode
+```
+
+</details>
+
+<details>
+<summary><b>Linux without KVM</b> (<code>linux-container</code> actor, requires SSHFS and FUSE 3)</summary>
+
+Install [SSHFS and FUSE 3](#workspace-mount-prerequisites), then save
+`~/.config/needy/profiles/opencode.yaml`:
+
+```yaml
+extends: builtin:opencode
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }   # or runsc, if gVisor is installed
+```
+
+```sh
+needy run create -it --profile opencode
+```
+
+</details>
+
+Use `ctrl-]` to detach and leave a run active. Common run commands:
+
+```sh
+needy run ls
+needy run attach                                # defaults to the only live run
+needy run exec latest -- uname -a               # routed through the run's rules
+needy run stop                                  # SIGTERM, mirror-out / sync merge, then SIGKILL after --grace
+```
+
+### 3. Inspect and customize
+
+Read the trace of the last run (routed commands, denied hosts, injected faults):
+
+```sh
+needy run report latest
+```
+
+Open an interactive writable shell on an image definition to install tools and
+commit the resulting layer to its lockfile (pass `--driver macos-vz` on a Mac):
+
+```sh
+needy image edit --profile builtin:opencode
+needy image log --profile builtin:opencode
+needy image rollback --profile builtin:opencode
+needy image export --profile builtin:opencode -o opencode.tar
+```
+
+Check where a profile's actor, executors, and commands will run before starting:
+
+```sh
+needy config profile check builtin:opencode --mode control --cmd "bash -c pwd"
+```
+
+### Multi-machine setup
+
+To run the actor on a Linux host and route child commands to a Mac (or another
+Linux/Windows machine) over an SSH tunnel or Cloudflare Access TCP tunnel,
+follow the [Linux actor → Mac executor walkthrough](docs/ai/explanations/linux-actor-mac-executor.md).
+
+Quick reference for pairing a remote control client or enrolling a runner:
+
+```sh
+# On the control host: enable a loopback TCP listener and replace the service
+needy config set daemon.listen '[tcp://127.0.0.1:7400]'
+needy daemon service install --replace --now
+
+# Enroll an executor runner (paste the code from `needy runner invite --roles executor`)
+needy --address tcp://127.0.0.1:7400 runner join mac --roles executor
+needy runner serve
+
+# Or pair a remote control client (paste the code from `needy client invite --name mac-cli`)
+needy --address tcp://127.0.0.1:7400 config context pair control
+needy config use control
+```
+
+Connector argv can carry connections through an authenticated tunnel directly
+during pairing or enrollment (for example
+`-- ssh -W 127.0.0.1:7400 user@example.com` or
+`-- cloudflared access tcp --hostname needy.example.com`). Use a TCP route;
+proxied HTTPS hostnames do not carry gRPC through Cloudflare Tunnel.
+
+### Other install methods and prerequisites
+
+Released binaries and images are published on [GitHub Releases](https://github.com/needy-dev/needy/releases)
+with `.sha256` checksums and build provenance attestations
+(`gh attestation verify <asset> -R needy-dev/needy`). Container images are on
+GHCR (`ghcr.io/needy-dev/needy-actor` and `ghcr.io/needy-dev/needy-executor`).
+
+- **Install script options**: `install.sh` verifies `.sha256`, installs to
+  `~/.local/bin` (`NEEDY_INSTALL_DIR`, `NEEDY_VERSION`), and installs/replaces
+  the user daemon service (`NEEDY_NO_DAEMON=1` skips the daemon on runner-only
+  machines). Works on Linux and macOS.
+- **proto**:
+  ```sh
+  proto plugin add needy "https://raw.githubusercontent.com/needy-dev/needy/main/toolchain/proto/needy.toml" --to global
+  proto install needy latest --config-mode global --pin global
+  ```
+- **Windows (executor only)**: download
+  [needy-x86_64-pc-windows-msvc.zip](https://github.com/needy-dev/needy/releases/latest/download/needy-x86_64-pc-windows-msvc.zip),
+  extract `needy.exe`, and add it to `PATH`.
+- **Manual / offline image pulls**: local `run create` and `image build` pull
+  missing release base images automatically. For offline or pre-warmed hosts,
+  use `needy image pull` (`--driver`, `--file ARCHIVE`), `needy image ls`, and
+  `needy image rm`.
+
+<details>
+<summary><b>Build from source</b></summary>
 
 ```sh
 git clone https://github.com/needy-dev/needy && cd needy
@@ -84,451 +210,67 @@ make guest                               # bin/needy-linux-<arch>, with Docker
 cp bin/needy-linux-* "$(dirname "$(command -v needy)")/"
 ```
 
-Actor images hold no needy: the control daemon brings its own **guest
-needy** into every actor it starts, a static Linux build of its own version.
-It looks for `needy-linux-<arch>` next to its executable (or takes
-`--guest-needy PATH`); a static Linux release `needy` is its own guest.
-
-#### macOS
+Actor images hold no needy binary: the daemon injects its own static Linux
+**guest needy** (`needy-linux-<arch>` next to `needy`, or `--guest-needy PATH`).
+A dev build has no GitHub release to pull base images from; build them from the
+checkout:
 
 ```sh
-brew install needy-dev/tap/needy
-needy --version
-needy daemon service install --now   # Homebrew does not start services itself
-```
-
-Alternatively, without [Homebrew](https://brew.sh/):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
-```
-
-Both install the guest needy next to `needy` on Apple silicon. The script
-also [starts the control daemon](#start-the-control-daemon).
-
-#### Linux
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/needy-dev/needy/main/install/install.sh | sh
-needy --version
-```
-
-> [!NOTE]
-> The script checks the archive's `.sha256` before it installs anything. Set
-> `NEEDY_VERSION` to a release tag or `NEEDY_INSTALL_DIR` to change the
-> release or the install directory (default: `~/.local/bin`). `latest` is the
-> newest release that is not a prerelease. The Linux build is static, so it
-> runs on any distribution.
->
-> The script then installs and starts the control daemon as a user service
-> (`needy daemon service install --now`), or replaces the one already there
-> (`--replace --now`), which stops its active runs. If the service manager
-> refuses, needy stays installed and the script prints a warning. Set
-> `NEEDY_NO_DAEMON=1` to skip this step, for example on a machine that is
-> only a runner.
-
-#### Windows
-
-Download
-[needy-x86_64-pc-windows-msvc.zip](https://github.com/needy-dev/needy/releases/latest/download/needy-x86_64-pc-windows-msvc.zip),
-extract `needy.exe` to a permanent directory and add that directory to your
-user `PATH`. A Windows machine is an executor only.
-
-#### Install with proto
-
-Install and configure [proto](https://moonrepo.dev/docs/proto) first. Then add
-the needy plugin and install the latest release:
-
-```sh
-proto plugin add needy "https://raw.githubusercontent.com/needy-dev/needy/main/toolchain/proto/needy.toml" --to global
-proto install needy latest --config-mode global --pin global
-needy --version
-```
-
-After installing, pull the base images of your needy's release for the
-drivers this machine has (see the table below):
-
-```sh
-needy image pull                 # or one driver: needy image pull --driver macos-vz
-needy image ls
-```
-
-For a VM driver (`linux-firecracker`, `macos-vz`) it downloads the release's
-VM image, checks it against its `.sha256` and unpacks it into needy's data
-directory; for a container driver it pulls the base image (and the executor
-image) through the engine or Apple's `container`. A machine whose engine can
-run `linux-container` executors but not actors (a Mac) gets the executor
-image alone. needy never downloads a VM
-image by itself: a run without one fails and names `needy image pull`. The
-container drivers pull a missing container image themselves.
-
-Each
-[GitHub release](https://github.com/needy-dev/needy/releases) carries these
-assets, each with a `.sha256` file:
-
-| Asset | What it is |
-| --- | --- |
-| `needy-x86_64-unknown-linux-musl.tar.gz`, `needy-aarch64-unknown-linux-musl.tar.gz` | `needy` for Linux, statically linked |
-| `needy-aarch64-apple-darwin.tar.gz`, `needy-x86_64-apple-darwin.tar.gz` | `needy` for macOS, signed with a Developer ID and notarized; the arm64 one also holds `needy-linux-aarch64`, the guest needy (not signed: a Linux binary) |
-| `needy-x86_64-pc-windows-msvc.zip` | `needy.exe` for Windows (executor only), not Authenticode-signed |
-| `needy-actor-linux-firecracker-x86_64.tar.gz` | the `linux-firecracker` base image: `vmlinux`, `rootfs.ext4`, `firecracker`, `manifest.json` |
-| `needy-actor-macos-vz-aarch64.tar.gz` | the `macos-vz` base image: `Image`, `initrd`, `rootfs.ext4`, `manifest.json` |
-
-Each archive has a build provenance attestation:
-`gh attestation verify needy-actor-macos-vz-aarch64.tar.gz -R needy-dev/needy`
-checks that this repository's release workflow built it. The container images
-are on GHCR for amd64 and arm64, tagged with the release (`v<version>`) and
-`latest`: `ghcr.io/needy-dev/needy-actor` and
-`ghcr.io/needy-dev/needy-executor`. A profile without `actor.image`, and a
-daemon without `--executor-image`, use those of its own version.
-
-A needy built from a checkout has no release to pull from, and `needy image
-pull` says so. Build the images instead, and name the container images it
-builds, `needy-actor:latest` and `needy-executor:latest`:
-
-```sh
-needy image build                                  # the base VM image of this host's VM driver
-needy image build --linux-container --executor     # or --macos-apple-container on a Mac
+needy image build                                  # host VM base image (needs checkout)
+needy image build --linux-container --executor     # or --macos-apple-container on Mac
 needy config set daemon.executor_image needy-executor:latest
 needy daemon service install --now
-# and in a container actor's profile: actor: { image: needy-actor:latest, ... }
 ```
 
-`needy image pull --file ARCHIVE` imports a VM image archive on a machine
-without a network, and `needy image rm IMAGE` removes a VM image
-(`--guest-disks` also the guest disks of older needy versions). The prebuilt
-kernels have no recipe's identity; `needy image build --recipe` builds one
-that does. An image works with every needy that speaks its base ABI; needy
-names the command when it does not.
+</details>
 
-What each machine needs besides `needy`:
+<details>
+<summary><b>Daemon service management &amp; uninstall</b></summary>
 
-| Machine | Needs | Then |
-| --- | --- | --- |
-| Linux with KVM (actor host) | Docker or another Docker-compatible engine | `needy image pull` (the `linux-firecracker` base, and the container images) |
-| Linux without KVM (actor host) | a Docker-compatible engine; [SSHFS and FUSE 3](#workspace-mount-prerequisites) for workspace mounts; `lxcfs` for resource views | `needy image pull` (the container images) |
-| Apple silicon Mac (actor host) | `brew install vfkit`, or Apple's [`container`](https://github.com/apple/container) | `needy image pull` (the `macos-vz` base, or the base in Apple's `container`) |
-| Any Linux, macOS or Windows machine (executor only) | project tools; an SFTP server for an executor-backed workspace | join as a runner, see [Add machines](#add-machines) |
+`needy daemon service status` checks the user service (`~/.config/systemd/user/needy.service`
+on Linux, launchd on macOS). System services use `--scope system --run-as USER`
+(root required). After `brew upgrade needy`, run `needy daemon service install --replace --now`.
+For foreground serving during development, run `needy daemon serve`.
+
+To uninstall (keeping state and data directories):
+
+```sh
+needy daemon service uninstall                            # if installed
+brew uninstall needy                                      # Homebrew
+rm -f ~/.local/bin/needy ~/.local/bin/needy-linux-*       # install script
+proto uninstall needy && proto plugin remove needy --from global   # proto
+cargo uninstall needy-cli                                 # from source
+```
+
+</details>
 
 #### Workspace mount prerequisites
 
 For a `linux-container` actor, install SSHFS and FUSE 3 on the **Linux actor
-host**. The daemon mounts the workspace there, even when the source is a
-remote Mac. Choose the command for that host:
+host** (VM actors bundle their own helpers):
 
 <!-- Package sources: docs/ai/references/cli/2026-11-15-workspace-mount-package-sources-note.md -->
 
-Debian / Ubuntu:
-
 ```sh
-sudo apt-get update
-sudo apt-get install -y sshfs fuse3
-```
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y sshfs fuse3
 
-Fedora:
-
-```sh
+# Fedora
 sudo dnf install -y fuse-sshfs fuse3
-```
 
-Arch Linux:
-
-```sh
+# Arch Linux
 sudo pacman -S --noconfirm sshfs fuse3
 ```
 
-Enable `allow_other` for the non-root daemon. The container user needs access
-to the mount that the daemon owns:
+Enable `user_allow_other` for the non-root daemon, then verify as the daemon
+account without `sudo`:
 
 ```sh
 sudo sh -c 'grep -qxF user_allow_other /etc/fuse.conf || echo user_allow_other >> /etc/fuse.conf'
-```
-
-Run these checks as the **daemon account**, without `sudo`:
-
-```sh
-id
 command -v sshfs && command -v fusermount3
 test -r /dev/fuse && test -w /dev/fuse
 docker info --format '{{.ServerVersion}}'
 ```
-
-See the [Linux actor / Mac executor walkthrough](docs/ai/explanations/linux-actor-mac-executor.md) for per-machine setup.
-
-#### Uninstall
-
-Use the commands that match how you installed needy. They keep needy's
-state and data directories. Remove the control service first, while `needy`
-is still there to stop it:
-
-```sh
-needy daemon service uninstall                            # if a service is installed
-brew uninstall needy                                      # Homebrew
-rm -f ~/.local/bin/needy ~/.local/bin/needy-linux-*       # install script
-proto uninstall needy && proto plugin remove needy --from global   # proto
-cargo uninstall needy-cli                                 # from source; also remove the copied needy-linux-*
-```
-
-On Windows, delete the directory you extracted `needy.exe` to and remove it
-from `PATH`.
-
-### Start the control daemon
-
-The install script has already installed and started a user service on a
-Linux systemd host or a Mac with launchd; check it:
-
-```sh
-needy daemon service status
-needy runner ls
-```
-
-After a Homebrew install, an install with `NEEDY_NO_DAEMON=1`, or when the
-script warned that the daemon did not start, install it yourself:
-
-```sh
-needy daemon service install --now
-```
-
-Local commands discover the private management socket. No client pairing or
-bearer is required on the control host. A saved remote context does not change
-service operations.
-
-`local` is the built-in default context, not an entry you create or pair.
-`needy config use local` selects this machine's management discovery again.
-An additional TCP listener does not change what `local` means.
-
-Service installation reports the manager, scope, runtime account, generated
-files, and native status/log commands. On Linux the default user service is
-`~/.config/systemd/user/needy.service`, managed with
-`systemctl --user status needy.service`. This stays a user service when the
-installing account is root. The installation snapshots the daemon settings;
-it also writes `services/user/registration.json` under the configuration directory.
-
-System services use `--scope system --run-as USER`, require installation by
-root, and write `/etc/systemd/system/needy.service` on Linux. `USER` is the
-daemon's runtime account; it can be a non-root account. The selected account
-still needs access to the binary, images, KVM device, or container engine it uses.
-The [service installation reference](docs/ai/references/cli/2026-11-14-installation-feedback-evidence.md)
-lists the scope and permission boundaries.
-
-For remote runners or clients, configure an additional listener, then replace
-the service so it takes the new snapshot (use `install --now` where none is
-installed yet):
-
-```sh
-needy config set daemon.listen '[tcp://127.0.0.1:7400]'
-needy daemon service install --replace --now
-```
-
-`install --replace --now` updates an installed service's configuration
-snapshot and restarts it; it is also what the install script runs on an
-upgrade. After `brew upgrade needy`, run it to move the service to the new
-version. Remote machines use registered credentials through
-an SSH tunnel. The network listener keeps the local management socket.
-
-For development or an external supervisor, use foreground serving:
-
-```sh
-needy daemon serve --listen tcp://127.0.0.1:7400
-```
-
-TCP carries no encryption itself. If the daemon finds no guest needy, it warns
-and cannot start actors.
-
-### Pick a profile
-
-Which actor do you want? Each block is a complete profile: the driving program
-is `bash`, and `python3` is routed to an executor while everything else runs
-in the actor. Save it as `~/.config/needy/profiles/demo.yaml`.
-
-<details>
-<summary><b>Linux with KVM</b>: a Firecracker microVM (<code>linux-firecracker</code>)</summary>
-
-```yaml
-user: { name: agent, uid: 1000, gid: 1000 }
-actor:
-  driver: linux-firecracker
-  recipe: builtin:gce-ubuntu-22.04
-  command: [bash]
-executors:
-  build: { driver: linux-container, key: "{run}" }
-commands:
-  - { match: "python3 **", to: build }
-```
-
-</details>
-
-<details>
-<summary><b>Linux without KVM</b>: a container with runc or gVisor (<code>linux-container</code>)</summary>
-
-```yaml
-user: { name: agent, uid: 1000, gid: 1000 }
-actor:
-  driver: linux-container
-  container: { oci_runtime: runc }      # or runsc, if gVisor is installed
-  recipe: builtin:gce-ubuntu-22.04
-  command: [bash]
-executors:
-  build: { driver: linux-container, key: "{run}" }
-commands:
-  - { match: "python3 **", to: build }
-```
-
-</details>
-
-<details>
-<summary><b>Apple silicon Mac</b>: a Virtualization.framework VM (<code>macos-vz</code>)</summary>
-
-```yaml
-# mkdir -p /tmp/needy-demo first: the Mac itself is the executor.
-user: { name: agent, uid: 1000, gid: 1000 }
-actor:
-  driver: macos-vz
-  command: [bash]
-executors:
-  mac: { driver: native, workspace: /tmp/needy-demo }
-commands:
-  - { match: "python3 **", to: mac }
-```
-
-</details>
-
-<details>
-<summary><b>Apple silicon Mac</b>: Apple's <code>container</code> (<code>macos-apple-container</code>)</summary>
-
-```yaml
-# mkdir -p /tmp/needy-demo first: the Mac itself is the executor.
-user: { name: agent, uid: 1000, gid: 1000 }
-actor:
-  driver: macos-apple-container
-  command: [bash]
-executors:
-  mac: { driver: native, workspace: /tmp/needy-demo }
-commands:
-  - { match: "python3 **", to: mac }
-```
-
-</details>
-
-`needy config profile check demo --mode control` says where the actor and each executor would run,
-what of the recipe the driver cannot present, and where a command would go:
-`needy config profile check demo --mode control --cmd "python3 -V"`.
-
-### Run it
-
-```sh
-needy run create -it --profile demo
-#   agent@instance:~$ uname -a                                  # the actor
-#   agent@instance:~$ python3 -c 'import platform; print(platform.node())'   # the executor
-#   agent@instance:~$ exit
-needy run report latest                       # what was routed, faults, the actor's identity
-```
-
-`ctrl-]` detaches and leaves the run active. Run commands accept an ID,
-unique prefix, name, or `latest`. With no selector, attach/logs/stop select the
-only live run. Reports default to `latest`.
-
-```sh
-needy run ls
-needy run attach
-needy run exec latest -- uname -a
-needy proc exec --host -d -- python3 -m http.server
-needy proc ls
-needy proc attach PROCESS
-needy fs cp --run latest --executor build ./src remote:/home/agent/workspace
-needy run stop
-```
-
-`run stop` gives the driving program SIGTERM, then SIGKILL after `--grace`
-(default 10s). The actor mirrors out before the stop completes.
-`--now` kills the actor immediately and skips mirror-out. The report records
-which stop occurred. Controlled daemon shutdown uses the same cleanup within
-its finite shutdown budget.
-
-`proc exec` runs one process outside a run. Select `--host`, `--runner NAME`,
-or `--executor ID` explicitly. `run exec` routes through a run's rules.
-Arguments after `--` in `run create` are appended to the profile's
-`actor.command`.
-
-### One command from your laptop
-
-Client pairing lets a Mac control runs. Runner enrollment lets it execute
-commands. A Mac can hold both roles, but each role needs its own credential.
-`needy runner invite --roles executor` prints joining instructions and a token.
-Use `-o json` for machine-readable output; `.code` is the token.
-`runner join NAME --code-file FILE` reads a private token file; `--code-file -`
-reads a token piped to stdin. A successful join saves enrollment, then
-`needy runner serve` keeps the runner connected. See the
-[invitation and status examples](docs/ai/references/cli/2026-11-14-installation-feedback-evidence.md#runner-onboarding).
-The [Linux-to-Mac walkthrough](docs/ai/explanations/linux-actor-mac-executor.md)
-starts runs from Linux and does not require client pairing.
-
-If you also want a Mac control client, reuse the walkthrough's SSH tunnel.
-In the **Linux setup terminal**, create a pairing code:
-
-```sh
-needy client invite --name mac-cli --admin
-```
-
-In a **new Mac terminal**, pair at the hidden code prompt, then select the saved connection:
-
-```sh
-needy --address tcp://127.0.0.1:7400 config context pair control
-needy config use control
-needy runner ls
-```
-
-Pairing saves the transport and client credential without changing the default.
-`config use control` selects that connection. The Mac can attach to
-runs without a local profile. To create runs from the Mac, also save the
-complete profile there. `host:` paths still refer to the Linux control host.
-Use the [interactive OpenCode example](examples/linux-mac/opencode.yaml) for
-an interactive session. The [local-model experiment](examples/opencode/profile.yaml)
-requires a separate model service.
-
-### Add machines
-
-For the Linux-to-Mac scenario, use the
-[runner enrollment steps](docs/ai/explanations/linux-actor-mac-executor.md#5-register-the-mac-runner).
-Run enrollment on the executor machine, then check both its name and OS.
-A native runner needs needy and its toolchain, not actor images.
-
-Profiles select it by name:
-
-```yaml
-executors:
-  mac: { runner: mac, driver: native }
-```
-
-`needy runner ls` lists enrolled machines. `needy proc exec --runner mac -- uname -s`
-runs directly on that machine, outside any run. On Windows, start the runner
-outside the SSH session, with its normal tool PATH. `runner join` reads the code at a hidden prompt;
-`runner serve` reuses the saved runner credential.
-
-#### Over a tunnel
-
-needy serves plain gRPC on a loopback port. Connector argv can carry each
-connection through an authenticated tunnel. Save the transport during pairing
-or runner enrollment:
-
-```sh
-# cloudflared reads its own Access credentials from its configured environment.
-needy runner join mac --roles executor -- cloudflared access tcp --hostname needy.example.com
-needy runner serve
-
-# Pair a control client separately, then select its saved connection.
-needy config context pair control -- ssh -W 127.0.0.1:7400 user@example.com
-needy config use control
-needy runner ls
-```
-
-The invitation codes come from `runner invite` and `client invite` on the
-control host. Each consumer reads its code through a hidden prompt.
-
-Use a TCP route of the tunnel (`tcp://`, `cloudflared access tcp`): proxied
-HTTPS hostnames do not carry gRPC through Cloudflare Tunnel. A dropped
-connection costs little: runners connect again with backoff, and a workspace
-mount starts its SFTP stream again for up to 2 minutes.
 
 ## Actor drivers
 
@@ -572,7 +314,9 @@ actor (Seatbelt and shims, no VM) exists as a proof of concept on the
 ## Configuration
 
 A profile is YAML; unknown keys are errors, and `extends:` builds on another
-profile. See the [example profiles](#examples) for complete configurations.
+profile (including `builtin:opencode`, `builtin:codex`, `builtin:pi`, and
+`builtin:herdr`). See the [example profiles](#examples) for complete
+configurations.
 
 ### Commands
 
@@ -644,17 +388,13 @@ files:
 run_files: [login-in, login-out]
 ```
 
-A copy-in / mirror-out pair is how state such as a login survives stateless
-actors. A `filter` (rclone-style rules, first match wins) applies on the
-control host, where it packs a copy-in and where it unpacks a mirror-out.
-
-A `mode: sync` mapping (`from: "host:STORE"`, `to: "actor:PATH"`) does the
-same for several runs at once and survives `run stop --now`: each run works
-on its own copy of the store, merged back three-way when it ends, with an
-`on-conflict` map (`store`, `run`, `lines`) for files both changed; `needy
-report` lists the stores, conflicts and pending merges. See
-[Sync mapping](docs/TERMS_AND_CONCEPTS.md#sync-mapping). Unit and in-process
-daemon tests only so far; not yet verified end to end on a real actor.
+A `mode: sync` mapping (`from: "host:STORE"`, `to: "actor:PATH"`) shares state
+across concurrent runs and survives `run stop --now`: each run works on its
+own copy of the store and merges back three-way when it ends, with an
+`on-conflict` map (`store`, `run`, `lines`) and pluggable merge drivers (such
+as OpenCode's SQLite row-merge driver). Dev Container features can declare sync
+mappings under `customizations.needy.files` so agent profiles sync state
+automatically. See [Sync mapping](docs/TERMS_AND_CONCEPTS.md#sync-mapping).
 
 ### Network
 
@@ -745,50 +485,59 @@ outside the workspace) need the operator. Containers needy creates carry the
 labels `needy.run` and `needy.role` (`actor` or `executor`):
 `docker ps --filter label=needy.run=RUN` lists a run's containers.
 
-### Customize the actor
+### Customize the actor & image definitions
 
 ```yaml
 actor:
   driver: linux-firecracker
-  runner: kvm
   recipe: builtin:gce-ubuntu-22.04   # or a path to your own recipe
+  image:
+    root: ubuntu:24.04               # optional; defaults to ubuntu:24.04
+    layers:
+      - feature: builtin:opencode    # Dev Container feature (builtin, OCI, https, or local path)
+      - run: apt-get update && apt-get install -y jq
+    env: { OPENCODE_DISABLE_AUTOUPDATE: "1" }
+    hooks:
+      start: ["echo ready"]
+      stop: ["echo bye"]
   command: [opencode]
-  env: { OPENCODE_DISABLE_AUTOUPDATE: "1" }
 user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree in the actor
 ```
 
-A recipe sets the machine: CPU model and count, memory, kernel, firmware
-strings, devices, hostname (`instance-{time}`), and which identity fields are `required:`.
-`needy image build --recipe RECIPE` builds the actor kernel with a recipe's
-kernel options. `linux-container` takes `actor.container.oci_runtime`.
-`actor.image: REF` runs your own image `FROM` needy's base on every driver
-(`needy image build --from REF` for the VM drivers); see
-[`examples/custom-image`](examples/custom-image/Dockerfile). `actor.image`
-also takes an image definition (a root and `run` layers, inline or as a
-path to an image file); needy checks one but does not build it yet.
+- **Image definitions** (inline under `actor.image` or in a separate `.yaml`
+  file) layer Dev Container `feature:` entries and `run:` commands over a
+  `root:` OCI image, with optional `env:` and `hooks:` (`start` / `stop`).
+  Layers build and cache automatically on `needy run create` or `needy image
+  build` (no repo checkout needed), and a sibling `.lock` file pins OCI feature
+  digests and interactive commits from `needy image edit` (inspect with `image
+  log`, revert with `image rollback`, export with `image export`).
+- **Prebuilt OCI references**: `actor.image: REF` runs an image `FROM` needy's
+  base on every driver (`needy image build --from REF` for VM drivers; see
+  [`examples/custom-image`](examples/custom-image/Dockerfile)).
+- **Recipes**: set CPU model and count, memory, kernel, firmware strings,
+  devices, hostname (`instance-{time}`), and `required:` identity fields.
+  `needy image build --recipe RECIPE` builds a kernel with a recipe's kernel
+  options (needs a repo checkout).
 
 ### Environment and data
 
 | Variable | Meaning |
 | --- | --- |
 | `NEEDY_STATE_DIR` | traces, `state.db`, run directories, the socket on macOS (`$XDG_STATE_HOME/needy`) |
-| `NEEDY_DATA_DIR` | VM images in `images/<driver>/` and guest disks (`$XDG_DATA_HOME/needy`) |
+| `NEEDY_DATA_DIR` | VM images in `images/<driver>/`, layer store, locks, and guest disks (`$XDG_DATA_HOME/needy`) |
 | `NEEDY_CONFIG_DIR` | the global configuration, saved connections, and `profiles/` (`$XDG_CONFIG_HOME/needy`) |
 | `NEEDY_RUNTIME_DIR` | the daemon's socket (`$XDG_RUNTIME_DIR/needy`) |
-| `NEEDY_REPO` | the checkout `needy image build` builds from, when not run inside it |
+| `NEEDY_REPO` | the checkout `needy image build` builds base images from, when not run inside it |
 | `DOCKER_HOST` | the Docker-compatible engine (Docker Engine, OrbStack, Podman) |
 
-`--config FILE` selects the client configuration file. `--context NAME` selects
-a saved connection for one invocation. For direct transport, combine
-`--address URI` with an optional private `--credential-file FILE`.
-`-v` turns on logs. Old endpoint/token selectors are unsupported; old run variables
-and endpoint-keyed credential files are not read or imported. Create named
-connections explicitly with `needy config context pair`.
+`--config FILE` selects the client configuration file, `--context NAME` selects
+a saved connection for one invocation, and `-v` turns on logs.
 
 ## Examples
 
 | Profile | Shows |
 | --- | --- |
+| [`examples/agents`](examples/agents/README.md) | Coding agents (`builtin:opencode`, `builtin:codex`, `builtin:pi`, `builtin:herdr`) packaged as Dev Container features with automatic state sync |
 | [`examples/linux-mac`](examples/linux-mac) | Linux bash or OpenCode with a shared project and child processes on a Mac |
 | [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model as the service `http://model.needy`, shells in a container |
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
@@ -798,7 +547,6 @@ connections explicitly with `needy config context pair`.
 | [`examples/macos-vz`](examples/macos-vz/profile.yaml) | The smoke test in a `macos-vz` actor, routing by absolute path |
 | [`examples/macos-apple-container`](examples/macos-apple-container/profile.yaml) | The smoke and chaos tests in Apple's `container` |
 | [`examples/custom-image`](examples/custom-image/profile.yaml) | An actor image `FROM` needy's base with jq added, on every driver |
-| [`examples/agents`](examples/agents/README.md) | pi, Codex, opencode and herdr in an actor: one image, a profile each, their logins kept across runs |
 | [`examples/local`](examples/local/profile.yaml) | This machine as a native executor: copy-in, mirror-out, chaos and the trace |
 | [`examples/cli`](examples/cli/profile.yaml) | A container executor for `needy proc exec`, with an actor that only waits |
 | [`examples/bench`](examples/bench/profile.yaml) | Latency and throughput probes inside an actor, with `cargo xtask bench run` |
@@ -826,9 +574,9 @@ flowchart LR
 
 - **Capture, decide, apply.** A driver's capture catches each exec, the
   gateway sidecar every connection, the workspace mount every file open. The
-  daemon runs the domain's interceptors (rules, then chaos; the allowlist,
-  chaos and header injection for the network) and the program sees ordinary
-  PIDs, pipes, terminals and exit codes.
+  daemon runs the domain's interceptors (rules, then chaos; the allowlist and
+  chaos for the network) and the program sees ordinary PIDs, pipes, terminals
+  and exit codes.
 - **Observe.** Routing decisions, routed execs, file transfers, gateway
   requests and faults are typed events in the trace (SQLite or JSONL, as the
   profile's `trace:` says). `needy run report` summarizes a run as text, markdown
@@ -851,7 +599,7 @@ the project files and toolchains.
 | `core-executor` | executor drivers, the container engine client, the process host |
 | `core` | interceptor domains (exec, net, file) and their chains, rules, chaos, network policy, recipes, events, reports; no IO |
 | `trace` | the event pipeline and its sinks |
-| `config` | profile and recipe schemas, loading and validation |
+| `config` | profile, image definition, and recipe schemas, loading and validation |
 | `api-proto`, `api-client`, `api-server` | the gRPC API and its two sides |
 
 Extension points are directories with one implementation each: actor drivers
@@ -864,6 +612,7 @@ interceptor domains (`core/src/intercept/`), sidecars
 - [Linux actor and Mac executor walkthrough](docs/ai/explanations/linux-actor-mac-executor.md)
 - [Example profiles](examples)
 - [Terms and concepts](docs/TERMS_AND_CONCEPTS.md)
+- [Reference docs index](docs/ai/references/INDEX.md)
 
 ## Development
 
