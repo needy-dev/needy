@@ -10,13 +10,11 @@ Recorded 2026-11-21.
 - **Base revision**: `6723724` (`main` after slice 1 steps 1–8), plus the
   `image` e2e scenario and the `root_digest` caching fix on branch
   `feat/e2e-image-slice-1`.
-- **Host tested live**: an Apple silicon Mac (`arm64`, macOS 27.2),
-  `vfkit v0.6.4`, non-root daemon (`uid != 0`).
-- **Host not checked in this run**: a Linux x86_64 KVM host
-  (`linux-firecracker`). Non-interactive SSH to the remote KVM host was
-  refused by the local SSH agent (`agent refused operation` under
-  `BatchMode=yes`), so `linux-firecracker/image` and x86_64 Firecracker
-  live measurements remain pending until SSH authorization is available.
+- **Hosts tested live**:
+  - An Apple silicon Mac (`arm64`, macOS 27.2), `vfkit v0.6.4`, non-root daemon
+    (`uid != 0`) for `macos-vz/image` and VM measurements.
+  - A Linux x86_64 KVM host, non-root daemon (`uid != 0`), tested at `c0ecc6c`
+    for `linux-firecracker/image`.
 
 ## E2E `image` scenario
 
@@ -54,7 +52,7 @@ Added `Scenario::Image` (`macos-vz/image` and `linux-firecracker/image`) to
 | Cell | Host | Command | Result | Duration |
 | --- | --- | --- | --- | --- |
 | `macos-vz/image` | Apple silicon Mac (`arm64`, macOS 27.2) | `cargo xtask e2e --only image` | **pass** | 37.5 s (after `root_digest` cache fix; 125.7 s before) |
-| `linux-firecracker/image` | Linux x86_64 KVM host | `cargo xtask e2e --remote <KVM_HOST> --only image` | **not checked** | SSH agent refused non-interactive signing |
+| `linux-firecracker/image` | Linux x86_64 KVM host (non-root) | `cargo xtask e2e --remote <KVM_HOST> --only /image` (at `c0ecc6c`) | **pass** | 28.4 s |
 
 ## Bug uncovered during live measurements
 
@@ -125,7 +123,5 @@ utilization.
 
 ## Remaining / Not checked
 
-- Live `cargo xtask e2e --remote <KVM_HOST> --only image` on a Linux x86_64
-  KVM host (`linux-firecracker`).
 - Live boot-time (0, 1, 8 layer disks), 8-layer + guest-disk device-limit
   confirmation, and edit-session tmpfs measurements on `linux-firecracker`.
