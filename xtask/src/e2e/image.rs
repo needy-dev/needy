@@ -77,7 +77,14 @@ exit 0
   let run1 = runs::create(env, &profile, &[])?;
   let (row1, console1) = end_run(env, &run1, End::Exit, checks, env.ctx.timeout)?;
   check_ended(checks, End::Exit, &row1, 0);
-  checks.value(&console1, "tool-path", "/opt/e2e-bin/e2e-layer-tool");
+  // Container drivers capture execs via PATH trampolines under `/run/needy/shims`
+  // prepended ahead of `image_path`; VM drivers capture in the kernel via
+  // `binfmt_needy`, so `command -v` resolves directly to `/opt/e2e-bin`.
+  let expected_tool_path = match cell.driver {
+    Driver::Container(_) | Driver::AppleContainer => "/run/needy/shims/e2e-layer-tool",
+    Driver::Firecracker | Driver::Vz | Driver::Host => "/opt/e2e-bin/e2e-layer-tool",
+  };
+  checks.value(&console1, "tool-path", expected_tool_path);
   checks.value(&console1, "tool", "e2e-layer-ok");
   checks.value(&console1, "layer-file", "declared-layer");
   checks.value(&console1, "layer-env", "from-image");
