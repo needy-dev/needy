@@ -13,6 +13,7 @@ use super::matrix::{Cell, Driver, End};
 use super::runs::{self, check_ended, end_run};
 
 const BUILD: Duration = Duration::from_secs(180);
+const FEATURE_BUILD: Duration = Duration::from_secs(300);
 const STEP: Duration = Duration::from_secs(120);
 
 pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
@@ -152,6 +153,86 @@ exit 0
 
   let report3 = runs::report(env, &run3)?;
   checks.eq("post-rollback run restores the original snapshot digest", Some(built_snapshot.as_str()), report3["snapshot"].as_str());
+
+  Ok(())
+}
+
+/// The `image-feature` scenario: fetches a published Dev Container feature
+/// from an OCI registry, builds it in a session with `with:` options, pins its
+/// digest in `<image>.lock`, verifies cached rebuild, and boots a run to check
+/// the installed tool on `PATH` and `run report`.
+pub fn run_feature(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
+  let (name, id) = cell.user.account();
+  let root_line = match cell.driver {
+    Driver::Container(_) | Driver::AppleContainer => format!("root: {}\n", env.ctx.host.image_names.actor),
+    Driver::Firecracker | Driver::Vz | Driver::Host => String::new(),
+  };
+  let image_yaml = format!(
+    r#"{root_line}layers:
+  - feature: ghcr.io/devcontainers/features/github-cli:1
+    with:
+      installDirectlyFromGitHubRelease: true
+"#
+  );
+  let image_path = env.file("test-feature-image.yaml", &image_yaml, 0o644)?;
+  let lockfile = image_path.with_file_name("test-feature-image.yaml.lock");
+
+  let script = r#"
+echo "E2E gh-path=$(command -v gh 2>/dev/null || echo absent)"
+echo "E2E gh-version=$(gh --version 2>/dev/null | head -n 1 || echo absent)"
+exit 0
+"#;
+
+  let mut actor = json!({
+    "driver": cell.driver.profile_name(),
+    "image": "./test-feature-image.yaml",
+    "command": ["/bin/sh", "-c", script],
+  });
+  if let Driver::Container(oci) = cell.driver {
+    actor["container"] = json!({ "oci_runtime": oci.name() });
+  }
+  let profile = env.profile(&json!({
+    "user": { "name": name, "uid": id, "gid": id },
+    "actor": actor,
+  }))?;
+  let profile_str = profile.display().to_string();
+
+  // 1. Build the feature image: pulls from OCI, runs `install.sh`, pins lockfile.
+  let built = env.needy(&["image", "build", "--profile", &profile_str], FEATURE_BUILD)?;
+  if !built.ok() {
+    bail!("feature image build failed: {}", built.brief());
+  }
+  let built_snapshot = built.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
+  checks.check("feature image build prints a snapshot digest", built_snapshot.starts_with("sha256:"), format!("{built_snapshot:?}"));
+
+  let lock_text = std::fs::read_to_string(&lockfile).unwrap_or_default();
+  checks.check(
+    "feature image build writes pinned digest to lockfile",
+    lock_text.contains("features:") && lock_text.contains("ghcr.io/devcontainers/features/github-cli: sha256:"),
+    lock_text,
+  );
+
+  // 2. Second build hits cache with the same snapshot digest.
+  let rebuilt = env.needy(&["image", "build", "--profile", &profile_str], BUILD)?;
+  checks.check("second feature image build succeeds", rebuilt.ok(), rebuilt.brief());
+  let rebuilt_snapshot = rebuilt.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
+  checks.eq("second feature image build hits cache with the same snapshot digest", built_snapshot.clone(), rebuilt_snapshot);
+
+  // 3. Boot the snapshot and verify the installed tool on `PATH` and `run report`.
+  let run_id = runs::create(env, &profile, &[])?;
+  let (row, console) = end_run(env, &run_id, End::Exit, checks, env.ctx.timeout)?;
+  check_ended(checks, End::Exit, &row, 0);
+
+  let expected_gh_path = match cell.driver {
+    Driver::Container(_) | Driver::AppleContainer => "/run/needy/shims/gh",
+    Driver::Firecracker | Driver::Vz | Driver::Host => "/usr/bin/gh",
+  };
+  checks.value(&console, "gh-path", expected_gh_path);
+  let gh_version = console.value("gh-version").unwrap_or_default();
+  checks.check("gh --version succeeds", gh_version.starts_with("gh version "), format!("{gh_version:?}"));
+
+  let report = runs::report(env, &run_id)?;
+  checks.eq("run report records the built feature snapshot digest", Some(built_snapshot.as_str()), report["snapshot"].as_str());
 
   Ok(())
 }

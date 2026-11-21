@@ -327,6 +327,9 @@ pub enum Scenario {
   /// Image definitions (`run:` layers, `env`/`PATH`), `image build`, `image edit`,
   /// lockfile commits, and `image rollback`.
   Image,
+  /// Dev Container feature layers: OCI fetch, `install.sh` build session,
+  /// lockfile feature pinning, `containerEnv` / `PATH`, and cached rebuild.
+  ImageFeature,
   /// Routing to a native executor on a runner that joined the control
   /// plane, and `needy proc exec --runner`.
   Runner(RunnerAt),
@@ -386,6 +389,7 @@ impl Cell {
     let executor = match scenario {
       Scenario::Service
       | Scenario::Image
+      | Scenario::ImageFeature
       | Scenario::Terminal
       | Scenario::Tui(_)
       | Scenario::Network(_)
@@ -435,6 +439,7 @@ impl Cell {
       Scenario::HostCopy => format!("{driver}/fs-cp"),
       Scenario::Service => format!("{driver}/service/user"),
       Scenario::Image => format!("{driver}/image"),
+      Scenario::ImageFeature => format!("{driver}/image-feature"),
     }
   }
 
@@ -617,6 +622,7 @@ pub fn cells() -> Vec<Cell> {
       }
     }
     cells.push(cell(Scenario::Image));
+    cells.push(cell(Scenario::ImageFeature));
     for (i, _) in super::tui::cases().iter().enumerate() {
       cells.push(Cell {
         terminal: Terminal::Now,
@@ -683,7 +689,7 @@ mod tests {
 
   #[test]
   fn image_cells_cover_vm_and_container_drivers() {
-    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["image".into()], &[])).collect();
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["*/image".into()], &[])).collect();
     let ids: Vec<String> = mine.iter().map(Cell::id).collect();
     assert_eq!(
       ids,
@@ -693,6 +699,23 @@ mod tests {
         "linux-container.runsc/image",
         "macos-vz/image",
         "macos-apple-container/image",
+      ]
+    );
+    assert!(mine.iter().all(|cell| cell.executor.is_none() && !cell.root));
+  }
+
+  #[test]
+  fn image_feature_cells_cover_vm_and_container_drivers() {
+    let mine: Vec<_> = cells().into_iter().filter(|cell| selected(&cell.id(), &["*/image-feature".into()], &[])).collect();
+    let ids: Vec<String> = mine.iter().map(Cell::id).collect();
+    assert_eq!(
+      ids,
+      vec![
+        "linux-firecracker/image-feature",
+        "linux-container.runc/image-feature",
+        "linux-container.runsc/image-feature",
+        "macos-vz/image-feature",
+        "macos-apple-container/image-feature",
       ]
     );
     assert!(mine.iter().all(|cell| cell.executor.is_none() && !cell.root));

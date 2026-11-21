@@ -63,6 +63,11 @@ const SESSION_STOP_GRACE: Duration = Duration::from_secs(3);
 /// to include in the error message.
 const FAILURE_LOG_LINES: usize = 20;
 
+/// Maximum byte length of the console tail included in a failed build error
+/// message so the gRPC `grpc-message` trailer stays well under HTTP/2's
+/// default 16 KiB `MAX_HEADER_LIST_SIZE` even after percent-encoding.
+const FAILURE_LOG_MAX_BYTES: usize = 4096;
+
 /// Result broadcast to waiters sharing an in-flight build for one cache key.
 type FlightResult = std::result::Result<Digest, String>;
 
@@ -2066,7 +2071,7 @@ set -a
 set +a
 chmod +x ./install.sh
 status=0
-sh ./install.sh || status=$?
+./install.sh || status=$?
 cd /
 rm -rf /tmp/needy-feature
 exit "$status"
@@ -2086,11 +2091,20 @@ fn first_line(script: &str) -> &str {
 
 fn format_build_failure(script: &str, status: &str, console: &str) -> String {
   let mut msg = format!("image build step `{}` {status}", first_line(script));
-  let lines: Vec<&str> = console.lines().map(str::trim_end).filter(|line| !line.trim().is_empty()).collect();
+  let lines: Vec<&str> =
+    console.lines().map(|line| line.rsplit('\r').next().unwrap_or(line).trim_end()).filter(|line| !line.trim().is_empty()).collect();
   let tail = &lines[lines.len().saturating_sub(FAILURE_LOG_LINES)..];
   if !tail.is_empty() {
+    let mut joined = tail.join("\n");
+    if joined.len() > FAILURE_LOG_MAX_BYTES {
+      let mut start = joined.len() - FAILURE_LOG_MAX_BYTES;
+      while !joined.is_char_boundary(start) {
+        start += 1;
+      }
+      joined = format!("...{}", &joined[start..]);
+    }
     msg.push('\n');
-    msg.push_str(&tail.join("\n"));
+    msg.push_str(&joined);
   }
   msg
 }
