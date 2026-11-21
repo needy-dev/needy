@@ -2322,6 +2322,7 @@ dependencies = [
  "backhand",
  "backon",
  "bytes",
+ "flate2",
  "futures-util",
  "http-body-util",
  "hyper",

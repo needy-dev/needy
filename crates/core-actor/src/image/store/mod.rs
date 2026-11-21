@@ -5,30 +5,34 @@
 //! A layer's one canonical form is an OCI layer archive (an uncompressed
 //! tar, deletions as `.wh.` whiteouts), named by the SHA-256 of that
 //! archive, its OCI `DiffID`. What a driver boots is derived from it and
-//! cached here: [`Store::materialize`] makes SquashFS layer disks. No caller
-//! sees whiteouts, disk formats or how commits collapse.
+//! cached here: [`Store::materialize`] makes SquashFS layer disks for the VM
+//! drivers, and [`Store::materialize_container`] assembles a loadable
+//! Docker/OCI image archive for the container drivers. No caller sees
+//! whiteouts, disk formats or how commits collapse.
 //!
-//! Built layers, snapshot records and disks are cache, in the cache
-//! directory: they can be built again. An image's commits are a user's hand
-//! edits, which cannot, so its commit layers and history are in the data
-//! directory. [`Store::collect`] removes what is named neither by the
-//! caller nor by a commit history.
+//! Built layers, snapshot records, disks and OCI archives are cache, in the
+//! cache directory: they can be built again. An image's commits are a user's
+//! hand edits, which cannot, so its commit layers and history are in the data
+//! directory. [`Store::collect`] removes what is named neither by the caller
+//! nor by a commit history.
 //!
 //! Everything here is blocking file IO, some of it on whole layers: call it
 //! off the async runtime.
 //!
 //! See `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`
 //! ("The layer store").
-// NOTICE: the directory layout (`layers/`, `snapshots/`, `disks/`,
+// NOTICE: the directory layout (`layers/`, `snapshots/`, `disks/`, `oci/`,
 // `images/`, each file `sha256-<hex>.<ext>`) is provisional and private to
 // this module; nothing outside reads it.
-// TODO(images): an OCI image for the container drivers is the other thing
-// `materialize` makes (slice 2); a general listing of stored layers waits
-// for `needy image ls` or `log` to need it.
+// TODO(images): a general listing of stored layers waits for `needy image ls`
+// or `log` to need it.
 
 mod archive;
 mod collapse;
 mod disk;
+mod oci;
+
+pub use oci::{extract_top_layer, snapshot_tag};
 
 use std::collections::HashSet;
 use std::fmt;
@@ -240,6 +244,14 @@ impl Store {
     self.store(layer, &self.cache.join("layers"))
   }
 
+  /// Stores the top layer of a committed container image archive (Docker save
+  /// or OCI image layout) as a canonical layer in the store and returns its
+  /// digest.
+  pub fn put_from_image_export(&self, image_tar: &Path) -> Result<Digest> {
+    let top = oci::extract_top_layer(image_tar)?;
+    self.put(top)
+  }
+
   /// Whether a layer with `digest` is stored (in either the cache or the
   /// data directory).
   pub fn has_layer(&self, digest: &Digest) -> bool {
@@ -307,6 +319,18 @@ impl Store {
       });
     }
     Ok(disks)
+  }
+
+  /// Assembles a `docker load` / `container image load`-compatible OCI image
+  /// archive for `snapshot` layered on `base_image_tar`, tagged as `tag`.
+  ///
+  /// Appends each layer of `snapshot` in order, runs the in-place shell shim
+  /// step whenever a snapshot layer adds or replaces a shell binary, and
+  /// caches the resulting archive under the store's cache directory keyed by
+  /// the snapshot digest, the base image config digest, and `tag`.
+  pub fn materialize_container(&self, snapshot: &Snapshot, base_image_tar: &Path, tag: &str) -> Result<PathBuf> {
+    let layers: Vec<(Digest, PathBuf)> = snapshot.layers.iter().map(|digest| Ok((*digest, self.layer(digest)?))).collect::<Result<_>>()?;
+    oci::materialize(&self.cache.join("oci"), snapshot.digest, &layers, base_image_tar, tag)
   }
 
   /// Commits an edit session's upper layer `upper` (as [`Store::put`] takes
@@ -420,7 +444,7 @@ impl Store {
         }
       }
     }
-    for (path, digest) in stored(&self.cache.join("snapshots"))? {
+    for (path, digest) in stored(&self.cache.join("snapshots"))?.into_iter().chain(stored(&self.cache.join("oci"))?) {
       if !kept.contains(&digest) {
         collected.bytes += remove_file(&path)?;
       }
