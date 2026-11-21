@@ -983,6 +983,7 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
     resolved_features: resolved.resolved_features,
     start_hooks: resolved.plan.hooks.start,
     stop_hooks: resolved.plan.hooks.stop,
+    sync_files: resolved.plan.sync_files,
   });
   Ok(())
 }

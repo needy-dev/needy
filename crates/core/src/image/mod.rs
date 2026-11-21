@@ -12,11 +12,14 @@ use std::fmt;
 use std::str::FromStr;
 
 use needy_config::image::{Definition, FeatureOption, Hooks, Layer, untagged};
-use needy_config::profile::User;
+use needy_config::profile::{OnConflict, User};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-pub use self::feature::{FeatureError, FeatureMetadata, LifecycleCommand, LifecycleEntry, OptionSpec, sanitize_option_name};
+pub use self::feature::{
+  FeatureCustomizations, FeatureError, FeatureFileSpec, FeatureMetadata, LifecycleCommand, LifecycleEntry, NeedyCustomizations, OptionSpec,
+  sanitize_option_name,
+};
 
 /// The `PATH` an actor's own programs are found on before an image adds to
 /// it; the image's `PATH` starts from it.
@@ -150,6 +153,30 @@ pub struct Plan {
   /// Lifecycle hooks for runs of this image: features' hooks first in resolved
   /// layer order, followed by the image definition's hooks.
   pub hooks: Hooks,
+  /// Sync mappings declared by features (`customizations.needy.files`),
+  /// collected in resolved layer order with `~` expanded for [`Plan::user`].
+  pub sync_files: Vec<FeatureSyncFile>,
+}
+
+/// A sync mapping declared by a Dev Container feature's
+/// `customizations.needy.files`, resolved for a specific [`Plan::user`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FeatureSyncFile {
+  /// Mapping name (key in `customizations.needy.files`).
+  pub name: String,
+  /// Store key under needy's `<data_dir>/files/<store>` directory.
+  /// Defaults to [`Self::name`] when omitted in `devcontainer-feature.json`.
+  pub store: String,
+  /// Target path inside the actor, with leading `~` expanded to the profile
+  /// user's home directory.
+  pub path: String,
+  /// rclone-style ordered `+` and `-` rules; first match wins.
+  pub filter: Vec<String>,
+  /// Conflict resolution choices for entries changed by both the run and the
+  /// store, in the order written.
+  pub on_conflict: Vec<(String, OnConflict)>,
+  /// The feature reference that declared this mapping.
+  pub feature: String,
 }
 
 /// One layer to build.
@@ -200,6 +227,22 @@ pub enum PlanError {
   DependencyCycle { cycle: String },
   #[error("feature `{feature}` declares `installsAfter` `{after}`, which appears after it in the layer order")]
   InstallsAfterViolation { feature: String, after: String },
+  #[error(
+    "features `{first_feature}` (mapping `{first_name}`) and `{second_feature}` (mapping `{second_name}`) both claim actor path `{path}`"
+  )]
+  SyncFilePathConflict {
+    path: String,
+    first_feature: String,
+    first_name: String,
+    second_feature: String,
+    second_name: String,
+  },
+  #[error("features `{first_feature}` and `{second_feature}` both declare sync mapping `{name}`")]
+  SyncFileNameConflict {
+    name: String,
+    first_feature: String,
+    second_feature: String,
+  },
 }
 
 /// An image's commit layer as its lockfile records it: the layer that holds
@@ -273,6 +316,7 @@ pub fn plan(
   let mut steps = Vec::with_capacity(resolved_layers.len());
   let mut acc_env = BTreeMap::from([("PATH".to_string(), SYSTEM_PATH.to_string())]);
   let mut hooks = Hooks::default();
+  let mut sync_files: Vec<FeatureSyncFile> = Vec::new();
 
   for layer in resolved_layers {
     let (input, resolved_input) = match layer {
@@ -287,6 +331,7 @@ pub fn plan(
       } => {
         apply_env(&mut acc_env, &resolved.metadata.container_env);
         hooks.start.extend(resolved.metadata.start_hooks());
+        collect_feature_sync_files(&reference, &resolved.metadata, user, &mut sync_files)?;
         let env = resolved.metadata.resolve_options(&options);
         let resolved_input = json!({
           "feature": {
@@ -322,7 +367,61 @@ pub fn plan(
     env: acc_env,
     path,
     hooks,
+    sync_files,
   })
+}
+
+/// Collects `customizations.needy.files` entries from one feature into `out`,
+/// expanding leading `~` for `user` and rejecting duplicate mapping names or
+/// conflicting actor paths across features.
+fn collect_feature_sync_files(
+  reference: &str,
+  metadata: &FeatureMetadata,
+  user: &User,
+  out: &mut Vec<FeatureSyncFile>,
+) -> Result<(), PlanError> {
+  let Some(needy) = &metadata.customizations.needy else {
+    return Ok(());
+  };
+  for (name, spec) in &needy.files {
+    let expanded = user.expand_home(spec.path.trim());
+    let norm = trim_trailing_slashes(&expanded);
+    for existing in out.iter() {
+      if existing.name == *name {
+        return Err(PlanError::SyncFileNameConflict {
+          name: name.clone(),
+          first_feature: existing.feature.clone(),
+          second_feature: reference.to_string(),
+        });
+      }
+      if trim_trailing_slashes(&existing.path) == norm {
+        return Err(PlanError::SyncFilePathConflict {
+          path: norm.to_string(),
+          first_feature: existing.feature.clone(),
+          first_name: existing.name.clone(),
+          second_feature: reference.to_string(),
+          second_name: name.clone(),
+        });
+      }
+    }
+    out.push(FeatureSyncFile {
+      name: name.clone(),
+      store: spec.store.clone().unwrap_or_else(|| name.clone()),
+      path: expanded,
+      filter: spec.filter.clone(),
+      on_conflict: spec.on_conflict.clone(),
+      feature: reference.to_string(),
+    });
+  }
+  Ok(())
+}
+
+/// `path` without trailing slashes, except the root.
+fn trim_trailing_slashes(path: &str) -> &str {
+  match path.trim_end_matches('/') {
+    "" => path,
+    trimmed => trimmed,
+  }
 }
 
 /// Expands `layers` by inserting `dependsOn` features before their dependents

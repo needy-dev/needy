@@ -150,6 +150,7 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
     resolved_features: Default::default(),
     start_hooks: vec!["./start.sh".into()],
     stop_hooks: vec!["./stop.sh".into()],
+    sync_files: Vec::new(),
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();
@@ -196,6 +197,7 @@ async fn the_guest_receives_materialized_layer_disk_digests_when_flattened() {
     resolved_features: Default::default(),
     start_hooks: Vec::new(),
     stop_hooks: Vec::new(),
+    sync_files: Vec::new(),
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();
