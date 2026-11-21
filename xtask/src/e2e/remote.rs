@@ -185,34 +185,111 @@ mod tests {
       "remote runs must preserve the service opt-in boundary"
     );
   }
+
+  #[test]
+  fn cargo_xtask_preserves_target_dir_outside_shipped_src() {
+    let script = cargo_xtask("needy-e2e", &["e2e".into(), "--list".into()]);
+    assert!(
+      script.contains("export CARGO_TARGET_DIR=\"$PWD/../target\""),
+      "remote cargo_xtask must place target/ outside DIR/src so rm -rf DIR/src preserves the build cache: {script}"
+    );
+    assert!(script.contains("cd needy-e2e/src"));
+    assert!(script.contains("cargo xtask e2e --list"));
+  }
+
+  #[test]
+  fn clean_script_removes_shipped_base_and_snapshot_images() {
+    let shipped = super::super::host::Images::shipped();
+    let script = clean_script(&shipped, "needy-e2e");
+    for expected in [
+      shipped.agents.as_str(),
+      shipped.actor.as_str(),
+      shipped.executor.as_str(),
+      EXECUTOR_BASE,
+      "reference=needy-snapshot:*",
+      "rm -rf needy-e2e",
+    ] {
+      assert!(script.contains(expected), "clean script missing {expected:?}: {script}");
+    }
+  }
+
+  #[test]
+  fn fetch_load_script_tags_base_on_initial_load_and_rebuilds_from_base() {
+    let shipped = super::super::host::Images::shipped();
+    let initial = fetch_load_script("needy-e2e/work", &shipped.executor, true, false, None, "needy-e2e");
+    assert!(
+      initial.contains(&format!("docker tag {} {EXECUTOR_BASE}", shipped.executor)),
+      "initial executor load must record base tag: {initial}"
+    );
+    assert!(!initial.contains("Dockerfile"), "initial load must not rebuild: {initial}");
+
+    let rebuilt = fetch_load_script("needy-e2e/work", &shipped.executor, false, true, Some("needy-e2e"), "needy-e2e");
+    assert!(
+      rebuilt.contains(&format!("FROM {EXECUTOR_BASE}")),
+      "executor rebuild must build FROM {EXECUTOR_BASE} to avoid layer stacking: {rebuilt}"
+    );
+    assert!(
+      !rebuilt.contains(&format!("FROM {}", shipped.executor)),
+      "executor rebuild must not stack on top of {}: {rebuilt}",
+      shipped.executor
+    );
+    assert!(rebuilt.contains("docker image rm \"$prev\""), "executor rebuild must remove the superseded image ID: {rebuilt}");
+    assert!(rebuilt.contains("chown -R needy-e2e: needy-e2e"));
+  }
+}
+
+/// Base tag for the initial loaded executor image on `Role::Run` hosts, so
+/// rebuilding the `needy` binary layer stays constant-depth (+1 layer)
+/// instead of stacking a new layer on every run.
+const EXECUTOR_BASE: &str = "needy-e2e-executor-base:src";
+
+/// Shell snippet that removes the harness's shipped images, `needy-snapshot:*`
+/// container images, and `dir` directly over SSH without shipping `HEAD` or
+/// compiling `xtask`.
+fn clean_script(shipped: &super::host::Images, dir: &str) -> String {
+  format!(
+    "docker image rm {} {} {} {EXECUTOR_BASE} 2>/dev/null; \
+     snaps=$(docker images --format '{{{{.Repository}}}}:{{{{.Tag}}}}' --filter 'reference=needy-snapshot:*' 2>/dev/null); \
+     [ -n \"$snaps\" ] && docker image rm $snaps 2>/dev/null; \
+     rm -rf {dir}",
+    shipped.agents, shipped.actor, shipped.executor
+  )
 }
 
 /// `cargo xtask ARGS` in `dir/src` on a build host. A non-interactive ssh
 /// shell may not have cargo on PATH; rustup's env file puts it there.
+/// `CARGO_TARGET_DIR` lives beside `src` (`$PWD/../target`) so `rm -rf dir/src`
+/// preserves compiled artifacts across runs.
 pub(super) fn cargo_xtask(dir: &str, args: &[String]) -> String {
-  format!("cd {dir}/src && {{ [ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; true; }} && cargo xtask {}", shell_words::join(args))
+  format!(
+    "cd {dir}/src && {{ [ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; true; }} && export CARGO_TARGET_DIR=\"$PWD/../target\" && cargo xtask {}",
+    shell_words::join(args)
+  )
 }
 
 pub fn run(root: &Path, host: &str, args: &Args) -> Result<i32> {
   let dir = checked_dir(&args.remote_dir)?;
+  if args.clean {
+    let shipped = super::host::Images::shipped();
+    let (code, _) = remote(host, &clean_script(&shipped, dir))?;
+    return Ok(code);
+  }
   eprintln!("e2e: shipping HEAD to {host}:{dir}/src");
   ship(root, host, dir)?;
-  let mut remote_args = vec!["e2e".to_string(), "--work-dir".into(), "../work".into()];
-  if args.clean {
-    remote_args.push("--clean".into());
-  } else {
-    remote_args.extend(["-o".into(), "json".into()]);
-    remote_args.extend(forwarded(args, &args.only, &args.skip, args.parallel));
-  }
+  let mut remote_args = vec![
+    "e2e".to_string(),
+    "--work-dir".into(),
+    "../work".into(),
+    "-o".into(),
+    "json".into(),
+  ];
+  remote_args.extend(forwarded(args, &args.only, &args.skip, args.parallel));
   let (code, stdout) = remote(host, &cargo_xtask(dir, &remote_args))?;
   if !args.remote_keep {
     let (cleaned, _) = remote(host, &format!("rm -rf {dir}/src"))?;
     if cleaned != 0 {
       eprintln!("e2e: cannot remove {host}:{dir}/src");
     }
-  }
-  if args.clean {
-    return Ok(code);
   }
   show(args.output, &[(host.to_string(), parse(&stdout, code))])?;
   Ok(code)
@@ -361,26 +438,7 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
           &args.work_dir.clone().unwrap_or_else(|| root.join(".tmp").join("e2e")),
           &super::host::Images::of_checkout(root),
         ),
-        Role::Build => ship(root, &h.ssh, &h.dir)
-          .and_then(|()| {
-            remote(
-              &h.ssh,
-              &cargo_xtask(
-                &h.dir,
-                &[
-                  "e2e".into(),
-                  "--work-dir".into(),
-                  "../work".into(),
-                  "--clean".into(),
-                ],
-              ),
-            )
-          })
-          .and_then(|_| remote(&h.ssh, &format!("rm -rf {}", h.dir)).map(|_| ())),
-        Role::Run => {
-          remote(&h.ssh, &format!("docker image rm {} {} {} 2>/dev/null; rm -rf {}", shipped.agents, shipped.actor, shipped.executor, h.dir))
-            .map(|_| ())
-        }
+        Role::Build | Role::Run => remote(&h.ssh, &clean_script(&shipped, &h.dir)).map(|_| ()),
         Role::Runner => Ok(()),
       };
       if let Err(e) = result {
@@ -538,10 +596,47 @@ pub fn run_hosts(root: &Path, file: &Path, args: &Args) -> Result<i32> {
 }
 
 /// Whether the run host has an executor image of the harness, whatever its
-/// ID.
+/// ID (either the pinned base tag or the active executor tag).
 fn executor_present(run: &Host) -> Result<bool> {
-  let (code, _) = remote(&run.ssh, &format!("docker image inspect {} >/dev/null 2>&1", super::host::Images::shipped().executor))?;
+  let image = &super::host::Images::shipped().executor;
+  let (code, _) =
+    remote(&run.ssh, &format!("docker image inspect {EXECUTOR_BASE} >/dev/null 2>&1 || docker image inspect {image} >/dev/null 2>&1"))?;
   Ok(code == 0)
+}
+
+/// Post-unpack shell script on a `Role::Run` host: installs the guest needy,
+/// loads any shipped container archives, tags/rebuilds the executor image from
+/// [`EXECUTOR_BASE`] (constant +1 layer instead of stacking), and removes any
+/// superseded executor image ID.
+fn fetch_load_script(work: &str, image: &str, loaded_executor: bool, rebuild_executor: bool, user: Option<&str>, run_dir: &str) -> String {
+  let mut script = format!(
+    "mkdir -p {work}/guest && cp {work}/bin/needy {work}/guest/needy \
+     && for f in {work}/containers/*.tar; do [ -f \"$f\" ] || continue; docker load -i \"$f\" || exit 1; done \
+     && rm -rf {work}/containers"
+  );
+  if loaded_executor {
+    // Pin the initial loaded executor image as the base for future rebuilds.
+    script.push_str(&format!(" && docker tag {image} {EXECUTOR_BASE}"));
+  }
+  if rebuild_executor {
+    // Rebuild the run host's executor image from the pinned base tag with this
+    // commit's needy binary (constant +1 layer), then remove the superseded
+    // image ID if it changed and is not the base image itself.
+    script.push_str(&format!(
+      " && (docker image inspect {EXECUTOR_BASE} >/dev/null 2>&1 || docker tag {image} {EXECUTOR_BASE}) \
+       && prev=$(docker image inspect --format '{{{{.Id}}}}' {image} 2>/dev/null || true) \
+       && mkdir -p {work}/executor && cp {work}/bin/needy {work}/executor/needy \
+       && printf 'FROM {EXECUTOR_BASE}\\nUSER root\\nCOPY needy /usr/local/bin/needy\\nUSER agent\\n' > {work}/executor/Dockerfile \
+       && docker build -q -t {image} {work}/executor >/dev/null && rm -rf {work}/executor \
+       && new=$(docker image inspect --format '{{{{.Id}}}}' {image} 2>/dev/null || true) \
+       && base=$(docker image inspect --format '{{{{.Id}}}}' {EXECUTOR_BASE} 2>/dev/null || true) \
+       && if [ -n \"$prev\" ] && [ \"$prev\" != \"$new\" ] && [ \"$prev\" != \"$base\" ]; then docker image rm \"$prev\" >/dev/null 2>&1 || true; fi"
+    ));
+  }
+  if let Some(user) = user {
+    script.push_str(&format!(" && chown -R {user}: {run_dir}"));
+  }
+  script
 }
 
 /// Streams `build`'s export into `run`'s work directory, loads the
@@ -580,6 +675,7 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
   // through this machine's uplink took most of a run (2026-11-13). A run
   // host that has an executor image already gets it rebuilt from the
   // static needy sent anyway (below), which compiles nothing.
+  let mut loaded_executor = false;
   let mut rebuild_executor = false;
   for archive in offered.split_whitespace().filter(|a| a.ends_with(".tar")) {
     let (role, id) = archive.trim_end_matches(".tar").split_once('-').unwrap_or(("", archive));
@@ -589,6 +685,9 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
     if role == "executor" && executor_present(run)? {
       rebuild_executor = true;
       continue;
+    }
+    if role == "executor" {
+      loaded_executor = true;
     }
     parts.push(format!("containers/{archive}"));
   }
@@ -611,23 +710,7 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
   if !packed.success() || !unpacked.success() {
     bail!("cannot copy the export of {} to {}", build.name, run.name);
   }
-  let mut script = format!(
-    "mkdir -p {work}/guest && cp {work}/bin/needy {work}/guest/needy \
-     && for f in {work}/containers/*.tar; do [ -f \"$f\" ] || continue; docker load -i \"$f\" || exit 1; done \
-     && rm -rf {work}/containers"
-  );
-  if rebuild_executor {
-    // The run host's executor image with this commit's needy in it.
-    let image = &shipped.executor;
-    script.push_str(&format!(
-      " && mkdir -p {work}/executor && cp {work}/bin/needy {work}/executor/needy \
-       && printf 'FROM {image}\\nUSER root\\nCOPY needy /usr/local/bin/needy\\nUSER agent\\n' > {work}/executor/Dockerfile \
-       && docker build -q -t {image} {work}/executor >/dev/null && rm -rf {work}/executor"
-    ));
-  }
-  if let Some(user) = &run.user {
-    script.push_str(&format!(" && chown -R {user}: {}", run.dir));
-  }
+  let script = fetch_load_script(&work, &shipped.executor, loaded_executor, rebuild_executor, run.user.as_deref(), &run.dir);
   let (code, _) = remote(&run.ssh, &script)?;
   if code != 0 {
     bail!("cannot load the container images on {}", run.name);

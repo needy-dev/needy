@@ -42,6 +42,8 @@ jobs:
       # shrink debug info, the bulk of `target/`.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      # Keep automated tests offline: never auto-pull release archives from GitHub.
+      NEEDY_DOWNLOAD_BASE: http://127.0.0.1:1
     steps:
       - uses: actions/checkout@v6
       # NOTICE(ci-disk): the hosted Ubuntu image ships toolchains this job
@@ -100,24 +102,51 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       # The version `.prototools` pins for local development.
       - uses: bufbuild/buf-action@v1
         with:
           version: "1.72.0"
           setup_only: true
-      # As `make proto`, with the formatter in check mode. `buf.gen.yaml`
-      # uses remote BSR plugins, which unauthenticated callers may run within
-      # the BSR's rate limit.
+      - name: Check whether proto sources changed
+        id: proto-changed
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT_NAME" = "pull_request" ] && [ -n "$PR_BASE" ]; then
+            base="$PR_BASE"
+          elif [ "$EVENT_NAME" = "push" ] && [ -n "$PUSH_BEFORE" ] && [ "$PUSH_BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            base="$PUSH_BEFORE"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --quiet "$base...HEAD" -- proto crates/api-proto/src/gen; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      # As `make proto`, with the formatter in check mode. Local lint and format
+      # always run; remote BSR `buf generate` runs only when `proto/` or
+      # `crates/api-proto/src/gen/` changed so non-proto PRs do not hit BSR rate
+      # limits.
       # NOTICE(proto-breaking): no `buf breaking` gate yet: the API is
       # unreleased (0.0.x) and changes freely. Add one against the last
       # release tag once a release promises wire compatibility.
-      - name: Lint, format and regenerate
+      - name: Lint and format
         working-directory: proto
         run: |
           buf lint
           buf format --diff --exit-code
-          buf generate
+      - name: Regenerate
+        if: steps.proto-changed.outputs.changed == 'true'
+        working-directory: proto
+        run: buf generate
       - name: Verify the generated code is committed
+        if: steps.proto-changed.outputs.changed == 'true'
         run: |
           # Include untracked files: a new generated file must be committed too.
           changes=$(git status --porcelain --untracked-files=all -- crates/api-proto/src/gen)

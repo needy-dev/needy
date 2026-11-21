@@ -15,6 +15,8 @@ fn a_checksum_mismatch_reports_a_typed_diagnostic_and_preserves_the_base() {
   let output = Command::new(env!("CARGO_BIN_EXE_needy"))
     .env("NEEDY_CONFIG_DIR", home.path().join("config"))
     .env("NEEDY_DATA_DIR", home.path().join("data"))
+    // Keep tests offline: never auto-pull release archives from GitHub.
+    .env("NEEDY_DOWNLOAD_BASE", "http://127.0.0.1:1")
     .env_remove("NEEDY_EXECUTION_CONTEXT")
     .args([
       "--diagnostic-format",

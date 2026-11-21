@@ -7,16 +7,9 @@ on:
     branches:
       - main
     # This workflow has no required checks, so a filter cannot block a pull request.
-    paths-ignore:
-      - 'docs/**'
-      - '.agents/**'
-      - '.github/ISSUE_TEMPLATE/**'
-      - '.github/*.md'
-      - '**/docs/**/*.md'
-      - '**/README*.md'
-      - '**/AGENTS.md'
-      - 'DESIGN.md'
-      - 'LICENSE'
+    paths:
+      - 'apps/docs/**'
+      - '.github/workflows/deploy-cloudflare-workers-preview-*.yml'
 
   # NOTICE: Preview metadata requires a pull_request event; manual runs have no PR head.
 
@@ -28,11 +21,6 @@ jobs:
       contents: read
 
     steps:
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '^26.12.1'
-          check-latest: true
-
       - name: Persist checkout metadata
         env:
           PR_NUM: ${{ github.event.number }}

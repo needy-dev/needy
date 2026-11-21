@@ -10,13 +10,63 @@ use serde_json::json;
 use super::checks::Checks;
 use super::env::CellEnv;
 use super::matrix::{Cell, Driver, End};
+use super::proc;
 use super::runs::{self, check_ended, end_run};
 
 const BUILD: Duration = Duration::from_secs(180);
 const FEATURE_BUILD: Duration = Duration::from_secs(300);
 const STEP: Duration = Duration::from_secs(120);
 
+/// Converts a `sha256:<hex>` snapshot digest into its container image tag.
+fn snapshot_tag(digest: &str) -> Option<String> {
+  let hex = digest.strip_prefix("sha256:")?;
+  (!hex.is_empty()).then(|| format!("needy-snapshot:{hex}"))
+}
+
+/// Removes `needy-snapshot:<hex>` container images materialized during an
+/// `image` or `image-feature` cell when the cell finishes or returns early.
+struct SnapshotCleanup {
+  driver: Driver,
+  tags: Vec<String>,
+}
+
+impl SnapshotCleanup {
+  fn new(driver: Driver) -> Self {
+    Self {
+      driver,
+      tags: Vec::new(),
+    }
+  }
+
+  fn track(&mut self, digest: &str) {
+    if let Some(tag) = snapshot_tag(digest)
+      && !self.tags.contains(&tag)
+    {
+      self.tags.push(tag);
+    }
+  }
+}
+
+impl Drop for SnapshotCleanup {
+  fn drop(&mut self) {
+    for tag in &self.tags {
+      match self.driver {
+        Driver::Container(_) => {
+          // Best-effort teardown; `host::clean` also prunes `needy-snapshot:*`.
+          let _ = proc::simple("docker", &["image", "rm", "-f", tag], Duration::from_secs(30));
+        }
+        Driver::AppleContainer => {
+          // Best-effort teardown; `host::clean` also prunes `needy-snapshot:*`.
+          let _ = proc::simple("container", &["image", "delete", tag], Duration::from_secs(30));
+        }
+        Driver::Firecracker | Driver::Vz | Driver::Host => {}
+      }
+    }
+  }
+}
+
 pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
+  let mut cleanup = SnapshotCleanup::new(cell.driver);
   let (name, id) = cell.user.account();
   let root_line = match cell.driver {
     Driver::Container(_) | Driver::AppleContainer => format!("root: {}\n", env.ctx.host.image_names.actor),
@@ -67,6 +117,7 @@ exit 0
     bail!("image build failed: {}", built.brief());
   }
   let built_snapshot = built.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
+  cleanup.track(&built_snapshot);
   checks.check("image build prints a snapshot digest", built_snapshot.starts_with("sha256:"), format!("{built_snapshot:?}"));
 
   let rebuilt = env.needy(&["image", "build", "--profile", &profile_str], BUILD)?;
@@ -130,6 +181,7 @@ exit 0
 
   let report2 = runs::report(env, &run2)?;
   let edited_snapshot = report2["snapshot"].as_str().unwrap_or_default().to_string();
+  cleanup.track(&edited_snapshot);
   checks.check(
     "post-edit run records a new snapshot digest",
     edited_snapshot.starts_with("sha256:") && edited_snapshot != built_snapshot,
@@ -162,6 +214,7 @@ exit 0
 /// digest in `<image>.lock`, verifies cached rebuild, and boots a run to check
 /// the installed tool on `PATH` and `run report`.
 pub fn run_feature(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
+  let mut cleanup = SnapshotCleanup::new(cell.driver);
   let (name, id) = cell.user.account();
   let root_line = match cell.driver {
     Driver::Container(_) | Driver::AppleContainer => format!("root: {}\n", env.ctx.host.image_names.actor),
@@ -203,6 +256,7 @@ exit 0
     bail!("feature image build failed: {}", built.brief());
   }
   let built_snapshot = built.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
+  cleanup.track(&built_snapshot);
   checks.check("feature image build prints a snapshot digest", built_snapshot.starts_with("sha256:"), format!("{built_snapshot:?}"));
 
   let lock_text = std::fs::read_to_string(&lockfile).unwrap_or_default();
@@ -235,4 +289,16 @@ exit 0
   checks.eq("run report records the built feature snapshot digest", Some(built_snapshot.as_str()), report["snapshot"].as_str());
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn snapshot_tag_formats_sha256_digests_and_rejects_others() {
+    assert_eq!(snapshot_tag("sha256:0123456789abcdef"), Some("needy-snapshot:0123456789abcdef".to_string()));
+    assert_eq!(snapshot_tag("sha256:"), None);
+    assert_eq!(snapshot_tag("not-a-digest"), None);
+  }
 }

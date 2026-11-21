@@ -24,6 +24,8 @@ impl Home {
       .env("NEEDY_STATE_DIR", self.path().join("state"))
       .env("NEEDY_DATA_DIR", self.path().join("data"))
       .env("NEEDY_RUNTIME_DIR", self.path().join("run"))
+      // Keep tests offline: never auto-pull release archives from GitHub.
+      .env("NEEDY_DOWNLOAD_BASE", "http://127.0.0.1:1")
       .env("HOME", self.path())
       .env("XDG_CONFIG_HOME", self.path().join("config-base"))
       .stdin(Stdio::null());
