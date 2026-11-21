@@ -56,21 +56,50 @@ fn an_unknown_on_conflict_choice_is_an_error_naming_the_choices() {
     .to_string();
 
   assert!(err.contains("files.pi.on-conflict"), "{err}");
-  assert!(err.contains("`store`, `run` or `lines`"), "{err}");
+  assert!(err.contains("`store`, `run`, `lines` or `{ driver: COMMAND }`"), "{err}");
 }
 
-// TODO(merge-drivers): this refusal goes with slice M2 of
-// 2026-11-17-images-and-run-data-spec.md, which runs merge drivers.
 #[test]
-fn a_merge_driver_is_refused_until_drivers_exist() {
-  let err = load(
-    "actor: { driver: linux-firecracker }\nfiles: { oc: { mode: sync, from: \"host:/s\", to: \"actor:~/.oc\", on-conflict: { \"*.db\": { driver: merge-sqlite } } } }",
+fn a_merge_driver_loads_from_a_driver_map() {
+  let p = load(
+    r#"
+actor: { driver: linux-firecracker }
+files:
+  oc:
+    mode: sync
+    from: "host:/s"
+    to: "actor:~/.oc"
+    on-conflict:
+      "opencode.db*": { driver: needy-merge-sqlite }
+      auth.json: run
+"#,
   )
-  .unwrap_err()
-  .to_string();
+  .unwrap();
 
-  assert!(err.contains("files.oc.on-conflict"), "{err}");
-  assert!(err.contains("merge drivers are not supported yet"), "{err}");
+  assert_eq!(
+    p.files.mappings["oc"].on_conflict,
+    vec![
+      ("opencode.db*".to_string(), OnConflict::Driver("needy-merge-sqlite".into())),
+      ("auth.json".to_string(), OnConflict::Run),
+    ]
+  );
+}
+
+#[test]
+fn an_empty_or_malformed_merge_driver_is_rejected() {
+  for yaml in [
+    r#"actor: { driver: linux-firecracker }
+files: { oc: { mode: sync, from: "host:/s", to: "actor:~/.oc", on-conflict: { "*.db": { driver: "" } } } }"#,
+    r#"actor: { driver: linux-firecracker }
+files: { oc: { mode: sync, from: "host:/s", to: "actor:~/.oc", on-conflict: { "*.db": { driver: "   " } } } }"#,
+    r#"actor: { driver: linux-firecracker }
+files: { oc: { mode: sync, from: "host:/s", to: "actor:~/.oc", on-conflict: { "*.db": { other: x } } } }"#,
+    r#"actor: { driver: linux-firecracker }
+files: { oc: { mode: sync, from: "host:/s", to: "actor:~/.oc", on-conflict: { "*.db": { driver: merge-db, extra: 1 } } } }"#,
+  ] {
+    let err = load(yaml).unwrap_err().to_string();
+    assert!(err.contains("files.oc.on-conflict"), "{err}");
+  }
 }
 
 #[test]

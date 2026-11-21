@@ -408,6 +408,7 @@ impl Images {
       cwd: "/".into(),
       env,
       copy_in,
+      mirror_out: Vec::new(),
       route_names: Vec::new(),
       session: GuestSession {
         upper: UpperLayer::Kept,
@@ -472,6 +473,9 @@ pub struct SessionSpec {
   /// Uncompressed tar archives staged into the session via `Guest::fetch_files`
   /// as `(name, guest_path, tar_bytes)`.
   pub copy_in: Vec<(String, String, Vec<u8>)>,
+  /// Directories inside the session mirrored back via `Guest::push_files` after
+  /// the command exits, as `(name, guest_path)`.
+  pub mirror_out: Vec<(String, String)>,
   /// Command names the kernel routes; `*` routes every exec.
   pub route_names: Vec<String>,
   /// Session settings (upper layer disposition and exec routing).
@@ -494,6 +498,9 @@ pub struct SessionOutcome {
   /// The stored layer digest when `session.upper == UpperLayer::Kept` and the
   /// session uploaded an upper layer after exiting cleanly.
   pub layer: Option<Digest>,
+  /// Uncompressed tar archives mirrored back via `Guest::push_files`, keyed by
+  /// mapping name.
+  pub mirrored_out: HashMap<String, Vec<u8>>,
   /// The actor's console log (may be empty).
   pub console: String,
 }
@@ -531,10 +538,13 @@ async fn run_session_in(
 
   let guest_config = build_guest_config(session_id, &channels, spec.clone_parts());
   let copy_in_archives: HashMap<String, Vec<u8>> = spec.copy_in.into_iter().map(|(name, _, bytes)| (name, bytes)).collect();
+  let expected_mirror_out: HashSet<String> = spec.mirror_out.into_iter().map(|(name, _)| name).collect();
   let upper_setting = guest_config.session.upper;
   let guest_service = Arc::new(SessionGuest {
     config: guest_config,
     copy_in_archives,
+    expected_mirror_out,
+    mirror_out_archives: Mutex::default(),
     dir: dir.to_path_buf(),
     trace: spec.trace.clone(),
     exit: Mutex::new(None),
@@ -632,6 +642,7 @@ async fn run_session_in(
   Ok(SessionOutcome {
     exit,
     layer,
+    mirrored_out: guest_service.mirrored_out(),
     console,
   })
 }
@@ -657,12 +668,15 @@ async fn run_container_session_in(
 
   let mut guest_config = build_guest_config(session_id, &channels, spec.clone_parts());
   let copy_in_archives: HashMap<String, Vec<u8>> = spec.copy_in.into_iter().map(|(name, _, bytes)| (name, bytes)).collect();
+  let expected_mirror_out: HashSet<String> = spec.mirror_out.into_iter().map(|(name, _)| name).collect();
   // Container sessions boot an assembled OCI image, not VM layer disks.
   guest_config.layers.clear();
   let upper_setting = guest_config.session.upper;
   let guest_service = Arc::new(SessionGuest {
     config: guest_config,
     copy_in_archives,
+    expected_mirror_out,
+    mirror_out_archives: Mutex::default(),
     dir: dir.to_path_buf(),
     trace: spec.trace.clone(),
     exit: Mutex::new(None),
@@ -757,6 +771,7 @@ async fn run_container_session_in(
   Ok(SessionOutcome {
     exit,
     layer,
+    mirrored_out: guest_service.mirrored_out(),
     console,
   })
 }
@@ -1147,6 +1162,8 @@ impl ImagesTrait for Daemon {
     let guest_service = Arc::new(SessionGuest {
       config: guest_config,
       copy_in_archives: HashMap::new(),
+      expected_mirror_out: HashSet::new(),
+      mirror_out_archives: Mutex::default(),
       dir: dir.clone(),
       trace: trace.clone(),
       exit: Mutex::new(None),
@@ -1465,7 +1482,7 @@ fn finish_commit(
 /// `linux-firecracker` on Linux with KVM). On a Linux host without a usable VM
 /// driver, falls back to `linux-container`. Apple's `container` is never used
 /// to build.
-async fn select_builder_driver(daemon: &Daemon, target: ActorDriver) -> ActorDriver {
+pub(crate) async fn select_builder_driver(daemon: &Daemon, target: ActorDriver) -> ActorDriver {
   match target {
     ActorDriver::MacosVz => ActorDriver::MacosVz,
     ActorDriver::LinuxFirecracker => {
@@ -1510,7 +1527,7 @@ async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
 /// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`
 /// into the Docker-compatible engine if not already present, pulling `base_image`
 /// first when absent from the engine.
-async fn materialize_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
+pub(crate) async fn materialize_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str) -> Result<String> {
   let engine = daemon.images.backends().engine.clone();
   let inspected = match engine.inspect_image(base_image).await.with_context(|| format!("inspecting container base image {base_image}"))? {
     Some(info) => info,
@@ -1741,6 +1758,7 @@ struct GuestConfigParts {
   cwd: String,
   env: BTreeMap<String, String>,
   copy_in: Vec<GuestCopy>,
+  mirror_out: Vec<GuestCopy>,
   route_names: Vec<String>,
   session: GuestSession,
   tty: Option<WindowSize>,
@@ -1765,6 +1783,14 @@ impl SessionSpec {
         .copy_in
         .iter()
         .map(|(name, path, _)| GuestCopy {
+          name: name.clone(),
+          path: path.clone(),
+        })
+        .collect(),
+      mirror_out: self
+        .mirror_out
+        .iter()
+        .map(|(name, path)| GuestCopy {
           name: name.clone(),
           path: path.clone(),
         })
@@ -1795,7 +1821,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     gateway_port: channels.gateway_port,
     sensors: Vec::new(),
     copy_in: parts.copy_in,
-    mirror_out: Vec::new(),
+    mirror_out: parts.mirror_out,
     sensor_faults: Vec::new(),
     tty: parts.tty,
     process_port: channels.process_port,
@@ -1805,7 +1831,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     layers: parts.layer_digests,
     image_path: parts.image_path,
     session: parts.session,
-    // Lifecycle hooks run only for normal runs, never in build sessions.
+    // Lifecycle hooks run only for normal runs, never in build or merge sessions.
     start_hooks: Vec::new(),
     stop_hooks: Vec::new(),
   }
@@ -1873,10 +1899,12 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
   .context("hashing base VM image panicked")?
 }
 
-/// What `GuestService` serves to an image session's guest init.
+/// What `GuestService` serves to an image or merge session's guest init.
 struct SessionGuest {
   config: GuestConfig,
   copy_in_archives: HashMap<String, Vec<u8>>,
+  expected_mirror_out: HashSet<String>,
+  mirror_out_archives: Mutex<HashMap<String, Vec<u8>>>,
   dir: PathBuf,
   trace: Dispatch,
   exit: Mutex<Option<Exit>>,
@@ -1886,6 +1914,10 @@ struct SessionGuest {
 impl SessionGuest {
   fn exit(&self) -> Option<Exit> {
     self.exit.lock().unwrap_or_else(|p| p.into_inner()).clone()
+  }
+
+  fn mirrored_out(&self) -> HashMap<String, Vec<u8>> {
+    self.mirror_out_archives.lock().unwrap_or_else(|p| p.into_inner()).clone()
   }
 }
 
@@ -1913,8 +1945,12 @@ impl Guest for SessionGuest {
       .ok_or_else(|| ControlError::NotFound(format!("no staged files named {name:?} in this image session")))
   }
 
-  async fn push_files(&self, _run: &str, _name: &str, _archive: Vec<u8>) -> Result<(), ControlError> {
-    Err(ControlError::Failed("file transfers are not supported in image sessions".into()))
+  async fn push_files(&self, _run: &str, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
+    if !self.expected_mirror_out.contains(name) {
+      return Err(ControlError::Failed(format!("unexpected mirror-out {name:?} in this session")));
+    }
+    self.mirror_out_archives.lock().unwrap_or_else(|p| p.into_inner()).insert(name.to_string(), archive);
+    Ok(())
   }
 
   async fn push_layer(&self, run: &str, archive: Chunks) -> Result<(), ControlError> {

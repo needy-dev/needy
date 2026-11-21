@@ -93,7 +93,7 @@ pub enum FileMode {
 
 /// What resolves an entry of a sync mapping that both the run and the store
 /// changed since the run was seeded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnConflict {
   /// Keep the store's copy.
   Store,
@@ -101,9 +101,9 @@ pub enum OnConflict {
   Run,
   /// Append the lines the run appended (append-only text).
   Lines,
-  // TODO(merge-drivers): `{ driver: COMMAND }`, a merge driver a feature
-  // ships, is slice M2 of 2026-11-17-images-and-run-data-spec.md; until
-  // then loading refuses it (`on_conflict`).
+  /// Hand every matching entry (as three trees: seed, run, store) to a merge
+  /// driver command run inside an actor.
+  Driver(String),
 }
 
 /// Reads `on-conflict`, a map from patterns to choices, keeping the order
@@ -114,7 +114,7 @@ pub fn deserialize_on_conflict<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(S
     type Value = Vec<(String, OnConflict)>;
 
     fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-      f.write_str("a map from patterns to `store`, `run` or `lines`")
+      f.write_str("a map from patterns to `store`, `run`, `lines` or `{ driver: COMMAND }`")
     }
 
     fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
@@ -139,7 +139,7 @@ impl<'de> Deserialize<'de> for OnConflict {
       type Value = OnConflict;
 
       fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("`store`, `run` or `lines`")
+        f.write_str("`store`, `run`, `lines` or `{ driver: COMMAND }`")
       }
 
       fn visit_str<E: de::Error>(self, v: &str) -> Result<OnConflict, E> {
@@ -147,14 +147,29 @@ impl<'de> Deserialize<'de> for OnConflict {
           "store" => Ok(OnConflict::Store),
           "run" => Ok(OnConflict::Run),
           "lines" => Ok(OnConflict::Lines),
-          other => Err(E::custom(format!("unknown on-conflict choice {other:?}: use `store`, `run` or `lines`"))),
+          other => Err(E::custom(format!("unknown on-conflict choice {other:?}: use `store`, `run`, `lines` or `{{ driver: COMMAND }}`"))),
         }
       }
 
-      fn visit_map<A: MapAccess<'de>>(self, _map: A) -> Result<OnConflict, A::Error> {
-        Err(de::Error::custom(
-          "merge drivers are not supported yet (`{ driver: ... }`); use `store`, `run` or `lines`, or leave the pattern out to keep the store's copy and report the run's",
-        ))
+      fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<OnConflict, A::Error> {
+        let mut driver: Option<String> = None;
+        while let Some(key) = map.next_key::<String>()? {
+          match key.as_str() {
+            "driver" => {
+              if driver.is_some() {
+                return Err(de::Error::duplicate_field("driver"));
+              }
+              driver = Some(map.next_value::<String>()?);
+            }
+            other => return Err(de::Error::unknown_field(other, &["driver"])),
+          }
+        }
+        let command = driver.ok_or_else(|| de::Error::missing_field("driver"))?;
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+          return Err(de::Error::custom("merge driver command must not be empty"));
+        }
+        Ok(OnConflict::Driver(trimmed.to_string()))
       }
     }
     d.deserialize_any(Choice)

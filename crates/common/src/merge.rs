@@ -24,8 +24,8 @@ pub struct Trees<'a> {
 }
 
 /// What resolves an entry that both the run and the store changed since the
-/// seed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// seed, or hands matching entries to a merge driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Choice {
   /// The store's copy stays; the run's is dropped without a conflict.
   Store,
@@ -35,10 +35,10 @@ pub enum Choice {
   /// copy are appended to the store's. A run that did more than append is a
   /// conflict.
   Lines,
-  // TODO(merge-drivers): a choice that hands every file its glob matches
-  // to a merge driver as three trees is slice M2 of
-  // 2026-11-17-images-and-run-data-spec.md; it plugs in here, and the merge
-  // then skips the files a driver claims.
+  /// A merge driver command: needy's built-in file merge skips every entry
+  /// matching this pattern across all three trees and returns them in
+  /// [`Outcome::driver_claims`] for the daemon to hand to the driver.
+  Driver(String),
 }
 
 /// How to merge a tree.
@@ -75,11 +75,24 @@ pub struct Change {
   pub action: Action,
 }
 
-/// Every entry the merge acted on, in path order. Entries the run left as
-/// the seed had them, or changed exactly as the store did, are not listed.
+/// Entries claimed by one merge driver command, skipped by needy's built-in
+/// file merge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriverClaim {
+  /// The driver command from `Choice::Driver`.
+  pub driver: String,
+  /// Every relative path (across seed, run, and store) matching a rule for
+  /// this driver, in path order. Includes side files such as `-wal` / `-shm`.
+  pub paths: Vec<String>,
+}
+
+/// Every entry the merge acted on, in path order, plus any entries claimed by
+/// merge drivers. Entries the run left as the seed had them, or changed
+/// exactly as the store did, are not listed.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Outcome {
   pub changes: Vec<Change>,
+  pub driver_claims: Vec<DriverClaim>,
 }
 
 impl Outcome {
@@ -113,8 +126,24 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
   let paths: BTreeSet<&String> = seed.keys().chain(run.keys()).chain(store.keys()).collect();
 
   let mut plan = Vec::new();
+  // Driver claims preserve the order in which each driver command first
+  // appears in `policy.on_conflict`.
+  let mut driver_order: Vec<String> = Vec::new();
+  let mut driver_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+  let mut driver_dirty: BTreeMap<String, bool> = BTreeMap::new();
+
   for path in paths {
     let (s, r, t) = (seed.get(path), run.get(path), store.get(path));
+    if let Some(Choice::Driver(driver)) = choice(policy, path) {
+      if !driver_paths.contains_key(driver) {
+        driver_order.push(driver.to_string());
+      }
+      driver_paths.entry(driver.to_string()).or_default().push(path.clone());
+      if !(same(s, r)? || same(t, r)?) {
+        driver_dirty.insert(driver.to_string(), true);
+      }
+      continue;
+    }
     if same(s, r)? || same(t, r)? {
       continue;
     }
@@ -125,11 +154,18 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
         Some(Choice::Store) => Step::Keep,
         Some(Choice::Run) => Step::TakeChosen,
         Some(Choice::Lines) => Step::Lines,
+        Some(Choice::Driver(_)) => unreachable!("driver claims handled above"),
         None => Step::Aside,
       }
     };
     plan.push((path.clone(), step));
   }
+
+  let driver_claims: Vec<DriverClaim> = driver_order
+    .into_iter()
+    .filter(|driver| driver_dirty.get(driver).copied().unwrap_or(false))
+    .filter_map(|driver| driver_paths.remove(&driver).map(|paths| DriverClaim { driver, paths }))
+    .collect();
 
   std::fs::create_dir_all(trees.store).with_context(|| format!("create store {}", trees.store.display()))?;
   let mut done: BTreeMap<String, Action> = BTreeMap::new();
@@ -190,7 +226,81 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
 
   Ok(Outcome {
     changes: done.into_iter().map(|(path, action)| Change { path, action }).collect(),
+    driver_claims,
   })
+}
+
+/// Stages the three trees (`seed/`, `run/`, `store/`) and an empty `out/`
+/// directory under `staging` containing only the entries in `paths`.
+pub fn stage_driver_trees(trees: Trees<'_>, paths: &[String], staging: &Path) -> Result<()> {
+  for (name, src) in [
+    ("seed", trees.seed),
+    ("run", trees.run),
+    ("store", trees.store),
+  ] {
+    let dst = staging.join(name);
+    std::fs::create_dir_all(&dst).with_context(|| format!("create {}", dst.display()))?;
+    for rel in paths {
+      copy_relative(src, &dst, rel)?;
+    }
+  }
+  let out = staging.join("out");
+  std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+  Ok(())
+}
+
+/// Atomically applies the merged files written by a merge driver in `out` back
+/// into `store`, and removes any `claimed` entries absent from `out` (such as
+/// checkpointed `-wal` / `-shm` side files). Returns the relative paths placed.
+pub fn apply_driver_output(out: &Path, store: &Path, claimed: &[String]) -> Result<Vec<String>> {
+  std::fs::create_dir_all(store).with_context(|| format!("create store {}", store.display()))?;
+  let produced = scan(out, &[])?;
+  let mut placed = Vec::new();
+  for (rel, node) in &produced {
+    if !place(store, rel, node)? {
+      anyhow::bail!("cannot place merge driver output {rel} into store {}", store.display());
+    }
+    placed.push(rel.clone());
+  }
+  // Remove stale claimed entries not present in `out` (deepest first so
+  // emptied directories can be removed cleanly).
+  let mut stale: Vec<&String> = claimed.iter().filter(|rel| !produced.contains_key(*rel)).collect();
+  stale.sort();
+  for rel in stale.into_iter().rev() {
+    let _ = remove(&store.join(rel))?;
+  }
+  Ok(placed)
+}
+
+/// Copies the run's copies of `paths` into `aside` when a merge driver fails
+/// or times out, leaving the store untouched.
+pub fn keep_driver_conflicts(run: &Path, paths: &[String], aside: &Path) -> Result<()> {
+  for rel in paths {
+    copy_relative(run, aside, rel)?;
+  }
+  Ok(())
+}
+
+/// Copies a single relative path from `src` to `dst` when it exists in `src`.
+fn copy_relative(src: &Path, dst: &Path, rel: &str) -> Result<()> {
+  let from = src.join(rel);
+  let meta = match std::fs::symlink_metadata(&from) {
+    Ok(meta) => meta,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    Err(e) => return Err(e).with_context(|| format!("stat {}", from.display())),
+  };
+  let kind = if meta.is_dir() {
+    Kind::Dir
+  } else if meta.is_symlink() {
+    Kind::Link(std::fs::read_link(&from).with_context(|| format!("read link {}", from.display()))?)
+  } else {
+    Kind::File
+  };
+  let target = dst.join(rel);
+  if std::fs::symlink_metadata(&target).is_ok_and(|m| !(m.is_dir() && kind == Kind::Dir)) {
+    std::fs::remove_file(&target).or_else(|_| std::fs::remove_dir_all(&target)).with_context(|| format!("replace {}", target.display()))?;
+  }
+  copy(&Node { path: from, kind }, &target)
 }
 
 /// What the merge does with one entry, before it touches the store.
@@ -208,8 +318,8 @@ enum Step {
   Aside,
 }
 
-fn choice(policy: &Policy, path: &str) -> Option<Choice> {
-  policy.on_conflict.iter().find(|(pattern, _)| matches(pattern, path)).map(|(_, choice)| *choice)
+fn choice<'a>(policy: &'a Policy, path: &str) -> Option<&'a Choice> {
+  policy.on_conflict.iter().find(|(pattern, _)| matches(pattern, path)).map(|(_, choice)| choice)
 }
 
 /// One entry of a tree, at `path` on disk.

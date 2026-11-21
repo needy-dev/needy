@@ -170,12 +170,23 @@ pub struct Config {
   /// period, for the actor to mirror out and end before it is killed:
   /// [`MIRROR_OUT_WAIT`] outside tests.
   pub mirror_out_wait: Duration,
+  /// How long a merge driver session may run before it is cancelled and
+  /// reported as a conflict: [`MERGE_DRIVER_TIMEOUT`] outside tests.
+  #[serde(default = "default_merge_driver_timeout")]
+  pub merge_driver_timeout: Duration,
+}
+
+#[cfg(unix)]
+fn default_merge_driver_timeout() -> Duration {
+  MERGE_DRIVER_TIMEOUT
 }
 
 #[cfg(unix)]
 pub use reconcile::REPORT_WAIT;
 #[cfg(unix)]
 pub use run::MIRROR_OUT_WAIT;
+#[cfg(unix)]
+pub use sync::MERGE_DRIVER_TIMEOUT;
 
 /// The guest needy a control daemon of `config` brings into its actors, or
 /// why it has none: the one `config` names, else `needy-linux-<arch>` next

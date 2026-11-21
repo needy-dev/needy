@@ -215,7 +215,9 @@ fn parses_customizations_needy_files_with_store_filter_and_on_conflict() {
 }
 
 #[test]
-fn rejects_merge_driver_in_customizations_needy_files_on_conflict() {
+fn accepts_merge_driver_in_customizations_needy_files_on_conflict() {
+  use needy_config::profile::OnConflict;
+
   let json = r#"{
     "id": "opencode",
     "customizations": {
@@ -224,7 +226,7 @@ fn rejects_merge_driver_in_customizations_needy_files_on_conflict() {
           "opencode": {
             "path": "~/.opencode",
             "on-conflict": {
-              "sessions.db": { "driver": "opencode-merge" }
+              "opencode.db*": { "driver": "needy-merge-sqlite" }
             }
           }
         }
@@ -232,8 +234,10 @@ fn rejects_merge_driver_in_customizations_needy_files_on_conflict() {
     }
   }"#;
 
-  let err = FeatureMetadata::parse(json).unwrap_err().to_string();
-  assert!(err.contains("merge drivers are not supported yet"), "{err}");
+  let meta = FeatureMetadata::parse(json).unwrap();
+  meta.check_allowed("ghcr.io/example/features/opencode:1").unwrap();
+  let needy = meta.customizations.needy.as_ref().expect("customizations.needy");
+  assert_eq!(needy.files["opencode"].on_conflict, vec![("opencode.db*".to_string(), OnConflict::Driver("needy-merge-sqlite".into()))]);
 }
 
 #[test]

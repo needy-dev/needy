@@ -18,7 +18,10 @@
       "files": {
         "opencode": {
           "path": "~/.local/share/opencode",
-          "filter": ["- /bin/**", "- /log/**", "+ **"]
+          "filter": ["- /bin/**", "- /log/**", "+ **"],
+          "on-conflict": {
+            "opencode.db*": { "driver": "needy-merge-sqlite" }
+          }
         }
       }
     }
