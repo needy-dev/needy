@@ -74,6 +74,10 @@ fn every_catalogued_leaf_exposes_usage_without_connecting() {
     "image pull",
     "image ls",
     "image build",
+    "image edit",
+    "image rollback",
+    "image log",
+    "image export",
     "image rm",
   ];
   for leaf in leaves {

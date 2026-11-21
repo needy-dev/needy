@@ -6,7 +6,7 @@
 //! resolve, and its recipe fits the CPU of the host its actor would run on.
 //! `--local` checks offline against this machine instead.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
 use clap::Subcommand;
@@ -125,7 +125,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           ]
         }
       }
-      let rows: Vec<_> = entries(ctx)?
+      let mut rows: Vec<_> = entries(ctx)?
         .into_iter()
         .map(|(name, source, finding)| ProfileRow {
           name,
@@ -133,6 +133,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           finding,
         })
         .collect();
+      rows.extend(needy_config::builtin::profiles().map(|name| ProfileRow {
+        name: format!("builtin:{name}"),
+        source: PathBuf::from("builtin"),
+        finding: String::new(),
+      }));
       output::print(output, &rows)?;
       Ok(0)
     }
@@ -141,11 +146,17 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       resolved,
       output,
     } => {
-      let path = ctx.profile(&profile)?;
+      let source = ctx.profile_source(&profile)?;
       let yaml = if resolved {
-        needy_config::profile::resolve(&Source::file(&path))?.yaml
+        needy_config::profile::resolve(&source)?.yaml
       } else {
-        std::fs::read_to_string(&path).with_context(|| format!("cannot read profile {}", path.display()))?
+        match &source {
+          Source::File(path) => std::fs::read_to_string(path).with_context(|| format!("cannot read profile {}", path.display()))?,
+          Source::Builtin(name) => {
+            needy_config::builtin::profile_yaml(name).ok_or_else(|| anyhow::anyhow!("no built-in profile named {name:?}"))?.to_string()
+          }
+          Source::Text { text, .. } => text.clone(),
+        }
       };
       let mut value: serde_json::Value = serde_yaml::from_str(&yaml).context("invalid profile YAML")?;
       let config = ctx.configuration()?;
@@ -164,13 +175,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       mode,
       output,
     } => {
-      let path = ctx.profile(&file.or(profile).expect("clap requires a profile or --file"))?;
+      let source = ctx.profile_source(&file.or(profile).expect("clap requires a profile or --file"))?;
       match output {
-        OutputFormat::Json => check_json(&path, &commands, mode, ctx).await,
+        OutputFormat::Json => check_json(&source, &commands, mode, ctx).await,
         OutputFormat::Table => match mode {
-          Mode::Static => check_static(&path, &commands),
-          Mode::Host => check_local(&path, &commands),
-          Mode::Control => check(&path, &commands, ctx).await,
+          Mode::Static => check_static(&source, &commands),
+          Mode::Host => check_local(&source, &commands),
+          Mode::Control => check(&source, &commands, ctx).await,
         },
       }
     }
@@ -198,8 +209,8 @@ pub(super) fn entries(ctx: &Context) -> Result<Vec<(String, PathBuf, String)>> {
   Ok(rows)
 }
 
-fn check_static(path: &Path, commands: &[String]) -> Result<i32> {
-  let profile = needy_config::profile::load(&Source::file(path))?;
+fn check_static(source: &Source, commands: &[String]) -> Result<i32> {
+  let profile = needy_config::profile::load(source)?;
   let findings = validate::profile(&profile);
   if let Some(reference) = &profile.actor.recipe {
     needy_config::recipe::load(&Source::reference(reference, &profile.base_dir))?;
@@ -210,10 +221,10 @@ fn check_static(path: &Path, commands: &[String]) -> Result<i32> {
 
 /// Asks the control plane where the profile would run and what it finds,
 /// prints that and the commands' decisions, and returns the exit code.
-async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
-  let profile = needy_config::profile::load(&Source::file(path))?;
+async fn check(source: &Source, commands: &[String], ctx: &Context) -> Result<i32> {
+  let profile = needy_config::profile::load(source)?;
   // As `run create` sends it: the control plane may run on another machine.
-  let resolved = needy_config::profile::resolve(&Source::file(path))?;
+  let resolved = needy_config::profile::resolve(source)?;
   let progress = output::Progress::new(ctx.connection_feedback(), "Checking profile with control service");
   let connection = ctx.connect().await?;
   let request = CheckProfileRequest {
@@ -266,8 +277,8 @@ async fn check(path: &Path, commands: &[String], ctx: &Context) -> Result<i32> {
 }
 
 /// Checks the profile against this machine, without a control plane.
-fn check_local(path: &Path, commands: &[String]) -> Result<i32> {
-  let profile = needy_config::profile::load(&Source::file(path))?;
+fn check_local(source: &Source, commands: &[String]) -> Result<i32> {
+  let profile = needy_config::profile::load(source)?;
   let mut findings = validate::profile(&profile);
   outln!("user: {} ({}:{})", profile.user.name, profile.user.uid, profile.user.gid)?;
   outln!("executors: {}", profile.executors.keys().cloned().collect::<Vec<_>>().join(", "))?;
@@ -375,8 +386,8 @@ fn decisions(profile: &Profile, commands: &[String]) -> Result<Vec<Decision>> {
   Ok(rows)
 }
 
-async fn check_json(path: &Path, commands: &[String], mode: Mode, ctx: &Context) -> Result<i32> {
-  let profile = needy_config::profile::load(&Source::file(path))?;
+async fn check_json(source: &Source, commands: &[String], mode: Mode, ctx: &Context) -> Result<i32> {
+  let profile = needy_config::profile::load(source)?;
   let mut findings = validate::profile(&profile);
   let mut placement = serde_json::json!({"status":"unresolved"});
   let mut recipe_facts = serde_json::Value::Null;
@@ -400,7 +411,7 @@ async fn check_json(path: &Path, commands: &[String], mode: Mode, ctx: &Context)
       }
     }
     Mode::Control => {
-      let resolved = needy_config::profile::resolve(&Source::file(path))?;
+      let resolved = needy_config::profile::resolve(source)?;
       let checked = ctx
         .connect()
         .await?

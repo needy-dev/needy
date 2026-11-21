@@ -21,6 +21,11 @@ service ImageService {
   rpc FinishImageEdit(FinishImageEditRequest) returns (FinishImageEditResponse);
   // Step an image's commit pointer back by `steps` commits in its history.
   rpc RollbackImage(RollbackImageRequest) returns (RollbackImageResponse);
+  // Return the commit history recorded for an image in the layer store.
+  rpc LogImage(LogImageRequest) returns (LogImageResponse);
+  // Resolve/build an image definition and stream it as a Docker/OCI image
+  // archive (`docker load` / `container image load` compatible).
+  rpc ExportImage(ExportImageRequest) returns (stream ExportImageResponse);
 }
 
 // An image's commit layer from its lockfile: the layer holding hand edits
@@ -144,4 +149,58 @@ message RollbackImageResponse {
   // or empty when rolled back past the first commit or when the commit record
   // predates base persistence.
   string base = 2;
+}
+
+message LogImageRequest {
+  // Stable identifier for the image, as passed to StartImageEdit.
+  string image_name = 1;
+  // Current commit layer digest (`sha256:<hex>`) from the lockfile, if any,
+  // used to mark the active commit in the returned history.
+  string current_layer = 2;
+}
+
+// One recorded commit in an image's history.
+message CommitHistoryEntry {
+  // The commit layer's digest (`sha256:<hex>`).
+  string layer = 1;
+  // The parent commit layer's digest (`sha256:<hex>`), or empty for the first
+  // commit.
+  string parent = 2;
+  // The base plan top key (`sha256:<hex>`) the commit was made on, or empty
+  // when the commit record predates base persistence.
+  string base = 3;
+  // Programs executed during the edit session, in order.
+  repeated RecordedCommand commands = 4;
+  // When the commit was made, in milliseconds since the Unix epoch.
+  int64 time_ms = 5;
+  // True when `layer` matches the caller's `current_layer`.
+  bool active = 6;
+}
+
+message LogImageResponse {
+  // Recorded commits for the image, oldest first.
+  repeated CommitHistoryEntry commits = 1;
+}
+
+message ExportImageRequest {
+  // Self-contained image definition as YAML (its `extends` chain merged).
+  string image_yaml = 1;
+  // Actor driver name (`linux-firecracker`, `macos-vz`, `linux-container`,
+  // `macos-apple-container`); empty picks this host's VM driver.
+  string driver = 2;
+  // Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+  ImageUser user = 3;
+  // Optional commit layer from the image's lockfile, stacked on top.
+  ImageCommit commit = 4;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 5;
+  // Optional `repository:tag` embedded in the exported archive's manifest;
+  // empty defaults to `needy-snapshot:<digest>`.
+  string tag = 6;
+}
+
+message ExportImageResponse {
+  // Raw bytes of the exported Docker/OCI tar archive.
+  bytes data = 1;
 }

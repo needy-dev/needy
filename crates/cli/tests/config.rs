@@ -388,11 +388,15 @@ fn an_explicit_document_selects_its_profiles_without_relocating_runtime_storage(
   );
   assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
   let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout).unwrap();
-  assert_eq!(rows.len(), 2);
+  let builtin_count = needy_config::builtin::profiles().count();
+  assert_eq!(rows.len(), 2 + builtin_count);
   assert_eq!(rows[0]["name"], "broken");
   assert!(!rows[0]["finding"].as_str().unwrap().is_empty());
   assert_eq!(rows[1]["name"], "good");
   assert_eq!(rows[1]["finding"], "");
+  assert_eq!(rows[2]["name"], "builtin:codex");
+  assert_eq!(rows[2]["source"], "builtin");
+  assert_eq!(rows[2]["finding"], "");
   let shown = needy(
     home.path(),
     &[

@@ -25,7 +25,9 @@ use crate::cli::Context;
 
 mod build;
 mod edit;
+mod export;
 pub(crate) mod lockfile;
+mod log;
 mod ls;
 mod progress;
 pub(crate) mod pull;
@@ -43,15 +45,13 @@ impl Args {
   /// therefore accepts `--context`/`--address`).
   pub fn allows_selection(&self) -> bool {
     match &self.command {
-      Command::Edit(_) | Command::Rollback(_) => true,
+      Command::Edit(_) | Command::Rollback(_) | Command::Log(_) | Command::Export(_) => true,
       Command::Build(args) => args.is_definition_build(),
       Command::Pull(_) | Command::Ls(_) | Command::Rm(_) => false,
     }
   }
 }
 
-// TODO(images): `image log` and `image export` come with slice 6 of the images
-// and run data spec.
 #[derive(Subcommand)]
 enum Command {
   /// Download the base images of this needy's release.
@@ -74,6 +74,10 @@ enum Command {
   Edit(edit::Args),
   /// Roll back an image's commit pointer in its lockfile.
   Rollback(rollback::Args),
+  /// Show the commit history recorded for an image definition.
+  Log(log::Args),
+  /// Export an image definition as a Docker/OCI image archive.
+  Export(export::Args),
   /// Remove VM images and old guest disks.
   ///
   /// With --guest-disks, the guest disks of guest binaries no longer in use.
@@ -88,6 +92,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Build(args) => build::run(args, ctx).await,
     Command::Edit(args) => edit::run(args, ctx).await,
     Command::Rollback(args) => rollback::run(args, ctx).await,
+    Command::Log(args) => log::run(args, ctx).await,
+    Command::Export(args) => export::run(args, ctx).await,
     Command::Rm(args) => rm::run(args, ctx).await,
   }
 }

@@ -982,6 +982,76 @@ pub struct RollbackImageResponse {
     #[prost(string, tag="2")]
     pub base: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LogImageRequest {
+    /// Stable identifier for the image, as passed to StartImageEdit.
+    #[prost(string, tag="1")]
+    pub image_name: ::prost::alloc::string::String,
+    /// Current commit layer digest (`sha256:<hex>`) from the lockfile, if any,
+    /// used to mark the active commit in the returned history.
+    #[prost(string, tag="2")]
+    pub current_layer: ::prost::alloc::string::String,
+}
+/// One recorded commit in an image's history.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CommitHistoryEntry {
+    /// The commit layer's digest (`sha256:<hex>`).
+    #[prost(string, tag="1")]
+    pub layer: ::prost::alloc::string::String,
+    /// The parent commit layer's digest (`sha256:<hex>`), or empty for the first
+    /// commit.
+    #[prost(string, tag="2")]
+    pub parent: ::prost::alloc::string::String,
+    /// The base plan top key (`sha256:<hex>`) the commit was made on, or empty
+    /// when the commit record predates base persistence.
+    #[prost(string, tag="3")]
+    pub base: ::prost::alloc::string::String,
+    /// Programs executed during the edit session, in order.
+    #[prost(message, repeated, tag="4")]
+    pub commands: ::prost::alloc::vec::Vec<RecordedCommand>,
+    /// When the commit was made, in milliseconds since the Unix epoch.
+    #[prost(int64, tag="5")]
+    pub time_ms: i64,
+    /// True when `layer` matches the caller's `current_layer`.
+    #[prost(bool, tag="6")]
+    pub active: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LogImageResponse {
+    /// Recorded commits for the image, oldest first.
+    #[prost(message, repeated, tag="1")]
+    pub commits: ::prost::alloc::vec::Vec<CommitHistoryEntry>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ExportImageRequest {
+    /// Self-contained image definition as YAML (its `extends` chain merged).
+    #[prost(string, tag="1")]
+    pub image_yaml: ::prost::alloc::string::String,
+    /// Actor driver name (`linux-firecracker`, `macos-vz`, `linux-container`,
+    /// `macos-apple-container`); empty picks this host's VM driver.
+    #[prost(string, tag="2")]
+    pub driver: ::prost::alloc::string::String,
+    /// Profile user for cache keys; unset uses the default user (`agent`, 1000:1000).
+    #[prost(message, optional, tag="3")]
+    pub user: ::core::option::Option<ImageUser>,
+    /// Optional commit layer from the image's lockfile, stacked on top.
+    #[prost(message, optional, tag="4")]
+    pub commit: ::core::option::Option<ImageCommit>,
+    /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+    /// image's lockfile.
+    #[prost(map="string, string", tag="5")]
+    pub pinned_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// Optional `repository:tag` embedded in the exported archive's manifest;
+    /// empty defaults to `needy-snapshot:<digest>`.
+    #[prost(string, tag="6")]
+    pub tag: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExportImageResponse {
+    /// Raw bytes of the exported Docker/OCI tar archive.
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 /// What a runner can host: each role with its drivers. A role with none is a
 /// role it does not hold.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

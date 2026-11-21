@@ -2187,3 +2187,134 @@ fn migrated_example_agent_profiles_load_validate_and_use_builtin_agent_features(
     assert_eq!(actual, expected_features, "unexpected feature layers in {rel}");
   }
 }
+
+#[tokio::test]
+async fn image_log_returns_empty_before_edits_and_records_commits_with_commands_base_and_active() {
+  use needy_api_server::control::{ImageLog, Images as _};
+  use needy_core_actor::image::store::Command as StoreCommand;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+
+  // Before any edits, `Images::log` returns an empty history.
+  let empty = daemon
+    .log(ImageLog {
+      image_name: "demo-image".into(),
+      current_layer: None,
+    })
+    .await
+    .unwrap();
+  assert!(empty.commits.is_empty());
+
+  // Record two commits in the store (simulating two edit sessions).
+  let base1 = needy_core::image::Digest::of(b"base-plan-1");
+  let base2 = needy_core::image::Digest::of(b"base-plan-2");
+  let layer1 = daemon
+    .images
+    .store
+    .commit(
+      "demo-image",
+      None,
+      Some(&base1),
+      std::io::Cursor::new(tar_with_file("first.txt", "one\n")),
+      vec![StoreCommand::new(
+        vec!["apt-get".into(), "update".into()],
+        "/",
+      )],
+    )
+    .unwrap();
+  let layer2 = daemon
+    .images
+    .store
+    .commit(
+      "demo-image",
+      Some(&layer1),
+      Some(&base2),
+      std::io::Cursor::new(tar_with_file("second.txt", "two\n")),
+      vec![StoreCommand::new(
+        vec!["pip".into(), "install".into(), "ruff".into()],
+        "/opt",
+      )],
+    )
+    .unwrap();
+
+  let logged = daemon
+    .log(ImageLog {
+      image_name: "demo-image".into(),
+      current_layer: Some(layer2.to_string()),
+    })
+    .await
+    .unwrap();
+  assert_eq!(logged.commits.len(), 2);
+
+  assert_eq!(logged.commits[0].layer, layer1.to_string());
+  assert_eq!(logged.commits[0].parent, None);
+  assert_eq!(logged.commits[0].base.as_deref(), Some(base1.to_string().as_str()));
+  assert!(!logged.commits[0].active);
+  assert_eq!(logged.commits[0].commands.len(), 1);
+  assert_eq!(logged.commits[0].commands[0].argv, ["apt-get", "update"]);
+  assert_eq!(logged.commits[0].commands[0].cwd, "/");
+
+  assert_eq!(logged.commits[1].layer, layer2.to_string());
+  assert_eq!(logged.commits[1].parent.as_deref(), Some(layer1.to_string().as_str()));
+  assert_eq!(logged.commits[1].base.as_deref(), Some(base2.to_string().as_str()));
+  assert!(logged.commits[1].active);
+  assert_eq!(logged.commits[1].commands.len(), 1);
+  assert_eq!(logged.commits[1].commands[0].argv, ["pip", "install", "ruff"]);
+  assert_eq!(logged.commits[1].commands[0].cwd, "/opt");
+}
+
+#[tokio::test]
+async fn image_export_streams_valid_oci_docker_archive() {
+  use futures_util::StreamExt as _;
+  use needy_api_server::control::{ImageExport, Images as _};
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (_sessions, _configs, responder) = spawn_build_responder(started_log.clone(), behavior, stop.clone());
+
+  let image_yaml = "layers:\n  - run: echo export-layer\n".to_string();
+  let mut stream = tokio::time::timeout(
+    Duration::from_secs(20),
+    daemon.export(ImageExport {
+      image_yaml,
+      driver: "linux-firecracker".into(),
+      user: None,
+      commit: None,
+      pinned_features: Default::default(),
+      tag: Some("example.com/exported:1".into()),
+    }),
+  )
+  .await
+  .expect("image export timed out")
+  .unwrap();
+
+  let mut bytes = Vec::new();
+  while let Some(chunk) = stream.next().await {
+    bytes.extend_from_slice(&chunk.unwrap());
+  }
+  stop.cancel();
+  responder.abort();
+
+  assert!(!bytes.is_empty(), "exported archive must not be empty");
+  let mut archive = tar::Archive::new(std::io::Cursor::new(&bytes));
+  let mut names = std::collections::BTreeSet::new();
+  let mut manifest_json = String::new();
+  for entry in archive.entries().unwrap() {
+    let mut entry = entry.unwrap();
+    let path = entry.path().unwrap().to_string_lossy().into_owned();
+    if path == "manifest.json" {
+      std::io::Read::read_to_string(&mut entry, &mut manifest_json).unwrap();
+    }
+    names.insert(path);
+  }
+  assert!(names.contains("oci-layout"), "missing oci-layout: {names:?}");
+  assert!(names.contains("index.json"), "missing index.json: {names:?}");
+  assert!(names.contains("manifest.json"), "missing manifest.json: {names:?}");
+  assert!(manifest_json.contains("example.com/exported:1"), "tag missing from manifest.json: {manifest_json}");
+}

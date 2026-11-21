@@ -1060,11 +1060,60 @@ pub struct ImageRollbackResult {
   pub base: Option<String>,
 }
 
-/// Building image definitions, interactive edit sessions, and commit rollback.
+/// A request to inspect an image's commit history in the layer store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageLog {
+  /// Stable identifier for the image (commit history key).
+  pub image_name: String,
+  /// Current commit layer digest from the lockfile, if any, used to mark the
+  /// active commit.
+  pub current_layer: Option<String>,
+}
+
+/// One recorded commit in an image's history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitHistoryEntry {
+  pub layer: String,
+  pub parent: Option<String>,
+  pub base: Option<String>,
+  pub commands: Vec<RecordedCommand>,
+  pub time_ms: i64,
+  pub active: bool,
+}
+
+/// Result of [`Images::log`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageLogResult {
+  pub commits: Vec<CommitHistoryEntry>,
+}
+
+/// A request to build/resolve an image definition and stream it as an
+/// OCI/Docker tar archive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImageExport {
+  /// Self-contained image definition YAML (its `extends` chain merged).
+  pub image_yaml: String,
+  /// Actor driver name; empty selects this host's VM driver.
+  pub driver: String,
+  /// Profile user for build plan cache keys; `None` uses the default user.
+  pub user: Option<needy_config::profile::User>,
+  /// Optional commit layer from the image's lockfile, stacked on top.
+  pub commit: Option<needy_core::image::Commit>,
+  /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  /// image's lockfile.
+  pub pinned_features: BTreeMap<String, String>,
+  /// Optional `repository:tag` embedded in the exported archive's manifest.
+  pub tag: Option<String>,
+}
+
+/// Building image definitions, interactive edit sessions, commit history,
+/// rollback, and OCI archive export.
 #[async_trait::async_trait]
 pub trait Images: Send + Sync + 'static {
   async fn build(&self, request: ImageBuild) -> Result<ImageBuildResult>;
   async fn start_edit(&self, request: ImageEditStart) -> Result<ImageEditStarted>;
   async fn finish_edit(&self, session_id: &str, abort: bool) -> Result<ImageEditFinished>;
   async fn rollback(&self, request: ImageRollback) -> Result<ImageRollbackResult>;
+  async fn log(&self, request: ImageLog) -> Result<ImageLogResult>;
+  async fn export(&self, request: ImageExport) -> Result<Chunks>;
 }

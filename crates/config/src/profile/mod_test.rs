@@ -493,7 +493,7 @@ fn extends_depth_is_limited() {
 }
 
 #[test]
-fn there_are_no_built_in_profiles() {
+fn an_unknown_built_in_profile_is_named() {
   let err = load_text("extends: builtin:base-linux\n").unwrap_err().to_string();
 
   assert!(err.contains("no built-in profile named \"base-linux\""), "{err}");
@@ -1022,4 +1022,54 @@ fn client_executor_is_explicit_and_named_client_stays_a_name() {
   )).unwrap();
   assert_eq!(profile.executors["here"].runner.as_ref().unwrap().to_string(), "creating client");
   assert_eq!(profile.executors["named"].runner.as_ref().unwrap().to_string(), "runner client");
+}
+
+#[test]
+fn builtin_profiles_load_validate_and_carry_inline_agent_images() {
+  let names: Vec<&str> = crate::builtin::profiles().collect();
+  assert_eq!(names, ["codex", "opencode", "pi", "herdr"]);
+
+  let expected = [
+    ("codex", vec!["builtin:codex"]),
+    ("opencode", vec!["builtin:opencode"]),
+    ("pi", vec!["builtin:pi"]),
+    (
+      "herdr",
+      vec![
+        "builtin:codex",
+        "builtin:pi",
+        "builtin:opencode",
+        "builtin:herdr",
+      ],
+    ),
+  ];
+
+  for (name, expected_features) in expected {
+    let source = crate::Source::builtin(name);
+    let profile = super::load(&source).unwrap_or_else(|e| panic!("failed to load builtin:{name}: {e}"));
+    let findings = crate::validate::profile(&profile);
+    assert!(findings.is_empty(), "validation findings for builtin:{name}: {findings:?}");
+
+    let Some(crate::image::Image::Definition(def)) = &profile.actor.image else {
+      panic!("builtin:{name} must carry an inline actor.image definition");
+    };
+    let actual: Vec<&str> = def
+      .layers
+      .iter()
+      .filter_map(|layer| match layer {
+        crate::image::Layer::Feature { reference, .. } => Some(reference.as_str()),
+        crate::image::Layer::Run(_) => None,
+      })
+      .collect();
+    assert_eq!(actual, expected_features, "unexpected feature layers in builtin:{name}");
+
+    // `profile::resolve` must also produce self-contained YAML for `builtin:<name>`.
+    let resolved = super::resolve(&source).unwrap_or_else(|e| panic!("failed to resolve builtin:{name}: {e}"));
+    assert!(resolved.image_file.is_none());
+    let reloaded = super::load(&crate::Source::text(resolved.yaml, std::path::PathBuf::new())).unwrap();
+    assert_eq!(reloaded.actor.image, profile.actor.image);
+  }
+
+  // Built-in standalone images remain disallowed (agents are features).
+  assert!(crate::image::load(&crate::Source::builtin("codex")).is_err());
 }
