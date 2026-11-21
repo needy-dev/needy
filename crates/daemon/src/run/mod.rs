@@ -511,6 +511,9 @@ pub struct Boot {
   pub start_hooks: Vec<String>,
   /// Lifecycle `stop` hooks (`needy_core::image::Plan::hooks.stop`).
   pub stop_hooks: Vec<String>,
+  /// Sync mappings declared by features (`customizations.needy.files`) in
+  /// resolved layer order, backed by `<daemon.data_dir>/files/<store>`.
+  pub sync_files: Vec<needy_core::image::FeatureSyncFile>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -715,6 +718,9 @@ impl Daemon {
     crate::sync::check(self, run)?;
     unwinding(run)?;
     crate::image::prepare(self, run).await?;
+    // Ensure stores for feature-declared sync mappings (`<data_dir>/files/<store>`)
+    // exist before seeding.
+    crate::sync::check(self, run)?;
     let client_holder = self.state.client_execution_for_run(&run.id).await?;
     // NOTICE: this bounds initial helper startup only. A bound executor's
     // disconnection deadline during commands belongs to the exec policy.

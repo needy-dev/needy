@@ -537,3 +537,131 @@ fn hooks_collect_features_in_resolved_layer_order_before_image_hooks_without_aff
   );
   assert_eq!(p_with_hooks.hooks.stop, ["image-stop"]);
 }
+
+#[test]
+fn collects_feature_sync_files_in_resolved_layer_order_with_expanded_home() {
+  use needy_config::profile::OnConflict;
+
+  let features = BTreeMap::from([
+    (
+      "ghcr.io/example/features/base-auth:1".into(),
+      resolved(
+        '1',
+        r#"{
+          "id": "base-auth",
+          "customizations": {
+            "needy": {
+              "files": {
+                "auth": {
+                  "path": "~/.config/auth",
+                  "on-conflict": { "token.json": "run" }
+                }
+              }
+            }
+          }
+        }"#,
+      ),
+    ),
+    (
+      "ghcr.io/example/features/opencode:1".into(),
+      resolved(
+        '2',
+        r#"{
+          "id": "opencode",
+          "dependsOn": { "ghcr.io/example/features/base-auth:1": {} },
+          "customizations": {
+            "needy": {
+              "files": {
+                "opencode": {
+                  "path": "~/.opencode",
+                  "store": "opencode-state",
+                  "filter": ["- cache/"],
+                  "on-conflict": { "history.jsonl": "lines" }
+                }
+              }
+            }
+          }
+        }"#,
+      ),
+    ),
+  ]);
+
+  let def = Definition {
+    root: Some("example.com/root:1".into()),
+    layers: vec![feature_layer("ghcr.io/example/features/opencode:1", &[])],
+    env: BTreeMap::new(),
+    hooks: Default::default(),
+  };
+  let user = User {
+    name: "dev".into(),
+    uid: 1001,
+    gid: 1001,
+  };
+
+  let p = plan(&def, &digest('a'), &user, None, &features).unwrap();
+  assert_eq!(
+    p.sync_files,
+    vec![
+      FeatureSyncFile {
+        name: "auth".into(),
+        store: "auth".into(),
+        path: "/home/dev/.config/auth".into(),
+        filter: vec![],
+        on_conflict: vec![("token.json".into(), OnConflict::Run)],
+        feature: "ghcr.io/example/features/base-auth:1".into(),
+      },
+      FeatureSyncFile {
+        name: "opencode".into(),
+        store: "opencode-state".into(),
+        path: "/home/dev/.opencode".into(),
+        filter: vec!["- cache/".into()],
+        on_conflict: vec![("history.jsonl".into(), OnConflict::Lines)],
+        feature: "ghcr.io/example/features/opencode:1".into(),
+      },
+    ]
+  );
+}
+
+#[test]
+fn rejects_two_features_claiming_same_actor_path_or_mapping_name() {
+  // Same actor path under different mapping names (including trailing slash normalization).
+  let same_path = BTreeMap::from([
+    (
+      "ghcr.io/example/features/one:1".into(),
+      resolved('1', r#"{ "id": "one", "customizations": { "needy": { "files": { "a": { "path": "~/.agent/" } } } } }"#),
+    ),
+    (
+      "ghcr.io/example/features/two:1".into(),
+      resolved('2', r#"{ "id": "two", "customizations": { "needy": { "files": { "b": { "path": "~/.agent" } } } } }"#),
+    ),
+  ]);
+  let def = Definition {
+    root: Some("example.com/root:1".into()),
+    layers: vec![
+      feature_layer("ghcr.io/example/features/one:1", &[]),
+      feature_layer("ghcr.io/example/features/two:1", &[]),
+    ],
+    env: BTreeMap::new(),
+    hooks: Default::default(),
+  };
+  let err = plan(&def, &digest('a'), &User::default(), None, &same_path).unwrap_err().to_string();
+  assert!(err.contains("/home/agent/.agent"), "{err}");
+  assert!(err.contains("ghcr.io/example/features/one:1"), "{err}");
+  assert!(err.contains("ghcr.io/example/features/two:1"), "{err}");
+
+  // Same mapping name at different actor paths.
+  let same_name = BTreeMap::from([
+    (
+      "ghcr.io/example/features/one:1".into(),
+      resolved('1', r#"{ "id": "one", "customizations": { "needy": { "files": { "state": { "path": "~/.one" } } } } }"#),
+    ),
+    (
+      "ghcr.io/example/features/two:1".into(),
+      resolved('2', r#"{ "id": "two", "customizations": { "needy": { "files": { "state": { "path": "~/.two" } } } } }"#),
+    ),
+  ]);
+  let err = plan(&def, &digest('a'), &User::default(), None, &same_name).unwrap_err().to_string();
+  assert!(err.contains("state"), "{err}");
+  assert!(err.contains("ghcr.io/example/features/one:1"), "{err}");
+  assert!(err.contains("ghcr.io/example/features/two:1"), "{err}");
+}

@@ -158,3 +158,100 @@ fn empty_lifecycle_hooks_produce_no_start_hooks() {
   let meta = FeatureMetadata::parse(json).unwrap();
   assert!(meta.start_hooks().is_empty());
 }
+
+#[test]
+fn parses_customizations_needy_files_with_store_filter_and_on_conflict() {
+  use needy_config::profile::OnConflict;
+
+  let json = r#"{
+    "id": "opencode",
+    "version": "1.0.0",
+    "customizations": {
+      "vscode": { "extensions": ["example.ext"] },
+      "needy": {
+        "files": {
+          "opencode": {
+            "path": "~/.opencode",
+            "filter": ["- cache/", "- *.log"],
+            "on-conflict": {
+              "auth.json": "run",
+              "history.jsonl": "lines",
+              "installation_id": "store"
+            }
+          },
+          "opencode-config": {
+            "path": "~/.config/opencode",
+            "store": "opencode/config"
+          }
+        }
+      }
+    }
+  }"#;
+
+  let meta = FeatureMetadata::parse(json).unwrap();
+  meta.check_allowed("ghcr.io/example/features/opencode:1").unwrap();
+
+  let needy = meta.customizations.needy.as_ref().expect("customizations.needy");
+  assert_eq!(needy.files.len(), 2);
+
+  let main = &needy.files["opencode"];
+  assert_eq!(main.path, "~/.opencode");
+  assert_eq!(main.store, None);
+  assert_eq!(main.filter, ["- cache/", "- *.log"]);
+  assert_eq!(
+    main.on_conflict,
+    vec![
+      ("auth.json".to_string(), OnConflict::Run),
+      ("history.jsonl".to_string(), OnConflict::Lines),
+      ("installation_id".to_string(), OnConflict::Store),
+    ]
+  );
+
+  let cfg = &needy.files["opencode-config"];
+  assert_eq!(cfg.path, "~/.config/opencode");
+  assert_eq!(cfg.store.as_deref(), Some("opencode/config"));
+  assert!(cfg.filter.is_empty());
+  assert!(cfg.on_conflict.is_empty());
+}
+
+#[test]
+fn rejects_merge_driver_in_customizations_needy_files_on_conflict() {
+  let json = r#"{
+    "id": "opencode",
+    "customizations": {
+      "needy": {
+        "files": {
+          "opencode": {
+            "path": "~/.opencode",
+            "on-conflict": {
+              "sessions.db": { "driver": "opencode-merge" }
+            }
+          }
+        }
+      }
+    }
+  }"#;
+
+  let err = FeatureMetadata::parse(json).unwrap_err().to_string();
+  assert!(err.contains("merge drivers are not supported yet"), "{err}");
+}
+
+#[test]
+fn rejects_invalid_sync_file_store_names_and_paths() {
+  let cases = [
+    (r#"{"id":"a","customizations":{"needy":{"files":{"../escape":{"path":"~/.a"}}}}}"#, "../escape"),
+    (r#"{"id":"a","customizations":{"needy":{"files":{"a/b":{"path":"~/.a"}}}}}"#, "a/b"),
+    (r#"{"id":"a","customizations":{"needy":{"files":{"a":{"path":"~/.a","store":"../escape"}}}}}"#, "../escape"),
+    (r#"{"id":"a","customizations":{"needy":{"files":{"a":{"path":"~/.a","store":"/etc/passwd"}}}}}"#, "/etc/passwd"),
+    (r#"{"id":"a","customizations":{"needy":{"files":{"a":{"path":"~/.a","store":"~/home"}}}}}"#, "~/home"),
+    (r#"{"id":"a","customizations":{"needy":{"files":{"a":{"path":""}}}}}"#, "path"),
+    (r#"{"id":"a","customizations":{"needy":{"files":{"a":{"path":"relative/dir"}}}}}"#, "relative/dir"),
+  ];
+
+  for (json, expected_fragment) in cases {
+    let meta = FeatureMetadata::parse(json).unwrap();
+    let err = meta.check_allowed("ghcr.io/example/features/a:1").unwrap_err().to_string();
+    assert!(err.contains("ghcr.io/example/features/a:1"), "error should name feature: {err}");
+    assert!(err.contains(expected_fragment), "error should mention {expected_fragment:?}: {err}");
+  }
+}

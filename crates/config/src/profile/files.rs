@@ -72,7 +72,11 @@ pub struct FileMapping {
   /// A sync mapping's choices for an entry both the run and the store
   /// changed, by pattern (as a `filter` rule's pattern matches), in the
   /// order written: the first that matches applies.
-  #[serde(default, rename = "on-conflict", deserialize_with = "on_conflict")]
+  #[serde(
+    default,
+    rename = "on-conflict",
+    deserialize_with = "deserialize_on_conflict"
+  )]
   pub on_conflict: Vec<(String, OnConflict)>,
 }
 
@@ -104,7 +108,7 @@ pub enum OnConflict {
 
 /// Reads `on-conflict`, a map from patterns to choices, keeping the order
 /// it is written in: the first matching pattern applies.
-fn on_conflict<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, OnConflict)>, D::Error> {
+pub fn deserialize_on_conflict<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<(String, OnConflict)>, D::Error> {
   struct Choices;
   impl<'de> Visitor<'de> for Choices {
     type Value = Vec<(String, OnConflict)>;

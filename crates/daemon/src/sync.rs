@@ -22,7 +22,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::{ControlError, ExecSpec};
 use needy_common::merge::{self, Choice, Policy, Trees};
-use needy_config::profile::{FileMapping, FileMode, OnConflict, Side};
+use needy_config::profile::{FileMode, OnConflict, Side};
 use needy_core::event::{Event, FilesMerge, FilesMergePending, FilesSync, Store};
 use needy_core::types::Origin;
 use needy_core_actor::driver::HostMount;
@@ -97,15 +97,85 @@ fn account() -> String {
   std::env::var("USER").unwrap_or_else(|_| format!("uid {}", unsafe { libc::geteuid() }))
 }
 
-/// The selected sync mappings of `run`: name, mapping, store and path in the
-/// actor.
-fn mappings(run: &Run) -> impl Iterator<Item = (&String, &FileMapping, &str, &str)> {
-  run.profile.files.mappings.iter().filter(|(name, _)| crate::files::selected(run, name)).filter_map(|(name, mapping)| {
-    match (mapping.mode, &mapping.from, &mapping.to) {
-      (FileMode::Sync, Side::Host(store), Side::Actor(target)) => Some((name, mapping, store.as_str(), target.as_str())),
+/// One effective sync mapping for a run, from either `profile.files` or a
+/// feature's `customizations.needy.files`.
+struct SyncMapping {
+  name: String,
+  store: PathBuf,
+  target: String,
+  filter: Vec<String>,
+  on_conflict: Vec<(String, OnConflict)>,
+}
+
+/// `path` without trailing slashes, except the root.
+fn trim_trailing_slashes(path: &str) -> &str {
+  match path.trim_end_matches('/') {
+    "" => path,
+    trimmed => trimmed,
+  }
+}
+
+/// The effective sync mappings of `run`: selected `mode: sync` entries from
+/// `run.profile.files`, followed by feature-declared sync mappings from
+/// `run.boot().sync_files` backed by `<daemon.data_dir>/files/<store>`.
+///
+/// Precedence: if `run.profile.files` explicitly defines a mapping with the
+/// same name OR claims the same actor target path (via `copy-in`, `mount`, or
+/// `sync`), the profile's mapping takes precedence and the feature's default
+/// mapping is skipped. Feature-declared sync mappings are not filtered by
+/// `profile.run_files` (which only accepts names declared in `profile.files`).
+fn mappings(daemon: &Daemon, run: &Run) -> Vec<SyncMapping> {
+  let mut out: Vec<SyncMapping> = run
+    .profile
+    .files
+    .mappings
+    .iter()
+    .filter(|(name, _)| crate::files::selected(run, name))
+    .filter_map(|(name, mapping)| match (mapping.mode, &mapping.from, &mapping.to) {
+      (FileMode::Sync, Side::Host(store), Side::Actor(target)) => Some(SyncMapping {
+        name: name.clone(),
+        store: crate::files::host_path(run, store),
+        target: target.clone(),
+        filter: mapping.filter.clone(),
+        on_conflict: mapping.on_conflict.clone(),
+      }),
       _ => None,
+    })
+    .collect();
+
+  let feature_files = run.boot().sync_files;
+  if feature_files.is_empty() {
+    return out;
+  }
+
+  let profile_claimed_paths: Vec<&str> = run
+    .profile
+    .files
+    .mappings
+    .values()
+    .filter_map(|mapping| match (mapping.mode, &mapping.to) {
+      (FileMode::CopyIn | FileMode::Mount | FileMode::Sync, Side::Actor(path)) => Some(trim_trailing_slashes(path)),
+      _ => None,
+    })
+    .collect();
+
+  for feature_file in feature_files {
+    if run.profile.files.mappings.contains_key(&feature_file.name) {
+      continue;
     }
-  })
+    let norm = trim_trailing_slashes(&feature_file.path);
+    if profile_claimed_paths.contains(&norm) {
+      continue;
+    }
+    out.push(SyncMapping {
+      name: feature_file.name,
+      store: daemon.config.data_dir.join("files").join(&feature_file.store),
+      target: feature_file.path,
+      filter: feature_file.filter,
+      on_conflict: feature_file.on_conflict,
+    });
+  }
+  out
 }
 
 fn runs_dir(daemon: &Daemon) -> PathBuf {
@@ -157,10 +227,11 @@ fn hex(bytes: &[u8]) -> String {
 /// acquires anything: a store under needy's data directory is created when
 /// missing; any other is the user's and must exist on the control host.
 pub fn check(daemon: &Daemon, run: &Run) -> Result<()> {
-  for (name, _, spec, _) in mappings(run) {
-    let store = crate::files::host_path(run, spec);
+  for mapping in mappings(daemon, run) {
+    let name = &mapping.name;
+    let store = &mapping.store;
     if store.starts_with(&daemon.config.data_dir) {
-      needy_api_server::create_private_dir(&store).with_context(|| format!("sync {name}: create the store {}", store.display()))?;
+      needy_api_server::create_private_dir(store).with_context(|| format!("sync {name}: create the store {}", store.display()))?;
     }
     if !store.is_dir() {
       bail!(
@@ -177,9 +248,10 @@ pub fn check(daemon: &Daemon, run: &Run) -> Result<()> {
 /// then copies the store, through the mapping's filter, into the run's seed
 /// and per-run copy, under the store's lock.
 pub async fn seed(daemon: &Daemon, run: &Run) -> Result<()> {
-  for (name, mapping, spec, _) in mappings(run) {
-    let store = crate::files::host_path(run, spec);
-    drain_store(daemon, &store).await;
+  for mapping in mappings(daemon, run) {
+    let name = &mapping.name;
+    let store = &mapping.store;
+    drain_store(daemon, store).await;
     let dir = run_dir(daemon, &run.id).join(name);
     needy_api_server::create_private_dir(&dir).with_context(|| format!("create {}", dir.display()))?;
     let record = Record {
@@ -215,11 +287,12 @@ pub async fn seed(daemon: &Daemon, run: &Run) -> Result<()> {
 /// The per-run copies of `run`, as mounts of the control host into its
 /// actor.
 pub fn mounts(daemon: &Daemon, run: &Run) -> Vec<HostMount> {
-  mappings(run)
-    .filter_map(|(name, _, _, target)| {
-      let copy = copy_dir(daemon, &run.id, name);
+  mappings(daemon, run)
+    .into_iter()
+    .filter_map(|mapping| {
+      let copy = copy_dir(daemon, &run.id, &mapping.name);
       copy.is_dir().then(|| HostMount {
-        target: target.to_string(),
+        target: mapping.target,
         executor: EXECUTOR.into(),
         source: copy.display().to_string(),
         writable: true,

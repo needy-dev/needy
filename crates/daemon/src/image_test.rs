@@ -1844,3 +1844,210 @@ hooks:
   stop.cancel();
   responder.await.unwrap();
 }
+
+#[tokio::test]
+async fn feature_declared_sync_mapping_seeds_mounts_merges_and_appears_in_report() {
+  use needy_core::event::{Event, Recorded};
+  use needy_core::report::{self, Format, Level};
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let opencode = make_feature_artifact(
+    "example/features/opencode",
+    "1",
+    r#"{
+      "id": "opencode",
+      "version": "1.0.0",
+      "customizations": {
+        "needy": {
+          "files": {
+            "opencode": {
+              "path": "~/.opencode",
+              "filter": ["- cache/"],
+              "on-conflict": { "history.jsonl": "lines" }
+            },
+            "opencode-config": {
+              "path": "~/.config/opencode"
+            }
+          }
+        }
+      }
+    }"#,
+    "#!/bin/sh\necho installing opencode\n",
+  );
+  let (base_url, _requests) = spawn_feature_registry(vec![opencode]).await;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let dir = started.dir.path();
+  let data = dir.join("data");
+  let feature_store = FeatureStore::new(&daemon.config.cache_dir).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  daemon.images.set_feature_store(feature_store);
+
+  let started_log = dir.join("started.log");
+  fake_image(&dir.join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (_sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  // Pre-seed one file and one filtered cache file in `<data_dir>/files/opencode`.
+  let store = data.join("files/opencode");
+  std::fs::create_dir_all(store.join("cache")).unwrap();
+  std::fs::write(store.join("auth.json"), "initial-token").unwrap();
+  std::fs::write(store.join("cache/tmp.bin"), "ignored").unwrap();
+
+  let profile = r#"
+actor:
+  driver: linux-firecracker
+  image:
+    root: example.com/root:1
+    layers:
+      - feature: ghcr.io/example/features/opencode:1
+user: { name: dev, uid: 1001, gid: 1001 }
+executors:
+  here: { driver: native }
+commands:
+  - { match: "**", to: here }
+"#;
+
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(profile, dir)))
+    .await
+    .expect("run create with feature sync mapping timed out")
+    .unwrap();
+
+  // Per-run copy is seeded from `<data_dir>/files/opencode` through the filter,
+  // `<data_dir>/files/opencode-config` is auto-created when missing, and
+  // `Guest::config` includes both pass-through mounts.
+  let auto_store = data.join("files/opencode-config");
+  assert!(auto_store.is_dir(), "missing feature store under data_dir must be auto-created");
+  let copy = data.join("sync/runs").join(&created.id).join("opencode/copy");
+  assert_eq!(std::fs::read_to_string(copy.join("auth.json")).unwrap(), "initial-token");
+  assert!(!copy.join("cache").exists(), "feature filter must exclude cache/ from per-run copy");
+
+  let guest_cfg = Guest::config(daemon, &created.id).await.unwrap();
+  let mount =
+    guest_cfg.mounts.iter().find(|m| m.target == "/home/dev/.opencode").expect("Guest::config must include feature-declared sync mount");
+  assert_eq!(mount.executor, crate::sync::EXECUTOR);
+  assert_eq!(mount.source, copy.to_str().unwrap());
+  assert!(mount.writable);
+  assert!(
+    guest_cfg.mounts.iter().any(|m| m.target == "/home/dev/.config/opencode"),
+    "Guest::config must include auto-created feature sync mount"
+  );
+
+  // Simulate the actor refreshing auth.json and writing a session file.
+  std::fs::write(copy.join("auth.json"), "refreshed-token").unwrap();
+  std::fs::create_dir_all(copy.join("sessions")).unwrap();
+  std::fs::write(copy.join("sessions/s1.jsonl"), "hello\n").unwrap();
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+
+  // Changes are merged back into `<data_dir>/files/opencode`, and the per-run copy is removed.
+  assert_eq!(std::fs::read_to_string(store.join("auth.json")).unwrap(), "refreshed-token");
+  assert_eq!(std::fs::read_to_string(store.join("sessions/s1.jsonl")).unwrap(), "hello\n");
+  assert!(!data.join("sync/runs").join(&created.id).exists());
+
+  // `run report` shows the merged feature sync mapping.
+  let trace = needy_trace::sink::sqlite::load(&dir.join("state/trace.db"), &created.id).await.unwrap();
+  let events: Vec<Recorded> = trace
+    .events
+    .iter()
+    .map(|e| Recorded {
+      time_ms: e.time_ms,
+      event: Event::decode(&e.kind, e.version, e.payload.get()).unwrap(),
+    })
+    .collect();
+  let summary: serde_json::Value = serde_json::from_str(&report::render(&created.id, &events, Level::Summary, Format::Json)).unwrap();
+  assert_eq!(summary["synced"][0]["name"], "opencode");
+  assert_eq!(summary["synced"][0]["store"], store.display().to_string());
+  assert_eq!(summary["synced"][0]["merge"], "merged");
+
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn profile_explicit_file_mapping_overrides_feature_declared_sync_mapping() {
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let opencode = make_feature_artifact(
+    "example/features/opencode",
+    "1",
+    r#"{
+      "id": "opencode",
+      "version": "1.0.0",
+      "customizations": {
+        "needy": {
+          "files": {
+            "opencode": {
+              "path": "~/.opencode"
+            }
+          }
+        }
+      }
+    }"#,
+    "#!/bin/sh\necho installing opencode\n",
+  );
+  let (base_url, _requests) = spawn_feature_registry(vec![opencode]).await;
+
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let dir = started.dir.path();
+  let data = dir.join("data");
+  let feature_store = FeatureStore::new(&daemon.config.cache_dir).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  daemon.images.set_feature_store(feature_store);
+
+  let started_log = dir.join("started.log");
+  fake_image(&dir.join("image"), &session_driver_script(&started_log));
+
+  let stop = tokio_util::sync::CancellationToken::new();
+  let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
+  let (_sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
+
+  // Profile explicitly maps the same actor path (`~/.opencode`) to a custom store
+  // under a different mapping name (`work_opencode`).
+  let custom_store = dir.join("work-opencode");
+  std::fs::create_dir_all(&custom_store).unwrap();
+  std::fs::write(custom_store.join("account.txt"), "work").unwrap();
+
+  let profile = format!(
+    r#"
+actor:
+  driver: linux-firecracker
+  image:
+    root: example.com/root:1
+    layers:
+      - feature: ghcr.io/example/features/opencode:1
+user: {{ name: dev, uid: 1001, gid: 1001 }}
+files:
+  work_opencode:
+    mode: sync
+    from: "host:{}"
+    to: "actor:~/.opencode"
+executors:
+  here: {{ driver: native }}
+commands:
+  - {{ match: "**", to: here }}
+"#,
+    custom_store.display()
+  );
+
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(&profile, dir)))
+    .await
+    .expect("run create with overridden feature sync mapping timed out")
+    .unwrap();
+
+  // Only the profile's explicit mapping mounts `/home/dev/.opencode`, backed by `work_opencode`.
+  let guest_cfg = Guest::config(daemon, &created.id).await.unwrap();
+  let opencode_mounts: Vec<_> = guest_cfg.mounts.iter().filter(|m| m.target == "/home/dev/.opencode").collect();
+  assert_eq!(opencode_mounts.len(), 1, "profile override must suppress feature default mount");
+
+  let custom_copy = data.join("sync/runs").join(&created.id).join("work_opencode/copy");
+  assert_eq!(opencode_mounts[0].source, custom_copy.to_str().unwrap());
+  assert_eq!(std::fs::read_to_string(custom_copy.join("account.txt")).unwrap(), "work");
+  assert!(!data.join("files/opencode").exists(), "overridden feature default store must not be created");
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  stop.cancel();
+  responder.await.unwrap();
+}
