@@ -21,8 +21,9 @@ use std::time::Duration;
 
 use bollard::errors::Error as BollardError;
 use bollard::query_parameters::{
-  CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder, LogsOptionsBuilder,
-  RemoveContainerOptionsBuilder, StopContainerOptionsBuilder, WaitContainerOptionsBuilder,
+  CommitContainerOptionsBuilder, CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DownloadFromContainerOptionsBuilder,
+  ImportImageOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, StopContainerOptionsBuilder,
+  WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -131,6 +132,16 @@ pub trait Engine: Send + Sync {
   /// The tar archive of `path` in the container `name`, which need not have
   /// started; `None` when the container has no such path.
   async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, Error>;
+  /// Commits `container`'s filesystem changes into a new image named
+  /// `repo:tag` and returns the new image's ID.
+  async fn commit_container(&self, container: &str, repo: &str, tag: &str) -> Result<String, Error>;
+  /// Streams the image's tar archive (`GET /images/{image}/get`).
+  fn export_image(&self, image: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>>;
+  /// Loads an image archive (an OCI or `docker save` tar stream) into the
+  /// engine (`POST /images/load`).
+  async fn load_image(&self, tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error>;
+  /// Removes `image` by name or ID; one that is gone already is fine.
+  async fn remove_image(&self, image: &str) -> Result<(), Error>;
 }
 
 /// This machine's engine (`DOCKER_HOST`, else the default socket), or the
@@ -225,6 +236,22 @@ impl Engine for Unreachable {
   }
 
   async fn download(&self, _name: &str, _path: &str) -> Result<Option<Vec<u8>>, Error> {
+    Err(self.error())
+  }
+
+  async fn commit_container(&self, _container: &str, _repo: &str, _tag: &str) -> Result<String, Error> {
+    Err(self.error())
+  }
+
+  fn export_image(&self, _image: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
+    futures_util::stream::iter([Err(self.error())]).boxed()
+  }
+
+  async fn load_image(&self, _tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error> {
+    Err(self.error())
+  }
+
+  async fn remove_image(&self, _image: &str) -> Result<(), Error> {
     Err(self.error())
   }
 }
@@ -325,6 +352,31 @@ impl Engine for Docker {
       Err(e) if e.is_not_found() => Ok(None),
       Err(e) => Err(e),
     }
+  }
+
+  async fn commit_container(&self, container: &str, repo: &str, tag: &str) -> Result<String, Error> {
+    let options = CommitContainerOptionsBuilder::default().container(container).repo(repo).tag(tag).build();
+    let response = self.0.commit_container(options, models::ContainerConfig::default()).await?;
+    Ok(response.id)
+  }
+
+  fn export_image(&self, image: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
+    self.0.export_image(image).map_err(Error::from).boxed()
+  }
+
+  async fn load_image(&self, tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error> {
+    let options = ImportImageOptionsBuilder::default().quiet(true).build();
+    let body = bollard::body_try_stream(tar.map_err(std::io::Error::other));
+    // NOTICE: use `import_image` with `body_try_stream` rather than
+    // `import_image_stream`: bollard 0.21.1's `import_image_stream` sets
+    // `Content-Type: application/json` instead of `application/x-tar`
+    // (`bollard-0.21.1/src/image.rs`, `import_image_stream`).
+    self.0.import_image(options, body, None).map_err(Error::from).try_for_each(|_| async { Ok(()) }).await
+  }
+
+  async fn remove_image(&self, image: &str) -> Result<(), Error> {
+    let options = RemoveImageOptionsBuilder::default().force(true).build();
+    ignore(self.0.remove_image(image, Some(options), None).await.map(drop), &[404])
   }
 }
 

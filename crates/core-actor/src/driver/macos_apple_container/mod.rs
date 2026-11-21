@@ -151,12 +151,7 @@ impl MacosAppleContainer {
   /// into Apple's `container` image store, as `needy image build
   /// --macos-apple-container` does.
   pub async fn load(&self, archive: &Path) -> Result<(), Error> {
-    let archive = archive.display().to_string();
-    let loaded = self.run(&["image", "load", "--input", &archive]).await?;
-    if !loaded.success {
-      return Err(refused(format!("`container image load` failed: {}", first_line(&loaded))));
-    }
-    Ok(())
+    self.cli.load_image(archive).await
   }
 
   /// Pulls the image into Apple's `container` image store (`container image

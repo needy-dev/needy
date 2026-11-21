@@ -76,6 +76,22 @@ impl Engine for Fake {
     archive.append_data(&mut header, path.rsplit('/').next().unwrap(), text.as_bytes()).unwrap();
     Ok(Some(archive.into_inner().unwrap()))
   }
+
+  async fn commit_container(&self, _container: &str, _repo: &str, _tag: &str) -> Result<String, Error> {
+    unreachable!("account tests never commit containers")
+  }
+
+  fn export_image(&self, _image: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
+    unreachable!("account tests never export images")
+  }
+
+  async fn load_image(&self, _tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error> {
+    unreachable!("account tests never load images")
+  }
+
+  async fn remove_image(&self, _image: &str) -> Result<(), Error> {
+    unreachable!("account tests never remove images")
+  }
 }
 
 // ROOT CAUSE:

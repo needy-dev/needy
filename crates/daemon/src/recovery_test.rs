@@ -152,6 +152,18 @@ impl Engine for Runtime {
   async fn download(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, engine::Error> {
     Ok(None)
   }
+  async fn commit_container(&self, _: &str, _: &str, _: &str) -> Result<String, engine::Error> {
+    Err(engine::Error::Refused("this fixture serves executor resources only".into()))
+  }
+  fn export_image(&self, _: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
+    Box::pin(futures_util::stream::empty())
+  }
+  async fn load_image(&self, _: futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>>) -> Result<(), engine::Error> {
+    Err(engine::Error::Refused("this fixture serves executor resources only".into()))
+  }
+  async fn remove_image(&self, _: &str) -> Result<(), engine::Error> {
+    Ok(())
+  }
 }
 
 /// Compose replacement control around the same verified holder and durable
