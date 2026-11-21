@@ -147,6 +147,7 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
     env: Default::default(),
     session: GuestSession::default(),
     commit_rebased: false,
+    resolved_features: Default::default(),
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();
@@ -188,6 +189,7 @@ async fn the_guest_receives_materialized_layer_disk_digests_when_flattened() {
     env: Default::default(),
     session: GuestSession::default(),
     commit_rebased: false,
+    resolved_features: Default::default(),
   });
 
   let config = Guest::config(&started.daemon, &created.id).await.unwrap();

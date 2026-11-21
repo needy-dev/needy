@@ -240,6 +240,108 @@ pub struct FetchedFeature {
   pub archive_path: PathBuf,
 }
 
+impl FetchedFeature {
+  /// Reads the cached feature archive as an uncompressed tar byte vector,
+  /// decompressing gzip when the registry served a `.tar.gz` blob.
+  pub fn uncompressed_tar(&self) -> Result<Vec<u8>> {
+    let raw = std::fs::read(&self.archive_path).map_err(io(self.archive_path.display()))?;
+    // Gzip magic bytes (`0x1f 0x8b`, RFC 1952 section 2.3.1).
+    if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
+      let mut out = Vec::new();
+      flate2::read::GzDecoder::new(raw.as_slice())
+        .read_to_end(&mut out)
+        .map_err(|e| Error::InvalidArchive(format!("cannot gunzip {}: {e}", self.archive_path.display())))?;
+      Ok(out)
+    } else {
+      Ok(raw)
+    }
+  }
+}
+
+/// A built-in Dev Container feature bundled with needy rather than fetched
+/// from an OCI registry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinFeature {
+  /// Stable reference name (for example `builtin:sshfs`).
+  pub reference: &'static str,
+  /// Raw `devcontainer-feature.json` metadata document.
+  pub metadata_json: &'static str,
+  /// POSIX `install.sh` script.
+  pub install_sh: &'static str,
+}
+
+impl BuiltinFeature {
+  /// Packs this built-in feature into an uncompressed tar archive containing
+  /// `devcontainer-feature.json` and an executable `install.sh`.
+  pub fn archive(&self) -> Result<Vec<u8>> {
+    let mut tar = tar::Builder::new(Vec::new());
+    for (name, mode, content) in [
+      (METADATA_FILE, 0o644u32, self.metadata_json.as_bytes()),
+      ("install.sh", 0o755u32, self.install_sh.as_bytes()),
+    ] {
+      let mut header = tar::Header::new_gnu();
+      header.set_size(content.len() as u64);
+      header.set_mode(mode);
+      header.set_cksum();
+      tar
+        .append_data(&mut header, name, content)
+        .map_err(|e| Error::InvalidArchive(format!("cannot pack built-in feature `{}`: {e}", self.reference)))?;
+    }
+    tar.into_inner().map_err(|e| Error::InvalidArchive(format!("cannot finalize built-in feature `{}`: {e}", self.reference)))
+  }
+
+  /// Content digest of this built-in feature's metadata and install script.
+  pub fn digest(&self) -> Digest {
+    let mut bytes = Vec::with_capacity(self.metadata_json.len() + self.install_sh.len() + 1);
+    bytes.extend_from_slice(self.metadata_json.as_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(self.install_sh.as_bytes());
+    Digest::of(&bytes)
+  }
+}
+
+/// Needy's built-in `sshfs` Dev Container feature (decision E8 in
+/// `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`):
+/// checks `command -v sshfs` and installs `sshfs` via the root's package
+/// manager when absent.
+// TODO(images): Slice 5 auto-prepends `builtin_sshfs()` as the first layer on
+// arbitrary non-needy roots that lack `sshfs`; in Slice 3 the helper is
+// packaged and validated ready for Slice 5.
+pub fn builtin_sshfs() -> BuiltinFeature {
+  BuiltinFeature {
+    reference: "builtin:sshfs",
+    metadata_json: r#"{
+  "id": "sshfs",
+  "version": "1.0.0",
+  "name": "SSHFS",
+  "description": "Installs sshfs when absent so needy can mount host workspaces and synced directories into the actor."
+}"#,
+    install_sh: r#"#!/bin/sh
+set -eu
+if command -v sshfs >/dev/null 2>&1; then
+  exit 0
+fi
+if command -v apt-get >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y --no-install-recommends sshfs fuse3 || apt-get install -y --no-install-recommends sshfs fuse
+  rm -rf /var/lib/apt/lists/*
+elif command -v apk >/dev/null 2>&1; then
+  apk add --no-cache sshfs fuse3 || apk add --no-cache sshfs fuse
+elif command -v dnf >/dev/null 2>&1; then
+  dnf install -y fuse-sshfs
+  dnf clean all
+elif command -v yum >/dev/null 2>&1; then
+  yum install -y fuse-sshfs
+  yum clean all
+else
+  echo "builtin:sshfs: no supported package manager (apt-get, apk, dnf, yum) found to install sshfs" >&2
+  exit 1
+fi
+"#,
+  }
+}
+
 /// Fetches Dev Container feature artifacts over OCI Distribution v2 and caches
 /// them under `cache_dir/features/sha256-<manifest-hex>/`.
 #[derive(Debug, Clone)]
@@ -285,6 +387,19 @@ impl FeatureStore {
   pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
     self.base_url = Some(base_url.into().trim_end_matches('/').to_string());
     self
+  }
+
+  /// Disables system HTTP proxies on the underlying client (useful for loopback
+  /// test registries).
+  pub fn without_proxy(mut self) -> Result<Self> {
+    self.client =
+      reqwest::Client::builder().user_agent(concat!("needy/", env!("CARGO_PKG_VERSION"))).no_proxy().build().map_err(|source| {
+        Error::Http {
+          url: String::from("<client>"),
+          source,
+        }
+      })?;
+    Ok(self)
   }
 
   /// Looks up a feature already cached under `digest`, making no network calls.

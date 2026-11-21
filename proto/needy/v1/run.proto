@@ -75,6 +75,9 @@ message CreateRunRequest {
   // Optional commit layer from the image's lockfile, stacked on top of the
   // image definition's built layers.
   ImageCommit image_commit = 13;
+  // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
+  // image's lockfile.
+  map<string, string> pinned_features = 14;
 
   // The client's profile directory, which the daemon cannot read when it
   // runs on another machine.
@@ -128,6 +131,9 @@ message Run {
   string snapshot = 14;
   // True when the lockfile's commit layer was applied on a changed base.
   bool commit_rebased = 15;
+  // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
+  // CLI to record in the image's lockfile.
+  map<string, string> resolved_features = 16;
 
   reserved 4;
 }

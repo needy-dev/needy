@@ -234,6 +234,7 @@ impl Daemon {
       actor_runner: Mutex::new(record.actor_runner.clone()),
       created_by: None,
       image_commit: None,
+      pinned_features: Default::default(),
       boot: Mutex::new(super::Boot {
         snapshot: record
           .snapshot

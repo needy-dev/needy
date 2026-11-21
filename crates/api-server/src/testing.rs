@@ -73,6 +73,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     workspace: None,
     snapshot: None,
     commit_rebased: false,
+    resolved_features: Default::default(),
   }
 }
 

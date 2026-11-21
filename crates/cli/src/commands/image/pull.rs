@@ -159,6 +159,55 @@ async fn detected() -> Result<Detected> {
   })
 }
 
+/// Ensures the base VM image for `driver` is present on this local host
+/// (decision E9 in `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`).
+///
+/// When `driver` is a VM driver and its base directory is missing or incomplete,
+/// attempts to pull it with the same checksum, architecture, and base-ABI checks
+/// `needy image pull` performs. If the pull cannot succeed (for example offline
+/// or a development build with no published release asset), logs a note and
+/// returns without error so callers never break offline/dev setups where the
+/// daemon uses a locally built `--actor-image` or reports its own diagnostic.
+// TODO(images): daemon-side auto-pull for remote daemons (`--context`/`--address`)
+// is deferred; this helper runs locally on the CLI host only.
+pub(crate) async fn ensure_vm_base(driver: ActorDriver, ctx: &Context) {
+  if !is_vm(driver) || ctx.selected_context.is_some() || ctx.address.is_some() {
+    return;
+  }
+  let Ok(paths) = ctx.paths() else {
+    return;
+  };
+  let images = paths.images();
+  let base_dir = vm::base_dir(&images, driver);
+  let present = match driver {
+    ActorDriver::MacosVz => vm::MacosVz::new(&base_dir).check().is_ok(),
+    ActorDriver::LinuxFirecracker => vm::LinuxFirecracker::new(&base_dir).check().is_ok(),
+    _ => true,
+  };
+  if present {
+    return;
+  }
+
+  let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
+  let version = env!("CARGO_PKG_VERSION");
+  let Ok(client) = reqwest::Client::builder().user_agent(concat!("needy/", env!("CARGO_PKG_VERSION"))).build() else {
+    return;
+  };
+  output::message(format_args!("base {driver} VM image is missing; pulling release v{version}"));
+  match pull_vm(&client, &images, driver, version, &assets(version), feedback).await {
+    Ok(dir) => {
+      let _ = progress::complete(
+        feedback,
+        format_args!("Installed {driver} image at {}", dir.display()),
+        format_args!("image pull: {driver}: {}", dir.display()),
+      );
+    }
+    Err(e) => {
+      output::message(format_args!("note: could not auto-pull base {driver} image: {e:#}"));
+    }
+  }
+}
+
 /// The release asset of `driver`'s base VM image.
 fn archive_name(driver: ActorDriver) -> String {
   format!("needy-actor-{driver}-{}.tar.gz", vm::arch(driver))
