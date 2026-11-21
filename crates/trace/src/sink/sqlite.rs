@@ -27,7 +27,10 @@ impl Store {
   pub async fn open(path: &Path) -> Result<Self, Error> {
     let url = format!("sqlite://{}?mode=rwc", path.display());
     let mut options = ConnectOptions::new(url);
-    options.sqlx_logging(false);
+    // NOTICE: one connection avoids multiplying SQLite WAL/SHM file
+    // descriptors per trace store; writes already go through bounded per-run
+    // dispatchers, and SQLite serializes writers anyway.
+    options.sqlx_logging(false).max_connections(1).min_connections(1);
     let db = Database::connect(options).await?;
     // NOTICE: WAL lets `needy report` read while the daemon writes. It is a
     // property of the database file, so setting it once per connection is
@@ -49,7 +52,7 @@ impl Store {
     // see (`https://www.sqlite.org/uri.html#uriimmutable`).
     let url = format!("sqlite://{}?mode=ro", path.display());
     let mut options = ConnectOptions::new(url);
-    options.sqlx_logging(false);
+    options.sqlx_logging(false).max_connections(1).min_connections(1);
     let db = Database::connect(options).await?;
     if has_other_schema(&db).await? {
       return Err(Error::Schema(path.to_path_buf()));

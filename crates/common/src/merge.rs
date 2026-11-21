@@ -6,7 +6,7 @@
 //! [`Choice::Lines`], treats a file as append-only bytes.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -132,6 +132,8 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
   let mut driver_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
   let mut driver_dirty: BTreeMap<String, bool> = BTreeMap::new();
 
+  let mut scratch = CompareScratch::default();
+
   for path in paths {
     let (s, r, t) = (seed.get(path), run.get(path), store.get(path));
     if let Some(Choice::Driver(driver)) = choice(policy, path) {
@@ -139,15 +141,15 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
         driver_order.push(driver.to_string());
       }
       driver_paths.entry(driver.to_string()).or_default().push(path.clone());
-      if !(same(s, r)? || same(t, r)?) {
+      if !(same(s, r, &mut scratch)? || same(t, r, &mut scratch)?) {
         driver_dirty.insert(driver.to_string(), true);
       }
       continue;
     }
-    if same(s, r)? || same(t, r)? {
+    if same(s, r, &mut scratch)? || same(t, r, &mut scratch)? {
       continue;
     }
-    let step = if same(t, s)? {
+    let step = if same(t, s, &mut scratch)? {
       Step::Take
     } else {
       match choice(policy, path) {
@@ -197,7 +199,7 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
         keep_aside(&run, path, aside)?;
         Action::Conflict
       }
-      Step::Lines => match appended(seed.get(path), run.get(path), store.get(path))? {
+      Step::Lines => match appended(seed.get(path), run.get(path), store.get(path), &mut scratch)? {
         Some(bytes) => {
           append(&target, &bytes)?;
           Action::Resolved(Choice::Lines)
@@ -378,30 +380,59 @@ fn relative(root: &Path, path: &Path) -> String {
   path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
+const COMPARE_CHUNK: usize = 64 * 1024;
+
+/// Reusable chunk buffers for file comparisons during one merge pass.
+#[derive(Default)]
+struct CompareScratch {
+  a: Vec<u8>,
+  b: Vec<u8>,
+}
+
+impl CompareScratch {
+  fn buffers(&mut self) -> (&mut [u8], &mut [u8]) {
+    if self.a.is_empty() {
+      self.a.resize(COMPARE_CHUNK, 0);
+      self.b.resize(COMPARE_CHUNK, 0);
+    }
+    (&mut self.a, &mut self.b)
+  }
+}
+
 /// Whether two entries are the same: both absent, or of one kind with the
 /// same content.
-fn same(a: Option<&Node>, b: Option<&Node>) -> Result<bool> {
+fn same(a: Option<&Node>, b: Option<&Node>, scratch: &mut CompareScratch) -> Result<bool> {
   match (a, b) {
     (None, None) => Ok(true),
     (Some(a), Some(b)) => match (&a.kind, &b.kind) {
-      (Kind::File, Kind::File) => same_content(&a.path, &b.path),
+      (Kind::File, Kind::File) => same_content(&a.path, &b.path, scratch),
       (a, b) => Ok(a == b),
     },
     _ => Ok(false),
   }
 }
 
-fn same_content(a: &Path, b: &Path) -> Result<bool> {
+fn same_content(a: &Path, b: &Path, scratch: &mut CompareScratch) -> Result<bool> {
   let (ma, mb) = (std::fs::metadata(a)?, std::fs::metadata(b)?);
   if ma.len() != mb.len() {
     return Ok(false);
   }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::MetadataExt;
+    if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
+      return Ok(true);
+    }
+  }
+  if ma.len() == 0 {
+    return Ok(true);
+  }
   let open = |p: &Path| std::fs::File::open(p).with_context(|| format!("open {}", p.display()));
   let (mut fa, mut fb) = (open(a)?, open(b)?);
-  let (mut ba, mut bb) = (vec![0u8; 64 * 1024], vec![0u8; 64 * 1024]);
+  let (ba, bb) = scratch.buffers();
   loop {
-    let na = read_full(&mut fa, &mut ba)?;
-    let nb = read_full(&mut fb, &mut bb)?;
+    let na = read_full(&mut fa, ba)?;
+    let nb = read_full(&mut fb, bb)?;
     if na != nb || ba[..na] != bb[..nb] {
       return Ok(false);
     }
@@ -524,7 +555,7 @@ fn partial(target: &Path) -> PathBuf {
 // second then appends nothing. Accepted: it keeps a repeated merge after a
 // crash idempotent, and an append-only log rarely gets one identical tail
 // from two runs.
-fn appended(seed: Option<&Node>, run: Option<&Node>, store: Option<&Node>) -> Result<Option<Vec<u8>>> {
+fn appended(seed: Option<&Node>, run: Option<&Node>, store: Option<&Node>, scratch: &mut CompareScratch) -> Result<Option<Vec<u8>>> {
   let file = |node: Option<&Node>| node.is_none_or(|n| n.kind == Kind::File);
   let (Some(run), Some(store)) = (run, store) else {
     return Ok(None);
@@ -532,23 +563,55 @@ fn appended(seed: Option<&Node>, run: Option<&Node>, store: Option<&Node>) -> Re
   if !file(Some(run)) || !file(Some(store)) || !file(seed) {
     return Ok(None);
   }
-  let seed = match seed {
-    Some(seed) => std::fs::read(&seed.path).with_context(|| format!("read {}", seed.path.display()))?,
-    None => Vec::new(),
-  };
-  let run = std::fs::read(&run.path).with_context(|| format!("read {}", run.path.display()))?;
-  let Some(tail) = run.strip_prefix(seed.as_slice()) else {
-    return Ok(None);
-  };
-  let current = std::fs::read(&store.path).with_context(|| format!("read {}", store.path.display()))?;
-  if current.ends_with(tail) {
+  let mut run_file = std::fs::File::open(&run.path).with_context(|| format!("open {}", run.path.display()))?;
+  let run_len = run_file.metadata().with_context(|| format!("stat {}", run.path.display()))?.len();
+  if let Some(seed) = seed {
+    let mut seed_file = std::fs::File::open(&seed.path).with_context(|| format!("open {}", seed.path.display()))?;
+    let seed_len = seed_file.metadata().with_context(|| format!("stat {}", seed.path.display()))?.len();
+    if run_len < seed_len {
+      return Ok(None);
+    }
+    if seed_len > 0 {
+      let (ba, bb) = scratch.buffers();
+      let mut remaining = seed_len;
+      while remaining > 0 {
+        let want = usize::try_from(remaining.min(ba.len() as u64)).expect("bounded by buffer len");
+        let na = read_full(&mut seed_file, &mut ba[..want])?;
+        let nb = read_full(&mut run_file, &mut bb[..want])?;
+        if na != want || nb != want || ba[..want] != bb[..want] {
+          return Ok(None);
+        }
+        remaining -= want as u64;
+      }
+    }
+  }
+  let mut tail = Vec::new();
+  run_file.read_to_end(&mut tail).with_context(|| format!("read {}", run.path.display()))?;
+  if tail.is_empty() {
     return Ok(Some(Vec::new()));
   }
-  let mut bytes = Vec::new();
-  if !current.is_empty() && !current.ends_with(b"\n") {
+  let mut store_file = std::fs::File::open(&store.path).with_context(|| format!("open {}", store.path.display()))?;
+  let store_len = store_file.metadata().with_context(|| format!("stat {}", store.path.display()))?.len();
+  let tail_len = tail.len() as u64;
+  if store_len >= tail_len {
+    store_file.seek(SeekFrom::Start(store_len - tail_len)).with_context(|| format!("seek {}", store.path.display()))?;
+    let mut suffix = vec![0u8; tail.len()];
+    if read_full(&mut store_file, &mut suffix)? == tail.len() && suffix == tail {
+      return Ok(Some(Vec::new()));
+    }
+  }
+  let needs_newline = if store_len > 0 {
+    store_file.seek(SeekFrom::Start(store_len - 1)).with_context(|| format!("seek {}", store.path.display()))?;
+    let mut last = [0u8; 1];
+    read_full(&mut store_file, &mut last)? == 1 && last[0] != b'\n'
+  } else {
+    false
+  };
+  let mut bytes = Vec::with_capacity(tail.len() + usize::from(needs_newline));
+  if needs_newline {
     bytes.push(b'\n');
   }
-  bytes.extend_from_slice(tail);
+  bytes.extend_from_slice(&tail);
   Ok(Some(bytes))
 }
 

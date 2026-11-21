@@ -114,9 +114,9 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
       out_proc.emit(Output::Stdout(bytes)).await;
     }
   });
-  let (in_tx, in_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+  let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(64);
   tasks.spawn_blocking(move || {
-    while let Ok(bytes) = in_rx.recv() {
+    while let Some(bytes) = in_rx.blocking_recv() {
       if let Err(e) = writer.write_all(&bytes).and_then(|()| writer.flush()) {
         tracing::debug!("process {pid}: terminal input: {e}");
         break;
@@ -169,8 +169,13 @@ pub(super) fn spawn(spec: &Spec, (rows, cols): (u16, u16), tasks: &TaskTracker, 
         Some(Input::Signal(_)) => continue,
         None => break,
       };
-      if in_tx.send(bytes).is_err() {
-        // The writer stopped because the terminal closed.
+      let sent = tokio::select! {
+        res = in_tx.send(bytes) => res.is_ok(),
+        _ = input_proc.wait() => false,
+        () = cancel.cancelled() => false,
+      };
+      if !sent {
+        // The writer stopped because the terminal closed, or the process/host ended.
         break;
       }
     }

@@ -764,3 +764,22 @@ async fn a_lagging_viewer_is_redrawn_although_the_skipped_output_left_the_text_u
   assert_eq!(client.screen().contents(), program.screen().contents());
   assert!(client.screen().bracketed_paste(), "the viewer missed the mode the skipped output turned on");
 }
+
+#[tokio::test]
+async fn bounded_input_queue_applies_backpressure_until_drained() {
+  let (proc, mut ends) = terminal_proc(24, 80);
+  // Fill all 64 slots of the bounded input channel.
+  for i in 0..64u8 {
+    proc.send_input(Input::Stdin(vec![i])).await;
+  }
+  // The 65th send must wait instead of growing unboundedly in memory.
+  let blocked = tokio::time::timeout(Duration::from_millis(50), proc.send_input(Input::Stdin(vec![64]))).await;
+  assert!(blocked.is_err(), "send_input must apply backpressure when the 64-item queue is full");
+
+  // Draining one item frees room for the next send to complete.
+  let first = ends.input.recv().await.expect("first queued input");
+  assert!(matches!(first, Input::Stdin(ref b) if b == &[0]));
+  tokio::time::timeout(Duration::from_millis(50), proc.send_input(Input::Stdin(vec![64])))
+    .await
+    .expect("send_input must resume once capacity is freed");
+}

@@ -7,6 +7,9 @@ use anyhow::Result;
 use needy_api_client::Client;
 use needy_api_proto::v1::{FetchFilesRequest, PushFilesRequest};
 
+// NOTICE: 1 MiB chunks stay under gRPC's default 4 MiB message limit.
+const CHUNK: usize = 1 << 20;
+
 /// Fetches a copy-in mapping from the host and unpacks it at `path`, owned
 /// by the user, as are the directories above it that it creates under the
 /// user's `home`.
@@ -17,7 +20,9 @@ pub(super) async fn copy_in(client: &Client, name: &str, path: &str, home: &str,
   while let Some(chunk) = stream.message().await.map_err(needy_api_client::Error::from)? {
     archive.extend(chunk.data);
   }
-  place(&archive, Path::new(path), home, uid, gid)
+  let root = PathBuf::from(path);
+  let home = home.to_string();
+  tokio::task::spawn_blocking(move || place(&archive, &root, &home, uid, gid)).await?
 }
 
 /// Unpacks a copy-in `archive` at `root` and gives its tree to the user.
@@ -87,27 +92,51 @@ fn chown_tree(path: &Path, uid: u32, gid: u32) {
 /// directory the driving program never created sends nothing.
 pub(super) async fn mirror_out(client: &Client, name: &str, path: &str) -> Result<()> {
   let root = PathBuf::from(path);
-  if !root.exists() {
+  let Some(archive) = tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>> {
+    if !root.exists() {
+      return Ok(None);
+    }
+    Ok(Some(needy_common::archive::pack(&root, &[])?))
+  })
+  .await??
+  else {
     return Ok(());
-  }
-  let archive = needy_common::archive::pack(&root, &[])?;
-  // NOTICE: 1 MiB chunks stay under gRPC's default 4 MiB message limit.
-  let mut messages: Vec<PushFilesRequest> = archive
-    .chunks(1 << 20)
-    .enumerate()
-    .map(|(i, chunk)| PushFilesRequest {
-      name: if i == 0 { name.into() } else { String::new() },
-      data: chunk.to_vec(),
-    })
-    .collect();
-  if messages.is_empty() {
-    messages.push(PushFilesRequest {
-      name: name.into(),
-      data: Vec::new(),
-    });
-  }
-  client.guest().push_files(tokio_stream::iter(messages)).await.map_err(needy_api_client::Error::from)?;
+  };
+  let stream = tokio_stream::iter(push_chunks(archive, name.into()));
+  client.guest().push_files(stream).await.map_err(needy_api_client::Error::from)?;
   Ok(())
+}
+
+/// Yields `archive` in 1 MiB `PushFilesRequest` frames lazily so the archive
+/// is not copied a second time in guest memory before sending. An empty
+/// archive still yields one empty frame carrying `name`.
+fn push_chunks(mut archive: Vec<u8>, name: String) -> impl Iterator<Item = PushFilesRequest> + Send + 'static {
+  let mut name = Some(name);
+  let mut offset = 0;
+  std::iter::from_fn(move || {
+    if offset >= archive.len() {
+      return name.take().map(|name| PushFilesRequest {
+        name,
+        data: Vec::new(),
+      });
+    }
+    let data = if offset == 0 && archive.len() <= CHUNK {
+      offset = archive.len();
+      std::mem::take(&mut archive)
+    } else {
+      let end = (offset + CHUNK).min(archive.len());
+      let chunk = archive[offset..end].to_vec();
+      offset = end;
+      if offset >= archive.len() {
+        archive = Vec::new();
+      }
+      chunk
+    };
+    Some(PushFilesRequest {
+      name: name.take().unwrap_or_default(),
+      data,
+    })
+  })
 }
 
 #[cfg(test)]

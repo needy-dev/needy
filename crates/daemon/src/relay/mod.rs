@@ -306,6 +306,13 @@ impl Daemon {
       },
     );
   }
+
+  /// Removes every remembered process belonging to `run` so `Daemon::processes`
+  /// does not retain `Arc<Instance>` handles after the run completes cleanup.
+  pub(crate) fn evict_run_processes(&self, run: &str) {
+    let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    processes.retain(|_, known| known.run.as_deref() != Some(run));
+  }
 }
 
 #[async_trait::async_trait]
