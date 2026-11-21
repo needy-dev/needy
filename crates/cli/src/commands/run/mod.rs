@@ -294,21 +294,34 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       }
       // Refuse invalid keys before creating a run that the caller cannot leave.
       relay::DetachKeys::parse(&detach_keys)?;
-      let profile = ctx.profile(&profile)?;
-      let path = std::fs::canonicalize(&profile).with_context(|| format!("cannot read profile {}", profile.display()))?;
+      let (source, profile_name, inline_lockfile) = match ctx.profile_source(&profile)? {
+        needy_config::Source::Builtin(name) => {
+          let lockfile = super::image::lockfile::builtin_lockfile_path(ctx, &name)?;
+          (needy_config::Source::builtin(&name), format!("builtin:{name}"), lockfile)
+        }
+        needy_config::Source::File(profile_path) => {
+          let path = std::fs::canonicalize(&profile_path).with_context(|| format!("cannot read profile {}", profile_path.display()))?;
+          let name = needy_config::profile::name(&path);
+          let lockfile = super::image::lockfile::path_for(&path);
+          (needy_config::Source::file(path), name, lockfile)
+        }
+        other => (other, String::new(), PathBuf::new()),
+      };
       // The daemon may run on another machine: it gets the profile and its
       // recipe as text, not paths to read.
-      let resolved = snapshot::resolve(&path, overrides)?;
+      let resolved = snapshot::resolve(&source, overrides)?;
       let progress = output::Progress::new(ctx.connection_feedback(), "Connecting to control service");
       let selection = crate::connection::resolve(ctx)?;
       let connection = selection.connect().await?;
       let loaded = needy_config::profile::load(&needy_config::Source::text(resolved.yaml.clone(), PathBuf::new()))?;
       let lockfile_path = if matches!(loaded.actor.image, Some(needy_config::image::Image::Definition(_))) {
-        let source_path = match &resolved.image_file {
-          Some(file) => std::fs::canonicalize(file).unwrap_or_else(|_| file.clone()),
-          None => path.clone(),
-        };
-        Some(super::image::lockfile::path_for(&source_path))
+        match &resolved.image_file {
+          Some(file) => {
+            let canonical = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+            Some(super::image::lockfile::path_for(&canonical))
+          }
+          None => Some(inline_lockfile),
+        }
       } else {
         None
       };
@@ -339,7 +352,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .create_run(CreateRunRequest {
           profile_yaml: resolved.yaml,
           recipe_yaml: resolved.recipe_yaml.unwrap_or_default(),
-          profile_name: needy_config::profile::name(&path),
+          profile_name,
           group,
           name,
           actor_args: args,

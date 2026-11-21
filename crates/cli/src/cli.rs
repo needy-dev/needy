@@ -107,6 +107,15 @@ impl Context {
     crate::connection::resolve(self)?.connect().await
   }
 
+  /// Resolves a profile argument (`builtin:NAME`, a bare profile name in the
+  /// config directory, or a file path) into a [`needy_config::Source`].
+  pub fn profile_source(&self, given: &Path) -> Result<needy_config::Source> {
+    if let Some(name) = given.to_str().and_then(|s| s.strip_prefix("builtin:")) {
+      return Ok(needy_config::Source::builtin(name));
+    }
+    Ok(needy_config::Source::file(self.profile(given)?))
+  }
+
   /// A bare profile name is resolved only in the selected config directory.
   pub fn profile(&self, given: &Path) -> Result<PathBuf> {
     let bare = given.components().count() == 1

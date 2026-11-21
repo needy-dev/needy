@@ -77,6 +77,12 @@ pub(crate) fn path_for(source: &Path) -> PathBuf {
   PathBuf::from(name)
 }
 
+/// The lockfile path for a built-in profile's inline image definition:
+/// `<data_dir>/locks/builtin-<name>.lock`.
+pub(crate) fn builtin_lockfile_path(ctx: &Context, name: &str) -> Result<PathBuf> {
+  Ok(ctx.paths()?.data.join("locks").join(format!("builtin-{name}.lock")))
+}
+
 /// Reads a lockfile, returning an empty [`Lockfile`] when the file does not
 /// exist.
 pub(crate) fn read(path: &Path) -> Result<Lockfile> {
@@ -152,10 +158,21 @@ pub(crate) fn resolve_target(
       })
     }
     (None, Some(profile_arg)) => {
-      let profile_path = ctx.profile(profile_arg)?;
-      let canonical_profile =
-        std::fs::canonicalize(&profile_path).with_context(|| format!("cannot read profile {}", profile_path.display()))?;
-      let resolved = needy_config::profile::resolve(&Source::file(&canonical_profile))?;
+      let (source, image_name_fallback, lockfile_fallback) = match ctx.profile_source(profile_arg)? {
+        Source::Builtin(name) => {
+          let lockfile = builtin_lockfile_path(ctx, &name)?;
+          (Source::builtin(&name), format!("builtin:{name}"), lockfile)
+        }
+        Source::File(profile_path) => {
+          let canonical_profile =
+            std::fs::canonicalize(&profile_path).with_context(|| format!("cannot read profile {}", profile_path.display()))?;
+          let lockfile = path_for(&canonical_profile);
+          let display = canonical_profile.display().to_string();
+          (Source::file(canonical_profile), display, lockfile)
+        }
+        Source::Text { text, base_dir } => (Source::text(text, base_dir), String::new(), PathBuf::new()),
+      };
+      let resolved = needy_config::profile::resolve(&source)?;
       let loaded = needy_config::profile::load(&Source::text(resolved.yaml.clone(), PathBuf::new()))?;
       let Some(Image::Definition(_)) = &loaded.actor.image else {
         bail!(
@@ -167,14 +184,17 @@ pub(crate) fn resolve_target(
       let doc: serde_yaml::Value = serde_yaml::from_str(&resolved.yaml)?;
       let image_value = doc.get("actor").and_then(|a| a.get("image")).context("resolved profile is missing `actor.image`")?;
       let image_yaml = serde_yaml::to_string(image_value)?;
-      let source_path = match &resolved.image_file {
-        Some(file) => std::fs::canonicalize(file).unwrap_or_else(|_| file.clone()),
-        None => canonical_profile,
+      let (image_name, lockfile) = match &resolved.image_file {
+        Some(file) => {
+          let canonical = std::fs::canonicalize(file).unwrap_or_else(|_| file.clone());
+          (canonical.display().to_string(), path_for(&canonical))
+        }
+        None => (image_name_fallback, lockfile_fallback),
       };
       let driver = driver_override.unwrap_or(loaded.actor.driver).as_str().to_string();
       Ok(ImageTarget {
-        image_name: source_path.display().to_string(),
-        lockfile: path_for(&source_path),
+        image_name,
+        lockfile,
         image_yaml,
         driver,
         user: Some(proto_user(&loaded.user)),

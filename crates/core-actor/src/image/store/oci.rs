@@ -264,6 +264,126 @@ pub(super) fn materialize(
   Ok(out_path)
 }
 
+/// Assembles a standalone `docker load` / `container image load`-compatible
+/// OCI archive containing `layers` (without a container base tar), tagged as
+/// `tag`, cached under `oci_dir`. Used when exporting a snapshot built on a VM
+/// driver where no base container tar is available on the host.
+pub(super) fn export_snapshot(oci_dir: &Path, snapshot_digest: Digest, layers: &[(Digest, PathBuf)], tag: &str) -> Result<PathBuf> {
+  let cache_key = Digest::of(format!("export\n{snapshot_digest}\n{tag}\n").as_bytes());
+  let out_path = oci_dir.join(format!("{}-export-{}.tar", super::stem(&snapshot_digest), &cache_key.hex()[..16]));
+  if out_path.exists() {
+    return Ok(out_path);
+  }
+
+  let arch = match std::env::consts::ARCH {
+    "aarch64" => "arm64",
+    "x86_64" => "amd64",
+    other => other,
+  };
+  let diff_ids: Vec<serde_json::Value> = layers.iter().map(|(digest, _)| serde_json::Value::String(digest.to_string())).collect();
+  let history: Vec<serde_json::Value> = layers.iter().map(|_| serde_json::json!({ "created_by": "needy" })).collect();
+  let mut config = serde_json::json!({
+    "architecture": arch,
+    "os": "linux",
+    "config": {},
+    "rootfs": {
+      "type": "layers",
+      "diff_ids": diff_ids,
+    },
+    "history": history,
+  });
+  ensure_needy_container_config(&mut config);
+
+  let config_bytes = serde_json::to_vec(&config).map_err(|e| Error::Invalid(format!("serializing image config: {e}")))?;
+  let config_digest = Digest::of(&config_bytes);
+
+  let mut blobs: Vec<BlobSource> = Vec::with_capacity(layers.len());
+  for (digest, path) in layers {
+    let size = std::fs::metadata(path).map_err(io(path.display()))?.len();
+    blobs.push(BlobSource {
+      digest: *digest,
+      size,
+      media_type: MEDIA_TYPE_OCI_LAYER_TAR,
+      data: BlobData::File(path.clone()),
+    });
+  }
+
+  let manifest = serde_json::json!({
+    "schemaVersion": 2,
+    "mediaType": MEDIA_TYPE_OCI_MANIFEST,
+    "config": {
+      "mediaType": MEDIA_TYPE_OCI_CONFIG,
+      "digest": config_digest.to_string(),
+      "size": config_bytes.len(),
+    },
+    "layers": blobs.iter().map(|blob| serde_json::json!({
+      "mediaType": blob.media_type,
+      "digest": blob.digest.to_string(),
+      "size": blob.size,
+    })).collect::<Vec<_>>(),
+  });
+  let manifest_bytes = serde_json::to_vec(&manifest).expect("an OCI manifest serializes");
+  let manifest_digest = Digest::of(&manifest_bytes);
+
+  let oci_layout_bytes = br#"{"imageLayoutVersion":"1.0.0"}"#;
+  let index_json = serde_json::json!({
+    "schemaVersion": 2,
+    "mediaType": MEDIA_TYPE_OCI_INDEX,
+    "manifests": [
+      {
+        "mediaType": MEDIA_TYPE_OCI_MANIFEST,
+        "digest": manifest_digest.to_string(),
+        "size": manifest_bytes.len(),
+        "annotations": {
+          "org.opencontainers.image.ref.name": tag,
+          "io.containerd.image.name": tag,
+        },
+      }
+    ],
+  });
+  let index_bytes = serde_json::to_vec(&index_json).expect("an OCI index serializes");
+
+  let docker_manifest = serde_json::json!([
+    {
+      "Config": blob_path(&config_digest),
+      "RepoTags": [tag],
+      "Layers": blobs.iter().map(|blob| blob_path(&blob.digest)).collect::<Vec<_>>(),
+    }
+  ]);
+  let docker_manifest_bytes = serde_json::to_vec(&docker_manifest).expect("a Docker manifest serializes");
+
+  std::fs::create_dir_all(oci_dir).map_err(io(oci_dir.display()))?;
+  let staged = tempfile::NamedTempFile::new_in(oci_dir).map_err(io(oci_dir.display()))?;
+  {
+    let mut builder = tar::Builder::new(BufWriter::new(staged.as_file().try_clone().map_err(io(staged.path().display()))?));
+    append_bytes(&mut builder, "oci-layout", oci_layout_bytes)?;
+    append_bytes(&mut builder, "index.json", &index_bytes)?;
+    append_bytes(&mut builder, "manifest.json", &docker_manifest_bytes)?;
+    append_bytes(&mut builder, &blob_path(&config_digest), &config_bytes)?;
+    append_bytes(&mut builder, &blob_path(&manifest_digest), &manifest_bytes)?;
+
+    let mut written_blobs = HashSet::new();
+    for blob in &blobs {
+      if !written_blobs.insert(blob.digest) {
+        continue;
+      }
+      let path = blob_path(&blob.digest);
+      if let BlobData::File(layer_path) = &blob.data {
+        let file = File::open(layer_path).map_err(io(layer_path.display()))?;
+        let mut header = regular_header(0o644, blob.size);
+        builder.append_data(&mut header, &path, file).map_err(io("writing OCI archive"))?;
+      }
+    }
+    let mut writer = builder.into_inner().map_err(io("finishing OCI archive"))?;
+    writer.flush().map_err(io(staged.path().display()))?;
+  }
+
+  if !out_path.exists() {
+    staged.persist(&out_path).map_err(|e| io(out_path.display())(e.error))?;
+  }
+  Ok(out_path)
+}
+
 #[derive(Clone, Copy)]
 struct TarSpan {
   offset: u64,

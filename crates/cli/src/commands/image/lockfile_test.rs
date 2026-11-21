@@ -176,4 +176,80 @@ fn cli_parses_image_build_edit_rollback_and_preserves_build_from() {
   assert!(super::super::rollback::parse_args(None, &["./agent.yaml".into(), "@0".into()]).is_err());
   assert!(super::super::rollback::parse_args(Some(PathBuf::from("dev")), &["./agent.yaml".into()]).is_err());
   assert!(super::super::rollback::parse_args(None, &[]).is_err());
+
+  // `image log` arg parsing and remote selection support.
+  let h = Harness::try_parse_from(["needy", "image", "log", "./agent.yaml"]).unwrap();
+  let Top::Image(args) = h.cmd;
+  assert!(args.allows_selection());
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "log",
+    "--profile",
+    "builtin:opencode",
+    "--output",
+    "json",
+  ])
+  .unwrap();
+  let Top::Image(args) = h.cmd;
+  assert!(args.allows_selection());
+  assert!(Harness::try_parse_from(["needy", "image", "log", "./agent.yaml", "--profile", "dev"]).is_err());
+
+  // `image export` arg parsing and remote selection support.
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "export",
+    "./agent.yaml",
+    "--output",
+    "/tmp/out.tar",
+  ])
+  .unwrap();
+  let Top::Image(args) = h.cmd;
+  assert!(args.allows_selection());
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "export",
+    "--profile",
+    "builtin:pi",
+    "--output",
+    "-",
+    "--tag",
+    "example.com/pi:1",
+  ])
+  .unwrap();
+  let Top::Image(args) = h.cmd;
+  assert!(args.allows_selection());
+  // `--output` is required for `image export`.
+  assert!(Harness::try_parse_from(["needy", "image", "export", "./agent.yaml"]).is_err());
+  assert!(
+    Harness::try_parse_from([
+      "needy",
+      "image",
+      "export",
+      "./agent.yaml",
+      "--profile",
+      "dev",
+      "-o",
+      "out.tar"
+    ])
+    .is_err()
+  );
+}
+
+#[test]
+fn resolve_target_supports_builtin_profiles() {
+  let dir = tempfile::tempdir().unwrap();
+  let ctx = Context {
+    config: Some(dir.path().join("config.yaml")),
+    selected_context: None,
+    address: None,
+    credential_file: None,
+    diagnostic_format: crate::diagnostics::Format::Human,
+  };
+  let target = resolve_target(None, Some(Path::new("builtin:opencode")), None, &ctx).unwrap();
+  assert_eq!(target.image_name, "builtin:opencode");
+  assert!(target.lockfile.ends_with("locks/builtin-opencode.lock"), "{}", target.lockfile.display());
+  assert!(target.image_yaml.contains("builtin:opencode"), "{}", target.image_yaml);
 }

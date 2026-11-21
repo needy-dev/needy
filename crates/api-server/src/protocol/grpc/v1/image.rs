@@ -2,16 +2,21 @@
 
 use std::sync::Arc;
 
+use futures_util::StreamExt as _;
 use needy_api_proto::v1::image_service_server::ImageService;
 use needy_api_proto::v1::{
-  BuildImageRequest, BuildImageResponse, FinishImageEditRequest, FinishImageEditResponse, RollbackImageRequest, RollbackImageResponse,
-  StartImageEditRequest, StartImageEditResponse,
+  BuildImageRequest, BuildImageResponse, ExportImageRequest, ExportImageResponse, FinishImageEditRequest, FinishImageEditResponse,
+  LogImageRequest, LogImageResponse, RollbackImageRequest, RollbackImageResponse, StartImageEditRequest, StartImageEditResponse,
 };
 use tonic::{Request, Response, Status};
 
-use super::caller;
+use super::{Streamed, caller};
 use crate::control::{Caller, ControlError, Images};
-use crate::protocol::domain;
+use crate::protocol::{domain, status};
+
+/// Maximum bytes per `ExportImageResponse` message (1 MiB, well under gRPC's
+/// default 4 MiB message limit).
+const EXPORT_CHUNK: usize = 1024 * 1024;
 
 pub struct Adapter<I> {
   pub images: Arc<I>,
@@ -56,5 +61,35 @@ impl<I: Images> ImageService for Adapter<I> {
     let request = domain::image_rollback(request.into_inner()).map_err(ControlError::from)?;
     let rolled = self.images.rollback(request).await?;
     Ok(Response::new(domain::proto_image_rollback(rolled)))
+  }
+
+  async fn log_image(&self, request: Request<LogImageRequest>) -> Result<Response<LogImageResponse>, Status> {
+    self.operator(&request, "actors cannot read image history")?;
+    let request = domain::image_log(request.into_inner()).map_err(ControlError::from)?;
+    let logged = self.images.log(request).await?;
+    Ok(Response::new(domain::proto_image_log(logged)))
+  }
+
+  type ExportImageStream = Streamed<ExportImageResponse>;
+
+  async fn export_image(&self, request: Request<ExportImageRequest>) -> Result<Response<Self::ExportImageStream>, Status> {
+    self.operator(&request, "actors cannot export images")?;
+    let request = domain::image_export(request.into_inner()).map_err(ControlError::from)?;
+    let chunks = self.images.export(request).await?;
+    let messages = chunks.flat_map(|read| {
+      let messages: Vec<Result<ExportImageResponse, Status>> = match read {
+        Ok(bytes) => bytes
+          .chunks(EXPORT_CHUNK)
+          .map(|data| {
+            Ok(ExportImageResponse {
+              data: data.to_vec(),
+            })
+          })
+          .collect(),
+        Err(e) => vec![Err(status::status(e))],
+      };
+      tokio_stream::iter(messages)
+    });
+    Ok(Response::new(Box::pin(messages)))
   }
 }

@@ -3,7 +3,6 @@
 use anyhow::{Context as _, Result, bail};
 use needy_config::{Source, profile};
 use serde_yaml::Value;
-use std::path::Path;
 
 #[derive(clap::Args, Default)]
 pub(super) struct Overrides {
@@ -35,8 +34,8 @@ fn environment(text: &str) -> Result<(String, String), String> {
   Ok((key.into(), value.into()))
 }
 
-pub(super) fn resolve(path: &Path, overrides: Overrides) -> Result<profile::Resolved> {
-  let resolved = profile::resolve(&Source::file(path))?;
+pub(super) fn resolve(source: &Source, overrides: Overrides) -> Result<profile::Resolved> {
+  let resolved = profile::resolve(source)?;
   let mut document: Value = serde_yaml::from_str(&resolved.yaml)?;
   let actor = &mut document["actor"];
   let image_overridden = overrides.image.is_some();
@@ -64,13 +63,14 @@ pub(super) fn resolve(path: &Path, overrides: Overrides) -> Result<profile::Reso
   }
   // Resolve again so newly supplied relative host paths use the profile's
   // directory, exactly as paths already written in the profile do.
-  let source = Source::text(serde_yaml::to_string(&document)?, path.parent().unwrap_or(Path::new("")).to_path_buf());
-  let mut snapshot = profile::resolve(&source)?;
+  let base_dir = source.base_dir();
+  let re_source = Source::text(serde_yaml::to_string(&document)?, base_dir.clone());
+  let mut snapshot = profile::resolve(&re_source)?;
   snapshot.recipe_yaml = resolved.recipe_yaml;
   if !image_overridden {
     snapshot.image_file = resolved.image_file;
   }
-  let loaded = profile::load(&Source::text(snapshot.yaml.clone(), path.parent().unwrap_or(Path::new("")).to_path_buf()))?;
+  let loaded = profile::load(&Source::text(snapshot.yaml.clone(), base_dir))?;
   let errors: Vec<_> = needy_config::validate::profile(&loaded)
     .into_iter()
     .filter(|f| f.severity == needy_config::validate::Severity::Error)

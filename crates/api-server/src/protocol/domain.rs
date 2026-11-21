@@ -21,9 +21,9 @@ use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
 
 use crate::control::{
   ClientInfo, ExecInput, ExecOutput, ExecSpec, GuestConfig, ImageBuild, ImageBuildResult, ImageEditFinished, ImageEditStart,
-  ImageEditStarted, ImageRollback, ImageRollbackResult, JoinTokenInfo, JoinTokenState, Joining, NewJoinToken, NewRun, Placement,
-  ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunFaults, RunInfo, RunnerHost, RunnerInfo, RunnerReport, RunnerStatus, Started,
-  StopMode, StoredEvent, Target, UpperLayer, WindowSize,
+  ImageEditStarted, ImageExport, ImageLog, ImageLogResult, ImageRollback, ImageRollbackResult, JoinTokenInfo, JoinTokenState, Joining,
+  NewJoinToken, NewRun, Placement, ProcessInfo, ProfileCheck, ProfileToCheck, Route, RunFaults, RunInfo, RunnerHost, RunnerInfo,
+  RunnerReport, RunnerStatus, Started, StopMode, StoredEvent, Target, UpperLayer, WindowSize,
 };
 
 /// A request field with no domain meaning.
@@ -925,4 +925,52 @@ pub fn proto_image_rollback(result: ImageRollbackResult) -> v1::RollbackImageRes
     layer: result.layer.unwrap_or_default(),
     base: result.base.unwrap_or_default(),
   }
+}
+
+pub fn image_log(request: v1::LogImageRequest) -> Result<ImageLog, Error> {
+  if request.image_name.trim().is_empty() {
+    return Err(Error::Missing("image name"));
+  }
+  Ok(ImageLog {
+    image_name: request.image_name,
+    current_layer: (!request.current_layer.trim().is_empty()).then_some(request.current_layer),
+  })
+}
+
+pub fn proto_image_log(result: ImageLogResult) -> v1::LogImageResponse {
+  v1::LogImageResponse {
+    commits: result
+      .commits
+      .into_iter()
+      .map(|c| v1::CommitHistoryEntry {
+        layer: c.layer,
+        parent: c.parent.unwrap_or_default(),
+        base: c.base.unwrap_or_default(),
+        commands: c
+          .commands
+          .into_iter()
+          .map(|cmd| v1::RecordedCommand {
+            argv: cmd.argv,
+            cwd: cmd.cwd,
+          })
+          .collect(),
+        time_ms: c.time_ms,
+        active: c.active,
+      })
+      .collect(),
+  }
+}
+
+pub fn image_export(request: v1::ExportImageRequest) -> Result<ImageExport, Error> {
+  if request.image_yaml.trim().is_empty() {
+    return Err(Error::Missing("image definition"));
+  }
+  Ok(ImageExport {
+    image_yaml: request.image_yaml,
+    driver: request.driver,
+    user: request.user.map(image_user),
+    commit: request.commit.map(image_commit).transpose()?,
+    pinned_features: pinned_features(request.pinned_features)?,
+    tag: (!request.tag.trim().is_empty()).then_some(request.tag),
+  })
 }

@@ -318,6 +318,14 @@ impl Store {
     oci::materialize(&self.cache.join("oci"), snapshot.digest, &layers, base_image_tar, tag)
   }
 
+  /// Assembles a standalone `docker load` / `container image load`-compatible
+  /// OCI archive containing `snapshot`'s layers, tagged as `tag`, without
+  /// requiring a container base image tar.
+  pub fn export_snapshot(&self, snapshot: &Snapshot, tag: &str) -> Result<PathBuf> {
+    let layers: Vec<(Digest, PathBuf)> = snapshot.layers.iter().map(|digest| Ok((*digest, self.layer(digest)?))).collect::<Result<_>>()?;
+    oci::export_snapshot(&self.cache.join("oci"), snapshot.digest, &layers, tag)
+  }
+
   /// Commits an edit session's upper layer `upper` (as [`Store::put`] takes
   /// it) to `image`, on its commit `parent`, or as its first commit: the
   /// edit is collapsed into the parent's commit layer, so an image has one

@@ -17,10 +17,10 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt as _;
 use needy_api_server::control::{
-  BuildStepOutcome, Caller, Chunks, ControlError, FaultAdded, Guest, GuestConfig, GuestControls, GuestCopy, GuestSession, GuestUser,
-  ImageBuild, ImageBuildResult, ImageEditFinished, ImageEditStart, ImageEditStarted, ImageRollback, ImageRollbackResult,
-  Images as ImagesTrait, Logs, NewRun, ProfileCheck, ProfileToCheck, RecordedCommand, Route, RunEvents, RunFaults, RunInfo, Runs, StopMode,
-  Target, UpperLayer, WindowSize,
+  BuildStepOutcome, Caller, Chunks, CommitHistoryEntry, ControlError, FaultAdded, Guest, GuestConfig, GuestControls, GuestCopy,
+  GuestSession, GuestUser, ImageBuild, ImageBuildResult, ImageEditFinished, ImageEditStart, ImageEditStarted, ImageExport, ImageLog,
+  ImageLogResult, ImageRollback, ImageRollbackResult, Images as ImagesTrait, Logs, NewRun, ProfileCheck, ProfileToCheck, RecordedCommand,
+  Route, RunEvents, RunFaults, RunInfo, Runs, StopMode, Target, UpperLayer, WindowSize,
 };
 use needy_api_server::{Health, Listen, Server};
 use needy_common::process::Exit;
@@ -1435,6 +1435,91 @@ impl ImagesTrait for Daemon {
       base: target.and_then(|c| c.base).map(|d| d.to_string()),
     })
   }
+
+  async fn log(&self, request: ImageLog) -> Result<ImageLogResult, ControlError> {
+    self.admit_work()?;
+    let store = self.images.store.clone();
+    let image_name = request.image_name;
+    let commits = tokio::task::spawn_blocking(move || store.history(&image_name))
+      .await
+      .map_err(|e| ControlError::Internal(format!("image log panicked: {e}")))?
+      .map_err(|e| match e {
+        StoreError::Invalid(_) => ControlError::Invalid(e.to_string()),
+        StoreError::Missing(_) | StoreError::UnknownCommit { .. } => ControlError::NotFound(e.to_string()),
+        StoreError::TooFar { .. } | StoreError::Io { .. } => ControlError::Failed(e.to_string()),
+      })?;
+    let current = request.current_layer.as_deref();
+    let entries = commits
+      .into_iter()
+      .map(|c| {
+        let layer = c.layer.to_string();
+        let active = current == Some(layer.as_str());
+        CommitHistoryEntry {
+          layer,
+          parent: c.parent.map(|d| d.to_string()),
+          base: c.base.map(|d| d.to_string()),
+          commands: c
+            .commands
+            .into_iter()
+            .map(|cmd| RecordedCommand {
+              argv: cmd.argv,
+              cwd: cmd.cwd,
+            })
+            .collect(),
+          time_ms: c.time_ms,
+          active,
+        }
+      })
+      .collect();
+    Ok(ImageLogResult { commits: entries })
+  }
+
+  async fn export(&self, request: ImageExport) -> Result<Chunks, ControlError> {
+    self.admit_work()?;
+    let definition = parse_definition(&request.image_yaml)?;
+    let target_driver = parse_driver(&request.driver)?;
+    let user = request.user.unwrap_or_default();
+    let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
+    let builder = select_builder_driver(self, target_driver).await;
+    check_driver_host(self, builder, base_container_image).await?;
+    if target_driver != builder {
+      check_driver_host(self, target_driver, base_container_image).await?;
+    }
+
+    let trace = Dispatch::new(
+      "image-export",
+      Vec::new(),
+      needy_trace::Options {
+        capacity: 64,
+        version: needy_core::event::SCHEMA_VERSION,
+        timing: false,
+      },
+    );
+    let resolved =
+      build_image_plan(self, &definition, target_driver, &user, request.commit.as_ref(), &request.pinned_features, &trace, &self.cancel)
+        .await
+        .map_err(crate::failed)?;
+
+    let tag = request.tag.unwrap_or_else(|| snapshot_tag(&resolved.snapshot.digest));
+    let tar_path = match target_driver {
+      ActorDriver::LinuxContainer => {
+        export_for_linux_container(self, &resolved.snapshot, base_container_image, &tag).await.map_err(crate::failed)?
+      }
+      ActorDriver::MacosAppleContainer => {
+        export_for_apple_container(self, &resolved.snapshot, base_container_image, &tag).await.map_err(crate::failed)?
+      }
+      ActorDriver::LinuxFirecracker | ActorDriver::MacosVz => {
+        let store = self.images.store.clone();
+        let snapshot = resolved.snapshot;
+        tokio::task::spawn_blocking(move || store.export_snapshot(&snapshot, &tag))
+          .await
+          .map_err(|e| ControlError::Internal(format!("exporting image snapshot panicked: {e}")))?
+          .map_err(|e| ControlError::Failed(e.to_string()))?
+      }
+    };
+
+    stream_export_file(&tar_path).await.map_err(crate::failed)
+  }
 }
 
 fn finish_commit(
@@ -1505,6 +1590,85 @@ async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
     return false;
   };
   drv.check_host().await.is_ok()
+}
+
+/// Materializes `snapshot` on top of `base_image` as a `docker load` / OCI tar
+/// tagged as `tag` without loading it into the engine.
+async fn export_for_linux_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str, tag: &str) -> Result<PathBuf> {
+  let engine = daemon.images.backends().engine.clone();
+  let inspected = match engine.inspect_image(base_image).await.with_context(|| format!("inspecting container base image {base_image}"))? {
+    Some(info) => info,
+    None => {
+      engine.pull(base_image).await.with_context(|| format!("pulling container base image {base_image}"))?;
+      engine
+        .inspect_image(base_image)
+        .await
+        .with_context(|| format!("inspecting pulled container base image {base_image}"))?
+        .ok_or_else(|| anyhow!("container actor image {base_image} is still missing after pull"))?
+    }
+  };
+  let base_tar = daemon.images.base_oci_dir.join(format!("{}.tar", sanitize_image_id(&inspected.id)));
+  if !base_tar.exists() {
+    write_stream_atomic(&base_tar, engine.export_image(base_image))
+      .await
+      .with_context(|| format!("exporting base container image {base_image}"))?;
+  }
+  let store = daemon.images.store.clone();
+  let snapshot_owned = snapshot.clone();
+  let tag_owned = tag.to_string();
+  let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar, &tag_owned))
+    .await
+    .context("materializing container snapshot panicked")??;
+  Ok(oci_tar)
+}
+
+/// Materializes `snapshot` on top of `base_image` from Apple's container store
+/// as a `docker load` / OCI tar tagged as `tag` without loading it back.
+async fn export_for_apple_container(daemon: &Daemon, snapshot: &Snapshot, base_image: &str, tag: &str) -> Result<PathBuf> {
+  let apple = MacosAppleContainer::with_cli(base_image.to_string(), daemon.images.backends().apple_cli.clone());
+  let id = apple
+    .image_id(base_image)
+    .await
+    .with_context(|| format!("inspecting Apple container base image {base_image}"))?
+    .ok_or_else(|| anyhow!("container actor image {base_image} is not in Apple's container store"))?;
+  let base_tar = daemon.images.base_oci_dir.join(format!("apple-{}.tar", sanitize_image_id(&id)));
+  if !base_tar.exists() {
+    tokio::fs::create_dir_all(&daemon.images.base_oci_dir)
+      .await
+      .with_context(|| format!("cannot create {}", daemon.images.base_oci_dir.display()))?;
+    let staged = daemon.images.base_oci_dir.join(format!(".save-{}.tar", uuid::Uuid::new_v4()));
+    if let Err(e) = apple.save(&staged).await {
+      let _ = tokio::fs::remove_file(&staged).await;
+      return Err(e).with_context(|| format!("saving base image {base_image} from Apple's container store"));
+    }
+    if !base_tar.exists() {
+      tokio::fs::rename(&staged, &base_tar).await.with_context(|| format!("cannot persist {}", base_tar.display()))?;
+    } else {
+      let _ = tokio::fs::remove_file(&staged).await;
+    }
+  }
+  let store = daemon.images.store.clone();
+  let snapshot_owned = snapshot.clone();
+  let tag_owned = tag.to_string();
+  let oci_tar = tokio::task::spawn_blocking(move || store.materialize_container(&snapshot_owned, &base_tar, &tag_owned))
+    .await
+    .context("materializing container snapshot panicked")??;
+  Ok(oci_tar)
+}
+
+/// Streams `path` in 1 MiB chunks for [`ImagesTrait::export`].
+async fn stream_export_file(path: &Path) -> Result<Chunks> {
+  const EXPORT_CHUNK: usize = 1024 * 1024;
+  let file = tokio::fs::File::open(path).await.with_context(|| format!("cannot open {}", path.display()))?;
+  let stream = futures_util::stream::try_unfold((file, vec![0u8; EXPORT_CHUNK]), |(mut file, mut buf)| async move {
+    let n = file.read(&mut buf).await.map_err(|e| ControlError::Failed(format!("reading exported image archive: {e}")))?;
+    if n == 0 {
+      Ok(None)
+    } else {
+      Ok(Some((buf[..n].to_vec(), (file, buf))))
+    }
+  });
+  Ok(Box::pin(stream))
 }
 
 /// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`
