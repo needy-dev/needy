@@ -514,6 +514,12 @@ impl Store {
   // NOTICE: files that are not `sha256-<hex>.<ext>` are left alone: they are
   // a write in progress (`tempfile`'s `.tmp` names) or not the store's.
   pub fn collect(&self, keep: &[Digest]) -> Result<Collected> {
+    self.collect_with(keep, false)
+  }
+
+  /// Like [`Self::collect`], but when `dry_run` is true counts what would be
+  /// removed without deleting any files.
+  pub fn collect_with(&self, keep: &[Digest], dry_run: bool) -> Result<Collected> {
     let mut kept: HashSet<Digest> = keep.iter().copied().collect();
     for digest in keep {
       match self.resolve(digest) {
@@ -530,6 +536,17 @@ impl Store {
     }
     let committed = self.committed()?;
     let mut collected = Collected::default();
+    let measure_or_remove = |path: &Path| -> Result<u64> {
+      if dry_run {
+        match std::fs::metadata(path) {
+          Ok(meta) => Ok(meta.len()),
+          Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+          Err(e) => Err(io(path.display())(e)),
+        }
+      } else {
+        remove_file(path)
+      }
+    };
     for (dir, is_layer) in [
       (self.cache.join("layers"), true),
       (self.data.join("layers"), true),
@@ -537,14 +554,14 @@ impl Store {
     ] {
       for (path, digest) in stored(&dir)? {
         if !kept.contains(&digest) && !committed.contains(&digest) {
-          collected.bytes += remove_file(&path)?;
+          collected.bytes += measure_or_remove(&path)?;
           collected.layers += usize::from(is_layer);
         }
       }
     }
     for (path, digest) in stored(&self.cache.join("snapshots"))?.into_iter().chain(stored(&self.cache.join("oci"))?) {
       if !kept.contains(&digest) {
-        collected.bytes += remove_file(&path)?;
+        collected.bytes += measure_or_remove(&path)?;
       }
     }
     Ok(collected)

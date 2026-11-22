@@ -6,7 +6,8 @@ use futures_util::StreamExt as _;
 use needy_api_proto::v1::image_service_server::ImageService;
 use needy_api_proto::v1::{
   BuildImageRequest, BuildImageResponse, ExportImageRequest, ExportImageResponse, FinishImageEditRequest, FinishImageEditResponse,
-  LogImageRequest, LogImageResponse, RollbackImageRequest, RollbackImageResponse, StartImageEditRequest, StartImageEditResponse,
+  LogImageRequest, LogImageResponse, PruneImagesRequest, PruneImagesResponse, RollbackImageRequest, RollbackImageResponse,
+  StartImageEditRequest, StartImageEditResponse,
 };
 use tonic::{Request, Response, Status};
 
@@ -82,5 +83,11 @@ impl<I: Images> ImageService for Adapter<I> {
       tokio_stream::iter(messages)
     });
     Ok(Response::new(Box::pin(messages)))
+  }
+
+  async fn prune_images(&self, request: Request<PruneImagesRequest>) -> Result<Response<PruneImagesResponse>, Status> {
+    self.operator(&request, "actors cannot prune images")?;
+    let pruned = self.images.prune(request.into_inner().into()).await?;
+    Ok(Response::new(pruned.into()))
   }
 }

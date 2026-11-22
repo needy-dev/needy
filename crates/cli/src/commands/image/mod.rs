@@ -29,6 +29,7 @@ mod export;
 pub(crate) mod lockfile;
 mod log;
 mod ls;
+mod prune;
 pub(crate) mod pull;
 mod rm;
 mod rollback;
@@ -49,6 +50,7 @@ impl Args {
       Command::Rollback(args) => args.connection.clone(),
       Command::Log(args) => args.connection.clone(),
       Command::Export(args) => args.connection.clone(),
+      Command::Prune(args) => args.connection.clone(),
       Command::Pull(_) | Command::Ls(_) | Command::Rm(_) => ConnectionArgs::default(),
     }
   }
@@ -80,6 +82,9 @@ enum Command {
   Log(log::Args),
   /// Export an image definition as a Docker/OCI image archive.
   Export(export::Args),
+  /// Remove unreferenced cached layers, disks, OCI archives, and container
+  /// snapshot images (`needy-snapshot:*`) on the control daemon.
+  Prune(prune::Args),
   /// Remove VM images and old guest disks.
   ///
   /// With --guest-disks, the guest disks of guest binaries no longer in use.
@@ -96,6 +101,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Rollback(args) => rollback::run(args, ctx).await,
     Command::Log(args) => log::run(args, ctx).await,
     Command::Export(args) => export::run(args, ctx).await,
+    Command::Prune(args) => prune::run(args, ctx).await,
     Command::Rm(args) => rm::run(args, ctx).await,
   }
 }

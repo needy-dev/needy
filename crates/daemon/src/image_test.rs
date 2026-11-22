@@ -1016,6 +1016,13 @@ impl needy_core_executor::engine::Engine for FakeContainerEngine {
     Ok(())
   }
 
+  async fn list_images(&self, reference_filter: &str) -> std::result::Result<Vec<String>, needy_core_executor::engine::Error> {
+    let prefix = reference_filter.trim_end_matches('*');
+    let mut tags: Vec<String> = self.images.lock().unwrap().keys().filter(|k| k.starts_with(prefix)).cloned().collect();
+    tags.sort();
+    Ok(tags)
+  }
+
   async fn remove_image(&self, image: &str) -> std::result::Result<(), needy_core_executor::engine::Error> {
     self.removed_images.lock().unwrap().push(image.to_string());
     self.images.lock().unwrap().remove(image);
@@ -2471,6 +2478,9 @@ async fn materialize_for_linux_container_fails_when_loaded_tag_is_not_inspectabl
       }
       Ok(())
     }
+    async fn list_images(&self, reference_filter: &str) -> std::result::Result<Vec<String>, needy_core_executor::engine::Error> {
+      self.inner.list_images(reference_filter).await
+    }
     async fn remove_image(&self, image: &str) -> std::result::Result<(), needy_core_executor::engine::Error> {
       self.inner.remove_image(image).await
     }
@@ -2535,4 +2545,90 @@ async fn image_export_for_linux_container_does_not_load_snapshot_into_engine() {
   assert!(!bytes.is_empty());
   assert_eq!(repo_tag_from_tar(&bytes), "example.com/exported-container:1");
   assert!(engine.loaded.lock().unwrap().is_empty(), "container export must not load snapshot into the engine");
+}
+
+#[tokio::test]
+async fn prune_removes_unreferenced_layers_keys_oci_and_container_snapshots_while_keeping_protected() {
+  use needy_api_server::control::{ImagePrune, Images as _};
+
+  let engine = FakeContainerEngine::new("needy-actor:latest", None);
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+
+  // Create two snapshots: one kept by caller `keep`, one unreferenced.
+  let kept_layer = daemon.images.store.put(std::io::Cursor::new(tar_with_file("keep.txt", "stay\n"))).unwrap();
+  let drop_layer = daemon.images.store.put(std::io::Cursor::new(tar_with_file("drop.txt", "bye\n"))).unwrap();
+  let kept_snap = daemon.images.store.snapshot(&[kept_layer]).unwrap();
+  let drop_snap = daemon.images.store.snapshot(&[drop_layer]).unwrap();
+
+  // Materialize both into the container engine (also populates `base-oci/` and `oci/`).
+  let kept_tag = super::materialize_for_linux_container(daemon, &kept_snap, "needy-actor:latest").await.unwrap();
+  let drop_tag = super::materialize_for_linux_container(daemon, &drop_snap, "needy-actor:latest").await.unwrap();
+
+  // Record step cache keys for both layers.
+  std::fs::create_dir_all(&daemon.images.keys_dir).unwrap();
+  let kept_key_path = daemon.images.keys_dir.join("sha256-1111");
+  let drop_key_path = daemon.images.keys_dir.join("sha256-2222");
+  std::fs::write(&kept_key_path, format!("{kept_layer}\n")).unwrap();
+  std::fs::write(&drop_key_path, format!("{drop_layer}\n")).unwrap();
+
+  // 1. Dry-run reports what would be removed without deleting anything.
+  let dry = daemon
+    .prune(ImagePrune {
+      all: false,
+      dry_run: true,
+      keep: vec![kept_snap.digest.to_string()],
+    })
+    .await
+    .unwrap();
+  assert_eq!(dry.layers_removed, 1);
+  assert_eq!(dry.snapshots_removed, 1);
+  assert_eq!(dry.removed_images, vec![drop_tag.clone()]);
+  assert!(dry.bytes_reclaimed > 0);
+  assert!(daemon.images.store.has_layer(&drop_layer), "dry-run must not delete layers");
+  assert!(drop_key_path.exists(), "dry-run must not delete cache keys");
+  assert!(engine.images.lock().unwrap().contains_key(&drop_tag), "dry-run must not delete container images");
+
+  // 2. Real prune (all = false) removes unreferenced layer, key, OCI archive, and container snapshot,
+  //    while preserving the kept snapshot, base image, and `base-oci/*.tar`.
+  let pruned = daemon
+    .prune(ImagePrune {
+      all: false,
+      dry_run: false,
+      keep: vec![kept_snap.digest.to_string()],
+    })
+    .await
+    .unwrap();
+  assert_eq!(pruned.layers_removed, 1);
+  assert_eq!(pruned.snapshots_removed, 1);
+  assert_eq!(pruned.removed_images, vec![drop_tag.clone()]);
+  assert!(pruned.bytes_reclaimed > 0);
+  assert!(daemon.images.store.has_layer(&kept_layer));
+  assert!(!daemon.images.store.has_layer(&drop_layer));
+  assert!(kept_key_path.exists());
+  assert!(!drop_key_path.exists());
+  assert!(engine.images.lock().unwrap().contains_key(&kept_tag));
+  assert!(!engine.images.lock().unwrap().contains_key(&drop_tag));
+  assert!(engine.images.lock().unwrap().contains_key("needy-actor:latest"), "base image must never be pruned");
+  let base_oci_count = std::fs::read_dir(&daemon.images.base_oci_dir).unwrap().count();
+  assert_eq!(base_oci_count, 1, "base-oci tar stays cached without --all");
+
+  // 3. Prune with all = true also removes cached `base-oci/*.tar`.
+  let pruned_all = daemon
+    .prune(ImagePrune {
+      all: true,
+      dry_run: false,
+      keep: vec![kept_snap.digest.to_string()],
+    })
+    .await
+    .unwrap();
+  assert_eq!(pruned_all.layers_removed, 0);
+  assert_eq!(pruned_all.snapshots_removed, 0);
+  assert!(pruned_all.bytes_reclaimed > 0, "base-oci tar bytes reclaimed");
+  let base_oci_after = std::fs::read_dir(&daemon.images.base_oci_dir).unwrap().count();
+  assert_eq!(base_oci_after, 0, "--all must remove cached base-oci tar");
 }
