@@ -12,6 +12,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 backon.workspace = true
 bytes.workspace = true
+devcontainer-features.workspace = true
 futures-util.workspace = true
 needy-api-client.workspace = true
 needy-api-server.workspace = true

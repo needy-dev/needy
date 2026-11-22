@@ -6,9 +6,9 @@
 #   docker build -f images/Dockerfile --platform linux/arm64 --target actor-macos-vz --output type=local,dest=OUT .
 #   docker build -f images/Dockerfile --target guest --output type=local,dest=OUT .
 # Stages build for the platform they run on: `uname -m` picks the musl
-# target, the kernel configuration and opencode's release. The Firecracker
-# actor (`actor`) is x86_64 only; the `macos-vz` actor (`actor-macos-vz`,
-# Virtualization.framework on Apple silicon) is arm64 only.
+# target and the kernel configuration. The Firecracker actor (`actor`) is
+# x86_64 only; the `macos-vz` actor (`actor-macos-vz`, Virtualization.framework
+# on Apple silicon) is arm64 only.
 #
 # The actor images are base images: they hold no needy of their own, only
 # the boot stub and the shim stub (`images/stub/`). The daemon injects its
@@ -18,7 +18,6 @@
 # docs/ai/references/architecture/2026-11-12-actor-images-design.md.
 ARG KERNEL_VERSION=6.18.62
 ARG FIRECRACKER_VERSION=v1.17.0
-ARG OPENCODE_VERSION=v1.19.5
 ARG BASE_ABI=1
 
 # Static needy binary for guests and executors.
@@ -204,19 +203,23 @@ RUN patch -p1 < /tmp/needy.patch \
       echo "firecracker is not statically linked:" >&2; readelf -dW /firecracker | grep '(NEEDED)' >&2; exit 1; \
     fi
 
+# Shared actor userland base: common packages and default `agent` user shared
+# by both VM (`actor-root`) and container (`container-root`) actor images.
+# Agent binaries (such as `opencode`) are installed via image layers or Dev
+# Container features rather than baked into the base rootfs.
+FROM ubuntu:24.04 AS actor-base
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      bash git ripgrep ca-certificates curl sshfs fuse3 iproute2 procps less file xz-utils \
+      pciutils dmidecode lm-sensors util-linux \
+ && rm -rf /var/lib/apt/lists/* \
+ && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent
+
 # Actor userland: the driving program's world. `systemd` is not run (needy's
 # init is PID 1); it brings `systemd-detect-virt`, which a cloud VM has and
 # which reads the recipe's DMI identity.
-FROM ubuntu:24.04 AS actor-root
-ARG OPENCODE_VERSION
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bash git ripgrep ca-certificates curl sshfs fuse3 iproute2 procps less file xz-utils \
-      pciutils dmidecode lm-sensors util-linux systemd \
+FROM actor-base AS actor-root
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd \
  && rm -rf /var/lib/apt/lists/* /run/systemd/container \
- && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent \
- && arch="$(case "$(uname -m)" in aarch64) echo arm64;; *) echo x64;; esac)" \
- && curl -fsSL "https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-${arch}.tar.gz" \
-    | tar xz -C /usr/local/bin opencode \
  && mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
 COPY --from=stubs /out/.needy/ /.needy/
 
@@ -231,9 +234,8 @@ COPY --from=actor-root / /r
 # tmpfs. If the rootfs ever becomes writable, give it headroom here. A margin
 # too small fails the build in `mke2fs -d` ("Could not allocate block");
 # `e2fsck -fn` checks the result.
-# TODO(rootfs): an EROFS image with compression, and the driving program
-# (opencode, about 200 MB) outside the base rootfs, would shrink it further;
-# neither is approved yet.
+# TODO(rootfs): an EROFS image with compression would shrink the base rootfs
+# further; deferred (out of scope for Track 3).
 RUN set -eu; \
     kib=$(du -sk /r | cut -f1); inodes=$(find /r | wc -l); \
     mke2fs -q -t ext4 -N $((inodes + inodes / 10)) -d /r /rootfs.ext4 "$((kib + kib / 10 + 64 * 1024))k"; \
@@ -273,17 +275,8 @@ COPY --from=stubs /out/base-abi /base-abi
 # other program through the trampolines it makes at each start.
 # It builds for x86_64 (Docker on Linux) and arm64 (Apple's `container` on
 # Apple silicon, `--platform linux/arm64`).
-FROM ubuntu:24.04 AS container-root
-ARG OPENCODE_VERSION
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      bash git ripgrep ca-certificates curl sshfs fuse3 iproute2 procps less file xz-utils \
-      pciutils dmidecode lm-sensors util-linux \
- && rm -rf /var/lib/apt/lists/* \
- && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent \
- && arch="$(case "$(uname -m)" in aarch64) echo arm64;; *) echo x64;; esac)" \
- && curl -fsSL "https://github.com/sst/opencode/releases/download/${OPENCODE_VERSION}/opencode-linux-${arch}.tar.gz" \
-    | tar xz -C /usr/local/bin opencode \
- && mkdir -p /.needy/channels
+FROM actor-base AS container-root
+RUN mkdir -p /.needy/channels
 COPY --from=stubs /out/.needy/ /.needy/
 # The script stays in the image as `/.needy/shim-image`: an image `FROM`
 # this one runs it as its last step, so the programs it adds are shims too

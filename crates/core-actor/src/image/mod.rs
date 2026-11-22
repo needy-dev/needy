@@ -11,10 +11,12 @@
 //! - [`manifest`]: what a VM image is and where it came from, in its
 //!   directory.
 //! - [`feature`]: OCI Dev Container feature artifact fetcher and content cache.
+//! - [`builtin`]: embedded needy-specific built-in Dev Container features.
 //! - [`store`]: the layer store: an image's layers, snapshots and commits,
 //!   and the layer disks the VM drivers boot a snapshot from.
 
 pub mod base;
+pub mod builtin;
 pub mod container;
 pub mod feature;
 pub mod guest;

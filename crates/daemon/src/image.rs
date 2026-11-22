@@ -2379,90 +2379,25 @@ fn cleanup_session_dir(dir: &Path) {
   }
 }
 
-fn sh_quote(value: &str) -> String {
-  format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-fn user_home_dir(user: &User) -> String {
-  if user.uid == 0 && user.name == "root" {
-    "/root".to_string()
-  } else {
-    format!("/home/{}", user.name)
+fn to_install_user(user: &User) -> devcontainer_features::InstallUser {
+  devcontainer_features::InstallUser {
+    name: user.name.clone(),
+    uid: user.uid,
+    gid: user.gid,
+    home: None,
   }
 }
 
 /// Builds the environment passed to a Dev Container feature's `install.sh`
-/// session: the sanitized option variables plus `_REMOTE_USER`,
-/// `_REMOTE_USER_HOME`, `_CONTAINER_USER`, and `_CONTAINER_USER_HOME`.
-// Reference: https://containers.dev/implementors/features/#user-env-var (retrieved 2026-11-21)
+/// session: delegates to [`devcontainer_features::feature_install_env`].
 fn feature_install_env(profile_user: &User, options: &BTreeMap<String, String>) -> BTreeMap<String, String> {
-  let mut env = options.clone();
-  env.insert("_REMOTE_USER".into(), profile_user.name.clone());
-  env.insert("_REMOTE_USER_HOME".into(), user_home_dir(profile_user));
-  env.insert("_CONTAINER_USER".into(), "root".into());
-  env.insert("_CONTAINER_USER_HOME".into(), "/root".into());
-  env
+  devcontainer_features::feature_install_env(&to_install_user(profile_user), options)
 }
 
-/// Builds the POSIX `sh -c` wrapper that ensures `profile_user` exists (A3),
-/// writes and sources `devcontainer-features.env`, executes `./install.sh`
-/// inside `/tmp/needy-feature`, and removes `/tmp/needy-feature` afterwards so
-/// staging files do not leak into the committed layer.
+/// Builds the POSIX `sh -c` wrapper for `/tmp/needy-feature`: delegates to
+/// [`devcontainer_features::feature_install_script`].
 fn feature_install_script(profile_user: &User, options: &BTreeMap<String, String>) -> String {
-  let home = user_home_dir(profile_user);
-  let q_name = sh_quote(&profile_user.name);
-  let q_home = sh_quote(&home);
-  let mut env_file = String::new();
-  for (key, value) in options {
-    env_file.push_str(key);
-    env_file.push('=');
-    env_file.push_str(&sh_quote(value));
-    env_file.push('\n');
-  }
-  let q_env_file = sh_quote(&env_file);
-  format!(
-    r#"set -eu
-if [ {uid} -ne 0 ]; then
-  if ! grep -q "^{raw_name}:" /etc/group 2>/dev/null; then
-    if command -v groupadd >/dev/null 2>&1; then
-      groupadd -g {gid} {q_name} 2>/dev/null || true
-    elif command -v addgroup >/dev/null 2>&1; then
-      addgroup -g {gid} {q_name} 2>/dev/null || true
-    else
-      printf '%s:x:%s:\n' {q_name} {gid} >> /etc/group
-    fi
-  fi
-  if ! id -u {q_name} >/dev/null 2>&1; then
-    if command -v useradd >/dev/null 2>&1; then
-      useradd -m -u {uid} -g {gid} -d {q_home} -s /bin/sh {q_name} 2>/dev/null || true
-    elif command -v adduser >/dev/null 2>&1; then
-      adduser -D -u {uid} -G {q_name} -h {q_home} -s /bin/sh {q_name} 2>/dev/null || true
-    else
-      printf '%s:x:%s:%s::%s:/bin/sh\n' {q_name} {uid} {gid} {q_home} >> /etc/passwd
-    fi
-  fi
-  mkdir -p {q_home}
-  chown {uid}:{gid} {q_home}
-fi
-cd /tmp/needy-feature
-printf '%s' {q_env_file} > devcontainer-features.env
-set -a
-. ./devcontainer-features.env
-set +a
-chmod +x ./install.sh
-status=0
-./install.sh || status=$?
-cd /
-rm -rf /tmp/needy-feature
-exit "$status"
-"#,
-    uid = profile_user.uid,
-    gid = profile_user.gid,
-    raw_name = profile_user.name,
-    q_name = q_name,
-    q_home = q_home,
-    q_env_file = q_env_file,
-  )
+  devcontainer_features::feature_install_script(&to_install_user(profile_user), options, "/tmp/needy-feature")
 }
 
 fn first_line(script: &str) -> &str {

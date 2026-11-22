@@ -12,6 +12,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 backhand.workspace = true
 bytes.workspace = true
+devcontainer-features.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
@@ -26,8 +27,6 @@ needy-core.workspace = true
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 object.workspace = true
-# OCI Distribution v2 client for Dev Container feature artifacts (`image::feature`).
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
