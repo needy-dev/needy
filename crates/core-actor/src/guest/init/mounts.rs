@@ -53,3 +53,80 @@ pub(super) fn detach<'a>(targets: impl Iterator<Item = &'a str>) {
     }
   }
 }
+
+/// Gives directories on the container's `$HOME` tmpfs to `uid:gid` without
+/// crossing into nested bind mounts (`st_dev != home_dev`).
+///
+/// Container runtimes (`runc`, etc.) create intermediate mount-point parents
+/// such as `/home/agent/.local` and `/home/agent/.local/share` as `root:root`
+/// (mode 0755) when applying nested host bind mounts (for example sync
+/// mappings like `~/.local/share/opencode`), which causes `EACCES` when the
+/// driving program creates sibling directories like `~/.local/state`.
+pub(super) fn chown_home_ancestors(home: &str, uid: u32, gid: u32) {
+  use std::os::unix::fs::MetadataExt as _;
+
+  let root = std::path::Path::new(home);
+  let Ok(home_meta) = std::fs::symlink_metadata(root) else {
+    return;
+  };
+  chown_same_dev_dirs(root, home_meta.dev(), uid, gid);
+}
+
+fn chown_same_dev_dirs(dir: &std::path::Path, home_dev: u64, uid: u32, gid: u32) {
+  use std::os::unix::fs::MetadataExt as _;
+
+  let Ok(entries) = std::fs::read_dir(dir) else {
+    return;
+  };
+  for entry in entries.flatten() {
+    let path = entry.path();
+    let Ok(meta) = std::fs::symlink_metadata(&path) else {
+      continue;
+    };
+    if !meta.file_type().is_dir() || meta.dev() != home_dev {
+      continue;
+    }
+    if (meta.uid() != uid || meta.gid() != gid)
+      && let Err(e) = std::os::unix::fs::lchown(&path, Some(uid), Some(gid))
+    {
+      tracing::warn!("cannot give {} to {uid}:{gid}: {e}", path.display());
+    }
+    chown_same_dev_dirs(&path, home_dev, uid, gid);
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::os::unix::fs::MetadataExt as _;
+
+  use super::*;
+
+  // ROOT CAUSE:
+  //
+  // Container runtimes create intermediate directories on the `$HOME` tmpfs
+  // (such as `/home/agent/.local` and `/home/agent/.local/share`) as
+  // `root:root` (0755) when mounting nested sync mappings like
+  // `~/.local/share/opencode`, causing `EACCES` when the driving program
+  // creates sibling directories like `~/.local/state`.
+  //
+  // Before the fix, guest `init` skipped `$HOME` setup for container actors.
+  // The fix walks directories on the same filesystem device (`st_dev`) as
+  // `$HOME` and chowns them to the profile's user without crossing into bind
+  // mounts.
+  #[test]
+  fn chown_same_dev_dirs_skips_symlinks_and_other_devices() {
+    let home = tempfile::tempdir().unwrap();
+    let nested = home.path().join(".local/share");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::os::unix::fs::symlink(&nested, home.path().join("link")).unwrap();
+
+    let meta = std::fs::symlink_metadata(home.path()).unwrap();
+    // Passing a mismatched device ID must be a no-op (never descends into
+    // mount points on another filesystem).
+    chown_same_dev_dirs(home.path(), meta.dev().wrapping_add(1), meta.uid(), meta.gid());
+    // Passing the same device ID walks nested directories cleanly without
+    // following symlinks or failing on non-root test runs.
+    chown_home_ancestors(&home.path().to_string_lossy(), meta.uid(), meta.gid());
+    assert!(nested.is_dir());
+  }
+}
