@@ -1,344 +1,419 @@
-#!/usr/bin/env python3
-"""Three-way SQLite row-merge driver for needy sync mappings (opencode feature).
+#!/bin/sh
+# Three-way SQLite row-merge driver for needy sync mappings (opencode feature).
+#
+# Three-tree driver contract:
+#   needy-merge-sqlite <seed_dir> <run_dir> <store_dir> <out_dir>
+#
+#   - <seed_dir>:  claimed files as they were when the run was seeded
+#   - <run_dir>:   claimed files from the run's per-run copy
+#   - <store_dir>: claimed files currently in the store
+#   - <out_dir>:   empty writable directory where merged files are written
+#
+# Uses the `sqlite3` CLI with `ATTACH DATABASE` so all row data (TEXT, BLOB,
+# NULL, quotes, newlines, composite primary keys) stays inside SQLite's own SQL
+# engine without passing values through shell variables.
+set -eu
 
-Three-tree driver contract:
-  needy-merge-sqlite <seed_dir> <run_dir> <store_dir> <out_dir>
+if [ "$#" -ne 4 ]; then
+  printf 'usage: %s <seed_dir> <run_dir> <store_dir> <out_dir>\n' "$0" >&2
+  exit 2
+fi
 
-  - <seed_dir>:  claimed files as they were when the run was seeded
-  - <run_dir>:   claimed files from the run's per-run copy
-  - <store_dir>: claimed files currently in the store
-  - <out_dir>:   empty writable directory where merged files are written
+if ! command -v sqlite3 >/dev/null 2>&1; then
+  printf 'needy-merge-sqlite: sqlite3 CLI is required but not found on PATH\n' >&2
+  exit 1
+fi
 
-Behavior:
-  - Copies each database together with any SQLite side files (-wal, -shm,
-    -journal) into a temporary directory and checkpoints WAL frames cleanly
-    before reading.
-  - Merges each user table three-way per row by its explicit primary key:
-    * insertions from either side are kept;
-    * updates/deletions made only by the run are applied;
-    * identical changes on both sides are kept without conflict;
-    * conflicting changes to the same primary key are reported on stderr and
-      cause a non-zero exit (leaving the store unchanged).
-  - Refuses tables keyed by AUTOINCREMENT integer primary keys (per
-    docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md)
-    rather than colliding or renumbering IDs.
-  - Verifies `PRAGMA integrity_check` on every merged database and writes a
-    clean, checkpointed database file (no -wal/-shm side files) into <out_dir>.
-"""
+SEED_DIR=$1
+RUN_DIR=$2
+STORE_DIR=$3
+OUT_DIR=$4
 
-from __future__ import annotations
+mkdir -p "$OUT_DIR"
 
-import os
-import re
-import shutil
-import sqlite3
-import sys
-import tempfile
-from pathlib import Path
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/needy-merge-sqlite-XXXXXX")
+trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 
-SQLITE_MAGIC = b"SQLite format 3\x00"
-SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
-AUTOINCREMENT_RE = re.compile(r"\bAUTOINCREMENT\b", re.IGNORECASE)
+# Escapes a SQLite identifier by doubling `"`.
+qident() {
+  printf '%s' "$1" | sed 's/"/""/g'
+}
 
+# Escapes a SQLite single-quoted string literal by doubling `'`.
+qlit() {
+  printf '%s' "$1" | sed "s/'/''/g"
+}
 
-def qident(name: str) -> str:
-  return '"' + name.replace('"', '""') + '"'
+is_sqlite_file() {
+  file=$1
+  [ -f "$file" ] || return 1
+  if [ ! -s "$file" ]; then
+    return 0
+  fi
+  magic=$(head -c 15 "$file" 2>/dev/null || true)
+  [ "$magic" = "SQLite format 3" ]
+}
 
+# Copies `src_root/rel` and any SQLite side files (-wal, -shm, -journal) into
+# `TMP_DIR/label/rel`, checkpoints WAL frames into the main DB, and removes
+# side files. Echoes the staged path, or nothing if absent.
+stage_and_checkpoint() {
+  src_root=$1
+  rel=$2
+  label=$3
+  src="$src_root/$rel"
+  if [ ! -f "$src" ]; then
+    return 0
+  fi
+  if ! is_sqlite_file "$src"; then
+    printf 'needy-merge-sqlite: %s/%s is not a SQLite database\n' "$label" "$rel" >&2
+    return 1
+  fi
+  dst="$TMP_DIR/$label/$rel"
+  mkdir -p "$(dirname "$dst")"
+  cp -p "$src" "$dst"
+  for suffix in -wal -shm -journal; do
+    if [ -f "${src}${suffix}" ]; then
+      cp -p "${src}${suffix}" "${dst}${suffix}"
+    fi
+  done
+  sqlite3 "$dst" "PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;" >/dev/null
+  rm -f "${dst}-wal" "${dst}-shm" "${dst}-journal"
+  printf '%s\n' "$dst"
+}
 
-def is_side_file(rel: str) -> bool:
-  return any(rel.endswith(suffix) for suffix in SIDE_SUFFIXES)
+# Collects unique relative paths of non-side files across all three trees.
+collect_db_paths() {
+  for root in "$SEED_DIR" "$RUN_DIR" "$STORE_DIR"; do
+    [ -d "$root" ] || continue
+    (
+      cd "$root"
+      find . -type f | sed 's|^\./||'
+    )
+  done | awk '
+    /-wal$/ || /-shm$/ || /-journal$/ { next }
+    { print }
+  ' | LC_ALL=C sort -u
+}
 
+# Extracts table schema metadata: prints `col|pk_pos` lines in column order.
+table_info_lines() {
+  db=$1
+  tbl=$2
+  qtbl=$(qident "$tbl")
+  sqlite3 -separator '|' "$db" "PRAGMA table_info(\"$qtbl\");" | awk -F'|' '{ print $2 "|" $6 }'
+}
 
-def is_sqlite_file(path: Path) -> bool:
-  if not path.is_file():
-    return False
-  try:
-    with path.open("rb") as f:
-      header = f.read(len(SQLITE_MAGIC))
-  except OSError:
-    return False
-  return header == SQLITE_MAGIC or path.stat().st_size == 0
+# Checks whether `db` has a table named `tbl`.
+db_has_table() {
+  db=$1
+  tbl=$2
+  ltbl=$(qlit "$tbl")
+  found=$(sqlite3 "$db" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='$ltbl' AND sql IS NOT NULL LIMIT 1;")
+  [ "$found" = "1" ]
+}
 
+# Builds SQL expressions and merges one table from `run_db` into `main`
+# (with optional `seed_db`). Writes conflict lines to stderr and returns 1
+# on any schema/PK/row conflict.
+merge_one_table() {
+  rel=$1
+  merged_db=$2
+  run_db=$3
+  seed_db=$4
+  tbl=$5
+  sql_file=$6
 
-def collect_db_paths(*roots: Path) -> list[str]:
-  rels: set[str] = set()
-  for root in roots:
-    if not root.is_dir():
-      continue
-    for dirpath, _dirnames, filenames in os.walk(root):
-      for fname in filenames:
-        full = Path(dirpath) / fname
-        rel = full.relative_to(root).as_posix()
-        if is_side_file(rel):
-          continue
-        rels.add(rel)
-  return sorted(rels)
+  qtbl=$(qident "$tbl")
+  ltbl=$(qlit "$tbl")
+  qrun=$(qlit "$run_db")
 
+  if ! db_has_table "$run_db" "$tbl"; then
+    return 0
+  fi
 
-def stage_and_checkpoint(src_root: Path, rel: str, tmp_dir: Path, label: str) -> Path | None:
-  """Copies `src_root/rel` and any SQLite side files into `tmp_dir/label/`
-  and folds any WAL frames into the main database file."""
-  src = src_root / rel
-  if not src.is_file():
-    return None
-  if not is_sqlite_file(src):
-    raise RuntimeError(f"{label}/{rel} is not a SQLite database")
+  if ! db_has_table "$merged_db" "$tbl"; then
+    create_sql=$(sqlite3 "$run_db" "SELECT sql FROM sqlite_master WHERE type='table' AND name='$ltbl';")
+    {
+      printf '%s;\n' "$create_sql"
+      printf 'INSERT INTO main."%s" SELECT * FROM run_db."%s";\n' "$qtbl" "$qtbl"
+    } >>"$sql_file"
+    return 0
+  fi
 
-  work_dir = tmp_dir / label
-  dst = work_dir / rel
-  dst.parent.mkdir(parents=True, exist_ok=True)
-  shutil.copy2(src, dst)
-  for suffix in SIDE_SUFFIXES:
-    side_src = Path(f"{src}{suffix}")
-    if side_src.is_file():
-      shutil.copy2(side_src, Path(f"{dst}{suffix}"))
+  store_schema=$(table_info_lines "$merged_db" "$tbl")
+  run_schema=$(table_info_lines "$run_db" "$tbl")
+  if [ "$store_schema" != "$run_schema" ]; then
+    printf "needy-merge-sqlite: %s: table '%s' schema differs between run and store and cannot be row-merged\n" "$rel" "$tbl" >&2
+    return 1
+  fi
 
-  conn = sqlite3.connect(str(dst))
-  try:
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    conn.execute("PRAGMA journal_mode=DELETE")
-    conn.commit()
-  finally:
-    conn.close()
+  has_seed=0
+  if [ -n "$seed_db" ] && db_has_table "$seed_db" "$tbl"; then
+    seed_schema=$(table_info_lines "$seed_db" "$tbl")
+    if [ "$seed_schema" = "$store_schema" ]; then
+      has_seed=1
+    fi
+  fi
 
-  for suffix in SIDE_SUFFIXES:
-    side_dst = Path(f"{dst}{suffix}")
-    if side_dst.exists():
-      side_dst.unlink()
-  return dst
+  # Extract all columns (in order) and PK columns (sorted by pk position).
+  cols_file="$TMP_DIR/cols.txt"
+  pks_file="$TMP_DIR/pks.txt"
+  printf '%s\n' "$store_schema" | awk -F'|' 'NF >= 2 { print $1 }' >"$cols_file"
+  printf '%s\n' "$store_schema" | awk -F'|' 'NF >= 2 && $2 + 0 > 0 { print $2 "|" $1 }' | sort -t'|' -k1,1n | awk -F'|' '{ print $2 }' >"$pks_file"
 
+  if [ ! -s "$pks_file" ]; then
+    # Table has no explicit primary key: allow only if run == store or run == seed.
+    attach_sql="ATTACH DATABASE '$qrun' AS run_db;"
+    if [ "$has_seed" -eq 1 ]; then
+      qseed=$(qlit "$seed_db")
+      attach_sql="$attach_sql ATTACH DATABASE '$qseed' AS seed_db;"
+    fi
+    diff_store=$(sqlite3 "$merged_db" "$attach_sql SELECT count(*) FROM (SELECT * FROM run_db.\"$qtbl\" EXCEPT SELECT * FROM main.\"$qtbl\" UNION ALL SELECT * FROM main.\"$qtbl\" EXCEPT SELECT * FROM run_db.\"$qtbl\");")
+    if [ "$diff_store" != "0" ]; then
+      if [ "$has_seed" -eq 1 ]; then
+        diff_seed=$(sqlite3 "$merged_db" "$attach_sql SELECT count(*) FROM (SELECT * FROM run_db.\"$qtbl\" EXCEPT SELECT * FROM seed_db.\"$qtbl\" UNION ALL SELECT * FROM seed_db.\"$qtbl\" EXCEPT SELECT * FROM run_db.\"$qtbl\");")
+      else
+        diff_seed="1"
+      fi
+      if [ "$diff_seed" != "0" ]; then
+        printf "needy-merge-sqlite: %s: table '%s' has no explicit primary key and cannot be row-merged\n" "$rel" "$tbl" >&2
+        return 1
+      fi
+    fi
+    return 0
+  fi
 
-def list_user_tables(conn: sqlite3.Connection) -> dict[str, str]:
-  rows = conn.execute(
-    "SELECT name, sql FROM sqlite_master "
-    "WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL"
-  ).fetchall()
-  return {name: sql for name, sql in rows}
+  # Build SQL column lists and join/equality predicates.
+  col_list=""
+  r_col_list=""
+  row_eq_rt=""
+  row_eq_rs=""
+  row_eq_ts=""
+  row_eq_ms=""
+  while IFS= read -r col; do
+    [ -n "$col" ] || continue
+    qcol=$(qident "$col")
+    col_list="${col_list:+${col_list}, }\"$qcol\""
+    r_col_list="${r_col_list:+${r_col_list}, }r.\"$qcol\""
+    row_eq_rt="${row_eq_rt:+${row_eq_rt} AND }r.\"$qcol\" IS t.\"$qcol\""
+    row_eq_rs="${row_eq_rs:+${row_eq_rs} AND }r.\"$qcol\" IS s.\"$qcol\""
+    row_eq_ts="${row_eq_ts:+${row_eq_ts} AND }t.\"$qcol\" IS s.\"$qcol\""
+    row_eq_ms="${row_eq_ms:+${row_eq_ms} AND }main.\"$qtbl\".\"$qcol\" IS s.\"$qcol\""
+  done <"$cols_file"
 
+  first_pk=""
+  pk_eq_rt=""
+  pk_eq_rs=""
+  pk_eq_sr=""
+  pk_eq_st=""
+  pk_eq_tr=""
+  pk_eq_ms=""
+  pk_disp_r=""
+  pk_disp_s=""
+  while IFS= read -r pk; do
+    [ -n "$pk" ] || continue
+    qpk=$(qident "$pk")
+    if [ -z "$first_pk" ]; then
+      first_pk=$qpk
+    fi
+    pk_eq_rt="${pk_eq_rt:+${pk_eq_rt} AND }r.\"$qpk\" IS t.\"$qpk\""
+    pk_eq_rs="${pk_eq_rs:+${pk_eq_rs} AND }r.\"$qpk\" IS s.\"$qpk\""
+    pk_eq_sr="${pk_eq_sr:+${pk_eq_sr} AND }s.\"$qpk\" IS r.\"$qpk\""
+    pk_eq_st="${pk_eq_st:+${pk_eq_st} AND }s.\"$qpk\" IS t.\"$qpk\""
+    pk_eq_tr="${pk_eq_tr:+${pk_eq_tr} AND }t.\"$qpk\" IS r.\"$qpk\""
+    pk_eq_ms="${pk_eq_ms:+${pk_eq_ms} AND }main.\"$qtbl\".\"$qpk\" IS s.\"$qpk\""
+    pk_disp_r="${pk_disp_r:+${pk_disp_r} || ',' || }COALESCE(CAST(r.\"$qpk\" AS TEXT), 'NULL')"
+    pk_disp_s="${pk_disp_s:+${pk_disp_s} || ',' || }COALESCE(CAST(s.\"$qpk\" AS TEXT), 'NULL')"
+  done <"$pks_file"
 
-def sqlite_sequence_tables(conn: sqlite3.Connection) -> set[str]:
-  row = conn.execute(
-    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
-  ).fetchone()
-  if row is None:
-    return set()
-  return {r[0] for r in conn.execute("SELECT name FROM sqlite_sequence").fetchall()}
+  # 1. Detect row-level conflicts before emitting mutations.
+  attach_sql="ATTACH DATABASE '$qrun' AS run_db;"
+  if [ "$has_seed" -eq 1 ]; then
+    qseed=$(qlit "$seed_db")
+    attach_sql="$attach_sql ATTACH DATABASE '$qseed' AS seed_db;"
+    conflict_sql="
+      SELECT $pk_disp_r FROM run_db.\"$qtbl\" r
+      JOIN main.\"$qtbl\" t ON $pk_eq_rt
+      LEFT JOIN seed_db.\"$qtbl\" s ON $pk_eq_rs
+      WHERE NOT ($row_eq_rt)
+        AND (s.\"$first_pk\" IS NULL OR (NOT ($row_eq_rs) AND NOT ($row_eq_ts)))
+      UNION
+      SELECT $pk_disp_s FROM seed_db.\"$qtbl\" s
+      JOIN main.\"$qtbl\" t ON $pk_eq_st
+      LEFT JOIN run_db.\"$qtbl\" r ON $pk_eq_sr
+      WHERE r.\"$first_pk\" IS NULL AND NOT ($row_eq_ts)
+      UNION
+      SELECT $pk_disp_s FROM seed_db.\"$qtbl\" s
+      JOIN run_db.\"$qtbl\" r ON $pk_eq_sr
+      LEFT JOIN main.\"$qtbl\" t ON $pk_eq_st
+      WHERE t.\"$first_pk\" IS NULL AND NOT ($row_eq_rs);
+    "
+  else
+    conflict_sql="
+      SELECT $pk_disp_r FROM run_db.\"$qtbl\" r
+      JOIN main.\"$qtbl\" t ON $pk_eq_rt
+      WHERE NOT ($row_eq_rt);
+    "
+  fi
 
+  conflicts=$(sqlite3 "$merged_db" "$attach_sql $conflict_sql")
+  if [ -n "$conflicts" ]; then
+    printf '%s\n' "$conflicts" | while IFS= read -r pk_val; do
+      [ -n "$pk_val" ] || continue
+      printf "needy-merge-sqlite: %s: conflict in table '%s' for primary key '%s'\n" "$rel" "$tbl" "$pk_val" >&2
+    done
+    return 1
+  fi
 
-def table_schema(conn: sqlite3.Connection, table: str) -> tuple[list[str], list[str]]:
-  """Returns (all_columns, pk_columns_in_order) for `table`."""
-  info = conn.execute(f"PRAGMA table_info({qident(table)})").fetchall()
-  cols = [row[1] for row in info]
-  pks = [row[1] for row in sorted((r for r in info if r[5] > 0), key=lambda r: r[5])]
-  return cols, pks
+  # 2. Emit clean mutations for this table.
+  if [ "$has_seed" -eq 1 ]; then
+    cat >>"$sql_file" <<EOF
+DELETE FROM main."$qtbl"
+WHERE EXISTS (
+  SELECT 1 FROM seed_db."$qtbl" s
+  WHERE $pk_eq_ms AND $row_eq_ms
+    AND NOT EXISTS (SELECT 1 FROM run_db."$qtbl" r WHERE $pk_eq_rs)
+);
+INSERT INTO main."$qtbl" ($col_list)
+SELECT $r_col_list FROM run_db."$qtbl" r
+WHERE NOT EXISTS (SELECT 1 FROM main."$qtbl" t WHERE $pk_eq_tr)
+  AND NOT EXISTS (SELECT 1 FROM seed_db."$qtbl" s WHERE $pk_eq_rs);
+INSERT OR REPLACE INTO main."$qtbl" ($col_list)
+SELECT $r_col_list FROM run_db."$qtbl" r
+JOIN main."$qtbl" t ON $pk_eq_rt
+JOIN seed_db."$qtbl" s ON $pk_eq_rs
+WHERE NOT ($row_eq_rt) AND $row_eq_ts;
+EOF
+  else
+    cat >>"$sql_file" <<EOF
+INSERT INTO main."$qtbl" ($col_list)
+SELECT $r_col_list FROM run_db."$qtbl" r
+WHERE NOT EXISTS (SELECT 1 FROM main."$qtbl" t WHERE $pk_eq_tr);
+EOF
+  fi
+}
 
+merge_one_db() {
+  rel=$1
+  out_path="$OUT_DIR/$rel"
+  mkdir -p "$(dirname "$out_path")"
 
-def read_rows_by_pk(
-  conn: sqlite3.Connection, table: str, cols: list[str], pk_cols: list[str]
-) -> dict[tuple, tuple]:
-  col_list = ", ".join(qident(c) for c in cols)
-  pk_indices = [cols.index(c) for c in pk_cols]
-  rows: dict[tuple, tuple] = {}
-  for row in conn.execute(f"SELECT {col_list} FROM {qident(table)}"):
-    key = tuple(row[i] for i in pk_indices)
-    rows[key] = row
-  return rows
-
-
-def merge_one_db(
-  rel: str,
-  seed_db: Path | None,
-  run_db: Path | None,
-  store_db: Path | None,
-  out_path: Path,
-  tmp_dir: Path,
-) -> list[str]:
-  """Merges one SQLite database. Returns a list of error/conflict messages
-  (empty on clean merge)."""
-  out_path.parent.mkdir(parents=True, exist_ok=True)
+  seed_db=$(stage_and_checkpoint "$SEED_DIR" "$rel" "seed")
+  run_db=$(stage_and_checkpoint "$RUN_DIR" "$rel" "run")
+  store_db=$(stage_and_checkpoint "$STORE_DIR" "$rel" "store")
 
   # Only the run has this database: take it directly.
-  if store_db is None:
-    if run_db is not None:
-      shutil.copy2(run_db, out_path)
-    return []
+  if [ -z "$store_db" ]; then
+    if [ -n "$run_db" ]; then
+      cp -p "$run_db" "$out_path"
+    fi
+    return 0
+  fi
 
   # The run deleted (or never had) the database.
-  if run_db is None:
-    if seed_db is not None and seed_db.read_bytes() == store_db.read_bytes():
-      # Only the run removed it; omit from out_dir.
-      return []
-    # Store changed (or created) it while run does not have it; keep store's.
-    shutil.copy2(store_db, out_path)
-    return []
+  if [ -z "$run_db" ]; then
+    if [ -n "$seed_db" ] && cmp -s "$seed_db" "$store_db"; then
+      return 0
+    fi
+    cp -p "$store_db" "$out_path"
+    return 0
+  fi
 
   # Fast path: run did not change the database relative to seed or store.
-  run_bytes = run_db.read_bytes()
-  if (seed_db is not None and run_bytes == seed_db.read_bytes()) or run_bytes == store_db.read_bytes():
-    shutil.copy2(store_db, out_path)
-    return []
+  if cmp -s "$run_db" "$store_db"; then
+    cp -p "$store_db" "$out_path"
+    return 0
+  fi
+  if [ -n "$seed_db" ] && cmp -s "$run_db" "$seed_db"; then
+    cp -p "$store_db" "$out_path"
+    return 0
+  fi
 
   # Fast path: store did not change since seed; take run's checkpointed copy.
-  if seed_db is not None and store_db.read_bytes() == seed_db.read_bytes():
-    shutil.copy2(run_db, out_path)
-    return []
+  if [ -n "$seed_db" ] && cmp -s "$store_db" "$seed_db"; then
+    cp -p "$run_db" "$out_path"
+    return 0
+  fi
 
   # Both run and store diverged (or both created from no seed): three-way row merge.
-  merged_tmp = tmp_dir / "merged" / rel
-  merged_tmp.parent.mkdir(parents=True, exist_ok=True)
-  shutil.copy2(store_db, merged_tmp)
+  merged_tmp="$TMP_DIR/merged/$rel"
+  mkdir -p "$(dirname "$merged_tmp")"
+  cp -p "$store_db" "$merged_tmp"
 
-  seed_conn = sqlite3.connect(f"file:{seed_db}?mode=ro", uri=True) if seed_db is not None else None
-  run_conn = sqlite3.connect(f"file:{run_db}?mode=ro", uri=True)
-  out_conn = sqlite3.connect(str(merged_tmp))
-
-  errors: list[str] = []
-  try:
-    out_conn.execute("PRAGMA foreign_keys = OFF")
-
-    seed_tables = list_user_tables(seed_conn) if seed_conn is not None else {}
-    run_tables = list_user_tables(run_conn)
-    store_tables = list_user_tables(out_conn)
-
-    seq_tables = sqlite_sequence_tables(out_conn) | sqlite_sequence_tables(run_conn)
-    all_tables = sorted(set(store_tables) | set(run_tables))
-
-    # Reject AUTOINCREMENT tables before mutating anything.
-    for table in all_tables:
-      sqls = [s for s in (store_tables.get(table), run_tables.get(table)) if s is not None]
-      if table in seq_tables or any(AUTOINCREMENT_RE.search(sql) for sql in sqls):
-        errors.append(
-          f"{rel}: table {table!r} uses AUTOINCREMENT primary key and cannot be row-merged"
-        )
-    if errors:
-      return errors
-
-    for table in all_tables:
-      in_store = table in store_tables
-      in_run = table in run_tables
-      if not in_run:
-        continue
-
-      run_cols, run_pks = table_schema(run_conn, table)
-      if not in_store:
-        # Table added only by run: create it and copy its rows.
-        out_conn.execute(run_tables[table])
-        col_list = ", ".join(qident(c) for c in run_cols)
-        placeholders = ", ".join("?" for _ in run_cols)
-        rows = run_conn.execute(f"SELECT {col_list} FROM {qident(table)}").fetchall()
-        if rows:
-          out_conn.executemany(
-            f"INSERT INTO {qident(table)} ({col_list}) VALUES ({placeholders})",
-            rows,
-          )
-        continue
-
-      store_cols, store_pks = table_schema(out_conn, table)
-      if store_cols != run_cols or store_pks != run_pks:
-        errors.append(
-          f"{rel}: table {table!r} schema differs between run and store and cannot be row-merged"
-        )
-        continue
-
-      if not store_pks:
-        # Table without an explicit primary key cannot be merged row-by-row.
-        col_list = ", ".join(qident(c) for c in store_cols)
-        run_all = run_conn.execute(f"SELECT {col_list} FROM {qident(table)}").fetchall()
-        store_all = out_conn.execute(f"SELECT {col_list} FROM {qident(table)}").fetchall()
-        seed_all = (
-          seed_conn.execute(f"SELECT {col_list} FROM {qident(table)}").fetchall()
-          if seed_conn is not None and table in seed_tables
-          else []
-        )
-        if run_all != seed_all and run_all != store_all:
-          errors.append(
-            f"{rel}: table {table!r} has no explicit primary key and cannot be row-merged"
-          )
-        continue
-
-      seed_rows: dict[tuple, tuple] = {}
-      if seed_conn is not None and table in seed_tables:
-        seed_cols, seed_pks = table_schema(seed_conn, table)
-        if seed_cols == store_cols and seed_pks == store_pks:
-          seed_rows = read_rows_by_pk(seed_conn, table, store_cols, store_pks)
-
-      run_rows = read_rows_by_pk(run_conn, table, run_cols, run_pks)
-      store_rows = read_rows_by_pk(out_conn, table, store_cols, store_pks)
-
-      col_list = ", ".join(qident(c) for c in store_cols)
-      placeholders = ", ".join("?" for _ in store_cols)
-      pk_where = " AND ".join(f"{qident(c)} = ?" for c in store_pks)
-
-      for pk in set(seed_rows) | set(run_rows) | set(store_rows):
-        s = seed_rows.get(pk)
-        r = run_rows.get(pk)
-        t = store_rows.get(pk)
-        if r == s or r == t:
-          continue
-        if t == s:
-          if r is None:
-            out_conn.execute(f"DELETE FROM {qident(table)} WHERE {pk_where}", pk)
-          else:
-            out_conn.execute(
-              f"INSERT OR REPLACE INTO {qident(table)} ({col_list}) VALUES ({placeholders})",
-              r,
-            )
-        else:
-          errors.append(f"{rel}: conflict in table {table!r} for primary key {pk!r}")
-
-    if errors:
-      out_conn.rollback()
-      return errors
-
-    out_conn.commit()
-    check = out_conn.execute("PRAGMA integrity_check").fetchall()
-    if check != [("ok",)]:
-      return [f"{rel}: integrity_check failed after merge: {check!r}"]
-
-    out_conn.execute("PRAGMA journal_mode=DELETE")
-    out_conn.commit()
-  finally:
-    if seed_conn is not None:
-      seed_conn.close()
-    run_conn.close()
-    out_conn.close()
-
-  shutil.copy2(merged_tmp, out_path)
-  return []
-
-
-def main(argv: list[str]) -> int:
-  if len(argv) != 5:
-    print(
-      f"usage: {argv[0]} <seed_dir> <run_dir> <store_dir> <out_dir>",
-      file=sys.stderr,
-    )
-    return 2
-
-  seed_dir, run_dir, store_dir, out_dir = (Path(p) for p in argv[1:5])
-  out_dir.mkdir(parents=True, exist_ok=True)
-
-  db_rels = collect_db_paths(seed_dir, run_dir, store_dir)
-  all_errors: list[str] = []
-
-  with tempfile.TemporaryDirectory(prefix="needy-merge-sqlite-") as tmp:
-    tmp_dir = Path(tmp)
-    for rel in db_rels:
-      try:
-        seed_db = stage_and_checkpoint(seed_dir, rel, tmp_dir, "seed")
-        run_db = stage_and_checkpoint(run_dir, rel, tmp_dir, "run")
-        store_db = stage_and_checkpoint(store_dir, rel, tmp_dir, "store")
-        errs = merge_one_db(rel, seed_db, run_db, store_db, out_dir / rel, tmp_dir)
-        all_errors.extend(errs)
-      except Exception as exc:  # noqa: BLE001
-        all_errors.append(f"{rel}: {exc}")
-
-  if all_errors:
-    for err in all_errors:
-      print(f"needy-merge-sqlite: {err}", file=sys.stderr)
+  # Reject AUTOINCREMENT tables before mutating anything.
+  autoinc_tables=$(
+    for db in "$merged_tmp" "$run_db"; do
+      sqlite3 "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql LIKE '%AUTOINCREMENT%';"
+      if db_has_table "$db" "sqlite_sequence"; then
+        sqlite3 "$db" "SELECT name FROM sqlite_sequence;"
+      fi
+    done | LC_ALL=C sort -u
+  )
+  if [ -n "$autoinc_tables" ]; then
+    printf '%s\n' "$autoinc_tables" | while IFS= read -r tbl; do
+      [ -n "$tbl" ] || continue
+      printf "needy-merge-sqlite: %s: table '%s' uses AUTOINCREMENT primary key and cannot be row-merged\n" "$rel" "$tbl" >&2
+    done
     return 1
-  return 0
+  fi
 
+  all_tables=$(
+    for db in "$merged_tmp" "$run_db"; do
+      sqlite3 "$db" "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL;"
+    done | LC_ALL=C sort -u
+  )
 
-if __name__ == "__main__":
-  sys.exit(main(sys.argv))
+  sql_file="$TMP_DIR/merge.sql"
+  qrun=$(qlit "$run_db")
+  {
+    printf "PRAGMA foreign_keys = OFF;\n"
+    printf "ATTACH DATABASE '%s' AS run_db;\n" "$qrun"
+    if [ -n "$seed_db" ]; then
+      qseed=$(qlit "$seed_db")
+      printf "ATTACH DATABASE '%s' AS seed_db;\n" "$qseed"
+    fi
+    printf "BEGIN IMMEDIATE;\n"
+  } >"$sql_file"
+
+  had_error=0
+  # Avoid subshell so `had_error` propagates cleanly in POSIX sh.
+  tables_file="$TMP_DIR/tables.txt"
+  printf '%s\n' "$all_tables" >"$tables_file"
+  while IFS= read -r tbl; do
+    [ -n "$tbl" ] || continue
+    if ! merge_one_table "$rel" "$merged_tmp" "$run_db" "$seed_db" "$tbl" "$sql_file"; then
+      had_error=1
+    fi
+  done <"$tables_file"
+
+  if [ "$had_error" -ne 0 ]; then
+    return 1
+  fi
+
+  printf "COMMIT;\n" >>"$sql_file"
+  sqlite3 -bail "$merged_tmp" <"$sql_file"
+
+  check=$(sqlite3 "$merged_tmp" "PRAGMA integrity_check;")
+  if [ "$check" != "ok" ]; then
+    printf 'needy-merge-sqlite: %s: integrity_check failed after merge: %s\n' "$rel" "$check" >&2
+    return 1
+  fi
+
+  sqlite3 "$merged_tmp" "PRAGMA journal_mode=DELETE;" >/dev/null
+  rm -f "${merged_tmp}-wal" "${merged_tmp}-shm" "${merged_tmp}-journal"
+  cp -p "$merged_tmp" "$out_path"
+}
+
+dbs_file="$TMP_DIR/dbs.txt"
+collect_db_paths >"$dbs_file"
+
+status=0
+while IFS= read -r rel; do
+  [ -n "$rel" ] || continue
+  if ! merge_one_db "$rel"; then
+    status=1
+  fi
+done <"$dbs_file"
+
+exit "$status"

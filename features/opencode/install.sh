@@ -7,14 +7,18 @@ set -eu
 
 VERSION="${VERSION:-1.19.5}"
 
-if ! command -v curl >/dev/null 2>&1; then
+need_apt=""
+command -v curl >/dev/null 2>&1 || need_apt="$need_apt curl ca-certificates"
+command -v sqlite3 >/dev/null 2>&1 || need_apt="$need_apt sqlite3"
+if [ -n "$need_apt" ]; then
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y --no-install-recommends curl ca-certificates
+    # shellcheck disable=SC2086
+    apt-get install -y --no-install-recommends $need_apt
     rm -rf /var/lib/apt/lists/*
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache curl ca-certificates
+    apk add --no-cache curl ca-certificates sqlite
   fi
 fi
 

@@ -1,6 +1,7 @@
 //! Integration tests for `features/opencode/needy-merge-sqlite`, tested
 //! directly as that feature's own code with real SQLite3 databases and
 //! write-ahead logs (`-wal`) present.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,7 +25,7 @@ fn run_py(script: &str, args: &[&Path]) -> std::process::Output {
 }
 
 fn run_driver(seed: &Path, run: &Path, store: &Path, out: &Path) -> std::process::Output {
-  Command::new("python3").arg(driver_script()).arg(seed).arg(run).arg(store).arg(out).output().expect("failed to execute needy-merge-sqlite")
+  Command::new("sh").arg(driver_script()).arg(seed).arg(run).arg(store).arg(out).output().expect("failed to execute needy-merge-sqlite")
 }
 
 #[test]
@@ -221,4 +222,77 @@ for db, title in [(run_db, "changed by run"), (store_db, "changed by store")]:
   assert!(stderr.contains("session"), "stderr must name the table: {stderr}");
   assert!(stderr.contains("s0"), "stderr must name the conflicting PK: {stderr}");
   assert!(!out.join("opencode.db").exists(), "failed merge must not write output DB");
+}
+
+#[test]
+fn single_side_creation_and_composite_pk_with_special_values_merge_cleanly() {
+  let dir = tempfile::tempdir().unwrap();
+  let [seed, run, store, out] = ["seed", "run", "store", "out"].map(|n| dir.path().join(n));
+  for d in [&seed, &run, &store, &out] {
+    std::fs::create_dir_all(d).unwrap();
+  }
+
+  // 1. First run creates opencode.db when seed and store are both empty.
+  let setup_first = r#"
+import sqlite3, sys
+from pathlib import Path
+
+run_db = Path(sys.argv[1]) / "opencode.db"
+conn = sqlite3.connect(str(run_db))
+conn.execute("CREATE TABLE kv (ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT, raw BLOB, PRIMARY KEY (ns, k))")
+conn.execute("INSERT INTO kv VALUES ('auth', 'tok', 'line1\n''quoted'' \"val\"', ?)", (b"\x00\x01\xff",))
+conn.execute("INSERT INTO kv VALUES ('auth', 'opt', NULL, NULL)")
+conn.commit()
+conn.close()
+"#;
+  let res = run_py(setup_first, &[&run]);
+  assert!(res.status.success(), "setup failed: {}", String::from_utf8_lossy(&res.stderr));
+
+  let first = run_driver(&seed, &run, &store, &out);
+  assert!(first.status.success(), "first merge failed: {}", String::from_utf8_lossy(&first.stderr));
+  assert!(out.join("opencode.db").is_file());
+
+  // 2. Concurrent runs on that DB: one deletes ('auth','opt') and inserts ('auth','r1'),
+  //    store inserts ('auth','s1') with quotes/newlines/BLOB.
+  std::fs::copy(out.join("opencode.db"), seed.join("opencode.db")).unwrap();
+  std::fs::copy(out.join("opencode.db"), store.join("opencode.db")).unwrap();
+  std::fs::remove_file(out.join("opencode.db")).unwrap();
+
+  let setup_second = r#"
+import sqlite3, sys
+from pathlib import Path
+
+run_db = Path(sys.argv[1]) / "opencode.db"
+store_db = Path(sys.argv[2]) / "opencode.db"
+
+r = sqlite3.connect(str(run_db))
+r.execute("DELETE FROM kv WHERE ns = 'auth' AND k = 'opt'")
+r.execute("INSERT INTO kv VALUES ('auth', 'r1', 'hello\nworld', ?)", (b"\xde\xad",))
+r.commit()
+r.close()
+
+s = sqlite3.connect(str(store_db))
+s.execute("INSERT INTO kv VALUES ('auth', 's1', 'store''s value', ?)", (b"\xbe\xef",))
+s.commit()
+s.close()
+"#;
+  let res2 = run_py(setup_second, &[&run, &store]);
+  assert!(res2.status.success(), "setup2 failed: {}", String::from_utf8_lossy(&res2.stderr));
+
+  let second = run_driver(&seed, &run, &store, &out);
+  assert!(second.status.success(), "second merge failed: {}", String::from_utf8_lossy(&second.stderr));
+
+  let verify = r#"
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+assert conn.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+rows = sorted(conn.execute("SELECT ns, k, v, raw FROM kv").fetchall())
+assert rows == [
+  ("auth", "r1", "hello\nworld", b"\xde\xad"),
+  ("auth", "s1", "store's value", b"\xbe\xef"),
+  ("auth", "tok", "line1\n'quoted' \"val\"", b"\x00\x01\xff"),
+], f"unexpected rows: {rows!r}"
+"#;
+  let v = run_py(verify, &[&out.join("opencode.db")]);
+  assert!(v.status.success(), "verify failed: {}", String::from_utf8_lossy(&v.stderr));
 }
