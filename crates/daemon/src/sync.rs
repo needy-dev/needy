@@ -608,10 +608,10 @@ async fn run_merge_driver(
           store: &store,
         };
         merge::stage_driver_trees(trees, &paths, &staging)?;
-        let seed_tar = needy_common::archive::pack(&staging.join("seed"), &[])?;
+        let base_tar = needy_common::archive::pack(&staging.join("base"), &[])?;
         let run_tar = needy_common::archive::pack(&staging.join("run"), &[])?;
-        let store_tar = needy_common::archive::pack(&staging.join("store"), &[])?;
-        Ok((seed_tar, run_tar, store_tar))
+        let current_tar = needy_common::archive::pack(&staging.join("current"), &[])?;
+        Ok((base_tar, run_tar, current_tar))
       })();
       remove(&staging);
       result
@@ -677,7 +677,12 @@ async fn run_merge_driver(
     }
   };
 
-  // Three-tree driver contract: `<driver> <seed_dir> <run_dir> <store_dir> <out_dir>`.
+  // Three-tree driver contract: `<driver> <base_dir> <run_dir> <current_dir> <merged_dir>`.
+  // NOTICE: place the four directories directly under `/tmp` (mode 1777) rather
+  // than nested under a shared `/tmp/needy-merge/` parent: guest `init` unpacks
+  // `copy_in` as root, which would leave an intermediate parent owned by root
+  // and cause `mkdir -p` for the output directory to fail with EACCES when the
+  // merge driver runs as the non-root profile user.
   let spec = SessionSpec {
     driver: session_driver,
     base_container_image,
@@ -691,19 +696,19 @@ async fn run_merge_driver(
       "-c".into(),
       format!(r#"mkdir -p "$1" "$2" "$3" "$4" && exec {} "$1" "$2" "$3" "$4""#, claim.driver),
       "sh".into(),
-      "/tmp/needy-merge/seed".into(),
-      "/tmp/needy-merge/run".into(),
-      "/tmp/needy-merge/store".into(),
-      "/tmp/needy-merge/out".into(),
+      "/tmp/needy-merge-base".into(),
+      "/tmp/needy-merge-run".into(),
+      "/tmp/needy-merge-current".into(),
+      "/tmp/needy-merge-merged".into(),
     ],
     cwd: "/".into(),
     env: BTreeMap::new(),
     copy_in: vec![
-      ("seed".into(), "/tmp/needy-merge/seed".into(), seed_tar),
-      ("run".into(), "/tmp/needy-merge/run".into(), run_tar),
-      ("store".into(), "/tmp/needy-merge/store".into(), store_tar),
+      ("base".into(), "/tmp/needy-merge-base".into(), seed_tar),
+      ("run".into(), "/tmp/needy-merge-run".into(), run_tar),
+      ("current".into(), "/tmp/needy-merge-current".into(), store_tar),
     ],
-    mirror_out: vec![("out".into(), "/tmp/needy-merge/out".into())],
+    mirror_out: vec![("merged".into(), "/tmp/needy-merge-merged".into())],
     route_names: Vec::new(),
     session: GuestSession {
       upper: UpperLayer::Disposable,
@@ -754,7 +759,12 @@ async fn run_merge_driver(
       code: Some(code),
       signal,
     }) if signal.is_empty() => {
-      return Ok(DriverOutcome::Failed(format!("exited with code {code}")));
+      let detail = outcome.console.trim();
+      if detail.is_empty() {
+        return Ok(DriverOutcome::Failed(format!("exited with code {code}")));
+      }
+      let tail: Vec<&str> = detail.lines().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+      return Ok(DriverOutcome::Failed(format!("exited with code {code}: {}", tail.join(" | "))));
     }
     Some(Exit { signal, .. }) if !signal.is_empty() => {
       return Ok(DriverOutcome::Failed(format!("killed by {signal}")));
@@ -764,8 +774,8 @@ async fn run_merge_driver(
     }
   }
 
-  // Unpack `out` mirror-out archive and apply atomically to the store.
-  let out_archive = outcome.mirrored_out.get("out").cloned().unwrap_or_default();
+  // Unpack `merged` mirror-out archive and apply atomically to the store.
+  let out_archive = outcome.mirrored_out.get("merged").cloned().unwrap_or_default();
   let store = record.store.clone();
   let claimed = claim.paths.clone();
   let mapping_dir = mapping_dir.to_path_buf();

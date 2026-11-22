@@ -344,9 +344,9 @@ fn spawn_merge_responder(
               fetched.insert(copy.name.clone(), db);
             }
             observed_task.lock().unwrap().push((
-              fetched.get("seed").cloned().unwrap_or_default(),
+              fetched.get("base").cloned().unwrap_or_default(),
               fetched.get("run").cloned().unwrap_or_default(),
-              fetched.get("store").cloned().unwrap_or_default(),
+              fetched.get("current").cloned().unwrap_or_default(),
             ));
 
             match mode_task {
@@ -370,7 +370,7 @@ fn spawn_merge_responder(
                 client
                   .guest()
                   .push_files(tokio_stream::iter(vec![PushFilesRequest {
-                    name: "out".into(),
+                    name: "merged".into(),
                     data: archive,
                   }]))
                   .await
