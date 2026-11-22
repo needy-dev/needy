@@ -193,6 +193,8 @@ async fn boot(container: bool) -> Result<()> {
   // package managers can update `/etc/passwd` and `/etc/group`.
   if !container && !is_root {
     mounts::home(&home, user.uid, user.gid);
+  } else if container && !is_root {
+    mounts::chown_home_ancestors(&home, user.uid, user.gid);
   }
   // Before anything runs as the user, so every program sees the same name.
   if !is_root {
