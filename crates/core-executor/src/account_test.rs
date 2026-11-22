@@ -50,3 +50,29 @@ async fn the_image_files_are_rewritten_for_the_user_and_bound_read_only() {
     ]
   );
 }
+
+// ROOT CAUSE:
+//
+// If a locally materialized `needy-snapshot:<digest>` image was missing from
+// the Docker engine, `account::binds` fell back to `engine.pull(image)` and
+// surfaced a misleading `pull access denied for needy-snapshot` error from
+// Docker Hub.
+//
+// Before the fix, `LinuxContainer::start` always used `account::binds`.
+// The fix uses `account::binds_local` for local snapshot images so a missing
+// image fails immediately with NotFound without attempting a registry pull.
+#[tokio::test]
+async fn binds_local_does_not_pull_when_image_is_missing() {
+  let fake = Fake::new().require_image_on_create();
+  let dir = tempfile::tempdir().unwrap();
+  let user = Account {
+    name: "agent",
+    uid: 1000,
+    gid: 1000,
+  };
+
+  let err = binds_local(&fake, "needy-snapshot:deadbeef", "needy-x-account", dir.path(), &user).await.unwrap_err();
+
+  assert!(err.is_not_found(), "expected NotFound, got {err:?}");
+  assert_eq!(fake.calls(), ["remove needy-x-account", "create needy-x-account"]);
+}

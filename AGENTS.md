@@ -394,6 +394,10 @@ cargo xtask bench --help
 cargo xtask e2e --list
 ```
 
+On macOS, raise the open-file limit first (`ulimit -n 4096`) when running the
+full `needy-daemon` unit suite; the default 256-fd soft limit causes parallel
+daemon tests to hit `EMFILE` and hang.
+
 
 ## Documentation Workflow
 

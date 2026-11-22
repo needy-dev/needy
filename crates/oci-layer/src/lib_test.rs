@@ -353,6 +353,44 @@ fn oci_export_and_assemble_on_base_produce_valid_hybrid_archives() {
   assert_eq!(Digest::of(&top_bytes), extra_digest);
 }
 
+// ROOT CAUSE:
+//
+// If a hybrid OCI archive wrote a short Docker reference (`needy-snapshot:<hex>`)
+// verbatim into `index.json`'s `io.containerd.image.name` annotation, Docker
+// engines using the containerd image store (`io.containerd.snapshotter.v1`)
+// imported the image under the unnormalized key, while `docker inspect` and
+// `docker create` normalized the query to `docker.io/library/needy-snapshot:<hex>`
+// and failed with 404.
+//
+// Before the fix, `io.containerd.image.name` copied `tag` verbatim.
+// The fix normalizes `io.containerd.image.name` to Docker's canonical form while
+// preserving `org.opencontainers.image.ref.name` and `manifest.json` `RepoTags`.
+#[test]
+fn oci_export_normalizes_containerd_image_name_annotation() {
+  let dir = tempfile::tempdir().unwrap();
+  let (d1, l1_path) = write_canonical_layer(dir.path(), "l1.tar", &TarBuilder::new().file("a", b"1").bytes());
+
+  let cases = [
+    ("needy-snapshot:deadbeef", "docker.io/library/needy-snapshot:deadbeef"),
+    ("needy-snapshot", "docker.io/library/needy-snapshot:latest"),
+    ("myorg/myrepo:v1", "docker.io/myorg/myrepo:v1"),
+    ("ghcr.io/needy-dev/needy-actor:v0.0.7", "ghcr.io/needy-dev/needy-actor:v0.0.7"),
+    ("localhost:5000/needy/actor:dev", "localhost:5000/needy/actor:dev"),
+  ];
+
+  for (idx, (tag, expected_containerd_name)) in cases.iter().enumerate() {
+    let out = dir.path().join(format!("out-{idx}.tar"));
+    export_layers(&[(d1, l1_path.clone())], "amd64", "linux", tag, &out, "oci-layer-test", |_| {}).unwrap();
+    let entries = read_tar_entries(&out);
+    let index: ImageIndex = serde_json::from_slice(&entries["index.json"]).unwrap();
+    let annotations = index.manifests()[0].annotations().as_ref().expect("annotations present");
+    assert_eq!(annotations.get("org.opencontainers.image.ref.name").map(String::as_str), Some(*tag));
+    assert_eq!(annotations.get("io.containerd.image.name").map(String::as_str), Some(*expected_containerd_name));
+    let docker_manifest: Vec<serde_json::Value> = serde_json::from_slice(&entries["manifest.json"]).unwrap();
+    assert_eq!(docker_manifest[0]["RepoTags"], serde_json::json!([*tag]));
+  }
+}
+
 #[test]
 fn oci_base_archive_reads_gzip_oci_layout_without_manifest_json() {
   let dir = tempfile::tempdir().unwrap();

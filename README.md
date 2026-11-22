@@ -627,6 +627,9 @@ cargo xtask bench --help      # latency and throughput probes
 cargo xtask e2e               # the end-to-end matrix on this host
 ```
 
+On macOS, run `ulimit -n 4096` before `make test` or `cargo test -p needy-daemon`;
+the default 256 open-file limit is too low for the parallel daemon test suite.
+
 `cargo xtask e2e` runs every cell of the end-to-end matrix this host can
 run: each actor driver it has, with each terminal mode, way a run ends, file
 mapping, fault domain, network rule and user, each cell against its own

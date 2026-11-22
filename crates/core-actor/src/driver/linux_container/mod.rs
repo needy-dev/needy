@@ -489,11 +489,16 @@ impl Driver for LinuxContainer {
       uid: user.uid,
       gid: user.gid,
     };
-    let image = start.snapshot_image.unwrap_or(&self.image);
     let scratch = format!("{}-account", name(start.run));
-    let accounts = needy_core_executor::account::binds(self.engine.as_ref(), image, &scratch, &start.dir.join("account"), &account)
-      .await
-      .map_err(engine_error)?;
+    let accounts = if let Some(snapshot) = start.snapshot_image {
+      needy_core_executor::account::binds_local(self.engine.as_ref(), snapshot, &scratch, &start.dir.join("account"), &account)
+        .await
+        .map_err(engine_error)?
+    } else {
+      needy_core_executor::account::binds(self.engine.as_ref(), &self.image, &scratch, &start.dir.join("account"), &account)
+        .await
+        .map_err(engine_error)?
+    };
     binds.extend(accounts);
     let mounts = Self::mount(start.dir, start.mounts, user.uid, user.gid).await?;
     binds.extend(mounts.iter().map(|(_, bind)| bind.clone()));

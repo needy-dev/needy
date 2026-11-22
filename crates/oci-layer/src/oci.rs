@@ -170,6 +170,28 @@ where
   write_hybrid_archive(out_path, &config_bytes, config_digest, &blobs, tag)
 }
 
+/// Normalizes an image reference for `io.containerd.image.name` in OCI
+/// `index.json` using Docker's canonical domain rules (`alpine:latest` ->
+/// `docker.io/library/alpine:latest`, `org/repo:tag` ->
+/// `docker.io/org/repo:tag`, explicit registries unchanged).
+// Source: https://github.com/distribution/reference/blob/v0.6.0/normalize.go#L112-L133
+// Reference: Docker Engine containerd image store (`driver-type: io.containerd.snapshotter.v1`);
+// `docker load` stores the verbatim `io.containerd.image.name` key while
+// `docker inspect` / `docker create` normalize short names to `docker.io/library/...`.
+fn containerd_image_name(reference: &str) -> String {
+  let normalized = match reference.split_once('/') {
+    None => format!("docker.io/library/{reference}"),
+    Some((first, _)) if first.contains('.') || first.contains(':') || first == "localhost" => reference.to_string(),
+    Some(_) => format!("docker.io/{reference}"),
+  };
+  let tail = normalized.rsplit_once('/').map_or(normalized.as_str(), |(_, tail)| tail);
+  if tail.contains('@') || tail.contains(':') {
+    normalized
+  } else {
+    format!("{normalized}:latest")
+  }
+}
+
 /// Writes the hybrid OCI Image Layout (`oci-layout`, `index.json`,
 /// `blobs/sha256/...`) and Docker `tarexport` (`manifest.json`) tar archive
 /// atomically to `out_path`.
@@ -193,7 +215,7 @@ fn write_hybrid_archive(out_path: &Path, config_bytes: &[u8], config_digest: Dig
 
   let annotations = HashMap::from([
     (ANNOTATION_REF_NAME.to_string(), tag.to_string()),
-    ("io.containerd.image.name".to_string(), tag.to_string()),
+    ("io.containerd.image.name".to_string(), containerd_image_name(tag)),
   ]);
   let manifest_descriptor = DescriptorBuilder::default()
     .media_type(MediaType::ImageManifest)
