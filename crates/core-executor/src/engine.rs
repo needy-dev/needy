@@ -415,6 +415,10 @@ pub fn with_tag(image: &str) -> String {
   }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "engine_testing.rs"]
+pub mod testing;
+
 #[cfg(test)]
 #[path = "engine_test.rs"]
 mod tests;

@@ -10,11 +10,10 @@
 //! Docker/OCI image archive for the container drivers. No caller sees
 //! whiteouts, disk formats or how commits collapse.
 //!
-//! Built layers, snapshot records, disks and OCI archives are cache, in the
-//! cache directory: they can be built again. An image's commits are a user's
-//! hand edits, which cannot, so its commit layers and history are in the data
-//! directory. [`Store::collect`] removes what is named neither by the caller
-//! nor by a commit history.
+//! Generic OCI layer canonicalization, algebraic collapse, SquashFS disk
+//! writing, and OCI/Docker hybrid archive assembly live in the standalone
+//! `oci-layer` crate; this module owns needy's cache/data store layout,
+//! commit history, and container shell-shim layer synthesis.
 //!
 //! Everything here is blocking file IO, some of it on whole layers: call it
 //! off the async runtime.
@@ -27,9 +26,6 @@
 // TODO(images): a general listing of stored layers waits for `needy image ls`
 // or `log` to need it.
 
-mod archive;
-mod collapse;
-mod disk;
 mod oci;
 
 pub use needy_core::image::Digest;
@@ -40,7 +36,12 @@ use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
+use oci_layer::archive;
+use oci_layer::collapse;
+use oci_layer::disk::{self, DiskLayout};
 use sha2::Digest as _;
+
+use crate::contract::{LAYER_MARKER, LAYER_ROOT};
 
 /// Maximum number of individual SquashFS layer disks [`Store::materialize`]
 /// returns for a VM snapshot before collapsing the lower prefix into one disk.
@@ -50,6 +51,11 @@ use sha2::Digest as _;
 // individual lets the top edit commit and recent layers swap without repacking
 // the collapsed lower disk.
 pub const MAX_UNFLATTENED_LAYERS: usize = 8;
+
+const NEEDY_DISK_LAYOUT: DiskLayout<'static> = DiskLayout {
+  marker: LAYER_MARKER,
+  root: LAYER_ROOT,
+};
 
 /// What the store refused or could not do.
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +85,15 @@ pub enum Error {
   },
 }
 
+impl From<oci_layer::Error> for Error {
+  fn from(err: oci_layer::Error) -> Self {
+    match err {
+      oci_layer::Error::Invalid(msg) => Self::Invalid(msg),
+      oci_layer::Error::Io { context, source } => Self::Io { context, source },
+    }
+  }
+}
+
 type Result<T> = std::result::Result<T, Error>;
 
 fn io(context: impl fmt::Display) -> impl FnOnce(std::io::Error) -> Error {
@@ -86,6 +101,10 @@ fn io(context: impl fmt::Display) -> impl FnOnce(std::io::Error) -> Error {
     context: context.to_string(),
     source,
   }
+}
+
+pub(super) fn to_oci_digest(digest: Digest) -> oci_layer::Digest {
+  oci_layer::Digest::from_bytes(*digest.as_bytes())
 }
 
 /// The name of this digest's files in the store: `sha256-<hex>`, since a
@@ -317,7 +336,7 @@ impl Store {
           merged = collapse::collapse(&merged, upper.as_ref().expect("loaded above"))?;
         }
         std::fs::create_dir_all(&dir).map_err(io(dir.display()))?;
-        disk::write(&merged, &prefix_digest, &disk::Below::default(), &path)?;
+        disk::write(&merged, &to_oci_digest(prefix_digest), &disk::Below::default(), &NEEDY_DISK_LAYOUT, &path)?;
       }
       disks.push(LayerDisk {
         digest: prefix_digest,
@@ -361,7 +380,7 @@ impl Store {
           let path = dir.join(name);
           if !path.exists() {
             std::fs::create_dir_all(&dir).map_err(io(dir.display()))?;
-            disk::write(index, digest, &below, &path)?;
+            disk::write(index, &to_oci_digest(*digest), &below, &NEEDY_DISK_LAYOUT, &path)?;
           }
           path
         }
@@ -441,7 +460,7 @@ impl Store {
         let lower = archive::Index::read(&self.layer(parent)?)?;
         let edit = archive::Index::read(staged.path())?;
         let merged = collapse::collapse(&lower, &edit)?;
-        self.store_with(&layers, |out| merged.write(out))?
+        self.store_with(&layers, |out| Ok(merged.write(out)?))?
       }
     };
     history.image = image.to_string();
@@ -546,7 +565,7 @@ impl Store {
 
   /// Stores the canonical form of the layer archive `layer` in `dir`.
   fn store(&self, layer: impl Read, dir: &Path) -> Result<Digest> {
-    self.store_with(dir, |out| archive::canonical(layer, out))
+    self.store_with(dir, |out| Ok(archive::canonical(layer, out)?))
   }
 
   /// Stores in `dir` the archive `write` writes, named by its digest.

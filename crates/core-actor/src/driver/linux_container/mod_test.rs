@@ -1,138 +1,21 @@
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::collections::HashMap;
 
 use needy_config::Source;
 use needy_config::profile::User;
 use needy_core::recipe::{CompiledRecipe, HostInfo};
-use needy_core_executor::engine::{Error as EngineError, Unreachable};
+use needy_core_executor::engine::Unreachable;
+use needy_core_executor::engine::testing::Fake;
 
 use super::*;
 
-/// An engine that records what it is asked and whose containers exit
-/// with `code` once waited for, after printing `log`.
-#[derive(Default)]
-struct Fake {
-  calls: Mutex<Vec<String>>,
-  bodies: Mutex<Vec<ContainerCreateBody>>,
-  runtimes: Vec<(&'static str, &'static [&'static str])>,
-  /// The images it has, by name.
-  images: Vec<(String, engine::Image)>,
-  /// The images a pull finds in the registry, by name; a pull of another
-  /// fails as a registry without it does.
-  registry: Vec<(String, engine::Image)>,
-  /// The images pulled so far.
-  pulled: Mutex<Vec<(String, engine::Image)>>,
-  code: i64,
-  log: &'static str,
-}
-
-impl Fake {
-  fn calls(&self) -> Vec<String> {
-    self.calls.lock().unwrap().clone()
-  }
-
-  fn record(&self, call: String) {
-    self.calls.lock().unwrap().push(call);
-  }
-}
-
-#[async_trait::async_trait]
-impl Engine for Fake {
-  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, EngineError> {
-    Ok(self.runtimes.iter().map(|(name, args)| (name.to_string(), args.iter().map(|a| a.to_string()).collect())).collect())
-  }
-
-  async fn inspect_image(&self, image: &str) -> Result<Option<engine::Image>, EngineError> {
-    let pulled = self.pulled.lock().unwrap().clone();
-    Ok(self.images.iter().chain(&pulled).find(|(name, _)| name == image).map(|(_, found)| found.clone()))
-  }
-
-  fn pull_progress(&self, image: &str) -> BoxStream<'static, Result<engine::models::CreateImageInfo, EngineError>> {
-    self.record(format!("pull {image}"));
-    match self.registry.iter().find(|(name, _)| name == image) {
-      Some(found) => {
-        self.pulled.lock().unwrap().push(found.clone());
-        futures_util::stream::empty().boxed()
-      }
-      None => futures_util::stream::iter([Err(EngineError::NotFound(format!(
-        "manifest for {image} not found: manifest unknown"
-      )))])
-      .boxed(),
-    }
-  }
-
-  async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), EngineError> {
-    self.record(format!("create {name}"));
-    self.bodies.lock().unwrap().push(body);
-    Ok(())
-  }
-
-  async fn start(&self, name: &str) -> Result<u32, EngineError> {
-    self.record(format!("start {name}"));
-    Ok(4242)
-  }
-
-  fn logs(&self, _name: &str) -> BoxStream<'static, Result<bytes::Bytes, EngineError>> {
-    futures_util::stream::iter([Ok(bytes::Bytes::from_static(self.log.as_bytes()))]).boxed()
-  }
-
-  async fn wait(&self, name: &str) -> Result<i64, EngineError> {
-    self.record(format!("wait {name}"));
-    Ok(self.code)
-  }
-
-  async fn stop(&self, name: &str, grace: Duration) -> Result<(), EngineError> {
-    self.record(format!("stop {name} {}s", grace.as_secs()));
-    Ok(())
-  }
-
-  async fn remove(&self, name: &str) -> Result<(), EngineError> {
-    self.record(format!("remove {name}"));
-    Ok(())
-  }
-
-  /// The image has an account file only at `/etc/passwd`: `agent` at 1000.
-  async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, EngineError> {
-    self.record(format!("download {name} {path}"));
-    if path != "/etc/passwd" {
-      return Ok(None);
-    }
-    let text = PASSWD.as_bytes();
-    let mut archive = tar::Builder::new(Vec::new());
-    let mut header = tar::Header::new_gnu();
-    header.set_size(text.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    archive.append_data(&mut header, "passwd", text).unwrap();
-    Ok(Some(archive.into_inner().unwrap()))
-  }
-
-  async fn commit_container(&self, container: &str, repo: &str, tag: &str) -> Result<String, EngineError> {
-    self.record(format!("commit {container} {repo}:{tag}"));
-    Ok(format!("sha256:committed-{container}"))
-  }
-
-  fn export_image(&self, image: &str) -> BoxStream<'static, Result<bytes::Bytes, EngineError>> {
-    self.record(format!("export {image}"));
-    futures_util::stream::empty().boxed()
-  }
-
-  async fn load_image(&self, mut tar: BoxStream<'static, Result<bytes::Bytes, EngineError>>) -> Result<(), EngineError> {
-    while let Some(chunk) = tar.next().await {
-      chunk?;
-    }
-    self.record("load".into());
-    Ok(())
-  }
-
-  async fn remove_image(&self, image: &str) -> Result<(), EngineError> {
-    self.record(format!("remove_image {image}"));
-    Ok(())
-  }
-}
-
-/// The image's `/etc/passwd` in [`Fake`].
+/// The image's `/etc/passwd` in tests.
 const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\nagent:x:1000:1000::/home/agent:/bin/bash\n";
+
+/// A fake engine preloaded with `/etc/passwd` and an empty registry (so pulls
+/// of unknown images fail with `manifest unknown`).
+fn fake() -> Fake {
+  Fake::new().with_file("/etc/passwd", PASSWD).with_registry([])
+}
 
 /// The guest needy a test's actor gets.
 const GUEST_NEEDY: &str = "/home/user/.local/bin/needy";
@@ -157,15 +40,8 @@ fn image_of(name: &str, abi: Option<&str>, architecture: &str) -> (String, engin
 
 #[tokio::test]
 async fn a_custom_image_without_a_base_abi_names_the_base_to_rebuild_from() {
-  let fake = Arc::new(Fake {
-    runtimes: vec![("runc", &[])],
-    images: vec![image_of(
-      "needy-custom-jq",
-      None,
-      container::oci_arch(crate::image::guest::arch()),
-    )],
-    ..Default::default()
-  });
+  let (name, img) = image_of("needy-custom-jq", None, container::oci_arch(crate::image::guest::arch()));
+  let fake = Arc::new(fake().with_runtime("runc", &[]).with_image(name, img));
   let container = LinuxContainer::with_engine(OciRuntime::Runc, "needy-custom-jq".into(), fake);
 
   let error = container.check_host().await.unwrap_err().to_string();
@@ -184,11 +60,8 @@ async fn an_image_of_another_architecture_is_refused_before_the_actor_starts() {
   } else {
     "amd64"
   };
-  let fake = Arc::new(Fake {
-    runtimes: vec![("runc", &[])],
-    images: vec![image_of("needy-custom-jq", Some("1"), other)],
-    ..Default::default()
-  });
+  let (name, img) = image_of("needy-custom-jq", Some("1"), other);
+  let fake = Arc::new(fake().with_runtime("runc", &[]).with_image(name, img));
   let container = LinuxContainer::with_engine(OciRuntime::Runc, "needy-custom-jq".into(), fake);
 
   let error = container.check_host().await.unwrap_err().to_string();
@@ -258,14 +131,8 @@ fn the_guest_needy_is_bind_mounted_read_only_over_the_base_images_placeholder() 
 
 #[tokio::test]
 async fn an_image_of_another_base_abi_is_refused_before_the_actor_starts() {
-  let (container, _) = runtime(
-    Fake {
-      runtimes: vec![("runc", &[])],
-      images: vec![image(Some("2"))],
-      ..Default::default()
-    },
-    OciRuntime::Runc,
-  );
+  let (name, img) = image(Some("2"));
+  let (container, _) = runtime(fake().with_runtime("runc", &[]).with_image(name, img), OciRuntime::Runc);
 
   let error = container.check_host().await.unwrap_err().to_string();
 
@@ -278,14 +145,8 @@ async fn an_image_of_another_base_abi_is_refused_before_the_actor_starts() {
 
 #[tokio::test]
 async fn an_image_built_with_its_own_needy_inside_is_refused() {
-  let (container, _) = runtime(
-    Fake {
-      runtimes: vec![("runc", &[])],
-      images: vec![image(None)],
-      ..Default::default()
-    },
-    OciRuntime::Runc,
-  );
+  let (name, img) = image(None);
+  let (container, _) = runtime(fake().with_runtime("runc", &[]).with_image(name, img), OciRuntime::Runc);
 
   let error = container.check_host().await.unwrap_err().to_string();
 
@@ -339,14 +200,8 @@ fn a_recipe_sets_the_hostname_and_the_memory_limit() {
 
 #[tokio::test]
 async fn a_host_without_the_oci_runtime_names_how_to_install_gvisor() {
-  let (container, _) = runtime(
-    Fake {
-      runtimes: vec![("runc", &[])],
-      images: vec![image(Some("1"))],
-      ..Default::default()
-    },
-    OciRuntime::Runsc,
-  );
+  let (name, img) = image(Some("1"));
+  let (container, _) = runtime(fake().with_runtime("runc", &[]).with_image(name, img), OciRuntime::Runsc);
 
   let error = container.check_host().await.unwrap_err().to_string();
 
@@ -356,14 +211,7 @@ async fn a_host_without_the_oci_runtime_names_how_to_install_gvisor() {
 
 #[tokio::test]
 async fn a_missing_image_is_pulled_before_the_actor_starts() {
-  let (container, fake) = runtime(
-    Fake {
-      runtimes: vec![("runc", &[])],
-      registry: vec![image(Some("1"))],
-      ..Default::default()
-    },
-    OciRuntime::Runc,
-  );
+  let (container, fake) = runtime(fake().with_runtime("runc", &[]).with_registry([image(Some("1"))]), OciRuntime::Runc);
 
   container.check_host().await.unwrap();
 
@@ -372,14 +220,7 @@ async fn a_missing_image_is_pulled_before_the_actor_starts() {
 
 #[tokio::test]
 async fn a_pulled_image_of_another_base_abi_is_refused() {
-  let (container, _) = runtime(
-    Fake {
-      runtimes: vec![("runc", &[])],
-      registry: vec![image(Some("2"))],
-      ..Default::default()
-    },
-    OciRuntime::Runc,
-  );
+  let (container, _) = runtime(fake().with_runtime("runc", &[]).with_registry([image(Some("2"))]), OciRuntime::Runc);
 
   let error = container.check_host().await.unwrap_err().to_string();
 
@@ -388,10 +229,7 @@ async fn a_pulled_image_of_another_base_abi_is_refused() {
 
 #[tokio::test]
 async fn a_release_base_that_no_registry_has_names_the_build_that_makes_one() {
-  let fake = Arc::new(Fake {
-    runtimes: vec![("runc", &[])],
-    ..Default::default()
-  });
+  let fake = Arc::new(fake().with_runtime("runc", &[]));
   let container = LinuxContainer::with_engine(OciRuntime::Runc, CONTAINER_IMAGE.into(), fake.clone());
 
   let error = container.check_host().await.unwrap_err().to_string();
@@ -407,14 +245,7 @@ async fn a_release_base_that_no_registry_has_names_the_build_that_makes_one() {
 #[tokio::test]
 async fn a_started_actor_logs_its_output_and_is_removed_when_it_exits() {
   let dir = tempfile::tempdir().unwrap();
-  let (container, fake) = runtime(
-    Fake {
-      code: 3,
-      log: "init: booted\n",
-      ..Default::default()
-    },
-    OciRuntime::Runc,
-  );
+  let (container, fake) = runtime(fake().with_exit_code(3).with_log("init: booted\n"), OciRuntime::Runc);
   let user = User::default();
 
   let mut actor = container.start(&start(dir.path(), &user, None)).await.unwrap();
@@ -446,13 +277,7 @@ async fn a_started_actor_logs_its_output_and_is_removed_when_it_exits() {
 #[tokio::test]
 async fn stopping_an_actor_stops_its_container_within_the_grace_and_removes_it() {
   let dir = tempfile::tempdir().unwrap();
-  let (container, fake) = runtime(
-    Fake {
-      code: 137,
-      ..Default::default()
-    },
-    OciRuntime::Runc,
-  );
+  let (container, fake) = runtime(fake().with_exit_code(137), OciRuntime::Runc);
   let user = User::default();
 
   let mut actor = container.start(&start(dir.path(), &user, None)).await.unwrap();
@@ -498,14 +323,8 @@ async fn an_engine_that_cannot_be_reached_fails_the_host_check_with_the_reason()
 // The fix refuses the run up front, naming the registration that works.
 #[tokio::test]
 async fn gvisor_without_host_sockets_is_refused_with_the_registration_that_works() {
-  let (container, _) = runtime(
-    Fake {
-      runtimes: vec![("runc", &[]), ("runsc", &[])],
-      images: vec![image(Some("1"))],
-      ..Default::default()
-    },
-    OciRuntime::Runsc,
-  );
+  let (name, img) = image(Some("1"));
+  let (container, _) = runtime(fake().with_runtime("runc", &[]).with_runtime("runsc", &[]).with_image(name, img), OciRuntime::Runsc);
 
   let error = container.check_host().await.unwrap_err().to_string();
 
@@ -514,14 +333,8 @@ async fn gvisor_without_host_sockets_is_refused_with_the_registration_that_works
 
 #[tokio::test]
 async fn gvisor_with_host_sockets_and_the_image_passes_the_host_check() {
-  let (container, _) = runtime(
-    Fake {
-      runtimes: vec![("runsc", &["--host-uds=all"])],
-      images: vec![image(Some("1"))],
-      ..Default::default()
-    },
-    OciRuntime::Runsc,
-  );
+  let (name, img) = image(Some("1"));
+  let (container, _) = runtime(fake().with_runtime("runsc", &["--host-uds=all"]).with_image(name, img), OciRuntime::Runsc);
 
   container.check_host().await.unwrap();
 }
@@ -537,7 +350,7 @@ async fn gvisor_with_host_sockets_and_the_image_passes_the_host_check() {
 #[tokio::test]
 async fn a_renamed_user_gets_its_passwd_entry_bound_into_the_container() {
   let dir = tempfile::tempdir().unwrap();
-  let (container, fake) = runtime(Fake::default(), OciRuntime::Runc);
+  let (container, fake) = runtime(fake(), OciRuntime::Runc);
   let user = User {
     name: "bob".into(),
     uid: 1001,
@@ -548,8 +361,8 @@ async fn a_renamed_user_gets_its_passwd_entry_bound_into_the_container() {
 
   let passwd = dir.path().join("account").join("passwd");
   assert_eq!(std::fs::read_to_string(&passwd).unwrap(), format!("{PASSWD}bob:x:1001:1001::/home/bob:/bin/bash\n"));
-  let bodies = fake.bodies.lock().unwrap();
-  let binds = bodies.last().unwrap().host_config.as_ref().unwrap().binds.clone().unwrap();
+  let bodies = fake.bodies();
+  let binds = bodies.last().unwrap().1.host_config.as_ref().unwrap().binds.clone().unwrap();
   assert!(binds.contains(&format!("{}:/etc/passwd:ro", passwd.display())), "{binds:?}");
   assert!(!binds.iter().any(|bind| bind.ends_with(":/etc/group:ro")), "{binds:?}");
 }
@@ -602,10 +415,10 @@ async fn snapshot_image_overrides_base_image_on_start() {
   let mut started = container.start(&req).await.unwrap();
   let _ = started.wait().await.unwrap();
 
-  let bodies = fake.bodies.lock().unwrap();
+  let bodies = fake.bodies();
   // Both the account-download scratch container and the actor container use the snapshot tag.
   assert!(bodies.len() >= 2, "{bodies:?}");
-  for body in bodies.iter() {
+  for (_, body) in &bodies {
     assert_eq!(body.image.as_deref(), Some(tag));
   }
 }
@@ -613,7 +426,7 @@ async fn snapshot_image_overrides_base_image_on_start() {
 #[tokio::test]
 async fn start_session_boots_writable_rootfs_and_keeps_container_until_removed() {
   let dir = tempfile::tempdir().unwrap();
-  let (container, fake) = runtime(Fake::default(), OciRuntime::Runc);
+  let (container, fake) = runtime(fake(), OciRuntime::Runc);
   let user = User {
     name: "root".into(),
     uid: 0,
@@ -627,10 +440,10 @@ async fn start_session_boots_writable_rootfs_and_keeps_container_until_removed()
   let status = session.wait().await.unwrap();
   assert!(status.success());
 
-  let bodies = fake.bodies.lock().unwrap().clone();
+  let bodies = fake.bodies();
   assert_eq!(bodies.len(), 1);
-  assert_eq!(bodies[0].image.as_deref(), Some(tag));
-  let host_config = bodies[0].host_config.as_ref().unwrap();
+  assert_eq!(bodies[0].1.image.as_deref(), Some(tag));
+  let host_config = bodies[0].1.host_config.as_ref().unwrap();
   assert_eq!(host_config.readonly_rootfs, Some(false));
   let tmpfs = host_config.tmpfs.as_ref().unwrap();
   assert!(!tmpfs.contains_key("/root"), "root home must remain writable on the container upper layer: {tmpfs:?}");

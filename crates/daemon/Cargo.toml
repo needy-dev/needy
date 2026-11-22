@@ -46,5 +46,6 @@ libc.workspace = true
 [dev-dependencies]
 bytes.workspace = true
 needy-common = { workspace = true, features = ["testing"] }
+needy-core-executor = { workspace = true, features = ["test-support"] }
 tar.workspace = true
 tempfile.workspace = true

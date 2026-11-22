@@ -20,16 +20,16 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
-use super::{Error, Result, io};
+use crate::{Error, Result, io};
 
 /// The prefix of an OCI whiteout file's name.
-const WHITEOUT: &str = ".wh.";
+pub const WHITEOUT: &str = ".wh.";
 /// The name of an OCI opaque-directory marker.
-const OPAQUE: &str = ".wh..wh..opq";
+pub const OPAQUE: &str = ".wh..wh..opq";
 
 /// One entry of a layer, not a whiteout.
 #[derive(Debug, Clone)]
-pub(super) struct Entry {
+pub struct Entry {
   pub kind: Kind,
   pub mode: u32,
   pub uid: u64,
@@ -43,8 +43,9 @@ impl Entry {
   }
 }
 
+/// The filesystem kind of a layer [`Entry`].
 #[derive(Debug, Clone)]
-pub(super) enum Kind {
+pub enum Kind {
   File(Data),
   Dir,
   Symlink(PathBuf),
@@ -57,7 +58,7 @@ pub(super) enum Kind {
 
 /// Where a file's content is: a span of a stored archive.
 #[derive(Debug, Clone)]
-pub(super) struct Data {
+pub struct Data {
   pub archive: Arc<Path>,
   pub offset: u64,
   pub size: u64,
@@ -76,7 +77,8 @@ impl Data {
   }
 }
 
-pub(super) struct Span {
+/// Lazy reader over a byte span in an archive file.
+pub struct Span {
   data: Data,
   file: Option<std::io::Take<File>>,
   left: u64,
@@ -106,7 +108,7 @@ impl Read for Span {
 /// whiteouts remove from the layers below, and its opaque directories,
 /// whose contents in the layers below it hides.
 #[derive(Debug, Clone, Default)]
-pub(super) struct Index {
+pub struct Index {
   pub entries: BTreeMap<PathBuf, Entry>,
   pub whiteouts: BTreeSet<PathBuf>,
   pub opaque: BTreeSet<PathBuf>,
@@ -215,11 +217,10 @@ impl Index {
 // archive, not of a tree: two builds that write one tree in different orders
 // make two layers.
 // TODO(images): file capabilities and other extended attributes are not
-// carried (the spec's "The layer store"); revisit with a disk writer that
-// keeps them.
+// carried; revisit with a disk writer that keeps them.
 // NOTICE: an upper directory written with overlayfs's `redirect_dir` or
-// `metacopy` features is not a whole layer; the guest mounts without them.
-pub(super) fn canonical(layer: impl Read, out: &mut dyn Write) -> Result<()> {
+// `metacopy` features is not a whole layer; mounts should disable them.
+pub fn canonical(layer: impl Read, out: &mut dyn Write) -> Result<()> {
   let mut archive = tar::Archive::new(layer);
   let mut builder = tar::Builder::new(out);
   let failed = |e: std::io::Error| Error::Invalid(e.to_string());

@@ -1,16 +1,16 @@
-//! Collapsing an edit into an image's commit layer: one layer that shows,
-//! over any stack below, what the commit layer and then the edit would.
+//! Algebraic multi-layer collapse: one layer that shows, over any stack below,
+//! what `lower` and then `upper` would.
 
 use std::path::Path;
 
-use super::Result;
-use super::archive::{Index, Kind};
+use crate::Result;
+use crate::archive::{Index, Kind};
 
 /// `upper` applied over `lower`, as one layer. `upper`'s entries win;
 /// `lower`'s entries that `upper` removes, hides or replaces are dropped;
 /// both layers' whiteouts and opaque directories stay for the layers below,
 /// except where `upper` puts an entry back over a `lower` whiteout.
-pub(super) fn collapse(lower: &Index, upper: &Index) -> Result<Index> {
+pub fn collapse(lower: &Index, upper: &Index) -> Result<Index> {
   let mut merged = Index::default();
   for (at, entry) in &lower.entries {
     if !hidden(upper, at) && !upper.entries.contains_key(at) {
