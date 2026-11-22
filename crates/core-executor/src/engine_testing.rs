@@ -300,6 +300,11 @@ impl Engine for Fake {
     Ok(())
   }
 
+  async fn list_images(&self, reference_filter: &str) -> Result<Vec<String>, Error> {
+    self.record(format!("list_images {reference_filter}"));
+    Ok(Vec::new())
+  }
+
   async fn remove_image(&self, image: &str) -> Result<(), Error> {
     self.record(format!("remove_image {image}"));
     Ok(())

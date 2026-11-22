@@ -140,6 +140,8 @@ pub trait Engine: Send + Sync {
   /// Loads an image archive (an OCI or `docker save` tar stream) into the
   /// engine (`POST /images/load`).
   async fn load_image(&self, tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error>;
+  /// Lists repository tags matching `reference_filter` (e.g. `"needy-snapshot:*"`).
+  async fn list_images(&self, reference_filter: &str) -> Result<Vec<String>, Error>;
   /// Removes `image` by name or ID; one that is gone already is fine.
   async fn remove_image(&self, image: &str) -> Result<(), Error>;
 }
@@ -248,6 +250,10 @@ impl Engine for Unreachable {
   }
 
   async fn load_image(&self, _tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error> {
+    Err(self.error())
+  }
+
+  async fn list_images(&self, _reference_filter: &str) -> Result<Vec<String>, Error> {
     Err(self.error())
   }
 
@@ -372,6 +378,18 @@ impl Engine for Docker {
     // `Content-Type: application/json` instead of `application/x-tar`
     // (`bollard-0.21.1/src/image.rs`, `import_image_stream`).
     self.0.import_image(options, body, None).map_err(Error::from).try_for_each(|_| async { Ok(()) }).await
+  }
+
+  async fn list_images(&self, reference_filter: &str) -> Result<Vec<String>, Error> {
+    let mut filters = std::collections::HashMap::new();
+    filters.insert("reference".to_string(), vec![reference_filter.to_string()]);
+    let options = bollard::query_parameters::ListImagesOptionsBuilder::default().filters(&filters).build();
+    let images = self.0.list_images(Some(options)).await?;
+    let mut tags: Vec<String> =
+      images.into_iter().flat_map(|img| img.repo_tags).filter(|tag| !tag.is_empty() && tag != "<none>:<none>").collect();
+    tags.sort();
+    tags.dedup();
+    Ok(tags)
   }
 
   async fn remove_image(&self, image: &str) -> Result<(), Error> {

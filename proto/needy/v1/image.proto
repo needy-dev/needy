@@ -26,6 +26,9 @@ service ImageService {
   // Resolve/build an image definition and stream it as a Docker/OCI image
   // archive (`docker load` / `container image load` compatible).
   rpc ExportImage(ExportImageRequest) returns (stream ExportImageResponse);
+  // Garbage-collect unreferenced cached layers, disks, OCI archives, stale
+  // cache keys, and `needy-snapshot:*` container images on the control daemon.
+  rpc PruneImages(PruneImagesRequest) returns (PruneImagesResponse);
 }
 
 // An image's commit layer from its lockfile: the layer holding hand edits
@@ -203,4 +206,26 @@ message ExportImageRequest {
 message ExportImageResponse {
   // Raw bytes of the exported Docker/OCI tar archive.
   bytes data = 1;
+}
+
+message PruneImagesRequest {
+  // Also prune cached base OCI exports (`base-oci/*.tar`).
+  bool all = 1;
+  // Compute what would be pruned without removing any files or images.
+  bool dry_run = 2;
+  // Additional snapshot or layer digests (`sha256:<hex>`) to keep alongside
+  // live runs, active edit sessions, and recorded commit histories.
+  repeated string keep = 3;
+}
+
+message PruneImagesResponse {
+  // Number of cached or orphaned layers removed from the layer store.
+  uint64 layers_removed = 1;
+  // Number of unreferenced `needy-snapshot:*` container images removed.
+  uint64 snapshots_removed = 2;
+  // Bytes reclaimed from the daemon's layer store cache.
+  uint64 bytes_reclaimed = 3;
+  // Container image tags (`needy-snapshot:<hex>`) removed (or that would be
+  // removed when `dry_run` is true).
+  repeated string removed_images = 4;
 }

@@ -44,6 +44,7 @@ type EditOutcomeResult = std::result::Result<ImageEditFinished, String>;
 /// A running interactive edit session.
 pub(crate) struct EditSession {
   pub id: String,
+  pub(super) snapshot: Digest,
   channels: driver::Channels,
   cancel: CancellationToken,
   aborted: Arc<AtomicBool>,
@@ -327,6 +328,7 @@ pub(super) async fn start_edit(daemon: &Daemon, request: ImageEditStart) -> Resu
   let aborted = Arc::new(AtomicBool::new(false));
   let session = Arc::new(EditSession {
     id: session_id.clone(),
+    snapshot: resolved.snapshot.digest,
     channels,
     cancel: session_cancel.clone(),
     aborted: aborted.clone(),

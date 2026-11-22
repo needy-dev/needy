@@ -1107,8 +1107,31 @@ pub struct ImageExport {
   pub tag: Option<String>,
 }
 
+/// Request for [`Images::prune`]: garbage-collects unreferenced cached layers,
+/// disks, OCI archives, stale cache keys, and `needy-snapshot:*` container
+/// images on the control daemon.
+#[derive(Debug, Clone, Default)]
+pub struct ImagePrune {
+  /// Also prune cached base OCI exports (`base-oci/*.tar`).
+  pub all: bool,
+  /// Compute what would be pruned without removing any files or images.
+  pub dry_run: bool,
+  /// Additional snapshot or layer digests (`sha256:<hex>`) to keep alongside
+  /// live runs, active edit sessions, and recorded commit histories.
+  pub keep: Vec<String>,
+}
+
+/// Summary returned by [`Images::prune`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImagePruneResult {
+  pub layers_removed: u64,
+  pub snapshots_removed: u64,
+  pub bytes_reclaimed: u64,
+  pub removed_images: Vec<String>,
+}
+
 /// Building image definitions, interactive edit sessions, commit history,
-/// rollback, and OCI archive export.
+/// rollback, OCI archive export, and garbage collection.
 #[async_trait::async_trait]
 pub trait Images: Send + Sync + 'static {
   async fn build(&self, request: ImageBuild) -> Result<ImageBuildResult>;
@@ -1117,4 +1140,5 @@ pub trait Images: Send + Sync + 'static {
   async fn rollback(&self, request: ImageRollback) -> Result<ImageRollbackResult>;
   async fn log(&self, request: ImageLog) -> Result<ImageLogResult>;
   async fn export(&self, request: ImageExport) -> Result<Chunks>;
+  async fn prune(&self, request: ImagePrune) -> Result<ImagePruneResult>;
 }

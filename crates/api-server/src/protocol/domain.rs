@@ -1227,6 +1227,27 @@ pub fn image_export(request: v1::ExportImageRequest) -> Result<ImageExport, Erro
   request.try_into()
 }
 
+impl From<v1::PruneImagesRequest> for crate::control::ImagePrune {
+  fn from(request: v1::PruneImagesRequest) -> Self {
+    Self {
+      all: request.all,
+      dry_run: request.dry_run,
+      keep: request.keep,
+    }
+  }
+}
+
+impl From<crate::control::ImagePruneResult> for v1::PruneImagesResponse {
+  fn from(result: crate::control::ImagePruneResult) -> Self {
+    Self {
+      layers_removed: result.layers_removed,
+      snapshots_removed: result.snapshots_removed,
+      bytes_reclaimed: result.bytes_reclaimed,
+      removed_images: result.removed_images,
+    }
+  }
+}
+
 #[cfg(test)]
 #[path = "domain_test.rs"]
 mod tests;

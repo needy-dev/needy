@@ -48,6 +48,11 @@ where
   K: Eq + Hash + Clone,
   V: Clone,
 {
+  /// Returns true when no operations are currently in flight.
+  pub(super) fn is_empty(&self) -> bool {
+    lock(&self.in_flight).is_empty()
+  }
+
   fn enter(&self, key: &K) -> Role<V> {
     let mut map = lock(&self.in_flight);
     if let Some(rx) = map.get(key) {

@@ -1052,6 +1052,35 @@ pub struct ExportImageResponse {
     #[prost(bytes="vec", tag="1")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PruneImagesRequest {
+    /// Also prune cached base OCI exports (`base-oci/*.tar`).
+    #[prost(bool, tag="1")]
+    pub all: bool,
+    /// Compute what would be pruned without removing any files or images.
+    #[prost(bool, tag="2")]
+    pub dry_run: bool,
+    /// Additional snapshot or layer digests (`sha256:<hex>`) to keep alongside
+    /// live runs, active edit sessions, and recorded commit histories.
+    #[prost(string, repeated, tag="3")]
+    pub keep: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PruneImagesResponse {
+    /// Number of cached or orphaned layers removed from the layer store.
+    #[prost(uint64, tag="1")]
+    pub layers_removed: u64,
+    /// Number of unreferenced `needy-snapshot:*` container images removed.
+    #[prost(uint64, tag="2")]
+    pub snapshots_removed: u64,
+    /// Bytes reclaimed from the daemon's layer store cache.
+    #[prost(uint64, tag="3")]
+    pub bytes_reclaimed: u64,
+    /// Container image tags (`needy-snapshot:<hex>`) removed (or that would be
+    /// removed when `dry_run` is true).
+    #[prost(string, repeated, tag="4")]
+    pub removed_images: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
 /// What a runner can host: each role with its drivers. A role with none is a
 /// role it does not hold.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]

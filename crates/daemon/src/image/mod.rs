@@ -10,6 +10,7 @@
 mod build;
 mod container;
 mod edit;
+mod prune;
 mod session;
 mod single_flight;
 
@@ -20,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use needy_api_server::control::{
   Chunks, ControlError, GuestSession, ImageBuild, ImageBuildResult, ImageEditFinished, ImageEditStart, ImageEditStarted, ImageExport,
-  ImageLog, ImageLogResult, ImageRollback, ImageRollbackResult, Images as ImagesTrait,
+  ImageLog, ImageLogResult, ImagePrune, ImagePruneResult, ImageRollback, ImageRollbackResult, Images as ImagesTrait,
 };
 use needy_common::sync::lock;
 use needy_config::image::{Definition, Image};
@@ -267,6 +268,10 @@ impl ImagesTrait for Daemon {
     };
 
     stream_export_file(&tar_path).await.map_err(crate::failed)
+  }
+
+  async fn prune(&self, request: ImagePrune) -> Result<ImagePruneResult, ControlError> {
+    prune::prune_images(self, request).await
   }
 }
 
