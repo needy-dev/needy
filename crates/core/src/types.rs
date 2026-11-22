@@ -89,6 +89,33 @@ impl fmt::Display for RunState {
   }
 }
 
+impl AsRef<str> for RunState {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+/// A run state name this build does not know.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown run state {0:?}")]
+pub struct UnknownRunState(pub String);
+
+impl std::str::FromStr for RunState {
+  type Err = UnknownRunState;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    match text {
+      "creating" => Ok(Self::Creating),
+      "running" => Ok(Self::Running),
+      "stopping" => Ok(Self::Stopping),
+      "stopped" => Ok(Self::Stopped),
+      "finished" => Ok(Self::Finished),
+      "failed" => Ok(Self::Failed),
+      _ => Err(UnknownRunState(text.to_string())),
+    }
+  }
+}
+
 /// An actor's life cycle, which the daemon's `actor::state` advances the
 /// same way for every actor driver. `Exited` is terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -118,6 +145,31 @@ impl ActorState {
 impl fmt::Display for ActorState {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for ActorState {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+/// An actor state name this build does not know.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown actor state {0:?}")]
+pub struct UnknownActorState(pub String);
+
+impl std::str::FromStr for ActorState {
+  type Err = UnknownActorState;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    match text {
+      "starting" => Ok(Self::Starting),
+      "configured" => Ok(Self::Configured),
+      "ready" => Ok(Self::Ready),
+      "exited" => Ok(Self::Exited),
+      _ => Err(UnknownActorState(text.to_string())),
+    }
   }
 }
 
@@ -160,6 +212,32 @@ impl Origin {
 impl fmt::Display for Origin {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for Origin {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+/// An exec origin name this build does not know.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown exec origin {0:?}")]
+pub struct UnknownOrigin(pub String);
+
+impl std::str::FromStr for Origin {
+  type Err = UnknownOrigin;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    match text {
+      "cli" => Ok(Self::Cli),
+      "fs" => Ok(Self::Fs),
+      "files" => Ok(Self::Files),
+      "actor-proxy" => Ok(Self::ActorProxy),
+      "actor-mount" => Ok(Self::ActorMount),
+      _ => Err(UnknownOrigin(text.to_string())),
+    }
   }
 }
 
@@ -346,6 +424,27 @@ pub enum Network {
   // reserved for the executor network the CLI note describes and waits for
   // the owner to name that slice. Only the actor gateway exists.
   Executor,
+}
+
+impl Network {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Actor => "actor",
+      Self::Executor => "executor",
+    }
+  }
+}
+
+impl fmt::Display for Network {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for Network {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
 }
 
 /// A fault that chaos injected.

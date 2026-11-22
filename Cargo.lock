@@ -2449,6 +2449,7 @@ dependencies = [
  "serde",
  "serde_path_to_error",
  "serde_yaml",
+ "shell-words",
  "shellexpand",
  "tempfile",
  "thiserror 2.0.21",

@@ -96,6 +96,23 @@ impl fmt::Display for ExecutorDriver {
   }
 }
 
+impl AsRef<str> for ExecutorDriver {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl std::str::FromStr for ExecutorDriver {
+  type Err = crate::value::ValueError;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    Self::ALL
+      .into_iter()
+      .find(|driver| driver.as_str() == text)
+      .ok_or_else(|| crate::value::ValueError(format!("unknown executor driver {text:?}")))
+  }
+}
+
 /// What a command does when its instance has no free slot.
 // NOTICE: `new` (start another instance with the same key) was removed
 // (owner decision, 2026-11-11): it waited like `wait`, since a second

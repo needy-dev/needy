@@ -10,13 +10,8 @@ use needy_api_proto::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{Streamed, caller};
-use crate::control::{Caller, ControlError, Images};
-use crate::protocol::{domain, status};
-
-/// Maximum bytes per `ExportImageResponse` message (1 MiB, well under gRPC's
-/// default 4 MiB message limit).
-const EXPORT_CHUNK: usize = 1024 * 1024;
+use super::{CHUNK, Streamed, operator};
+use crate::control::{Caller, Images};
 
 pub struct Adapter<I> {
   pub images: Arc<I>,
@@ -25,11 +20,7 @@ pub struct Adapter<I> {
 
 impl<I> Adapter<I> {
   fn operator<T>(&self, request: &Request<T>, refusal: &str) -> Result<Caller, Status> {
-    match caller(&self.caller, request) {
-      caller @ (Caller::Operator | Caller::Client { .. }) => Ok(caller),
-      Caller::Actor { .. } => Err(ControlError::role_denied(refusal).into()),
-      Caller::Runner { .. } => Err(ControlError::role_denied("runners cannot manage images").into()),
-    }
+    operator(&self.caller, request, refusal, "runners cannot manage images")
   }
 }
 
@@ -37,56 +28,56 @@ impl<I> Adapter<I> {
 impl<I: Images> ImageService for Adapter<I> {
   async fn build_image(&self, request: Request<BuildImageRequest>) -> Result<Response<BuildImageResponse>, Status> {
     self.operator(&request, "actors cannot build images")?;
-    let request = domain::image_build(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let built = self.images.build(request).await?;
-    Ok(Response::new(domain::proto_image_build(built)))
+    Ok(Response::new(built.into()))
   }
 
   async fn start_image_edit(&self, request: Request<StartImageEditRequest>) -> Result<Response<StartImageEditResponse>, Status> {
     self.operator(&request, "actors cannot edit images")?;
-    let request = domain::image_edit_start(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let started = self.images.start_edit(request).await?;
-    Ok(Response::new(domain::proto_image_edit_started(started)))
+    Ok(Response::new(started.into()))
   }
 
   async fn finish_image_edit(&self, request: Request<FinishImageEditRequest>) -> Result<Response<FinishImageEditResponse>, Status> {
     self.operator(&request, "actors cannot edit images")?;
     let request = request.into_inner();
     let finished = self.images.finish_edit(&request.session_id, request.abort).await?;
-    Ok(Response::new(domain::proto_image_edit_finished(finished)))
+    Ok(Response::new(finished.into()))
   }
 
   async fn rollback_image(&self, request: Request<RollbackImageRequest>) -> Result<Response<RollbackImageResponse>, Status> {
     self.operator(&request, "actors cannot roll back images")?;
-    let request = domain::image_rollback(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let rolled = self.images.rollback(request).await?;
-    Ok(Response::new(domain::proto_image_rollback(rolled)))
+    Ok(Response::new(rolled.into()))
   }
 
   async fn log_image(&self, request: Request<LogImageRequest>) -> Result<Response<LogImageResponse>, Status> {
     self.operator(&request, "actors cannot read image history")?;
-    let request = domain::image_log(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let logged = self.images.log(request).await?;
-    Ok(Response::new(domain::proto_image_log(logged)))
+    Ok(Response::new(logged.into()))
   }
 
   type ExportImageStream = Streamed<ExportImageResponse>;
 
   async fn export_image(&self, request: Request<ExportImageRequest>) -> Result<Response<Self::ExportImageStream>, Status> {
     self.operator(&request, "actors cannot export images")?;
-    let request = domain::image_export(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let chunks = self.images.export(request).await?;
     let messages = chunks.flat_map(|read| {
       let messages: Vec<Result<ExportImageResponse, Status>> = match read {
         Ok(bytes) => bytes
-          .chunks(EXPORT_CHUNK)
+          .chunks(CHUNK)
           .map(|data| {
             Ok(ExportImageResponse {
               data: data.to_vec(),
             })
           })
           .collect(),
-        Err(e) => vec![Err(status::status(e))],
+        Err(e) => vec![Err(e.into())],
       };
       tokio_stream::iter(messages)
     });

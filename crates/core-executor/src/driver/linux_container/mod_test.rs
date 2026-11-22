@@ -109,6 +109,23 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
 }
 
 #[test]
+fn root_user_uses_root_home_for_workspace() {
+  let mut spec = spec(ContainerConfig::default());
+  spec.user = User {
+    name: "root".into(),
+    uid: 0,
+    gid: 0,
+  };
+
+  let container = container(&spec, &options()).unwrap();
+
+  assert_eq!(container.workspace, "/root/workspace");
+  assert_eq!(container.body.user.as_deref(), Some("0:0"));
+  let host = container.body.host_config.as_ref().unwrap();
+  assert!(host.binds.as_deref().unwrap().iter().any(|b| b.ends_with(":/root/workspace")), "{:?}", host.binds);
+}
+
+#[test]
 fn a_profile_image_and_workspace_replace_the_defaults() {
   let mut spec = spec(ContainerConfig::default());
   spec.config.workspace = Some("ws".into());

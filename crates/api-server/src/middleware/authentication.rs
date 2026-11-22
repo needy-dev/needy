@@ -195,8 +195,7 @@ where
         };
         if !admitted {
           return Ok(
-            crate::protocol::status::status(crate::control::ControlError::role_denied("management socket admits only its owner and root"))
-              .into_http(),
+            tonic::Status::from(crate::control::ControlError::role_denied("management socket admits only its owner and root")).into_http(),
           );
         }
       }
@@ -207,7 +206,7 @@ where
         && (token.is_empty() || request.headers().get_all(http::header::AUTHORIZATION).iter().count() != 1)
       {
         return Ok(
-          crate::protocol::status::status(
+          tonic::Status::from(
             crate::control::ControlError::Unauthenticated("missing or invalid bearer token".into())
               .with_diagnostic("auth.credential_rejected", []),
           )
@@ -219,9 +218,9 @@ where
           request.extensions_mut().insert(caller);
           inner.call(request).await
         }
-        Err(error) => Ok(crate::protocol::status::status(error.with_diagnostic("auth.backend_unavailable", [])).into_http()),
+        Err(error) => Ok(tonic::Status::from(error.with_diagnostic("auth.backend_unavailable", [])).into_http()),
         Ok(None) => Ok(
-          crate::protocol::status::status(
+          tonic::Status::from(
             crate::control::ControlError::Unauthenticated("missing or invalid bearer token".into())
               .with_diagnostic("auth.credential_rejected", []),
           )

@@ -121,6 +121,14 @@ macro_rules! events {
         })
       }
     }
+
+    $(
+      impl From<$payload> for Event {
+        fn from(payload: $payload) -> Self {
+          Event::$variant(payload)
+        }
+      }
+    )*
   };
 }
 
@@ -401,6 +409,12 @@ impl Transfer {
       Self::CopyIn => "copy-in",
       Self::MirrorOut => "mirror-out",
     }
+  }
+}
+
+impl std::fmt::Display for Transfer {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
   }
 }
 

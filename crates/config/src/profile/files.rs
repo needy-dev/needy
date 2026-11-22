@@ -195,6 +195,25 @@ pub enum Side {
 
 impl Side {
   pub fn parse(text: &str) -> Result<Self, String> {
+    text.parse()
+  }
+
+  /// Expands `~` to the profile user's home on the actor side. A host path
+  /// keeps `~` for the control host's home, and an executor path for the
+  /// executor's home, which only the daemon knows once the instance exists
+  /// (`needy-daemon`'s `pool::Instance::expand_home`).
+  pub(super) fn expand_home(self, user: &User) -> Self {
+    match self {
+      Self::Actor(path) => Self::Actor(user.expand_home(&path)),
+      side => side,
+    }
+  }
+}
+
+impl std::str::FromStr for Side {
+  type Err = String;
+
+  fn from_str(text: &str) -> Result<Self, String> {
     if let Some(path) = text.strip_prefix("host:") {
       return Ok(Self::Host(path.to_string()));
     }
@@ -213,15 +232,14 @@ impl Side {
     }
     Err(format!("file side must start with host:, actor: or executor:: {text:?}"))
   }
+}
 
-  /// Expands `~` to the profile user's home on the actor side. A host path
-  /// keeps `~` for the control host's home, and an executor path for the
-  /// executor's home, which only the daemon knows once the instance exists
-  /// (`needy-daemon`'s `pool::Instance::expand_home`).
-  pub(super) fn expand_home(self, user: &User) -> Self {
+impl std::fmt::Display for Side {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
-      Self::Actor(path) => Self::Actor(user.expand_home(&path)),
-      side => side,
+      Self::Host(path) => write!(f, "host:{path}"),
+      Self::Actor(path) => write!(f, "actor:{path}"),
+      Self::Executor { name, path } => write!(f, "executor:{name}:{path}"),
     }
   }
 }

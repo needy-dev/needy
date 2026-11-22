@@ -18,7 +18,6 @@ use super::{Streamed, chunked};
 use tokio_stream::StreamExt as _;
 
 use crate::control::{Caller, Chunks, ControlError, Guest, GuestControl};
-use crate::protocol::domain;
 
 pub struct Adapter<G> {
   pub guest: Arc<G>,
@@ -38,7 +37,7 @@ impl<G> Adapter<G> {
 impl<G: Guest> GuestService for Adapter<G> {
   async fn get_config(&self, _: Request<GetConfigRequest>) -> Result<Response<GetConfigResponse>, Status> {
     let config = self.guest.config(self.run()?).await?;
-    Ok(Response::new(domain::proto_guest_config(config)))
+    Ok(Response::new(config.into()))
   }
 
   async fn push_events(&self, request: Request<Streaming<PushEventsRequest>>) -> Result<Response<PushEventsResponse>, Status> {

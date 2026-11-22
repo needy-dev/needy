@@ -77,7 +77,7 @@ pub fn container(spec: &Spec, options: &Options) -> Result<Container, Error> {
     None => options.state_dir.join("workspaces").join(&key),
   };
   // Paths inside the container are Linux paths, whatever the host is.
-  let workspace = format!("/home/{}/workspace", spec.user.name);
+  let workspace = format!("{}/workspace", spec.user.home());
   let body = ContainerCreateBody {
     image: Some(docker.image.clone().unwrap_or_else(|| options.image.clone())),
     cmd: Some(

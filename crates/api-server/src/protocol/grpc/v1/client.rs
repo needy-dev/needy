@@ -14,7 +14,6 @@ use tonic::{Request, Response, Status};
 
 use super::{administer, caller};
 use crate::control::{Caller, Clients, ControlError, NewPairingCode};
-use crate::protocol::domain;
 
 pub struct Adapter<C> {
   pub clients: Arc<C>,
@@ -41,7 +40,7 @@ impl<C: Clients> ClientService for Adapter<C> {
         kind: CallerKind::Client as i32,
         client_id: id,
         name,
-        access: domain::proto_client_access(access),
+        access: needy_api_proto::v1::ClientAccess::from(access).into(),
       },
       _ => return Err(ControlError::role_denied("caller inspection is available to operators and clients").into()),
     };
@@ -54,18 +53,18 @@ impl<C: Clients> ClientService for Adapter<C> {
     let created = self
       .clients
       .create_pairing_code(NewPairingCode {
-        access: domain::client_access(request.access).map_err(ControlError::from)?,
+        access: request.access.try_into()?,
         ttl_ms: request.ttl_ms,
         name: request.name,
       })
       .await?;
     Ok(Response::new(CreatePairingCodeResponse {
-      access: domain::proto_client_access(created.access),
+      access: needy_api_proto::v1::ClientAccess::from(created.access).into(),
       id: created.id,
       name: created.name,
       expires_at_ms: created.expires_ms,
       code: created.code,
-      replaces: created.replaces.map(domain::proto_client),
+      replaces: created.replaces.map(Into::into),
     }))
   }
 
@@ -76,14 +75,14 @@ impl<C: Clients> ClientService for Adapter<C> {
     }
     let paired = self.clients.pair(&code).await?;
     Ok(Response::new(PairResponse {
-      client: Some(domain::proto_client(paired.client)),
+      client: Some(paired.client.into()),
       token: paired.token,
     }))
   }
 
   async fn list_clients(&self, request: Request<ListClientsRequest>) -> Result<Response<ListClientsResponse>, Status> {
     self.admin(&request, "listing clients")?;
-    let clients = self.clients.clients().await?.into_iter().map(domain::proto_client).collect();
+    let clients = self.clients.clients().await?.into_iter().map(Into::into).collect();
     Ok(Response::new(ListClientsResponse { clients }))
   }
 

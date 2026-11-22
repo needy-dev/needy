@@ -12,9 +12,9 @@ use needy_api_proto::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use super::{CHUNK, Streamed, caller};
-use crate::control::{Caller, ControlError, Runs};
-use crate::protocol::{domain, status};
+use super::{CHUNK, Streamed, caller, operator};
+use crate::control::{Caller, ControlError, NewRun, Runs};
+use crate::protocol::domain;
 
 // NOTICE: a stored event is a few hundred bytes; 1000 of them stay well
 // under gRPC's default 4 MiB message limit.
@@ -28,11 +28,7 @@ pub struct Adapter<S> {
 impl<S> Adapter<S> {
   /// The caller of a call only an operator or a client may make.
   fn operator<T>(&self, request: &Request<T>, refusal: &str) -> Result<Caller, Status> {
-    match caller(&self.caller, request) {
-      caller @ (Caller::Operator | Caller::Client { .. }) => Ok(caller),
-      Caller::Actor { .. } => Err(ControlError::role_denied(refusal).into()),
-      Caller::Runner { .. } => Err(ControlError::role_denied("runners cannot manage runs").into()),
-    }
+    operator(&self.caller, request, refusal, "runners cannot manage runs")
   }
 }
 
@@ -61,7 +57,7 @@ impl<S: Runs> RunService for Adapter<S> {
   ) -> Result<Response<needy_api_proto::v1::PrepareClientExecutionResponse>, Status> {
     self.operator(&request, "actors cannot reserve client execution")?;
     let host = request.into_inner().host.ok_or_else(|| Status::invalid_argument("client host is required"))?;
-    let reserved = self.runs.prepare_client_execution(domain::runner_host(host)).await?;
+    let reserved = self.runs.prepare_client_execution(host.into()).await?;
     Ok(Response::new(needy_api_proto::v1::PrepareClientExecutionResponse {
       holder: reserved.holder,
       capability: reserved.capability,
@@ -72,31 +68,31 @@ impl<S: Runs> RunService for Adapter<S> {
   async fn create_run(&self, request: Request<CreateRunRequest>) -> Result<Response<CreateRunResponse>, Status> {
     let caller = self.operator(&request, "actors cannot create runs")?;
     let on_control_host = arrived_on_unix_socket(&request);
-    let mut request = domain::new_run(request.into_inner()).map_err(ControlError::from)?;
+    let mut request: NewRun = request.into_inner().try_into()?;
     request.by = Some(caller.principal());
     request.on_control_host = on_control_host;
     let run = self.runs.create(request).await?;
     Ok(Response::new(CreateRunResponse {
-      run: Some(domain::proto_run(run)),
+      run: Some(run.into()),
     }))
   }
 
   async fn get_run(&self, request: Request<GetRunRequest>) -> Result<Response<GetRunResponse>, Status> {
     let run = self.runs.get(&request.into_inner().run_id).await?;
     Ok(Response::new(GetRunResponse {
-      run: Some(domain::proto_run(run)),
+      run: Some(run.into()),
     }))
   }
 
   async fn list_runs(&self, _: Request<ListRunsRequest>) -> Result<Response<ListRunsResponse>, Status> {
-    let runs = self.runs.list().await?.into_iter().map(domain::proto_run).collect();
+    let runs = self.runs.list().await?.into_iter().map(Into::into).collect();
     Ok(Response::new(ListRunsResponse { runs }))
   }
 
   async fn stop_run(&self, request: Request<StopRunRequest>) -> Result<Response<StopRunResponse>, Status> {
     let caller = self.operator(&request, "actors cannot stop runs")?;
     let request = request.into_inner();
-    let mode = domain::stop_mode(request.now, request.grace_ms).map_err(ControlError::from)?;
+    let mode = domain::stop_mode(request.now, request.grace_ms)?;
     let stopped = self.runs.stop(&request.run_id, caller.principal(), mode).await?;
     Ok(Response::new(domain::proto_stopped(stopped)))
   }
@@ -118,7 +114,7 @@ impl<S: Runs> RunService for Adapter<S> {
             })
           })
           .collect(),
-        Err(e) => vec![Err(status::status(e))],
+        Err(e) => vec![Err(e.into())],
       };
       tokio_stream::iter(messages)
     });
@@ -131,7 +127,7 @@ impl<S: Runs> RunService for Adapter<S> {
     self.operator(&request, "actors cannot read run events")?;
     let loaded = self.runs.events(&request.into_inner().run_id).await?;
     let run = loaded.run;
-    let mut events = loaded.events.into_iter().map(domain::proto_stored_event).collect::<Vec<_>>();
+    let mut events = loaded.events.into_iter().map(Into::into).collect::<Vec<_>>();
     let mut messages = Vec::new();
     // A run without events is still one message, which names the run.
     loop {
@@ -158,13 +154,13 @@ impl<S: Runs> RunService for Adapter<S> {
       Caller::Runner { .. } => return Err(ControlError::role_denied("runners cannot place commands").into()),
     };
     let route = self.runs.decide(&run, domain::exec_context(request)).await?;
-    Ok(Response::new(domain::proto_route(route)))
+    Ok(Response::new(route.into()))
   }
 
   async fn check_profile(&self, request: Request<CheckProfileRequest>) -> Result<Response<CheckProfileResponse>, Status> {
     self.operator(&request, "actors cannot check profiles")?;
-    let check = self.runs.check(domain::profile_to_check(request.into_inner())).await?;
-    Ok(Response::new(domain::proto_profile_check(check)))
+    let check = self.runs.check(request.into_inner().into()).await?;
+    Ok(Response::new(check.into()))
   }
 
   async fn add_fault(&self, request: Request<AddFaultRequest>) -> Result<Response<AddFaultResponse>, Status> {
@@ -180,7 +176,7 @@ impl<S: Runs> RunService for Adapter<S> {
   async fn list_faults(&self, request: Request<ListFaultsRequest>) -> Result<Response<ListFaultsResponse>, Status> {
     self.operator(&request, "actors cannot read a run's chaos")?;
     let faults = self.runs.faults(&request.into_inner().run_id).await?;
-    Ok(Response::new(domain::proto_faults(faults)))
+    Ok(Response::new(faults.into()))
   }
 
   async fn remove_fault(&self, request: Request<RemoveFaultRequest>) -> Result<Response<RemoveFaultResponse>, Status> {

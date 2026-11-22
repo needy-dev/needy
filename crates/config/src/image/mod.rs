@@ -89,7 +89,7 @@ enum RawHookCommand {
 
 /// Shell-quotes `argv` into a POSIX `sh -c` command string.
 pub fn shell_join(argv: &[String]) -> String {
-  argv.iter().map(|arg| format!("'{}'", arg.replace('\'', "'\\''"))).collect::<Vec<_>>().join(" ")
+  shell_words::join(argv)
 }
 
 fn deserialize_hook_list<'de, D: de::Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {

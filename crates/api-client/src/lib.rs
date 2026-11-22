@@ -71,6 +71,15 @@ pub struct Client {
   auth: BearerAuth,
 }
 
+impl From<Channel> for Client {
+  fn from(channel: Channel) -> Self {
+    Self {
+      channel,
+      auth: BearerAuth::default(),
+    }
+  }
+}
+
 // NOTICE: HTTP/2 pings every 20 s, answered within 20 s, find a connection
 // that died without a reset (a sleeping laptop, a dropped tunnel) in under a
 // minute; the server pings at the same interval.
@@ -146,10 +155,7 @@ impl Client {
 
   /// Wraps an existing channel, for example one with a custom TLS setup.
   pub fn from_channel(channel: Channel) -> Self {
-    Self {
-      channel,
-      auth: BearerAuth::default(),
-    }
+    Self::from(channel)
   }
 
   pub fn with_token(mut self, token: &str) -> Result<Self> {

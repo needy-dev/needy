@@ -6,10 +6,12 @@
 pub mod account;
 pub mod archive;
 pub mod filter;
+pub mod fs;
 pub mod merge;
 pub mod process;
 pub mod seed;
 pub mod sftp;
+pub mod sync;
 #[cfg(all(feature = "testing", unix))]
 pub mod testing;
 pub mod time;
