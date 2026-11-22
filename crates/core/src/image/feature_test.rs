@@ -51,7 +51,7 @@ fn parses_official_devcontainer_feature_json_and_fills_defaults() {
   assert_eq!(meta.installs_after, ["ghcr.io/devcontainers/features/common-utils"]);
   assert_eq!(
     meta.depends_on["ghcr.io/devcontainers/features/git:1"],
-    BTreeMap::from([("version".into(), FeatureOption::String("os-provided".into()))])
+    BTreeMap::from([("version".into(), OptionValue::String("os-provided".into()))])
   );
 
   // Defaults are filled in; user overrides win; undeclared options pass through.

@@ -1,15 +1,19 @@
 //! Dev Container feature metadata (`devcontainer-feature.json`), option
-//! resolution, and security refusals. No IO: fetching feature artifacts and
-//! reading `devcontainer-feature.json` from disk or a registry belong to
-//! `needy-core-actor`.
+//! resolution, and security refusals. Delegates generic Dev Container feature
+//! parsing and option resolution to `devcontainer-features` while keeping
+//! needy-specific `customizations.needy` sync mappings and E3 security refusals
+//! in `needy-core`.
 //!
 //! See "Resolving and planning a build" in
 //! `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`.
 
 use std::collections::BTreeMap;
+use std::ops::Deref;
 use std::path::{Component, Path};
+use std::str::FromStr;
 
-use needy_config::image::{FeatureOption, shell_join};
+pub use devcontainer_features::{LifecycleCommand, LifecycleEntry, MetadataError, OptionSpec, OptionValue, sanitize_option_name};
+use needy_config::image::FeatureOption;
 use needy_config::profile::{OnConflict, deserialize_on_conflict};
 use serde::Deserialize;
 
@@ -17,7 +21,9 @@ use serde::Deserialize;
 #[derive(Debug, thiserror::Error)]
 pub enum FeatureError {
   #[error("invalid devcontainer-feature.json: {0}")]
-  InvalidMetadata(#[from] serde_json::Error),
+  InvalidMetadata(#[from] MetadataError),
+  #[error("invalid customizations.needy in devcontainer-feature.json: {0}")]
+  InvalidCustomizations(#[from] serde_json::Error),
   #[error("feature `{feature}` is refused because it sets `{property}`: {reason}")]
   Refused {
     feature: String,
@@ -32,124 +38,32 @@ pub enum FeatureError {
   },
 }
 
-/// Parsed `devcontainer-feature.json` metadata for a Dev Container feature.
-// Source: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainer-features.md
-// (retrieved 2026-11-16; see `docs/ai/references/architecture/2026-11-16-environments-and-snapshots-design.md#sources`).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct FeatureMetadata {
-  /// Feature identifier (required by the Dev Container Features spec).
-  pub id: String,
-  /// Semantic version of the feature, if declared.
-  #[serde(default)]
-  pub version: Option<String>,
-  /// Human-readable display name.
-  #[serde(default)]
-  pub name: Option<String>,
-  /// Declared option schemas and defaults.
-  #[serde(default)]
-  pub options: BTreeMap<String, OptionSpec>,
-  /// Environment variables added to the image in layer order.
-  #[serde(rename = "containerEnv", default)]
-  pub container_env: BTreeMap<String, String>,
-  /// Hard dependencies that must be installed before this feature.
-  #[serde(rename = "dependsOn", default)]
-  pub depends_on: BTreeMap<String, BTreeMap<String, FeatureOption>>,
-  /// Soft ordering constraints: if any listed feature is also present, it must
-  /// appear before this feature.
-  #[serde(rename = "installsAfter", default)]
-  pub installs_after: Vec<String>,
-  /// Refused when `true` (E3: an image cannot widen its actor).
-  #[serde(default)]
-  pub privileged: bool,
-  /// Refused when non-empty (E3).
-  #[serde(rename = "capAdd", default)]
-  pub cap_add: Vec<String>,
-  /// Refused when non-empty (E3).
-  #[serde(rename = "securityOpt", default)]
-  pub security_opt: Vec<String>,
-  /// Refused when non-empty (E3).
-  #[serde(default)]
-  pub mounts: Vec<serde_json::Value>,
-  /// Refused when non-empty (E3: feature entrypoints are not supported).
-  #[serde(default)]
-  pub entrypoint: Option<String>,
-  /// Ignored: needy's own init is PID 1 in every actor.
-  #[serde(default)]
-  pub init: bool,
-  /// Prebuild-time creation hook (`onCreateCommand`).
-  // TODO(images): `onCreateCommand` is a prebuild-time hook (analogue to a
-  // `run` layer in `2026-11-16-environments-and-snapshots-design.md`); running
-  // it as a cached build step is deferred until a feature requires it.
-  #[serde(rename = "onCreateCommand", default)]
-  pub on_create_command: Option<LifecycleCommand>,
-  /// Mapped to needy's `start` hook (runs before `postCreateCommand` and
-  /// `postStartCommand`).
-  #[serde(rename = "updateContentCommand", default)]
-  pub update_content_command: Option<LifecycleCommand>,
-  /// Mapped to needy's `start` hook.
-  #[serde(rename = "postCreateCommand", default)]
-  pub post_create_command: Option<LifecycleCommand>,
-  /// Mapped to needy's `start` hook.
-  #[serde(rename = "postStartCommand", default)]
-  pub post_start_command: Option<LifecycleCommand>,
-  /// Attach-time hook (`postAttachCommand`).
-  // TODO(images): `attach` hook is deferred until a case needs it, see
-  // `docs/ai/references/architecture/2026-11-17-images-and-run-data-spec.md`.
-  #[serde(rename = "postAttachCommand", default)]
-  pub post_attach_command: Option<LifecycleCommand>,
-  /// Tool-specific customizations (`customizations.needy.files` declares sync
-  /// mappings for the feature; other tools' keys are ignored).
-  #[serde(default)]
-  pub customizations: FeatureCustomizations,
-}
-
-/// A Dev Container lifecycle command in `devcontainer-feature.json`: a shell
-/// string, an argv array, or an object map of named commands (each a string or
-/// argv array).
-// Source: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainer-features.md
-// Reference: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainerjson-reference.md#lifecycle-scripts
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-pub enum LifecycleCommand {
-  /// A shell command string executed via `sh -c`.
-  Shell(String),
-  /// An argv array executed directly (shell-quoted for `sh -c`).
-  Argv(Vec<String>),
-  /// Named commands; flattened in deterministic key order.
-  // NOTICE: Dev Container specifies parallel execution for object-form hooks;
-  // needy runs hooks sequentially in sorted key order for deterministic logs
-  // and routing traces.
-  Map(BTreeMap<String, LifecycleEntry>),
-}
-
-/// One value in an object-form Dev Container lifecycle command.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-pub enum LifecycleEntry {
-  Shell(String),
-  Argv(Vec<String>),
-}
-
-impl LifecycleEntry {
-  fn to_shell(&self) -> Option<String> {
-    match self {
-      Self::Shell(cmd) if !cmd.is_empty() => Some(cmd.clone()),
-      Self::Shell(_) => None,
-      Self::Argv(argv) if !argv.is_empty() => Some(shell_join(argv)),
-      Self::Argv(_) => None,
-    }
+/// Converts a needy profile/image `FeatureOption` into a standalone
+/// `devcontainer_features::OptionValue`.
+pub fn to_option_value(opt: &FeatureOption) -> OptionValue {
+  match opt {
+    FeatureOption::String(s) => OptionValue::String(s.clone()),
+    FeatureOption::Bool(b) => OptionValue::Bool(*b),
+    FeatureOption::Int(i) => OptionValue::Int(*i),
   }
 }
 
-impl LifecycleCommand {
-  /// Converts this lifecycle command into zero or more POSIX `sh -c` command
-  /// strings in deterministic order.
-  pub fn to_shell_commands(&self) -> Vec<String> {
-    match self {
-      Self::Shell(cmd) => (!cmd.is_empty()).then(|| cmd.clone()).into_iter().collect(),
-      Self::Argv(argv) => (!argv.is_empty()).then(|| shell_join(argv)).into_iter().collect(),
-      Self::Map(entries) => entries.values().filter_map(LifecycleEntry::to_shell).collect(),
-    }
+/// Parsed `devcontainer-feature.json` metadata for a Dev Container feature,
+/// pairing the standalone [`devcontainer_features::FeatureMetadata`] with
+/// needy-specific [`FeatureCustomizations`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeatureMetadata {
+  /// Generic Dev Container feature metadata parsed by `devcontainer-features`.
+  pub inner: devcontainer_features::FeatureMetadata,
+  /// Needy-specific `customizations.needy` block.
+  pub customizations: FeatureCustomizations,
+}
+
+impl Deref for FeatureMetadata {
+  type Target = devcontainer_features::FeatureMetadata;
+
+  fn deref(&self) -> &Self::Target {
+    &self.inner
   }
 }
 
@@ -197,59 +111,54 @@ pub struct FeatureFileSpec {
   pub on_conflict: Vec<(String, OnConflict)>,
 }
 
-/// One option entry under `options` in `devcontainer-feature.json`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
-pub struct OptionSpec {
-  /// Option type (`"string"` or `"boolean"`).
-  #[serde(rename = "type", default)]
-  pub kind: Option<String>,
-  /// Default value when the user does not set this option under `with:`.
-  #[serde(default)]
-  pub default: Option<FeatureOption>,
-  /// Human-readable description of the option.
-  #[serde(default)]
-  pub description: Option<String>,
-}
-
 impl FeatureMetadata {
-  /// Parses a `devcontainer-feature.json` document.
-  pub fn parse(json: &str) -> Result<Self, FeatureError> {
-    Ok(serde_json::from_str(json)?)
+  /// Parses a `devcontainer-feature.json` document (including JSONC comments
+  /// and trailing commas).
+  pub fn parse(jsonc: &str) -> Result<Self, FeatureError> {
+    let inner = devcontainer_features::FeatureMetadata::parse(jsonc)?;
+    let needy = match inner.customizations.get("needy") {
+      Some(value) if !value.is_null() => Some(serde_json::from_value::<NeedyCustomizations>(value.clone())?),
+      _ => None,
+    };
+    Ok(Self {
+      inner,
+      customizations: FeatureCustomizations { needy },
+    })
   }
 
   /// Checks decision E3 of the images and run data spec: refuses features that
   /// request `privileged`, `capAdd`, `securityOpt`, `mounts`, or `entrypoint`.
   /// `init` is ignored.
   pub fn check_allowed(&self, reference: &str) -> Result<(), FeatureError> {
-    if self.privileged {
+    if self.inner.privileged {
       return Err(FeatureError::Refused {
         feature: reference.to_string(),
         property: "privileged",
         reason: "an image definition cannot widen its actor's privileges",
       });
     }
-    if !self.cap_add.is_empty() {
+    if !self.inner.cap_add.is_empty() {
       return Err(FeatureError::Refused {
         feature: reference.to_string(),
         property: "capAdd",
         reason: "an image definition cannot add Linux capabilities to its actor",
       });
     }
-    if !self.security_opt.is_empty() {
+    if !self.inner.security_opt.is_empty() {
       return Err(FeatureError::Refused {
         feature: reference.to_string(),
         property: "securityOpt",
         reason: "an image definition cannot alter its actor's security options",
       });
     }
-    if !self.mounts.is_empty() {
+    if !self.inner.mounts.is_empty() {
       return Err(FeatureError::Refused {
         feature: reference.to_string(),
         property: "mounts",
         reason: "an image definition cannot declare host or volume mounts",
       });
     }
-    if self.entrypoint.as_deref().is_some_and(|e| !e.is_empty()) {
+    if self.inner.entrypoint.as_deref().is_some_and(|e| !e.is_empty()) {
       return Err(FeatureError::Refused {
         feature: reference.to_string(),
         property: "entrypoint",
@@ -267,61 +176,24 @@ impl FeatureMetadata {
   /// Resolves option defaults and user-supplied `with:` values into sanitized
   /// environment variables for `devcontainer-features.env`.
   pub fn resolve_options(&self, overrides: &BTreeMap<String, FeatureOption>) -> BTreeMap<String, String> {
-    let mut env = BTreeMap::new();
-    for (name, spec) in &self.options {
-      if let Some(default) = &spec.default {
-        env.insert(sanitize_option_name(name), default.to_string());
-      }
-    }
-    for (name, value) in overrides {
-      env.insert(sanitize_option_name(name), value.to_string());
-    }
-    env
+    let converted: BTreeMap<String, OptionValue> = overrides.iter().map(|(k, v)| (k.clone(), to_option_value(v))).collect();
+    self.inner.resolve_options(&converted)
   }
 
   /// Lifecycle commands mapped to needy's `start` hook, in Dev Container
   /// lifecycle order: `updateContentCommand`, `postCreateCommand`,
   /// `postStartCommand`.
   pub fn start_hooks(&self) -> Vec<String> {
-    let mut hooks = Vec::new();
-    for cmd in [
-      &self.update_content_command,
-      &self.post_create_command,
-      &self.post_start_command,
-    ]
-    .into_iter()
-    .flatten()
-    {
-      hooks.extend(cmd.to_shell_commands());
-    }
-    hooks
+    self.inner.start_hooks()
   }
 }
 
-/// Converts a Dev Container feature option name into the shell environment
-/// variable name written to `devcontainer-features.env`.
-// Source: https://github.com/devcontainers/spec/blob/c95ffeed1d059abfe9ffbe79762dc2fa4e7c2421/docs/specs/devcontainer-features.md
-// (retrieved 2026-11-16; see `docs/ai/references/architecture/2026-11-16-environments-and-snapshots-design.md#sources`).
-// Reference: Dev Container Features specification, "Option Resolution":
-// `str.replace(/[^\w_]/g, '_').replace(/^[\d_]+/g, '_').toUpperCase()`
-pub fn sanitize_option_name(name: &str) -> String {
-  let replaced: String = name
-    .chars()
-    .map(|c| {
-      if c.is_ascii_alphanumeric() || c == '_' {
-        c
-      } else {
-        '_'
-      }
-    })
-    .collect();
-  let trimmed = replaced.trim_start_matches(|c: char| c.is_ascii_digit() || c == '_');
-  let collapsed = if trimmed.len() < replaced.len() {
-    format!("_{trimmed}")
-  } else {
-    replaced
-  };
-  collapsed.to_ascii_uppercase()
+impl FromStr for FeatureMetadata {
+  type Err = FeatureError;
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    Self::parse(s)
+  }
 }
 
 /// Validates a single `customizations.needy.files.<name>` entry: safe mapping

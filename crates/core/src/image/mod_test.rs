@@ -372,7 +372,7 @@ fn depends_on_cycle_returns_error_naming_cycle() {
 }
 
 #[test]
-fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
+fn installs_after_reorders_present_features_topologically_and_rejects_cycles() {
   let features = BTreeMap::from([
     ("ghcr.io/devcontainers/features/common-utils:2".into(), resolved('1', r#"{ "id": "common-utils" }"#)),
     (
@@ -391,7 +391,7 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
     env: BTreeMap::new(),
     ..Default::default()
   };
-  plan(&valid, &digest('a'), &User::default(), None, &features).unwrap();
+  let valid_plan = plan(&valid, &digest('a'), &User::default(), None, &features).unwrap();
 
   // Soft constraint: node alone (common-utils absent) is valid.
   let alone = Definition {
@@ -402,7 +402,8 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
   };
   plan(&alone, &digest('a'), &User::default(), None, &features).unwrap();
 
-  // Contradiction: node listed before common-utils -> error naming both.
+  // Reversed declaration order: node listed before common-utils is topologically
+  // reordered per the Dev Container Features spec so common-utils installs first.
   let reversed = Definition {
     root: None,
     layers: vec![
@@ -412,9 +413,41 @@ fn installs_after_valid_order_passes_and_contradiction_names_both_features() {
     env: BTreeMap::new(),
     ..Default::default()
   };
-  let err = plan(&reversed, &digest('a'), &User::default(), None, &features).unwrap_err().to_string();
-  assert!(err.contains("ghcr.io/devcontainers/features/node:1"), "{err}");
-  assert!(err.contains("ghcr.io/devcontainers/features/common-utils"), "{err}");
+  let reordered = plan(&reversed, &digest('a'), &User::default(), None, &features).unwrap();
+  let refs: Vec<&str> = reordered
+    .steps
+    .iter()
+    .map(|s| match &s.input {
+      Input::Feature { reference, .. } => reference.as_str(),
+      Input::Run(script) => script.as_str(),
+    })
+    .collect();
+  assert_eq!(
+    refs,
+    [
+      "ghcr.io/devcontainers/features/common-utils:2",
+      "ghcr.io/devcontainers/features/node:1",
+    ]
+  );
+  assert_eq!(keys(&reordered), keys(&valid_plan));
+
+  // Mutual installsAfter cycle is rejected cleanly.
+  let cyclic = BTreeMap::from([
+    ("ghcr.io/example/features/a:1".into(), resolved('1', r#"{ "id": "a", "installsAfter": ["ghcr.io/example/features/b"] }"#)),
+    ("ghcr.io/example/features/b:1".into(), resolved('2', r#"{ "id": "b", "installsAfter": ["ghcr.io/example/features/a"] }"#)),
+  ]);
+  let cyclic_def = Definition {
+    root: None,
+    layers: vec![
+      feature_layer("ghcr.io/example/features/a:1", &[]),
+      feature_layer("ghcr.io/example/features/b:1", &[]),
+    ],
+    env: BTreeMap::new(),
+    ..Default::default()
+  };
+  let err = plan(&cyclic_def, &digest('a'), &User::default(), None, &cyclic).unwrap_err().to_string();
+  assert!(err.contains("ghcr.io/example/features/a:1"), "{err}");
+  assert!(err.contains("ghcr.io/example/features/b:1"), "{err}");
 }
 
 #[test]

@@ -1,7 +1,9 @@
+use std::io::Read as _;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::*;
 
@@ -38,10 +40,6 @@ fn make_oci_manifest(layer_digest: &Digest, layer_size: usize) -> Vec<u8> {
     ]
   }))
   .unwrap()
-}
-
-fn loopback_client() -> reqwest::Client {
-  reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
 #[derive(Clone)]
@@ -193,7 +191,7 @@ async fn fetch_handles_bearer_auth_verifies_sha256_and_caches_atomically() {
   .await;
 
   let cache = tempfile::tempdir().unwrap();
-  let store = FeatureStore::new(cache.path()).unwrap().with_client(loopback_client()).with_base_url(&base_url);
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
 
   let reference = Reference::parse("ghcr.io/devcontainers/features/node:1").unwrap();
   let fetched = store.fetch(&reference).await.unwrap();
@@ -228,7 +226,7 @@ async fn cache_hit_by_pinned_digest_makes_zero_http_requests() {
   .await;
 
   let cache = tempfile::tempdir().unwrap();
-  let store = FeatureStore::new(cache.path()).unwrap().with_client(loopback_client()).with_base_url(&base_url);
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
 
   // First fetch populates the cache.
   let tag_ref = Reference::parse("ghcr.io/devcontainers/features/git:1.3.0").unwrap();
@@ -278,7 +276,7 @@ async fn corrupt_blob_sha256_fails_cleanly_and_leaves_no_partial_cache() {
   .await;
 
   let cache = tempfile::tempdir().unwrap();
-  let store = FeatureStore::new(cache.path()).unwrap().with_client(loopback_client()).with_base_url(&base_url);
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
   let reference = Reference::parse("ghcr.io/devcontainers/features/node:1").unwrap();
 
   let err = store.fetch(&reference).await.unwrap_err();
@@ -436,7 +434,7 @@ async fn concurrent_fetches_share_one_in_flight_download() {
   .await;
 
   let cache = tempfile::tempdir().unwrap();
-  let store = FeatureStore::new(cache.path()).unwrap().with_client(loopback_client()).with_base_url(&base_url);
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
   let reference = Reference::parse("ghcr.io/devcontainers/features/node:1").unwrap();
 
   let mut handles = Vec::new();
@@ -538,7 +536,7 @@ async fn bearer_token_cache_reuses_token_across_fetches() {
   });
 
   let cache = tempfile::tempdir().unwrap();
-  let store = FeatureStore::new(cache.path()).unwrap().with_client(loopback_client()).with_base_url(&base_url);
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
 
   let first = store.fetch(&Reference::parse("ghcr.io/devcontainers/features/node:1").unwrap()).await.unwrap();
   assert_eq!(first.digest, manifest1_digest);
