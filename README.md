@@ -57,8 +57,8 @@ needy daemon service install --now
 
 ### 2. Run a coding agent
 
-On **Linux with KVM and Docker**, start a built-in coding agent directly — no
-repo clone or manual image pull required:
+On **Linux with KVM**, start a built-in coding agent directly — no repo clone
+or manual image pull required:
 
 ```sh
 needy run create -it --profile builtin:opencode
@@ -70,10 +70,12 @@ and caches the agent's Dev Container feature layers, and mounts a persistent
 sync store for its login and session state (with a SQLite row-merge driver for
 OpenCode's database).
 
-The `builtin:*` profiles set `actor.workspace` to an empty container workspace
-(`~/workspace` on the `build` executor). In your own profile, omit
-`actor.workspace` to mount the directory `needy run create` runs in live at
-`~/workspace` (see [Workspace](#workspace)).
+The `builtin:*` profiles stay minimal: they declare the agent feature, entry
+command, and unrestricted gateway egress (`allow: ["*"]`), without pre-binding
+an executor, command routing, or `actor.workspace`. Extend a `builtin:*`
+profile to attach an executor (the directory `needy run create` runs in is then
+mounted live at `~/workspace`; see [Workspace](#workspace)) or tighten
+`actor.network.allow`.
 
 <details>
 <summary><b>Apple silicon Mac</b> (<code>macos-vz</code> actor + <code>native</code> executor)</summary>
@@ -84,13 +86,14 @@ Save `~/.config/needy/profiles/opencode.yaml`:
 extends: builtin:opencode
 actor:
   driver: macos-vz
-  workspace: { path: ~/workspace, from: "executor:build:/tmp/needy-demo", writable: true }
 executors:
-  build: { driver: native }
+  mac: { driver: native }
+commands:
+  - { match: "**", to: mac }
+unknown: mac
 ```
 
 ```sh
-mkdir -p /tmp/needy-demo
 needy run create -it --profile opencode
 ```
 
