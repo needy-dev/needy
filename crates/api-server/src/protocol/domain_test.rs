@@ -1,6 +1,8 @@
 use needy_api_proto::v1;
 use needy_core::types::Origin;
 
+use crate::control::RunnerHost;
+
 use super::*;
 
 #[test]

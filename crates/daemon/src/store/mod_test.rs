@@ -2,7 +2,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core::types::{Capabilities, RunnerRole};
+use sea_orm::{ActiveModelTrait as _, ActiveValue::Set, IntoActiveModel as _};
 
+use super::entity::join_token;
 use super::*;
 
 const HOUR_MS: i64 = 3_600_000;

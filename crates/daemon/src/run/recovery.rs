@@ -21,7 +21,7 @@ use crate::{Daemon, actor, pool, store};
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Snapshot {
+struct RunCheckpoint {
   version: u32,
   holder: String,
   command: Vec<String>,
@@ -214,7 +214,7 @@ impl Daemon {
   /// control detach. The directory and snapshot stay private to the owner.
   pub(crate) async fn snapshot_run(&self, run: &Run) -> Result<()> {
     let boot = run.boot();
-    let snapshot = Snapshot {
+    let checkpoint = RunCheckpoint {
       version: 2,
       holder: self.holder.id().into(),
       command: run.actor_command.clone(),
@@ -227,7 +227,7 @@ impl Daemon {
       boot: SavedBoot::from_boot(&boot),
     };
     let path = run.dir.join("control-snapshot.json");
-    let mut bytes = serde_json::to_vec(&snapshot)?;
+    let mut bytes = serde_json::to_vec(&checkpoint)?;
     bytes.push(b'\n');
     needy_common::fs::write_atomic(&path, &bytes, Some(0o600))?;
     Ok(())
@@ -243,7 +243,7 @@ impl Daemon {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
       };
-    let snapshot: Snapshot = serde_json::from_reader(file)?;
+    let snapshot: RunCheckpoint = serde_json::from_reader(file)?;
     if snapshot.version != 2 {
       bail!("unsupported control snapshot version");
     }

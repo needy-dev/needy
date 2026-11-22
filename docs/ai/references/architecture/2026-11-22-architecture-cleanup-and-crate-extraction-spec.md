@@ -3,7 +3,9 @@
 Status: approved scope contract synthesized from the owner's decisions on
 2026-11-22 following the
 [codebase architecture review](2026-11-22-codebase-architecture-review.md).
-Nothing in this contract is implemented yet; it does not claim shipped support.
+Tracks 1, 2A, 3A, 3B, 4A, and 4B landed in PRs #60–#65; Track 2B (moving
+`daemon/service` and `image` pull/build mechanics out of `crates/cli`) was
+deferred by owner decision on 2026-11-22.
 
 ## Problem Statement
 
