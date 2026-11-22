@@ -10,7 +10,7 @@ use needy_api_server::control::{Caller, Guest, GuestControl, Processes, Runs, St
 use needy_api_server::{Health, Listen, Server};
 use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_executor::driver::{LinuxContainer, Native, linux_container};
-use needy_core_executor::engine::{self, Engine};
+use needy_core_executor::engine::{self, testing::Fake};
 use needy_core_executor::process::Host;
 use needy_core_executor::service::ExecutorService;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -23,7 +23,6 @@ type RunningService = (Host, CancellationToken, tokio::task::JoinHandle<()>);
 /// Removing that resource kills its processes and closes its actual socket.
 #[derive(Default)]
 struct Runtime {
-  bodies: Mutex<HashMap<String, engine::models::ContainerCreateBody>>,
   sockets: Mutex<HashMap<String, PathBuf>>,
   running: Mutex<HashMap<String, RunningService>>,
   removal: Mutex<Option<Arc<Removal>>>,
@@ -68,101 +67,79 @@ impl Drop for Runtime {
   }
 }
 
-#[async_trait::async_trait]
-impl Engine for Runtime {
-  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, engine::Error> {
-    Ok(BTreeMap::new())
-  }
-  async fn inspect_image(&self, _: &str) -> Result<Option<engine::Image>, engine::Error> {
-    Ok(Some(engine::Image::default()))
-  }
-  fn pull_progress(&self, _: &str) -> futures_util::stream::BoxStream<'static, Result<engine::models::CreateImageInfo, engine::Error>> {
-    Box::pin(futures_util::stream::empty())
-  }
-  async fn create(&self, name: &str, body: engine::models::ContainerCreateBody) -> Result<(), engine::Error> {
-    self.bodies.lock().unwrap().insert(name.into(), body);
-    Ok(())
-  }
-  async fn start(&self, name: &str) -> Result<u32, engine::Error> {
-    let body = self.bodies.lock().unwrap().get(name).unwrap().clone();
-    let cmd = body.cmd.unwrap();
-    let endpoint = cmd.windows(2).find(|pair| pair[0] == "--listen").unwrap()[1].strip_prefix("unix:").unwrap();
-    let endpoint = std::path::Path::new(endpoint);
-    let target = endpoint.parent().unwrap().to_str().unwrap();
-    let binds = body.host_config.unwrap().binds.unwrap();
-    let source = binds
-      .iter()
-      .find_map(|bind| {
-        let (source, to) = bind.rsplit_once(':')?;
-        (to == target).then_some(source)
-      })
-      .unwrap();
-    let socket = PathBuf::from(source).join(endpoint.file_name().unwrap());
-    self.sockets.lock().unwrap().insert(name.into(), socket.clone());
-    let host = Host::default();
-    let service = ExecutorService {
-      host: host.clone(),
-      name: name.into(),
-    };
-    let server = Server::new(
-      Health {
-        instance_id: name.into(),
-        role: "executor",
-      },
-      Caller::Operator,
+impl Runtime {
+  fn engine(self: &Arc<Self>) -> Arc<Fake> {
+    let start_rt = Arc::clone(self);
+    let remove_rt = Arc::clone(self);
+    Arc::new(
+      Fake::new()
+        .with_stop_removes()
+        .with_wait_error(engine::Error::Refused("this fixture serves executor resources only".into()))
+        .with_on_start(Arc::new(move |name, body| {
+          let rt = Arc::clone(&start_rt);
+          let name = name.to_string();
+          Box::pin(async move {
+            let body = body.unwrap();
+            let cmd = body.cmd.unwrap();
+            let endpoint = cmd.windows(2).find(|pair| pair[0] == "--listen").unwrap()[1].strip_prefix("unix:").unwrap();
+            let endpoint = std::path::Path::new(endpoint);
+            let target = endpoint.parent().unwrap().to_str().unwrap();
+            let binds = body.host_config.unwrap().binds.unwrap();
+            let source = binds
+              .iter()
+              .find_map(|bind| {
+                let (source, to) = bind.rsplit_once(':')?;
+                (to == target).then_some(source)
+              })
+              .unwrap();
+            let socket = PathBuf::from(source).join(endpoint.file_name().unwrap());
+            rt.sockets.lock().unwrap().insert(name.clone(), socket.clone());
+            let host = Host::default();
+            let service = ExecutorService {
+              host: host.clone(),
+              name: name.clone(),
+            };
+            let server = Server::new(
+              Health {
+                instance_id: name.clone(),
+                role: "executor",
+              },
+              Caller::Operator,
+            )
+            .process_service(service.preserving())
+            .bind(&[Listen::Unix(socket)])
+            .await
+            .map_err(|e| engine::Error::Refused(e.to_string()))?;
+            let cancel = CancellationToken::new();
+            let stop = cancel.clone();
+            let served = tokio::spawn(async move {
+              server.serve(stop).await.unwrap();
+            });
+            rt.running.lock().unwrap().insert(name, (host, cancel, served));
+            Ok(std::process::id())
+          })
+        }))
+        .with_on_remove(Arc::new(move |name| {
+          let rt = Arc::clone(&remove_rt);
+          let name = name.to_string();
+          Box::pin(async move {
+            let removal = rt.removal.lock().unwrap().take();
+            if let Some(removal) = removal.as_ref().filter(|removal| removal.before) {
+              removal.pause().await;
+            }
+            let running = rt.running.lock().unwrap().remove(&name);
+            if let Some((host, cancel, served)) = running {
+              host.shutdown().await;
+              cancel.cancel();
+              served.await.unwrap();
+            }
+            if let Some(removal) = removal.as_ref().filter(|removal| !removal.before) {
+              removal.pause().await;
+            }
+            Ok(())
+          })
+        })),
     )
-    .process_service(service.preserving())
-    .bind(&[Listen::Unix(socket)])
-    .await
-    .map_err(|e| engine::Error::Refused(e.to_string()))?;
-    let cancel = CancellationToken::new();
-    let stop = cancel.clone();
-    let served = tokio::spawn(async move {
-      server.serve(stop).await.unwrap();
-    });
-    self.running.lock().unwrap().insert(name.into(), (host, cancel, served));
-    Ok(std::process::id())
-  }
-  fn logs(&self, _: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
-    Box::pin(futures_util::stream::empty())
-  }
-  async fn wait(&self, _: &str) -> Result<i64, engine::Error> {
-    Err(engine::Error::Refused("this fixture serves executor resources only".into()))
-  }
-  async fn stop(&self, name: &str, _: Duration) -> Result<(), engine::Error> {
-    self.remove(name).await
-  }
-  async fn remove(&self, name: &str) -> Result<(), engine::Error> {
-    let removal = self.removal.lock().unwrap().take();
-    if let Some(removal) = removal.as_ref().filter(|removal| removal.before) {
-      removal.pause().await;
-    }
-    self.bodies.lock().unwrap().remove(name);
-    let running = self.running.lock().unwrap().remove(name);
-    if let Some((host, cancel, served)) = running {
-      host.shutdown().await;
-      cancel.cancel();
-      served.await.unwrap();
-    }
-    if let Some(removal) = removal.as_ref().filter(|removal| !removal.before) {
-      removal.pause().await;
-    }
-    Ok(())
-  }
-  async fn download(&self, _: &str, _: &str) -> Result<Option<Vec<u8>>, engine::Error> {
-    Ok(None)
-  }
-  async fn commit_container(&self, _: &str, _: &str, _: &str) -> Result<String, engine::Error> {
-    Err(engine::Error::Refused("this fixture serves executor resources only".into()))
-  }
-  fn export_image(&self, _: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
-    Box::pin(futures_util::stream::empty())
-  }
-  async fn load_image(&self, _: futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>>) -> Result<(), engine::Error> {
-    Err(engine::Error::Refused("this fixture serves executor resources only".into()))
-  }
-  async fn remove_image(&self, _: &str) -> Result<(), engine::Error> {
-    Ok(())
   }
 }
 
@@ -178,7 +155,7 @@ async fn control(before: &Daemon, runtime: Arc<Runtime>) -> Daemon {
       state_dir: before.config.state_dir.clone(),
       allow: Vec::new(),
     },
-    runtime,
+    runtime.engine(),
   );
   let links: Arc<link::Links> = Arc::default();
   let cancel = CancellationToken::new();

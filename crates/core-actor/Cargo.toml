@@ -27,6 +27,7 @@ needy-core.workspace = true
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 object.workspace = true
+oci-layer = { workspace = true, features = ["squashfs"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -65,6 +66,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 needy-common = { workspace = true, features = ["testing"] }
+needy-core-executor = { workspace = true, features = ["test-support"] }
 needy-trace = { workspace = true, features = ["memory", "timing"] }
 serde_yaml.workspace = true
 tonic.workspace = true

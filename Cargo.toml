@@ -11,6 +11,7 @@ members = [
     "crates/core-executor",
     "crates/daemon",
     "crates/devcontainer-features",
+    "crates/oci-layer",
     "crates/trace",
     "xtask",
 ]
@@ -63,6 +64,8 @@ object = { version = "0.41", default-features = false, features = ["read_core", 
 # OCI Distribution v2 client for Dev Container features (`devcontainer-features`),
 # pinned to 0.15 so it stays on `reqwest` 0.12 + `rustls`/`ring` without `aws-lc-sys`.
 oci-client = { version = "0.15", default-features = false, features = ["rustls-tls"] }
+# OCI Image Specification types (`oci-layer`); matches the 0.8 already resolved via `oci-client`.
+oci-spec = { version = "0.8", default-features = false, features = ["image"] }
 portable-pty = "0.9"
 vt100 = "0.18"
 vte = "0.15"
@@ -105,6 +108,7 @@ uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
 devcontainer-features = { path = "crates/devcontainer-features", version = "0.0.7" }
+oci-layer = { path = "crates/oci-layer", version = "0.0.7" }
 needy-api-client = { path = "crates/api-client", version = "0.0.7" }
 needy-api-proto = { path = "crates/api-proto", version = "0.0.7" }
 needy-api-server = { path = "crates/api-server", version = "0.0.7" }

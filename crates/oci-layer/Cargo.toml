@@ -1,0 +1,23 @@
+[package]
+name = "oci-layer"
+description = "Standalone pure-Rust OCI layer canonicalization (overlayfs <-> OCI whiteouts), algebraic layer collapse, hybrid OCI/Docker tar assembly, and optional SquashFS disk generation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+default = []
+squashfs = ["dep:backhand"]
+
+[dependencies]
+backhand = { workspace = true, optional = true }
+flate2.workspace = true
+oci-spec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tar.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true

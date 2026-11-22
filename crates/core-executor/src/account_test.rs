@@ -1,98 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
-
-use futures_util::stream::BoxStream;
+use crate::engine::testing::Fake;
 
 use super::*;
-
-/// An engine whose containers have `files` (path to content), and which
-/// has no image until it pulled one.
-#[derive(Default)]
-struct Fake {
-  files: HashMap<&'static str, &'static str>,
-  calls: Mutex<Vec<String>>,
-}
-
-impl Fake {
-  fn record(&self, call: String) {
-    self.calls.lock().unwrap().push(call);
-  }
-}
-
-#[async_trait::async_trait]
-impl Engine for Fake {
-  async fn runtimes(&self) -> Result<BTreeMap<String, Vec<String>>, Error> {
-    Ok(BTreeMap::new())
-  }
-
-  async fn inspect_image(&self, _image: &str) -> Result<Option<crate::engine::Image>, Error> {
-    Ok(None)
-  }
-
-  fn pull_progress(&self, image: &str) -> BoxStream<'static, Result<crate::engine::models::CreateImageInfo, Error>> {
-    self.record(format!("pull {image}"));
-    Box::pin(futures_util::stream::empty())
-  }
-
-  async fn create(&self, name: &str, _body: ContainerCreateBody) -> Result<(), Error> {
-    self.record(format!("create {name}"));
-    if self.calls.lock().unwrap().iter().any(|c| c.starts_with("pull")) {
-      Ok(())
-    } else {
-      Err(Error::NotFound("No such image".into()))
-    }
-  }
-
-  async fn start(&self, _name: &str) -> Result<u32, Error> {
-    unreachable!("the scratch container never starts")
-  }
-
-  fn logs(&self, _name: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
-    Box::pin(futures_util::stream::empty())
-  }
-
-  async fn wait(&self, _name: &str) -> Result<i64, Error> {
-    Ok(0)
-  }
-
-  async fn stop(&self, _name: &str, _grace: std::time::Duration) -> Result<(), Error> {
-    Ok(())
-  }
-
-  async fn remove(&self, name: &str) -> Result<(), Error> {
-    self.record(format!("remove {name}"));
-    Ok(())
-  }
-
-  async fn download(&self, _name: &str, path: &str) -> Result<Option<Vec<u8>>, Error> {
-    let Some(text) = self.files.get(path) else {
-      return Ok(None);
-    };
-    let mut archive = tar::Builder::new(Vec::new());
-    let mut header = tar::Header::new_gnu();
-    header.set_size(text.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    archive.append_data(&mut header, path.rsplit('/').next().unwrap(), text.as_bytes()).unwrap();
-    Ok(Some(archive.into_inner().unwrap()))
-  }
-
-  async fn commit_container(&self, _container: &str, _repo: &str, _tag: &str) -> Result<String, Error> {
-    unreachable!("account tests never commit containers")
-  }
-
-  fn export_image(&self, _image: &str) -> BoxStream<'static, Result<bytes::Bytes, Error>> {
-    unreachable!("account tests never export images")
-  }
-
-  async fn load_image(&self, _tar: BoxStream<'static, Result<bytes::Bytes, Error>>) -> Result<(), Error> {
-    unreachable!("account tests never load images")
-  }
-
-  async fn remove_image(&self, _image: &str) -> Result<(), Error> {
-    unreachable!("account tests never remove images")
-  }
-}
 
 // ROOT CAUSE:
 //
@@ -104,13 +12,10 @@ impl Engine for Fake {
 // The fix binds account files rewritten for the profile's user.
 #[tokio::test]
 async fn the_image_files_are_rewritten_for_the_user_and_bound_read_only() {
-  let fake = Fake {
-    files: HashMap::from([
-      ("/etc/passwd", "root:x:0:0:root:/root:/bin/bash\nubuntu:x:1000:1000::/home/ubuntu:/bin/bash\n"),
-      ("/etc/group", "root:x:0:\nubuntu:x:1000:\n"),
-    ]),
-    ..Fake::default()
-  };
+  let fake = Fake::new()
+    .require_image_on_create()
+    .with_file("/etc/passwd", "root:x:0:0:root:/root:/bin/bash\nubuntu:x:1000:1000::/home/ubuntu:/bin/bash\n")
+    .with_file("/etc/group", "root:x:0:\nubuntu:x:1000:\n");
   let dir = tempfile::tempdir().unwrap();
   let user = Account {
     name: "bob",
@@ -132,12 +37,15 @@ async fn the_image_files_are_rewritten_for_the_user_and_bound_read_only() {
   assert_eq!(std::fs::read_to_string(passwd).unwrap(), "root:x:0:0:root:/root:/bin/bash\nbob:x:1000:1000::/home/bob:/bin/bash\n");
   assert_eq!(std::fs::read_to_string(group).unwrap(), "root:x:0:\nbob:x:1000:\n");
   assert_eq!(
-    *fake.calls.lock().unwrap(),
+    fake.calls(),
     [
       "remove needy-x-account",
       "create needy-x-account",
       "pull needy-executor:latest",
       "create needy-x-account",
+      "download needy-x-account /etc/passwd",
+      "download needy-x-account /etc/group",
+      "download needy-x-account /etc/shadow",
       "remove needy-x-account",
     ]
   );

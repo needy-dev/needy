@@ -1,27 +1,35 @@
 //! A layer disk: a layer as a SquashFS image a VM driver attaches read-only
 //! and the guest stacks with overlayfs.
 //!
-//! Its root holds the marker [`crate::contract::LAYER_MARKER`], which names
-//! the layer's digest, and the layer's tree under
-//! [`crate::contract::LAYER_ROOT`], with its deletions in overlayfs's form:
-//! a whiteout is a character device 0/0. The SquashFS writer writes no
-//! extended attributes, so an opaque directory cannot be marked as one; its
-//! disk whites out instead every entry the layers below still show in it.
+//! Its root holds a marker file (configured by [`DiskLayout::marker`]) that
+//! names the layer's digest (`<digest>\n`), and the layer's tree under
+//! [`DiskLayout::root`], with its deletions in overlayfs's form: a whiteout is
+//! a character device 0/0. The SquashFS writer writes no extended attributes, so
+//! an opaque directory cannot be marked as one; its disk whites out instead
+//! every entry the layers below still show in it.
 // NOTICE: `backhand` writes SquashFS in Rust on Linux and macOS alike, where
-// `macos-vz` builds its disks and no `mksquashfs` is at hand; both actor
-// kernels read zlib SquashFS (`guest::disk` has the configuration lines).
+// no `mksquashfs` is required; Linux kernels read zlib SquashFS
+// (`CONFIG_SQUASHFS_ZLIB`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use super::archive::{Entry, Index, Kind};
-use super::{Digest, Error, Result, io};
-use crate::contract::{LAYER_MARKER, LAYER_ROOT};
+use crate::archive::{Entry, Index, Kind};
+use crate::{Digest, Error, Result, io};
+
+/// Paths inside the generated SquashFS image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiskLayout<'a> {
+  /// File at the SquashFS root holding `<digest>\n` (e.g. `"layer-digest"`).
+  pub marker: &'a str,
+  /// Directory at the SquashFS root holding the layer's filesystem tree (e.g. `"root"`).
+  pub root: &'a str,
+}
 
 /// What the layers below a layer show: each visible path, and whether it is
 /// a directory.
 #[derive(Debug, Default)]
-pub(super) struct Below {
+pub struct Below {
   view: BTreeMap<PathBuf, bool>,
 }
 
@@ -65,7 +73,7 @@ impl Below {
 
 /// Whether `layer`'s disk depends on the layers below it: it has an opaque
 /// directory, or puts a directory back where it removed one.
-pub(super) fn hides_below(layer: &Index) -> bool {
+pub fn hides_below(layer: &Index) -> bool {
   !layer.opaque.is_empty() || layer.whiteouts.iter().any(|removed| layer.entries.get(removed).is_some_and(Entry::is_dir))
 }
 
@@ -75,8 +83,8 @@ enum Node {
 }
 
 /// Writes the disk of `layer`, whose digest is `digest`, over the layers
-/// `below`, to `path`: beside it, then renamed.
-pub(super) fn write(layer: &Index, digest: &Digest, below: &Below, path: &Path) -> Result<()> {
+/// `below`, using `layout`, to `path`: staged beside it, then renamed.
+pub fn write(layer: &Index, digest: &Digest, below: &Below, layout: &DiskLayout<'_>, path: &Path) -> Result<()> {
   let mut tree = BTreeMap::new();
   for at in layer.entries.keys() {
     // SquashFS has hard links, but `backhand` writes none: a hard link is
@@ -108,10 +116,10 @@ pub(super) fn write(layer: &Index, digest: &Digest, below: &Below, path: &Path) 
   fs.set_root_mode(0o755);
   let root_owned = |mode| backhand::NodeHeader::new(mode, 0, 0, 0);
   let marker = format!("{digest}\n").into_bytes();
-  fs.push_file(std::io::Cursor::new(marker), LAYER_MARKER, root_owned(0o644)).map_err(|e| failed(e.to_string()))?;
-  fs.push_dir(LAYER_ROOT, root_owned(0o755)).map_err(|e| failed(e.to_string()))?;
+  fs.push_file(std::io::Cursor::new(marker), layout.marker, root_owned(0o644)).map_err(|e| failed(e.to_string()))?;
+  fs.push_dir(layout.root, root_owned(0o755)).map_err(|e| failed(e.to_string()))?;
   for (at, node) in tree {
-    let target = Path::new(LAYER_ROOT).join(&at);
+    let target = Path::new(layout.root).join(&at);
     let pushed = match node {
       Node::Whiteout => fs.push_char_device(0, &target, root_owned(0)),
       Node::Entry(entry) => {

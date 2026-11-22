@@ -1,10 +1,31 @@
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
 use super::*;
 use crate::image::base;
-use crate::image::store::Store;
+use crate::image::store::{Error, Store};
+
+const MEDIA_TYPE_OCI_INDEX: &str = "application/vnd.oci.image.index.v1+json";
+const MEDIA_TYPE_OCI_MANIFEST: &str = "application/vnd.oci.image.manifest.v1+json";
+const MEDIA_TYPE_OCI_CONFIG: &str = "application/vnd.oci.image.config.v1+json";
+const MEDIA_TYPE_OCI_LAYER_TAR_GZIP: &str = "application/vnd.oci.image.layer.v1.tar+gzip";
+
+fn blob_path(digest: &Digest) -> String {
+  format!("blobs/sha256/{}", digest.hex())
+}
+
+fn append_bytes<W: Write>(builder: &mut tar::Builder<W>, path: &str, bytes: &[u8]) -> std::io::Result<()> {
+  let mut header = tar::Header::new_gnu();
+  header.set_entry_type(tar::EntryType::Regular);
+  header.set_mode(0o644);
+  header.set_uid(0);
+  header.set_gid(0);
+  header.set_mtime(0);
+  header.set_size(bytes.len() as u64);
+  builder.append_data(&mut header, path, bytes)
+}
 
 /// Helper to build an uncompressed layer tar in memory.
 struct LayerBuilder(tar::Builder<Vec<u8>>);

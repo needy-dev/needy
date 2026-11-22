@@ -310,10 +310,11 @@ fn a_device_defaults_to_the_hosts_path_and_every_permission() {
 
 /// Creates an executor container with typed run options from the executor
 /// image, runs a command in it and destroys it.
-/// Skips without Docker or without the image (`needy build --executor`), and
-/// off Linux, where the host cannot reach a socket inside a container.
+/// Requires a live Docker daemon and executor image (`needy build --executor`),
+/// on Linux where the host can reach a socket inside a container.
 #[cfg(target_os = "linux")]
 #[tokio::test]
+#[ignore = "requires live Docker daemon; verified via cargo xtask e2e"]
 async fn create_and_destroy_an_executor_container() {
   use needy_api_proto::v1::{ExecRequest, ExecStart, exec_request, exec_response};
 
@@ -330,10 +331,8 @@ async fn create_and_destroy_an_executor_container() {
   // The test asks the engine itself, not through the driver, whether the
   // container is gone.
   let engine = bollard::Docker::connect_with_defaults().unwrap();
-  if engine.ping().await.is_err() || engine.inspect_image(&options.image).await.is_err() {
-    eprintln!("skipped: no Docker or no {} image", options.image);
-    return;
-  }
+  engine.ping().await.expect("live Docker daemon must answer ping");
+  engine.inspect_image(&options.image).await.expect("executor image must exist in Docker");
   let mut spec = spec(docker("{ memory: 256MiB, cpus: 0.5, env: { NEEDY_TEST: typed } }"));
   spec.key = format!("test-{}", uuid::Uuid::new_v4().simple());
   // The executor runs as the owner of the socket directory, which is the
@@ -520,7 +519,7 @@ async fn a_container_of_another_user_joins_the_daemons_group_and_gives_it_its_so
     state_dir: state.path().to_path_buf(),
     ..options()
   };
-  let fake = Arc::new(Fake::default());
+  let fake = Arc::new(fake_engine());
   let driver = LinuxContainer::with_engine(options, fake.clone());
   let mut spec = spec(ContainerConfig::default());
   let me = nix::unistd::geteuid().as_raw();
@@ -530,7 +529,7 @@ async fn a_container_of_another_user_joins_the_daemons_group_and_gives_it_its_so
   let _ = driver.create(&spec).await;
 
   let gid = nix::unistd::getegid().as_raw().to_string();
-  let body = fake.bodies.lock().unwrap().iter().find(|(name, _)| name == "needy-build-s1").map(|(_, body)| body.clone()).unwrap();
+  let body = fake.body("needy-build-s1").unwrap();
   assert_eq!(body.host_config.unwrap().group_add, Some(vec![gid.clone()]));
   let cmd = body.cmd.unwrap();
   assert_eq!(cmd[cmd.len() - 2..], ["--socket-group".to_string(), gid]);
@@ -544,111 +543,22 @@ async fn a_container_of_the_daemons_own_user_joins_no_group() {
     state_dir: state.path().to_path_buf(),
     ..options()
   };
-  let fake = Arc::new(Fake::default());
+  let fake = Arc::new(fake_engine());
   let driver = LinuxContainer::with_engine(options, fake.clone());
   let mut spec = spec(ContainerConfig::default());
   spec.user = user(nix::unistd::geteuid().as_raw());
 
   let _ = driver.create(&spec).await;
 
-  let body = fake.bodies.lock().unwrap().iter().find(|(name, _)| name == "needy-build-s1").map(|(_, body)| body.clone()).unwrap();
+  let body = fake.body("needy-build-s1").unwrap();
   assert_eq!(body.host_config.unwrap().group_add, None);
   assert!(!body.cmd.unwrap().contains(&"--socket-group".to_string()));
 }
 
 /// An engine without the executor's image until it is pulled, whose
 /// containers do not start.
-#[derive(Default)]
-struct Fake {
-  calls: std::sync::Mutex<Vec<String>>,
-  /// The body of each container created, by its name.
-  bodies: std::sync::Mutex<Vec<(String, ContainerCreateBody)>>,
-}
-
-impl Fake {
-  fn record(&self, call: String) {
-    self.calls.lock().unwrap().push(call);
-  }
-
-  fn pulled(&self) -> bool {
-    self.calls.lock().unwrap().iter().any(|call| call.starts_with("pull"))
-  }
-}
-
-#[async_trait::async_trait]
-impl Engine for Fake {
-  async fn runtimes(&self) -> Result<std::collections::BTreeMap<String, Vec<String>>, engine::Error> {
-    Ok(Default::default())
-  }
-
-  async fn inspect_image(&self, _image: &str) -> Result<Option<engine::Image>, engine::Error> {
-    Ok(self.pulled().then(Default::default))
-  }
-
-  fn pull_progress(&self, image: &str) -> futures_util::stream::BoxStream<'static, Result<engine::models::CreateImageInfo, engine::Error>> {
-    self.record(format!("pull {image}"));
-    Box::pin(futures_util::stream::empty())
-  }
-
-  async fn create(&self, name: &str, body: ContainerCreateBody) -> Result<(), engine::Error> {
-    self.record(format!("create {name}"));
-    self.bodies.lock().unwrap().push((name.to_string(), body));
-    if self.pulled() {
-      Ok(())
-    } else {
-      Err(engine::Error::NotFound("No such image".into()))
-    }
-  }
-
-  async fn start(&self, name: &str) -> Result<u32, engine::Error> {
-    self.record(format!("start {name}"));
-    Err(engine::Error::Refused("cannot start".into()))
-  }
-
-  fn logs(&self, _name: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
-    Box::pin(futures_util::stream::empty())
-  }
-
-  async fn wait(&self, _name: &str) -> Result<i64, engine::Error> {
-    Ok(0)
-  }
-
-  async fn stop(&self, _name: &str, _grace: std::time::Duration) -> Result<(), engine::Error> {
-    Ok(())
-  }
-
-  async fn remove(&self, name: &str) -> Result<(), engine::Error> {
-    self.record(format!("remove {name}"));
-    Ok(())
-  }
-
-  async fn download(&self, name: &str, path: &str) -> Result<Option<Vec<u8>>, engine::Error> {
-    self.record(format!("download {name} {path}"));
-    Ok(None)
-  }
-
-  async fn commit_container(&self, container: &str, repo: &str, tag: &str) -> Result<String, engine::Error> {
-    self.record(format!("commit {container} {repo}:{tag}"));
-    Ok(format!("sha256:committed-{container}"))
-  }
-
-  fn export_image(&self, image: &str) -> futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>> {
-    self.record(format!("export {image}"));
-    Box::pin(futures_util::stream::empty())
-  }
-
-  async fn load_image(
-    &self,
-    _tar: futures_util::stream::BoxStream<'static, Result<bytes::Bytes, engine::Error>>,
-  ) -> Result<(), engine::Error> {
-    self.record("load".into());
-    Ok(())
-  }
-
-  async fn remove_image(&self, image: &str) -> Result<(), engine::Error> {
-    self.record(format!("remove_image {image}"));
-    Ok(())
-  }
+fn fake_engine() -> engine::testing::Fake {
+  engine::testing::Fake::new().require_image_on_create().with_start_error(engine::Error::Refused("cannot start".into()))
 }
 
 #[cfg(unix)]
@@ -659,7 +569,7 @@ async fn a_missing_image_is_pulled_as_docker_run_does_and_a_failed_start_removes
     state_dir: state.path().to_path_buf(),
     ..options()
   };
-  let fake = Arc::new(Fake::default());
+  let fake = Arc::new(fake_engine());
   let driver = LinuxContainer::with_engine(options, fake.clone());
   let mut spec = spec(ContainerConfig::default());
   spec.user = user(nix::unistd::geteuid().as_raw());
@@ -670,7 +580,7 @@ async fn a_missing_image_is_pulled_as_docker_run_does_and_a_failed_start_removes
   let name = "needy-build-s1";
   let scratch = format!("{name}-account");
   assert_eq!(
-    *fake.calls.lock().unwrap(),
+    fake.calls(),
     [
       format!("remove {scratch}"),
       format!("create {scratch}"),
