@@ -60,6 +60,12 @@ impl From<domain::Error> for ControlError {
   }
 }
 
+impl From<domain::Error> for Status {
+  fn from(error: domain::Error) -> Self {
+    ControlError::from(error).into()
+  }
+}
+
 #[cfg(test)]
 #[path = "status_test.rs"]
 mod tests;

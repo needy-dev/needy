@@ -70,6 +70,7 @@ pub enum ControlError {
   /// Original domain cause with safe producer facts.
   #[error("{error}")]
   Diagnostic {
+    #[source]
     error: Box<ControlError>,
     diagnostic: Diagnostic,
   },

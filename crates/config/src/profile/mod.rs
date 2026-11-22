@@ -88,9 +88,14 @@ impl Default for User {
 }
 
 impl User {
-  /// `/home/<name>`, the same on the actor and every executor.
+  /// `/root` for `root`, otherwise `/home/<name>`, the same on the actor and
+  /// every executor.
   pub fn home(&self) -> String {
-    format!("/home/{}", self.name)
+    if self.name == "root" {
+      "/root".into()
+    } else {
+      format!("/home/{}", self.name)
+    }
   }
 
   /// Expands a leading `~` to [`User::home`].

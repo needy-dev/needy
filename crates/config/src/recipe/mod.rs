@@ -82,6 +82,18 @@ impl IdentityField {
   }
 }
 
+impl std::fmt::Display for IdentityField {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for IdentityField {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
 /// Recipes declare no prepend lists; every list replaces the parent's.
 const MERGE: merge::Rules = merge::Rules {
   prepend: &[],

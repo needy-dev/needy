@@ -11,8 +11,8 @@ use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
 use super::{Streamed, caller};
-use crate::control::{Caller, ControlError, ExecOpen, Inputs, Processes, WindowSize};
-use crate::protocol::{domain, status};
+use crate::control::{Caller, ControlError, ExecOpen, ExecSpec, Inputs, Processes};
+use crate::protocol::domain;
 
 pub struct Adapter<P> {
   pub processes: Arc<P>,
@@ -62,7 +62,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
     let first = inbound.message().await?.ok_or_else(|| ControlError::Invalid("empty request stream".into()))?;
     let open = match first.payload {
       Some(exec_request::Payload::Start(start)) => {
-        let mut spec = domain::exec_spec(start).map_err(ControlError::from)?;
+        let mut spec: ExecSpec = start.try_into()?;
         spec.run = run(&caller, spec.run)?;
         spec.runner = runner(&caller, spec.runner)?;
         spec.by = Some(caller.principal());
@@ -77,16 +77,13 @@ impl<P: Processes> ProcessService for Adapter<P> {
           run(&caller, attach.run_id)?
         },
         replay: attach.replay,
-        window: attach.window.map(|w| WindowSize {
-          rows: w.rows,
-          cols: w.cols,
-        }),
+        window: attach.window.map(Into::into),
         read_only: attach.read_only,
       },
       _ => return Err(ControlError::Invalid("the first request must start or attach".into()).into()),
     };
     let outputs = self.processes.exec(open, inputs(inbound)).await?;
-    let responses = outputs.map(|output| output.map(domain::proto_exec_output).map_err(status::status));
+    let responses = outputs.map(|output| output.map(Into::into).map_err(Status::from));
     Ok(Response::new(Box::pin(responses)))
   }
 
@@ -95,7 +92,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
     let request = request.into_inner();
     let run = run(&caller, request.run_id)?;
     let runner = runner(&caller, request.runner)?;
-    let processes = self.processes.list(&run, &runner).await?.into_iter().map(domain::proto_process_info).collect();
+    let processes = self.processes.list(&run, &runner).await?.into_iter().map(Into::into).collect();
     Ok(Response::new(ListProcessesResponse { processes }))
   }
 

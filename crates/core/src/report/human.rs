@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use anstyle::{AnsiColor, Style};
 
-use super::{FindingKind, MergeState, Summary, actor_stop, duration, ms, network_name, truncate};
+use super::{FindingKind, MergeState, Summary, actor_stop, duration, ms, truncate};
 use crate::event::ActorExit;
 use crate::types::{Capture, RunState};
 
@@ -156,7 +156,7 @@ fn write(out: &mut String, s: &Summary, color: bool) -> std::fmt::Result {
   if !s.network.is_empty() {
     let host_width = s.network.iter().map(|h| h.host.chars().count()).max().unwrap_or(0);
     let rows: Vec<(String, String)> =
-      s.network.iter().map(|h| (network_name(h.network).to_string(), format!("{:<host_width$}  {}", h.host, h.count))).collect();
+      s.network.iter().map(|h| (h.network.to_string(), format!("{:<host_width$}  {}", h.host, h.count))).collect();
     writeln!(out, "\nNetwork")?;
     aligned(out, "  ", &rows);
   }

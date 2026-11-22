@@ -172,6 +172,30 @@ impl OciRuntime {
   }
 }
 
+impl std::fmt::Display for OciRuntime {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for OciRuntime {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl std::str::FromStr for OciRuntime {
+  type Err = crate::value::ValueError;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    match text {
+      "runc" => Ok(Self::Runc),
+      "runsc" => Ok(Self::Runsc),
+      other => Err(crate::value::ValueError(format!("unknown OCI runtime {other:?}; expected runc or runsc"))),
+    }
+  }
+}
+
 impl ActorDriver {
   pub const ALL: [Self; 4] = [
     Self::LinuxFirecracker,
@@ -194,6 +218,23 @@ impl ActorDriver {
 impl std::fmt::Display for ActorDriver {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for ActorDriver {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
+impl std::str::FromStr for ActorDriver {
+  type Err = crate::value::ValueError;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    Self::ALL
+      .into_iter()
+      .find(|driver| driver.as_str() == text)
+      .ok_or_else(|| crate::value::ValueError(format!("unknown actor driver {text:?}")))
   }
 }
 

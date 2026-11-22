@@ -188,8 +188,8 @@ hooks:
   )
   .unwrap();
 
-  assert_eq!(image.hooks.start, ["./prepare.sh", "'git' 'config' 'user.name' 'Agent Smith'",]);
-  assert_eq!(image.hooks.stop, ["./flush.sh", "'sync' 'it'\\''s done'"]);
+  assert_eq!(image.hooks.start, ["./prepare.sh", "git config user.name 'Agent Smith'"]);
+  assert_eq!(image.hooks.stop, ["./flush.sh", "sync 'it'\\''s done'"]);
 }
 
 #[test]

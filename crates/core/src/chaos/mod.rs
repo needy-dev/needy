@@ -74,6 +74,18 @@ impl FaultSource {
   }
 }
 
+impl std::fmt::Display for FaultSource {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str(self.as_str())
+  }
+}
+
+impl AsRef<str> for FaultSource {
+  fn as_ref(&self) -> &str {
+    self.as_str()
+  }
+}
+
 /// One fault of a run with its counts, as `needy chaos ls` lists it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FaultState {

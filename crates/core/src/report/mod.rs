@@ -4,9 +4,9 @@
 //! events and decides whether the text may carry colors.
 
 mod human;
+mod markdown;
 
 use std::collections::BTreeMap;
-use std::fmt::Write;
 
 use needy_config::profile::FaultDomain;
 use serde::Serialize;
@@ -145,7 +145,6 @@ struct Tally {
   /// What ran the actor, and how it caught an exec.
   actor_driver: Option<String>,
   actor_capture: Option<Capture>,
-  routed: usize,
   kept: usize,
   denied: usize,
   faults: usize,
@@ -155,7 +154,6 @@ struct Tally {
   probes: BTreeMap<String, usize>,
   /// Injected faults by `NAME (DOMAIN)`.
   fault_names: BTreeMap<String, usize>,
-  executor_cmds: BTreeMap<String, usize>,
   actor_net: BTreeMap<String, usize>,
   executor_net: BTreeMap<String, usize>,
   /// Commands placed on each executor.
@@ -222,7 +220,6 @@ impl Tally {
           Outcome::Run(Placement::Actor) if decide.origin == Origin::ActorProxy => self.kept += 1,
           Outcome::Run(Placement::Actor) => {}
           Outcome::Run(Placement::Executor(executor)) => {
-            self.routed += 1;
             *self.routed_by.entry(executor.clone()).or_default() += 1;
           }
           Outcome::Deny(message) => {
@@ -243,7 +240,6 @@ impl Tally {
           self.cli += 1;
         }
         if is_command(start.origin) {
-          *self.executor_cmds.entry(format!("{} on {}", command_name(&start.argv), start.executor)).or_default() += 1;
           self.commands_by.entry((command_name(&start.argv).to_string(), start.executor.clone())).or_default().0 += 1;
         }
       }
@@ -362,30 +358,19 @@ impl Tally {
   }
 }
 
-fn network_name(network: Network) -> &'static str {
-  match network {
-    Network::Actor => "actor",
-    Network::Executor => "executor",
-  }
-}
-
 /// Renders the report of run `id` from its events, in recorded order.
 pub fn render(id: &str, events: &[Recorded], level: Level, format: Format) -> String {
   let mut tally = Tally::default();
   for recorded in events {
     tally.add(recorded.time_ms, &recorded.event);
   }
+  let summary = summarize(id, events, &tally, level);
   match format {
-    Format::Human { color } => human::render(&summarize(id, events, &tally, level), color),
-    Format::Markdown => {
-      let mut out = String::new();
-      // NOTICE: writing to a `String` cannot fail.
-      write_report(&mut out, id, events, &tally, level).expect("formatting into a String");
-      out
-    }
+    Format::Human { color } => human::render(&summary, color),
+    Format::Markdown => markdown::render(&summary),
     // NOTICE: a summary is strings, numbers, lists and maps with string
     // keys, which always serialize to JSON.
-    Format::Json => serde_json::to_string_pretty(&summarize(id, events, &tally, level)).expect("a summary serializes to JSON") + "\n",
+    Format::Json => serde_json::to_string_pretty(&summary).expect("a summary serializes to JSON") + "\n",
   }
 }
 
@@ -636,6 +621,10 @@ pub struct TimelineEvent {
   pub offset_ms: i64,
   pub kind: String,
   pub payload: serde_json::Value,
+  /// Original field-ordered JSON payload, used by the Markdown timeline so
+  /// key order is preserved before truncation.
+  #[serde(skip)]
+  pub(super) raw_payload: String,
 }
 
 /// The first end, or the last event, minus the create (or the first event).
@@ -654,7 +643,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     find(FindingKind::RunFailed, format!("run failed: {reason}"));
   }
   for (transfer, name, reason) in &t.files_failed {
-    find(FindingKind::FilesFailed, format!("{} {name} failed: {reason}", transfer.as_str()));
+    find(FindingKind::FilesFailed, format!("{transfer} {name} failed: {reason}"));
   }
   if !t.probes.is_empty() {
     let count = t.probes.values().sum::<usize>();
@@ -665,7 +654,7 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     find(FindingKind::DeniedCommand, format!("denied command: {argv}: {message}"));
   }
   for (host, network) in &t.net_denials {
-    find(FindingKind::DeniedNetwork, format!("network denied: {host} ({} network)", network_name(*network)));
+    find(FindingKind::DeniedNetwork, format!("network denied: {host} ({network} network)"));
   }
   if t.faults > 0 {
     find(FindingKind::Faults, format!("injected faults: {} ({})", t.faults, top(&t.fault_names, TOP)));
@@ -746,187 +735,19 @@ fn summarize(id: &str, events: &[Recorded], t: &Tally, level: Level) -> Summary 
     events: (level == Level::Detailed).then(|| {
       events
         .iter()
-        .map(|recorded| TimelineEvent {
-          offset_ms: recorded.time_ms - created,
-          kind: recorded.event.kind().to_string(),
-          // NOTICE: an event's payload is JSON by construction.
-          payload: serde_json::from_str(&recorded.event.payload()).unwrap_or_default(),
+        .map(|recorded| {
+          let raw_payload = recorded.event.payload();
+          TimelineEvent {
+            offset_ms: recorded.time_ms - created,
+            kind: recorded.event.kind().to_string(),
+            // NOTICE: an event's payload is JSON by construction.
+            payload: serde_json::from_str(&raw_payload).unwrap_or_default(),
+            raw_payload,
+          }
         })
         .collect()
     }),
   }
-}
-
-fn write_report(out: &mut String, id: &str, events: &[Recorded], t: &Tally, level: Level) -> std::fmt::Result {
-  let (created, ended) = span(events, t);
-  let driver = match &t.actor_exit {
-    None => "-".to_string(),
-    Some(ActorExit {
-      signal: Some(signal),
-      ..
-    }) => signal.clone(),
-    Some(ActorExit { code, .. }) => format!("exit {}", code.map_or("-".to_string(), |c| c.to_string())),
-  };
-
-  writeln!(out, "# Run report: {id} (profile: {})\n", t.profile.as_deref().unwrap_or("-"))?;
-  if t.dropped > 0 {
-    writeln!(
-      out,
-      "> ⚠️ The trace is incomplete: {} events were dropped when the trace queue was full, so the counts below may be low.\n",
-      t.dropped
-    )?;
-  }
-  writeln!(out, "## Overview\n")?;
-  if let Some(snapshot) = &t.snapshot {
-    writeln!(out, "Snapshot: `{snapshot}`.\n")?;
-  }
-  let by = |principal: &Option<Principal>| principal.as_ref().map_or("-".to_string(), Principal::to_string);
-  if t.started_by.is_some() || t.stopped_by.is_some() {
-    write!(out, "Started by `{}`, stopped by `{}`", by(&t.started_by), by(&t.stopped_by))?;
-    if let Some(how) = &t.actor_stop {
-      write!(out, " ({})", actor_stop(how))?;
-    }
-    writeln!(out, ".\n")?;
-  }
-  writeln!(
-    out,
-    "| Duration | State | Driving program | Routed to executor | Kept on actor | CLI commands | Failed | Model calls (actor gateway) |"
-  )?;
-  writeln!(out, "| --- | --- | --- | --- | --- | --- | --- | --- |")?;
-  writeln!(
-    out,
-    "| {} | {} | {driver} | {} | {} | {} | {} | {} |\n",
-    duration(ended - created),
-    t.state.map_or("-", RunState::as_str),
-    t.routed,
-    t.kept,
-    t.cli,
-    t.failed,
-    t.model_calls,
-  )?;
-  writeln!(out, "## Decisions\n")?;
-  writeln!(out, "| ↪️ Routed to executor | 🏠 Kept on actor | 🚫 Denied | 💥 Fault injected |")?;
-  writeln!(out, "| --- | --- | --- | --- |")?;
-  writeln!(out, "| {} | {} | {} | {} |\n", t.routed, t.kept, t.denied, t.faults)?;
-  match &t.route_names {
-    None => writeln!(out, "🏠 No actor ran in this run.\n")?,
-    Some(None) => writeln!(out, "🏠 Kept on actor counts every command the actor ran, except needy's own init and proxy.\n")?,
-    Some(Some(names)) if names.is_empty() => {
-      writeln!(out, "🏠 The actor routes no command names to needy, so commands it ran are not counted as kept on actor.\n")?
-    }
-    Some(Some(names)) => {
-      let names = names.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
-      writeln!(
-        out,
-        "🏠 Kept on actor counts only commands the actor's kernel routed to needy ({names}); other commands ran on the actor without a trace event.\n"
-      )?;
-    }
-  }
-  if let Some(driver) = &t.actor_driver {
-    writeln!(out, "The actor ran in `{driver}`.\n")?;
-  }
-  if t.actor_capture == Some(Capture::Shims) {
-    writeln!(out, "{SHIM_ROUTING}\n")?;
-  }
-
-  writeln!(out, "## Findings\n")?;
-  let mut any = false;
-  if let Some(reason) = &t.failure {
-    any = true;
-    writeln!(out, "- ❌ Run failed: {reason}")?;
-  }
-  for (transfer, name, reason) in &t.files_failed {
-    any = true;
-    let transfer = match transfer {
-      Transfer::CopyIn => "Copy-in",
-      Transfer::MirrorOut => "Mirror-out",
-    };
-    writeln!(out, "- ❌ {transfer} `{name}` failed: {reason}")?;
-  }
-  if !t.probes.is_empty() {
-    any = true;
-    writeln!(out, "- ⚠️ Environment probing: {} identity commands ({})", t.probes.values().sum::<usize>(), top(&t.probes, TOP))?;
-  }
-  for (argv, message) in &t.denials {
-    any = true;
-    writeln!(out, "- 🚫 Denied command: `{argv}`: {message}")?;
-  }
-  for (host, network) in &t.net_denials {
-    any = true;
-    writeln!(out, "- 🚫 Network denied: {host} ({} network)", network_name(*network))?;
-  }
-  if t.faults > 0 {
-    any = true;
-    writeln!(out, "- ℹ️ Injected faults: {} ({})", t.faults, top(&t.fault_names, TOP))?;
-  }
-  for (_, message) in t.synced.values().filter_map(sync_finding) {
-    any = true;
-    writeln!(out, "- ⚠️ {}", capitalize(&message))?;
-  }
-  if !t.chaos_changes.is_empty() {
-    any = true;
-    writeln!(out, "- ℹ️ Chaos changed while running: {}", t.chaos_changes.join(", "))?;
-  }
-  if !any {
-    writeln!(out, "- No findings.")?;
-  }
-
-  writeln!(out, "\n## Top activity\n")?;
-  let mut slowest = t.slowest.clone();
-  slowest.sort_by_key(|s| std::cmp::Reverse(s.0));
-  let slowest = slowest.iter().take(3).map(|(ms, argv)| format!("`{}` ({ms} ms)", truncate(argv, 60))).collect::<Vec<_>>().join(", ");
-  let lines = [
-    ("Executor commands", top(&t.executor_cmds, TOP)),
-    ("Executor network", top(&t.executor_net, TOP)),
-    ("Actor network", top(&t.actor_net, TOP)),
-    ("Slowest commands", slowest),
-  ];
-  let mut any = false;
-  for (label, value) in lines.iter().filter(|(_, value)| !value.is_empty()) {
-    any = true;
-    writeln!(out, "- {label}: {value}")?;
-  }
-  if !any {
-    writeln!(out, "- No activity.")?;
-  }
-  if !t.synced.is_empty() {
-    writeln!(out, "\n## Synced files\n")?;
-    writeln!(out, "| Mapping | Merge | Taken | Resolved | Conflicts | Store |")?;
-    writeln!(out, "| --- | --- | --- | --- | --- | --- |")?;
-    for s in t.synced.values() {
-      writeln!(
-        out,
-        "| `{}` | {} | {} | {} | {} | `{}` (control host, account `{}`) |",
-        s.name,
-        s.merge.as_str(),
-        s.taken,
-        s.resolved,
-        s.conflicts.len(),
-        s.store,
-        s.account
-      )?;
-    }
-  }
-  let hooks = latency(t);
-  if !hooks.is_empty() {
-    writeln!(out, "\n## Latency\n")?;
-    writeln!(out, "| Hook | Count | Mean | Min | Max |")?;
-    writeln!(out, "| --- | --- | --- | --- | --- |")?;
-    for h in &hooks {
-      writeln!(out, "| `{}` | {} | {} | {} | {} |", h.hook, h.count, ms(h.mean_us), ms(h.min_us), ms(h.max_us))?;
-    }
-  }
-
-  if level == Level::Detailed {
-    writeln!(out, "\n## Event timeline\n")?;
-    writeln!(out, "| +ms | Event | Details |")?;
-    writeln!(out, "| --- | --- | --- |")?;
-    for recorded in events {
-      let details = truncate(&recorded.event.payload(), 160).replace('|', "\\|");
-      writeln!(out, "| {} | {} | `{details}` |", recorded.time_ms - created, recorded.event.kind())?;
-    }
-  }
-  Ok(())
 }
 
 #[cfg(test)]

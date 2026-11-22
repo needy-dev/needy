@@ -30,9 +30,13 @@ pub struct Account<'a> {
 }
 
 impl Account<'_> {
-  /// `/home/<name>`.
+  /// `/root` for `root`, otherwise `/home/<name>`.
   pub fn home(&self) -> String {
-    format!("/home/{}", self.name)
+    if self.name == "root" {
+      "/root".into()
+    } else {
+      format!("/home/{}", self.name)
+    }
   }
 
   fn passwd_entry(&self) -> String {

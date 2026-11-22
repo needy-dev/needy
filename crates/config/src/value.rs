@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, Serializer};
 /// A value that does not have the form its type needs.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
-pub struct ValueError(String);
+pub struct ValueError(pub(crate) String);
 
 /// A span of time: `500ms`, `2s`, `10m` or `3d4h`. A bare number is seconds.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -42,6 +42,24 @@ impl From<Duration> for std::time::Duration {
   }
 }
 
+impl From<std::time::Duration> for Duration {
+  fn from(value: std::time::Duration) -> Self {
+    Self(value)
+  }
+}
+
+impl AsRef<std::time::Duration> for Duration {
+  fn as_ref(&self) -> &std::time::Duration {
+    &self.0
+  }
+}
+
+impl fmt::Display for Duration {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fmt::Display::fmt(&humantime::format_duration(self.0), f)
+  }
+}
+
 impl FromStr for Duration {
   type Err = ValueError;
 
@@ -57,7 +75,7 @@ impl FromStr for Duration {
 /// Written back as users write it: `500ms`, `2s`, `1m 30s`.
 impl Serialize for Duration {
   fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&humantime::format_duration(self.0).to_string())
+    s.collect_str(self)
   }
 }
 
@@ -114,6 +132,27 @@ impl ByteSize {
   /// The size in whole MiB, rounded to the nearest.
   pub const fn mib(&self) -> u64 {
     (self.bytes + MIB / 2) / MIB
+  }
+}
+
+impl fmt::Display for ByteSize {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    const KIB: u64 = 1 << 10;
+    const GIB: u64 = 1 << 30;
+    const TIB: u64 = 1 << 40;
+    if self.bytes == 0 {
+      f.write_str("0MiB")
+    } else if self.bytes.is_multiple_of(TIB) {
+      write!(f, "{}TiB", self.bytes / TIB)
+    } else if self.bytes.is_multiple_of(GIB) {
+      write!(f, "{}GiB", self.bytes / GIB)
+    } else if self.bytes.is_multiple_of(MIB) {
+      write!(f, "{}MiB", self.bytes / MIB)
+    } else if self.bytes.is_multiple_of(KIB) {
+      write!(f, "{}KiB", self.bytes / KIB)
+    } else {
+      write!(f, "{}B", self.bytes)
+    }
   }
 }
 
@@ -186,6 +225,36 @@ impl Extend<String> for Words {
 impl From<Vec<String>> for Words {
   fn from(words: Vec<String>) -> Self {
     Self(words)
+  }
+}
+
+impl From<Words> for Vec<String> {
+  fn from(words: Words) -> Self {
+    words.0
+  }
+}
+
+impl AsRef<[String]> for Words {
+  fn as_ref(&self) -> &[String] {
+    &self.0
+  }
+}
+
+impl IntoIterator for Words {
+  type Item = String;
+  type IntoIter = std::vec::IntoIter<String>;
+
+  fn into_iter(self) -> Self::IntoIter {
+    self.0.into_iter()
+  }
+}
+
+impl<'a> IntoIterator for &'a Words {
+  type Item = &'a String;
+  type IntoIter = std::slice::Iter<'a, String>;
+
+  fn into_iter(self) -> Self::IntoIter {
+    self.0.iter()
   }
 }
 
@@ -290,6 +359,24 @@ impl fmt::Display for Glob {
   }
 }
 
+impl AsRef<str> for Glob {
+  fn as_ref(&self) -> &str {
+    &self.0
+  }
+}
+
+impl From<String> for Glob {
+  fn from(pattern: String) -> Self {
+    Self(pattern)
+  }
+}
+
+impl From<&str> for Glob {
+  fn from(pattern: &str) -> Self {
+    Self(pattern.to_string())
+  }
+}
+
 /// Text with `{name}` placeholders that are filled in later, such as an
 /// executor key `"{run}"` or a hostname `"instance-{hash}"`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
@@ -319,6 +406,24 @@ impl Template {
 impl fmt::Display for Template {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(&self.0)
+  }
+}
+
+impl AsRef<str> for Template {
+  fn as_ref(&self) -> &str {
+    &self.0
+  }
+}
+
+impl From<String> for Template {
+  fn from(text: String) -> Self {
+    Self(text)
+  }
+}
+
+impl From<&str> for Template {
+  fn from(text: &str) -> Self {
+    Self(text.to_string())
   }
 }
 

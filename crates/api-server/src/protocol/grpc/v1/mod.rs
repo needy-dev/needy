@@ -55,6 +55,15 @@ fn caller<T>(listener: &Caller, request: &tonic::Request<T>) -> Caller {
   request.extensions().get::<Caller>().cloned().unwrap_or_else(|| listener.clone())
 }
 
+/// The caller of a call only an operator or a paired client may make.
+fn operator<T>(listener: &Caller, request: &tonic::Request<T>, actor_refusal: &str, runner_refusal: &str) -> Result<Caller, Status> {
+  match caller(listener, request) {
+    caller @ (Caller::Operator | Caller::Client { .. }) => Ok(caller),
+    Caller::Actor { .. } => Err(ControlError::role_denied(actor_refusal).into()),
+    Caller::Runner { .. } => Err(ControlError::role_denied(runner_refusal).into()),
+  }
+}
+
 /// Management authority is an explicit server grant, independent of transport.
 fn administer<T>(listener: &Caller, request: &tonic::Request<T>, what: &str, others: &str) -> Result<(), Status> {
   match caller(listener, request) {

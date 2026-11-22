@@ -154,7 +154,7 @@ impl Error {
 
   pub fn kind(&self) -> Kind {
     match self {
-      Self::Status(status) => kind(status.code()),
+      Self::Status(status) => status.code().into(),
       Self::Transport(_) | Self::Unreachable { .. } | Self::Connector { .. } => Kind::Unavailable,
       Self::InvalidEndpoint(_) | Self::InvalidToken | Self::IdentityMismatch { .. } => Kind::Invalid,
       Self::Failed { .. } => Kind::Failed,
@@ -176,17 +176,19 @@ impl From<tonic::Status> for Error {
   }
 }
 
-fn kind(code: tonic::Code) -> Kind {
-  use tonic::Code;
-  match code {
-    Code::Unauthenticated => Kind::Unauthenticated,
-    Code::PermissionDenied => Kind::Denied,
-    Code::NotFound => Kind::NotFound,
-    Code::InvalidArgument => Kind::Invalid,
-    Code::FailedPrecondition => Kind::Failed,
-    Code::ResourceExhausted => Kind::Exhausted,
-    Code::Unavailable => Kind::Unavailable,
-    _ => Kind::Other,
+impl From<tonic::Code> for Kind {
+  fn from(code: tonic::Code) -> Self {
+    use tonic::Code;
+    match code {
+      Code::Unauthenticated => Self::Unauthenticated,
+      Code::PermissionDenied => Self::Denied,
+      Code::NotFound => Self::NotFound,
+      Code::InvalidArgument => Self::Invalid,
+      Code::FailedPrecondition => Self::Failed,
+      Code::ResourceExhausted => Self::Exhausted,
+      Code::Unavailable => Self::Unavailable,
+      _ => Self::Other,
+    }
   }
 }
 

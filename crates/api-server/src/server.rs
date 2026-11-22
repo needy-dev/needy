@@ -38,10 +38,33 @@ pub enum Listen {
 impl Listen {
   /// `unix:/path`, or `HOST:PORT`.
   pub fn parse(text: &str) -> Self {
+    Self::from(text)
+  }
+}
+
+impl From<&str> for Listen {
+  fn from(text: &str) -> Self {
     match text.strip_prefix("unix:") {
       Some(path) => Self::Unix(PathBuf::from(path)),
       None => Self::Tcp(text.to_string()),
     }
+  }
+}
+
+impl From<String> for Listen {
+  fn from(text: String) -> Self {
+    match text.strip_prefix("unix:") {
+      Some(path) => Self::Unix(PathBuf::from(path)),
+      None => Self::Tcp(text),
+    }
+  }
+}
+
+impl std::str::FromStr for Listen {
+  type Err = std::convert::Infallible;
+
+  fn from_str(text: &str) -> Result<Self, Self::Err> {
+    Ok(Self::from(text))
   }
 }
 

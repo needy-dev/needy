@@ -16,9 +16,8 @@ use needy_api_proto::v1::{
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::{Streamed, administer, caller};
+use super::{Streamed, administer, caller, operator};
 use crate::control::{Caller, ControlError, Runners};
-use crate::protocol::domain;
 
 pub struct Adapter<R> {
   pub runners: Arc<R>,
@@ -28,10 +27,7 @@ pub struct Adapter<R> {
 impl<R> Adapter<R> {
   /// Refuses a call only an operator or a client may make.
   fn operator<T>(&self, request: &Request<T>) -> Result<(), Status> {
-    match caller(&self.caller, request) {
-      Caller::Operator | Caller::Client { .. } => Ok(()),
-      Caller::Actor { .. } | Caller::Runner { .. } => Err(ControlError::role_denied("only operators manage runners").into()),
-    }
+    operator(&self.caller, request, "only operators manage runners", "only operators manage runners").map(|_| ())
   }
 
   /// Refuses a call only the operator may make: a client is refused too.
@@ -76,17 +72,17 @@ impl<R: Runners> RunnerService for Adapter<R> {
 
   async fn create_join_token(&self, request: Request<CreateJoinTokenRequest>) -> Result<Response<CreateJoinTokenResponse>, Status> {
     self.admin(&request, "creating join tokens")?;
-    let request = domain::new_join_token(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let created = self.runners.create_join_token(request).await?;
     Ok(Response::new(CreateJoinTokenResponse {
-      join_token: Some(domain::proto_join_token(created.info)),
+      join_token: Some(created.info.into()),
       token: created.token,
     }))
   }
 
   async fn list_join_tokens(&self, request: Request<ListJoinTokensRequest>) -> Result<Response<ListJoinTokensResponse>, Status> {
     self.admin(&request, "listing join tokens")?;
-    let join_tokens = self.runners.join_tokens().await?.into_iter().map(domain::proto_join_token).collect();
+    let join_tokens = self.runners.join_tokens().await?.into_iter().map(Into::into).collect();
     Ok(Response::new(ListJoinTokensResponse { join_tokens }))
   }
 
@@ -97,10 +93,10 @@ impl<R: Runners> RunnerService for Adapter<R> {
   }
 
   async fn join(&self, request: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
-    let request = domain::joining(request.into_inner()).map_err(ControlError::from)?;
+    let request = request.into_inner().try_into()?;
     let joined = self.runners.join(request).await?;
     Ok(Response::new(JoinResponse {
-      runner: Some(domain::proto_runner(joined.runner)),
+      runner: Some(joined.runner.into()),
       credential: joined.credential,
       heartbeat_interval_ms: joined.heartbeat_interval_ms,
     }))
@@ -110,7 +106,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
     let Caller::Runner { name } = caller(&self.caller, &request) else {
       return Err(ControlError::role_denied("only runners send heartbeats").into());
     };
-    let report = domain::runner_report(request.into_inner()).map_err(ControlError::from)?;
+    let report = request.into_inner().try_into()?;
     let beat = self.runners.heartbeat(&name, report).await?;
     Ok(Response::new(HeartbeatResponse {
       credential: beat.credential.unwrap_or_default(),
@@ -120,7 +116,7 @@ impl<R: Runners> RunnerService for Adapter<R> {
 
   async fn list_runners(&self, request: Request<ListRunnersRequest>) -> Result<Response<ListRunnersResponse>, Status> {
     self.operator(&request)?;
-    let runners = self.runners.runners().await?.into_iter().map(domain::proto_runner).collect();
+    let runners = self.runners.runners().await?.into_iter().map(Into::into).collect();
     Ok(Response::new(ListRunnersResponse { runners }))
   }
 
