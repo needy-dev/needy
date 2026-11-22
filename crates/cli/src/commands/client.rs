@@ -1,8 +1,7 @@
 //! Server-side client invitations and revocation. Local pairing belongs to config.
 
-use super::runner::{ago, time};
-use crate::cli::Context;
-use crate::output::{self, OutputFormat, Row, outln};
+use crate::cli::{ConnectionArgs, Context};
+use crate::output::{self, OutputFormat, Row, ago, outln, time};
 use anyhow::{Result, bail};
 use clap::Subcommand;
 use needy_api_client::proto::v1::{self, ClientAccess, CreatePairingCodeRequest, GetCallerRequest, ListClientsRequest, RevokeClientRequest};
@@ -11,31 +10,40 @@ use std::time::Duration;
 
 #[derive(clap::Args)]
 pub struct Args {
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
   #[command(subcommand)]
   command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-  /// Issue a one-use client invitation. The secret is shown once.
+  /// Issue a one-time client invitation (the token is shown once).
   Invite {
+    /// Time until the invitation expires (for example `10m` or `1h`).
     #[arg(long, default_value = "10m", value_parser = humantime::parse_duration)]
     ttl: Duration,
+    /// Display name for the invited client.
     #[arg(long, default_value = "")]
     name: String,
-    /// Grant management access; omitted invitations permit run/process use.
+    /// Grant administrator access (default invitations permit run and process use only).
     #[arg(long)]
     admin: bool,
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// List public identities, including revoked clients.
+  /// List registered clients, including revoked ones.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Revoke one identity while keeping its audit record.
-  Revoke { client_id: String },
+  /// Revoke a client's credential while keeping its audit record.
+  Revoke {
+    /// Client ID to revoke.
+    client_id: String,
+  },
 }
 
 #[derive(Serialize)]
@@ -141,7 +149,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         OutputFormat::Table => {
           output::success("Client invitation created.")?;
           outln!(
-            "\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the client machine, run:\n\n  needy --address <control-address> config context pair control --token {}\n\nUse an address reachable from the client, or its local tunnel address.\nThen select and check the connection:\n\n  needy config use control\n  needy config context check control\n\nThe token is shown once. Omit --token to enter it at the hidden prompt.\nFor automation, use -o json, extract .code, and pipe it to pair with\n--code-file -. A private --code-file FILE also works.",
+            "\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the client machine, run:\n\n  needy config context pair control --address <control-address> --token {}\n\nUse an address reachable from the client, or its local tunnel address.\nThen select and check the connection:\n\n  needy config use control\n  needy config context check control\n\nThe token is shown once. Omit --token to enter it at the hidden prompt.\nFor automation, use -o json, extract .code, and pipe it to pair with\n--code-file -. A private --code-file FILE also works.",
             "ID",
             created.id,
             "NAME",

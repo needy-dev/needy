@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use needy_api_client::proto::v1::RollbackImageRequest;
 
 use super::lockfile;
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output;
 
 #[derive(clap::Args)]
@@ -18,6 +18,8 @@ pub struct Args {
   /// Image file path and/or `@N` steps to roll back (default `@1`).
   #[arg(value_name = "IMAGE|@N")]
   pub args: Vec<String>,
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
 }
 
 /// Parses `[IMAGE]` and optional `@N` step count from `args`, enforcing that
@@ -78,7 +80,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   if rolled.layer.is_empty() {
     lock.commit = None;
     lockfile::write(&target.lockfile, &lock)?;
-    output::message(format_args!("image rollback: cleared commit layer in {} (back to built layers)", target.lockfile.display()));
+    output::acknowledge(&format!("Cleared commit layer in {} (back to built layers).", target.lockfile.display()))?;
   } else {
     let base = if rolled.base.is_empty() {
       current.base
@@ -90,7 +92,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       base,
     });
     lockfile::write(&target.lockfile, &lock)?;
-    output::message(format_args!("image rollback: {} -> {} (lockfile {})", steps, rolled.layer, target.lockfile.display()));
+    output::acknowledge(&format!("Rolled back {} -> {} (lockfile {}).", steps, rolled.layer, target.lockfile.display()))?;
   }
   Ok(0)
 }

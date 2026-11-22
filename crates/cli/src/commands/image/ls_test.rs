@@ -52,11 +52,3 @@ fn each_vm_image_is_listed_with_what_its_manifest_says() {
   assert_eq!(rows[1].path.as_deref(), Some(base.as_path()));
   assert!(rows[1].size >= 8192, "{}", rows[1].size);
 }
-
-#[test]
-fn sizes_are_shown_in_binary_units() {
-  assert_eq!(size(512), "512 B");
-  assert_eq!(size(1536), "1.5 KiB");
-  assert_eq!(size(600 << 20), "600.0 MiB");
-  assert_eq!(size(3 << 30), "3.0 GiB");
-}

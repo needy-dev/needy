@@ -11,6 +11,7 @@ use crate::output;
 
 #[derive(clap::Args)]
 pub struct Args {
+  /// Process ID to attach to.
   process_id: String,
   /// Do not replay buffered output or draw the current screen.
   #[arg(long)]

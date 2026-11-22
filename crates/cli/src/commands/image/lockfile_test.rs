@@ -142,28 +142,68 @@ fn format_run_snippet_emits_valid_yaml_layer_with_cwd_and_quoting() {
 
 #[test]
 fn cli_parses_image_build_edit_rollback_and_preserves_build_from() {
-  // Definition build by file path.
-  let h = Harness::try_parse_from(["needy", "image", "build", "./agent.yaml"]).unwrap();
+  // Definition build by file path accepts connection flags.
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "build",
+    "./agent.yaml",
+    "--address",
+    "unix:///tmp/d.sock",
+  ])
+  .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert_eq!(args.connection().address.as_deref(), Some("unix:///tmp/d.sock"));
 
-  // Definition build by profile.
-  let h = Harness::try_parse_from(["needy", "image", "build", "--profile", "dev"]).unwrap();
+  // Definition build by profile accepts connection flags.
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "build",
+    "--profile",
+    "dev",
+    "--context",
+    "remote",
+  ])
+  .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert_eq!(args.connection().selected_context.as_deref(), Some("remote"));
 
-  // Existing `image build --from` still parses and stays local.
+  // Existing `image build --from` still parses.
   let h = Harness::try_parse_from(["needy", "image", "build", "--from", "example.com/actor:1"]).unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(!args.allows_selection());
+  assert!(!args.connection().is_set());
+
+  // Local-only image subcommands reject remote connection flags at parse time.
+  assert!(Harness::try_parse_from(["needy", "image", "pull", "--address", "unix:///tmp/d.sock"]).is_err());
+  assert!(Harness::try_parse_from(["needy", "image", "ls", "--context", "remote"]).is_err());
+  assert!(
+    Harness::try_parse_from([
+      "needy",
+      "image",
+      "rm",
+      "base",
+      "--address",
+      "unix:///tmp/d.sock"
+    ])
+    .is_err()
+  );
 
   // `image edit` with file or profile.
-  let h = Harness::try_parse_from(["needy", "image", "edit", "./agent.yaml"]).unwrap();
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "edit",
+    "./agent.yaml",
+    "--context",
+    "remote",
+  ])
+  .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert_eq!(args.connection().selected_context.as_deref(), Some("remote"));
   let h = Harness::try_parse_from(["needy", "image", "edit", "--profile", "dev"]).unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert!(!args.connection().is_set());
 
   // `image rollback` arg parsing.
   assert_eq!(super::super::rollback::parse_args(None, &["./agent.yaml".into()]).unwrap(), (Some(PathBuf::from("./agent.yaml")), None, 1));
@@ -178,9 +218,17 @@ fn cli_parses_image_build_edit_rollback_and_preserves_build_from() {
   assert!(super::super::rollback::parse_args(None, &[]).is_err());
 
   // `image log` arg parsing and remote selection support.
-  let h = Harness::try_parse_from(["needy", "image", "log", "./agent.yaml"]).unwrap();
+  let h = Harness::try_parse_from([
+    "needy",
+    "image",
+    "log",
+    "./agent.yaml",
+    "--context",
+    "remote",
+  ])
+  .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert_eq!(args.connection().selected_context.as_deref(), Some("remote"));
   let h = Harness::try_parse_from([
     "needy",
     "image",
@@ -192,7 +240,7 @@ fn cli_parses_image_build_edit_rollback_and_preserves_build_from() {
   ])
   .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert!(!args.connection().is_set());
   assert!(Harness::try_parse_from(["needy", "image", "log", "./agent.yaml", "--profile", "dev"]).is_err());
 
   // `image export` arg parsing and remote selection support.
@@ -201,28 +249,52 @@ fn cli_parses_image_build_edit_rollback_and_preserves_build_from() {
     "image",
     "export",
     "./agent.yaml",
-    "--output",
+    "--file",
     "/tmp/out.tar",
+    "--context",
+    "remote",
   ])
   .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
+  assert_eq!(args.connection().selected_context.as_deref(), Some("remote"));
   let h = Harness::try_parse_from([
     "needy",
     "image",
     "export",
     "--profile",
     "builtin:pi",
-    "--output",
+    "--file",
     "-",
     "--tag",
     "example.com/pi:1",
   ])
   .unwrap();
   let Top::Image(args) = h.cmd;
-  assert!(args.allows_selection());
-  // `--output` is required for `image export`.
+  assert!(!args.connection().is_set());
+  // `--file` is required for `image export`, and `-o`/`--output` is rejected.
   assert!(Harness::try_parse_from(["needy", "image", "export", "./agent.yaml"]).is_err());
+  assert!(
+    Harness::try_parse_from([
+      "needy",
+      "image",
+      "export",
+      "./agent.yaml",
+      "-o",
+      "/tmp/out.tar"
+    ])
+    .is_err()
+  );
+  assert!(
+    Harness::try_parse_from([
+      "needy",
+      "image",
+      "export",
+      "./agent.yaml",
+      "--output",
+      "/tmp/out.tar"
+    ])
+    .is_err()
+  );
   assert!(
     Harness::try_parse_from([
       "needy",
@@ -231,7 +303,7 @@ fn cli_parses_image_build_edit_rollback_and_preserves_build_from() {
       "./agent.yaml",
       "--profile",
       "dev",
-      "-o",
+      "--file",
       "out.tar"
     ])
     .is_err()
@@ -247,6 +319,7 @@ fn resolve_target_supports_builtin_profiles() {
     address: None,
     credential_file: None,
     diagnostic_format: crate::diagnostics::Format::Human,
+    quiet: false,
   };
   let target = resolve_target(None, Some(Path::new("builtin:opencode")), None, &ctx).unwrap();
   assert_eq!(target.image_name, "builtin:opencode");

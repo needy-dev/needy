@@ -2,7 +2,7 @@
 //! A runner enrolls with `runner join`, then connects with `runner serve`.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use clap::Subcommand;
@@ -13,8 +13,8 @@ use needy_config::profile::{ActorDriver, ExecutorDriver};
 use needy_core::types::{Capabilities, RunnerRole};
 use serde::Serialize;
 
-use crate::cli::Context;
-use crate::output::{self, OutputFormat, Row, outln};
+use crate::cli::{ConnectionArgs, Context};
+use crate::output::{self, OutputFormat, Row, ago, outln, time};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -24,75 +24,114 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Issue a runner invitation; print its secret once.
+  /// Issue a runner invitation (the token is shown once).
   Invite(InviteArgs),
-  /// Enroll this machine once and save its own credential.
+  /// Enroll this machine as a runner and save its credential.
   Join(JoinArgs),
-  /// Reconnect from this machine's saved enrollment.
+  /// Connect and serve work using this machine's saved runner enrollment.
   Serve(ServeArgs),
-  /// Inspect or revoke join-code metadata.
+  /// Inspect or revoke runner join tokens.
   Token {
+    #[command(flatten)]
+    connection: ConnectionArgs,
     #[command(subcommand)]
     command: TokenCommand,
   },
-  /// List runners, including removed machines.
+  /// List registered runners, including removed machines.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
+    #[command(flatten)]
+    connection: ConnectionArgs,
   },
-  /// Rotate a runner's credential at its next heartbeat.
-  Rotate { name: String },
-  /// Revoke one runner; keep its registry record.
-  Rm { name: String },
+  /// Rotate a runner's credential on its next heartbeat.
+  Rotate {
+    /// Runner name to rotate.
+    name: String,
+    #[command(flatten)]
+    connection: ConnectionArgs,
+  },
+  /// Revoke a runner while keeping its registry record.
+  Rm {
+    /// Runner name to revoke.
+    name: String,
+    #[command(flatten)]
+    connection: ConnectionArgs,
+  },
 }
 
 impl Args {
-  pub fn allows_selection(&self) -> bool {
-    !matches!(&self.command, Command::Serve(_))
+  pub(crate) fn connection(&self) -> ConnectionArgs {
+    match &self.command {
+      Command::Invite(args) => args.connection.clone(),
+      Command::Join(args) => args.connection.clone(),
+      Command::Serve(_) => ConnectionArgs::default(),
+      Command::Token { connection, .. }
+      | Command::Ls { connection, .. }
+      | Command::Rotate { connection, .. }
+      | Command::Rm { connection, .. } => connection.clone(),
+    }
   }
 }
 
 #[derive(clap::Args)]
 struct InviteArgs {
+  /// Time until the invitation expires (for example `1h` or `30m`).
   #[arg(long, default_value = "1h", value_parser = humantime::parse_duration)]
   ttl: Duration,
+  /// Maximum number of runners that may enroll with this token.
   #[arg(long, default_value_t = 1)]
   uses: u32,
+  /// Roles the enrolled runner is allowed to host (comma-separated: `actor`, `executor`).
   #[arg(long, value_delimiter = ',')]
   roles: Vec<RunnerRole>,
+  /// Labels applied to enrolled runners (`KEY=VALUE`, comma-separated).
   #[arg(long, value_delimiter = ',', value_parser = label)]
   labels: Vec<(String, String)>,
+  /// Output format.
   #[arg(short = 'o', long, value_enum, default_value_t)]
   output: OutputFormat,
+  #[command(flatten)]
+  connection: ConnectionArgs,
 }
 
 #[derive(clap::Args)]
 struct JoinArgs {
+  /// Name for this runner on the control plane (must be a DNS label).
   name: String,
-  /// Read the joining token from a private file, or `-` for standard input.
+  /// Read the joining token from a private file, or `-` for stdin.
   // NOTICE: Files and stdin cover automation in this slice. Token-valued argv
   // and implicit environment inputs need a separate owner-approved input contract.
   #[arg(long)]
   code_file: Option<std::path::PathBuf>,
+  /// Roles this runner should host (comma-separated: `actor`, `executor`).
   #[arg(long, value_delimiter = ',')]
   roles: Option<Vec<RunnerRole>>,
+  /// Labels advertised by this runner (`KEY=VALUE`, comma-separated).
   #[arg(long, value_delimiter = ',', value_parser = label)]
   labels: Vec<(String, String)>,
+  /// Path to the base actor VM image directory on this machine.
   #[arg(long)]
   actor_image: Option<std::path::PathBuf>,
   #[arg(long, hide = true)]
   kvm: Option<std::path::PathBuf>,
-  /// Connector argv; conflicts with an explicit address or context.
+  #[command(flatten)]
+  connection: ConnectionArgs,
+  /// Connector command after `--`; conflicts with `--address` or `--context`.
   #[arg(last = true, allow_hyphen_values = true)]
   command: Vec<String>,
 }
 
 #[derive(clap::Args)]
 struct ServeArgs {
+  /// Narrow the enrolled roles this runner hosts (comma-separated: `actor`, `executor`).
   #[arg(long, value_delimiter = ',')]
   roles: Option<Vec<RunnerRole>>,
+  /// Override labels advertised by this runner (`KEY=VALUE`, comma-separated).
   #[arg(long, value_delimiter = ',', value_parser = label)]
   labels: Vec<(String, String)>,
+  /// Path to the base actor VM image directory on this machine.
   #[arg(long)]
   actor_image: Option<std::path::PathBuf>,
   #[arg(long, hide = true)]
@@ -103,13 +142,17 @@ struct ServeArgs {
 
 #[derive(Subcommand)]
 enum TokenCommand {
-  /// List join-code metadata, including spent and revoked invitations.
+  /// List join-token metadata, including spent and revoked invitations.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Revoke a join code; existing runners keep their own credentials.
-  Revoke { id: String },
+  /// Revoke a join token without affecting already-enrolled runners.
+  Revoke {
+    /// Join token ID to revoke.
+    id: String,
+  },
 }
 
 /// One `KEY=VALUE` label.
@@ -201,17 +244,6 @@ fn labels_cell(labels: &BTreeMap<String, String>) -> String {
     return "-".into();
   }
   labels.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(",")
-}
-
-pub(crate) fn time(ms: i64) -> String {
-  let at = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0));
-  humantime::format_rfc3339_seconds(at).to_string()
-}
-
-/// How long ago `ms` was on this machine's clock, to the second.
-pub(crate) fn ago(ms: i64) -> String {
-  let seconds = u64::try_from(needy_common::time::now_ms().saturating_sub(ms) / 1000).unwrap_or(0);
-  format!("{} ago", humantime::format_duration(Duration::from_secs(seconds)))
 }
 
 #[derive(Serialize)]
@@ -413,7 +445,7 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
     }
     Some(path) => crate::configuration::read_secret(&path)?,
     None => {
-      eprintln!("{}", joining_guidance(args.roles.as_deref()));
+      output::stderr_ln(format_args!("{}", joining_guidance(args.roles.as_deref())));
       rpassword::prompt_password("Joining token: ")?
     }
   };
@@ -463,12 +495,14 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
     }) | Command::Token {
       command: TokenCommand::Ls {
         output: OutputFormat::Json
-      }
+      },
+      ..
     } | Command::Ls {
-      output: OutputFormat::Json
+      output: OutputFormat::Json,
+      ..
     }
   );
-  let progress = output::Progress::new(human && ctx.connection_feedback(), "Connecting to control service");
+  let progress = output::Progress::new(ctx.connection_progress(human), "Connecting to control service");
   let connection = ctx.connect().await?;
   let mut runners = connection.runners();
   match command {
@@ -478,6 +512,7 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
       roles: selected_roles,
       labels,
       output: format,
+      connection: _,
     }) => {
       let request = CreateJoinTokenRequest {
         ttl_ms: i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX),
@@ -506,7 +541,7 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
             roles.join(",")
           };
           outln!(
-            "Runner invitation created.\n\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the runner machine, run:\n\n  needy --address <control-address> runner join <runner-name>{arguments}\n\nUse an address reachable from the runner, or its local tunnel address.\nPaste the token when prompted.\n\nJoining token (shown once):\n\n  {}\n\nFor automation, create an invitation with -o json, extract .code,\nand pipe it to runner join with --code-file -. A private --code-file FILE also works.",
+            "Runner invitation created.\n\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n  {:<12}{}\n\nOn the runner machine, run:\n\n  needy runner join <runner-name> --address <control-address>{arguments}\n\nUse an address reachable from the runner, or its local tunnel address.\nPaste the token when prompted.\n\nJoining token (shown once):\n\n  {}\n\nFor automation, create an invitation with -o json, extract .code,\nand pipe it to runner join with --code-file -. A private --code-file FILE also works.",
             "ID:",
             token.id,
             "Roles:",
@@ -522,6 +557,7 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
     }
     Command::Token {
       command: TokenCommand::Ls { output: format },
+      ..
     } => {
       progress.message("Fetching runner invitations");
       let list = runners.list_join_tokens(ListJoinTokensRequest {}).await.map_err(fail)?.into_inner();
@@ -531,26 +567,27 @@ async fn management(command: Command, ctx: &Context) -> Result<i32> {
     }
     Command::Token {
       command: TokenCommand::Revoke { id },
+      ..
     } => {
       progress.message(format!("Revoking runner invitation {id}"));
       runners.revoke_join_token(RevokeJoinTokenRequest { id: id.clone() }).await.map_err(fail)?;
       progress.finish();
       output::acknowledge(&format!("Revoked runner invitation: {id}"))?;
     }
-    Command::Ls { output: format } => {
+    Command::Ls { output: format, .. } => {
       progress.message("Fetching runners");
       let list = runners.list_runners(ListRunnersRequest {}).await.map_err(fail)?.into_inner();
       progress.finish();
       let rows = list.runners.into_iter().map(RunnerRow::try_from).collect::<Result<Vec<_>>>()?;
       output::print(format, &rows)?;
     }
-    Command::Rotate { name } => {
+    Command::Rotate { name, .. } => {
       progress.message(format!("Requesting credential rotation for runner {name}"));
       runners.rotate_runner(RotateRunnerRequest { name: name.clone() }).await.map_err(fail)?;
       progress.finish();
       output::acknowledge(&format!("Requested credential rotation for runner: {name}"))?;
     }
-    Command::Rm { name } => {
+    Command::Rm { name, .. } => {
       progress.message(format!("Revoking runner {name}"));
       runners.remove_runner(RemoveRunnerRequest { name: name.clone() }).await.map_err(fail)?;
       progress.finish();

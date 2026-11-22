@@ -223,7 +223,10 @@ pub fn render_in(error: &anyhow::Error, format: Format, context: Option<&crate::
       for check in &mut diagnostic.checks {
         if !check.argv.is_empty() {
           let remote = !matches!(check.argv.get(1).map(String::as_str), Some("config" | "daemon" | "image"));
-          check.argv.splice(1..1, selected.action_selection(context, remote));
+          check.argv.splice(1..1, selected.config_selection());
+          if remote {
+            check.argv.extend(selected.remote_selection(context));
+          }
         }
       }
       if let Some(name) = selected.context {

@@ -27,6 +27,7 @@ fn a_windows_exit_code_above_255_is_a_failure_on_a_unix_client() {
     address: None,
     credential_file: None,
     diagnostic_format: crate::diagnostics::Format::Human,
+    quiet: false,
   };
   assert_eq!(status(exited(256), &ctx).unwrap(), signals::OUT_OF_RANGE);
   assert_eq!(status(exited(300), &ctx).unwrap(), signals::OUT_OF_RANGE);

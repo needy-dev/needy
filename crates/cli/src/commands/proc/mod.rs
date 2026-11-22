@@ -5,12 +5,14 @@ pub(crate) mod exec;
 mod kill;
 mod ps;
 
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use anyhow::Result;
 use clap::Subcommand;
 
 #[derive(clap::Args)]
 pub struct Args {
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
   #[command(subcommand)]
   command: Command,
 }

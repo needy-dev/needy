@@ -47,11 +47,11 @@ async fn direct_context_check_reports_standalone_executor_without_control_identi
   let result = needy(
     home.path(),
     &[
-      "--address",
-      &address,
       "config",
       "context",
       "check",
+      "--address",
+      &address,
       "-o",
       "json",
     ],

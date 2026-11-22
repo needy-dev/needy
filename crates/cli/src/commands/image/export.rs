@@ -1,4 +1,4 @@
-//! `needy image export [IMAGE] [--profile P] --output <PATH>`: builds or
+//! `needy image export [IMAGE] [--profile P] --file <PATH>`: builds or
 //! resolves an image definition on the control daemon and writes its
 //! Docker/OCI tar archive to `<PATH>` (atomically) or stdout (`-`).
 
@@ -10,7 +10,7 @@ use needy_api_client::proto::v1::ExportImageRequest;
 use needy_config::profile::ActorDriver;
 
 use super::lockfile::{self, LockCommit};
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output;
 
 #[derive(clap::Args)]
@@ -27,11 +27,13 @@ pub struct Args {
   #[arg(long, value_parser = super::driver)]
   pub driver: Option<ActorDriver>,
   /// Destination tar archive path, or `-` to write to stdout.
-  #[arg(short = 'o', long, value_name = "PATH")]
-  pub output: PathBuf,
+  #[arg(long, value_name = "PATH")]
+  pub file: PathBuf,
   /// Optional `repository:tag` embedded in the exported archive's manifest.
   #[arg(long)]
   pub tag: Option<String>,
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
@@ -56,7 +58,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     .map_err(fail)?
     .into_inner();
 
-  if args.output == Path::new("-") {
+  if args.file == Path::new("-") {
     progress.finish();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -67,7 +69,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     return Ok(0);
   }
 
-  let dir = args.output.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+  let dir = args.file.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
   std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
   let staged = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
 
@@ -76,13 +78,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       .write(true)
       .create_new(true)
       .open(&staged)
-      .with_context(|| format!("cannot stage {}", args.output.display()))?;
+      .with_context(|| format!("cannot stage {}", args.file.display()))?;
     let mut total: u64 = 0;
     while let Some(chunk) = stream.message().await.map_err(fail)? {
-      file.write_all(&chunk.data).with_context(|| format!("cannot write {}", args.output.display()))?;
+      file.write_all(&chunk.data).with_context(|| format!("cannot write {}", args.file.display()))?;
       total += chunk.data.len() as u64;
     }
-    file.sync_all().with_context(|| format!("cannot sync {}", args.output.display()))?;
+    file.sync_all().with_context(|| format!("cannot sync {}", args.file.display()))?;
     Ok::<u64, anyhow::Error>(total)
   }
   .await;
@@ -90,8 +92,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   progress.finish();
   match write_result {
     Ok(bytes) => {
-      std::fs::rename(&staged, &args.output).with_context(|| format!("cannot persist {}", args.output.display()))?;
-      output::message(format_args!("image export: wrote {} ({bytes} bytes)", args.output.display()));
+      std::fs::rename(&staged, &args.file).with_context(|| format!("cannot persist {}", args.file.display()))?;
+      output::acknowledge(&format!("Exported {} ({bytes} bytes).", args.file.display()))?;
       Ok(0)
     }
     Err(err) => {

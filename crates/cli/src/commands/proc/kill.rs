@@ -8,8 +8,9 @@ use crate::output;
 
 #[derive(clap::Args)]
 pub struct Args {
+  /// Process ID to signal.
   process_id: String,
-  /// Signal name, for example SIGKILL; a number is the host's signal.
+  /// Signal name (for example `SIGKILL`) or host signal number.
   #[arg(short, long, default_value = "SIGTERM")]
   signal: String,
 }

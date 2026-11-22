@@ -15,6 +15,7 @@ use crate::output::{self, OutputFormat, Row};
 
 #[derive(clap::Args)]
 pub struct Args {
+  /// Output format.
   #[arg(short = 'o', long, value_enum, default_value_t)]
   output: OutputFormat,
 }
@@ -55,7 +56,7 @@ impl Row for Image {
       self.version.clone().unwrap_or_else(|| "-".into()),
       self.base_abi.clone().unwrap_or_else(|| "-".into()),
       self.source.clone(),
-      size(self.size),
+      output::bytes(self.size),
       self.path.as_ref().map_or_else(|| "-".into(), |path| path.display().to_string()),
     ]
   }
@@ -145,22 +146,6 @@ fn disk_usage(dir: &Path) -> u64 {
       }
     })
     .sum()
-}
-
-/// A size for people, in binary units.
-fn size(bytes: u64) -> String {
-  const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
-  let mut value = bytes as f64;
-  let mut unit = 0;
-  while value >= 1024.0 && unit < UNITS.len() - 1 {
-    value /= 1024.0;
-    unit += 1;
-  }
-  if unit == 0 {
-    format!("{bytes} B")
-  } else {
-    format!("{value:.1} {}", UNITS[unit])
-  }
 }
 
 /// The needy images the engine has: those with a base ABI label (actor
