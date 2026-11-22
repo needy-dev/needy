@@ -89,7 +89,7 @@ fn report(report: RunnerReport) -> store::Report {
 impl Daemon {
   /// The machine `runner` last reported in a heartbeat.
   pub(crate) fn runner_host(&self, runner: &str) -> Option<needy_api_server::control::RunnerHost> {
-    self.runner_hosts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(runner).cloned()
+    needy_common::sync::lock(&self.runner_hosts).get(runner).cloned()
   }
 }
 
@@ -198,9 +198,7 @@ impl Runners for Daemon {
     let credential = self.state.heartbeat(runner, report(reported), now_ms()).await.map_err(|error| control_error(error, true))?;
     // Only an accepted heartbeat tells the control plane about a machine.
     if let Some(host) = host {
-      // NOTICE: one insert under the lock, so a panic elsewhere leaves the
-      // map whole.
-      self.runner_hosts.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(runner.to_string(), host);
+      needy_common::sync::lock(&self.runner_hosts).insert(runner.to_string(), host);
     }
     if credential.is_some() {
       tracing::info!("runner {runner}: handed out a rotated credential");

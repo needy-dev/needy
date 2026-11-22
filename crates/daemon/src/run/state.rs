@@ -59,8 +59,7 @@ impl State {
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, RunState> {
-    // A panic elsewhere cannot leave the state half-written; it is one value.
-    self.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    needy_common::sync::lock(&self.0)
   }
 }
 

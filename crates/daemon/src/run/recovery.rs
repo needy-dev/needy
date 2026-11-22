@@ -175,10 +175,9 @@ impl Restored {
         bail!("cannot complete release of executor {} for run {}", instance.name, run.id);
       }
     }
-    let channels = actor::channels(daemon, &run)?;
     let token = run.cancel.child_token();
-    actor::serve_guest(daemon, &run, &channels, actor::facets(&run).transport, &token).await?;
-    actor::serve_gateway(&run, &channels, &token)?;
+    actor::serve_guest(daemon, &run, &token).await?;
+    actor::serve_gateway(&run, &token)?;
     actor::resume_services(daemon, &run, &token, &events)?;
     // A configured guest resumes its persistent control stream. The actor
     // process service proves terminal readiness again when next attached.
@@ -228,13 +227,9 @@ impl Daemon {
       boot: SavedBoot::from_boot(&boot),
     };
     let path = run.dir.join("control-snapshot.json");
-    let temporary = run.dir.join(format!(".control-snapshot-{}", uuid::Uuid::new_v4()));
-    let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temporary)?;
-    use std::io::Write as _;
-    serde_json::to_writer(&mut file, &snapshot)?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)?;
+    let mut bytes = serde_json::to_vec(&snapshot)?;
+    bytes.push(b'\n');
+    needy_common::fs::write_atomic(&path, &bytes, Some(0o600))?;
     Ok(())
   }
 
@@ -383,3 +378,7 @@ impl Daemon {
     }))
   }
 }
+
+#[cfg(test)]
+#[path = "../recovery_test.rs"]
+mod recovery_tests;

@@ -2,11 +2,12 @@
 //! credentials, rather than this file, authorize its caller.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write as _;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
+use needy_common::fs::write_atomic;
+use needy_common::sync::lock;
 use serde::{Deserialize, Serialize};
 
 /// A discovery failure with a stable producer-owned diagnostic reason.
@@ -122,8 +123,8 @@ impl Publisher {
   }
 
   pub(crate) fn finish(&self, complete: bool) -> Result<()> {
-    let mut lock = self.lock.lock().unwrap_or_else(|error| error.into_inner());
-    if lock.is_none() {
+    let mut guard = lock(&self.lock);
+    if guard.is_none() {
       return Ok(());
     }
     let result = self.write(
@@ -136,13 +137,13 @@ impl Publisher {
       },
     );
     self.remove_owned();
-    lock.take();
+    guard.take();
     result
   }
 
   pub(crate) fn retract(&self) {
-    let lock = self.lock.lock().unwrap_or_else(|error| error.into_inner());
-    if lock.is_some() {
+    let guard = lock(&self.lock);
+    if guard.is_some() {
       self.remove_owned();
     }
   }
@@ -158,8 +159,8 @@ impl Publisher {
   }
 
   pub(crate) fn publish(&self, address: &str) -> Result<()> {
-    let lock = self.lock.lock().unwrap_or_else(|error| error.into_inner());
-    if lock.is_none() {
+    let guard = lock(&self.lock);
+    if guard.is_none() {
       bail!("discovery publication attempted after shutdown");
     }
     let record = Record {
@@ -173,24 +174,13 @@ impl Publisher {
   }
 
   fn write(&self, name: &str, record: &impl Serialize) -> Result<()> {
-    let temporary = self.runtime.join(format!(".{name}-{}", self.instance));
     let result = (|| -> Result<()> {
-      let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temporary)?;
-      use std::os::unix::fs::PermissionsExt as _;
-      file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-      serde_json::to_writer(&mut file, record)?;
-      file.write_all(b"\n")?;
-      file.sync_all()?;
-      std::fs::rename(&temporary, self.runtime.join(name))?;
+      let mut bytes = serde_json::to_vec(record)?;
+      bytes.push(b'\n');
+      write_atomic(&self.runtime.join(name), &bytes, Some(0o600))?;
       File::open(&self.runtime)?.sync_all()?;
       Ok(())
     })();
-    if result.is_err()
-      && let Err(error) = std::fs::remove_file(&temporary)
-      && error.kind() != std::io::ErrorKind::NotFound
-    {
-      tracing::warn!("cannot remove discovery temporary file: {error}");
-    }
     result.context("cannot publish local control discovery")
   }
 }

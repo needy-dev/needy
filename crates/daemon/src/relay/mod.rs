@@ -233,7 +233,7 @@ impl Daemon {
   }
 
   fn process(&self, process: &str) -> Result<Known, ControlError> {
-    let processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let processes = needy_common::sync::lock(&self.processes);
     processes.get(process).cloned().ok_or_else(|| {
       ControlError::NotFound("no such process".into()).with_diagnostic("process.not_found", [("process".into(), process.into())])
     })
@@ -258,7 +258,7 @@ impl Daemon {
       Some((name, recorded)) => (name, recorded.or(origin)),
       None => (instance.name.clone(), origin),
     };
-    let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut processes = needy_common::sync::lock(&self.processes);
     processes
       .entry(process.to_string())
       .or_insert_with(|| Known {
@@ -293,7 +293,7 @@ impl Daemon {
   /// Records the instance of `process` and, when this daemon started it, its
   /// origin; a later sighting without an origin keeps the one recorded.
   fn remember(&self, process: &str, instance: &Arc<Instance>, origin: Option<Origin>, run: Option<String>) {
-    let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut processes = needy_common::sync::lock(&self.processes);
     let origin = origin.or_else(|| processes.get(process).and_then(|known| known.origin));
     let run = run.or_else(|| processes.get(process).and_then(|known| known.run.clone()));
     processes.insert(
@@ -310,7 +310,7 @@ impl Daemon {
   /// Removes every remembered process belonging to `run` so `Daemon::processes`
   /// does not retain `Arc<Instance>` handles after the run completes cleanup.
   pub(crate) fn evict_run_processes(&self, run: &str) {
-    let mut processes = self.processes.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut processes = needy_common::sync::lock(&self.processes);
     processes.retain(|_, known| known.run.as_deref() != Some(run));
   }
 }

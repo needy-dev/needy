@@ -174,12 +174,12 @@ impl Client {
       },
     )
     .await?;
-    *self.lease.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(stream);
+    *needy_common::sync::lock(&self.lease) = Some(stream);
     Ok(())
   }
 
   pub(crate) fn disconnect(&self) {
-    self.lease.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    needy_common::sync::lock(&self.lease).take();
   }
 
   async fn call(&self, command: Command) -> Result<Reply> {
@@ -629,13 +629,9 @@ fn private_file(path: &Path, create: bool) -> Result<File> {
 }
 
 fn write_private(path: &Path, value: &impl Serialize) -> Result<()> {
-  let temporary = path.with_extension(format!("{}-tmp", uuid::Uuid::new_v4()));
-  let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).custom_flags(libc::O_NOFOLLOW).open(&temporary)?;
-  use std::io::Write as _;
-  serde_json::to_writer(&mut file, value)?;
-  file.write_all(b"\n")?;
-  file.sync_all()?;
-  std::fs::rename(temporary, path)?;
+  let mut bytes = serde_json::to_vec(value)?;
+  bytes.push(b'\n');
+  needy_common::fs::write_atomic(path, &bytes, Some(0o600))?;
   Ok(())
 }
 
