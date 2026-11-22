@@ -47,16 +47,19 @@ pub struct Options {
   /// them (`ctrl-p,ctrl-q`); empty turns detaching off.
   #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
   detach_keys: String,
+  /// Working directory for the command.
   #[arg(long)]
   cwd: Option<String>,
-  /// Set an environment variable, KEY=VALUE.
+  /// Set an environment variable (`KEY=VALUE`); repeat for multiple variables.
   #[arg(short = 'e', long = "env", value_name = "KEY=VALUE", value_parser = crate::commands::parse_env)]
   env: Vec<(String, String)>,
   /// Start from an empty environment.
   #[arg(long)]
   clear_env: bool,
+  /// Output format (`human`, `json`, or `ndjson`).
   #[arg(short = 'o', long, value_enum, default_value = "human")]
   output: Output,
+  /// Command and arguments to execute (after `--`).
   #[arg(required = true, last = true, allow_hyphen_values = true)]
   command: Vec<String>,
 }

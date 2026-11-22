@@ -21,7 +21,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use needy_config::profile::ActorDriver;
 
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 
 mod build;
 mod edit;
@@ -29,7 +29,6 @@ mod export;
 pub(crate) mod lockfile;
 mod log;
 mod ls;
-mod progress;
 pub(crate) mod pull;
 mod rm;
 mod rollback;
@@ -41,13 +40,16 @@ pub struct Args {
 }
 
 impl Args {
-  /// Whether this `image` subcommand talks to the control daemon (and
-  /// therefore accepts `--context`/`--address`).
-  pub fn allows_selection(&self) -> bool {
+  /// Returns remote connection flags for `image` subcommands that talk to the
+  /// control daemon.
+  pub(crate) fn connection(&self) -> ConnectionArgs {
     match &self.command {
-      Command::Edit(_) | Command::Rollback(_) | Command::Log(_) | Command::Export(_) => true,
-      Command::Build(args) => args.is_definition_build(),
-      Command::Pull(_) | Command::Ls(_) | Command::Rm(_) => false,
+      Command::Build(args) => args.connection.clone(),
+      Command::Edit(args) => args.connection.clone(),
+      Command::Rollback(args) => args.connection.clone(),
+      Command::Log(args) => args.connection.clone(),
+      Command::Export(args) => args.connection.clone(),
+      Command::Pull(_) | Command::Ls(_) | Command::Rm(_) => ConnectionArgs::default(),
     }
   }
 }

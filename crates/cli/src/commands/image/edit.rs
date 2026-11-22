@@ -12,7 +12,7 @@ use needy_config::profile::ActorDriver;
 use needy_core_executor::relay;
 
 use super::lockfile::{self, LockCommit};
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output::{self, outln};
 
 #[derive(clap::Args)]
@@ -30,6 +30,8 @@ pub struct Args {
   /// Keys that abort the edit session without committing; empty turns detaching off.
   #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
   pub detach_keys: String,
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {

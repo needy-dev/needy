@@ -208,7 +208,7 @@ fn legacy_endpoint_cannot_silently_redirect_a_request_to_local_management() {
   assert_eq!(diagnostic["reason"], "config.selection_conflict");
   let explicit = needy(home.path())
     .env("NEEDY_ENDPOINT", "http://127.0.0.1:9")
-    .args(["--context", "local", "runner", "ls", "-o", "json"])
+    .args(["runner", "ls", "-o", "json", "--context", "local"])
     .output()
     .unwrap();
   assert!(explicit.status.success(), "{}", stderr(&explicit));

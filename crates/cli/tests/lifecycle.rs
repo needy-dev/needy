@@ -135,23 +135,24 @@ fn service_install_snapshots_settings_without_starting_and_refuses_foreign_defin
   assert_eq!(saved["contexts"].as_mapping().unwrap().len(), 0);
   assert_eq!(registration["path"].as_str().unwrap(), bin.to_str().unwrap());
   let definition = Path::new(registration["definition"].as_str().unwrap());
-  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(output.stdout.is_empty(), "service install status must go to stderr: {}", String::from_utf8_lossy(&output.stdout));
+  let stderr = String::from_utf8_lossy(&output.stderr);
   let manager = if cfg!(target_os = "macos") {
     "launchd"
   } else {
     "systemd"
   };
-  assert!(stdout.contains(&format!("Detected service manager: {manager} (user scope)")), "{stdout}");
-  assert!(stdout.contains(&format!("Writing configuration snapshot: {}", snapshot.display())), "{stdout}");
-  assert!(stdout.contains(&format!("Writing service definition: {}", definition.display())), "{stdout}");
-  assert!(stdout.contains(&format!("Writing service registration: {}", receipt.display())), "{stdout}");
+  assert!(stderr.contains(&format!("Detected service manager: {manager} (user scope)")), "{stderr}");
+  assert!(stderr.contains(&format!("Writing configuration snapshot: {}", snapshot.display())), "{stderr}");
+  assert!(stderr.contains(&format!("Writing service definition: {}", definition.display())), "{stderr}");
+  assert!(stderr.contains(&format!("Writing service registration: {}", receipt.display())), "{stderr}");
   if cfg!(target_os = "macos") {
     let uid = registration["uid"].as_u64().unwrap();
-    assert!(stdout.contains(&format!("Check status: launchctl print gui/{uid}/dev.needy.control")), "{stdout}");
-    assert!(stdout.contains("View logs: tail -n 100 -f "), "{stdout}");
+    assert!(stderr.contains(&format!("Check status: launchctl print gui/{uid}/dev.needy.control")), "{stderr}");
+    assert!(stderr.contains("View logs: tail -n 100 -f "), "{stderr}");
   } else {
-    assert!(stdout.contains("Check status: systemctl --user status needy.service"), "{stdout}");
-    assert!(stdout.contains("View logs: journalctl --user '--unit=needy.service' --no-pager --lines 100 --follow"), "{stdout}");
+    assert!(stderr.contains("Check status: systemctl --user status needy.service"), "{stderr}");
+    assert!(stderr.contains("View logs: journalctl --user '--unit=needy.service' --no-pager --lines 100 --follow"), "{stderr}");
   }
   std::fs::write(definition, "foreign service definition\n").unwrap();
   let replaced = home.command().env("PATH", &bin).args(["daemon", "service", "install", "--replace"]).output().unwrap();

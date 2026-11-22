@@ -5,7 +5,6 @@
 //! Either way they are decoded into `needy_core::event` values and rendered
 //! by `needy_core::report`; this command picks the format and the colors.
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result};
@@ -27,6 +26,7 @@ enum Level {
 enum Format {
   /// Plain text in aligned sections.
   Human,
+  /// Markdown document.
   Markdown,
   /// A stable JSON summary.
   Json,
@@ -34,18 +34,18 @@ enum Format {
 
 #[derive(clap::Args)]
 pub struct Args {
-  /// Run ID, unique prefix, name (online only), or latest. Defaults to the inherited run, else latest.
+  /// Run ID, unique prefix, name (online only), or `latest`. Defaults to the inherited run, else `latest`.
   run: Option<String>,
+  /// Report detail level (`summary` or `detailed`).
   #[arg(long, value_enum, default_value = "summary")]
   level: Level,
+  /// Report output format (`human`, `markdown`, or `json`).
   #[arg(short = 'o', long, value_enum, default_value = "human")]
   output: Format,
   /// Write the report to this file instead of stdout.
   #[arg(long)]
   file: Option<PathBuf>,
-  /// Read the trace database in this machine's state directory
-  /// (`NEEDY_STATE_DIR`) instead of asking the control plane, as on the
-  /// control host with no daemon running.
+  /// Read the local trace database (`NEEDY_STATE_DIR`) instead of querying the control plane.
   #[arg(long)]
   offline: bool,
 }
@@ -53,7 +53,7 @@ pub struct Args {
 /// Colors only for a terminal, and not when `NO_COLOR` is set
 /// (<https://no-color.org>).
 fn color(to_file: bool) -> bool {
-  !to_file && std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty())
+  !to_file && crate::output::stdout_color()
 }
 
 /// One stored event, from either source.

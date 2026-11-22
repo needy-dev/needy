@@ -14,29 +14,43 @@ use needy_api_client::Client;
 use crate::commands::{client, config, daemon, fs, image, proc, run, runner};
 use crate::paths::Paths;
 
+/// Control-plane connection options for commands that talk to a daemon.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub(crate) struct ConnectionArgs {
+  /// Saved control-plane connection to use for this command.
+  #[arg(long = "context", global = true, conflicts_with = "address")]
+  pub(crate) selected_context: Option<String>,
+  /// Direct control-plane address (`tcp://HOST:PORT`, `https://HOST:PORT`, or `unix:///PATH`).
+  #[arg(long, global = true)]
+  pub(crate) address: Option<String>,
+  /// Private bearer token file; requires `--address`.
+  #[arg(long, global = true, requires = "address")]
+  pub(crate) credential_file: Option<PathBuf>,
+}
+
+impl ConnectionArgs {
+  pub(crate) fn is_set(&self) -> bool {
+    self.selected_context.is_some() || self.address.is_some() || self.credential_file.is_some()
+  }
+}
+
 #[derive(Parser)]
 #[command(
   name = "needy",
   version,
-  about = "Route a driving program's work to executors"
+  about = "Run isolated actors and route their commands to executors"
 )]
 struct Cli {
-  /// Client configuration document. Named profiles are beside it in profiles/.
+  /// Path to the client configuration file (named profiles live beside it in `profiles/`).
   #[arg(long, global = true)]
   config: Option<PathBuf>,
-  /// Saved control-plane connection for this invocation.
-  #[arg(long = "context", global = true, conflicts_with = "address")]
-  selected_context: Option<String>,
-  /// Direct transport: tcp://HOST:PORT, https://HOST:PORT or unix:///PATH.
-  #[arg(long, global = true)]
-  address: Option<String>,
-  /// Private outgoing bearer file; only with a direct address.
-  #[arg(long, global = true, requires = "address")]
-  credential_file: Option<PathBuf>,
-  /// Infrastructure errors on stderr; child output is unchanged.
+  /// Format for infrastructure errors on stderr (child output is unchanged).
   #[arg(long, global = true, value_enum, default_value = "human")]
   diagnostic_format: crate::diagnostics::Format,
-  /// Log to stderr: -v info, -vv debug for needy, -vvv everything.
+  /// Suppress non-error status messages and progress spinners.
+  #[arg(short, long, global = true)]
+  quiet: bool,
+  /// Enable diagnostic logging on stderr (`-v` info, `-vv` debug for needy, `-vvv` trace).
   #[arg(short, long, global = true, action = clap::ArgAction::Count)]
   verbose: u8,
   #[command(subcommand)]
@@ -45,22 +59,37 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Manage client configuration, connections and task profiles.
+  /// Manage client configuration, saved connections, and task profiles.
   Config(config::Args),
-  /// Serve locally or manage this machine's control service.
+  /// Run the local control daemon or manage its OS service.
   Daemon(Box<daemon::Args>),
-  /// Authorize clients on the selected control plane.
+  /// Invite, list, and revoke remote clients on the control plane.
   Client(client::Args),
-  /// Register execution machines and manage runner credentials.
+  /// Enroll and manage remote execution runners.
   Runner(runner::Args),
-  /// Manage an actor and its bound executors.
+  /// Create, inspect, attach to, and stop runs.
   Run(run::Args),
-  /// Execute, list, attach and signal executor processes.
+  /// Execute, list, attach to, and signal executor processes.
   Proc(proc::Args),
-  /// Copy files between this machine and an explicit remote target.
+  /// Copy files between this machine and an executor.
   Fs(fs::Args),
-  /// Pull, list, build and remove local images.
+  /// Pull, list, build, edit, export, and remove actor images.
   Image(image::Args),
+}
+
+impl Command {
+  fn connection(&self) -> ConnectionArgs {
+    match self {
+      Command::Config(args) => args.connection(),
+      Command::Daemon(_) => ConnectionArgs::default(),
+      Command::Client(args) => args.connection.clone(),
+      Command::Runner(args) => args.connection(),
+      Command::Run(args) => args.connection.clone(),
+      Command::Proc(args) => args.connection.clone(),
+      Command::Fs(args) => args.connection.clone(),
+      Command::Image(args) => args.connection(),
+    }
+  }
 }
 
 /// Invocation inputs. Target resolution lives in one connection boundary.
@@ -70,15 +99,28 @@ pub struct Context {
   pub(crate) address: Option<String>,
   pub(crate) credential_file: Option<PathBuf>,
   pub(crate) diagnostic_format: crate::diagnostics::Format,
+  pub(crate) quiet: bool,
 }
 
 impl Context {
+  /// Whether animated progress may be shown for this command.
+  /// Respects `--quiet`, `--diagnostic-format json`, `-v`/`RUST_LOG`, and
+  /// whether stdout is human-readable (`is_table`).
+  pub(crate) fn show_progress(&self, is_table: bool) -> bool {
+    !self.quiet && is_table && !matches!(self.diagnostic_format, crate::diagnostics::Format::Json) && !crate::logging::stderr_active()
+  }
+
   /// A connector owns stderr for prompts and diagnostics throughout a request.
   /// If selection cannot be inspected, omit animation; the connection boundary
   /// still reports the original selection error when the command connects.
   pub(crate) fn connection_feedback(&self) -> bool {
-    !matches!(self.diagnostic_format, crate::diagnostics::Format::Json)
-      && crate::connection::resolve(self).is_ok_and(|selected| selected.command.is_none())
+    self.show_progress(true) && crate::connection::resolve(self).is_ok_and(|selected| selected.command.is_none())
+  }
+
+  /// Whether animated progress may be shown while talking to a control daemon
+  /// for a command whose stdout format is controlled by `is_table`.
+  pub(crate) fn connection_progress(&self, is_table: bool) -> bool {
+    is_table && self.connection_feedback()
   }
 
   pub fn configuration_file(&self) -> Result<PathBuf> {
@@ -158,12 +200,14 @@ pub const CLOSED_STDOUT: i32 = 128 + 13;
 pub fn run() -> i32 {
   let cli = Cli::parse();
   let format = cli.diagnostic_format;
+  let connection = cli.command.connection();
   let diagnostic_context = Context {
     config: cli.config.clone(),
-    selected_context: cli.selected_context.clone(),
-    address: cli.address.clone(),
-    credential_file: cli.credential_file.clone(),
+    selected_context: connection.selected_context.clone(),
+    address: connection.address.clone(),
+    credential_file: connection.credential_file.clone(),
     diagnostic_format: format,
+    quiet: cli.quiet,
   };
   match dispatch(cli) {
     Ok(code) => code,
@@ -193,25 +237,17 @@ fn stdout_closed(error: &anyhow::Error) -> bool {
 }
 
 fn dispatch(cli: Cli) -> Result<i32> {
-  let remote = cli.selected_context.is_some() || cli.address.is_some() || cli.credential_file.is_some();
-  if remote && matches!(&cli.command, Command::Daemon(_)) {
-    anyhow::bail!("this operation is local; remove --context/--address and use its local options");
-  }
-  if remote && matches!(&cli.command, Command::Image(args) if !args.allows_selection()) {
-    anyhow::bail!("this image operation is local; remove --context/--address and use its local options");
-  }
-  if remote && matches!(&cli.command, Command::Config(args) if !args.allows_selection()) {
-    anyhow::bail!("this configuration operation is local; remove --context/--address");
-  }
-  if remote && matches!(&cli.command, Command::Runner(args) if !args.allows_selection()) {
-    anyhow::bail!("runner serve uses this machine's saved enrollment; remove --context/--address");
-  }
+  // `--diagnostic-format json` reserves stderr for machine-readable JSON diagnostics,
+  // so suppress human status and progress chatter on stderr alongside `--quiet`.
+  crate::output::set_quiet(cli.quiet || matches!(cli.diagnostic_format, crate::diagnostics::Format::Json));
+  let connection = cli.command.connection();
   let ctx = Context {
     config: cli.config,
-    selected_context: cli.selected_context,
-    address: cli.address,
-    credential_file: cli.credential_file,
+    selected_context: connection.selected_context,
+    address: connection.address,
+    credential_file: connection.credential_file,
     diagnostic_format: cli.diagnostic_format,
+    quiet: cli.quiet,
   };
   if let Command::Daemon(args) = &cli.command {
     // SAFETY: argument parsing and configuration reads above spawn no threads.

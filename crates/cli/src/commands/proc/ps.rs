@@ -28,6 +28,7 @@ pub struct Args {
   /// Also list needy's own processes: file transfers and workspace mounts.
   #[arg(short = 'a', long)]
   all: bool,
+  /// Output format.
   #[arg(short = 'o', long, value_enum, default_value_t)]
   output: OutputFormat,
 }

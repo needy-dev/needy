@@ -15,7 +15,7 @@ use needy_core_executor::relay;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
 
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output::{self, OutputFormat, Row, outln};
 
 /// How a run command's `RUN` reads (`crate::runs`).
@@ -28,6 +28,8 @@ const RUN_HELP: &str = "The run: an ID, an ID prefix, a name or `latest`. Defaul
 // owner-approved parsing grammar.
 #[derive(clap::Args)]
 pub struct Args {
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
   #[command(subcommand)]
   command: Command,
 }
@@ -51,51 +53,52 @@ enum Command {
     /// Run the driving program on a terminal, available to `run attach`.
     #[arg(short = 't')]
     tty: bool,
-    /// Attach to the driving program immediately and return its exit code.
-    /// Needs `-t`.
+    /// Attach to the driving program immediately and return its exit code (requires `-t`).
     // Not clap's `requires`, whose error does not say why; `run` checks it.
     #[arg(short = 'i')]
     interactive: bool,
-    /// Keys that leave the run running; empty turns detaching off.
+    /// Keys that detach from the terminal while leaving the run running; empty disables detaching.
     #[arg(long, default_value = relay::DEFAULT_DETACH_KEYS)]
     detach_keys: String,
-    /// Profile YAML; relative paths in it resolve against its directory. A
-    /// bare NAME, with no path separator and no `.yaml`, is
-    /// `profiles/NAME.yaml` in the config directory (`NEEDY_CONFIG_DIR`).
+    /// Profile path, bare profile name, or `builtin:NAME`.
+    ///
+    /// Relative paths inside the profile resolve against its directory. A bare
+    /// NAME (no path separator and no `.yaml`) resolves to `profiles/NAME.yaml`
+    /// in the config directory (`NEEDY_CONFIG_DIR`).
     #[arg(short = 'f', long)]
     profile: PathBuf,
     #[command(flatten)]
     overrides: snapshot::Overrides,
-    /// Runs in one group share executors whose key uses `{group}`.
-    /// Defaults to the run ID.
+    /// Group name for sharing executors whose key uses `{group}` (defaults to the run ID).
     #[arg(long, default_value = "", hide_default_value = true)]
     group: String,
-    /// A name to address the run by instead of its ID.
+    /// Human-friendly name to address the run by instead of its ID.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
-    /// Arguments appended to the profile's driving program
-    /// (`actor.command`), as in `-- --continue`.
+    /// Arguments appended to the profile's driving program (`actor.command`), as in `-- --continue`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
   },
-  /// List runs, including stopped and failed ones, also across control
-  /// plane restarts. An executor no runner reported after a restart shows
-  /// `(lost)`.
+  /// List runs, including stopped and failed ones.
+  ///
+  /// Includes runs preserved across control-plane restarts. An executor that no
+  /// runner reported after a restart is marked `(lost)`.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Stop a run and release its executors. A running driving program gets
-  /// SIGTERM, then SIGKILL after the grace period, and the actor's
-  /// mirror-out runs before the actor ends.
+  /// Stop a run and release its executors.
+  ///
+  /// A running driving program receives SIGTERM, then SIGKILL after the grace
+  /// period, and the actor's mirror-out runs before the actor ends.
   Stop {
     #[arg(help = RUN_HELP)]
     run: Option<String>,
-    /// How long the driving program has after SIGTERM before SIGKILL
-    /// (default 10s).
+    /// Grace period between SIGTERM and SIGKILL for the driving program (default `10s`).
     #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration, conflicts_with = "now")]
     grace: Option<std::time::Duration>,
-    /// Kill the actor at once, without its mirror-out.
+    /// Kill the actor immediately without running mirror-out.
     #[arg(long)]
     now: bool,
   },
@@ -418,7 +421,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       // An actor killed without being asked to (`--now`) lost its
       // mirror-out; say so where the user looks.
       if stopped.graceful == Some(false) && !now {
-        eprintln!("run {run}: the actor was killed without its mirror-out: {}", stopped.reason);
+        output::message(format_args!("run {run}: the actor was killed without its mirror-out: {}", stopped.reason));
       }
       output::acknowledge(&format!("Stopped run {run}."))?;
     }

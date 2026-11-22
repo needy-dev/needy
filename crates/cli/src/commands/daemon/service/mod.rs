@@ -27,48 +27,63 @@ pub struct Args {
 
 #[derive(clap::Args)]
 struct Selection {
+  /// Service manager scope (`user` for the current account, `system` for root-managed).
   #[arg(long, value_enum, default_value = "user")]
   scope: Scope,
 }
 
 #[derive(clap::Subcommand)]
 enum Command {
+  /// Install the control daemon as a systemd or launchd service.
   Install(InstallArgs),
+  /// Stop and remove the installed control service definition.
   Uninstall {
     #[command(flatten)]
     selection: Selection,
+    /// Maximum time to wait for the service to stop and unregister.
     #[arg(long, default_value = "60s", value_parser = humantime::parse_duration)]
     timeout: Duration,
   },
+  /// Start the installed control service and wait until its API is ready.
   Start {
     #[command(flatten)]
     selection: Selection,
+    /// Maximum time to wait for the control API to become ready.
     #[arg(long, default_value = "30s", value_parser = humantime::parse_duration)]
     timeout: Duration,
   },
+  /// Stop the installed control service and verify clean shutdown.
   Stop {
     #[command(flatten)]
     selection: Selection,
+    /// Maximum time to wait for the service to stop cleanly.
     #[arg(long, default_value = "60s", value_parser = humantime::parse_duration)]
     timeout: Duration,
   },
+  /// Restart the installed control service and wait until its API is ready.
   Restart {
     #[command(flatten)]
     selection: Selection,
+    /// Maximum time to wait for stop and restart combined.
     #[arg(long, default_value = "60s", value_parser = humantime::parse_duration)]
     timeout: Duration,
   },
+  /// Show the installed control service's state, PID, and readiness.
   Status {
     #[command(flatten)]
     selection: Selection,
+    /// Output format.
     #[arg(short, long, value_enum, default_value = "table")]
     output: OutputFormat,
   },
+  /// Show logs from the installed control service.
   Logs {
     #[command(flatten)]
     selection: Selection,
+    /// Follow log output as new lines arrive.
     #[arg(short, long)]
     follow: bool,
+    /// Number of recent log lines to show.
     #[arg(long, default_value_t = 100)]
     tail: usize,
   },
@@ -78,12 +93,16 @@ enum Command {
 struct InstallArgs {
   #[command(flatten)]
   selection: Selection,
+  /// Start the service immediately after installing it.
   #[arg(long)]
   now: bool,
+  /// Replace an existing needy-managed service installation with a fresh config snapshot.
   #[arg(long)]
   replace: bool,
+  /// System account the service runs as (required with `--scope system`).
   #[arg(long)]
   run_as: Option<String>,
+  /// Maximum time to wait for service operations during installation.
   #[arg(long, default_value = "30s", value_parser = humantime::parse_duration)]
   timeout: Duration,
 }
@@ -204,10 +223,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Err(error) => return Err(error.into()),
   };
   if let Command::Status { output, .. } = args.command {
-    let progress = output::Progress::new(
-      matches!(output, output::OutputFormat::Table) && !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json),
-      "Inspecting control service...",
-    );
+    let progress = output::Progress::new(ctx.show_progress(matches!(output, output::OutputFormat::Table)), "Inspecting control service...");
     let row = match registration {
       Some(registration) => status(manager.as_ref(), &registration).await?,
       None => Status {
@@ -226,7 +242,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   }
   let registration = registration.ok_or_else(missing)?;
   verify_owned(&registration)?;
-  let progress = !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json);
+  let progress = ctx.show_progress(true);
   match args.command {
     Command::Start { timeout, .. } => {
       start(manager.as_ref(), &registration, Instant::now() + timeout, progress).await?;
@@ -251,10 +267,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       std::fs::remove_file(&receipt)?;
       // Configuration, credentials, snapshots, logs, state and images remain.
       output::acknowledge("Control service uninstalled.")?;
-      {
-        use std::io::Write as _;
-        writeln!(std::io::stderr().lock(), "\nRemoved:\n  {}\n  {}", registration.definition.display(), receipt.display())?;
-      }
+      output::detail(format_args!("\nRemoved:\n  {}\n  {}", registration.definition.display(), receipt.display()))?;
     }
     Command::Logs { follow, tail, .. } => {
       let status = manager.logs(&registration, follow, tail).status().await.context("cannot read service logs")?;
@@ -522,8 +535,8 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
     Scope::User => "user",
     Scope::System => "system",
   };
-  output::outln!("Detected service manager: {} ({scope_name} scope)", manager.name())?;
-  output::outln!("Runtime account: {account}")?;
+  output::detail(format_args!("Detected service manager: {} ({scope_name} scope)", manager.name()))?;
+  output::detail(format_args!("Runtime account: {account}"))?;
   // One transaction covers ownership inspection, stop of an older generation,
   // and publication. Competing mutations fail instead of interleaving receipts.
   #[cfg(unix)]
@@ -633,7 +646,7 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
     );
   }
   if let Some(previous) = &previous {
-    stop(manager, previous, deadline, !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)).await?;
+    stop(manager, previous, deadline, ctx.show_progress(true)).await?;
   }
   for path in [&paths.state, &paths.data, &paths.runtime, &snapshot_dir] {
     prepare_directory(path, uid, gid)?;
@@ -642,27 +655,27 @@ async fn install(ctx: &Context, manager: &dyn Manager, directory: &Path, receipt
     std::fs::create_dir_all(parent)?;
   }
   std::fs::create_dir_all(directory)?;
-  output::outln!("Writing configuration snapshot: {}", registration.snapshot.display())?;
+  output::detail(format_args!("Writing configuration snapshot: {}", registration.snapshot.display()))?;
   write_new(&registration.snapshot, serde_yaml::to_string(&config)?.as_bytes(), 0o600)?;
   #[cfg(unix)]
   if matches!(scope, Scope::System) {
     std::os::unix::fs::chown(&registration.snapshot, Some(uid), Some(gid))?;
   }
   let definition = manager.render(&registration)?;
-  output::outln!("Writing service definition: {}", registration.definition.display())?;
+  output::detail(format_args!("Writing service definition: {}", registration.definition.display()))?;
   write_atomic(&registration.definition, definition.as_bytes(), 0o644)?;
-  output::outln!("Writing service registration: {}", receipt.display())?;
+  output::detail(format_args!("Writing service registration: {}", receipt.display()))?;
   write_atomic(receipt, &serde_json::to_vec_pretty(&registration)?, 0o600)?;
-  output::outln!("Check status: {}", command_line(&manager.status_command(&registration)))?;
-  output::outln!("View logs: {}", command_line(&manager.logs(&registration, true, 100)))?;
-  output::outln!("Enabling {} control service ({scope_name})", manager.name())?;
+  output::detail(format_args!("Check status: {}", command_line(&manager.status_command(&registration))))?;
+  output::detail(format_args!("View logs: {}", command_line(&manager.logs(&registration, true, 100))))?;
+  output::detail(format_args!("Enabling {} control service ({scope_name})", manager.name()))?;
   execute(manager.command(Action::Reload, &registration), deadline).await?;
   execute(manager.command(Action::Enable, &registration), deadline).await?;
   if now {
-    output::outln!("Starting {} control service ({scope_name})", manager.name())?;
-    start(manager, &registration, deadline, !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)).await?;
+    output::detail(format_args!("Starting {} control service ({scope_name})", manager.name()))?;
+    start(manager, &registration, deadline, ctx.show_progress(true)).await?;
   }
-  output::success(&format!("Installed {} control service ({scope_name})", manager.name()))?;
+  output::acknowledge(&format!("Installed {} control service ({scope_name})", manager.name()))?;
   Ok(())
 }
 

@@ -29,7 +29,7 @@ use needy_core::recipe::PerRun;
 use needy_core_actor::image::manifest::{self, Manifest};
 
 use super::lockfile::{self, LockCommit};
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output::{self, outln};
 
 mod from;
@@ -45,60 +45,64 @@ pub struct Args {
     conflicts_with_all = ["profile", "from", "recipe", "out", "executor", "linux_container", "macos_apple_container"]
   )]
   pub image: Option<PathBuf>,
-  /// Build the image definition used by this profile (`actor.image`) through
-  /// the daemon.
+  /// Build the image definition used by a profile (`actor.image`) through the daemon.
   #[arg(
     short = 'f',
     long,
     conflicts_with_all = ["image", "from", "recipe", "out", "executor", "linux_container", "macos_apple_container"]
   )]
   pub profile: Option<PathBuf>,
-  /// Actor driver to build an image definition for (defaults to this host's VM
-  /// driver when building an image file directly).
+  /// Actor driver to build an image definition for.
+  ///
+  /// Defaults to this host's VM driver when building an image file directly.
   #[arg(
     long,
     value_parser = super::driver,
     conflicts_with_all = ["from", "recipe", "out", "executor", "linux_container", "macos_apple_container"]
   )]
   pub driver: Option<ActorDriver>,
-  /// Recipe whose kernel options the actor image is built with: a path, or
-  /// `builtin:NAME`.
+  /// Recipe whose kernel options the actor image is built with (path or `builtin:NAME`).
   #[arg(long)]
   recipe: Option<String>,
-  /// Output directory for the actor image: vmlinux, rootfs.ext4,
-  /// firecracker and manifest.json, or on Apple silicon macOS Image, initrd,
-  /// rootfs.ext4 and manifest.json for `macos-vz` actors. It is a base image
-  /// without needy, which the daemon injects when an actor starts. Defaults
-  /// to the base image the daemon boots.
+  /// Output directory for the built VM base image.
+  ///
+  /// Writes vmlinux, rootfs.ext4, firecracker, and manifest.json (or on Apple
+  /// silicon macOS: Image, initrd, rootfs.ext4, and manifest.json). Defaults to
+  /// the base image directory the daemon boots.
   #[arg(long)]
   out: Option<PathBuf>,
-  /// Also build the executor image, `needy-executor:latest` (the daemon
-  /// uses it with `--executor-image needy-executor:latest`).
+  /// Also build the executor image (`needy-executor:latest`).
+  ///
+  /// Pass `--executor-image needy-executor:latest` to `needy daemon serve` to
+  /// use the locally built image.
   #[arg(long)]
   executor: bool,
-  /// Also build the `linux-container` actor's base image,
-  /// `needy-actor:latest` (a profile uses it with `actor.image:
-  /// needy-actor:latest`).
+  /// Also build the `linux-container` actor base image (`needy-actor:latest`).
+  ///
+  /// Reference it in a profile with `actor.image: needy-actor:latest`.
   #[arg(long)]
   linux_container: bool,
-  /// Build the container actor base image, `needy-actor:latest`, for
-  /// linux/arm64 and load it into Apple's `container`, for `actor.driver:
-  /// macos-apple-container` on a Mac with Apple silicon, instead of the VM
+  /// Build and load `needy-actor:latest` into Apple's `container` store.
+  ///
+  /// Builds the linux/arm64 container actor base image for
+  /// `actor.driver: macos-apple-container` on Apple silicon instead of the VM
   /// actor image.
   #[arg(long, conflicts_with_all = ["recipe", "out"])]
   macos_apple_container: bool,
-  /// Make the VM image of this host's VM driver (`linux-firecracker`, or
-  /// `macos-vz` on Apple silicon) from an OCI image `FROM` needy's
-  /// container base, which a profile names with `actor.image: REF`. The
-  /// kernel is the base VM image's (`--base`), the root file system the OCI
-  /// image's. It defaults to where the daemon looks for `REF`; `--out`
-  /// writes it elsewhere. Needs no needy checkout.
+  /// Build a VM image from an OCI image based on needy's container base.
+  ///
+  /// Uses the kernel from the base VM image (`--base`) and the root filesystem
+  /// from the OCI image `REF` (no needy checkout required). Defaults to where
+  /// the daemon looks for `actor.image: REF`; `--out` writes it elsewhere.
   #[arg(long, value_name = "REF", conflicts_with_all = ["recipe", "executor", "linux_container", "macos_apple_container"])]
   from: Option<String>,
-  /// The base VM image whose kernel `--from` takes. Defaults to the image
-  /// the daemon boots.
+  /// Base VM image directory whose kernel `--from` reuses.
+  ///
+  /// Defaults to the base image the daemon boots.
   #[arg(long, value_name = "DIR", requires = "from")]
   base: Option<PathBuf>,
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
 }
 
 impl Args {
@@ -113,7 +117,10 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   if args.is_definition_build() {
     return run_definition_build(args, ctx).await;
   }
-  let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
+  if args.connection.is_set() {
+    bail!("local image builds do not accept --context, --address, or --credential-file");
+  }
+  let feedback = ctx.show_progress(true);
   if let Some(reference) = &args.from {
     let paths = ctx.paths()?;
     let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;

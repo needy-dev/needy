@@ -95,7 +95,7 @@ pub fn windows_preflight(remote: &Remote) -> Result<String> {
      [IO.File]::WriteAllText('auth-preflight.yaml', 'version: 1'); \
      [IO.File]::WriteAllText('auth-preflight.code', 'not-a-credential'); \
      try {{ & .\\src\\target\\debug\\needy.exe --config auth-preflight.yaml \
-       --address tcp://127.0.0.1:1 --credential-file auth-preflight.code run ls; $result=$LASTEXITCODE }} \
+       run ls --address tcp://127.0.0.1:1 --credential-file auth-preflight.code; $result=$LASTEXITCODE }} \
      finally {{ Remove-Item auth-preflight.yaml,auth-preflight.code -ErrorAction SilentlyContinue }}; exit $result",
     remote.dir
   );
@@ -303,14 +303,25 @@ impl Client {
       ("NEEDY_DATA_DIR", "data"),
     ];
     let mut argv = vec![self.binary.clone()];
-    if connected {
+    let connection = connected.then(|| {
       if self.context {
-        argv.extend(["--context".into(), "control".into()]);
+        ("--context".to_string(), "control".to_string())
       } else {
-        argv.extend(["--address".into(), self.address.clone()]);
+        ("--address".to_string(), self.address.clone())
+      }
+    });
+    if let Some(pos) = args.iter().position(|&a| a == "--") {
+      argv.extend(args[..pos].iter().map(|s| s.to_string()));
+      if let Some((flag, value)) = connection {
+        argv.extend([flag, value]);
+      }
+      argv.extend(args[pos..].iter().map(|s| s.to_string()));
+    } else {
+      argv.extend(args.iter().map(|s| s.to_string()));
+      if let Some((flag, value)) = connection {
+        argv.extend([flag, value]);
       }
     }
-    argv.extend(args.iter().map(|s| s.to_string()));
     if let Some(remote) = &self.remote {
       let mut command = ssh(&remote.ssh);
       let env = dirs.map(|(key, dir)| format!("{key}={}/{dir}", self.root));

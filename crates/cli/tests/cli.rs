@@ -204,7 +204,7 @@ impl Daemon {
     if std::os::unix::net::UnixStream::connect(self.home.join("run/daemon.sock")).is_err() {
       return Ok(());
     }
-    let invoke = |args: &[&str]| needy_at(&self.home).args(["--address", &address]).args(args).output();
+    let invoke = |args: &[&str]| needy_at(&self.home).args(args).args(["--address", &address]).output();
     let listed = invoke(&["run", "ls", "-o", "json"])?;
     ensure!(listed.status.success(), "cannot list fixture runs: {}", stderr(&listed));
     let rows: Vec<serde_json::Value> = serde_json::from_slice(&listed.stdout)?;
@@ -1151,9 +1151,9 @@ fn run_create_explains_profile_and_group() {
   let output = home.run(&["run", "create", "--help"]);
 
   let text = stdout(&output);
-  assert!(text.contains("--profile <PROFILE>") && text.contains("Profile YAML"), "{text}");
-  assert!(text.contains("--group <GROUP>") && text.contains("Runs in one group share executors"), "{text}");
-  assert!(text.contains("Defaults to the run ID"), "{text}");
+  assert!(text.contains("--profile <PROFILE>") && text.contains("Profile path, bare profile name"), "{text}");
+  assert!(text.contains("--group <GROUP>") && text.contains("sharing executors"), "{text}");
+  assert!(text.contains("defaults to the run ID"), "{text}");
 }
 
 #[test]
@@ -1538,12 +1538,12 @@ fn detached_exec_whose_stream_ends_before_the_start_exits_255_and_says_why() {
   let daemon = EndingDaemon::start(&home, Some("run stopped"));
 
   let output = home.run(&[
-    "--address",
-    &daemon.endpoint,
     "proc",
     "exec",
     "--host",
     "-d",
+    "--address",
+    &daemon.endpoint,
     "--",
     "sleep",
     "30",
@@ -1564,14 +1564,14 @@ fn detached_exec_json_whose_stream_closes_before_the_start_reports_an_error() {
   let daemon = EndingDaemon::start(&home, None);
 
   let output = home.run(&[
-    "--address",
-    &daemon.endpoint,
     "proc",
     "exec",
     "--host",
     "-d",
     "--output",
     "json",
+    "--address",
+    &daemon.endpoint,
     "--",
     "sleep",
     "30",
@@ -1595,14 +1595,14 @@ fn an_unknown_exec_outcome_honors_json_diagnostics_without_changing_stdout() {
   let output = home.run(&[
     "--diagnostic-format",
     "json",
-    "--address",
-    &daemon.endpoint,
     "proc",
     "exec",
     "--host",
     "-d",
     "--output",
     "json",
+    "--address",
+    &daemon.endpoint,
     "--",
     "sleep",
     "30",
@@ -1617,8 +1617,12 @@ fn an_unknown_exec_outcome_honors_json_diagnostics_without_changing_stdout() {
   assert_eq!(diagnostic["checks"][0]["location"], "client");
   let argv = diagnostic["checks"][0]["argv"].as_array().unwrap();
   assert_eq!(argv[0], "needy");
-  assert!(argv.windows(2).any(|args| args[0] == "--address" && args[1] == daemon.endpoint));
-  assert_eq!(&argv[argv.len() - 2..], &[serde_json::json!("proc"), serde_json::json!("ls")]);
+  let subcmd = argv.windows(2).position(|args| args[0] == "proc" && args[1] == "ls").expect("check argv must include `proc ls`");
+  let addr = argv
+    .windows(2)
+    .position(|args| args[0] == "--address" && args[1] == daemon.endpoint)
+    .expect("check argv must include `--address <endpoint>`");
+  assert!(subcmd < addr, "scoped --address must follow subcommand: {argv:?}");
 }
 
 /// Sends SIGTERM twice, half a second apart, and returns how long the
@@ -1703,7 +1707,7 @@ fn a_second_sigterm_makes_the_executor_exit_at_once() {
   let home = Home::new();
   let daemon = spawn_daemon(&home, "executor");
   let address = format!("unix:{}", home.path().join("run/daemon.sock").display());
-  let (mut attached, sleep) = attach_sleep(&home, &["--address", &address, "proc", "exec", "--host"]);
+  let (mut attached, sleep) = attach_sleep(&home, &["proc", "exec", "--host", "--address", &address]);
 
   let (elapsed, output) = terminate_twice(daemon);
   attached.kill().ok();
@@ -2404,7 +2408,7 @@ fn runner_invitation_explains_joining_with_aligned_metadata() {
 
   assert!(output.status.success(), "{}", stderr(&output));
   assert!(text.contains("On the runner machine, run:"), "{text}");
-  assert!(text.contains("needy --address <control-address> runner join <runner-name> --roles executor"), "{text}");
+  assert!(text.contains("needy runner join <runner-name> --address <control-address> --roles executor"), "{text}");
   assert!(text.contains("Joining token (shown once):"), "{text}");
   assert!(text.contains("  Roles:      executor\n"), "{text}");
   assert!(text.contains("  Expires:    "), "{text}");
@@ -2424,11 +2428,11 @@ fn runner_invitation_can_be_piped_to_join_and_reports_the_next_steps() {
   let mut joining = runner
     .needy()
     .args([
-      "--address",
-      &address,
       "runner",
       "join",
       "example-runner",
+      "--address",
+      &address,
       "--roles",
       "executor",
       "--code-file",
@@ -2443,9 +2447,10 @@ fn runner_invitation_can_be_piped_to_join_and_reports_the_next_steps() {
     .unwrap();
   joining.stdin.take().unwrap().write_all(format!("{code}\n").as_bytes()).unwrap();
   let output = joining.wait_with_output().unwrap();
-  let text = stdout(&output);
+  let text = stderr(&output);
 
-  assert!(output.status.success(), "{}", stderr(&output));
+  assert!(output.status.success(), "{text}");
+  assert!(stdout(&output).is_empty(), "runner join confirmation must go to stderr, not stdout: {}", stdout(&output));
   assert!(text.contains("Joined successfully. Enrollment saved."), "{text}");
   assert!(text.contains("example-runner"), "{text}");
   assert!(text.contains(&address), "{text}");
@@ -2456,7 +2461,7 @@ fn runner_invitation_can_be_piped_to_join_and_reports_the_next_steps() {
   assert!(!text.contains(&code), "joining must not echo the invitation");
   let style = anstyle::AnsiColor::Green.on_default().to_string();
   assert!(!text.contains(&style), "piped output must not contain terminal colors");
-  assert!(!stderr(&output).contains("Joining token:"), "stdin input must not open an interactive prompt");
+  assert!(!text.contains("Joining token:"), "stdin input must not open an interactive prompt");
   assert!(runner.path().join("state/runner.json").exists());
 }
 
@@ -2474,11 +2479,11 @@ fn runner_join_highlights_success_on_a_terminal() {
   let (status, bytes) = on_terminal(
     &runner,
     &[
-      "--address",
-      &address,
       "runner",
       "join",
       "example-runner",
+      "--address",
+      &address,
       "--roles",
       "executor",
       "--code-file",
@@ -2632,11 +2637,11 @@ fn enroll_runner(home: &Home, control: &Home, token: &str, extra: &[String]) -> 
   home
     .needy()
     .args([
-      "--address",
-      &endpoint,
       "runner",
       "join",
       "mac",
+      "--address",
+      &endpoint,
       "--code-file",
       invitation.to_str().unwrap(),
       "--labels",
@@ -2851,11 +2856,11 @@ fn a_runner_daemon_stopped_while_it_joins_keeps_its_credential() {
     std::fs::set_permissions(&invitation, std::fs::Permissions::from_mode(0o600)).unwrap();
   }
   command.args([
-    "--address",
-    &control.endpoint,
     "runner",
     "join",
     "mac",
+    "--address",
+    &control.endpoint,
     "--code-file",
     invitation.to_str().unwrap(),
   ]);
@@ -3348,6 +3353,20 @@ fn pair_context(home: &Home, endpoint: &str, name: &str, code: &str) -> Output {
   ])
 }
 
+/// Appends `--context NAME` before `--` (if present) so it applies to needy rather than a child command.
+fn with_context<'a>(args: &[&'a str], context: &'a str) -> Vec<&'a str> {
+  let mut out = Vec::with_capacity(args.len() + 2);
+  if let Some(pos) = args.iter().position(|&a| a == "--") {
+    out.extend_from_slice(&args[..pos]);
+    out.extend(["--context", context]);
+    out.extend_from_slice(&args[pos..]);
+  } else {
+    out.extend_from_slice(args);
+    out.extend(["--context", context]);
+  }
+  out
+}
+
 /// A named network administrator bootstrapped by this control host's owner.
 fn as_operator(home: &Home, endpoint: &str, args: &[&str]) -> Output {
   if !home.run(&["config", "context", "show", "administration"]).status.success() {
@@ -3365,7 +3384,7 @@ fn as_operator(home: &Home, endpoint: &str, args: &[&str]) -> Output {
     let paired = pair_context(home, endpoint, "administration", value["code"].as_str().unwrap());
     assert!(paired.status.success(), "{}", stderr(&paired));
   }
-  home.needy().args(["--context", "administration"]).args(args).output().unwrap()
+  home.needy().args(with_context(args, "administration")).output().unwrap()
 }
 
 fn as_local_operator(home: &Home, args: &[&str]) -> Output {
@@ -3374,7 +3393,7 @@ fn as_local_operator(home: &Home, args: &[&str]) -> Output {
 
 /// Explicit saved identity: never borrow a credential for a direct address.
 fn as_client(home: &Home, _endpoint: &str, args: &[&str]) -> Output {
-  home.needy().args(["--context", "remote"]).args(args).output().unwrap()
+  home.needy().args(with_context(args, "remote")).output().unwrap()
 }
 
 fn pairing_code(control: &Home, _endpoint: &str, name: &str) -> String {
@@ -3384,13 +3403,11 @@ fn pairing_code(control: &Home, _endpoint: &str, name: &str) -> String {
   value["code"].as_str().unwrap().to_string()
 }
 
-// ROOT CAUSE:
-//
-// The guide placed --address before config. Pair's duplicate local flag
-// shadowed that global value, so clap rejected the command before reading
-// the invitation. Pair and context set must share the root transport flag.
+// Connection flags are scoped to the remote subcommands that use them, so
+// `config context pair` and `config context set` take `--address` on the
+// subcommand itself rather than on the root CLI.
 #[test]
-fn client_pair_accepts_the_guides_global_address_and_reports_the_written_file() {
+fn client_pair_accepts_scoped_address_and_reports_the_written_file() {
   use std::os::unix::fs::PermissionsExt as _;
   let control = Home::new();
   let (_daemon, endpoint) = spawn_control_on_tcp(&control);
@@ -3399,12 +3416,12 @@ fn client_pair_accepts_the_guides_global_address_and_reports_the_written_file() 
   let path = laptop.write("invitation", &code);
   std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
   let paired = laptop.run(&[
-    "--address",
-    &endpoint,
     "config",
     "context",
     "pair",
     "control",
+    "--address",
+    &endpoint,
     "--code-file",
     path.to_str().unwrap(),
   ]);
@@ -3416,12 +3433,12 @@ fn client_pair_accepts_the_guides_global_address_and_reports_the_written_file() 
   assert!(!text.contains("needy:"));
   assert!(stdout(&paired).is_empty(), "{}", stdout(&paired));
   let changed = laptop.run(&[
-    "--address",
-    &endpoint,
     "config",
     "context",
     "set",
     "control",
+    "--address",
+    &endpoint,
   ]);
   assert!(changed.status.success(), "{}", stderr(&changed));
   assert!(laptop.run(&["config", "use", "control"]).status.success());
@@ -3434,12 +3451,12 @@ fn client_pair_accepts_the_guides_global_address_and_reports_the_written_file() 
   let (status, bytes) = on_terminal(
     &terminal_home,
     &[
-      "--address",
-      &endpoint,
       "config",
       "context",
       "pair",
       "control",
+      "--address",
+      &endpoint,
       "--code-file",
       terminal_file.to_str().unwrap(),
     ],
@@ -3470,7 +3487,7 @@ fn client_invite_shows_pairing_instructions_and_stdin_pairing_does_not_echo_secr
   assert!(human.status.success(), "{}", stderr(&human));
   let text = stdout(&human);
   assert!(text.contains("Client invitation created."), "{text}");
-  assert!(text.contains("needy --address <control-address> config context pair control"), "{text}");
+  assert!(text.contains("needy config context pair control --address <control-address>"), "{text}");
   assert!(text.contains("--code-file -"), "{text}");
   let code = pairing_code(&control, &endpoint, "stdin-client");
   let laptop = Home::new();
@@ -3507,12 +3524,13 @@ fn the_invitation_command_pairs_with_a_one_time_token_argument() {
   assert!(human.status.success(), "{}", stderr(&human));
   let text = stdout(&human);
   assert!(text.contains("CLIENT ROLE"), "{text}");
-  let command = text.lines().find(|l| l.trim_start().starts_with("needy --address ")).unwrap();
+  let command = text.lines().find(|l| l.trim_start().starts_with("needy config context pair ")).unwrap();
   let mut argv = shell_words::split(command.trim()).unwrap();
   let index = argv.iter().position(|a| a == "--token").expect("invitation must print a copyable token command");
   let code = argv[index + 1].clone();
   assert_eq!(text.matches(&code).count(), 1, "invitation code must be shown once");
-  argv[2] = endpoint;
+  let address_index = argv.iter().position(|a| a == "--address").expect("invitation must include --address");
+  argv[address_index + 1] = endpoint;
   let laptop = Home::new();
   let paired = laptop.needy().args(&argv[1..]).output().unwrap();
   assert!(paired.status.success(), "{}", stderr(&paired));
@@ -3533,12 +3551,12 @@ fn a_token_argument_conflicts_with_file_input_before_consuming_the_invitation() 
   let code = pairing_code(&control, &endpoint, "laptop");
   let laptop = Home::new();
   let conflict = laptop.run(&[
-    "--address",
-    &endpoint,
     "config",
     "context",
     "pair",
     "control",
+    "--address",
+    &endpoint,
     "--token",
     &code,
     "--code-file",
@@ -3547,12 +3565,12 @@ fn a_token_argument_conflicts_with_file_input_before_consuming_the_invitation() 
   assert_eq!(conflict.status.code(), Some(2));
   assert!(!stderr(&conflict).contains(&code));
   let paired = laptop.run(&[
-    "--address",
-    &endpoint,
     "config",
     "context",
     "pair",
     "control",
+    "--address",
+    &endpoint,
     "--token",
     &code,
   ]);
@@ -3569,12 +3587,12 @@ fn pairing_does_not_animate_over_verbose_logs_or_connector_stderr() {
     &laptop,
     &[
       "-v",
-      "--address",
-      &endpoint,
       "config",
       "context",
       "pair",
       "control",
+      "--address",
+      &endpoint,
       "--token",
       &code,
     ],
@@ -3738,12 +3756,12 @@ fn pairing_reports_an_explicit_configuration_file() {
   let paired = laptop.run(&[
     "--config",
     config.to_str().unwrap(),
-    "--address",
-    &endpoint,
     "config",
     "context",
     "pair",
     "remote",
+    "--address",
+    &endpoint,
     "--code-file",
     file.to_str().unwrap(),
   ]);
@@ -4003,7 +4021,7 @@ fn report_and_run_logs_come_from_the_control_plane_and_name_the_client() {
   // The stand-in actor prints two lines; `-f` shows them while the run runs
   // and follows until the run stops.
   const CONSOLE: &str = "boot\nhello from the actor\n";
-  let mut follow = laptop.needy().args(["--context", "remote", "run", "logs", "-f", &run]).stdout(Stdio::piped()).spawn().unwrap();
+  let mut follow = laptop.needy().args(["run", "logs", "-f", &run, "--context", "remote"]).stdout(Stdio::piped()).spawn().unwrap();
   let (shown, printed) = std::sync::mpsc::channel();
   let reader = std::thread::spawn({
     use std::io::Read as _;
@@ -4088,11 +4106,11 @@ fn pairing_preserves_local_selection_and_failed_explicit_targets_never_fall_back
   assert_eq!(laptop.run(&["run", "ls"]).status.code(), Some(1), "pairing did not select a remote default");
   assert!(laptop.run(&["config", "use", "remote"]).status.success());
   assert!(laptop.run(&["run", "ls"]).status.success());
-  let failed = laptop.needy().args(["--address", "http://127.0.0.1:9", "run", "ls"]).output().unwrap();
+  let failed = laptop.needy().args(["run", "ls", "--address", "http://127.0.0.1:9"]).output().unwrap();
   assert_eq!(failed.status.code(), Some(1));
   assert!(stderr(&failed).contains("http://127.0.0.1:9"), "{}", stderr(&failed));
   let _local = Daemon::start(&laptop);
-  let local = laptop.run(&["--context", "local", "client", "ls", "-o", "json"]);
+  let local = laptop.run(&["client", "ls", "-o", "json", "--context", "local"]);
   assert!(local.status.success(), "{}", stderr(&local));
   assert_eq!(serde_json::from_str::<Vec<serde_json::Value>>(&stdout(&local)).unwrap().len(), 0);
   assert!(laptop.run(&["run", "ls"]).status.success(), "remote selection survived local serving");

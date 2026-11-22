@@ -29,7 +29,8 @@ pub(crate) fn stderr_active() -> bool {
 /// Installs the global subscriber. `verbosity` is the number of `-v` flags;
 /// `log_dir` adds a daily file for the daemon.
 pub fn init(verbosity: u8, log_dir: Option<&Path>) -> Result<Guard> {
-  let stderr = fmt::layer().with_writer(std::io::stderr).with_target(verbosity > 1).with_filter(stderr_filter(verbosity));
+  let (filter, stderr_on) = stderr_filter(verbosity);
+  let stderr = fmt::layer().with_writer(std::io::stderr).with_target(verbosity > 1).with_filter(filter);
   let mut file_error = None;
   let (file, guard) = match log_dir.map(file_appender) {
     Some(Ok(appender)) => {
@@ -43,7 +44,7 @@ pub fn init(verbosity: u8, log_dir: Option<&Path>) -> Result<Guard> {
     None => (None, None),
   };
   tracing_subscriber::registry().with(stderr).with(file).try_init()?;
-  STDERR_ACTIVE.store(verbosity > 0, Ordering::Relaxed);
+  STDERR_ACTIVE.store(stderr_on, Ordering::Relaxed);
   if let Some(error) = file_error {
     // A read-only home, as in some containers, must not stop the daemon.
     tracing::warn!("no log file: {error:#}");
@@ -51,18 +52,23 @@ pub fn init(verbosity: u8, log_dir: Option<&Path>) -> Result<Guard> {
   Ok(Guard(guard))
 }
 
-fn stderr_filter(verbosity: u8) -> EnvFilter {
+fn stderr_filter(verbosity: u8) -> (EnvFilter, bool) {
+  if verbosity == 0 {
+    if let Ok(filter) = EnvFilter::try_from_default_env() {
+      return (filter, true);
+    }
+    return (EnvFilter::new("off"), false);
+  }
   // `-vv` turns on debug for needy's crates only; dependencies such as h2
   // are noisy at debug.
   let directives = match verbosity {
-    0 => "off",
     1 => "info",
     2 => {
       "info,needy=debug,needy_cli=debug,needy_daemon=debug,needy_core=debug,needy_core_executor=debug,needy_core_actor=debug,needy_api_client=debug,needy_api_server=debug"
     }
     _ => "trace",
   };
-  EnvFilter::new(directives)
+  (EnvFilter::new(directives), true)
 }
 
 fn file_appender(dir: &Path) -> Result<RollingFileAppender> {

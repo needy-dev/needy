@@ -9,20 +9,24 @@ use needy_api_client::Client;
 use needy_api_client::files::{self, Target};
 use needy_api_client::proto::v1::Origin;
 
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output;
 
 #[derive(clap::Args)]
 pub struct Args {
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
   #[command(subcommand)]
   command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-  /// Copy a file or directory into a directory: `SRC remote:DIR` or `remote:PATH DIR`.
+  /// Copy a file or directory between local and remote (`SRC remote:DIR` or `remote:PATH DIR`).
   Cp {
+    /// Local path or `remote:PATH` to copy from.
     source: String,
+    /// Local directory or `remote:DIR` to copy into.
     destination: String,
     /// Bound run; requires its named executor.
     #[arg(long, requires = "executor", conflicts_with_all = ["runner", "host"])]

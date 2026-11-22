@@ -22,7 +22,7 @@ use needy_core::types::Outcome;
 use serde::Serialize;
 
 use super::config::DocumentFormat;
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output::{self, OutputFormat, Row, outln};
 
 #[derive(clap::Args)]
@@ -33,33 +33,45 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-  /// List local named YAML files, retaining findings for malformed rows.
+  /// List local named profiles and built-in profiles.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Display source or resolved profile data. Environment values and credentials
-  /// are masked; arbitrary argv/free text can still contain unknown secrets.
+  /// Show a profile's YAML or JSON definition with credentials redacted.
+  ///
+  /// Environment values and credentials are masked; arbitrary argv or free text
+  /// may still contain unredacted values.
   Show {
+    /// Profile name, file path, or `builtin:NAME`.
     profile: PathBuf,
+    /// Expand `extends` chains and inline references before displaying.
     #[arg(long)]
     resolved: bool,
+    /// Document output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: DocumentFormat,
   },
-  /// Check schema and routing, optionally adding host or control-plane facts.
+  /// Validate a profile's schema, routing rules, and optional placement.
   Check {
+    /// Profile name, file path, or `builtin:NAME`.
     #[arg(required_unless_present = "file", conflicts_with = "file")]
     profile: Option<PathBuf>,
-    /// Check a profile file on this client, as with run create -f.
+    /// Profile file on this machine (same as `run create -f`).
     #[arg(short = 'f', long, value_name = "FILE")]
     file: Option<PathBuf>,
+    /// Simulate routing for a command line (repeat for multiple commands).
     #[arg(long = "cmd")]
     commands: Vec<String>,
+    /// Validation depth: `static` (schema only), `host` (local KVM/recipe), or `control` (control plane).
     #[arg(long, value_enum, default_value_t)]
     mode: Mode,
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
+    #[command(flatten)]
+    connection: ConnectionArgs,
   },
 }
 
@@ -72,14 +84,11 @@ enum Mode {
 }
 
 impl Args {
-  pub fn uses_control(&self) -> bool {
-    matches!(
-      self.command,
-      Command::Check {
-        mode: Mode::Control,
-        ..
-      }
-    )
+  pub(crate) fn connection(&self) -> ConnectionArgs {
+    match &self.command {
+      Command::Check { connection, .. } => connection.clone(),
+      _ => ConnectionArgs::default(),
+    }
   }
 }
 
@@ -174,7 +183,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       commands,
       mode,
       output,
+      connection,
     } => {
+      if !matches!(mode, Mode::Control) && connection.is_set() {
+        anyhow::bail!("--context, --address, and --credential-file require --mode control");
+      }
       let source = ctx.profile_source(&file.or(profile).expect("clap requires a profile or --file"))?;
       match output {
         OutputFormat::Json => check_json(&source, &commands, mode, ctx).await,

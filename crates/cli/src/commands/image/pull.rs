@@ -29,9 +29,9 @@ use needy_core_actor::image::manifest::{self, Manifest};
 use needy_core_actor::image::{base, container, vm};
 use sha2::{Digest as _, Sha256};
 
-use super::{is_vm, progress, release_image};
+use super::{is_vm, release_image};
 use crate::cli::Context;
-use crate::output;
+use crate::output::{self, progress};
 
 /// Test hook, as `install/install.sh` has: a URL that serves the release
 /// assets directly (such as a local HTTP server over a workflow run's
@@ -62,7 +62,7 @@ pub struct Args {
 }
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
-  let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
+  let feedback = ctx.show_progress(true);
   let images = ctx.paths()?.images();
   if let Some(file) = &args.file {
     if args.drivers.len() > 1 || args.drivers.iter().any(|driver| !is_vm(*driver)) {
@@ -247,7 +247,7 @@ pub(crate) async fn ensure_vm_base(driver: ActorDriver, ctx: &Context) {
     return;
   }
 
-  let feedback = matches!(ctx.diagnostic_format, crate::diagnostics::Format::Human);
+  let feedback = ctx.show_progress(true);
   let version = env!("CARGO_PKG_VERSION");
   let Ok(client) = reqwest::Client::builder().user_agent(concat!("needy/", env!("CARGO_PKG_VERSION"))).build() else {
     return;

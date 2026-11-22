@@ -50,21 +50,26 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct ServeArgs {
-  /// Additional listeners; the private management listener always exists.
+  /// Additional listener addresses (`tcp://HOST:PORT` or `unix:///PATH`); the private local socket always exists.
   #[arg(long)]
   listen: Vec<String>,
+  /// Path to the base actor VM image directory.
   #[arg(long)]
   actor_image: Option<std::path::PathBuf>,
+  /// Name for the built-in local runner on this control host.
   #[arg(long)]
   local_runner: Option<String>,
   // NOTICE: stand-in Firecracker tests use this path; real Firecracker
   // opens its platform-defined KVM device itself.
   #[arg(long, hide = true)]
   kvm: Option<std::path::PathBuf>,
+  /// Path to the guest `needy` binary injected into VM actors.
   #[arg(long)]
   guest_needy: Option<std::path::PathBuf>,
+  /// Default container image for `linux-container` executors.
   #[arg(long)]
   executor_image: Option<String>,
+  /// Interval between runner health heartbeats (for example `15s`).
   #[arg(long, value_parser = humantime::parse_duration)]
   heartbeat_interval: Option<std::time::Duration>,
 }
@@ -77,14 +82,16 @@ struct HolderArgs {
 
 #[derive(clap::Args)]
 struct ExecutorArgs {
+  /// Listener address (`tcp://HOST:PORT` or `unix:///PATH`).
   #[arg(long)]
   listen: String,
+  /// Name reported for this standalone executor.
   #[arg(long, default_value = "local")]
   name: String,
-  /// Private file containing the incoming executor bearer.
+  /// Private file containing the incoming executor bearer token.
   #[arg(long)]
   token_file: Option<std::path::PathBuf>,
-  /// Share this executor's Unix socket with this group, mode 0660.
+  /// Share this executor's Unix socket with this group ID (mode 0660).
   #[arg(long)]
   socket_group: Option<u32>,
 }
@@ -181,8 +188,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     args.listen
   };
   let listen = listen.iter().map(|address| listener(address)).collect::<Result<Vec<_>>>()?;
-  let progress =
-    crate::output::Progress::new(!matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json), "Initializing control service...");
+  let progress = crate::output::Progress::new(ctx.show_progress(true), "Initializing control service...");
   let daemon = needy_daemon::Daemon::start(config).await?;
   progress.finish();
   // TODO(startup-feedback): listener readiness needs a serve callback before

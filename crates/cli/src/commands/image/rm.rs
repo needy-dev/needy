@@ -44,7 +44,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     match find(&paths.images(), driver, image) {
       Some(dir) => {
         std::fs::remove_dir_all(&dir).with_context(|| format!("cannot remove {}", dir.display()))?;
-        output::message(format_args!("image rm: removed {}", dir.display()));
+        output::acknowledge(&format!("Removed {}.", dir.display()))?;
       }
       None if args.container => {}
       None => {
@@ -67,7 +67,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   if args.guest_disks {
     for disk in old_guest_disks(&paths.guest_disks(), current_guest_disk().as_deref())? {
       std::fs::remove_file(&disk).with_context(|| format!("cannot remove {}", disk.display()))?;
-      output::message(format_args!("image rm: removed the guest disk {}", disk.display()));
+      output::acknowledge(&format!("Removed guest disk {}.", disk.display()))?;
     }
   }
   Ok(if failed == 0 { 0 } else { 1 })
@@ -121,7 +121,7 @@ async fn remove_container(reference: &str) -> usize {
   if let Ok(docker) = bollard::Docker::connect_with_defaults() {
     match docker.remove_image(reference, None::<bollard::query_parameters::RemoveImageOptions>, None).await {
       Ok(_) => {
-        output::message(format_args!("image rm: removed {reference} from the engine"));
+        let _ = output::acknowledge(&format!("Removed {reference} from the engine."));
         removed += 1;
       }
       Err(e) => tracing::info!("the engine did not remove {reference}: {e}"),
@@ -132,7 +132,7 @@ async fn remove_container(reference: &str) -> usize {
     let store = needy_core_actor::driver::macos_apple_container::MacosAppleContainer::new(reference.to_string());
     match store.delete().await {
       Ok(()) => {
-        output::message(format_args!("image rm: removed {reference} from Apple's container"));
+        let _ = output::acknowledge(&format!("Removed {reference} from Apple's container."));
         removed += 1;
       }
       Err(e) => tracing::info!("{e}"),

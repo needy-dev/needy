@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::cli::Context;
-use crate::output::{self, OutputFormat, Row, outln};
+use crate::output::{self, OutputFormat, Row};
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -33,10 +33,9 @@ enum Command {
   Rm(RmArgs),
 }
 
-/// The run: an ID, an ID prefix, a name or `latest`; the inherited run, else the
-/// only live run, when absent.
 #[derive(clap::Args)]
 struct RunArg {
+  /// Target run (ID, unique prefix, name, or `latest`); defaults to the inherited or only live run.
   #[arg(long)]
   run: Option<String>,
 }
@@ -110,12 +109,14 @@ struct AddArgs {
 struct LsArgs {
   #[command(flatten)]
   run: RunArg,
+  /// Output format.
   #[arg(short = 'o', long, value_enum, default_value_t)]
   output: OutputFormat,
 }
 
 #[derive(clap::Args)]
 struct RmArgs {
+  /// Name of the fault to remove.
   name: String,
   #[command(flatten)]
   run: RunArg,
@@ -140,7 +141,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       for warning in &added.warnings {
         output::message(format!("warning: {warning}"));
       }
-      outln!("added {} to run {}", args.name, added.run_id)?;
+      output::acknowledge(&format!("added {} to run {}", args.name, added.run_id))?;
     }
     Command::Ls(args) => {
       let run = crate::runs::select(&connection, args.run.run, ctx).await?;
@@ -160,7 +161,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         .await
         .map_err(needy_api_client::Error::from)?
         .into_inner();
-      outln!("removed {} from run {}", args.name, removed.run_id)?;
+      output::acknowledge(&format!("removed {} from run {}", args.name, removed.run_id))?;
     }
   }
   Ok(0)

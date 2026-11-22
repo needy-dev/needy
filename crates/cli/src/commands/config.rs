@@ -1,5 +1,5 @@
 //! Global settings, saved transports and local profile files.
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::configuration::{self, Locked};
 use crate::output::{self, OutputFormat, Row, outln};
 use anyhow::{Context as _, Result};
@@ -16,51 +16,69 @@ pub struct Args {
   command: Command,
 }
 impl Args {
-  pub fn allows_selection(&self) -> bool {
-    matches!(
-      &self.command,
+  pub(crate) fn connection(&self) -> ConnectionArgs {
+    match &self.command {
       Command::Context {
-        command: ContextCommand::Check { .. } | ContextCommand::Pair { .. } | ContextCommand::Set { .. }
-      }
-    ) || matches!(&self.command, Command::Profile(args) if args.uses_control())
+        command: ContextCommand::Check { connection, .. },
+      } => connection.clone(),
+      Command::Profile(args) => args.connection(),
+      _ => ConnectionArgs::default(),
+    }
   }
 }
 #[derive(Subcommand)]
 enum Command {
-  /// List global settings, saved contexts and local profiles, without a server.
+  /// List global settings, saved connections, and local profiles.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Show global settings with credentials redacted.
+  /// Show global configuration with credentials redacted.
   Show {
+    /// Document output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: DocumentFormat,
   },
-  /// Read a schema-defined global key.
+  /// Read a global configuration key.
   Get {
+    /// Dotted configuration key (for example `paths.state` or `daemon.listen`).
     key: String,
+    /// Document output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: DocumentFormat,
   },
-  /// Parse one typed YAML value and atomically save a valid complete candidate.
-  Set { key: String, value: String },
-  /// Restore a writable key's default.
-  Unset { key: String },
-  /// Show resolved directories and their override sources.
+  /// Set a global configuration key to a YAML value.
+  Set {
+    /// Dotted configuration key to update.
+    key: String,
+    /// YAML-formatted value for the key.
+    value: String,
+  },
+  /// Reset a writable configuration key to its default value.
+  Unset {
+    /// Dotted configuration key to reset.
+    key: String,
+  },
+  /// Show resolved needy directories and where each path came from.
   Paths {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
-  /// Select a saved connection or `local`, the built-in target for this machine's daemon.
+  /// Select the default control-plane connection (`local` or a saved context).
+  ///
   /// No server connection is required to save the selection.
-  Use { name: String },
-  /// Manage saved transports and identities.
+  Use {
+    /// Saved context name or `local`.
+    name: String,
+  },
+  /// Manage saved control-plane connections and credentials.
   Context {
     #[command(subcommand)]
     command: ContextCommand,
   },
-  /// Inspect local profile files. Environment values and credentials are masked.
+  /// List, display, and validate task profiles.
   Profile(super::profile::Args),
 }
 #[derive(Clone, Copy, Default, clap::ValueEnum)]
@@ -72,11 +90,10 @@ pub enum DocumentFormat {
 
 #[derive(clap::Args)]
 struct Transport {
-  // The root --address flag works before or after the subcommand. A local
-  // flag with the same name shadows it during clap's required-arg checks.
-  #[arg(skip)]
+  /// Direct control-plane address (`tcp://HOST:PORT`, `https://HOST:PORT`, or `unix:///PATH`).
+  #[arg(long)]
   address: Option<String>,
-  /// Connector argv; stdout must carry protocol data only.
+  /// Connector command after `--`; stdout must carry protocol data only.
   #[arg(last = true, num_args = 1.., conflicts_with = "address")]
   command: Vec<String>,
 }
@@ -99,45 +116,63 @@ impl Transport {
 }
 #[derive(Subcommand)]
 enum ContextCommand {
+  /// List saved control-plane connections.
   Ls {
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
   },
+  /// Show a saved connection with its credential redacted.
   Show {
+    /// Saved context name or `local`.
     name: String,
+    /// Document output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: DocumentFormat,
   },
-  /// Consume one invitation and save its independent identity; selection stays unchanged.
+  /// Pair with a control plane using a one-time invitation and save it as a context.
+  ///
+  /// The active context selection stays unchanged until you run `needy config use`.
   Pair {
+    /// Name for the saved connection.
     name: String,
     #[command(flatten)]
     transport: Transport,
     /// One-time client invitation token.
     #[arg(long, value_name = "TOKEN", conflicts_with = "code_file")]
     token: Option<String>,
-    /// Read an invitation from a private file, or `-` for standard input.
+    /// Read the invitation token from a private file, or `-` for stdin.
     #[arg(long)]
     code_file: Option<PathBuf>,
+    /// Replace an existing saved context with the same name.
     #[arg(long)]
     replace: bool,
   },
-  /// Replace transport only; keep identity and selection.
+  /// Update a saved connection's address or connector without changing its credential.
   Set {
+    /// Saved context name to update.
     name: String,
     #[command(flatten)]
     transport: Transport,
   },
-  /// Check health and authenticated identity without creating a run.
+  /// Check control-plane reachability and authenticated identity.
   Check {
+    /// Saved context name to check (defaults to the active context).
     name: Option<String>,
+    /// Maximum time to wait for the health and identity checks.
     #[arg(long, default_value = "5s", value_parser = humantime::parse_duration)]
     timeout: Duration,
+    /// Output format.
     #[arg(short = 'o', long, value_enum, default_value_t)]
     output: OutputFormat,
+    #[command(flatten)]
+    connection: ConnectionArgs,
   },
-  /// Remove a local record; revocation is a separate server operation.
-  Rm { name: String },
+  /// Remove a saved local context record (does not revoke the client on the server).
+  Rm {
+    /// Saved context name to remove.
+    name: String,
+  },
 }
 #[derive(Serialize)]
 struct Entry {
@@ -385,6 +420,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         ("profiles", paths.profiles(), "NEEDY_CONFIG_DIR", false),
         ("state", paths.state.clone(), "NEEDY_STATE_DIR", saved.paths.state.is_some()),
         ("data", paths.data.clone(), "NEEDY_DATA_DIR", saved.paths.data.is_some()),
+        ("cache", paths.cache.clone(), "NEEDY_CACHE_DIR", false),
         ("runtime", paths.runtime.clone(), "NEEDY_RUNTIME_DIR", saved.paths.runtime.is_some()),
       ]
       .into_iter()
@@ -438,15 +474,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       locked.save()?;
       updated("Context removed.", path)?;
     }
-    ContextCommand::Set {
-      name,
-      mut transport,
-    } => {
-      anyhow::ensure!(
-        ctx.selected_context.is_none() && ctx.credential_file.is_none(),
-        "context set changes its named transport; omit --context and --credential-file"
-      );
-      transport.address = ctx.address.clone();
+    ContextCommand::Set { name, transport } => {
       transport.validate()?;
       let mut locked = Locked::open(path)?;
       let record = locked.config.contexts.get_mut(&name).ok_or_else(|| missing(&name))?;
@@ -457,16 +485,11 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
     }
     ContextCommand::Pair {
       name,
-      mut transport,
+      transport,
       token,
       code_file,
       replace,
     } => {
-      anyhow::ensure!(
-        ctx.selected_context.is_none() && ctx.credential_file.is_none(),
-        "pair uses its own transport and invitation; omit --context and --credential-file"
-      );
-      transport.address = ctx.address.clone();
       transport.validate()?;
       anyhow::ensure!(name != "local" && global::valid_name(&name), "context name requires a DNS label; local is reserved");
       let mut locked = Locked::open(path)?;
@@ -494,9 +517,9 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
           }
           Some(path) => configuration::read_secret(&path).context("cannot read invitation code file")?,
           None => {
-            eprintln!(
+            output::stderr_ln(format_args!(
               "To obtain a client invitation, run on the control host:\n\n  needy client invite --name <client-name>\n\nPaste its token below. You can also pass --token TOKEN,\nuse --code-file FILE, or pipe the token with --code-file -.\n"
-            );
+            ));
             rpassword::prompt_password("Invitation code: ")
               .context("cannot read hidden invitation code; use --code-file FILE or --code-file -")?
           }
@@ -504,36 +527,46 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       };
       let code = code.trim();
       anyhow::ensure!(!code.is_empty() && !code.contains(['\r', '\n', '\0']), "provide one nonempty client invitation code");
-      let progress = output::Progress::new(
-        !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json) && transport.command.is_empty(),
-        "Pairing with control service...",
-      );
-      let connection = transport.connect().await?;
-      let paired =
-        connection.clients().pair(v1::PairRequest { code: code.into() }).await.map_err(needy_api_client::Error::from)?.into_inner();
-      let client = paired.client.ok_or_else(|| unsaved("unknown", anyhow::anyhow!("server issued a credential without client identity")))?;
-      let access = match v1::ClientAccess::try_from(client.access) {
-        Ok(v1::ClientAccess::Runs) => Access::Runs,
-        Ok(v1::ClientAccess::Admin) => Access::Admin,
-        _ => return Err(unsaved(&client.id, anyhow::anyhow!("server issued an unknown client access value"))),
+      let progress = output::Progress::new(ctx.show_progress(true) && transport.command.is_empty(), "Pairing with control service...");
+      // An invitation code is consumed remotely. The first termination signal
+      // must let its response reach local configuration storage.
+      let termination = needy_api_server::termination::Termination::listen()?;
+      let pair_and_save = async {
+        let connection = transport.connect().await?;
+        let paired =
+          connection.clients().pair(v1::PairRequest { code: code.into() }).await.map_err(needy_api_client::Error::from)?.into_inner();
+        let client =
+          paired.client.ok_or_else(|| unsaved("unknown", anyhow::anyhow!("server issued a credential without client identity")))?;
+        let access = match v1::ClientAccess::try_from(client.access) {
+          Ok(v1::ClientAccess::Runs) => Access::Runs,
+          Ok(v1::ClientAccess::Admin) => Access::Admin,
+          _ => return Err(unsaved(&client.id, anyhow::anyhow!("server issued an unknown client access value"))),
+        };
+        let id = client.id.clone();
+        let record = global::Context {
+          address: transport.address,
+          command: (!transport.command.is_empty()).then_some(transport.command),
+          credential: paired.token,
+          identity: Identity {
+            client_id: client.id,
+            name: client.name,
+            access,
+            paired_at_ms: client.created_at_ms,
+          },
+        };
+        record.validate().map_err(|cause| unsaved(&id, cause.into()))?;
+        connection.with_token(&record.credential).map_err(|cause| unsaved(&id, cause.into()))?;
+        progress.message("Saving client configuration...");
+        locked.config.contexts.insert(name.clone(), record);
+        locked.save().map_err(|cause| unsaved(&id, cause))?;
+        Ok::<_, anyhow::Error>(())
       };
-      let id = client.id.clone();
-      let record = global::Context {
-        address: transport.address,
-        command: (!transport.command.is_empty()).then_some(transport.command),
-        credential: paired.token,
-        identity: Identity {
-          client_id: client.id,
-          name: client.name,
-          access,
-          paired_at_ms: client.created_at_ms,
-        },
-      };
-      record.validate().map_err(|cause| unsaved(&id, cause.into()))?;
-      connection.with_token(&record.credential).map_err(|cause| unsaved(&id, cause.into()))?;
-      progress.message("Saving client configuration...");
-      locked.config.contexts.insert(name.clone(), record);
-      locked.save().map_err(|cause| unsaved(&id, cause))?;
+      match termination.unless_forced(pair_and_save).await {
+        Some(result) => result?,
+        None => anyhow::bail!(
+          "a second termination signal ended pairing before its credential was saved; inspect client registrations before retrying"
+        ),
+      }
       progress.finish();
       updated("Paired successfully!", path)?;
     }
@@ -541,11 +574,12 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
       name,
       timeout,
       output,
+      connection: _,
     } => {
       let config = ctx.configuration()?;
       anyhow::ensure!(
         name.is_none() || (ctx.selected_context.is_none() && ctx.address.is_none()),
-        "a context name conflicts with global --context/--address"
+        "a context name conflicts with --context/--address"
       );
       let direct = ctx.address.is_some();
       let name = if direct {
@@ -565,9 +599,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         record.map(|r| r.address.clone().unwrap_or_else(|| "connector".into())).unwrap_or_else(|| "local discovery".into())
       });
       let progress = output::Progress::new(
-        matches!(output, OutputFormat::Table)
-          && !matches!(ctx.diagnostic_format, crate::diagnostics::Format::Json)
-          && record.is_none_or(|r| r.command.is_none()),
+        ctx.show_progress(matches!(output, OutputFormat::Table)) && record.is_none_or(|r| r.command.is_none()),
         "Checking connection...",
       );
       let probe = async {
@@ -644,6 +676,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         address: ctx.address.clone(),
         credential_file: ctx.credential_file.clone(),
         diagnostic_format: ctx.diagnostic_format,
+        quiet: ctx.quiet,
       };
       output::print(output, &[row])?;
       if let Some(error) = failure {
@@ -658,9 +691,8 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
 
 /// A local mutation reports the configuration artifact that actually changed.
 fn updated(message: &str, path: &std::path::Path) -> Result<()> {
-  use std::io::Write as _;
   output::acknowledge(message)?;
-  writeln!(std::io::stderr().lock(), "\nUpdated:\n  {}", path.display())?;
+  output::detail(format_args!("\nUpdated:\n  {}", path.display()))?;
   Ok(())
 }
 

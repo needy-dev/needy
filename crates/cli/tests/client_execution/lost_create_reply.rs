@@ -101,12 +101,12 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
   let profile = home.write("client.yaml", "actor: {driver: linux-firecracker}\nexecutors:\n  workstation: {driver: native, runner: {client: true}}\ncommands:\n  - {match: '**', to: workstation}\n");
   let endpoint = format!("unix:{}", socket.display());
   let created = home.run(&[
-    "--address",
-    &endpoint,
     "run",
     "create",
     "-f",
     profile.to_str().unwrap(),
+    "--address",
+    &endpoint,
   ]);
   assert!(!created.status.success(), "the response fault must reach the CLI");
   assert!(stderr(&created).contains("creation response was lost"), "{}", stderr(&created));
@@ -115,11 +115,11 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
   assert_eq!(runs.len(), 1);
   assert_eq!(runs[0].state, needy_core::types::RunState::Running);
   let output = home.run(&[
-    "--address",
-    &endpoint,
     "run",
     "exec",
     &runs[0].id,
+    "--address",
+    &endpoint,
     "--",
     "printf",
     "survived",

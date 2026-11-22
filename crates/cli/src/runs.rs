@@ -104,7 +104,7 @@ fn table(runs: &[&Run]) -> String {
       [
         run.run_id.clone(),
         run.profile.clone(),
-        crate::commands::runner::ago(run.created_at_ms),
+        crate::output::ago(run.created_at_ms),
       ]
     }))
     .collect();

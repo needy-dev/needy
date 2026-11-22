@@ -120,20 +120,24 @@ impl Resolved {
     })
   }
 
-  /// Non-secret argv that keeps a suggested operation on this selection.
-  pub fn action_selection(&self, context: &Context, remote: bool) -> Vec<String> {
+  /// Non-secret `--config` argv that keeps a suggested operation on this config file.
+  pub fn config_selection(&self) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(file) = &self.config_file {
       args.extend(["--config".into(), file.display().to_string()]);
     }
-    if remote {
-      if let Some(name) = &self.context {
-        args.extend(["--context".into(), name.clone()]);
-      } else if let Some(address) = &self.address {
-        args.extend(["--address".into(), address.clone()]);
-        if let Some(file) = &context.credential_file {
-          args.extend(["--credential-file".into(), file.display().to_string()]);
-        }
+    args
+  }
+
+  /// Non-secret remote connection argv appended after the subcommand.
+  pub fn remote_selection(&self, context: &Context) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(name) = &self.context {
+      args.extend(["--context".into(), name.clone()]);
+    } else if let Some(address) = &self.address {
+      args.extend(["--address".into(), address.clone()]);
+      if let Some(file) = &context.credential_file {
+        args.extend(["--credential-file".into(), file.display().to_string()]);
       }
     }
     args
@@ -276,6 +280,7 @@ pub async fn local(ctx: &Context) -> Result<Client> {
     address: None,
     credential_file: None,
     diagnostic_format: ctx.diagnostic_format,
+    quiet: ctx.quiet,
   };
   resolve(&local)?.connect().await
 }

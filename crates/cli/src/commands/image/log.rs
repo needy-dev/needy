@@ -8,7 +8,7 @@ use needy_api_client::proto::v1::LogImageRequest;
 use serde::Serialize;
 
 use super::lockfile;
-use crate::cli::Context;
+use crate::cli::{ConnectionArgs, Context};
 use crate::output::{self, OutputFormat, Row};
 
 #[derive(clap::Args)]
@@ -23,6 +23,8 @@ pub struct Args {
   /// Output format.
   #[arg(short = 'o', long, value_enum, default_value_t)]
   pub output: OutputFormat,
+  #[command(flatten)]
+  pub(crate) connection: ConnectionArgs,
 }
 
 #[derive(Serialize)]
@@ -64,7 +66,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let lock = lockfile::read(&target.lockfile)?;
   let current_layer = lock.commit.map(|c| c.layer).unwrap_or_default();
 
-  let progress = output::Progress::new(ctx.connection_feedback(), "Fetching image commit history");
+  let progress = output::Progress::new(ctx.connection_progress(matches!(args.output, OutputFormat::Table)), "Fetching image commit history");
   let connection = ctx.connect().await?;
   let logged = connection
     .images()

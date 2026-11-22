@@ -1,16 +1,84 @@
 //! Output formats for people (borderless tables) and tools (JSON). Rows are
 //! typed structs; each command defines its own.
 
-mod progress;
+pub(crate) mod progress;
 mod table;
 
 pub use progress::Progress;
 
 use std::io::IsTerminal as _;
 use std::io::Write as _;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use serde::Serialize;
+
+static QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Enables or disables `--quiet` mode, suppressing non-error status messages
+/// and animated progress on stderr.
+pub(crate) fn set_quiet(quiet: bool) {
+  QUIET.store(quiet, Ordering::Relaxed);
+}
+
+/// Whether `--quiet` mode is active.
+pub(crate) fn is_quiet() -> bool {
+  QUIET.load(Ordering::Relaxed)
+}
+
+/// Whether `NO_COLOR` is unset or empty (<https://no-color.org>).
+fn color_allowed() -> bool {
+  std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+}
+
+/// Whether `TERM` is unset or not `"dumb"`.
+fn term_capable() -> bool {
+  std::env::var_os("TERM").is_none_or(|value| value != "dumb")
+}
+
+/// Whether stdout is an interactive terminal that supports ANSI styling.
+pub(crate) fn stdout_color() -> bool {
+  std::io::stdout().is_terminal() && color_allowed() && term_capable()
+}
+
+/// Whether stderr is an interactive terminal that supports ANSI styling.
+pub(crate) fn stderr_color() -> bool {
+  std::io::stderr().is_terminal() && color_allowed() && term_capable()
+}
+
+/// Whether stderr can render live animated progress (spinners and bars).
+pub(crate) fn stderr_animated() -> bool {
+  !is_quiet() && !crate::logging::stderr_active() && stderr_color()
+}
+
+/// Formats an epoch millisecond timestamp as RFC 3339 seconds.
+pub(crate) fn time(ms: i64) -> String {
+  let at = SystemTime::UNIX_EPOCH + Duration::from_millis(u64::try_from(ms).unwrap_or(0));
+  humantime::format_rfc3339_seconds(at).to_string()
+}
+
+/// Formats how long ago `ms` was on this machine's clock, to the second.
+pub(crate) fn ago(ms: i64) -> String {
+  let seconds = u64::try_from(needy_common::time::now_ms().saturating_sub(ms) / 1000).unwrap_or(0);
+  format!("{} ago", humantime::format_duration(Duration::from_secs(seconds)))
+}
+
+/// Formats a byte count for people, in binary units.
+pub(crate) fn bytes(bytes: u64) -> String {
+  const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+  let mut value = bytes as f64;
+  let mut unit = 0;
+  while value >= 1024.0 && unit < UNITS.len() - 1 {
+    value /= 1024.0;
+    unit += 1;
+  }
+  if unit == 0 {
+    format!("{bytes} B")
+  } else {
+    format!("{value:.1} {}", UNITS[unit])
+  }
+}
 
 /// As `print!`, but returns the write's error instead of panicking, so a
 /// closed stdout ends the command through [`crate::cli::run`].
@@ -38,11 +106,10 @@ pub fn write(args: std::fmt::Arguments) -> std::io::Result<()> {
   std::io::stdout().lock().write_fmt(args)
 }
 
-/// A successful interactive step. Redirected output stays plain text, and
-/// `NO_COLOR` has the same meaning as for rendered run reports.
+/// A successful interactive step on stdout. Redirected output stays plain text,
+/// and `NO_COLOR` has the same meaning as for rendered run reports.
 pub fn success(message: &str) -> std::io::Result<()> {
-  let color = std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
-  let style = if color {
+  let style = if stdout_color() {
     anstyle::AnsiColor::Green.on_default()
   } else {
     anstyle::Style::new()
@@ -51,9 +118,12 @@ pub fn success(message: &str) -> std::io::Result<()> {
 }
 
 /// Confirms a mutation on stderr without contaminating script/data stdout.
+/// Suppressed in `--quiet` mode.
 pub fn acknowledge(message: &str) -> std::io::Result<()> {
-  let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
-  let style = if color {
+  if is_quiet() {
+    return Ok(());
+  }
+  let style = if stderr_color() {
     anstyle::AnsiColor::Green.on_default()
   } else {
     anstyle::Style::new()
@@ -61,11 +131,25 @@ pub fn acknowledge(message: &str) -> std::io::Result<()> {
   writeln!(std::io::stderr().lock(), "{style}{message}{style:#}")
 }
 
+/// Writes an unprefixed human detail line to stderr. Suppressed in `--quiet`
+/// mode.
+pub fn detail(args: std::fmt::Arguments) -> std::io::Result<()> {
+  if is_quiet() {
+    return Ok(());
+  }
+  writeln!(std::io::stderr().lock(), "{args}")
+}
+
+/// Writes an interactive prompt or guidance block to stderr (not suppressed by
+/// `--quiet`).
+pub fn stderr_ln(args: std::fmt::Arguments) {
+  let _ = writeln!(std::io::stderr().lock(), "{args}");
+}
+
 /// An infrastructure error label on stderr. Redirected diagnostics and
 /// NO_COLOR stay plain; child-process output does not pass through here.
 pub fn error(message: impl std::fmt::Display) {
-  let color = std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
-  let style = if color {
+  let style = if stderr_color() {
     anstyle::AnsiColor::Red.on_default().bold()
   } else {
     anstyle::Style::new()
@@ -101,8 +185,12 @@ pub fn print_table<R: Row>(rows: &[R]) -> std::io::Result<()> {
 }
 
 /// Prints a general message on stderr, such as progress, a warning, or a
-/// handled outcome. Infrastructure errors use [`error`] instead.
+/// handled outcome. Infrastructure errors use [`error`] instead. Suppressed in
+/// `--quiet` mode.
 pub fn message(message: impl std::fmt::Display) {
+  if is_quiet() {
+    return;
+  }
   eprintln!("needy: {message}");
 }
 
