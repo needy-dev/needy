@@ -23,6 +23,24 @@ use crate::engine::{Engine, Error, models::ContainerCreateBody};
 /// image without a file gets no bind for it; a missing image is pulled, as
 /// `docker run` does.
 pub async fn binds(engine: &dyn Engine, image: &str, scratch: &str, dir: &Path, user: &Account<'_>) -> Result<Vec<String>, Error> {
+  binds_with_pull(engine, image, scratch, dir, user, true).await
+}
+
+/// Like [`binds`], for a locally loaded image (such as a materialized
+/// `needy-snapshot:<digest>`) that must already exist in `engine` and must
+/// never fall back to pulling from a remote registry.
+pub async fn binds_local(engine: &dyn Engine, image: &str, scratch: &str, dir: &Path, user: &Account<'_>) -> Result<Vec<String>, Error> {
+  binds_with_pull(engine, image, scratch, dir, user, false).await
+}
+
+async fn binds_with_pull(
+  engine: &dyn Engine,
+  image: &str,
+  scratch: &str,
+  dir: &Path,
+  user: &Account<'_>,
+  pull_if_missing: bool,
+) -> Result<Vec<String>, Error> {
   let body = ContainerCreateBody {
     image: Some(image.to_string()),
     // Never started; a command only satisfies an image without one.
@@ -33,7 +51,7 @@ pub async fn binds(engine: &dyn Engine, image: &str, scratch: &str, dir: &Path, 
   // One left by an earlier daemon would block the name.
   engine.remove(scratch).await?;
   match engine.create(scratch, body.clone()).await {
-    Err(e) if e.is_not_found() => {
+    Err(e) if pull_if_missing && e.is_not_found() => {
       engine.pull(image).await?;
       engine.create(scratch, body).await?;
     }

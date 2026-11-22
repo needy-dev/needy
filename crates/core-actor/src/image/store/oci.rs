@@ -87,7 +87,10 @@ pub(super) fn materialize(
   tag: &str,
 ) -> Result<PathBuf> {
   let base = BaseArchive::open(base_image_tar)?;
-  let cache_key = Digest::of(format!("{snapshot_digest}\n{}\n{tag}\n", base.config_digest()).as_bytes());
+  // NOTICE: `oci-v2` invalidates pre-fix cached archives whose `index.json`
+  // wrote an unnormalized `io.containerd.image.name` (rejected on lookup by
+  // Docker's containerd image store).
+  let cache_key = Digest::of(format!("oci-v2\n{snapshot_digest}\n{}\n{tag}\n", base.config_digest()).as_bytes());
   let out_path = oci_dir.join(format!("{}-on-{}.tar", super::stem(&snapshot_digest), &cache_key.hex()[..16]));
   if out_path.exists() {
     return Ok(out_path);
@@ -114,7 +117,7 @@ pub(super) fn materialize(
 /// `tag`, cached under `oci_dir`. Used when exporting a snapshot built on a VM
 /// driver where no base container tar is available on the host.
 pub(super) fn export_snapshot(oci_dir: &Path, snapshot_digest: Digest, layers: &[(Digest, PathBuf)], tag: &str) -> Result<PathBuf> {
-  let cache_key = Digest::of(format!("export\n{snapshot_digest}\n{tag}\n").as_bytes());
+  let cache_key = Digest::of(format!("oci-v2\nexport\n{snapshot_digest}\n{tag}\n").as_bytes());
   let out_path = oci_dir.join(format!("{}-export-{}.tar", super::stem(&snapshot_digest), &cache_key.hex()[..16]));
   if out_path.exists() {
     return Ok(out_path);

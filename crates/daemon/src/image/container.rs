@@ -161,6 +161,9 @@ pub(crate) async fn materialize_for_linux_container(daemon: &Daemon, snapshot: &
       if engine.inspect_image(&tag).await.with_context(|| format!("inspecting snapshot image {tag}"))?.is_none() {
         let stream = stream_file(&oci_tar).await?;
         engine.load_image(stream).await.with_context(|| format!("loading snapshot image {tag} into the engine"))?;
+        if engine.inspect_image(&tag).await.with_context(|| format!("verifying loaded snapshot image {tag}"))?.is_none() {
+          anyhow::bail!("loaded snapshot archive into the engine, but image {tag} is still not found");
+        }
       }
       Ok(tag.clone())
     })

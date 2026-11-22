@@ -2382,6 +2382,115 @@ async fn materialize_for_linux_container_single_flight_deduplicates_concurrent_c
   assert_eq!(engine.loaded.lock().unwrap().len(), 1, "snapshot must be loaded once");
 }
 
+// ROOT CAUSE:
+//
+// If `engine.load_image` returned `Ok(())` without registering `tag` under the
+// name Docker resolves (for example, an unnormalized `io.containerd.image.name`
+// on Docker's containerd image store), `materialize_for_linux_container`
+// silently succeeded and actor startup only failed later with a 404.
+//
+// Before the fix, `materialize_for_linux_container` did not re-inspect `tag`
+// after `load_image`.
+// The fix verifies `engine.inspect_image(&tag)` after loading and fails loudly
+// if the tag is still missing.
+#[tokio::test]
+async fn materialize_for_linux_container_fails_when_loaded_tag_is_not_inspectable() {
+  struct DropLoadEngine {
+    inner: Arc<FakeContainerEngine>,
+  }
+
+  #[async_trait::async_trait]
+  impl needy_core_executor::engine::Engine for DropLoadEngine {
+    async fn runtimes(&self) -> std::result::Result<std::collections::BTreeMap<String, Vec<String>>, needy_core_executor::engine::Error> {
+      self.inner.runtimes().await
+    }
+    async fn inspect_image(
+      &self,
+      image: &str,
+    ) -> std::result::Result<Option<needy_core_executor::engine::Image>, needy_core_executor::engine::Error> {
+      self.inner.inspect_image(image).await
+    }
+    fn pull_progress(
+      &self,
+      image: &str,
+    ) -> futures_util::stream::BoxStream<
+      'static,
+      std::result::Result<needy_core_executor::engine::models::CreateImageInfo, needy_core_executor::engine::Error>,
+    > {
+      self.inner.pull_progress(image)
+    }
+    async fn create(
+      &self,
+      name: &str,
+      body: needy_core_executor::engine::models::ContainerCreateBody,
+    ) -> std::result::Result<(), needy_core_executor::engine::Error> {
+      self.inner.create(name, body).await
+    }
+    async fn start(&self, name: &str) -> std::result::Result<u32, needy_core_executor::engine::Error> {
+      self.inner.start(name).await
+    }
+    fn logs(
+      &self,
+      name: &str,
+    ) -> futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, needy_core_executor::engine::Error>> {
+      self.inner.logs(name)
+    }
+    async fn wait(&self, name: &str) -> std::result::Result<i64, needy_core_executor::engine::Error> {
+      self.inner.wait(name).await
+    }
+    async fn stop(&self, name: &str, grace: Duration) -> std::result::Result<(), needy_core_executor::engine::Error> {
+      self.inner.stop(name, grace).await
+    }
+    async fn remove(&self, name: &str) -> std::result::Result<(), needy_core_executor::engine::Error> {
+      self.inner.remove(name).await
+    }
+    async fn download(&self, name: &str, path: &str) -> std::result::Result<Option<Vec<u8>>, needy_core_executor::engine::Error> {
+      self.inner.download(name, path).await
+    }
+    async fn commit_container(
+      &self,
+      container: &str,
+      repo: &str,
+      tag: &str,
+    ) -> std::result::Result<String, needy_core_executor::engine::Error> {
+      self.inner.commit_container(container, repo, tag).await
+    }
+    fn export_image(
+      &self,
+      image: &str,
+    ) -> futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, needy_core_executor::engine::Error>> {
+      self.inner.export_image(image)
+    }
+    async fn load_image(
+      &self,
+      mut tar: futures_util::stream::BoxStream<'static, std::result::Result<bytes::Bytes, needy_core_executor::engine::Error>>,
+    ) -> std::result::Result<(), needy_core_executor::engine::Error> {
+      use futures_util::StreamExt as _;
+      while let Some(chunk) = tar.next().await {
+        chunk?;
+      }
+      Ok(())
+    }
+    async fn remove_image(&self, image: &str) -> std::result::Result<(), needy_core_executor::engine::Error> {
+      self.inner.remove_image(image).await
+    }
+  }
+
+  let inner = FakeContainerEngine::new("needy-actor:latest", None);
+  let backends = crate::holder::ContainerBackends {
+    engine: Arc::new(DropLoadEngine { inner }),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |_| {}).await;
+  let daemon = &started.daemon;
+
+  let layer = daemon.images.store.put(std::io::Cursor::new(tar_with_file("missing-tag.txt", "ok\n"))).unwrap();
+  let snapshot = daemon.images.store.snapshot(&[layer]).unwrap();
+
+  let err = super::materialize_for_linux_container(daemon, &snapshot, "needy-actor:latest").await.unwrap_err();
+  assert!(err.to_string().contains("is still not found"), "unexpected error: {err:#}");
+}
+
 #[tokio::test]
 async fn image_export_for_linux_container_does_not_load_snapshot_into_engine() {
   use futures_util::StreamExt as _;
