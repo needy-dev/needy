@@ -27,3 +27,19 @@ fn a_failed_copy_names_the_executor_and_the_path() {
 
   assert_eq!(error.to_string(), "cannot copy windows:C:/Users/user/missing: tar: : Couldn't visit directory");
 }
+
+#[derive(clap::Parser)]
+struct Line {
+  #[command(flatten)]
+  args: Args,
+}
+
+#[test]
+fn fs_cp_help_documents_remote_prefix() {
+  use clap::CommandFactory as _;
+  let mut cmd = Line::command();
+  let cp = cmd.find_subcommand_mut("cp").expect("cp subcommand");
+  let help = cp.render_long_help().to_string();
+  assert!(help.contains("remote:"), "{help}");
+  assert!(!help.contains("EXECUTOR:"), "{help}");
+}

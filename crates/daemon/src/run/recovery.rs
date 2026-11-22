@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+use needy_config::profile::OnConflict;
 use needy_core::chaos::{FaultState, Injector};
 use needy_core::event::ExecutorRef;
+use needy_core::image::FeatureSyncFile;
 use needy_core::types::{ActorState, RunState};
 use serde::{Deserialize, Serialize};
 use tokio_util::task::TaskTracker;
@@ -32,6 +34,112 @@ struct Snapshot {
   // detach. Abrupt crashes retain the last snapshot; process continuity does
   // not promise deterministic recovery of transient policy counters.
   faults: Vec<FaultState>,
+  /// Image boot metadata resolved before actor start. Defaulted when reading
+  /// snapshots written before boot metadata was persisted.
+  #[serde(default)]
+  boot: SavedBoot,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedBoot {
+  #[serde(default)]
+  snapshot_image: Option<String>,
+  #[serde(default)]
+  path: String,
+  #[serde(default)]
+  env: BTreeMap<String, String>,
+  #[serde(default)]
+  commit_rebased: bool,
+  #[serde(default)]
+  resolved_features: BTreeMap<String, String>,
+  #[serde(default)]
+  start_hooks: Vec<String>,
+  #[serde(default)]
+  stop_hooks: Vec<String>,
+  #[serde(default)]
+  sync_files: Vec<SavedSyncFile>,
+}
+
+impl SavedBoot {
+  fn from_boot(boot: &super::Boot) -> Self {
+    Self {
+      snapshot_image: boot.snapshot_image.clone(),
+      path: boot.path.clone(),
+      env: boot.env.clone(),
+      commit_rebased: boot.commit_rebased,
+      resolved_features: boot.resolved_features.clone(),
+      start_hooks: boot.start_hooks.clone(),
+      stop_hooks: boot.stop_hooks.clone(),
+      sync_files: boot.sync_files.iter().map(SavedSyncFile::from_feature_sync_file).collect(),
+    }
+  }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedSyncFile {
+  name: String,
+  store: String,
+  path: String,
+  #[serde(default)]
+  filter: Vec<String>,
+  #[serde(default)]
+  on_conflict: Vec<(String, SavedOnConflict)>,
+  feature: String,
+}
+
+impl SavedSyncFile {
+  fn from_feature_sync_file(file: &FeatureSyncFile) -> Self {
+    Self {
+      name: file.name.clone(),
+      store: file.store.clone(),
+      path: file.path.clone(),
+      filter: file.filter.clone(),
+      on_conflict: file.on_conflict.iter().map(|(pattern, choice)| (pattern.clone(), SavedOnConflict::from_on_conflict(choice))).collect(),
+      feature: file.feature.clone(),
+    }
+  }
+
+  fn into_feature_sync_file(self) -> FeatureSyncFile {
+    FeatureSyncFile {
+      name: self.name,
+      store: self.store,
+      path: self.path,
+      filter: self.filter,
+      on_conflict: self.on_conflict.into_iter().map(|(pattern, choice)| (pattern, choice.into_on_conflict())).collect(),
+      feature: self.feature,
+    }
+  }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SavedOnConflict {
+  Store,
+  Run,
+  Lines,
+  Driver(String),
+}
+
+impl SavedOnConflict {
+  fn from_on_conflict(choice: &OnConflict) -> Self {
+    match choice {
+      OnConflict::Store => Self::Store,
+      OnConflict::Run => Self::Run,
+      OnConflict::Lines => Self::Lines,
+      OnConflict::Driver(command) => Self::Driver(command.clone()),
+    }
+  }
+
+  fn into_on_conflict(self) -> OnConflict {
+    match self {
+      Self::Store => OnConflict::Store,
+      Self::Run => OnConflict::Run,
+      Self::Lines => OnConflict::Lines,
+      Self::Driver(command) => OnConflict::Driver(command),
+    }
+  }
 }
 
 /// One restored reference graph. Activation is deferred until every open
@@ -82,9 +190,31 @@ impl Restored {
 }
 
 impl Daemon {
+  /// Loads the trace events recorded for `run` from `trace.db`, falling back to
+  /// `trace.jsonl` when the database has no rows for the run.
+  pub(crate) async fn load_run_events(&self, run: &str) -> Result<Vec<needy_trace::Event>> {
+    match needy_trace::sink::sqlite::load(&self.config.state_dir.join("trace.db"), run).await {
+      Ok(loaded) => Ok(loaded.events),
+      Err(needy_trace::Error::NoRun(_) | needy_trace::Error::NoDatabase(_)) => {
+        match std::fs::read_to_string(self.run_dir(run).join("trace.jsonl")) {
+          Ok(text) => text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(serde_json::from_str)
+            .collect::<Result<Vec<needy_trace::Event>, _>>()
+            .map_err(Into::into),
+          Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+          Err(error) => Err(error.into()),
+        }
+      }
+      Err(error) => Err(error.into()),
+    }
+  }
+
   /// Written after acquisition and before actor start, then at graceful
   /// control detach. The directory and snapshot stay private to the owner.
   pub(crate) async fn snapshot_run(&self, run: &Run) -> Result<()> {
+    let boot = run.boot();
     let snapshot = Snapshot {
       version: 2,
       holder: self.holder.id().into(),
@@ -95,6 +225,7 @@ impl Daemon {
       actor: run.actor.get(),
       executors: run.executors().values().map(|instance| instance.saved()).collect(),
       faults: run.injector.list(),
+      boot: SavedBoot::from_boot(&boot),
     };
     let path = run.dir.join("control-snapshot.json");
     let temporary = run.dir.join(format!(".control-snapshot-{}", uuid::Uuid::new_v4()));
@@ -129,19 +260,7 @@ impl Daemon {
       }
     };
     let profile = needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), std::path::PathBuf::new()))?;
-    let events = match needy_trace::sink::sqlite::load(&self.config.state_dir.join("trace.db"), &record.id).await {
-      Ok(loaded) => loaded.events,
-      Err(needy_trace::Error::NoRun(_) | needy_trace::Error::NoDatabase(_)) => {
-        match std::fs::read_to_string(self.run_dir(&record.id).join("trace.jsonl")) {
-          Ok(text) => {
-            text.lines().filter(|line| !line.trim().is_empty()).map(serde_json::from_str).collect::<Result<Vec<needy_trace::Event>, _>>()?
-          }
-          Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-          Err(error) => return Err(error.into()),
-        }
-      }
-      Err(error) => return Err(error.into()),
-    };
+    let events = self.load_run_events(&record.id).await?;
     let next_seq = events.last().map_or(0, |event| event.seq + 1);
     let trace = self.run_trace_at(&record.id, Some(&profile.trace), next_seq);
     // Instance release is persisted before the external destroy operation and
@@ -241,6 +360,14 @@ impl Daemon {
           .as_deref()
           .and_then(|digest| digest.parse().ok())
           .and_then(|digest| self.images.store.resolve(&digest).ok()),
+        snapshot_image: snapshot.boot.snapshot_image,
+        path: snapshot.boot.path,
+        env: snapshot.boot.env,
+        commit_rebased: snapshot.boot.commit_rebased,
+        resolved_features: snapshot.boot.resolved_features,
+        start_hooks: snapshot.boot.start_hooks,
+        stop_hooks: snapshot.boot.stop_hooks,
+        sync_files: snapshot.boot.sync_files.into_iter().map(SavedSyncFile::into_feature_sync_file).collect(),
         ..super::Boot::default()
       }),
       tasks: TaskTracker::new(),

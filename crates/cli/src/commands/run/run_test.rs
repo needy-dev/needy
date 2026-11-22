@@ -164,6 +164,19 @@ fn create_accepts_local_file_and_temporary_overrides() {
   assert_eq!(args, ["extra"]);
 }
 
+#[test]
+fn run_create_accepts_short_e_env_flag() {
+  use clap::Parser as _;
+  let line = Line::try_parse_from(["run", "create", "-f", "profile.yaml", "-e", "FOO=bar"]).unwrap();
+  let Command::Create { overrides, .. } = line.command else {
+    panic!("not create");
+  };
+  assert_eq!(overrides.env, vec![("FOO".into(), "bar".into())]);
+
+  let err = Line::try_parse_from(["run", "create", "-f", "profile.yaml", "-e", "INVALID"]).err().expect("must reject");
+  assert!(err.to_string().contains("KEY=VALUE"), "{err}");
+}
+
 fn workspace(executor: &str, source: &str, writable: bool) -> v1::RunWorkspace {
   v1::RunWorkspace {
     path: "/home/agent/workspace".into(),

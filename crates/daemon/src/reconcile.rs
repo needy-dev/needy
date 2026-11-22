@@ -23,6 +23,7 @@ use needy_api_client::proto::v1::ProcessInfo;
 use needy_common::process::Exit;
 use needy_common::time::now_ms;
 use needy_config::profile::{ActorDriver, ExecutorDriver};
+use needy_core::event::{Event, RunFail};
 use needy_core::types::RunState;
 
 use crate::store::{self, InstanceKind, InstanceRecord, InstanceState, ProcessRecord, ProcessState};
@@ -180,10 +181,16 @@ impl Daemon {
         }
       }
       // The run's profile names its actor's driver, whose sockets these are.
-      match needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), PathBuf::new())) {
-        Ok(profile) => actor::remove_sockets(self, &profile.actor, &self.run_dir(&record.id)),
-        Err(e) => tracing::warn!("run {}: cannot read its profile to remove its actor's sockets: {e:#}", record.id),
-      }
+      let profile = match needy_config::profile::load(&needy_config::Source::text(record.profile_yaml.clone(), PathBuf::new())) {
+        Ok(profile) => {
+          actor::remove_sockets(self, &profile.actor, &self.run_dir(&record.id));
+          Some(profile)
+        }
+        Err(e) => {
+          tracing::warn!("run {}: cannot read its profile to remove its actor's sockets: {e:#}", record.id);
+          None
+        }
+      };
       record.state = if before == RunState::Stopping {
         RunState::Stopped
       } else {
@@ -194,10 +201,23 @@ impl Daemon {
         RunState::Failed
       };
       record.updated_ms = now;
-      // TODO(trace): the run's trace gets no `run.fail` for this: a new
-      // `Dispatch` would number its events from 0 again. Appending to a
-      // run's trace across a restart needs the trace to continue the run's
-      // sequence; `state.db` and `run ls` carry the reason meanwhile.
+      if let Some(reason) = &record.failure {
+        let next_seq = match self.load_run_events(&record.id).await {
+          Ok(events) => events.last().map_or(0, |event| event.seq + 1),
+          Err(e) => {
+            tracing::warn!("run {}: cannot read existing trace to append run.fail: {e:#}", record.id);
+            0
+          }
+        };
+        let trace = self.run_trace_at(&record.id, profile.as_ref().map(|p| &p.trace), next_seq);
+        crate::run::emit(
+          &trace,
+          &Event::RunFail(RunFail {
+            reason: reason.clone(),
+          }),
+        );
+        trace.flush().await;
+      }
       self.state.save_run(&record).await.context("cannot write a reconciled run")?;
       tracing::warn!("run {} ended {} at start: {}", record.id, record.state, record.failure.as_deref().unwrap_or("it was stopping"));
     }

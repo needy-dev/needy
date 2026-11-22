@@ -149,20 +149,6 @@ impl LinuxContainer {
     Self { engine, options }
   }
 
-  async fn create_container(&self, container: &Container) -> Result<(), Error> {
-    match self.engine.create(&container.name, container.body.clone()).await {
-      // Like `docker run`, pull an image that is not here yet.
-      Err(e) if e.is_not_found() => {
-        let image = container.body.image.clone().unwrap_or_default();
-        tracing::info!("pulling {image}");
-        self.engine.pull(&image).await?;
-        self.engine.create(&container.name, container.body.clone()).await?;
-        Ok(())
-      }
-      created => Ok(created?),
-    }
-  }
-
   /// Reconnects to the existing instance's process service. Recovery never
   /// calls create/start or replaces a container when its service is missing.
   pub async fn reconnect(&self, name: &str, sftp: Vec<String>, workspace: String) -> Result<Instance, Error> {
@@ -238,7 +224,8 @@ impl Driver for LinuxContainer {
     }
     // A container left by an earlier daemon would block the name.
     self.engine.remove(&container.name).await?;
-    self.create_container(&container).await?;
+    // `account::binds` above has already pulled the image if it was missing.
+    self.engine.create(&container.name, container.body.clone()).await?;
     let ready = async {
       self.engine.start(&container.name).await?;
       connect(&format!("unix:{}", container.socket().display())).await

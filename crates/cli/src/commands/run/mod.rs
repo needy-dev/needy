@@ -289,7 +289,12 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     } => {
       // A usage error like clap's (exit 2), worded to say why.
       if interactive && !tty {
-        output::message("`-i` attaches your terminal to the driving program, which needs one: use `-it`");
+        let error = crate::diagnostics::Error::new(
+          "cli.invalid_arguments",
+          "`-i` attaches your terminal to the driving program, which needs one: use `-it`",
+        )
+        .check("Pass `-it` to allocate a terminal and attach to the driving program.");
+        crate::diagnostics::render_in(&error.into(), ctx.diagnostic_format, Some(ctx));
         return Ok(2);
       }
       // Refuse invalid keys before creating a run that the caller cannot leave.

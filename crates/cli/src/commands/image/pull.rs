@@ -107,15 +107,27 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       ActorDriver::MacosAppleContainer => pull_apple(&version, feedback).await,
     };
     if let Err(e) = pulled {
-      output::message(format_args!("image pull: {driver}: {e:#}"));
+      render_pull_failure(driver.as_str(), e, ctx);
       failed += 1;
     }
   }
   if executor && let Err(e) = pull_executor(&needy_core_executor::engine::connect()?, &version, feedback).await {
-    output::message(format_args!("image pull: linux-container executors: {e:#}"));
+    render_pull_failure("linux-container executors", e, ctx);
     failed += 1;
   }
   Ok(if failed == 0 { 0 } else { 1 })
+}
+
+fn render_pull_failure(target: &str, error: anyhow::Error, ctx: &Context) {
+  let error = if error.chain().any(|cause| cause.is::<crate::diagnostics::Error>()) {
+    error
+  } else {
+    crate::diagnostics::Error::new("image.pull_failed", format!("image pull: {target}: {error:#}"))
+      .fact("driver", target)
+      .cause(error)
+      .into()
+  };
+  crate::diagnostics::render_in(&error, ctx.diagnostic_format, Some(ctx));
 }
 
 /// What this host has, as a runner's detection finds it.

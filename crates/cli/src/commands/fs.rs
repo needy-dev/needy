@@ -20,7 +20,7 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-  /// Copy a file or directory into a directory: `SRC EXECUTOR:DIR` or `EXECUTOR:PATH DIR`.
+  /// Copy a file or directory into a directory: `SRC remote:DIR` or `remote:PATH DIR`.
   Cp {
     source: String,
     destination: String,
@@ -90,7 +90,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   Ok(0)
 }
 
-/// What the `EXECUTOR:` side of a copy names.
+/// What the `remote:` side of a copy names.
 enum Place {
   Run { run: String, executor: String },
   Runner(String),

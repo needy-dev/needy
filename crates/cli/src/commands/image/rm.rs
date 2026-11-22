@@ -48,12 +48,19 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       }
       None if args.container => {}
       None => {
-        output::message(format_args!("image rm: no {driver} VM image {image} (see `needy image ls`)"));
+        let error = crate::diagnostics::Error::new("image.not_found", format!("image rm: no {driver} VM image {image}"))
+          .fact("driver", driver.as_str())
+          .fact("image", image)
+          .check("List installed images with `needy image ls`.");
+        crate::diagnostics::render_in(&error.into(), ctx.diagnostic_format, Some(ctx));
         failed += 1;
       }
     }
     if args.container && image != "base" && remove_container(image).await == 0 {
-      output::message(format_args!("image rm: no container image {image}"));
+      let error = crate::diagnostics::Error::new("image.not_found", format!("image rm: no container image {image}"))
+        .fact("image", image)
+        .check("List installed images with `needy image ls`.");
+      crate::diagnostics::render_in(&error.into(), ctx.diagnostic_format, Some(ctx));
       failed += 1;
     }
   }

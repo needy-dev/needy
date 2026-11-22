@@ -1,7 +1,7 @@
 use needy_api_server::control::{Chunks, ControlError, Guest, GuestSession, Runs, UpperLayer};
 use needy_core_actor::image::store::{Digest, Snapshot};
 
-use super::UPPER_LAYER;
+use super::{UPPER_LAYER, keep_upper};
 use crate::run::Boot;
 use crate::testing::{self, new_run};
 
@@ -222,7 +222,37 @@ fn parts(parts: Vec<Result<Vec<u8>, ControlError>>) -> Chunks {
 }
 
 #[tokio::test]
-async fn a_kept_upper_layer_is_written_to_the_runs_directory_whole() {
+async fn keep_upper_writes_the_archive_whole_and_leaves_no_partial_on_error() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join(UPPER_LAYER);
+
+  keep_upper(&path, parts(vec![Ok(b"ab".to_vec()), Ok(b"cd".to_vec())])).await.unwrap();
+  let broken = parts(vec![
+    Ok(b"xy".to_vec()),
+    Err(ControlError::Unavailable("the layer upload broke".into())),
+  ]);
+  let error = keep_upper(&path, broken).await.unwrap_err();
+
+  // The broken upload leaves the whole one in place, and no partial file.
+  assert_eq!(std::fs::read(&path).unwrap(), b"abcd");
+  assert!(error.to_string().contains("the layer upload broke"), "{error}");
+  let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+  assert!(!files.iter().any(|f| f.to_string_lossy().ends_with(".partial")), "{files:?}");
+}
+
+// ROOT CAUSE:
+//
+// `Daemon::push_layer` wrote `upper.tar` into `run.dir` whenever
+// `boot.session.upper == UpperLayer::Kept`, even though normal runs never
+// consume or delete that file (image build/edit sessions use `SessionGuest` in
+// `image.rs`).
+//
+// Before the fix, calling `Daemon::push_layer` on a run left an orphaned
+// `upper.tar` in `run.dir`.
+// The fix rejects `push_layer` on normal runs with `ControlError::Failed` and
+// never writes `upper.tar`.
+#[tokio::test]
+async fn a_normal_run_refuses_an_upper_layer_upload_and_leaves_no_file() {
   let started = testing::daemon().await;
   let created = Runs::create(&started.daemon, new_run(NO_MOUNT, started.dir.path())).await.unwrap();
   let run = started.daemon.runs.find(&created.id).unwrap();
@@ -234,18 +264,11 @@ async fn a_kept_upper_layer_is_written_to_the_runs_directory_whole() {
     ..Boot::default()
   });
 
-  Guest::push_layer(&started.daemon, &created.id, parts(vec![Ok(b"ab".to_vec()), Ok(b"cd".to_vec())])).await.unwrap();
-  let broken = parts(vec![
-    Ok(b"xy".to_vec()),
-    Err(ControlError::Unavailable("the layer upload broke".into())),
-  ]);
-  let error = Guest::push_layer(&started.daemon, &created.id, broken).await.unwrap_err();
+  let error = Guest::push_layer(&started.daemon, &created.id, parts(vec![Ok(b"ab".to_vec())])).await.unwrap_err();
 
-  // The broken upload leaves the whole one in place, and no partial file.
-  assert_eq!(std::fs::read(run.dir.join(UPPER_LAYER)).unwrap(), b"abcd");
-  assert!(error.to_string().contains("the layer upload broke"), "{error}");
-  let files: Vec<_> = std::fs::read_dir(&run.dir).unwrap().map(|e| e.unwrap().file_name()).collect();
-  assert!(!files.iter().any(|f| f.to_string_lossy().ends_with(".partial")), "{files:?}");
+  assert!(matches!(error, ControlError::Failed(_)), "{error:?}");
+  assert!(error.to_string().contains("not an image session"), "{error}");
+  assert!(!run.dir.join(UPPER_LAYER).exists());
 }
 
 #[tokio::test]
