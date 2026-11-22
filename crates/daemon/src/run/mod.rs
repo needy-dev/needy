@@ -715,11 +715,10 @@ impl Daemon {
     };
     actor::check_host(self, run).await?;
     files::check_host_paths(run)?;
-    crate::sync::check(self, run)?;
     unwinding(run)?;
     crate::image::prepare(self, run).await?;
-    // Ensure stores for feature-declared sync mappings (`<data_dir>/files/<store>`)
-    // exist before seeding.
+    // Ensure stores for profile- and feature-declared sync mappings
+    // (`<data_dir>/files/<store>`) exist before seeding.
     crate::sync::check(self, run)?;
     let client_holder = self.state.client_execution_for_run(&run.id).await?;
     // NOTICE: this bounds initial helper startup only. A bound executor's

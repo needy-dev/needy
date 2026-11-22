@@ -242,7 +242,6 @@ async fn a_control_listener_stop_preserves_the_runs_processes_on_runners() {
     let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
     async move {
       daemon.serve_until(std::slice::from_ref(&endpoint), Some(TOKEN.into()), stop).await.unwrap();
-      daemon.suspend_control().await;
     }
   });
   while std::os::unix::net::UnixStream::connect(&socket).is_err() {
@@ -363,4 +362,20 @@ async fn shutdown_rejects_new_runs_and_process_starts() {
   let error = result.err().expect("new executor work must be refused during shutdown");
   assert!(matches!(error, ControlError::Diagnostic { .. }), "{error:?}");
   assert!(error.to_string().contains("shutting down"));
+}
+
+#[tokio::test]
+async fn serve_until_suspends_control_when_binding_fails() {
+  let started = testing::daemon().await;
+  let daemon = &started.daemon;
+  let blocker = started.dir.path().join("not-a-dir");
+  std::fs::write(&blocker, b"").unwrap();
+  let endpoint = format!("unix:{}", blocker.join("ctl.sock").display());
+  let stop = tokio_util::sync::CancellationToken::new();
+
+  let error = daemon.serve_until(&[endpoint], None, stop).await.unwrap_err();
+  assert!(format!("{error:#}").contains("ctl.sock"), "{error:#}");
+  assert!(daemon.suspending.load(std::sync::atomic::Ordering::SeqCst));
+  let rejected = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap_err();
+  assert!(rejected.to_string().contains("shutting down"), "{rejected}");
 }

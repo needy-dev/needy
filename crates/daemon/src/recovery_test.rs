@@ -504,3 +504,87 @@ async fn interrupted_release(before_removal: bool, before_watch: bool) {
   assert!(!socket.exists());
   assert!(testing::ended(pid).await);
 }
+
+// ROOT CAUSE:
+//
+// `restore_run` only restored `Boot::snapshot` from `state.db` and dropped all
+// other `Boot` fields (`sync_files`, `start_hooks`, `stop_hooks`, `env`,
+// `path`, `resolved_features`, `snapshot_image`, `commit_rebased`). After a
+// control restart, feature-declared sync mappings and image metadata were lost.
+//
+// Before the fix, `restored.boot()` reverted to `Boot::default()` except for
+// `snapshot`.
+// The fix persists those `Boot` fields in `control-snapshot.json` with
+// `#[serde(default)]` for backward compatibility and restores them on restart.
+#[tokio::test]
+async fn control_restart_preserves_boot_metadata_and_sync_files() {
+  use needy_config::profile::OnConflict;
+  use needy_core::image::FeatureSyncFile;
+
+  let started = testing::daemon().await;
+  let profile = "actor: { driver: linux-firecracker }\nexecutors:\n  here: { driver: native }\ncommands:\n  - { match: '**', to: here }\n";
+  let created = Runs::create(&started.daemon, testing::new_run(profile, started.dir.path())).await.unwrap();
+  let expected_boot = crate::run::Boot {
+    snapshot: None,
+    layer_disks: Vec::new(),
+    snapshot_image: Some("needy-snapshot:deadbeef".into()),
+    path: "/opt/tools/bin:/usr/bin:/bin".into(),
+    env: BTreeMap::from([
+      ("EDITOR".into(), "nvim".into()),
+      ("LANG".into(), "C.UTF-8".into()),
+    ]),
+    session: Default::default(),
+    commit_rebased: true,
+    resolved_features: BTreeMap::from([("ghcr.io/example/feat:1".into(), "sha256:abcd".into())]),
+    start_hooks: vec!["./start.sh".into()],
+    stop_hooks: vec!["./stop.sh".into()],
+    sync_files: vec![FeatureSyncFile {
+      name: "tool-state".into(),
+      store: "tool-state".into(),
+      path: "/home/agent/.tool".into(),
+      filter: vec!["+ config.json".into(), "- *".into()],
+      on_conflict: vec![
+        ("config.json".into(), OnConflict::Store),
+        ("history.log".into(), OnConflict::Lines),
+        ("cache.bin".into(), OnConflict::Run),
+        ("state.db".into(), OnConflict::Driver("merge-sqlite".into())),
+      ],
+      feature: "ghcr.io/example/feat:1".into(),
+    }],
+  };
+  started.daemon.runs.find(&created.id).unwrap().set_boot(expected_boot.clone());
+
+  let started = testing::restart(started).await;
+  let restored_boot = started.daemon.runs.find(&created.id).unwrap().boot();
+  let info = Runs::get(&started.daemon, &created.id).await.unwrap();
+  let guest = Guest::config(&started.daemon, &created.id).await.unwrap();
+
+  assert_eq!(restored_boot, expected_boot);
+  assert!(info.commit_rebased);
+  assert_eq!(info.resolved_features, expected_boot.resolved_features);
+  assert_eq!(guest.image_path, expected_boot.path);
+  assert_eq!(guest.env.get("EDITOR").map(String::as_str), Some("nvim"));
+  assert_eq!(guest.start_hooks, expected_boot.start_hooks);
+  assert_eq!(guest.stop_hooks, expected_boot.stop_hooks);
+  Runs::stop(&started.daemon, &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  started.daemon.shutdown().await;
+}
+
+#[tokio::test]
+async fn control_restart_reads_legacy_snapshot_without_boot_field() {
+  let started = testing::daemon().await;
+  let profile = "actor: { driver: linux-firecracker }\nexecutors:\n  here: { driver: native }\ncommands:\n  - { match: '**', to: here }\n";
+  let created = Runs::create(&started.daemon, testing::new_run(profile, started.dir.path())).await.unwrap();
+  let snapshot_path = started.daemon.run_dir(&created.id).join("control-snapshot.json");
+  let config = (*started.daemon.config).clone();
+  started.daemon.suspend_control().await;
+
+  let mut raw: serde_json::Value = serde_json::from_slice(&std::fs::read(&snapshot_path).unwrap()).unwrap();
+  raw.as_object_mut().unwrap().remove("boot");
+  std::fs::write(&snapshot_path, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+  let restarted = Daemon::start(config).await.unwrap();
+  assert_eq!(restarted.runs.find(&created.id).unwrap().boot(), crate::run::Boot::default());
+  Runs::stop(&restarted, &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  restarted.shutdown().await;
+}

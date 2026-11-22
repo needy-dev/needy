@@ -6,7 +6,6 @@
 use futures_util::StreamExt as _;
 use needy_api_server::control::{
   Chunks, ControlError, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser,
-  UpperLayer,
 };
 use needy_common::process::Exit;
 use needy_config::profile::{FaultDomain, FileMode, Side};
@@ -212,19 +211,12 @@ impl Guest for Daemon {
     files::push(&run, name, archive).await
   }
 
-  /// Keeps the session's upper layer as `upper.tar` in the run's directory
-  /// for the layer store, written as it arrives.
-  async fn push_layer(&self, run: &str, archive: Chunks) -> Result<(), ControlError> {
+  /// Rejects upper-layer uploads on normal runs. Image build and edit sessions
+  /// serve their own `Guest` implementation (`image::SessionGuest`) that
+  /// consumes and stores `upper.tar`; normal runs never keep an upper layer.
+  async fn push_layer(&self, run: &str, _archive: Chunks) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
-    if run.boot().session.upper != UpperLayer::Kept {
-      return Err(ControlError::Failed(format!("run {}'s session keeps no upper layer", run.id)));
-    }
-    // TODO(images): slice 1, step 7 puts the archive in the layer store
-    // (`needy_core_actor::image::store::Store::put` or `commit`) when the
-    // session ends, and removes this file.
-    keep_upper(&run.dir.join(UPPER_LAYER), archive)
-      .await
-      .map_err(|e| ControlError::Failed(format!("run {}: keeping the upper layer: {e:#}", run.id)))
+    Err(ControlError::Failed(format!("run {} is not an image session and cannot keep an upper layer", run.id)))
   }
 
   /// The route list now and each change, and a graceful stop once `run

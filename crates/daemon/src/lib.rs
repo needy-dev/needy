@@ -343,16 +343,16 @@ impl Daemon {
   }
 
   /// Serves the control API on every address in `listen` until a
-  /// termination signal, then shuts down with [`Daemon::shutdown`], also
-  /// when serving failed. A second termination signal ends the shutdown
-  /// where it is and fails, naming the runs it did not clean up; the caller
-  /// should then exit.
+  /// termination signal, then detaches control with [`Daemon::suspend_control`]
+  /// (also when serving failed) while the holder keeps surviving runs alive;
+  /// embedders that want full teardown call [`Daemon::shutdown`] instead. A
+  /// second termination signal ends the detach where it is and fails, naming
+  /// the live runs; the caller should then exit.
   pub async fn serve(&self, listen: &[String], token: Option<String>) -> Result<()> {
     let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
     let ended = termination
       .unless_forced(async {
         let served = self.serve_until(listen, token, termination.stop()).await;
-        self.suspend_control().await;
         if self.cleanup_incomplete.load(Ordering::SeqCst) {
           return Err(
             IncompleteShutdown {
@@ -386,6 +386,17 @@ impl Daemon {
   }
 
   async fn serve_until(&self, listen: &[String], token: Option<String>, stop: CancellationToken) -> Result<()> {
+    let result = self.serve_listeners(listen, token, stop).await;
+    // `serve_listeners` suspends control before stopping the server on a
+    // termination signal so open exec streams drain cleanly; if serving failed
+    // or ended early, detach control here once.
+    if !self.suspending.load(Ordering::SeqCst) {
+      self.suspend_control().await;
+    }
+    result
+  }
+
+  async fn serve_listeners(&self, listen: &[String], token: Option<String>, stop: CancellationToken) -> Result<()> {
     let management = self.config.runtime_dir.join("daemon.sock");
     let mut listen: Vec<Listen> = listen.iter().map(|l| Listen::parse(l)).collect();
     if !listen.iter().any(|address| matches!(address, Listen::Unix(path) if path == &management)) {
@@ -475,6 +486,7 @@ impl Daemon {
       self.tasks.wait().await;
     };
     if tokio::time::timeout(Duration::from_secs(10), drained).await.is_err() {
+      self.cleanup_incomplete.store(true, Ordering::SeqCst);
       tracing::warn!("control task drain exceeded 10s; runtime resources remain held");
     }
     // Drain the events emitted while relays and services ended before a new
@@ -482,7 +494,8 @@ impl Daemon {
     for run in self.runs.live() {
       run.trace.flush().await;
     }
-    if let Err(error) = self.discovery.finish(true) {
+    if let Err(error) = self.discovery.finish(!self.cleanup_incomplete.load(Ordering::SeqCst)) {
+      self.cleanup_incomplete.store(true, Ordering::SeqCst);
       tracing::error!("cannot close control discovery: {error:#}");
     }
   }

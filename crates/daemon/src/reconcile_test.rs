@@ -545,3 +545,46 @@ async fn an_idle_holder_ends_after_control_disconnects() {
   started.daemon.suspend_control().await;
   eventually("the idle holder released its protected socket", async || !socket.exists()).await;
 }
+
+// ROOT CAUSE:
+//
+// `reconcile_open_runs` marked lost runs `Failed` in `state.db` without
+// appending a `run.fail` event to the run's trace, because an earlier comment
+// assumed a new `Dispatch` would restart sequence numbering at 0.
+//
+// Before the fix, `Runs::events` / `trace.db` had no `run.fail` for a
+// reconciled lost run.
+// The fix resumes the trace at `last_seq + 1` via `run_trace_at`, emits
+// `Event::RunFail`, and flushes it.
+#[tokio::test]
+async fn reconciling_a_lost_run_appends_run_fail_at_next_sequence_number() {
+  const LOCAL_PROFILE: &str = r#"
+actor: { driver: linux-firecracker }
+executors:
+  here: { driver: native }
+commands:
+  - { match: "**", to: here }
+"#;
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(LOCAL_PROFILE, started.dir.path())).await.unwrap();
+  let before = Runs::events(&started.daemon, &created.id).await.unwrap();
+  let last_seq_before = before.events.last().expect("run.create recorded").seq;
+  let snapshot_path = started.daemon.run_dir(&created.id).join("control-snapshot.json");
+  let config = (*started.daemon.config).clone();
+  started.daemon.suspend_control().await;
+  // Removing the snapshot makes the run unadoptable on restart so
+  // reconciliation fails it.
+  std::fs::remove_file(&snapshot_path).unwrap();
+
+  let restarted = crate::Daemon::start(config).await.unwrap();
+  let failed = Runs::get(&restarted, &created.id).await.unwrap();
+  let after = Runs::events(&restarted, &created.id).await.unwrap();
+  restarted.shutdown().await;
+
+  assert_eq!(failed.state, RunState::Failed);
+  let last = after.events.last().expect("run.fail appended");
+  assert_eq!(last.kind, "run.fail");
+  assert_eq!(last.seq, last_seq_before + 1);
+  assert!(last.payload.contains("the original runtime holder or actor was lost; continuity could not be verified"), "{}", last.payload);
+  assert!(after.events.windows(2).all(|pair| pair[0].seq < pair[1].seq), "trace numbering was not monotonic");
+}

@@ -1201,7 +1201,26 @@ fn run_create_interactive_requires_a_terminal() {
   let home = Home::new();
   let output = home.run(&["run", "create", "-i", "--profile", "example.yaml"]);
   assert_eq!(output.status.code(), Some(2));
-  assert_eq!(stderr(&output), "needy: `-i` attaches your terminal to the driving program, which needs one: use `-it`\n");
+  assert!(stderr(&output).contains("`-i` attaches your terminal to the driving program, which needs one: use `-it`"), "{}", stderr(&output));
+}
+
+#[test]
+fn run_create_interactive_requires_a_terminal_emits_json_diagnostic() {
+  let home = Home::new();
+  let output = home.run(&[
+    "--diagnostic-format",
+    "json",
+    "run",
+    "create",
+    "-i",
+    "--profile",
+    "example.yaml",
+  ]);
+  assert_eq!(output.status.code(), Some(2));
+  assert!(output.stdout.is_empty());
+  let diagnostic: serde_json::Value = serde_json::from_slice(&output.stderr).expect("valid json diagnostic");
+  assert_eq!(diagnostic["reason"], "cli.invalid_arguments");
+  assert!(diagnostic["summary"].as_str().unwrap().contains("use `-it`"));
 }
 
 // ROOT CAUSE:

@@ -50,8 +50,8 @@ pub struct Options {
   #[arg(long)]
   cwd: Option<String>,
   /// Set an environment variable, KEY=VALUE.
-  #[arg(short = 'e', long = "env")]
-  env: Vec<String>,
+  #[arg(short = 'e', long = "env", value_name = "KEY=VALUE", value_parser = crate::commands::parse_env)]
+  env: Vec<(String, String)>,
   /// Start from an empty environment.
   #[arg(long)]
   clear_env: bool,
@@ -128,8 +128,7 @@ async fn execute(args: Options, target: Target, ctx: &Context) -> Result<i32> {
   let interactive = relay::interactive();
   let tty = (args.tty || (interactive && !args.no_tty)) && args.output == Output::Human;
   let window = tty.then(relay::window);
-  let mut env: HashMap<String, String> =
-    args.env.iter().filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), v.to_string())).collect();
+  let mut env: HashMap<String, String> = args.env.into_iter().collect();
   // The terminal's type and color support go with it; the executor replaces
   // a `TERM` it has no terminfo entry for.
   if tty {

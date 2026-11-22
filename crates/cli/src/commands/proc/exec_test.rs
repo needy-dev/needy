@@ -34,3 +34,28 @@ fn a_windows_exit_code_above_255_is_a_failure_on_a_unix_client() {
   assert_eq!(status(exited(7), &ctx).unwrap(), 7);
   assert_eq!(status(exited(0), &ctx).unwrap(), 0);
 }
+
+#[derive(clap::Parser)]
+struct ExecLine {
+  #[command(flatten)]
+  args: Args,
+}
+
+// ROOT CAUSE:
+//
+// `proc exec -e` parsed raw strings and used `.filter_map(|kv| kv.split_once('='))`,
+// silently dropping malformed environment entries without `=`.
+// Validating `--env` at parse time rejects malformed entries with a clear error.
+#[test]
+fn proc_exec_rejects_malformed_env_entries() {
+  use clap::Parser as _;
+
+  let err = ExecLine::try_parse_from(["exec", "--host", "-e", "INVALID", "--", "true"]).err().expect("must reject");
+  assert!(err.to_string().contains("KEY=VALUE"), "{err}");
+
+  let err = ExecLine::try_parse_from(["exec", "--host", "-e", "=value", "--", "true"]).err().expect("must reject");
+  assert!(err.to_string().contains("nonempty key"), "{err}");
+
+  let parsed = ExecLine::try_parse_from(["exec", "--host", "-e", "FOO=bar", "--", "true"]).unwrap();
+  assert_eq!(parsed.args.options.env, vec![("FOO".into(), "bar".into())]);
+}

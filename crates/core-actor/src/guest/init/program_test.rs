@@ -131,6 +131,56 @@ fn the_driving_program_gets_image_path_and_actor_env_path_replaces_it() {
   assert_eq!(path(&overridden).as_deref(), Some("/custom/bin"));
 }
 
+#[test]
+fn environment_sets_expected_defaults_and_applies_config_env() {
+  let config = GetConfigResponse {
+    user: Some(needy_api_proto::v1::GuestUser {
+      name: "agent".into(),
+      uid: 1000,
+      gid: 1000,
+    }),
+    image_path: "/usr/bin:/bin".into(),
+    env: [
+      ("CUSTOM_VAR".to_string(), "value".to_string()),
+      ("LANG".to_string(), "en_US.UTF-8".to_string()),
+    ]
+    .into(),
+    ..GetConfigResponse::default()
+  };
+
+  let env = environment(&config, "/home/agent");
+  let proxy = format!("http://{GATEWAY_LISTEN}");
+  let expected_prefix: Vec<(String, String)> = [
+    ("HOME", "/home/agent".to_string()),
+    ("USER", "agent".to_string()),
+    ("LOGNAME", "agent".to_string()),
+    ("SHELL", "/bin/bash".to_string()),
+    ("PATH", super::super::stubs::search_path(&config.image_path)),
+    ("TERM", "xterm-256color".to_string()),
+    ("COLORTERM", "truecolor".to_string()),
+    ("LANG", "C.UTF-8".to_string()),
+    ("HTTP_PROXY", proxy.clone()),
+    ("HTTPS_PROXY", proxy.clone()),
+    ("http_proxy", proxy.clone()),
+    ("https_proxy", proxy),
+    ("NO_PROXY", "localhost,127.0.0.1".to_string()),
+    ("no_proxy", "localhost,127.0.0.1".to_string()),
+  ]
+  .into_iter()
+  .map(|(k, v)| (k.to_string(), v))
+  .collect();
+
+  assert_eq!(&env[..expected_prefix.len()], expected_prefix.as_slice());
+  let extra: std::collections::BTreeMap<_, _> = env[expected_prefix.len()..].iter().cloned().collect();
+  assert_eq!(
+    extra,
+    std::collections::BTreeMap::from([
+      ("CUSTOM_VAR".to_string(), "value".to_string()),
+      ("LANG".to_string(), "en_US.UTF-8".to_string()),
+    ])
+  );
+}
+
 #[tokio::test]
 async fn start_and_stop_hooks_run_in_order_as_user_in_cwd_with_failure_semantics() {
   // SAFETY: `geteuid` cannot fail.

@@ -36,7 +36,6 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
   }
   let user = config.user.clone().unwrap_or_default();
   identity::offset_uptime(config.uptime_offset_secs);
-  let proxy = format!("http://{GATEWAY_LISTEN}");
   let search = super::stubs::search_path(&config.image_path);
   // In a container the program's file may be a shim; its real file starts
   // it, so the driving program itself is never routed.
@@ -51,21 +50,7 @@ pub(super) async fn run(stops: &super::stop::Stops, config: &GetConfigResponse, 
   command
     .args(&config.command[1..])
     .env_clear()
-    .env("HOME", home)
-    .env("USER", &user.name)
-    .env("LOGNAME", &user.name)
-    .env("SHELL", "/bin/bash")
-    .env("PATH", &search)
-    .env("TERM", "xterm-256color")
-    .env("COLORTERM", "truecolor")
-    .env("LANG", "C.UTF-8")
-    .env("HTTP_PROXY", &proxy)
-    .env("HTTPS_PROXY", &proxy)
-    .env("http_proxy", &proxy)
-    .env("https_proxy", &proxy)
-    .env("NO_PROXY", "localhost,127.0.0.1")
-    .env("no_proxy", "localhost,127.0.0.1")
-    .envs(&config.env)
+    .envs(environment(config, home))
     // The daemon sends the default working directory; the home directory
     // is the one that always exists.
     .current_dir(if config.cwd.is_empty() {
@@ -163,7 +148,8 @@ pub(super) async fn run_stop_hooks(config: &GetConfigResponse, home: &str) {
   }
 }
 
-/// The driving program's environment, as [`run`] sets it.
+/// The driving program's environment, shared by [`run`], [`run_hook`], and
+/// [`run_on_terminal`].
 fn environment(config: &GetConfigResponse, home: &str) -> Vec<(String, String)> {
   let user = config.user.clone().unwrap_or_default();
   let proxy = format!("http://{GATEWAY_LISTEN}");

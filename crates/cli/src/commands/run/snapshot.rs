@@ -19,19 +19,11 @@ pub(super) struct Overrides {
   #[arg(long)]
   workspace_writable: bool,
   /// Set one actor environment entry; repeat for multiple entries.
-  #[arg(long = "env", value_name = "KEY=VALUE", value_parser = environment)]
-  env: Vec<(String, String)>,
+  #[arg(short = 'e', long = "env", value_name = "KEY=VALUE", value_parser = crate::commands::parse_env)]
+  pub(super) env: Vec<(String, String)>,
   /// Replace the driving program, using shell quoting to split its arguments.
   #[arg(long)]
   entry_command: Option<String>,
-}
-
-fn environment(text: &str) -> Result<(String, String), String> {
-  let (key, value) = text.split_once('=').ok_or("an environment entry must be KEY=VALUE")?;
-  if key.is_empty() || key.contains('\0') || value.contains('\0') {
-    return Err("an environment entry needs a nonempty key and no NUL bytes".into());
-  }
-  Ok((key.into(), value.into()))
 }
 
 pub(super) fn resolve(source: &Source, overrides: Overrides) -> Result<profile::Resolved> {
