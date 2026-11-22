@@ -10,10 +10,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
 use needy_api_server::control::ControlError;
+use needy_common::sync::lock;
 use needy_config::profile::{self, OnFull};
 use needy_core_executor::driver::{self, Driver, LinuxContainer, Native, Spec, sftp_command};
 use tokio::sync::OnceCell;
@@ -229,21 +230,15 @@ impl Pool {
     }
   }
 
-  fn lock(&self) -> MutexGuard<'_, HashMap<String, KeyCell>> {
-    // NOTICE: every change under the lock is one map or counter update, so a
-    // panic elsewhere leaves the map whole.
-    self.instances.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-  }
-
   /// The instance for the spec's key at `site`, created through the
   /// executor's driver when no run holds one yet. Acquires of one key
   /// share one creation; a failed creation leaves the key free for the next
   /// acquire.
   pub async fn acquire(&self, spec: Spec, site: &Site) -> Result<Arc<Instance>> {
     loop {
-      let cell = self.lock().entry(spec.key.clone()).or_default().clone();
+      let cell = lock(&self.instances).entry(spec.key.clone()).or_default().clone();
       let created = cell.get_or_try_init(|| self.create(&spec, site)).await;
-      let mut instances = self.lock();
+      let mut instances = lock(&self.instances);
       let current = instances.get(&spec.key).is_some_and(|c| Arc::ptr_eq(c, &cell));
       match created {
         Ok(instance) if current => {
@@ -305,7 +300,7 @@ impl Pool {
   /// Restores one invocation's hold while retaining key sharing and reference
   /// counts. A missing service fails recovery instead of starting replacement work.
   pub(crate) async fn restore(&self, saved: Saved, config: &profile::Executor) -> Result<Arc<Instance>> {
-    let cell = self.lock().entry(saved.key.clone()).or_default().clone();
+    let cell = lock(&self.instances).entry(saved.key.clone()).or_default().clone();
     let instance = cell
       .get_or_try_init(|| async {
         let (mut handle, driver): (driver::Instance, Option<Arc<dyn Driver>>) = match saved.driver.as_str() {
@@ -350,7 +345,7 @@ impl Pool {
   /// Gives back one hold on `instance`; the last one destroys it.
   pub async fn release(&self, instance: &Arc<Instance>) {
     {
-      let mut instances = self.lock();
+      let mut instances = lock(&self.instances);
       if instance.refs.fetch_sub(1, Ordering::SeqCst) > 1 {
         return;
       }
@@ -374,14 +369,14 @@ impl Pool {
 
   /// Every pooled instance.
   pub async fn instances(&self) -> Vec<Arc<Instance>> {
-    self.lock().values().filter_map(|cell| cell.get().cloned()).collect()
+    lock(&self.instances).values().filter_map(|cell| cell.get().cloned()).collect()
   }
 
   /// The one pooled instance of the executor `name`, for a command outside
   /// any run. Instances of the same executor under different keys make
   /// the name ambiguous.
   pub async fn named(&self, name: &str) -> Result<Arc<Instance>, ControlError> {
-    let instances = self.lock();
+    let instances = lock(&self.instances);
     let mut matches: Vec<_> = instances.values().filter_map(|cell| cell.get()).filter(|i| i.name == name).collect();
     match matches.len() {
       0 => Err(ControlError::NotFound("no such executor".into())),

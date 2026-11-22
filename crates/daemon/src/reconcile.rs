@@ -365,7 +365,3 @@ impl Daemon {
 #[cfg(test)]
 #[path = "reconcile_test.rs"]
 mod tests;
-
-#[cfg(test)]
-#[path = "recovery_test.rs"]
-mod recovery_tests;

@@ -235,7 +235,7 @@ impl Runner {
       self.enrollment.credential = beat.credential;
       store(&self.path, &self.enrollment)?;
       self.client = Some(client.with_token(&self.enrollment.credential)?);
-      *self.credential.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = self.enrollment.credential.clone();
+      *needy_common::sync::lock(&self.credential) = self.enrollment.credential.clone();
       tracing::info!("runner {}: stored a rotated credential", self.enrollment.name);
     }
     Ok(())
@@ -348,24 +348,10 @@ fn store(path: &Path, enrollment: &Enrollment) -> Result<()> {
   needy_api_server::create_private_dir(dir).with_context(|| format!("cannot create {}", dir.display()))?;
   #[cfg(not(unix))]
   std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-  let partial = path.with_extension("json.partial");
-  let mut options = std::fs::OpenOptions::new();
-  options.write(true).create(true).truncate(true);
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::OpenOptionsExt;
-    options.mode(0o600);
-  }
   // TODO(windows): the file keeps the directory's ACL on Windows; a runner
   // there relies on its state directory being private to the user.
-  let write = || -> std::io::Result<()> {
-    use std::io::Write as _;
-    let mut file = options.open(&partial)?;
-    file.write_all(&serde_json::to_vec_pretty(enrollment)?)?;
-    file.sync_all()?;
-    std::fs::rename(&partial, path)
-  };
-  write().with_context(|| format!("cannot write {}", path.display()))
+  let bytes = serde_json::to_vec_pretty(enrollment).with_context(|| format!("cannot write {}", path.display()))?;
+  needy_common::fs::write_atomic(path, &bytes, Some(0o600)).with_context(|| format!("cannot write {}", path.display()))
 }
 
 impl Runner {
@@ -477,7 +463,7 @@ impl Dialer {
   /// Starts the grace period of the processes of runs, unless one is
   /// running: they end when it passes before a control stream opens.
   fn orphan(&self, stop: &CancellationToken) {
-    let mut orphaned = self.orphaned.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut orphaned = needy_common::sync::lock(&self.orphaned);
     if orphaned.is_some() {
       return;
     }
@@ -507,7 +493,7 @@ impl Dialer {
   /// A control stream opened: the control plane decides about the
   /// processes of runs from the report, so the grace period stops.
   fn reconnected(&self) {
-    let orphaned = self.orphaned.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+    let orphaned = needy_common::sync::lock(&self.orphaned).take();
     if let Some(claimed) = orphaned {
       claimed.cancel();
     }
@@ -515,7 +501,7 @@ impl Dialer {
 
   /// A client presenting the current credential.
   fn authenticated(&self, client: &Client) -> Result<Client> {
-    let credential = self.credential.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let credential = needy_common::sync::lock(&self.credential).clone();
     Ok(client.clone().with_token(&credential)?)
   }
 

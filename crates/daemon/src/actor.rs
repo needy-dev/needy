@@ -21,7 +21,7 @@ use needy_api_server::{Health, Listen, Server};
 use needy_config::profile::{FaultDomain, FileMode, Side as FileSide};
 use needy_core::event::{ActorReady, ActorStart, ActorVmExit, Event};
 use needy_core::types::{ActorState, Effect, Fired, Network, RunState};
-use needy_core_actor::driver::{self, Channels, Driver, Facets, HostMount, Running, Side, Terminal, Transport};
+use needy_core_actor::driver::{self, Channels, Driver, Facets, HostMount, Running, Side, Terminal};
 use needy_core_actor::image::guest;
 use needy_core_actor::sidecar::gateway;
 use tokio_util::sync::CancellationToken;
@@ -144,15 +144,14 @@ pub fn mounts(run: &Run) -> Vec<HostMount> {
 pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   let driver = driver_for(daemon, &run.profile.actor)?;
   let facets = facets(run);
-  let channels = driver.channels(&run.dir);
   let actor = run.cancel.child_token();
   advance(run, ActorState::Starting);
-  if let Err(e) = serve_guest(daemon, run, &channels, facets.transport, &actor).await {
+  if let Err(e) = serve_guest(daemon, run, &actor).await {
     actor.cancel();
     advance(run, ActorState::Exited);
     return Err(e);
   }
-  if let Err(e) = serve_gateway(run, &channels, &actor) {
+  if let Err(e) = serve_gateway(run, &actor) {
     actor.cancel();
     advance(run, ActorState::Exited);
     return Err(e);
@@ -424,13 +423,7 @@ async fn answers(client: needy_api_client::Client) -> Result<needy_api_client::C
 
 /// Serves the run's API to the actor on its guest channel, as
 /// `Caller::Actor` bound to the run, until `actor` is cancelled.
-pub(crate) async fn serve_guest(
-  daemon: &Daemon,
-  run: &Run,
-  _channels: &Channels,
-  _transport: Transport,
-  actor: &CancellationToken,
-) -> Result<()> {
+pub(crate) async fn serve_guest(daemon: &Daemon, run: &Run, actor: &CancellationToken) -> Result<()> {
   let api = Arc::new(daemon.clone());
   let health = Health {
     instance_id: uuid::Uuid::new_v4().to_string(),
@@ -457,7 +450,7 @@ pub(crate) async fn serve_guest(
 
 /// Serves the actor's gateway on its gateway channel until `actor` is
 /// cancelled.
-pub(crate) fn serve_gateway(run: &Run, _channels: &Channels, actor: &CancellationToken) -> Result<()> {
+pub(crate) fn serve_gateway(run: &Run, actor: &CancellationToken) -> Result<()> {
   let path = &run.dir.join("cg.sock");
   // TODO(mitm): the gateway adds no headers (header injection was removed
   // on 2026-11-12); on HTTPS it needs a separate MITM infrastructure (its

@@ -26,6 +26,7 @@ use needy_api_server::control::{
   StoredEvent,
 };
 use needy_common::process::Exit;
+use needy_common::sync::lock;
 use needy_common::time::now_ms;
 use needy_config::Source;
 use needy_config::profile::{FaultDomain, Profile, TraceSink};
@@ -242,9 +243,7 @@ impl Run {
   }
 
   fn lock_executors(&self) -> MutexGuard<'_, BTreeMap<String, Arc<Instance>>> {
-    // NOTICE: each change is one insert, so a panic elsewhere leaves the map
-    // whole.
-    self.executors.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock(&self.executors)
   }
 }
 
@@ -514,12 +513,6 @@ pub struct Boot {
   /// Sync mappings declared by features (`customizations.needy.files`) in
   /// resolved layer order, backed by `<daemon.data_dir>/files/<store>`.
   pub sync_files: Vec<needy_core::image::FeatureSyncFile>,
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-  // NOTICE: the lists change by one push or retain, so a panic elsewhere
-  // leaves them whole.
-  mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn no_such_run() -> ControlError {
@@ -1210,7 +1203,7 @@ impl Runs for Daemon {
   ) -> Result<needy_api_server::control::ClientExecution, ControlError> {
     self.admit_work()?;
     let (holder, run, capability) = self.state.prepare_client_execution(now_ms()).await.map_err(|e| failed(e.into()))?;
-    self.runner_hosts.lock().unwrap_or_else(|e| e.into_inner()).insert(holder.clone(), host);
+    lock(&self.runner_hosts).insert(holder.clone(), host);
     Ok(needy_api_server::control::ClientExecution {
       run,
       holder,

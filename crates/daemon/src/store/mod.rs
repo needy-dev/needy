@@ -34,6 +34,7 @@ use self::entity::{join_token, runner};
 pub use self::lifecycle::{InstanceState, ProcessState, Refused, RunnerState};
 pub use self::runs::{InstanceKind, InstanceRecord, ProcessRecord, RunRecord, actor_instance, executor_instance};
 pub use self::secret::Secret;
+pub(crate) use self::secret::hex;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

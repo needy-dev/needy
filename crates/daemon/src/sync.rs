@@ -266,7 +266,7 @@ struct StoreLock(#[allow(dead_code)] std::fs::File);
 fn acquire_lock(daemon_data: &Path, store: &Path) -> Result<StoreLock> {
   let locks = daemon_data.join("sync").join("locks");
   needy_api_server::create_private_dir(&locks).with_context(|| format!("create {}", locks.display()))?;
-  let key = hex(&Sha256::digest(store.as_os_str().as_encoded_bytes()));
+  let key = crate::store::hex(&Sha256::digest(store.as_os_str().as_encoded_bytes()));
   let path = locks.join(format!("{key}.lock"));
   let file =
     std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
@@ -283,10 +283,6 @@ fn locked<T>(daemon_data: &Path, store: &Path, f: impl FnOnce() -> Result<T>) ->
 /// Acquires the exclusive lock on `store` without blocking the async runtime.
 async fn lock_store(daemon_data: PathBuf, store: PathBuf) -> Result<StoreLock> {
   tokio::task::spawn_blocking(move || acquire_lock(&daemon_data, &store)).await?
-}
-
-fn hex(bytes: &[u8]) -> String {
-  bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Checks the store of every sync mapping `run` uses, before the run

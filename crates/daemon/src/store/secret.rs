@@ -97,7 +97,7 @@ fn random<const N: usize>() -> [u8; N] {
   bytes
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
   use std::fmt::Write as _;
   bytes.iter().fold(String::with_capacity(bytes.len() * 2), |mut text, byte| {
     // Writing to a `String` cannot fail.

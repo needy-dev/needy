@@ -29,6 +29,7 @@ use needy_api_client::proto::v1::{
 };
 use needy_api_client::{Executor, Responses};
 use needy_api_server::control::{ControlError, FromRunner, ToRunner};
+use needy_common::sync::lock;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -96,15 +97,9 @@ impl Drop for PendingExec<'_> {
 }
 
 impl Links {
-  fn lock(&self) -> MutexGuard<'_, HashMap<String, Arc<Link>>> {
-    // NOTICE: every change under the lock is one map update, so a panic
-    // elsewhere leaves the map whole.
-    self.links.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-  }
-
   /// The runner's link while its control stream is open.
   pub(crate) fn get(&self, runner: &str) -> Option<Arc<Link>> {
-    self.lock().get(runner).cloned()
+    lock(&self.links).get(runner).cloned()
   }
 
   /// The runner's link once its control stream is open, waiting up to
@@ -125,7 +120,7 @@ impl Links {
 
   /// The names of the connected runners, sorted.
   pub(crate) fn names(&self) -> Vec<String> {
-    let mut names: Vec<String> = self.lock().keys().cloned().collect();
+    let mut names: Vec<String> = lock(&self.links).keys().cloned().collect();
     names.sort();
     names
   }
@@ -150,7 +145,7 @@ impl Links {
       pending: Mutex::default(),
       closed: CancellationToken::new(),
     });
-    if let Some(earlier) = self.lock().insert(runner.to_string(), link.clone()) {
+    if let Some(earlier) = lock(&self.links).insert(runner.to_string(), link.clone()) {
       tracing::info!("runner {runner}: a new control stream replaces the earlier one");
       earlier.close();
     }
@@ -187,7 +182,7 @@ impl Links {
   /// Ends the runner's control stream, if it has one; the runner connects
   /// again, or learns at once that it was removed.
   pub(crate) fn close(&self, runner: &str) {
-    let link = self.lock().remove(runner);
+    let link = lock(&self.links).remove(runner);
     if let Some(link) = link {
       link.close();
     }
@@ -195,7 +190,7 @@ impl Links {
 
   /// Ends every control stream, as the daemon stops serving.
   pub(crate) fn close_all(&self) {
-    let links: Vec<Arc<Link>> = self.lock().drain().map(|(_, link)| link).collect();
+    let links: Vec<Arc<Link>> = lock(&self.links).drain().map(|(_, link)| link).collect();
     for link in links {
       link.close();
     }
@@ -204,7 +199,7 @@ impl Links {
   /// Drops `link` once its stream ended, unless a newer stream replaced it.
   fn forget(&self, link: &Arc<Link>) {
     {
-      let mut links = self.lock();
+      let mut links = lock(&self.links);
       if links.get(&link.runner).is_some_and(|current| Arc::ptr_eq(current, link)) {
         links.remove(&link.runner);
         tracing::info!("runner {} disconnected", link.runner);
@@ -244,8 +239,7 @@ impl Links {
 
 impl Link {
   fn pending(&self) -> MutexGuard<'_, HashMap<u64, Pending>> {
-    // NOTICE: as in `Links::lock`.
-    self.pending.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    lock(&self.pending)
   }
 
   fn take(&self, task: u64) -> Option<Pending> {
