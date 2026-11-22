@@ -38,9 +38,17 @@ base image.
 
 ## Pick the driver
 
-The built-in profiles default to `linux-firecracker` and a `linux-container`
-executor. For another driver, write a short profile that extends `builtin:<agent>`
-(no repo checkout required), for example `~/.config/needy/profiles/opencode.yaml`:
+The built-in profiles stay minimal (`linux-firecracker`, the agent feature and
+command, and `actor.network.allow: ["*"]`), with no pre-bound executor, routing
+rules, or `actor.workspace`. The full example profiles in this directory
+([`opencode.yaml`](opencode.yaml), [`codex.yaml`](codex.yaml),
+[`pi.yaml`](pi.yaml), [`herdr.yaml`](herdr.yaml)) additionally add a
+`linux-container` `build` executor, shell routing, and per-agent host
+allowlists.
+
+For another driver or a custom executor, write a short profile that extends
+`builtin:<agent>` (no repo checkout required), for example
+`~/.config/needy/profiles/opencode.yaml`:
 
 ```yaml
 # Linux without KVM (requires SSHFS and FUSE 3 on the actor host)
@@ -51,18 +59,19 @@ actor:
 ```
 
 ```yaml
-# Apple silicon Mac: the executor is the Mac itself, as in examples/macos-vz.
-# mkdir -p /tmp/needy-agents first.
+# Apple silicon Mac: commands run on the Mac itself in the current directory
 extends: builtin:opencode
 actor:
   driver: macos-vz                       # or macos-apple-container
-  workspace: { path: ~/workspace, from: "executor:build:/tmp/needy-agents", writable: true }
 executors:
-  build: { driver: native }
+  mac: { driver: native }
+commands:
+  - { match: "**", to: mac }
+unknown: mac
 ```
 
-On a Mac, the agent's commands run on the Mac as your user, in that
-directory. On Linux they run in a container.
+On a Mac with that profile, `needy run create` mounts your current directory
+live at `~/workspace` and runs routed commands on the Mac as your user.
 
 ## First start and login
 
@@ -138,10 +147,12 @@ from needy and leave the run going.
 
 ## The workspace
 
-The built-in profiles set `actor.workspace` to an empty directory in the
-`build` container's `~/workspace`. The agent can clone a repository there with
-its own tools, or you can copy files in with
-`needy fs cp ./src build:/home/agent/workspace`. To mount the directory you run
-`needy run create` in live at `~/workspace`, omit `actor.workspace` in a custom
-profile; or point `actor.workspace.from` at a directory on a `native` executor
-(as in the macOS example above).
+The `builtin:*` profiles leave `actor.workspace` unset and declare no
+executors. When you extend a built-in profile with a `native` (local or
+`runner: { client: true }`) or local `linux-container` executor,
+`needy run create` mounts the directory you run it in live at `~/workspace`.
+
+The full example profiles in this directory (`examples/agents/*.yaml`) set
+`actor.workspace` to an empty directory in the `build` container's
+`~/workspace`. The agent can clone a repository there with its own tools, or
+you can copy files in with `needy fs cp ./src build:/home/agent/workspace`.

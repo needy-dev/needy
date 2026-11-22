@@ -1049,6 +1049,14 @@ fn builtin_profiles_load_validate_and_carry_inline_agent_images() {
     let profile = super::load(&source).unwrap_or_else(|e| panic!("failed to load builtin:{name}: {e}"));
     let findings = crate::validate::profile(&profile);
     assert!(findings.is_empty(), "validation findings for builtin:{name}: {findings:?}");
+    assert!(profile.actor.workspace.is_none(), "builtin:{name} should not hardcode actor.workspace");
+    assert!(profile.executors.is_empty(), "builtin:{name} should not hardcode executors");
+    assert!(profile.commands.is_empty(), "builtin:{name} should not hardcode command routing");
+    assert_eq!(
+      profile.actor.network.allow.iter().map(|g| g.as_str()).collect::<Vec<_>>(),
+      vec!["*"],
+      "builtin:{name} should allow all hosts by default"
+    );
 
     let Some(crate::image::Image::Definition(def)) = &profile.actor.image else {
       panic!("builtin:{name} must carry an inline actor.image definition");
@@ -1072,4 +1080,28 @@ fn builtin_profiles_load_validate_and_carry_inline_agent_images() {
 
   // Built-in standalone images remain disallowed (agents are features).
   assert!(crate::image::load(&crate::Source::builtin("codex")).is_err());
+}
+
+#[test]
+fn extending_builtin_profile_with_custom_executor_leaves_no_default_build_or_workspace() {
+  let profile = super::load(&crate::Source::text(
+    r#"extends: builtin:opencode
+actor:
+  driver: linux-container
+  container: { oci_runtime: runc }
+executors:
+  remote: { driver: native, runner: { client: true } }
+commands:
+  - { match: "**", to: remote }
+unknown: remote
+"#,
+    std::path::PathBuf::new(),
+  ))
+  .unwrap();
+
+  let findings = crate::validate::profile(&profile);
+  assert!(findings.is_empty(), "validation findings: {findings:?}");
+  assert!(profile.actor.workspace.is_none());
+  assert_eq!(profile.executors.keys().collect::<Vec<_>>(), vec!["remote"]);
+  assert_eq!(profile.actor.network.allow.iter().map(|g| g.as_str()).collect::<Vec<_>>(), vec!["*"]);
 }
