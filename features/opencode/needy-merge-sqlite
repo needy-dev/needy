@@ -2,12 +2,12 @@
 # Three-way SQLite row-merge driver for needy sync mappings (opencode feature).
 #
 # Three-tree driver contract:
-#   needy-merge-sqlite <seed_dir> <run_dir> <store_dir> <out_dir>
+#   needy-merge-sqlite <base_dir> <run_dir> <current_dir> <merged_dir>
 #
-#   - <seed_dir>:  claimed files as they were when the run was seeded
-#   - <run_dir>:   claimed files from the run's per-run copy
-#   - <store_dir>: claimed files currently in the store
-#   - <out_dir>:   empty writable directory where merged files are written
+#   - <base_dir>:    claimed files as they were when the run started (common ancestor)
+#   - <run_dir>:     claimed files from the run's per-run copy
+#   - <current_dir>: claimed files currently in the persistent store
+#   - <merged_dir>:  empty writable directory where merged files are written
 #
 # Uses the `sqlite3` CLI with `ATTACH DATABASE` so all row data (TEXT, BLOB,
 # NULL, quotes, newlines, composite primary keys) stays inside SQLite's own SQL
@@ -15,7 +15,7 @@
 set -eu
 
 if [ "$#" -ne 4 ]; then
-  printf 'usage: %s <seed_dir> <run_dir> <store_dir> <out_dir>\n' "$0" >&2
+  printf 'usage: %s <base_dir> <run_dir> <current_dir> <merged_dir>\n' "$0" >&2
   exit 2
 fi
 
@@ -24,12 +24,12 @@ if ! command -v sqlite3 >/dev/null 2>&1; then
   exit 1
 fi
 
-SEED_DIR=$1
+BASE_DIR=$1
 RUN_DIR=$2
-STORE_DIR=$3
-OUT_DIR=$4
+CURRENT_DIR=$3
+MERGED_DIR=$4
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$MERGED_DIR"
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/needy-merge-sqlite-XXXXXX")
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
@@ -84,7 +84,7 @@ stage_and_checkpoint() {
 
 # Collects unique relative paths of non-side files across all three trees.
 collect_db_paths() {
-  for root in "$SEED_DIR" "$RUN_DIR" "$STORE_DIR"; do
+  for root in "$BASE_DIR" "$RUN_DIR" "$CURRENT_DIR"; do
     [ -d "$root" ] || continue
     (
       cd "$root"
@@ -296,12 +296,12 @@ EOF
 
 merge_one_db() {
   rel=$1
-  out_path="$OUT_DIR/$rel"
+  out_path="$MERGED_DIR/$rel"
   mkdir -p "$(dirname "$out_path")"
 
-  seed_db=$(stage_and_checkpoint "$SEED_DIR" "$rel" "seed")
+  seed_db=$(stage_and_checkpoint "$BASE_DIR" "$rel" "base")
   run_db=$(stage_and_checkpoint "$RUN_DIR" "$rel" "run")
-  store_db=$(stage_and_checkpoint "$STORE_DIR" "$rel" "store")
+  store_db=$(stage_and_checkpoint "$CURRENT_DIR" "$rel" "current")
 
   # Only the run has this database: take it directly.
   if [ -z "$store_db" ]; then

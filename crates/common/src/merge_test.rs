@@ -447,15 +447,15 @@ fn driver_staging_and_applying_replaces_claimed_files_and_cleans_stale_side_file
   };
   stage_driver_trees(trees, &claimed, staging.path()).unwrap();
 
-  assert_eq!(read(&staging.path().join("seed"), "opencode.db").as_deref(), Some("seed-db"));
+  assert_eq!(read(&staging.path().join("base"), "opencode.db").as_deref(), Some("seed-db"));
   assert_eq!(read(&staging.path().join("run"), "opencode.db-wal").as_deref(), Some("run-wal"));
-  assert_eq!(read(&staging.path().join("store"), "opencode.db-wal").as_deref(), Some("store-wal"));
-  assert!(!staging.path().join("store/other.txt").exists());
+  assert_eq!(read(&staging.path().join("current"), "opencode.db-wal").as_deref(), Some("store-wal"));
+  assert!(!staging.path().join("current/other.txt").exists());
 
-  // Simulate driver writing checkpointed opencode.db (no -wal) into out/.
-  let out = staging.path().join("out");
-  write(&out, "opencode.db", "merged-db");
-  apply_driver_output(&out, &f.store, &claimed).unwrap();
+  // Simulate driver writing checkpointed opencode.db (no -wal) into merged/.
+  let merged = staging.path().join("merged");
+  write(&merged, "opencode.db", "merged-db");
+  apply_driver_output(&merged, &f.store, &claimed).unwrap();
 
   assert_eq!(read(&f.store, "opencode.db").as_deref(), Some("merged-db"));
   assert!(!f.store.join("opencode.db-wal").exists(), "stale -wal side file must be removed");

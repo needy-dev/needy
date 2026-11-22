@@ -232,13 +232,13 @@ pub fn merge(trees: Trees<'_>, aside: &Path, policy: &Policy) -> Result<Outcome>
   })
 }
 
-/// Stages the three trees (`seed/`, `run/`, `store/`) and an empty `out/`
+/// Stages the three trees (`base/`, `run/`, `current/`) and an empty `merged/`
 /// directory under `staging` containing only the entries in `paths`.
 pub fn stage_driver_trees(trees: Trees<'_>, paths: &[String], staging: &Path) -> Result<()> {
   for (name, src) in [
-    ("seed", trees.seed),
+    ("base", trees.seed),
     ("run", trees.run),
-    ("store", trees.store),
+    ("current", trees.store),
   ] {
     let dst = staging.join(name);
     std::fs::create_dir_all(&dst).with_context(|| format!("create {}", dst.display()))?;
@@ -246,8 +246,8 @@ pub fn stage_driver_trees(trees: Trees<'_>, paths: &[String], staging: &Path) ->
       copy_relative(src, &dst, rel)?;
     }
   }
-  let out = staging.join("out");
-  std::fs::create_dir_all(&out).with_context(|| format!("create {}", out.display()))?;
+  let merged = staging.join("merged");
+  std::fs::create_dir_all(&merged).with_context(|| format!("create {}", merged.display()))?;
   Ok(())
 }
 
