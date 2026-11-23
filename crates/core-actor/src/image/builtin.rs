@@ -65,41 +65,12 @@ impl BuiltinFeature {
 
 /// Embedded built-in Dev Container features shipped with needy so `builtin:<id>`
 /// references work offline without an external OCI registry or repository clone.
-// TODO(agent-decoupling): move `builtin:{codex,pi,opencode,herdr}` out of
-// `needy-core-actor` into external OCI feature refs or user-level presets once
-// quickstart profiles no longer rely on embedded agent builtins.
-const BUILTINS: &[BuiltinFeature] = &[
-  BuiltinFeature {
-    reference: "builtin:sshfs",
-    metadata_json: include_str!("../../../../features/sshfs/devcontainer-feature.json"),
-    install_sh: include_str!("../../../../features/sshfs/install.sh"),
-    extra_files: &[],
-  },
-  BuiltinFeature {
-    reference: "builtin:codex",
-    metadata_json: include_str!("../../../../features/codex/devcontainer-feature.json"),
-    install_sh: include_str!("../../../../features/codex/install.sh"),
-    extra_files: &[],
-  },
-  BuiltinFeature {
-    reference: "builtin:pi",
-    metadata_json: include_str!("../../../../features/pi/devcontainer-feature.json"),
-    install_sh: include_str!("../../../../features/pi/install.sh"),
-    extra_files: &[],
-  },
-  BuiltinFeature {
-    reference: "builtin:opencode",
-    metadata_json: include_str!("../../../../features/opencode/devcontainer-feature.json"),
-    install_sh: include_str!("../../../../features/opencode/install.sh"),
-    extra_files: &[("needy-merge-sqlite", 0o755, include_bytes!("../../../../features/opencode/needy-merge-sqlite"))],
-  },
-  BuiltinFeature {
-    reference: "builtin:herdr",
-    metadata_json: include_str!("../../../../features/herdr/devcontainer-feature.json"),
-    install_sh: include_str!("../../../../features/herdr/install.sh"),
-    extra_files: &[],
-  },
-];
+const BUILTINS: &[BuiltinFeature] = &[BuiltinFeature {
+  reference: "builtin:sshfs",
+  metadata_json: include_str!("../../../../features/sshfs/devcontainer-feature.json"),
+  install_sh: include_str!("../../../../features/sshfs/install.sh"),
+  extra_files: &[],
+}];
 
 /// Returns whether `reference` names a built-in needy feature (`builtin:<id>`).
 pub fn is_builtin_ref(reference: &str) -> bool {

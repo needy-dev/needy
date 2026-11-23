@@ -1,5 +1,4 @@
-# herdr in an actor, built from needy's agent features (`builtin:codex`,
-# `builtin:pi`, `builtin:opencode`, `builtin:herdr`).
+# herdr in an actor, built from the OCI features in `ghcr.io/needy-dev/features`.
 #
 # Start herdr directly (needy builds and caches each feature layer once):
 #   needy run create -it --profile builtin:herdr
@@ -14,10 +13,10 @@ actor:
   driver: linux-firecracker
   image:
     layers:
-      - feature: builtin:codex
-      - feature: builtin:pi
-      - feature: builtin:opencode
-      - feature: builtin:herdr
+      - feature: ghcr.io/needy-dev/features/codex:1
+      - feature: ghcr.io/needy-dev/features/pi:1
+      - feature: ghcr.io/needy-dev/features/opencode:1
+      - feature: ghcr.io/needy-dev/features/herdr:1
   command: [herdr]
   network:
     allow: ["*"]

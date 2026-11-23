@@ -322,7 +322,7 @@ pub(crate) fn same_feature(layer: &Value) -> Option<String> {
 /// `reference` without its `:TAG` or `@DIGEST`.
 // NOTICE: written by hand rather than with an OCI reference parser: the
 // workspace has none, and a local feature directory (`./features/x`) or
-// built-in feature (`builtin:codex`) is not an OCI reference. A tag is the
+// built-in feature (`builtin:sshfs`) is not an OCI reference. A tag is the
 // text after the last `:` of the last path segment, so a registry's port
 // (`localhost:5000/x`) stays; `builtin:<name>` has no tag.
 pub fn untagged(reference: &str) -> &str {

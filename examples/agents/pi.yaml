@@ -1,4 +1,4 @@
-# pi in an actor, built from needy's `builtin:pi` feature (`features/pi/`).
+# pi in an actor, built from `ghcr.io/needy-dev/features/pi:1`.
 # Every shell it starts, and so every command its bash tool runs, goes to the
 # `build` executor, which holds the workspace.
 #
@@ -8,8 +8,8 @@
 # On the first start, run /login and pick a provider. A subscription's
 # browser sign-in cannot call back to the actor's localhost: when pi asks,
 # paste the final redirect URL or the code the page shows. GitHub Copilot
-# signs in with a device code. The `builtin:pi` feature automatically syncs
-# `~/.pi/agent` with needy's `<data_dir>/files/pi` store across runs and sets
+# signs in with a device code. The feature automatically syncs `~/.pi/agent`
+# with needy's `<data_dir>/files/pi` store across runs and sets
 # `PI_SKIP_VERSION_CHECK=1` and `PI_TELEMETRY=0`.
 user: { name: agent, uid: 1000, gid: 1000 }
 
@@ -17,7 +17,7 @@ actor:
   driver: linux-firecracker
   image:
     layers:
-      - feature: builtin:pi
+      - feature: ghcr.io/needy-dev/features/pi:1
   workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command: [pi]
   # Without a subscription login: a provider's API key (pi reads
