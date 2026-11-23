@@ -399,6 +399,8 @@ async fn actor_seed_fixes_recipe_hostname_uuid_and_machine_id_across_runs() {
   assert_ne!(r1.hostname, r3.hostname);
   assert_ne!(r1.machine_id, r3.machine_id);
   assert_ne!(r1.identity.smbios.as_ref().unwrap().uuid, r3.identity.smbios.as_ref().unwrap().uuid);
+  let guest_cfg = needy_api_server::control::Guest::config(&started.daemon, &first.id).await.unwrap();
+  assert_eq!(guest_cfg.machine_id, r1.machine_id.unwrap());
 }
 
 #[tokio::test]

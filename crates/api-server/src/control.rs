@@ -561,6 +561,9 @@ pub struct GuestConfig {
   /// Command names the kernel routes; `*` routes every exec.
   pub route_names: Vec<String>,
   pub hostname: String,
+  /// Linux `/etc/machine-id` (32 lowercase hex digits) to write in the guest;
+  /// empty when left untouched or bind-mounted from the host.
+  pub machine_id: String,
   pub uptime_offset_secs: i64,
   pub mounts: Vec<GuestMount>,
   /// The driving program.

@@ -117,6 +117,15 @@ impl Guest for Daemon {
       // apart by name, such as session locks that record pid and hostname,
       // took one actor's process for another's. The run ID is unique.
       hostname: recipe.and_then(|r| r.hostname.clone()).unwrap_or_else(|| format!("needy-{}", run.id)),
+      machine_id: recipe
+        .and_then(|r| r.machine_id.clone())
+        .or_else(|| {
+          profile.actor.seed.as_ref().map(|seed| match seed {
+            needy_config::profile::Seed::Int(n) => needy_common::seed::machine_id(*n),
+            needy_config::profile::Seed::String(s) => needy_common::seed::machine_id(needy_common::seed::from_str(s)),
+          })
+        })
+        .unwrap_or_default(),
       uptime_offset_secs: recipe.map(|r| r.uptime_offset_secs).unwrap_or(0),
       mounts,
       command: run.actor_command.clone(),
@@ -165,6 +174,7 @@ impl Guest for Daemon {
     }
     if facets.identity.hostname != in_guest {
       config.hostname.clear();
+      config.machine_id.clear();
     }
     if facets.identity.hwmon != in_guest {
       config.sensors.clear();

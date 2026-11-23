@@ -731,6 +731,11 @@ pub struct GetConfigResponse {
     /// program exits (or on graceful stop), before mirror-out and sync merges.
     #[prost(string, repeated, tag="24")]
     pub stop_hooks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// Linux `/etc/machine-id` (32 lowercase hex digits) to write in the guest
+    /// when the driver sets identity in the guest. Empty leaves `/etc/machine-id`
+    /// untouched.
+    #[prost(string, tag="25")]
+    pub machine_id: ::prost::alloc::string::String,
 }
 /// An event observed inside the actor. The listener the guest calls is bound to
 /// its run, so the event names none.
