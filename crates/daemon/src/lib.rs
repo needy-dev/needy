@@ -44,6 +44,10 @@ pub mod runner;
 #[cfg(unix)]
 mod actor;
 #[cfg(unix)]
+mod actor_runner;
+#[cfg(unix)]
+mod bridge;
+#[cfg(unix)]
 mod chaos;
 #[cfg(unix)]
 mod check;
@@ -51,6 +55,8 @@ mod check;
 mod clients;
 #[cfg(unix)]
 mod files;
+#[cfg(unix)]
+pub mod gateway_tcp;
 #[cfg(unix)]
 mod guest;
 #[cfg(unix)]
@@ -71,6 +77,8 @@ mod run;
 mod runners;
 #[cfg(unix)]
 mod schedule;
+#[cfg(unix)]
+mod static_runners;
 #[cfg(unix)]
 mod store;
 #[cfg(unix)]
@@ -174,6 +182,25 @@ pub struct Config {
   /// reported as a conflict: [`MERGE_DRIVER_TIMEOUT`] outside tests.
   #[serde(default = "default_merge_driver_timeout")]
   pub merge_driver_timeout: Duration,
+  /// Optional YAML/JSON file containing pre-provisioned static runner
+  /// credentials, hot-reloaded on mtime/inode change without restarting the
+  /// daemon.
+  #[serde(default)]
+  pub runners_file: Option<PathBuf>,
+  /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host workspaces).
+  #[serde(default)]
+  pub disable_host_files: bool,
+  /// Restrict `host:` file mappings to canonical paths inside this directory.
+  #[serde(default)]
+  pub host_files_root: Option<PathBuf>,
+  /// Optional shared TCP address (`HOST:PORT`) for the authenticated remote
+  /// actor HTTP/CONNECT gateway.
+  #[serde(default)]
+  pub gateway_listen: Option<String>,
+  /// Additional CIDR blocks (e.g. `10.0.0.0/8`, `192.168.0.0/16`) rejected by
+  /// the actor gateway's egress policy for non-service targets.
+  #[serde(default)]
+  pub gateway_blocked_cidrs: Vec<String>,
 }
 
 #[cfg(unix)]
@@ -212,6 +239,8 @@ pub struct IncompleteShutdown {
 #[derive(Clone)]
 pub struct Daemon {
   pub(crate) config: Arc<Config>,
+  /// Parsed operator-configured CIDR blocks rejected by local and remote actor gateways.
+  pub(crate) gateway_blocked_cidrs: Vec<needy_core_actor::sidecar::gateway::IpCidr>,
   instance_id: String,
   discovery: Arc<discovery::Publisher>,
   /// `trace.db`, shared by the runs' SQLite sinks.
@@ -225,6 +254,8 @@ pub struct Daemon {
   pub(crate) pool: Arc<Pool>,
   /// The runners whose control streams are open.
   pub(crate) links: Arc<link::Links>,
+  /// Statically configured runners hot-reloaded from `config.runners_file`.
+  pub(crate) static_runners: Arc<static_runners::StaticRunners>,
   /// Each runner's machine as its last heartbeat reported it.
   // NOTICE: kept in memory: a runner reports it in every heartbeat, so a
   // control plane that restarts knows it again within one heartbeat.
@@ -249,6 +280,10 @@ pub struct Daemon {
   /// Run creates in progress, which shutdown waits for.
   pub(crate) creates: TaskTracker,
   pub(crate) cancel: CancellationToken,
+  /// Child of `cancel` that also cancels when the last `Daemon` clone drops,
+  /// so background runner-maintenance tasks never leak file descriptors.
+  pub(crate) maintenance_cancel: CancellationToken,
+  _maintenance_guard: Arc<tokio_util::sync::DropGuard>,
   /// Ends the exec streams of commands outside any run. A child of
   /// `cancel`, cancelled with the runs when a shutdown begins, so those
   /// streams end while the server still serves, as a run's do.
@@ -273,6 +308,15 @@ impl Daemon {
   }
 
   pub(crate) async fn start_with_backends(config: Config, backends: holder::ContainerBackends) -> Result<Self> {
+    let gateway_blocked_cidrs = config
+      .gateway_blocked_cidrs
+      .iter()
+      .map(|raw| {
+        raw
+          .parse::<needy_core_actor::sidecar::gateway::IpCidr>()
+          .map_err(|e| anyhow::anyhow!("invalid gateway_blocked_cidrs entry {raw:?}: {e}"))
+      })
+      .collect::<Result<Vec<_>>>()?;
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
     }
@@ -304,11 +348,16 @@ impl Daemon {
       }
     };
     let links: Arc<link::Links> = Arc::default();
+    let static_runners = Arc::new(static_runners::StaticRunners::new(config.runners_file.clone()));
+    static_runners.reload(&links);
+    let maintenance_cancel = cancel.child_token();
+    let maintenance_guard = Arc::new(maintenance_cancel.clone().drop_guard());
     let images = Arc::new(image::Images::with_backends(&config.cache_dir, &config.data_dir, backends));
     let daemon = Self {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, container, links.clone())),
       config: Arc::new(config),
+      gateway_blocked_cidrs,
       instance_id,
       discovery,
       traces,
@@ -316,6 +365,7 @@ impl Daemon {
       runs: Arc::new(Registry::new(state.clone())),
       state,
       links,
+      static_runners,
       runner_hosts: Arc::default(),
       holder,
       suspending: Arc::default(),
@@ -323,6 +373,8 @@ impl Daemon {
       tasks,
       creates: TaskTracker::new(),
       outside_runs: cancel.child_token(),
+      maintenance_cancel,
+      _maintenance_guard: maintenance_guard,
       cancel,
       shutting_down: Arc::default(),
       runs_stopped: Arc::default(),
@@ -339,6 +391,7 @@ impl Daemon {
     // After reconciling, so every run a previous daemon left is ended or
     // listed again.
     sync::drain(&daemon).await;
+    daemon.spawn_runner_maintenance();
     Ok(daemon)
   }
 
@@ -411,6 +464,13 @@ impl Daemon {
     // Keep control/runner streams available until normal run cleanup has
     // finished. Cancelling the listeners first would cut off mirror-out.
     let server_stop = CancellationToken::new();
+    if let Some(gateway_address) = &self.config.gateway_listen {
+      let bound = self.bind_gateway_tcp(gateway_address).await?;
+      if let Ok(local) = bound.local_addr() {
+        tracing::info!("shared actor gateway listening on tcp://{local}");
+      }
+      self.tasks.spawn(bound.serve(server_stop.clone()));
+    }
     let serving = server.serve(server_stop.clone());
     tokio::pin!(serving);
     let address = format!("unix:{}", management.display());
@@ -448,6 +508,7 @@ impl Daemon {
       .runs(api.clone())
       .images(api.clone())
       .processes(api.clone())
+      .guest(api.clone())
       .runners(api.clone())
       .clients(api)
   }

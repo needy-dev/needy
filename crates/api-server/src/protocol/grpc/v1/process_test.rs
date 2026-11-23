@@ -125,19 +125,111 @@ async fn an_attach_names_the_process_and_replay() {
 }
 
 #[tokio::test]
-async fn an_actor_lists_only_its_own_run() {
+async fn an_actor_cannot_list_or_kill_processes() {
   let served = serve(Caller::Actor {
     run: "s-actor".into(),
   })
   .await;
 
-  let listed = served.client.processes().list_processes(ListProcessesRequest::default()).await.unwrap().into_inner().processes;
+  let list_err = served.client.processes().list_processes(ListProcessesRequest::default()).await.unwrap_err();
+  let kill_err = served
+    .client
+    .processes()
+    .kill_process(KillProcessRequest {
+      process_id: "p1".into(),
+      signal: "SIGKILL".into(),
+    })
+    .await
+    .unwrap_err();
 
-  assert_eq!(served.fake.calls(), [r#"list "s-actor""#]);
-  assert_eq!(listed[0].run_id, "s-actor");
-  assert_eq!(listed[0].origin, Origin::Cli as i32);
-  assert!(!listed[0].running);
-  assert_eq!(listed[0].exited.as_ref().map(|e| e.signal.as_str()), Some("SIGKILL"));
+  assert_eq!([list_err.code(), kill_err.code()], [Code::PermissionDenied, Code::PermissionDenied]);
+  assert!(served.fake.calls().is_empty());
+
+  // Defense-in-depth directly at the adapter (without middleware).
+  use needy_api_proto::v1::process_service_server::ProcessService as _;
+  let actor_adapter = super::Adapter {
+    processes: served.fake.clone(),
+    caller: Caller::Actor {
+      run: "s-actor".into(),
+    },
+  };
+  assert_eq!(
+    actor_adapter
+      .kill_process(tonic::Request::new(KillProcessRequest {
+        process_id: "p1".into(),
+        signal: "SIGKILL".into(),
+      }))
+      .await
+      .unwrap_err()
+      .code(),
+    Code::PermissionDenied
+  );
+  let runner_adapter = super::Adapter {
+    processes: served.fake.clone(),
+    caller: Caller::Runner { name: "r1".into() },
+  };
+  assert_eq!(
+    runner_adapter
+      .kill_process(tonic::Request::new(KillProcessRequest {
+        process_id: "p1".into(),
+        signal: "SIGKILL".into(),
+      }))
+      .await
+      .unwrap_err()
+      .code(),
+    Code::PermissionDenied
+  );
+}
+
+// ROOT CAUSE:
+//
+// `ProcessService/Exec(Attach)` with an empty `run_id` previously bypassed the
+// actor run-scoping check, allowing `Caller::Actor` to attach to any process on
+// the control daemon by `process_id`.
+//
+// Before the fix, `attach.run_id.is_empty()` skipped `run(&caller, ...)` and
+// looked up the process globally.
+// The fix rejects `Exec(Attach)` for `Caller::Actor` and `Caller::Runner`.
+#[tokio::test]
+async fn an_actor_cannot_attach_to_a_process_with_empty_run_id() {
+  let served = serve(Caller::Actor {
+    run: "s-actor".into(),
+  })
+  .await;
+
+  let err = ExecStream::attach(
+    &served.client,
+    needy_api_proto::v1::ExecAttach {
+      process_id: "p9".into(),
+      run_id: String::new(),
+      replay: true,
+      ..Default::default()
+    },
+  )
+  .await
+  .err()
+  .expect("an actor must not attach to processes");
+
+  assert_eq!(err.kind(), Kind::Denied);
+  assert!(served.fake.calls().is_empty());
+
+  // Also verify when authenticated via Node Authorizer on an Operator listener.
+  let op = serve(Caller::Operator).await;
+  let actor_client = op.client.clone().with_token(crate::testing::MAC_CREDENTIAL).unwrap().with_run_id("s-actor").unwrap();
+  let token_err = ExecStream::attach(
+    &actor_client,
+    needy_api_proto::v1::ExecAttach {
+      process_id: "p9".into(),
+      run_id: String::new(),
+      replay: false,
+      ..Default::default()
+    },
+  )
+  .await
+  .err()
+  .expect("an actor token must not attach to processes");
+  assert_eq!(token_err.kind(), Kind::Denied);
+  assert!(op.fake.calls().is_empty());
 }
 
 #[tokio::test]
@@ -165,13 +257,20 @@ async fn an_actor_cannot_name_a_runner() {
   })
   .await;
 
-  let request = ListProcessesRequest {
-    runner: "mac".into(),
-    ..Default::default()
-  };
-  let status = served.client.processes().list_processes(request).await.unwrap_err();
+  let err = ExecStream::start(
+    &served.client,
+    ExecStart {
+      runner: "mac".into(),
+      origin: Origin::ActorProxy.into(),
+      ..start(&["python3"])
+    },
+  )
+  .await
+  .err()
+  .expect("an actor cannot name a runner");
 
-  assert_eq!((status.code(), status.message()), (tonic::Code::PermissionDenied, "an actor cannot name a runner"));
+  assert_eq!(err.kind(), Kind::Denied);
+  assert_eq!(err.to_string(), "an actor cannot name a runner");
   assert!(served.fake.calls().is_empty());
 }
 

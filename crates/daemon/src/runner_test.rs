@@ -38,10 +38,14 @@ fn config(served: &Served, state_dir: &std::path::Path, join_token: Option<Strin
     state_dir: state_dir.to_path_buf(),
     control: Some(served.endpoint.clone()),
     join_token,
+    credential: None,
     name: "mac".into(),
     capabilities: crate::testing::capabilities("executor(native)"),
     labels: BTreeMap::from([("os".to_string(), "darwin".to_string())]),
     grace: crate::runner::DISCONNECT_GRACE,
+    activity_hook: None,
+    ephemeral: false,
+    actor: None,
   }
 }
 
@@ -167,4 +171,103 @@ async fn rejected_label_overrides_do_not_replace_saved_runner_settings() {
   assert!(error.to_string().contains("not accepted"));
   assert_eq!(enrollment(state.path()).unwrap().1.labels.get("os").map(String::as_str), Some("darwin"));
   assert!(!enrollment(state.path()).unwrap().1.labels.contains_key("invalid key"));
+}
+
+#[tokio::test]
+async fn preprovisioned_credential_starts_readonly_without_writing_runner_json() {
+  let served = control(Duration::from_secs(15)).await;
+  let minted = operator(&served)
+    .runners()
+    .mint_runner_credential(needy_api_client::proto::v1::MintRunnerCredentialRequest {
+      name: "k8s-exec".into(),
+      ttl_ms: 60_000,
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  assert_eq!(credential_name(&minted.credential), Some("k8s-exec"));
+
+  let state = tempfile::tempdir().unwrap();
+  let mut cfg = config(&served, state.path(), None);
+  cfg.name = credential_name(&minted.credential).unwrap().to_string();
+  cfg.credential = Some(minted.credential);
+
+  let mut runner = Runner::start(cfg).await.unwrap();
+  runner.beat().await.unwrap();
+
+  assert!(!state.path().join("runner.json").exists(), "read-only mode must never write runner.json");
+  let runners = listed(&served).await;
+  assert_eq!(runners.len(), 1);
+  assert_eq!((runners[0].name.as_str(), runners[0].status()), ("k8s-exec", RunnerStatus::Online));
+}
+
+#[tokio::test]
+async fn activity_hook_is_throttled_and_nonzero_exit_does_not_abort_exec() {
+  use needy_api_server::control::{ExecOpen, ExecOutput, ExecSpec, Processes};
+
+  let served = control(Duration::from_secs(15)).await;
+  let minted = operator(&served)
+    .runners()
+    .mint_runner_credential(needy_api_client::proto::v1::MintRunnerCredentialRequest {
+      name: "hooked".into(),
+      ttl_ms: 60_000,
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  let state = tempfile::tempdir().unwrap();
+  let log = state.path().join("hook.log");
+  // The hook appends a line AND exits non-zero to verify failures never abort tasks.
+  let hook_cmd = format!("echo tick >> '{}' && exit 7", log.display());
+  let mut cfg = config(&served, state.path(), None);
+  cfg.name = "hooked".into();
+  cfg.credential = Some(minted.credential);
+  cfg.activity_hook = Some(ActivityHookConfig {
+    command: hook_cmd,
+    interval: Duration::from_secs(60),
+  });
+  let runner = Runner::start(cfg).await.unwrap();
+  let stop = CancellationToken::new();
+  let _serving = tokio::spawn(runner.serve(stop.clone()));
+  eventually("runner connects", async || served.daemon().links.get("hooked").is_some()).await;
+
+  // Run two commands back-to-back within the 60s throttle window.
+  for expected in ["first", "second"] {
+    let spec = ExecSpec {
+      argv: vec!["sh".into(), "-c".into(), format!("echo {expected}")],
+      cwd: String::new(),
+      env: Default::default(),
+      clear_env: false,
+      tty: None,
+      detach: false,
+      run: String::new(),
+      executor: String::new(),
+      runner: "hooked".into(),
+      no_stdin: true,
+      origin: needy_core::types::Origin::Cli,
+      search_path_if_missing: false,
+      by: None,
+    };
+    let mut outputs = served.daemon().exec(ExecOpen::Start(spec), Box::pin(tokio_stream::empty())).await.unwrap();
+    let mut stdout = Vec::new();
+    let mut exit_code = None;
+    while let Some(item) = outputs.next().await {
+      match item.unwrap() {
+        ExecOutput::Stdout(bytes) => stdout.extend_from_slice(&bytes),
+        ExecOutput::Exited(exit) => exit_code = exit.code,
+        _ => {}
+      }
+    }
+    assert_eq!(exit_code, Some(0), "non-zero activity hook must not fail exec");
+    assert_eq!(String::from_utf8_lossy(&stdout).trim(), expected);
+  }
+
+  eventually("hook wrote tick", async || std::fs::read_to_string(&log).is_ok_and(|s| !s.is_empty())).await;
+  // Give any spurious unthrottled hooks a moment to land, then assert only 1 fired.
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  let ticks: Vec<_> = std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
+  assert_eq!(ticks.len(), 1, "hook must be throttled within interval, got {ticks:?}");
+  stop.cancel();
 }

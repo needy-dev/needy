@@ -52,3 +52,27 @@ fn context_headers_reject_invalid_names_and_values() {
     assert!(config.validate().is_err(), "expected validation failure for:\n{yaml}");
   }
 }
+
+#[test]
+fn gateway_blocked_cidrs_accepts_valid_v4_and_v6_and_rejects_invalid() {
+  let mut cfg = Config::default();
+  cfg.daemon.gateway_blocked_cidrs = vec![
+    "10.0.0.0/8".into(),
+    "192.168.0.0/16".into(),
+    "fc00::/7".into(),
+  ];
+  cfg.validate().expect("valid CIDRs should pass");
+
+  for bad in [
+    "10.0.0.1",
+    "10.0.0.0/33",
+    "fc00::/129",
+    "not-an-ip/8",
+    "10.0.0.0/abc",
+  ] {
+    let mut cfg = Config::default();
+    cfg.daemon.gateway_blocked_cidrs = vec![bad.into()];
+    let err = cfg.validate().expect_err(&format!("{bad} must be rejected"));
+    assert_eq!(err.field(), "daemon.gateway_blocked_cidrs");
+  }
+}

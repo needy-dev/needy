@@ -175,6 +175,9 @@ pub struct NewRun {
   /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
   /// image's lockfile.
   pub pinned_features: BTreeMap<String, String>,
+  /// Optional maximum time to wait for required actor or executor runners to
+  /// connect before failing `CreateRun` (milliseconds; 0 means no wait).
+  pub wait_for_runner_ms: u64,
 }
 
 impl std::fmt::Debug for NewRun {
@@ -188,7 +191,7 @@ impl std::fmt::Debug for NewRun {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RunInfo {
   pub id: String,
   pub name: String,
@@ -203,6 +206,8 @@ pub struct RunInfo {
   /// whether they still run is unknown.
   pub lost: Vec<ExecutorRef>,
   pub created_ms: i64,
+  /// Last observed activity timestamp in Unix milliseconds.
+  pub last_activity_ms: i64,
   pub profile: String,
   /// How the actor's driving program ended; `None` while it runs, without
   /// an actor, or when the VM ended before the program reported its exit.
@@ -225,6 +230,31 @@ pub struct RunInfo {
   /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
   /// to record in the image's lockfile.
   pub resolved_features: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for RunInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("RunInfo")
+      .field("id", &self.id)
+      .field("name", &self.name)
+      .field("group", &self.group)
+      .field("state", &self.state)
+      .field("executors", &self.executors)
+      .field("released", &self.released)
+      .field("lost", &self.lost)
+      .field("created_ms", &self.created_ms)
+      .field("last_activity_ms", &self.last_activity_ms)
+      .field("profile", &self.profile)
+      .field("actor_exit", &self.actor_exit)
+      .field("tty", &self.tty)
+      .field("failure", &self.failure)
+      .field("actor", &self.actor)
+      .field("workspace", &self.workspace)
+      .field("snapshot", &self.snapshot)
+      .field("commit_rebased", &self.commit_rebased)
+      .field("resolved_features", &self.resolved_features)
+      .finish()
+  }
 }
 
 /// Where a run's workspace is.
@@ -430,6 +460,13 @@ pub trait Runs: Send + Sync + 'static {
   async fn faults(&self, run: &str) -> Result<RunFaults>;
   /// Removes the fault `name` from live run `run`; returns the full run ID.
   async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String>;
+  /// Node Authorizer: checks whether `runner` is currently authorized to act
+  /// on behalf of `run_id`'s actor (the run exists and is active, is bound to
+  /// `runner`, and `runner`'s active control stream generation matches the
+  /// binding).
+  async fn authorize_actor_runner(&self, _runner: &str, _run_id: &str) -> Result<bool> {
+    Ok(false)
+  }
 }
 
 // ------------------------------------------------------------ processes
@@ -711,6 +748,25 @@ pub trait Guest: Send + Sync + 'static {
   /// each change, and a graceful stop when `run stop` asks for one. Init
   /// holds it for the actor's life; it ends when the run or the actor does.
   async fn control(&self, run: &str) -> Result<GuestControls>;
+  /// Outbound actor host bridge lifecycle, console, and reverse terminal
+  /// control stream for a remote actor run.
+  async fn bridge(
+    &self,
+    _run: &str,
+    _inbound: FromRunner<needy_api_proto::v1::BridgeRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::BridgeResponse>> {
+    Err(ControlError::Unavailable("actor bridge is not supported on this service".into()))
+  }
+  /// Outbound stream opened by a remote actor host bridge for an announced
+  /// reverse terminal exec task.
+  async fn terminal_task(
+    &self,
+    _run: &str,
+    _task: u64,
+    _responses: FromRunner<needy_api_proto::v1::TerminalTaskRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::TerminalTaskResponse>> {
+    Err(ControlError::Unavailable("actor terminal tasks are not supported on this service".into()))
+  }
 }
 
 // -------------------------------------------------------------- runners
@@ -820,9 +876,34 @@ pub struct RunnerInfo {
   pub join_token: String,
   /// Its machine, once a heartbeat reported it to this control plane.
   pub host: Option<RunnerHost>,
+  /// When a short-lived credential expires, in Unix milliseconds; `None` for
+  /// non-expiring runners.
+  pub expires_ms: Option<i64>,
+  /// Loaded from a static runners file rather than enrolled in `state.db`.
+  pub static_config: bool,
 }
 
-/// What a bearer token is to the runner registry or the client registry.
+/// Request to mint a short-lived, TTL-enforced runner credential directly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MintRunnerCredential {
+  pub name: String,
+  pub ttl_ms: i64,
+  /// The roles the runner may declare; empty allows every role.
+  pub roles: BTreeSet<RunnerRole>,
+  /// Labels applied to the runner.
+  pub labels: BTreeMap<String, String>,
+}
+
+/// A newly minted short-lived runner credential.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedRunnerCredential {
+  pub runner: RunnerInfo,
+  pub credential: String,
+  pub expires_ms: i64,
+  pub heartbeat_interval_ms: i64,
+}
+
+/// What a bearer token is to the runner or client registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
   /// The credential of this runner.
@@ -833,8 +914,8 @@ pub enum Credential {
     name: String,
     access: ClientAccess,
   },
-  /// Shaped like a runner credential or a client token, but nobody holds
-  /// it: removed, revoked, rotated away, or never issued.
+  /// Shaped like a runner credential or a client token, but nobody holds it:
+  /// removed, revoked, rotated away, or never issued.
   Refused,
   /// Not a credential of this registry.
   Other,
@@ -858,6 +939,8 @@ pub trait Runners: Send + Sync + 'static {
   async fn runners(&self) -> Result<Vec<RunnerInfo>>;
   async fn rotate(&self, runner: &str) -> Result<()>;
   async fn remove(&self, runner: &str) -> Result<()>;
+  async fn mint_credential(&self, request: MintRunnerCredential) -> Result<MintedRunnerCredential>;
+  async fn revoke_credential(&self, runner: &str) -> Result<()>;
   /// Whose credential a bearer token is. The middleware calls it for every
   /// token that is not the control token. Backend failures are errors;
   /// invalid credentials are `Credential::Refused`.

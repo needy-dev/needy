@@ -41,3 +41,8 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-21 | [Slice 3: Dev Container features as layers](2026-11-21-images-slice-3-evidence.md) | evidence |
 | 2026-11-22 | [Codebase architecture, Rust idioms, CLI, and ecosystem review](2026-11-22-codebase-architecture-review.md) | review |
 | 2026-11-22 | [Architecture cleanup, CLI unification, and standalone image crates (approved contract)](2026-11-22-architecture-cleanup-and-crate-extraction-spec.md) | spec |
+| 2026-11-22 | [Transparent network gateway (proposed spec)](2026-11-22-transparent-network-gateway-spec.md) | spec |
+| 2026-11-23 | [Needy on Kubernetes with `rc` and Managed IaaS](2026-11-23-kubernetes-rc-integration-design.md) | design |
+| 2026-11-23 | [Phase 1: Remote actor host transport and K8s-friendly runner ergonomics (proposed spec)](2026-11-23-remote-actor-host-and-runner-ergonomics-spec.md) | spec |
+| 2026-11-23 | [Phase 2: `rc` Needy integration and bare-metal KVM IaaS loop (proposed spec)](2026-11-23-rc-v1alpha2-needy-integration-spec.md) | spec |
+| 2026-11-23 | [Phase 3: External client penetration and cloud OCI image layers (proposed spec)](2026-11-23-external-client-penetration-and-oci-layers-spec.md) | spec |

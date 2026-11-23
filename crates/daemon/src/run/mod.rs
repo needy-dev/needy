@@ -17,6 +17,7 @@ pub mod stop;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, bail};
@@ -73,6 +74,9 @@ pub struct Run {
   /// The profile as the client resolved it, kept in `state.db`.
   pub(crate) profile_yaml: String,
   pub created_ms: i64,
+  /// Last observed activity timestamp in Unix milliseconds (updated on guest
+  /// RPCs, gateway traffic, routing decisions, and terminal/exec I/O).
+  pub last_activity_ms: AtomicI64,
   pub dir: PathBuf,
   pub state: State,
   /// Its actor's lifecycle; `None` until the actor starts.
@@ -109,7 +113,10 @@ pub struct Run {
   failure: Mutex<Option<String>>,
   /// The runner its actor was placed on, once placed; `None` for the
   /// control host.
-  actor_runner: Mutex<Option<String>>,
+  pub(crate) actor_runner: Mutex<Option<String>>,
+  /// Active control-stream generation ID of the remote actor runner bound to
+  /// this run; `None` for local control-host actors.
+  actor_runner_link: Mutex<Option<u64>>,
   /// Who asked for the run, as `run.create` records it.
   created_by: Option<Principal>,
   /// What its actor boots of its image, as `Guest::config` tells init.
@@ -119,6 +126,11 @@ pub struct Run {
   /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
   /// image's lockfile, passed by the CLI.
   pub pinned_features: BTreeMap<String, String>,
+  /// HTTP/CONNECT gateway registered for remote actor runs, served via the
+  /// daemon's shared TCP gateway listener.
+  gateway: Mutex<Option<Arc<needy_core_actor::sidecar::gateway::Gateway>>>,
+  /// Outbound remote actor host bridge attachment slot (at most one per run).
+  pub(crate) bridge: Mutex<crate::bridge::Slot>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -129,6 +141,26 @@ impl Run {
   /// Records `event` in the run's trace.
   pub fn emit(&self, event: &Event) {
     emit(&self.trace, event);
+  }
+
+  /// Advances `last_activity_ms` to at least the current wall-clock time.
+  pub fn touch_activity(&self) {
+    self.last_activity_ms.fetch_max(now_ms(), Ordering::Relaxed);
+  }
+
+  /// The run's last observed activity timestamp in Unix milliseconds.
+  pub fn last_activity_ms(&self) -> i64 {
+    self.last_activity_ms.load(Ordering::Relaxed)
+  }
+
+  /// Registers the per-run [`Gateway`] for a remote actor run.
+  pub(crate) fn set_gateway(&self, gateway: Arc<needy_core_actor::sidecar::gateway::Gateway>) {
+    *lock(&self.gateway) = Some(gateway);
+  }
+
+  /// Returns the per-run [`Gateway`] while the remote actor run is active.
+  pub(crate) fn gateway(&self) -> Option<Arc<needy_core_actor::sidecar::gateway::Gateway>> {
+    lock(&self.gateway).clone()
   }
 
   pub fn executor(&self, name: &str) -> Option<Arc<Instance>> {
@@ -210,7 +242,7 @@ impl Run {
       profile_yaml: self.profile_yaml.clone(),
       state: self.state.get(),
       created_ms: self.created_ms,
-      updated_ms: now,
+      updated_ms: now.max(self.last_activity_ms()),
       actor_exit: self.actor_exit(),
       failure: lock(&self.failure).clone(),
       actor_runner: lock(&self.actor_runner).clone(),
@@ -228,6 +260,7 @@ impl Run {
       released: lock(&self.released).clone(),
       lost: Vec::new(),
       created_ms: self.created_ms,
+      last_activity_ms: self.last_activity_ms(),
       profile: self.profile_name.clone(),
       // NOTICE: an actor whose VM ended before init reported the driving
       // program's exit has none; `actor.vm.exit` in the trace has the VM's.
@@ -239,6 +272,34 @@ impl Run {
       snapshot: self.boot().snapshot.map(|s| s.digest.to_string()),
       commit_rebased: self.boot().commit_rebased,
       resolved_features: self.boot().resolved_features,
+    }
+  }
+
+  /// Binds this run's remote actor to `runner` on control-stream generation
+  /// `link_id` for Node Authorizer verification.
+  pub(crate) fn bind_actor_runner(&self, runner: String, link_id: u64) {
+    *lock(&self.actor_runner) = Some(runner);
+    *lock(&self.actor_runner_link) = Some(link_id);
+  }
+
+  /// Returns `(runner_name, link_id)` if this run's actor is bound to a remote
+  /// actor runner.
+  pub(crate) fn actor_runner_binding(&self) -> Option<(String, u64)> {
+    let runner = lock(&self.actor_runner).clone()?;
+    let link_id = (*lock(&self.actor_runner_link))?;
+    Some((runner, link_id))
+  }
+
+  /// True when this run's actor runs on a remote runner over `GuestService.Bridge`.
+  pub(crate) fn is_remote_actor(&self) -> bool {
+    lock(&self.actor_runner_link).is_some()
+  }
+
+  /// Detaches any remote gateway registered for this run and cancels active
+  /// gateway connections.
+  pub(crate) fn close_gateway(&self) {
+    if let Some(gateway) = lock(&self.gateway).take() {
+      gateway.cancel();
     }
   }
 
@@ -444,6 +505,7 @@ impl Registry {
       released,
       lost,
       created_ms: record.created_ms,
+      last_activity_ms: record.updated_ms,
       profile: record.profile_name,
       actor_exit: record.actor_exit,
       failure: record.failure,
@@ -587,7 +649,7 @@ impl Daemon {
       } else if !request.client_execution.is_empty() {
         bail!("a client execution capability was supplied but no executor selects the creating client");
       }
-      self.provision(&run).await
+      self.provision(&run, request.wait_for_runner_ms).await
     }
     .await;
     let provisioned = bound.and_then(|()| unwinding(&run));
@@ -662,6 +724,7 @@ impl Daemon {
       profile,
       profile_yaml: request.profile_yaml.clone(),
       created_ms,
+      last_activity_ms: AtomicI64::new(created_ms),
       dir,
       state: State::new(),
       actor_command,
@@ -678,10 +741,13 @@ impl Daemon {
       actor_exit: Mutex::new(None),
       failure: Mutex::new(None),
       actor_runner: Mutex::new(None),
+      actor_runner_link: Mutex::new(None),
       created_by: request.by.clone(),
       boot: Mutex::default(),
       image_commit: request.image_commit.clone(),
       pinned_features: request.pinned_features.clone(),
+      gateway: Mutex::new(None),
+      bridge: Mutex::new(crate::bridge::Slot::Idle),
       tasks: TaskTracker::new(),
       cancel,
     }))
@@ -697,26 +763,10 @@ impl Daemon {
   // the drivers can unwind a create themselves, so shutdown need not wait
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
-  async fn provision(&self, run: &Arc<Run>) -> Result<()> {
-    // Where everything goes is decided before anything is acquired, so a
-    // selector that names no runner fails the create at once.
-    let runners = self.candidates().await?;
-    let actor =
-      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor(run.profile.actor.driver), &runners).context("actor")?;
-    if let Some(refusal) = self.actor_refusal(&actor) {
-      bail!("actor: {refusal}");
-    }
-    *lock(&run.actor_runner) = match &actor {
-      Placement::Runner(name) => Some(name.clone()),
-      Placement::ControlHost => None,
-    };
-    actor::check_host(self, run).await?;
-    files::check_host_paths(run)?;
+  async fn provision(&self, run: &Arc<Run>, wait_for_runner_ms: u64) -> Result<()> {
+    let host_files = files::HostFilesPolicy::from_config(&self.config);
+    files::check_host_paths(run, &host_files)?;
     unwinding(run)?;
-    crate::image::prepare(self, run).await?;
-    // Ensure stores for profile- and feature-declared sync mappings
-    // (`<data_dir>/files/<store>`) exist before seeding.
-    crate::sync::check(self, run)?;
     let client_holder = self.state.client_execution_for_run(&run.id).await?;
     // NOTICE: this bounds initial helper startup only. A bound executor's
     // disconnection deadline during commands belongs to the exec policy.
@@ -725,20 +775,92 @@ impl Daemon {
     {
       bail!("client execution holder is not connected; no control-host fallback is allowed");
     }
-    let mut sites = Vec::new();
-    for (exec_name, config) in &run.profile.executors {
-      let placement = if matches!(config.runner, Some(needy_config::profile::RunnerSelector::Client)) {
-        if config.driver != needy_config::profile::ExecutorDriver::Native {
-          bail!("executor {exec_name}: client execution supports native executors; remote container creation is not supported");
+    // Where everything goes (both actor and executors) is decided before
+    // anything is acquired, so a selector that names no runner fails the
+    // create at once (or waits up to `wait_for_runner_ms` for runners to connect).
+    let wait_deadline = (wait_for_runner_ms > 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(wait_for_runner_ms));
+    let (actor_placement, sites) = loop {
+      let runners = self.candidates().await?;
+      let mut retryable = None;
+      let actor_placement =
+        match schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor(run.profile.actor.driver), &runners) {
+          Ok(placement) => Some(placement),
+          Err(err) => {
+            if wait_deadline.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+              retryable = Some(anyhow::Error::from(err).context("actor"));
+              None
+            } else {
+              return Err(anyhow::Error::from(err).context("actor"));
+            }
+          }
+        };
+      let mut resolved = Vec::new();
+      if retryable.is_none() {
+        for (exec_name, config) in &run.profile.executors {
+          let placement = if matches!(config.runner, Some(needy_config::profile::RunnerSelector::Client)) {
+            if config.driver != needy_config::profile::ExecutorDriver::Native {
+              bail!("executor {exec_name}: client execution supports native executors; remote container creation is not supported");
+            }
+            Placement::Runner(client_holder.clone().context("client execution capability is required")?)
+          } else {
+            match schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners) {
+              Ok(placement) => placement,
+              Err(err) => {
+                if wait_deadline.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+                  retryable = Some(anyhow::Error::from(err).context(format!("executor {exec_name}")));
+                  break;
+                }
+                return Err(anyhow::Error::from(err).context(format!("executor {exec_name}")));
+              }
+            }
+          };
+          let site = match self.site(&placement, config.driver) {
+            Ok(site) => site,
+            Err(err) => {
+              if wait_deadline.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+                retryable = Some(anyhow::anyhow!("executor {exec_name}: {err}"));
+                break;
+              }
+              return Err(anyhow::anyhow!("executor {exec_name}: {err}"));
+            }
+          };
+          resolved.push(site);
         }
-        Placement::Runner(client_holder.clone().context("client execution capability is required")?)
-      } else {
-        schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
-          .with_context(|| format!("executor {exec_name}"))?
-      };
-      let site = self.site(&placement, config.driver).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
-      sites.push(site);
+      }
+      if let Some(err) = retryable {
+        let deadline = wait_deadline.expect("retryable set only when wait_deadline is Some");
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+          return Err(err);
+        }
+        unwinding(run)?;
+        let notified = self.links.notified();
+        tokio::select! {
+          () = run.cancel.cancelled() => bail!("the daemon shut down while the run was being created"),
+          () = notified => {}
+          () = tokio::time::sleep(remaining.min(std::time::Duration::from_millis(50))) => {}
+        }
+        continue;
+      }
+      break (actor_placement.expect("set when retryable is None"), resolved);
+    };
+    let remote_actor_runner = match &actor_placement {
+      Placement::Runner(name) if !self.is_local(name) => Some(name.clone()),
+      _ => None,
+    };
+    *lock(&run.actor_runner) = match &actor_placement {
+      Placement::Runner(name) => Some(name.clone()),
+      Placement::ControlHost => None,
+    };
+    if remote_actor_runner.is_none() {
+      actor::check_host(self, run).await?;
+      unwinding(run)?;
+      crate::image::prepare(self, run).await?;
     }
+    // Ensure stores for profile- and feature-declared sync mappings
+    // (`<data_dir>/files/<store>`) exist before seeding (must run after
+    // `image::prepare`, which populates feature-declared `sync_files`).
+    crate::sync::check(self, run)?;
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
     let hostname = run.recipe.as_ref().and_then(|r| r.hostname.clone());
     for ((exec_name, config), site) in run.profile.executors.iter().zip(sites) {
@@ -777,16 +899,28 @@ impl Daemon {
       snapshot: run.boot().snapshot.map(|s| s.digest.to_string()),
     }));
     unwinding(run)?;
-    files::copy_in(run).await?;
+    files::copy_in(run, &host_files).await?;
     unwinding(run)?;
     crate::sync::seed(self, run).await?;
     unwinding(run)?;
-    actor::start(self, run).await?;
+    if let Some(runner_name) = remote_actor_runner {
+      let link =
+        self.links.get(&runner_name).ok_or_else(|| anyhow::anyhow!("actor runner {runner_name} disconnected before actor start"))?;
+      run.bind_actor_runner(runner_name.clone(), link.id);
+      actor::start_remote(self, run);
+      link
+        .start_actor(&run.id, run.profile.actor.driver.as_str())
+        .await
+        .with_context(|| format!("cannot dispatch StartActor to runner {runner_name}"))?;
+    } else {
+      actor::start(self, run).await?;
+    }
     Ok(())
   }
 
   /// Unwinds a create that failed after the run was registered.
   async fn rollback(&self, run: &Arc<Run>, request: &NewRun, error: &anyhow::Error) {
+    run.close_gateway();
     if let Err(refused) = run.state.advance(RunState::Failed) {
       tracing::debug!("run {}: {refused}", run.id);
     }
@@ -854,8 +988,9 @@ impl Daemon {
   /// stays listed as finished or failed until it is stopped, which then has
   /// nothing left to release.
   pub(crate) async fn finish_run(&self, run: &Run) {
+    run.close_gateway();
     self.save_run(run).await;
-    files::mirror_out(run).await;
+    files::mirror_out(run, &files::HostFilesPolicy::from_config(&self.config)).await;
     self.release_executors(run).await;
     crate::sync::end(self, run).await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
@@ -950,9 +1085,10 @@ impl Daemon {
     // The relays of the run's commands and its actor's tasks stop, and an
     // actor still running is killed.
     run.cancel.cancel();
+    run.close_gateway();
     run.tasks.close();
     run.tasks.wait().await;
-    files::mirror_out(run).await;
+    files::mirror_out(run, &files::HostFilesPolicy::from_config(&self.config)).await;
     if stopping && let Err(refused) = run.state.advance(RunState::Stopped) {
       tracing::warn!("run {}: {refused}", run.id);
     }
@@ -1105,6 +1241,22 @@ impl Daemon {
     if let Err(e) = self.state.start_instance(record).await {
       tracing::warn!("run {}: cannot write instance {} to state.db: {e:#}", record.run, record.id);
     }
+  }
+
+  /// Node Authorizer: returns the active run `run_id` when `runner` is its
+  /// bound remote actor runner AND `runner`'s current control-stream
+  /// generation matches the binding.
+  pub(crate) fn authorized_actor_run(&self, runner: &str, run_id: &str) -> Option<Arc<Run>> {
+    let run = self.runs.exact(run_id)?;
+    if matches!(run.state.get(), RunState::Finished | RunState::Stopped | RunState::Failed) {
+      return None;
+    }
+    let (bound_runner, bound_link_id) = run.actor_runner_binding()?;
+    if bound_runner != runner {
+      return None;
+    }
+    let current_link_id = self.links.current_id(runner)?;
+    (current_link_id == bound_link_id).then_some(run)
   }
 
   pub(crate) fn run_dir(&self, id: &str) -> PathBuf {
@@ -1298,6 +1450,7 @@ impl Runs for Daemon {
 
   async fn decide(&self, run: &str, ctx: ExecContext) -> Result<Route, ControlError> {
     let run = self.runs.find(run)?;
+    run.touch_activity();
     Ok(routing::route(&run, ctx).await)
   }
 
@@ -1315,6 +1468,10 @@ impl Runs for Daemon {
 
   async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String, ControlError> {
     Daemon::remove_fault(self, run, name, by).await
+  }
+
+  async fn authorize_actor_runner(&self, runner: &str, run_id: &str) -> Result<bool, ControlError> {
+    Ok(self.authorized_actor_run(runner, run_id).is_some())
   }
 }
 

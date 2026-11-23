@@ -120,6 +120,11 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     report_wait: crate::REPORT_WAIT,
     mirror_out_wait: crate::MIRROR_OUT_WAIT,
     merge_driver_timeout: crate::MERGE_DRIVER_TIMEOUT,
+    runners_file: None,
+    disable_host_files: false,
+    host_files_root: None,
+    gateway_listen: None,
+    gateway_blocked_cidrs: Vec::new(),
   };
 
   let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");
@@ -259,10 +264,14 @@ async fn a_control_listener_stop_preserves_the_runs_processes_on_runners() {
     state_dir: runner_state.path().to_path_buf(),
     control: Some(endpoint.clone()),
     join_token: Some(token),
+    credential: None,
     name: "far".into(),
     capabilities: crate::testing::capabilities("executor(native)"),
     labels: Default::default(),
     grace: crate::runner::DISCONNECT_GRACE,
+    activity_hook: None,
+    ephemeral: false,
+    actor: None,
   };
   let runner = crate::runner::Runner::start(config).await.unwrap();
   let runner_stop = tokio_util::sync::CancellationToken::new();

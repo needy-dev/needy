@@ -18,7 +18,10 @@
 //! first, and `status` answers a plain-HTTP request with that status.
 
 mod connect;
+mod egress;
 mod http;
+
+pub use egress::{BlockedReason, EgressPolicy, IpCidr};
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -28,11 +31,11 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
+use hyper::header::{PROXY_AUTHENTICATE, PROXY_AUTHORIZATION};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use needy_core::chaos::Injector;
 use needy_core::event::{Event, NetDeny};
@@ -41,9 +44,13 @@ use needy_core::network::Policy;
 use needy_core::types::Fired;
 use needy_core::types::Network;
 use needy_trace::Dispatch;
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tokio_stream::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+use egress::ValidatedConnector;
 
 type Body = BoxBody<Bytes, hyper::Error>;
 
@@ -51,6 +58,60 @@ fn text(status: StatusCode, message: &str) -> Response<Body> {
   let mut response = Response::new(Full::new(Bytes::from(format!("{message}\n"))).map_err(|never| match never {}).boxed());
   *response.status_mut() = status;
   response
+}
+
+fn proxy_auth_required(message: &str) -> Response<Body> {
+  let mut response = text(StatusCode::PROXY_AUTHENTICATION_REQUIRED, message);
+  response.headers_mut().insert(PROXY_AUTHENTICATE, hyper::header::HeaderValue::from_static("Bearer"));
+  response
+}
+
+fn verify_proxy_auth(request: &Request<Incoming>, expected_hash: &[u8; 32]) -> bool {
+  let Some(value) = request.headers().get(PROXY_AUTHORIZATION) else {
+    return false;
+  };
+  let Ok(value) = value.to_str() else {
+    return false;
+  };
+  let Some((scheme, token)) = value.split_once(' ') else {
+    return false;
+  };
+  if !scheme.eq_ignore_ascii_case("bearer") || token.is_empty() {
+    return false;
+  }
+  let actual: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+  actual.ct_eq(expected_hash).into()
+}
+
+/// Optional settings for [`Gateway::with_options`].
+#[derive(Clone, Default)]
+pub struct GatewayOptions {
+  /// Resolve-then-validate SSRF policy for non-service upstreams.
+  pub egress: EgressPolicy,
+  /// Optional per-run bearer token required via `Proxy-Authorization: Bearer <token>`
+  /// on every request (for TCP-exposed gateways). When `None`, requests are not
+  /// authenticated (local Unix socket mode).
+  pub auth_token: Option<String>,
+  /// Optional callback invoked on each authenticated CONNECT or HTTP request,
+  /// used by the daemon to advance `Run::last_activity_ms`.
+  pub on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+impl GatewayOptions {
+  pub fn with_egress(mut self, egress: EgressPolicy) -> Self {
+    self.egress = egress;
+    self
+  }
+
+  pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+    self.auth_token = Some(token.into());
+    self
+  }
+
+  pub fn with_on_activity(mut self, on_activity: Arc<dyn Fn() + Send + Sync>) -> Self {
+    self.on_activity = Some(on_activity);
+    self
+  }
 }
 
 /// One network's gateway. Its connections and tunnels are tasks it owns,
@@ -62,7 +123,16 @@ pub struct Gateway {
   /// The allowlist and the services' URLs.
   policy: Policy,
   chain: Chain,
-  client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Incoming>,
+  egress: Arc<EgressPolicy>,
+  /// Client for actor-chosen external targets (resolve-then-validate enabled).
+  client: Client<hyper_rustls::HttpsConnector<ValidatedConnector>, Incoming>,
+  /// Client for operator-configured `actor.network.services` targets (exempt
+  /// from loopback/private IP blocking).
+  service_client: Client<hyper_rustls::HttpsConnector<ValidatedConnector>, Incoming>,
+  /// SHA-256 digest of the required `Proxy-Authorization: Bearer <token>` when
+  /// token authentication is enabled.
+  auth_token_hash: Option<[u8; 32]>,
+  on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
   cancel: CancellationToken,
   tasks: TaskTracker,
 }
@@ -70,19 +140,58 @@ pub struct Gateway {
 impl Gateway {
   /// A gateway for `network` with `policy` and the run's faults in
   /// `injector`, that records in `trace` and stops when its owner cancels
-  /// `cancel`.
+  /// `cancel`. Uses default [`GatewayOptions`] (SSRF resolve-then-validate
+  /// enabled, no proxy token required).
   pub fn new(policy: Policy, trace: Dispatch, network: Network, injector: Option<Arc<Injector>>, cancel: CancellationToken) -> Self {
-    let https = hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().build();
-    let client = Client::builder(hyper_util::rt::TokioExecutor::new()).build(https);
+    Self::with_options(policy, trace, network, injector, cancel, GatewayOptions::default())
+  }
+
+  /// Like [`Gateway::new`], with explicit [`GatewayOptions`] for SSRF policy,
+  /// per-run bearer authentication, and activity callbacks.
+  pub fn with_options(
+    policy: Policy,
+    trace: Dispatch,
+    network: Network,
+    injector: Option<Arc<Injector>>,
+    cancel: CancellationToken,
+    options: GatewayOptions,
+  ) -> Self {
+    let egress = Arc::new(options.egress);
+    let build_client = |policy: Option<Arc<EgressPolicy>>| {
+      let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .wrap_connector(ValidatedConnector::new(policy));
+      Client::builder(hyper_util::rt::TokioExecutor::new()).build(https)
+    };
+    let client = build_client(Some(egress.clone()));
+    let service_client = build_client(None);
+    let auth_token_hash = options.auth_token.map(|token| {
+      let digest = Sha256::digest(token.as_bytes());
+      let mut out = [0u8; 32];
+      out.copy_from_slice(&digest);
+      out
+    });
     Self {
       trace,
       network,
       chain: Chain::new(&policy, injector),
       policy,
+      egress,
       client,
+      service_client,
+      auth_token_hash,
+      on_activity: options.on_activity,
       cancel,
       tasks: TaskTracker::new(),
     }
+  }
+
+  /// Cancels this gateway's token, immediately terminating any active HTTP
+  /// keep-alive connections and CONNECT tunnels.
+  pub fn cancel(&self) {
+    self.cancel.cancel();
   }
 
   /// Serves the connections `incoming` yields until the owner's token is
@@ -114,7 +223,26 @@ impl Gateway {
   }
 
   /// Serves one accepted connection until it closes or the owner cancels.
-  async fn serve<S>(self: Arc<Self>, stream: S)
+  pub async fn serve<S>(self: Arc<Self>, stream: S)
+  where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+  {
+    self.serve_inner(stream, true).await;
+  }
+
+  /// Serves one connection that was already authenticated by the transport
+  /// (for example, a remote actor host bridge that authenticated the TCP
+  /// connection with its per-run actor token before forwarding guest traffic).
+  /// Still strips any `Proxy-Authorization` header, invokes `on_activity`,
+  /// and enforces all egress/allowlist/chaos policies.
+  pub async fn serve_authenticated<S>(self: Arc<Self>, stream: S)
+  where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+  {
+    self.serve_inner(stream, false).await;
+  }
+
+  async fn serve_inner<S>(self: Arc<Self>, stream: S, require_auth: bool)
   where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
   {
@@ -128,7 +256,7 @@ impl Gateway {
       let gateway = gateway.clone();
       let reset = reset.clone();
       async move {
-        let handled = gateway.handle(request).await;
+        let handled = gateway.handle(request, require_auth).await;
         if handled.is_err() {
           reset.store(true, Ordering::SeqCst);
         }
@@ -147,7 +275,18 @@ impl Gateway {
     }
   }
 
-  async fn handle(&self, request: Request<Incoming>) -> Result<Response<Body>, Reset> {
+  async fn handle(&self, mut request: Request<Incoming>, require_auth: bool) -> Result<Response<Body>, Reset> {
+    if require_auth
+      && let Some(expected_hash) = &self.auth_token_hash
+      && !verify_proxy_auth(&request, expected_hash)
+    {
+      return Ok(proxy_auth_required("needy: proxy authentication required"));
+    }
+    // Always strip proxy credentials before forwarding so tokens never leak to upstreams.
+    request.headers_mut().remove(PROXY_AUTHORIZATION);
+    if let Some(on_activity) = &self.on_activity {
+      on_activity();
+    }
     if request.method() == Method::CONNECT {
       self.connect(request).await
     } else {

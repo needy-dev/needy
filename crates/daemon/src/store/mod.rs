@@ -15,7 +15,7 @@ mod entity;
 pub mod lifecycle;
 mod migration;
 mod runs;
-mod secret;
+pub(crate) mod secret;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,7 @@ pub use self::lifecycle::{InstanceState, ProcessState, Refused, RunnerState};
 pub use self::runs::{InstanceKind, InstanceRecord, ProcessRecord, RunRecord, actor_instance, executor_instance};
 pub use self::secret::Secret;
 pub(crate) use self::secret::hex;
+pub(crate) use self::secret::{RUNNER as RUNNER_SECRET_KIND, hash as hash_secret, id as secret_id, matches as secret_matches};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -59,6 +60,8 @@ pub enum Error {
   RunnerExists(String),
   #[error("no runner {0}")]
   NoRunner(String),
+  #[error("runner {0} credential expired")]
+  RunnerExpired(String),
   /// Malformed, unknown, or with a wrong secret: which of these is not
   /// said, so a guess learns nothing.
   #[error("the pairing code is not valid")]
@@ -136,6 +139,8 @@ pub struct Runner {
   /// Its last heartbeat, or its join.
   pub last_seen_ms: i64,
   pub removed_ms: Option<i64>,
+  /// When a short-lived credential expires; `None` for non-expiring runners.
+  pub expires_ms: Option<i64>,
   /// A new credential was asked for and the runner has not used it yet.
   pub rotating: bool,
 }
@@ -234,7 +239,7 @@ impl Store {
     let scope = join_token_of(row.clone())?.scope;
     let (capabilities, labels) = admit(&scope, report)?;
     let existing = runner::Entity::find_by_id(name).one(&txn).await?;
-    if existing.as_ref().is_some_and(|r| runner_state(r) == RunnerState::Joined) {
+    if existing.as_ref().is_some_and(|r| runner_state(r) == RunnerState::Joined && !is_expired(r, now)) {
       return Err(Error::RunnerExists(name.to_string()));
     }
     let mut spent = row.clone().into_active_model();
@@ -254,8 +259,9 @@ impl Store {
       created_ms: now,
       last_seen_ms: now,
       removed_ms: None,
+      expires_ms: None,
     };
-    // A removed runner's row gives way to the new one.
+    // A removed or expired runner's row gives way to the new one.
     if existing.is_some() {
       runner::Entity::delete_by_id(name).exec(&txn).await?;
     }
@@ -264,16 +270,58 @@ impl Store {
     Ok((runner_of(joined)?, credential))
   }
 
+  /// Mints a short-lived, TTL-enforced runner credential directly without a
+  /// join token. A removed or expired runner's name may be minted again.
+  pub async fn mint_runner(&self, name: &str, ttl_ms: i64, scope: Scope, now: i64) -> Result<(Runner, Secret)> {
+    check_name(name)?;
+    if ttl_ms <= 0 {
+      return Err(Error::Invalid("a runner credential needs a positive time to live".into()));
+    }
+    check_labels(&scope.labels)?;
+    let txn = self.db.begin().await?;
+    let existing = runner::Entity::find_by_id(name).one(&txn).await?;
+    if existing.as_ref().is_some_and(|r| runner_state(r) == RunnerState::Joined && !is_expired(r, now)) {
+      return Err(Error::RunnerExists(name.to_string()));
+    }
+    let credential = Secret::generate(secret::RUNNER, name);
+    let expires_ms = now.saturating_add(ttl_ms);
+    let minted = runner::Model {
+      name: name.to_string(),
+      capabilities: json(&Capabilities::default())?,
+      labels: json(&scope.labels)?,
+      scope_roles: json(&scope.roles)?,
+      scope_labels: json(&scope.labels)?,
+      join_token: String::new(),
+      credential_hash: Some(credential.hash()),
+      pending_hash: None,
+      rotating: false,
+      created_ms: now,
+      last_seen_ms: now,
+      removed_ms: None,
+      expires_ms: Some(expires_ms),
+    };
+    if existing.is_some() {
+      runner::Entity::delete_by_id(name).exec(&txn).await?;
+    }
+    runner::Entity::insert(minted.clone().into_active_model()).exec(&txn).await?;
+    txn.commit().await?;
+    Ok((runner_of(minted)?, credential))
+  }
+
   /// The name of the runner `credential` belongs to, or `None` when no
-  /// runner holds it. A rotation's new credential is accepted from its
-  /// first use on, and that use retires the old one.
-  pub async fn authenticate(&self, credential: &str) -> Result<Option<String>> {
+  /// active runner holds it (including removed or expired credentials). A
+  /// rotation's new credential is accepted from its first use on, and that
+  /// use retires the old one.
+  pub async fn authenticate(&self, credential: &str, now: i64) -> Result<Option<String>> {
     let Some(name) = secret::id(secret::RUNNER, credential) else {
       return Ok(None);
     };
     let Some(row) = runner::Entity::find_by_id(name).one(&self.db).await? else {
       return Ok(None);
     };
+    if row.removed_ms.is_some() || is_expired(&row, now) {
+      return Ok(None);
+    }
     let current = row.credential_hash.as_deref().is_some_and(|stored| secret::matches(credential, stored));
     let pending = row.pending_hash.as_deref().is_some_and(|stored| secret::matches(credential, stored));
     if pending {
@@ -291,7 +339,7 @@ impl Store {
   /// a rotation is waiting for one; the runner's current credential stays
   /// valid until the new one is used.
   pub async fn heartbeat(&self, name: &str, report: Report, now: i64) -> Result<Option<Secret>> {
-    let row = self.active(name).await?;
+    let row = self.active(name, now).await?;
     let current = runner_of(row.clone())?;
     let (capabilities, labels) = admit(&current.scope, report)?;
     let mut beat = row.into_active_model();
@@ -311,10 +359,21 @@ impl Store {
   /// Records that the runner `name` was seen at `now` without a report, as
   /// when it opens its control stream.
   pub async fn seen(&self, name: &str, now: i64) -> Result<()> {
-    let mut row = self.active(name).await?.into_active_model();
+    let mut row = self.active(name, now).await?.into_active_model();
     row.last_seen_ms = Set(now);
     row.update(&self.db).await?;
     Ok(())
+  }
+
+  /// Verifies that runner `name` is active and has not expired at `now`.
+  pub async fn check_active(&self, name: &str, now: i64) -> Result<()> {
+    self.active(name, now).await.map(|_| ())
+  }
+
+  /// Names of non-removed runners whose short-lived credential has expired at `now`.
+  pub async fn expired_runners(&self, now: i64) -> Result<Vec<String>> {
+    let rows = runner::Entity::find().all(&self.db).await?;
+    Ok(rows.into_iter().filter(|row| row.removed_ms.is_none() && is_expired(row, now)).map(|row| row.name).collect())
   }
 
   /// Every runner, including removed ones, by name.
@@ -325,8 +384,8 @@ impl Store {
 
   /// Asks for a new credential for the runner `name`, which its next
   /// heartbeat receives.
-  pub async fn rotate(&self, name: &str) -> Result<()> {
-    let mut row = self.active(name).await?.into_active_model();
+  pub async fn rotate(&self, name: &str, now: i64) -> Result<()> {
+    let mut row = self.active(name, now).await?.into_active_model();
     row.rotating = Set(true);
     row.update(&self.db).await?;
     Ok(())
@@ -354,12 +413,22 @@ impl Store {
     Ok(())
   }
 
-  /// The runner `name`, unless it does not exist or was removed: a
-  /// removed runner is gone to everything a joined one does.
-  async fn active(&self, name: &str) -> Result<runner::Model> {
-    let row = runner::Entity::find_by_id(name).one(&self.db).await?;
-    row.filter(|row| runner_state(row) == RunnerState::Joined).ok_or_else(|| Error::NoRunner(name.to_string()))
+  /// The runner `name`, unless it does not exist, was removed, or its
+  /// short-lived credential expired.
+  async fn active(&self, name: &str, now: i64) -> Result<runner::Model> {
+    let row = runner::Entity::find_by_id(name).one(&self.db).await?.ok_or_else(|| Error::NoRunner(name.to_string()))?;
+    if runner_state(&row) != RunnerState::Joined {
+      return Err(Error::NoRunner(name.to_string()));
+    }
+    if is_expired(&row, now) {
+      return Err(Error::RunnerExpired(name.to_string()));
+    }
+    Ok(row)
   }
+}
+
+fn is_expired(row: &runner::Model, now: i64) -> bool {
+  row.expires_ms.is_some_and(|exp| now >= exp)
 }
 
 /// A runner row's state in its lifecycle: `removed_ms` is what stores it.
@@ -390,7 +459,7 @@ async fn has_other_schema(db: &DatabaseConnection) -> Result<bool> {
 /// The capabilities and labels a runner gets for `report` within `scope`:
 /// its own capabilities, whose roles the scope must allow, and its own
 /// labels with the scope's.
-fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String, String>)> {
+pub(crate) fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String, String>)> {
   let roles: BTreeSet<RunnerRole> = report.capabilities.roles();
   if roles.is_empty() {
     return Err(Error::Invalid("a runner needs at least one role".into()));
@@ -424,7 +493,7 @@ fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String
 
 /// A runner's name is part of its credential and of `runner ls`, so it is
 /// a DNS label: lowercase letters, digits and `-`.
-fn check_name(name: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str) -> Result<()> {
   check_label("runner", name)
 }
 
@@ -440,7 +509,7 @@ fn check_label(what: &str, name: &str) -> Result<()> {
   )))
 }
 
-fn check_labels(labels: &BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn check_labels(labels: &BTreeMap<String, String>) -> Result<()> {
   let word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
   for (key, value) in labels {
     if !(1..=63).contains(&key.len()) || !key.chars().all(|c| word(c) || c == '/') {
@@ -488,6 +557,7 @@ fn runner_of(row: runner::Model) -> Result<Runner> {
     created_ms: row.created_ms,
     last_seen_ms: row.last_seen_ms,
     removed_ms: row.removed_ms,
+    expires_ms: row.expires_ms,
     rotating: row.rotating,
   })
 }

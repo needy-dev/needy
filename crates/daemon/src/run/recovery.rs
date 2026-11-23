@@ -177,7 +177,7 @@ impl Restored {
     }
     let token = run.cancel.child_token();
     actor::serve_guest(daemon, &run, &token).await?;
-    actor::serve_gateway(&run, &token)?;
+    actor::serve_gateway(daemon, &run, &token)?;
     actor::resume_services(daemon, &run, &token, &events)?;
     // A configured guest resumes its persistent control stream. The actor
     // process service proves terminal readiness again when next attached.
@@ -315,6 +315,7 @@ impl Daemon {
       profile,
       profile_yaml: record.profile_yaml.clone(),
       created_ms: record.created_ms,
+      last_activity_ms: std::sync::atomic::AtomicI64::new(record.updated_ms.max(record.created_ms)),
       dir: self.run_dir(&record.id),
       state: State::restore(if record.state == RunState::Creating {
         RunState::Running
@@ -346,9 +347,12 @@ impl Daemon {
       actor_exit: Mutex::new(record.actor_exit.clone()),
       failure: Mutex::new(record.failure.clone()),
       actor_runner: Mutex::new(record.actor_runner.clone()),
+      actor_runner_link: Mutex::new(None),
       created_by: None,
       image_commit: None,
       pinned_features: Default::default(),
+      gateway: Mutex::new(None),
+      bridge: Mutex::new(crate::bridge::Slot::Idle),
       boot: Mutex::new(super::Boot {
         snapshot: record
           .snapshot

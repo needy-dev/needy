@@ -106,6 +106,11 @@ pub(crate) async fn daemon_in_with_backends(
     report_wait: crate::REPORT_WAIT,
     mirror_out_wait: crate::MIRROR_OUT_WAIT,
     merge_driver_timeout: crate::MERGE_DRIVER_TIMEOUT,
+    runners_file: None,
+    disable_host_files: false,
+    host_files_root: None,
+    gateway_listen: None,
+    gateway_blocked_cidrs: Vec::new(),
   };
   adjust(&mut config);
   let daemon = Daemon::start_with_backends(config, backends).await.unwrap();
@@ -263,10 +268,14 @@ pub async fn join_runner(
     state_dir: Default::default(),
     control: Some(served.endpoint.clone()),
     join_token: None,
+    credential: None,
     name: name.into(),
     capabilities: self::capabilities(capabilities),
     labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
     grace: crate::runner::DISCONNECT_GRACE,
+    activity_hook: None,
+    ephemeral: false,
+    actor: None,
   };
   join_runner_with(served, operator, config).await
 }

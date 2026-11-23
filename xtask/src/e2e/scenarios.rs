@@ -56,6 +56,7 @@ pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
     Scenario::Tui(i) => tui(env, cell, i, checks),
     Scenario::HostExec => host_exec(env, checks),
     Scenario::HostCopy => host_copy(env, checks),
+    Scenario::RemoteActorHost => super::remote_actor::run(env, cell, checks),
   }
 }
 

@@ -10,7 +10,7 @@ use std::task::{Context, Poll};
 use tonic::body::Body;
 use tower::{Layer, Service};
 
-use crate::control::{Caller, Clients, Credential, Runners};
+use crate::control::{Caller, Clients, Credential, Runners, Runs};
 
 /// Methods that a client may call without a token.
 pub const PUBLIC_METHODS: &[&str] = &["/needy.v1.HealthService/Check"];
@@ -30,13 +30,35 @@ pub const RUNNER_METHODS: &[&str] = &[
   "/needy.v1.RunnerService/Task",
 ];
 
+/// Metadata header carried by an actor runner when calling [`ACTOR_METHODS`]
+/// on behalf of a run bound to it (Node Authorizer).
+pub const RUN_ID_HEADER: &str = "x-needy-run-id";
+
+/// The explicit allowlist of methods an actor may call, whether on a run's
+/// local guest listener or delegated through its bound actor runner.
+pub const ACTOR_METHODS: &[&str] = &[
+  "/needy.v1.GuestService/GetConfig",
+  "/needy.v1.GuestService/PushEvents",
+  "/needy.v1.GuestService/ReportExit",
+  "/needy.v1.GuestService/FetchFiles",
+  "/needy.v1.GuestService/PushFiles",
+  "/needy.v1.GuestService/PushLayer",
+  "/needy.v1.GuestService/Control",
+  "/needy.v1.GuestService/Bridge",
+  "/needy.v1.GuestService/TerminalTask",
+  "/needy.v1.RunService/Decide",
+  "/needy.v1.ProcessService/Exec",
+  "/needy.v1.HealthService/Check",
+];
+
 /// Decides who a request is from.
 #[async_trait::async_trait]
 pub trait Authenticator: Send + Sync + 'static {
   /// The caller of `method` that presents the bearer `token` (empty
-  /// without one), or `None` for invalid credentials. Backend lookup failures
+  /// without one) and optional `run_id` (`x-needy-run-id`), or `None` for
+  /// invalid credentials. Backend lookup failures and authorization denials
   /// return an error independently of credential rejection.
-  async fn authenticate(&self, method: &str, token: &str) -> crate::control::Result<Option<Caller>>;
+  async fn authenticate(&self, method: &str, token: &str, run_id: Option<&str>) -> crate::control::Result<Option<Caller>>;
 }
 
 /// A static token, or none.
@@ -57,23 +79,29 @@ impl Token {
 
 /// The policy of one server: its listener's caller for the control token
 /// (or for tokenless requests where admission allows), a runner for a runner's
-/// credential, on the runner methods only, and a client for a paired
-/// client's token. A token shaped like a runner credential or a client token
-/// that nobody holds is refused even without a control token, so a removed
-/// runner or a revoked client learns that it was.
+/// credential on [`RUNNER_METHODS`] (or mapped to `Caller::Actor` on
+/// [`ACTOR_METHODS`] via the Node Authorizer when `x-needy-run-id` names an
+/// active run bound to that runner), and a client for a paired client's token.
+/// A token shaped like a runner credential or a client token that nobody holds
+/// is refused even without a control token, so a removed runner or revoked
+/// client learns that it was.
 #[derive(Clone)]
 pub struct Credentials {
   pub allow_anonymous: bool,
   pub listener: Caller,
   pub token: Token,
+  pub runs: Option<Arc<dyn Runs>>,
   pub runners: Option<Arc<dyn Runners>>,
   pub clients: Option<Arc<dyn Clients>>,
 }
 
 #[async_trait::async_trait]
 impl Authenticator for Credentials {
-  async fn authenticate(&self, method: &str, token: &str) -> crate::control::Result<Option<Caller>> {
-    if PUBLIC_METHODS.contains(&method) || (self.runners.is_some() && method == JOIN) || (self.clients.is_some() && method == PAIR) {
+  async fn authenticate(&self, method: &str, token: &str, run_id: Option<&str>) -> crate::control::Result<Option<Caller>> {
+    if PUBLIC_METHODS.contains(&method) {
+      return Ok(Some(self.listener.clone()));
+    }
+    if (self.runners.is_some() && method == JOIN) || (self.clients.is_some() && method == PAIR) {
       return Ok(Some(self.listener.clone()));
     }
     if self.token.0.is_some() && self.token.accepts(token) {
@@ -83,7 +111,21 @@ impl Authenticator for Credentials {
       && !token.is_empty()
     {
       match runners.credential(token).await? {
-        Credential::Runner(name) => return Ok(RUNNER_METHODS.contains(&method).then_some(Caller::Runner { name })),
+        Credential::Runner(name) => {
+          if let Some(run_id) = run_id {
+            let authorized = match &self.runs {
+              Some(runs) => runs.authorize_actor_runner(&name, run_id).await?,
+              None => false,
+            };
+            if authorized {
+              return Ok(Some(Caller::Actor {
+                run: run_id.to_string(),
+              }));
+            }
+            return Err(crate::control::ControlError::role_denied(format!("runner {name} is not authorized to act for run {run_id}")));
+          }
+          return Ok(RUNNER_METHODS.contains(&method).then_some(Caller::Runner { name }));
+        }
         Credential::Refused => return Ok(None),
         Credential::Client { .. } | Credential::Other => {}
       }
@@ -213,10 +255,36 @@ where
           .into_http(),
         );
       }
-      match auth.authenticate(request.uri().path(), &token).await {
+      let run_id = if request.headers().contains_key(RUN_ID_HEADER) {
+        let mut values = request.headers().get_all(RUN_ID_HEADER).iter();
+        let valid = match (values.next(), values.next()) {
+          (Some(v), None) => v.to_str().ok().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string),
+          _ => None,
+        };
+        let Some(id) = valid else {
+          return Ok(
+            tonic::Status::from(
+              crate::control::ControlError::Unauthenticated("invalid x-needy-run-id header".into())
+                .with_diagnostic("auth.credential_rejected", []),
+            )
+            .into_http(),
+          );
+        };
+        Some(id)
+      } else {
+        None
+      };
+      let method = request.uri().path();
+      match auth.authenticate(method, &token, run_id.as_deref()).await {
         Ok(Some(caller)) => {
+          if matches!(caller, Caller::Actor { .. }) && !ACTOR_METHODS.contains(&method) {
+            return Ok(tonic::Status::from(crate::control::ControlError::role_denied("actors cannot call this method")).into_http());
+          }
           request.extensions_mut().insert(caller);
           inner.call(request).await
+        }
+        Err(error @ (crate::control::ControlError::Denied { .. } | crate::control::ControlError::Diagnostic { .. })) => {
+          Ok(tonic::Status::from(error).into_http())
         }
         Err(error) => Ok(tonic::Status::from(error.with_diagnostic("auth.backend_unavailable", [])).into_http()),
         Ok(None) => Ok(

@@ -10,7 +10,7 @@ use needy_api_proto::v1::{
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::{Streamed, caller};
+use super::{Streamed, caller, operator};
 use crate::control::{Caller, ControlError, ExecOpen, ExecSpec, Inputs, Processes};
 use crate::protocol::domain;
 
@@ -68,18 +68,20 @@ impl<P: Processes> ProcessService for Adapter<P> {
         spec.by = Some(caller.principal());
         ExecOpen::Start(spec)
       }
-      Some(exec_request::Payload::Attach(attach)) => ExecOpen::Attach {
-        process: attach.process_id,
-        // An actor reaches only its own run.
-        run: if attach.run_id.is_empty() {
-          attach.run_id
-        } else {
-          run(&caller, attach.run_id)?
-        },
-        replay: attach.replay,
-        window: attach.window.map(Into::into),
-        read_only: attach.read_only,
-      },
+      Some(exec_request::Payload::Attach(attach)) => {
+        match &caller {
+          Caller::Actor { .. } => return Err(ControlError::role_denied("actors cannot attach to processes").into()),
+          Caller::Runner { .. } => return Err(ControlError::role_denied("runners cannot attach to processes").into()),
+          Caller::Operator | Caller::Client { .. } => {}
+        }
+        ExecOpen::Attach {
+          process: attach.process_id,
+          run: attach.run_id,
+          replay: attach.replay,
+          window: attach.window.map(Into::into),
+          read_only: attach.read_only,
+        }
+      }
       _ => return Err(ControlError::Invalid("the first request must start or attach".into()).into()),
     };
     let outputs = self.processes.exec(open, inputs(inbound)).await?;
@@ -88,7 +90,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
   }
 
   async fn list_processes(&self, request: Request<ListProcessesRequest>) -> Result<Response<ListProcessesResponse>, Status> {
-    let caller = caller(&self.caller, &request);
+    let caller = operator(&self.caller, &request, "actors cannot list processes", "runners cannot list processes")?;
     let request = request.into_inner();
     let run = run(&caller, request.run_id)?;
     let runner = runner(&caller, request.runner)?;
@@ -97,7 +99,7 @@ impl<P: Processes> ProcessService for Adapter<P> {
   }
 
   async fn kill_process(&self, request: Request<KillProcessRequest>) -> Result<Response<KillProcessResponse>, Status> {
-    let caller = caller(&self.caller, &request);
+    let caller = operator(&self.caller, &request, "actors cannot kill processes", "runners cannot kill processes")?;
     let request = request.into_inner();
     self.processes.kill(&request.process_id, &request.signal, caller.principal()).await?;
     Ok(Response::new(KillProcessResponse {}))

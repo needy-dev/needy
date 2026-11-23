@@ -24,7 +24,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::{
   ControlRequest, ControlResponse, EndRun, EndRunResponse, ExecEnded, ExecRequest, ExecResponse, ExecTask, KillProcessRequest,
-  ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, TaskError, TaskRequest, TaskResponse, control_request,
+  ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, StartActor, TaskError, TaskRequest, TaskResponse, control_request,
   control_response, exec_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Executor, Responses};
@@ -55,12 +55,17 @@ pub(crate) type OnReport = Box<dyn Fn(&str, RunnerReport) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct Links {
   links: Mutex<HashMap<String, Arc<Link>>>,
+  /// Monotonically increasing control-stream generation IDs.
+  next_id: AtomicU64,
   /// Notified whenever a runner's control stream opens.
   opened: tokio::sync::Notify,
 }
 
 /// One runner's control stream.
 pub(crate) struct Link {
+  /// Unique generation ID for this control stream connection, used by the
+  /// Node Authorizer to reject stale connections after a runner reconnects.
+  pub(crate) id: u64,
   runner: String,
   tasks: mpsc::Sender<ControlResponse>,
   next: AtomicU64,
@@ -102,6 +107,16 @@ impl Links {
     lock(&self.links).get(runner).cloned()
   }
 
+  /// The generation ID of `runner`'s currently active control stream, if connected.
+  pub(crate) fn current_id(&self, runner: &str) -> Option<u64> {
+    lock(&self.links).get(runner).map(|link| link.id)
+  }
+
+  /// Notified whenever any runner's control stream opens.
+  pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+    self.opened.notified()
+  }
+
   /// The runner's link once its control stream is open, waiting up to
   /// `wait` for it; `None` when it did not open by then.
   pub(crate) async fn connected(&self, runner: &str, wait: Duration) -> Option<Arc<Link>> {
@@ -139,6 +154,7 @@ impl Links {
   ) -> ToRunner<ControlResponse> {
     let (tx, rx) = mpsc::channel(QUEUE);
     let link = Arc::new(Link {
+      id: self.next_id.fetch_add(1, Ordering::Relaxed) + 1,
       runner: runner.to_string(),
       tasks: tx,
       next: AtomicU64::new(1),
@@ -278,6 +294,20 @@ impl Link {
   /// The runner's connection ended, as an error.
   fn disconnected(&self) -> Status {
     Status::unavailable(format!("runner {} disconnected", self.runner))
+  }
+
+  /// Dispatches a `StartActor` task to the runner on this control stream.
+  pub(crate) async fn start_actor(&self, run_id: &str, driver: &str) -> Result<(), Status> {
+    let id = self.next.fetch_add(1, Ordering::Relaxed);
+    self
+      .announce(
+        id,
+        runner_task::Kind::StartActor(StartActor {
+          run_id: run_id.to_string(),
+          driver: driver.to_string(),
+        }),
+      )
+      .await
   }
 
   /// Announces task `id` on the control stream.
