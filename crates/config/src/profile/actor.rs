@@ -36,7 +36,7 @@ pub struct Actor {
   #[serde(default)]
   pub recipe: Option<String>,
   /// Optional stable machine identity seed (integer or string label, such as
-  /// `"claude-1"`). When set, recipe placeholders, SMBIOS UUID/serial, MAC, and
+  /// `"worker-1"`). When set, recipe placeholders, SMBIOS UUID/serial, MAC, and
   /// `/etc/machine-id` derive from this seed instead of each run's ID.
   #[serde(default)]
   pub seed: Option<Seed>,

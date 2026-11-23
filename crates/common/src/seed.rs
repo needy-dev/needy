@@ -12,7 +12,7 @@ pub fn mix(seed: u64, salt: u64) -> u64 {
 }
 
 /// Derives a stable 64-bit seed from an arbitrary string label (for example a
-/// profile's `actor.seed: "claude-1"`), using 64-bit FNV-1a followed by [`mix`].
+/// profile's `actor.seed: "worker-1"`), using 64-bit FNV-1a followed by [`mix`].
 /// Kept here rather than using `std::collections::hash_map::DefaultHasher`
 /// because its output must never change between Rust or needy versions.
 // Reference: https://datatracker.ietf.org/doc/html/draft-eastlake-fnv-17#section-2
@@ -42,16 +42,16 @@ mod tests {
 
   #[test]
   fn from_str_is_deterministic_and_distinguishes_labels() {
-    assert_eq!(from_str("claude-1"), from_str("claude-1"));
-    assert_ne!(from_str("claude-1"), from_str("claude-2"));
+    assert_eq!(from_str("worker-1"), from_str("worker-1"));
+    assert_ne!(from_str("worker-1"), from_str("worker-2"));
   }
 
   #[test]
   fn machine_id_is_32_lowercase_hex_chars_and_deterministic() {
-    let id = machine_id(from_str("claude-1"));
+    let id = machine_id(from_str("worker-1"));
     assert_eq!(id.len(), 32);
     assert!(id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)), "{id}");
-    assert_eq!(id, machine_id(from_str("claude-1")));
-    assert_ne!(id, machine_id(from_str("claude-2")));
+    assert_eq!(id, machine_id(from_str("worker-1")));
+    assert_ne!(id, machine_id(from_str("worker-2")));
   }
 }

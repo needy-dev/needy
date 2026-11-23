@@ -381,8 +381,8 @@ async fn a_runs_recipe_time_is_its_creation_time_and_run_create_records_it() {
 #[tokio::test]
 async fn actor_seed_fixes_recipe_hostname_uuid_and_machine_id_across_runs() {
   let dir = tempfile::tempdir().unwrap();
-  let yaml_a = "actor: { driver: linux-firecracker, recipe: \"builtin:dell-optiplex-ubuntu-24.04\", seed: \"claude-1\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
-  let yaml_b = "actor: { driver: linux-firecracker, recipe: \"builtin:dell-optiplex-ubuntu-24.04\", seed: \"claude-2\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
+  let yaml_a = "actor: { driver: linux-firecracker, recipe: \"builtin:dell-optiplex-ubuntu-24.04\", seed: \"worker-1\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
+  let yaml_b = "actor: { driver: linux-firecracker, recipe: \"builtin:dell-optiplex-ubuntu-24.04\", seed: \"worker-2\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
   let started = testing::daemon().await;
 
   let first = Runs::create(&started.daemon, new_run(yaml_a, dir.path())).await.unwrap();
