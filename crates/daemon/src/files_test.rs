@@ -233,6 +233,7 @@ async fn a_completed_actor_mirrors_client_files_before_revoking_its_holder() {
   let helper = AbortOnDropHandle::new(tokio::spawn(crate::runner::serve_client_execution(crate::runner::ClientExecutionConfig {
     control: Some(served.endpoint.clone()),
     command: None,
+    headers: Default::default(),
     holder: holder.clone(),
     capability: capability.clone(),
     run: reserved.run,

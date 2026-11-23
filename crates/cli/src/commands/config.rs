@@ -325,8 +325,12 @@ fn mutation(config: &Config, key: &str, value: Option<&str>) -> Result<Config> {
   candidate.validate().map_err(|cause| invalid(cause.into()))?;
   Ok(candidate)
 }
+fn context_secrets(config: &Config) -> Vec<&str> {
+  config.contexts.values().flat_map(|r| std::iter::once(r.credential.as_str()).chain(r.headers.values().map(String::as_str))).collect()
+}
+
 fn context_rows(config: &Config) -> Vec<ContextRow> {
-  let secrets: Vec<_> = config.contexts.values().map(|r| r.credential.as_str()).collect();
+  let secrets = context_secrets(config);
   let mut rows = vec![ContextRow {
     name: "local".into(),
     current: config.current_context == "local",
@@ -375,13 +379,13 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Context { command } => return context(command, ctx, &path).await,
     Command::Show { output } => {
       let config = ctx.configuration()?;
-      let secrets: Vec<_> = config.contexts.values().map(|r| r.credential.as_str()).collect();
+      let secrets = context_secrets(&config);
       document(&config, output, &secrets)?;
     }
     Command::Get { key, output } => {
       let parts = key_parts(&key)?;
       let config = ctx.configuration()?;
-      let secrets: Vec<_> = config.contexts.values().map(|r| r.credential.as_str()).collect();
+      let secrets = context_secrets(&config);
       let value = serde_json::to_value(&config)?;
       let mut selected = &value;
       for part in parts {
@@ -454,7 +458,8 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         document(&serde_json::json!({"name":"local", "transport":"local discovery", "identity":"OS account"}), output, &[])?;
       } else {
         let record = config.contexts.get(&name).ok_or_else(|| missing(&name))?;
-        document(record, output, &[&record.credential])?;
+        let secrets: Vec<_> = std::iter::once(record.credential.as_str()).chain(record.headers.values().map(String::as_str)).collect();
+        document(record, output, &secrets)?;
       }
     }
     ContextCommand::Rm { name } => {
@@ -546,6 +551,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
         let record = global::Context {
           address: transport.address,
           command: (!transport.command.is_empty()).then_some(transport.command),
+          headers: Default::default(),
           credential: paired.token,
           identity: Identity {
             client_id: client.id,
@@ -612,6 +618,7 @@ async fn context(command: ContextCommand, ctx: &Context, path: &std::path::Path)
           }
           .connect()
           .await?
+          .with_headers(&record.headers)?
           .with_token(&record.credential)?
         } else {
           crate::connection::local(ctx).await?

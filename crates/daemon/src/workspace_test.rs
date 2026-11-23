@@ -197,6 +197,7 @@ async fn a_client_executor_reaches_the_folder_from_another_machine() {
   let _helper = AbortOnDropHandle::new(tokio::spawn(crate::runner::serve_client_execution(crate::runner::ClientExecutionConfig {
     control: Some(served.endpoint.clone()),
     command: None,
+    headers: Default::default(),
     holder: holder.clone(),
     capability: reserved.capability.clone(),
     run: reserved.run,

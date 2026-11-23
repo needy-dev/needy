@@ -91,6 +91,7 @@ pub(super) async fn launch(ctx: &Context, selection: &Resolved, client: &Client)
   let config = ClientExecutionConfig {
     control: selection.address.clone(),
     command: selection.command.clone(),
+    headers: selection.headers().clone(),
     holder: reserved.holder,
     capability: reserved.capability.clone(),
     run: reserved.run_id,

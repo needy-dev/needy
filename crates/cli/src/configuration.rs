@@ -55,7 +55,12 @@ fn read(path: &Path) -> Result<Config> {
     .as_mapping()
     .into_iter()
     .flat_map(|records| records.values())
-    .filter_map(|record| record["credential"].as_str())
+    .flat_map(|record| {
+      record["credential"]
+        .as_str()
+        .into_iter()
+        .chain(record["headers"].as_mapping().into_iter().flat_map(|headers| headers.values().filter_map(|v| v.as_str())))
+    })
     .collect();
   let config: Config = serde_path_to_error::deserialize(serde_yaml::Deserializer::from_str(&text)).map_err(|error| {
     let field = error.path().to_string();
@@ -224,7 +229,7 @@ pub fn redact(value: &mut serde_json::Value, secrets: &[&str]) {
       for (key, value) in map {
         if matches!(key.as_str(), "credential" | "token" | "password" | "secret" | "api_key") {
           *value = "<redacted>".into();
-        } else if key == "env" || key == "environment" {
+        } else if matches!(key.as_str(), "env" | "environment" | "headers") {
           mask_values(value);
         } else {
           redact(value, secrets);
@@ -307,4 +312,26 @@ fn failure(reason: &'static str, summary: &str, path: &Path, cause: anyhow::Erro
     .check("Inspect config paths and the file/parent permissions; preserve existing credentials.")
     .cause(cause)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn redact_masks_context_header_values_and_preserves_names() {
+    let mut value = serde_json::json!({
+      "address": "https://needy.example.com",
+      "credential": "tok_secret",
+      "headers": {
+        "CF-Access-Client-Id": "id-123.access",
+        "CF-Access-Client-Secret": "sec-456"
+      }
+    });
+    redact(&mut value, &["tok_secret", "id-123.access", "sec-456"]);
+    assert_eq!(value["credential"], "<redacted>");
+    assert_eq!(value["headers"]["CF-Access-Client-Id"], "<redacted>");
+    assert_eq!(value["headers"]["CF-Access-Client-Secret"], "<redacted>");
+    assert_eq!(value["address"], "https://needy.example.com");
+  }
 }

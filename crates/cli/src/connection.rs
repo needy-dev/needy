@@ -1,6 +1,7 @@
 //! Resolve one target and one credential source before opening a transport.
 //! A failed connection never selects another daemon or a stronger identity.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
@@ -42,12 +43,18 @@ pub struct Resolved {
   pub source: &'static str,
   pub address: Option<String>,
   pub command: Option<Vec<String>>,
+  headers: BTreeMap<String, String>,
   credential: Option<String>,
   config_file: Option<PathBuf>,
   expected_instance: Option<String>,
 }
 
 impl Resolved {
+  #[cfg(unix)]
+  pub fn headers(&self) -> &BTreeMap<String, String> {
+    &self.headers
+  }
+
   pub fn display(&self) -> String {
     self
       .address
@@ -87,6 +94,7 @@ impl Resolved {
         })
         .cause(cause)
     })?;
+    let client = client.with_headers(&self.headers)?;
     if let Some(expected) = &self.expected_instance {
       let health =
         tokio::time::timeout(std::time::Duration::from_secs(5), client.health().check(needy_api_client::proto::v1::CheckRequest {}))
@@ -182,6 +190,7 @@ pub fn resolve(ctx: &Context) -> Result<Resolved> {
       source: "--address",
       address: Some(address.clone()),
       command: None,
+      headers: BTreeMap::new(),
       credential,
       expected_instance: None,
       config_file: ctx.configuration_file().ok(),
@@ -224,6 +233,7 @@ pub fn resolve(ctx: &Context) -> Result<Resolved> {
           source: "inherited execution context",
           address,
           command,
+          headers: BTreeMap::new(),
           credential: None,
           expected_instance: None,
           config_file: Some(config_file),
@@ -232,13 +242,13 @@ pub fn resolve(ctx: &Context) -> Result<Resolved> {
     },
     (None, None) => (config.current_context.clone(), "saved configuration"),
   };
-  let (address, command, credential, expected_instance) = if name == "local" {
+  let (address, command, headers, credential, expected_instance) = if name == "local" {
     #[cfg(unix)]
     {
       let mut paths = ctx.base_paths()?.with_config_file(config_file.clone());
       paths.apply(&config.paths);
       let record = needy_daemon::discovery::read(&paths.runtime)?;
-      (Some(record.address), None, None, Some(record.instance_id))
+      (Some(record.address), None, BTreeMap::new(), None, Some(record.instance_id))
     }
     #[cfg(not(unix))]
     {
@@ -254,7 +264,7 @@ pub fn resolve(ctx: &Context) -> Result<Resolved> {
         .fact("context", &name)
         .check("List connections with needy config context ls and select an existing name.")
     })?;
-    (record.address.clone(), record.command.clone(), Some(record.credential.clone()), None)
+    (record.address.clone(), record.command.clone(), record.headers.clone(), Some(record.credential.clone()), None)
   };
   if let Some(execution) = &inherited
     && (execution.address != address || execution.command != command)
@@ -266,6 +276,7 @@ pub fn resolve(ctx: &Context) -> Result<Resolved> {
     source,
     address,
     command,
+    headers,
     credential,
     expected_instance,
     config_file: Some(config_file),
