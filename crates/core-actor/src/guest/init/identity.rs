@@ -19,12 +19,17 @@ use super::write_param;
 // `images/kernel/` declares `base_mc` and `override_mc` with mode 0644.
 const CORETEMP: &str = "/sys/module/fake_coretemp/parameters";
 
-/// Sets the hostname and the sensors' idle readings.
+/// Sets the hostname, `/etc/machine-id`, and the sensors' idle readings.
 pub(super) fn apply(config: &GetConfigResponse) {
   if !config.hostname.is_empty()
     && let Err(e) = nix::unistd::sethostname(&config.hostname)
   {
     tracing::warn!("cannot set the hostname {}: {e}", config.hostname);
+  }
+  if !config.machine_id.is_empty()
+    && let Err(e) = std::fs::write("/etc/machine-id", format!("{}\n", config.machine_id))
+  {
+    tracing::warn!("cannot write /etc/machine-id: {e}");
   }
   for sensor in &config.sensors {
     if sensor.chip == "coretemp" {

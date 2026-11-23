@@ -35,6 +35,11 @@ pub struct Actor {
   /// A recipe reference: `builtin:NAME` or a path relative to the profile.
   #[serde(default)]
   pub recipe: Option<String>,
+  /// Optional stable machine identity seed (integer or string label, such as
+  /// `"worker-1"`). When set, recipe placeholders, SMBIOS UUID/serial, MAC, and
+  /// `/etc/machine-id` derive from this seed instead of each run's ID.
+  #[serde(default)]
+  pub seed: Option<Seed>,
   #[serde(default)]
   pub limits: Limits,
   #[serde(default)]
@@ -57,6 +62,15 @@ pub struct Actor {
   /// with the VM drivers.
   #[serde(default)]
   pub container: Option<ContainerActor>,
+}
+
+/// Stable machine identity seed for an actor: either a non-negative integer
+/// or a string label (hashed deterministically to a `u64`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Seed {
+  Int(u64),
+  String(String),
 }
 
 /// The actor's workspace: one directory, written once, from which

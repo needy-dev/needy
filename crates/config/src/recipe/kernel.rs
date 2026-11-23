@@ -15,6 +15,9 @@ pub struct Os {
   pub kernel: Kernel,
   /// `{hash}` derives from the run seed.
   pub hostname: Option<Template>,
+  /// Linux `/etc/machine-id` (32 lowercase hex chars). When absent, derived
+  /// deterministically from the run or actor seed.
+  pub machine_id: Option<Template>,
   pub uptime: Option<Duration>,
 }
 

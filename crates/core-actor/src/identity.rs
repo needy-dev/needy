@@ -96,9 +96,22 @@ impl Host {
 
 /// Writes the recipe's identity files for the actor in `dir`, with
 /// `vcpus` processors, and returns the binds that put them, and lxcfs's
-/// views, over the host's. Without a recipe only the sensors and lxcfs's
-/// views apply.
+/// views, over the host's. Without a recipe only the sensors, any fallback
+/// `machine_id`, and lxcfs's views apply.
 pub fn prepare(dir: &Path, recipe: Option<&CompiledRecipe>, vcpus: u32, host: &Host, oci: OciRuntime) -> Result<Vec<String>, Error> {
+  prepare_with_machine_id(dir, recipe, None, vcpus, host, oci)
+}
+
+/// Like [`prepare`], with an optional fallback `machine_id` (used when
+/// `actor.seed` is configured without a recipe).
+pub fn prepare_with_machine_id(
+  dir: &Path,
+  recipe: Option<&CompiledRecipe>,
+  fallback_machine_id: Option<&str>,
+  vcpus: u32,
+  host: &Host,
+  oci: OciRuntime,
+) -> Result<Vec<String>, Error> {
   let gvisor = oci == OciRuntime::Runsc;
   let mut binds = Vec::new();
   if let Some(recipe) = recipe {
@@ -120,6 +133,13 @@ pub fn prepare(dir: &Path, recipe: Option<&CompiledRecipe>, vcpus: u32, host: &H
       }
       binds.push(format!("{}:/sys/class/dmi/id:ro", dmi.display()));
     }
+  }
+  if let Some(machine_id) = recipe.and_then(|r| r.machine_id.as_deref()).or(fallback_machine_id)
+    && !machine_id.is_empty()
+  {
+    let path = identity_dir(dir).join("machine-id");
+    write(&path, &format!("{machine_id}\n"), 0o444)?;
+    binds.push(format!("{}:/etc/machine-id:ro", path.display()));
   }
   // Every actor has sensors, as every VM has the fake coretemp.
   if host.hwmon || gvisor {

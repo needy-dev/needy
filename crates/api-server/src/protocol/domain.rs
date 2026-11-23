@@ -905,6 +905,7 @@ impl From<GuestConfig> for v1::GetConfigResponse {
       user: Some(config.user.into()),
       route_names: config.route_names,
       hostname: config.hostname,
+      machine_id: config.machine_id,
       uptime_offset_secs: config.uptime_offset_secs,
       mounts: config.mounts.into_iter().map(Into::into).collect(),
       command: config.command,
