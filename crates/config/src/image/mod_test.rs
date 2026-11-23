@@ -249,3 +249,12 @@ fn effective_root_defaults_to_pinned_default_root() {
   let with_root = load_text("root: debian:bookworm-slim\n").unwrap();
   assert_eq!(with_root.effective_root(), "debian:bookworm-slim");
 }
+
+#[test]
+fn pull_policy_defaults_to_if_not_present_and_parses_all_variants() {
+  assert_eq!(load_text("layers: []\n").unwrap().pull_policy, PullPolicy::IfNotPresent);
+  assert_eq!(load_text("pull_policy: if-not-present\n").unwrap().pull_policy, PullPolicy::IfNotPresent);
+  assert_eq!(load_text("pull_policy: always\n").unwrap().pull_policy, PullPolicy::Always);
+  assert_eq!(load_text("pull_policy: never\n").unwrap().pull_policy, PullPolicy::Never);
+  assert!(load_text("pull_policy: sometimes\n").is_err());
+}

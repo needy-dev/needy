@@ -305,6 +305,11 @@ pub(super) async fn resolve_features(
     }
   }
 
+  let pull_policy = match definition.pull_policy {
+    needy_config::image::PullPolicy::IfNotPresent => needy_core_actor::image::feature::PullPolicy::IfNotPresent,
+    needy_config::image::PullPolicy::Always => needy_core_actor::image::feature::PullPolicy::Always,
+    needy_config::image::PullPolicy::Never => needy_core_actor::image::feature::PullPolicy::Never,
+  };
   let mut by_ref: BTreeMap<String, ResolvedFeature> = BTreeMap::new();
   let mut fetched: BTreeMap<Digest, FetchedFeature> = BTreeMap::new();
   let mut resolved_digests: BTreeMap<String, String> = BTreeMap::new();
@@ -328,11 +333,11 @@ pub(super) async fn resolve_features(
         Some(pinned_str) => {
           let pinned_digest = Digest::parse(pinned_str).with_context(|| format!("invalid pinned digest for feature `{canonical}`"))?;
           store
-            .fetch_pinned(&oci_ref, &pinned_digest)
+            .fetch_pinned_with_policy(&oci_ref, &pinned_digest, pull_policy)
             .await
             .with_context(|| format!("fetching pinned feature `{raw_ref}` ({pinned_digest})"))?
         }
-        None => store.fetch(&oci_ref).await.with_context(|| format!("fetching feature `{raw_ref}`"))?,
+        None => store.fetch_with_policy(&oci_ref, pull_policy).await.with_context(|| format!("fetching feature `{raw_ref}`"))?,
       };
       (canonical, artifact)
     };
@@ -534,6 +539,9 @@ async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
 /// Computes the root digest for `builder`: the base VM image's digest for VM
 /// builders, or the base container image's ID for `linux-container` builders
 /// on Linux hosts without a VM driver.
+// TODO(images): `definition.pull_policy` currently governs OCI feature fetches;
+// container base image `always`/`never` pull policy is deferred to a follow-up
+// slice (container drivers currently always inspect locally and pull if absent).
 async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_image: &str) -> Result<Digest> {
   if builder == ActorDriver::LinuxContainer {
     let engine = daemon.images.backends().engine.clone();

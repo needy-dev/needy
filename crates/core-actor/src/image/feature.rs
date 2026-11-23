@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-pub use devcontainer_features::{Digest, FetchError as Error, FetchedFeature, RefTarget, Reference, canonical_ref};
+pub use devcontainer_features::{Digest, FetchError as Error, FetchedFeature, PullPolicy, RefTarget, Reference, canonical_ref};
 
 pub use crate::image::builtin::{BuiltinFeature, all_builtins, builtin, builtin_sshfs, is_builtin_ref};
 
@@ -47,11 +47,22 @@ impl FeatureStore {
     self.0.get_cached(digest)
   }
 
-  /// Fetches `reference` (or returns it from cache when pinned by digest and
-  /// already present). Concurrent fetches for the same reference share one
-  /// in-flight download.
+  /// Looks up a feature already cached under `reference` (by digest or local
+  /// tag index), making no network calls.
+  pub fn get_cached_by_ref(&self, reference: &Reference) -> Result<Option<FetchedFeature>> {
+    self.0.get_cached_by_ref(reference)
+  }
+
+  /// Fetches `reference` using [`PullPolicy::IfNotPresent`]. Concurrent
+  /// fetches for the same reference share one in-flight download.
   pub async fn fetch(&self, reference: &Reference) -> Result<FetchedFeature> {
     self.0.fetch(reference).await
+  }
+
+  /// Fetches `reference` according to `policy`. Concurrent fetches for the
+  /// same reference share one in-flight download.
+  pub async fn fetch_with_policy(&self, reference: &Reference, policy: PullPolicy) -> Result<FetchedFeature> {
+    self.0.fetch_with_policy(reference, policy).await
   }
 
   /// Fetches `reference` pinned to `pinned` (from a lockfile), hitting the
@@ -59,6 +70,11 @@ impl FeatureStore {
   /// pulling directly by `@sha256:...` without resolving any tag.
   pub async fn fetch_pinned(&self, reference: &Reference, pinned: &Digest) -> Result<FetchedFeature> {
     self.0.fetch_pinned(reference, pinned).await
+  }
+
+  /// Fetches `reference` pinned to `pinned` according to `policy`.
+  pub async fn fetch_pinned_with_policy(&self, reference: &Reference, pinned: &Digest, policy: PullPolicy) -> Result<FetchedFeature> {
+    self.0.fetch_pinned_with_policy(reference, pinned, policy).await
   }
 
   /// Materializes an embedded built-in feature (`builtin:<id>`) into the local

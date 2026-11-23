@@ -19,7 +19,7 @@ pub mod install;
 pub mod metadata;
 
 pub use crate::digest::{Digest, InvalidDigest};
-pub use crate::fetch::{FeatureStore, FetchError, FetchedFeature, RefTarget, Reference, canonical_ref};
+pub use crate::fetch::{FeatureStore, FetchError, FetchedFeature, PullPolicy, RefTarget, Reference, canonical_ref};
 pub use crate::graph::{FeatureRequest, GraphError, OrderedFeature, resolve_order, resolve_order_excluding};
 pub use crate::install::{InstallUser, feature_install_env, feature_install_script};
 pub use crate::metadata::{
