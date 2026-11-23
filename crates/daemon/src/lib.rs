@@ -181,6 +181,10 @@ pub struct Config {
   /// Restrict `host:` file mappings to canonical paths inside this directory.
   #[serde(default)]
   pub host_files_root: Option<PathBuf>,
+  /// Additional CIDR blocks (e.g. `10.0.0.0/8`, `192.168.0.0/16`) rejected by
+  /// the actor gateway's egress policy for non-service targets.
+  #[serde(default)]
+  pub gateway_blocked_cidrs: Vec<String>,
 }
 
 #[cfg(unix)]
@@ -219,6 +223,8 @@ pub struct IncompleteShutdown {
 #[derive(Clone)]
 pub struct Daemon {
   pub(crate) config: Arc<Config>,
+  /// Parsed operator-configured CIDR blocks rejected by local and remote actor gateways.
+  pub(crate) gateway_blocked_cidrs: Vec<needy_core_actor::sidecar::gateway::IpCidr>,
   instance_id: String,
   discovery: Arc<discovery::Publisher>,
   /// `trace.db`, shared by the runs' SQLite sinks.
@@ -280,6 +286,15 @@ impl Daemon {
   }
 
   pub(crate) async fn start_with_backends(config: Config, backends: holder::ContainerBackends) -> Result<Self> {
+    let gateway_blocked_cidrs = config
+      .gateway_blocked_cidrs
+      .iter()
+      .map(|raw| {
+        raw
+          .parse::<needy_core_actor::sidecar::gateway::IpCidr>()
+          .map_err(|e| anyhow::anyhow!("invalid gateway_blocked_cidrs entry {raw:?}: {e}"))
+      })
+      .collect::<Result<Vec<_>>>()?;
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
     }
@@ -316,6 +331,7 @@ impl Daemon {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, container, links.clone())),
       config: Arc::new(config),
+      gateway_blocked_cidrs,
       instance_id,
       discovery,
       traces,

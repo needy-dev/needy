@@ -67,6 +67,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
       disable_host_files: false,
       host_files_root: None,
+      gateway_blocked_cidrs: Vec::new(),
     })
     .await
     .unwrap(),

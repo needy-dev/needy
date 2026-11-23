@@ -1,5 +1,6 @@
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ use super::*;
 struct Seen {
   path: String,
   authorization: Option<String>,
+  proxy_authorization: Option<String>,
 }
 
 /// An HTTP server on loopback that answers 200 and records each request.
@@ -42,6 +44,7 @@ async fn upstream() -> (SocketAddr, Arc<Mutex<Vec<Seen>>>) {
           record.lock().unwrap().push(Seen {
             path: request.uri().path().to_string(),
             authorization: request.headers().get("authorization").map(|v| v.to_str().unwrap().to_string()),
+            proxy_authorization: request.headers().get("proxy-authorization").map(|v| v.to_str().unwrap().to_string()),
           });
           async { Ok::<_, std::convert::Infallible>(Response::new(Full::new(Bytes::from("upstream")))) }
         });
@@ -73,7 +76,11 @@ impl Running {
 /// A gateway that allows `127.0.0.1` and has the service `model`
 /// (`model.needy`) at `upstream`, with the faults in `chaos`.
 fn start(upstream: SocketAddr, chaos: &str) -> Running {
-  let network = serde_yaml::from_str(&format!("{{ allow: [127.0.0.1], services: {{ model: {{ url: \"http://{upstream}\" }} }} }}")).unwrap();
+  start_with(&format!("{{ allow: [127.0.0.1], services: {{ model: {{ url: \"http://{upstream}\" }} }} }}"), chaos, GatewayOptions::default())
+}
+
+fn start_with(network_yaml: &str, chaos: &str, options: GatewayOptions) -> Running {
+  let network = serde_yaml::from_str(network_yaml).unwrap();
   let policy = Policy::actor(&network);
   let memory = Memory::new();
   let trace = Dispatch::new(
@@ -87,7 +94,7 @@ fn start(upstream: SocketAddr, chaos: &str) -> Running {
   );
   let injector = (!chaos.is_empty()).then(|| Arc::new(Injector::new(&serde_yaml::from_str(chaos).unwrap())));
   let cancel = CancellationToken::new();
-  let gateway = Arc::new(Gateway::new(policy, trace.clone(), Network::Actor, injector, cancel.clone()));
+  let gateway = Arc::new(Gateway::with_options(policy, trace.clone(), Network::Actor, injector, cancel.clone(), options));
   let dir = tempfile::tempdir().unwrap();
   let socket = dir.path().join("gateway.sock");
   let listener = UnixListener::bind(&socket).unwrap();
@@ -104,11 +111,19 @@ fn start(upstream: SocketAddr, chaos: &str) -> Running {
 
 /// Sends `GET uri` in absolute form, as a client behind `HTTP_PROXY` does.
 async fn get(socket: &Path, uri: &str) -> (StatusCode, String) {
+  get_with_proxy_auth(socket, uri, None).await
+}
+
+async fn get_with_proxy_auth(socket: &Path, uri: &str, proxy_auth: Option<&str>) -> (StatusCode, String) {
   let stream = UnixStream::connect(socket).await.unwrap();
   let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
   tokio::spawn(connection);
   let host = uri.parse::<hyper::Uri>().unwrap().host().unwrap().to_string();
-  let request = Request::get(uri).header(hyper::header::HOST, host).body(Empty::<Bytes>::new()).unwrap();
+  let mut builder = Request::get(uri).header(hyper::header::HOST, host);
+  if let Some(auth) = proxy_auth {
+    builder = builder.header(hyper::header::PROXY_AUTHORIZATION, auth);
+  }
+  let request = builder.body(Empty::<Bytes>::new()).unwrap();
   let response = sender.send_request(request).await.unwrap();
   let status = response.status();
   let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -117,8 +132,13 @@ async fn get(socket: &Path, uri: &str) -> (StatusCode, String) {
 
 /// Sends `CONNECT authority` and returns the status and the open stream.
 async fn connect(socket: &Path, authority: &str) -> (u16, UnixStream) {
+  connect_with_proxy_auth(socket, authority, None).await
+}
+
+async fn connect_with_proxy_auth(socket: &Path, authority: &str, proxy_auth: Option<&str>) -> (u16, UnixStream) {
   let mut stream = UnixStream::connect(socket).await.unwrap();
-  stream.write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n\r\n").as_bytes()).await.unwrap();
+  let auth_line = proxy_auth.map(|a| format!("Proxy-Authorization: {a}\r\n")).unwrap_or_default();
+  stream.write_all(format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n{auth_line}\r\n").as_bytes()).await.unwrap();
   let mut head = Vec::new();
   while !head.ends_with(b"\r\n\r\n") {
     let mut byte = [0u8; 1];
@@ -168,6 +188,7 @@ async fn a_service_s_host_is_forwarded_to_its_url_as_sent() {
     [Seen {
       path: "/v1/models".into(),
       authorization: None,
+      proxy_authorization: None,
     }]
   );
   let events = gateway.events().await;
@@ -189,7 +210,7 @@ async fn a_service_s_host_is_forwarded_to_its_url_as_sent() {
 #[tokio::test]
 async fn an_allowed_host_is_forwarded_to_itself() {
   let (address, seen) = upstream().await;
-  let gateway = start(address, "");
+  let gateway = start_with("{ allow: [127.0.0.1] }", "", GatewayOptions::default().with_egress(EgressPolicy::allow_all()));
 
   let (status, _) = get(&gateway.socket, &format!("http://{address}/plain")).await;
 
@@ -199,6 +220,7 @@ async fn an_allowed_host_is_forwarded_to_itself() {
     [Seen {
       path: "/plain".into(),
       authorization: None,
+      proxy_authorization: None,
     }]
   );
 }
@@ -344,7 +366,7 @@ async fn chaos_does_not_count_a_host_the_allowlist_denied() {
 #[tokio::test]
 async fn a_connect_to_an_allowed_host_opens_a_tunnel() {
   let (address, seen) = upstream().await;
-  let gateway = start(address, "");
+  let gateway = start_with("{ allow: [127.0.0.1] }", "", GatewayOptions::default().with_egress(EgressPolicy::allow_all()));
 
   let (status, mut tunnel) = connect(&gateway.socket, &address.to_string()).await;
   tunnel.write_all(b"GET /tunneled HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").await.unwrap();
@@ -385,7 +407,7 @@ async fn a_connect_to_a_host_off_the_allowlist_is_denied() {
 #[tokio::test]
 async fn cancelling_the_owner_ends_the_gateway_and_its_open_tunnels() {
   let (address, _) = upstream().await;
-  let gateway = start(address, "");
+  let gateway = start_with("{ allow: [127.0.0.1] }", "", GatewayOptions::default().with_egress(EgressPolicy::allow_all()));
   let (status, mut tunnel) = connect(&gateway.socket, &address.to_string()).await;
   assert_eq!(status, 200);
 
@@ -396,4 +418,226 @@ async fn cancelling_the_owner_ends_the_gateway_and_its_open_tunnels() {
   let read = tokio::time::timeout(Duration::from_secs(5), tunnel.read_to_end(&mut rest)).await.expect("the tunnel closes");
   // A closed tunnel reads end of file, or a reset.
   assert!(!matches!(read, Ok(n) if n > 0), "{rest:?}");
+}
+
+// ROOT CAUSE:
+//
+// If a client sent `CONNECT [::1]:443` or `CONNECT [2001:db8::1]:443`,
+// `authority.split(':').next()` truncated the host at the first colon to `"["`,
+// corrupting allowlist matching and trace events.
+//
+// Before the fix, IPv6 authorities were split on `':'`.
+// The fix parses `http::uri::Authority` directly and strips brackets from the host.
+#[test]
+fn ipv6_connect_and_service_authorities_parse_without_truncation() {
+  let loopback: hyper::http::uri::Authority = "[::1]:443".parse().unwrap();
+  assert_eq!(connect::parse_connect_authority(Some(&loopback)), Some(("::1".into(), 443, "[::1]:443".into())));
+
+  let doc: hyper::http::uri::Authority = "[2001:db8::1]:8443".parse().unwrap();
+  assert_eq!(connect::parse_connect_authority(Some(&doc)), Some(("2001:db8::1".into(), 8443, "[2001:db8::1]:8443".into())));
+
+  let no_port: hyper::http::uri::Authority = "[::1]".parse().unwrap();
+  assert_eq!(connect::parse_connect_authority(Some(&no_port)), None);
+
+  assert_eq!(connect::service_authority("http://[::1]:11434"), Some(("::1".into(), 11434)));
+  assert_eq!(connect::service_authority("http://[2001:db8::1]"), Some(("2001:db8::1".into(), 80)));
+  assert_eq!(connect::service_authority("https://[::1]:443"), None);
+}
+
+#[test]
+fn egress_policy_blocks_loopback_link_local_ula_imds_unspecified_mapped_and_cidrs() {
+  let default = EgressPolicy::default();
+
+  // Loopback
+  assert_eq!(default.check("127.0.0.1".parse::<IpAddr>().unwrap()), Err(BlockedReason::Loopback));
+  assert_eq!(default.check("127.255.255.254".parse::<IpAddr>().unwrap()), Err(BlockedReason::Loopback));
+  assert_eq!(default.check("::1".parse::<IpAddr>().unwrap()), Err(BlockedReason::Loopback));
+
+  // Link-local & IPv4 cloud metadata
+  assert_eq!(default.check("169.254.169.254".parse::<IpAddr>().unwrap()), Err(BlockedReason::LinkLocal));
+  assert_eq!(default.check("169.254.0.1".parse::<IpAddr>().unwrap()), Err(BlockedReason::LinkLocal));
+  assert_eq!(default.check("fe80::1".parse::<IpAddr>().unwrap()), Err(BlockedReason::LinkLocal));
+
+  // IPv6 ULA & AWS IPv6 IMDS
+  assert_eq!(default.check("fd00:ec2::254".parse::<IpAddr>().unwrap()), Err(BlockedReason::Ula));
+  assert_eq!(default.check("fc00::1".parse::<IpAddr>().unwrap()), Err(BlockedReason::Ula));
+
+  // Unspecified / 0.0.0.0/8
+  assert_eq!(default.check("0.0.0.0".parse::<IpAddr>().unwrap()), Err(BlockedReason::Unspecified));
+  assert_eq!(default.check("0.1.2.3".parse::<IpAddr>().unwrap()), Err(BlockedReason::Unspecified));
+  assert_eq!(default.check("::".parse::<IpAddr>().unwrap()), Err(BlockedReason::Unspecified));
+
+  // IPv4-mapped IPv6 targeting blocked IPv4 ranges
+  assert_eq!(default.check("::ffff:127.0.0.1".parse::<IpAddr>().unwrap()), Err(BlockedReason::Loopback));
+  assert_eq!(default.check("::ffff:169.254.169.254".parse::<IpAddr>().unwrap()), Err(BlockedReason::LinkLocal));
+  assert_eq!(default.check("::ffff:0.0.0.0".parse::<IpAddr>().unwrap()), Err(BlockedReason::Unspecified));
+
+  // Documentation / public IPs pass default policy
+  assert_eq!(default.check("192.0.2.1".parse::<IpAddr>().unwrap()), Ok(()));
+  assert_eq!(default.check("198.51.100.1".parse::<IpAddr>().unwrap()), Ok(()));
+  assert_eq!(default.check("2001:db8::1".parse::<IpAddr>().unwrap()), Ok(()));
+
+  // Operator-configured private CIDRs (e.g. RFC1918 + IPv6 range)
+  let rfc1918_10: IpCidr = "10.0.0.0/8".parse().unwrap();
+  let rfc1918_172: IpCidr = "172.16.0.0/12".parse().unwrap();
+  let rfc1918_192: IpCidr = "192.168.0.0/16".parse().unwrap();
+  let custom_v6: IpCidr = "2001:db8::/32".parse().unwrap();
+  let strict = EgressPolicy::default().with_blocked_cidrs(vec![rfc1918_10, rfc1918_172, rfc1918_192, custom_v6]);
+
+  assert_eq!(strict.check("10.1.2.3".parse::<IpAddr>().unwrap()), Err(BlockedReason::Cidr(rfc1918_10)));
+  assert_eq!(strict.check("::ffff:10.1.2.3".parse::<IpAddr>().unwrap()), Err(BlockedReason::Cidr(rfc1918_10)));
+  assert_eq!(strict.check("172.16.5.4".parse::<IpAddr>().unwrap()), Err(BlockedReason::Cidr(rfc1918_172)));
+  assert_eq!(strict.check("192.168.1.1".parse::<IpAddr>().unwrap()), Err(BlockedReason::Cidr(rfc1918_192)));
+  assert_eq!(strict.check("2001:db8::1".parse::<IpAddr>().unwrap()), Err(BlockedReason::Cidr(custom_v6)));
+  assert_eq!(strict.check("198.51.100.1".parse::<IpAddr>().unwrap()), Ok(()));
+}
+
+#[tokio::test]
+async fn ssrf_blocks_loopback_metadata_and_ipv6_even_with_wildcard_allowlist() {
+  let (address, seen) = upstream().await;
+  let gateway = start_with("{ allow: ['*'] }", "", GatewayOptions::default());
+
+  // Direct HTTP to loopback is blocked
+  let (status, body) = get(&gateway.socket, &format!("http://{address}/secret")).await;
+  assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+  // Direct HTTP to localhost (DNS resolution -> loopback) is blocked
+  let (status, body) = get(&gateway.socket, &format!("http://localhost:{}/secret", address.port())).await;
+  assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+  // Direct HTTP to IPv4 IMDS and IPv4-mapped IPv6 IMDS is blocked
+  let (status, body) = get(&gateway.socket, "http://169.254.169.254/latest/meta-data/").await;
+  assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+  let (status, body) = get(&gateway.socket, "http://[::ffff:169.254.169.254]/latest/meta-data/").await;
+  assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+
+  // CONNECT to loopback IPv4, IPv6, IPv4-mapped IPv6, and IPv6 IMDS are all blocked
+  for authority in [
+    address.to_string(),
+    "[::1]:443".to_string(),
+    "[::ffff:127.0.0.1]:443".to_string(),
+    "[fd00:ec2::254]:80".to_string(),
+  ] {
+    let (status, _) = connect(&gateway.socket, &authority).await;
+    assert_eq!(status, 403, "expected 403 for CONNECT {authority}");
+  }
+
+  assert!(seen.lock().unwrap().is_empty());
+
+  // Verify the IPv6 CONNECT recorded unbracketed `::1`, never `"["`.
+  let events = gateway.events().await;
+  assert!(
+    events.iter().any(|e| matches!(e, Event::NetDeny(d) if d.host == "::1" && d.path.is_none())),
+    "expected NetDeny for ::1, got {events:?}"
+  );
+  assert!(!events.iter().any(|e| matches!(e, Event::NetDeny(d) if d.host == "[")), "truncated '[' host must never appear: {events:?}");
+}
+
+#[tokio::test]
+async fn operator_configured_services_bypass_ssrf_blocking() {
+  let (address, seen) = upstream().await;
+  let strict = EgressPolicy::default().with_blocked_cidrs(vec![
+    "10.0.0.0/8".parse().unwrap(),
+    "192.168.0.0/16".parse().unwrap(),
+  ]);
+  let gateway =
+    start_with(&format!("{{ services: {{ ollama: {{ url: \"http://{address}\" }} }} }}"), "", GatewayOptions::default().with_egress(strict));
+
+  // Plain HTTP to configured service succeeds despite loopback target
+  let (status, body) = get(&gateway.socket, "http://ollama.needy/api/tags").await;
+  assert_eq!((status, body.as_str()), (StatusCode::OK, "upstream"));
+
+  // CONNECT tunnel to configured service also succeeds despite loopback target
+  let (status, mut stream) = connect(&gateway.socket, "ollama.needy:80").await;
+  assert_eq!(status, 200);
+  stream.write_all(b"GET /api/version HTTP/1.1\r\nHost: ollama.needy\r\nConnection: close\r\n\r\n").await.unwrap();
+  let mut reply = String::new();
+  stream.read_to_string(&mut reply).await.unwrap();
+  assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("upstream"), "{reply}");
+
+  let paths: Vec<String> = seen.lock().unwrap().iter().map(|s| s.path.clone()).collect();
+  assert_eq!(paths, ["/api/tags", "/api/version"]);
+}
+
+#[tokio::test]
+async fn proxy_token_auth_enforces_bearer_token_and_strips_header() {
+  let (address, seen) = upstream().await;
+  let token = "needy-actor.run-123.0123456789abcdef";
+  let gateway = start_with(
+    &format!("{{ services: {{ model: {{ url: \"http://{address}\" }} }} }}"),
+    "",
+    GatewayOptions::default().with_auth_token(token),
+  );
+
+  // Missing Proxy-Authorization -> 407
+  let (status, _) = get_with_proxy_auth(&gateway.socket, "http://model.needy/v1/models", None).await;
+  assert_eq!(status, StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+
+  // Wrong token -> 407
+  let (status, _) = get_with_proxy_auth(&gateway.socket, "http://model.needy/v1/models", Some("Bearer wrong-token")).await;
+  assert_eq!(status, StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+
+  // Wrong scheme -> 407
+  let (status, _) = get_with_proxy_auth(&gateway.socket, "http://model.needy/v1/models", Some(&format!("Basic {token}"))).await;
+  assert_eq!(status, StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+
+  // CONNECT without token -> 407
+  let (status, _) = connect_with_proxy_auth(&gateway.socket, "model.needy:80", None).await;
+  assert_eq!(status, 407);
+
+  // Upstream saw nothing from rejected requests
+  assert!(seen.lock().unwrap().is_empty());
+
+  // Valid token on HTTP GET -> 200 and Proxy-Authorization header stripped before upstream
+  let bearer = format!("Bearer {token}");
+  let (status, body) = get_with_proxy_auth(&gateway.socket, "http://model.needy/v1/models", Some(&bearer)).await;
+  assert_eq!((status, body.as_str()), (StatusCode::OK, "upstream"));
+  assert_eq!(
+    *seen.lock().unwrap(),
+    [Seen {
+      path: "/v1/models".into(),
+      authorization: None,
+      proxy_authorization: None,
+    }]
+  );
+
+  // Valid token on CONNECT -> 200 and tunnel works
+  let (status, mut stream) = connect_with_proxy_auth(&gateway.socket, "model.needy:80", Some(&bearer)).await;
+  assert_eq!(status, 200);
+  stream.write_all(b"GET /tunneled HTTP/1.1\r\nHost: model.needy\r\nConnection: close\r\n\r\n").await.unwrap();
+  let mut reply = String::new();
+  stream.read_to_string(&mut reply).await.unwrap();
+  assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("upstream"), "{reply}");
+}
+
+#[tokio::test]
+async fn on_activity_fires_for_authenticated_http_and_connect_requests_only() {
+  let (address, _) = upstream().await;
+  let hits = Arc::new(AtomicUsize::new(0));
+  let counter = hits.clone();
+  let token = "needy-actor.run-456.fedcba9876543210";
+  let gateway = start_with(
+    &format!("{{ services: {{ model: {{ url: \"http://{address}\" }} }} }}"),
+    "",
+    GatewayOptions::default().with_auth_token(token).with_on_activity(Arc::new(move || {
+      counter.fetch_add(1, Ordering::SeqCst);
+    })),
+  );
+
+  // Unauthenticated request must NOT trigger activity
+  let (status, _) = get_with_proxy_auth(&gateway.socket, "http://model.needy/v1/models", None).await;
+  assert_eq!(status, StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+  assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+  let bearer = format!("Bearer {token}");
+
+  // Authenticated HTTP request triggers activity
+  let (status, _) = get_with_proxy_auth(&gateway.socket, "http://model.needy/v1/models", Some(&bearer)).await;
+  assert_eq!(status, StatusCode::OK);
+  assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+  // Authenticated CONNECT request triggers activity
+  let (status, _) = connect_with_proxy_auth(&gateway.socket, "model.needy:80", Some(&bearer)).await;
+  assert_eq!(status, 200);
+  assert_eq!(hits.load(Ordering::SeqCst), 2);
 }
