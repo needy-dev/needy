@@ -25,6 +25,7 @@ pub mod files;
 pub mod guest;
 pub mod ready;
 
+use std::collections::BTreeSet;
 use std::pin::Pin;
 use std::time::Duration;
 
@@ -39,7 +40,7 @@ use needy_api_proto::v1::{ExecRequest, ExecResponse, KillProcessRequest, ListPro
 use tokio::sync::mpsc;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::metadata::{AsciiMetadataValue, MetadataValue};
+use tonic::metadata::{Ascii, AsciiMetadataValue, MetadataKey, MetadataValue};
 use tonic::service::Interceptor;
 use tonic::service::interceptor::InterceptedService;
 #[cfg(unix)]
@@ -50,13 +51,27 @@ use tonic::{Request, Status};
 pub use error::{Error, Kind, Result};
 pub use needy_api_proto as proto;
 
-/// Adds `authorization: Bearer <token>` to every request when a token is set.
-#[derive(Debug, Clone, Default)]
-pub struct BearerAuth(Option<AsciiMetadataValue>);
+/// Adds configured request headers and `authorization: Bearer <token>` to every
+/// request.
+#[derive(Clone, Default)]
+pub struct BearerAuth {
+  token: Option<AsciiMetadataValue>,
+  headers: Vec<(MetadataKey<Ascii>, AsciiMetadataValue)>,
+}
+
+impl std::fmt::Debug for BearerAuth {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let names: Vec<_> = self.headers.iter().map(|(key, _)| key.as_str()).collect();
+    f.debug_struct("BearerAuth").field("token", &self.token.as_ref().map(|_| "<redacted>")).field("headers", &names).finish()
+  }
+}
 
 impl Interceptor for BearerAuth {
   fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
-    if let Some(value) = &self.0 {
+    for (key, value) in &self.headers {
+      request.metadata_mut().insert(key.clone(), value.clone());
+    }
+    if let Some(value) = &self.token {
       request.metadata_mut().insert("authorization", value.clone());
     }
     Ok(request)
@@ -160,7 +175,54 @@ impl Client {
 
   pub fn with_token(mut self, token: &str) -> Result<Self> {
     let value = MetadataValue::try_from(format!("Bearer {token}")).map_err(|_| Error::InvalidToken)?;
-    self.auth = BearerAuth(Some(value));
+    self.auth.token = Some(value);
+    Ok(self)
+  }
+
+  /// Adds static ASCII request headers (for example reverse-proxy or access
+  /// service-token headers) to every call on this client. Header names are
+  /// lowercased for HTTP/2; `authorization` is reserved for [`Self::with_token`].
+  pub fn with_headers<K, V, I>(mut self, headers: I) -> Result<Self>
+  where
+    I: IntoIterator<Item = (K, V)>,
+    K: AsRef<str>,
+    V: AsRef<str>,
+  {
+    let mut seen = BTreeSet::new();
+    let mut parsed = Vec::new();
+    for (name, value) in headers {
+      let name = name.as_ref();
+      let lower = name.to_ascii_lowercase();
+      if lower == "authorization" {
+        return Err(Error::InvalidHeader {
+          name: name.to_string(),
+          message: "authorization is managed by with_token".into(),
+        });
+      }
+      if !seen.insert(lower.clone()) {
+        return Err(Error::InvalidHeader {
+          name: name.to_string(),
+          message: "duplicate header name".into(),
+        });
+      }
+      let key = MetadataKey::<Ascii>::from_bytes(lower.as_bytes()).map_err(|_| Error::InvalidHeader {
+        name: name.to_string(),
+        message: "not a valid ASCII metadata key".into(),
+      })?;
+      let raw = value.as_ref();
+      if raw.is_empty() {
+        return Err(Error::InvalidHeader {
+          name: name.to_string(),
+          message: "value cannot be empty".into(),
+        });
+      }
+      let value = MetadataValue::try_from(raw).map_err(|_| Error::InvalidHeader {
+        name: name.to_string(),
+        message: "value is not valid printable ASCII".into(),
+      })?;
+      parsed.push((key, value));
+    }
+    self.auth.headers = parsed;
     Ok(self)
   }
 
@@ -315,3 +377,7 @@ async fn connect_vsock(endpoint: Endpoint, cid: u32, port: u32) -> Result<Channe
 async fn connect_vsock(_endpoint: Endpoint, cid: u32, port: u32) -> Result<Channel> {
   Err(Error::InvalidEndpoint(format!("vsock://{cid}:{port} needs Linux")))
 }
+
+#[cfg(test)]
+#[path = "lib_test.rs"]
+mod tests;

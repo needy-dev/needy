@@ -9,6 +9,8 @@ pub enum Error {
   InvalidEndpoint(String),
   #[error("token is not a valid header value")]
   InvalidToken,
+  #[error("invalid request header {name}: {message}")]
+  InvalidHeader { name: String, message: String },
   /// A fact observed at the external connector process boundary.
   #[error("connector {program}: {message}")]
   Connector {
@@ -156,7 +158,7 @@ impl Error {
     match self {
       Self::Status(status) => status.code().into(),
       Self::Transport(_) | Self::Unreachable { .. } | Self::Connector { .. } => Kind::Unavailable,
-      Self::InvalidEndpoint(_) | Self::InvalidToken | Self::IdentityMismatch { .. } => Kind::Invalid,
+      Self::InvalidEndpoint(_) | Self::InvalidToken | Self::InvalidHeader { .. } | Self::IdentityMismatch { .. } => Kind::Invalid,
       Self::Failed { .. } => Kind::Failed,
       Self::Ended { .. } => Kind::Ended,
       Self::Remote(_) | Self::RemoteDiagnostic { .. } | Self::Closed | Self::Read(_) => Kind::Other,

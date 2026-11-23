@@ -368,6 +368,7 @@ impl Runner {
     let dialer = Dialer {
       control: self.control.clone(),
       command: None,
+      headers: std::collections::BTreeMap::new(),
       bound_run: None,
       ended: Arc::new(AtomicBool::new(false)),
       name: self.name().to_string(),
@@ -401,6 +402,7 @@ impl Runner {
 struct Dialer {
   control: String,
   command: Option<Vec<String>>,
+  headers: std::collections::BTreeMap<String, String>,
   /// Private client holders accept tasks for this invocation only and keep
   /// its processes through an arbitrarily long control disconnection.
   bound_run: Option<String>,
@@ -499,10 +501,10 @@ impl Dialer {
     }
   }
 
-  /// A client presenting the current credential.
+  /// A client presenting the current credential and configured headers.
   fn authenticated(&self, client: &Client) -> Result<Client> {
     let credential = needy_common::sync::lock(&self.credential).clone();
-    Ok(client.clone().with_token(&credential)?)
+    Ok(client.clone().with_headers(&self.headers)?.with_token(&credential)?)
   }
 
   /// One control stream, from connecting until it ends.
@@ -849,6 +851,8 @@ mod tests;
 pub struct ClientExecutionConfig {
   pub control: Option<String>,
   pub command: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+  pub headers: std::collections::BTreeMap<String, String>,
   pub holder: String,
   pub capability: String,
   pub run: String,
@@ -869,6 +873,7 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
   let dialer = Dialer {
     control: config.control.clone().unwrap_or_default(),
     command: config.command.clone(),
+    headers: config.headers.clone(),
     bound_run: Some(config.run),
     ended: Arc::new(AtomicBool::new(false)),
     name: config.holder.clone(),
@@ -887,6 +892,7 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
           Some(command) => Client::connect_command(command.clone()).await?,
           None => Client::connect(config.control.as_deref().context("holder has no control transport")?).await?,
         }
+        .with_headers(&config.headers)?
         .with_token(&config.capability)?;
         client
           .runners()

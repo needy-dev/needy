@@ -39,6 +39,8 @@ pub struct Context {
   pub address: Option<String>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub command: Option<Vec<String>>,
+  #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+  pub headers: BTreeMap<String, String>,
   pub identity: Identity,
   pub credential: String,
 }
@@ -156,6 +158,34 @@ pub fn validate_address(address: &str, listener: bool) -> Result<(), Error> {
   Ok(())
 }
 
+/// Validate static ASCII request headers attached to a saved context.
+pub fn validate_headers(headers: &BTreeMap<String, String>) -> Result<(), Error> {
+  let mut seen = BTreeSet::new();
+  for (name, value) in headers {
+    let field = format!("headers.{name}");
+    let lower = name.to_ascii_lowercase();
+    if lower.is_empty()
+      || lower.ends_with("-bin")
+      || !lower.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_' | b'.'))
+    {
+      return Err(Error::invalid(
+        field,
+        "header name must be a nonempty ASCII gRPC metadata key (letters, digits, '-', '_', '.'; not '-bin')",
+      ));
+    }
+    if lower == "authorization" {
+      return Err(Error::invalid(field, "authorization header is reserved for the context credential"));
+    }
+    if !seen.insert(lower) {
+      return Err(Error::invalid(field, "duplicate header name (header names are case-insensitive)"));
+    }
+    if value.is_empty() || !value.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+      return Err(Error::invalid(field, "header value must be nonempty printable ASCII"));
+    }
+  }
+  Ok(())
+}
+
 impl Context {
   pub fn validate(&self) -> Result<(), Error> {
     match (&self.address, &self.command) {
@@ -163,6 +193,7 @@ impl Context {
       (None, Some(command)) if !command.is_empty() && command.iter().all(|s| !s.contains('\0')) && !command[0].is_empty() => {}
       _ => return Err(Error::invalid("transport", "a context requires exactly one address or nonempty connector argv")),
     }
+    validate_headers(&self.headers)?;
     if self.identity.client_id.is_empty() {
       return Err(Error::invalid("identity.client_id", "a context requires a nonempty client ID"));
     }
@@ -237,3 +268,7 @@ impl Config {
     Ok(())
   }
 }
+
+#[cfg(test)]
+#[path = "global_test.rs"]
+mod tests;
