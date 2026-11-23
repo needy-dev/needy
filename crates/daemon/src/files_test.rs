@@ -279,3 +279,110 @@ async fn a_completed_actor_mirrors_client_files_before_revoking_its_holder() {
     .expect("normal invocation revocation is a successful holder exit");
   assert_eq!(std::fs::read(destination.join("result.bin")).expect("natural completion mirrored client output"), b"completed\0\xffbytes\n");
 }
+
+#[tokio::test]
+async fn disable_host_files_rejects_copy_in_mirror_out_and_host_workspace() {
+  let started = testing::daemon_with(|config| config.disable_host_files = true).await;
+  let seed = started.dir.path().join("seed");
+  std::fs::create_dir_all(&seed).unwrap();
+  std::fs::write(seed.join("secret.txt"), "top-secret").unwrap();
+  let out = started.dir.path().join("out");
+
+  // Copy-in from host: rejected.
+  let copy_in_yaml = profile(&format!(r#"  seed: {{ mode: copy-in, from: "host:{}", to: "actor:~/seed/" }}"#, seed.display()));
+  let err = Runs::create(&started.daemon, new_run(&copy_in_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("host: file mappings are disabled"), "{err}");
+
+  // Mirror-out to host: rejected.
+  let mirror_out_yaml = profile(&format!(r#"  out: {{ mode: mirror-out, from: "actor:~/out/", to: "host:{}" }}"#, out.display()));
+  let err = Runs::create(&started.daemon, new_run(&mirror_out_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("host: file mappings are disabled"), "{err}");
+
+  // Host workspace (desugared into host: copy-in/mirror-out): rejected.
+  let ws_yaml = format!(
+    r#"
+user: {{ name: agent, uid: 1000, gid: 1000 }}
+actor:
+  driver: linux-firecracker
+  workspace: {{ path: ~/workspace, from: "host:{}" }}
+executors:
+  here: {{ driver: native }}
+commands:
+  - {{ match: "**", to: here }}
+"#,
+    seed.display()
+  );
+  let err = Runs::create(&started.daemon, new_run(&ws_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("host: file mappings are disabled"), "{err}");
+}
+
+#[tokio::test]
+async fn host_files_root_allows_paths_inside_root_and_blocks_outside_and_symlink_escapes() {
+  use std::os::unix::fs::symlink;
+
+  let dir = tempfile::tempdir().unwrap();
+  let allowed_root = dir.path().join("allowed");
+  let outside = dir.path().join("outside");
+  std::fs::create_dir_all(allowed_root.join("in")).unwrap();
+  std::fs::create_dir_all(&outside).unwrap();
+  std::fs::write(allowed_root.join("in/ok.txt"), "ok").unwrap();
+  std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+
+  // Symlinks inside allowed_root pointing outside.
+  let escape_read = allowed_root.join("escape-read");
+  symlink(&outside, &escape_read).unwrap();
+  let escape_write_dir = allowed_root.join("escape-write");
+  symlink(&outside, &escape_write_dir).unwrap();
+
+  let root_for_config = allowed_root.clone();
+  let started = testing::daemon_in(dir, move |config| {
+    config.host_files_root = Some(root_for_config);
+  })
+  .await;
+
+  // 1. Copy-in and mirror-out inside allowed_root succeed.
+  let ok_out = allowed_root.join("out");
+  let ok_yaml = profile(&format!(
+    "  seed: {{ mode: copy-in, from: \"host:{}\", to: \"actor:~/seed/\" }}\n  \
+     results: {{ mode: mirror-out, from: \"actor:~/out/\", to: \"host:{}\" }}",
+    allowed_root.join("in").display(),
+    ok_out.display(),
+  ));
+  let created = Runs::create(&started.daemon, new_run(&ok_yaml, started.dir.path())).await.unwrap();
+  Runs::stop(&started.daemon, &created.id, Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+
+  // 2. Direct path outside allowed_root is rejected.
+  let outside_yaml = profile(&format!(r#"  seed: {{ mode: copy-in, from: "host:{}", to: "actor:~/seed/" }}"#, outside.display()));
+  let err = Runs::create(&started.daemon, new_run(&outside_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("outside host-files-root"), "{err}");
+
+  // 3. Symlink inside allowed_root escaping for copy-in is rejected.
+  let symlink_read_yaml = profile(&format!(r#"  seed: {{ mode: copy-in, from: "host:{}", to: "actor:~/seed/" }}"#, escape_read.display()));
+  let err = Runs::create(&started.daemon, new_run(&symlink_read_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("outside host-files-root"), "{err}");
+
+  // 4. Symlink inside allowed_root escaping for mirror-out (existing dir) is rejected.
+  let symlink_write_yaml =
+    profile(&format!(r#"  results: {{ mode: mirror-out, from: "actor:~/out/", to: "host:{}" }}"#, escape_write_dir.display()));
+  let err = Runs::create(&started.daemon, new_run(&symlink_write_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("outside host-files-root"), "{err}");
+
+  // 5. Non-existent child under a symlink escaping allowed_root for mirror-out is rejected.
+  let symlink_nested_yaml =
+    profile(&format!(r#"  results: {{ mode: mirror-out, from: "actor:~/out/", to: "host:{}" }}"#, escape_write_dir.join("child").display()));
+  let err = Runs::create(&started.daemon, new_run(&symlink_nested_yaml, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("outside host-files-root"), "{err}");
+
+  // 6. Out-of-root non-existent path and out-of-root regular file must fail
+  // with "outside host-files-root" BEFORE probing existence or opening.
+  let outside_missing = outside.join("does-not-exist");
+  let outside_missing_copy =
+    profile(&format!(r#"  seed: {{ mode: copy-in, from: "host:{}", to: "actor:~/seed/" }}"#, outside_missing.display()));
+  let err = Runs::create(&started.daemon, new_run(&outside_missing_copy, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("outside host-files-root"), "must not leak existence: {err}");
+
+  let outside_file_mirror =
+    profile(&format!(r#"  results: {{ mode: mirror-out, from: "actor:~/out/", to: "host:{}" }}"#, outside.join("secret.txt").display()));
+  let err = Runs::create(&started.daemon, new_run(&outside_file_mirror, started.dir.path())).await.unwrap_err();
+  assert!(err.to_string().contains("outside host-files-root"), "must not leak file type: {err}");
+}

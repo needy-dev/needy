@@ -213,12 +213,12 @@ impl Guest for Daemon {
 
   async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>, ControlError> {
     let run = self.runs.find(run)?;
-    files::fetch(&run, name).await
+    files::fetch(&run, name, &files::HostFilesPolicy::from_config(&self.config)).await
   }
 
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
-    files::push(&run, name, archive).await
+    files::push(&run, name, archive, &files::HostFilesPolicy::from_config(&self.config)).await
   }
 
   /// Rejects upper-layer uploads on normal runs. Image build and edit sessions
