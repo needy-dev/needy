@@ -175,6 +175,9 @@ pub struct NewRun {
   /// Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
   /// image's lockfile.
   pub pinned_features: BTreeMap<String, String>,
+  /// Optional maximum time to wait for required actor or executor runners to
+  /// connect before failing `CreateRun` (milliseconds; 0 means no wait).
+  pub wait_for_runner_ms: u64,
 }
 
 impl std::fmt::Debug for NewRun {
@@ -203,6 +206,8 @@ pub struct RunInfo {
   /// whether they still run is unknown.
   pub lost: Vec<ExecutorRef>,
   pub created_ms: i64,
+  /// Last observed activity timestamp in Unix milliseconds.
+  pub last_activity_ms: i64,
   pub profile: String,
   /// How the actor's driving program ended; `None` while it runs, without
   /// an actor, or when the VM ended before the program reported its exit.
@@ -820,8 +825,29 @@ pub struct RunnerInfo {
   pub join_token: String,
   /// Its machine, once a heartbeat reported it to this control plane.
   pub host: Option<RunnerHost>,
-  /// Loaded from a static runners file rather than enrolled in state.db.
+  /// When a short-lived credential expires, in Unix milliseconds; `None` for
+  /// non-expiring runners.
+  pub expires_ms: Option<i64>,
+  /// Loaded from a static runners file rather than enrolled in `state.db`.
   pub static_config: bool,
+}
+
+/// Request to mint a short-lived, TTL-enforced runner credential directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintRunnerCredential {
+  pub name: String,
+  pub ttl_ms: i64,
+  pub roles: BTreeSet<RunnerRole>,
+  pub labels: BTreeMap<String, String>,
+}
+
+/// Reply to [`Runners::mint_credential`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MintedRunnerCredential {
+  pub runner: RunnerInfo,
+  pub credential: String,
+  pub expires_ms: i64,
+  pub heartbeat_interval_ms: i64,
 }
 
 /// What a bearer token is to the runner registry or the client registry.
@@ -860,6 +886,8 @@ pub trait Runners: Send + Sync + 'static {
   async fn runners(&self) -> Result<Vec<RunnerInfo>>;
   async fn rotate(&self, runner: &str) -> Result<()>;
   async fn remove(&self, runner: &str) -> Result<()>;
+  async fn mint_credential(&self, request: MintRunnerCredential) -> Result<MintedRunnerCredential>;
+  async fn revoke_credential(&self, runner: &str) -> Result<()>;
   /// Whose credential a bearer token is. The middleware calls it for every
   /// token that is not the control token. Backend failures are errors;
   /// invalid credentials are `Credential::Refused`.

@@ -49,6 +49,7 @@ impl Setup {
       capabilities: crate::testing::capabilities("executor(native)"),
       labels: BTreeMap::new(),
       grace: crate::runner::DISCONNECT_GRACE,
+      activity_hook: None,
     };
     let runner = Runner::start(config).await.unwrap();
     let stop = CancellationToken::new();

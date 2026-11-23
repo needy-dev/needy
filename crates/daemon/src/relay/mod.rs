@@ -150,6 +150,8 @@ struct Relay {
   filter: Option<Arc<dyn StreamFilter>>,
   /// Where the filter's held bytes wait; set with `filter`.
   timers: Option<Timers>,
+  /// Live run whose `last_activity_ms` is refreshed on process output.
+  activity: Option<Arc<Run>>,
   requested: Instant,
 }
 
@@ -368,8 +370,12 @@ impl Processes for Daemon {
             tasks: run.tasks.clone(),
             cancel: run.cancel.clone(),
           }),
+          activity: run.clone(),
           requested,
         };
+        if let Some(run) = &run {
+          run.touch_activity();
+        }
         (run, relay, decided, Upstream::Start(spec))
       }
       ExecOpen::Attach {
@@ -401,6 +407,9 @@ impl Processes for Daemon {
         // An attach shares the process's run lifetime even though it adds
         // no second exec record to that run's trace or state.db.
         let owner = known.run.as_deref().and_then(|id| self.runs.exact(id));
+        if let Some(run) = &owner {
+          run.touch_activity();
+        }
         let relay = Relay {
           instance: known.instance,
           trace: None,
@@ -411,6 +420,7 @@ impl Processes for Daemon {
           detach: Arc::new(AtomicBool::new(false)),
           filter: None,
           timers: None,
+          activity: owner.clone(),
           requested,
         };
         (
@@ -511,8 +521,8 @@ impl Processes for Daemon {
       upstream.input(),
       relay.filter.clone(),
       relay.timers.clone(),
-      relay.trace.clone(),
       relay.detach.clone(),
+      relay.activity.clone(),
       out_tx.clone(),
     )));
     let daemon = self.clone();
@@ -663,8 +673,8 @@ async fn forward_input(
   upstream: client_exec::Input,
   filter: Option<Arc<dyn StreamFilter>>,
   timers: Option<Timers>,
-  trace: Option<Dispatch>,
   detach: Arc<AtomicBool>,
+  activity: Option<Arc<Run>>,
   out_tx: Sender,
 ) {
   loop {
@@ -677,11 +687,16 @@ async fn forward_input(
     let Some(mut message) = next else {
       break;
     };
+    if let Some(run) = &activity
+      && matches!(message, ExecInput::Stdin(_) | ExecInput::Signal(_) | ExecInput::Resize(_))
+    {
+      run.touch_activity();
+    }
     if let (Some(filter), ExecInput::Stdin(bytes)) = (&filter, &message) {
       let filtered = filter.inbound(bytes);
-      if let Some(trace) = &trace {
+      if let Some(run) = &activity {
         for fired in filtered.fired {
-          run::emit(trace, &Event::FaultInjected(fired));
+          run.emit(&Event::FaultInjected(fired));
         }
       }
       for reply in filtered.replies {
@@ -819,6 +834,9 @@ impl Relay {
         }
       };
       let mut done = false;
+      if let Some(run) = &self.activity {
+        run.touch_activity();
+      }
       let output = match output {
         client_exec::Event::Started(started) => {
           process_id = started.process_id.clone();

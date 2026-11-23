@@ -65,6 +65,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     released: Vec::new(),
     lost: Vec::new(),
     created_ms: 1,
+    last_activity_ms: 1,
     profile: "fake".into(),
     actor_exit: None,
     failure: None,
@@ -428,6 +429,7 @@ fn fake_runner(name: &str) -> RunnerInfo {
     rotating: false,
     join_token: "t1".into(),
     host: None,
+    expires_ms: None,
     static_config: false,
   }
 }
@@ -497,6 +499,21 @@ impl Runners for Fake {
 
   async fn remove(&self, runner: &str) -> Result<()> {
     self.call(format!("remove {runner}"));
+    Ok(())
+  }
+
+  async fn mint_credential(&self, request: MintRunnerCredential) -> Result<MintedRunnerCredential> {
+    self.call(format!("mint {} ttl={}", request.name, request.ttl_ms));
+    Ok(MintedRunnerCredential {
+      runner: fake_runner(&request.name),
+      credential: format!("needy-runner.{}.minted", request.name),
+      expires_ms: 1 + request.ttl_ms,
+      heartbeat_interval_ms: 15_000,
+    })
+  }
+
+  async fn revoke_credential(&self, runner: &str) -> Result<()> {
+    self.call(format!("revoke credential {runner}"));
     Ok(())
   }
 

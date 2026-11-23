@@ -281,10 +281,11 @@ impl Daemon {
   /// configured), and whether it is connected now.
   pub(crate) async fn candidates(&self) -> anyhow::Result<Vec<Candidate>> {
     self.static_runners.reload(&self.links);
+    let now = needy_common::time::now_ms();
     let runners = self.state.runners().await.context("cannot read the runner registry")?;
     let mut merged: BTreeMap<String, Candidate> = BTreeMap::new();
     for runner in runners {
-      if runner.removed_ms.is_some() {
+      if runner.removed_ms.is_some() || runner.expires_ms.is_some_and(|exp| now >= exp) {
         continue;
       }
       if self.state.client_execution(&runner.name).await?.is_none() {

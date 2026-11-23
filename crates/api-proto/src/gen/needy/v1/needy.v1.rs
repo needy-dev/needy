@@ -1266,6 +1266,10 @@ pub struct Runner {
     /// reported it; unset until one did.
     #[prost(message, optional, tag="10")]
     pub host: ::core::option::Option<RunnerHost>,
+    /// When a short-lived credential expires, in Unix milliseconds; unset for
+    /// non-expiring runners.
+    #[prost(int64, optional, tag="11")]
+    pub expires_at_ms: ::core::option::Option<i64>,
     /// Loaded from a static runners file rather than enrolled in state.db.
     #[prost(bool, tag="12")]
     pub static_config: bool,
@@ -1293,6 +1297,42 @@ pub struct RemoveRunnerRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct RemoveRunnerResponse {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MintRunnerCredentialRequest {
+    /// A DNS label: lowercase letters, digits and '-'.
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Required, positive duration until the credential expires.
+    #[prost(int64, tag="2")]
+    pub ttl_ms: i64,
+    /// Roles the runner is allowed to declare; empty allows every role.
+    #[prost(enumeration="RunnerRole", repeated, tag="3")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    /// Labels applied to the runner.
+    #[prost(map="string, string", tag="4")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MintRunnerCredentialResponse {
+    #[prost(message, optional, tag="1")]
+    pub runner: ::core::option::Option<Runner>,
+    /// The runner's credential; not stored, not shown again.
+    #[prost(string, tag="2")]
+    pub credential: ::prost::alloc::string::String,
+    #[prost(int64, tag="3")]
+    pub expires_at_ms: i64,
+    /// How often the control plane expects a heartbeat.
+    #[prost(int64, tag="4")]
+    pub heartbeat_interval_ms: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeRunnerCredentialRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeRunnerCredentialResponse {
 }
 /// From a runner on its control stream.
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -1673,6 +1713,10 @@ pub struct CreateRunRequest {
     /// image's lockfile.
     #[prost(map="string, string", tag="14")]
     pub pinned_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// Optional maximum time to wait for required actor or executor runners to
+    /// connect before failing `CreateRun` (milliseconds; 0 means no wait).
+    #[prost(uint64, tag="16")]
+    pub wait_for_runner_ms: u64,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ExecutorRef {
@@ -1740,6 +1784,10 @@ pub struct Run {
     /// CLI to record in the image's lockfile.
     #[prost(map="string, string", tag="16")]
     pub resolved_features: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// Last observed activity timestamp in Unix milliseconds (updated on guest
+    /// RPCs, gateway traffic, routing decisions, and terminal/exec I/O).
+    #[prost(int64, tag="17")]
+    pub last_activity_ms: i64,
 }
 /// Where a run's workspace is: its directory in the actor, and where its
 /// files come from.

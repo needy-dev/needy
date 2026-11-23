@@ -2801,6 +2801,18 @@ impl HeldJoin {
       async fn remove_runner(&self, _: Request<RemoveRunnerRequest>) -> Result<Response<RemoveRunnerResponse>, Status> {
         refused()
       }
+      async fn mint_runner_credential(
+        &self,
+        _: Request<needy_api_client::proto::v1::MintRunnerCredentialRequest>,
+      ) -> Result<Response<needy_api_client::proto::v1::MintRunnerCredentialResponse>, Status> {
+        refused()
+      }
+      async fn revoke_runner_credential(
+        &self,
+        _: Request<needy_api_client::proto::v1::RevokeRunnerCredentialRequest>,
+      ) -> Result<Response<needy_api_client::proto::v1::RevokeRunnerCredentialResponse>, Status> {
+        refused()
+      }
       async fn control(&self, _: Request<Streaming<ControlRequest>>) -> Result<Response<Self::ControlStream>, Status> {
         refused()
       }

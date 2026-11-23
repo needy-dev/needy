@@ -78,6 +78,17 @@ pub const DISCONNECT_GRACE: Duration = Duration::from_secs(120);
 // running after 5 s is stuck in the kernel and is reported running.
 const END_WAIT: Duration = Duration::from_secs(5);
 
+/// Default minimum interval between consecutive `--activity-hook` invocations.
+pub const DEFAULT_ACTIVITY_HOOK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Configuration for `--activity-hook`: a shell command invoked asynchronously
+/// at most once per `interval` while routed exec or SFTP streams are active.
+#[derive(Debug, Clone)]
+pub struct ActivityHookConfig {
+  pub command: String,
+  pub interval: Duration,
+}
+
 /// Extracts the runner name `<name>` from a runner credential shaped like
 /// `needy-runner.<name>.<hex>`.
 pub fn credential_name(credential: &str) -> Option<&str> {
@@ -107,6 +118,8 @@ pub struct Config {
   /// How long it keeps the processes of runs while it cannot reach the
   /// control plane: [`DISCONNECT_GRACE`] outside tests.
   pub grace: Duration,
+  /// Optional throttled shell hook triggered on active exec / SFTP streams.
+  pub activity_hook: Option<ActivityHookConfig>,
 }
 
 /// Runtime selections saved at enrollment. Role/image serve overrides are
@@ -156,6 +169,68 @@ struct Enrollment {
   settings: Settings,
 }
 
+/// Throttled async runner for `--activity-hook`.
+struct ActivityHook {
+  command: String,
+  interval: Duration,
+  last_fired: Mutex<Option<std::time::Instant>>,
+}
+
+impl ActivityHook {
+  fn new(config: ActivityHookConfig) -> Arc<Self> {
+    Arc::new(Self {
+      command: config.command,
+      interval: config.interval,
+      last_fired: Mutex::new(None),
+    })
+  }
+
+  /// Triggers the hook asynchronously if at least `interval` has elapsed since
+  /// the last invocation. Spawn or exit failures are logged as warnings and
+  /// never interrupt active tasks.
+  fn trigger(self: &Arc<Self>) {
+    let should_fire = {
+      let mut last = needy_common::sync::lock(&self.last_fired);
+      let now = std::time::Instant::now();
+      if last.is_none_or(|prev| now.duration_since(prev) >= self.interval) {
+        *last = Some(now);
+        true
+      } else {
+        false
+      }
+    };
+    if !should_fire {
+      return;
+    }
+    let command = self.command.clone();
+    tokio::spawn(async move {
+      #[cfg(unix)]
+      let mut cmd = {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(&command);
+        cmd
+      };
+      #[cfg(not(unix))]
+      let mut cmd = {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.arg("/C").arg(&command);
+        cmd
+      };
+      cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+      match cmd.output().await {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+          let stderr = String::from_utf8_lossy(&output.stderr);
+          tracing::warn!("activity hook exited with {}: {}", output.status, stderr.trim());
+        }
+        Err(e) => {
+          tracing::warn!("activity hook failed to execute: {e}");
+        }
+      }
+    });
+  }
+}
+
 /// A runner that joined or started with a pre-provisioned credential.
 pub struct Runner {
   path: PathBuf,
@@ -175,6 +250,7 @@ pub struct Runner {
   /// As the control plane last said; `None` until it said.
   interval: Option<Duration>,
   grace: Duration,
+  activity_hook: Option<Arc<ActivityHook>>,
 }
 
 impl Runner {
@@ -232,6 +308,7 @@ impl Runner {
       client: None,
       interval,
       grace: config.grace,
+      activity_hook: config.activity_hook.map(ActivityHook::new),
     })
   }
 
@@ -413,6 +490,7 @@ impl Runner {
       tasks: TaskTracker::new(),
       grace: self.grace,
       orphaned: Mutex::default(),
+      activity_hook: self.activity_hook.clone(),
     };
     let tasks = dialer.tasks.clone();
     let dialing = {
@@ -455,6 +533,7 @@ struct Dialer {
   /// Set while the control plane is unreachable: cancelling it keeps the
   /// processes of runs that the grace period would end.
   orphaned: Mutex<Option<CancellationToken>>,
+  activity_hook: Option<Arc<ActivityHook>>,
 }
 
 impl Dialer {
@@ -609,13 +688,17 @@ impl Dialer {
       let stop = stop.clone();
       match kind {
         runner_task::Kind::Exec(_) => {
+          if let Some(hook) = &self.activity_hook {
+            hook.trigger();
+          }
           // A task stream presents the credential current when it opens.
           let client = self.authenticated(&client)?;
           let name = self.name.clone();
           let bound_run = self.bound_run.clone();
           let ended = self.ended.clone();
+          let hook = self.activity_hook.clone();
           self.tasks.spawn(async move {
-            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id, bound_run, ended)).await {
+            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id, bound_run, ended, hook)).await {
               tracing::warn!("runner {name}: exec task {id}: {e:#}");
             }
           });
@@ -716,7 +799,14 @@ fn task_error(status: &tonic::Status) -> TaskError {
 /// responses back up. When the control plane leaves the stream, or the
 /// connection ends, a persistent runner follows ordinary stream semantics;
 /// a private client holder preserves the process under its invocation owner.
-async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Option<String>, ended: Arc<AtomicBool>) -> Result<()> {
+async fn exec(
+  client: Client,
+  service: ExecutorService,
+  id: u64,
+  bound_run: Option<String>,
+  ended: Arc<AtomicBool>,
+  activity_hook: Option<Arc<ActivityHook>>,
+) -> Result<()> {
   let (up, rx) = mpsc::channel::<TaskRequest>(RESULTS);
   let named = TaskRequest {
     payload: Some(task_request::Payload::TaskId(id)),
@@ -736,11 +826,15 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
     let left = left.clone();
     let up = up.clone();
     let host = service.host.clone();
+    let activity_hook = activity_hook.clone();
     async move {
       loop {
         match down.message().await {
           Ok(Some(message)) => {
             if let Some(request) = message.exec {
+              if let Some(hook) = &activity_hook {
+                hook.trigger();
+              }
               if let Some(run) = &bound_run {
                 use needy_api_client::proto::v1::exec_request::Payload;
                 let allowed = match &request.payload {
@@ -823,12 +917,17 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
         break;
       };
       let (message, last) = match response {
-        Ok(response) => (
-          TaskRequest {
-            payload: Some(task_request::Payload::Exec(response)),
-          },
-          false,
-        ),
+        Ok(response) => {
+          if let Some(hook) = &activity_hook {
+            hook.trigger();
+          }
+          (
+            TaskRequest {
+              payload: Some(task_request::Payload::Exec(response)),
+            },
+            false,
+          )
+        }
         Err(status) => (error(&status), true),
       };
       if up.send(message).await.is_err() || last {
@@ -920,6 +1019,7 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
     tasks: TaskTracker::new(),
     grace: DISCONNECT_GRACE,
     orphaned: Mutex::default(),
+    activity_hook: None,
   };
   let tasks = dialer.tasks.clone();
   let heartbeats = async {

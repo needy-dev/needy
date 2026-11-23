@@ -45,6 +45,7 @@ async fn far(grace: Duration) -> Far {
     capabilities: crate::testing::capabilities("executor(native)"),
     labels: BTreeMap::new(),
     grace,
+    activity_hook: None,
   };
   let runner = testing::join_runner_with(&served, &operator, config).await;
   Far {

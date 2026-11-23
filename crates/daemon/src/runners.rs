@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use needy_api_client::proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse};
 use needy_api_server::control::{
-  Beat, ControlError, CreatedJoinToken, Credential, FromRunner, JoinTokenInfo, JoinTokenState, Joined, Joining, NewJoinToken, Result,
-  RunnerInfo, RunnerReport, RunnerStatus, Runners, ToRunner,
+  Beat, ControlError, CreatedJoinToken, Credential, FromRunner, JoinTokenInfo, JoinTokenState, Joined, Joining, MintRunnerCredential,
+  MintedRunnerCredential, NewJoinToken, Result, RunnerInfo, RunnerReport, RunnerStatus, Runners, ToRunner,
 };
 use needy_common::time::now_ms;
 
@@ -22,7 +22,8 @@ use crate::store::{self, Error};
 /// one late or lost heartbeat (a tunnel that reconnects) does not flap it.
 const MISSED_HEARTBEATS: i64 = 3;
 
-/// How often the background maintenance loop reloads the static runners file.
+/// How often the background maintenance loop checks the static runners file
+/// and closes expired short-lived runner control streams.
 const MAINTENANCE_TICK: Duration = Duration::from_secs(1);
 
 impl Daemon {
@@ -30,28 +31,74 @@ impl Daemon {
     i64::try_from(self.config.heartbeat_interval.as_millis()).unwrap_or(i64::MAX)
   }
 
-  /// Spawns the background loop that reloads `--runners-file`.
+  /// Spawns the background loop that reloads `--runners-file` and disconnects
+  /// any short-lived runners whose TTL has elapsed.
   pub(crate) fn spawn_runner_maintenance(&self) {
+    // Hold only the leaf handles, never `Daemon`, so dropping the last `Daemon`
+    // clone cancels `maintenance_cancel` via its drop guard and releases all
+    // resources promptly.
     let static_runners = self.static_runners.clone();
     let links = self.links.clone();
+    let state = self.state.clone();
     let cancel = self.maintenance_cancel.clone();
     self.tasks.spawn(async move {
       let mut interval = tokio::time::interval(MAINTENANCE_TICK);
       interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+      // Skip the immediate first tick (start_with_backends already loaded).
       interval.tick().await;
       loop {
         tokio::select! {
           () = cancel.cancelled() => break,
           _ = interval.tick() => {
             static_runners.reload(&links);
+            match state.expired_runners(now_ms()).await {
+              Ok(expired) => {
+                for name in expired {
+                  if links.get(&name).is_some() {
+                    tracing::info!("runner {name} credential expired; closing control stream");
+                    links.close(&name);
+                  }
+                }
+              }
+              Err(e) => tracing::warn!("cannot check expired runners: {e}"),
+            }
           }
         }
       }
     });
   }
 
-  /// Whether `runner` joined (or is statically configured), was not removed,
-  /// and sends heartbeats, as `runner ls` shows it online.
+  /// Schedules a targeted disconnect when a freshly minted runner credential
+  /// reaches `expires_ms`, so short TTLs disconnect promptly without waiting for
+  /// the periodic sweep.
+  fn schedule_expiry(&self, name: String, expires_ms: i64) {
+    let links = self.links.clone();
+    let static_runners = self.static_runners.clone();
+    let state = self.state.clone();
+    let cancel = self.maintenance_cancel.clone();
+    self.tasks.spawn(async move {
+      let wait_ms = expires_ms.saturating_sub(now_ms());
+      if wait_ms > 0 {
+        tokio::select! {
+          () = cancel.cancelled() => return,
+          () = tokio::time::sleep(Duration::from_millis(wait_ms as u64)) => {}
+        }
+      }
+      if cancel.is_cancelled() || static_runners.contains(&name) {
+        return;
+      }
+      // Re-check current store state before disconnecting so a runner that was
+      // revoked and re-minted with a longer TTL under the same name is not
+      // killed by the stale timer.
+      if matches!(state.check_active(&name, now_ms()).await, Err(Error::RunnerExpired(_))) && links.get(&name).is_some() {
+        tracing::info!("runner {name} credential expired; closing control stream");
+        links.close(&name);
+      }
+    });
+  }
+
+  /// Whether `runner` joined (or is statically configured), was not removed or
+  /// expired, and sends heartbeats, as `runner ls` shows it online.
   pub(crate) async fn runner_online(&self, runner: &str) -> bool {
     self.static_runners.reload(&self.links);
     let now = now_ms();
@@ -69,8 +116,10 @@ impl Daemon {
   }
 
   fn runner_info(&self, runner: store::Runner, now: i64) -> RunnerInfo {
+    let expired = runner.expires_ms.is_some_and(|exp| now >= exp);
     let status = match runner.removed_ms {
       Some(_) => RunnerStatus::Removed,
+      None if expired => RunnerStatus::Removed,
       None if now - runner.last_seen_ms <= MISSED_HEARTBEATS * self.heartbeat_interval_ms() => RunnerStatus::Online,
       None => RunnerStatus::Offline,
     };
@@ -84,6 +133,7 @@ impl Daemon {
       last_seen_ms: runner.last_seen_ms,
       rotating: runner.rotating,
       join_token: runner.join_token,
+      expires_ms: runner.expires_ms,
       static_config: false,
     }
   }
@@ -104,6 +154,7 @@ impl Daemon {
       last_seen_ms: runner.last_seen_ms,
       rotating: false,
       join_token: String::new(),
+      expires_ms: None,
       static_config: true,
     }
   }
@@ -156,6 +207,7 @@ pub(crate) fn control_error(error: Error, mutation: bool) -> ControlError {
     Error::OutOfScope(_) => ("bootstrap.scope_denied", vec![]),
     Error::NoJoinToken(_) => ("bootstrap.invalid_code", vec![]),
     Error::NoRunner(name) => ("runner.not_found", vec![("runner".into(), name.clone())]),
+    Error::RunnerExpired(name) => ("runner.expired", vec![("runner".into(), name.clone())]),
     Error::NoClient(id) => ("client.not_found", vec![("client".into(), id.clone())]),
     Error::RunnerExists(name) => ("runner.name_in_use", vec![("runner".into(), name.clone())]),
     Error::PairingCodeOpen(name) => ("client.invitation_open", vec![("client".into(), name.clone())]),
@@ -177,7 +229,8 @@ pub(crate) fn control_error(error: Error, mutation: bool) -> ControlError {
     | Error::Revoked(_)
     | Error::InvalidPairingCode
     | Error::PairingCodeExpired(_)
-    | Error::PairingCodeUsed(_) => ControlError::Unauthenticated(message),
+    | Error::PairingCodeUsed(_)
+    | Error::RunnerExpired(_) => ControlError::Unauthenticated(message),
     Error::NoJoinToken(_) | Error::NoRunner(_) | Error::NoClient(_) => ControlError::NotFound(message),
     Error::OutOfScope(_) => ControlError::denied(message),
     Error::RunnerExists(_) | Error::PairingCodeOpen(_) | Error::Refused(_) => ControlError::Failed(message),
@@ -257,7 +310,15 @@ impl Runners for Daemon {
     if !self.state.client_execution_active(runner, now).await.map_err(|e| control_error(e, false))? {
       return Err(ControlError::Unauthenticated("client execution invocation ended or reservation expired".into()));
     }
-    let credential = self.state.heartbeat(runner, report(reported), now).await.map_err(|error| control_error(error, true))?;
+    let credential = match self.state.heartbeat(runner, report(reported), now).await {
+      Ok(credential) => credential,
+      Err(error) => {
+        if matches!(error, Error::RunnerExpired(_)) {
+          self.links.close(runner);
+        }
+        return Err(control_error(error, true));
+      }
+    };
     // Only an accepted heartbeat tells the control plane about a machine.
     if let Some(host) = host {
       needy_common::sync::lock(&self.runner_hosts).insert(runner.to_string(), host);
@@ -294,7 +355,7 @@ impl Runners for Daemon {
     if self.static_runners.contains(runner) {
       return Err(ControlError::Failed(format!("runner {runner} is statically configured and cannot be rotated")));
     }
-    self.state.rotate(runner).await.map_err(|error| control_error(error, true))?;
+    self.state.rotate(runner, now_ms()).await.map_err(|error| control_error(error, true))?;
     tracing::info!("runner {runner}: credential rotation asked for");
     Ok(())
   }
@@ -311,6 +372,40 @@ impl Runners for Daemon {
     Ok(())
   }
 
+  async fn mint_credential(&self, request: MintRunnerCredential) -> Result<MintedRunnerCredential> {
+    self.static_runners.reload(&self.links);
+    if self.static_runners.contains(&request.name) {
+      return Err(ControlError::Failed(format!("runner {} is statically configured and cannot be minted dynamically", request.name)));
+    }
+    let now = now_ms();
+    let scope = store::Scope {
+      roles: request.roles,
+      labels: request.labels,
+    };
+    let (runner, credential) =
+      self.state.mint_runner(&request.name, request.ttl_ms, scope, now).await.map_err(|error| control_error(error, true))?;
+    let expires_ms = runner.expires_ms.unwrap_or_else(|| now.saturating_add(request.ttl_ms));
+    self.schedule_expiry(runner.name.clone(), expires_ms);
+    tracing::info!("minted short-lived credential for runner {}, expires at {expires_ms}", runner.name);
+    Ok(MintedRunnerCredential {
+      runner: self.runner_info(runner, now),
+      credential: credential.into_string(),
+      expires_ms,
+      heartbeat_interval_ms: self.heartbeat_interval_ms(),
+    })
+  }
+
+  async fn revoke_credential(&self, runner: &str) -> Result<()> {
+    self.static_runners.reload(&self.links);
+    if self.static_runners.contains(runner) {
+      return Err(ControlError::Failed(format!("runner {runner} is statically configured and cannot be revoked")));
+    }
+    self.state.remove(runner, now_ms()).await.map_err(|error| control_error(error, true))?;
+    self.links.close(runner);
+    tracing::info!("runner {runner} credential revoked");
+    Ok(())
+  }
+
   async fn credential(&self, token: &str) -> Result<Credential> {
     if !store::is_runner_credential(token) {
       return Ok(Credential::Other);
@@ -323,9 +418,10 @@ impl Runners for Daemon {
         Credential::Refused
       });
     }
-    Ok(match self.state.authenticate(token).await {
+    let now = now_ms();
+    Ok(match self.state.authenticate(token, now).await {
       Ok(Some(name)) => {
-        if self.state.client_execution_active(&name, now_ms()).await.map_err(|e| control_error(e, false))? {
+        if self.state.client_execution_active(&name, now).await.map_err(|e| control_error(e, false))? {
           Credential::Runner(name)
         } else {
           Credential::Refused
@@ -344,8 +440,13 @@ impl Runners for Daemon {
     let now = now_ms();
     // A runner connecting, such as again after a restart of the control
     // plane, is seen now, not at its next heartbeat.
-    if !self.static_runners.seen(runner, now) {
-      self.state.seen(runner, now).await.map_err(|error| control_error(error, true))?;
+    if !self.static_runners.seen(runner, now)
+      && let Err(error) = self.state.seen(runner, now).await
+    {
+      if matches!(error, Error::RunnerExpired(_)) {
+        self.links.close(runner);
+      }
+      return Err(control_error(error, true));
     }
     // The runner's report goes to `reconcile`, outside the stream's reader.
     let daemon = self.clone();
@@ -358,6 +459,15 @@ impl Runners for Daemon {
   }
 
   async fn task(&self, runner: &str, task: u64, responses: FromRunner<TaskRequest>) -> Result<ToRunner<TaskResponse>> {
+    self.static_runners.reload(&self.links);
+    if !self.static_runners.contains(runner)
+      && let Err(error) = self.state.check_active(runner, now_ms()).await
+    {
+      if matches!(error, Error::RunnerExpired(_)) {
+        self.links.close(runner);
+      }
+      return Err(control_error(error, false));
+    }
     self.links.task(runner, task, responses)
   }
 }
