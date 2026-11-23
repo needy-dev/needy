@@ -603,3 +603,23 @@ fn the_broadwell_example_recipe_hides_what_a_cascade_lake_host_adds() {
     assert!(hidden.iter().any(|h| h == feature), "{feature} is not hidden: {hidden:?}");
   }
 }
+
+#[test]
+fn recipe_machine_id_derives_from_seed_and_allows_explicit_override() {
+  let default_recipe = load("os: { hostname: \"box-{hash}\" }\n");
+  let a = compile(&default_recipe, &HostInfo::default(), &PerRun::at(42, 0));
+  let b = compile(&default_recipe, &HostInfo::default(), &PerRun::at(42, 0));
+  let c = compile(&default_recipe, &HostInfo::default(), &PerRun::at(43, 0));
+  assert_eq!(a.machine_id, b.machine_id);
+  assert_ne!(a.machine_id, c.machine_id);
+  assert_eq!(a.machine_id.as_deref().unwrap().len(), 32);
+
+  let explicit = load("os: { machine_id: \"0123456789abcdef0123456789abcdef\" }\n");
+  let compiled = compile(&explicit, &HostInfo::default(), &PerRun::at(1, 0));
+  assert_eq!(compiled.machine_id.as_deref(), Some("0123456789abcdef0123456789abcdef"));
+  assert!(compiled.findings.is_empty(), "{:?}", compiled.findings);
+
+  let malformed = load("os: { machine_id: \"not-hex\" }\n");
+  let bad = compile(&malformed, &HostInfo::default(), &PerRun::at(1, 0));
+  assert!(bad.findings.iter().any(|f| f.message.contains("os.machine_id")), "{:?}", bad.findings);
+}

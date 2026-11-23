@@ -20,6 +20,9 @@ use super::write_param;
 const CORETEMP: &str = "/sys/module/fake_coretemp/parameters";
 
 /// Sets the hostname and the sensors' idle readings.
+// TODO(machine-id): write `/etc/machine-id` inside VM and `macos-apple-container`
+// guests once `GuestConfig` proto carries `machine_id` (currently container
+// actors on `linux-container` bind-mount `/etc/machine-id` from the host).
 pub(super) fn apply(config: &GetConfigResponse) {
   if !config.hostname.is_empty()
     && let Err(e) = nix::unistd::sethostname(&config.hostname)

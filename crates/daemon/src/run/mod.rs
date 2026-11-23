@@ -633,7 +633,11 @@ impl Daemon {
           tracing::warn!("run {id}: cannot read this machine's CPU; the recipe skips host checks: {e}");
           Default::default()
         });
-        let seed = u64::from_str_radix(&id[..8], 16).unwrap_or(0);
+        let seed = match &profile.actor.seed {
+          Some(needy_config::profile::Seed::Int(n)) => *n,
+          Some(needy_config::profile::Seed::String(s)) => needy_common::seed::from_str(s),
+          None => u64::from_str_radix(&id[..8], 16).unwrap_or(0),
+        };
         let compiled = needy_core::recipe::compile(&recipe, &host, &PerRun::at(seed, created_ms));
         for finding in &compiled.findings {
           tracing::warn!("run {id}: recipe {finding}");

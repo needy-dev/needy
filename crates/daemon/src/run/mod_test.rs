@@ -379,6 +379,29 @@ async fn a_runs_recipe_time_is_its_creation_time_and_run_create_records_it() {
 }
 
 #[tokio::test]
+async fn actor_seed_fixes_recipe_hostname_uuid_and_machine_id_across_runs() {
+  let dir = tempfile::tempdir().unwrap();
+  let yaml_a = "actor: { driver: linux-firecracker, recipe: \"builtin:dell-optiplex-ubuntu-24.04\", seed: \"claude-1\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
+  let yaml_b = "actor: { driver: linux-firecracker, recipe: \"builtin:dell-optiplex-ubuntu-24.04\", seed: \"claude-2\" }\nuser: { name: agent, uid: 1000, gid: 1000 }\nexecutors:\n  here: { driver: native }\n";
+  let started = testing::daemon().await;
+
+  let first = Runs::create(&started.daemon, new_run(yaml_a, dir.path())).await.unwrap();
+  let second = Runs::create(&started.daemon, new_run(yaml_a, dir.path())).await.unwrap();
+  let other = Runs::create(&started.daemon, new_run(yaml_b, dir.path())).await.unwrap();
+
+  let r1 = started.daemon.runs.find(&first.id).unwrap().recipe.clone().unwrap();
+  let r2 = started.daemon.runs.find(&second.id).unwrap().recipe.clone().unwrap();
+  let r3 = started.daemon.runs.find(&other.id).unwrap().recipe.clone().unwrap();
+
+  assert_eq!(r1.hostname, r2.hostname);
+  assert_eq!(r1.machine_id, r2.machine_id);
+  assert_eq!(r1.identity.smbios.as_ref().unwrap().uuid, r2.identity.smbios.as_ref().unwrap().uuid);
+  assert_ne!(r1.hostname, r3.hostname);
+  assert_ne!(r1.machine_id, r3.machine_id);
+  assert_ne!(r1.identity.smbios.as_ref().unwrap().uuid, r3.identity.smbios.as_ref().unwrap().uuid);
+}
+
+#[tokio::test]
 async fn a_create_whose_selector_names_no_connected_runner_fails_before_it_acquires_anything() {
   let (served, _far) = with_runner_far().await;
   let daemon = served.daemon();

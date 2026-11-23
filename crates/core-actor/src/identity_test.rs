@@ -43,7 +43,14 @@ fn the_recipes_cpuinfo_is_bound_over_the_hosts() {
   let binds = prepare(run.path(), Some(&recipe("")), 2, &host, OciRuntime::Runc).unwrap();
 
   let cpuinfo = run.path().join("identity/cpuinfo");
-  assert_eq!(binds, [format!("{}:/proc/cpuinfo:ro", cpuinfo.display())]);
+  let machine_id = run.path().join("identity/machine-id");
+  assert_eq!(
+    binds,
+    [
+      format!("{}:/proc/cpuinfo:ro", cpuinfo.display()),
+      format!("{}:/etc/machine-id:ro", machine_id.display()),
+    ]
+  );
   let text = std::fs::read_to_string(cpuinfo).unwrap();
   assert_eq!(text.matches("model name\t: Intel(R) Xeon(R) CPU @ 2.80GHz").count(), 2, "{text}");
 }
@@ -147,7 +154,26 @@ fn under_gvisor_dmi_and_hwmon_are_bound_whatever_the_host_has_and_no_lxcfs_view_
   let binds = prepare(run.path(), Some(&recipe(SENSORS)), 1, &host, OciRuntime::Runsc).unwrap();
 
   let targets: Vec<&str> = binds.iter().map(|b| b.split(':').nth(1).unwrap()).collect();
-  assert_eq!(targets, ["/proc/cpuinfo", "/sys/class/dmi/id", "/sys/class/hwmon"]);
+  assert_eq!(
+    targets,
+    [
+      "/proc/cpuinfo",
+      "/sys/class/dmi/id",
+      "/etc/machine-id",
+      "/sys/class/hwmon"
+    ]
+  );
+}
+
+#[test]
+fn machine_id_is_bound_from_recipe_or_fallback_seed() {
+  let root = tempfile::tempdir().unwrap();
+  let run = tempfile::tempdir().unwrap();
+  let host = host(root.path(), false, false, false);
+
+  let binds = prepare_with_machine_id(run.path(), None, Some("0123456789abcdef0123456789abcdef"), 1, &host, OciRuntime::Runc).unwrap();
+  assert!(binds.iter().any(|b| b.ends_with(":/etc/machine-id:ro")), "{binds:?}");
+  assert_eq!(std::fs::read_to_string(run.path().join("identity/machine-id")).unwrap(), "0123456789abcdef0123456789abcdef\n");
 }
 
 #[test]
