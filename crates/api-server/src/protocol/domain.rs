@@ -359,6 +359,7 @@ impl From<RunnerInfo> for v1::Runner {
       last_seen_at_ms: runner.last_seen_ms,
       rotating: runner.rotating,
       join_token_id: runner.join_token,
+      static_config: runner.static_config,
     }
   }
 }

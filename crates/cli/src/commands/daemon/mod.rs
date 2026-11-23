@@ -72,6 +72,9 @@ struct ServeArgs {
   /// Interval between runner health heartbeats (for example `15s`).
   #[arg(long, value_parser = humantime::parse_duration)]
   heartbeat_interval: Option<std::time::Duration>,
+  /// Path to a YAML/JSON file containing pre-provisioned static runner credentials (hot-reloaded).
+  #[arg(long)]
+  runners_file: Option<std::path::PathBuf>,
   /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host workspaces).
   #[arg(long)]
   disable_host_files: bool,
@@ -194,6 +197,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     report_wait: needy_daemon::REPORT_WAIT,
     mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
     merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
+    runners_file: args.runners_file.or(settings.runners_file),
     disable_host_files: args.disable_host_files || settings.disable_host_files,
     host_files_root: args.host_files_root.or(settings.host_files_root),
     gateway_blocked_cidrs: settings.gateway_blocked_cidrs,

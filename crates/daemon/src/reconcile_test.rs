@@ -40,6 +40,7 @@ async fn far(grace: Duration) -> Far {
     state_dir: Default::default(),
     control: Some(proxy.endpoint.clone()),
     join_token: None,
+    credential: None,
     name: "far".into(),
     capabilities: crate::testing::capabilities("executor(native)"),
     labels: BTreeMap::new(),

@@ -38,6 +38,7 @@ fn config(served: &Served, state_dir: &std::path::Path, join_token: Option<Strin
     state_dir: state_dir.to_path_buf(),
     control: Some(served.endpoint.clone()),
     join_token,
+    credential: None,
     name: "mac".into(),
     capabilities: crate::testing::capabilities("executor(native)"),
     labels: BTreeMap::from([("os".to_string(), "darwin".to_string())]),

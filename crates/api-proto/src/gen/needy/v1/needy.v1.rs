@@ -1266,6 +1266,9 @@ pub struct Runner {
     /// reported it; unset until one did.
     #[prost(message, optional, tag="10")]
     pub host: ::core::option::Option<RunnerHost>,
+    /// Loaded from a static runners file rather than enrolled in state.db.
+    #[prost(bool, tag="12")]
+    pub static_config: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ListRunnersRequest {

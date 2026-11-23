@@ -110,7 +110,6 @@ fn local_only_commands_do_not_expose_remote_connection_flags() {
     "image rm",
     "config ls",
     "config paths",
-    "runner serve",
   ];
   for leaf in local_only {
     let output = Command::new(env!("CARGO_BIN_EXE_needy")).args(leaf.split_whitespace()).arg("--help").output().unwrap();
@@ -119,6 +118,23 @@ fn local_only_commands_do_not_expose_remote_connection_flags() {
     assert!(!help.contains("--context"), "{leaf}: local command must not expose --context:\n{help}");
     assert!(!help.contains("--address"), "{leaf}: local command must not expose --address:\n{help}");
     assert!(!help.contains("--credential-file"), "{leaf}: local command must not expose --credential-file:\n{help}");
+  }
+}
+
+#[test]
+fn runner_serve_exposes_preprovisioned_credential_and_activity_hook_flags() {
+  let output = Command::new(env!("CARGO_BIN_EXE_needy")).args(["runner", "serve", "--help"]).output().unwrap();
+  assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+  let help = String::from_utf8(output.stdout).unwrap();
+  assert!(!help.contains("--context"), "runner serve must not expose --context:\n{help}");
+  for flag in [
+    "--address",
+    "--name",
+    "--credential-env",
+    "--credential-file",
+    "--actor-image",
+  ] {
+    assert!(help.contains(flag), "runner serve --help must expose {flag}:\n{help}");
   }
 }
 

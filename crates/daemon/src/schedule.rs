@@ -277,27 +277,36 @@ pub(crate) fn placement(selector: Option<&RunnerSelector>, need: Need, runners: 
 }
 
 impl Daemon {
-  /// Every runner that was not removed, and whether it is connected now.
+  /// Every runner that was not removed (both `state.db` and statically
+  /// configured), and whether it is connected now.
   pub(crate) async fn candidates(&self) -> anyhow::Result<Vec<Candidate>> {
+    self.static_runners.reload(&self.links);
     let runners = self.state.runners().await.context("cannot read the runner registry")?;
-    let mut shared = Vec::new();
+    let mut merged: BTreeMap<String, Candidate> = BTreeMap::new();
     for runner in runners {
-      if self.state.client_execution(&runner.name).await?.is_none() {
-        shared.push(runner);
+      if runner.removed_ms.is_some() {
+        continue;
       }
-    }
-    Ok(
-      shared
-        .into_iter()
-        .filter(|runner| runner.removed_ms.is_none())
-        .map(|runner| Candidate {
+      if self.state.client_execution(&runner.name).await?.is_none() {
+        let candidate = Candidate {
           connected: self.links.get(&runner.name).is_some(),
           name: runner.name,
           capabilities: runner.capabilities,
           labels: runner.labels,
-        })
-        .collect(),
-    )
+        };
+        merged.insert(candidate.name.clone(), candidate);
+      }
+    }
+    for runner in self.static_runners.list() {
+      let candidate = Candidate {
+        connected: self.links.get(&runner.name).is_some(),
+        name: runner.name,
+        capabilities: runner.capabilities,
+        labels: runner.labels,
+      };
+      merged.insert(candidate.name.clone(), candidate);
+    }
+    Ok(merged.into_values().collect())
   }
 
   /// Whether `runner` runs on this host, as the operator said.

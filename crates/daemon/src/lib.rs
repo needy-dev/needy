@@ -72,6 +72,8 @@ mod runners;
 #[cfg(unix)]
 mod schedule;
 #[cfg(unix)]
+mod static_runners;
+#[cfg(unix)]
 mod store;
 #[cfg(unix)]
 mod sync;
@@ -174,6 +176,10 @@ pub struct Config {
   /// reported as a conflict: [`MERGE_DRIVER_TIMEOUT`] outside tests.
   #[serde(default = "default_merge_driver_timeout")]
   pub merge_driver_timeout: Duration,
+  /// Optional path to a YAML/JSON file containing pre-provisioned static runner
+  /// credentials (hot-reloaded when modified).
+  #[serde(default)]
+  pub runners_file: Option<PathBuf>,
   /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host
   /// workspaces).
   #[serde(default)]
@@ -238,6 +244,8 @@ pub struct Daemon {
   pub(crate) pool: Arc<Pool>,
   /// The runners whose control streams are open.
   pub(crate) links: Arc<link::Links>,
+  /// Statically configured runners hot-reloaded from `config.runners_file`.
+  pub(crate) static_runners: Arc<static_runners::StaticRunners>,
   /// Each runner's machine as its last heartbeat reported it.
   // NOTICE: kept in memory: a runner reports it in every heartbeat, so a
   // control plane that restarts knows it again within one heartbeat.
@@ -262,6 +270,10 @@ pub struct Daemon {
   /// Run creates in progress, which shutdown waits for.
   pub(crate) creates: TaskTracker,
   pub(crate) cancel: CancellationToken,
+  /// Child of `cancel` that also cancels when the last `Daemon` clone drops,
+  /// so background runner-maintenance tasks never leak file descriptors.
+  pub(crate) maintenance_cancel: CancellationToken,
+  _maintenance_guard: Arc<tokio_util::sync::DropGuard>,
   /// Ends the exec streams of commands outside any run. A child of
   /// `cancel`, cancelled with the runs when a shutdown begins, so those
   /// streams end while the server still serves, as a run's do.
@@ -326,6 +338,10 @@ impl Daemon {
       }
     };
     let links: Arc<link::Links> = Arc::default();
+    let static_runners = Arc::new(static_runners::StaticRunners::new(config.runners_file.clone()));
+    static_runners.reload(&links);
+    let maintenance_cancel = cancel.child_token();
+    let maintenance_guard = Arc::new(maintenance_cancel.clone().drop_guard());
     let images = Arc::new(image::Images::with_backends(&config.cache_dir, &config.data_dir, backends));
     let daemon = Self {
       local: Instance::machine(&native),
@@ -339,6 +355,7 @@ impl Daemon {
       runs: Arc::new(Registry::new(state.clone())),
       state,
       links,
+      static_runners,
       runner_hosts: Arc::default(),
       holder,
       suspending: Arc::default(),
@@ -346,6 +363,8 @@ impl Daemon {
       tasks,
       creates: TaskTracker::new(),
       outside_runs: cancel.child_token(),
+      maintenance_cancel,
+      _maintenance_guard: maintenance_guard,
       cancel,
       shutting_down: Arc::default(),
       runs_stopped: Arc::default(),
@@ -362,6 +381,7 @@ impl Daemon {
     // After reconciling, so every run a previous daemon left is ended or
     // listed again.
     sync::drain(&daemon).await;
+    daemon.spawn_runner_maintenance();
     Ok(daemon)
   }
 

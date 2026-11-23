@@ -35,6 +35,7 @@ pub use self::lifecycle::{InstanceState, ProcessState, Refused, RunnerState};
 pub use self::runs::{InstanceKind, InstanceRecord, ProcessRecord, RunRecord, actor_instance, executor_instance};
 pub use self::secret::Secret;
 pub(crate) use self::secret::hex;
+pub(crate) use self::secret::{RUNNER as RUNNER_SECRET_KIND, hash as hash_secret, id as secret_id, matches as secret_matches};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -390,7 +391,7 @@ async fn has_other_schema(db: &DatabaseConnection) -> Result<bool> {
 /// The capabilities and labels a runner gets for `report` within `scope`:
 /// its own capabilities, whose roles the scope must allow, and its own
 /// labels with the scope's.
-fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String, String>)> {
+pub(crate) fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String, String>)> {
   let roles: BTreeSet<RunnerRole> = report.capabilities.roles();
   if roles.is_empty() {
     return Err(Error::Invalid("a runner needs at least one role".into()));
@@ -424,7 +425,7 @@ fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTreeMap<String
 
 /// A runner's name is part of its credential and of `runner ls`, so it is
 /// a DNS label: lowercase letters, digits and `-`.
-fn check_name(name: &str) -> Result<()> {
+pub(crate) fn check_name(name: &str) -> Result<()> {
   check_label("runner", name)
 }
 
@@ -440,7 +441,7 @@ fn check_label(what: &str, name: &str) -> Result<()> {
   )))
 }
 
-fn check_labels(labels: &BTreeMap<String, String>) -> Result<()> {
+pub(crate) fn check_labels(labels: &BTreeMap<String, String>) -> Result<()> {
   let word = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
   for (key, value) in labels {
     if !(1..=63).contains(&key.len()) || !key.chars().all(|c| word(c) || c == '/') {

@@ -5,6 +5,8 @@
 //! join and heartbeat response, so whether a runner is online is decided by
 //! the same clock and interval that the runner follows.
 
+use std::time::Duration;
+
 use needy_api_client::proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse};
 use needy_api_server::control::{
   Beat, ControlError, CreatedJoinToken, Credential, FromRunner, JoinTokenInfo, JoinTokenState, Joined, Joining, NewJoinToken, Result,
@@ -13,20 +15,49 @@ use needy_api_server::control::{
 use needy_common::time::now_ms;
 
 use crate::Daemon;
+use crate::static_runners::StaticRunner;
 use crate::store::{self, Error};
 
 /// A runner is offline after this many heartbeat intervals without one, so
 /// one late or lost heartbeat (a tunnel that reconnects) does not flap it.
 const MISSED_HEARTBEATS: i64 = 3;
 
+/// How often the background maintenance loop reloads the static runners file.
+const MAINTENANCE_TICK: Duration = Duration::from_secs(1);
+
 impl Daemon {
   fn heartbeat_interval_ms(&self) -> i64 {
     i64::try_from(self.config.heartbeat_interval.as_millis()).unwrap_or(i64::MAX)
   }
 
-  /// Whether `runner` joined, was not removed and sends heartbeats, as
-  /// `runner ls` shows it online.
+  /// Spawns the background loop that reloads `--runners-file`.
+  pub(crate) fn spawn_runner_maintenance(&self) {
+    let static_runners = self.static_runners.clone();
+    let links = self.links.clone();
+    let cancel = self.maintenance_cancel.clone();
+    self.tasks.spawn(async move {
+      let mut interval = tokio::time::interval(MAINTENANCE_TICK);
+      interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+      interval.tick().await;
+      loop {
+        tokio::select! {
+          () = cancel.cancelled() => break,
+          _ = interval.tick() => {
+            static_runners.reload(&links);
+          }
+        }
+      }
+    });
+  }
+
+  /// Whether `runner` joined (or is statically configured), was not removed,
+  /// and sends heartbeats, as `runner ls` shows it online.
   pub(crate) async fn runner_online(&self, runner: &str) -> bool {
+    self.static_runners.reload(&self.links);
+    let now = now_ms();
+    if let Some(entry) = self.static_runners.get(runner) {
+      return self.static_runner_info(entry, now).status == RunnerStatus::Online;
+    }
     let runners = match self.state.runners().await {
       Ok(runners) => runners,
       Err(e) => {
@@ -34,7 +65,6 @@ impl Daemon {
         return false;
       }
     };
-    let now = now_ms();
     runners.into_iter().find(|r| r.name == runner).is_some_and(|r| self.runner_info(r, now).status == RunnerStatus::Online)
   }
 
@@ -54,6 +84,27 @@ impl Daemon {
       last_seen_ms: runner.last_seen_ms,
       rotating: runner.rotating,
       join_token: runner.join_token,
+      static_config: false,
+    }
+  }
+
+  fn static_runner_info(&self, runner: StaticRunner, now: i64) -> RunnerInfo {
+    let status = if runner.last_seen_ms > 0 && now - runner.last_seen_ms <= MISSED_HEARTBEATS * self.heartbeat_interval_ms() {
+      RunnerStatus::Online
+    } else {
+      RunnerStatus::Offline
+    };
+    RunnerInfo {
+      host: self.runner_host(&runner.name),
+      name: runner.name,
+      capabilities: runner.capabilities,
+      labels: runner.labels,
+      status,
+      created_ms: runner.created_ms,
+      last_seen_ms: runner.last_seen_ms,
+      rotating: false,
+      join_token: String::new(),
+      static_config: true,
     }
   }
 }
@@ -191,11 +242,22 @@ impl Runners for Daemon {
   }
 
   async fn heartbeat(&self, runner: &str, mut reported: RunnerReport) -> Result<Beat> {
-    if !self.state.client_execution_active(runner, now_ms()).await.map_err(|e| control_error(e, false))? {
+    self.static_runners.reload(&self.links);
+    let now = now_ms();
+    let host = reported.host.take();
+    if self.static_runners.heartbeat(runner, report(reported.clone()), now).map_err(|error| control_error(error, false))? {
+      if let Some(host) = host {
+        needy_common::sync::lock(&self.runner_hosts).insert(runner.to_string(), host);
+      }
+      return Ok(Beat {
+        credential: None,
+        heartbeat_interval_ms: self.heartbeat_interval_ms(),
+      });
+    }
+    if !self.state.client_execution_active(runner, now).await.map_err(|e| control_error(e, false))? {
       return Err(ControlError::Unauthenticated("client execution invocation ended or reservation expired".into()));
     }
-    let host = reported.host.take();
-    let credential = self.state.heartbeat(runner, report(reported), now_ms()).await.map_err(|error| control_error(error, true))?;
+    let credential = self.state.heartbeat(runner, report(reported), now).await.map_err(|error| control_error(error, true))?;
     // Only an accepted heartbeat tells the control plane about a machine.
     if let Some(host) = host {
       needy_common::sync::lock(&self.runner_hosts).insert(runner.to_string(), host);
@@ -210,24 +272,38 @@ impl Runners for Daemon {
   }
 
   async fn runners(&self) -> Result<Vec<RunnerInfo>> {
+    self.static_runners.reload(&self.links);
     let now = now_ms();
     let runners = self.state.runners().await.map_err(|error| control_error(error, false))?;
-    let mut shared = Vec::new();
+    let mut merged: std::collections::BTreeMap<String, RunnerInfo> = std::collections::BTreeMap::new();
     for runner in runners {
       if self.state.client_execution(&runner.name).await.map_err(|e| control_error(e, false))?.is_none() {
-        shared.push(self.runner_info(runner, now));
+        let info = self.runner_info(runner, now);
+        merged.insert(info.name.clone(), info);
       }
     }
-    Ok(shared)
+    for runner in self.static_runners.list() {
+      let info = self.static_runner_info(runner, now);
+      merged.insert(info.name.clone(), info);
+    }
+    Ok(merged.into_values().collect())
   }
 
   async fn rotate(&self, runner: &str) -> Result<()> {
+    self.static_runners.reload(&self.links);
+    if self.static_runners.contains(runner) {
+      return Err(ControlError::Failed(format!("runner {runner} is statically configured and cannot be rotated")));
+    }
     self.state.rotate(runner).await.map_err(|error| control_error(error, true))?;
     tracing::info!("runner {runner}: credential rotation asked for");
     Ok(())
   }
 
   async fn remove(&self, runner: &str) -> Result<()> {
+    self.static_runners.reload(&self.links);
+    if self.static_runners.contains(runner) {
+      return Err(ControlError::Failed(format!("runner {runner} is statically configured and cannot be removed")));
+    }
     self.state.remove(runner, now_ms()).await.map_err(|error| control_error(error, true))?;
     // Its control stream ends; connecting again, the runner is refused.
     self.links.close(runner);
@@ -238,6 +314,14 @@ impl Runners for Daemon {
   async fn credential(&self, token: &str) -> Result<Credential> {
     if !store::is_runner_credential(token) {
       return Ok(Credential::Other);
+    }
+    self.static_runners.reload(&self.links);
+    if let Some((name, matched)) = self.static_runners.authenticate(token) {
+      return Ok(if matched {
+        Credential::Runner(name)
+      } else {
+        Credential::Refused
+      });
     }
     Ok(match self.state.authenticate(token).await {
       Ok(Some(name)) => {
@@ -256,9 +340,13 @@ impl Runners for Daemon {
   }
 
   async fn control(&self, runner: &str, results: FromRunner<ControlRequest>) -> Result<ToRunner<ControlResponse>> {
+    self.static_runners.reload(&self.links);
+    let now = now_ms();
     // A runner connecting, such as again after a restart of the control
     // plane, is seen now, not at its next heartbeat.
-    self.state.seen(runner, now_ms()).await.map_err(|error| control_error(error, true))?;
+    if !self.static_runners.seen(runner, now) {
+      self.state.seen(runner, now).await.map_err(|error| control_error(error, true))?;
+    }
     // The runner's report goes to `reconcile`, outside the stream's reader.
     let daemon = self.clone();
     let on_report: crate::link::OnReport = Box::new(move |runner, report| {

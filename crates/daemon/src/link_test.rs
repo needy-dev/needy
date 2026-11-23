@@ -44,6 +44,7 @@ impl Setup {
       state_dir: state.path().to_path_buf(),
       control: Some(proxy.endpoint.clone()),
       join_token: Some(token),
+      credential: None,
       name: "mac".into(),
       capabilities: crate::testing::capabilities("executor(native)"),
       labels: BTreeMap::new(),

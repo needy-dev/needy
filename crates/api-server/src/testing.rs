@@ -428,6 +428,7 @@ fn fake_runner(name: &str) -> RunnerInfo {
     rotating: false,
     join_token: "t1".into(),
     host: None,
+    static_config: false,
   }
 }
 
