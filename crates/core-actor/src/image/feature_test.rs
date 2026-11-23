@@ -329,13 +329,7 @@ fn builtin_sshfs_has_valid_metadata_passes_check_allowed_and_packs_install_sh() 
 
 #[test]
 fn all_embedded_builtin_features_are_valid_and_pack_executable_install_sh() {
-  let expected_refs = [
-    "builtin:sshfs",
-    "builtin:codex",
-    "builtin:pi",
-    "builtin:opencode",
-    "builtin:herdr",
-  ];
+  let expected_refs = ["builtin:sshfs"];
   let all = all_builtins();
   let actual_refs: Vec<&str> = all.iter().map(|f| f.reference).collect();
   assert_eq!(actual_refs, expected_refs);
@@ -366,40 +360,6 @@ fn all_embedded_builtin_features_are_valid_and_pack_executable_install_sh() {
     assert!(saw_install_exec, "{reference} archive must contain executable install.sh");
   }
 
-  // Agent features declare sync mappings for their state directories.
-  let codex_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:codex").unwrap().metadata_json).unwrap();
-  assert_eq!(
-    codex_meta.depends_on["ghcr.io/devcontainers/features/python:1"]["installTools"],
-    devcontainer_features::OptionValue::Bool(false)
-  );
-  let codex_files = &codex_meta.customizations.needy.unwrap().files;
-  assert_eq!(codex_files["codex"].path, "~/.codex");
-
-  let pi_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:pi").unwrap().metadata_json).unwrap();
-  let pi_files = &pi_meta.customizations.needy.unwrap().files;
-  assert_eq!(pi_files["pi"].path, "~/.pi/agent");
-
-  let opencode_builtin = builtin("builtin:opencode").unwrap();
-  let opencode_meta = needy_core::image::FeatureMetadata::parse(opencode_builtin.metadata_json).unwrap();
-  let opencode_files = &opencode_meta.customizations.needy.unwrap().files;
-  assert_eq!(opencode_files["opencode"].path, "~/.local/share/opencode");
-  assert_eq!(
-    opencode_files["opencode"].on_conflict,
-    vec![("opencode.db*".to_string(), needy_config::profile::OnConflict::Driver("needy-merge-sqlite".into()))]
-  );
-  let opencode_archive = opencode_builtin.archive().unwrap();
-  let mut opencode_tar = tar::Archive::new(opencode_archive.as_slice());
-  let mut saw_driver_exec = false;
-  for entry in opencode_tar.entries().unwrap() {
-    let entry = entry.unwrap();
-    if entry.path().unwrap() == Path::new("needy-merge-sqlite") {
-      let mode = entry.header().mode().unwrap();
-      assert_eq!(mode & 0o111, 0o111, "needy-merge-sqlite must be executable, got {mode:#o}");
-      saw_driver_exec = true;
-    }
-  }
-  assert!(saw_driver_exec, "builtin:opencode archive must bundle executable needy-merge-sqlite");
-
   assert!(builtin("builtin:nonexistent").is_none());
 }
 
@@ -407,11 +367,11 @@ fn all_embedded_builtin_features_are_valid_and_pack_executable_install_sh() {
 fn feature_store_fetch_builtin_caches_without_network() {
   let cache = tempfile::tempdir().unwrap();
   let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap();
-  let fetched = store.fetch_builtin("builtin:codex").unwrap();
-  assert_eq!(fetched.digest, builtin("builtin:codex").unwrap().digest());
+  let fetched = store.fetch_builtin("builtin:sshfs").unwrap();
+  assert_eq!(fetched.digest, builtin("builtin:sshfs").unwrap().digest());
   assert!(fetched.archive_path.is_file());
   let meta = needy_core::image::FeatureMetadata::parse(&fetched.metadata_json).unwrap();
-  assert_eq!(meta.id, "codex");
+  assert_eq!(meta.id, "sshfs");
 
   // Unknown builtin reference fails with InvalidReference.
   assert!(matches!(store.fetch_builtin("builtin:unknown"), Err(Error::InvalidReference(_, _))));

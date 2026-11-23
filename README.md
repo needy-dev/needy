@@ -497,7 +497,7 @@ actor:
   image:
     root: ubuntu:24.04               # optional; defaults to ubuntu:24.04
     layers:
-      - feature: builtin:opencode    # Dev Container feature (builtin, OCI, https, or local path)
+      - feature: ghcr.io/needy-dev/features/opencode:1  # Dev Container feature (OCI, builtin:sshfs, https, or local path)
       - run: apt-get update && apt-get install -y jq
     env: { OPENCODE_DISABLE_AUTOUPDATE: "1" }
     hooks:
