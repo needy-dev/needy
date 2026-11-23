@@ -22,7 +22,10 @@ etcetera.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
 gethostname.workspace = true
+http.workspace = true
 humantime.workspace = true
+hyper = { workspace = true, features = ["http2"] }
+hyper-util = { workspace = true, features = ["http2"] }
 ignore.workspace = true
 indicatif.workspace = true
 libc.workspace = true
@@ -44,9 +47,13 @@ serde_path_to_error.workspace = true
 sha2.workspace = true
 shell-words.workspace = true
 tar.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
 tonic = { workspace = true, features = ["transport"] }
+tower.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true

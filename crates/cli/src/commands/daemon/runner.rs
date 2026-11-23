@@ -12,8 +12,16 @@ pub struct RunnerArgs {
   pub(crate) address: Option<String>,
   #[arg(long)]
   pub(crate) actor_image: Option<PathBuf>,
-  #[arg(long, hide = true)]
+  #[arg(long)]
+  pub(crate) guest_needy: Option<PathBuf>,
+  #[arg(long)]
   pub(crate) kvm: Option<PathBuf>,
+  #[arg(long)]
+  pub(crate) work_dir: Option<PathBuf>,
+  #[arg(long)]
+  pub(crate) gateway: Option<String>,
+  #[arg(long)]
+  pub(crate) ephemeral: bool,
   #[arg(long)]
   pub(crate) join: Option<String>,
   #[arg(long, conflicts_with = "join_token_file")]
@@ -136,6 +144,16 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     Some(address) => address.to_string(),
     None => "saved control connection".to_string(),
   };
+  #[cfg(unix)]
+  let actor = (!capabilities.actor.is_empty()).then(|| needy_daemon::runner::ActorConfig {
+    gateway: args.gateway.clone(),
+    actor_image: image.clone(),
+    vm_images: paths.images(),
+    guest_disks: paths.guest_disks(),
+    guest_needy: args.guest_needy.clone(),
+    kvm: kvm.clone(),
+    work_dir: args.work_dir.clone(),
+  });
   let config = needy_daemon::runner::Config {
     state_dir: paths.state,
     control,
@@ -146,6 +164,9 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     labels: args.labels.into_iter().collect(),
     grace: args.disconnect_grace.unwrap_or(needy_daemon::runner::DISCONNECT_GRACE),
     activity_hook,
+    ephemeral: args.ephemeral,
+    #[cfg(unix)]
+    actor,
   };
   if joining {
     let progress = crate::output::Progress::new(

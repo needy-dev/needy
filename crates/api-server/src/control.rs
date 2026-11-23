@@ -191,7 +191,7 @@ impl std::fmt::Debug for NewRun {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RunInfo {
   pub id: String,
   pub name: String,
@@ -230,6 +230,31 @@ pub struct RunInfo {
   /// Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the CLI
   /// to record in the image's lockfile.
   pub resolved_features: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for RunInfo {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("RunInfo")
+      .field("id", &self.id)
+      .field("name", &self.name)
+      .field("group", &self.group)
+      .field("state", &self.state)
+      .field("executors", &self.executors)
+      .field("released", &self.released)
+      .field("lost", &self.lost)
+      .field("created_ms", &self.created_ms)
+      .field("last_activity_ms", &self.last_activity_ms)
+      .field("profile", &self.profile)
+      .field("actor_exit", &self.actor_exit)
+      .field("tty", &self.tty)
+      .field("failure", &self.failure)
+      .field("actor", &self.actor)
+      .field("workspace", &self.workspace)
+      .field("snapshot", &self.snapshot)
+      .field("commit_rebased", &self.commit_rebased)
+      .field("resolved_features", &self.resolved_features)
+      .finish()
+  }
 }
 
 /// Where a run's workspace is.
@@ -723,6 +748,25 @@ pub trait Guest: Send + Sync + 'static {
   /// each change, and a graceful stop when `run stop` asks for one. Init
   /// holds it for the actor's life; it ends when the run or the actor does.
   async fn control(&self, run: &str) -> Result<GuestControls>;
+  /// Outbound actor host bridge lifecycle, console, and reverse terminal
+  /// control stream for a remote actor run.
+  async fn bridge(
+    &self,
+    _run: &str,
+    _inbound: FromRunner<needy_api_proto::v1::BridgeRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::BridgeResponse>> {
+    Err(ControlError::Unavailable("actor bridge is not supported on this service".into()))
+  }
+  /// Outbound stream opened by a remote actor host bridge for an announced
+  /// reverse terminal exec task.
+  async fn terminal_task(
+    &self,
+    _run: &str,
+    _task: u64,
+    _responses: FromRunner<needy_api_proto::v1::TerminalTaskRequest>,
+  ) -> Result<ToRunner<needy_api_proto::v1::TerminalTaskResponse>> {
+    Err(ControlError::Unavailable("actor terminal tasks are not supported on this service".into()))
+  }
 }
 
 // -------------------------------------------------------------- runners
@@ -840,15 +884,17 @@ pub struct RunnerInfo {
 }
 
 /// Request to mint a short-lived, TTL-enforced runner credential directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MintRunnerCredential {
   pub name: String,
   pub ttl_ms: i64,
+  /// The roles the runner may declare; empty allows every role.
   pub roles: BTreeSet<RunnerRole>,
+  /// Labels applied to the runner.
   pub labels: BTreeMap<String, String>,
 }
 
-/// Reply to [`Runners::mint_credential`].
+/// A newly minted short-lived runner credential.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MintedRunnerCredential {
   pub runner: RunnerInfo,
@@ -857,7 +903,7 @@ pub struct MintedRunnerCredential {
   pub heartbeat_interval_ms: i64,
 }
 
-/// What a bearer token is to the runner registry or the client registry.
+/// What a bearer token is to the runner or client registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Credential {
   /// The credential of this runner.
@@ -868,8 +914,8 @@ pub enum Credential {
     name: String,
     access: ClientAccess,
   },
-  /// Shaped like a runner credential or a client token, but nobody holds
-  /// it: removed, revoked, rotated away, or never issued.
+  /// Shaped like a runner credential or a client token, but nobody holds it:
+  /// removed, revoked, rotated away, or never issued.
   Refused,
   /// Not a credential of this registry.
   Other,

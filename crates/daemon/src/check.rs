@@ -92,9 +92,11 @@ impl Daemon {
 
     match schedule::placement(profile.actor.runner.as_ref(), Need::Actor(profile.actor.driver), &runners) {
       Ok(placement) => {
-        if let Some(refusal) = self.actor_refusal(&placement) {
-          check.findings.push(error(format!("actor: {refusal}")));
-        } else {
+        let local_actor = match &placement {
+          Placement::ControlHost => true,
+          Placement::Runner(name) => self.is_local(name),
+        };
+        if local_actor {
           // A driver this daemon lacks is already a finding of
           // `validate::profile`.
           if let Ok(driver) = crate::actor::driver_for(self, &profile.actor) {

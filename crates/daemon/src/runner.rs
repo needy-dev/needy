@@ -97,6 +97,10 @@ pub fn credential_name(credential: &str) -> Option<&str> {
   (prefix == "needy-runner" && !name.is_empty() && !secret.is_empty()).then_some(name)
 }
 
+/// Host-side configuration used when a runner accepts `StartActor` tasks.
+#[cfg(unix)]
+pub use crate::actor_runner::ActorConfig;
+
 /// How a runner starts.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -120,6 +124,12 @@ pub struct Config {
   pub grace: Duration,
   /// Optional throttled shell hook triggered on active exec / SFTP streams.
   pub activity_hook: Option<ActivityHookConfig>,
+  /// When true, exit cleanly after serving a single actor run (or a single
+  /// `EndRun` in executor-only mode).
+  pub ephemeral: bool,
+  /// Host-side actor configuration used when accepting `StartActor` tasks.
+  #[cfg(unix)]
+  pub actor: Option<ActorConfig>,
 }
 
 /// Runtime selections saved at enrollment. Role/image serve overrides are
@@ -251,6 +261,9 @@ pub struct Runner {
   interval: Option<Duration>,
   grace: Duration,
   activity_hook: Option<Arc<ActivityHook>>,
+  ephemeral: bool,
+  #[cfg(unix)]
+  actor: Option<ActorConfig>,
 }
 
 impl Runner {
@@ -309,6 +322,9 @@ impl Runner {
       interval,
       grace: config.grace,
       activity_hook: config.activity_hook.map(ActivityHook::new),
+      ephemeral: config.ephemeral,
+      #[cfg(unix)]
+      actor: config.actor,
     })
   }
 
@@ -397,7 +413,9 @@ fn host() -> RunnerHost {
 /// credential.
 fn refusal(path: &Path, read_only: bool) -> anyhow::Error {
   if read_only {
-    anyhow::anyhow!("the control plane refused this runner's credential: the credential was removed, revoked, or expired")
+    anyhow::anyhow!(
+      "the control plane refused this runner's credential: the credential was revoked, expired, or removed from static configuration"
+    )
   } else {
     anyhow::anyhow!(
       "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
@@ -482,6 +500,8 @@ impl Runner {
       headers: std::collections::BTreeMap::new(),
       bound_run: None,
       ended: Arc::new(AtomicBool::new(false)),
+      ephemeral: self.ephemeral,
+      ephemeral_claimed: Arc::new(AtomicBool::new(false)),
       name: self.name().to_string(),
       path: self.path.clone(),
       read_only: self.read_only,
@@ -491,6 +511,8 @@ impl Runner {
       grace: self.grace,
       orphaned: Mutex::default(),
       activity_hook: self.activity_hook.clone(),
+      #[cfg(unix)]
+      actor: self.actor.clone(),
     };
     let tasks = dialer.tasks.clone();
     let dialing = {
@@ -520,6 +542,8 @@ struct Dialer {
   /// its processes through an arbitrarily long control disconnection.
   bound_run: Option<String>,
   ended: Arc<AtomicBool>,
+  ephemeral: bool,
+  ephemeral_claimed: Arc<AtomicBool>,
   name: String,
   /// `runner.json`, named when the credential is refused.
   path: PathBuf,
@@ -534,6 +558,8 @@ struct Dialer {
   /// processes of runs that the grace period would end.
   orphaned: Mutex<Option<CancellationToken>>,
   activity_hook: Option<Arc<ActivityHook>>,
+  #[cfg(unix)]
+  actor: Option<ActorConfig>,
 }
 
 impl Dialer {
@@ -669,6 +695,7 @@ impl Dialer {
           }
           runner_task::Kind::KillProcess(request) => self.service.host.list().iter().any(|p| p.id == request.process_id && p.run_id == *run),
           runner_task::Kind::Exec(_) => true, // The first ExecRequest is checked below.
+          runner_task::Kind::StartActor(_) => false,
         };
         if !allowed {
           let error = ControlError::denied("task does not belong to this client execution invocation");
@@ -703,8 +730,49 @@ impl Dialer {
             }
           });
         }
+        runner_task::Kind::StartActor(start) => {
+          if self.ephemeral && self.ephemeral_claimed.swap(true, Ordering::SeqCst) {
+            tracing::warn!("runner {}: ignoring StartActor for run {} because --ephemeral already claimed a run", self.name, start.run_id);
+            continue;
+          }
+          #[cfg(unix)]
+          {
+            let Some(actor_config) = self.actor.clone() else {
+              tracing::warn!("runner {}: received StartActor for run {} without actor configuration", self.name, start.run_id);
+              if self.ephemeral {
+                stop.cancel();
+              }
+              continue;
+            };
+            let control = self.control.clone();
+            let credential = needy_common::sync::lock(&self.credential).clone();
+            let name = self.name.clone();
+            let ephemeral = self.ephemeral;
+            let stop = stop.clone();
+            self.tasks.spawn(async move {
+              if let Err(e) =
+                crate::actor_runner::run_actor(&control, &credential, &start.run_id, &start.driver, &actor_config, stop.clone()).await
+              {
+                tracing::warn!("runner {name}: actor for run {}: {e:#}", start.run_id);
+              }
+              if ephemeral {
+                stop.cancel();
+              }
+            });
+          }
+          #[cfg(not(unix))]
+          {
+            tracing::warn!("runner {}: StartActor for run {} requires Unix", self.name, start.run_id);
+            if self.ephemeral {
+              stop.cancel();
+            }
+          }
+        }
         kind => {
+          let is_end_run = matches!(kind, runner_task::Kind::EndRun(_));
           let results = results.clone();
+          let ephemeral = self.ephemeral;
+          let ephemeral_claimed = self.ephemeral_claimed.clone();
           self.tasks.spawn(async move {
             let Some(result) = stop.run_until_cancelled(answer(&service, kind)).await else {
               return;
@@ -718,6 +786,9 @@ impl Dialer {
             // The stream ended; the control plane gave up on the task.
             if results.send(message).await.is_err() {
               tracing::debug!("task {id}: the control stream ended before its result");
+            }
+            if is_end_run && ephemeral && !ephemeral_claimed.load(Ordering::SeqCst) {
+              stop.cancel();
             }
           });
         }
@@ -738,6 +809,7 @@ async fn answer(service: &ExecutorService, kind: runner_task::Kind) -> task_resu
     }
     runner_task::Kind::EndRun(request) => Ok(task_result::Result::EndRun(end_run(service, &request.run_id).await)),
     runner_task::Kind::Exec(_) => Err(tonic::Status::invalid_argument("an exec task has its own stream")),
+    runner_task::Kind::StartActor(_) => Err(tonic::Status::invalid_argument("a start_actor task runs asynchronously")),
   };
   answered.unwrap_or_else(|status| task_result::Result::Error(task_error(&status)))
 }
@@ -957,7 +1029,7 @@ pub async fn serve_with_labels(config: Config, persist_labels: bool) -> Result<(
   let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
   let served = async {
     let mut runner = Runner::start(config).await?;
-    if persist_labels {
+    if persist_labels && !runner.read_only {
       runner.beat().await.context("runner label overrides were not accepted; saved settings are unchanged")?;
       runner.enrollment.settings.labels = runner.labels.clone();
       store(&runner.path, &runner.enrollment)?;
@@ -1011,6 +1083,8 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
     headers: config.headers.clone(),
     bound_run: Some(config.run),
     ended: Arc::new(AtomicBool::new(false)),
+    ephemeral: false,
+    ephemeral_claimed: Arc::new(AtomicBool::new(false)),
     name: config.holder.clone(),
     path: config.directory.clone(),
     read_only: true,
@@ -1020,6 +1094,8 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
     grace: DISCONNECT_GRACE,
     orphaned: Mutex::default(),
     activity_hook: None,
+    #[cfg(unix)]
+    actor: None,
   };
   let tasks = dialer.tasks.clone();
   let heartbeats = async {

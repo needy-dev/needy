@@ -362,6 +362,9 @@ pub enum Scenario {
   HostExec,
   /// `needy fs cp` outside any run, into a nested directory and back.
   HostCopy,
+  /// Control daemon without KVM, static-credential runner with activity hook,
+  /// and outbound `needy actor serve` Firecracker bridge.
+  RemoteActorHost,
 }
 
 /// One cell: a scenario with every dimension fixed.
@@ -440,6 +443,7 @@ impl Cell {
       Scenario::Service => format!("{driver}/service/user"),
       Scenario::Image => format!("{driver}/image"),
       Scenario::ImageFeature => format!("{driver}/image-feature"),
+      Scenario::RemoteActorHost => format!("{driver}/remote-actor-host"),
     }
   }
 
@@ -469,6 +473,7 @@ impl Cell {
         "actor and routed-command writes on creating client",
       ],
       Scenario::Runner(_) => vec![],
+      Scenario::RemoteActorHost => vec!["workspace from executor (mount)"],
       Scenario::HostCopy => vec!["fs cp host->executor nested", "fs cp executor->host"],
       _ => vec![],
     }
@@ -485,6 +490,7 @@ impl Cell {
     match self.scenario {
       Scenario::Network(net) => net.name(),
       Scenario::Chaos(Fault::Net) => "service",
+      Scenario::RemoteActorHost => "allow+deny",
       _ => "none",
     }
   }
@@ -511,7 +517,10 @@ impl Cell {
   /// Whether the actor's workspace is mounted from an executor, which a
   /// `linux-container` actor does with sshfs on the host.
   pub fn mounts_workspace(&self) -> bool {
-    matches!(self.scenario, Scenario::Workspace(Workspace::Executor(_)) | Scenario::Chaos(Fault::File) | Scenario::ClientExecution(_))
+    matches!(
+      self.scenario,
+      Scenario::Workspace(Workspace::Executor(_)) | Scenario::Chaos(Fault::File) | Scenario::ClientExecution(_) | Scenario::RemoteActorHost
+    )
   }
 }
 
@@ -620,6 +629,9 @@ pub fn cells() -> Vec<Cell> {
           ..cell(Scenario::Lifecycle(journey))
         });
       }
+    }
+    if driver == Driver::Firecracker {
+      cells.push(cell(Scenario::RemoteActorHost));
     }
     cells.push(cell(Scenario::Image));
     cells.push(cell(Scenario::ImageFeature));

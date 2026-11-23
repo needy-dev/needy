@@ -44,6 +44,10 @@ pub mod runner;
 #[cfg(unix)]
 mod actor;
 #[cfg(unix)]
+mod actor_runner;
+#[cfg(unix)]
+mod bridge;
+#[cfg(unix)]
 mod chaos;
 #[cfg(unix)]
 mod check;
@@ -178,12 +182,12 @@ pub struct Config {
   /// reported as a conflict: [`MERGE_DRIVER_TIMEOUT`] outside tests.
   #[serde(default = "default_merge_driver_timeout")]
   pub merge_driver_timeout: Duration,
-  /// Optional path to a YAML/JSON file containing pre-provisioned static runner
-  /// credentials (hot-reloaded when modified).
+  /// Optional YAML/JSON file containing pre-provisioned static runner
+  /// credentials, hot-reloaded on mtime/inode change without restarting the
+  /// daemon.
   #[serde(default)]
   pub runners_file: Option<PathBuf>,
-  /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host
-  /// workspaces).
+  /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host workspaces).
   #[serde(default)]
   pub disable_host_files: bool,
   /// Restrict `host:` file mappings to canonical paths inside this directory.

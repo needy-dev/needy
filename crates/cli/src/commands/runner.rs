@@ -146,8 +146,21 @@ struct ServeArgs {
   /// Path to the base actor VM image directory on this machine.
   #[arg(long)]
   actor_image: Option<std::path::PathBuf>,
-  #[arg(long, hide = true)]
+  /// Path to the guest `needy` binary injected into actor VMs.
+  #[arg(long)]
+  guest_needy: Option<std::path::PathBuf>,
+  /// Path to the KVM device (defaults to `/dev/kvm`).
+  #[arg(long)]
   kvm: Option<std::path::PathBuf>,
+  /// Working directory for temporary actor VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
+  #[arg(long)]
+  work_dir: Option<std::path::PathBuf>,
+  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs.
+  #[arg(long, alias = "gateway-address")]
+  gateway: Option<String>,
+  /// Serve a single actor run (or a single bound run in executor mode) and exit cleanly.
+  #[arg(long)]
+  ephemeral: bool,
   #[arg(long, hide = true, value_parser = humantime::parse_duration)]
   disconnect_grace: Option<Duration>,
   /// Shell command invoked asynchronously (throttled) when routed exec or SFTP streams are active.
@@ -407,7 +420,11 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           name: args.name,
           address: args.address,
           actor_image: args.actor_image,
+          guest_needy: args.guest_needy,
           kvm: args.kvm,
+          work_dir: args.work_dir,
+          gateway: args.gateway,
+          ephemeral: args.ephemeral,
           join: None,
           join_token_env: None,
           join_token_file: None,
@@ -479,7 +496,11 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
       name: Some(args.name),
       address: None,
       actor_image: args.actor_image,
+      guest_needy: None,
       kvm: args.kvm,
+      work_dir: None,
+      gateway: None,
+      ephemeral: false,
       join: Some(address),
       join_token_env: None,
       join_token_file: None,

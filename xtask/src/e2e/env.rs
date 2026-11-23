@@ -185,6 +185,10 @@ impl<'a> CellEnv<'a> {
     command
   }
 
+  pub fn needy_command(&self, args: &[&str]) -> Command {
+    self.command(args)
+  }
+
   /// `needy ARGS` against this cell's daemon.
   pub fn needy(&self, args: &[&str], timeout: Duration) -> Result<Output> {
     proc::run(self.command(args), timeout)
@@ -237,7 +241,6 @@ impl<'a> CellEnv<'a> {
       std::fs::create_dir_all(self.dir.join("d"))?;
       std::os::unix::fs::symlink(built, &images).with_context(|| format!("cannot link {}", images.display()))?;
     }
-    let log = File::options().create(true).append(true).open(self.dir.join("daemon.log"))?;
     let mut args = vec![
       "daemon".to_string(),
       "serve".into(),
@@ -260,6 +263,20 @@ impl<'a> CellEnv<'a> {
     if let Some(image) = &self.ctx.host.vm_image {
       args.extend(["--actor-image".into(), image.display().to_string()]);
     }
+    self.spawn_daemon(&args)
+  }
+
+  /// Starts this cell's control daemon with an explicit `daemon serve` flag
+  /// list (for scenarios that override KVM, host-file, or gateway settings).
+  pub fn start_daemon_custom(&mut self, serve_args: &[String]) -> Result<()> {
+    anyhow::ensure!(self.daemon.is_none(), "this cell already owns a control child");
+    let mut args = vec!["daemon".to_string(), "serve".into()];
+    args.extend(serve_args.iter().cloned());
+    self.spawn_daemon(&args)
+  }
+
+  fn spawn_daemon(&mut self, args: &[String]) -> Result<()> {
+    let log = File::options().create(true).append(true).open(self.dir.join("daemon.log"))?;
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let mut command = self.command(&args);
     command.stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);

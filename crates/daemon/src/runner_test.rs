@@ -44,6 +44,8 @@ fn config(served: &Served, state_dir: &std::path::Path, join_token: Option<Strin
     labels: BTreeMap::from([("os".to_string(), "darwin".to_string())]),
     grace: crate::runner::DISCONNECT_GRACE,
     activity_hook: None,
+    ephemeral: false,
+    actor: None,
   }
 }
 
@@ -217,6 +219,7 @@ async fn activity_hook_is_throttled_and_nonzero_exit_does_not_abort_exec() {
     .into_inner();
   let state = tempfile::tempdir().unwrap();
   let log = state.path().join("hook.log");
+  // The hook appends a line AND exits non-zero to verify failures never abort tasks.
   let hook_cmd = format!("echo tick >> '{}' && exit 7", log.display());
   let mut cfg = config(&served, state.path(), None);
   cfg.name = "hooked".into();
@@ -230,6 +233,7 @@ async fn activity_hook_is_throttled_and_nonzero_exit_does_not_abort_exec() {
   let _serving = tokio::spawn(runner.serve(stop.clone()));
   eventually("runner connects", async || served.daemon().links.get("hooked").is_some()).await;
 
+  // Run two commands back-to-back within the 60s throttle window.
   for expected in ["first", "second"] {
     let spec = ExecSpec {
       argv: vec!["sh".into(), "-c".into(), format!("echo {expected}")],
@@ -261,6 +265,7 @@ async fn activity_hook_is_throttled_and_nonzero_exit_does_not_abort_exec() {
   }
 
   eventually("hook wrote tick", async || std::fs::read_to_string(&log).is_ok_and(|s| !s.is_empty())).await;
+  // Give any spurious unthrottled hooks a moment to land, then assert only 1 fired.
   tokio::time::sleep(Duration::from_millis(100)).await;
   let ticks: Vec<_> = std::fs::read_to_string(&log).unwrap().lines().map(str::to_string).collect();
   assert_eq!(ticks.len(), 1, "hook must be throttled within interval, got {ticks:?}");

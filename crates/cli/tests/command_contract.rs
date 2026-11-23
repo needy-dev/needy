@@ -133,7 +133,12 @@ fn runner_serve_exposes_preprovisioned_credential_and_activity_hook_flags() {
     "--credential-env",
     "--credential-file",
     "--activity-hook",
+    "--ephemeral",
+    "--gateway",
     "--actor-image",
+    "--guest-needy",
+    "--kvm",
+    "--work-dir",
   ] {
     assert!(help.contains(flag), "runner serve --help must expose {flag}:\n{help}");
   }

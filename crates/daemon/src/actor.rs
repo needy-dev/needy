@@ -34,7 +34,7 @@ use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 // NOTICE: the guest's state is not kept, so the actor gets a short time to
 // exit on `SIGTERM` before it is killed; a run's stop waits this long at
 // most for its actor.
-const VM_STOP_GRACE: Duration = Duration::from_secs(3);
+pub(crate) const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// What this host gives every actor driver: the actor image, the KVM
 /// device and where guest disks go, as the daemon was configured.
@@ -347,6 +347,28 @@ const TERMINAL_WAIT: Duration = Duration::from_secs(60);
 /// Firecracker), once it answers ([`answers`]). Waits for the actor to serve
 /// it while the run runs. The actor is ready from then on.
 pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, ControlError> {
+  if run.is_remote_actor() {
+    // Remote actor bridges register `run.terminal` when the guest's terminal
+    // process service answers (`BridgeTerminalReady`). Wait until it arrives
+    // or the run stops.
+    let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
+    loop {
+      if let Some(instance) = run.terminal.get() {
+        return Ok(instance.clone());
+      }
+      if run.cancel.is_cancelled() || run.actor.get() == Some(ActorState::Exited) {
+        return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id)));
+      }
+      if tokio::time::Instant::now() >= deadline {
+        return Err(ControlError::Unavailable(format!("timed out waiting for the terminal of run {}", run.id)));
+      }
+      tokio::select! {
+        () = run.cancel.cancelled() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
+        () = run.actor.exited() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
+        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+      }
+    }
+  }
   let channels = channels(daemon, run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
   let client = connect_terminal(&channels, &run.cancel, &format!("run {}", run.id)).await?;
   if advance(run, ActorState::Ready) {
@@ -477,6 +499,26 @@ pub(crate) fn serve_gateway(daemon: &Daemon, run: &Arc<Run>, actor: &Cancellatio
   Ok(())
 }
 
+/// Prepares a remote actor run without starting a local VM: advances the actor
+/// state to `Starting` and registers its per-run [`Gateway`] for the shared
+/// TCP gateway listener (authenticated by the Node Authorizer).
+pub(crate) fn start_remote(daemon: &Daemon, run: &Arc<Run>) {
+  advance(run, ActorState::Starting);
+  let policy = needy_core::network::Policy::actor(&run.profile.actor.network);
+  let activity_run = run.clone();
+  let egress = gateway::EgressPolicy::default().with_blocked_cidrs(daemon.gateway_blocked_cidrs.clone());
+  let options = gateway::GatewayOptions::default().with_egress(egress).with_on_activity(Arc::new(move || activity_run.touch_activity()));
+  let gateway = Arc::new(gateway::Gateway::with_options(
+    policy,
+    run.trace.clone(),
+    Network::Actor,
+    Some(run.injector.clone()),
+    run.cancel.child_token(),
+    options,
+  ));
+  run.set_gateway(gateway);
+}
+
 /// Removes the sockets of an actor of kind `kind` from the run's directory
 /// `dir`: the driver's channels and the control backends behind the holder.
 /// Only a completed invocation removes these; control suspend preserves them.
@@ -564,7 +606,7 @@ pub(crate) async fn watch(daemon: Daemon, run: Arc<Run>, name: &'static str, mut
 }
 
 /// Records in `state.db` that run `run`'s actor ended.
-async fn release_actor(daemon: &Daemon, run: &Run) {
+pub(crate) async fn release_actor(daemon: &Daemon, run: &Run) {
   daemon.advance_instance(&run.id, &store::actor_instance(&run.id), InstanceState::Released, needy_common::time::now_ms()).await;
 }
 
@@ -574,7 +616,7 @@ const FAILURE_LOG_LINES: usize = 5;
 /// Why a run whose VM exited before its driving program did failed: the
 /// VM's exit and the last lines of the log Firecracker and the guest's
 /// console share, on one line. `name` is the actor's driver.
-fn vm_failure(name: &str, exit: &ActorVmExit, log: &Path) -> String {
+pub(crate) fn vm_failure(name: &str, exit: &ActorVmExit, log: &Path) -> String {
   let status = match exit {
     ActorVmExit {
       error: Some(error), ..

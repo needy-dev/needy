@@ -6,9 +6,10 @@ use std::sync::Arc;
 use needy_api_proto::v1::guest_service_control_response::Message;
 use needy_api_proto::v1::guest_service_server::GuestService;
 use needy_api_proto::v1::{
-  FetchFilesRequest, FetchFilesResponse, GetConfigRequest, GetConfigResponse, GracefulStop, GuestServiceControlRequest,
-  GuestServiceControlResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest, PushFilesResponse, PushLayerRequest,
-  PushLayerResponse, ReportExitRequest, ReportExitResponse, RouteList,
+  BridgeRequest, BridgeResponse, FetchFilesRequest, FetchFilesResponse, GetConfigRequest, GetConfigResponse, GracefulStop,
+  GuestServiceControlRequest, GuestServiceControlResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest, PushFilesResponse,
+  PushLayerRequest, PushLayerResponse, ReportExitRequest, ReportExitResponse, RouteList, TerminalTaskRequest, TerminalTaskResponse,
+  terminal_task_request,
 };
 use needy_common::process::Exit;
 use needy_core::event::Event;
@@ -112,6 +113,29 @@ impl<G: Guest> GuestService for Adapter<G> {
         }),
       })
     }))))
+  }
+
+  type BridgeStream = Streamed<BridgeResponse>;
+
+  async fn bridge(&self, request: Request<Streaming<BridgeRequest>>) -> Result<Response<Self::BridgeStream>, Status> {
+    let run = self.run(&request)?;
+    let outbound = self.guest.bridge(&run, Box::pin(request.into_inner())).await?;
+    Ok(Response::new(Box::pin(outbound.map(Ok))))
+  }
+
+  type TerminalTaskStream = Streamed<TerminalTaskResponse>;
+
+  async fn terminal_task(&self, request: Request<Streaming<TerminalTaskRequest>>) -> Result<Response<Self::TerminalTaskStream>, Status> {
+    let run = self.run(&request)?;
+    let mut inbound = request.into_inner();
+    let Some(first) = inbound.message().await? else {
+      return Err(ControlError::Invalid("the terminal task stream ended before naming a task".into()).into());
+    };
+    let Some(terminal_task_request::Payload::TaskId(task)) = first.payload else {
+      return Err(ControlError::Invalid("the first message on a terminal task stream must be task_id".into()).into());
+    };
+    let outbound = self.guest.terminal_task(&run, task, Box::pin(inbound)).await?;
+    Ok(Response::new(Box::pin(outbound.map(Ok))))
   }
 }
 

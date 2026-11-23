@@ -337,7 +337,18 @@ message RunnerTask {
     // End everything the runner runs for a run. Answered on the control
     // stream.
     EndRun end_run = 5;
+    // Start a remote actor for a run and bridge its channels outbound to the
+    // control plane using this runner's credential and `x-needy-run-id`.
+    StartActor start_actor = 6;
   }
+}
+
+// Start a remote actor for `run_id` using `driver` (for example
+// `linux-firecracker`). The runner opens `GuestService.Bridge` with its own
+// credential and `x-needy-run-id: <run_id>`.
+message StartActor {
+  string run_id = 1;
+  string driver = 2;
 }
 
 // A run ended, or is not one the control plane knows: the runner kills its

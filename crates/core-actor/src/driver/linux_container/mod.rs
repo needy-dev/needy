@@ -131,18 +131,13 @@ impl LinuxContainer {
   /// The driver of `actor`, whose `container:` options name the OCI runtime
   /// (`validate::profile` refuses a profile without it first).
   pub fn of(actor: &Actor) -> Result<Self, Error> {
-    Self::of_with_engine(actor, engine::local())
-  }
-
-  /// Like [`Self::of`], using `engine` instead of the default local engine.
-  pub fn of_with_engine(actor: &Actor, engine: Arc<dyn Engine>) -> Result<Self, Error> {
     let Some(ContainerActor {
       oci_runtime: Some(oci_runtime),
     }) = &actor.container
     else {
       return Err(Error::Unsupported("actor.container.oci_runtime is missing".into()));
     };
-    let mut driver = Self::with_engine(*oci_runtime, actor.container_image(), engine);
+    let mut driver = Self::new(*oci_runtime, actor.container_image());
     driver.seed = actor.seed.as_ref().map(|seed| match seed {
       needy_config::profile::Seed::Int(n) => *n,
       needy_config::profile::Seed::String(s) => needy_common::seed::from_str(s),
