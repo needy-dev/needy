@@ -40,12 +40,32 @@ const METADATA_FILE: &str = "devcontainer-feature.json";
 /// Filename of the cached feature archive inside a cache entry directory.
 const ARCHIVE_FILE: &str = "feature.tar";
 
+/// Controls when [`FeatureStore`] consults a remote OCI registry for
+/// tag-based feature references, matching Kubernetes `imagePullPolicy`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PullPolicy {
+  /// Use a locally cached tag resolution when present; pull from the registry
+  /// only when not yet cached (the default).
+  #[default]
+  IfNotPresent,
+  /// Always query the remote OCI registry to resolve tags (still reusing the
+  /// locally cached archive blob when the resolved digest matches).
+  Always,
+  /// Never contact a remote OCI registry; fail with [`FetchError::NotCached`]
+  /// if the feature is not already present in the local cache.
+  Never,
+}
+
 /// Errors fetching or reading a cached OCI Dev Container feature.
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
   /// The feature reference string is not a valid OCI reference.
   #[error("invalid OCI feature reference {0:?}: {1}")]
   InvalidReference(String, String),
+  /// The feature is not present in the local cache and the pull policy forbids
+  /// network access.
+  #[error("feature {0:?} is not in the local cache (pull policy: never)")]
+  NotCached(String),
   /// OCI registry or transport error reported by `oci-client`.
   #[error("OCI registry error: {0}")]
   Registry(#[from] OciDistributionError),
@@ -359,14 +379,53 @@ impl FeatureStore {
     }))
   }
 
-  /// Fetches `reference` (or returns it from cache when pinned by digest and
-  /// already present). Concurrent fetches for the same reference share one
-  /// in-flight download.
+  /// Looks up a feature already cached under `reference` (by digest for
+  /// `@sha256:...` references, or via the local tag index for `:tag`
+  /// references), making no network calls.
+  pub fn get_cached_by_ref(&self, reference: &Reference) -> Result<Option<FetchedFeature>> {
+    if let Some(pinned) = reference.digest() {
+      return self.get_cached(&pinned);
+    }
+    let Some(path) = self.tag_index_path(reference) else {
+      return Ok(None);
+    };
+    let text = match std::fs::read_to_string(&path) {
+      Ok(text) => text,
+      Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+      Err(err) => return Err(io(path.display())(err)),
+    };
+    let Ok(digest) = Digest::parse(text.trim()) else {
+      return Ok(None);
+    };
+    self.get_cached(&digest)
+  }
+
+  /// Fetches `reference` using [`PullPolicy::IfNotPresent`] (preferring a
+  /// locally cached tag or digest entry before contacting the registry).
+  /// Concurrent fetches for the same reference share one in-flight download.
   pub async fn fetch(&self, reference: &Reference) -> Result<FetchedFeature> {
-    if let Some(pinned) = reference.digest()
-      && let Some(cached) = self.get_cached(&pinned)?
-    {
-      return Ok(cached);
+    self.fetch_with_policy(reference, PullPolicy::IfNotPresent).await
+  }
+
+  /// Fetches `reference` according to `policy`. Concurrent fetches for the
+  /// same reference share one in-flight download.
+  pub async fn fetch_with_policy(&self, reference: &Reference, policy: PullPolicy) -> Result<FetchedFeature> {
+    match policy {
+      PullPolicy::Never => {
+        return self.get_cached_by_ref(reference)?.ok_or_else(|| FetchError::NotCached(reference.to_string()));
+      }
+      PullPolicy::IfNotPresent => {
+        if let Some(cached) = self.get_cached_by_ref(reference)? {
+          return Ok(cached);
+        }
+      }
+      PullPolicy::Always => {
+        if let Some(pinned) = reference.digest()
+          && let Some(cached) = self.get_cached(&pinned)?
+        {
+          return Ok(cached);
+        }
+      }
     }
 
     let registry = self.registry_override.as_deref().unwrap_or(&reference.registry);
@@ -380,9 +439,15 @@ impl FeatureStore {
 
     let role = {
       let mut in_flight = self.in_flight.lock().unwrap_or_else(|p| p.into_inner());
-      if let Some(pinned) = reference.digest()
-        && let Some(cached) = self.get_cached(&pinned)?
-      {
+      let cached = match policy {
+        PullPolicy::IfNotPresent => self.get_cached_by_ref(reference)?,
+        PullPolicy::Always => match reference.digest() {
+          Some(pinned) => self.get_cached(&pinned)?,
+          None => None,
+        },
+        PullPolicy::Never => None,
+      };
+      if let Some(cached) = cached {
         Role::Cached(cached)
       } else if let Some(rx) = in_flight.get(&flight_key) {
         Role::Waiter(rx.clone())
@@ -437,10 +502,18 @@ impl FeatureStore {
   /// local cache with zero HTTP requests when already present and otherwise
   /// pulling directly by `@sha256:...` without resolving any tag.
   pub async fn fetch_pinned(&self, reference: &Reference, pinned: &Digest) -> Result<FetchedFeature> {
+    self.fetch_pinned_with_policy(reference, pinned, PullPolicy::IfNotPresent).await
+  }
+
+  /// Fetches `reference` pinned to `pinned` according to `policy`.
+  pub async fn fetch_pinned_with_policy(&self, reference: &Reference, pinned: &Digest, policy: PullPolicy) -> Result<FetchedFeature> {
     if let Some(cached) = self.get_cached(pinned)? {
       return Ok(cached);
     }
-    self.fetch(&reference.with_digest(*pinned)).await
+    if policy == PullPolicy::Never {
+      return Err(FetchError::NotCached(format!("{reference} ({pinned})")));
+    }
+    self.fetch_with_policy(&reference.with_digest(*pinned), policy).await
   }
 
   /// Writes `blob_bytes` and `metadata_json` atomically into the cache under
@@ -502,6 +575,7 @@ impl FeatureStore {
     }
 
     if let Some(cached) = self.get_cached(&manifest_digest)? {
+      self.record_tag(reference, &manifest_digest)?;
       return Ok(cached);
     }
 
@@ -535,7 +609,7 @@ impl FeatureStore {
     drop(archive_file);
 
     let target_dir = self.entry_dir(&manifest_digest);
-    tokio::task::spawn_blocking(move || {
+    let fetched = tokio::task::spawn_blocking(move || {
       let metadata_json = extract_metadata_from_file(&staged_archive)?;
       let staged_metadata = staged.path().join(METADATA_FILE);
       write_and_sync(&staged_metadata, metadata_json.as_bytes())?;
@@ -560,11 +634,38 @@ impl FeatureStore {
     .map_err(|e| FetchError::Io {
       context: format!("caching feature archive panicked: {e}"),
       source: std::io::Error::other(e.to_string()),
-    })?
+    })??;
+    self.record_tag(reference, &manifest_digest)?;
+    Ok(fetched)
   }
 
   fn entry_dir(&self, digest: &Digest) -> PathBuf {
     self.cache_dir.join("features").join(format!("sha256-{}", digest.hex()))
+  }
+
+  fn tag_index_path(&self, reference: &Reference) -> Option<PathBuf> {
+    let RefTarget::Tag(tag) = &reference.target else {
+      return None;
+    };
+    let registry = self.registry_override.as_deref().unwrap_or(&reference.registry);
+    let key = format!("{registry}/{}:{tag}", reference.repository);
+    let hash = Digest::of(key.as_bytes());
+    Some(self.cache_dir.join("features").join("tags").join(format!("sha256-{}", hash.hex())))
+  }
+
+  fn record_tag(&self, reference: &Reference, digest: &Digest) -> Result<()> {
+    let Some(path) = self.tag_index_path(reference) else {
+      return Ok(());
+    };
+    let Some(dir) = path.parent() else {
+      return Ok(());
+    };
+    std::fs::create_dir_all(dir).map_err(io(dir.display()))?;
+    let mut staged = tempfile::Builder::new().prefix(".tag-").tempfile_in(dir).map_err(io(dir.display()))?;
+    staged.write_all(format!("{digest}\n").as_bytes()).map_err(io(dir.display()))?;
+    staged.as_file().sync_all().map_err(io(dir.display()))?;
+    staged.persist(&path).map_err(|e| io(path.display())(e.error))?;
+    Ok(())
   }
 }
 

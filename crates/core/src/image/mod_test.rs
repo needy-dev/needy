@@ -8,6 +8,7 @@ fn digest(byte: char) -> Digest {
 fn definition(scripts: &[&str]) -> Definition {
   Definition {
     root: None,
+    pull_policy: Default::default(),
     layers: scripts.iter().map(|script| Layer::Run(script.to_string())).collect(),
     env: BTreeMap::new(),
     hooks: Default::default(),
@@ -548,6 +549,7 @@ fn hooks_collect_features_in_resolved_layer_order_before_image_hooks_without_aff
     layers: vec![feature_layer("ghcr.io/example/features/app:1", &[])],
     env: BTreeMap::new(),
     hooks: needy_config::image::Hooks::default(),
+    ..Default::default()
   };
   let mut def_with_hooks = def_no_hooks.clone();
   def_with_hooks.hooks = needy_config::image::Hooks {
@@ -624,6 +626,7 @@ fn collects_feature_sync_files_in_resolved_layer_order_with_expanded_home() {
     layers: vec![feature_layer("ghcr.io/example/features/opencode:1", &[])],
     env: BTreeMap::new(),
     hooks: Default::default(),
+    ..Default::default()
   };
   let user = User {
     name: "dev".into(),
@@ -676,6 +679,7 @@ fn rejects_two_features_claiming_same_actor_path_or_mapping_name() {
     ],
     env: BTreeMap::new(),
     hooks: Default::default(),
+    ..Default::default()
   };
   let err = plan(&def, &digest('a'), &User::default(), None, &same_path).unwrap_err().to_string();
   assert!(err.contains("/home/agent/.agent"), "{err}");
@@ -706,6 +710,7 @@ fn plan_uses_default_root_when_root_is_omitted() {
     layers: vec![Layer::Run("echo hi".into())],
     env: BTreeMap::new(),
     hooks: Default::default(),
+    ..Default::default()
   };
   let p = plan(&def, &digest('a'), &User::default(), None, &no_features()).unwrap();
   assert_eq!(p.root_image, DEFAULT_ROOT);
@@ -722,6 +727,7 @@ fn custom_root_prepends_builtin_sshfs_without_duplicating_when_already_listed() 
     layers: vec![Layer::Run("echo hi".into())],
     env: BTreeMap::new(),
     hooks: Default::default(),
+    ..Default::default()
   };
   assert!(needs_sshfs(&custom));
   let p = plan(&custom, &digest('a'), &User::default(), None, &features).unwrap();
@@ -739,6 +745,7 @@ fn custom_root_prepends_builtin_sshfs_without_duplicating_when_already_listed() 
     ],
     env: BTreeMap::new(),
     hooks: Default::default(),
+    ..Default::default()
   };
   assert!(!needs_sshfs(&explicit));
   let p_explicit = plan(&explicit, &digest('a'), &User::default(), None, &features).unwrap();
@@ -751,6 +758,7 @@ fn custom_root_prepends_builtin_sshfs_without_duplicating_when_already_listed() 
     layers: vec![Layer::Run("echo hi".into())],
     env: BTreeMap::new(),
     hooks: Default::default(),
+    ..Default::default()
   };
   assert!(!needs_sshfs(&base));
   let p_base = plan(&base, &digest('a'), &User::default(), None, &no_features()).unwrap();

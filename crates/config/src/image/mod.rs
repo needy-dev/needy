@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 
 use crate::{Error, Kind, Source, merge, source};
@@ -34,6 +34,22 @@ pub enum Image {
 // Reference: https://hub.docker.com/_/ubuntu (Ubuntu 24.04 LTS "Noble Numbat")
 pub const DEFAULT_ROOT: &str = "ubuntu:24.04";
 
+/// Controls when remote OCI feature references are pulled from a registry,
+/// matching Kubernetes `imagePullPolicy`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PullPolicy {
+  /// Use a locally cached tag resolution when present; pull from the registry
+  /// only on a cache miss (default).
+  #[default]
+  IfNotPresent,
+  /// Always query the remote registry to resolve tags (still reusing the
+  /// cached archive blob when the resolved digest matches).
+  Always,
+  /// Never contact a remote registry; fail if a feature is not already cached.
+  Never,
+}
+
 /// An image definition: a root and the layers built over it, in order.
 // TODO(images): `root` takes an image reference only; the Dockerfile build
 // form (`build:`, as executors' `container.build` has it) is deferred until
@@ -44,6 +60,9 @@ pub struct Definition {
   /// The OCI image the layers are built over. When absent, [`DEFAULT_ROOT`]
   /// is used.
   pub root: Option<String>,
+  /// Pull policy for remote OCI features in this image (`if-not-present`,
+  /// `always`, or `never`).
+  pub pull_policy: PullPolicy,
   /// Built in order over the root. Along `extends` the parent's come first.
   pub layers: Vec<Layer>,
   /// The environment of the image's programs.

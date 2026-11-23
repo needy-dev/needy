@@ -551,3 +551,51 @@ async fn bearer_token_cache_reuses_token_across_fetches() {
   assert_eq!(token_requests.load(Ordering::SeqCst), 1, "token exchange must be reused from cache");
   assert_eq!(total_requests.load(Ordering::SeqCst), 2, "cached token must avoid 401 challenge + token exchange");
 }
+
+#[tokio::test]
+async fn pull_policy_controls_tag_cache_hits_and_registry_rechecks() {
+  let metadata = r#"{"id":"python","version":"1.2.0"}"#;
+  let blob = make_feature_tar(metadata, "#!/bin/sh\nexit 0\n");
+  let blob_digest = Digest::of(&blob);
+  let manifest_bytes = make_oci_manifest(&blob_digest, blob.len());
+  let manifest_digest = Digest::of(&manifest_bytes);
+
+  let (base_url, requests) = spawn_mock_registry(MockRegistryState {
+    repo: "devcontainers/features/python".into(),
+    tag: "1".into(),
+    manifest_bytes,
+    manifest_digest,
+    blob_digest,
+    blob_bytes: blob,
+    required_token: "tok".into(),
+    requests: Arc::new(AtomicUsize::new(0)),
+  })
+  .await;
+
+  let cache = tempfile::tempdir().unwrap();
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+  let tag_ref = Reference::parse("ghcr.io/devcontainers/features/python:1").unwrap();
+
+  // `never` on a cold cache fails with NotCached and makes zero HTTP requests.
+  let miss = store.fetch_with_policy(&tag_ref, PullPolicy::Never).await.unwrap_err();
+  assert!(matches!(miss, Error::NotCached(_)), "expected NotCached, got {miss:?}");
+  assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+  // First `if-not-present` populates both the blob cache and local tag index.
+  let first = store.fetch_with_policy(&tag_ref, PullPolicy::IfNotPresent).await.unwrap();
+  assert_eq!(first.digest, manifest_digest);
+  assert!(requests.load(Ordering::SeqCst) >= 2);
+  requests.store(0, Ordering::SeqCst);
+
+  // Subsequent `if-not-present` (and default `fetch`) and `never` hit the local
+  // tag cache with zero HTTP requests.
+  assert_eq!(store.fetch(&tag_ref).await.unwrap(), first);
+  assert_eq!(store.fetch_with_policy(&tag_ref, PullPolicy::Never).await.unwrap(), first);
+  assert_eq!(requests.load(Ordering::SeqCst), 0);
+
+  // `always` re-queries the manifest on the registry, but skips re-downloading
+  // the blob because the digest is already cached locally.
+  let refreshed = store.fetch_with_policy(&tag_ref, PullPolicy::Always).await.unwrap();
+  assert_eq!(refreshed, first);
+  assert_eq!(requests.load(Ordering::SeqCst), 1);
+}
