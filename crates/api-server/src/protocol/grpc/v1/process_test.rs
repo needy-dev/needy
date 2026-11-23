@@ -212,6 +212,24 @@ async fn an_actor_cannot_attach_to_a_process_with_empty_run_id() {
 
   assert_eq!(err.kind(), Kind::Denied);
   assert!(served.fake.calls().is_empty());
+
+  // Also verify when authenticated via Node Authorizer on an Operator listener.
+  let op = serve(Caller::Operator).await;
+  let actor_client = op.client.clone().with_token(crate::testing::MAC_CREDENTIAL).unwrap().with_run_id("s-actor").unwrap();
+  let token_err = ExecStream::attach(
+    &actor_client,
+    needy_api_proto::v1::ExecAttach {
+      process_id: "p9".into(),
+      run_id: String::new(),
+      replay: false,
+      ..Default::default()
+    },
+  )
+  .await
+  .err()
+  .expect("an actor token must not attach to processes");
+  assert_eq!(token_err.kind(), Kind::Denied);
+  assert!(op.fake.calls().is_empty());
 }
 
 #[tokio::test]

@@ -55,12 +55,17 @@ pub(crate) type OnReport = Box<dyn Fn(&str, RunnerReport) + Send + Sync>;
 #[derive(Default)]
 pub(crate) struct Links {
   links: Mutex<HashMap<String, Arc<Link>>>,
+  /// Monotonically increasing control-stream generation IDs.
+  next_id: AtomicU64,
   /// Notified whenever a runner's control stream opens.
   opened: tokio::sync::Notify,
 }
 
 /// One runner's control stream.
 pub(crate) struct Link {
+  /// Unique generation ID for this control stream connection, used by the
+  /// Node Authorizer to reject stale connections after a runner reconnects.
+  pub(crate) id: u64,
   runner: String,
   tasks: mpsc::Sender<ControlResponse>,
   next: AtomicU64,
@@ -100,6 +105,11 @@ impl Links {
   /// The runner's link while its control stream is open.
   pub(crate) fn get(&self, runner: &str) -> Option<Arc<Link>> {
     lock(&self.links).get(runner).cloned()
+  }
+
+  /// The generation ID of `runner`'s currently active control stream, if connected.
+  pub(crate) fn current_id(&self, runner: &str) -> Option<u64> {
+    lock(&self.links).get(runner).map(|link| link.id)
   }
 
   /// Notified whenever any runner's control stream opens.
@@ -144,6 +154,7 @@ impl Links {
   ) -> ToRunner<ControlResponse> {
     let (tx, rx) = mpsc::channel(QUEUE);
     let link = Arc::new(Link {
+      id: self.next_id.fetch_add(1, Ordering::Relaxed) + 1,
       runner: runner.to_string(),
       tasks: tx,
       next: AtomicU64::new(1),

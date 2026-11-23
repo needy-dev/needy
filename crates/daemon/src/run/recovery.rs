@@ -347,6 +347,8 @@ impl Daemon {
       actor_exit: Mutex::new(record.actor_exit.clone()),
       failure: Mutex::new(record.failure.clone()),
       actor_runner: Mutex::new(record.actor_runner.clone()),
+      actor_runner_link: Mutex::new(None),
+      gateway: Mutex::new(None),
       created_by: None,
       image_commit: None,
       pinned_features: Default::default(),

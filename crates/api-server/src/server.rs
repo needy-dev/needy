@@ -107,6 +107,8 @@ pub struct Server {
   routes: Routes,
   caller: Caller,
   token: Option<String>,
+  /// The run registry, which also authenticates per-run actor tokens.
+  runs: Option<Arc<dyn Runs>>,
   /// The runner registry, which also authenticates runners' credentials.
   runners: Option<Arc<dyn Runners>>,
   /// The client registry, which also authenticates clients' tokens.
@@ -123,6 +125,7 @@ impl Server {
       routes: Routes::new(HealthServiceServer::new(health)),
       caller,
       token: None,
+      runs: None,
       runners: None,
       clients: None,
       socket_group: None,
@@ -157,7 +160,11 @@ impl Server {
 
   pub fn runs<S: Runs>(mut self, runs: Arc<S>) -> Self {
     let caller = self.caller.clone();
-    self.routes = self.routes.add_service(RunServiceServer::new(run::Adapter { runs, caller }));
+    self.routes = self.routes.add_service(RunServiceServer::new(run::Adapter {
+      runs: runs.clone(),
+      caller,
+    }));
+    self.runs = Some(runs);
     self
   }
 
@@ -248,6 +255,7 @@ impl Server {
         allow_anonymous: true,
         listener: self.caller,
         token: Token(self.token),
+        runs: self.runs,
         runners: self.runners,
         clients: self.clients,
       },

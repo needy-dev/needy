@@ -52,6 +52,8 @@ mod clients;
 #[cfg(unix)]
 mod files;
 #[cfg(unix)]
+pub mod gateway_tcp;
+#[cfg(unix)]
 mod guest;
 #[cfg(unix)]
 mod image;
@@ -187,6 +189,10 @@ pub struct Config {
   /// Restrict `host:` file mappings to canonical paths inside this directory.
   #[serde(default)]
   pub host_files_root: Option<PathBuf>,
+  /// Optional shared TCP address (`HOST:PORT`) for the authenticated remote
+  /// actor HTTP/CONNECT gateway.
+  #[serde(default)]
+  pub gateway_listen: Option<String>,
   /// Additional CIDR blocks (e.g. `10.0.0.0/8`, `192.168.0.0/16`) rejected by
   /// the actor gateway's egress policy for non-service targets.
   #[serde(default)]
@@ -454,6 +460,13 @@ impl Daemon {
     // Keep control/runner streams available until normal run cleanup has
     // finished. Cancelling the listeners first would cut off mirror-out.
     let server_stop = CancellationToken::new();
+    if let Some(gateway_address) = &self.config.gateway_listen {
+      let bound = self.bind_gateway_tcp(gateway_address).await?;
+      if let Ok(local) = bound.local_addr() {
+        tracing::info!("shared actor gateway listening on tcp://{local}");
+      }
+      self.tasks.spawn(bound.serve(server_stop.clone()));
+    }
     let serving = server.serve(server_stop.clone());
     tokio::pin!(serving);
     let address = format!("unix:{}", management.display());
@@ -491,6 +504,7 @@ impl Daemon {
       .runs(api.clone())
       .images(api.clone())
       .processes(api.clone())
+      .guest(api.clone())
       .runners(api.clone())
       .clients(api)
   }

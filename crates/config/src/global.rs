@@ -84,6 +84,7 @@ pub struct Daemon {
   pub runners_file: Option<PathBuf>,
   pub disable_host_files: bool,
   pub host_files_root: Option<PathBuf>,
+  pub gateway_listen: Option<String>,
   pub gateway_blocked_cidrs: Vec<String>,
 }
 
@@ -101,6 +102,7 @@ impl Default for Daemon {
       runners_file: None,
       disable_host_files: false,
       host_files_root: None,
+      gateway_listen: None,
       gateway_blocked_cidrs: Vec::new(),
     }
   }
@@ -267,6 +269,12 @@ impl Config {
     }
     if self.daemon.host_files_root.as_ref().is_some_and(|p| !p.is_absolute()) {
       return Err(Error::invalid("daemon.host_files_root", "daemon.host_files_root requires an absolute path"));
+    }
+    if let Some(address) = &self.daemon.gateway_listen {
+      validate_address(address, true).map_err(|mut error| {
+        error.field = "daemon.gateway_listen".into();
+        error
+      })?;
     }
     for cidr in &self.daemon.gateway_blocked_cidrs {
       validate_cidr(cidr)?;

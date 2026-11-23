@@ -113,6 +113,12 @@ pub struct Run {
   /// The runner its actor was placed on, once placed; `None` for the
   /// control host.
   actor_runner: Mutex<Option<String>>,
+  /// Control-stream generation ID of `actor_runner` when bound for remote
+  /// actor execution, verified by the Node Authorizer.
+  actor_runner_link: Mutex<Option<u64>>,
+  /// Per-run gateway registered for a remote actor run (served over
+  /// `--gateway-listen`).
+  gateway: Mutex<Option<Arc<needy_core_actor::sidecar::gateway::Gateway>>>,
   /// Who asked for the run, as `run.create` records it.
   created_by: Option<Principal>,
   /// What its actor boots of its image, as `Guest::config` tells init.
@@ -211,6 +217,33 @@ impl Run {
   /// The run's last observed activity timestamp in Unix milliseconds.
   pub fn last_activity_ms(&self) -> i64 {
     self.last_activity_ms.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
+  /// Registers the per-run [`Gateway`] for a remote actor run.
+  #[allow(dead_code)]
+  pub(crate) fn set_gateway(&self, gateway: Arc<needy_core_actor::sidecar::gateway::Gateway>) {
+    *lock(&self.gateway) = Some(gateway);
+  }
+
+  /// Returns the per-run [`Gateway`] while the remote actor run is active.
+  pub(crate) fn gateway(&self) -> Option<Arc<needy_core_actor::sidecar::gateway::Gateway>> {
+    lock(&self.gateway).clone()
+  }
+
+  /// Detaches any remote gateway registered for this run and cancels active
+  /// gateway connections.
+  pub(crate) fn close_gateway(&self) {
+    if let Some(gateway) = lock(&self.gateway).take() {
+      gateway.cancel();
+    }
+  }
+
+  /// Returns `(runner_name, link_id)` if this run's actor is bound to a remote
+  /// actor runner.
+  pub(crate) fn actor_runner_binding(&self) -> Option<(String, u64)> {
+    let runner = lock(&self.actor_runner).clone()?;
+    let link_id = (*lock(&self.actor_runner_link))?;
+    Some((runner, link_id))
   }
 
   /// The run as `state.db` keeps it, at `now`.
@@ -694,6 +727,8 @@ impl Daemon {
       actor_exit: Mutex::new(None),
       failure: Mutex::new(None),
       actor_runner: Mutex::new(None),
+      actor_runner_link: Mutex::new(None),
+      gateway: Mutex::new(None),
       created_by: request.by.clone(),
       boot: Mutex::default(),
       image_commit: request.image_commit.clone(),
@@ -854,11 +889,13 @@ impl Daemon {
 
   /// Unwinds a create that failed after the run was registered.
   async fn rollback(&self, run: &Arc<Run>, request: &NewRun, error: &anyhow::Error) {
+    run.close_gateway();
     if let Err(refused) = run.state.advance(RunState::Failed) {
       tracing::debug!("run {}: {refused}", run.id);
     }
     // The actor's tasks and VM, if it started, stop.
     run.cancel.cancel();
+    run.close_gateway();
     run.tasks.close();
     run.tasks.wait().await;
     self.release_executors(run).await;
@@ -921,6 +958,7 @@ impl Daemon {
   /// stays listed as finished or failed until it is stopped, which then has
   /// nothing left to release.
   pub(crate) async fn finish_run(&self, run: &Run) {
+    run.close_gateway();
     self.save_run(run).await;
     files::mirror_out(run, &files::HostFilesPolicy::from_config(&self.config)).await;
     self.release_executors(run).await;
@@ -1017,6 +1055,7 @@ impl Daemon {
     // The relays of the run's commands and its actor's tasks stop, and an
     // actor still running is killed.
     run.cancel.cancel();
+    run.close_gateway();
     run.tasks.close();
     run.tasks.wait().await;
     files::mirror_out(run, &files::HostFilesPolicy::from_config(&self.config)).await;
@@ -1172,6 +1211,19 @@ impl Daemon {
     if let Err(e) = self.state.start_instance(record).await {
       tracing::warn!("run {}: cannot write instance {} to state.db: {e:#}", record.run, record.id);
     }
+  }
+
+  pub(crate) fn authorized_actor_run(&self, runner: &str, run_id: &str) -> Option<Arc<Run>> {
+    let run = self.runs.exact(run_id)?;
+    if matches!(run.state.get(), RunState::Finished | RunState::Stopped | RunState::Failed) {
+      return None;
+    }
+    let (bound_runner, bound_link_id) = run.actor_runner_binding()?;
+    if bound_runner != runner {
+      return None;
+    }
+    let current_link_id = self.links.current_id(runner)?;
+    (current_link_id == bound_link_id).then_some(run)
   }
 
   pub(crate) fn run_dir(&self, id: &str) -> PathBuf {
@@ -1382,6 +1434,10 @@ impl Runs for Daemon {
 
   async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String, ControlError> {
     Daemon::remove_fault(self, run, name, by).await
+  }
+
+  async fn authorize_actor_runner(&self, runner: &str, run_id: &str) -> Result<bool, ControlError> {
+    Ok(self.authorized_actor_run(runner, run_id).is_some())
   }
 }
 

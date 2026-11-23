@@ -109,6 +109,7 @@ pub(crate) async fn daemon_in_with_backends(
     runners_file: None,
     disable_host_files: false,
     host_files_root: None,
+    gateway_listen: None,
     gateway_blocked_cidrs: Vec::new(),
   };
   adjust(&mut config);

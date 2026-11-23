@@ -228,6 +228,10 @@ impl Runs for Fake {
     self.call(format!("remove fault {name} from {run} by {by}"));
     Ok("s1".into())
   }
+
+  async fn authorize_actor_runner(&self, runner: &str, run_id: &str) -> Result<bool> {
+    Ok(runner == "mac" && run_id == "s-actor")
+  }
 }
 
 #[async_trait::async_trait]
@@ -437,6 +441,7 @@ fn fake_runner(name: &str) -> RunnerInfo {
 /// Credentials the fake knows: `needy-runner.mac.good` is the runner
 /// `mac`'s; `needy-runner.gone.old` was revoked.
 pub const MAC_CREDENTIAL: &str = "needy-runner.mac.good";
+pub const OTHER_CREDENTIAL: &str = "needy-runner.other.good";
 pub const REVOKED_CREDENTIAL: &str = "needy-runner.gone.old";
 
 #[async_trait::async_trait]
@@ -520,6 +525,7 @@ impl Runners for Fake {
   async fn credential(&self, token: &str) -> Result<Credential> {
     Ok(match token {
       MAC_CREDENTIAL => Credential::Runner("mac".into()),
+      OTHER_CREDENTIAL => Credential::Runner("other".into()),
       REVOKED_CREDENTIAL => Credential::Refused,
       _ => Credential::Other,
     })

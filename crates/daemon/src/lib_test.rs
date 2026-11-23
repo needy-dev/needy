@@ -123,6 +123,7 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     runners_file: None,
     disable_host_files: false,
     host_files_root: None,
+    gateway_listen: None,
     gateway_blocked_cidrs: Vec::new(),
   };
 

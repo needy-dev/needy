@@ -81,6 +81,9 @@ struct ServeArgs {
   /// Restrict `host:` file mappings to canonical paths inside this directory.
   #[arg(long, value_name = "DIR")]
   host_files_root: Option<std::path::PathBuf>,
+  /// Shared TCP listener address (`tcp://HOST:PORT`) for the authenticated remote actor gateway.
+  #[arg(long, value_name = "ADDR")]
+  gateway_listen: Option<String>,
   /// Block outbound actor gateway connections to this CIDR (repeatable, e.g. `10.0.0.0/8`).
   #[arg(long = "gateway-block-cidr", value_name = "CIDR")]
   gateway_blocked_cidrs: Vec<String>,
@@ -165,6 +168,9 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   if args.host_files_root.is_some() {
     effective.daemon.host_files_root = args.host_files_root.clone();
   }
+  if args.gateway_listen.is_some() {
+    effective.daemon.gateway_listen = args.gateway_listen.clone();
+  }
   if !args.gateway_blocked_cidrs.is_empty() {
     effective.daemon.gateway_blocked_cidrs = args.gateway_blocked_cidrs.clone();
   }
@@ -200,6 +206,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     runners_file: args.runners_file.or(settings.runners_file),
     disable_host_files: args.disable_host_files || settings.disable_host_files,
     host_files_root: args.host_files_root.or(settings.host_files_root),
+    gateway_listen: args.gateway_listen.or(settings.gateway_listen).as_deref().map(listener).transpose()?,
     gateway_blocked_cidrs: settings.gateway_blocked_cidrs,
   };
   match needy_daemon::guest_needy(&config) {
