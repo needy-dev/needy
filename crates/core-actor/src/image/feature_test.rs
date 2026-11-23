@@ -368,6 +368,10 @@ fn all_embedded_builtin_features_are_valid_and_pack_executable_install_sh() {
 
   // Agent features declare sync mappings for their state directories.
   let codex_meta = needy_core::image::FeatureMetadata::parse(builtin("builtin:codex").unwrap().metadata_json).unwrap();
+  assert_eq!(
+    codex_meta.depends_on["ghcr.io/devcontainers/features/python:1"]["installTools"],
+    devcontainer_features::OptionValue::Bool(false)
+  );
   let codex_files = &codex_meta.customizations.needy.unwrap().files;
   assert_eq!(codex_files["codex"].path, "~/.codex");
 
