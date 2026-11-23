@@ -2127,7 +2127,7 @@ async fn resolve_features_resolves_builtin_agent_and_custom_root_sshfs_without_n
     r#"
 root: debian:bookworm-slim
 layers:
-  - feature: builtin:codex
+  - feature: builtin:opencode
   - feature: builtin:pi
 "#,
     PathBuf::new(),
@@ -2136,21 +2136,79 @@ layers:
 
   let resolved = super::resolve_features(&store, &def, &std::collections::BTreeMap::new()).await.unwrap();
   assert!(resolved.by_ref.contains_key(BUILTIN_SSHFS), "custom root must resolve builtin:sshfs");
-  assert!(resolved.by_ref.contains_key("builtin:codex"));
+  assert!(resolved.by_ref.contains_key("builtin:opencode"));
   assert!(resolved.by_ref.contains_key("builtin:pi"));
-  assert!(resolved.resolved_digests.contains_key("builtin:codex"));
+  assert!(resolved.resolved_digests.contains_key("builtin:opencode"));
 
   let root = needy_core::image::Digest::of(b"debian:bookworm-slim");
   let user = needy_config::profile::User::default();
   let plan = needy_core::image::plan(&def, &root, &user, None, &resolved.by_ref).unwrap();
   assert_eq!(plan.steps.len(), 3);
   assert!(matches!(&plan.steps[0].input, Input::Feature { reference, .. } if reference == BUILTIN_SSHFS));
-  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "builtin:codex"));
+  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "builtin:opencode"));
   assert!(matches!(&plan.steps[2].input, Input::Feature { reference, .. } if reference == "builtin:pi"));
 
   let sync_paths: Vec<&str> = plan.sync_files.iter().map(|s| s.path.as_str()).collect();
-  assert!(sync_paths.contains(&"/home/agent/.codex"), "{sync_paths:?}");
+  assert!(sync_paths.contains(&"/home/agent/.local/share/opencode"), "{sync_paths:?}");
   assert!(sync_paths.contains(&"/home/agent/.pi/agent"), "{sync_paths:?}");
+}
+
+#[tokio::test]
+async fn resolve_features_resolves_builtin_codex_python_dep_and_hits_tag_cache() {
+  use needy_core::image::Input;
+  use needy_core_actor::image::feature::FeatureStore;
+
+  let python = make_feature_artifact(
+    "devcontainers/features/python",
+    "1",
+    r#"{
+      "id": "python",
+      "version": "1.0.0",
+      "options": {
+        "installTools": { "type": "boolean", "default": true }
+      }
+    }"#,
+    "#!/bin/sh\necho installing python\n",
+  );
+  let (base_url, requests) = spawn_feature_registry(vec![python]).await;
+
+  let cache = tempfile::tempdir().unwrap();
+  let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
+
+  let def: needy_config::image::Definition = needy_config::image::load(&needy_config::Source::text(
+    r#"
+layers:
+  - feature: builtin:codex
+"#,
+    PathBuf::new(),
+  ))
+  .unwrap();
+
+  // First resolve fetches `ghcr.io/devcontainers/features/python:1` and caches its tag.
+  let resolved = super::resolve_features(&store, &def, &std::collections::BTreeMap::new()).await.unwrap();
+  assert!(resolved.by_ref.contains_key("builtin:codex"));
+  assert!(resolved.by_ref.contains_key("ghcr.io/devcontainers/features/python:1"));
+
+  let root = needy_core::image::Digest::of(b"ubuntu:24.04");
+  let user = needy_config::profile::User::default();
+  let plan = needy_core::image::plan(&def, &root, &user, None, &resolved.by_ref).unwrap();
+  assert_eq!(plan.steps.len(), 2);
+  assert!(
+    matches!(
+      &plan.steps[0].input,
+      Input::Feature { reference, env, .. }
+        if reference == "ghcr.io/devcontainers/features/python:1" && env.get("INSTALLTOOLS").map(String::as_str) == Some("false")
+    ),
+    "expected python:1 with installTools=false before codex, got {:?}",
+    plan.steps[0].input
+  );
+  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "builtin:codex"));
+
+  // Second resolve under default `if-not-present` hits the local tag cache with zero HTTP requests.
+  requests.store(0, std::sync::atomic::Ordering::SeqCst);
+  let second = super::resolve_features(&store, &def, &std::collections::BTreeMap::new()).await.unwrap();
+  assert_eq!(second.resolved_digests, resolved.resolved_digests);
+  assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
 #[test]

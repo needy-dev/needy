@@ -10,6 +10,11 @@
       "description": "Codex release version to install (without leading rust-v)."
     }
   },
+  "dependsOn": {
+    "ghcr.io/devcontainers/features/python:1": {
+      "installTools": false
+    }
+  },
   "customizations": {
     "needy": {
       "files": {
