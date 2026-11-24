@@ -24,7 +24,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::{
   ControlRequest, ControlResponse, EndRun, EndRunResponse, ExecEnded, ExecRequest, ExecResponse, ExecTask, KillProcessRequest,
-  ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, TaskError, TaskRequest, TaskResponse, control_request,
+  ListProcessesRequest, ListProcessesResponse, RunnerReport, RunnerTask, StartActor, TaskError, TaskRequest, TaskResponse, control_request,
   control_response, exec_response, runner_task, task_request, task_result,
 };
 use needy_api_client::{Executor, Responses};
@@ -294,6 +294,20 @@ impl Link {
   /// The runner's connection ended, as an error.
   fn disconnected(&self) -> Status {
     Status::unavailable(format!("runner {} disconnected", self.runner))
+  }
+
+  /// Dispatches a `StartActor` task to the runner on this control stream.
+  pub(crate) async fn start_actor(&self, run_id: &str, driver: &str) -> Result<(), Status> {
+    let id = self.next.fetch_add(1, Ordering::Relaxed);
+    self
+      .announce(
+        id,
+        runner_task::Kind::StartActor(StartActor {
+          run_id: run_id.to_string(),
+          driver: driver.to_string(),
+        }),
+      )
+      .await
   }
 
   /// Announces task `id` on the control stream.

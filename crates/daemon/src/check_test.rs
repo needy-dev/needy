@@ -185,7 +185,7 @@ async fn a_selector_that_names_no_connected_runner_is_an_error_finding() {
 }
 
 #[tokio::test]
-async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_finding() {
+async fn an_actor_on_a_remote_runner_resolves_without_local_host_errors() {
   let served = control().await;
   let _far = runner(&served, "far", "actor(linux-firecracker)", &[]).await;
 
@@ -193,8 +193,7 @@ async fn an_actor_on_a_runner_other_than_the_control_hosts_own_is_an_error_findi
 
   assert_eq!(check.actor, Some(Placement::Runner("far".into())));
   let found = messages(&check);
-  assert_eq!(found.len(), 1, "{found:?}");
-  assert!(found[0].starts_with("error: actor: runner far cannot host actors yet"), "{found:?}");
+  assert!(found.is_empty(), "{found:?}");
 }
 
 #[tokio::test]

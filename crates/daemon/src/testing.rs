@@ -274,6 +274,8 @@ pub async fn join_runner(
     labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
     grace: crate::runner::DISCONNECT_GRACE,
     activity_hook: None,
+    ephemeral: false,
+    actor: None,
   };
   join_runner_with(served, operator, config).await
 }

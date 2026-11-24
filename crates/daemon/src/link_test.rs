@@ -50,6 +50,8 @@ impl Setup {
       labels: BTreeMap::new(),
       grace: crate::runner::DISCONNECT_GRACE,
       activity_hook: None,
+      ephemeral: false,
+      actor: None,
     };
     let runner = Runner::start(config).await.unwrap();
     let stop = CancellationToken::new();

@@ -46,6 +46,8 @@ async fn far(grace: Duration) -> Far {
     labels: BTreeMap::new(),
     grace,
     activity_hook: None,
+    ephemeral: false,
+    actor: None,
   };
   let runner = testing::join_runner_with(&served, &operator, config).await;
   Far {

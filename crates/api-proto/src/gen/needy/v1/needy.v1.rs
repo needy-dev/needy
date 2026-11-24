@@ -509,6 +509,598 @@ impl Origin {
         }
     }
 }
+/// What a runner can host: each role with its drivers. A role with none is a
+/// role it does not hold.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunnerCapabilities {
+    #[prost(enumeration="ActorDriver", repeated, tag="1")]
+    pub actor: ::prost::alloc::vec::Vec<i32>,
+    #[prost(enumeration="ExecutorDriver", repeated, tag="2")]
+    pub executor: ::prost::alloc::vec::Vec<i32>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JoinToken {
+    /// Public; names the token in listings and in `RevokeJoinToken`.
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+    /// The roles a runner may declare; empty allows every role.
+    #[prost(enumeration="RunnerRole", repeated, tag="2")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    /// Labels every runner that joins with it gets.
+    #[prost(map="string, string", tag="3")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(int64, tag="4")]
+    pub created_at_ms: i64,
+    #[prost(int64, tag="5")]
+    pub expires_at_ms: i64,
+    #[prost(uint32, tag="6")]
+    pub uses_left: u32,
+    #[prost(enumeration="JoinTokenState", tag="7")]
+    pub state: i32,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateJoinTokenRequest {
+    /// Required, positive.
+    #[prost(int64, tag="1")]
+    pub ttl_ms: i64,
+    /// How many runners may join with it. Required, at least 1.
+    #[prost(uint32, tag="2")]
+    pub uses: u32,
+    #[prost(enumeration="RunnerRole", repeated, tag="3")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    #[prost(map="string, string", tag="4")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct CreateJoinTokenResponse {
+    #[prost(message, optional, tag="1")]
+    pub join_token: ::core::option::Option<JoinToken>,
+    /// The secret to hand to the runner; not stored, not shown again.
+    #[prost(string, tag="2")]
+    pub token: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListJoinTokensRequest {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListJoinTokensResponse {
+    #[prost(message, repeated, tag="1")]
+    pub join_tokens: ::prost::alloc::vec::Vec<JoinToken>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeJoinTokenRequest {
+    #[prost(string, tag="1")]
+    pub id: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeJoinTokenResponse {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JoinRequest {
+    #[prost(string, tag="1")]
+    pub join_token: ::prost::alloc::string::String,
+    /// A DNS label: lowercase letters, digits and '-'.
+    #[prost(string, tag="2")]
+    pub name: ::prost::alloc::string::String,
+    #[prost(map="string, string", tag="4")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// What the runner detected, restricted by its `--roles`. At least one
+    /// role, each within the join token's roles.
+    #[prost(message, optional, tag="5")]
+    pub capabilities: ::core::option::Option<RunnerCapabilities>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct JoinResponse {
+    #[prost(message, optional, tag="1")]
+    pub runner: ::core::option::Option<Runner>,
+    /// The runner's credential, a bearer token for `Heartbeat`. Not stored,
+    /// not shown again.
+    #[prost(string, tag="2")]
+    pub credential: ::prost::alloc::string::String,
+    /// How often the control plane expects a heartbeat.
+    #[prost(int64, tag="3")]
+    pub heartbeat_interval_ms: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HeartbeatRequest {
+    #[prost(map="string, string", tag="2")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    /// The machine the runner runs on. The control plane checks a recipe
+    /// against the host its actor would run on, and picks the SFTP server of a
+    /// workspace mount by the platform.
+    #[prost(message, optional, tag="3")]
+    pub host: ::core::option::Option<RunnerHost>,
+    /// What the runner can host now, as at its join; its roles stay within its
+    /// join token's scope.
+    #[prost(message, optional, tag="4")]
+    pub capabilities: ::core::option::Option<RunnerCapabilities>,
+}
+/// A runner's machine.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunnerHost {
+    /// The operating system and CPU architecture as Rust names them
+    /// (`std::env::consts`): "linux", "macos"; "x86_64", "aarch64".
+    #[prost(string, tag="1")]
+    pub os: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub arch: ::prost::alloc::string::String,
+    /// From `/proc/cpuinfo` on Linux; empty elsewhere.
+    #[prost(string, tag="3")]
+    pub cpu_vendor: ::prost::alloc::string::String,
+    #[prost(string, tag="4")]
+    pub cpu_model: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag="5")]
+    pub cpu_flags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The CPUID entries its KVM supports; unset without a usable KVM.
+    #[prost(message, optional, tag="6")]
+    pub kvm_cpuid: ::core::option::Option<KvmCpuid>,
+    /// The home directory of the user the runner runs as. A `~` in a native
+    /// executor's paths on this runner (its `workspace`, `path_map` values and
+    /// `executor:NAME:` file sides) is this directory. Empty when unknown.
+    #[prost(string, tag="7")]
+    pub home: ::prost::alloc::string::String,
+}
+/// What `KVM_GET_SUPPORTED_CPUID` reported.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct KvmCpuid {
+    #[prost(message, repeated, tag="1")]
+    pub entries: ::prost::alloc::vec::Vec<CpuidEntry>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct CpuidEntry {
+    #[prost(uint32, tag="1")]
+    pub leaf: u32,
+    #[prost(uint32, tag="2")]
+    pub subleaf: u32,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct HeartbeatResponse {
+    /// A new credential after `RotateRunner`, empty otherwise. The runner keeps
+    /// it and uses it from its next call on; that use retires the old one.
+    #[prost(string, tag="1")]
+    pub credential: ::prost::alloc::string::String,
+    #[prost(int64, tag="2")]
+    pub heartbeat_interval_ms: i64,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct Runner {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Its own labels and those of its join token.
+    #[prost(map="string, string", tag="3")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+    #[prost(enumeration="RunnerStatus", tag="4")]
+    pub status: i32,
+    #[prost(int64, tag="5")]
+    pub created_at_ms: i64,
+    /// Its last heartbeat, or its join.
+    #[prost(int64, tag="6")]
+    pub last_seen_at_ms: i64,
+    /// A new credential was asked for and the runner has not used it yet.
+    #[prost(bool, tag="7")]
+    pub rotating: bool,
+    /// The ID of the join token it joined with.
+    #[prost(string, tag="8")]
+    pub join_token_id: ::prost::alloc::string::String,
+    /// As it last reported them, in its join or a heartbeat.
+    #[prost(message, optional, tag="9")]
+    pub capabilities: ::core::option::Option<RunnerCapabilities>,
+    /// Its machine as its last heartbeat to this control plane process
+    /// reported it; unset until one did.
+    #[prost(message, optional, tag="10")]
+    pub host: ::core::option::Option<RunnerHost>,
+    /// When a short-lived credential expires, in Unix milliseconds; unset for
+    /// non-expiring runners.
+    #[prost(int64, optional, tag="11")]
+    pub expires_at_ms: ::core::option::Option<i64>,
+    /// Loaded from a static runners file rather than enrolled in state.db.
+    #[prost(bool, tag="12")]
+    pub static_config: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ListRunnersRequest {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ListRunnersResponse {
+    #[prost(message, repeated, tag="1")]
+    pub runners: ::prost::alloc::vec::Vec<Runner>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateRunnerRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RotateRunnerResponse {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveRunnerRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RemoveRunnerResponse {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MintRunnerCredentialRequest {
+    /// A DNS label: lowercase letters, digits and '-'.
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+    /// Required, positive duration until the credential expires.
+    #[prost(int64, tag="2")]
+    pub ttl_ms: i64,
+    /// Roles the runner is allowed to declare; empty allows every role.
+    #[prost(enumeration="RunnerRole", repeated, tag="3")]
+    pub roles: ::prost::alloc::vec::Vec<i32>,
+    /// Labels applied to the runner.
+    #[prost(map="string, string", tag="4")]
+    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct MintRunnerCredentialResponse {
+    #[prost(message, optional, tag="1")]
+    pub runner: ::core::option::Option<Runner>,
+    /// The runner's credential; not stored, not shown again.
+    #[prost(string, tag="2")]
+    pub credential: ::prost::alloc::string::String,
+    #[prost(int64, tag="3")]
+    pub expires_at_ms: i64,
+    /// How often the control plane expects a heartbeat.
+    #[prost(int64, tag="4")]
+    pub heartbeat_interval_ms: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeRunnerCredentialRequest {
+    #[prost(string, tag="1")]
+    pub name: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RevokeRunnerCredentialResponse {
+}
+/// From a runner on its control stream.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ControlRequest {
+    #[prost(oneof="control_request::Payload", tags="1, 2")]
+    pub payload: ::core::option::Option<control_request::Payload>,
+}
+/// Nested message and enum types in `ControlRequest`.
+pub mod control_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        Result(super::TaskResult),
+        /// Sent first on every control stream: the processes the runner still
+        /// runs for runs. The control plane claims those of runs that are live
+        /// and ends the others with `EndRun`.
+        #[prost(message, tag="2")]
+        Report(super::RunnerReport),
+    }
+}
+/// What a runner still runs for runs when it connects.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct RunnerReport {
+    /// Its running processes that belong to a run (`run_id` set).
+    #[prost(message, repeated, tag="1")]
+    pub processes: ::prost::alloc::vec::Vec<ProcessInfo>,
+}
+/// From the control plane on a runner's control stream.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ControlResponse {
+    #[prost(oneof="control_response::Payload", tags="1")]
+    pub payload: ::core::option::Option<control_response::Payload>,
+}
+/// Nested message and enum types in `ControlResponse`.
+pub mod control_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        #[prost(message, tag="1")]
+        Task(super::RunnerTask),
+    }
+}
+/// A task the control plane needs a runner to carry out.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct RunnerTask {
+    /// Unique among the tasks of one control stream.
+    #[prost(uint64, tag="1")]
+    pub id: u64,
+    #[prost(oneof="runner_task::Kind", tags="2, 3, 4, 5, 6")]
+    pub kind: ::core::option::Option<runner_task::Kind>,
+}
+/// Nested message and enum types in `RunnerTask`.
+pub mod runner_task {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Kind {
+        /// Open a `Task` stream for this task.
+        #[prost(message, tag="2")]
+        Exec(super::ExecTask),
+        /// Answered on the control stream.
+        #[prost(message, tag="3")]
+        ListProcesses(super::ListProcessesRequest),
+        /// Answered on the control stream.
+        #[prost(message, tag="4")]
+        KillProcess(super::KillProcessRequest),
+        /// End everything the runner runs for a run. Answered on the control
+        /// stream.
+        #[prost(message, tag="5")]
+        EndRun(super::EndRun),
+        /// Start a remote actor for a run and bridge its channels outbound to the
+        /// control plane using this runner's credential and `x-needy-run-id`.
+        #[prost(message, tag="6")]
+        StartActor(super::StartActor),
+    }
+}
+/// Start a remote actor for `run_id` using `driver` (for example
+/// `linux-firecracker`). The runner opens `GuestService.Bridge` with its own
+/// credential and `x-needy-run-id: <run_id>`.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct StartActor {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub driver: ::prost::alloc::string::String,
+}
+/// A run ended, or is not one the control plane knows: the runner kills its
+/// processes, including a workspace mount's SFTP server.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct EndRun {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct EndRunResponse {
+    /// The run's processes after the end, those that exited before it
+    /// included.
+    #[prost(message, repeated, tag="1")]
+    pub processes: ::prost::alloc::vec::Vec<ProcessInfo>,
+    /// The IDs of the processes this task killed.
+    #[prost(string, repeated, tag="2")]
+    pub ended: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+/// An exec: its start or attach comes on the task's own stream.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ExecTask {
+}
+/// The result of a task answered on the control stream.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskResult {
+    #[prost(uint64, tag="1")]
+    pub task_id: u64,
+    #[prost(oneof="task_result::Result", tags="2, 3, 4, 5")]
+    pub result: ::core::option::Option<task_result::Result>,
+}
+/// Nested message and enum types in `TaskResult`.
+pub mod task_result {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Result {
+        #[prost(message, tag="2")]
+        ListProcesses(super::ListProcessesResponse),
+        #[prost(message, tag="3")]
+        KillProcess(super::KillProcessResponse),
+        #[prost(message, tag="4")]
+        Error(super::TaskError),
+        #[prost(message, tag="5")]
+        EndRun(super::EndRunResponse),
+    }
+}
+/// Why a runner refused or failed a task, as the gRPC status its process
+/// service returned.
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskError {
+    #[prost(bytes="vec", tag="3")]
+    pub details: ::prost::alloc::vec::Vec<u8>,
+    #[prost(message, optional, tag="4")]
+    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
+    /// A `google.rpc.Code` value.
+    #[prost(int32, tag="1")]
+    pub code: i32,
+    #[prost(string, tag="2")]
+    pub message: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskRequest {
+    #[prost(oneof="task_request::Payload", tags="1, 2, 3")]
+    pub payload: ::core::option::Option<task_request::Payload>,
+}
+/// Nested message and enum types in `TaskRequest`.
+pub mod task_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        /// The first request: the task this stream is for.
+        #[prost(uint64, tag="1")]
+        TaskId(u64),
+        #[prost(message, tag="2")]
+        Exec(super::ExecResponse),
+        /// The exec could not start or attach, or its stream failed; nothing
+        /// follows.
+        #[prost(message, tag="3")]
+        Error(super::TaskError),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TaskResponse {
+    #[prost(message, optional, tag="1")]
+    pub exec: ::core::option::Option<ExecRequest>,
+}
+/// What a runner can host. A join token's scope names roles; a runner
+/// reports its `RunnerCapabilities`, whose roles are those with at least one
+/// driver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RunnerRole {
+    Unspecified = 0,
+    Actor = 1,
+    Executor = 2,
+}
+impl RunnerRole {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUNNER_ROLE_UNSPECIFIED",
+            Self::Actor => "RUNNER_ROLE_ACTOR",
+            Self::Executor => "RUNNER_ROLE_EXECUTOR",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUNNER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUNNER_ROLE_ACTOR" => Some(Self::Actor),
+            "RUNNER_ROLE_EXECUTOR" => Some(Self::Executor),
+            _ => None,
+        }
+    }
+}
+/// How a runner can run an actor: an actor driver, as a profile's
+/// `actor.driver` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ActorDriver {
+    Unspecified = 0,
+    /// `linux-firecracker`: a usable KVM and the actor image (vmlinux,
+    /// rootfs.ext4, firecracker).
+    LinuxFirecracker = 1,
+    /// `linux-container`: a Docker-compatible engine that answers. Whether it
+    /// has the OCI runtime a profile names (`runc`, gVisor's `runsc`) is
+    /// checked when a run is created.
+    LinuxContainer = 2,
+    /// `macos-vz`: Apple silicon macOS with vfkit and the `macos-vz` actor
+    /// image (Image, rootfs.ext4): a Virtualization.framework VM.
+    MacosVz = 3,
+    /// `macos-apple-container`: Apple's `container` CLI on a Mac, whose
+    /// services answer.
+    MacosAppleContainer = 4,
+}
+impl ActorDriver {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "ACTOR_DRIVER_UNSPECIFIED",
+            Self::LinuxFirecracker => "ACTOR_DRIVER_LINUX_FIRECRACKER",
+            Self::LinuxContainer => "ACTOR_DRIVER_LINUX_CONTAINER",
+            Self::MacosVz => "ACTOR_DRIVER_MACOS_VZ",
+            Self::MacosAppleContainer => "ACTOR_DRIVER_MACOS_APPLE_CONTAINER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "ACTOR_DRIVER_UNSPECIFIED" => Some(Self::Unspecified),
+            "ACTOR_DRIVER_LINUX_FIRECRACKER" => Some(Self::LinuxFirecracker),
+            "ACTOR_DRIVER_LINUX_CONTAINER" => Some(Self::LinuxContainer),
+            "ACTOR_DRIVER_MACOS_VZ" => Some(Self::MacosVz),
+            "ACTOR_DRIVER_MACOS_APPLE_CONTAINER" => Some(Self::MacosAppleContainer),
+            _ => None,
+        }
+    }
+}
+/// How a runner can create an executor: an executor driver, as a profile's
+/// `executors.NAME.driver` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum ExecutorDriver {
+    Unspecified = 0,
+    /// `native`: the runner's own process space; every runner has it.
+    Native = 1,
+    /// `linux-container`: a Docker-compatible engine the runner reaches.
+    LinuxContainer = 2,
+}
+impl ExecutorDriver {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "EXECUTOR_DRIVER_UNSPECIFIED",
+            Self::Native => "EXECUTOR_DRIVER_NATIVE",
+            Self::LinuxContainer => "EXECUTOR_DRIVER_LINUX_CONTAINER",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "EXECUTOR_DRIVER_UNSPECIFIED" => Some(Self::Unspecified),
+            "EXECUTOR_DRIVER_NATIVE" => Some(Self::Native),
+            "EXECUTOR_DRIVER_LINUX_CONTAINER" => Some(Self::LinuxContainer),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum JoinTokenState {
+    Unspecified = 0,
+    Valid = 1,
+    Expired = 2,
+    /// No uses are left.
+    UsedUp = 3,
+    Revoked = 4,
+}
+impl JoinTokenState {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "JOIN_TOKEN_STATE_UNSPECIFIED",
+            Self::Valid => "JOIN_TOKEN_STATE_VALID",
+            Self::Expired => "JOIN_TOKEN_STATE_EXPIRED",
+            Self::UsedUp => "JOIN_TOKEN_STATE_USED_UP",
+            Self::Revoked => "JOIN_TOKEN_STATE_REVOKED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "JOIN_TOKEN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
+            "JOIN_TOKEN_STATE_VALID" => Some(Self::Valid),
+            "JOIN_TOKEN_STATE_EXPIRED" => Some(Self::Expired),
+            "JOIN_TOKEN_STATE_USED_UP" => Some(Self::UsedUp),
+            "JOIN_TOKEN_STATE_REVOKED" => Some(Self::Revoked),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
+#[repr(i32)]
+pub enum RunnerStatus {
+    Unspecified = 0,
+    /// A heartbeat arrived within the last three heartbeat intervals.
+    Online = 1,
+    Offline = 2,
+    Removed = 3,
+}
+impl RunnerStatus {
+    /// String value of the enum field names used in the ProtoBuf definition.
+    ///
+    /// The values are not transformed in any way and thus are considered stable
+    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
+    pub fn as_str_name(&self) -> &'static str {
+        match self {
+            Self::Unspecified => "RUNNER_STATUS_UNSPECIFIED",
+            Self::Online => "RUNNER_STATUS_ONLINE",
+            Self::Offline => "RUNNER_STATUS_OFFLINE",
+            Self::Removed => "RUNNER_STATUS_REMOVED",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "RUNNER_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
+            "RUNNER_STATUS_ONLINE" => Some(Self::Online),
+            "RUNNER_STATUS_OFFLINE" => Some(Self::Offline),
+            "RUNNER_STATUS_REMOVED" => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct GuestServiceControlRequest {
 }
@@ -771,6 +1363,175 @@ pub struct ReportExitRequest {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct ReportExitResponse {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BridgeRequest {
+    #[prost(oneof="bridge_request::Payload", tags="1, 2, 3, 4, 5, 6")]
+    pub payload: ::core::option::Option<bridge_request::Payload>,
+}
+/// Nested message and enum types in `BridgeRequest`.
+pub mod bridge_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        /// Must be the first message on the stream.
+        #[prost(message, tag="1")]
+        Attach(super::BridgeAttach),
+        /// Reported once the remote actor VM/process has booted (if not already
+        /// populated in `attach`).
+        #[prost(message, tag="2")]
+        Started(super::BridgeStarted),
+        /// Console bytes read from the actor's serial console (`console.log`).
+        #[prost(bytes, tag="3")]
+        Console(::prost::alloc::vec::Vec<u8>),
+        /// The actor VM/process exited.
+        #[prost(message, tag="4")]
+        Exit(super::BridgeExit),
+        /// Answer to a non-streaming terminal task (`ListProcesses`, `KillProcess`).
+        #[prost(message, tag="5")]
+        TaskResult(super::BridgeTaskResult),
+        /// The actor's terminal process service answered and is ready for attach.
+        #[prost(message, tag="6")]
+        TerminalReady(super::BridgeTerminalReady),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeAttach {
+    #[prost(uint32, tag="1")]
+    pub pid: u32,
+    #[prost(uint32, tag="2")]
+    pub vcpus: u32,
+    #[prost(uint32, tag="3")]
+    pub mem_mib: u32,
+    #[prost(string, tag="4")]
+    pub driver: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub capture: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeStarted {
+    #[prost(uint32, tag="1")]
+    pub pid: u32,
+    #[prost(uint32, tag="2")]
+    pub vcpus: u32,
+    #[prost(uint32, tag="3")]
+    pub mem_mib: u32,
+    #[prost(string, tag="4")]
+    pub driver: ::prost::alloc::string::String,
+    #[prost(string, tag="5")]
+    pub capture: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeExit {
+    #[prost(int32, optional, tag="1")]
+    pub code: ::core::option::Option<i32>,
+    #[prost(string, tag="2")]
+    pub signal: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub error: ::prost::alloc::string::String,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeTerminalReady {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BridgeTaskResult {
+    #[prost(uint64, tag="1")]
+    pub task_id: u64,
+    #[prost(oneof="bridge_task_result::Result", tags="2, 3, 4")]
+    pub result: ::core::option::Option<bridge_task_result::Result>,
+}
+/// Nested message and enum types in `BridgeTaskResult`.
+pub mod bridge_task_result {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Result {
+        #[prost(message, tag="2")]
+        ListProcesses(super::ListProcessesResponse),
+        #[prost(message, tag="3")]
+        KillProcess(super::KillProcessResponse),
+        #[prost(message, tag="4")]
+        Error(super::TaskError),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeResponse {
+    #[prost(oneof="bridge_response::Payload", tags="1, 2, 3")]
+    pub payload: ::core::option::Option<bridge_response::Payload>,
+}
+/// Nested message and enum types in `BridgeResponse`.
+pub mod bridge_response {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Payload {
+        /// Sent once after `BridgeAttach` is accepted: the run's profile and
+        /// compiled recipe so a stateless bridge can boot the actor.
+        #[prost(message, tag="1")]
+        Attached(super::BridgeAttached),
+        /// Stop the actor VM/process (graceful SIGTERM then SIGKILL after grace_ms).
+        #[prost(message, tag="2")]
+        Stop(super::BridgeStop),
+        /// A terminal process-service task for the actor's driving program.
+        #[prost(message, tag="3")]
+        TerminalTask(super::BridgeTerminalTask),
+    }
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeAttached {
+    #[prost(string, tag="1")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(string, tag="2")]
+    pub profile_yaml: ::prost::alloc::string::String,
+    #[prost(string, tag="3")]
+    pub recipe_json: ::prost::alloc::string::String,
+    #[prost(bool, tag="4")]
+    pub tty: bool,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeStop {
+    #[prost(int64, tag="1")]
+    pub grace_ms: i64,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeTerminalTask {
+    #[prost(uint64, tag="1")]
+    pub id: u64,
+    #[prost(oneof="bridge_terminal_task::Kind", tags="2, 3, 4")]
+    pub kind: ::core::option::Option<bridge_terminal_task::Kind>,
+}
+/// Nested message and enum types in `BridgeTerminalTask`.
+pub mod bridge_terminal_task {
+    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    pub enum Kind {
+        #[prost(message, tag="2")]
+        ListProcesses(super::ListProcessesRequest),
+        #[prost(message, tag="3")]
+        KillProcess(super::KillProcessRequest),
+        #[prost(message, tag="4")]
+        Exec(super::BridgeExecTask),
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeExecTask {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TerminalTaskRequest {
+    #[prost(oneof="terminal_task_request::Payload", tags="1, 2, 3")]
+    pub payload: ::core::option::Option<terminal_task_request::Payload>,
+}
+/// Nested message and enum types in `TerminalTaskRequest`.
+pub mod terminal_task_request {
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
+    pub enum Payload {
+        /// First message: identifies the announced `BridgeTerminalTask.id`.
+        #[prost(uint64, tag="1")]
+        TaskId(u64),
+        #[prost(message, tag="2")]
+        Exec(super::ExecResponse),
+        #[prost(message, tag="3")]
+        Error(super::TaskError),
+    }
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TerminalTaskResponse {
+    #[prost(message, optional, tag="1")]
+    pub exec: ::core::option::Option<ExecRequest>,
 }
 /// What happens to a session's upper layer, the writable tmpfs over its
 /// layers.
@@ -1085,584 +1846,6 @@ pub struct PruneImagesResponse {
     /// removed when `dry_run` is true).
     #[prost(string, repeated, tag="4")]
     pub removed_images: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-/// What a runner can host: each role with its drivers. A role with none is a
-/// role it does not hold.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RunnerCapabilities {
-    #[prost(enumeration="ActorDriver", repeated, tag="1")]
-    pub actor: ::prost::alloc::vec::Vec<i32>,
-    #[prost(enumeration="ExecutorDriver", repeated, tag="2")]
-    pub executor: ::prost::alloc::vec::Vec<i32>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct JoinToken {
-    /// Public; names the token in listings and in `RevokeJoinToken`.
-    #[prost(string, tag="1")]
-    pub id: ::prost::alloc::string::String,
-    /// The roles a runner may declare; empty allows every role.
-    #[prost(enumeration="RunnerRole", repeated, tag="2")]
-    pub roles: ::prost::alloc::vec::Vec<i32>,
-    /// Labels every runner that joins with it gets.
-    #[prost(map="string, string", tag="3")]
-    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    #[prost(int64, tag="4")]
-    pub created_at_ms: i64,
-    #[prost(int64, tag="5")]
-    pub expires_at_ms: i64,
-    #[prost(uint32, tag="6")]
-    pub uses_left: u32,
-    #[prost(enumeration="JoinTokenState", tag="7")]
-    pub state: i32,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CreateJoinTokenRequest {
-    /// Required, positive.
-    #[prost(int64, tag="1")]
-    pub ttl_ms: i64,
-    /// How many runners may join with it. Required, at least 1.
-    #[prost(uint32, tag="2")]
-    pub uses: u32,
-    #[prost(enumeration="RunnerRole", repeated, tag="3")]
-    pub roles: ::prost::alloc::vec::Vec<i32>,
-    #[prost(map="string, string", tag="4")]
-    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct CreateJoinTokenResponse {
-    #[prost(message, optional, tag="1")]
-    pub join_token: ::core::option::Option<JoinToken>,
-    /// The secret to hand to the runner; not stored, not shown again.
-    #[prost(string, tag="2")]
-    pub token: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListJoinTokensRequest {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListJoinTokensResponse {
-    #[prost(message, repeated, tag="1")]
-    pub join_tokens: ::prost::alloc::vec::Vec<JoinToken>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RevokeJoinTokenRequest {
-    #[prost(string, tag="1")]
-    pub id: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RevokeJoinTokenResponse {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct JoinRequest {
-    #[prost(string, tag="1")]
-    pub join_token: ::prost::alloc::string::String,
-    /// A DNS label: lowercase letters, digits and '-'.
-    #[prost(string, tag="2")]
-    pub name: ::prost::alloc::string::String,
-    #[prost(map="string, string", tag="4")]
-    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    /// What the runner detected, restricted by its `--roles`. At least one
-    /// role, each within the join token's roles.
-    #[prost(message, optional, tag="5")]
-    pub capabilities: ::core::option::Option<RunnerCapabilities>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct JoinResponse {
-    #[prost(message, optional, tag="1")]
-    pub runner: ::core::option::Option<Runner>,
-    /// The runner's credential, a bearer token for `Heartbeat`. Not stored,
-    /// not shown again.
-    #[prost(string, tag="2")]
-    pub credential: ::prost::alloc::string::String,
-    /// How often the control plane expects a heartbeat.
-    #[prost(int64, tag="3")]
-    pub heartbeat_interval_ms: i64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct HeartbeatRequest {
-    #[prost(map="string, string", tag="2")]
-    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    /// The machine the runner runs on. The control plane checks a recipe
-    /// against the host its actor would run on, and picks the SFTP server of a
-    /// workspace mount by the platform.
-    #[prost(message, optional, tag="3")]
-    pub host: ::core::option::Option<RunnerHost>,
-    /// What the runner can host now, as at its join; its roles stay within its
-    /// join token's scope.
-    #[prost(message, optional, tag="4")]
-    pub capabilities: ::core::option::Option<RunnerCapabilities>,
-}
-/// A runner's machine.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RunnerHost {
-    /// The operating system and CPU architecture as Rust names them
-    /// (`std::env::consts`): "linux", "macos"; "x86_64", "aarch64".
-    #[prost(string, tag="1")]
-    pub os: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
-    pub arch: ::prost::alloc::string::String,
-    /// From `/proc/cpuinfo` on Linux; empty elsewhere.
-    #[prost(string, tag="3")]
-    pub cpu_vendor: ::prost::alloc::string::String,
-    #[prost(string, tag="4")]
-    pub cpu_model: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag="5")]
-    pub cpu_flags: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-    /// The CPUID entries its KVM supports; unset without a usable KVM.
-    #[prost(message, optional, tag="6")]
-    pub kvm_cpuid: ::core::option::Option<KvmCpuid>,
-    /// The home directory of the user the runner runs as. A `~` in a native
-    /// executor's paths on this runner (its `workspace`, `path_map` values and
-    /// `executor:NAME:` file sides) is this directory. Empty when unknown.
-    #[prost(string, tag="7")]
-    pub home: ::prost::alloc::string::String,
-}
-/// What `KVM_GET_SUPPORTED_CPUID` reported.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KvmCpuid {
-    #[prost(message, repeated, tag="1")]
-    pub entries: ::prost::alloc::vec::Vec<CpuidEntry>,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct CpuidEntry {
-    #[prost(uint32, tag="1")]
-    pub leaf: u32,
-    #[prost(uint32, tag="2")]
-    pub subleaf: u32,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct HeartbeatResponse {
-    /// A new credential after `RotateRunner`, empty otherwise. The runner keeps
-    /// it and uses it from its next call on; that use retires the old one.
-    #[prost(string, tag="1")]
-    pub credential: ::prost::alloc::string::String,
-    #[prost(int64, tag="2")]
-    pub heartbeat_interval_ms: i64,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Runner {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// Its own labels and those of its join token.
-    #[prost(map="string, string", tag="3")]
-    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-    #[prost(enumeration="RunnerStatus", tag="4")]
-    pub status: i32,
-    #[prost(int64, tag="5")]
-    pub created_at_ms: i64,
-    /// Its last heartbeat, or its join.
-    #[prost(int64, tag="6")]
-    pub last_seen_at_ms: i64,
-    /// A new credential was asked for and the runner has not used it yet.
-    #[prost(bool, tag="7")]
-    pub rotating: bool,
-    /// The ID of the join token it joined with.
-    #[prost(string, tag="8")]
-    pub join_token_id: ::prost::alloc::string::String,
-    /// As it last reported them, in its join or a heartbeat.
-    #[prost(message, optional, tag="9")]
-    pub capabilities: ::core::option::Option<RunnerCapabilities>,
-    /// Its machine as its last heartbeat to this control plane process
-    /// reported it; unset until one did.
-    #[prost(message, optional, tag="10")]
-    pub host: ::core::option::Option<RunnerHost>,
-    /// When a short-lived credential expires, in Unix milliseconds; unset for
-    /// non-expiring runners.
-    #[prost(int64, optional, tag="11")]
-    pub expires_at_ms: ::core::option::Option<i64>,
-    /// Loaded from a static runners file rather than enrolled in state.db.
-    #[prost(bool, tag="12")]
-    pub static_config: bool,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ListRunnersRequest {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ListRunnersResponse {
-    #[prost(message, repeated, tag="1")]
-    pub runners: ::prost::alloc::vec::Vec<Runner>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RotateRunnerRequest {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RotateRunnerResponse {
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RemoveRunnerRequest {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RemoveRunnerResponse {
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MintRunnerCredentialRequest {
-    /// A DNS label: lowercase letters, digits and '-'.
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-    /// Required, positive duration until the credential expires.
-    #[prost(int64, tag="2")]
-    pub ttl_ms: i64,
-    /// Roles the runner is allowed to declare; empty allows every role.
-    #[prost(enumeration="RunnerRole", repeated, tag="3")]
-    pub roles: ::prost::alloc::vec::Vec<i32>,
-    /// Labels applied to the runner.
-    #[prost(map="string, string", tag="4")]
-    pub labels: ::std::collections::HashMap<::prost::alloc::string::String, ::prost::alloc::string::String>,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct MintRunnerCredentialResponse {
-    #[prost(message, optional, tag="1")]
-    pub runner: ::core::option::Option<Runner>,
-    /// The runner's credential; not stored, not shown again.
-    #[prost(string, tag="2")]
-    pub credential: ::prost::alloc::string::String,
-    #[prost(int64, tag="3")]
-    pub expires_at_ms: i64,
-    /// How often the control plane expects a heartbeat.
-    #[prost(int64, tag="4")]
-    pub heartbeat_interval_ms: i64,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RevokeRunnerCredentialRequest {
-    #[prost(string, tag="1")]
-    pub name: ::prost::alloc::string::String,
-}
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RevokeRunnerCredentialResponse {
-}
-/// From a runner on its control stream.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ControlRequest {
-    #[prost(oneof="control_request::Payload", tags="1, 2")]
-    pub payload: ::core::option::Option<control_request::Payload>,
-}
-/// Nested message and enum types in `ControlRequest`.
-pub mod control_request {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Payload {
-        #[prost(message, tag="1")]
-        Result(super::TaskResult),
-        /// Sent first on every control stream: the processes the runner still
-        /// runs for runs. The control plane claims those of runs that are live
-        /// and ends the others with `EndRun`.
-        #[prost(message, tag="2")]
-        Report(super::RunnerReport),
-    }
-}
-/// What a runner still runs for runs when it connects.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct RunnerReport {
-    /// Its running processes that belong to a run (`run_id` set).
-    #[prost(message, repeated, tag="1")]
-    pub processes: ::prost::alloc::vec::Vec<ProcessInfo>,
-}
-/// From the control plane on a runner's control stream.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ControlResponse {
-    #[prost(oneof="control_response::Payload", tags="1")]
-    pub payload: ::core::option::Option<control_response::Payload>,
-}
-/// Nested message and enum types in `ControlResponse`.
-pub mod control_response {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Payload {
-        #[prost(message, tag="1")]
-        Task(super::RunnerTask),
-    }
-}
-/// A task the control plane needs a runner to carry out.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct RunnerTask {
-    /// Unique among the tasks of one control stream.
-    #[prost(uint64, tag="1")]
-    pub id: u64,
-    #[prost(oneof="runner_task::Kind", tags="2, 3, 4, 5")]
-    pub kind: ::core::option::Option<runner_task::Kind>,
-}
-/// Nested message and enum types in `RunnerTask`.
-pub mod runner_task {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
-    pub enum Kind {
-        /// Open a `Task` stream for this task.
-        #[prost(message, tag="2")]
-        Exec(super::ExecTask),
-        /// Answered on the control stream.
-        #[prost(message, tag="3")]
-        ListProcesses(super::ListProcessesRequest),
-        /// Answered on the control stream.
-        #[prost(message, tag="4")]
-        KillProcess(super::KillProcessRequest),
-        /// End everything the runner runs for a run. Answered on the control
-        /// stream.
-        #[prost(message, tag="5")]
-        EndRun(super::EndRun),
-    }
-}
-/// A run ended, or is not one the control plane knows: the runner kills its
-/// processes, including a workspace mount's SFTP server.
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct EndRun {
-    #[prost(string, tag="1")]
-    pub run_id: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct EndRunResponse {
-    /// The run's processes after the end, those that exited before it
-    /// included.
-    #[prost(message, repeated, tag="1")]
-    pub processes: ::prost::alloc::vec::Vec<ProcessInfo>,
-    /// The IDs of the processes this task killed.
-    #[prost(string, repeated, tag="2")]
-    pub ended: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
-}
-/// An exec: its start or attach comes on the task's own stream.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ExecTask {
-}
-/// The result of a task answered on the control stream.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TaskResult {
-    #[prost(uint64, tag="1")]
-    pub task_id: u64,
-    #[prost(oneof="task_result::Result", tags="2, 3, 4, 5")]
-    pub result: ::core::option::Option<task_result::Result>,
-}
-/// Nested message and enum types in `TaskResult`.
-pub mod task_result {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Result {
-        #[prost(message, tag="2")]
-        ListProcesses(super::ListProcessesResponse),
-        #[prost(message, tag="3")]
-        KillProcess(super::KillProcessResponse),
-        #[prost(message, tag="4")]
-        Error(super::TaskError),
-        #[prost(message, tag="5")]
-        EndRun(super::EndRunResponse),
-    }
-}
-/// Why a runner refused or failed a task, as the gRPC status its process
-/// service returned.
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TaskError {
-    #[prost(bytes="vec", tag="3")]
-    pub details: ::prost::alloc::vec::Vec<u8>,
-    #[prost(message, optional, tag="4")]
-    pub diagnostic: ::core::option::Option<ErrorDiagnostic>,
-    /// A `google.rpc.Code` value.
-    #[prost(int32, tag="1")]
-    pub code: i32,
-    #[prost(string, tag="2")]
-    pub message: ::prost::alloc::string::String,
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TaskRequest {
-    #[prost(oneof="task_request::Payload", tags="1, 2, 3")]
-    pub payload: ::core::option::Option<task_request::Payload>,
-}
-/// Nested message and enum types in `TaskRequest`.
-pub mod task_request {
-    #[derive(Clone, PartialEq, ::prost::Oneof)]
-    pub enum Payload {
-        /// The first request: the task this stream is for.
-        #[prost(uint64, tag="1")]
-        TaskId(u64),
-        #[prost(message, tag="2")]
-        Exec(super::ExecResponse),
-        /// The exec could not start or attach, or its stream failed; nothing
-        /// follows.
-        #[prost(message, tag="3")]
-        Error(super::TaskError),
-    }
-}
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct TaskResponse {
-    #[prost(message, optional, tag="1")]
-    pub exec: ::core::option::Option<ExecRequest>,
-}
-/// What a runner can host. A join token's scope names roles; a runner
-/// reports its `RunnerCapabilities`, whose roles are those with at least one
-/// driver.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum RunnerRole {
-    Unspecified = 0,
-    Actor = 1,
-    Executor = 2,
-}
-impl RunnerRole {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "RUNNER_ROLE_UNSPECIFIED",
-            Self::Actor => "RUNNER_ROLE_ACTOR",
-            Self::Executor => "RUNNER_ROLE_EXECUTOR",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "RUNNER_ROLE_UNSPECIFIED" => Some(Self::Unspecified),
-            "RUNNER_ROLE_ACTOR" => Some(Self::Actor),
-            "RUNNER_ROLE_EXECUTOR" => Some(Self::Executor),
-            _ => None,
-        }
-    }
-}
-/// How a runner can run an actor: an actor driver, as a profile's
-/// `actor.driver` names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum ActorDriver {
-    Unspecified = 0,
-    /// `linux-firecracker`: a usable KVM and the actor image (vmlinux,
-    /// rootfs.ext4, firecracker).
-    LinuxFirecracker = 1,
-    /// `linux-container`: a Docker-compatible engine that answers. Whether it
-    /// has the OCI runtime a profile names (`runc`, gVisor's `runsc`) is
-    /// checked when a run is created.
-    LinuxContainer = 2,
-    /// `macos-vz`: Apple silicon macOS with vfkit and the `macos-vz` actor
-    /// image (Image, rootfs.ext4): a Virtualization.framework VM.
-    MacosVz = 3,
-    /// `macos-apple-container`: Apple's `container` CLI on a Mac, whose
-    /// services answer.
-    MacosAppleContainer = 4,
-}
-impl ActorDriver {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "ACTOR_DRIVER_UNSPECIFIED",
-            Self::LinuxFirecracker => "ACTOR_DRIVER_LINUX_FIRECRACKER",
-            Self::LinuxContainer => "ACTOR_DRIVER_LINUX_CONTAINER",
-            Self::MacosVz => "ACTOR_DRIVER_MACOS_VZ",
-            Self::MacosAppleContainer => "ACTOR_DRIVER_MACOS_APPLE_CONTAINER",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "ACTOR_DRIVER_UNSPECIFIED" => Some(Self::Unspecified),
-            "ACTOR_DRIVER_LINUX_FIRECRACKER" => Some(Self::LinuxFirecracker),
-            "ACTOR_DRIVER_LINUX_CONTAINER" => Some(Self::LinuxContainer),
-            "ACTOR_DRIVER_MACOS_VZ" => Some(Self::MacosVz),
-            "ACTOR_DRIVER_MACOS_APPLE_CONTAINER" => Some(Self::MacosAppleContainer),
-            _ => None,
-        }
-    }
-}
-/// How a runner can create an executor: an executor driver, as a profile's
-/// `executors.NAME.driver` names it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum ExecutorDriver {
-    Unspecified = 0,
-    /// `native`: the runner's own process space; every runner has it.
-    Native = 1,
-    /// `linux-container`: a Docker-compatible engine the runner reaches.
-    LinuxContainer = 2,
-}
-impl ExecutorDriver {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "EXECUTOR_DRIVER_UNSPECIFIED",
-            Self::Native => "EXECUTOR_DRIVER_NATIVE",
-            Self::LinuxContainer => "EXECUTOR_DRIVER_LINUX_CONTAINER",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "EXECUTOR_DRIVER_UNSPECIFIED" => Some(Self::Unspecified),
-            "EXECUTOR_DRIVER_NATIVE" => Some(Self::Native),
-            "EXECUTOR_DRIVER_LINUX_CONTAINER" => Some(Self::LinuxContainer),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum JoinTokenState {
-    Unspecified = 0,
-    Valid = 1,
-    Expired = 2,
-    /// No uses are left.
-    UsedUp = 3,
-    Revoked = 4,
-}
-impl JoinTokenState {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "JOIN_TOKEN_STATE_UNSPECIFIED",
-            Self::Valid => "JOIN_TOKEN_STATE_VALID",
-            Self::Expired => "JOIN_TOKEN_STATE_EXPIRED",
-            Self::UsedUp => "JOIN_TOKEN_STATE_USED_UP",
-            Self::Revoked => "JOIN_TOKEN_STATE_REVOKED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "JOIN_TOKEN_STATE_UNSPECIFIED" => Some(Self::Unspecified),
-            "JOIN_TOKEN_STATE_VALID" => Some(Self::Valid),
-            "JOIN_TOKEN_STATE_EXPIRED" => Some(Self::Expired),
-            "JOIN_TOKEN_STATE_USED_UP" => Some(Self::UsedUp),
-            "JOIN_TOKEN_STATE_REVOKED" => Some(Self::Revoked),
-            _ => None,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
-#[repr(i32)]
-pub enum RunnerStatus {
-    Unspecified = 0,
-    /// A heartbeat arrived within the last three heartbeat intervals.
-    Online = 1,
-    Offline = 2,
-    Removed = 3,
-}
-impl RunnerStatus {
-    /// String value of the enum field names used in the ProtoBuf definition.
-    ///
-    /// The values are not transformed in any way and thus are considered stable
-    /// (if the ProtoBuf definition does not change) and safe for programmatic use.
-    pub fn as_str_name(&self) -> &'static str {
-        match self {
-            Self::Unspecified => "RUNNER_STATUS_UNSPECIFIED",
-            Self::Online => "RUNNER_STATUS_ONLINE",
-            Self::Offline => "RUNNER_STATUS_OFFLINE",
-            Self::Removed => "RUNNER_STATUS_REMOVED",
-        }
-    }
-    /// Creates an enum from field names used in the ProtoBuf definition.
-    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
-        match value {
-            "RUNNER_STATUS_UNSPECIFIED" => Some(Self::Unspecified),
-            "RUNNER_STATUS_ONLINE" => Some(Self::Online),
-            "RUNNER_STATUS_OFFLINE" => Some(Self::Offline),
-            "RUNNER_STATUS_REMOVED" => Some(Self::Removed),
-            _ => None,
-        }
-    }
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct CreateRunRequest {

@@ -359,7 +359,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         holder.keep();
       }
       progress.message("Creating run");
-      let run = connection
+      let created = connection
         .runs()
         .create_run(CreateRunRequest {
           profile_yaml: resolved.yaml,
@@ -378,9 +378,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         })
         .await
         .map_err(fail)?
-        .into_inner()
-        .run
-        .unwrap_or_default();
+        .into_inner();
+      let run = created.run.unwrap_or_default();
       progress.finish();
       if let Some(lock_path) = &lockfile_path {
         let resolved_features: std::collections::BTreeMap<String, String> = run.resolved_features.into_iter().collect();

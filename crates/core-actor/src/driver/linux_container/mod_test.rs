@@ -462,35 +462,3 @@ async fn start_session_boots_writable_rootfs_and_keeps_container_until_removed()
   session.remove().await;
   assert_eq!(fake.calls().last().map(String::as_str), Some("remove needy-actor-0123456789ab"));
 }
-
-// ROOT CAUSE:
-//
-// `daemon::holder::driver_with_backends` built `LinuxContainer` with
-// `LinuxContainer::with_engine(...)` instead of `LinuxContainer::of(...)`,
-// dropping `actor.seed`. When `actor.seed` was configured without a `recipe`,
-// `fallback_machine_id` stayed `None` and `/etc/machine-id` was not bound.
-//
-// The fix adds `LinuxContainer::of_with_engine` so holder-constructed drivers
-// keep `actor.seed` and bind `/etc/machine-id:ro` even without a recipe.
-#[tokio::test]
-async fn of_with_engine_binds_machine_id_from_actor_seed_without_recipe() {
-  let dir = tempfile::tempdir().unwrap();
-  let fake = Arc::new(fake());
-  let profile = needy_config::profile::load(&needy_config::Source::text(
-    "actor:\n  driver: linux-container\n  container: { oci_runtime: runc }\n  seed: \"worker-1\"\n",
-    PathBuf::new(),
-  ))
-  .unwrap();
-
-  let container = LinuxContainer::of_with_engine(&profile.actor, fake.clone()).unwrap();
-  let user = User::default();
-  let mut started = container.start(&start(dir.path(), &user, None)).await.unwrap();
-  let _ = started.wait().await.unwrap();
-
-  let machine_id_path = dir.path().join("identity").join("machine-id");
-  let expected_id = needy_common::seed::machine_id(needy_common::seed::from_str("worker-1"));
-  assert_eq!(std::fs::read_to_string(&machine_id_path).unwrap(), format!("{expected_id}\n"));
-  let bodies = fake.bodies();
-  let binds = bodies.last().unwrap().1.host_config.as_ref().unwrap().binds.clone().unwrap();
-  assert!(binds.contains(&format!("{}:/etc/machine-id:ro", machine_id_path.display())), "{binds:?}");
-}

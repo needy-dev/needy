@@ -431,17 +431,20 @@ executors:
 }
 
 #[tokio::test]
-async fn an_actor_on_a_runner_other_than_the_control_hosts_own_fails_the_create() {
+async fn an_actor_on_a_remote_runner_places_and_authorizes_that_runner() {
   let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
   let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
   let _far = testing::join_runner(&served, &operator, "far", "actor(linux-firecracker)", &[]).await;
   let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker, runner: far }\n";
 
-  let Err(ControlError::Failed(message)) = Runs::create(served.daemon(), new_run(profile, served.dir())).await else {
-    panic!("an actor on another runner must fail the create");
-  };
+  let created = Runs::create(served.daemon(), new_run(profile, served.dir())).await.unwrap();
 
-  assert!(message.starts_with("actor: runner far cannot host actors yet"), "{message}");
+  assert_eq!(created.state, RunState::Running);
+  assert_eq!(created.actor, Some(needy_core::types::ActorState::Starting));
+  assert!(Runs::authorize_actor_runner(served.daemon(), "far", &created.id).await.unwrap());
+  assert!(!Runs::authorize_actor_runner(served.daemon(), "other", &created.id).await.unwrap());
+  Runs::stop(served.daemon(), &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  assert!(!Runs::authorize_actor_runner(served.daemon(), "far", &created.id).await.unwrap());
 }
 
 #[tokio::test]
@@ -548,4 +551,27 @@ async fn explicit_stop_removes_control_backend_sockets() {
   Runs::stop(&started.daemon, &run.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
   assert!(!directory.join("cu.sock").exists(), "control guest socket outlived explicit stop");
   assert!(!directory.join("cg.sock").exists(), "control gateway socket outlived explicit stop");
+}
+
+#[tokio::test]
+async fn node_authorizer_rejects_stale_runner_generation_and_ended_runs() {
+  let served = testing::serve(testing::daemon().await, Some(CONTROL_TOKEN)).await;
+  let operator = served.client.clone().with_token(CONTROL_TOKEN).unwrap();
+  let _far = testing::join_runner(&served, &operator, "far", "actor(linux-firecracker)", &[]).await;
+  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker, runner: far }\n";
+
+  let created = Runs::create(served.daemon(), new_run(profile, served.dir())).await.unwrap();
+  assert!(Runs::authorize_actor_runner(served.daemon(), "far", &created.id).await.unwrap());
+
+  // Reconnecting the runner with a new control stream changes its link generation,
+  // immediately invalidating the previous run binding.
+  served.daemon().links.close("far");
+  assert!(!Runs::authorize_actor_runner(served.daemon(), "far", &created.id).await.unwrap());
+  // Wait for `far` to reconnect on a new generation; still unauthorized for the old run.
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+  while served.daemon().links.get("far").is_none() && tokio::time::Instant::now() < deadline {
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+  }
+  assert!(served.daemon().links.get("far").is_some());
+  assert!(!Runs::authorize_actor_runner(served.daemon(), "far", &created.id).await.unwrap());
 }

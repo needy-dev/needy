@@ -38,7 +38,7 @@ impl Args {
 #[derive(clap::Subcommand)]
 enum Command {
   /// Serve the control plane in the foreground.
-  Serve(ServeArgs),
+  Serve(Box<ServeArgs>),
   /// Own local actor and process resources independently of control.
   #[command(hide = true)]
   Holder(HolderArgs),
@@ -113,7 +113,7 @@ struct ExecutorArgs {
 
 pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   match args.command {
-    Command::Serve(args) => serve(args, ctx).await,
+    Command::Serve(args) => serve(*args, ctx).await,
     #[cfg(unix)]
     Command::Holder(args) => {
       needy_daemon::holder::serve_file(&args.config_file).await?;

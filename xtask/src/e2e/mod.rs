@@ -35,6 +35,8 @@ mod proc;
 #[cfg(unix)]
 mod remote;
 #[cfg(unix)]
+mod remote_actor;
+#[cfg(unix)]
 mod runs;
 #[cfg(unix)]
 mod scenarios;
@@ -489,7 +491,7 @@ mod run {
           _ => super::transport::free_port()?,
         });
       }
-      if cell.scenario != matrix::Scenario::Service {
+      if !matches!(cell.scenario, matrix::Scenario::Service | matrix::Scenario::RemoteActorHost) {
         env.start_daemon()?;
         invariants::sockets(&env, &mut checks, "at daemon start");
         invariants::discovery(&env, &mut checks);

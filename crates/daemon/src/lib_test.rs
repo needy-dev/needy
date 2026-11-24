@@ -270,6 +270,8 @@ async fn a_control_listener_stop_preserves_the_runs_processes_on_runners() {
     labels: Default::default(),
     grace: crate::runner::DISCONNECT_GRACE,
     activity_hook: None,
+    ephemeral: false,
+    actor: None,
   };
   let runner = crate::runner::Runner::start(config).await.unwrap();
   let runner_stop = tokio_util::sync::CancellationToken::new();

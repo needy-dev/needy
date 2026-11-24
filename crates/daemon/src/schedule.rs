@@ -277,8 +277,8 @@ pub(crate) fn placement(selector: Option<&RunnerSelector>, need: Need, runners: 
 }
 
 impl Daemon {
-  /// Every runner that was not removed (both `state.db` and statically
-  /// configured), and whether it is connected now.
+  /// Every runner that was not removed or expired (both `state.db` and
+  /// statically configured), and whether it is connected now.
   pub(crate) async fn candidates(&self) -> anyhow::Result<Vec<Candidate>> {
     self.static_runners.reload(&self.links);
     let now = needy_common::time::now_ms();
@@ -313,22 +313,6 @@ impl Daemon {
   /// Whether `runner` runs on this host, as the operator said.
   pub(crate) fn is_local(&self, runner: &str) -> bool {
     self.config.local_runner.as_deref() == Some(runner)
-  }
-
-  /// Why an actor cannot run at `placement`, if it cannot: an actor runs on
-  /// the control host, reached directly or as its own runner.
-  // TODO(runner-actor): an actor on another runner needs the actor role
-  // over dial-out (the VM's lifecycle and its guest channel relayed through
-  // the runner); see `Config::local_runner`.
-  pub(crate) fn actor_refusal(&self, placement: &Placement) -> Option<String> {
-    match placement {
-      Placement::ControlHost => None,
-      Placement::Runner(name) if self.is_local(name) => None,
-      Placement::Runner(name) => Some(format!(
-        "runner {name} cannot host actors yet: an actor runs on the control host, or on its own runner \
-         (`needy daemon serve --local-runner NAME`)"
-      )),
-    }
   }
 
   /// Where the pool creates an executor whose driver is `driver` at

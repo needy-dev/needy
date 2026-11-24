@@ -4,6 +4,7 @@ syntax = "proto3";
 package needy.v1;
 
 import "needy/v1/process.proto";
+import "needy/v1/runner.proto";
 
 // GuestService is served to the supervisor inside an actor microVM over vsock.
 service GuestService {
@@ -24,6 +25,12 @@ service GuestService {
   // daemon-to-init message is a case of `GuestServiceControlResponse`
   // rather than another long-lived call.
   rpc Control(GuestServiceControlRequest) returns (stream GuestServiceControlResponse);
+  // Outbound lifecycle, console, and reverse terminal control stream from a
+  // remote actor host bridge. At most one bridge may attach per run.
+  rpc Bridge(stream BridgeRequest) returns (stream BridgeResponse);
+  // Outbound stream opened by a remote actor host bridge for a single
+  // reverse terminal exec task announced on `Bridge`.
+  rpc TerminalTask(stream TerminalTaskRequest) returns (stream TerminalTaskResponse);
 }
 
 message GuestServiceControlRequest {}
@@ -231,3 +238,101 @@ message ReportExitRequest {
 }
 
 message ReportExitResponse {}
+
+message BridgeRequest {
+  oneof payload {
+    // Must be the first message on the stream.
+    BridgeAttach attach = 1;
+    // Reported once the remote actor VM/process has booted (if not already
+    // populated in `attach`).
+    BridgeStarted started = 2;
+    // Console bytes read from the actor's serial console (`console.log`).
+    bytes console = 3;
+    // The actor VM/process exited.
+    BridgeExit exit = 4;
+    // Answer to a non-streaming terminal task (`ListProcesses`, `KillProcess`).
+    BridgeTaskResult task_result = 5;
+    // The actor's terminal process service answered and is ready for attach.
+    BridgeTerminalReady terminal_ready = 6;
+  }
+}
+
+message BridgeAttach {
+  uint32 pid = 1;
+  uint32 vcpus = 2;
+  uint32 mem_mib = 3;
+  string driver = 4;
+  string capture = 5;
+}
+
+message BridgeStarted {
+  uint32 pid = 1;
+  uint32 vcpus = 2;
+  uint32 mem_mib = 3;
+  string driver = 4;
+  string capture = 5;
+}
+
+message BridgeExit {
+  optional int32 code = 1;
+  string signal = 2;
+  string error = 3;
+}
+
+message BridgeTerminalReady {}
+
+message BridgeTaskResult {
+  uint64 task_id = 1;
+  oneof result {
+    ListProcessesResponse list_processes = 2;
+    KillProcessResponse kill_process = 3;
+    TaskError error = 4;
+  }
+}
+
+message BridgeResponse {
+  oneof payload {
+    // Sent once after `BridgeAttach` is accepted: the run's profile and
+    // compiled recipe so a stateless bridge can boot the actor.
+    BridgeAttached attached = 1;
+    // Stop the actor VM/process (graceful SIGTERM then SIGKILL after grace_ms).
+    BridgeStop stop = 2;
+    // A terminal process-service task for the actor's driving program.
+    BridgeTerminalTask terminal_task = 3;
+  }
+}
+
+message BridgeAttached {
+  string run_id = 1;
+  string profile_yaml = 2;
+  string recipe_json = 3;
+  bool tty = 4;
+}
+
+message BridgeStop {
+  int64 grace_ms = 1;
+}
+
+message BridgeTerminalTask {
+  uint64 id = 1;
+  oneof kind {
+    ListProcessesRequest list_processes = 2;
+    KillProcessRequest kill_process = 3;
+    BridgeExecTask exec = 4;
+  }
+}
+
+message BridgeExecTask {}
+
+message TerminalTaskRequest {
+  oneof payload {
+    // First message: identifies the announced `BridgeTerminalTask.id`.
+    uint64 task_id = 1;
+    ExecResponse exec = 2;
+    TaskError error = 3;
+  }
+}
+
+message TerminalTaskResponse {
+  ExecRequest exec = 1;
+}

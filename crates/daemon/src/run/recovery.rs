@@ -348,10 +348,11 @@ impl Daemon {
       failure: Mutex::new(record.failure.clone()),
       actor_runner: Mutex::new(record.actor_runner.clone()),
       actor_runner_link: Mutex::new(None),
-      gateway: Mutex::new(None),
       created_by: None,
       image_commit: None,
       pinned_features: Default::default(),
+      gateway: Mutex::new(None),
+      bridge: Mutex::new(crate::bridge::Slot::Idle),
       boot: Mutex::new(super::Boot {
         snapshot: record
           .snapshot
