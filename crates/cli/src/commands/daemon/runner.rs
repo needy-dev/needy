@@ -9,6 +9,8 @@ pub struct RunnerArgs {
   #[arg(long)]
   pub(crate) name: Option<String>,
   #[arg(long)]
+  pub(crate) address: Option<String>,
+  #[arg(long)]
   pub(crate) actor_image: Option<PathBuf>,
   #[arg(long, hide = true)]
   pub(crate) kvm: Option<PathBuf>,
@@ -18,6 +20,10 @@ pub struct RunnerArgs {
   pub(crate) join_token_env: Option<String>,
   #[arg(long)]
   pub(crate) join_token_file: Option<PathBuf>,
+  #[arg(long, conflicts_with = "credential_file")]
+  pub(crate) credential_env: Option<String>,
+  #[arg(long, conflicts_with = "credential_env")]
+  pub(crate) credential_file: Option<PathBuf>,
   #[arg(long, value_delimiter = ',')]
   pub(crate) roles: Option<Vec<needy_core::types::RunnerRole>>,
   #[arg(long, value_delimiter = ',', value_parser = crate::commands::runner::label)]
@@ -39,7 +45,27 @@ pub async fn run_runner(args: RunnerArgs, ctx: &Context) -> Result<i32> {
 async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> Result<i32> {
   let joining = code.is_some();
   let labels_overridden = !args.labels.is_empty();
-  if !joining {
+  let credential = read_runner_credential(args.credential_env.as_deref(), args.credential_file.as_deref())?;
+  let stateless = credential.is_some();
+  let control = args.address.take().or_else(|| args.join.take());
+  if let Some(address) = &control
+    && !address.starts_with("exec:")
+  {
+    needy_config::global::validate_address(address, false)?;
+  }
+  if stateless {
+    if control.is_none() {
+      bail!("--address URI is required when using --credential-env or --credential-file");
+    }
+    if args.name.is_none() {
+      let cred = credential.as_deref().unwrap_or_default();
+      args.name = Some(
+        needy_daemon::runner::credential_name(cred)
+          .map(str::to_string)
+          .ok_or_else(|| anyhow::anyhow!("cannot derive runner name from credential; pass --name NAME"))?,
+      );
+    }
+  } else if !joining {
     let (name, stored) = needy_daemon::runner::enrollment(&ctx.paths()?.state)?;
     args.name = Some(name);
     if let Some(roles) = &args.roles {
@@ -92,15 +118,16 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     bail!("this machine can host none of the roles --roles names");
   }
   let capability_summary = capabilities.to_string();
-  let control_summary = match args.join.as_deref() {
+  let control_summary = match control.as_deref() {
     Some(address) if address.starts_with("exec:") => "saved connector".to_string(),
     Some(address) => address.to_string(),
     None => "saved control connection".to_string(),
   };
   let config = needy_daemon::runner::Config {
     state_dir: paths.state,
-    control: args.join,
+    control,
     join_token: code,
+    credential,
     name: name.clone(),
     capabilities,
     labels: args.labels.into_iter().collect(),
@@ -134,9 +161,25 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     // TODO(runner-progress): persistent serve has no connection-state callback;
     // add waiting feedback only with an owner-approved callback that separates
     // connection/reconnection from active serving, without covering its lifetime.
-    needy_daemon::runner::serve_with_labels(config, labels_overridden).await?;
+    needy_daemon::runner::serve_with_labels(config, labels_overridden && !stateless).await?;
   }
   Ok(0)
+}
+
+/// Reads a pre-provisioned runner credential from an environment variable or
+/// read-only file (such as a Kubernetes mounted Secret).
+fn read_runner_credential(env: Option<&str>, file: Option<&std::path::Path>) -> Result<Option<String>> {
+  let raw = match (env, file) {
+    (Some(var), None) => std::env::var(var).map_err(|_| anyhow::anyhow!("environment variable {var:?} is not set"))?,
+    (None, Some(path)) => {
+      std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("cannot read runner credential file {}: {e}", path.display()))?
+    }
+    (None, None) => return Ok(None),
+    (Some(_), Some(_)) => bail!("set only one of --credential-env or --credential-file"),
+  };
+  let trimmed = raw.trim();
+  anyhow::ensure!(!trimmed.is_empty() && !trimmed.contains(['\r', '\n', '\0']), "runner credential must be a single nonempty line");
+  Ok(Some(trimmed.to_string()))
 }
 
 /// A runner name from this machine's host name: its first label, in

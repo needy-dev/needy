@@ -125,6 +125,18 @@ struct JoinArgs {
 
 #[derive(clap::Args)]
 struct ServeArgs {
+  /// Control daemon address (`tcp://HOST:PORT`, `http://HOST:PORT`, `https://HOST:PORT`, or `unix:///PATH`).
+  #[arg(long)]
+  address: Option<String>,
+  /// Runner name (optional when using `--credential-env` or `--credential-file`; extracted from the credential by default).
+  #[arg(long)]
+  name: Option<String>,
+  /// Read a pre-provisioned runner credential from an environment variable (read-only; never writes `runner.json`).
+  #[arg(long, conflicts_with = "credential_file")]
+  credential_env: Option<String>,
+  /// Read a pre-provisioned runner credential from a file (read-only; never writes `runner.json`).
+  #[arg(long, conflicts_with = "credential_env")]
+  credential_file: Option<std::path::PathBuf>,
   /// Narrow the enrolled roles this runner hosts (comma-separated: `actor`, `executor`).
   #[arg(long, value_delimiter = ',')]
   roles: Option<Vec<RunnerRole>>,
@@ -386,12 +398,15 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Serve(args) => {
       return super::daemon::run_runner(
         super::daemon::RunnerArgs {
-          name: None,
+          name: args.name,
+          address: args.address,
           actor_image: args.actor_image,
           kvm: args.kvm,
           join: None,
           join_token_env: None,
           join_token_file: None,
+          credential_env: args.credential_env,
+          credential_file: args.credential_file,
           roles: args.roles,
           labels: args.labels,
           disconnect_grace: args.disconnect_grace,
@@ -454,11 +469,14 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
   super::daemon::join_runner(
     super::daemon::RunnerArgs {
       name: Some(args.name),
+      address: None,
       actor_image: args.actor_image,
       kvm: args.kvm,
       join: Some(address),
       join_token_env: None,
       join_token_file: None,
+      credential_env: None,
+      credential_file: None,
       roles: args.roles,
       labels: args.labels,
       disconnect_grace: None,

@@ -242,6 +242,8 @@ message Runner {
   // Its machine as its last heartbeat to this control plane process
   // reported it; unset until one did.
   RunnerHost host = 10;
+  // Loaded from a static runners file rather than enrolled in state.db.
+  bool static_config = 12;
 }
 
 message ListRunnersRequest {}

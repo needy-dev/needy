@@ -78,15 +78,27 @@ pub const DISCONNECT_GRACE: Duration = Duration::from_secs(120);
 // running after 5 s is stuck in the kernel and is reported running.
 const END_WAIT: Duration = Duration::from_secs(5);
 
+/// Extracts the runner name `<name>` from a runner credential shaped like
+/// `needy-runner.<name>.<hex>`.
+pub fn credential_name(credential: &str) -> Option<&str> {
+  let mut parts = credential.splitn(3, '.');
+  let (prefix, name, secret) = (parts.next()?, parts.next()?, parts.next()?);
+  (prefix == "needy-runner" && !name.is_empty() && !secret.is_empty()).then_some(name)
+}
+
 /// How a runner starts.
 #[derive(Debug, Clone)]
 pub struct Config {
-  /// `runner.json`.
+  /// `runner.json`. Unused when `credential` is `Some`.
   pub state_dir: PathBuf,
   /// The control plane's endpoint; the one stored at the join when `None`.
   pub control: Option<String>,
   /// Needed on the first start only.
   pub join_token: Option<String>,
+  /// Pre-provisioned read-only runner credential (e.g. from `--credential-env`
+  /// or `--credential-file`). When `Some`, `runner.json` is never read or
+  /// written.
+  pub credential: Option<String>,
   pub name: String,
   /// What it reports it can host: detected at start and restricted by
   /// `--roles` (`crate::capabilities::of_this_machine`).
@@ -144,9 +156,10 @@ struct Enrollment {
   settings: Settings,
 }
 
-/// A runner that joined.
+/// A runner that joined or started with a pre-provisioned credential.
 pub struct Runner {
   path: PathBuf,
+  read_only: bool,
   control: String,
   enrollment: Enrollment,
   capabilities: Capabilities,
@@ -165,36 +178,51 @@ pub struct Runner {
 }
 
 impl Runner {
-  /// Loads the stored credential, or joins with the join token when there
-  /// is none.
+  /// Loads the stored credential, uses the pre-provisioned credential without
+  /// touching `runner.json`, or joins with the join token when there is none.
   pub async fn start(config: Config) -> Result<Self> {
     let path = config.state_dir.join(ENROLLMENT);
-    let (enrollment, interval) = match load(&path)? {
-      Some(stored) => {
-        if stored.name != config.name {
-          bail!(
-            "this runner joined as {}, not {}; pass --name {} or delete {} to join again",
-            stored.name,
-            config.name,
-            stored.name,
-            path.display()
-          );
+    let (enrollment, interval, read_only) = if let Some(credential) = config.credential {
+      let Some(control) = config.control.clone() else {
+        bail!("--address is required when starting a runner with a pre-provisioned credential");
+      };
+      let enrollment = Enrollment {
+        control,
+        name: config.name,
+        credential,
+        settings: Settings::default(),
+      };
+      (enrollment, None, true)
+    } else {
+      let (enrollment, interval) = match load(&path)? {
+        Some(stored) => {
+          if stored.name != config.name {
+            bail!(
+              "this runner joined as {}, not {}; pass --name {} or delete {} to join again",
+              stored.name,
+              config.name,
+              stored.name,
+              path.display()
+            );
+          }
+          (stored, None)
         }
-        (stored, None)
-      }
-      None => {
-        let Some(join_token) = &config.join_token else {
-          bail!("this runner has not joined yet: give it a join token with --join-token-env or --join-token-file");
-        };
-        let Some(control) = &config.control else {
-          bail!("this runner has not joined yet: give it the control plane's endpoint with --join");
-        };
-        join(&config, control, join_token, &path).await?
-      }
+        None => {
+          let Some(join_token) = &config.join_token else {
+            bail!("this runner has not joined yet: give it a join token with --join-token-env or --join-token-file");
+          };
+          let Some(control) = &config.control else {
+            bail!("this runner has not joined yet: give it the control plane's endpoint with --join");
+          };
+          join(&config, control, join_token, &path).await?
+        }
+      };
+      (enrollment, interval, false)
     };
     let control = config.control.clone().unwrap_or_else(|| enrollment.control.clone());
     Ok(Self {
       path,
+      read_only,
       control,
       credential: Arc::new(Mutex::new(enrollment.credential.clone())),
       enrollment,
@@ -233,10 +261,12 @@ impl Runner {
     self.interval = interval(beat.heartbeat_interval_ms);
     if !beat.credential.is_empty() {
       self.enrollment.credential = beat.credential;
-      store(&self.path, &self.enrollment)?;
+      if !self.read_only {
+        store(&self.path, &self.enrollment)?;
+      }
       self.client = Some(client.with_token(&self.enrollment.credential)?);
       *needy_common::sync::lock(&self.credential) = self.enrollment.credential.clone();
-      tracing::info!("runner {}: stored a rotated credential", self.enrollment.name);
+      tracing::info!("runner {}: accepted a rotated credential", self.enrollment.name);
     }
     Ok(())
   }
@@ -255,7 +285,7 @@ impl Runner {
         // Keep the typed refusal: an invocation holder treats its normal
         // credential revocation as completion, while a persistent runner
         // still reports the enrollment guidance to its operator.
-        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path, self.read_only))),
         Err(e) => {
           tracing::warn!("runner {}: heartbeat: {e:#}", self.enrollment.name);
           // The connection is made again for the next heartbeat.
@@ -288,12 +318,16 @@ fn host() -> RunnerHost {
 
 /// The error a runner ends with once the control plane refuses its
 /// credential.
-fn refusal(path: &Path) -> anyhow::Error {
-  anyhow::anyhow!(
-    "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
-     delete {} and join again with a new join token",
-    path.display()
-  )
+fn refusal(path: &Path, read_only: bool) -> anyhow::Error {
+  if read_only {
+    anyhow::anyhow!("the control plane refused this runner's credential: the credential was removed, revoked, or expired")
+  } else {
+    anyhow::anyhow!(
+      "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
+       delete {} and join again with a new join token",
+      path.display()
+    )
+  }
 }
 
 /// Whether the control plane refused the runner's credential, rather than
@@ -373,6 +407,7 @@ impl Runner {
       ended: Arc::new(AtomicBool::new(false)),
       name: self.name().to_string(),
       path: self.path.clone(),
+      read_only: self.read_only,
       credential: self.credential.clone(),
       service,
       tasks: TaskTracker::new(),
@@ -410,6 +445,7 @@ struct Dialer {
   name: String,
   /// `runner.json`, named when the credential is refused.
   path: PathBuf,
+  read_only: bool,
   credential: Arc<Mutex<String>>,
   service: ExecutorService,
   /// The tasks the control plane asked for; they end with `stop`.
@@ -446,7 +482,7 @@ impl Dialer {
         self.orphan(&stop);
       }
       match ended {
-        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path, self.read_only))),
         Err(e) => tracing::warn!("runner {}: control stream: {e:#}", self.name),
         Ok(()) => tracing::info!("runner {}: the control plane ended the control stream", self.name),
       }
@@ -878,6 +914,7 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
     ended: Arc::new(AtomicBool::new(false)),
     name: config.holder.clone(),
     path: config.directory.clone(),
+    read_only: true,
     credential: Arc::new(Mutex::new(config.capability.clone())),
     service,
     tasks: TaskTracker::new(),

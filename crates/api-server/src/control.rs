@@ -820,6 +820,8 @@ pub struct RunnerInfo {
   pub join_token: String,
   /// Its machine, once a heartbeat reported it to this control plane.
   pub host: Option<RunnerHost>,
+  /// Loaded from a static runners file rather than enrolled in state.db.
+  pub static_config: bool,
 }
 
 /// What a bearer token is to the runner registry or the client registry.
