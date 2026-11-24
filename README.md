@@ -64,17 +64,19 @@ or manual image pull required:
 needy run create -it --profile builtin:opencode
 ```
 
-Needy also ships `builtin:codex`, `builtin:pi`, and `builtin:herdr`. On the
-first local run, needy automatically pulls the release's base VM image, builds
-and caches the agent's Dev Container feature layers, and mounts a persistent
-sync store for its login and session state (with a SQLite row-merge driver for
-OpenCode's database).
+Needy also ships minimal built-in profiles for `builtin:codex`, `builtin:pi`,
+and `builtin:herdr` — each is a thin wrapper around the corresponding OCI Dev
+Container feature published under `ghcr.io/needy-dev/features/*`. On the first
+local run, needy automatically pulls the release's base VM image, fetches and
+caches the feature layers, and mounts a persistent sync store for login and
+session state (including OpenCode's SQLite row-merge driver).
 
-The `builtin:*` profiles stay minimal: they declare the agent feature, entry
+The `builtin:*` profiles stay minimal: they declare the OCI feature, entry
 command, and unrestricted gateway egress (`allow: ["*"]`), without pre-binding
-an executor, command routing, or `actor.workspace`. Extend a `builtin:*`
-profile to attach an executor (the directory `needy run create` runs in is then
-mounted live at `~/workspace`; see [Workspace](#workspace)) or tighten
+an executor, command routing, or `actor.workspace`. Extend one (or reference
+`ghcr.io/needy-dev/features/<agent>:1` directly in `actor.image.layers`) to
+attach an executor (the directory `needy run create` runs in is then mounted
+live at `~/workspace`; see [Workspace](#workspace)) or tighten
 `actor.network.allow`.
 
 <details>
@@ -143,6 +145,7 @@ needy image edit --profile builtin:opencode
 needy image log --profile builtin:opencode
 needy image rollback --profile builtin:opencode
 needy image export --profile builtin:opencode -o opencode.tar
+needy image prune
 ```
 
 Check where a profile's actor, executors, and commands will run before starting:
@@ -157,7 +160,8 @@ To run the actor on a Linux host and route child commands to a Mac (or another
 Linux/Windows machine) over an SSH tunnel or Cloudflare Access TCP tunnel,
 follow the [Linux actor → Mac executor walkthrough](docs/ai/explanations/linux-actor-mac-executor.md).
 
-Quick reference for pairing a remote control client or enrolling a runner:
+Quick reference for pairing a remote control client or enrolling a runner
+(`executor` or remote Firecracker `actor`):
 
 ```sh
 # On the control host: enable a loopback TCP listener and replace the service
@@ -168,6 +172,10 @@ needy daemon service install --replace --now
 needy --address tcp://127.0.0.1:7400 runner join mac --roles executor
 needy runner serve
 
+# Or enroll a remote Firecracker actor runner (with `--gateway-listen` on the daemon)
+needy --address tcp://127.0.0.1:7400 runner join kvm-1 --roles actor
+needy runner serve --roles actor --gateway tcp://127.0.0.1:7401   # add --ephemeral for one-shot workers
+
 # Or pair a remote control client (paste the code from `needy client invite --name mac-cli`)
 needy --address tcp://127.0.0.1:7400 config context pair control
 needy config use control
@@ -177,14 +185,22 @@ Connector argv can carry connections through an authenticated tunnel directly
 during pairing or enrollment (for example
 `-- ssh -W 127.0.0.1:7400 user@example.com` or
 `-- cloudflared access tcp --hostname needy.example.com`). Use a TCP route;
-proxied HTTPS hostnames do not carry gRPC through Cloudflare Tunnel.
+proxied HTTPS hostnames do not carry gRPC through Cloudflare Tunnel. Saved
+contexts also support custom request headers for reverse proxies.
+
+For automated or multi-tenant deployments, `needy daemon serve` supports
+hot-reloading static/TTL runner credentials (`--runners-file`, paired with
+`runner serve --credential-env` or `--credential-file`), `run create --wait-for-runner`,
+authenticated remote gateways (`--gateway-listen`, `--gateway-block-cidr`), and
+host-file boundaries (`--disable-host-files`, `--host-files-root`).
 
 ### Other install methods and prerequisites
 
 Released binaries and images are published on [GitHub Releases](https://github.com/needy-dev/needy/releases)
 with `.sha256` checksums and build provenance attestations
-(`gh attestation verify <asset> -R needy-dev/needy`). Container images are on
-GHCR (`ghcr.io/needy-dev/needy-actor` and `ghcr.io/needy-dev/needy-executor`).
+(`gh attestation verify <asset> -R needy-dev/needy`). Container images and
+agent Dev Container features are on GHCR (`ghcr.io/needy-dev/needy-actor`,
+`ghcr.io/needy-dev/needy-executor`, and `ghcr.io/needy-dev/features/*`).
 
 - **Install script options**: `install.sh` verifies `.sha256`, installs to
   `~/.local/bin` (`NEEDY_INSTALL_DIR`, `NEEDY_VERSION`), and installs/replaces
@@ -200,8 +216,8 @@ GHCR (`ghcr.io/needy-dev/needy-actor` and `ghcr.io/needy-dev/needy-executor`).
   extract `needy.exe`, and add it to `PATH`.
 - **Manual / offline image pulls**: local `run create` and `image build` pull
   missing release base images automatically. For offline or pre-warmed hosts,
-  use `needy image pull` (`--driver`, `--file ARCHIVE`), `needy image ls`, and
-  `needy image rm`.
+  use `needy image pull` (`--driver`, `--file ARCHIVE`), `needy image ls`,
+  `needy image prune`, and `needy image rm`.
 
 <details>
 <summary><b>Build from source</b></summary>
@@ -423,7 +439,9 @@ actor:
 A service is a plain-HTTP name the actor uses; the gateway forwards it to
 `url`, so the actor never learns the real address. `needy config profile check`
 lists the services and warns when a URL does not answer from the control
-host.
+host. The gateway blocks loopback/link-local SSRF targets by default, accepts
+additional `--gateway-block-cidr` rules, and can serve remote actor runners over
+an authenticated TCP listener (`--gateway-listen`).
 
 ### Chaos
 
@@ -494,10 +512,12 @@ labels `needy.run` and `needy.role` (`actor` or `executor`):
 actor:
   driver: linux-firecracker
   recipe: builtin:gce-ubuntu-22.04   # or a path to your own recipe
+  seed: worker-1                     # optional: stable SMBIOS, MAC, and /etc/machine-id
   image:
     root: ubuntu:24.04               # optional; defaults to ubuntu:24.04
+    pull_policy: if-not-present      # if-not-present (default), always, or never
     layers:
-      - feature: ghcr.io/needy-dev/features/opencode:1  # Dev Container feature (OCI, builtin:sshfs, https, or local path)
+      - feature: ghcr.io/needy-dev/features/opencode:1  # OCI, https, local path, or builtin:sshfs
       - run: apt-get update && apt-get install -y jq
     env: { OPENCODE_DISABLE_AUTOUPDATE: "1" }
     hooks:
@@ -509,18 +529,26 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
 
 - **Image definitions** (inline under `actor.image` or in a separate `.yaml`
   file) layer Dev Container `feature:` entries and `run:` commands over a
-  `root:` OCI image, with optional `env:` and `hooks:` (`start` / `stop`).
-  Layers build and cache automatically on `needy run create` or `needy image
-  build` (no repo checkout needed), and a sibling `.lock` file pins OCI feature
-  digests and interactive commits from `needy image edit` (inspect with `image
-  log`, revert with `image rollback`, export with `image export`).
+  `root:` OCI image, with optional `pull_policy:`, `env:`, and `hooks:` (`start`
+  / `stop`). Layers build and cache automatically on `needy run create` or
+  `needy image build` (no repo checkout needed), and a sibling `.lock` file pins
+  OCI feature digests and interactive commits from `needy image edit` (inspect
+  with `image log`, revert with `image rollback`, export with `image export`,
+  reclaim space with `image prune`).
 - **Prebuilt OCI references**: `actor.image: REF` runs an image `FROM` needy's
   base on every driver (`needy image build --from REF` for VM drivers; see
   [`examples/custom-image`](examples/custom-image/Dockerfile)).
-- **Recipes**: set CPU model and count, memory, kernel, firmware strings,
-  devices, hostname (`instance-{time}`), and `required:` identity fields.
-  `needy image build --recipe RECIPE` builds a kernel with a recipe's kernel
-  options (needs a repo checkout).
+- **Recipes & stable identity**: recipes set CPU model and count, memory,
+  kernel, firmware strings, devices, hostname (`instance-{time}`),
+  `os.machine_id` (`/etc/machine-id`), and `required:` identity fields. Setting
+  `actor.seed` derives per-machine values deterministically across runs instead
+  of from each run ID. `needy image build --recipe RECIPE` builds a kernel with
+  a recipe's kernel options (needs a repo checkout).
+- **What is `builtin:`**: needy keeps its embedded catalog small — two recipes
+  (`builtin:gce-ubuntu-22.04`, `builtin:dell-optiplex-ubuntu-24.04`), one
+  feature (`builtin:sshfs`, auto-prepended for custom roots), and four minimal
+  agent profiles (`builtin:opencode`, `builtin:codex`, `builtin:pi`,
+  `builtin:herdr`) that pull their features from `ghcr.io/needy-dev/features/*`.
 
 ### Environment and data
 
@@ -540,7 +568,7 @@ a saved connection for one invocation, and `-v` turns on logs.
 
 | Profile | Shows |
 | --- | --- |
-| [`examples/agents`](examples/agents/README.md) | Coding agents (`builtin:opencode`, `builtin:codex`, `builtin:pi`, `builtin:herdr`) packaged as Dev Container features with automatic state sync |
+| [`examples/agents`](examples/agents/README.md) | Coding agents backed by `ghcr.io/needy-dev/features/*` (and their minimal `builtin:opencode`, `builtin:codex`, `builtin:pi`, `builtin:herdr` profiles) with automatic state sync |
 | [`examples/linux-mac`](examples/linux-mac) | Linux bash or OpenCode with a shared project and child processes on a Mac |
 | [`examples/opencode`](examples/opencode/profile.yaml) | opencode in an actor with a GCE identity, a local model as the service `http://model.needy`, shells in a container |
 | [`examples/macos`](examples/macos/profile.yaml) | A Linux actor running `xcodebuild`, `simctl` and `swift build` on runner `mac` |
@@ -601,6 +629,8 @@ the project files and toolchains.
 | `core-actor` | actor drivers, the guest (init, capture, proxy), the gateway sidecar, identity |
 | `core-executor` | executor drivers, the container engine client, the process host |
 | `core` | interceptor domains (exec, net, file) and their chains, rules, chaos, network policy, recipes, events, reports; no IO |
+| `devcontainer-features` | standalone OCI / HTTPS / local Dev Container feature resolver, cache, and dependency graph |
+| `oci-layer` | standalone OCI image archive and layer tar manipulation |
 | `trace` | the event pipeline and its sinks |
 | `config` | profile, image definition, and recipe schemas, loading and validation |
 | `api-proto`, `api-client`, `api-server` | the gRPC API and its two sides |
