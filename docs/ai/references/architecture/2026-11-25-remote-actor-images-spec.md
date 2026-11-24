@@ -55,6 +55,13 @@ When none applies, `run create` fails before any actor starts, with an error
 that names the missing step and says how to build it (on a host that can
 build, with the same registry). It never boots the base silently.
 
+*Settled in R1:* for a remote actor the plan is made on the control
+daemon's base VM image (`root_digest`, whatever builder the host would pick
+for a local run), and a missing step is built here only when the host can run
+`linux-firecracker` sessions: a `linux-container` build would be made on
+another root. Remote runs skip `actor::check_host`, so a daemon without KVM
+serves image runs whose layers it holds (`image::prepare_remote`).
+
 `TODO(remote-build)`: dispatching build steps to an actor runner that has KVM
 is deferred. A builder host with the same registry covers the known
 deployments; reopen when a deployment has no such host.
@@ -89,6 +96,11 @@ service GuestService {
   (`Store::put` returns it) against the requested one.
 - The runner keeps its own layer store under its cache and data directories,
   so a layer fetched once is reused by later runs on that host.
+- *Landed in R1:* `BridgeAttached` fields 5 (`layers`) and 6 (`root`),
+  `GuestService.FetchLayer` (`FetchLayerRequest.digest = 1`,
+  `FetchLayerResponse.data = 1`). Field 7 (`sources`) waits for R3. The runner
+  stages each fetched layer in its work directory, never holding it whole,
+  and refuses one whose stored digest differs from the requested one.
 
 ### D3. The runner materializes and reports the disks
 
@@ -98,10 +110,15 @@ disk paths to `Start::layer_disks`. The guest matches disks by digest
 `MAX_UNFLATTENED_LAYERS`, so the guest's `layers` list must name the disks the
 runner made, not the snapshot's layers.
 
-*Provisional:* a new `BridgeRequest.prepared` (`BridgePrepared { repeated
-string layer_disks }`), sent before the VM starts. The daemon records it on the
-run; `GetConfig` for a remote run with a snapshot waits for it (bounded by the
-actor start timeout) and serves those digests as `layers`.
+*Landed in R1:* `BridgeRequest.prepared = 7` (`BridgePrepared { repeated
+string layer_disks = 1 }`), sent before the VM starts. The daemon records it on
+the run; `GetConfig` for a remote run with a non-empty snapshot waits for it
+(30 s, `REMOTE_LAYERS_WAIT` in `crates/daemon/src/guest.rs`: the wait covers
+only the race between the bridge stream and the guest's own stream, since the
+runner reports before it boots) and serves those digests as `layers`. A
+failure before the VM runs (a root mismatch, a fetch, the VM start) is
+reported as `BridgeExit.error`, and the run fails with "the actor runner could
+not start the actor: ...".
 
 ### D4. The runner checks the root
 
@@ -143,6 +160,10 @@ A remote run records the same `image.*` trace events as a local run for what
 the daemon did (lookup, pull, build, push), and the runner's fetch time is
 reported in `actor.start`. *Provisional:* `layers_fetched_ms`.
 
+*Deferred in R1* (`TODO(remote-actor-images)` in
+`crates/daemon/src/actor_runner.rs`): `ActorStart` refuses unknown fields, so
+`layers_fetched_ms` needs a trace schema version of its own.
+
 ## Slices
 
 Each slice is a separate PR with its own tests.
@@ -173,8 +194,8 @@ Each slice is a separate PR with its own tests.
 
 ## Open questions
 
-1. Should `GetConfig` wait for `BridgePrepared`, or should the runner wait for
-   an acknowledgement before starting the VM? The first keeps the runner
-   simple; the second keeps `GetConfig` free of waits.
+1. ~~Should `GetConfig` wait for `BridgePrepared`, or should the runner wait
+   for an acknowledgement before starting the VM?~~ Settled in R1: `GetConfig`
+   waits (bounded), so the runner's start sequence stays one-way (D3).
 2. Lifecycle of registry artifacts: by last pull or never deleted while a
    lockfile names them.
