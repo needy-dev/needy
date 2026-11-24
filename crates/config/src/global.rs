@@ -83,6 +83,7 @@ pub struct Daemon {
   pub process_path: Option<Vec<PathBuf>>,
   pub disable_host_files: bool,
   pub host_files_root: Option<PathBuf>,
+  pub gateway_blocked_cidrs: Vec<String>,
 }
 
 impl Default for Daemon {
@@ -98,6 +99,7 @@ impl Default for Daemon {
       process_path: None,
       disable_host_files: false,
       host_files_root: None,
+      gateway_blocked_cidrs: Vec::new(),
     }
   }
 }
@@ -264,6 +266,9 @@ impl Config {
     if self.daemon.host_files_root.as_ref().is_some_and(|p| !p.is_absolute()) {
       return Err(Error::invalid("daemon.host_files_root", "daemon.host_files_root requires an absolute path"));
     }
+    for cidr in &self.daemon.gateway_blocked_cidrs {
+      validate_cidr(cidr)?;
+    }
     for (name, value) in [
       ("daemon.executor_image", &self.daemon.executor_image),
       ("daemon.engine_host", &self.daemon.engine_host),
@@ -274,6 +279,25 @@ impl Config {
     }
     Ok(())
   }
+}
+
+/// Validate an IPv4 or IPv6 CIDR string (`<ip>/<prefix>`).
+pub fn validate_cidr(cidr: &str) -> Result<(), Error> {
+  let Some((addr, prefix)) = cidr.split_once('/') else {
+    return Err(Error::invalid("daemon.gateway_blocked_cidrs", format!("invalid CIDR {cidr:?}: missing '/'")));
+  };
+  let ip: std::net::IpAddr =
+    addr.parse().map_err(|e| Error::invalid("daemon.gateway_blocked_cidrs", format!("invalid CIDR address {addr:?}: {e}")))?;
+  let prefix_len: u8 =
+    prefix.parse().map_err(|e| Error::invalid("daemon.gateway_blocked_cidrs", format!("invalid CIDR prefix {prefix:?}: {e}")))?;
+  let max = match ip {
+    std::net::IpAddr::V4(_) => 32,
+    std::net::IpAddr::V6(_) => 128,
+  };
+  if prefix_len > max {
+    return Err(Error::invalid("daemon.gateway_blocked_cidrs", format!("invalid CIDR {cidr:?}: prefix length {prefix_len} exceeds {max}")));
+  }
+  Ok(())
 }
 
 #[cfg(test)]

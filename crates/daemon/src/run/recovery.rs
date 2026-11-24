@@ -177,7 +177,7 @@ impl Restored {
     }
     let token = run.cancel.child_token();
     actor::serve_guest(daemon, &run, &token).await?;
-    actor::serve_gateway(&run, &token)?;
+    actor::serve_gateway(daemon, &run, &token)?;
     actor::resume_services(daemon, &run, &token, &events)?;
     // A configured guest resumes its persistent control stream. The actor
     // process service proves terminal readiness again when next attached.

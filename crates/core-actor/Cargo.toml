@@ -31,6 +31,7 @@ oci-layer = { workspace = true, features = ["squashfs"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 # A layer's canonical form in the layer store (`image::store`) is a tar archive.
 tar.workspace = true
 tempfile.workspace = true
@@ -38,6 +39,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
+tower.workspace = true
 tracing.workspace = true
 
 # Stopping the VM sends Firecracker `SIGTERM`; reconciling a leftover VM
