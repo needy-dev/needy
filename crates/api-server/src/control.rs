@@ -435,6 +435,13 @@ pub trait Runs: Send + Sync + 'static {
   async fn faults(&self, run: &str) -> Result<RunFaults>;
   /// Removes the fault `name` from live run `run`; returns the full run ID.
   async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String>;
+  /// Node Authorizer: checks whether `runner` is currently authorized to act
+  /// on behalf of `run_id`'s actor (the run exists and is active, is bound to
+  /// `runner`, and `runner`'s active control stream generation matches the
+  /// binding).
+  async fn authorize_actor_runner(&self, _runner: &str, _run_id: &str) -> Result<bool> {
+    Ok(false)
+  }
 }
 
 // ------------------------------------------------------------ processes

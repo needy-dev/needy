@@ -68,6 +68,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       runners_file: None,
       disable_host_files: false,
       host_files_root: None,
+      gateway_listen: None,
       gateway_blocked_cidrs: Vec::new(),
     })
     .await
@@ -82,6 +83,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       allow_anonymous: true,
       listener: Caller::Operator,
       token: Token(None),
+      runs: Some(daemon.clone()),
       runners: Some(daemon.clone()),
       clients: None,
     }))
