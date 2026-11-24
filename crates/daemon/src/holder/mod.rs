@@ -523,13 +523,7 @@ pub(crate) fn driver_with_backends(
 ) -> Result<Box<dyn driver::Driver>, driver::Error> {
   match actor.driver {
     needy_config::profile::ActorDriver::LinuxContainer => {
-      let Some(needy_config::profile::ContainerActor {
-        oci_runtime: Some(oci_runtime),
-      }) = &actor.container
-      else {
-        return Err(driver::Error::Unsupported("actor.container.oci_runtime is missing".into()));
-      };
-      Ok(Box::new(driver::linux_container::LinuxContainer::with_engine(*oci_runtime, actor.container_image(), backends.engine.clone())))
+      Ok(Box::new(driver::linux_container::LinuxContainer::of_with_engine(actor, backends.engine.clone())?))
     }
     needy_config::profile::ActorDriver::MacosAppleContainer => {
       Ok(Box::new(driver::macos_apple_container::MacosAppleContainer::with_cli(actor.container_image(), backends.apple_cli.clone())))
