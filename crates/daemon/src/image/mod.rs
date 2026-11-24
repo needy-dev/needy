@@ -31,14 +31,15 @@ use needy_core_actor::image::feature::FeatureStore;
 use needy_core_actor::image::store::{Store, snapshot_tag};
 use needy_trace::Dispatch;
 
+pub(crate) use self::build::base_root;
 #[cfg(test)]
 pub(crate) use self::build::root_digest;
 pub(crate) use self::build::select_builder_driver;
-use self::build::{CachedRootDigest, build_image_plan, resolve_image_snapshot};
+use self::build::{CachedRootDigest, build_image_plan, resolve_image_snapshot, resolve_remote_snapshot};
 #[cfg(test)]
 use self::build::{FAILURE_LOG_MAX_BYTES, feature_install_script, format_build_failure, resolve_features};
-pub(crate) use self::container::materialize_for_linux_container;
 use self::container::{export_for_apple_container, export_for_linux_container, stream_export_file};
+pub(crate) use self::container::{materialize_for_linux_container, stream_archive};
 pub(crate) use self::edit::EditSession;
 use self::session::session_profile_yaml;
 pub(crate) use self::session::{SessionSpec, run_session};
@@ -80,17 +81,22 @@ pub struct Images {
   root_digest_cache: Mutex<Option<CachedRootDigest>>,
 }
 
+/// The layer store under `cache_dir` (built and fetched layers, disks,
+/// snapshots) and `data_dir` (commit layers and commit history).
+pub(crate) fn store_in(cache_dir: &Path, data_dir: &Path) -> Store {
+  Store::new(cache_dir.join("image-store"), data_dir.join("image-store"))
+}
+
 impl Images {
   /// Opens the layer store under `cache_dir` (built layers, disks, snapshots,
   /// cache keys) and `data_dir` (commit layers and commit history).
   pub(crate) fn with_backends(cache_dir: &Path, data_dir: &Path, backends: ContainerBackends) -> Self {
     let cache = cache_dir.join("image-store");
-    let data = data_dir.join("image-store");
     let keys_dir = cache.join("keys");
     let base_oci_dir = cache.join("base-oci");
     let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store");
     Self {
-      store: Store::new(cache, data),
+      store: store_in(cache_dir, data_dir),
       features: Mutex::new(features),
       keys_dir,
       base_oci_dir,
@@ -149,8 +155,45 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
   let commit_rebased = resolved.plan.commit_rebased();
   run.set_boot(Boot {
     snapshot: Some(resolved.snapshot),
+    root: Some(resolved.plan.root),
     layer_disks: resolved.layer_disks,
     snapshot_image: resolved.snapshot_image,
+    path: resolved.plan.path,
+    env: resolved.plan.env,
+    session: GuestSession::default(),
+    commit_rebased,
+    resolved_features: resolved.resolved_features,
+    start_hooks: resolved.plan.hooks.start,
+    stop_hooks: resolved.plan.hooks.stop,
+    sync_files: resolved.plan.sync_files,
+  });
+  Ok(())
+}
+
+/// Resolves `run`'s `actor.image` as [`prepare`] does for an actor on a
+/// remote actor runner: plans it, takes its layers from the layer store or
+/// builds them here, and installs the snapshot and its root on `run`
+/// without materializing disks, which the runner makes of the layers it
+/// fetches (`GuestService.FetchLayer`). A layer this daemon neither holds
+/// nor can build fails the create before the actor starts, never booting
+/// the base alone. No-op when `actor.image` is absent or an OCI image
+/// reference.
+// TODO(images): an OCI image reference for a remote actor is ignored here
+// as for a local VM actor; see `prepare`.
+pub(crate) async fn prepare_remote(daemon: &Daemon, run: &Run) -> Result<()> {
+  let Some(Image::Definition(definition)) = &run.profile.actor.image else {
+    return Ok(());
+  };
+  let resolved =
+    resolve_remote_snapshot(daemon, definition, &run.profile.user, run.image_commit.as_ref(), &run.pinned_features, &run.trace, &run.cancel)
+      .await?;
+
+  let commit_rebased = resolved.plan.commit_rebased();
+  run.set_boot(Boot {
+    snapshot: Some(resolved.snapshot),
+    root: Some(resolved.plan.root),
+    layer_disks: Vec::new(),
+    snapshot_image: None,
     path: resolved.plan.path,
     env: resolved.plan.env,
     session: GuestSession::default(),
@@ -300,4 +343,4 @@ async fn check_driver_host(daemon: &Daemon, driver: ActorDriver, base_container_
 
 #[cfg(test)]
 #[path = "../image_test.rs"]
-mod tests;
+pub(crate) mod tests;

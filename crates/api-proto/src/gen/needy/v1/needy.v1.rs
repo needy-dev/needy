@@ -1193,6 +1193,19 @@ pub struct PushLayerRequest {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PushLayerResponse {
 }
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FetchLayerRequest {
+    /// `sha256:<64 hex digits>`, the layer's OCI DiffID.
+    #[prost(string, tag="1")]
+    pub digest: ::prost::alloc::string::String,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct FetchLayerResponse {
+    /// The next part of the archive. The digest of the whole is the
+    /// requested one; the runner checks it.
+    #[prost(bytes="vec", tag="1")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 /// One layer init stacks over the base. Its disk is found by the marker it
 /// carries (`needy-layer` at the disk's root), not by attach order.
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1366,7 +1379,7 @@ pub struct ReportExitResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BridgeRequest {
-    #[prost(oneof="bridge_request::Payload", tags="1, 2, 3, 4, 5, 6")]
+    #[prost(oneof="bridge_request::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
     pub payload: ::core::option::Option<bridge_request::Payload>,
 }
 /// Nested message and enum types in `BridgeRequest`.
@@ -1392,6 +1405,10 @@ pub mod bridge_request {
         /// The actor's terminal process service answered and is ready for attach.
         #[prost(message, tag="6")]
         TerminalReady(super::BridgeTerminalReady),
+        /// The layer disks the runner made of the run's snapshot, sent before
+        /// the VM starts.
+        #[prost(message, tag="7")]
+        Prepared(super::BridgePrepared),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1431,6 +1448,15 @@ pub struct BridgeExit {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgeTerminalReady {
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgePrepared {
+    /// The digests of the disks the runner attaches, lowest first, as their
+    /// `needy-layer` markers name them: the snapshot's layers, or a flattened
+    /// lower prefix's stack digest and the layers above it. The daemon serves
+    /// them as `GetConfigResponse.layers`.
+    #[prost(string, repeated, tag="1")]
+    pub layer_disks: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BridgeTaskResult {
@@ -1482,6 +1508,16 @@ pub struct BridgeAttached {
     pub recipe_json: ::prost::alloc::string::String,
     #[prost(bool, tag="4")]
     pub tty: bool,
+    /// The run's snapshot: its layers' digests (`sha256:<hex>`, the OCI
+    /// DiffID of the uncompressed canonical layer), lowest first, which the
+    /// runner fetches with `FetchLayer`. Empty boots the base.
+    #[prost(string, repeated, tag="5")]
+    pub layers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// The digest of the base the snapshot was built on (`sha256:<hex>`);
+    /// the runner refuses to stack the layers on another base. Empty when
+    /// `layers` is.
+    #[prost(string, tag="6")]
+    pub root: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgeStop {

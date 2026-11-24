@@ -6,16 +6,16 @@ use std::sync::Arc;
 use needy_api_proto::v1::guest_service_control_response::Message;
 use needy_api_proto::v1::guest_service_server::GuestService;
 use needy_api_proto::v1::{
-  BridgeRequest, BridgeResponse, FetchFilesRequest, FetchFilesResponse, GetConfigRequest, GetConfigResponse, GracefulStop,
-  GuestServiceControlRequest, GuestServiceControlResponse, PushEventsRequest, PushEventsResponse, PushFilesRequest, PushFilesResponse,
-  PushLayerRequest, PushLayerResponse, ReportExitRequest, ReportExitResponse, RouteList, TerminalTaskRequest, TerminalTaskResponse,
-  terminal_task_request,
+  BridgeRequest, BridgeResponse, FetchFilesRequest, FetchFilesResponse, FetchLayerRequest, FetchLayerResponse, GetConfigRequest,
+  GetConfigResponse, GracefulStop, GuestServiceControlRequest, GuestServiceControlResponse, PushEventsRequest, PushEventsResponse,
+  PushFilesRequest, PushFilesResponse, PushLayerRequest, PushLayerResponse, ReportExitRequest, ReportExitResponse, RouteList,
+  TerminalTaskRequest, TerminalTaskResponse, terminal_task_request,
 };
 use needy_common::process::Exit;
 use needy_core::event::Event;
 use tonic::{Request, Response, Status, Streaming};
 
-use super::{Streamed, chunked};
+use super::{CHUNK, Streamed, chunked};
 use tokio_stream::StreamExt as _;
 
 use crate::control::{Caller, Chunks, ControlError, Guest, GuestControl};
@@ -113,6 +113,30 @@ impl<G: Guest> GuestService for Adapter<G> {
         }),
       })
     }))))
+  }
+
+  type FetchLayerStream = Streamed<FetchLayerResponse>;
+
+  async fn fetch_layer(&self, request: Request<FetchLayerRequest>) -> Result<Response<Self::FetchLayerStream>, Status> {
+    let run = self.run(&request)?;
+    let chunks = self.guest.fetch_layer(&run, &request.into_inner().digest).await?;
+    // A read may return more than one message carries; it is split, never
+    // joined, since a layer can be hundreds of megabytes.
+    let messages = futures_util::StreamExt::flat_map(chunks, |read| {
+      let messages: Vec<Result<FetchLayerResponse, Status>> = match read {
+        Ok(bytes) => bytes
+          .chunks(CHUNK)
+          .map(|data| {
+            Ok(FetchLayerResponse {
+              data: data.to_vec(),
+            })
+          })
+          .collect(),
+        Err(e) => vec![Err(e.into())],
+      };
+      tokio_stream::iter(messages)
+    });
+    Ok(Response::new(Box::pin(messages)))
   }
 
   type BridgeStream = Streamed<BridgeResponse>;

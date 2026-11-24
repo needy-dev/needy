@@ -115,17 +115,23 @@ pub(super) async fn export_for_apple_container(daemon: &Daemon, snapshot: &Snaps
 
 /// Streams `path` in 1 MiB chunks for [`needy_api_server::control::Images::export`].
 pub(super) async fn stream_export_file(path: &Path) -> Result<Chunks> {
-  const EXPORT_CHUNK: usize = 1024 * 1024;
   let file = tokio::fs::File::open(path).await.with_context(|| format!("cannot open {}", path.display()))?;
+  Ok(stream_archive(file))
+}
+
+/// `file` from where it is to its end, read in parts as the stream is
+/// polled, so an archive is never held whole.
+pub(crate) fn stream_archive(file: tokio::fs::File) -> Chunks {
+  const EXPORT_CHUNK: usize = 1024 * 1024;
   let stream = futures_util::stream::try_unfold((file, vec![0u8; EXPORT_CHUNK]), |(mut file, mut buf)| async move {
-    let n = file.read(&mut buf).await.map_err(|e| ControlError::Failed(format!("reading exported image archive: {e}")))?;
+    let n = file.read(&mut buf).await.map_err(|e| ControlError::Failed(format!("reading an archive: {e}")))?;
     if n == 0 {
       Ok(None)
     } else {
       Ok(Some((buf[..n].to_vec(), (file, buf))))
     }
   });
-  Ok(Box::pin(stream))
+  Box::pin(stream)
 }
 
 /// Materializes `snapshot` on top of `base_image` and loads `needy-snapshot:<hex>`

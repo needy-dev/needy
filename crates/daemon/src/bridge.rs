@@ -358,12 +358,17 @@ impl Daemon {
       Some(recipe) => serde_json::to_string(recipe).map_err(|e| ControlError::Internal(format!("cannot serialize recipe: {e}")))?,
       None => String::new(),
     };
+    // The run's snapshot as `image::prepare_remote` planned it; the runner
+    // fetches its layers with `GuestService.FetchLayer`.
+    let boot = run.boot();
     let attached = BridgeResponse {
       payload: Some(bridge_response::Payload::Attached(BridgeAttached {
         run_id: run.id.clone(),
         profile_yaml: run.profile_yaml.clone(),
         recipe_json,
         tty: run.tty.is_some(),
+        layers: boot.snapshot.map(|snapshot| snapshot.layers.iter().map(ToString::to_string).collect()).unwrap_or_default(),
+        root: boot.root.map(|root| root.to_string()).unwrap_or_default(),
       })),
     };
     if tx.send(attached).await.is_err() {
@@ -551,6 +556,14 @@ async fn drive_bridge(
         }
       }
       Some(Ok(BridgeRequest {
+        payload: Some(bridge_request::Payload::Prepared(prepared)),
+      })) => {
+        run.touch_activity();
+        // NOTICE: `Guest::config` waits for these: the guest names the
+        // disks it stacks by the markers the runner wrote.
+        run.remote_layers.send_replace(Some(prepared.layer_disks));
+      }
+      Some(Ok(BridgeRequest {
         payload: Some(bridge_request::Payload::Exit(exit)),
       })) => {
         run.touch_activity();
@@ -615,7 +628,12 @@ async fn drive_bridge(
       tracing::debug!("run {}: {refused}", run.id);
     }
   } else {
-    let reason = actor::vm_failure(&driver_name, &exit, &console_path);
+    let reason = match &exit.error {
+      // The runner failed before the VM ran, such as on layers built on
+      // another base: its error is the whole story.
+      Some(error) if !started.load(Ordering::SeqCst) => format!("the actor runner could not start the actor: {error}"),
+      _ => actor::vm_failure(&driver_name, &exit, &console_path),
+    };
     tracing::warn!("run {} failed: {reason}", run.id);
     run.fail(reason);
   }
@@ -625,4 +643,4 @@ async fn drive_bridge(
 
 #[cfg(test)]
 #[path = "bridge_test.rs"]
-mod tests;
+pub(crate) mod tests;

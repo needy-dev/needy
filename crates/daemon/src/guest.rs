@@ -3,6 +3,8 @@
 //! driving program's exit, the archives of its copy-in and mirror-out
 //! mappings, and the upper layer a session keeps.
 
+use std::time::Duration;
+
 use futures_util::StreamExt as _;
 use needy_api_server::control::{
   Chunks, ControlError, FromRunner, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor,
@@ -13,6 +15,7 @@ use needy_config::profile::{FaultDomain, FileMode, Side};
 use needy_core::event::{ActorConfig, ActorExit, Event};
 use needy_core::types::ActorState;
 use needy_core_actor::driver::Side as Presenter;
+use needy_core_actor::image::store::Digest;
 use tokio_stream::wrappers::WatchStream;
 
 use crate::run::{Run, route_list};
@@ -32,6 +35,33 @@ fn mounts(daemon: &Daemon, run: &Run) -> Vec<GuestMount> {
       sftp_command: m.sftp_command,
     })
     .collect()
+}
+
+/// How long `Guest::config` waits for a remote actor's runner to report the
+/// layer disks it made (`BridgePrepared`).
+// NOTICE: the runner reports them on the bridge before it starts the VM
+// whose init asks for its configuration on another stream, so the wait only
+// covers that race between the two streams, not the layers' fetch.
+const REMOTE_LAYERS_WAIT: Duration = Duration::from_secs(30);
+
+/// The layer disks a remote actor's runner made of `run`'s snapshot, once
+/// it reported them, lowest first.
+// NOTICE: open question 1 of `2026-11-25-remote-actor-images-spec.md` is
+// settled this way: `GetConfig` waits for `BridgePrepared` rather than the
+// runner waiting for an acknowledgement, which keeps the runner's start
+// sequence one-way.
+async fn remote_layers(run: &Run) -> Result<Vec<String>, ControlError> {
+  let mut reported = run.remote_layers.subscribe();
+  match tokio::time::timeout(REMOTE_LAYERS_WAIT, reported.wait_for(Option::is_some)).await {
+    Ok(Ok(layers)) => Ok(layers.clone().unwrap_or_default()),
+    // The sender lives as long as the run, which the caller holds.
+    Ok(Err(_)) => Err(ControlError::Unavailable(format!("run {} ended before its actor runner reported its layer disks", run.id))),
+    Err(_) => Err(ControlError::Unavailable(format!(
+      "run {}: its actor runner did not report the layer disks it made within {}s",
+      run.id,
+      REMOTE_LAYERS_WAIT.as_secs()
+    ))),
+  }
 }
 
 /// The user and group this daemon runs as: a container actor's init gives
@@ -85,6 +115,13 @@ impl Guest for Daemon {
       .collect();
     let recipe = run.recipe.as_ref();
     let boot = run.boot();
+    // A remote actor stacks the disks its runner made, which may flatten
+    // lower layers as `Store::materialize` does here.
+    let remote_layers = if run.is_remote_actor() && boot.snapshot.as_ref().is_some_and(|s| !s.layers.is_empty()) {
+      Some(remote_layers(&run).await?)
+    } else {
+      None
+    };
     // The run's exec faults now, also those `needy chaos add` added
     // before the actor asked.
     let routed = run.route_names();
@@ -158,7 +195,9 @@ impl Guest for Daemon {
       // For VM drivers, use the materialized layer disk digests (which may
       // auto-flatten lower layers above `MAX_UNFLATTENED_LAYERS`) so guest
       // `init`'s `needy-layer` marker matching aligns with attached disks.
-      layers: if boot.snapshot_image.is_some() {
+      layers: if let Some(layers) = remote_layers {
+        layers
+      } else if boot.snapshot_image.is_some() {
         Vec::new()
       } else if !boot.layer_disks.is_empty() {
         boot.layer_disks.iter().map(|disk| disk.digest.to_string()).collect()
@@ -225,6 +264,24 @@ impl Guest for Daemon {
     let run = self.runs.find(run)?;
     run.touch_activity();
     files::push(&run, name, archive, &files::HostFilesPolicy::from_config(&self.config)).await
+  }
+
+  /// Streams a layer of the run's snapshot to its remote actor runner.
+  /// Only a layer the snapshot names is served, so a runner's credential
+  /// bound to one run reaches no other run's layers.
+  async fn fetch_layer(&self, run: &str, digest: &str) -> Result<Chunks, ControlError> {
+    let run = self.runs.find(run)?;
+    run.touch_activity();
+    let digest: Digest = digest.parse().map_err(|e| ControlError::Invalid(format!("invalid layer digest {digest:?}: {e}")))?;
+    if !run.boot().snapshot.is_some_and(|snapshot| snapshot.layers.contains(&digest)) {
+      return Err(ControlError::denied(format!("layer {digest} is not in run {}'s image", run.id)));
+    }
+    let store = self.images.store.clone();
+    let file = tokio::task::spawn_blocking(move || store.open_layer(&digest))
+      .await
+      .map_err(|e| ControlError::Internal(format!("opening layer {digest} panicked: {e}")))?
+      .map_err(|e| ControlError::Failed(e.to_string()))?;
+    Ok(crate::image::stream_archive(tokio::fs::File::from_std(file)))
   }
 
   /// Rejects upper-layer uploads on normal runs. Image build and edit sessions

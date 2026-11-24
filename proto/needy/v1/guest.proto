@@ -31,6 +31,11 @@ service GuestService {
   // Outbound stream opened by a remote actor host bridge for a single
   // reverse terminal exec task announced on `Bridge`.
   rpc TerminalTask(stream TerminalTaskRequest) returns (stream TerminalTaskResponse);
+  // One layer of the caller's run's snapshot (`BridgeAttached.layers`), as
+  // its canonical uncompressed OCI layer archive (a tar), for a remote actor
+  // runner to stack. Any digest the run's snapshot does not name is
+  // refused with `PERMISSION_DENIED`.
+  rpc FetchLayer(FetchLayerRequest) returns (stream FetchLayerResponse);
 }
 
 message GuestServiceControlRequest {}
@@ -100,6 +105,17 @@ message PushLayerRequest {
 }
 
 message PushLayerResponse {}
+
+message FetchLayerRequest {
+  // `sha256:<64 hex digits>`, the layer's OCI DiffID.
+  string digest = 1;
+}
+
+message FetchLayerResponse {
+  // The next part of the archive. The digest of the whole is the
+  // requested one; the runner checks it.
+  bytes data = 1;
+}
 
 // One layer init stacks over the base. Its disk is found by the marker it
 // carries (`needy-layer` at the disk's root), not by attach order.
@@ -254,6 +270,9 @@ message BridgeRequest {
     BridgeTaskResult task_result = 5;
     // The actor's terminal process service answered and is ready for attach.
     BridgeTerminalReady terminal_ready = 6;
+    // The layer disks the runner made of the run's snapshot, sent before
+    // the VM starts.
+    BridgePrepared prepared = 7;
   }
 }
 
@@ -281,6 +300,14 @@ message BridgeExit {
 
 message BridgeTerminalReady {}
 
+message BridgePrepared {
+  // The digests of the disks the runner attaches, lowest first, as their
+  // `needy-layer` markers name them: the snapshot's layers, or a flattened
+  // lower prefix's stack digest and the layers above it. The daemon serves
+  // them as `GetConfigResponse.layers`.
+  repeated string layer_disks = 1;
+}
+
 message BridgeTaskResult {
   uint64 task_id = 1;
   oneof result {
@@ -307,6 +334,14 @@ message BridgeAttached {
   string profile_yaml = 2;
   string recipe_json = 3;
   bool tty = 4;
+  // The run's snapshot: its layers' digests (`sha256:<hex>`, the OCI
+  // DiffID of the uncompressed canonical layer), lowest first, which the
+  // runner fetches with `FetchLayer`. Empty boots the base.
+  repeated string layers = 5;
+  // The digest of the base the snapshot was built on (`sha256:<hex>`);
+  // the runner refuses to stack the layers on another base. Empty when
+  // `layers` is.
+  string root = 6;
 }
 
 message BridgeStop {

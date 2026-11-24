@@ -503,6 +503,7 @@ async fn control_restart_preserves_boot_metadata_and_sync_files() {
   let created = Runs::create(&started.daemon, testing::new_run(profile, started.dir.path())).await.unwrap();
   let expected_boot = crate::run::Boot {
     snapshot: None,
+    root: None,
     layer_disks: Vec::new(),
     snapshot_image: Some("needy-snapshot:deadbeef".into()),
     path: "/opt/tools/bin:/usr/bin:/bin".into(),

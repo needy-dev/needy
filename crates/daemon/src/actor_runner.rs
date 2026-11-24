@@ -17,12 +17,14 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  BridgeAttach, BridgeExit, BridgeRequest, BridgeStarted, BridgeTaskResult, BridgeTerminalReady, BridgeTerminalTask, TerminalTaskRequest,
-  bridge_request, bridge_response, bridge_task_result, bridge_terminal_task, terminal_task_request,
+  BridgeAttach, BridgeAttached, BridgeExit, BridgePrepared, BridgeRequest, BridgeStarted, BridgeTaskResult, BridgeTerminalReady,
+  BridgeTerminalTask, FetchLayerRequest, TerminalTaskRequest, bridge_request, bridge_response, bridge_task_result, bridge_terminal_task,
+  terminal_task_request,
 };
 use needy_api_server::middleware::authentication::RUN_ID_HEADER;
 use needy_core_actor::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
 use needy_core_actor::driver::{Driver as _, Host, Running, Start, linux_firecracker};
+use needy_core_actor::image::store::{Digest, LayerDisk, Store};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -44,6 +46,9 @@ pub struct ActorConfig {
   pub vm_images: PathBuf,
   /// Where guest disks live (`paths.guest_disks()`).
   pub guest_disks: PathBuf,
+  /// The runner's layer store: the layers it fetched of its runs' images
+  /// and the disks it made of them, reused by later runs on this host.
+  pub layer_store: Store,
   /// Path to the guest `needy` binary injected into the VM.
   pub guest_needy: Option<PathBuf>,
   /// Path to the KVM device (defaults to `/dev/kvm`).
@@ -132,12 +137,6 @@ pub(crate) async fn run_actor(
     spawn_gateway_proxy(&gateway_uds, gateway_target, credential.to_string(), attached.run_id.clone(), &tasks, &cancel)?;
   }
 
-  let recipe: Option<needy_core::recipe::CompiledRecipe> = if attached.recipe_json.is_empty() {
-    None
-  } else {
-    Some(serde_json::from_str(&attached.recipe_json).context("cannot decode compiled recipe from control plane")?)
-  };
-
   let host = Host {
     image: config.actor_image.clone(),
     images: config.vm_images.clone(),
@@ -145,26 +144,73 @@ pub(crate) async fn run_actor(
     guest_disks: config.guest_disks.clone(),
   };
   let driver = linux_firecracker::LinuxFirecracker::on(&host, None);
-  let exe = std::env::current_exe().context("cannot locate current executable")?;
-  let guest_needy = needy_core_actor::image::guest::find(config.guest_needy.as_deref(), &exe, needy_core_actor::image::guest::arch())
-    .context("cannot locate guest needy binary")?;
+  // What fails before the VM runs is reported as the actor's exit, so the
+  // run fails with its reason rather than as a lost bridge.
+  let booted = async {
+    let layer_disks = prepare_layers(&control_client, &config.layer_store, &config.actor_image, &attached, &work_dir).await?;
+    // TODO(remote-actor-images): the time the fetch took belongs in
+    // `actor.start` (`layers_fetched_ms`, D6 of
+    // 2026-11-25-remote-actor-images-spec.md); it needs a trace schema
+    // version, since `ActorStart` refuses unknown fields. Reopen with that
+    // schema change.
+    bridge_tx
+      .send(BridgeRequest {
+        payload: Some(bridge_request::Payload::Prepared(BridgePrepared {
+          layer_disks: layer_disks.iter().map(|disk| disk.digest.to_string()).collect(),
+        })),
+      })
+      .await
+      .context("control plane bridge closed before the VM started")?;
 
-  let profile = needy_config::profile::load(&needy_config::Source::text(attached.profile_yaml.clone(), PathBuf::new()))
-    .context("cannot decode profile from control plane")?;
+    let recipe: Option<needy_core::recipe::CompiledRecipe> = if attached.recipe_json.is_empty() {
+      None
+    } else {
+      Some(serde_json::from_str(&attached.recipe_json).context("cannot decode compiled recipe from control plane")?)
+    };
+    let exe = std::env::current_exe().context("cannot locate current executable")?;
+    let guest_needy = needy_core_actor::image::guest::find(config.guest_needy.as_deref(), &exe, needy_core_actor::image::guest::arch())
+      .context("cannot locate guest needy binary")?;
 
-  let mut vm: Box<dyn Running> = driver
-    .start(&Start {
-      run: &attached.run_id,
-      dir: &work_dir,
-      user: &profile.user,
-      recipe: recipe.as_ref(),
-      mounts: &[],
-      guest: &guest_needy,
-      layer_disks: &[],
-      snapshot_image: None,
-    })
-    .await
-    .context("cannot start local Firecracker microVM")?;
+    let profile = needy_config::profile::load(&needy_config::Source::text(attached.profile_yaml.clone(), PathBuf::new()))
+      .context("cannot decode profile from control plane")?;
+
+    let layer_disks: Vec<PathBuf> = layer_disks.into_iter().map(|disk| disk.path).collect();
+    driver
+      .start(&Start {
+        run: &attached.run_id,
+        dir: &work_dir,
+        user: &profile.user,
+        recipe: recipe.as_ref(),
+        mounts: &[],
+        guest: &guest_needy,
+        layer_disks: &layer_disks,
+        snapshot_image: None,
+      })
+      .await
+      .context("cannot start local Firecracker microVM")
+  }
+  .await;
+  let mut vm: Box<dyn Running> = match booted {
+    Ok(vm) => vm,
+    Err(e) => {
+      let exit = BridgeExit {
+        code: None,
+        signal: String::new(),
+        error: format!("{e:#}"),
+      };
+      // The control plane may be gone already; the error is returned either way.
+      let _ = bridge_tx
+        .send(BridgeRequest {
+          payload: Some(bridge_request::Payload::Exit(exit)),
+        })
+        .await;
+      cancel.cancel();
+      drop(bridge_tx);
+      tasks.close();
+      let _ = tokio::time::timeout(Duration::from_secs(3), tasks.wait()).await;
+      return Err(e);
+    }
+  };
 
   bridge_tx
     .send(BridgeRequest {
@@ -271,6 +317,85 @@ pub(crate) async fn run_actor(
 
   if bridge_broken {
     bail!("control plane bridge disconnected");
+  }
+  Ok(())
+}
+
+/// Fetches the layers of the run's snapshot (`attached.layers`) this
+/// runner's `store` lacks from the control plane, checks the root they were
+/// built on against the base it boots from `base`, and makes the disks to
+/// attach, lowest first. No layers, no disks: the actor boots the base.
+async fn prepare_layers(control: &Client, store: &Store, base: &Path, attached: &BridgeAttached, scratch: &Path) -> Result<Vec<LayerDisk>> {
+  if attached.layers.is_empty() {
+    return Ok(Vec::new());
+  }
+  let base_dir = base.to_path_buf();
+  let root = attached.root.clone();
+  tokio::task::spawn_blocking(move || check_root(&base_dir, &root)).await.context("checking the base VM image panicked")??;
+  let layers = attached
+    .layers
+    .iter()
+    .map(|layer| layer.parse::<Digest>().with_context(|| format!("the control plane named an invalid layer digest {layer:?}")))
+    .collect::<Result<Vec<_>>>()?;
+  for layer in &layers {
+    if !store.has_layer(layer) {
+      fetch_layer(control, store, layer, scratch).await?;
+    }
+  }
+  let store = store.clone();
+  tokio::task::spawn_blocking(move || -> Result<Vec<LayerDisk>> {
+    let snapshot = store.snapshot(&layers)?;
+    Ok(store.materialize(&snapshot)?)
+  })
+  .await
+  .context("materializing the run's layers panicked")?
+  .context("cannot make the run's layer disks")
+}
+
+/// Refuses to stack layers built on base `root` (`sha256:<hex>`) on the base
+/// VM image in `base`, unless it is the same (D4 in
+/// `2026-11-25-remote-actor-images-spec.md`). Blocking.
+fn check_root(base: &Path, root: &str) -> Result<()> {
+  let built_on: Digest = root.parse().with_context(|| format!("the control plane named the run's layers with an invalid root {root:?}"))?;
+  let boots = crate::image::base_root(base).with_context(|| format!("cannot read the base VM image in {}", base.display()))?;
+  if built_on != boots {
+    bail!(
+      "the run's image layers were built on base {built_on}, but this runner boots base {boots} from {}; refusing to stack them \
+       on another base: give the control daemon and this runner the same base VM image",
+      base.display()
+    );
+  }
+  Ok(())
+}
+
+/// Fetches layer `digest` from the control plane into `store` through a file
+/// in `scratch`, never holding it whole, and checks that what was stored is
+/// the layer asked for.
+async fn fetch_layer(control: &Client, store: &Store, digest: &Digest, scratch: &Path) -> Result<()> {
+  let mut parts = control
+    .guest()
+    .fetch_layer(FetchLayerRequest {
+      digest: digest.to_string(),
+    })
+    .await
+    .with_context(|| format!("control plane refused layer {digest}"))?
+    .into_inner();
+  let staged = tempfile::NamedTempFile::new_in(scratch).with_context(|| format!("cannot stage layer {digest} in {}", scratch.display()))?;
+  let mut file = tokio::fs::File::from_std(staged.reopen().with_context(|| format!("cannot open {}", staged.path().display()))?);
+  while let Some(part) = parts.message().await.with_context(|| format!("fetching layer {digest} broke"))? {
+    file.write_all(&part.data).await.with_context(|| format!("cannot write {}", staged.path().display()))?;
+  }
+  file.flush().await.with_context(|| format!("cannot write {}", staged.path().display()))?;
+  drop(file);
+  let store = store.clone();
+  let stored = tokio::task::spawn_blocking(move || -> Result<Digest> {
+    let archive = std::fs::File::open(staged.path()).with_context(|| format!("cannot open {}", staged.path().display()))?;
+    Ok(store.put(std::io::BufReader::new(archive))?)
+  })
+  .await
+  .context("storing a fetched layer panicked")??;
+  if stored != *digest {
+    bail!("the control plane sent layer {stored} for {digest}");
   }
   Ok(())
 }
@@ -590,3 +715,7 @@ async fn handle_terminal_task(
     }
   }
 }
+
+#[cfg(test)]
+#[path = "actor_runner_test.rs"]
+mod tests;

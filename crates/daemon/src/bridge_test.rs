@@ -40,16 +40,16 @@ commands:
     to: here
 ";
 
-struct ConnectedActorRunner {
-  credential: String,
+pub(crate) struct ConnectedActorRunner {
+  pub(crate) credential: String,
   _ctrl_tx: mpsc::Sender<ControlRequest>,
-  ctrl_stream: tonic::Streaming<needy_api_client::proto::v1::ControlResponse>,
+  pub(crate) ctrl_stream: tonic::Streaming<needy_api_client::proto::v1::ControlResponse>,
 }
 
 /// Mints a short-lived actor runner credential, sends a heartbeat with
 /// `actor(linux-firecracker)`, and opens its `RunnerService.Control` stream
 /// on `addr`.
-async fn connect_actor_runner(daemon: &crate::Daemon, addr: &str, name: &str) -> ConnectedActorRunner {
+pub(crate) async fn connect_actor_runner(daemon: &crate::Daemon, addr: &str, name: &str) -> ConnectedActorRunner {
   let minted = Runners::mint_credential(
     daemon,
     MintRunnerCredential {
@@ -914,6 +914,7 @@ async fn ephemeral_runner_exits_cleanly_after_completing_a_single_run() {
           actor_image: runner_dir.join("no-image"),
           vm_images: runner_dir.join("images"),
           guest_disks: runner_dir.join("guest-disks"),
+          layer_store: crate::runner::layer_store(&runner_dir.join("cache"), &runner_dir.join("data")),
           guest_needy: Some(runner_dir.join("no-guest")),
           kvm: runner_dir.join("no-kvm"),
           work_dir: Some(runner_dir.join("work")),

@@ -385,6 +385,16 @@ impl Guest for Fake {
     }
   }
 
+  /// Layer `sha256:aa…` of 3 MiB in one read, so the adapter splits it;
+  /// any other digest is not the run's.
+  async fn fetch_layer(&self, _run: &str, digest: &str) -> Result<Chunks> {
+    if digest == format!("sha256:{}", "a".repeat(64)) {
+      Ok(Box::pin(tokio_stream::iter([Ok(vec![b'l'; 3 << 20])])))
+    } else {
+      Err(ControlError::denied(format!("layer {digest} is not in the run's image")))
+    }
+  }
+
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<()> {
     self.pushed.lock().unwrap().push((run.into(), name.into(), archive));
     Ok(())

@@ -36,7 +36,7 @@ commands:
 /// A stand-in Firecracker that logs its directory to `<started_log>` and
 /// waits until `<dir>/done` is created (or its parent exits, for the final
 /// run VM).
-fn session_driver_script(started_log: &Path) -> String {
+pub(crate) fn session_driver_script(started_log: &Path) -> String {
   format!(
     r#"dir=$(dirname "$3")
 touch "$dir/v.sock"
@@ -56,7 +56,7 @@ fn tar_with_file(name: &str, content: &str) -> Vec<u8> {
 
 /// What a simulated build-session guest returns to the daemon.
 #[derive(Default)]
-struct BuildBehavior {
+pub(crate) struct BuildBehavior {
   /// Optional gate: wait on this notify before completing the session (used
   /// to hold the first build in flight for single-flight tests).
   gate: Option<Arc<Notify>>,
@@ -72,7 +72,7 @@ struct BuildBehavior {
 /// Drives any build sessions that start (directories under `state/sessions/`),
 /// recording every `GetConfigResponse` observed and counting how many build
 /// sessions ran. Stops when `stop` is cancelled.
-fn spawn_build_responder(
+pub(crate) fn spawn_build_responder(
   started_log: PathBuf,
   behavior: Arc<std::sync::Mutex<BuildBehavior>>,
   stop: tokio_util::sync::CancellationToken,
