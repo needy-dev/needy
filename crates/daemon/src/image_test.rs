@@ -2639,6 +2639,12 @@ async fn prune_removes_unreferenced_layers_keys_oci_and_container_snapshots_whil
   let drop_key_path = daemon.images.keys_dir.join("sha256-2222");
   std::fs::write(&kept_key_path, format!("{kept_layer}\n")).unwrap();
   std::fs::write(&drop_key_path, format!("{drop_layer}\n")).unwrap();
+  // And where a layer registry holds them; a source outlives no key.
+  std::fs::create_dir_all(&daemon.images.sources_dir).unwrap();
+  let kept_source_path = daemon.images.sources_dir.join("sha256-1111.json");
+  let drop_source_path = daemon.images.sources_dir.join("sha256-2222.json");
+  std::fs::write(&kept_source_path, "{}").unwrap();
+  std::fs::write(&drop_source_path, "{}").unwrap();
 
   // 1. Dry-run reports what would be removed without deleting anything.
   let dry = daemon
@@ -2655,6 +2661,7 @@ async fn prune_removes_unreferenced_layers_keys_oci_and_container_snapshots_whil
   assert!(dry.bytes_reclaimed > 0);
   assert!(daemon.images.store.has_layer(&drop_layer), "dry-run must not delete layers");
   assert!(drop_key_path.exists(), "dry-run must not delete cache keys");
+  assert!(drop_source_path.exists(), "dry-run must not delete layer sources");
   assert!(engine.images.lock().unwrap().contains_key(&drop_tag), "dry-run must not delete container images");
 
   // 2. Real prune (all = false) removes unreferenced layer, key, OCI archive, and container snapshot,
@@ -2675,6 +2682,8 @@ async fn prune_removes_unreferenced_layers_keys_oci_and_container_snapshots_whil
   assert!(!daemon.images.store.has_layer(&drop_layer));
   assert!(kept_key_path.exists());
   assert!(!drop_key_path.exists());
+  assert!(kept_source_path.exists());
+  assert!(!drop_source_path.exists());
   assert!(engine.images.lock().unwrap().contains_key(&kept_tag));
   assert!(!engine.images.lock().unwrap().contains_key(&drop_tag));
   assert!(engine.images.lock().unwrap().contains_key("needy-actor:latest"), "base image must never be pruned");

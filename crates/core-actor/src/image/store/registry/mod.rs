@@ -47,6 +47,10 @@ use super::{Digest, Store};
 // artifact: readers refuse another config media type.
 pub const CONFIG_MEDIA_TYPE: &str = "application/vnd.needy.layer.config.v1+json";
 
+/// The media type of a layer artifact's layer blob: the canonical layer,
+/// compressed with gzip.
+pub const LAYER_MEDIA_TYPE: &str = IMAGE_LAYER_GZIP_MEDIA_TYPE;
+
 /// What a layer registry refused or could not do.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -232,6 +236,34 @@ pub struct RemoteLayer {
   pub size: u64,
 }
 
+impl RemoteLayer {
+  /// What a reader needs to pull this layer without looking it up again.
+  pub fn source(&self) -> Source {
+    Source {
+      key: self.config.key,
+      diff_id: self.config.diff_id,
+      blob: self.blob,
+      size: self.size,
+    }
+  }
+}
+
+/// A layer's compressed blob in a repository: what [`Registry::pull`]
+/// reads, which a control daemon hands an actor runner so it pulls the
+/// layer directly (`BridgeAttached.sources`, spec D5).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Source {
+  /// The cache key the layer was built under; its artifact's tag.
+  pub key: Digest,
+  /// The layer the blob decompresses to: a blob that decompresses to
+  /// another layer is refused.
+  pub diff_id: Digest,
+  /// The digest of the compressed blob.
+  pub blob: Digest,
+  /// The size of the compressed blob in bytes.
+  pub size: u64,
+}
+
 /// What [`Registry::push`] pushed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pushed {
@@ -314,11 +346,13 @@ impl Registry {
     }))
   }
 
-  /// Pulls `layer` into `store` and returns its digest, which is the DiffID
-  /// its config names: a blob that decompresses to another layer is
-  /// refused and not kept.
-  pub async fn pull(&self, store: &Store, layer: &RemoteLayer) -> Result<Digest> {
-    let tagged = self.repository.tagged(&layer.config.key);
+  /// Pulls the layer of `layer` into `store` and returns its digest, which
+  /// is `layer.diff_id`: a blob that decompresses to another layer is
+  /// refused and not kept, as is one whose compressed digest is not
+  /// `layer.blob`.
+  pub async fn pull(&self, store: &Store, layer: &Source) -> Result<Digest> {
+    let tagged = self.repository.tagged(&layer.key);
+    let reference = self.repository.reference(&layer.key);
     let client = self.client(&tagged).await;
     let staging = store.cache.join("registry");
     tokio::fs::create_dir_all(&staging).await.map_err(io(staging.display()))?;
@@ -332,15 +366,15 @@ impl Registry {
     };
     // NOTICE: `pull_blob` verifies the compressed digest as it reads.
     client.pull_blob(&tagged, &descriptor, &mut file).await.map_err(|source| Error::Registry {
-      reference: layer.reference.clone(),
+      reference: reference.clone(),
       source,
     })?;
     file.sync_all().await.map_err(io(staged.path().display()))?;
     drop(file);
 
     let store = store.clone();
-    let reference = layer.reference.clone();
-    let expected = layer.config.diff_id;
+    let context = format!("storing pulled layer {reference}");
+    let expected = layer.diff_id;
     tokio::task::spawn_blocking(move || -> Result<Digest> {
       let compressed = std::fs::File::open(staged.path()).map_err(io(staged.path().display()))?;
       let decompressed = flate2::read::GzDecoder::new(std::io::BufReader::new(compressed));
@@ -355,7 +389,7 @@ impl Registry {
     })
     .await
     .map_err(|e| Error::Io {
-      context: format!("storing pulled layer {}", layer.reference),
+      context,
       source: std::io::Error::other(e.to_string()),
     })?
   }

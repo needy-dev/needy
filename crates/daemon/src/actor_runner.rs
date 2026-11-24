@@ -18,12 +18,13 @@ use anyhow::{Context as _, Result, bail};
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
   BridgeAttach, BridgeAttached, BridgeExit, BridgePrepared, BridgeRequest, BridgeStarted, BridgeTaskResult, BridgeTerminalReady,
-  BridgeTerminalTask, FetchLayerRequest, TerminalTaskRequest, bridge_request, bridge_response, bridge_task_result, bridge_terminal_task,
-  terminal_task_request,
+  BridgeTerminalTask, FetchLayerRequest, LayerSource, TerminalTaskRequest, bridge_request, bridge_response, bridge_task_result,
+  bridge_terminal_task, terminal_task_request,
 };
 use needy_api_server::middleware::authentication::RUN_ID_HEADER;
 use needy_core_actor::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
 use needy_core_actor::driver::{Driver as _, Host, Running, Start, linux_firecracker};
+use needy_core_actor::image::store::registry::{self, Registry, Repository};
 use needy_core_actor::image::store::{Digest, LayerDisk, Store};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::mpsc;
@@ -321,10 +322,12 @@ pub(crate) async fn run_actor(
   Ok(())
 }
 
-/// Fetches the layers of the run's snapshot (`attached.layers`) this
-/// runner's `store` lacks from the control plane, checks the root they were
-/// built on against the base it boots from `base`, and makes the disks to
-/// attach, lowest first. No layers, no disks: the actor boots the base.
+/// Takes the layers of the run's snapshot (`attached.layers`) this runner's
+/// `store` lacks, checks the root they were built on against the base it
+/// boots from `base`, and makes the disks to attach, lowest first. A layer
+/// with a source in `attached.sources` is pulled from the layer registry;
+/// one without, or one whose pull fails, is fetched from the control plane.
+/// No layers, no disks: the actor boots the base.
 async fn prepare_layers(control: &Client, store: &Store, base: &Path, attached: &BridgeAttached, scratch: &Path) -> Result<Vec<LayerDisk>> {
   if attached.layers.is_empty() {
     return Ok(Vec::new());
@@ -338,9 +341,16 @@ async fn prepare_layers(control: &Client, store: &Store, base: &Path, attached: 
     .map(|layer| layer.parse::<Digest>().with_context(|| format!("the control plane named an invalid layer digest {layer:?}")))
     .collect::<Result<Vec<_>>>()?;
   for layer in &layers {
-    if !store.has_layer(layer) {
-      fetch_layer(control, store, layer, scratch).await?;
+    if store.has_layer(layer) {
+      continue;
     }
+    if let Some(source) = attached.sources.get(&layer.to_string()) {
+      match pull_layer(store, layer, source).await {
+        Ok(()) => continue,
+        Err(e) => tracing::warn!("cannot pull layer {layer} from the layer registry, fetching it from the control plane: {e:#}"),
+      }
+    }
+    fetch_layer(control, store, layer, scratch).await?;
   }
   let store = store.clone();
   tokio::task::spawn_blocking(move || -> Result<Vec<LayerDisk>> {
@@ -365,6 +375,33 @@ fn check_root(base: &Path, root: &str) -> Result<()> {
       base.display()
     );
   }
+  Ok(())
+}
+
+/// Pulls layer `digest` from the layer registry blob `source` names into
+/// `store` (D5 in `2026-11-25-remote-actor-images-spec.md`). The blob's
+/// compressed digest and the layer's own are checked: a layer that is not
+/// `digest` is refused and not kept.
+// NOTICE: the runner pulls from the repository the control daemon names
+// and has no registry setting of its own: it trusts the control daemon for
+// the run it starts anyway, and checks every layer's digest. A plain-HTTP
+// repository is sent no credentials; an HTTPS one gets this host's Docker
+// credential store's for the registry's host only.
+// TODO(layer-registry): a runner-side allowlist of repositories the control
+// daemon may name; deferred until a deployment must keep runners off some
+// registry the control daemon reaches.
+async fn pull_layer(store: &Store, digest: &Digest, source: &LayerSource) -> Result<()> {
+  if source.media_type != registry::LAYER_MEDIA_TYPE {
+    bail!("the layer registry holds layer {digest} as {:?}, which this runner cannot read", source.media_type);
+  }
+  let repository = Repository::parse(&source.repository)?;
+  let source = registry::Source {
+    key: source.key.parse().with_context(|| format!("invalid cache key {:?}", source.key))?,
+    diff_id: *digest,
+    blob: source.blob.parse().with_context(|| format!("invalid blob digest {:?}", source.blob))?,
+    size: source.size,
+  };
+  Registry::new(repository).pull(store, &source).await?;
   Ok(())
 }
 

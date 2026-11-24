@@ -142,6 +142,7 @@ async fn the_guest_is_told_its_snapshots_layers_lowest_first_and_the_images_path
       layers: vec![root, built],
     }),
     root: None,
+    sources: Default::default(),
     layer_disks: Vec::new(),
     snapshot_image: None,
     path: "/usr/local/bin:/usr/bin:/bin".into(),
@@ -181,6 +182,7 @@ async fn the_guest_receives_materialized_layer_disk_digests_when_flattened() {
       layers: vec![l0, l1, l2],
     }),
     root: None,
+    sources: Default::default(),
     layer_disks: vec![
       needy_core_actor::image::store::LayerDisk {
         digest: flat,

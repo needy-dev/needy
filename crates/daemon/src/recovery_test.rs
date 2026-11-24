@@ -504,6 +504,7 @@ async fn control_restart_preserves_boot_metadata_and_sync_files() {
   let expected_boot = crate::run::Boot {
     snapshot: None,
     root: None,
+    sources: Default::default(),
     layer_disks: Vec::new(),
     snapshot_image: Some("needy-snapshot:deadbeef".into()),
     path: "/opt/tools/bin:/usr/bin:/bin".into(),

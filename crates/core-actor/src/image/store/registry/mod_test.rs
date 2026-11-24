@@ -105,7 +105,7 @@ async fn a_pushed_layer_pulls_into_a_fresh_store_as_the_same_layer() {
   let puller_dir = tempfile::tempdir().unwrap();
   let puller = store(puller_dir.path());
   assert!(!puller.has_layer(&diff_id));
-  let pulled = client.pull(&puller, &found).await.unwrap();
+  let pulled = client.pull(&puller, &found.source()).await.unwrap();
   assert_eq!(pulled, diff_id);
   assert!(puller.has_layer(&diff_id));
   assert_eq!(std::fs::read(puller.layer(&diff_id).unwrap()).unwrap(), std::fs::read(pusher.layer(&diff_id).unwrap()).unwrap());
@@ -165,7 +165,7 @@ async fn a_layer_whose_config_names_another_diff_id_is_refused_and_not_kept() {
   let found = client.lookup(&tampered.key).await.unwrap().expect("the tampered artifact is found");
   let puller_dir = tempfile::tempdir().unwrap();
   let puller = store(puller_dir.path());
-  let err = client.pull(&puller, &found).await.unwrap_err();
+  let err = client.pull(&puller, &found.source()).await.unwrap_err();
   assert!(matches!(&err, Error::DiffId { expected, actual, .. } if *expected == tampered.diff_id && *actual == diff_id), "{err}");
   assert!(!puller.has_layer(&diff_id), "a refused layer is not kept");
   assert!(!puller.has_layer(&tampered.diff_id));
@@ -198,4 +198,46 @@ async fn a_tag_that_is_not_a_needy_layer_is_refused() {
 
   let err = client.lookup(&key).await.unwrap_err();
   assert!(matches!(err, Error::Invalid { .. }), "{err}");
+}
+
+#[tokio::test]
+async fn a_source_pulls_without_a_lookup_and_only_as_the_layer_it_names() {
+  let registry = TestRegistry::start().await;
+  let client = Registry::new(Repository::parse(&registry.repository("needy/layers")).unwrap());
+  let pusher_dir = tempfile::tempdir().unwrap();
+  let pusher = store(pusher_dir.path());
+  let diff_id = pusher.put(layer_with_deletions().as_slice()).unwrap();
+  let config = config(diff_id, "step");
+  let pushed = client.push(&pusher, &config).await.unwrap();
+  let source = Source {
+    key: config.key,
+    diff_id,
+    blob: pushed.blob,
+    size: pushed.size,
+  };
+
+  // A reader told the source (an actor runner) reads the blob only.
+  let before = registry.requests().len();
+  let puller_dir = tempfile::tempdir().unwrap();
+  let puller = store(puller_dir.path());
+  assert_eq!(client.pull(&puller, &source).await.unwrap(), diff_id);
+  let read: Vec<_> = registry.requests()[before..].iter().filter(|r| !r.ends_with("/v2/")).cloned().collect();
+  assert_eq!(read, [format!("GET /v2/needy/layers/blobs/{}", pushed.blob)]);
+
+  // A source naming another layer than its blob decompresses to is refused.
+  let other_dir = tempfile::tempdir().unwrap();
+  let other = store(other_dir.path());
+  let lying = Source {
+    diff_id: Digest::of(b"another layer"),
+    ..source.clone()
+  };
+  let err = client.pull(&other, &lying).await.unwrap_err();
+  assert!(matches!(&err, Error::DiffId { expected, actual, .. } if *expected == lying.diff_id && *actual == diff_id), "{err}");
+  assert!(!other.has_layer(&diff_id), "a refused layer is not kept");
+
+  // A blob whose bytes are not its digest is refused before it is stored.
+  registry.tamper_blob(&pushed.blob.to_string(), b"not the layer".to_vec());
+  let err = client.pull(&other, &source).await.unwrap_err();
+  assert!(matches!(&err, Error::Registry { .. }), "{err}");
+  assert!(!other.has_layer(&diff_id));
 }

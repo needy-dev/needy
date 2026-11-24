@@ -38,6 +38,7 @@ use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_actor::driver;
+use needy_core_actor::image::store::registry;
 use needy_core_actor::image::store::{Digest, LayerDisk, Snapshot};
 use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
@@ -569,6 +570,11 @@ pub struct Boot {
   /// passed to a container driver's `Start::snapshot_image`. `None` for VM
   /// drivers or runs without an image definition.
   pub snapshot_image: Option<String>,
+  /// Where the layer registry holds layers of `snapshot`, keyed by layer:
+  /// a remote actor runner pulls these directly (`BridgeAttached.sources`)
+  /// and fetches the others from this daemon. Empty for a local actor, and
+  /// for a recovered run, whose runner then fetches every layer here.
+  pub sources: BTreeMap<Digest, registry::Source>,
   /// The image's `PATH` (`needy_core::image::Plan::path`); empty for none.
   pub path: String,
   /// The image's environment (`needy_core::image::Plan::env`), without `PATH`;

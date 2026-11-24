@@ -59,6 +59,10 @@ pub struct Images {
   /// Maps `needy_core::image::Digest` cache keys to built layer digests
   /// (`sha256-<hex>` files containing `sha256:<layer-hex>\n`).
   keys_dir: PathBuf,
+  /// Where the layer registry holds a cache key's layer, as this daemon
+  /// pulled or pushed it (`sha256-<hex>.json`, named as in `keys_dir`), so a
+  /// remote actor runner is told where to pull it without a lookup per run.
+  sources_dir: PathBuf,
   /// Cached exported base OCI image tars keyed by base image ID.
   base_oci_dir: PathBuf,
   /// Container runtime boundaries (Docker-compatible engine and Apple's `container` CLI).
@@ -98,12 +102,14 @@ impl Images {
   pub(crate) fn with_backends(cache_dir: &Path, data_dir: &Path, backends: ContainerBackends, registry: Option<Registry>) -> Self {
     let cache = cache_dir.join("image-store");
     let keys_dir = cache.join("keys");
+    let sources_dir = cache.join("registry-sources");
     let base_oci_dir = cache.join("base-oci");
     let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store");
     Self {
       store: store_in(cache_dir, data_dir),
       features: Mutex::new(features),
       keys_dir,
+      sources_dir,
       base_oci_dir,
       backends,
       registry,
@@ -130,6 +136,11 @@ impl Images {
   /// materialization.
   pub(crate) fn backends(&self) -> &ContainerBackends {
     &self.backends
+  }
+
+  /// The layer registry (`daemon.layer_registry`), if one is configured.
+  pub(crate) fn registry(&self) -> Option<&Registry> {
+    self.registry.as_ref()
   }
 }
 
@@ -172,6 +183,7 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
     start_hooks: resolved.plan.hooks.start,
     stop_hooks: resolved.plan.hooks.stop,
     sync_files: resolved.plan.sync_files,
+    sources: Default::default(),
   });
   Ok(())
 }
@@ -200,6 +212,7 @@ pub(crate) async fn prepare_remote(daemon: &Daemon, run: &Run) -> Result<()> {
     root: Some(resolved.plan.root),
     layer_disks: Vec::new(),
     snapshot_image: None,
+    sources: resolved.sources,
     path: resolved.plan.path,
     env: resolved.plan.env,
     session: GuestSession::default(),

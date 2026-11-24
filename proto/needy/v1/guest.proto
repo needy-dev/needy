@@ -336,12 +336,37 @@ message BridgeAttached {
   bool tty = 4;
   // The run's snapshot: its layers' digests (`sha256:<hex>`, the OCI
   // DiffID of the uncompressed canonical layer), lowest first, which the
-  // runner fetches with `FetchLayer`. Empty boots the base.
+  // runner pulls from `sources` or fetches with `FetchLayer`. Empty boots
+  // the base.
   repeated string layers = 5;
   // The digest of the base the snapshot was built on (`sha256:<hex>`);
   // the runner refuses to stack the layers on another base. Empty when
   // `layers` is.
   string root = 6;
+  // Where the runner may pull layers of `layers` directly, keyed by layer
+  // digest: the control daemon's layer registry, for the layers it found
+  // there or pushed there. The runner fetches a layer without an entry, or
+  // one it cannot pull, with `FetchLayer`, and stores a pulled layer only
+  // when its digest is the key.
+  map<string, LayerSource> sources = 7;
+}
+
+// A layer's blob in a layer registry repository (an OCI Distribution
+// registry), as the control daemon found it there or pushed it.
+message LayerSource {
+  // The repository, `[http://]HOST[:PORT]/PATH`: `http://` marks a
+  // plain-HTTP registry, which is sent no credentials.
+  string repository = 1;
+  // The digest of the layer's compressed blob (`sha256:<hex>`).
+  string blob = 2;
+  // The blob's size in bytes.
+  uint64 size = 3;
+  // The blob's media type, `application/vnd.oci.image.layer.v1.tar+gzip`.
+  // A runner fetches a layer whose blob it cannot read with `FetchLayer`.
+  string media_type = 4;
+  // The cache key the layer was built under (`sha256:<hex>`); the blob's
+  // artifact is tagged `key-<hex>` in the repository.
+  string key = 5;
 }
 
 message BridgeStop {

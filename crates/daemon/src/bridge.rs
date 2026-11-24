@@ -17,7 +17,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::{
   BridgeAttach, BridgeAttached, BridgeExecTask, BridgeExit, BridgeRequest, BridgeResponse, BridgeStarted, BridgeStop, BridgeTaskResult,
-  BridgeTerminalTask, ExecEnded, ExecRequest, ExecResponse, KillProcessRequest, ListProcessesRequest, ListProcessesResponse,
+  BridgeTerminalTask, ExecEnded, ExecRequest, ExecResponse, KillProcessRequest, LayerSource, ListProcessesRequest, ListProcessesResponse,
   TerminalTaskRequest, TerminalTaskResponse, bridge_request, bridge_response, bridge_task_result, bridge_terminal_task, exec_response,
   terminal_task_request,
 };
@@ -359,8 +359,31 @@ impl Daemon {
       None => String::new(),
     };
     // The run's snapshot as `image::prepare_remote` planned it; the runner
-    // fetches its layers with `GuestService.FetchLayer`.
+    // pulls the layers the layer registry holds from there and fetches the
+    // others with `GuestService.FetchLayer`.
     let boot = run.boot();
+    let sources = match self.images.registry() {
+      Some(registry) => {
+        let repository = registry.repository().to_string();
+        boot
+          .sources
+          .iter()
+          .map(|(layer, source)| {
+            (
+              layer.to_string(),
+              LayerSource {
+                repository: repository.clone(),
+                blob: source.blob.to_string(),
+                size: source.size,
+                media_type: needy_core_actor::image::store::registry::LAYER_MEDIA_TYPE.to_string(),
+                key: source.key.to_string(),
+              },
+            )
+          })
+          .collect()
+      }
+      None => Default::default(),
+    };
     let attached = BridgeResponse {
       payload: Some(bridge_response::Payload::Attached(BridgeAttached {
         run_id: run.id.clone(),
@@ -369,6 +392,7 @@ impl Daemon {
         tty: run.tty.is_some(),
         layers: boot.snapshot.map(|snapshot| snapshot.layers.iter().map(ToString::to_string).collect()).unwrap_or_default(),
         root: boot.root.map(|root| root.to_string()).unwrap_or_default(),
+        sources,
       })),
     };
     if tx.send(attached).await.is_err() {

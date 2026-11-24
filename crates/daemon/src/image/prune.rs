@@ -44,6 +44,7 @@ pub(super) async fn prune_images(daemon: &Daemon, request: ImagePrune) -> Result
   let kept_tags: HashSet<String> = keep.iter().map(snapshot_tag).collect();
   let store = daemon.images.store.clone();
   let keys_dir = daemon.images.keys_dir.clone();
+  let sources_dir = daemon.images.sources_dir.clone();
   let base_oci_dir = daemon.images.base_oci_dir.clone();
   let dry_run = request.dry_run;
   let all = request.all;
@@ -53,6 +54,7 @@ pub(super) async fn prune_images(daemon: &Daemon, request: ImagePrune) -> Result
     let collected = store.collect_with(&keep_for_store, dry_run)?;
     let mut bytes = collected.bytes;
     bytes += prune_stale_keys(&store, &keys_dir, &keep_for_store, dry_run)?;
+    bytes += prune_stale_sources(&keys_dir, &sources_dir, dry_run)?;
     if all {
       bytes += prune_base_oci(&base_oci_dir, dry_run)?;
     }
@@ -126,6 +128,31 @@ fn prune_stale_keys(store: &needy_core_actor::image::store::Store, keys_dir: &Pa
       None => true,
     };
     if stale {
+      bytes += measure_or_remove(&path, dry_run)?;
+    }
+  }
+  Ok(bytes)
+}
+
+/// Removes `registry-sources/sha256-*.json` records whose cache key entry is
+/// gone, so a source is never offered for a layer this daemon no longer
+/// indexes.
+// NOTICE: runs after `prune_stale_keys`; a dry run, which removes no key,
+// counts only sources whose key was already gone. The records are a few
+// hundred bytes each.
+fn prune_stale_sources(keys_dir: &Path, sources_dir: &Path, dry_run: bool) -> anyhow::Result<u64> {
+  let entries = match std::fs::read_dir(sources_dir) {
+    Ok(entries) => entries,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+    Err(e) => return Err(e.into()),
+  };
+  let mut bytes = 0u64;
+  for entry in entries {
+    let path = entry?.path();
+    let Some(key) = path.file_name().and_then(|n| n.to_str()).and_then(|n| n.strip_suffix(".json")) else {
+      continue;
+    };
+    if key.starts_with("sha256-") && !keys_dir.join(key).exists() {
       bytes += measure_or_remove(&path, dry_run)?;
     }
   }

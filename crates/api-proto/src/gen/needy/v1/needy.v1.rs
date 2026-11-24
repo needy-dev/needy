@@ -1477,14 +1477,14 @@ pub mod bridge_task_result {
         Error(super::TaskError),
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BridgeResponse {
     #[prost(oneof="bridge_response::Payload", tags="1, 2, 3")]
     pub payload: ::core::option::Option<bridge_response::Payload>,
 }
 /// Nested message and enum types in `BridgeResponse`.
 pub mod bridge_response {
-    #[derive(Clone, PartialEq, Eq, Hash, ::prost::Oneof)]
+    #[derive(Clone, PartialEq, ::prost::Oneof)]
     pub enum Payload {
         /// Sent once after `BridgeAttach` is accepted: the run's profile and
         /// compiled recipe so a stateless bridge can boot the actor.
@@ -1498,7 +1498,7 @@ pub mod bridge_response {
         TerminalTask(super::BridgeTerminalTask),
     }
 }
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+#[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BridgeAttached {
     #[prost(string, tag="1")]
     pub run_id: ::prost::alloc::string::String,
@@ -1510,7 +1510,8 @@ pub struct BridgeAttached {
     pub tty: bool,
     /// The run's snapshot: its layers' digests (`sha256:<hex>`, the OCI
     /// DiffID of the uncompressed canonical layer), lowest first, which the
-    /// runner fetches with `FetchLayer`. Empty boots the base.
+    /// runner pulls from `sources` or fetches with `FetchLayer`. Empty boots
+    /// the base.
     #[prost(string, repeated, tag="5")]
     pub layers: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     /// The digest of the base the snapshot was built on (`sha256:<hex>`);
@@ -1518,6 +1519,36 @@ pub struct BridgeAttached {
     /// `layers` is.
     #[prost(string, tag="6")]
     pub root: ::prost::alloc::string::String,
+    /// Where the runner may pull layers of `layers` directly, keyed by layer
+    /// digest: the control daemon's layer registry, for the layers it found
+    /// there or pushed there. The runner fetches a layer without an entry, or
+    /// one it cannot pull, with `FetchLayer`, and stores a pulled layer only
+    /// when its digest is the key.
+    #[prost(map="string, message", tag="7")]
+    pub sources: ::std::collections::HashMap<::prost::alloc::string::String, LayerSource>,
+}
+/// A layer's blob in a layer registry repository (an OCI Distribution
+/// registry), as the control daemon found it there or pushed it.
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct LayerSource {
+    /// The repository, `\[<http://\]HOST\[:PORT\]/PATH`:> `<http://`> marks a
+    /// plain-HTTP registry, which is sent no credentials.
+    #[prost(string, tag="1")]
+    pub repository: ::prost::alloc::string::String,
+    /// The digest of the layer's compressed blob (`sha256:<hex>`).
+    #[prost(string, tag="2")]
+    pub blob: ::prost::alloc::string::String,
+    /// The blob's size in bytes.
+    #[prost(uint64, tag="3")]
+    pub size: u64,
+    /// The blob's media type, `application/vnd.oci.image.layer.v1.tar+gzip`.
+    /// A runner fetches a layer whose blob it cannot read with `FetchLayer`.
+    #[prost(string, tag="4")]
+    pub media_type: ::prost::alloc::string::String,
+    /// The cache key the layer was built under (`sha256:<hex>`); the blob's
+    /// artifact is tagged `key-<hex>` in the repository.
+    #[prost(string, tag="5")]
+    pub key: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgeStop {

@@ -98,7 +98,7 @@ service GuestService {
   so a layer fetched once is reused by later runs on that host.
 - *Landed in R1:* `BridgeAttached` fields 5 (`layers`) and 6 (`root`),
   `GuestService.FetchLayer` (`FetchLayerRequest.digest = 1`,
-  `FetchLayerResponse.data = 1`). Field 7 (`sources`) waits for R3. The runner
+  `FetchLayerResponse.data = 1`). Field 7 (`sources`) landed in R3 (D5). The runner
   stages each fetched layer in its work directory, never holding it whole,
   and refuses one whose stored digest differs from the requested one.
 
@@ -131,7 +131,9 @@ must not be stacked on this one.
 
 *Provisional configuration:* `daemon.layer_registry` / `needy daemon serve
 --layer-registry REPOSITORY` (for example `registry.example.com/needy/layers`),
-read-write; `needy runner serve --layer-registry REPOSITORY`, read-only.
+read-write; ~~`needy runner serve --layer-registry REPOSITORY`, read-only~~
+(dropped in R3: the runner pulls from the repository the control daemon
+names).
 
 - Each built step is pushed as one OCI artifact: a gzip layer blob, a needy
   config blob (*provisional* media type
@@ -187,6 +189,54 @@ read-write; `needy runner serve --layer-registry REPOSITORY`, read-only.
 - `TODO(layer-registry)`: the push holds the compressed layer in memory
   (`oci-client` 0.15 has no streaming push); zstd layers; backfilling layers
   built before a registry was configured.
+
+**Settled in R3** (`crates/daemon/src/actor_runner.rs`,
+`crates/daemon/src/image/build.rs`, `crates/daemon/src/bridge.rs`); names
+stay provisional:
+
+- Wire: `BridgeAttached.sources = 7`, `map<string, LayerSource>` keyed by
+  layer digest; `LayerSource { repository = 1, blob = 2, size = 3,
+  media_type = 4, key = 5 }`. `repository` is the text `Repository`
+  displays (`http://` kept for a plain-HTTP registry), `blob` and `size`
+  the compressed blob, `media_type` the gzip layer type, `key` the cache
+  key whose tag holds the artifact. Additive (`buf breaking` against
+  `origin/main` is clean).
+- The daemon records where the registry holds a step's layer when it pulls
+  or pushes it, next to the cache key index
+  (`image-store/registry-sources/sha256-<key>.json`: repository, key,
+  DiffID, blob, size), so `run create` names sources without a lookup per
+  run. Only sources recorded for the repository configured now, and for
+  the layer the key names, are offered; `needy image prune` drops a record
+  whose key is gone. A layer built before a registry was configured, a
+  commit layer and a recovered run have no source: the runner fetches them
+  with `FetchLayer`.
+- The runner has no `--layer-registry`: it pulls from the repository the
+  control daemon names (it trusts the control daemon for the run anyway)
+  and checks every layer: the blob's compressed digest, then the DiffID
+  against the map key (`Store::put_expecting`), keeping nothing it refuses.
+  Credentials are the runner host's Docker credential store's for the
+  registry's host; a plain-HTTP repository gets none. Any failure (an
+  unreachable registry, another media type, a digest mismatch) is logged
+  and the layer is fetched from the control daemon.
+  `TODO(layer-registry)` in `actor_runner.rs`: a runner-side allowlist of
+  repositories, for a deployment that must keep runners off a registry the
+  control daemon reaches.
+- A control daemon without KVM pulls a missing step from the registry into
+  its own store (the same single flight as a local run, traced as
+  `image.layer.pull`) before it names the step in a snapshot: `Store::snapshot`
+  needs every layer stored, the DiffID is verified before any runner is
+  told of it, and `FetchLayer` stays a working fallback. The cost is one
+  download per control host, cached. D4's root check is unchanged.
+- No new trace kinds: the daemon's pulls and pushes are `image.layer.*`; the
+  runner's fetch time stays R1's `TODO(remote-actor-images)`.
+- Tests: `crates/daemon/src/actor_runner_test.rs` (no-KVM daemon with the
+  in-memory test registry, a runner pulling directly with no `FetchLayer`,
+  falling back when the registry is unreachable or names another layer's
+  blob), `crates/core-actor/src/image/store/registry/mod_test.rs`
+  (`Registry::pull` of a `Source`), and the e2e cell
+  `xtask/src/e2e/remote_actor.rs`, whose builder pushes to an in-process
+  test registry, whose control daemon starts with an empty layer store, and
+  whose actor runner keeps a layer store of its own.
 
 `TODO(layer-registry-sharing)`: one registry repository per tenant. Sharing
 layers across tenants (public, pinned features only) waits for an owner

@@ -54,7 +54,11 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `registry.example.com/needy/layers`, or `http://HOST:PORT/PATH` for a
   plain-HTTP in-cluster registry) to `needy daemon serve` so control hosts
   that share the repository pull each other's built image steps instead of
-  building them again. See [Actor images](configuration.md#actor-images-recipes-and-builtin).
+  building them again. A control daemon without KVM serves image runs whose
+  steps the registry holds, and its remote actor runners pull those layers
+  from the registry directly (with their own host's Docker credentials, none
+  over plain HTTP), falling back to the control daemon. Runners need no
+  registry setting. See [Actor images](configuration.md#actor-images-recipes-and-builtin).
 - **Host-file boundaries**: pass `--disable-host-files` to reject all `host:`
   file mappings, or `--host-files-root DIR` to confine `host:` mappings to an
   allowed directory tree.

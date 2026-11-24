@@ -90,6 +90,14 @@ impl TestRegistry {
     self.state.lock().unwrap_or_else(|p| p.into_inner()).requests.clone()
   }
 
+  /// Replaces the bytes of blob `digest` with `bytes`, as a registry that
+  /// serves corrupt or tampered content would.
+  pub fn tamper_blob(&self, digest: &str, bytes: Vec<u8>) {
+    let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+    assert!(state.blobs.contains_key(digest), "no blob {digest} to tamper with");
+    state.blobs.insert(digest.to_string(), Bytes::from(bytes));
+  }
+
   /// The tags of `repository`.
   pub fn tags(&self, repository: &str) -> Vec<String> {
     let state = self.state.lock().unwrap_or_else(|p| p.into_inner());

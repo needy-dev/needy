@@ -14,11 +14,15 @@
 //!
 //! The actor boots an image definition with a `run:` layer. The control
 //! daemon has no KVM, so it cannot build the layer: a builder daemon with KVM
-//! on the same state and cache directories builds it first (`needy image
-//! build`), and the control daemon serves it to the runner from its layer
-//! store (`GuestService.FetchLayer`).
-// TODO(layer-registry): build on a separate host and share the layer through
-// a registry once R3 of 2026-11-25-remote-actor-images-spec.md lands.
+//! builds it first (`needy image build`) and pushes it to a layer registry
+//! (`--layer-registry`). The control daemon starts with an empty layer store
+//! and pulls the layer from the registry, and the actor runner, with a layer
+//! store of its own, pulls it from the registry directly
+//! (`BridgeAttached.sources`), as in 2026-11-25-remote-actor-images-spec.md.
+// NOTICE: the registry is the in-memory OCI Distribution registry of
+// `needy-core-actor`'s `test-support`, served from this process over plain
+// HTTP, so the cell needs no registry container. It serves the subset of the
+// specification `oci-client` uses, not a conforming registry.
 
 use std::fs::File;
 use std::path::Path;
@@ -30,6 +34,8 @@ use needy_api_client::Client;
 use needy_api_client::proto::v1::GetRunRequest;
 use nix::sys::signal::Signal;
 use serde_json::json;
+
+use needy_core_actor::image::store::registry::testing::TestRegistry;
 
 use super::checks::Checks;
 use super::env::CellEnv;
@@ -143,11 +149,19 @@ env:
   env.file("remote-image.yaml", image_yaml, 0o644)?;
   let (user_name, user_id) = cell.user.account();
 
-  // Builder daemon WITH KVM on the cell's directories: builds the layer into
-  // the layer store the control daemon below serves from.
+  // The layer registry the builder pushes to and the control daemon and the
+  // actor runner pull from. Declared after its runtime, so it stops first.
+  let registry_runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build()?;
+  let registry = registry_runtime.block_on(TestRegistry::start());
+  let repository = registry.repository("needy/layers");
+
+  // Builder daemon WITH KVM on the cell's directories: builds the layer and
+  // pushes it to the layer registry.
   let mut builder_args = vec![
     "--local-runner".to_string(),
     "e2e-builder".into(),
+    "--layer-registry".into(),
+    repository.clone(),
     "-v".into(),
   ];
   if let Some(image) = &env.ctx.host.vm_image {
@@ -176,6 +190,14 @@ env:
   let built_snapshot = built.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
   checks.check("builder daemon builds the remote actor's image", built_snapshot.starts_with("sha256:"), format!("{built_snapshot:?}"));
   env.stop_daemon().map_err(anyhow::Error::msg).context("cannot stop the builder daemon")?;
+  let tags = registry.tags("needy/layers");
+  checks.check("builder daemon pushes the layer to the layer registry", tags.len() == 1, format!("{tags:?}"));
+  // The control daemon below shares the builder's directories: emptying the
+  // layer store leaves the registry as the only place the layer is.
+  let layer_store = env.path("k/image-store");
+  if layer_store.exists() {
+    std::fs::remove_dir_all(&layer_store).with_context(|| format!("cannot empty {}", layer_store.display()))?;
+  }
 
   // Process 1: Control daemon WITHOUT KVM, with `--disable-host-files`,
   // `--runners-file`, and `--gateway-listen`.
@@ -192,6 +214,8 @@ env:
     no_kvm.display().to_string(),
     "--local-runner".into(),
     "e2e-ctrl".into(),
+    "--layer-registry".into(),
+    repository,
     "-v".into(),
   ];
   // The control daemon plans the image on the same base the runner boots.
@@ -267,6 +291,9 @@ env:
     .env("NEEDY_STATE_DIR", &actor_state)
     .env("NEEDY_RUNTIME_DIR", env.path("ar"))
     .env("NEEDY_CONFIG_DIR", env.path("ac"))
+    // A layer store of its own (built layers live in the cache directory),
+    // not the control daemon's: the runner takes the layer from the registry.
+    .env("NEEDY_CACHE_DIR", env.path("ak"))
     .env("NEEDY_ACTOR_RUNNER_TOKEN", ACTOR_RUNNER_TOKEN)
     .stdin(Stdio::null())
     .stdout(actor_log.try_clone()?)
@@ -388,6 +415,7 @@ exit 0"#
   let kinds = runs::event_kinds(&report);
   for expected in [
     "image.build.step",
+    "image.layer.pull",
     "actor.start",
     "exec.decide",
     "net.deny",
@@ -395,6 +423,26 @@ exit 0"#
   ] {
     checks.check(format!("report: trace includes {expected}"), kinds.iter().any(|k| k == expected), format!("{kinds:?}"));
   }
+
+  // The control daemon and the actor runner each read the layer's blob from
+  // the registry: the runner pulled it directly instead of fetching it from
+  // the control daemon.
+  let mut blob_reads = std::collections::BTreeMap::<String, usize>::new();
+  for request in registry.requests() {
+    if let Some(blob) = request.strip_prefix("GET /v2/needy/layers/blobs/") {
+      *blob_reads.entry(blob.to_string()).or_default() += 1;
+    }
+  }
+  checks.check(
+    "actor runner pulls the layer from the layer registry directly",
+    blob_reads.values().any(|reads| *reads >= 2),
+    format!("{blob_reads:?}"),
+  );
+  checks.check(
+    "actor runner keeps the layer in its own layer store",
+    env.path("ak/image-store/layers").read_dir().is_ok_and(|mut entries| entries.next().is_some()),
+    env.path("ak/image-store/layers").display().to_string(),
+  );
 
   // `last_activity_ms` advanced past run creation.
   let final_run = get_run(&env.runtime(), &run_id)?;

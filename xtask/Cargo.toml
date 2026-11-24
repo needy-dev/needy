@@ -18,6 +18,8 @@ run = [
   "dep:needy-api-client",
   "dep:needy-config",
   "dep:needy-core-actor",
+  # The remote actor cell hosts an in-memory layer registry.
+  "needy-core-actor/test-support",
   "dep:needy-core-executor",
   "dep:needy-daemon",
   "dep:needy-trace",

@@ -663,7 +663,9 @@ Each built step is one artifact tagged `key-<cache key hex>`: the layer
 compressed with gzip, and a config naming its digest (the DiffID), its
 cache key, the layer it was built on and the feature it installed. A daemon
 pulls a step it has not built before building it, and pushes a step it
-built. The store itself keeps only uncompressed layers.
+built. A remote actor runner pulls a run's layers from the repository the
+control daemon names (`BridgeAttached.sources`) and fetches any other from
+the control daemon. The store itself keeps only uncompressed layers.
 
 ### Layer disk (provisional)
 

@@ -19,7 +19,7 @@ use needy_core::network::Policy;
 use needy_core_actor::driver;
 use needy_core_actor::image::feature::{FeatureStore, FetchedFeature, Reference as FeatureReference};
 use needy_core_actor::image::manifest;
-use needy_core_actor::image::store::registry::{Feature as RegistryFeature, LayerConfig};
+use needy_core_actor::image::store::registry::{Feature as RegistryFeature, LayerConfig, Registry, Source};
 use needy_core_actor::image::store::{LayerDisk, Snapshot, snapshot_tag};
 use needy_trace::Dispatch;
 use sha2::Digest as _;
@@ -81,6 +81,9 @@ pub(super) struct ResolvedSnapshot {
   pub(super) builder: ActorDriver,
   pub(super) plan: Plan,
   pub(super) snapshot: Snapshot,
+  /// Where the layer registry holds the snapshot's step layers, for those
+  /// this daemon pulled or pushed.
+  pub(super) sources: BTreeMap<Digest, Source>,
   pub(super) steps: Vec<BuildStepOutcome>,
   pub(super) resolved_features: BTreeMap<String, String>,
 }
@@ -119,6 +122,50 @@ impl Images {
     self.keys_dir.join(key.to_string().replace(':', "-"))
   }
 
+  fn source_path(&self, key: &Digest) -> PathBuf {
+    self.sources_dir.join(format!("{}.json", key.to_string().replace(':', "-")))
+  }
+
+  /// Records where the layer registry holds the layer of cache key
+  /// `source.key`.
+  fn record_source(&self, registry: &Registry, source: &Source) -> Result<()> {
+    std::fs::create_dir_all(&self.sources_dir).with_context(|| format!("cannot create {}", self.sources_dir.display()))?;
+    let path = self.source_path(&source.key);
+    let recorded = RecordedSource {
+      repository: registry.repository().to_string(),
+      source: source.clone(),
+    };
+    let contents = serde_json::to_vec(&recorded).context("cannot encode a layer source")?;
+    needy_common::fs::write_atomic(&path, &contents, None).with_context(|| format!("cannot persist {}", path.display()))?;
+    Ok(())
+  }
+
+  /// Where the layer registry configured now holds `layer`, the layer of
+  /// cache key `key`, if this daemon pulled it from there or pushed it
+  /// there. A source recorded for another repository, or for another layer
+  /// of the key, is none: the runner fetches that layer from this daemon.
+  fn lookup_source(&self, key: &Digest, layer: &Digest) -> Option<Source> {
+    let registry = self.registry.as_ref()?;
+    let path = self.source_path(key);
+    let bytes = match std::fs::read(&path) {
+      Ok(bytes) => bytes,
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+      Err(e) => {
+        tracing::warn!("cannot read layer source {}: {e}", path.display());
+        return None;
+      }
+    };
+    let recorded: RecordedSource = match serde_json::from_slice(&bytes) {
+      Ok(recorded) => recorded,
+      Err(e) => {
+        tracing::warn!("ignoring malformed layer source {}: {e}", path.display());
+        return None;
+      }
+    };
+    (recorded.repository == registry.repository().to_string() && recorded.source.key == *key && recorded.source.diff_id == *layer)
+      .then_some(recorded.source)
+  }
+
   /// Resolves one build step under single-flight deduplication: returns
   /// `(layer_digest, cached, elapsed_ms)`.
   #[allow(clippy::too_many_arguments)]
@@ -133,12 +180,12 @@ impl Images {
     cancel: &CancellationToken,
     built_below: &[Digest],
     step: &Step,
-  ) -> Result<(Digest, bool, u64)> {
+  ) -> Result<(Digest, bool, u64, Option<Source>)> {
     // TODO(layer-registry): a layer built before a registry was configured
     // is a local hit and never pushed; backfilling the registry waits for a
     // deployment that needs it (R3 falls back to `FetchLayer` for it).
     if let Some(layer) = self.lookup_cached(&step.key)? {
-      return Ok((layer, true, 0));
+      return Ok((layer, true, 0, self.lookup_source(&step.key, &layer)));
     }
 
     let mut built_ms: Option<u64> = None;
@@ -151,9 +198,10 @@ impl Images {
         // Spec D1: a local miss is looked up in the layer registry before
         // it is built, under the same single flight, so concurrent creates
         // pull each key once.
-        if let Some(layer) = self.pull_step(step, trace).await {
-          self.record_cached(&step.key, &layer)?;
-          return Ok(layer);
+        if let Some((registry, source)) = self.pull_step(step, trace).await {
+          self.record_cached(&step.key, &source.diff_id)?;
+          self.record_source(registry, &source)?;
+          return Ok(source.diff_id);
         }
         let builder = match builder {
           Builder::Here(driver) => *driver,
@@ -165,14 +213,18 @@ impl Images {
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.record_cached(&step.key, &layer)?;
         built_ms = Some(elapsed_ms);
-        self.push_step(step, built_below.last().copied(), layer, trace).await;
+        if let Some((registry, source)) = self.push_step(step, built_below.last().copied(), layer, trace).await {
+          self.record_source(registry, &source)?;
+        }
         Ok(layer)
       })
       .await?;
 
+    // Recorded inside the single flight, so a waiter reads it too.
+    let source = self.lookup_source(&step.key, &layer);
     match built_ms {
-      Some(ms) => Ok((layer, false, ms)),
-      None => Ok((layer, true, 0)),
+      Some(ms) => Ok((layer, false, ms, source)),
+      None => Ok((layer, true, 0, source)),
     }
   }
 
@@ -200,15 +252,19 @@ impl Images {
   }
 
   /// Looks the cache key of `step` up in the layer registry, when one is
-  /// configured, and pulls the layer it names into the store. Records
-  /// `image.layer.pull`. A miss, or a lookup or pull that fails, is `None`:
-  /// the step is built instead.
-  async fn pull_step(&self, step: &Step, trace: &Dispatch) -> Option<Digest> {
+  /// configured, and pulls the layer it names into the store, returning the
+  /// registry and where it holds the layer. Records `image.layer.pull`. A
+  /// miss, or a lookup or pull that fails, is `None`: the step is built
+  /// instead.
+  async fn pull_step(&self, step: &Step, trace: &Dispatch) -> Option<(&Registry, Source)> {
     let registry = self.registry.as_ref()?;
     let reference = registry.repository().reference(&step.key);
     let started = Instant::now();
     let pulled = match registry.lookup(&step.key).await {
-      Ok(Some(remote)) => registry.pull(&self.store, &remote).await.map(Some),
+      Ok(Some(remote)) => {
+        let source = remote.source();
+        registry.pull(&self.store, &source).await.map(|_| Some(source))
+      }
       Ok(None) => Ok(None),
       Err(e) => Err(e),
     };
@@ -216,32 +272,31 @@ impl Images {
     let (layer, error) = match pulled {
       Ok(layer) => (layer, None),
       Err(e) => {
-        tracing::warn!("cannot pull image layer {reference}, building it: {e}");
+        tracing::warn!("cannot pull image layer {reference}: {e}");
         (None, Some(e.to_string()))
       }
     };
     let event = Event::ImageLayerPull(ImageLayerPull {
       key: step.key.to_string(),
       reference,
-      layer: layer.map(|layer| layer.to_string()),
+      layer: layer.as_ref().map(|source| source.diff_id.to_string()),
       ms,
       error,
     });
     trace.emit(event.kind().as_str(), event.raw());
-    layer
+    layer.map(|source| (registry, source))
   }
 
   /// Pushes the layer `step` built on `parent` to the layer registry, when
-  /// one is configured, and records `image.layer.push`.
+  /// one is configured, and records `image.layer.push`. Returns the
+  /// registry and where it holds the layer once pushed.
   // NOTICE: a failed push is logged and traced but does not fail the build:
   // the layer is in this host's store and the run can boot it; another host
   // builds the step again. The push runs inside the build's single flight,
   // so a step is pushed before any waiter (or a remote runner told of it)
   // can look it up.
-  async fn push_step(&self, step: &Step, parent: Option<Digest>, layer: Digest, trace: &Dispatch) {
-    let Some(registry) = self.registry.as_ref() else {
-      return;
-    };
+  async fn push_step(&self, step: &Step, parent: Option<Digest>, layer: Digest, trace: &Dispatch) -> Option<(&Registry, Source)> {
+    let registry = self.registry.as_ref()?;
     let feature = match &step.input {
       Input::Feature {
         reference, digest, ..
@@ -259,11 +314,19 @@ impl Images {
     };
     let reference = registry.repository().reference(&step.key);
     let started = Instant::now();
-    let error = match registry.push(&self.store, &config).await {
-      Ok(_) => None,
+    let (pushed, error) = match registry.push(&self.store, &config).await {
+      Ok(pushed) => (
+        Some(Source {
+          key: step.key,
+          diff_id: layer,
+          blob: pushed.blob,
+          size: pushed.size,
+        }),
+        None,
+      ),
       Err(e) => {
         tracing::warn!("cannot push image layer {layer} to {reference}: {e}");
-        Some(e.to_string())
+        (None, Some(e.to_string()))
       }
     };
     let event = Event::ImageLayerPush(ImageLayerPush {
@@ -274,6 +337,7 @@ impl Images {
       error,
     });
     trace.emit(event.kind().as_str(), event.raw());
+    pushed.map(|source| (registry, source))
   }
 
   /// Runs a single build step in a fresh VM or container session on top of
@@ -481,6 +545,16 @@ pub(super) async fn resolve_features(
   })
 }
 
+/// Where the layer registry holds a cache key's layer, as
+/// `Images::sources_dir` records it.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct RecordedSource {
+  /// The repository as `daemon.layer_registry` named it then.
+  repository: String,
+  #[serde(flatten)]
+  source: Source,
+}
+
 /// Who builds the steps of a plan that are not in the layer store.
 enum Builder {
   /// This host, in sessions of this driver.
@@ -562,6 +636,7 @@ async fn resolve_snapshot_on(
   let plan = needy_core::image::plan(definition, &root, user, commit, &resolved_features.by_ref)?;
   let mut layers = Vec::with_capacity(plan.steps.len() + usize::from(plan.commit.is_some()));
   let mut steps = Vec::with_capacity(plan.steps.len());
+  let mut sources = BTreeMap::new();
 
   for step in &plan.steps {
     if cancel.is_cancelled() {
@@ -570,10 +645,13 @@ async fn resolve_snapshot_on(
     let step_label = step_label(step);
     // Spec D1: the store, then the layer registry, then a build, which a
     // `Builder::Unavailable` refuses.
-    let (layer, cached, ms) = daemon
+    let (layer, cached, ms, source) = daemon
       .images
       .resolve_step(daemon, builder, base_container_image, user, &resolved_features.fetched, trace, cancel, &layers, step)
       .await?;
+    if let Some(source) = source {
+      sources.insert(layer, source);
+    }
     let event = Event::ImageBuildStep(ImageBuildStep {
       key: step.key.to_string(),
       layer: layer.to_string(),
@@ -613,6 +691,7 @@ async fn resolve_snapshot_on(
     },
     plan,
     snapshot,
+    sources,
     steps,
     resolved_features: resolved_features.resolved_digests,
   })

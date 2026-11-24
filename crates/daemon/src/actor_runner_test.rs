@@ -12,8 +12,12 @@ use needy_api_client::Client;
 use needy_api_client::proto::v1::{
   BridgeAttach, BridgeAttached, BridgePrepared, BridgeRequest, FetchLayerRequest, bridge_request, bridge_response,
 };
-use needy_api_server::Listen;
-use needy_api_server::control::{Guest, MintRunnerCredential, Runners, Runs, StopMode};
+use needy_api_server::control::{
+  Caller, Chunks, ControlError, FromRunner, Guest, GuestConfig, GuestControls, MintRunnerCredential, Runners, Runs, StopMode, ToRunner,
+};
+use needy_api_server::{Health, Listen, Server};
+use needy_common::process::Exit;
+use needy_core::event::Event;
 use needy_core::types::{Capabilities, Principal, RunState, RunnerRole};
 use needy_core_actor::image::store::Digest;
 use tokio::sync::mpsc;
@@ -41,12 +45,64 @@ executors:
   here: { driver: native }
 "#;
 
+/// The daemon's guest API, counting the layers a runner fetches from it.
+struct CountingGuest {
+  daemon: crate::Daemon,
+  fetched: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl Guest for CountingGuest {
+  async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
+    self.daemon.config(run).await
+  }
+  async fn event(&self, run: &str, time_ms: i64, event: Event) -> Result<(), ControlError> {
+    self.daemon.event(run, time_ms, event).await
+  }
+  async fn exit(&self, run: &str, exit: Exit) -> Result<(), ControlError> {
+    self.daemon.exit(run, exit).await
+  }
+  async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>, ControlError> {
+    self.daemon.fetch_files(run, name).await
+  }
+  async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
+    self.daemon.push_files(run, name, archive).await
+  }
+  async fn push_layer(&self, run: &str, archive: Chunks) -> Result<(), ControlError> {
+    self.daemon.push_layer(run, archive).await
+  }
+  async fn control(&self, run: &str) -> Result<GuestControls, ControlError> {
+    Guest::control(&self.daemon, run).await
+  }
+  async fn fetch_layer(&self, run: &str, digest: &str) -> Result<Chunks, ControlError> {
+    self.fetched.fetch_add(1, Ordering::SeqCst);
+    self.daemon.fetch_layer(run, digest).await
+  }
+  async fn bridge(
+    &self,
+    run: &str,
+    inbound: FromRunner<needy_api_client::proto::v1::BridgeRequest>,
+  ) -> Result<ToRunner<needy_api_client::proto::v1::BridgeResponse>, ControlError> {
+    self.daemon.bridge(run, inbound).await
+  }
+  async fn terminal_task(
+    &self,
+    run: &str,
+    task: u64,
+    responses: FromRunner<needy_api_client::proto::v1::TerminalTaskRequest>,
+  ) -> Result<ToRunner<needy_api_client::proto::v1::TerminalTaskResponse>, ControlError> {
+    self.daemon.terminal_task(run, task, responses).await
+  }
+}
+
 /// A control daemon serving on TCP whose build sessions a responder drives,
 /// as `image_test` does for local runs.
 struct Control {
   started: Started,
   addr: String,
   sessions: Arc<AtomicUsize>,
+  /// The layers runners fetched with `GuestService.FetchLayer`.
+  fetched: Arc<AtomicUsize>,
   stop: CancellationToken,
   server: tokio::task::JoinHandle<Result<(), needy_api_server::server::Error>>,
   responder: tokio::task::JoinHandle<()>,
@@ -60,7 +116,26 @@ impl Control {
     let stop = CancellationToken::new();
     let behavior = Arc::new(std::sync::Mutex::new(BuildBehavior::default()));
     let (sessions, _configs, responder) = spawn_build_responder(started_log, behavior, stop.clone());
-    let bound = started.daemon.server(None).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+    // `Daemon::server`, with the guest API counting the layers it serves.
+    let fetched = Arc::new(AtomicUsize::new(0));
+    let api = Arc::new(started.daemon.clone());
+    let guest = Arc::new(CountingGuest {
+      daemon: started.daemon.clone(),
+      fetched: fetched.clone(),
+    });
+    let health = Health {
+      instance_id: started.daemon.instance_id.clone(),
+      role: "control",
+    };
+    let server = Server::new(health, Caller::Operator)
+      .token(None)
+      .runs(api.clone())
+      .images(api.clone())
+      .processes(api.clone())
+      .guest(guest)
+      .runners(api.clone())
+      .clients(api);
+    let bound = server.bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
     let Listen::Tcp(addr) = &bound.addresses()[0] else {
       unreachable!();
     };
@@ -70,6 +145,7 @@ impl Control {
       started,
       addr,
       sessions,
+      fetched,
       stop,
       server,
       responder,
@@ -260,6 +336,7 @@ async fn a_remote_runner_fetches_materializes_and_boots_the_run_s_image_layers()
   let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
   let layers = control.snapshot_layers(&created.id);
   assert_eq!(control.sessions.load(Ordering::SeqCst), 2, "the control daemon built both steps");
+  assert!(control.daemon().runs.find(&created.id).unwrap().boot().sources.is_empty(), "no layer registry, no sources");
 
   // Init's configuration names the disks the runner reported.
   let config = tokio::time::timeout(Duration::from_secs(10), Guest::config(control.daemon(), &created.id)).await.unwrap().unwrap();
@@ -286,6 +363,8 @@ async fn a_remote_runner_fetches_materializes_and_boots_the_run_s_image_layers()
     assert!(path.starts_with(runner_dir.path()), "{}", path.display());
     assert_eq!(&std::fs::read(&path).unwrap()[..4], b"hsqs");
   }
+
+  assert_eq!(control.fetched.load(Ordering::SeqCst), 2, "without a layer registry the runner fetches every layer here");
 
   Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
   control.end().await;
@@ -423,4 +502,149 @@ async fn a_control_daemon_without_kvm_takes_remote_steps_from_the_layer_registry
 
   Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
   control.end().await;
+}
+
+/// Waits until the actor of `run` asks for its configuration, which it does
+/// once the runner has stacked its layers, and returns the layers it names.
+async fn booted_layers(control: &Control, run: &str) -> Vec<String> {
+  tokio::time::timeout(Duration::from_secs(10), Guest::config(control.daemon(), run)).await.unwrap().unwrap().layers
+}
+
+/// The `GET`s of blob `blob` the registry served.
+fn blob_reads(registry: &needy_core_actor::image::store::registry::testing::TestRegistry, blob: &Digest) -> usize {
+  let read = format!("GET /v2/needy/layers/blobs/{blob}");
+  registry.requests().iter().filter(|request| **request == read).count()
+}
+
+#[tokio::test]
+async fn a_runner_pulls_registry_layers_directly_for_a_control_daemon_without_kvm() {
+  use needy_core_actor::image::store::registry::testing::TestRegistry;
+
+  let registry = TestRegistry::start().await;
+  let repository = registry.repository("needy/layers");
+  let built = build_into_registry(&repository).await;
+  let control = control_without_kvm(&repository).await;
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner(&control, runner_dir.path(), "").await;
+
+  let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
+  assert_eq!(control.snapshot_layers(&created.id), built);
+  assert_eq!(control.sessions.load(Ordering::SeqCst), 0);
+
+  // The control daemon pulled both steps (traced), and names where the
+  // registry holds them.
+  let events = Runs::events(control.daemon(), &created.id).await.unwrap().events;
+  let pulls: Vec<_> = events
+    .iter()
+    .filter_map(|e| match Event::decode(&e.kind, e.version, &e.payload).unwrap() {
+      Event::ImageLayerPull(pull) => Some(pull),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(
+    pulls.iter().map(|pull| pull.layer.clone().unwrap()).collect::<Vec<_>>(),
+    built.iter().map(ToString::to_string).collect::<Vec<_>>()
+  );
+  assert!(pulls.iter().all(|pull| pull.error.is_none()), "{pulls:?}");
+  let sources = control.daemon().runs.find(&created.id).unwrap().boot().sources;
+  assert_eq!(sources.keys().copied().collect::<Vec<_>>(), {
+    let mut sorted = built.clone();
+    sorted.sort();
+    sorted
+  });
+
+  // The runner pulled each layer from the registry, not from the daemon.
+  assert_eq!(booted_layers(&control, &created.id).await, built.iter().map(ToString::to_string).collect::<Vec<_>>());
+  let store = crate::runner::layer_store(&runner_dir.path().join("cache"), &runner_dir.path().join("data"));
+  for layer in &built {
+    assert!(store.has_layer(layer), "the runner's store lacks {layer}");
+    assert_eq!(blob_reads(&registry, &sources[layer].blob), 2, "the control daemon and the runner each read {layer}'s blob once");
+  }
+  assert_eq!(control.fetched.load(Ordering::SeqCst), 0, "the runner fetched no layer from the control daemon");
+
+  Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
+}
+
+/// A control daemon without KVM that pulled both steps of
+/// [`REMOTE_IMAGE_PROFILE`] from `registry` for a first run, placed on
+/// another runner, and so holds them with their sources.
+async fn control_holding_registry_layers(
+  registry: &needy_core_actor::image::store::registry::testing::TestRegistry,
+) -> (Control, crate::bridge::tests::ConnectedActorRunner, String) {
+  let repository = registry.repository("needy/layers");
+  build_into_registry(&repository).await;
+  let control = control_without_kvm(&repository).await;
+  let other = connect_actor_runner(control.daemon(), &control.addr, "other-node").await;
+  let first = control.create(&REMOTE_IMAGE_PROFILE.replace("runner: actor-node", "runner: other-node")).await.unwrap();
+  assert_eq!(control.daemon().runs.find(&first.id).unwrap().boot().sources.len(), 2);
+  (control, other, first.id)
+}
+
+#[tokio::test]
+async fn a_runner_that_cannot_reach_the_registry_fetches_layers_from_the_control_daemon() {
+  use needy_core_actor::image::store::registry::testing::TestRegistry;
+
+  let registry = TestRegistry::start().await;
+  let (control, _other, first) = control_holding_registry_layers(&registry).await;
+  drop(registry);
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner(&control, runner_dir.path(), "").await;
+
+  let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
+  let layers = control.snapshot_layers(&created.id);
+  assert_eq!(control.daemon().runs.find(&created.id).unwrap().boot().sources.len(), 2, "the daemon still names the registry");
+
+  assert_eq!(booted_layers(&control, &created.id).await, layers.iter().map(ToString::to_string).collect::<Vec<_>>());
+  let store = crate::runner::layer_store(&runner_dir.path().join("cache"), &runner_dir.path().join("data"));
+  for layer in &layers {
+    assert!(store.has_layer(layer), "the runner's store lacks {layer}");
+  }
+  assert_eq!(control.fetched.load(Ordering::SeqCst), 2, "both layers came from the control daemon");
+
+  for id in [&first, &created.id] {
+    Runs::stop(control.daemon(), id, Principal::Operator, StopMode::Now).await.unwrap();
+  }
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
+}
+
+#[tokio::test]
+async fn a_runner_refuses_a_registry_blob_that_is_another_layer_and_fetches_it_from_the_control_daemon() {
+  use needy_core_actor::image::store::registry::testing::TestRegistry;
+
+  let registry = TestRegistry::start().await;
+  let (control, _other, first) = control_holding_registry_layers(&registry).await;
+  // Each step's source names the other step's blob: a valid blob of the
+  // registry, which decompresses to another layer than the one named.
+  let sources_dir = control.daemon().config.cache_dir.join("image-store/registry-sources");
+  let records: Vec<_> = std::fs::read_dir(&sources_dir).unwrap().map(|entry| entry.unwrap().path()).collect();
+  assert_eq!(records.len(), 2);
+  let mut values: Vec<serde_json::Value> =
+    records.iter().map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()).collect();
+  let blobs = [values[0]["blob"].clone(), values[1]["blob"].clone()];
+  values[0]["blob"] = blobs[1].clone();
+  values[1]["blob"] = blobs[0].clone();
+  for (path, value) in records.iter().zip(&values) {
+    std::fs::write(path, serde_json::to_vec(value).unwrap()).unwrap();
+  }
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner(&control, runner_dir.path(), "").await;
+
+  let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
+  let layers = control.snapshot_layers(&created.id);
+
+  assert_eq!(booted_layers(&control, &created.id).await, layers.iter().map(ToString::to_string).collect::<Vec<_>>());
+  let store = crate::runner::layer_store(&runner_dir.path().join("cache"), &runner_dir.path().join("data"));
+  for layer in &layers {
+    assert!(store.has_layer(layer), "the runner's store lacks {layer}");
+  }
+  assert_eq!(control.fetched.load(Ordering::SeqCst), 2, "both swapped layers were refused and fetched from the control daemon");
+
+  for id in [&first, &created.id] {
+    Runs::stop(control.daemon(), id, Principal::Operator, StopMode::Now).await.unwrap();
+  }
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
 }
