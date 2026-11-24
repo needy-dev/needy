@@ -11,7 +11,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use needy_api_client::Client;
 
-use crate::commands::{client, config, daemon, fs, image, proc, run, runner};
+use crate::commands::{client, config, daemon, fs, image, proc, run, runner, shell};
 use crate::paths::Paths;
 
 /// Control-plane connection options for commands that talk to a daemon.
@@ -69,6 +69,8 @@ enum Command {
   Runner(runner::Args),
   /// Create, inspect, attach to, and stop runs.
   Run(run::Args),
+  /// Run a profile's program in a sandbox by typing its name in your shell.
+  Shell(shell::Args),
   /// Execute, list, attach to, and signal executor processes.
   Proc(proc::Args),
   /// Copy files between this machine and an executor.
@@ -85,6 +87,7 @@ impl Command {
       Command::Client(args) => args.connection.clone(),
       Command::Runner(args) => args.connection(),
       Command::Run(args) => args.connection.clone(),
+      Command::Shell(args) => args.connection.clone(),
       Command::Proc(args) => args.connection.clone(),
       Command::Fs(args) => args.connection.clone(),
       Command::Image(args) => args.connection(),
@@ -160,10 +163,7 @@ impl Context {
 
   /// A bare profile name is resolved only in the selected config directory.
   pub fn profile(&self, given: &Path) -> Result<PathBuf> {
-    let bare = given.components().count() == 1
-      && matches!(given.components().next(), Some(Component::Normal(_)))
-      && !matches!(given.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"));
-    if !bare {
+    if !is_profile_name(given) {
       return Ok(given.to_path_buf());
     }
     let profiles = self.paths()?.profiles();
@@ -185,6 +185,14 @@ impl Context {
       _ => Ok(yaml),
     }
   }
+}
+
+/// Whether a profile argument is a bare name (`codex`), which names a file in
+/// the selected config directory's `profiles/`, rather than a path.
+pub(crate) fn is_profile_name(given: &Path) -> bool {
+  given.components().count() == 1
+    && matches!(given.components().next(), Some(Component::Normal(_)))
+    && !matches!(given.extension().and_then(|e| e.to_str()), Some("yaml" | "yml"))
 }
 
 /// The exit code of a command whose stdout's reader went away, as with
@@ -281,6 +289,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
       Command::Client(args) => client::run(args, &ctx).await,
       Command::Runner(args) => runner::run(args, &ctx).await,
       Command::Run(args) => run::run(args, &ctx).await,
+      Command::Shell(args) => shell::run(args, &ctx).await,
       Command::Proc(args) => proc::run(args, &ctx).await,
       Command::Fs(args) => fs::run(args, &ctx).await,
       Command::Image(args) => image::run(args, &ctx).await,

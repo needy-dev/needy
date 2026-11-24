@@ -127,6 +127,15 @@ needy run exec latest -- uname -a               # routed through the run's rules
 needy run stop                                  # SIGTERM, mirror-out / sync merge, then SIGKILL after --grace
 ```
 
+To run an agent by typing its name in your own zsh or bash, without the
+`needy` prefix (other commands run as usual):
+
+```sh
+needy shell -f builtin:codex             # a subshell: `codex` runs in a sandbox until `exit`
+eval "$(needy shell init zsh)"           # once, or in ~/.zshrc: lets needy change the current shell
+needy shell activate -f builtin:codex    # the current shell, until `needy shell deactivate`
+```
+
 ### 3. Inspect and customize
 
 Read the trace of the last run (routed commands, denied hosts, injected faults):

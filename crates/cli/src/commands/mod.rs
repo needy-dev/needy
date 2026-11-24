@@ -11,6 +11,7 @@ pub mod proc;
 pub mod profile;
 pub mod run;
 pub mod runner;
+pub mod shell;
 
 /// Parses a `KEY=VALUE` environment variable argument for clap `value_parser`.
 pub(crate) fn parse_env(text: &str) -> Result<(String, String), String> {

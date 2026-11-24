@@ -19,3 +19,4 @@ The `needy` command surface, exec streams, traces and reports.
 | 2026-11-15 | [Local profile creation and client execution](2026-11-15-client-execution-usage.md) | usage, automated tests, and selected live evidence |
 | 2026-11-15 | [CLI output design, terminal examples, and v0.0.5 audit](2026-11-15-cli-output-audit.md) | help probe, source audit, and proposed follow-up |
 | 2026-11-15 | [Client onboarding output changes and regression evidence](2026-11-15-client-onboarding-output-evidence.md) | evidence |
+| 2026-11-23 | [`needy shell`: sandboxed commands in the user's shell](2026-11-23-needy-shell-design.md) | design |

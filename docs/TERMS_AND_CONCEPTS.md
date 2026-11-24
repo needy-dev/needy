@@ -96,6 +96,16 @@ Arguments after `--` are appended to the profile's `actor.command`.
 Init keeps its output in the actor's console
 while no client is attached. See the [automated and live-probe evidence](ai/references/cli/2026-11-11-interactive-actor-evidence.md).
 
+### Sandboxed command (provisional)
+
+A shell function that `needy shell` (a subshell) or `needy shell activate`
+(the current shell) defines in the user's own shell, named
+after the file name of a profile's `actor.command[0]`. Each call creates a run
+of the profile with the typed arguments after `actor.command`, as
+`needy run create -it -f PROFILE -- ARGS` does; every other command runs as
+usual. `exit` (subshell) or `needy shell deactivate` (current shell) removes it. See
+the [needy shell design](ai/references/cli/2026-11-23-needy-shell-design.md).
+
 ### Harness
 
 One kind of driving program: an agent loop such as opencode, Codex or an
