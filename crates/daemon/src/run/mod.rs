@@ -92,6 +92,12 @@ pub struct Run {
   pub tty: Option<needy_api_server::control::WindowSize>,
   /// The actor's process service for that terminal, once connected.
   pub terminal: tokio::sync::OnceCell<Arc<Instance>>,
+  /// The terminal a remote actor's bridge reported (`BridgeTerminalReady`),
+  /// which `terminal` is initialized from.
+  // NOTICE: the bridge cannot set `terminal` itself: an attach waiting for
+  // the remote terminal holds `terminal`'s initialization, and a
+  // `tokio::sync::OnceCell` refuses `set` while it is being initialized.
+  pub bridged_terminal: std::sync::OnceLock<Arc<Instance>>,
   /// The initial interactive client must subscribe before the program starts.
   pub wait_for_attach: bool,
   pub recipe: Option<CompiledRecipe>,
@@ -731,6 +737,7 @@ impl Daemon {
       tty: request.tty,
       wait_for_attach: request.wait_for_attach,
       terminal: tokio::sync::OnceCell::new(),
+      bridged_terminal: std::sync::OnceLock::new(),
       actor: Default::default(),
       stop_request: Default::default(),
       stop_complete: Default::default(),

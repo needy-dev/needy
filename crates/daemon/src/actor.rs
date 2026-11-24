@@ -348,12 +348,12 @@ const TERMINAL_WAIT: Duration = Duration::from_secs(60);
 /// it while the run runs. The actor is ready from then on.
 pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, ControlError> {
   if run.is_remote_actor() {
-    // Remote actor bridges register `run.terminal` when the guest's terminal
-    // process service answers (`BridgeTerminalReady`). Wait until it arrives
-    // or the run stops.
+    // Remote actor bridges register `run.bridged_terminal` when the guest's
+    // terminal process service answers (`BridgeTerminalReady`). Wait until it
+    // arrives or the run stops.
     let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
     loop {
-      if let Some(instance) = run.terminal.get() {
+      if let Some(instance) = run.bridged_terminal.get() {
         return Ok(instance.clone());
       }
       if run.cancel.is_cancelled() || run.actor.get() == Some(ActorState::Exited) {
