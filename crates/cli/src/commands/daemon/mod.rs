@@ -72,6 +72,12 @@ struct ServeArgs {
   /// Interval between runner health heartbeats (for example `15s`).
   #[arg(long, value_parser = humantime::parse_duration)]
   heartbeat_interval: Option<std::time::Duration>,
+  /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host workspaces).
+  #[arg(long)]
+  disable_host_files: bool,
+  /// Restrict `host:` file mappings to canonical paths inside this directory.
+  #[arg(long, value_name = "DIR")]
+  host_files_root: Option<std::path::PathBuf>,
 }
 
 #[derive(clap::Args)]
@@ -147,6 +153,12 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   if args.executor_image.is_some() {
     effective.daemon.executor_image = args.executor_image.clone();
   }
+  if args.disable_host_files {
+    effective.daemon.disable_host_files = true;
+  }
+  if args.host_files_root.is_some() {
+    effective.daemon.host_files_root = args.host_files_root.clone();
+  }
   effective.validate()?;
   if args.heartbeat_interval.is_some_and(|interval| interval.is_zero()) {
     return Err(
@@ -176,6 +188,8 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     report_wait: needy_daemon::REPORT_WAIT,
     mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
     merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
+    disable_host_files: args.disable_host_files || settings.disable_host_files,
+    host_files_root: args.host_files_root.or(settings.host_files_root),
   };
   match needy_daemon::guest_needy(&config) {
     Ok(guest) => tracing::info!("actors get the guest needy {}", guest.display()),

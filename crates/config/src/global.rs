@@ -81,6 +81,8 @@ pub struct Daemon {
   pub heartbeat_interval: Duration,
   pub engine_host: Option<String>,
   pub process_path: Option<Vec<PathBuf>>,
+  pub disable_host_files: bool,
+  pub host_files_root: Option<PathBuf>,
 }
 
 impl Default for Daemon {
@@ -94,6 +96,8 @@ impl Default for Daemon {
       heartbeat_interval: Duration::from_secs(15),
       engine_host: None,
       process_path: None,
+      disable_host_files: false,
+      host_files_root: None,
     }
   }
 }
@@ -256,6 +260,9 @@ impl Config {
     }
     if self.daemon.process_path.as_ref().is_some_and(|paths| paths.is_empty() || paths.iter().any(|p| !p.is_absolute())) {
       return Err(Error::invalid("daemon.process_path", "daemon.process_path requires nonempty absolute path entries"));
+    }
+    if self.daemon.host_files_root.as_ref().is_some_and(|p| !p.is_absolute()) {
+      return Err(Error::invalid("daemon.host_files_root", "daemon.host_files_root requires an absolute path"));
     }
     for (name, value) in [
       ("daemon.executor_image", &self.daemon.executor_image),

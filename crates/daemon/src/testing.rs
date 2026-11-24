@@ -106,6 +106,8 @@ pub(crate) async fn daemon_in_with_backends(
     report_wait: crate::REPORT_WAIT,
     mirror_out_wait: crate::MIRROR_OUT_WAIT,
     merge_driver_timeout: crate::MERGE_DRIVER_TIMEOUT,
+    disable_host_files: false,
+    host_files_root: None,
   };
   adjust(&mut config);
   let daemon = Daemon::start_with_backends(config, backends).await.unwrap();

@@ -711,7 +711,8 @@ impl Daemon {
       Placement::ControlHost => None,
     };
     actor::check_host(self, run).await?;
-    files::check_host_paths(run)?;
+    let host_files = files::HostFilesPolicy::from_config(&self.config);
+    files::check_host_paths(run, &host_files)?;
     unwinding(run)?;
     crate::image::prepare(self, run).await?;
     // Ensure stores for profile- and feature-declared sync mappings
@@ -777,7 +778,7 @@ impl Daemon {
       snapshot: run.boot().snapshot.map(|s| s.digest.to_string()),
     }));
     unwinding(run)?;
-    files::copy_in(run).await?;
+    files::copy_in(run, &host_files).await?;
     unwinding(run)?;
     crate::sync::seed(self, run).await?;
     unwinding(run)?;
@@ -855,7 +856,7 @@ impl Daemon {
   /// nothing left to release.
   pub(crate) async fn finish_run(&self, run: &Run) {
     self.save_run(run).await;
-    files::mirror_out(run).await;
+    files::mirror_out(run, &files::HostFilesPolicy::from_config(&self.config)).await;
     self.release_executors(run).await;
     crate::sync::end(self, run).await;
     actor::remove_sockets(self, &run.profile.actor, &run.dir);
@@ -952,7 +953,7 @@ impl Daemon {
     run.cancel.cancel();
     run.tasks.close();
     run.tasks.wait().await;
-    files::mirror_out(run).await;
+    files::mirror_out(run, &files::HostFilesPolicy::from_config(&self.config)).await;
     if stopping && let Err(refused) = run.state.advance(RunState::Stopped) {
       tracing::warn!("run {}: {refused}", run.id);
     }

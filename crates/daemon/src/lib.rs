@@ -174,6 +174,13 @@ pub struct Config {
   /// reported as a conflict: [`MERGE_DRIVER_TIMEOUT`] outside tests.
   #[serde(default = "default_merge_driver_timeout")]
   pub merge_driver_timeout: Duration,
+  /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host
+  /// workspaces).
+  #[serde(default)]
+  pub disable_host_files: bool,
+  /// Restrict `host:` file mappings to canonical paths inside this directory.
+  #[serde(default)]
+  pub host_files_root: Option<PathBuf>,
 }
 
 #[cfg(unix)]
