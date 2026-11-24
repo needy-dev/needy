@@ -150,6 +150,44 @@ read-write; `needy runner serve --layer-registry REPOSITORY`, read-only.
 - Layers are compressed for the registry only; the store keeps the canonical
   uncompressed tar (`TODO(images)` in `store/mod.rs` stays for local disk).
 
+**Settled in R2** (`crates/core-actor/src/image/store/registry`,
+`crates/daemon/src/image/build.rs`); names stay provisional:
+
+- The client is `image::store::registry` in `needy-core-actor`, next to the
+  store: it reads the store's layer files and stores pulled layers only when
+  their digest is the DiffID the config names, so a refused layer is never
+  kept. The runner side (R3) uses the same client read-only.
+- An artifact is an OCI image manifest (`application/vnd.oci.image.manifest.v1+json`)
+  with one layer, `application/vnd.oci.image.layer.v1.tar+gzip`, and the
+  config `application/vnd.needy.layer.config.v1+json`:
+  `{"diff_id", "key", "parent"?, "feature": {"reference", "digest"}?}`
+  (`parent` is the layer the step was built on). Readers ignore unknown
+  config fields and refuse another config or layer media type.
+- Lookup is a manifest `GET` of `key-<cache key hex>`; a 404 is a miss.
+- The daemon looks a local miss up and pulls it inside the step's single
+  flight, then builds on a miss. A lookup or pull that fails (registry
+  unreachable, invalid artifact, DiffID mismatch) is traced and the step is
+  built. After a build it pushes inside the same single flight; a failed push
+  is logged and traced and does not fail the build. A later push of the same
+  key replaces the tag (last writer wins). Layers built before a registry was
+  configured, and commit layers (no cache key), are not pushed.
+- A remote actor's plan on a host that cannot build (R1's
+  `Builder::Unavailable`) takes the same single flight: the store, then the
+  registry, and only then the "cannot build it" error, which names the
+  registry when one is configured.
+- Trace: `image.layer.pull` (`key`, `reference`, `layer` on a hit, `ms`,
+  `error`) and `image.layer.push` (`key`, `layer`, `reference`, `ms`,
+  `error`), event schema version 14. A pulled step's `image.build.step` is
+  `cached: true`.
+- Configuration: `--layer-registry` and `daemon.layer_registry` as named
+  above; the CLI and the daemon parse it at start-up (an explicit registry
+  host, no tag or digest). A plain-HTTP registry gets no credentials; an
+  HTTPS one gets the Docker credential store's, read again for every
+  operation so rotated helper tokens are picked up.
+- `TODO(layer-registry)`: the push holds the compressed layer in memory
+  (`oci-client` 0.15 has no streaming push); zstd layers; backfilling layers
+  built before a registry was configured.
+
 `TODO(layer-registry-sharing)`: one registry repository per tenant. Sharing
 layers across tenants (public, pinned features only) waits for an owner
 decision.

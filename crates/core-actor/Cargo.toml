@@ -7,6 +7,11 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# `image::store::registry::testing`: an in-memory OCI Distribution registry
+# for tests of crates that use the layer registry.
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -27,6 +32,8 @@ needy-core.workspace = true
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 object.workspace = true
+# The layer registry (`image::store::registry`) speaks OCI Distribution.
+oci-client.workspace = true
 oci-layer = { workspace = true, features = ["squashfs"] }
 serde.workspace = true
 serde_json.workspace = true

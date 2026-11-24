@@ -13,12 +13,13 @@ use needy_common::sync::lock;
 use needy_config::image::{Definition, Layer};
 use needy_config::profile::{ActorDriver, CONTAINER_IMAGE, User};
 use needy_config::value::Glob;
-use needy_core::event::{Event, ImageBuildStep};
+use needy_core::event::{Event, ImageBuildStep, ImageLayerPull, ImageLayerPush};
 use needy_core::image::{Commit as PlanCommit, Digest, FeatureMetadata, Input, Plan, ResolvedFeature, Step};
 use needy_core::network::Policy;
 use needy_core_actor::driver;
 use needy_core_actor::image::feature::{FeatureStore, FetchedFeature, Reference as FeatureReference};
 use needy_core_actor::image::manifest;
+use needy_core_actor::image::store::registry::{Feature as RegistryFeature, LayerConfig};
 use needy_core_actor::image::store::{LayerDisk, Snapshot, snapshot_tag};
 use needy_trace::Dispatch;
 use sha2::Digest as _;
@@ -124,7 +125,7 @@ impl Images {
   async fn resolve_step(
     self: &Arc<Self>,
     daemon: &Daemon,
-    builder: ActorDriver,
+    builder: &Builder,
     base_container_image: &str,
     profile_user: &User,
     fetched_features: &BTreeMap<Digest, FetchedFeature>,
@@ -133,6 +134,9 @@ impl Images {
     built_below: &[Digest],
     step: &Step,
   ) -> Result<(Digest, bool, u64)> {
+    // TODO(layer-registry): a layer built before a registry was configured
+    // is a local hit and never pushed; backfilling the registry waits for a
+    // deployment that needs it (R3 falls back to `FetchLayer` for it).
     if let Some(layer) = self.lookup_cached(&step.key)? {
       return Ok((layer, true, 0));
     }
@@ -144,12 +148,24 @@ impl Images {
         if let Some(layer) = self.lookup_cached(&step.key)? {
           return Ok(layer);
         }
+        // Spec D1: a local miss is looked up in the layer registry before
+        // it is built, under the same single flight, so concurrent creates
+        // pull each key once.
+        if let Some(layer) = self.pull_step(step, trace).await {
+          self.record_cached(&step.key, &layer)?;
+          return Ok(layer);
+        }
+        let builder = match builder {
+          Builder::Here(driver) => *driver,
+          Builder::Unavailable(reason) => bail!(self.unbuildable(step, reason)),
+        };
         let started = Instant::now();
         let layer =
           self.build_step(daemon, builder, base_container_image, profile_user, fetched_features, trace, cancel, built_below, step).await?;
         let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.record_cached(&step.key, &layer)?;
         built_ms = Some(elapsed_ms);
+        self.push_step(step, built_below.last().copied(), layer, trace).await;
         Ok(layer)
       })
       .await?;
@@ -158,6 +174,106 @@ impl Images {
       Some(ms) => Ok((layer, false, ms)),
       None => Ok((layer, true, 0)),
     }
+  }
+
+  /// Why a step that is neither in the store nor in the layer registry
+  /// fails a plan nobody can build, and how to build it (spec D1).
+  fn unbuildable(&self, step: &Step, reason: &str) -> String {
+    let label = step_label(step);
+    match &self.registry {
+      Some(registry) => format!(
+        "image step `{}` (cache key {}) is not in this control daemon's layer store nor in the layer registry {}, and this host \
+         cannot build it: {reason}; build the image (`needy image build`) on a host that can run linux-firecracker with the same \
+         layer registry, or here once this host can",
+        first_line(&label),
+        step.key,
+        registry.repository()
+      ),
+      None => format!(
+        "image step `{}` (cache key {}) is not in this control daemon's layer store, and this host cannot build it: {reason}; \
+         a remote actor boots layers this daemon holds, so build the image here (`needy image build`) once this host can run \
+         linux-firecracker, or share layers through a layer registry (`daemon.layer_registry`) with a host that can",
+        first_line(&label),
+        step.key
+      ),
+    }
+  }
+
+  /// Looks the cache key of `step` up in the layer registry, when one is
+  /// configured, and pulls the layer it names into the store. Records
+  /// `image.layer.pull`. A miss, or a lookup or pull that fails, is `None`:
+  /// the step is built instead.
+  async fn pull_step(&self, step: &Step, trace: &Dispatch) -> Option<Digest> {
+    let registry = self.registry.as_ref()?;
+    let reference = registry.repository().reference(&step.key);
+    let started = Instant::now();
+    let pulled = match registry.lookup(&step.key).await {
+      Ok(Some(remote)) => registry.pull(&self.store, &remote).await.map(Some),
+      Ok(None) => Ok(None),
+      Err(e) => Err(e),
+    };
+    let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    let (layer, error) = match pulled {
+      Ok(layer) => (layer, None),
+      Err(e) => {
+        tracing::warn!("cannot pull image layer {reference}, building it: {e}");
+        (None, Some(e.to_string()))
+      }
+    };
+    let event = Event::ImageLayerPull(ImageLayerPull {
+      key: step.key.to_string(),
+      reference,
+      layer: layer.map(|layer| layer.to_string()),
+      ms,
+      error,
+    });
+    trace.emit(event.kind().as_str(), event.raw());
+    layer
+  }
+
+  /// Pushes the layer `step` built on `parent` to the layer registry, when
+  /// one is configured, and records `image.layer.push`.
+  // NOTICE: a failed push is logged and traced but does not fail the build:
+  // the layer is in this host's store and the run can boot it; another host
+  // builds the step again. The push runs inside the build's single flight,
+  // so a step is pushed before any waiter (or a remote runner told of it)
+  // can look it up.
+  async fn push_step(&self, step: &Step, parent: Option<Digest>, layer: Digest, trace: &Dispatch) {
+    let Some(registry) = self.registry.as_ref() else {
+      return;
+    };
+    let feature = match &step.input {
+      Input::Feature {
+        reference, digest, ..
+      } => Some(RegistryFeature {
+        reference: reference.clone(),
+        digest: *digest,
+      }),
+      Input::Run(_) => None,
+    };
+    let config = LayerConfig {
+      diff_id: layer,
+      key: step.key,
+      parent,
+      feature,
+    };
+    let reference = registry.repository().reference(&step.key);
+    let started = Instant::now();
+    let error = match registry.push(&self.store, &config).await {
+      Ok(_) => None,
+      Err(e) => {
+        tracing::warn!("cannot push image layer {layer} to {reference}: {e}");
+        Some(e.to_string())
+      }
+    };
+    let event = Event::ImageLayerPush(ImageLayerPush {
+      key: step.key.to_string(),
+      layer: layer.to_string(),
+      reference,
+      ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+      error,
+    });
+    trace.emit(event.kind().as_str(), event.raw());
   }
 
   /// Runs a single build step in a fresh VM or container session on top of
@@ -451,28 +567,13 @@ async fn resolve_snapshot_on(
     if cancel.is_cancelled() {
       bail!("the daemon shut down while building the image");
     }
-    let step_label = match &step.input {
-      Input::Run(script) => script.clone(),
-      Input::Feature { reference, .. } => format!("feature: {reference}"),
-    };
-    let (layer, cached, ms) = match builder {
-      Builder::Here(driver) => {
-        daemon
-          .images
-          .resolve_step(daemon, *driver, base_container_image, user, &resolved_features.fetched, trace, cancel, &layers, step)
-          .await?
-      }
-      Builder::Unavailable(reason) => match daemon.images.lookup_cached(&step.key)? {
-        Some(layer) => (layer, true, 0),
-        None => bail!(
-          "image step `{}` (cache key {}) is not in this control daemon's layer store, and this host cannot build it: {reason}; \
-           a remote actor boots layers this daemon holds, so build the image here (`needy image build`) once this host can run \
-           linux-firecracker",
-          first_line(&step_label),
-          step.key
-        ),
-      },
-    };
+    let step_label = step_label(step);
+    // Spec D1: the store, then the layer registry, then a build, which a
+    // `Builder::Unavailable` refuses.
+    let (layer, cached, ms) = daemon
+      .images
+      .resolve_step(daemon, builder, base_container_image, user, &resolved_features.fetched, trace, cancel, &layers, step)
+      .await?;
     let event = Event::ImageBuildStep(ImageBuildStep {
       key: step.key.to_string(),
       layer: layer.to_string(),
@@ -490,6 +591,8 @@ async fn resolve_snapshot_on(
     layers.push(layer);
   }
 
+  // NOTICE: a commit layer has no cache key, so the layer registry does not
+  // hold it (spec D5 shares built steps); it stays in this host's store.
   if let Some(commit) = &plan.commit {
     if !daemon.images.store.has_layer(&commit.layer) {
       bail!(
@@ -720,6 +823,14 @@ fn feature_install_env(profile_user: &User, options: &BTreeMap<String, String>) 
 /// [`devcontainer_features::feature_install_script`].
 pub(super) fn feature_install_script(profile_user: &User, options: &BTreeMap<String, String>) -> String {
   devcontainer_features::feature_install_script(&to_install_user(profile_user), options, "/tmp/needy-feature")
+}
+
+/// What a step runs, as build events and errors name it.
+fn step_label(step: &Step) -> String {
+  match &step.input {
+    Input::Run(script) => script.clone(),
+    Input::Feature { reference, .. } => format!("feature: {reference}"),
+  }
 }
 
 fn first_line(script: &str) -> &str {

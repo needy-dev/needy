@@ -2696,3 +2696,130 @@ async fn prune_removes_unreferenced_layers_keys_oci_and_container_snapshots_whil
   let base_oci_after = std::fs::read_dir(&daemon.images.base_oci_dir).unwrap().count();
   assert_eq!(base_oci_after, 0, "--all must remove cached base-oci tar");
 }
+
+/// The decoded events of `run`'s trace.
+async fn decoded_events(daemon: &crate::Daemon, run: &str) -> Vec<Event> {
+  Runs::events(daemon, run).await.unwrap().events.iter().map(|e| Event::decode(&e.kind, e.version, &e.payload).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_layer_registry_lets_a_second_daemon_boot_the_steps_the_first_built_without_building() {
+  use needy_core_actor::image::store::registry::testing::TestRegistry;
+
+  let registry = TestRegistry::start().await;
+  let repository = registry.repository("needy/layers");
+
+  // The first daemon misses both steps in the registry, builds them and
+  // pushes them.
+  let first = testing::daemon_with({
+    let repository = repository.clone();
+    move |config| config.layer_registry = Some(repository)
+  })
+  .await;
+  let started_log = first.dir.path().join("started.log");
+  fake_image(&first.dir.path().join("image"), &session_driver_script(&started_log));
+  let stop = tokio_util::sync::CancellationToken::new();
+  let (sessions, _configs, responder) =
+    spawn_build_responder(started_log, Arc::new(std::sync::Mutex::new(BuildBehavior::default())), stop.clone());
+  let built = tokio::time::timeout(Duration::from_secs(20), Runs::create(&first.daemon, new_run(IMAGE_PROFILE, first.dir.path())))
+    .await
+    .expect("run create timed out")
+    .unwrap();
+  assert_eq!(sessions.load(Ordering::SeqCst), 2);
+  assert_eq!(registry.tags("needy/layers").len(), 2);
+
+  let events = decoded_events(&first.daemon, &built.id).await;
+  let pulls: Vec<_> = events
+    .iter()
+    .filter_map(|e| match e {
+      Event::ImageLayerPull(pull) => Some(pull),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(pulls.len(), 2, "{events:?}");
+  assert!(pulls.iter().all(|pull| pull.layer.is_none() && pull.error.is_none()), "both steps miss: {pulls:?}");
+  let pushes: Vec<_> = events
+    .iter()
+    .filter_map(|e| match e {
+      Event::ImageLayerPush(push) => Some(push),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(pushes.len(), 2, "{events:?}");
+  assert!(pushes.iter().all(|push| push.error.is_none()), "{pushes:?}");
+  for push in &pushes {
+    assert!(registry.tags("needy/layers").contains(&format!("key-{}", push.key.trim_start_matches("sha256:"))), "{push:?}");
+  }
+  Runs::stop(&first.daemon, &built.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  stop.cancel();
+  responder.await.unwrap();
+
+  // A second daemon on fresh directories pulls both steps and builds none.
+  let second = testing::daemon_with(move |config| config.layer_registry = Some(repository)).await;
+  let started_log = second.dir.path().join("started.log");
+  fake_image(&second.dir.path().join("image"), &session_driver_script(&started_log));
+  let stop = tokio_util::sync::CancellationToken::new();
+  let (sessions, _configs, responder) =
+    spawn_build_responder(started_log, Arc::new(std::sync::Mutex::new(BuildBehavior::default())), stop.clone());
+  let pulled = tokio::time::timeout(Duration::from_secs(20), Runs::create(&second.daemon, new_run(IMAGE_PROFILE, second.dir.path())))
+    .await
+    .expect("run create timed out")
+    .unwrap();
+  assert_eq!(sessions.load(Ordering::SeqCst), 0, "no build session ran");
+  assert_eq!(pulled.snapshot, built.snapshot, "the same layers, the same snapshot");
+
+  let events = decoded_events(&second.daemon, &pulled.id).await;
+  let steps: Vec<_> = events
+    .iter()
+    .filter_map(|e| match e {
+      Event::ImageBuildStep(step) => Some(step),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(steps.iter().map(|step| step.cached).collect::<Vec<_>>(), [true, true]);
+  let pulled_layers: Vec<_> = events
+    .iter()
+    .filter_map(|e| match e {
+      Event::ImageLayerPull(pull) => Some(pull.layer.clone()),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(pulled_layers, steps.iter().map(|step| Some(step.layer.clone())).collect::<Vec<_>>());
+  assert!(!events.iter().any(|e| matches!(e, Event::ImageLayerPush(_))), "a pulled step is not pushed again");
+  let guest = Guest::config(&second.daemon, &pulled.id).await.unwrap();
+  assert_eq!(guest.layers.len(), 2);
+
+  Runs::stop(&second.daemon, &pulled.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  stop.cancel();
+  responder.await.unwrap();
+}
+
+#[tokio::test]
+async fn an_unreachable_layer_registry_is_traced_and_the_steps_are_built() {
+  // NOTICE: port 9 on loopback (the discard service, RFC 863) answers
+  // nothing on a test host, so the connection is refused.
+  let started = testing::daemon_with(|config| config.layer_registry = Some("http://127.0.0.1:9/needy/layers".into())).await;
+  let daemon = &started.daemon;
+  let started_log = started.dir.path().join("started.log");
+  fake_image(&started.dir.path().join("image"), &session_driver_script(&started_log));
+  let stop = tokio_util::sync::CancellationToken::new();
+  let (sessions, _configs, responder) =
+    spawn_build_responder(started_log, Arc::new(std::sync::Mutex::new(BuildBehavior::default())), stop.clone());
+
+  let created = tokio::time::timeout(Duration::from_secs(20), Runs::create(daemon, new_run(IMAGE_PROFILE, started.dir.path())))
+    .await
+    .expect("run create timed out")
+    .unwrap();
+  assert_eq!(sessions.load(Ordering::SeqCst), 2);
+  assert!(created.snapshot.is_some());
+
+  let events = decoded_events(daemon, &created.id).await;
+  let failed_pulls =
+    events.iter().filter(|e| matches!(e, Event::ImageLayerPull(pull) if pull.layer.is_none() && pull.error.is_some())).count();
+  let failed_pushes = events.iter().filter(|e| matches!(e, Event::ImageLayerPush(push) if push.error.is_some())).count();
+  assert_eq!((failed_pulls, failed_pushes), (2, 2), "{events:?}");
+
+  Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
+  stop.cancel();
+  responder.await.unwrap();
+}

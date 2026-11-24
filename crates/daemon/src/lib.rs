@@ -201,6 +201,12 @@ pub struct Config {
   /// the actor gateway's egress policy for non-service targets.
   #[serde(default)]
   pub gateway_blocked_cidrs: Vec<String>,
+  /// The layer registry repository (`daemon.layer_registry`,
+  /// `--layer-registry`): `[http://]HOST[:PORT]/PATH`, read and written.
+  /// Built image steps are pushed to it and a step this host misses is
+  /// pulled from it before it is built.
+  #[serde(default)]
+  pub layer_registry: Option<String>,
 }
 
 #[cfg(unix)]
@@ -317,6 +323,18 @@ impl Daemon {
           .map_err(|e| anyhow::anyhow!("invalid gateway_blocked_cidrs entry {raw:?}: {e}"))
       })
       .collect::<Result<Vec<_>>>()?;
+    let layer_registry = config
+      .layer_registry
+      .as_deref()
+      .map(|text| {
+        needy_core_actor::image::store::registry::Repository::parse(text)
+          .map(needy_core_actor::image::store::registry::Registry::new)
+          .context("invalid daemon.layer_registry")
+      })
+      .transpose()?;
+    if let Some(registry) = &layer_registry {
+      tracing::info!("image layers are shared through the layer registry {}", registry.repository());
+    }
     for dir in [&config.state_dir, &config.runtime_dir] {
       warn_if_shared(dir);
     }
@@ -352,7 +370,7 @@ impl Daemon {
     static_runners.reload(&links);
     let maintenance_cancel = cancel.child_token();
     let maintenance_guard = Arc::new(maintenance_cancel.clone().drop_guard());
-    let images = Arc::new(image::Images::with_backends(&config.cache_dir, &config.data_dir, backends));
+    let images = Arc::new(image::Images::with_backends(&config.cache_dir, &config.data_dir, backends, layer_registry));
     let daemon = Self {
       local: Instance::machine(&native),
       pool: Arc::new(Pool::new(native, container, links.clone())),

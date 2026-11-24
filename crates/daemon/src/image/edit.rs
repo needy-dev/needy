@@ -483,7 +483,7 @@ pub(super) async fn rollback(daemon: &Daemon, request: ImageRollback) -> Result<
     .map_err(|e| match e {
       StoreError::UnknownCommit { .. } | StoreError::Missing(_) => ControlError::NotFound(e.to_string()),
       StoreError::TooFar { .. } | StoreError::Invalid(_) => ControlError::Invalid(e.to_string()),
-      StoreError::Io { .. } => ControlError::Failed(e.to_string()),
+      StoreError::Io { .. } | StoreError::Unexpected { .. } => ControlError::Failed(e.to_string()),
     })?;
   Ok(ImageRollbackResult {
     layer: target.as_ref().map(|c| c.layer.to_string()),
@@ -501,7 +501,7 @@ pub(super) async fn log(daemon: &Daemon, request: ImageLog) -> Result<ImageLogRe
     .map_err(|e| match e {
       StoreError::Invalid(_) => ControlError::Invalid(e.to_string()),
       StoreError::Missing(_) | StoreError::UnknownCommit { .. } => ControlError::NotFound(e.to_string()),
-      StoreError::TooFar { .. } | StoreError::Io { .. } => ControlError::Failed(e.to_string()),
+      StoreError::TooFar { .. } | StoreError::Io { .. } | StoreError::Unexpected { .. } => ControlError::Failed(e.to_string()),
     })?;
   let current = request.current_layer.as_deref();
   let entries = commits

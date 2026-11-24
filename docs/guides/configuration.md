@@ -192,6 +192,15 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
   needy image export --profile builtin:opencode -o opencode.tar
   needy image prune
   ```
+- **Sharing built layers**: `needy daemon serve --layer-registry REPOSITORY`
+  (or `needy config set daemon.layer_registry REPOSITORY`) shares built layers
+  through an OCI registry repository such as
+  `registry.example.com/needy/layers`. A step this daemon has not built is
+  pulled from the registry before it is built, and a built step is pushed
+  there, tagged `key-<cache key>`. Credentials come from the Docker credential
+  store (`docker login`, credential helpers); an `http://` prefix opts into a
+  plain-HTTP registry, which gets no credentials. A failed push is logged and
+  traced (`image.layer.push`) without failing the build.
 - **Prebuilt OCI references**: `actor.image: REF` runs an image `FROM` needy's
   base on every driver (`needy image build --from REF` for VM drivers; see
   [`examples/custom-image`](../../examples/custom-image/Dockerfile)).

@@ -679,7 +679,10 @@ fn build_oci_client(protocol: ClientProtocol, no_proxy: Option<String>) -> oci_c
   oci_client::Client::new(config)
 }
 
-async fn resolve_registry_auth(registry: String) -> RegistryAuth {
+/// The credentials the Docker credential store (`~/.docker/config.json`, its
+/// `credsStore` and `credHelpers`) holds for `registry` (a host, with its
+/// port if any), or anonymous access when it holds none or the lookup fails.
+pub async fn resolve_registry_auth(registry: String) -> RegistryAuth {
   // Credential helpers can spawn a subprocess, so run lookup off the async runtime.
   tokio::task::spawn_blocking(move || match docker_credential::get_credential(&registry) {
     Ok(DockerCredential::UsernamePassword(username, password)) => RegistryAuth::Basic(username, password),

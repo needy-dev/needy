@@ -86,6 +86,9 @@ pub struct Daemon {
   pub host_files_root: Option<PathBuf>,
   pub gateway_listen: Option<String>,
   pub gateway_blocked_cidrs: Vec<String>,
+  /// The OCI registry repository that shares built image layers
+  /// (`[http://]HOST[:PORT]/PATH`); the daemon parses it when it starts.
+  pub layer_registry: Option<String>,
 }
 
 impl Default for Daemon {
@@ -104,6 +107,7 @@ impl Default for Daemon {
       host_files_root: None,
       gateway_listen: None,
       gateway_blocked_cidrs: Vec::new(),
+      layer_registry: None,
     }
   }
 }
@@ -282,6 +286,7 @@ impl Config {
     for (name, value) in [
       ("daemon.executor_image", &self.daemon.executor_image),
       ("daemon.engine_host", &self.daemon.engine_host),
+      ("daemon.layer_registry", &self.daemon.layer_registry),
     ] {
       if value.as_ref().is_some_and(|v| v.is_empty() || v.contains('\0')) {
         return Err(Error::invalid(name, format!("{name} cannot be empty or contain NUL")));

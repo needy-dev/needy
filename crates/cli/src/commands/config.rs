@@ -271,6 +271,7 @@ const WRITABLE: &[&str] = &[
   "daemon.heartbeat_interval",
   "daemon.engine_host",
   "daemon.process_path",
+  "daemon.layer_registry",
 ];
 fn key_parts(key: &str) -> Result<Vec<&str>> {
   let parts: Vec<_> = key.split('.').collect();

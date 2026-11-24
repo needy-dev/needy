@@ -653,6 +653,18 @@ with a history to roll back through. Built layers, snapshots and layer
 disks are cache; commit layers and their history are data. Nothing calls
 it yet (slice 1 of the spec wires it).
 
+### Layer registry (provisional)
+
+An OCI Distribution repository that hosts share built layers through
+(`needy daemon serve --layer-registry REPOSITORY`, `daemon.layer_registry`;
+`needy-core-actor`'s `image::store::registry`; see the
+[remote actor images spec](ai/references/architecture/2026-11-25-remote-actor-images-spec.md#d5-a-layer-registry-oci-distribution)).
+Each built step is one artifact tagged `key-<cache key hex>`: the layer
+compressed with gzip, and a config naming its digest (the DiffID), its
+cache key, the layer it was built on and the feature it installed. A daemon
+pulls a step it has not built before building it, and pushes a step it
+built. The store itself keeps only uncompressed layers.
+
 ### Layer disk (provisional)
 
 A layer as a read-only SquashFS disk a VM driver attaches after the guest
