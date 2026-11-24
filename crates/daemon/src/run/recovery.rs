@@ -328,6 +328,7 @@ impl Daemon {
       actor_command: snapshot.command,
       tty: snapshot.tty.map(|(rows, cols)| needy_api_server::control::WindowSize { rows, cols }),
       terminal: tokio::sync::OnceCell::new(),
+      bridged_terminal: std::sync::OnceLock::new(),
       wait_for_attach: snapshot.wait_for_attach,
       recipe: snapshot.recipe,
       injector,

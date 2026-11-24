@@ -543,7 +543,9 @@ async fn drive_bridge(
       })) => {
         run.touch_activity();
         let executor = Instance::actor(&run.id, Arc::new(BridgeExecutor { link: link.clone() }));
-        let _ = run.terminal.set(executor);
+        // NOTICE: a second report from the same bridge changes nothing: the
+        // run keeps the terminal it was first given.
+        let _ = run.bridged_terminal.set(executor);
         if actor::advance(&run, ActorState::Ready) {
           run.emit(&Event::ActorReady(ActorReady {}));
         }

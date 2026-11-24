@@ -10,11 +10,11 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  BridgeAttach, BridgeExit, BridgeRequest, ControlRequest, CreateRunRequest, GetConfigRequest, GetRunRequest, HeartbeatRequest,
-  RunnerReport, bridge_request, bridge_response, control_request, control_response, runner_task,
+  BridgeAttach, BridgeExit, BridgeRequest, BridgeTerminalReady, ControlRequest, CreateRunRequest, GetConfigRequest, GetRunRequest,
+  HeartbeatRequest, RunnerReport, bridge_request, bridge_response, bridge_terminal_task, control_request, control_response, runner_task,
 };
 use needy_api_server::Listen;
-use needy_api_server::control::{ControlError, ExecOpen, ExecSpec, Guest, MintRunnerCredential, Processes, Runners, Runs};
+use needy_api_server::control::{ControlError, ExecOpen, ExecSpec, Guest, MintRunnerCredential, Processes, Runners, Runs, WindowSize};
 use needy_api_server::protocol::domain::proto_capabilities;
 use needy_core::intercept::exec::ExecContext;
 use needy_core::types::{ActorState, Capabilities, Origin, RunState, RunnerRole};
@@ -484,6 +484,102 @@ async fn bridge_clean_exit_after_actor_exit_finishes_run() {
   assert_eq!(info.state, RunState::Finished);
   assert_eq!(info.actor, Some(ActorState::Exited));
 
+  stop.cancel();
+  let _ = server_task.await;
+  started.daemon.shutdown().await;
+}
+
+// ROOT CAUSE:
+//
+// If an attach to a remote actor's driving program started before the actor
+// runner reported `BridgeTerminalReady` (always so for `needy run create
+// -it`), the attach timed out after a minute because the attach initialized
+// `run.terminal` while waiting for the bridge, and the bridge's `set` on a
+// `OnceCell` being initialized failed and was dropped.
+//
+// Before the fix, the attach never reached the actor's terminal.
+// The fix keeps the bridge's terminal apart from `run.terminal`, so an attach
+// waiting for it gets it as soon as the runner reports it.
+#[tokio::test]
+async fn an_attach_waiting_before_terminal_ready_reaches_the_remote_terminal() {
+  let started = testing::daemon_with(|config| {
+    config.kvm = config.state_dir.join("nonexistent-kvm");
+  })
+  .await;
+
+  let bound = started.daemon.server(None).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+  let Listen::Tcp(addr) = &bound.addresses()[0] else {
+    unreachable!();
+  };
+  let addr = addr.clone();
+  let stop = CancellationToken::new();
+  let server_task = tokio::spawn(bound.serve(stop.clone()));
+  let _actor_runner = connect_actor_runner(&started.daemon, &addr, "actor-node").await;
+
+  let created = started
+    .daemon
+    .create(needy_api_server::control::NewRun {
+      tty: Some(WindowSize { rows: 24, cols: 80 }),
+      ..new_run(REMOTE_PROFILE, started.dir.path())
+    })
+    .await
+    .unwrap();
+
+  let (tx, rx) = mpsc::channel(16);
+  tx.send(Ok(BridgeRequest {
+    payload: Some(bridge_request::Payload::Attach(BridgeAttach {
+      pid: 1001,
+      vcpus: 1,
+      mem_mib: 256,
+      driver: "linux-firecracker".into(),
+      capture: "kernel".into(),
+    })),
+  }))
+  .await
+  .unwrap();
+  let mut out = started.daemon.bridge(&created.id, Box::pin(ReceiverStream::new(rx))).await.unwrap();
+  let _ = out.next().await.unwrap();
+
+  // The attach starts before the guest's terminal answers, as `run create
+  // -it` does while the VM boots.
+  let daemon = started.daemon.clone();
+  let run = created.id.clone();
+  let attach = tokio::spawn(async move {
+    daemon
+      .exec(
+        ExecOpen::Attach {
+          process: String::new(),
+          run,
+          replay: false,
+          window: None,
+          read_only: true,
+        },
+        Box::pin(tokio_stream::empty()),
+      )
+      .await
+  });
+  tokio::time::sleep(Duration::from_millis(200)).await;
+  assert!(!attach.is_finished(), "the attach waits for the actor's terminal");
+
+  tx.send(Ok(BridgeRequest {
+    payload: Some(bridge_request::Payload::TerminalReady(BridgeTerminalReady {})),
+  }))
+  .await
+  .unwrap();
+
+  // The attach looks up the driving program on the actor's terminal, which
+  // reaches the runner as a terminal task on the bridge.
+  let task = tokio::time::timeout(Duration::from_secs(3), out.next())
+    .await
+    .expect("the waiting attach reaches the actor's terminal after BridgeTerminalReady")
+    .expect("bridge stream ended");
+  let Some(bridge_response::Payload::TerminalTask(task)) = task.payload else {
+    panic!("expected a terminal task, got {:?}", task.payload);
+  };
+  assert!(matches!(task.kind, Some(bridge_terminal_task::Kind::ListProcesses(_))), "{:?}", task.kind);
+
+  attach.abort();
+  drop(tx);
   stop.cancel();
   let _ = server_task.await;
   started.daemon.shutdown().await;
