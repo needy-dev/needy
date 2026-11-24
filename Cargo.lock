@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "devcontainer-features"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "docker_credential",
  "flate2",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "needy-api-client"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-trait",
  "backon",
@@ -2346,7 +2346,7 @@ dependencies = [
 
 [[package]]
 name = "needy-api-proto"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "prost",
  "prost-types",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "needy-api-server"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -2380,7 +2380,7 @@ dependencies = [
 
 [[package]]
 name = "needy-cli"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anstyle",
  "anyhow",
@@ -2433,7 +2433,7 @@ dependencies = [
 
 [[package]]
 name = "needy-common"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "glob-match",
@@ -2444,7 +2444,7 @@ dependencies = [
 
 [[package]]
 name = "needy-config"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "glob-match",
  "http",
@@ -2460,7 +2460,7 @@ dependencies = [
 
 [[package]]
 name = "needy-core"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anstyle",
  "devcontainer-features",
@@ -2479,7 +2479,7 @@ dependencies = [
 
 [[package]]
 name = "needy-core-actor"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2528,7 +2528,7 @@ dependencies = [
 
 [[package]]
 name = "needy-core-executor"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-trait",
  "bollard",
@@ -2556,7 +2556,7 @@ dependencies = [
 
 [[package]]
 name = "needy-daemon"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2599,7 +2599,7 @@ dependencies = [
 
 [[package]]
 name = "needy-trace"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-trait",
  "needy-common",
@@ -2824,7 +2824,7 @@ dependencies = [
 
 [[package]]
 name = "oci-layer"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "backhand",
  "flate2",
@@ -5315,7 +5315,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
