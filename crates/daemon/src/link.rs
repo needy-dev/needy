@@ -102,6 +102,11 @@ impl Links {
     lock(&self.links).get(runner).cloned()
   }
 
+  /// Notified whenever any runner's control stream opens.
+  pub(crate) fn notified(&self) -> tokio::sync::futures::Notified<'_> {
+    self.opened.notified()
+  }
+
   /// The runner's link once its control stream is open, waiting up to
   /// `wait` for it; `None` when it did not open by then.
   pub(crate) async fn connected(&self, runner: &str, wait: Duration) -> Option<Arc<Link>> {

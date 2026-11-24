@@ -3159,6 +3159,58 @@ pub mod runner_service_client {
                 .insert(GrpcMethod::new("needy.v1.RunnerService", "RemoveRunner"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn mint_runner_credential(
+            &mut self,
+            request: impl tonic::IntoRequest<super::MintRunnerCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MintRunnerCredentialResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.RunnerService/MintRunnerCredential",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("needy.v1.RunnerService", "MintRunnerCredential"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn revoke_runner_credential(
+            &mut self,
+            request: impl tonic::IntoRequest<super::RevokeRunnerCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeRunnerCredentialResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/needy.v1.RunnerService/RevokeRunnerCredential",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(
+                    GrpcMethod::new("needy.v1.RunnerService", "RevokeRunnerCredential"),
+                );
+            self.inner.unary(req, path, codec).await
+        }
         pub async fn control(
             &mut self,
             request: impl tonic::IntoStreamingRequest<Message = super::ControlRequest>,
@@ -3273,6 +3325,20 @@ pub mod runner_service_server {
             request: tonic::Request<super::RemoveRunnerRequest>,
         ) -> std::result::Result<
             tonic::Response<super::RemoveRunnerResponse>,
+            tonic::Status,
+        >;
+        async fn mint_runner_credential(
+            &self,
+            request: tonic::Request<super::MintRunnerCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::MintRunnerCredentialResponse>,
+            tonic::Status,
+        >;
+        async fn revoke_runner_credential(
+            &self,
+            request: tonic::Request<super::RevokeRunnerCredentialRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::RevokeRunnerCredentialResponse>,
             tonic::Status,
         >;
         /// Server streaming response type for the Control method.
@@ -3719,6 +3785,104 @@ pub mod runner_service_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = RemoveRunnerSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.RunnerService/MintRunnerCredential" => {
+                    #[allow(non_camel_case_types)]
+                    struct MintRunnerCredentialSvc<T: RunnerService>(pub Arc<T>);
+                    impl<
+                        T: RunnerService,
+                    > tonic::server::UnaryService<super::MintRunnerCredentialRequest>
+                    for MintRunnerCredentialSvc<T> {
+                        type Response = super::MintRunnerCredentialResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::MintRunnerCredentialRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunnerService>::mint_runner_credential(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = MintRunnerCredentialSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/needy.v1.RunnerService/RevokeRunnerCredential" => {
+                    #[allow(non_camel_case_types)]
+                    struct RevokeRunnerCredentialSvc<T: RunnerService>(pub Arc<T>);
+                    impl<
+                        T: RunnerService,
+                    > tonic::server::UnaryService<super::RevokeRunnerCredentialRequest>
+                    for RevokeRunnerCredentialSvc<T> {
+                        type Response = super::RevokeRunnerCredentialResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::RevokeRunnerCredentialRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as RunnerService>::revoke_runner_credential(
+                                        &inner,
+                                        request,
+                                    )
+                                    .await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RevokeRunnerCredentialSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(

@@ -150,6 +150,12 @@ struct ServeArgs {
   kvm: Option<std::path::PathBuf>,
   #[arg(long, hide = true, value_parser = humantime::parse_duration)]
   disconnect_grace: Option<Duration>,
+  /// Shell command invoked asynchronously (throttled) when routed exec or SFTP streams are active.
+  #[arg(long)]
+  activity_hook: Option<String>,
+  /// Minimum interval between `--activity-hook` invocations (default `15s`).
+  #[arg(long, value_parser = humantime::parse_duration)]
+  activity_hook_interval: Option<Duration>,
 }
 
 #[derive(Subcommand)]
@@ -410,6 +416,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           roles: args.roles,
           labels: args.labels,
           disconnect_grace: args.disconnect_grace,
+          activity_hook: args.activity_hook,
+          activity_hook_interval: args.activity_hook_interval,
         },
         ctx,
       )
@@ -480,6 +488,8 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
       roles: args.roles,
       labels: args.labels,
       disconnect_grace: None,
+      activity_hook: None,
+      activity_hook_interval: None,
     },
     ctx,
     code.into(),

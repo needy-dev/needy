@@ -34,6 +34,9 @@ pub mod runner {
     pub created_ms: i64,
     pub last_seen_ms: i64,
     pub removed_ms: Option<i64>,
+    /// When a short-lived runner credential expires; `None` for non-expiring
+    /// runners.
+    pub expires_ms: Option<i64>,
   }
 
   #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

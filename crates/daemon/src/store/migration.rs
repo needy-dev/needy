@@ -17,6 +17,7 @@ impl MigratorTrait for Migrator {
       Box::new(ClientAccess),
       Box::new(ClientExecutions),
       Box::new(RunSnapshot),
+      Box::new(RunnerExpires),
     ]
   }
 }
@@ -468,5 +469,27 @@ impl MigrationTrait for RunSnapshot {
 
   async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
     manager.alter_table(Table::alter().table(Runs::Table).drop_column(Alias::new("snapshot")).to_owned()).await
+  }
+}
+
+/// Optional expiry timestamp for short-lived runner credentials.
+struct RunnerExpires;
+
+impl MigrationName for RunnerExpires {
+  fn name(&self) -> &str {
+    "m20261123_000010_runner_expires"
+  }
+}
+
+#[async_trait::async_trait]
+impl MigrationTrait for RunnerExpires {
+  async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager
+      .alter_table(Table::alter().table(Runners::Table).add_column(ColumnDef::new(Alias::new("expires_ms")).big_integer()).to_owned())
+      .await
+  }
+
+  async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+    manager.alter_table(Table::alter().table(Runners::Table).drop_column(Alias::new("expires_ms")).to_owned()).await
   }
 }

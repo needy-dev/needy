@@ -73,6 +73,9 @@ pub struct Run {
   /// The profile as the client resolved it, kept in `state.db`.
   pub(crate) profile_yaml: String,
   pub created_ms: i64,
+  /// Last observed activity timestamp in Unix milliseconds (updated on guest
+  /// RPCs, gateway traffic, routing decisions, and terminal/exec I/O).
+  pub last_activity_ms: std::sync::atomic::AtomicI64,
   pub dir: PathBuf,
   pub state: State,
   /// Its actor's lifecycle; `None` until the actor starts.
@@ -200,6 +203,16 @@ impl Run {
     }
   }
 
+  /// Advances `last_activity_ms` to at least the current wall-clock time.
+  pub fn touch_activity(&self) {
+    self.last_activity_ms.fetch_max(now_ms(), std::sync::atomic::Ordering::Relaxed);
+  }
+
+  /// The run's last observed activity timestamp in Unix milliseconds.
+  pub fn last_activity_ms(&self) -> i64 {
+    self.last_activity_ms.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
   /// The run as `state.db` keeps it, at `now`.
   fn record(&self, now: i64) -> RunRecord {
     RunRecord {
@@ -210,7 +223,7 @@ impl Run {
       profile_yaml: self.profile_yaml.clone(),
       state: self.state.get(),
       created_ms: self.created_ms,
-      updated_ms: now,
+      updated_ms: now.max(self.last_activity_ms()),
       actor_exit: self.actor_exit(),
       failure: lock(&self.failure).clone(),
       actor_runner: lock(&self.actor_runner).clone(),
@@ -228,6 +241,7 @@ impl Run {
       released: lock(&self.released).clone(),
       lost: Vec::new(),
       created_ms: self.created_ms,
+      last_activity_ms: self.last_activity_ms(),
       profile: self.profile_name.clone(),
       // NOTICE: an actor whose VM ended before init reported the driving
       // program's exit has none; `actor.vm.exit` in the trace has the VM's.
@@ -444,6 +458,7 @@ impl Registry {
       released,
       lost,
       created_ms: record.created_ms,
+      last_activity_ms: record.updated_ms,
       profile: record.profile_name,
       actor_exit: record.actor_exit,
       failure: record.failure,
@@ -587,7 +602,7 @@ impl Daemon {
       } else if !request.client_execution.is_empty() {
         bail!("a client execution capability was supplied but no executor selects the creating client");
       }
-      self.provision(&run).await
+      self.provision(&run, request.wait_for_runner_ms).await
     }
     .await;
     let provisioned = bound.and_then(|()| unwinding(&run));
@@ -662,6 +677,7 @@ impl Daemon {
       profile,
       profile_yaml: request.profile_yaml.clone(),
       created_ms,
+      last_activity_ms: std::sync::atomic::AtomicI64::new(created_ms),
       dir,
       state: State::new(),
       actor_command,
@@ -697,27 +713,10 @@ impl Daemon {
   // the drivers can unwind a create themselves, so shutdown need not wait
   // for the step; not needed while each step is bounded (`connect` waits
   // 10 s at most) and a second termination signal forces exit.
-  async fn provision(&self, run: &Arc<Run>) -> Result<()> {
-    // Where everything goes is decided before anything is acquired, so a
-    // selector that names no runner fails the create at once.
-    let runners = self.candidates().await?;
-    let actor =
-      schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor(run.profile.actor.driver), &runners).context("actor")?;
-    if let Some(refusal) = self.actor_refusal(&actor) {
-      bail!("actor: {refusal}");
-    }
-    *lock(&run.actor_runner) = match &actor {
-      Placement::Runner(name) => Some(name.clone()),
-      Placement::ControlHost => None,
-    };
-    actor::check_host(self, run).await?;
+  async fn provision(&self, run: &Arc<Run>, wait_for_runner_ms: u64) -> Result<()> {
     let host_files = files::HostFilesPolicy::from_config(&self.config);
     files::check_host_paths(run, &host_files)?;
     unwinding(run)?;
-    crate::image::prepare(self, run).await?;
-    // Ensure stores for profile- and feature-declared sync mappings
-    // (`<data_dir>/files/<store>`) exist before seeding.
-    crate::sync::check(self, run)?;
     let client_holder = self.state.client_execution_for_run(&run.id).await?;
     // NOTICE: this bounds initial helper startup only. A bound executor's
     // disconnection deadline during commands belongs to the exec policy.
@@ -726,20 +725,87 @@ impl Daemon {
     {
       bail!("client execution holder is not connected; no control-host fallback is allowed");
     }
-    let mut sites = Vec::new();
-    for (exec_name, config) in &run.profile.executors {
-      let placement = if matches!(config.runner, Some(needy_config::profile::RunnerSelector::Client)) {
-        if config.driver != needy_config::profile::ExecutorDriver::Native {
-          bail!("executor {exec_name}: client execution supports native executors; remote container creation is not supported");
+    // Where everything goes (both actor and executors) is decided before
+    // anything is acquired, so a selector that names no runner fails the
+    // create at once (or waits up to `wait_for_runner_ms` for runners to connect).
+    let wait_deadline = (wait_for_runner_ms > 0).then(|| tokio::time::Instant::now() + std::time::Duration::from_millis(wait_for_runner_ms));
+    let (actor, sites) = loop {
+      let runners = self.candidates().await?;
+      let mut retryable = None;
+      let actor = match schedule::placement(run.profile.actor.runner.as_ref(), schedule::Need::Actor(run.profile.actor.driver), &runners) {
+        Ok(placement) => Some(placement),
+        Err(err) => {
+          if wait_deadline.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+            retryable = Some(anyhow::Error::from(err).context("actor"));
+            None
+          } else {
+            return Err(anyhow::Error::from(err).context("actor"));
+          }
         }
-        Placement::Runner(client_holder.clone().context("client execution capability is required")?)
-      } else {
-        schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners)
-          .with_context(|| format!("executor {exec_name}"))?
       };
-      let site = self.site(&placement, config.driver).map_err(|e| anyhow::anyhow!("executor {exec_name}: {e}"))?;
-      sites.push(site);
+      let mut resolved = Vec::new();
+      if retryable.is_none() {
+        for (exec_name, config) in &run.profile.executors {
+          let placement = if matches!(config.runner, Some(needy_config::profile::RunnerSelector::Client)) {
+            if config.driver != needy_config::profile::ExecutorDriver::Native {
+              bail!("executor {exec_name}: client execution supports native executors; remote container creation is not supported");
+            }
+            Placement::Runner(client_holder.clone().context("client execution capability is required")?)
+          } else {
+            match schedule::placement(config.runner.as_ref(), schedule::Need::Executor(config.driver), &runners) {
+              Ok(placement) => placement,
+              Err(err) => {
+                if wait_deadline.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+                  retryable = Some(anyhow::Error::from(err).context(format!("executor {exec_name}")));
+                  break;
+                }
+                return Err(anyhow::Error::from(err).context(format!("executor {exec_name}")));
+              }
+            }
+          };
+          let site = match self.site(&placement, config.driver) {
+            Ok(site) => site,
+            Err(err) => {
+              if wait_deadline.is_some_and(|deadline| tokio::time::Instant::now() < deadline) {
+                retryable = Some(anyhow::anyhow!("executor {exec_name}: {err}"));
+                break;
+              }
+              return Err(anyhow::anyhow!("executor {exec_name}: {err}"));
+            }
+          };
+          resolved.push(site);
+        }
+      }
+      if let Some(err) = retryable {
+        let deadline = wait_deadline.expect("retryable set only when wait_deadline is Some");
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+          return Err(err);
+        }
+        unwinding(run)?;
+        let notified = self.links.notified();
+        tokio::select! {
+          () = run.cancel.cancelled() => bail!("the daemon shut down while the run was being created"),
+          () = notified => {}
+          () = tokio::time::sleep(remaining.min(std::time::Duration::from_millis(50))) => {}
+        }
+        continue;
+      }
+      break (actor.expect("set when retryable is None"), resolved);
+    };
+    if let Some(refusal) = self.actor_refusal(&actor) {
+      bail!("actor: {refusal}");
     }
+    *lock(&run.actor_runner) = match &actor {
+      Placement::Runner(name) => Some(name.clone()),
+      Placement::ControlHost => None,
+    };
+    actor::check_host(self, run).await?;
+    unwinding(run)?;
+    crate::image::prepare(self, run).await?;
+    // Ensure stores for profile- and feature-declared sync mappings
+    // (`<data_dir>/files/<store>`) exist before seeding.
+    crate::sync::check(self, run)?;
     // Executors present the actor's hostname, so `uname -n` agrees on both sides.
     let hostname = run.recipe.as_ref().and_then(|r| r.hostname.clone());
     for ((exec_name, config), site) in run.profile.executors.iter().zip(sites) {

@@ -39,6 +39,7 @@ impl Store {
       created_ms: now,
       last_seen_ms: now,
       removed_ms: None,
+      expires_ms: None,
     };
     let txn = self.db.begin().await?;
     runner::Entity::insert(row.into_active_model()).exec(&txn).await?;
@@ -63,7 +64,10 @@ impl Store {
   }
 
   pub async fn client_execution_invocation(&self, capability: &str) -> Result<String> {
-    let name = self.authenticate(capability).await?.ok_or_else(|| Error::Invalid("client execution capability is invalid".into()))?;
+    let name = self
+      .authenticate(capability, needy_common::time::now_ms())
+      .await?
+      .ok_or_else(|| Error::Invalid("client execution capability is invalid".into()))?;
     let binding = self.client_execution(&name).await?.ok_or_else(|| Error::Invalid("not a client execution capability".into()))?;
     if binding.run.is_some() {
       return Err(Error::Invalid("client execution capability was used".into()));
@@ -74,7 +78,7 @@ impl Store {
   /// Consumes a capability by a conditional update, so simultaneous creates
   /// cannot both claim it. An existing run never changes holders on attach.
   pub async fn bind_client_execution(&self, capability: &str, run: &str, now: i64) -> Result<String> {
-    let name = self.authenticate(capability).await?.ok_or_else(|| Error::Invalid("client execution capability is invalid".into()))?;
+    let name = self.authenticate(capability, now).await?.ok_or_else(|| Error::Invalid("client execution capability is invalid".into()))?;
     let claimed = binding::Entity::update_many()
       .col_expr(binding::Column::Run, sea_orm::sea_query::Expr::value(run))
       .filter(binding::Column::Holder.eq(&name))

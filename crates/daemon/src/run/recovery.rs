@@ -315,6 +315,7 @@ impl Daemon {
       profile,
       profile_yaml: record.profile_yaml.clone(),
       created_ms: record.created_ms,
+      last_activity_ms: std::sync::atomic::AtomicI64::new(record.updated_ms.max(record.created_ms)),
       dir: self.run_dir(&record.id),
       state: State::restore(if record.state == RunState::Creating {
         RunState::Running

@@ -450,15 +450,16 @@ pub(crate) async fn serve_guest(daemon: &Daemon, run: &Run, actor: &Cancellation
 
 /// Serves the actor's gateway on its gateway channel until `actor` is
 /// cancelled.
-pub(crate) fn serve_gateway(daemon: &Daemon, run: &Run, actor: &CancellationToken) -> Result<()> {
+pub(crate) fn serve_gateway(daemon: &Daemon, run: &Arc<Run>, actor: &CancellationToken) -> Result<()> {
   let path = &run.dir.join("cg.sock");
   // TODO(mitm): the gateway adds no headers (header injection was removed
   // on 2026-11-12); on HTTPS it needs a separate MITM infrastructure (its
   // own CA, opt-in, per host), deferred until that exists and the owner
   // approves it.
   let policy = needy_core::network::Policy::actor(&run.profile.actor.network);
+  let activity_run = run.clone();
   let egress = gateway::EgressPolicy::default().with_blocked_cidrs(daemon.gateway_blocked_cidrs.clone());
-  let options = gateway::GatewayOptions::default().with_egress(egress);
+  let options = gateway::GatewayOptions::default().with_egress(egress).with_on_activity(Arc::new(move || activity_run.touch_activity()));
   let gateway =
     Arc::new(gateway::Gateway::with_options(policy, run.trace.clone(), Network::Actor, Some(run.injector.clone()), actor.clone(), options));
   // A socket left by an earlier daemon would make bind fail.

@@ -30,6 +30,10 @@ pub struct RunnerArgs {
   pub(crate) labels: Vec<(String, String)>,
   #[arg(long, hide = true, value_parser = humantime::parse_duration)]
   pub(crate) disconnect_grace: Option<std::time::Duration>,
+  #[arg(long)]
+  pub(crate) activity_hook: Option<String>,
+  #[arg(long, value_parser = humantime::parse_duration)]
+  pub(crate) activity_hook_interval: Option<std::time::Duration>,
 }
 
 /// `runner join` enrolls through the daemon boundary, saves its credential,
@@ -87,6 +91,15 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
   if let Some(image) = args.actor_image {
     args.actor_image = Some(std::fs::canonicalize(image)?);
   }
+  let activity_hook = match args.activity_hook {
+    Some(command) => {
+      anyhow::ensure!(!command.trim().is_empty(), "--activity-hook command must not be empty");
+      let interval = args.activity_hook_interval.unwrap_or(needy_daemon::runner::DEFAULT_ACTIVITY_HOOK_INTERVAL);
+      anyhow::ensure!(!interval.is_zero(), "--activity-hook-interval must be positive");
+      Some(needy_daemon::runner::ActivityHookConfig { command, interval })
+    }
+    None => None,
+  };
   let settings = needy_daemon::runner::Settings {
     roles: args.roles.clone().map(|roles| roles.into_iter().collect()),
     labels: args.labels.clone().into_iter().collect(),
@@ -132,6 +145,7 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     capabilities,
     labels: args.labels.into_iter().collect(),
     grace: args.disconnect_grace.unwrap_or(needy_daemon::runner::DISCONNECT_GRACE),
+    activity_hook,
   };
   if joining {
     let progress = crate::output::Progress::new(

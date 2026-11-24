@@ -10,8 +10,9 @@ use needy_api_proto::v1::runner_service_server::RunnerService;
 use needy_api_proto::v1::{ControlRequest, ControlResponse, TaskRequest, TaskResponse, task_request};
 use needy_api_proto::v1::{
   CreateJoinTokenRequest, CreateJoinTokenResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest, JoinResponse, ListJoinTokensRequest,
-  ListJoinTokensResponse, ListRunnersRequest, ListRunnersResponse, RemoveRunnerRequest, RemoveRunnerResponse, RevokeJoinTokenRequest,
-  RevokeJoinTokenResponse, RotateRunnerRequest, RotateRunnerResponse,
+  ListJoinTokensResponse, ListRunnersRequest, ListRunnersResponse, MintRunnerCredentialRequest, MintRunnerCredentialResponse,
+  RemoveRunnerRequest, RemoveRunnerResponse, RevokeJoinTokenRequest, RevokeJoinTokenResponse, RevokeRunnerCredentialRequest,
+  RevokeRunnerCredentialResponse, RotateRunnerRequest, RotateRunnerResponse,
 };
 use tokio_stream::StreamExt as _;
 use tonic::{Request, Response, Status, Streaming};
@@ -130,6 +131,30 @@ impl<R: Runners> RunnerService for Adapter<R> {
     self.admin(&request, "removing runners")?;
     self.runners.remove(&request.into_inner().name).await?;
     Ok(Response::new(RemoveRunnerResponse {}))
+  }
+
+  async fn mint_runner_credential(
+    &self,
+    request: Request<MintRunnerCredentialRequest>,
+  ) -> Result<Response<MintRunnerCredentialResponse>, Status> {
+    self.admin(&request, "minting runner credentials")?;
+    let request = request.into_inner().try_into()?;
+    let minted = self.runners.mint_credential(request).await?;
+    Ok(Response::new(MintRunnerCredentialResponse {
+      runner: Some(minted.runner.into()),
+      credential: minted.credential,
+      expires_at_ms: minted.expires_ms,
+      heartbeat_interval_ms: minted.heartbeat_interval_ms,
+    }))
+  }
+
+  async fn revoke_runner_credential(
+    &self,
+    request: Request<RevokeRunnerCredentialRequest>,
+  ) -> Result<Response<RevokeRunnerCredentialResponse>, Status> {
+    self.admin(&request, "revoking runner credentials")?;
+    self.runners.revoke_credential(&request.into_inner().name).await?;
+    Ok(Response::new(RevokeRunnerCredentialResponse {}))
   }
 }
 
