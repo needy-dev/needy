@@ -4,8 +4,16 @@ Released binaries and base VM images are published on
 [GitHub Releases](https://github.com/needy-dev/needy/releases) with `.sha256`
 checksums and build provenance attestations
 (`gh attestation verify <asset> -R needy-dev/needy`). Container images and agent
-Dev Container features are published on GHCR (`ghcr.io/needy-dev/needy-actor`,
-`ghcr.io/needy-dev/needy-executor`, and `ghcr.io/needy-dev/features/*`).
+Dev Container features are published on GHCR. The base images are
+`ghcr.io/needy-dev/needy/actor-base` (the start of every actor image, to build
+`FROM`) and `ghcr.io/needy-dev/needy/executor-base` (the `linux-container`
+executor's image), tagged `<version>-ubuntu-24.04` for `linux/amd64` and
+`linux/arm64`, with build provenance attestations
+(`gh attestation verify oci://ghcr.io/needy-dev/needy/actor-base@<digest> -R needy-dev/needy`).
+`ghcr.io/needy-dev/needy-actor` (`actor-base` with the container shims) and
+`ghcr.io/needy-dev/needy-executor` (`executor-base`) stay published under
+their release tags for a transition period, and features under
+`ghcr.io/needy-dev/features/*`.
 
 ## Quick install
 

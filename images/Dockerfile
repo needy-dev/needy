@@ -1,6 +1,8 @@
 # syntax=docker/dockerfile:1
 # Builds everything an actor or executor needs.
 #   docker build -f images/Dockerfile --target actor --output type=local,dest=OUT .
+#   docker build -f images/Dockerfile --target actor-base -t actor-base .
+#   docker build -f images/Dockerfile --target executor-base -t executor-base .
 #   docker build -f images/Dockerfile --target executor -t needy-executor .
 #   docker build -f images/Dockerfile --target actor-container -t needy-actor .
 #   docker build -f images/Dockerfile --platform linux/arm64 --target actor-macos-vz --output type=local,dest=OUT .
@@ -9,6 +11,12 @@
 # target and the kernel configuration. The Firecracker actor (`actor`) is
 # x86_64 only; the `macos-vz` actor (`actor-macos-vz`, Virtualization.framework
 # on Apple silicon) is arm64 only.
+#
+# The published images are `actor-base` and `executor-base`
+# (`ghcr.io/needy-dev/needy/actor-base` and `.../executor-base`); the VM
+# files, `needy-actor` and `needy-executor` are derived from them. See
+# docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md (B1,
+# B3, B6).
 #
 # The actor images are base images: they hold no needy of their own, only
 # the boot stub and the shim stub (`images/stub/`). The daemon injects its
@@ -19,6 +27,21 @@
 ARG KERNEL_VERSION=6.18.62
 ARG FIRECRACKER_VERSION=v1.17.0
 ARG BASE_ABI=1
+# The distribution root of the published images (`actor-base`,
+# `executor-base`), pinned by the digest of its multi-architecture index, so
+# their first layers are exactly the distribution's and their DiffIDs match
+# upstream's. Resolved 2026-11-25 with
+# `docker buildx imagetools inspect ubuntu:24.04` (tag `noble-20261110.1`;
+# linux/amd64 sha256:9a04f13b3f80ef056361e30868593b1cfd2279fe19e4081cb93a90bf56819d6a,
+# linux/arm64 sha256:cd04f18ea6639206fcecf4c148bde909cd08098e1d0569117c2af59242059558).
+# Source: https://github.com/docker-library/official-images/blob/df4e0c3a4ebc7c2daee538d2f130776a93ac2111/library/ubuntu#L33-L45
+# Reference: https://hub.docker.com/_/ubuntu
+# NOTICE: the release workflow pulls `UBUNTU_IMAGE@UBUNTU_DIGEST` from the
+# labels `actor-base` records and checks its DiffIDs are `actor-base`'s
+# first; a new digest is a new root, which invalidates every step cache once
+# (B6 of the spec above). The build-only stages below keep `ubuntu:24.04`.
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:24.04
+ARG UBUNTU_DIGEST=sha256:562111b88caa79c71391c0c4d3c2114a7d5c35915c20561fd893cb1e07929e6b
 
 # Static needy binary for guests and executors.
 # NOTICE: the cache mount on /src/target is shared by every build on this
@@ -87,14 +110,22 @@ COPY --from=xtask /xtask /xtask
 # stub (`proxy`), static musl C programs with no needy code, so an image
 # works with every needy of its base ABI; an empty placeholder where the
 # guest needy goes (`needy`); the directory a VM's boot stub mounts the
-# guest disk at (`disk`); and the base ABI it was built for (`base-abi`).
-# The build fails unless the stubs are static.
+# guest disk at (`disk`); the directory a container driver binds the
+# actor's channels on (`channels`); the script that shims an image's shells
+# in place (`shim-image`, images/container/shim.sh), which `needy-actor`
+# and images `FROM` `actor-base` run as their last step; and the base ABI it
+# was built for (`base-abi`). The build fails unless the stubs are static.
 FROM ubuntu:24.04 AS stubs
 ARG BASE_ABI
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev musl-tools binutils \
  && rm -rf /var/lib/apt/lists/*
 COPY images/stub/ /src/
-RUN mkdir -p /out/.needy/disk \
+# The script stays in the image as `/.needy/shim-image`: an image `FROM`
+# `needy-actor` or `actor-base` runs it as its last step, so the programs it
+# adds are shims too (`examples/custom-image/Dockerfile`). Without arguments
+# it shims Docker's default container PATH.
+COPY --chmod=755 images/container/shim.sh /out/.needy/shim-image
+RUN mkdir -p /out/.needy/disk /out/.needy/channels \
  && musl-gcc -static -Os -s -Wall -Werror -o /out/.needy/init /src/boot.c \
  && musl-gcc -static -Os -s -Wall -Werror -o /out/.needy/proxy /src/shim.c \
  && for stub in /out/.needy/init /out/.needy/proxy; do \
@@ -203,25 +234,41 @@ RUN patch -p1 < /tmp/needy.patch \
       echo "firecracker is not statically linked:" >&2; readelf -dW /firecracker | grep '(NEEDED)' >&2; exit 1; \
     fi
 
-# Shared actor userland base: common packages and default `agent` user shared
-# by both VM (`actor-root`) and container (`container-root`) actor images.
+# `actor-base`, published as `ghcr.io/needy-dev/needy/actor-base`: the start
+# of every actor image, for the VM and container drivers alike. Its layers,
+# lowest first: the distribution's own (`UBUNTU_IMAGE` at `UBUNTU_DIGEST`,
+# unchanged, so their DiffIDs are upstream's), the userland (common packages
+# and the default `agent` user) and the needy layer (`/.needy`, see `stubs`),
+# with the base ABI in its label. Nothing is flattened: an image `FROM` it
+# starts with exactly its layers, which is how needy recognises the layers
+# above the base (B4 of the layered OCI base spec). It has no container
+# shims: `/usr/bin/bash` and the other shells are the real programs; the
+# container drivers' `needy-actor` adds them (`actor-container`).
 # Agent binaries (such as `opencode`) are installed via image layers or Dev
-# Container features rather than baked into the base rootfs.
-FROM ubuntu:24.04 AS actor-base
+# Container features rather than baked into the base.
+FROM ${UBUNTU_IMAGE}@${UBUNTU_DIGEST} AS actor-userland
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       bash git ripgrep ca-certificates curl sshfs fuse3 iproute2 procps less file xz-utils \
       pciutils dmidecode lm-sensors util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent
 
-# Actor userland: the driving program's world. `systemd` is not run (needy's
-# init is PID 1); it brings `systemd-detect-virt`, which a cloud VM has and
-# which reads the recipe's DMI identity.
+FROM actor-userland AS actor-base
+ARG BASE_ABI
+ARG UBUNTU_IMAGE
+ARG UBUNTU_DIGEST
+COPY --from=stubs /out/.needy/ /.needy/
+LABEL needy.base-abi=$BASE_ABI \
+      org.opencontainers.image.base.name=$UBUNTU_IMAGE \
+      org.opencontainers.image.base.digest=$UBUNTU_DIGEST
+
+# The VM's userland: `actor-base` and what only a VM needs. `systemd` is not
+# run (needy's init is PID 1); it brings `systemd-detect-virt`, which a cloud
+# VM has and which reads the recipe's DMI identity.
 FROM actor-base AS actor-root
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends systemd \
  && rm -rf /var/lib/apt/lists/* /run/systemd/container \
  && mkdir -p /home/agent/workspace && chown agent:agent /home/agent/workspace
-COPY --from=stubs /out/.needy/ /.needy/
 
 FROM ubuntu:24.04 AS actor-image
 RUN apt-get update && apt-get install -y --no-install-recommends e2fsprogs && rm -rf /var/lib/apt/lists/*
@@ -266,37 +313,46 @@ COPY --from=macos-vz-initrd /initrd /initrd
 COPY --from=actor-image /rootfs.ext4 /rootfs.ext4
 COPY --from=stubs /out/base-abi /base-abi
 
-# Container actor userland: the actor-root's programs without what only a VM
-# needs: no systemd (a container's `systemd-detect-virt` would name the
-# container anyway). sshfs is there for Apple's `container`, whose actor
-# mounts the workspace inside (a Mac has no FUSE for the host side); a Docker
-# container actor's runtime mounts it on the host. Its last step shims the
-# shells in place (images/container/shim.sh); the guest needy reaches every
-# other program through the trampolines it makes at each start.
+# The container actor image, `needy-actor`: `actor-base` and one layer,
+# the shim step (images/container/shim.sh), which shims the shells in place;
+# the guest needy reaches every other program through the trampolines it
+# makes at each start. It adds nothing else: no systemd (a container's
+# `systemd-detect-virt` would name the container anyway). sshfs, from
+# `actor-base`, is there for Apple's `container`, whose actor mounts the
+# workspace inside (a Mac has no FUSE for the host side); a Docker container
+# actor's runtime mounts it on the host. It inherits `actor-base`'s
+# `needy.base-abi` label, which the container drivers check, and `PATH`.
 # It builds for x86_64 (Docker on Linux) and arm64 (Apple's `container` on
 # Apple silicon, `--platform linux/arm64`).
-FROM actor-base AS container-root
-RUN mkdir -p /.needy/channels
-COPY --from=stubs /out/.needy/ /.needy/
-# The script stays in the image as `/.needy/shim-image`: an image `FROM`
-# this one runs it as its last step, so the programs it adds are shims too
-# (`examples/custom-image/Dockerfile`). Without arguments it shims Docker's
-# default container PATH.
-COPY --chmod=755 images/container/shim.sh /.needy/shim-image
+# NOTICE: the base's layers are kept, not flattened, so `needy-actor`'s
+# DiffIDs start with `actor-base`'s; the shells' real programs are stored
+# twice (in the base at their paths, in the shim layer under
+# `/.needy/real`), about 1.6 MB uncompressed (0.8 MB gzipped).
+# TODO(base-images): `needy-actor` and `needy-executor` are compatibility
+# images; drop them (this target and `executor`) once a release has shipped
+# `actor-base` and `executor-base` and the docs and examples use them (B6 of
+# docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md).
+# Its labels name the `actor-base` it comes from: the release workflow
+# passes the published name (BASE_NAME) and, when it pushed the base, its
+# digest (BASE_DIGEST); built elsewhere they are empty, which replaces the
+# distribution's names `actor-base` records. They come after the shim step
+# so a changed digest does not rebuild it.
+FROM actor-base AS actor-container
 RUN /.needy/shim-image
-
-# The container actor image, `needy-actor`: one layer, so the copies the
-# shim step made of programs from earlier layers are not stored twice. The
-# label records its base ABI, which the container drivers check.
-FROM scratch AS actor-container
-ARG BASE_ABI
-COPY --from=container-root / /
-ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-LABEL needy.base-abi=$BASE_ABI
 ENTRYPOINT ["/.needy/init"]
+ARG BASE_NAME=
+ARG BASE_DIGEST=
+LABEL org.opencontainers.image.base.name=$BASE_NAME \
+      org.opencontainers.image.base.digest=$BASE_DIGEST
 
-# Executor: a container where routed commands run.
-FROM ubuntu:24.04 AS executor
+# `executor-base`, published as `ghcr.io/needy-dev/needy/executor-base`: a
+# container where routed commands run, the `linux-container` executor
+# driver's image. It is its own userland on the same pinned root, not
+# `actor-base`'s: its packages are a build toolchain (python, node, a C
+# compiler, ssh) and it carries this needy, which serves the executor.
+FROM ${UBUNTU_IMAGE}@${UBUNTU_DIGEST} AS executor-base
+ARG UBUNTU_IMAGE
+ARG UBUNTU_DIGEST
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       bash git ripgrep ca-certificates curl openssh-sftp-server openssh-client python3 python3-pip \
       build-essential nodejs npm procps less file iproute2 \
@@ -304,6 +360,17 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
  && userdel -r ubuntu 2>/dev/null; useradd -m -u 1000 -s /bin/bash agent \
  && mkdir -p /home/agent/workspace /run/needy && chown agent:agent /home/agent/workspace /run/needy
 COPY --from=needy /needy /usr/local/bin/needy
+LABEL org.opencontainers.image.base.name=$UBUNTU_IMAGE \
+      org.opencontainers.image.base.digest=$UBUNTU_DIGEST
 USER agent
 WORKDIR /home/agent/workspace
 CMD ["needy", "daemon", "--mode", "executor", "--listen", "unix:/run/needy/executor.sock", "--name", "executor"]
+
+# `needy-executor`, the compatibility name of `executor-base`: the same
+# layers and configuration but its labels, which name the `executor-base`
+# it comes from as `actor-container`'s do (see TODO(base-images) there).
+FROM executor-base AS executor
+ARG BASE_NAME=
+ARG BASE_DIGEST=
+LABEL org.opencontainers.image.base.name=$BASE_NAME \
+      org.opencontainers.image.base.digest=$BASE_DIGEST
