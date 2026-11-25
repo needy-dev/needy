@@ -98,13 +98,15 @@ fn the_first_certs_d_root_with_a_directory_for_the_host_wins() {
   let user = tempfile::tempdir().unwrap();
   let system = tempfile::tempdir().unwrap();
   let host = "registry.example.com:5000";
-  std::fs::create_dir_all(system.path().join(host)).unwrap();
-  std::fs::write(system.path().join(host).join("system.crt"), "system").unwrap();
+  // The platform's spelling of `host:port` (`hostport` on Windows).
+  let dir = certs::host_directories(host).pop().unwrap();
+  std::fs::create_dir_all(system.path().join(&dir)).unwrap();
+  std::fs::write(system.path().join(&dir).join("system.crt"), "system").unwrap();
   let roots = vec![user.path().to_path_buf(), system.path().to_path_buf()];
   assert_eq!(certs::for_host(&roots, host).unwrap(), [b"system".to_vec()]);
   assert!(certs::for_host(&roots, "other.example.com").unwrap().is_empty());
 
-  std::fs::create_dir_all(user.path().join(host)).unwrap();
+  std::fs::create_dir_all(user.path().join(&dir)).unwrap();
   for (name, content) in [
     ("b.crt", "b"),
     ("a.crt", "a"),
@@ -112,9 +114,32 @@ fn the_first_certs_d_root_with_a_directory_for_the_host_wins() {
     ("client.key", "key"),
     ("README", "x"),
   ] {
-    std::fs::write(user.path().join(host).join(name), content).unwrap();
+    std::fs::write(user.path().join(&dir).join(name), content).unwrap();
   }
   assert_eq!(certs::for_host(&roots, host).unwrap(), [b"a".to_vec(), b"b".to_vec()], "only the user's CA files, in name order");
+}
+
+#[test]
+fn a_host_with_a_port_has_containerds_spelling_first_then_the_platforms() {
+  let platform = if cfg!(windows) {
+    "registry.example.com5000"
+  } else {
+    "registry.example.com:5000"
+  };
+  assert_eq!(certs::host_directories("registry.example.com:5000"), ["registry.example.com_5000_", platform]);
+  assert_eq!(certs::host_directories("registry.example.com"), ["registry.example.com"]);
+}
+
+#[test]
+fn a_host_port_underscore_directory_is_read_before_the_colon_one() {
+  let root = tempfile::tempdir().unwrap();
+  let host = "registry.example.com:5000";
+  std::fs::create_dir_all(root.path().join("registry.example.com_5000_")).unwrap();
+  std::fs::write(root.path().join("registry.example.com_5000_").join("ca.crt"), "containerd").unwrap();
+  let platform = certs::host_directories(host).pop().unwrap();
+  std::fs::create_dir_all(root.path().join(&platform)).unwrap();
+  std::fs::write(root.path().join(&platform).join("ca.crt"), "docker").unwrap();
+  assert_eq!(certs::for_host(&[root.path().to_path_buf()], host).unwrap(), [b"containerd".to_vec()]);
 }
 
 #[tokio::test]

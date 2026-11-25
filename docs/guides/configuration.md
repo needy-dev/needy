@@ -215,7 +215,9 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
     the CA files of the registry's host in containers-style `certs.d`:
     `$XDG_CONFIG_HOME/containers/certs.d/HOST[:PORT]/*.crt` (default
     `~/.config/containers/certs.d`), then `/etc/containers/certs.d`, then
-    `/etc/docker/certs.d`. The first directory that exists for the host is
+    `/etc/docker/certs.d`. A host with a port may also be spelled
+    `HOST_PORT_` (containerd's spelling, tried first) and is `HOSTPORT` on
+    Windows. The first directory that exists for the host is
     used. Client certificates (`*.cert`, `*.key`) are not presented yet.
   - `needy daemon serve --insecure-registry HOST[:PORT]` (repeatable; or
     `daemon.insecure_registries: [HOST]` in the settings file) stops verifying

@@ -278,6 +278,9 @@ Settled in B-3 (2026-11-26):
     `/etc/docker/certs.d`. "First wins" and reading `/etc/docker/certs.d`
     follow containers/image v5.36.0 (`docker/docker_client.go`,
     `dockerCertDir`), so a CA already set up for Docker or Podman works.
+    A host with a port is looked up as containerd's `host_port_` first, then
+    `host:port` (`hostport` on Windows, whose file names cannot hold `:`), as
+    containerd's `hostPaths` does; `_default` is not read.
   - Credentials: the Docker credential store (`DOCKER_CONFIG` or
     `~/.docker`, `auths`, `credHelpers`, `credsStore`) through
     `docker_credential`, read again for each connection (feature fetches

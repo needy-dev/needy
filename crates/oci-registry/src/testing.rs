@@ -167,10 +167,11 @@ impl TestRegistry {
     self.ca_pem.as_deref()
   }
 
-  /// Writes the CA as `<root>/<host:port>/ca.crt`, as a `certs.d` root
-  /// holds it, and returns `root`.
+  /// Writes the CA as `<root>/<host:port>/ca.crt` (`<hostport>` on
+  /// Windows), as a `certs.d` root holds it, and returns `root`.
   pub fn write_certs_d(&self, root: &Path) -> PathBuf {
-    let dir = root.join(self.host());
+    let name = crate::certs::host_directories(&self.host()).pop().expect("a host has a directory name");
+    let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("create the certs.d directory");
     std::fs::write(dir.join("ca.crt"), self.ca_pem().expect("a TLS registry has a CA")).expect("write the CA file");
     root.to_path_buf()

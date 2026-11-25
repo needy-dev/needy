@@ -14,9 +14,14 @@
 // which is the same directory when it is not. `/etc/docker/certs.d` is read
 // last because containers/image reads it too, so a CA already set up for
 // Docker works without copying it.
-// NOTICE: a directory is named `host:port`, as Docker and containers/image
-// name it; containerd's `host_port_` spelling (for file systems without `:`)
-// is not read, since needy serves registries only from Unix hosts.
+// NOTICE: a host with a port has two directory names, tried in this order:
+// containerd's `host_port_` spelling, then `host:port` as Docker and
+// containers/image name it (`hostport`, without the colon, on Windows, whose
+// file names cannot hold `:`). containerd's `_default` directory is not read.
+// Source: https://github.com/containerd/containerd/blob/927de108c3f3bb39c3aeab011caf05a64fac1caf/core/remotes/docker/config/hosts.go#L305-L312
+// (`hostDirectory`), https://github.com/containerd/containerd/blob/927de108c3f3bb39c3aeab011caf05a64fac1caf/core/remotes/docker/config/config_unix.go#L26-L35
+// and https://github.com/containerd/containerd/blob/927de108c3f3bb39c3aeab011caf05a64fac1caf/core/remotes/docker/config/config_windows.go#L25-L34
+// (`hostPaths`).
 
 use std::path::{Path, PathBuf};
 
@@ -42,6 +47,26 @@ pub fn default_roots() -> Vec<PathBuf> {
     .collect()
 }
 
+/// The directory names a root may hold for `host`, most specific first: for
+/// `host:port`, `host_port_` and then `host:port` (`hostport` on Windows);
+/// for a host without a port, the host.
+pub fn host_directories(host: &str) -> Vec<String> {
+  let colonless = |name: &str| {
+    if cfg!(windows) {
+      name.replace(':', "")
+    } else {
+      name.to_string()
+    }
+  };
+  match host.rfind(':') {
+    Some(idx) if idx > 0 => vec![
+      format!("{}_{}_", &host[..idx], &host[idx + 1..]),
+      colonless(host),
+    ],
+    _ => vec![host.to_string()],
+  }
+}
+
 /// The PEM CA files for `host` from the first root that has a directory for
 /// it, in file name order; none when no root has one.
 pub fn for_host(roots: &[PathBuf], host: &str) -> Result<Vec<Vec<u8>>> {
@@ -54,10 +79,9 @@ pub fn for_host(roots: &[PathBuf], host: &str) -> Result<Vec<Vec<u8>>> {
     }
   };
   for root in roots {
-    let dir = root.join(host);
-    if !dir.is_dir() {
+    let Some(dir) = host_directories(host).into_iter().map(|name| root.join(name)).find(|dir| dir.is_dir()) else {
       continue;
-    }
+    };
     let mut files = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(error(&dir))? {
       let path = entry.map_err(error(&dir))?.path();
