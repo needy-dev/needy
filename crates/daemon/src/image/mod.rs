@@ -10,6 +10,7 @@
 mod build;
 mod container;
 mod edit;
+mod import;
 mod prune;
 mod session;
 mod single_flight;
@@ -42,6 +43,8 @@ use self::build::{FAILURE_LOG_MAX_BYTES, feature_install_script, format_build_fa
 use self::container::{export_for_apple_container, export_for_linux_container, stream_export_file};
 pub(crate) use self::container::{materialize_for_linux_container, stream_archive};
 pub(crate) use self::edit::EditSession;
+#[cfg(test)]
+pub(crate) use self::import::tests as import_tests;
 use self::session::session_profile_yaml;
 pub(crate) use self::session::{SessionSpec, run_session};
 use self::single_flight::SingleFlight;
@@ -63,6 +66,9 @@ pub struct Images {
   base_oci_dir: PathBuf,
   /// Container runtime boundaries (Docker-compatible engine and Apple's `container` CLI).
   backends: ContainerBackends,
+  /// How this daemon reaches registries (credentials, TLS, insecure
+  /// registries), for `actor.image` imports.
+  access: oci_registry::Access,
   /// The layer registry (`daemon.layer_registry`): a step missing here is
   /// pulled from it before it is built, and a built step is pushed to it.
   registry: Option<Registry>,
@@ -88,7 +94,7 @@ pub struct Images {
 /// The layer store under `cache_dir` (built and fetched layers, disks,
 /// snapshots) and `data_dir` (commit layers and commit history).
 pub(crate) fn store_in(cache_dir: &Path, data_dir: &Path) -> Store {
-  Store::new(cache_dir.join("image-store"), data_dir.join("image-store"))
+  crate::runner::layer_store(cache_dir, data_dir)
 }
 
 impl Images {
@@ -106,13 +112,14 @@ impl Images {
     let cache = cache_dir.join("image-store");
     let keys_dir = cache.join("keys");
     let base_oci_dir = cache.join("base-oci");
-    let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store").with_access(access);
+    let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store").with_access(access.clone());
     Self {
       store: store_in(cache_dir, data_dir),
       features: Mutex::new(features),
       keys_dir,
       base_oci_dir,
       backends,
+      access,
       registry,
       step_flight: SingleFlight::default(),
       base_export_flight: SingleFlight::default(),
@@ -143,15 +150,20 @@ impl Images {
 /// Resolves `run`'s `actor.image` when it is an [`Image::Definition`]: builds
 /// any missing `run` layers, stacks any lockfile commit on top, materializes
 /// the resulting snapshot for the run's driver, and installs it on `run` via
-/// [`Run::set_boot`]. No-op when `actor.image` is absent or an OCI image
-/// reference.
+/// [`Run::set_boot`]. An OCI image reference on a VM driver is imported
+/// above the base ([`import`]); on a container driver the driver runs it as
+/// it is. No-op when `actor.image` is absent.
 // TODO(images): auto-pulling a missing base VM image on `run create` comes
 // with slice 3 of the images and run data spec ("Slices"); until then
 // `actor::check_host` fails before this runs with the `needy image pull`
 // advice.
 pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
-  let Some(Image::Definition(definition)) = &run.profile.actor.image else {
-    return Ok(());
+  let definition = match &run.profile.actor.image {
+    Some(Image::Definition(definition)) => definition,
+    Some(Image::Reference(reference)) if is_vm(run.profile.actor.driver) => {
+      return import::prepare(daemon, run, reference, import::Disks::Here).await;
+    }
+    Some(Image::Reference(_)) | None => return Ok(()),
   };
   let resolved = build_image_plan(
     daemon,
@@ -189,13 +201,19 @@ pub(crate) async fn prepare(daemon: &Daemon, run: &Run) -> Result<()> {
 /// without materializing disks, which the runner makes of the layers it
 /// fetches (`GuestService.FetchLayer`). A layer this daemon neither holds
 /// nor can build fails the create before the actor starts, never booting
-/// the base alone. No-op when `actor.image` is absent or an OCI image
-/// reference.
-// TODO(images): an OCI image reference for a remote actor is ignored here
-// as for a local VM actor; see `prepare`.
+/// the base alone. An OCI image reference is imported above the base here,
+/// and the runner fetches its layers as it fetches built steps.
+/// No-op when `actor.image` is absent.
+// TODO(runner-registry): the runner pulls an imported image's layers from
+// this daemon (`FetchLayer`), not from the image's registry; direct pulls
+// are B-5 of the layered OCI base spec.
 pub(crate) async fn prepare_remote(daemon: &Daemon, run: &Run) -> Result<()> {
-  let Some(Image::Definition(definition)) = &run.profile.actor.image else {
-    return Ok(());
+  let definition = match &run.profile.actor.image {
+    Some(Image::Definition(definition)) => definition,
+    Some(Image::Reference(reference)) if is_vm(run.profile.actor.driver) => {
+      return import::prepare(daemon, run, reference, import::Disks::Runner).await;
+    }
+    Some(Image::Reference(_)) | None => return Ok(()),
   };
   let resolved =
     resolve_remote_snapshot(daemon, definition, &run.profile.user, run.image_commit.as_ref(), &run.pinned_features, &run.trace, &run.cancel)
@@ -329,6 +347,12 @@ impl ImagesTrait for Daemon {
   async fn prune(&self, request: ImagePrune) -> Result<ImagePruneResult, ControlError> {
     prune::prune_images(self, request).await
   }
+}
+
+/// Whether `driver` boots needy's VM image, on which an OCI image is
+/// imported above the base rather than run as it is.
+fn is_vm(driver: ActorDriver) -> bool {
+  matches!(driver, ActorDriver::LinuxFirecracker | ActorDriver::MacosVz)
 }
 
 fn parse_definition(yaml: &str) -> Result<Definition, ControlError> {

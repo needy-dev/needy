@@ -42,8 +42,6 @@ pub struct ActorConfig {
   pub gateway: Option<String>,
   /// Path to the base actor VM image directory.
   pub actor_image: PathBuf,
-  /// Where built VM images live (`paths.images()`).
-  pub vm_images: PathBuf,
   /// Where guest disks live (`paths.guest_disks()`).
   pub guest_disks: PathBuf,
   /// The runner's layer store: the layers it fetched of its runs' images
@@ -139,7 +137,6 @@ pub(crate) async fn run_actor(
 
   let host = Host {
     image: config.actor_image.clone(),
-    images: config.vm_images.clone(),
     kvm: config.kvm.clone(),
     guest_disks: config.guest_disks.clone(),
   };

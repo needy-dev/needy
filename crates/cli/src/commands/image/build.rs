@@ -5,8 +5,9 @@
 //! `images/Dockerfile`, through the Docker API with BuildKit. With
 //! `--macos-apple-container` it builds the container actor image for
 //! linux/arm64 instead of the VM's, and loads it into Apple's `container`.
-//! With `--from REF` it makes the VM image of an OCI image `FROM` the
-//! container base instead (`from`), which needs no checkout.
+//! With `--from REF` it imports an OCI image `FROM` needy's `actor-base`
+//! into the layer store instead (`from`), which needs no checkout and no
+//! engine.
 //!
 //! The images it builds are tagged as built here (`needy-actor:latest`,
 //! `needy-executor:latest`), not as the release's, which the drivers use by
@@ -96,18 +97,24 @@ pub struct Args {
   /// actor image.
   #[arg(long, conflicts_with_all = ["recipe", "out"])]
   macos_apple_container: bool,
-  /// Build a VM image from an OCI image based on needy's container base.
+  /// Import an OCI image built FROM needy's actor-base for this host's VM driver.
   ///
-  /// Uses the kernel from the base VM image (`--base`) and the root filesystem
-  /// from the OCI image `REF` (no needy checkout required). Defaults to where
-  /// the daemon looks for `actor.image: REF`; `--out` writes it elsewhere.
-  #[arg(long, value_name = "REF", conflicts_with_all = ["recipe", "executor", "linux_container", "macos_apple_container"])]
+  /// Pulls only the layers of `REF` above actor-base from its registry into
+  /// the layer store, as a run whose `actor.image` is `REF` does, and prints
+  /// the snapshot they make. Needs no needy checkout and no container engine.
+  /// Prefix `http://` for a plain-HTTP registry.
+  #[arg(long, value_name = "REF", conflicts_with_all = ["recipe", "out", "executor", "linux_container", "macos_apple_container"])]
   from: Option<String>,
-  /// Base VM image directory whose kernel `--from` reuses.
+  /// Base VM image directory whose recorded actor-base `--from` imports above.
   ///
   /// Defaults to the base image the daemon boots.
   #[arg(long, value_name = "DIR", requires = "from")]
   base: Option<PathBuf>,
+  /// A registry (`HOST[:PORT]`) whose TLS certificate `--from` does not verify.
+  ///
+  /// Adds to `daemon.insecure_registries` in the settings file. Repeatable.
+  #[arg(long = "insecure-registry", value_name = "HOST", requires = "from")]
+  insecure_registries: Vec<String>,
   #[command(flatten)]
   pub(crate) connection: ConnectionArgs,
 }
@@ -130,16 +137,23 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
   let feedback = ctx.show_progress(true);
   if let Some(reference) = &args.from {
     let paths = ctx.paths()?;
-    let docker = Docker::connect_with_defaults().context("cannot reach Docker")?;
+    let mut insecure = ctx.configuration()?.daemon.insecure_registries;
+    insecure.extend(args.insecure_registries);
+    let access = oci_registry::Access::standard().with_insecure_registries(&insecure).context("invalid insecure registry")?;
     let base = args.base.unwrap_or_else(|| paths.base_image());
     let from = from::From {
       reference,
       base: &base,
-      images: &paths.images(),
-      out: args.out.as_deref(),
+      store: needy_daemon::runner::layer_store(&paths.cache, &paths.data),
+      access,
     };
-    let dir = from::build(&docker, &from, feedback).await?;
-    output::message(format_args!("image build: {reference} is the VM image {}", dir.display()));
+    let report = from::import(&from, feedback).await?;
+    for line in from::summary(&report) {
+      output::message(format_args!("{line}"));
+    }
+    if let Some(snapshot) = report.snapshot {
+      outln!("{snapshot}")?;
+    }
     return Ok(0);
   }
   let root = repo_root()?;

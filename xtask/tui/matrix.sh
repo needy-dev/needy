@@ -16,8 +16,9 @@
 #   exec        needy run exec -t of direct.sh on a native executor of the run
 #
 # Needs: a control daemon NEEDY reaches, the agents image (IMAGE, default
-# needy-agents) in the local Docker engine and, for the VM drivers, its VM
-# image (`needy image build --from IMAGE`); a set IMAGE is also the actor's
+# needy-agents) in the local Docker engine or, for the VM drivers, built
+# FROM actor-base and in a registry (a VM actor imports its layers above
+# actor-base, docs/guides/agent-images.md); a set IMAGE is also the actor's
 # image in the profiles this writes. DRIVER is the actor's
 # driver: macos-vz, macos-apple-container, linux-firecracker or
 # linux-container. TUIs are opencode pi codex herdr. The profiles

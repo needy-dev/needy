@@ -55,7 +55,6 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       data_dir: home.path().join("data"),
       cache_dir: home.path().join("cache"),
       actor_image: home.path().join("image"),
-      vm_images: home.path().join("images"),
       kvm: home.path().join("kvm"),
       guest_needy: Some(home.path().join("needy-linux")),
       guest_disks: home.path().join("guest"),

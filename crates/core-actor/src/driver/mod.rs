@@ -45,8 +45,6 @@ use needy_config::profile::{ActorDriver, User};
 use needy_core::recipe::CompiledRecipe;
 use needy_core::types::Capture;
 
-use crate::image::vm;
-
 #[cfg(unix)]
 pub mod linux_container;
 pub mod linux_firecracker;
@@ -245,10 +243,6 @@ pub struct Host {
   /// `crate::image::vm::base_dir`), which a VM driver boots for a profile
   /// without `actor.image`.
   pub image: PathBuf,
-  /// Where `needy image build --from` writes the VM images a profile names by
-  /// their OCI reference (`crate::image::vm::dir_of`): needy's data
-  /// directory's `images`.
-  pub images: PathBuf,
   /// `linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,
   /// The guest disks the VM drivers make from guest needy binaries
@@ -299,7 +293,6 @@ pub async fn detect_host(driver: ActorDriver, kvm: &Path, engine: &needy_core_ex
     ActorDriver::LinuxContainer | ActorDriver::MacosAppleContainer => {
       let host = Host {
         image: PathBuf::new(),
-        images: PathBuf::new(),
         kvm: kvm.to_path_buf(),
         guest_disks: PathBuf::new(),
       };
@@ -425,28 +418,18 @@ pub(crate) async fn guest_disk(binary: &Path, cache: &Path) -> Result<PathBuf, E
   }
 }
 
-/// The VM image a VM driver of `driver` boots on `host`: the one `needy
-/// build --from` made of the OCI image `reference` (a profile's
-/// `actor.image`), else the base VM image. `of` makes the driver's image
-/// type from its directory.
-pub(crate) fn vm_image<T>(host: &Host, driver: ActorDriver, reference: Option<&str>, of: fn(&Path, vm::Source) -> T) -> T {
-  match reference {
-    Some(reference) => of(&vm::dir_of(&host.images, driver, reference), vm::Source::Reference(reference.to_string())),
-    None => of(&host.image, vm::Source::Base),
-  }
-}
-
-/// A VM image as [`Driver::image`] shows it.
-pub(crate) fn describe_vm_image(dir: &Path, source: &vm::Source) -> String {
+/// A VM image as [`Driver::image`] shows it: the base VM image in `dir`,
+/// and the OCI image `imports` names (`actor.image`) whose layers above
+/// `actor-base` the run attaches (`crate::image::store::import`).
+pub(crate) fn describe_vm_image(dir: &Path, imports: Option<&str>) -> String {
   let manifest = crate::image::manifest::read(dir).ok().flatten();
-  let origin = manifest.as_ref().and_then(|manifest| manifest.source.as_ref());
-  match (source, origin) {
-    (vm::Source::Base, Some(origin)) => format!("the base VM image {} ({origin})", dir.display()),
-    (vm::Source::Base, None) => format!("the base VM image {}", dir.display()),
-    (vm::Source::Reference(reference), Some(crate::image::manifest::Source::Oci { id, platform, .. })) => {
-      format!("{reference}, as the VM image {} made from {id} ({platform})", dir.display())
-    }
-    (vm::Source::Reference(reference), _) => format!("{reference}, as the VM image {}", dir.display()),
+  let base = match manifest.as_ref().and_then(|manifest| manifest.source.as_ref()) {
+    Some(origin) => format!("the base VM image {} ({origin})", dir.display()),
+    None => format!("the base VM image {}", dir.display()),
+  };
+  match imports {
+    Some(reference) => format!("{reference}, imported above {base}"),
+    None => base,
   }
 }
 

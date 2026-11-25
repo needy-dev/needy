@@ -69,10 +69,13 @@ pub fn stack_digest(image: &str, diff_ids: &[String]) -> Result<Digest, Error> {
 /// before needy recorded its base; its root is the digest of its
 /// `rootfs.ext4`, which the caller hashes.
 // TODO(base-identity): the archive and file digests are kept so the step
-// caches of VM images made before B-1 (and of `needy image build --from`
-// images, which have no base) keep working; drop them, and refuse an image
-// without a base, once B-4 makes `--from` an import above the base and no
-// supported release ships a manifest without `base`.
+// caches of base VM images pulled from releases made before B-1 keep
+// working. B-4 made `needy image build --from` an import above the base, so
+// no VM image without a base is made or booted for an OCI image any more,
+// and an import refuses a base without one (`store::import::vm_base`).
+// Drop them, and refuse a base without `base`, once no supported release
+// ships a manifest without it (the first release after B-1 is the first
+// with it).
 pub fn of_vm(manifest: &Manifest) -> Result<Option<Digest>, Error> {
   if let Some(base) = &manifest.base {
     return stack_digest(&base.image, &base.diff_ids).map(Some);
@@ -92,8 +95,15 @@ pub fn of_container(name: &str, image: &engine::Image) -> Result<Digest, Error> 
   // NOTICE: a custom root (`root: debian:bookworm`, or an image `FROM
   // needy-actor`, which inherits its labels) has no base of needy's whose
   // layers it is known to start with; its root stays the image's ID.
-  // TODO(base-identity): recognise an image that starts with `actor-base`'s
-  // layers by comparing DiffIDs, with B-4's import above the base.
+  // TODO(base-identity): a custom root that starts with `actor-base`'s
+  // DiffIDs is not given a stack digest of its layers. In a container its
+  // config (`Env`, `User`, `WorkingDir`) is part of what its steps are built
+  // on, which the image ID covers and a ChainID would not; and the identity
+  // would pay only when the VM drivers build on the same root, which B-4
+  // does not: it imports `actor.image` above the base, and a definition's
+  // `root:` stays the container builders' (slice 5 of the images and run
+  // data spec). Reopen with that slice, deciding which config fields the
+  // identity covers.
   if !is_needy_base_image(name) {
     return Ok(image_id(image));
   }
@@ -119,7 +129,7 @@ pub fn of_container(name: &str, image: &engine::Image) -> Result<Digest, Error> 
 /// Whether `reference` names an `actor-base` image: the release's
 /// `ghcr.io/needy-dev/needy/actor-base` or the `needy-actor-base` that
 /// `needy image build` tags, at any registry, tag or digest.
-fn names_actor_base(reference: &str) -> bool {
+pub(crate) fn names_actor_base(reference: &str) -> bool {
   let name = needy_config::image::untagged(reference);
   let last = name.rsplit('/').next().unwrap_or(name);
   last == "actor-base" || last == "needy-actor-base"

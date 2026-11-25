@@ -7,6 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# `image::store::import::testing`: synthetic OCI images `FROM` a stand-in
+# `actor-base`, written into `oci-registry`'s test registry, for the daemon's
+# and the CLI's import tests.
+test-support = ["oci-registry/test-support"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -34,6 +40,8 @@ oci-layer = { workspace = true, features = ["squashfs"] }
 oci-client.workspace = true
 oci-registry.workspace = true
 oci-spec.workspace = true
+# Imported image layers may be zstd-compressed (`image::store::import`).
+ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
