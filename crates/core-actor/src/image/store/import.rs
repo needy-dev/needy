@@ -48,7 +48,7 @@ pub mod testing;
 mod tests;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::str::FromStr;
 
 use oci_client::errors::OciDistributionError;
@@ -635,10 +635,10 @@ fn check_entries(name: &str, diff_id: &Digest, layer: &Path) -> Result<Vec<(Stri
   let failed = io(format!("reading a layer of {name}"));
   let file = std::fs::File::open(layer).map_err(io(layer.display()))?;
   let mut archive = tar::Archive::new(std::io::BufReader::new(file));
-  let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+  let mut seen: BTreeSet<String> = BTreeSet::new();
   let mut trees = Vec::new();
-  let needy_path = |action: &'static str, path: &Path| {
-    let path = path.to_string_lossy().into_owned();
+  let needy_path = |action: &'static str, path: &str| {
+    let path = path.to_string();
     Error::NeedyPath {
       reference: name.to_string(),
       layer: *diff_id,
@@ -657,14 +657,15 @@ fn check_entries(name: &str, diff_id: &Digest, layer: &Path) -> Result<Vec<(Stri
     let Some(path) = relative(&path) else {
       continue;
     };
-    let mut components = path.components();
-    let first = components.next().map(|c| c.as_os_str().to_string_lossy().into_owned()).unwrap_or_default();
-    let top_level = components.next().is_none();
+    let (first, top_level) = match path.split_once('/') {
+      Some((first, _)) => (first, false),
+      None => (path.as_str(), true),
+    };
     if first == NEEDY_DIR {
       return Err(needy_path("writes", &path));
     }
     if top_level && first == format!("{}{NEEDY_DIR}", oci_layer::archive::WHITEOUT) {
-      return Err(needy_path("removes", Path::new(NEEDY_DIR)));
+      return Err(needy_path("removes", NEEDY_DIR));
     }
     if top_level && first == oci_layer::archive::OPAQUE {
       return Err(needy_path("hides everything below it, /.needy included, with", &path));
@@ -684,9 +685,8 @@ fn check_entries(name: &str, diff_id: &Digest, layer: &Path) -> Result<Vec<(Stri
         return Err(Error::Invalid {
           reference: name.to_string(),
           reason: format!(
-            "layer {diff_id} has a hard link /{} to {}, which is not a file of the same layer",
-            path.display(),
-            target.map_or_else(|| "nothing".to_string(), |t| format!("/{}", t.display()))
+            "layer {diff_id} has a hard link /{path} to {}, which is not a file of the same layer",
+            target.map_or_else(|| "nothing".to_string(), |t| format!("/{t}"))
           ),
         });
       }
@@ -698,15 +698,17 @@ fn check_entries(name: &str, diff_id: &Digest, layer: &Path) -> Result<Vec<(Stri
 
 /// `path` relative to the layer's root, as the store's canonical form names
 /// it (no leading `/` or `./`), or `None` for the root itself or a path that
-/// climbs out of the layer, which the store refuses on its own.
-fn relative(path: &Path) -> Option<PathBuf> {
-  let mut clean = PathBuf::new();
+/// climbs out of the layer, which the store refuses on its own. Parts are
+/// joined with `/` whatever the host: a layer's paths are the guest's, and
+/// a Windows `PathBuf` would print them with `\`.
+fn relative(path: &Path) -> Option<String> {
+  let mut parts = Vec::new();
   for component in path.components() {
     match component {
-      Component::Normal(part) => clean.push(part),
+      Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
       Component::RootDir | Component::CurDir => {}
       Component::ParentDir | Component::Prefix(_) => return None,
     }
   }
-  (!clean.as_os_str().is_empty()).then_some(clean)
+  (!parts.is_empty()).then(|| parts.join("/"))
 }
