@@ -568,7 +568,11 @@ jobs:
           diff <(layers executor-base:ci) <(layers needy-executor:ci)
           test "$(label needy-actor:ci org.opencontainers.image.base.name)" = "$ACTOR_BASE"
           test "$(label needy-executor:ci org.opencontainers.image.base.name)" = "$EXECUTOR_BASE"
-          docker run --rm --entrypoint /bin/sh needy-actor:ci -c 'test /usr/bin/bash -ef /.needy/proxy && test -x /.needy/real/usr/bin/bash'
+          # NOTICE: compare contents, not inodes. The shims are made in a layer
+          # above the one holding /.needy/proxy, and a hard link cannot span
+          # layers, so a shim is a copy of the proxy rather than a link to it
+          # once the image is assembled (docker-container builder, `load`).
+          docker run --rm --entrypoint /bin/sh needy-actor:ci -c 'cmp -s /usr/bin/bash /.needy/proxy && test -x /.needy/real/usr/bin/bash'
 
       - name: Push needy-actor by digest
         id: push-actor
