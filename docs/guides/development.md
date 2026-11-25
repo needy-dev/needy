@@ -35,6 +35,10 @@ cargo xtask e2e               # the end-to-end matrix on this host
 On macOS, run `ulimit -n 4096` before `make test` or `cargo test -p needy-daemon`;
 the default 256 open-file limit is too low for the parallel daemon test suite.
 
+Cargo never deletes old build artifacts. Each release, dependency update,
+profile change or toolchain update leaves stale copies in `target/`. When it
+grows large, run `cargo clean`; the next build compiles everything again.
+
 ## End-to-end matrix (`cargo xtask e2e`)
 
 `cargo xtask e2e` runs every cell of the end-to-end matrix this host can run:

@@ -120,6 +120,14 @@ needy-core-executor = { path = "crates/core-executor", version = "0.0.16" }
 needy-daemon = { path = "crates/daemon", version = "0.0.16" }
 needy-trace = { path = "crates/trace", version = "0.0.16", default-features = false }
 
+# Line tables keep file:line in panics and backtraces, which is what tests,
+# logs and agents read. Full debug info adds local variables and types for an
+# interactive debugger, and it is most of `target/`. The `test` profile
+# inherits this setting. To debug with variables, override it for one build:
+# `CARGO_PROFILE_DEV_DEBUG=full cargo build`.
+[profile.dev]
+debug = "line-tables-only"
+
 [profile.release]
 lto = "thin"
 strip = true
