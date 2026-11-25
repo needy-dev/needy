@@ -66,6 +66,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
       merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
       runners_file: None,
+      clients_file: None,
       disable_host_files: false,
       host_files_root: None,
       gateway_listen: None,

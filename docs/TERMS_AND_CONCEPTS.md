@@ -325,6 +325,12 @@ role permits run and process operations; `admin` also permits client and
 runner administration. This authority is separate from a local OS account
 or a creator-only ACL.
 
+A **static** client is declared with its token (or the token's SHA-256) in
+the daemon's `--clients-file` instead of pairing, so it exists before the
+daemon starts. Its ID is `static-NAME`; it is listed with paired clients,
+cannot be revoked through the API (the file is its only source), and holds
+its name against paired clients while the file declares it.
+
 The CLI stores saved connection contexts, their server-issued identities,
 and credentials in its private `config.yaml` document. A context contains an
 address or connector argv and the credential used with that transport.
