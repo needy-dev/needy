@@ -100,7 +100,7 @@ needy uses XDG directories, each overridable by an environment variable
 | `NEEDY_STATE_DIR` | `$XDG_STATE_HOME/needy` | `state.db` (runner and client registries, runs, instances), `trace.db`, `runs/<id>/` (profile, console log, snapshot) (`crates/daemon/src/lib.rs:325-329`) | **PVC.** Losing it loses paired clients, minted runners and every run's history. |
 | `NEEDY_DATA_DIR` | `$XDG_DATA_HOME/needy` | `images/linux-firecracker/base` (the base VM image), `guest/` (guest disks), `image-store/` commit layers (`crates/cli/src/paths.rs:84-103`, `crates/daemon/src/image/mod.rs:86-88`) | emptyDir is enough for the MVP; the base image is pulled again at start. |
 | `NEEDY_CACHE_DIR` | `$XDG_CACHE_HOME/needy` | `image-store/`: built layers, snapshots, cache keys; remote actor runners fetch a run's layers from here (`GuestService.FetchLayer`) | PVC if runs use image definitions before #112; emptyDir once a layer registry refills it. |
-| `NEEDY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/needy`, else the state directory | `daemon.sock` (management socket) | emptyDir (`medium: Memory`), so the socket is not on the PVC. |
+| `NEEDY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/needy`, else the state directory | `daemon.sock` (management socket) | A `0700` subdirectory of an emptyDir (`medium: Memory`), so the socket is not on the PVC; the daemon refuses a directory others can read (`discovery.invalid_record: runtime directory must be private`, `crates/daemon/src/discovery.rs`), and an emptyDir itself is `0777`. |
 
 Use `strategy.type: Recreate` and one replica: `state.db` is SQLite on a
 ReadWriteOnce volume (D5).
@@ -200,6 +200,10 @@ spec:
         args:
         - |
           set -e
+          # The runtime directory must be 0700 and owned by the daemon's uid
+          # (crates/daemon/src/discovery.rs); an emptyDir is 0777, so use a
+          # private subdirectory of it.
+          mkdir -p -m 0700 "$NEEDY_RUNTIME_DIR"
           needy image pull --driver linux-firecracker -q   # only for image definitions
           exec needy daemon serve \
             --listen tcp://0.0.0.0:7400 \
@@ -214,7 +218,7 @@ spec:
         - { name: NEEDY_STATE_DIR, value: /var/lib/needy/state }
         - { name: NEEDY_CACHE_DIR, value: /var/lib/needy/cache }
         - { name: NEEDY_DATA_DIR, value: /home/needy/data }
-        - { name: NEEDY_RUNTIME_DIR, value: /run/needy }
+        - { name: NEEDY_RUNTIME_DIR, value: /run/needy/private }
         ports:
         - { name: control, containerPort: 7400 }
         - { name: gateway, containerPort: 7401 }
@@ -297,33 +301,38 @@ needed) returns `needy-client.<id>.<64 hex>`; store it in a Secret that only
 the same name replaces and revokes the earlier token
 (`proto/needy/v1/client.proto`, `CreatePairingCodeRequest.name`).
 
-### Gap and proposed minimal fix (not implemented)
+### Static clients (`--clients-file`, G1)
 
-**Gap G1: controller bootstrap.** A controller needs an admin credential it
-can provision before the daemon starts, as it does for runners with
-`--runners-file`.
+**Gap G1** (a controller needs an admin credential it can provision before
+the daemon starts) is closed by `needy daemon serve --clients-file PATH`
+(needy-dev/needy#114, expected in v0.0.18; code, not yet released). The
+file is hot-reloaded like the runners file, and unknown keys are errors at
+every level:
 
-Interim workaround (probe, verified by the `rc` session on a cluster): the
-management socket admits processes of the daemon's own uid (peer
-credentials, `crates/api-server/src/middleware/authentication.rs`), so a
-sidecar in the daemon Pod that runs as the same uid and shares
-`NEEDY_RUNTIME_DIR` (an `emptyDir`) can run `needy client invite --admin -o
-json` without `pods/exec`, and the controller pairs with the code.
+```yaml
+clients:
+- name: rc                      # DNS label; the trace names it client:static-rc
+  access: admin                 # admin | runs (default runs)
+  token_hash: sha256:<64 hex>   # SHA-256 of the whole token; or `token:` in plain
+```
 
-Two minimal options for the proper fix:
+The token is `needy-client.static-<name>.<64 hex>`: generate 32 random
+bytes as hex, keep the full token in a Secret only `rc-controller` reads,
+and put its hash in the daemon's Secret (mounted as a directory, never with
+`subPath`). Removing or rotating an entry takes effect on the next request;
+static clients are listed by `ListClients` and cannot be revoked through the
+API. While the file holds a name, pairing that name is refused.
 
-1. *Preferred:* `needy daemon serve --clients-file PATH`, a hot-reloaded
-   file of static clients (`name`, `credential_hash` as SHA-256 of
-   `needy-client.<name>.<hex>`, `access: admin|runs`), mirroring
-   `crates/daemon/src/static_runners.rs`. Clients keep a named principal
-   (`client:rc` in traces) and the file holds only hashes.
-2. *Smallest diff:* a `--token-file` flag that passes the token to
-   `Daemon::serve(listen, token)`, whose plumbing already exists
-   (`crates/daemon/src/lib.rs:404,500-507`;
-   `crates/api-server/src/middleware/authentication.rs:108-110`). Its caller
-   is the anonymous `Operator`, and the server treats a shared token as
-   legacy (`crates/api-server/src/server.rs:469-471`), so option 1 fits the
-   current access model better.
+Until a release carries it, the interim workaround (probe, verified by the
+`rc` session on a cluster) is: the management socket admits processes of
+the daemon's own uid (peer credentials,
+`crates/api-server/src/middleware/authentication.rs`), so a sidecar in the
+daemon Pod that runs as the same uid and shares `NEEDY_RUNTIME_DIR` can run
+`needy client invite --admin -o json` without `pods/exec`, and the
+controller pairs with the code. `client invite` refuses a second invitation
+for a name while one is open (`client.invitation_open`), so a failed `Pair`
+blocks retries for the whole TTL: keep `--ttl` short (the `rc` session uses
+`1m`).
 
 ### A Go client (proposal)
 
@@ -467,7 +476,7 @@ from code; the probes pulled at start).
 ```sh
 needy runner serve \
   --address tcp://needy-daemon.tenant-a.svc:7400 \
-  --credential-file /var/run/needy/credential \
+  --credential-file /etc/needy/credential/credential \
   --roles actor \
   --ephemeral \
   --gateway tcp://needy-daemon.tenant-a.svc:7401 \
@@ -576,7 +585,7 @@ spec:
       needy image pull --driver linux-firecracker -q    # or bake it in and pass --actor-image
       exec needy runner serve \
         --address tcp://needy-daemon.tenant-a.svc:7400 \
-        --credential-file /var/run/needy/credential \
+        --credential-file /etc/needy/credential/credential \
         --roles actor --ephemeral \
         --gateway tcp://needy-daemon.tenant-a.svc:7401 \
         --work-dir /home/needy/vm
@@ -589,7 +598,9 @@ spec:
       limits: { example.com/kvm: "1", memory: 6Gi, ephemeral-storage: 20Gi }
     volumeMounts:
     - { name: home, mountPath: /home/needy }
-    - { name: credential, mountPath: /var/run/needy, readOnly: true }
+    # Not under /var/run: on Debian-based images /var/run is /run, and a
+    # read-only mount there makes /run/needy read-only for the runner.
+    - { name: credential, mountPath: /etc/needy/credential, readOnly: true }
   volumes:
   - { name: home, emptyDir: {} }
   - name: credential
@@ -657,6 +668,14 @@ commands:
   executor is missing from `executors`, a `Placement`'s `runner` is empty,
   or any finding explains an unresolved selector (`proto/needy/v1/run.proto`,
   `CheckProfileResponse`).
+- **Wait for the runner before `CheckProfile`.** A freshly minted runner
+  that has never connected lists as `online` with empty capabilities for a
+  few heartbeats, and `CheckProfile` then fails with `cannot host
+  actor(linux-firecracker): it has none` (probe, observed by the `rc`
+  session). Wait until `ListRunners` shows it `online` **and** its
+  `capabilities.actor` contains `LINUX_FIRECRACKER`, then `CheckProfile`,
+  then `CreateRun`. **Gap G7:** a minted runner should read offline until
+  its first `Control` stream.
   **Gap G3:** the daemon has no switch that forbids control-host placement.
 - `actor.network.allow` must name every host the agent reaches, including
   the product server it reports back to. HTTPS is tunnelled unmodified and
@@ -891,9 +910,12 @@ client, the daemon image and the runner image to one needy release.
   changed what the base's identity is. Pull the base image with the same
   needy version on both sides.
 - Gaps found while writing this note (none implemented):
-  - G1: no non-interactive admin credential for a controller (section 3).
+  - G1: no non-interactive admin credential for a controller (section 3);
+    closed by `--clients-file` (#114, expected in v0.0.18).
   - G2: no slim needy runtime image (section 5).
   - G3: no switch to forbid control-host placement (section 6).
+  - G7: a minted, never-connected runner lists as `online` with empty
+    capabilities (section 6).
   - G6: routed commands map only the working directory between actor and
     executor paths; a literal actor path in arguments (for example
     `~/workspace/x`) is not translated (probe, observed by the `rc` session).
@@ -916,7 +938,10 @@ client, the daemon image and the runner image to one needy release.
       `NEEDY_STATE_DIR`, Service (7400, 7401), `needy-runners` Secret mounted
       as a directory, NetworkPolicies.
 - [ ] Bootstrap an admin client once per daemon (section 3) and keep its
-      token in a controller-only Secret; switch when G1 lands.
+      token in a controller-only Secret; switch to `--clients-file` when
+      v0.0.18 is out.
+- [ ] Upgrade the controller before anyone sets `Workspace` `spec.needy`:
+      an older controller's typed `Update` drops the field.
 - [ ] Generate a Go client from the pinned needy tag (section 9).
 - [ ] `Actor` reconciler: validate and inject `runner:` fields → mint
       (TTL > lifetime) → Secret → Pod → `CreateRun` with
