@@ -6,6 +6,31 @@ actor-executor model on Kubernetes alongside `rc` (a Kubernetes workspace
 orchestrator), a managed IaaS control plane (IaC, quota, billing, bare-metal
 provisioning), and an external device gateway for user-owned clients.
 
+> **Revision notice (2026-11-26):** Parts of this design changed on
+> 2026-11-25 and 2026-11-26; the text below is kept as written.
+>
+> - KVM nodes are not bare metal. They are nested-virtualization pools of
+>   EC2 8th generation Intel families (c8i, m8i, r8i and their flex
+>   variants) on the stock EKS AL2023 AMI, with `/dev/kvm` exposed by a
+>   generic-device-plugin as a cluster-specific extended resource
+>   (`example.com/kvm`-style, named by the pool's device plugin), not `devices.kubevirt.io/kvm`
+>   (section 5, item 6, and D6).
+> - `rc`'s `Workspace` fields `hotMount`, `lxcfs`, `supplementalGroups` and
+>   `podReplacementPolicy` are in progress in `rc` (not on its main branch at
+>   commit `2f4811a`); `needyExecutor` and the `Actor` resource do not exist
+>   yet (D3).
+> - Image distribution follows
+>   [One layered OCI base for VM and container actors](2026-11-25-layered-oci-base-spec.md):
+>   standard OCI images built on `actor-base` and a layer registry of
+>   ordinary images, not `needy image edit` pushes (D6).
+> - A standalone actor runtime design (`runn`, drafted 2026-11-24) is
+>   deferred. D1, D2, D4 and D5 stand; D5's fail-fast restart contract
+>   matches the code at `ad4a146`.
+> - The owner decided the division of work on 2026-11-26: `rc` owns needy
+>   on Kubernetes (daemon, `Actor`, Workspace executors); `devices-api` only
+>   creates `rc` resources; user-device executors (D7) are out of the MVP.
+>   See the handoff [Integrating needy into `rc`](2026-11-26-rc-integration-guide.md).
+
 Related notes:
 
 - [Deployment topology and daemon responsibilities](2026-11-15-topology-and-daemon-responsibilities-design.md)
