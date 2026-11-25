@@ -33,8 +33,8 @@ Decided by the owner on 2026-11-26:
 | Component | Owns | Does not own |
 | --- | --- | --- |
 | `rc` | needy on Kubernetes: one `needy-daemon` per tenant namespace (D5), an `Actor` resource whose reconciler mints a runner credential, runs one ephemeral actor runner Pod on a KVM node and calls `CreateRun` (D2, D3), and executor runners inside existing `Workspace`s through `spec.services` | needy's routing, gateway, traces or profile schema |
-| `devices-api` (lobe-iaas) | Creating `rc` resources (`Workspace`, and `Actor` once it exists), quota and billing | Talking to `needy-daemon` directly |
-| `lobehub-cloud` | The product; talks to `devices-api` only | Kubernetes or needy |
+| `devices-api` (managed IaaS) | Creating `rc` resources (`Workspace`, and `Actor` once it exists), quota and billing | Talking to `needy-daemon` directly |
+| The product | The product; talks to `devices-api` only | Kubernetes or needy |
 | device-gateway | Unchanged for the MVP | |
 | needy | The daemon, the runners, the actor VM, routing, gateway, traces | Kubernetes objects |
 
@@ -44,7 +44,7 @@ yet.
 
 ```mermaid
 flowchart LR
-  LC["lobehub-cloud"] --> DA["devices-api\n(quota, billing)"]
+  LC["product"] --> DA["devices-api\n(quota, billing)"]
   DA -->|"creates Actor / Workspace CRs"| RC["rc-controller"]
   subgraph NS["tenant namespace"]
     D["needy-daemon Deployment\n:7400 control (gRPC)\n:7401 actor gateway\nPVC: state"]
@@ -82,8 +82,8 @@ Pod.
 | `--disable-host-files` | Refuses every `host:` file mapping (copy-in, mirror-out, sync, host workspaces). Always set it: `host:` would be the daemon Pod's own filesystem. |
 | `--host-files-root DIR` | Alternative to the above: confines `host:` to one tree. |
 | `--heartbeat-interval DURATION` | Runner heartbeat interval; default 15 s (`crates/config/src/global.rs:99`). A runner is online while a heartbeat arrived within three intervals (`proto/needy/v1/runner.proto`, `RunnerStatus`). |
-| `--layer-registry REPOSITORY` | **After #112 only** (B-3, open). Pulls and pushes built image steps as ordinary OCI images (`[http://]HOST[:PORT]/PATH`). |
-| `--insecure-registry HOST[:PORT]` | **After #112 only.** Skips TLS verification for one registry host. |
+| `--layer-registry REPOSITORY` | Since #112 (B-3). Pulls and pushes built image steps as ordinary OCI images (`[http://]HOST[:PORT]/PATH`). |
+| `--insecure-registry HOST[:PORT]` | Since #112 (B-3). Skips TLS verification for one registry host. |
 
 There is no daemon flag for a control token (`--token-env` in
 `docs/TERMS_AND_CONCEPTS.md` describes a flag that no longer exists; the
@@ -126,10 +126,10 @@ imports a mirrored archive instead.
 
 Also note (code): a daemon without KVM cannot build image steps for remote
 actors; a step not in its layer store fails the create
-(`crates/daemon/src/image/build.rs:398-409`, `TODO(remote-build)`). Before
-#112 that leaves base-image profiles only, unless the layer store already
-holds the steps; after #112 a builder on a KVM node pushes the steps to the
-layer registry and the daemon pulls them.
+(`crates/daemon/src/image/build.rs:398-409`, `TODO(remote-build)`). Without a
+layer registry that leaves base-image profiles only, unless the layer store
+already holds the steps; with a layer registry (#112) a builder on a KVM node
+pushes the steps and the daemon pulls them.
 
 ### User, ports, readiness (code and probe)
 
@@ -497,8 +497,8 @@ needy runner serve \
 ### KVM scheduling (probe)
 
 - The KVM device is an extended resource whose name depends on the cluster:
-  `lobe-iaas.lobehub.com/kvm` on lobe-iaas EKS `devices-kvm` pools (nodes
-  labelled and tainted `lobe-iaas.lobehub.com/kvm=true:NoSchedule`, 8th
+  `example.com/kvm` on a managed IaaS's EKS `devices-kvm` pool (nodes
+  labelled and tainted `example.com/kvm=true:NoSchedule`, 8th
   generation Intel families with nested virtualization, a
   generic-device-plugin DaemonSet), or `devic.es/kvm` with
   generic-device-plugin's default domain. `rc` should take the resource
@@ -545,9 +545,9 @@ spec:
   automountServiceAccountToken: false
   activeDeadlineSeconds: 7200            # maxRunDuration plus start-up
   terminationGracePeriodSeconds: 30
-  nodeSelector: { lobe-iaas.lobehub.com/kvm: "true" }          # from rc config
+  nodeSelector: { example.com/kvm: "true" }          # from rc config
   tolerations:
-  - { key: lobe-iaas.lobehub.com/kvm, operator: Equal, value: "true", effect: NoSchedule }
+  - { key: example.com/kvm, operator: Equal, value: "true", effect: NoSchedule }
   securityContext:
     runAsUser: 1000
     runAsGroup: 1000
@@ -574,7 +574,7 @@ spec:
     securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
     resources:
       requests: { cpu: 1500m, memory: 4Gi, ephemeral-storage: 10Gi }
-      limits: { lobe-iaas.lobehub.com/kvm: "1", memory: 6Gi, ephemeral-storage: 20Gi }
+      limits: { example.com/kvm: "1", memory: 6Gi, ephemeral-storage: 20Gi }
     volumeMounts:
     - { name: home, mountPath: /home/needy }
     - { name: credential, mountPath: /var/run/needy, readOnly: true }
@@ -655,7 +655,7 @@ commands:
   directory over SFTP; see section 7.
 - `actor.image` today: an image definition (layers, features) works for a
   remote actor when the daemon has or can obtain every step (section 2);
-  after #112, from a layer registry. An OCI reference (`actor.image: REF`)
+  or from a layer registry (#112). An OCI reference (`actor.image: REF`)
   is ignored for a remote actor (`crates/daemon/src/image/mod.rs:173-186`,
   `TODO(images)`); importing it is B-4.
 
@@ -779,7 +779,7 @@ automountServiceAccountToken: false
   whatever the Workspace already needs).
 - The daemon: ingress on 7400 from `rc-controller`, actor Pods and
   Workspace Pods; ingress on 7401 from actor Pods only. Egress to the
-  internet for the gateway, to the layer registry (after #112), to
+  internet for the gateway, to the layer registry (#112), to
   in-cluster services named in `actor.network.services`; deny the
   Kubernetes API, other namespaces and `169.254.169.254`. Pass the pod,
   service and VPC ranges as `--gateway-block-cidr` as well, because a
@@ -834,7 +834,7 @@ client, the daemon image and the runner image to one needy release.
 | Image layers on remote actors (`FetchLayer`, root check) | #104, in v0.0.17 |
 | Remote terminal wait, base-image hint | #108, in v0.0.17 |
 | `actor-base`/`executor-base` published; root identity is the base's stack digest | B-1 #110, B-2 #111, merged after v0.0.17; first in the next release |
-| Layer registry, standard registry auth and TLS | B-3 #112, **open** |
+| Layer registry, standard registry auth and TLS | B-3 #112, merged |
 | `actor.image: <OCI ref>` imported above the base | B-4, not started |
 | `needy image build --push`, runners pulling from the import | B-5, not started |
 | macOS drivers | Not relevant to the cluster |

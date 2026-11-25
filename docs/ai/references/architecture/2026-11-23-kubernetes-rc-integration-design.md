@@ -13,7 +13,7 @@ provisioning), and an external device gateway for user-owned clients.
 >   EC2 8th generation Intel families (c8i, m8i, r8i and their flex
 >   variants) on the stock EKS AL2023 AMI, with `/dev/kvm` exposed by a
 >   generic-device-plugin as a cluster-specific extended resource
->   (`lobe-iaas.lobehub.com/kvm` there), not `devices.kubevirt.io/kvm`
+>   (`example.com/kvm`-style, named by the pool's device plugin), not `devices.kubevirt.io/kvm`
 >   (section 5, item 6, and D6).
 > - `rc`'s `Workspace` already has `hotMount`, `lxcfs`, `supplementalGroups`
 >   and `podReplacementPolicy` in `v1alpha1`; `needyExecutor` and the
