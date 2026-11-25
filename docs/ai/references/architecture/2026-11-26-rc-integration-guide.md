@@ -751,6 +751,36 @@ automountServiceAccountToken: false
   `openssh-sftp-server` (Debian and Ubuntu) in Workspace images.
 - `needy` must be on the Workspace image's `PATH`, at the daemon's version.
 
+### 7a. Planned: one builder per namespace (proposal)
+
+An `Actor`'s profile is the user's, so the Dev Container features above
+`actor-base` are only known at run time. The daemon resolves them and
+computes each step's cache key; a step neither in its layer store nor in the
+layer registry must be built, and a control daemon without KVM cannot build
+it (`TODO(remote-build)` in `crates/daemon/src/image/build.rs`).
+
+Owner decision (2026-11-26): builds run in an **independently deployed
+builder, one per namespace**, not in the actor runner and not through a
+separate build system. Planned shape, to be specified with the slice that
+implements it:
+
+- A `needy-builder` Deployment on the KVM pool, 0..N replicas, running
+  `needy runner serve --roles builder` (a new role) with a runner credential
+  of the namespace's daemon. It builds steps in Firecracker sessions (same
+  isolation and egress policy as actors) and pushes them to the namespace's
+  layer registry.
+- The daemon dispatches only the missing steps to a connected builder and
+  waits for them, then pulls them from the layer registry; the first run of a
+  new feature set waits for the build, so `rc` timeouts must allow for it.
+- Credentials: the builder needs write access to the layer registry and read
+  access to private feature registries; actor runners need read access only.
+- `rc` owns the Deployment next to the daemon and may scale it to zero when
+  idle (builds are rare once the cache is warm).
+
+Until that slice lands, user-defined features work only when the layer
+registry already holds every step (for example, built by CI or by a builder
+run by hand with `needy image build` and `--layer-registry`).
+
 ## 8. Networking and security
 
 ### What the Node Authorizer guarantees (code)
