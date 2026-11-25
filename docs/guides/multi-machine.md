@@ -58,6 +58,10 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `--insecure-registry HOST` follow
   [registry credentials and TLS](configuration.md#actor-images-recipes-and-builtin);
   runners do not contact registries yet.
+- **Agent images on remote actors**: a remote VM actor whose `actor.image`
+  is an OCI image built `FROM` `actor-base` is imported by the control daemon
+  (which needs registry access, not KVM), and the runner fetches the layers
+  from it; see [Agent images](agent-images.md).
 - **Host-file boundaries**: pass `--disable-host-files` to reject all `host:`
   file mappings, or `--host-files-root DIR` to confine `host:` mappings to an
   allowed directory tree.

@@ -28,6 +28,9 @@ docs/
 - [Configuration reference](guides/configuration.md): command rules, workspace
   resolution, file and sync mappings, network gateway, chaos faults, executors,
   image definitions, recipes, `builtin:` catalog, and environment variables.
+- [Agent images](guides/agent-images.md): building an image `FROM`
+  `actor-base` with Docker, BuildKit, `devcontainer build` or Shipwright, and
+  what a VM actor imports, checks and ignores.
 - [Multi-machine and remote runner setup](guides/multi-machine.md): enrolling
   executor and remote Firecracker actor runners, tunnels, static/TTL credentials,
   and daemon security boundaries.

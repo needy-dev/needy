@@ -20,6 +20,10 @@ layer registry, and tests on Kubernetes clusters with KVM nodes. Names marked
 > [layered OCI base spec](2026-11-25-layered-oci-base-spec.md) ("Settled in
 > B-3"): steps are pushed as ordinary OCI images, not the
 > `application/vnd.needy.layer.config.v1+json` artifact below.
+>
+> **Update (2026-11-26):** B-4 of the layered OCI base spec imports an
+> `actor.image` OCI reference for remote VM actors on the control daemon;
+> the runner fetches those layers with `FetchLayer` as in D2.
 
 Parent notes:
 

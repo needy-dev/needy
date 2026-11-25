@@ -314,10 +314,16 @@ background start, `exec -t`) stay with `xtask/tui/matrix.sh` (`NOTICE` in
 The agents image is `examples/agents/Dockerfile` (embedded in the harness)
 on the harness's actor image, `needy-e2e-agents` with the checkout's tag, built on
 every host that runs a TUI cell, run hosts included: it downloads the
-agents' pinned releases and compiles nothing. From it the harness makes this
-host's VM image (`needy image build --from`, into the work directory's
-`images/`, which each cell's data directory links to) or loads it into
-Apple's `container`.
+agents' pinned releases and compiles nothing. The harness loads it into
+Apple's `container` for that driver.
+
+*Migration notice (2026-11-26, B-4 of the
+[layered OCI base spec](2026-11-25-layered-oci-base-spec.md)):* the harness
+made this host's VM image of it with `needy image build --from`. A VM actor
+of an OCI image now imports the image's layers above `actor-base` from a
+registry, which the harness does not run yet, so the TUI cells on the VM
+drivers are reported not covered (`TODO(e2e-import)` in
+`xtask/src/e2e/host.rs`).
 
 ## Lifecycle acceptance added on 2026-11-15
 
