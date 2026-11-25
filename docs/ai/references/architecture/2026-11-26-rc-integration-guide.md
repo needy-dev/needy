@@ -311,7 +311,7 @@ every level:
 
 ```yaml
 clients:
-- name: rc                      # DNS label; the trace names it client:static-rc
+- name: rc                      # DNS label; ID static-rc, the trace names it client:rc
   access: admin                 # admin | runs (default runs)
   token_hash: sha256:<64 hex>   # SHA-256 of the whole token; or `token:` in plain
 ```
