@@ -229,3 +229,36 @@ Settled in review (2026-11-25): images are named by what they are under
 `ghcr.io/needy-dev/needy/`; only `actor-base` and `executor-base` are
 published; systemd and the container shims stay needy's implementation
 (B1).
+
+Settled in B-2 (2026-11-26):
+
+- The root (step cache keys' `root`, `BridgeAttached.root`, the remote
+  runner's D4 check) is the base's stack digest: the OCI ChainID of
+  `actor-base`'s `rootfs.diff_ids`, lowest first (image-spec v1.1.0,
+  `config.md`, "Layer ChainID"; `oci_layer::chain_id`). `needy_core_actor::image::root`
+  derives it: for a VM image from `manifest.json`'s `base.diff_ids`
+  (`of_vm`); for a container builder from `needy-actor`'s DiffIDs without
+  the last (the shim layer) (`of_container`). `needy-actor` is recognised by
+  its name (as `is_needy_base_image` names it) and its
+  `org.opencontainers.image.base.name` label, which must be empty (built
+  outside the release) or name an `actor-base`; one with the label but
+  another name, or fewer than two layers, is refused rather than guessed at.
+- Images that record no base keep their old root: a VM image without
+  `base` (made before B-1, or by `needy image build --from`) its
+  `manifest.sha256` or the digest of its `rootfs.ext4`; a container root
+  that is not needy's base, or a `needy-actor` from before B-1 (one layer,
+  no label), the engine's image ID. `TODO(base-identity)` markers in
+  `crates/core-actor/src/image/root.rs` name when to drop them.
+- Every existing step cache key changes once for images that record a base
+  (a new root): the old keys are no longer looked up, and their steps are
+  built again once. Lockfile commits name the old top key and are applied
+  as rebased (`commit_rebased`).
+- The needy layer is not reproducible across builders, so a base built from
+  a checkout (`needy image build`) has its own root, different from the
+  release's; layers built on one are not reused on the other. The VM image's
+  own additions (`actor-root`: systemd, the workspace directory) are not in
+  the identity, so a layer built in a container is reused in a VM and the
+  other way round, as B2 intends.
+- `DEFAULT_ROOT` (`ubuntu:24.04`) is not part of the root: a definition
+  without `root:` is built on needy's base. Pinning it by digest is left to
+  `TODO(default-root)` in `crates/config/src/image/mod.rs`.

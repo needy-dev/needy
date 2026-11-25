@@ -8,7 +8,7 @@ use oci_spec::image::{ImageIndex, ImageManifest, MediaType, OciLayout};
 use crate::archive::{Index, Kind, canonical};
 use crate::collapse::collapse;
 use crate::oci::{BaseArchive, assemble_on_base, blob_path, export_layers, extract_top_layer};
-use crate::{Digest, Error};
+use crate::{Digest, Error, chain_id};
 
 /// Helper to build a tar archive entry by entry.
 struct TarBuilder(tar::Builder<Vec<u8>>);
@@ -459,4 +459,20 @@ fn oci_base_archive_reads_gzip_oci_layout_without_manifest_json() {
   let mut unpacked = Vec::new();
   top.read_to_end(&mut unpacked).unwrap();
   assert_eq!(Digest::of(&unpacked), diff_id);
+}
+
+// The expected ChainIDs were computed outside Rust from the definition
+// (image-spec v1.1.0 config.md, "Layer ChainID"), with the DiffIDs of the
+// one-byte layers `a`, `b` and `c`:
+//   a="sha256:$(printf a | shasum -a 256 | cut -d' ' -f1)"   # likewise b, c
+//   ab="sha256:$(printf '%s %s' "$a" "$b" | shasum -a 256 | cut -d' ' -f1)"
+//   abc="sha256:$(printf '%s %s' "$ab" "$c" | shasum -a 256 | cut -d' ' -f1)"
+#[test]
+fn chain_id_follows_the_image_spec_definition() {
+  let [a, b, c] = [b"a", b"b", b"c"].map(|layer| Digest::of(layer));
+  assert_eq!(chain_id(&[]), None);
+  assert_eq!(chain_id(&[a]), Some(a), "the ChainID of one layer is its DiffID");
+  assert_eq!(chain_id(&[a, b]).unwrap().to_string(), "sha256:51c0c8ace48498d6f5fee6b0592cc06f2da0f3cbe09c5a34a97dce85c3889676");
+  assert_eq!(chain_id(&[a, b, c]).unwrap().to_string(), "sha256:2fce7f8ce91bcf0a1428b36e1024639fdbd9469eea762dba98aa749631885106");
+  assert_ne!(chain_id(&[b, a]), chain_id(&[a, b]), "the order of the layers is part of the ChainID");
 }

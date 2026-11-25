@@ -57,10 +57,8 @@ pub struct Manifest {
 /// as known where it was built, without a registry. The root file system
 /// holds the base's layers and the VM's own additions (systemd and the
 /// workspace directory, the `actor-root` stage of `images/Dockerfile`),
-/// which are not among `diff_ids`.
-// TODO(base-identity): nothing reads this yet; the base stack digest step
-// cache keys use is B-2 of
-// docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md.
+/// which are not among `diff_ids`. The stack digest of `diff_ids` is the
+/// image's root ([`super::root::of_vm`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Base {

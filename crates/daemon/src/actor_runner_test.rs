@@ -365,4 +365,34 @@ fn a_runner_stacks_layers_only_on_the_base_they_were_built_on() {
   manifest.sha256 = Some(Digest::of(b"released").hex().to_string());
   needy_core_actor::image::manifest::write(&image, &manifest).unwrap();
   super::check_root(&image, &Digest::of(b"released").to_string()).unwrap();
+
+  // An image that records its `actor-base` is rooted on the base's stack
+  // digest, whichever builder built the layers; its archive digest is not
+  // its root any more.
+  let diff_ids = vec![
+    Digest::of(b"distribution").to_string(),
+    Digest::of(b"needy").to_string(),
+  ];
+  manifest.base = Some(needy_core_actor::image::manifest::Base {
+    image: "ghcr.io/needy-dev/needy/actor-base:v0.0.18-ubuntu-24.04".into(),
+    digest: None,
+    diff_ids: diff_ids.clone(),
+  });
+  needy_core_actor::image::manifest::write(&image, &manifest).unwrap();
+  let stack = needy_core_actor::image::root::stack_digest("actor-base", &diff_ids).unwrap();
+  super::check_root(&image, &stack.to_string()).unwrap();
+  let refused = super::check_root(&image, &Digest::of(b"released").to_string()).unwrap_err();
+  assert!(format!("{refused:#}").contains(&format!("this runner boots base {stack}")), "{refused:#}");
+  // Another `actor-base` (a base built from a checkout has its own needy
+  // layer) is another root.
+  let other = needy_core_actor::image::root::stack_digest(
+    "actor-base",
+    &[
+      Digest::of(b"distribution").to_string(),
+      Digest::of(b"needy, built elsewhere").to_string(),
+    ],
+  )
+  .unwrap();
+  let refused = super::check_root(&image, &other.to_string()).unwrap_err();
+  assert!(format!("{refused:#}").contains("refusing to stack them on another base"), "{refused:#}");
 }

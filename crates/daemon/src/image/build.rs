@@ -18,8 +18,8 @@ use needy_core::image::{Commit as PlanCommit, Digest, FeatureMetadata, Input, Pl
 use needy_core::network::Policy;
 use needy_core_actor::driver;
 use needy_core_actor::image::feature::{FeatureStore, FetchedFeature, Reference as FeatureReference};
-use needy_core_actor::image::manifest;
 use needy_core_actor::image::store::{LayerDisk, Snapshot, snapshot_tag};
+use needy_core_actor::image::{manifest, root};
 use needy_trace::Dispatch;
 use sha2::Digest as _;
 use tokio_util::sync::CancellationToken;
@@ -622,9 +622,10 @@ async fn vm_unavailable(daemon: &Daemon, driver: ActorDriver) -> Option<String> 
   drv.check_host().await.err().map(|e| e.to_string())
 }
 
-/// Computes the root digest for `builder`: the base VM image's digest for VM
-/// builders, or the base container image's ID for `linux-container` builders
-/// on Linux hosts without a VM driver.
+/// Computes the root digest for `builder`: the base VM image's root for VM
+/// builders, or the root of the base container image for `linux-container`
+/// builders on Linux hosts without a VM driver. For needy's own base both
+/// are the stack digest of the same `actor-base` ([`root::of_container`]).
 // TODO(images): `definition.pull_policy` currently governs OCI feature fetches;
 // container base image `always`/`never` pull policy is deferred to a follow-up
 // slice (container drivers currently always inspect locally and pull if absent).
@@ -636,7 +637,7 @@ async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_i
       .await
       .with_context(|| format!("inspecting container base image {base_container_image}"))?
       .ok_or_else(|| anyhow!("container actor image {base_container_image} is not in the engine"))?;
-    return Ok(Digest::parse(&inspected.id).unwrap_or_else(|_| Digest::of(inspected.id.as_bytes())));
+    return Ok(root::of_container(base_container_image, &inspected)?);
   }
   root_digest(daemon).await
 }
@@ -645,9 +646,11 @@ async fn root_digest_for(daemon: &Daemon, builder: ActorDriver, base_container_i
 ///
 /// NOTICE: in slice 1, image definitions on VM drivers boot the host's base VM
 /// image (`daemon.config.actor_image`) with built layers stacked over it. The
-/// root digest is taken from `manifest.json`'s `sha256` field when present
-/// (released images), or computed as the SHA-256 of `rootfs.ext4` when absent
-/// (locally built images and test fixtures).
+/// root digest is the stack digest of the `actor-base` its `manifest.json`
+/// records (B2 of `2026-11-25-layered-oci-base-spec.md`); for an image that
+/// records none, `manifest.json`'s `sha256` field when present (released
+/// images), or the SHA-256 of `rootfs.ext4` when absent (locally built images
+/// and test fixtures), as [`root::of_vm`] says.
 // TODO(images): resolving an OCI `definition.root` to its own lower layers
 // comes with slice 5 of the images and run data spec.
 pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
@@ -685,8 +688,8 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
 /// computes it, without its cache: a remote actor runner checks the root a
 /// snapshot was built on against the base it boots (D4 in
 /// `2026-11-25-remote-actor-images-spec.md`). Blocking.
-// NOTICE: a locally built base without `manifest.sha256` is hashed whole on
-// every call; released images carry the digest in their manifest.
+// NOTICE: a locally built base without `manifest.base` or `manifest.sha256`
+// is hashed whole on every call; released images record their base.
 pub(crate) fn base_root(dir: &std::path::Path) -> Result<Digest> {
   match manifest_root(dir)? {
     Some(digest) => Ok(digest),
@@ -694,9 +697,12 @@ pub(crate) fn base_root(dir: &std::path::Path) -> Result<Digest> {
   }
 }
 
-/// The root digest `manifest.json` in `dir` records (`sha256`), if any.
+/// The root `manifest.json` in `dir` records ([`root::of_vm`]), if any.
 fn manifest_root(dir: &std::path::Path) -> Result<Option<Digest>> {
-  Ok(manifest::read(dir)?.and_then(|manifest| manifest.sha256).and_then(|sha256| Digest::parse(&format!("sha256:{sha256}")).ok()))
+  let Some(manifest) = manifest::read(dir)? else {
+    return Ok(None);
+  };
+  root::of_vm(&manifest).with_context(|| format!("cannot tell the root of the base VM image in {}", dir.display()))
 }
 
 fn hash_rootfs(rootfs: &std::path::Path) -> Result<Digest> {

@@ -850,6 +850,7 @@ impl FakeContainerEngine {
       os: "linux".into(),
       architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
       labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+      diff_ids: Vec::new(),
     };
     let mut images = std::collections::HashMap::new();
     images.insert(base_tag.to_string(), (image, base_tar.clone()));
@@ -980,6 +981,7 @@ impl needy_core_executor::engine::Engine for FakeContainerEngine {
       os: "linux".into(),
       architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
       labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+      diff_ids: Vec::new(),
     };
     self.images.lock().unwrap().insert(full, (image, committed_tar));
     Ok(format!("sha256:{}", "c".repeat(64)))
@@ -1011,6 +1013,7 @@ impl needy_core_executor::engine::Engine for FakeContainerEngine {
       os: "linux".into(),
       architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
       labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+      diff_ids: Vec::new(),
     };
     self.images.lock().unwrap().insert(tag, (image, all));
     Ok(())
@@ -1389,6 +1392,101 @@ async fn linux_container_fallback_builds_and_edits_without_vm_driver_and_cleans_
   assert_eq!(finished.commands[0].argv, ["touch", "/etc/edited"]);
   assert_eq!(engine.committed.lock().unwrap().len(), 3);
   assert_eq!(engine.removed_images.lock().unwrap().len(), 4);
+}
+
+// ROOT CAUSE:
+//
+// If a host built an image's steps in containers (no VM driver), the steps
+// were keyed on the engine's ID of `needy-actor`, while a VM builder keyed
+// the same image on its base VM image's file digest, although both start
+// from the same `actor-base`.
+//
+// Before the fix, the same step had a different cache key per builder, so a
+// layer built by one was never reused by the other.
+// The fix keys both on the base's stack digest (B2 of
+// `2026-11-25-layered-oci-base-spec.md`): `needy-actor`'s layers without its
+// shim layer, and the `actor-base` layers the VM image's manifest records.
+#[tokio::test]
+async fn the_container_builder_and_the_vm_builder_key_steps_on_the_same_base() {
+  use needy_api_server::control::{ImageBuild, Images};
+
+  let on_start: OnContainerStart = Arc::new(|_name, body, gate| {
+    tokio::spawn(async move {
+      let binds = body.host_config.and_then(|hc| hc.binds).unwrap_or_default();
+      let channels_host = binds.iter().find_map(|b| b.strip_suffix(":/.needy/channels")).expect("channels bind mount missing").to_string();
+      let sock = PathBuf::from(channels_host).join("guest.sock");
+      let client = needy_api_client::Client::connect(&format!("unix:{}", sock.display())).await.unwrap();
+      client.guest().get_config(GetConfigRequest {}).await.unwrap();
+      client
+        .guest()
+        .report_exit(ReportExitRequest {
+          code: Some(0),
+          signal: String::new(),
+        })
+        .await
+        .unwrap();
+      gate.send_replace(true);
+    });
+  });
+  let base: Vec<String> =
+    [&b"distribution"[..], b"userland", b"needy"].iter().map(|layer| needy_core::image::Digest::of(layer).to_string()).collect();
+  let engine = FakeContainerEngine::new("needy-actor:latest", Some(on_start));
+  {
+    let mut images = engine.images.lock().unwrap();
+    let (actor, _) = images.get_mut("needy-actor:latest").unwrap();
+    // `needy-actor` as `needy image build --linux-container` makes it:
+    // `actor-base` and the shim layer, its base name label empty.
+    actor.diff_ids = base.iter().cloned().chain([needy_core::image::Digest::of(b"shims").to_string()]).collect();
+    actor.labels.insert("org.opencontainers.image.base.name".into(), String::new());
+  }
+  let backends = crate::holder::ContainerBackends {
+    engine: engine.clone(),
+    apple_cli: needy_core_actor::driver::macos_apple_container::default_cli(),
+  };
+  let started = testing::daemon_in_with_backends(tempfile::tempdir_in("/tmp").unwrap(), backends, |config| {
+    // No VM driver: the steps are built in containers.
+    std::fs::remove_file(&config.kvm).unwrap();
+  })
+  .await;
+  let daemon = &started.daemon;
+  // The base VM image was derived from the same `actor-base`.
+  let mut manifest = needy_core_actor::image::manifest::read(&daemon.config.actor_image).unwrap().unwrap();
+  manifest.base = Some(needy_core_actor::image::manifest::Base {
+    image: "needy-actor-base:latest".into(),
+    digest: None,
+    diff_ids: base,
+  });
+  needy_core_actor::image::manifest::write(&daemon.config.actor_image, &manifest).unwrap();
+
+  let image_yaml = "root: needy-actor:latest\nlayers:\n  - run: echo step-1\n";
+  let built = tokio::time::timeout(
+    Duration::from_secs(20),
+    Images::build(
+      daemon,
+      ImageBuild {
+        image_yaml: image_yaml.into(),
+        driver: "linux-container".into(),
+        user: None,
+        commit: None,
+        pinned_features: Default::default(),
+      },
+    ),
+  )
+  .await
+  .expect("container build timed out")
+  .unwrap();
+
+  let vm_root = crate::image::root_digest(daemon).await.unwrap();
+  let definition = needy_config::image::Definition {
+    root: Some("needy-actor:latest".into()),
+    layers: vec![needy_config::image::Layer::Run("echo step-1".into())],
+    ..Default::default()
+  };
+  let on_the_vm_base =
+    needy_core::image::plan(&definition, &vm_root, &needy_config::profile::User::default(), None, &std::collections::BTreeMap::new())
+      .unwrap();
+  assert_eq!(built.steps.len(), 1);
+  assert_eq!(built.steps[0].key, on_the_vm_base.steps[0].key.to_string(), "both builders must key the step on the same base");
 }
 
 // ------------------------------------------------------------ feature builds
@@ -2417,6 +2515,7 @@ async fn materialize_for_linux_container_cache_hit_skips_base_export_and_load() 
     os: "linux".into(),
     architecture: needy_core_actor::image::container::oci_arch(needy_core_actor::image::guest::arch()).into(),
     labels: std::collections::HashMap::from([("needy.base-abi".into(), "1".into())]),
+    diff_ids: Vec::new(),
   };
   engine.images.lock().unwrap().insert(expected_tag.clone(), (preloaded_image, Vec::new()));
 
