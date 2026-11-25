@@ -489,12 +489,7 @@ pub(crate) fn serve_gateway(daemon: &Daemon, run: &Arc<Run>, actor: &Cancellatio
   // on 2026-11-12); on HTTPS it needs a separate MITM infrastructure (its
   // own CA, opt-in, per host), deferred until that exists and the owner
   // approves it.
-  let policy = needy_core::network::Policy::actor(&run.profile.actor.network);
-  let activity_run = run.clone();
-  let egress = gateway::EgressPolicy::default().with_blocked_cidrs(daemon.gateway_blocked_cidrs.clone());
-  let options = gateway::GatewayOptions::default().with_egress(egress).with_on_activity(Arc::new(move || activity_run.touch_activity()));
-  let gateway =
-    Arc::new(gateway::Gateway::with_options(policy, run.trace.clone(), Network::Actor, Some(run.injector.clone()), actor.clone(), options));
+  let gateway = run_gateway(daemon, run, actor.clone());
   // A socket left by an earlier daemon would make bind fail.
   if let Err(e) = std::fs::remove_file(path)
     && e.kind() != std::io::ErrorKind::NotFound
@@ -513,21 +508,52 @@ pub(crate) fn serve_gateway(daemon: &Daemon, run: &Arc<Run>, actor: &Cancellatio
 /// Prepares a remote actor run without starting a local VM: advances the actor
 /// state to `Starting` and registers its per-run [`Gateway`] for the shared
 /// TCP gateway listener (authenticated by the Node Authorizer).
+// NOTICE: a runner that runs the actor's gateway itself
+// (`BridgeAttach.local_gateway`) makes the bridge close this one when it
+// attaches (`bridge::attach_bridge`), so exactly one gateway enforces the
+// run's network; an older runner proxies to this one, as before.
 pub(crate) fn start_remote(daemon: &Daemon, run: &Arc<Run>) {
   advance(run, ActorState::Starting);
-  let policy = needy_core::network::Policy::actor(&run.profile.actor.network);
+  run.set_gateway(run_gateway(daemon, run, run.cancel.child_token()));
+}
+
+/// The gateway of `run`'s actor on this daemon: its profile's network and
+/// faults, the daemon's blocked CIDRs, recording in the run's trace and
+/// advancing its activity, until `cancel`.
+fn run_gateway(daemon: &Daemon, run: &Arc<Run>, cancel: CancellationToken) -> Arc<gateway::Gateway> {
   let activity_run = run.clone();
-  let egress = gateway::EgressPolicy::default().with_blocked_cidrs(daemon.gateway_blocked_cidrs.clone());
-  let options = gateway::GatewayOptions::default().with_egress(egress).with_on_activity(Arc::new(move || activity_run.touch_activity()));
-  let gateway = Arc::new(gateway::Gateway::with_options(
-    policy,
+  gateway(
+    &run.profile.actor.network,
     run.trace.clone(),
-    Network::Actor,
-    Some(run.injector.clone()),
-    run.cancel.child_token(),
-    options,
-  ));
-  run.set_gateway(gateway);
+    run.injector.clone(),
+    daemon.gateway_blocked_cidrs.clone(),
+    cancel,
+    Arc::new(move || activity_run.touch_activity()),
+  )
+}
+
+/// An actor's gateway: the allowlist and services of the profile's
+/// `actor.network`, the faults in `injector`, never connecting to
+/// `blocked_cidrs` (the daemon's `--gateway-block-cidr`), recording in
+/// `trace` and calling `on_activity` on each request, until `cancel`. The
+/// one place an actor's gateway is built: by the daemon for an actor it
+/// runs or whose runner proxies to it, and by an actor runner for the actor
+/// it hosts (`actor_runner`), so the two enforce the same policy.
+pub(crate) fn gateway(
+  network: &needy_config::profile::ActorNetwork,
+  trace: needy_trace::Dispatch,
+  injector: Arc<needy_core::chaos::Injector>,
+  blocked_cidrs: Vec<gateway::IpCidr>,
+  cancel: CancellationToken,
+  on_activity: Arc<dyn Fn() + Send + Sync>,
+) -> Arc<gateway::Gateway> {
+  let policy = needy_core::network::Policy::actor(network);
+  let egress = gateway::EgressPolicy::default().with_blocked_cidrs(blocked_cidrs);
+  // TODO(gateway-upstream): per-actor upstream proxy, next slice after S1,
+  // owner discussed 2026-11-26; every actor's gateway dials direct
+  // (`gateway::Upstream::Direct`) until then.
+  let options = gateway::GatewayOptions::default().with_egress(egress).with_on_activity(on_activity);
+  Arc::new(gateway::Gateway::with_options(policy, trace, Network::Actor, Some(injector), cancel, options))
 }
 
 /// Removes the sockets of an actor of kind `kind` from the run's directory

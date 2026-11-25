@@ -867,12 +867,23 @@ Two separate networks. The actor network sits near the actor's main dependency
 enforces an allowlist (HTTPS is tunnelled as is) and forwards **services**.
 The executor network sits near what the work operates on.
 
+**Gateway placement.** The actor gateway runs next to the actor: in the
+daemon for an actor on the control host, and in the **actor runner** for a
+remote actor whose runner and daemon both support it (S1, see
+[the runner gateway design](ai/references/architecture/2026-11-26-runner-gateway-design.md)).
+The daemon stays the policy source (it sends the profile, its blocked CIDRs
+and the run's creation time on the bridge) and the trace owner (the runner
+sends what its gateway records back on the bridge); the actor's egress then
+leaves from the runner's host. An older runner proxies the gateway channel
+to the daemon's shared gateway listener instead, and the daemon runs the
+gateway as before.
+
 ### Service
 
 A plain-HTTP name the actor uses for an endpoint outside it:
 `actor.network.services.NAME.url`. In the actor it is `http://NAME.needy`;
-the gateway forwards each request to the URL, which the control host (where
-the gateway runs) resolves, and a `CONNECT NAME.needy:80` (clients that
+the gateway forwards each request to the URL, which the host where the
+gateway runs (the control host, or a remote actor's runner) resolves, and a `CONNECT NAME.needy:80` (clients that
 tunnel plain HTTP through a proxy) to the URL's host and port. The actor
 never learns the real address.
 

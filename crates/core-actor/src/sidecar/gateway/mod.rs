@@ -9,7 +9,9 @@
 //! decision and records typed `net.*` and `fault.injected` events in the
 //! run's trace. A plain-HTTP request to a service's host (`NAME.needy`) goes
 //! to the service's URL, which this machine resolves: the gateway runs next
-//! to the daemon, on the control host.
+//! to its actor, in the daemon on the control host or in the actor runner
+//! that hosts a remote actor (see
+//! `docs/ai/references/architecture/2026-11-26-runner-gateway-design.md`).
 //!
 //! A fault's effect is delivered as a real upstream would deliver it through
 //! a proxy: `refuse` answers 502 as when the upstream refuses the
@@ -21,7 +23,7 @@ mod connect;
 mod egress;
 mod http;
 
-pub use egress::{BlockedReason, EgressPolicy, IpCidr};
+pub use egress::{BlockedReason, EgressPolicy, IpCidr, Upstream};
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -95,6 +97,8 @@ pub struct GatewayOptions {
   /// Optional callback invoked on each authenticated CONNECT or HTTP request,
   /// used by the daemon to advance `Run::last_activity_ms`.
   pub on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
+  /// How connections to upstreams go out; direct by default.
+  pub upstream: Upstream,
 }
 
 impl GatewayOptions {
@@ -112,6 +116,11 @@ impl GatewayOptions {
     self.on_activity = Some(on_activity);
     self
   }
+
+  pub fn with_upstream(mut self, upstream: Upstream) -> Self {
+    self.upstream = upstream;
+    self
+  }
 }
 
 /// One network's gateway. Its connections and tunnels are tasks it owns,
@@ -124,6 +133,8 @@ pub struct Gateway {
   policy: Policy,
   chain: Chain,
   egress: Arc<EgressPolicy>,
+  /// How tunnels and requests reach their upstream.
+  upstream: Upstream,
   /// Client for actor-chosen external targets (resolve-then-validate enabled).
   client: Client<hyper_rustls::HttpsConnector<ValidatedConnector>, Incoming>,
   /// Client for operator-configured `actor.network.services` targets (exempt
@@ -157,12 +168,13 @@ impl Gateway {
     options: GatewayOptions,
   ) -> Self {
     let egress = Arc::new(options.egress);
+    let upstream = options.upstream;
     let build_client = |policy: Option<Arc<EgressPolicy>>| {
       let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
         .enable_http1()
-        .wrap_connector(ValidatedConnector::new(policy));
+        .wrap_connector(ValidatedConnector::new(policy, upstream.clone()));
       Client::builder(hyper_util::rt::TokioExecutor::new()).build(https)
     };
     let client = build_client(Some(egress.clone()));
@@ -179,6 +191,7 @@ impl Gateway {
       chain: Chain::new(&policy, injector),
       policy,
       egress,
+      upstream,
       client,
       service_client,
       auth_token_hash,

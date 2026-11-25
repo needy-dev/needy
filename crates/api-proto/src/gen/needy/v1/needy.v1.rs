@@ -1379,7 +1379,7 @@ pub struct ReportExitResponse {
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct BridgeRequest {
-    #[prost(oneof="bridge_request::Payload", tags="1, 2, 3, 4, 5, 6, 7")]
+    #[prost(oneof="bridge_request::Payload", tags="1, 2, 3, 4, 5, 6, 7, 8, 9")]
     pub payload: ::core::option::Option<bridge_request::Payload>,
 }
 /// Nested message and enum types in `BridgeRequest`.
@@ -1409,6 +1409,17 @@ pub mod bridge_request {
         /// the VM starts.
         #[prost(message, tag="7")]
         Prepared(super::BridgePrepared),
+        /// Trace events the runner's local actor gateway recorded, in the order
+        /// it recorded them. Sent only when `BridgeAttached.local_gateway` is
+        /// set. The daemon records them in the run's trace at their `time_ms`;
+        /// their sequence numbers there are the order they arrive in.
+        #[prost(message, tag="8")]
+        Events(super::BridgeEvents),
+        /// The actor used its network since the last report: the runner's local
+        /// gateway saw a request or tunnel. Coalesced by the runner, at most one
+        /// per interval; the daemon advances the run's last activity.
+        #[prost(message, tag="9")]
+        Activity(super::BridgeActivity),
     }
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1423,6 +1434,12 @@ pub struct BridgeAttach {
     pub driver: ::prost::alloc::string::String,
     #[prost(string, tag="5")]
     pub capture: ::prost::alloc::string::String,
+    /// The runner can run the actor's gateway itself, next to the actor. A
+    /// daemon that agrees sets `BridgeAttached.local_gateway`; an older runner
+    /// leaves this unset, and its actor's network goes through the daemon's
+    /// gateway.
+    #[prost(bool, tag="6")]
+    pub local_gateway: bool,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgeStarted {
@@ -1448,6 +1465,16 @@ pub struct BridgeExit {
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgeTerminalReady {
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct BridgeEvents {
+    /// Each event's `version` is the runner build's schema version; the daemon
+    /// refuses one it does not read.
+    #[prost(message, repeated, tag="1")]
+    pub events: ::prost::alloc::vec::Vec<TraceEvent>,
+}
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BridgeActivity {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgePrepared {
@@ -1518,6 +1545,22 @@ pub struct BridgeAttached {
     /// `layers` is.
     #[prost(string, tag="6")]
     pub root: ::prost::alloc::string::String,
+    /// The runner runs the actor's gateway (the runner asked with
+    /// `BridgeAttach.local_gateway`): it enforces the profile's allowlist,
+    /// services and network faults with the fields below, and sends what the
+    /// gateway records as `BridgeEvents`. The daemon then serves no gateway
+    /// for the run. Unset, the runner proxies the actor's gateway channel to
+    /// the daemon's shared gateway listener, as before.
+    #[prost(bool, tag="7")]
+    pub local_gateway: bool,
+    /// CIDRs the gateway refuses to connect to, as the daemon's
+    /// `--gateway-block-cidr` names them (`198.51.100.0/24`, `fd00::/8`).
+    #[prost(string, repeated, tag="8")]
+    pub gateway_blocked_cidrs: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// When the run was created, in Unix milliseconds on the daemon's clock:
+    /// the origin of the faults' `after` and `until` windows.
+    #[prost(int64, tag="9")]
+    pub created_ms: i64,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct BridgeStop {

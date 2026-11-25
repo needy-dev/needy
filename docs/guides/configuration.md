@@ -98,8 +98,10 @@ A service is a plain-HTTP name the actor uses; the gateway forwards it to `url`,
 so the actor never learns the real address. `needy config profile check` lists
 the services and warns when a URL does not answer from the control host. The
 gateway blocks loopback/link-local SSRF targets by default, accepts additional
-`--gateway-block-cidr` rules, and can serve remote actor runners over an
-authenticated TCP listener (`--gateway-listen`).
+`--gateway-block-cidr` rules. A remote actor's runner runs its gateway itself
+with the same policy, so its service URLs are resolved from the runner's host;
+for older runners the daemon serves the gateway over an authenticated TCP
+listener (`--gateway-listen`).
 
 ## Chaos
 

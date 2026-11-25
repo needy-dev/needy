@@ -236,10 +236,35 @@ pub(super) fn strip_brackets(host: &str) -> &str {
   host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
+/// How the gateway reaches an upstream: the one seam every connection it
+/// opens for the actor goes through, a tunnel's and a forwarded request's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Upstream {
+  /// Resolves and connects from the gateway's own host, after
+  /// [`EgressPolicy`] validated the resolved addresses.
+  #[default]
+  Direct,
+  // TODO(gateway-upstream): per-actor upstream proxy, next slice after S1,
+  // owner discussed 2026-11-26. A `Socks5h` variant (proxy URL, the actor's
+  // credentials) would hand the host name to the proxy unresolved, so where
+  // `EgressPolicy` then applies needs that slice's design; nothing selects
+  // an upstream until then.
+}
+
+impl Upstream {
+  /// A connection to `(host, port)`, validated against `policy` when
+  /// given (none for an operator's service).
+  pub(super) async fn connect(&self, host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
+    match self {
+      Self::Direct => resolve_and_connect(host, port, policy).await,
+    }
+  }
+}
+
 /// Resolves `(host, port)` once, validates every returned [`SocketAddr`]
 /// against `policy` (if present), and connects directly to the validated
 /// addresses so no second DNS lookup can occur.
-pub(super) async fn resolve_and_connect(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
+async fn resolve_and_connect(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
   let host = strip_brackets(host);
   let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
     vec![SocketAddr::new(ip, port)]
@@ -282,11 +307,12 @@ pub(super) fn blocked_in_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -
 #[derive(Clone)]
 pub(super) struct ValidatedConnector {
   policy: Option<Arc<EgressPolicy>>,
+  upstream: Upstream,
 }
 
 impl ValidatedConnector {
-  pub(super) fn new(policy: Option<Arc<EgressPolicy>>) -> Self {
-    Self { policy }
+  pub(super) fn new(policy: Option<Arc<EgressPolicy>>, upstream: Upstream) -> Self {
+    Self { policy, upstream }
   }
 }
 
@@ -301,6 +327,7 @@ impl tower::Service<hyper::Uri> for ValidatedConnector {
 
   fn call(&mut self, uri: hyper::Uri) -> Self::Future {
     let policy = self.policy.clone();
+    let upstream = self.upstream.clone();
     Box::pin(async move {
       let Some(raw_host) = uri.host() else {
         return Err(EgressError::InvalidUri(format!("missing host in {uri}")));
@@ -312,7 +339,7 @@ impl tower::Service<hyper::Uri> for ValidatedConnector {
         80
       };
       let port = uri.port_u16().unwrap_or(default_port);
-      let stream = resolve_and_connect(&host, port, policy.as_deref()).await?;
+      let stream = upstream.connect(&host, port, policy.as_deref()).await?;
       Ok(TokioIo::new(stream))
     })
   }

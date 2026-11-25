@@ -159,7 +159,8 @@ struct ServeArgs {
   /// Working directory for temporary actor VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
   #[arg(long)]
   work_dir: Option<std::path::PathBuf>,
-  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs.
+  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs, used only with a
+  /// control plane that does not let this runner run the actor's gateway itself (one older than this runner).
   #[arg(long, alias = "gateway-address")]
   gateway: Option<String>,
   /// Serve a single actor run (or a single bound run in executor mode) and exit cleanly.

@@ -170,6 +170,17 @@ impl Injector {
     }
   }
 
+  /// The faults of a run created at `created_ms` (Unix milliseconds), such
+  /// as on another host that learned the run's creation time from the
+  /// control plane: its `after` and `until` windows count from then, not
+  /// from this call. A time in the future counts from now.
+  // NOTICE: the origin is a wall-clock time from another host's clock, so
+  // a skew between the two clocks shifts the windows by that much.
+  pub fn since_ms(chaos: &Chaos, created_ms: i64) -> Self {
+    let elapsed = Duration::from_millis(needy_common::time::now_ms().saturating_sub(created_ms).max(0) as u64);
+    Self::since(chaos, Instant::now().checked_sub(elapsed).unwrap_or_else(Instant::now))
+  }
+
   fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Entry>> {
     // NOTICE: a poisoned lock only means another check panicked mid-count;
     // the counts are still usable.

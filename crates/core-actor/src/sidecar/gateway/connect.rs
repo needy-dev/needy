@@ -18,7 +18,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use needy_core::event::{Event, NetConnect, NetDeny, NetError};
 
-use super::egress::{self, EgressError, strip_brackets};
+use super::egress::{EgressError, strip_brackets};
 use super::{Body, Gateway, Reset, text};
 
 impl Gateway {
@@ -40,7 +40,7 @@ impl Gateway {
       },
     };
     let started = std::time::Instant::now();
-    let connected = egress::resolve_and_connect(&upstream_host, upstream_port, egress_policy).await;
+    let connected = self.upstream.connect(&upstream_host, upstream_port, egress_policy).await;
     self.trace.time("net.connect", started.elapsed());
     let mut upstream = match connected {
       Ok(stream) => stream,

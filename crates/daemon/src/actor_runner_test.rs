@@ -1,6 +1,8 @@
 //! Remote actors with image definitions: the control daemon prepares the
 //! image, the bridge names the snapshot, the runner fetches, materializes and
-//! reports the layer disks, and checks the root they were built on.
+//! reports the layer disks, and checks the root they were built on. And the
+//! actor's gateway on the runner (S1): the control plane's policy, its
+//! events in the run's trace, its activity and its faults' windows.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -453,4 +455,210 @@ async fn a_control_daemon_without_kvm_takes_remote_steps_from_the_layer_registry
 
   Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
   control.end().await;
+}
+
+const GATEWAY_PROFILE: &str = r#"
+actor:
+  driver: linux-firecracker
+  runner: actor-node
+  command: [sh, -c, 'echo hi']
+  network:
+    allow: ['198.51.100.10']
+    services:
+      mock: { url: 'http://UPSTREAM' }
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native }
+"#;
+
+/// A plain-HTTP server on loopback that answers every request `200 ok`.
+async fn serve_ok() -> std::net::SocketAddr {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let address = listener.local_addr().unwrap();
+  tokio::spawn(async move {
+    while let Ok((mut stream, _)) = listener.accept().await {
+      tokio::spawn(async move {
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+          match stream.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(n) => request.extend_from_slice(&chunk[..n]),
+          }
+        }
+        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await;
+      });
+    }
+  });
+  address
+}
+
+/// What the gateway on `socket` first answers to `request`, as the actor's
+/// forwarder would send it.
+async fn through_gateway(socket: &Path, request: &str) -> String {
+  use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+  let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+  stream.write_all(request.as_bytes()).await.unwrap();
+  let mut answer = Vec::new();
+  let mut chunk = [0u8; 4096];
+  // A response with its body: the gateway's own answers are short, and
+  // `Connection: close` ends a forwarded one.
+  loop {
+    match tokio::time::timeout(Duration::from_secs(10), stream.read(&mut chunk)).await.expect("the gateway did not answer") {
+      Ok(0) | Err(_) => break,
+      Ok(n) => answer.extend_from_slice(&chunk[..n]),
+    }
+    let text = String::from_utf8_lossy(&answer);
+    if let Some((head, body)) = text.split_once("\r\n\r\n")
+      && let Some(length) = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length: ").map(str::to_string))
+      && body.len() >= length.trim().parse::<usize>().unwrap()
+    {
+      break;
+    }
+  }
+  String::from_utf8_lossy(&answer).into_owned()
+}
+
+/// Run `id`'s trace on the control daemon in `dir`, decoded.
+async fn trace(dir: &Path, id: &str) -> Vec<needy_core::event::Event> {
+  let trace = needy_trace::sink::sqlite::load(&dir.join("state/trace.db"), id).await.unwrap();
+  trace.events.iter().map(|e| needy_core::event::Event::decode(&e.kind, e.version, e.payload.get()).unwrap()).collect()
+}
+
+#[tokio::test]
+async fn a_runner_runs_the_remote_actor_s_gateway_under_the_control_plane_s_policy_and_reports_to_its_trace() {
+  use needy_core::event::Event;
+  let upstream = serve_ok().await;
+  // The profile allows 198.51.100.10; the control daemon's operator blocks
+  // its range, and the runner must enforce that too.
+  let control = Control::start(|config| config.gateway_blocked_cidrs = vec!["198.51.100.0/24".into()]).await;
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner(&control, runner_dir.path(), "").await;
+  let created = control.create(&GATEWAY_PROFILE.replace("UPSTREAM", &upstream.to_string())).await.unwrap();
+  let run = control.daemon().runs.find(&created.id).unwrap();
+
+  // The runner serves the VM's gateway channel itself; the daemon's
+  // gateway for the run is closed, so one gateway enforces its network.
+  let socket =
+    needy_core_actor::driver::linux_firecracker::host_port(&runner_dir.path().join("work"), needy_core_actor::contract::GATEWAY_PORT);
+  let mut started = run.remote_started.subscribe();
+  tokio::time::timeout(Duration::from_secs(10), started.wait_for(|started| *started)).await.unwrap().unwrap();
+  assert!(socket.exists(), "the runner does not serve the gateway channel at {}", socket.display());
+  assert_eq!(run.remote_gateway(), Some(crate::run::GatewaySite::Runner));
+  assert!(run.gateway().is_none(), "the daemon must not keep a gateway for a run whose runner runs it");
+  tokio::time::sleep(Duration::from_millis(20)).await;
+  let idle_since = run.last_activity_ms();
+
+  let allowed = through_gateway(&socket, "GET http://mock.needy/hello HTTP/1.1\r\nHost: mock.needy\r\nConnection: close\r\n\r\n").await;
+  assert!(allowed.starts_with("HTTP/1.1 200 "), "{allowed}");
+  assert!(allowed.ends_with("ok"), "{allowed}");
+  let denied =
+    through_gateway(&socket, "GET http://denied.example.com/ HTTP/1.1\r\nHost: denied.example.com\r\nConnection: close\r\n\r\n").await;
+  assert!(denied.starts_with("HTTP/1.1 403 "), "{denied}");
+  let blocked = through_gateway(&socket, "CONNECT 198.51.100.10:443 HTTP/1.1\r\nHost: 198.51.100.10:443\r\n\r\n").await;
+  assert!(blocked.starts_with("HTTP/1.1 403 "), "{blocked}");
+  assert!(blocked.contains("blocked CIDR 198.51.100.0/24"), "{blocked}");
+
+  // Network-only work keeps the run active.
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while run.last_activity_ms() <= idle_since && tokio::time::Instant::now() < deadline {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  assert!(run.last_activity_ms() > idle_since, "the runner's gateway activity did not advance last_activity_ms");
+
+  // What the runner's gateway recorded is in the run's trace on the daemon.
+  let recorded = |events: &[Event]| {
+    let served = events.iter().any(|e| matches!(e, Event::NetRequest(r) if r.host == "mock.needy" && r.status == 200));
+    let denied = events.iter().any(|e| matches!(e, Event::NetDeny(d) if d.host == "denied.example.com"));
+    let blocked = events.iter().any(|e| matches!(e, Event::NetDeny(d) if d.host == "198.51.100.10"));
+    served && denied && blocked
+  };
+  let mut events = Vec::new();
+  for _ in 0..100 {
+    run.trace.flush().await;
+    events = trace(control.started.dir.path(), &created.id).await;
+    if recorded(&events) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  assert!(recorded(&events), "{events:?}");
+
+  Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
+}
+
+#[tokio::test]
+async fn the_runner_s_gateway_counts_fault_windows_from_the_run_s_creation_on_the_control_plane() {
+  let profile = needy_config::profile::load(&needy_config::Source::text(
+    r#"
+actor:
+  driver: linux-firecracker
+  command: [sh]
+  network:
+    allow: ['*.invalid']
+chaos:
+  seed: 7
+  faults:
+    early: { net: { connect: early.invalid }, refuse: true, until: 30m }
+    late: { net: { connect: late.invalid }, refuse: true, after: 30m }
+"#
+    .to_string(),
+    PathBuf::new(),
+  ))
+  .unwrap();
+  // The run was created an hour ago on the control plane: `early`'s window
+  // has closed and `late`'s is open, though the runner's gateway starts now.
+  let attached = BridgeAttached {
+    run_id: "r1".into(),
+    local_gateway: true,
+    created_ms: needy_common::time::now_ms() - 3_600_000,
+    ..Default::default()
+  };
+  let dir = tempfile::tempdir().unwrap();
+  let socket = dir.path().join("gateway.sock");
+  let (bridge, mut sent) = mpsc::channel(64);
+  let tasks = tokio_util::task::TaskTracker::new();
+  let stop = CancellationToken::new();
+  let trace = super::serve_gateway(&socket, &profile, &attached, bridge, &tasks, stop.clone()).unwrap();
+
+  let late = through_gateway(&socket, "CONNECT late.invalid:443 HTTP/1.1\r\nHost: late.invalid:443\r\n\r\n").await;
+  assert!(late.starts_with("HTTP/1.1 502 "), "{late}");
+  assert!(late.contains("needy chaos: late"), "{late}");
+  let early = through_gateway(&socket, "CONNECT early.invalid:443 HTTP/1.1\r\nHost: early.invalid:443\r\n\r\n").await;
+  assert!(!early.contains("needy chaos"), "{early}");
+
+  // The fault the gateway fired goes to the bridge as an event, and its
+  // requests as activity.
+  tokio::time::timeout(Duration::from_secs(5), trace.flush()).await.unwrap();
+  let mut fired = Vec::new();
+  let mut active = false;
+  let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+  while !active || fired.is_empty() {
+    let Ok(Some(request)) = tokio::time::timeout_at(deadline, sent.recv()).await else {
+      break;
+    };
+    match request.payload {
+      Some(bridge_request::Payload::Events(events)) => {
+        for event in events.events {
+          assert_eq!(event.version, needy_core::event::SCHEMA_VERSION);
+          if event.kind == "fault.injected" {
+            let fault: needy_core::types::Fired = serde_json::from_str(&event.payload).unwrap();
+            fired.push(fault.name);
+          }
+        }
+      }
+      Some(bridge_request::Payload::Activity(_)) => active = true,
+      other => panic!("the gateway sent {other:?} on the bridge"),
+    }
+  }
+  assert_eq!(fired, ["late"]);
+  assert!(active, "the gateway's requests were not reported as activity");
+  // The gateway and its forwarders end with `stop` and the trace.
+  stop.cancel();
+  drop(trace);
+  tasks.close();
+  tokio::time::timeout(Duration::from_secs(5), tasks.wait()).await.unwrap();
 }

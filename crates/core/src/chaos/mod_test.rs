@@ -84,6 +84,18 @@ fn a_time_window_counts_from_the_run_s_creation() {
 }
 
 #[test]
+fn a_time_window_counts_from_a_creation_time_in_unix_milliseconds() {
+  let yaml = "faults: { late: {exec: 'curl **', exit: 7, after: 10s}, early: {exec: 'wget **', exit: 7, until: 10s} }";
+  let now = needy_common::time::now_ms();
+  let young = Injector::since_ms(&chaos(yaml), now);
+  assert!(exec(&young, "curl x").is_none());
+  assert!(exec(&young, "wget x").is_some());
+  let old = Injector::since_ms(&chaos(yaml), now - 11_000);
+  assert!(exec(&old, "curl x").is_some());
+  assert!(exec(&old, "wget x").is_none());
+}
+
+#[test]
 fn probability_is_reproducible() {
   let yaml = "seed: 42\nfaults: { flaky: {net: {connect: '*'}, refuse: true, probability: 0.3} }";
   let run = || {
