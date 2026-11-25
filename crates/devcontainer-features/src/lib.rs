@@ -5,8 +5,8 @@
 //!   option schemas/values, option name sanitization, and lifecycle commands.
 //! - [`graph`]: transitive `dependsOn` expansion, cycle detection, and
 //!   spec-compliant `installsAfter` topological sorting.
-//! - [`fetch`]: OCI Distribution v2 feature fetching (`oci-client` +
-//!   `docker_credential`), single-flight deduplication, and atomic
+//! - [`fetch`]: OCI Distribution v2 feature fetching (`oci-client`, with
+//!   credentials and TLS from `oci-registry`), single-flight deduplication, and atomic
 //!   content-addressed caching (`FeatureStore`).
 //! - [`install`]: `install.sh` environment variables (`_REMOTE_USER*`,
 //!   `_CONTAINER_USER*`) and POSIX wrapper script generation.

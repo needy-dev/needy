@@ -28,6 +28,12 @@ needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["timing"] }
 object.workspace = true
 oci-layer = { workspace = true, features = ["squashfs"] }
+# The layer registry (`image::store::registry`) speaks OCI Distribution and
+# writes standard image configs; registry access (credentials, TLS) is
+# `oci-registry`'s, for features too.
+oci-client.workspace = true
+oci-registry.workspace = true
+oci-spec.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -67,6 +73,8 @@ tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+oci-registry = { workspace = true, features = ["test-support"] }
 needy-common = { workspace = true, features = ["testing"] }
 needy-core-executor = { workspace = true, features = ["test-support"] }
 needy-trace = { workspace = true, features = ["memory", "timing"] }

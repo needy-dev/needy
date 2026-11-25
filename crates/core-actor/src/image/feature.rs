@@ -25,6 +25,12 @@ impl FeatureStore {
     Ok(Self(devcontainer_features::FeatureStore::new(cache_dir)?))
   }
 
+  /// Reaches registries with `access` (credentials, CA files, insecure
+  /// registries) instead of the standard configuration.
+  pub fn with_access(self, access: oci_registry::Access) -> Self {
+    Self(self.0.with_access(access))
+  }
+
   /// Overrides the URL scheme (`"https"` by default; `"http"` for plain HTTP
   /// test registries).
   pub fn with_scheme(self, scheme: impl Into<String>) -> Self {
