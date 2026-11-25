@@ -79,7 +79,9 @@ mod runners;
 mod schedule;
 #[cfg(unix)]
 mod static_clients;
+#[cfg(unix)]
 mod static_file;
+#[cfg(unix)]
 mod static_runners;
 #[cfg(unix)]
 mod store;
