@@ -125,6 +125,18 @@ struct JoinArgs {
 
 #[derive(clap::Args)]
 struct ServeArgs {
+  /// Control daemon address (`tcp://HOST:PORT`, `http://HOST:PORT`, `https://HOST:PORT`, or `unix:///PATH`).
+  #[arg(long)]
+  address: Option<String>,
+  /// Runner name (optional when using `--credential-env` or `--credential-file`; extracted from the credential by default).
+  #[arg(long)]
+  name: Option<String>,
+  /// Read a pre-provisioned runner credential from an environment variable (read-only; never writes `runner.json`).
+  #[arg(long, conflicts_with = "credential_file")]
+  credential_env: Option<String>,
+  /// Read a pre-provisioned runner credential from a file (read-only; never writes `runner.json`).
+  #[arg(long, conflicts_with = "credential_env")]
+  credential_file: Option<std::path::PathBuf>,
   /// Narrow the enrolled roles this runner hosts (comma-separated: `actor`, `executor`).
   #[arg(long, value_delimiter = ',')]
   roles: Option<Vec<RunnerRole>>,
@@ -134,10 +146,29 @@ struct ServeArgs {
   /// Path to the base actor VM image directory on this machine.
   #[arg(long)]
   actor_image: Option<std::path::PathBuf>,
-  #[arg(long, hide = true)]
+  /// Path to the guest `needy` binary injected into actor VMs.
+  #[arg(long)]
+  guest_needy: Option<std::path::PathBuf>,
+  /// Path to the KVM device (defaults to `/dev/kvm`).
+  #[arg(long)]
   kvm: Option<std::path::PathBuf>,
+  /// Working directory for temporary actor VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
+  #[arg(long)]
+  work_dir: Option<std::path::PathBuf>,
+  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs.
+  #[arg(long, alias = "gateway-address")]
+  gateway: Option<String>,
+  /// Serve a single actor run (or a single bound run in executor mode) and exit cleanly.
+  #[arg(long)]
+  ephemeral: bool,
   #[arg(long, hide = true, value_parser = humantime::parse_duration)]
   disconnect_grace: Option<Duration>,
+  /// Shell command invoked asynchronously (throttled) when routed exec or SFTP streams are active.
+  #[arg(long)]
+  activity_hook: Option<String>,
+  /// Minimum interval between `--activity-hook` invocations (default `15s`).
+  #[arg(long, value_parser = humantime::parse_duration)]
+  activity_hook_interval: Option<Duration>,
 }
 
 #[derive(Subcommand)]
@@ -386,15 +417,24 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     Command::Serve(args) => {
       return super::daemon::run_runner(
         super::daemon::RunnerArgs {
-          name: None,
+          name: args.name,
+          address: args.address,
           actor_image: args.actor_image,
+          guest_needy: args.guest_needy,
           kvm: args.kvm,
+          work_dir: args.work_dir,
+          gateway: args.gateway,
+          ephemeral: args.ephemeral,
           join: None,
           join_token_env: None,
           join_token_file: None,
+          credential_env: args.credential_env,
+          credential_file: args.credential_file,
           roles: args.roles,
           labels: args.labels,
           disconnect_grace: args.disconnect_grace,
+          activity_hook: args.activity_hook,
+          activity_hook_interval: args.activity_hook_interval,
         },
         ctx,
       )
@@ -454,14 +494,23 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
   super::daemon::join_runner(
     super::daemon::RunnerArgs {
       name: Some(args.name),
+      address: None,
       actor_image: args.actor_image,
+      guest_needy: None,
       kvm: args.kvm,
+      work_dir: None,
+      gateway: None,
+      ephemeral: false,
       join: Some(address),
       join_token_env: None,
       join_token_file: None,
+      credential_env: None,
+      credential_file: None,
       roles: args.roles,
       labels: args.labels,
       disconnect_grace: None,
+      activity_hook: None,
+      activity_hook_interval: None,
     },
     ctx,
     code.into(),

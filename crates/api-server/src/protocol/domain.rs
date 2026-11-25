@@ -342,6 +342,22 @@ pub fn proto_runner_host(host: &RunnerHost) -> v1::RunnerHost {
   host.into()
 }
 
+impl TryFrom<v1::MintRunnerCredentialRequest> for crate::control::MintRunnerCredential {
+  type Error = Error;
+
+  fn try_from(request: v1::MintRunnerCredentialRequest) -> Result<Self, Error> {
+    if request.name.is_empty() {
+      return Err(Error::Missing("runner name"));
+    }
+    Ok(Self {
+      name: request.name,
+      ttl_ms: request.ttl_ms,
+      roles: runner_roles(&request.roles)?,
+      labels: labels(request.labels),
+    })
+  }
+}
+
 impl From<RunnerInfo> for v1::Runner {
   fn from(runner: RunnerInfo) -> Self {
     let status = match runner.status {
@@ -359,6 +375,8 @@ impl From<RunnerInfo> for v1::Runner {
       last_seen_at_ms: runner.last_seen_ms,
       rotating: runner.rotating,
       join_token_id: runner.join_token,
+      expires_at_ms: runner.expires_ms,
+      static_config: runner.static_config,
     }
   }
 }
@@ -426,6 +444,7 @@ impl TryFrom<v1::CreateRunRequest> for NewRun {
       on_control_host: false,
       image_commit: request.image_commit.map(image_commit).transpose()?,
       pinned_features: pinned_features(request.pinned_features)?,
+      wait_for_runner_ms: request.wait_for_runner_ms,
     })
   }
 }
@@ -560,6 +579,7 @@ impl From<RunInfo> for v1::Run {
       snapshot: run.snapshot.unwrap_or_default(),
       commit_rebased: run.commit_rebased,
       resolved_features: run.resolved_features.into_iter().collect(),
+      last_activity_ms: run.last_activity_ms,
     }
   }
 }
@@ -905,6 +925,7 @@ impl From<GuestConfig> for v1::GetConfigResponse {
       user: Some(config.user.into()),
       route_names: config.route_names,
       hostname: config.hostname,
+      machine_id: config.machine_id,
       uptime_offset_secs: config.uptime_offset_secs,
       mounts: config.mounts.into_iter().map(Into::into).collect(),
       command: config.command,

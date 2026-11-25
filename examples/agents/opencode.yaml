@@ -1,6 +1,6 @@
-# opencode in an actor, built from needy's `builtin:opencode` feature
-# (`features/opencode/`). Every shell it starts, and so every command its bash
-# tool runs, goes to the `build` executor, which holds the workspace.
+# opencode in an actor, built from `ghcr.io/needy-dev/features/opencode:1`.
+# Every shell it starts, and so every command its bash tool runs, goes to the
+# `build` executor, which holds the workspace.
 # examples/opencode runs it against a local model instead.
 #
 # Start opencode directly (needy builds and caches the feature layer on first run):
@@ -9,16 +9,16 @@
 # On the first start, run /connect (or `opencode auth login`) and pick a
 # provider: an API key is pasted in; GitHub Copilot signs in with a device
 # code; a browser sign-in that calls back to the actor's localhost cannot
-# finish from a browser elsewhere. The `builtin:opencode` feature automatically
-# syncs `~/.local/share/opencode` with needy's `<data_dir>/files/opencode`
-# store across runs and sets `OPENCODE_DISABLE_AUTOUPDATE=1`.
+# finish from a browser elsewhere. The feature automatically syncs
+# `~/.local/share/opencode` with needy's `<data_dir>/files/opencode` store
+# across runs and sets `OPENCODE_DISABLE_AUTOUPDATE=1`.
 user: { name: agent, uid: 1000, gid: 1000 }
 
 actor:
   driver: linux-firecracker
   image:
     layers:
-      - feature: builtin:opencode
+      - feature: ghcr.io/needy-dev/features/opencode:1
   workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command: [opencode]
   # Without /connect: a provider's API key (opencode reads

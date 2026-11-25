@@ -5,7 +5,8 @@
 
 use futures_util::StreamExt as _;
 use needy_api_server::control::{
-  Chunks, ControlError, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor, GuestUser,
+  Chunks, ControlError, FromRunner, Guest, GuestConfig, GuestControl, GuestControls, GuestCopy, GuestFault, GuestMount, GuestSensor,
+  GuestUser, ToRunner,
 };
 use needy_common::process::Exit;
 use needy_config::profile::{FaultDomain, FileMode, Side};
@@ -44,6 +45,7 @@ fn daemon_user() -> (u32, u32) {
 impl Guest for Daemon {
   async fn config(&self, run: &str) -> Result<GuestConfig, ControlError> {
     let run = self.runs.find(run)?;
+    run.touch_activity();
     let channels = actor::channels(self, &run).map_err(|e| ControlError::Failed(format!("run {}: {e:#}", run.id)))?;
     let facets = actor::facets(&run);
     let profile = &run.profile;
@@ -117,6 +119,15 @@ impl Guest for Daemon {
       // apart by name, such as session locks that record pid and hostname,
       // took one actor's process for another's. The run ID is unique.
       hostname: recipe.and_then(|r| r.hostname.clone()).unwrap_or_else(|| format!("needy-{}", run.id)),
+      machine_id: recipe
+        .and_then(|r| r.machine_id.clone())
+        .or_else(|| {
+          profile.actor.seed.as_ref().map(|seed| match seed {
+            needy_config::profile::Seed::Int(n) => needy_common::seed::machine_id(*n),
+            needy_config::profile::Seed::String(s) => needy_common::seed::machine_id(needy_common::seed::from_str(s)),
+          })
+        })
+        .unwrap_or_default(),
       uptime_offset_secs: recipe.map(|r| r.uptime_offset_secs).unwrap_or(0),
       mounts,
       command: run.actor_command.clone(),
@@ -165,6 +176,7 @@ impl Guest for Daemon {
     }
     if facets.identity.hostname != in_guest {
       config.hostname.clear();
+      config.machine_id.clear();
     }
     if facets.identity.hwmon != in_guest {
       config.sensors.clear();
@@ -178,12 +190,14 @@ impl Guest for Daemon {
 
   async fn event(&self, run: &str, time_ms: i64, event: Event) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
+    run.touch_activity();
     run.trace.emit_at(time_ms, event.kind().as_str(), event.raw());
     Ok(())
   }
 
   async fn exit(&self, run: &str, exit: Exit) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
+    run.touch_activity();
     if run.actor_exit().as_ref() == Some(&exit) {
       return Ok(());
     }
@@ -203,12 +217,14 @@ impl Guest for Daemon {
 
   async fn fetch_files(&self, run: &str, name: &str) -> Result<Vec<u8>, ControlError> {
     let run = self.runs.find(run)?;
-    files::fetch(&run, name).await
+    run.touch_activity();
+    files::fetch(&run, name, &files::HostFilesPolicy::from_config(&self.config)).await
   }
 
   async fn push_files(&self, run: &str, name: &str, archive: Vec<u8>) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
-    files::push(&run, name, archive).await
+    run.touch_activity();
+    files::push(&run, name, archive, &files::HostFilesPolicy::from_config(&self.config)).await
   }
 
   /// Rejects upper-layer uploads on normal runs. Image build and edit sessions
@@ -216,6 +232,7 @@ impl Guest for Daemon {
   /// consumes and stores `upper.tar`; normal runs never keep an upper layer.
   async fn push_layer(&self, run: &str, _archive: Chunks) -> Result<(), ControlError> {
     let run = self.runs.find(run)?;
+    run.touch_activity();
     Err(ControlError::Failed(format!("run {} is not an image session and cannot keep an upper layer", run.id)))
   }
 
@@ -226,6 +243,7 @@ impl Guest for Daemon {
   // a stopping guest listener does not wait its grace period for it.
   async fn control(&self, run: &str) -> Result<GuestControls, ControlError> {
     let run = self.runs.find(run)?;
+    run.touch_activity();
     let routes = WatchStream::new(run.routes.subscribe()).map(GuestControl::Routes);
     // Polled from the start, so the run counts its guest as waiting for a
     // stop (`StopRequest::wait`) for as long as the stream is open.
@@ -244,6 +262,23 @@ impl Guest for Daemon {
       }
     };
     Ok(Box::pin(futures_util::stream::select(routes, stop).take_until(ended)))
+  }
+
+  async fn bridge(
+    &self,
+    run: &str,
+    inbound: FromRunner<needy_api_client::proto::v1::BridgeRequest>,
+  ) -> Result<ToRunner<needy_api_client::proto::v1::BridgeResponse>, ControlError> {
+    self.attach_bridge(run, inbound).await
+  }
+
+  async fn terminal_task(
+    &self,
+    run: &str,
+    task: u64,
+    responses: FromRunner<needy_api_client::proto::v1::TerminalTaskRequest>,
+  ) -> Result<ToRunner<needy_api_client::proto::v1::TerminalTaskResponse>, ControlError> {
+    self.bridge_terminal_task(run, task, responses)
   }
 }
 

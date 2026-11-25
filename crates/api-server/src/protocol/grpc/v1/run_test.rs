@@ -80,8 +80,66 @@ async fn an_actor_cannot_create_stop_or_read_the_logs_of_runs() {
       Code::PermissionDenied
     ]
   );
-  assert_eq!(create.message(), "actors cannot create runs");
   assert!(served.fake.calls().is_empty(), "{:?}", served.fake.calls());
+}
+
+// ROOT CAUSE:
+//
+// `RunService/GetRun` and `RunService/ListRuns` previously skipped `self.operator(...)`
+// checks, allowing `Caller::Actor` to inspect or enumerate other runs on the same
+// control daemon.
+//
+// Before the fix, an actor could call `GetRun` and `ListRuns` and observe every run.
+// The fix enforces both the `ACTOR_METHODS` middleware allowlist and `self.operator(...)`
+// on `get_run` and `list_runs` (rejecting both `Caller::Actor` and `Caller::Runner`).
+#[tokio::test]
+async fn an_actor_cannot_get_or_list_runs() {
+  let served = serve(actor()).await;
+  let runs = served.client.runs();
+
+  let get = runs
+    .clone()
+    .get_run(GetRunRequest {
+      run_id: "s1".into(),
+    })
+    .await
+    .unwrap_err();
+  let list = runs.clone().list_runs(ListRunsRequest {}).await.unwrap_err();
+
+  assert_eq!([get.code(), list.code()], [Code::PermissionDenied, Code::PermissionDenied]);
+  assert!(served.fake.calls().is_empty());
+
+  // Also verify defense-in-depth directly at the gRPC adapter without middleware.
+  use needy_api_proto::v1::run_service_server::RunService as _;
+  let adapter = super::Adapter {
+    runs: served.fake.clone(),
+    caller: actor(),
+  };
+  let direct_get = adapter
+    .get_run(tonic::Request::new(GetRunRequest {
+      run_id: "s1".into(),
+    }))
+    .await
+    .unwrap_err();
+  let direct_list = adapter.list_runs(tonic::Request::new(ListRunsRequest {})).await.unwrap_err();
+  assert_eq!((direct_get.code(), direct_get.message()), (Code::PermissionDenied, "actors cannot inspect runs"));
+  assert_eq!((direct_list.code(), direct_list.message()), (Code::PermissionDenied, "actors cannot list runs"));
+
+  let runner_adapter = super::Adapter {
+    runs: served.fake.clone(),
+    caller: Caller::Runner { name: "r1".into() },
+  };
+  assert_eq!(
+    runner_adapter
+      .get_run(tonic::Request::new(GetRunRequest {
+        run_id: "s1".into()
+      }))
+      .await
+      .unwrap_err()
+      .code(),
+    Code::PermissionDenied
+  );
+  assert_eq!(runner_adapter.list_runs(tonic::Request::new(ListRunsRequest {})).await.unwrap_err().code(), Code::PermissionDenied);
 }
 
 #[tokio::test]

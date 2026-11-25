@@ -78,6 +78,9 @@ message CreateRunRequest {
   // Pinned feature digests (`canonical_ref -> sha256:<hex>`) from the
   // image's lockfile.
   map<string, string> pinned_features = 14;
+  // Optional maximum time to wait for required actor or executor runners to
+  // connect before failing `CreateRun` (milliseconds; 0 means no wait).
+  uint64 wait_for_runner_ms = 16;
 
   // The client's profile directory, which the daemon cannot read when it
   // runs on another machine.
@@ -134,6 +137,9 @@ message Run {
   // Resolved feature digests (`canonical_ref -> sha256:<hex>`) for the
   // CLI to record in the image's lockfile.
   map<string, string> resolved_features = 16;
+  // Last observed activity timestamp in Unix milliseconds (updated on guest
+  // RPCs, gateway traffic, routing decisions, and terminal/exec I/O).
+  int64 last_activity_ms = 17;
 
   reserved 4;
 }

@@ -78,13 +78,15 @@ impl<S: Runs> RunService for Adapter<S> {
   }
 
   async fn get_run(&self, request: Request<GetRunRequest>) -> Result<Response<GetRunResponse>, Status> {
+    self.operator(&request, "actors cannot inspect runs")?;
     let run = self.runs.get(&request.into_inner().run_id).await?;
     Ok(Response::new(GetRunResponse {
       run: Some(run.into()),
     }))
   }
 
-  async fn list_runs(&self, _: Request<ListRunsRequest>) -> Result<Response<ListRunsResponse>, Status> {
+  async fn list_runs(&self, request: Request<ListRunsRequest>) -> Result<Response<ListRunsResponse>, Status> {
+    self.operator(&request, "actors cannot list runs")?;
     let runs = self.runs.list().await?.into_iter().map(Into::into).collect();
     Ok(Response::new(ListRunsResponse { runs }))
   }

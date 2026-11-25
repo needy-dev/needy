@@ -172,6 +172,7 @@ pub(super) async fn start_edit(daemon: &Daemon, request: ImageEditStart) -> Resu
     },
     route_names: vec!["*".into()],
     hostname: format!("needy-{session_id}"),
+    machine_id: String::new(),
     uptime_offset_secs: 0,
     mounts: Vec::new(),
     command: vec!["/bin/sh".into()],

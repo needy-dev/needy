@@ -78,15 +78,42 @@ pub const DISCONNECT_GRACE: Duration = Duration::from_secs(120);
 // running after 5 s is stuck in the kernel and is reported running.
 const END_WAIT: Duration = Duration::from_secs(5);
 
+/// Default minimum interval between consecutive `--activity-hook` invocations.
+pub const DEFAULT_ACTIVITY_HOOK_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Configuration for `--activity-hook`: a shell command invoked asynchronously
+/// at most once per `interval` while routed exec or SFTP streams are active.
+#[derive(Debug, Clone)]
+pub struct ActivityHookConfig {
+  pub command: String,
+  pub interval: Duration,
+}
+
+/// Extracts the runner name `<name>` from a runner credential shaped like
+/// `needy-runner.<name>.<hex>`.
+pub fn credential_name(credential: &str) -> Option<&str> {
+  let mut parts = credential.splitn(3, '.');
+  let (prefix, name, secret) = (parts.next()?, parts.next()?, parts.next()?);
+  (prefix == "needy-runner" && !name.is_empty() && !secret.is_empty()).then_some(name)
+}
+
+/// Host-side configuration used when a runner accepts `StartActor` tasks.
+#[cfg(unix)]
+pub use crate::actor_runner::ActorConfig;
+
 /// How a runner starts.
 #[derive(Debug, Clone)]
 pub struct Config {
-  /// `runner.json`.
+  /// `runner.json`. Unused when `credential` is `Some`.
   pub state_dir: PathBuf,
   /// The control plane's endpoint; the one stored at the join when `None`.
   pub control: Option<String>,
   /// Needed on the first start only.
   pub join_token: Option<String>,
+  /// Pre-provisioned read-only runner credential (e.g. from `--credential-env`
+  /// or `--credential-file`). When `Some`, `runner.json` is never read or
+  /// written.
+  pub credential: Option<String>,
   pub name: String,
   /// What it reports it can host: detected at start and restricted by
   /// `--roles` (`crate::capabilities::of_this_machine`).
@@ -95,6 +122,14 @@ pub struct Config {
   /// How long it keeps the processes of runs while it cannot reach the
   /// control plane: [`DISCONNECT_GRACE`] outside tests.
   pub grace: Duration,
+  /// Optional throttled shell hook triggered on active exec / SFTP streams.
+  pub activity_hook: Option<ActivityHookConfig>,
+  /// When true, exit cleanly after serving a single actor run (or a single
+  /// `EndRun` in executor-only mode).
+  pub ephemeral: bool,
+  /// Host-side actor configuration used when accepting `StartActor` tasks.
+  #[cfg(unix)]
+  pub actor: Option<ActorConfig>,
 }
 
 /// Runtime selections saved at enrollment. Role/image serve overrides are
@@ -144,9 +179,72 @@ struct Enrollment {
   settings: Settings,
 }
 
-/// A runner that joined.
+/// Throttled async runner for `--activity-hook`.
+struct ActivityHook {
+  command: String,
+  interval: Duration,
+  last_fired: Mutex<Option<std::time::Instant>>,
+}
+
+impl ActivityHook {
+  fn new(config: ActivityHookConfig) -> Arc<Self> {
+    Arc::new(Self {
+      command: config.command,
+      interval: config.interval,
+      last_fired: Mutex::new(None),
+    })
+  }
+
+  /// Triggers the hook asynchronously if at least `interval` has elapsed since
+  /// the last invocation. Spawn or exit failures are logged as warnings and
+  /// never interrupt active tasks.
+  fn trigger(self: &Arc<Self>) {
+    let should_fire = {
+      let mut last = needy_common::sync::lock(&self.last_fired);
+      let now = std::time::Instant::now();
+      if last.is_none_or(|prev| now.duration_since(prev) >= self.interval) {
+        *last = Some(now);
+        true
+      } else {
+        false
+      }
+    };
+    if !should_fire {
+      return;
+    }
+    let command = self.command.clone();
+    tokio::spawn(async move {
+      #[cfg(unix)]
+      let mut cmd = {
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c").arg(&command);
+        cmd
+      };
+      #[cfg(not(unix))]
+      let mut cmd = {
+        let mut cmd = tokio::process::Command::new("cmd");
+        cmd.arg("/C").arg(&command);
+        cmd
+      };
+      cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
+      match cmd.output().await {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+          let stderr = String::from_utf8_lossy(&output.stderr);
+          tracing::warn!("activity hook exited with {}: {}", output.status, stderr.trim());
+        }
+        Err(e) => {
+          tracing::warn!("activity hook failed to execute: {e}");
+        }
+      }
+    });
+  }
+}
+
+/// A runner that joined or started with a pre-provisioned credential.
 pub struct Runner {
   path: PathBuf,
+  read_only: bool,
   control: String,
   enrollment: Enrollment,
   capabilities: Capabilities,
@@ -162,39 +260,58 @@ pub struct Runner {
   /// As the control plane last said; `None` until it said.
   interval: Option<Duration>,
   grace: Duration,
+  activity_hook: Option<Arc<ActivityHook>>,
+  ephemeral: bool,
+  #[cfg(unix)]
+  actor: Option<ActorConfig>,
 }
 
 impl Runner {
-  /// Loads the stored credential, or joins with the join token when there
-  /// is none.
+  /// Loads the stored credential, uses the pre-provisioned credential without
+  /// touching `runner.json`, or joins with the join token when there is none.
   pub async fn start(config: Config) -> Result<Self> {
     let path = config.state_dir.join(ENROLLMENT);
-    let (enrollment, interval) = match load(&path)? {
-      Some(stored) => {
-        if stored.name != config.name {
-          bail!(
-            "this runner joined as {}, not {}; pass --name {} or delete {} to join again",
-            stored.name,
-            config.name,
-            stored.name,
-            path.display()
-          );
+    let (enrollment, interval, read_only) = if let Some(credential) = config.credential {
+      let Some(control) = config.control.clone() else {
+        bail!("--address is required when starting a runner with a pre-provisioned credential");
+      };
+      let enrollment = Enrollment {
+        control,
+        name: config.name,
+        credential,
+        settings: Settings::default(),
+      };
+      (enrollment, None, true)
+    } else {
+      let (enrollment, interval) = match load(&path)? {
+        Some(stored) => {
+          if stored.name != config.name {
+            bail!(
+              "this runner joined as {}, not {}; pass --name {} or delete {} to join again",
+              stored.name,
+              config.name,
+              stored.name,
+              path.display()
+            );
+          }
+          (stored, None)
         }
-        (stored, None)
-      }
-      None => {
-        let Some(join_token) = &config.join_token else {
-          bail!("this runner has not joined yet: give it a join token with --join-token-env or --join-token-file");
-        };
-        let Some(control) = &config.control else {
-          bail!("this runner has not joined yet: give it the control plane's endpoint with --join");
-        };
-        join(&config, control, join_token, &path).await?
-      }
+        None => {
+          let Some(join_token) = &config.join_token else {
+            bail!("this runner has not joined yet: give it a join token with --join-token-env or --join-token-file");
+          };
+          let Some(control) = &config.control else {
+            bail!("this runner has not joined yet: give it the control plane's endpoint with --join");
+          };
+          join(&config, control, join_token, &path).await?
+        }
+      };
+      (enrollment, interval, false)
     };
     let control = config.control.clone().unwrap_or_else(|| enrollment.control.clone());
     Ok(Self {
       path,
+      read_only,
       control,
       credential: Arc::new(Mutex::new(enrollment.credential.clone())),
       enrollment,
@@ -204,6 +321,10 @@ impl Runner {
       client: None,
       interval,
       grace: config.grace,
+      activity_hook: config.activity_hook.map(ActivityHook::new),
+      ephemeral: config.ephemeral,
+      #[cfg(unix)]
+      actor: config.actor,
     })
   }
 
@@ -233,10 +354,12 @@ impl Runner {
     self.interval = interval(beat.heartbeat_interval_ms);
     if !beat.credential.is_empty() {
       self.enrollment.credential = beat.credential;
-      store(&self.path, &self.enrollment)?;
+      if !self.read_only {
+        store(&self.path, &self.enrollment)?;
+      }
       self.client = Some(client.with_token(&self.enrollment.credential)?);
       *needy_common::sync::lock(&self.credential) = self.enrollment.credential.clone();
-      tracing::info!("runner {}: stored a rotated credential", self.enrollment.name);
+      tracing::info!("runner {}: accepted a rotated credential", self.enrollment.name);
     }
     Ok(())
   }
@@ -255,7 +378,7 @@ impl Runner {
         // Keep the typed refusal: an invocation holder treats its normal
         // credential revocation as completion, while a persistent runner
         // still reports the enrollment guidance to its operator.
-        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path, self.read_only))),
         Err(e) => {
           tracing::warn!("runner {}: heartbeat: {e:#}", self.enrollment.name);
           // The connection is made again for the next heartbeat.
@@ -288,12 +411,18 @@ fn host() -> RunnerHost {
 
 /// The error a runner ends with once the control plane refuses its
 /// credential.
-fn refusal(path: &Path) -> anyhow::Error {
-  anyhow::anyhow!(
-    "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
-     delete {} and join again with a new join token",
-    path.display()
-  )
+fn refusal(path: &Path, read_only: bool) -> anyhow::Error {
+  if read_only {
+    anyhow::anyhow!(
+      "the control plane refused this runner's credential: the credential was revoked, expired, or removed from static configuration"
+    )
+  } else {
+    anyhow::anyhow!(
+      "the control plane refused this runner's credential: the runner was removed or its credential replaced; \
+       delete {} and join again with a new join token",
+      path.display()
+    )
+  }
 }
 
 /// Whether the control plane refused the runner's credential, rather than
@@ -371,13 +500,19 @@ impl Runner {
       headers: std::collections::BTreeMap::new(),
       bound_run: None,
       ended: Arc::new(AtomicBool::new(false)),
+      ephemeral: self.ephemeral,
+      ephemeral_claimed: Arc::new(AtomicBool::new(false)),
       name: self.name().to_string(),
       path: self.path.clone(),
+      read_only: self.read_only,
       credential: self.credential.clone(),
       service,
       tasks: TaskTracker::new(),
       grace: self.grace,
       orphaned: Mutex::default(),
+      activity_hook: self.activity_hook.clone(),
+      #[cfg(unix)]
+      actor: self.actor.clone(),
     };
     let tasks = dialer.tasks.clone();
     let dialing = {
@@ -407,9 +542,12 @@ struct Dialer {
   /// its processes through an arbitrarily long control disconnection.
   bound_run: Option<String>,
   ended: Arc<AtomicBool>,
+  ephemeral: bool,
+  ephemeral_claimed: Arc<AtomicBool>,
   name: String,
   /// `runner.json`, named when the credential is refused.
   path: PathBuf,
+  read_only: bool,
   credential: Arc<Mutex<String>>,
   service: ExecutorService,
   /// The tasks the control plane asked for; they end with `stop`.
@@ -419,6 +557,9 @@ struct Dialer {
   /// Set while the control plane is unreachable: cancelling it keeps the
   /// processes of runs that the grace period would end.
   orphaned: Mutex<Option<CancellationToken>>,
+  activity_hook: Option<Arc<ActivityHook>>,
+  #[cfg(unix)]
+  actor: Option<ActorConfig>,
 }
 
 impl Dialer {
@@ -446,7 +587,7 @@ impl Dialer {
         self.orphan(&stop);
       }
       match ended {
-        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path))),
+        Err(e) if refused(&e) => return Err(e.context(refusal(&self.path, self.read_only))),
         Err(e) => tracing::warn!("runner {}: control stream: {e:#}", self.name),
         Ok(()) => tracing::info!("runner {}: the control plane ended the control stream", self.name),
       }
@@ -554,6 +695,7 @@ impl Dialer {
           }
           runner_task::Kind::KillProcess(request) => self.service.host.list().iter().any(|p| p.id == request.process_id && p.run_id == *run),
           runner_task::Kind::Exec(_) => true, // The first ExecRequest is checked below.
+          runner_task::Kind::StartActor(_) => false,
         };
         if !allowed {
           let error = ControlError::denied("task does not belong to this client execution invocation");
@@ -573,19 +715,64 @@ impl Dialer {
       let stop = stop.clone();
       match kind {
         runner_task::Kind::Exec(_) => {
+          if let Some(hook) = &self.activity_hook {
+            hook.trigger();
+          }
           // A task stream presents the credential current when it opens.
           let client = self.authenticated(&client)?;
           let name = self.name.clone();
           let bound_run = self.bound_run.clone();
           let ended = self.ended.clone();
+          let hook = self.activity_hook.clone();
           self.tasks.spawn(async move {
-            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id, bound_run, ended)).await {
+            if let Some(Err(e)) = stop.run_until_cancelled(exec(client, service, id, bound_run, ended, hook)).await {
               tracing::warn!("runner {name}: exec task {id}: {e:#}");
             }
           });
         }
+        runner_task::Kind::StartActor(start) => {
+          if self.ephemeral && self.ephemeral_claimed.swap(true, Ordering::SeqCst) {
+            tracing::warn!("runner {}: ignoring StartActor for run {} because --ephemeral already claimed a run", self.name, start.run_id);
+            continue;
+          }
+          #[cfg(unix)]
+          {
+            let Some(actor_config) = self.actor.clone() else {
+              tracing::warn!("runner {}: received StartActor for run {} without actor configuration", self.name, start.run_id);
+              if self.ephemeral {
+                stop.cancel();
+              }
+              continue;
+            };
+            let control = self.control.clone();
+            let credential = needy_common::sync::lock(&self.credential).clone();
+            let name = self.name.clone();
+            let ephemeral = self.ephemeral;
+            let stop = stop.clone();
+            self.tasks.spawn(async move {
+              if let Err(e) =
+                crate::actor_runner::run_actor(&control, &credential, &start.run_id, &start.driver, &actor_config, stop.clone()).await
+              {
+                tracing::warn!("runner {name}: actor for run {}: {e:#}", start.run_id);
+              }
+              if ephemeral {
+                stop.cancel();
+              }
+            });
+          }
+          #[cfg(not(unix))]
+          {
+            tracing::warn!("runner {}: StartActor for run {} requires Unix", self.name, start.run_id);
+            if self.ephemeral {
+              stop.cancel();
+            }
+          }
+        }
         kind => {
+          let is_end_run = matches!(kind, runner_task::Kind::EndRun(_));
           let results = results.clone();
+          let ephemeral = self.ephemeral;
+          let ephemeral_claimed = self.ephemeral_claimed.clone();
           self.tasks.spawn(async move {
             let Some(result) = stop.run_until_cancelled(answer(&service, kind)).await else {
               return;
@@ -599,6 +786,9 @@ impl Dialer {
             // The stream ended; the control plane gave up on the task.
             if results.send(message).await.is_err() {
               tracing::debug!("task {id}: the control stream ended before its result");
+            }
+            if is_end_run && ephemeral && !ephemeral_claimed.load(Ordering::SeqCst) {
+              stop.cancel();
             }
           });
         }
@@ -619,6 +809,7 @@ async fn answer(service: &ExecutorService, kind: runner_task::Kind) -> task_resu
     }
     runner_task::Kind::EndRun(request) => Ok(task_result::Result::EndRun(end_run(service, &request.run_id).await)),
     runner_task::Kind::Exec(_) => Err(tonic::Status::invalid_argument("an exec task has its own stream")),
+    runner_task::Kind::StartActor(_) => Err(tonic::Status::invalid_argument("a start_actor task runs asynchronously")),
   };
   answered.unwrap_or_else(|status| task_result::Result::Error(task_error(&status)))
 }
@@ -680,7 +871,14 @@ fn task_error(status: &tonic::Status) -> TaskError {
 /// responses back up. When the control plane leaves the stream, or the
 /// connection ends, a persistent runner follows ordinary stream semantics;
 /// a private client holder preserves the process under its invocation owner.
-async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Option<String>, ended: Arc<AtomicBool>) -> Result<()> {
+async fn exec(
+  client: Client,
+  service: ExecutorService,
+  id: u64,
+  bound_run: Option<String>,
+  ended: Arc<AtomicBool>,
+  activity_hook: Option<Arc<ActivityHook>>,
+) -> Result<()> {
   let (up, rx) = mpsc::channel::<TaskRequest>(RESULTS);
   let named = TaskRequest {
     payload: Some(task_request::Payload::TaskId(id)),
@@ -700,11 +898,15 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
     let left = left.clone();
     let up = up.clone();
     let host = service.host.clone();
+    let activity_hook = activity_hook.clone();
     async move {
       loop {
         match down.message().await {
           Ok(Some(message)) => {
             if let Some(request) = message.exec {
+              if let Some(hook) = &activity_hook {
+                hook.trigger();
+              }
               if let Some(run) = &bound_run {
                 use needy_api_client::proto::v1::exec_request::Payload;
                 let allowed = match &request.payload {
@@ -787,12 +989,17 @@ async fn exec(client: Client, service: ExecutorService, id: u64, bound_run: Opti
         break;
       };
       let (message, last) = match response {
-        Ok(response) => (
-          TaskRequest {
-            payload: Some(task_request::Payload::Exec(response)),
-          },
-          false,
-        ),
+        Ok(response) => {
+          if let Some(hook) = &activity_hook {
+            hook.trigger();
+          }
+          (
+            TaskRequest {
+              payload: Some(task_request::Payload::Exec(response)),
+            },
+            false,
+          )
+        }
         Err(status) => (error(&status), true),
       };
       if up.send(message).await.is_err() || last {
@@ -822,7 +1029,7 @@ pub async fn serve_with_labels(config: Config, persist_labels: bool) -> Result<(
   let termination = needy_api_server::termination::Termination::listen().context("cannot handle termination signals")?;
   let served = async {
     let mut runner = Runner::start(config).await?;
-    if persist_labels {
+    if persist_labels && !runner.read_only {
       runner.beat().await.context("runner label overrides were not accepted; saved settings are unchanged")?;
       runner.enrollment.settings.labels = runner.labels.clone();
       store(&runner.path, &runner.enrollment)?;
@@ -876,13 +1083,19 @@ pub async fn serve_client_execution(config: ClientExecutionConfig) -> Result<()>
     headers: config.headers.clone(),
     bound_run: Some(config.run),
     ended: Arc::new(AtomicBool::new(false)),
+    ephemeral: false,
+    ephemeral_claimed: Arc::new(AtomicBool::new(false)),
     name: config.holder.clone(),
     path: config.directory.clone(),
+    read_only: true,
     credential: Arc::new(Mutex::new(config.capability.clone())),
     service,
     tasks: TaskTracker::new(),
     grace: DISCONNECT_GRACE,
     orphaned: Mutex::default(),
+    activity_hook: None,
+    #[cfg(unix)]
+    actor: None,
   };
   let tasks = dialer.tasks.clone();
   let heartbeats = async {

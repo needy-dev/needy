@@ -472,6 +472,7 @@ fn build_guest_config(session_id: &str, channels: &driver::Channels, parts: Gues
     },
     route_names: parts.route_names,
     hostname: format!("needy-{session_id}"),
+    machine_id: String::new(),
     uptime_offset_secs: 0,
     mounts: Vec::new(),
     command: parts.command,

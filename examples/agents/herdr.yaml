@@ -1,8 +1,7 @@
-# herdr in an actor, built from needy's agent features (`builtin:codex`,
-# `builtin:pi`, `builtin:opencode`, `builtin:herdr`): a terminal workspace
-# whose panes run the other agents. The panes' own shells stay in the actor,
-# where the agents are; the shells an agent starts, and so every command it
-# runs, go to the `build` executor, which holds the workspace.
+# herdr in an actor, built from the OCI features in `ghcr.io/needy-dev/features`:
+# a terminal workspace whose panes run the other agents. The panes' own shells
+# stay in the actor, where the agents are; the shells an agent starts, and so
+# every command it runs, go to the `build` executor, which holds the workspace.
 #
 # Start herdr directly (needy builds and caches each feature layer once):
 #   needy run create -it --profile examples/agents/herdr.yaml
@@ -19,10 +18,10 @@ actor:
   driver: linux-firecracker
   image:
     layers:
-      - feature: builtin:codex
-      - feature: builtin:pi
-      - feature: builtin:opencode
-      - feature: builtin:herdr
+      - feature: ghcr.io/needy-dev/features/codex:1
+      - feature: ghcr.io/needy-dev/features/pi:1
+      - feature: ghcr.io/needy-dev/features/opencode:1
+      - feature: ghcr.io/needy-dev/features/herdr:1
   workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command: [herdr]
   network:

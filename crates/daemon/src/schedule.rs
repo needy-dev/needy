@@ -277,48 +277,42 @@ pub(crate) fn placement(selector: Option<&RunnerSelector>, need: Need, runners: 
 }
 
 impl Daemon {
-  /// Every runner that was not removed, and whether it is connected now.
+  /// Every runner that was not removed or expired (both `state.db` and
+  /// statically configured), and whether it is connected now.
   pub(crate) async fn candidates(&self) -> anyhow::Result<Vec<Candidate>> {
+    self.static_runners.reload(&self.links);
+    let now = needy_common::time::now_ms();
     let runners = self.state.runners().await.context("cannot read the runner registry")?;
-    let mut shared = Vec::new();
+    let mut merged: BTreeMap<String, Candidate> = BTreeMap::new();
     for runner in runners {
-      if self.state.client_execution(&runner.name).await?.is_none() {
-        shared.push(runner);
+      if runner.removed_ms.is_some() || runner.expires_ms.is_some_and(|exp| now >= exp) {
+        continue;
       }
-    }
-    Ok(
-      shared
-        .into_iter()
-        .filter(|runner| runner.removed_ms.is_none())
-        .map(|runner| Candidate {
+      if self.state.client_execution(&runner.name).await?.is_none() {
+        let candidate = Candidate {
           connected: self.links.get(&runner.name).is_some(),
           name: runner.name,
           capabilities: runner.capabilities,
           labels: runner.labels,
-        })
-        .collect(),
-    )
+        };
+        merged.insert(candidate.name.clone(), candidate);
+      }
+    }
+    for runner in self.static_runners.list() {
+      let candidate = Candidate {
+        connected: self.links.get(&runner.name).is_some(),
+        name: runner.name,
+        capabilities: runner.capabilities,
+        labels: runner.labels,
+      };
+      merged.insert(candidate.name.clone(), candidate);
+    }
+    Ok(merged.into_values().collect())
   }
 
   /// Whether `runner` runs on this host, as the operator said.
   pub(crate) fn is_local(&self, runner: &str) -> bool {
     self.config.local_runner.as_deref() == Some(runner)
-  }
-
-  /// Why an actor cannot run at `placement`, if it cannot: an actor runs on
-  /// the control host, reached directly or as its own runner.
-  // TODO(runner-actor): an actor on another runner needs the actor role
-  // over dial-out (the VM's lifecycle and its guest channel relayed through
-  // the runner); see `Config::local_runner`.
-  pub(crate) fn actor_refusal(&self, placement: &Placement) -> Option<String> {
-    match placement {
-      Placement::ControlHost => None,
-      Placement::Runner(name) if self.is_local(name) => None,
-      Placement::Runner(name) => Some(format!(
-        "runner {name} cannot host actors yet: an actor runs on the control host, or on its own runner \
-         (`needy daemon serve --local-runner NAME`)"
-      )),
-    }
   }
 
   /// Where the pool creates an executor whose driver is `driver` at

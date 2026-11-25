@@ -2115,7 +2115,7 @@ fn format_build_failure_collapses_carriage_returns_and_bounds_message_size() {
 }
 
 #[tokio::test]
-async fn resolve_features_resolves_builtin_agent_and_custom_root_sshfs_without_network() {
+async fn resolve_features_resolves_custom_root_builtin_sshfs_without_network() {
   use needy_core::image::{BUILTIN_SSHFS, Input};
   use needy_core_actor::image::feature::FeatureStore;
 
@@ -2127,8 +2127,7 @@ async fn resolve_features_resolves_builtin_agent_and_custom_root_sshfs_without_n
     r#"
 root: debian:bookworm-slim
 layers:
-  - feature: builtin:opencode
-  - feature: builtin:pi
+  - run: echo ready
 "#,
     PathBuf::new(),
   ))
@@ -2136,25 +2135,18 @@ layers:
 
   let resolved = super::resolve_features(&store, &def, &std::collections::BTreeMap::new()).await.unwrap();
   assert!(resolved.by_ref.contains_key(BUILTIN_SSHFS), "custom root must resolve builtin:sshfs");
-  assert!(resolved.by_ref.contains_key("builtin:opencode"));
-  assert!(resolved.by_ref.contains_key("builtin:pi"));
-  assert!(resolved.resolved_digests.contains_key("builtin:opencode"));
+  assert!(resolved.resolved_digests.contains_key(BUILTIN_SSHFS));
 
   let root = needy_core::image::Digest::of(b"debian:bookworm-slim");
   let user = needy_config::profile::User::default();
   let plan = needy_core::image::plan(&def, &root, &user, None, &resolved.by_ref).unwrap();
-  assert_eq!(plan.steps.len(), 3);
+  assert_eq!(plan.steps.len(), 2);
   assert!(matches!(&plan.steps[0].input, Input::Feature { reference, .. } if reference == BUILTIN_SSHFS));
-  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "builtin:opencode"));
-  assert!(matches!(&plan.steps[2].input, Input::Feature { reference, .. } if reference == "builtin:pi"));
-
-  let sync_paths: Vec<&str> = plan.sync_files.iter().map(|s| s.path.as_str()).collect();
-  assert!(sync_paths.contains(&"/home/agent/.local/share/opencode"), "{sync_paths:?}");
-  assert!(sync_paths.contains(&"/home/agent/.pi/agent"), "{sync_paths:?}");
+  assert!(matches!(&plan.steps[1].input, Input::Run(cmd) if cmd == "echo ready"));
 }
 
 #[tokio::test]
-async fn resolve_features_resolves_builtin_codex_python_dep_and_hits_tag_cache() {
+async fn resolve_features_resolves_feature_dependency_and_hits_tag_cache() {
   use needy_core::image::Input;
   use needy_core_actor::image::feature::FeatureStore;
 
@@ -2170,7 +2162,21 @@ async fn resolve_features_resolves_builtin_codex_python_dep_and_hits_tag_cache()
     }"#,
     "#!/bin/sh\necho installing python\n",
   );
-  let (base_url, requests) = spawn_feature_registry(vec![python]).await;
+  let tool = make_feature_artifact(
+    "needy-dev/features/example-tool",
+    "1",
+    r#"{
+      "id": "example-tool",
+      "version": "1.0.0",
+      "dependsOn": {
+        "ghcr.io/devcontainers/features/python:1": {
+          "installTools": false
+        }
+      }
+    }"#,
+    "#!/bin/sh\necho installing example-tool\n",
+  );
+  let (base_url, requests) = spawn_feature_registry(vec![python, tool]).await;
 
   let cache = tempfile::tempdir().unwrap();
   let store = FeatureStore::new(cache.path()).unwrap().without_proxy().unwrap().with_base_url(&base_url);
@@ -2178,15 +2184,15 @@ async fn resolve_features_resolves_builtin_codex_python_dep_and_hits_tag_cache()
   let def: needy_config::image::Definition = needy_config::image::load(&needy_config::Source::text(
     r#"
 layers:
-  - feature: builtin:codex
+  - feature: ghcr.io/needy-dev/features/example-tool:1
 "#,
     PathBuf::new(),
   ))
   .unwrap();
 
-  // First resolve fetches `ghcr.io/devcontainers/features/python:1` and caches its tag.
+  // First resolve fetches the feature and its `python:1` dependency and caches both tags.
   let resolved = super::resolve_features(&store, &def, &std::collections::BTreeMap::new()).await.unwrap();
-  assert!(resolved.by_ref.contains_key("builtin:codex"));
+  assert!(resolved.by_ref.contains_key("ghcr.io/needy-dev/features/example-tool:1"));
   assert!(resolved.by_ref.contains_key("ghcr.io/devcontainers/features/python:1"));
 
   let root = needy_core::image::Digest::of(b"ubuntu:24.04");
@@ -2199,10 +2205,10 @@ layers:
       Input::Feature { reference, env, .. }
         if reference == "ghcr.io/devcontainers/features/python:1" && env.get("INSTALLTOOLS").map(String::as_str) == Some("false")
     ),
-    "expected python:1 with installTools=false before codex, got {:?}",
+    "expected python:1 with installTools=false before example-tool, got {:?}",
     plan.steps[0].input
   );
-  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "builtin:codex"));
+  assert!(matches!(&plan.steps[1].input, Input::Feature { reference, .. } if reference == "ghcr.io/needy-dev/features/example-tool:1"));
 
   // Second resolve under default `if-not-present` hits the local tag cache with zero HTTP requests.
   requests.store(0, std::sync::atomic::Ordering::SeqCst);
@@ -2212,19 +2218,19 @@ layers:
 }
 
 #[test]
-fn migrated_example_agent_profiles_load_validate_and_use_builtin_agent_features() {
+fn example_agent_profiles_load_validate_and_use_oci_agent_features() {
   let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().parent().unwrap();
   let cases = [
-    ("examples/agents/codex.yaml", vec!["builtin:codex"]),
-    ("examples/agents/pi.yaml", vec!["builtin:pi"]),
-    ("examples/agents/opencode.yaml", vec!["builtin:opencode"]),
+    ("examples/agents/codex.yaml", vec!["ghcr.io/needy-dev/features/codex:1"]),
+    ("examples/agents/pi.yaml", vec!["ghcr.io/needy-dev/features/pi:1"]),
+    ("examples/agents/opencode.yaml", vec!["ghcr.io/needy-dev/features/opencode:1"]),
     (
       "examples/agents/herdr.yaml",
       vec![
-        "builtin:codex",
-        "builtin:pi",
-        "builtin:opencode",
-        "builtin:herdr",
+        "ghcr.io/needy-dev/features/codex:1",
+        "ghcr.io/needy-dev/features/pi:1",
+        "ghcr.io/needy-dev/features/opencode:1",
+        "ghcr.io/needy-dev/features/herdr:1",
       ],
     ),
   ];

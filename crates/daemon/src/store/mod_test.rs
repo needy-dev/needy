@@ -109,9 +109,9 @@ async fn joining_returns_a_credential_that_authenticates_the_runner() {
   assert_eq!(runner.name, "mac");
   assert_eq!(runner.capabilities, native());
   assert_eq!(runner.last_seen_ms, NOW + 5);
-  assert_eq!(store.authenticate(credential.expose()).await.unwrap().as_deref(), Some("mac"));
-  assert_eq!(store.authenticate("needy-runner.mac.0000").await.unwrap(), None);
-  assert_eq!(store.authenticate(token.expose()).await.unwrap(), None, "a join token is no credential");
+  assert_eq!(store.authenticate(credential.expose(), NOW + 5).await.unwrap().as_deref(), Some("mac"));
+  assert_eq!(store.authenticate("needy-runner.mac.0000", NOW + 5).await.unwrap(), None);
+  assert_eq!(store.authenticate(token.expose(), NOW + 5).await.unwrap(), None, "a join token is no credential");
 }
 
 #[tokio::test]
@@ -248,14 +248,18 @@ async fn rotation_hands_out_a_credential_at_the_next_heartbeat_and_drops_the_old
   let (store, _dir) = store().await;
   let old = joined(&store, "mac").await;
 
-  store.rotate("mac").await.unwrap();
+  store.rotate("mac", NOW).await.unwrap();
   assert!(store.runners().await.unwrap()[0].rotating);
   let new = store.heartbeat("mac", executor(), NOW + 1).await.unwrap().expect("a new credential");
 
   assert_ne!(new.expose(), old.expose());
-  assert_eq!(store.authenticate(old.expose()).await.unwrap().as_deref(), Some("mac"), "the old credential works until the new one is used");
-  assert_eq!(store.authenticate(new.expose()).await.unwrap().as_deref(), Some("mac"));
-  assert_eq!(store.authenticate(old.expose()).await.unwrap(), None, "the old credential is refused once the new one was used");
+  assert_eq!(
+    store.authenticate(old.expose(), NOW + 1).await.unwrap().as_deref(),
+    Some("mac"),
+    "the old credential works until the new one is used"
+  );
+  assert_eq!(store.authenticate(new.expose(), NOW + 1).await.unwrap().as_deref(), Some("mac"));
+  assert_eq!(store.authenticate(old.expose(), NOW + 1).await.unwrap(), None, "the old credential is refused once the new one was used");
   assert!(!store.runners().await.unwrap()[0].rotating);
   assert!(store.heartbeat("mac", executor(), NOW + 2).await.unwrap().is_none());
 }
@@ -264,14 +268,14 @@ async fn rotation_hands_out_a_credential_at_the_next_heartbeat_and_drops_the_old
 async fn a_rotated_credential_that_was_lost_is_replaced_at_the_next_heartbeat() {
   let (store, _dir) = store().await;
   let old = joined(&store, "mac").await;
-  store.rotate("mac").await.unwrap();
+  store.rotate("mac", NOW).await.unwrap();
   let lost = store.heartbeat("mac", executor(), NOW + 1).await.unwrap().unwrap();
 
   let again = store.heartbeat("mac", executor(), NOW + 2).await.unwrap().expect("another credential");
 
-  assert_eq!(store.authenticate(lost.expose()).await.unwrap(), None);
-  assert_eq!(store.authenticate(again.expose()).await.unwrap().as_deref(), Some("mac"));
-  assert_eq!(store.authenticate(old.expose()).await.unwrap(), None);
+  assert_eq!(store.authenticate(lost.expose(), NOW + 2).await.unwrap(), None);
+  assert_eq!(store.authenticate(again.expose(), NOW + 2).await.unwrap().as_deref(), Some("mac"));
+  assert_eq!(store.authenticate(old.expose(), NOW + 2).await.unwrap(), None);
 }
 
 #[tokio::test]
@@ -281,14 +285,38 @@ async fn a_removed_runner_is_refused_listed_as_removed_and_may_join_again() {
 
   store.remove("mac", NOW + 7).await.unwrap();
 
-  assert_eq!(store.authenticate(credential.expose()).await.unwrap(), None);
+  assert_eq!(store.authenticate(credential.expose(), NOW + 7).await.unwrap(), None);
   assert_eq!(store.runners().await.unwrap()[0].removed_ms, Some(NOW + 7));
-  assert_eq!(store.rotate("mac").await.unwrap_err().to_string(), "no runner mac");
+  assert_eq!(store.rotate("mac", NOW + 7).await.unwrap_err().to_string(), "no runner mac");
   assert_eq!(store.remove("mac", NOW + 8).await.unwrap_err().to_string(), "runner mac is removed; it cannot become removed");
   assert_eq!(store.runners().await.unwrap()[0].removed_ms, Some(NOW + 7), "the first removal stays");
   let again = joined(&store, "mac").await;
-  assert_eq!(store.authenticate(again.expose()).await.unwrap().as_deref(), Some("mac"));
+  assert_eq!(store.authenticate(again.expose(), NOW + 8).await.unwrap().as_deref(), Some("mac"));
   assert_eq!(store.runners().await.unwrap()[0].removed_ms, None);
+}
+
+#[tokio::test]
+async fn a_minted_runner_credential_enforces_ttl_and_can_be_reminted_after_expiry() {
+  let (store, _dir) = store().await;
+  let scope = Scope {
+    roles: [RunnerRole::Executor].into(),
+    labels: [("pool".into(), "ephemeral".into())].into(),
+  };
+
+  let err = store.mint_runner("temp", 0, scope.clone(), NOW).await.unwrap_err();
+  assert!(err.to_string().contains("positive time to live"), "{err}");
+
+  let (runner, cred) = store.mint_runner("temp", 5_000, scope.clone(), NOW).await.unwrap();
+  assert_eq!(runner.expires_ms, Some(NOW + 5_000));
+  assert_eq!(store.authenticate(cred.expose(), NOW + 4_999).await.unwrap().as_deref(), Some("temp"));
+  assert_eq!(store.authenticate(cred.expose(), NOW + 5_000).await.unwrap(), None);
+  assert!(matches!(store.heartbeat("temp", executor(), NOW + 5_000).await, Err(Error::RunnerExpired(_))));
+  assert_eq!(store.expired_runners(NOW + 5_000).await.unwrap(), vec!["temp"]);
+
+  // Once expired, the same name may be minted again.
+  let (renewed, new_cred) = store.mint_runner("temp", 10_000, scope, NOW + 5_000).await.unwrap();
+  assert_eq!(renewed.expires_ms, Some(NOW + 15_000));
+  assert_eq!(store.authenticate(new_cred.expose(), NOW + 6_000).await.unwrap().as_deref(), Some("temp"));
 }
 
 #[tokio::test]

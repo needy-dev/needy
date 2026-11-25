@@ -106,6 +106,10 @@ pub struct CompiledRecipe {
   /// `images/Dockerfile` as build arguments of its `kernel` stage.
   pub kernel_build_env: BTreeMap<String, String>,
   pub hostname: Option<String>,
+  /// Linux `/etc/machine-id` (32 lowercase hex digits), derived from the seed
+  /// unless overridden by `recipe.os.machine_id`.
+  #[serde(default)]
+  pub machine_id: Option<String>,
   /// The `{time}` it was compiled with ([`PerRun::time`]).
   pub time: String,
   pub uptime_offset_secs: i64,
@@ -213,6 +217,16 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, run: &PerRun) -> CompiledRecipe
     hypervisor: recipe.cpu.hypervisor.map(|h| h == Hypervisor::Visible),
     threads_per_core: recipe.cpu.topology.as_ref().map_or(1, |t| t.threads_per_core.max(1)),
   };
+  let machine_id = match &recipe.os.machine_id {
+    Some(template) => {
+      let value = fill(template.as_str()).to_ascii_lowercase();
+      if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+        findings.push(Finding::warning(format!("os.machine_id {value:?} is not 32 hexadecimal characters")));
+      }
+      Some(value)
+    }
+    None => Some(needy_common::seed::machine_id(run.seed)),
+  };
   CompiledRecipe {
     vcpus,
     mem_mib,
@@ -221,6 +235,7 @@ pub fn compile(recipe: &Recipe, host: &HostInfo, run: &PerRun) -> CompiledRecipe
     cpu_template,
     kernel_build_env,
     hostname: recipe.os.hostname.as_ref().map(|t| fill(t.as_str())),
+    machine_id,
     time: run.time.clone(),
     uptime_offset_secs,
     sensors,

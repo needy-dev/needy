@@ -116,3 +116,55 @@ fn an_unknown_provider_from_the_wire_is_refused() {
 
   assert_eq!(capabilities(Some(reported)).unwrap_err().to_string(), "unknown executor driver 42");
 }
+
+#[test]
+fn runner_serve_accepts_k8s_credential_and_activity_hook_flags() {
+  use clap::Parser as _;
+
+  #[derive(clap::Parser)]
+  struct Wrapper {
+    #[command(flatten)]
+    args: Args,
+  }
+
+  let parsed = Wrapper::try_parse_from([
+    "needy",
+    "serve",
+    "--address",
+    "tcp://192.0.2.10:7443",
+    "--credential-env",
+    "NEEDY_RUNNER_CRED",
+    "--activity-hook",
+    "touch /tmp/alive",
+    "--activity-hook-interval",
+    "30s",
+  ])
+  .unwrap();
+
+  match parsed.args.command {
+    Command::Serve(serve) => {
+      assert_eq!(serve.address.as_deref(), Some("tcp://192.0.2.10:7443"));
+      assert_eq!(serve.name, None);
+      assert_eq!(serve.credential_env.as_deref(), Some("NEEDY_RUNNER_CRED"));
+      assert_eq!(serve.credential_file, None);
+      assert_eq!(serve.activity_hook.as_deref(), Some("touch /tmp/alive"));
+      assert_eq!(serve.activity_hook_interval, Some(Duration::from_secs(30)));
+    }
+    _ => panic!("expected serve subcommand"),
+  }
+
+  // --credential-env and --credential-file conflict.
+  assert!(
+    Wrapper::try_parse_from([
+      "needy",
+      "serve",
+      "--address",
+      "tcp://192.0.2.10:7443",
+      "--credential-env",
+      "A",
+      "--credential-file",
+      "/tmp/cred",
+    ])
+    .is_err()
+  );
+}

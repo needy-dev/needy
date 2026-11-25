@@ -163,3 +163,201 @@ async fn the_control_token_is_still_required_for_operators() {
 
   assert_eq!(status.code(), Code::Unauthenticated);
 }
+
+#[tokio::test]
+async fn static_runners_hot_reload_add_remove_and_forbid_rotate_or_rm() {
+  use needy_api_client::proto::v1::RevokeRunnerCredentialRequest;
+
+  let dir = tempfile::tempdir().unwrap();
+  let runners_file = dir.path().join("runners.yaml");
+  let cred_a = "needy-runner.static-a.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  let cred_b = "needy-runner.static-b.fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+  std::fs::write(
+    &runners_file,
+    format!("runners:\n  - name: static-a\n    credential: {cred_a}\n    roles: [executor]\n    labels:\n      pool: k8s\n"),
+  )
+  .unwrap();
+
+  let started = testing::daemon_with(|config| {
+    config.heartbeat_interval = Duration::from_secs(15);
+    config.runners_file = Some(runners_file.clone());
+  })
+  .await;
+  let served = testing::serve(started, Some(CONTROL_TOKEN)).await;
+
+  // Static runner authenticates, sends heartbeat, and appears in ListRunners and candidates.
+  as_runner(&served, cred_a).runners().heartbeat(heartbeat()).await.unwrap();
+  let listed = operator(&served).runners().list_runners(ListRunnersRequest {}).await.unwrap().into_inner().runners;
+  assert_eq!(listed.len(), 1);
+  assert_eq!(listed[0].name, "static-a");
+  assert!(listed[0].static_config);
+  assert_eq!(listed[0].status(), RunnerStatus::Online);
+  assert_eq!(listed[0].labels.get("pool").map(String::as_str), Some("k8s"));
+
+  // Open a control stream for static-a.
+  let (_tx, rx) = tokio::sync::mpsc::channel(1);
+  let mut control =
+    as_runner(&served, cred_a).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+  assert!(served.daemon().links.get("static-a").is_some());
+  let candidates = served.daemon().candidates().await.unwrap();
+  assert!(candidates.iter().any(|c| c.name == "static-a" && c.connected));
+
+  // Rotate, Remove, and Revoke are refused for static runners.
+  let rot = operator(&served)
+    .runners()
+    .rotate_runner(RotateRunnerRequest {
+      name: "static-a".into(),
+    })
+    .await
+    .unwrap_err();
+  assert_eq!(rot.code(), Code::FailedPrecondition);
+  let rm = operator(&served)
+    .runners()
+    .remove_runner(RemoveRunnerRequest {
+      name: "static-a".into(),
+    })
+    .await
+    .unwrap_err();
+  assert_eq!(rm.code(), Code::FailedPrecondition);
+  let rev = operator(&served)
+    .runners()
+    .revoke_runner_credential(RevokeRunnerCredentialRequest {
+      name: "static-a".into(),
+    })
+    .await
+    .unwrap_err();
+  assert_eq!(rev.code(), Code::FailedPrecondition);
+
+  // Hot-reload: replace static-a with static-b (atomic rename ensures inode+mtime change).
+  let tmp = dir.path().join("runners.yaml.tmp");
+  std::fs::write(&tmp, format!("runners:\n  - name: static-b\n    credential: {cred_b}\n    roles: [executor]\n")).unwrap();
+  std::fs::rename(&tmp, &runners_file).unwrap();
+
+  // Trigger reload via an RPC (or background tick): static-b works, static-a is refused and its control stream closes.
+  as_runner(&served, cred_b).runners().heartbeat(heartbeat()).await.unwrap();
+  let refused = as_runner(&served, cred_a).runners().heartbeat(heartbeat()).await.unwrap_err();
+  assert_eq!(refused.code(), Code::Unauthenticated);
+  assert!(served.daemon().links.get("static-a").is_none());
+  let ended = tokio::time::timeout(Duration::from_secs(2), control.message()).await.expect("control stream closes");
+  assert!(matches!(ended, Ok(None) | Err(_)), "expected closed control stream, got {ended:?}");
+}
+
+#[tokio::test]
+async fn minted_runner_credential_disconnects_on_ttl_expiry_and_explicit_revoke() {
+  use needy_api_client::proto::v1::{MintRunnerCredentialRequest, RevokeRunnerCredentialRequest};
+
+  let served = served(Duration::from_secs(15)).await;
+
+  // 1. Short TTL expiry automatically closes control stream and rejects new requests.
+  let minted = operator(&served)
+    .runners()
+    .mint_runner_credential(MintRunnerCredentialRequest {
+      name: "ephemeral-ttl".into(),
+      ttl_ms: 200,
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  assert!(minted.expires_at_ms > 0);
+  as_runner(&served, &minted.credential).runners().heartbeat(heartbeat()).await.unwrap();
+  let (_tx, rx) = tokio::sync::mpsc::channel(1);
+  let mut control =
+    as_runner(&served, &minted.credential).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+  assert!(served.daemon().links.get("ephemeral-ttl").is_some());
+
+  // Wait for TTL expiry to disconnect the control stream.
+  let ended = tokio::time::timeout(Duration::from_secs(3), control.message()).await.expect("control stream closes on TTL expiry");
+  assert!(matches!(ended, Ok(None) | Err(_)), "expected closed stream, got {ended:?}");
+  let refused = as_runner(&served, &minted.credential).runners().heartbeat(heartbeat()).await.unwrap_err();
+  assert_eq!(refused.code(), Code::Unauthenticated);
+
+  // 2. Explicit RevokeRunnerCredential immediately closes control stream and rejects auth.
+  let minted2 = operator(&served)
+    .runners()
+    .mint_runner_credential(MintRunnerCredentialRequest {
+      name: "ephemeral-revoke".into(),
+      ttl_ms: 60_000,
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+  as_runner(&served, &minted2.credential).runners().heartbeat(heartbeat()).await.unwrap();
+  let (_tx2, rx2) = tokio::sync::mpsc::channel(1);
+  let mut control2 =
+    as_runner(&served, &minted2.credential).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx2)).await.unwrap().into_inner();
+  assert!(served.daemon().links.get("ephemeral-revoke").is_some());
+
+  operator(&served)
+    .runners()
+    .revoke_runner_credential(RevokeRunnerCredentialRequest {
+      name: "ephemeral-revoke".into(),
+    })
+    .await
+    .unwrap();
+  let ended2 = tokio::time::timeout(Duration::from_secs(2), control2.message()).await.expect("control stream closes on revoke");
+  assert!(matches!(ended2, Ok(None) | Err(_)), "expected closed stream, got {ended2:?}");
+  let refused2 = as_runner(&served, &minted2.credential).runners().heartbeat(heartbeat()).await.unwrap_err();
+  assert_eq!(refused2.code(), Code::Unauthenticated);
+}
+
+// ROOT CAUSE:
+//
+// `schedule_expiry` spawned a timer that closed `links.close(&name)` without
+// re-checking `state.check_active`. If a short-TTL runner was revoked and
+// re-minted under the same name with a longer TTL, the stale timer woke up and
+// killed the new runner's control stream.
+//
+// Before the fix, the newly minted runner was disconnected when the old TTL
+// elapsed. The fix verifies the runner is not static and is currently expired
+// in `state.db` before closing its link.
+#[tokio::test]
+async fn stale_expiry_timer_does_not_disconnect_reminted_runner_with_same_name() {
+  use needy_api_client::proto::v1::{MintRunnerCredentialRequest, RevokeRunnerCredentialRequest};
+
+  let served = served(Duration::from_secs(15)).await;
+
+  // Mint with a short 200ms TTL, then immediately revoke and re-mint with 60s TTL.
+  let _first = operator(&served)
+    .runners()
+    .mint_runner_credential(MintRunnerCredentialRequest {
+      name: "reused-ephemeral".into(),
+      ttl_ms: 200,
+      ..Default::default()
+    })
+    .await
+    .unwrap();
+  operator(&served)
+    .runners()
+    .revoke_runner_credential(RevokeRunnerCredentialRequest {
+      name: "reused-ephemeral".into(),
+    })
+    .await
+    .unwrap();
+  let second = operator(&served)
+    .runners()
+    .mint_runner_credential(MintRunnerCredentialRequest {
+      name: "reused-ephemeral".into(),
+      ttl_ms: 60_000,
+      ..Default::default()
+    })
+    .await
+    .unwrap()
+    .into_inner();
+
+  as_runner(&served, &second.credential).runners().heartbeat(heartbeat()).await.unwrap();
+  let (_tx, rx) = tokio::sync::mpsc::channel(1);
+  let _control =
+    as_runner(&served, &second.credential).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+  assert!(served.daemon().links.get("reused-ephemeral").is_some());
+
+  // Wait well past the first credential's 200ms expiry.
+  tokio::time::sleep(Duration::from_millis(400)).await;
+
+  assert!(
+    served.daemon().links.get("reused-ephemeral").is_some(),
+    "stale expiry timer must not close the re-minted runner's control stream"
+  );
+  as_runner(&served, &second.credential).runners().heartbeat(heartbeat()).await.unwrap();
+}

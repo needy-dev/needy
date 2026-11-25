@@ -235,9 +235,8 @@ fn an_image_file_extends_no_built_in() {
 #[test]
 fn untagged_preserves_builtin_feature_references() {
   assert_eq!(untagged("builtin:sshfs"), "builtin:sshfs");
-  assert_eq!(untagged("builtin:codex"), "builtin:codex");
-  assert_eq!(untagged("builtin:pi"), "builtin:pi");
-  assert_eq!(untagged("builtin:codex@sha256:abc"), "builtin:codex");
+  assert_eq!(untagged("builtin:example"), "builtin:example");
+  assert_eq!(untagged("builtin:sshfs@sha256:abc"), "builtin:sshfs");
 }
 
 #[test]

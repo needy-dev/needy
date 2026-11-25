@@ -51,18 +51,23 @@ use tonic::{Request, Status};
 pub use error::{Error, Kind, Result};
 pub use needy_api_proto as proto;
 
-/// Adds configured request headers and `authorization: Bearer <token>` to every
-/// request.
+/// Adds configured request headers, `authorization: Bearer <token>`, and
+/// optional `x-needy-run-id: <run_id>` to every request when set.
 #[derive(Clone, Default)]
 pub struct BearerAuth {
   token: Option<AsciiMetadataValue>,
   headers: Vec<(MetadataKey<Ascii>, AsciiMetadataValue)>,
+  run_id: Option<AsciiMetadataValue>,
 }
 
 impl std::fmt::Debug for BearerAuth {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     let names: Vec<_> = self.headers.iter().map(|(key, _)| key.as_str()).collect();
-    f.debug_struct("BearerAuth").field("token", &self.token.as_ref().map(|_| "<redacted>")).field("headers", &names).finish()
+    f.debug_struct("BearerAuth")
+      .field("token", &self.token.as_ref().map(|_| "<redacted>"))
+      .field("headers", &names)
+      .field("run_id", &self.run_id)
+      .finish()
   }
 }
 
@@ -73,6 +78,9 @@ impl Interceptor for BearerAuth {
     }
     if let Some(value) = &self.token {
       request.metadata_mut().insert("authorization", value.clone());
+    }
+    if let Some(value) = &self.run_id {
+      request.metadata_mut().insert("x-needy-run-id", value.clone());
     }
     Ok(request)
   }
@@ -173,6 +181,11 @@ impl Client {
     Self::from(channel)
   }
 
+  /// Returns a clone of the underlying HTTP/2 gRPC channel.
+  pub fn channel(&self) -> Channel {
+    self.channel.clone()
+  }
+
   pub fn with_token(mut self, token: &str) -> Result<Self> {
     let value = MetadataValue::try_from(format!("Bearer {token}")).map_err(|_| Error::InvalidToken)?;
     self.auth.token = Some(value);
@@ -223,6 +236,14 @@ impl Client {
       parsed.push((key, value));
     }
     self.auth.headers = parsed;
+    Ok(self)
+  }
+
+  /// Attaches `x-needy-run-id: <run_id>` to every request, used by an actor
+  /// runner to invoke `ACTOR_METHODS` on behalf of a bound run.
+  pub fn with_run_id(mut self, run_id: &str) -> Result<Self> {
+    let value = MetadataValue::try_from(run_id).map_err(|_| Error::InvalidToken)?;
+    self.auth.run_id = Some(value);
     Ok(self)
   }
 

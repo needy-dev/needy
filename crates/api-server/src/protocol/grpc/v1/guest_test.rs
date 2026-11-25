@@ -265,3 +265,24 @@ async fn the_control_socket_serves_no_control_stream() {
 
   assert_eq!(status.code(), Code::PermissionDenied);
 }
+
+#[tokio::test]
+async fn an_authorized_actor_runner_reaches_guest_service_on_operator_listener() {
+  let served = serve(Caller::Operator).await;
+  let actor_client = served.client.clone().with_token(crate::testing::MAC_CREDENTIAL).unwrap().with_run_id("s-actor").unwrap();
+
+  let config = actor_client.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+  assert_eq!(config.run_id, "s-actor");
+
+  actor_client
+    .guest()
+    .report_exit(ReportExitRequest {
+      code: Some(0),
+      signal: String::new(),
+    })
+    .await
+    .unwrap();
+  let exits = served.fake.exits.lock().unwrap();
+  assert_eq!(exits.len(), 1);
+  assert_eq!(exits[0].0, "s-actor");
+}

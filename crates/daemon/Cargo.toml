@@ -34,10 +34,14 @@ sysinfo.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 http.workspace = true
+hyper = { workspace = true, features = ["http2"] }
+hyper-util = { workspace = true, features = ["http2"] }
+tempfile.workspace = true
 tokio.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
+tower.workspace = true
 uuid.workspace = true
 
 [target.'cfg(unix)'.dependencies]

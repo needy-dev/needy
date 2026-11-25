@@ -324,5 +324,5 @@ fn resolve_target_supports_builtin_profiles() {
   let target = resolve_target(None, Some(Path::new("builtin:opencode")), None, &ctx).unwrap();
   assert_eq!(target.image_name, "builtin:opencode");
   assert!(target.lockfile.ends_with("locks/builtin-opencode.lock"), "{}", target.lockfile.display());
-  assert!(target.image_yaml.contains("builtin:opencode"), "{}", target.image_yaml);
+  assert!(target.image_yaml.contains("ghcr.io/needy-dev/features/opencode:1"), "{}", target.image_yaml);
 }

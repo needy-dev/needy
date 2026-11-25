@@ -40,6 +40,12 @@ service RunnerService {
   rpc RotateRunner(RotateRunnerRequest) returns (RotateRunnerResponse);
   // Revoke a runner's credentials. It stays listed as removed.
   rpc RemoveRunner(RemoveRunnerRequest) returns (RemoveRunnerResponse);
+  // Mint a short-lived, TTL-enforced runner credential directly without a
+  // join token. The credential is returned once.
+  rpc MintRunnerCredential(MintRunnerCredentialRequest) returns (MintRunnerCredentialResponse);
+  // Revoke a runner's credential immediately and close its active control
+  // stream.
+  rpc RevokeRunnerCredential(RevokeRunnerCredentialRequest) returns (RevokeRunnerCredentialResponse);
   // A runner's control stream, open while the runner is connected: the
   // control plane sends tasks, the runner the results of the tasks that
   // take one reply. A runner that connects again replaces its earlier
@@ -242,6 +248,11 @@ message Runner {
   // Its machine as its last heartbeat to this control plane process
   // reported it; unset until one did.
   RunnerHost host = 10;
+  // When a short-lived credential expires, in Unix milliseconds; unset for
+  // non-expiring runners.
+  optional int64 expires_at_ms = 11;
+  // Loaded from a static runners file rather than enrolled in state.db.
+  bool static_config = 12;
 }
 
 message ListRunnersRequest {}
@@ -261,6 +272,32 @@ message RemoveRunnerRequest {
 }
 
 message RemoveRunnerResponse {}
+
+message MintRunnerCredentialRequest {
+  // A DNS label: lowercase letters, digits and '-'.
+  string name = 1;
+  // Required, positive duration until the credential expires.
+  int64 ttl_ms = 2;
+  // Roles the runner is allowed to declare; empty allows every role.
+  repeated RunnerRole roles = 3;
+  // Labels applied to the runner.
+  map<string, string> labels = 4;
+}
+
+message MintRunnerCredentialResponse {
+  Runner runner = 1;
+  // The runner's credential; not stored, not shown again.
+  string credential = 2;
+  int64 expires_at_ms = 3;
+  // How often the control plane expects a heartbeat.
+  int64 heartbeat_interval_ms = 4;
+}
+
+message RevokeRunnerCredentialRequest {
+  string name = 1;
+}
+
+message RevokeRunnerCredentialResponse {}
 
 // From a runner on its control stream.
 message ControlRequest {
@@ -300,7 +337,18 @@ message RunnerTask {
     // End everything the runner runs for a run. Answered on the control
     // stream.
     EndRun end_run = 5;
+    // Start a remote actor for a run and bridge its channels outbound to the
+    // control plane using this runner's credential and `x-needy-run-id`.
+    StartActor start_actor = 6;
   }
+}
+
+// Start a remote actor for `run_id` using `driver` (for example
+// `linux-firecracker`). The runner opens `GuestService.Bridge` with its own
+// credential and `x-needy-run-id: <run_id>`.
+message StartActor {
+  string run_id = 1;
+  string driver = 2;
 }
 
 // A run ended, or is not one the control plane knows: the runner kills its

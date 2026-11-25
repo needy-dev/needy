@@ -116,6 +116,7 @@ fn engine_error(e: engine::Error) -> Error {
 pub struct LinuxContainer {
   pub oci_runtime: OciRuntime,
   pub image: String,
+  seed: Option<u64>,
   engine: Arc<dyn Engine>,
 }
 
@@ -130,19 +131,30 @@ impl LinuxContainer {
   /// The driver of `actor`, whose `container:` options name the OCI runtime
   /// (`validate::profile` refuses a profile without it first).
   pub fn of(actor: &Actor) -> Result<Self, Error> {
+    Self::of_with_engine(actor, engine::local())
+  }
+
+  /// Like [`Self::of`], using `engine` instead of the default local engine.
+  pub fn of_with_engine(actor: &Actor, engine: Arc<dyn Engine>) -> Result<Self, Error> {
     let Some(ContainerActor {
       oci_runtime: Some(oci_runtime),
     }) = &actor.container
     else {
       return Err(Error::Unsupported("actor.container.oci_runtime is missing".into()));
     };
-    Ok(Self::new(*oci_runtime, actor.container_image()))
+    let mut driver = Self::with_engine(*oci_runtime, actor.container_image(), engine);
+    driver.seed = actor.seed.as_ref().map(|seed| match seed {
+      needy_config::profile::Seed::Int(n) => *n,
+      needy_config::profile::Seed::String(s) => needy_common::seed::from_str(s),
+    });
+    Ok(driver)
   }
 
   pub fn with_engine(oci_runtime: OciRuntime, image: String, engine: Arc<dyn Engine>) -> Self {
     Self {
       oci_runtime,
       image,
+      seed: None,
       engine,
     }
   }
@@ -480,7 +492,15 @@ impl Driver for LinuxContainer {
     }
     let user = start.user;
     let host = identity::Host::read(Path::new("/"));
-    let mut binds = identity::prepare(start.dir, start.recipe, crate::driver::size(start.recipe).0, &host, self.oci_runtime)?;
+    let fallback_machine_id = self.seed.map(needy_common::seed::machine_id);
+    let mut binds = identity::prepare_with_machine_id(
+      start.dir,
+      start.recipe,
+      fallback_machine_id.as_deref(),
+      crate::driver::size(start.recipe).0,
+      &host,
+      self.oci_runtime,
+    )?;
     // The profile's user in the account files: init may not mount here, and
     // the root is read-only, so they are bound from the host and init finds
     // them right.

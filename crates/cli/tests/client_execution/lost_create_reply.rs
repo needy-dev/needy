@@ -65,6 +65,11 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       report_wait: needy_daemon::REPORT_WAIT,
       mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
       merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
+      runners_file: None,
+      disable_host_files: false,
+      host_files_root: None,
+      gateway_listen: None,
+      gateway_blocked_cidrs: Vec::new(),
     })
     .await
     .unwrap(),
@@ -78,6 +83,7 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       allow_anonymous: true,
       listener: Caller::Operator,
       token: Token(None),
+      runs: Some(daemon.clone()),
       runners: Some(daemon.clone()),
       clients: None,
     }))

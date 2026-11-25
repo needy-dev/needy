@@ -1030,16 +1030,16 @@ fn builtin_profiles_load_validate_and_carry_inline_agent_images() {
   assert_eq!(names, ["codex", "opencode", "pi", "herdr"]);
 
   let expected = [
-    ("codex", vec!["builtin:codex"]),
-    ("opencode", vec!["builtin:opencode"]),
-    ("pi", vec!["builtin:pi"]),
+    ("codex", vec!["ghcr.io/needy-dev/features/codex:1"]),
+    ("opencode", vec!["ghcr.io/needy-dev/features/opencode:1"]),
+    ("pi", vec!["ghcr.io/needy-dev/features/pi:1"]),
     (
       "herdr",
       vec![
-        "builtin:codex",
-        "builtin:pi",
-        "builtin:opencode",
-        "builtin:herdr",
+        "ghcr.io/needy-dev/features/codex:1",
+        "ghcr.io/needy-dev/features/pi:1",
+        "ghcr.io/needy-dev/features/opencode:1",
+        "ghcr.io/needy-dev/features/herdr:1",
       ],
     ),
   ];

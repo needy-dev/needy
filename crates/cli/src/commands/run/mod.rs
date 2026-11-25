@@ -75,6 +75,9 @@ enum Command {
     /// Human-friendly name to address the run by instead of its ID.
     #[arg(long, default_value = "", hide_default_value = true)]
     name: String,
+    /// Wait up to this duration for required actor or executor runners to connect before failing.
+    #[arg(long, value_name = "DURATION", value_parser = humantime::parse_duration)]
+    wait_for_runner: Option<std::time::Duration>,
     /// Arguments appended to the profile's driving program (`actor.command`), as in `-- --continue`.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -288,6 +291,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
       overrides,
       group,
       name,
+      wait_for_runner,
       args,
     } => {
       // A usage error like clap's (exit 2), worded to say why.
@@ -355,7 +359,7 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
         holder.keep();
       }
       progress.message("Creating run");
-      let run = connection
+      let created = connection
         .runs()
         .create_run(CreateRunRequest {
           profile_yaml: resolved.yaml,
@@ -370,12 +374,12 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           client_dir: client_dir()?,
           image_commit,
           pinned_features,
+          wait_for_runner_ms: wait_for_runner.map(|d| d.as_millis() as u64).unwrap_or(0),
         })
         .await
         .map_err(fail)?
-        .into_inner()
-        .run
-        .unwrap_or_default();
+        .into_inner();
+      let run = created.run.unwrap_or_default();
       progress.finish();
       if let Some(lock_path) = &lockfile_path {
         let resolved_features: std::collections::BTreeMap<String, String> = run.resolved_features.into_iter().collect();

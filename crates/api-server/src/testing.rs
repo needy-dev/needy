@@ -65,6 +65,7 @@ fn info(id: &str, name: &str) -> RunInfo {
     released: Vec::new(),
     lost: Vec::new(),
     created_ms: 1,
+    last_activity_ms: 1,
     profile: "fake".into(),
     actor_exit: None,
     failure: None,
@@ -226,6 +227,10 @@ impl Runs for Fake {
   async fn remove_fault(&self, run: &str, name: &str, by: Principal) -> Result<String> {
     self.call(format!("remove fault {name} from {run} by {by}"));
     Ok("s1".into())
+  }
+
+  async fn authorize_actor_runner(&self, runner: &str, run_id: &str) -> Result<bool> {
+    Ok(runner == "mac" && run_id == "s-actor")
   }
 }
 
@@ -428,12 +433,15 @@ fn fake_runner(name: &str) -> RunnerInfo {
     rotating: false,
     join_token: "t1".into(),
     host: None,
+    expires_ms: None,
+    static_config: false,
   }
 }
 
 /// Credentials the fake knows: `needy-runner.mac.good` is the runner
 /// `mac`'s; `needy-runner.gone.old` was revoked.
 pub const MAC_CREDENTIAL: &str = "needy-runner.mac.good";
+pub const OTHER_CREDENTIAL: &str = "needy-runner.other.good";
 pub const REVOKED_CREDENTIAL: &str = "needy-runner.gone.old";
 
 #[async_trait::async_trait]
@@ -499,9 +507,25 @@ impl Runners for Fake {
     Ok(())
   }
 
+  async fn mint_credential(&self, request: MintRunnerCredential) -> Result<MintedRunnerCredential> {
+    self.call(format!("mint {} ttl={}", request.name, request.ttl_ms));
+    Ok(MintedRunnerCredential {
+      runner: fake_runner(&request.name),
+      credential: format!("needy-runner.{}.minted", request.name),
+      expires_ms: 1 + request.ttl_ms,
+      heartbeat_interval_ms: 15_000,
+    })
+  }
+
+  async fn revoke_credential(&self, runner: &str) -> Result<()> {
+    self.call(format!("revoke credential {runner}"));
+    Ok(())
+  }
+
   async fn credential(&self, token: &str) -> Result<Credential> {
     Ok(match token {
       MAC_CREDENTIAL => Credential::Runner("mac".into()),
+      OTHER_CREDENTIAL => Credential::Runner("other".into()),
       REVOKED_CREDENTIAL => Credential::Refused,
       _ => Credential::Other,
     })

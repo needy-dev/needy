@@ -2,21 +2,22 @@
 
 Four coding agents are built into needy as ready-to-use profiles
 (`builtin:codex`, `builtin:opencode`, `builtin:pi`, `builtin:herdr`) backed by
-Dev Container features under [`features/`](../../features/). No repository
+published OCI Dev Container features from
+[`needy-dev/features`](https://github.com/needy-dev/features). No repository
 clone or `docker build` step is needed: `needy run create` pulls the base image
-if missing, builds each feature layer once in a disposable session, and caches
-it by content key.
+and OCI features if missing, builds each feature layer once in a disposable
+session, and caches it by content key.
 
 The agent runs in the actor. Every shell it starts goes to the `build`
 executor, which holds the workspace, so all the commands the agent runs go
 there too.
 
-| Built-in profile | Example file | Feature | Default version | Synced state directory |
-| --- | --- | --- | --- | --- |
-| `builtin:codex` | [`codex.yaml`](codex.yaml) | `builtin:codex` ([`features/codex/`](../../features/codex/)) | 0.167.2 | `~/.codex` |
-| `builtin:pi` | [`pi.yaml`](pi.yaml) | `builtin:pi` ([`features/pi/`](../../features/pi/)) | 1.5.2 (Node.js 26.13.1) | `~/.pi/agent` |
-| `builtin:opencode` | [`opencode.yaml`](opencode.yaml) | `builtin:opencode` ([`features/opencode/`](../../features/opencode/)) | 1.19.5 | `~/.local/share/opencode` |
-| `builtin:herdr` | [`herdr.yaml`](herdr.yaml) | `builtin:herdr` ([`features/herdr/`](../../features/herdr/)) + the three above | 0.9.5 | all three above |
+| Built-in profile | Example file | Feature | Synced state directory |
+| --- | --- | --- | --- |
+| `builtin:codex` | [`codex.yaml`](codex.yaml) | `ghcr.io/needy-dev/features/codex:1` | `~/.codex` |
+| `builtin:pi` | [`pi.yaml`](pi.yaml) | `ghcr.io/needy-dev/features/pi:1` | `~/.pi/agent` |
+| `builtin:opencode` | [`opencode.yaml`](opencode.yaml) | `ghcr.io/needy-dev/features/opencode:1` | `~/.local/share/opencode` |
+| `builtin:herdr` | [`herdr.yaml`](herdr.yaml) | `ghcr.io/needy-dev/features/herdr:1` + the three above | all three above |
 
 Each feature's `install.sh` pins its default download to one release and checks
 its checksum (with provenance comments). Passing `with: { version: "..." }` on
@@ -136,11 +137,11 @@ without them:
 
 ## herdr
 
-`builtin:herdr` ([`herdr.yaml`](herdr.yaml)) starts herdr with `builtin:codex`,
-`builtin:pi`, `builtin:opencode`, and `builtin:herdr` stacked in one image. Its
-panes run shells in the actor, so `codex`, `pi` and `opencode` start there. A
-shell that one of these agents starts goes to the executor (a rule with
-`when.under`).
+`builtin:herdr` ([`herdr.yaml`](herdr.yaml)) starts herdr with the `codex`,
+`pi`, `opencode`, and `herdr` features from `ghcr.io/needy-dev/features`
+stacked in one image. Its panes run shells in the actor, so `codex`, `pi` and
+`opencode` start there. A shell that one of these agents starts goes to the
+executor (a rule with `when.under`).
 
 When herdr's client exits (ctrl+b q), the run ends. Use ctrl-] to detach
 from needy and leave the run going.
