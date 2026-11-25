@@ -4,6 +4,26 @@ Status: **proposed spec**, 2026-11-23.
 Parent design: [Needy on Kubernetes with `rc` and Managed IaaS](2026-11-23-kubernetes-rc-integration-design.md).
 Prerequisite: [Remote Actor Host Transport and K8s-Friendly Runner Ergonomics (Phase 1)](2026-11-23-remote-actor-host-and-runner-ergonomics-spec.md).
 
+> **Revision notice (2026-11-26):** Parts of this spec changed on
+> 2026-11-25 and 2026-11-26; the text below is kept as written.
+>
+> - The KVM pool is not bare metal: it is a nested-virtualization pool of
+>   EC2 8th generation Intel families on the stock EKS AL2023 AMI (no LXCFS
+>   or DMI mask), tainted, with `/dev/kvm` exposed by a generic-device-plugin
+>   as an extended resource (`lobe-iaas.lobehub.com/kvm`). The bare-metal
+>   sizing and warm-capacity notes below no longer apply as written.
+> - `rc`'s `Workspace` already has `hotMount`, `lxcfs`, `supplementalGroups`
+>   and `podReplacementPolicy` (`api/workspaces/v1alpha1/workspace_types.go`
+>   in `rc`); `needyExecutor` and `Actor` remain to be added.
+> - `devices-api` only creates `rc` resources and keeps quota and billing;
+>   `rc` owns the namespace's `needy-daemon`, the `Actor` reconciler and
+>   Workspace executor runners (owner decision, 2026-11-26).
+> - Image layers follow
+>   [One layered OCI base for VM and container actors](2026-11-25-layered-oci-base-spec.md),
+>   not `needy image edit` pushes.
+> - Current integration details, verified against needy's code, are in the
+>   handoff [Integrating needy into `rc`](2026-11-26-rc-integration-guide.md).
+
 ## Problem Statement
 
 Running Needy's actor-executor architecture on Kubernetes with `rc` and a

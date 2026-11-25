@@ -48,3 +48,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-23 | [Phase 1: Remote actor host transport and K8s-friendly runner ergonomics (proposed spec)](2026-11-23-remote-actor-host-and-runner-ergonomics-spec.md) | spec |
 | 2026-11-23 | [Phase 2: `rc` Needy integration and bare-metal KVM IaaS loop (proposed spec)](2026-11-23-rc-v1alpha2-needy-integration-spec.md) | spec |
 | 2026-11-23 | [Phase 3: External client penetration and cloud OCI image layers (proposed spec)](2026-11-23-external-client-penetration-and-oci-layers-spec.md) | spec |
+| 2026-11-26 | [Integrating needy into `rc`](2026-11-26-rc-integration-guide.md) | handoff |

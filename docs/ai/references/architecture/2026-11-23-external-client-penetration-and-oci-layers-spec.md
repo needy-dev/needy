@@ -6,6 +6,21 @@ Prerequisites:
 - [Remote Actor Host Transport and K8s-Friendly Runner Ergonomics (Phase 1)](2026-11-23-remote-actor-host-and-runner-ergonomics-spec.md)
 - [`rc` Needy Integration and Bare-Metal KVM IaaS Loop (Phase 2)](2026-11-23-rc-v1alpha2-needy-integration-spec.md)
 
+> **Revision notice (2026-11-26):** Parts of this spec changed on
+> 2026-11-25 and 2026-11-26; the text below is kept as written.
+>
+> - OCI layer distribution follows
+>   [One layered OCI base for VM and container actors](2026-11-25-layered-oci-base-spec.md):
+>   ordinary OCI images built on the published `actor-base`, a layer
+>   registry of ordinary step images (B-3), `actor.image` import above the
+>   base (B-4) and builds in CI or standard builders (B-5), instead of
+>   pushing `needy image edit` layers.
+> - "Bare-metal Actor Pods" are Actor Pods on nested-virtualization KVM
+>   pools with a device plugin resource.
+> - External user-device executors are out of the MVP: they need a cluster
+>   gRPC ingress that nobody owns yet. See the handoff
+>   [Integrating needy into `rc`](2026-11-26-rc-integration-guide.md).
+
 ## Problem Statement
 
 After Phase 2, cloud Actors can route commands across in-cluster `rc` Executor
