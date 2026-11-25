@@ -705,8 +705,8 @@ sequenceDiagram
 
 `rc`'s `Workspace` already runs resident processes through `spec.services`:
 exact argv, the Workspace's env plus `RC_KUBE_SOCKET`, restarted by
-`rc-kube` with capped exponential backoff (rc:
-`api/workspaces/v1alpha1/workspace_types.go:205-232,312-320`,
+`rc-kube` with capped exponential backoff (rc at commit `2f4811a`:
+`api/workspaces/v1alpha1/workspace_types.go:194-221,308`,
 `internal/rckube/services.go:121-143`).
 
 ```yaml

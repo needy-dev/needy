@@ -15,9 +15,10 @@ provisioning), and an external device gateway for user-owned clients.
 >   generic-device-plugin as a cluster-specific extended resource
 >   (`example.com/kvm`-style, named by the pool's device plugin), not `devices.kubevirt.io/kvm`
 >   (section 5, item 6, and D6).
-> - `rc`'s `Workspace` already has `hotMount`, `lxcfs`, `supplementalGroups`
->   and `podReplacementPolicy` in `v1alpha1`; `needyExecutor` and the
->   `Actor` resource do not exist yet (D3).
+> - `rc`'s `Workspace` fields `hotMount`, `lxcfs`, `supplementalGroups` and
+>   `podReplacementPolicy` are in progress in `rc` (not on its main branch at
+>   commit `2f4811a`); `needyExecutor` and the `Actor` resource do not exist
+>   yet (D3).
 > - Image distribution follows
 >   [One layered OCI base for VM and container actors](2026-11-25-layered-oci-base-spec.md):
 >   standard OCI images built on `actor-base` and a layer registry of

@@ -12,9 +12,9 @@ Prerequisite: [Remote Actor Host Transport and K8s-Friendly Runner Ergonomics (P
 >   or DMI mask), tainted, with `/dev/kvm` exposed by a generic-device-plugin
 >   as an extended resource (named by the pool's device plugin, for example `example.com/kvm`). The bare-metal
 >   sizing and warm-capacity notes below no longer apply as written.
-> - `rc`'s `Workspace` already has `hotMount`, `lxcfs`, `supplementalGroups`
->   and `podReplacementPolicy` (`api/workspaces/v1alpha1/workspace_types.go`
->   in `rc`); `needyExecutor` and `Actor` remain to be added.
+> - `rc`'s `Workspace` fields `hotMount`, `lxcfs`, `supplementalGroups` and
+>   `podReplacementPolicy` are in progress in `rc` (not on its main branch at
+>   commit `2f4811a`); `needyExecutor` and `Actor` remain to be added.
 > - `devices-api` only creates `rc` resources and keeps quota and billing;
 >   `rc` owns the namespace's `needy-daemon`, the `Actor` reconciler and
 >   Workspace executor runners (owner decision, 2026-11-26).
