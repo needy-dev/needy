@@ -34,6 +34,7 @@ fn image_of(name: &str, abi: Option<&str>, architecture: &str) -> (String, engin
     os: "linux".into(),
     architecture: architecture.into(),
     labels,
+    diff_ids: Vec::new(),
   };
   (name.into(), image)
 }

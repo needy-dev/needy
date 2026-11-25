@@ -138,6 +138,12 @@ The runner compares `root` with the digest of the base image it would boot
 fails the run with a clear error on mismatch: layers built on another base
 must not be stacked on this one.
 
+*Migration notice (B-2 of the [layered OCI base spec](2026-11-25-layered-oci-base-spec.md)):*
+the root is now the stack digest of the `actor-base` the base VM image's
+manifest records, the same identity a container builder gives `needy-actor`;
+`sha256` (or the `rootfs.ext4` digest) is only the root of an image that
+records no base.
+
 ### D5. A layer registry (OCI Distribution)
 
 *Under revision; see the notice at the top. Kept as the record of what was

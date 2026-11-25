@@ -10,6 +10,8 @@
 //!   driver checks an image records before it starts an actor from it.
 //! - [`manifest`]: what a VM image is and where it came from, in its
 //!   directory.
+//! - [`root`]: the root an image definition's steps are built on, the
+//!   base's stack digest whichever driver built them.
 //! - [`feature`]: OCI Dev Container feature artifact fetcher and content cache.
 //! - [`builtin`]: embedded needy-specific built-in Dev Container features.
 //! - [`store`]: the layer store: an image's layers, snapshots and commits,
@@ -21,5 +23,6 @@ pub mod container;
 pub mod feature;
 pub mod guest;
 pub mod manifest;
+pub mod root;
 pub mod store;
 pub mod vm;

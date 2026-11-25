@@ -61,6 +61,10 @@ pub struct Image {
   pub os: String,
   pub architecture: String,
   pub labels: HashMap<String, String>,
+  /// Its layers, lowest first: the DiffIDs of its configuration's
+  /// `rootfs.diff_ids` (`sha256:<hex>` of each uncompressed layer), as the
+  /// engine lists them in `RootFS.Layers`.
+  pub diff_ids: Vec<String>,
 }
 
 /// What the engine did not do. The messages say it whole, for a driver to
@@ -281,6 +285,7 @@ impl Engine for Docker {
         os: inspected.os.unwrap_or_default(),
         architecture: inspected.architecture.unwrap_or_default(),
         labels: inspected.config.and_then(|config| config.labels).unwrap_or_default(),
+        diff_ids: inspected.root_fs.and_then(|root| root.layers).unwrap_or_default(),
       })),
       Err(e) if e.is_not_found() => Ok(None),
       Err(e) => Err(e),

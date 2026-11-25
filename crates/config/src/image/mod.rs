@@ -32,9 +32,15 @@ pub enum Image {
 /// `images/Dockerfile`.
 // Source: `images/Dockerfile` (`UBUNTU_IMAGE`, which `actor-base` is built on,
 // pinned there by `UBUNTU_DIGEST`)
-// TODO(base-identity): this root is the tag, not the digest `actor-base`
-// pins; the root identity of image definitions is B-2 of
-// docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md.
+// NOTICE: this name is not the root steps are built on: a definition without
+// `root:` is built on needy's base (the base VM image, or `needy-actor` in a
+// container), whose identity is `actor-base`'s stack digest (B2 of
+// docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md). Only
+// the plan's `root_image` names it, and nothing pulls it.
+// TODO(default-root): it is the tag, not the digest `actor-base` pins
+// (`UBUNTU_DIGEST`); pinning it here would be a second copy of that digest
+// to keep in step. Pin it, or derive it from the base, once something pulls
+// or builds on it (B-4's import above the base).
 // Reference: https://hub.docker.com/_/ubuntu (Ubuntu 24.04 LTS "Noble Numbat")
 pub const DEFAULT_ROOT: &str = "ubuntu:24.04";
 

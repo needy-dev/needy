@@ -89,6 +89,20 @@ impl Digest {
   }
 }
 
+/// The ChainID of the layers whose DiffIDs are `diff_ids`, lowest first: one
+/// identifier for the root file system they make when applied in order.
+/// `None` for no layers.
+// Source: https://github.com/opencontainers/image-spec/blob/e7f7c0ca69b21688c3cea7c87a04e4503e6099e2/config.md?plain=1#L42-L53
+// (image-spec v1.1.0, "Layer ChainID": `ChainID(L0) = DiffID(L0)`,
+// `ChainID(L0|...|Ln) = Digest(ChainID(L0|...|Ln-1) + " " + DiffID(Ln))`)
+// Reference: https://github.com/opencontainers/image-spec/blob/v1.1.0/config.md#layer-chainid
+// NOTICE: written here because `oci-spec` has the configuration's types but
+// does not compute ChainIDs; the definition is the two lines above.
+pub fn chain_id(diff_ids: &[Digest]) -> Option<Digest> {
+  let (first, rest) = diff_ids.split_first()?;
+  Some(rest.iter().fold(*first, |chain, diff_id| Digest::of(format!("{chain} {diff_id}").as_bytes())))
+}
+
 fn hex_nibble(byte: u8) -> u8 {
   match byte {
     b'0'..=b'9' => byte - b'0',
