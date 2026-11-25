@@ -1,7 +1,7 @@
 use needy_api_proto::v1::guest_service_control_response::Message;
 use needy_api_proto::v1::{
-  FetchFilesRequest, GetConfigRequest, GracefulStop, GuestServiceControlRequest, GuestSession, PushEventsRequest, PushFilesRequest,
-  PushLayerRequest, ReportExitRequest, RouteList, TraceEvent, UpperLayer,
+  FetchFilesRequest, FetchLayerRequest, GetConfigRequest, GracefulStop, GuestServiceControlRequest, GuestSession, PushEventsRequest,
+  PushFilesRequest, PushLayerRequest, ReportExitRequest, RouteList, TraceEvent, UpperLayer,
 };
 use needy_core::event::{Event, RunStop, SCHEMA_VERSION};
 use tonic::Code;
@@ -111,6 +111,25 @@ async fn the_driving_program_s_exit_is_reported() {
   let exits = served.fake.exits.lock().unwrap();
   assert_eq!(exits[0].0, "s-actor");
   assert_eq!((exits[0].1.code, exits[0].1.signal.as_str()), (None, "SIGKILL"));
+}
+
+#[tokio::test]
+async fn a_layer_arrives_in_chunks_and_one_outside_the_run_s_image_is_denied() {
+  let served = serve(actor()).await;
+
+  let layer = format!("sha256:{}", "a".repeat(64));
+  let mut stream = served.client.guest().fetch_layer(FetchLayerRequest { digest: layer }).await.unwrap().into_inner();
+  let mut total = 0;
+  let mut largest = 0;
+  while let Some(chunk) = stream.message().await.unwrap() {
+    total += chunk.data.len();
+    largest = largest.max(chunk.data.len());
+  }
+  let other = format!("sha256:{}", "b".repeat(64));
+  let denied = served.client.guest().fetch_layer(FetchLayerRequest { digest: other }).await.unwrap_err();
+
+  assert_eq!((total, largest), (3 << 20, 1 << 20));
+  assert_eq!(denied.code(), Code::PermissionDenied);
 }
 
 #[tokio::test]

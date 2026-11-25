@@ -38,7 +38,7 @@ use needy_core::intercept::exec::ExecContext;
 use needy_core::recipe::{CompiledRecipe, PerRun};
 use needy_core::types::{ActorState, Principal, RunState};
 use needy_core_actor::driver;
-use needy_core_actor::image::store::{LayerDisk, Snapshot};
+use needy_core_actor::image::store::{Digest, LayerDisk, Snapshot};
 use needy_core_executor::driver::Spec;
 use needy_trace::Dispatch;
 use needy_trace::sink::Sink;
@@ -137,6 +137,9 @@ pub struct Run {
   gateway: Mutex<Option<Arc<needy_core_actor::sidecar::gateway::Gateway>>>,
   /// Outbound remote actor host bridge attachment slot (at most one per run).
   pub(crate) bridge: Mutex<crate::bridge::Slot>,
+  /// The layer disks a remote actor's runner made of the run's snapshot,
+  /// as `BridgePrepared` reported them; `None` until it does.
+  pub(crate) remote_layers: tokio::sync::watch::Sender<Option<Vec<String>>>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -554,6 +557,9 @@ fn stored(error: store::Error) -> ControlError {
 pub struct Boot {
   /// `None` boots the base alone.
   pub snapshot: Option<Snapshot>,
+  /// The digest of the base `snapshot` was built on (`Plan::root`): a
+  /// remote actor runner refuses to stack the snapshot on another base.
+  pub root: Option<Digest>,
   /// The materialized layer disks of `snapshot`, lowest first
   /// (`needy_core_actor::image::store::Store::materialize`), passed to a VM
   /// driver's `Start::layer_disks`. Empty for container drivers.
@@ -755,6 +761,7 @@ impl Daemon {
       pinned_features: request.pinned_features.clone(),
       gateway: Mutex::new(None),
       bridge: Mutex::new(crate::bridge::Slot::Idle),
+      remote_layers: tokio::sync::watch::Sender::new(None),
       tasks: TaskTracker::new(),
       cancel,
     }))
@@ -863,6 +870,11 @@ impl Daemon {
       actor::check_host(self, run).await?;
       unwinding(run)?;
       crate::image::prepare(self, run).await?;
+    } else {
+      // The runner checks its own host when it starts the actor; this host
+      // only plans the image and holds its layers, which needs no KVM
+      // unless a layer must be built.
+      crate::image::prepare_remote(self, run).await?;
     }
     // Ensure stores for profile- and feature-declared sync mappings
     // (`<data_dir>/files/<store>`) exist before seeding (must run after

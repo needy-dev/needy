@@ -11,6 +11,14 @@
 //! 3. **Ephemeral remote Firecracker actor runner (with KVM)**: `needy runner
 //!    serve --address tcp://... --credential-env NEEDY_ACTOR_RUNNER_TOKEN
 //!    --roles actor --labels role=actor-e2e --ephemeral --gateway 127.0.0.1:<gw_port>`
+//!
+//! The actor boots an image definition with a `run:` layer. The control
+//! daemon has no KVM, so it cannot build the layer: a builder daemon with KVM
+//! on the same state and cache directories builds it first (`needy image
+//! build`), and the control daemon serves it to the runner from its layer
+//! store (`GuestService.FetchLayer`).
+// TODO(layer-registry): build on a separate host and share the layer through
+// a registry once R3 of 2026-11-25-remote-actor-images-spec.md lands.
 
 use std::fs::File;
 use std::path::Path;
@@ -121,10 +129,58 @@ pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
   // Short private work directory for Firecracker sockets (`sun_path` + 0700 privacy invariant).
   let actor_work = env.mkdir("aw", 0o700)?;
 
+  // The actor's image: one `run:` layer with a program and a file, and an
+  // image `PATH`.
+  let image_yaml = r#"layers:
+  - run: |
+      mkdir -p /opt/e2e-remote-bin
+      printf '#!/bin/sh\necho "e2e-remote-layer-ok"\n' > /opt/e2e-remote-bin/e2e-remote-tool
+      chmod 755 /opt/e2e-remote-bin/e2e-remote-tool
+      echo "remote-layer" > /etc/e2e-remote-layer.txt
+env:
+  PATH: "/opt/e2e-remote-bin:${PATH}"
+"#;
+  env.file("remote-image.yaml", image_yaml, 0o644)?;
+  let (user_name, user_id) = cell.user.account();
+
+  // Builder daemon WITH KVM on the cell's directories: builds the layer into
+  // the layer store the control daemon below serves from.
+  let mut builder_args = vec![
+    "--local-runner".to_string(),
+    "e2e-builder".into(),
+    "-v".into(),
+  ];
+  if let Some(image) = &env.ctx.host.vm_image {
+    builder_args.extend(["--actor-image".into(), image.display().to_string()]);
+  }
+  if let Ok(guest) = &env.ctx.host.guest {
+    builder_args.extend(["--guest-needy".into(), guest.display().to_string()]);
+  }
+  env.start_daemon_custom(&builder_args)?;
+  let build_profile = env.profile(&json!({
+    "user": { "name": user_name, "uid": user_id, "gid": user_id },
+    "actor": { "driver": cell.driver.profile_name(), "image": "./remote-image.yaml" },
+  }))?;
+  let built = env.needy(
+    &[
+      "image",
+      "build",
+      "--profile",
+      &build_profile.display().to_string(),
+    ],
+    Duration::from_secs(180),
+  )?;
+  if !built.ok() {
+    bail!("remote-actor image build failed: {}", built.brief());
+  }
+  let built_snapshot = built.stdout.lines().map(str::trim).rfind(|l| !l.is_empty()).unwrap_or_default().to_string();
+  checks.check("builder daemon builds the remote actor's image", built_snapshot.starts_with("sha256:"), format!("{built_snapshot:?}"));
+  env.stop_daemon().map_err(anyhow::Error::msg).context("cannot stop the builder daemon")?;
+
   // Process 1: Control daemon WITHOUT KVM, with `--disable-host-files`,
   // `--runners-file`, and `--gateway-listen`.
   let no_kvm = env.path("no-such-kvm");
-  let daemon_args = vec![
+  let mut daemon_args = vec![
     "--listen".to_string(),
     ctrl_addr.clone(),
     "--gateway-listen".into(),
@@ -138,6 +194,10 @@ pub fn run(env: &mut CellEnv, cell: &Cell, checks: &mut Checks) -> Result<()> {
     "e2e-ctrl".into(),
     "-v".into(),
   ];
+  // The control daemon plans the image on the same base the runner boots.
+  if let Some(image) = &env.ctx.host.vm_image {
+    daemon_args.extend(["--actor-image".into(), image.display().to_string()]);
+  }
   env.start_daemon_custom(&daemon_args)?;
   super::invariants::sockets(env, checks, "at daemon start");
   super::invariants::discovery(env, checks);
@@ -226,13 +286,15 @@ echo "E2E routed-rc=$?"
 echo "E2E allow-code=$(curl -sS -o /dev/null --max-time 30 -w '%{{http_code}}' https://example.com/)"
 curl -sS -o /dev/null --max-time 30 https://example.org/
 echo "E2E deny-rc=$?"
+echo "E2E layer-file=$(cat /etc/e2e-remote-layer.txt 2>/dev/null || echo absent)"
+echo "E2E layer-tool=$(e2e-remote-tool 2>/dev/null || echo absent)"
 exit 0"#
   );
   let mut actor_block = super::scenarios::actor(&env.ctx.host.image_names, cell, &script);
   actor_block["runner"] = json!({ "labels": ["role=actor-e2e"] });
   actor_block["workspace"] = json!({ "from": format!("executor:{EXECUTOR_NAME}:{}", ws.display()) });
   actor_block["network"] = json!({ "allow": ["example.com"] });
-  let (user_name, user_id) = cell.user.account();
+  actor_block["image"] = json!("./remote-image.yaml");
   let profile = env.profile(&json!({
     "user": { "name": user_name, "uid": user_id, "gid": user_id },
     "actor": actor_block,
@@ -283,6 +345,8 @@ exit 0"#
   checks.value(&console, "routed-marker", "True");
   checks.value(&console, "routed-rc", "7");
   checks.value(&console, "allow-code", "200");
+  checks.value(&console, "layer-file", "remote-layer");
+  checks.value(&console, "layer-tool", "e2e-remote-layer-ok");
   checks.check(
     "gateway denies host outside allowlist",
     console.value("deny-rc").is_some_and(|rc| rc != "0"),
@@ -322,7 +386,13 @@ exit 0"#
   let findings = report["findings"].to_string();
   checks.check("report: denied host recorded in findings", findings.contains("network denied: example.org"), findings);
   let kinds = runs::event_kinds(&report);
-  for expected in ["actor.start", "exec.decide", "net.deny", "actor.vm.exit"] {
+  for expected in [
+    "image.build.step",
+    "actor.start",
+    "exec.decide",
+    "net.deny",
+    "actor.vm.exit",
+  ] {
     checks.check(format!("report: trace includes {expected}"), kinds.iter().any(|k| k == expected), format!("{kinds:?}"));
   }
 

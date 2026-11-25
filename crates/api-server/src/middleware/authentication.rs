@@ -46,6 +46,7 @@ pub const ACTOR_METHODS: &[&str] = &[
   "/needy.v1.GuestService/Control",
   "/needy.v1.GuestService/Bridge",
   "/needy.v1.GuestService/TerminalTask",
+  "/needy.v1.GuestService/FetchLayer",
   "/needy.v1.RunService/Decide",
   "/needy.v1.ProcessService/Exec",
   "/needy.v1.HealthService/Check",

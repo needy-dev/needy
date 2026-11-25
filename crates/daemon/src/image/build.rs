@@ -365,6 +365,14 @@ pub(super) async fn resolve_features(
   })
 }
 
+/// Who builds the steps of a plan that are not in the layer store.
+enum Builder {
+  /// This host, in sessions of this driver.
+  Here(ActorDriver),
+  /// Nobody: a missing step fails the plan, for this reason.
+  Unavailable(String),
+}
+
 /// Plans `definition`, builds any missing `run` or `feature` steps under
 /// single-flight deduplication on the host's builder driver (VM driver when
 /// available, else `linux-container` on Linux; never Apple's `container`),
@@ -384,6 +392,55 @@ pub(super) async fn resolve_image_snapshot(
   let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
   let builder = select_builder_driver(daemon, target_driver).await;
   let root = root_digest_for(daemon, builder, base_container_image).await?;
+  resolve_snapshot_on(daemon, definition, &Builder::Here(builder), root, user, commit, pinned_features, trace, cancel).await
+}
+
+/// Plans `definition` for an actor on a remote `linux-firecracker` runner
+/// and records its [`Snapshot`] without materializing anything: the runner
+/// fetches the layers and makes the disks.
+///
+/// The plan is made on this daemon's base VM image, whose digest the runner
+/// checks against its own. A step not in the layer store is built here only
+/// when this host can run `linux-firecracker` sessions; a `linux-container`
+/// build would be made on another root. Otherwise the plan fails, naming
+/// the step, before any actor starts.
+// TODO(remote-build): dispatching build steps to an actor runner that has
+// KVM is deferred; see 2026-11-25-remote-actor-images-spec.md (D1).
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn resolve_remote_snapshot(
+  daemon: &Daemon,
+  definition: &Definition,
+  user: &User,
+  commit: Option<&PlanCommit>,
+  pinned_features: &BTreeMap<String, String>,
+  trace: &Dispatch,
+  cancel: &CancellationToken,
+) -> Result<ResolvedSnapshot> {
+  let root = root_digest(daemon).await.context("a remote actor's image is planned on this control daemon's base VM image")?;
+  let builder = match vm_unavailable(daemon, ActorDriver::LinuxFirecracker).await {
+    None => Builder::Here(ActorDriver::LinuxFirecracker),
+    Some(reason) => Builder::Unavailable(reason),
+  };
+  resolve_snapshot_on(daemon, definition, &builder, root, user, commit, pinned_features, trace, cancel).await
+}
+
+/// Plans `definition` on `root`, takes each step's layer from the store or
+/// has `builder` build it, stacks `commit` on top if present, and records
+/// the resulting [`Snapshot`]. The result's `builder` is the builder's
+/// driver, or `linux-firecracker` when nobody builds.
+#[allow(clippy::too_many_arguments)]
+async fn resolve_snapshot_on(
+  daemon: &Daemon,
+  definition: &Definition,
+  builder: &Builder,
+  root: Digest,
+  user: &User,
+  commit: Option<&PlanCommit>,
+  pinned_features: &BTreeMap<String, String>,
+  trace: &Dispatch,
+  cancel: &CancellationToken,
+) -> Result<ResolvedSnapshot> {
+  let base_container_image = definition.root.as_deref().unwrap_or(CONTAINER_IMAGE);
   let feature_store = daemon.images.feature_store();
   let resolved_features = resolve_features(&feature_store, definition, pinned_features).await?;
   let plan = needy_core::image::plan(definition, &root, user, commit, &resolved_features.by_ref)?;
@@ -394,13 +451,27 @@ pub(super) async fn resolve_image_snapshot(
     if cancel.is_cancelled() {
       bail!("the daemon shut down while building the image");
     }
-    let (layer, cached, ms) = daemon
-      .images
-      .resolve_step(daemon, builder, base_container_image, user, &resolved_features.fetched, trace, cancel, &layers, step)
-      .await?;
     let step_label = match &step.input {
       Input::Run(script) => script.clone(),
       Input::Feature { reference, .. } => format!("feature: {reference}"),
+    };
+    let (layer, cached, ms) = match builder {
+      Builder::Here(driver) => {
+        daemon
+          .images
+          .resolve_step(daemon, *driver, base_container_image, user, &resolved_features.fetched, trace, cancel, &layers, step)
+          .await?
+      }
+      Builder::Unavailable(reason) => match daemon.images.lookup_cached(&step.key)? {
+        Some(layer) => (layer, true, 0),
+        None => bail!(
+          "image step `{}` (cache key {}) is not in this control daemon's layer store, and this host cannot build it: {reason}; \
+           a remote actor boots layers this daemon holds, so build the image here (`needy image build`) once this host can run \
+           linux-firecracker",
+          first_line(&step_label),
+          step.key
+        ),
+      },
     };
     let event = Event::ImageBuildStep(ImageBuildStep {
       key: step.key.to_string(),
@@ -433,7 +504,10 @@ pub(super) async fn resolve_image_snapshot(
   let snapshot = tokio::task::spawn_blocking(move || store.snapshot(&layers)).await.context("snapshotting layers panicked")??;
 
   Ok(ResolvedSnapshot {
-    builder,
+    builder: match builder {
+      Builder::Here(driver) => *driver,
+      Builder::Unavailable(_) => ActorDriver::LinuxFirecracker,
+    },
     plan,
     snapshot,
     steps,
@@ -526,14 +600,21 @@ pub(crate) async fn select_builder_driver(daemon: &Daemon, target: ActorDriver) 
 }
 
 async fn check_vm_available(daemon: &Daemon, driver: ActorDriver) -> bool {
+  vm_unavailable(daemon, driver).await.is_none()
+}
+
+/// Why this host cannot run `driver`'s sessions, or `None` when it can.
+async fn vm_unavailable(daemon: &Daemon, driver: ActorDriver) -> Option<String> {
   let profile_yaml = session_profile_yaml(driver, &User::default(), None);
-  let Ok(profile) = needy_config::profile::load(&needy_config::Source::text(profile_yaml, PathBuf::new())) else {
-    return false;
+  let profile = match needy_config::profile::load(&needy_config::Source::text(profile_yaml, PathBuf::new())) {
+    Ok(profile) => profile,
+    Err(e) => return Some(e.to_string()),
   };
-  let Ok(drv) = driver::new(&actor::host(daemon), &profile.actor) else {
-    return false;
+  let drv = match driver::new(&actor::host(daemon), &profile.actor) {
+    Ok(drv) => drv,
+    Err(e) => return Some(e.to_string()),
   };
-  drv.check_host().await.is_ok()
+  drv.check_host().await.err().map(|e| e.to_string())
 }
 
 /// Computes the root digest for `builder`: the base VM image's digest for VM
@@ -568,10 +649,7 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
   let dir = daemon.config.actor_image.clone();
   let images = daemon.images.clone();
   tokio::task::spawn_blocking(move || -> Result<Digest> {
-    if let Some(manifest) = manifest::read(&dir)?
-      && let Some(sha256) = manifest.sha256
-      && let Ok(digest) = Digest::parse(&format!("sha256:{sha256}"))
-    {
+    if let Some(digest) = manifest_root(&dir)? {
       return Ok(digest);
     }
     let rootfs = dir.join("rootfs.ext4");
@@ -585,10 +663,7 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
     {
       return Ok(cached.digest);
     }
-    let mut file = std::fs::File::open(&rootfs).with_context(|| format!("cannot open {} to hash base rootfs", rootfs.display()))?;
-    let mut hasher = sha2::Sha256::new();
-    std::io::copy(&mut file, &mut hasher).with_context(|| format!("cannot hash {}", rootfs.display()))?;
-    let digest = Digest::from_bytes(hasher.finalize().into());
+    let digest = hash_rootfs(&rootfs)?;
     *lock(&images.root_digest_cache) = Some(CachedRootDigest {
       path: rootfs,
       len,
@@ -599,6 +674,31 @@ pub(crate) async fn root_digest(daemon: &Daemon) -> Result<Digest> {
   })
   .await
   .context("hashing base VM image panicked")?
+}
+
+/// The root digest of the base VM image in `dir`, as [`root_digest`]
+/// computes it, without its cache: a remote actor runner checks the root a
+/// snapshot was built on against the base it boots (D4 in
+/// `2026-11-25-remote-actor-images-spec.md`). Blocking.
+// NOTICE: a locally built base without `manifest.sha256` is hashed whole on
+// every call; released images carry the digest in their manifest.
+pub(crate) fn base_root(dir: &std::path::Path) -> Result<Digest> {
+  match manifest_root(dir)? {
+    Some(digest) => Ok(digest),
+    None => hash_rootfs(&dir.join("rootfs.ext4")),
+  }
+}
+
+/// The root digest `manifest.json` in `dir` records (`sha256`), if any.
+fn manifest_root(dir: &std::path::Path) -> Result<Option<Digest>> {
+  Ok(manifest::read(dir)?.and_then(|manifest| manifest.sha256).and_then(|sha256| Digest::parse(&format!("sha256:{sha256}")).ok()))
+}
+
+fn hash_rootfs(rootfs: &std::path::Path) -> Result<Digest> {
+  let mut file = std::fs::File::open(rootfs).with_context(|| format!("cannot open {} to hash base rootfs", rootfs.display()))?;
+  let mut hasher = sha2::Sha256::new();
+  std::io::copy(&mut file, &mut hasher).with_context(|| format!("cannot hash {}", rootfs.display()))?;
+  Ok(Digest::from_bytes(hasher.finalize().into()))
 }
 
 fn to_install_user(user: &User) -> devcontainer_features::InstallUser {

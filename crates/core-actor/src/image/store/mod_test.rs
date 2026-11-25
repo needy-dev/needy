@@ -146,6 +146,24 @@ fn put_accepts_an_overlay_upper_layer_as_the_same_layer_as_its_oci_form() {
 }
 
 #[test]
+fn an_opened_layer_is_its_canonical_archive_and_stores_again_under_its_digest() {
+  let dir = tempfile::tempdir().unwrap();
+  let here = store(dir.path());
+  let layer = put(&here, Archive::new().dir("etc").overlay_whiteout("etc/motd").overlay_opaque("var").file("var/new", "x"));
+  let elsewhere = store(&dir.path().join("elsewhere"));
+
+  let mut archive = Vec::new();
+  here.open_layer(&layer).unwrap().read_to_end(&mut archive).unwrap();
+  let stored = elsewhere.put(archive.as_slice()).unwrap();
+
+  assert_eq!(Digest::of(&archive), layer, "the archive is the one its digest names");
+  assert_eq!(stored, layer, "another store keeps it under the same digest");
+  assert!(elsewhere.has_layer(&layer));
+  let missing = Digest::of(b"no such layer");
+  assert!(matches!(here.open_layer(&missing), Err(Error::Missing(digest)) if digest == missing));
+}
+
+#[test]
 fn put_refuses_a_path_that_leaves_the_layer() {
   let dir = tempfile::tempdir().unwrap();
   let store = store(dir.path());

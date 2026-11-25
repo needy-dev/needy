@@ -354,6 +354,7 @@ impl Daemon {
       pinned_features: Default::default(),
       gateway: Mutex::new(None),
       bridge: Mutex::new(crate::bridge::Slot::Idle),
+      remote_layers: tokio::sync::watch::Sender::new(None),
       boot: Mutex::new(super::Boot {
         snapshot: record
           .snapshot

@@ -748,6 +748,13 @@ pub trait Guest: Send + Sync + 'static {
   /// each change, and a graceful stop when `run stop` asks for one. Init
   /// holds it for the actor's life; it ends when the run or the actor does.
   async fn control(&self, run: &str) -> Result<GuestControls>;
+  /// One layer of the run's snapshot, `digest` (`sha256:<hex>`), as its
+  /// canonical uncompressed OCI layer archive, for a remote actor runner to
+  /// stack. A digest the run's snapshot does not name is
+  /// [`ControlError::Denied`].
+  async fn fetch_layer(&self, _run: &str, _digest: &str) -> Result<Chunks> {
+    Err(ControlError::Unavailable("image layers are not served on this service".into()))
+  }
   /// Outbound actor host bridge lifecycle, console, and reverse terminal
   /// control stream for a remote actor run.
   async fn bridge(

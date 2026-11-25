@@ -229,6 +229,14 @@ impl Store {
     self.layer(digest).is_ok()
   }
 
+  /// Opens the canonical archive of stored layer `digest`, the uncompressed
+  /// OCI layer whose SHA-256 is `digest`, as a remote actor runner fetches
+  /// it. Storing it again with [`Store::put`] gives the same digest.
+  pub fn open_layer(&self, digest: &Digest) -> Result<std::fs::File> {
+    let path = self.layer(digest)?;
+    std::fs::File::open(&path).map_err(io(path.display()))
+  }
+
   /// Records the stack `layers`, lowest first, as a snapshot. Every layer
   /// must be stored.
   pub fn snapshot(&self, layers: &[Digest]) -> Result<Snapshot> {
