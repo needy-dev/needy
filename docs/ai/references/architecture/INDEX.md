@@ -38,7 +38,8 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-17 | [Slice 1 plan: snapshots and hand edits on the VM drivers](2026-11-17-images-slice-1-plan.md) | plan |
 | 2026-11-21 | [Slice 1: snapshots and hand edits on VM drivers](2026-11-21-images-slice-1-evidence.md) | evidence |
 | 2026-11-21 | [Slice 2: container snapshots, trampolines, and container build fallback](2026-11-21-images-slice-2-evidence.md) | evidence |
-| 2026-11-25 | [Image layers for remote actors and a layer registry (approved)](2026-11-25-remote-actor-images-spec.md) | spec |
+| 2026-11-25 | [Image layers for remote actors and a layer registry (approved; D5 under revision)](2026-11-25-remote-actor-images-spec.md) | spec |
+| 2026-11-25 | [One layered OCI base for VM and container actors (approved)](2026-11-25-layered-oci-base-spec.md) | spec |
 | 2026-11-21 | [Slice 3: Dev Container features as layers](2026-11-21-images-slice-3-evidence.md) | evidence |
 | 2026-11-22 | [Codebase architecture, Rust idioms, CLI, and ecosystem review](2026-11-22-codebase-architecture-review.md) | review |
 | 2026-11-22 | [Architecture cleanup, CLI unification, and standalone image crates (approved contract)](2026-11-22-architecture-cleanup-and-crate-extraction-spec.md) | spec |
