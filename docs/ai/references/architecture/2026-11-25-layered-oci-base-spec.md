@@ -262,3 +262,107 @@ Settled in B-2 (2026-11-26):
 - `DEFAULT_ROOT` (`ubuntu:24.04`) is not part of the root: a definition
   without `root:` is built on needy's base. Pinning it by digest is left to
   `TODO(default-root)` in `crates/config/src/image/mod.rs`.
+
+Settled in B-3 (2026-11-26):
+
+- **Registry access** is one crate, `oci-registry` (no needy dependencies),
+  used by Dev Container feature fetches and the layer registry, and by B-4's
+  import next. `Access::connect` builds one `oci-client` client per registry
+  host (TLS settings are client-wide in `oci-client` 0.15):
+  - Trust: the system store and the bundled WebPKI roots
+    (`oci-client` features `rustls-tls-native-roots` and `rustls-tls`; both
+    select `ring`, so no second crypto provider), plus `*.crt` from the first
+    `certs.d` directory that exists for the host, in this order:
+    `$XDG_CONFIG_HOME/containers/certs.d/<host[:port]>` (default
+    `~/.config/containers/certs.d`), `/etc/containers/certs.d`,
+    `/etc/docker/certs.d`. "First wins" and reading `/etc/docker/certs.d`
+    follow containers/image v5.36.0 (`docker/docker_client.go`,
+    `dockerCertDir`), so a CA already set up for Docker or Podman works.
+  - Credentials: the Docker credential store (`DOCKER_CONFIG` or
+    `~/.docker`, `auths`, `credHelpers`, `credsStore`) through
+    `docker_credential`, read again for each connection (feature fetches
+    reuse a connection per host and repository for at most five minutes, or
+    until an exchanged token expires). `REGISTRY_AUTH_FILE` is not read.
+  - `identitytoken`: **exchanged**, not refused. The refresh token is POSTed
+    to the realm of the registry's `Bearer` challenge with
+    `grant_type=refresh_token`, `service`, `scope` and `client_id=needy`
+    (distribution v3.0.0 `docs/content/spec/auth/oauth.md`, as
+    containers/image's `getBearerTokenOAuth2` does), and the access token is
+    given to `oci-client` as `RegistryAuth::Bearer`. The exchange is one
+    form POST next to `oci-client`, so it was feasible without a fork. A
+    registry without a `Bearer` challenge, an HTTP realm, or a refusal
+    (including the spec's 404 fallback, since the GET flow needs a username)
+    is `Error::IdentityToken`; the refresh token never reaches `/v2/`.
+  - `--insecure-registry HOST[:PORT]` (repeatable) on `needy daemon serve`
+    and `daemon.insecure_registries` in the settings file (Docker's
+    `insecure-registries` name, per host as containerd's `skip_verify`)
+    sets `accept_invalid_certificates` for that host's client only and warns
+    on every connection. It is not plain HTTP and still sends credentials.
+    `needy runner serve` does not take it yet: a runner contacts no registry
+    until B-5 (`TODO(runner-registry)` in `crates/cli/src/commands/runner.rs`).
+  - Plain HTTP is only an explicit `http://` and never carries credentials.
+  - `TODO(registry-mtls)`: client certificates (`*.cert`/`*.key`) wait for
+    `oci-client` to take a client identity. `TODO(registry-mirrors)`:
+    `hosts.toml` and `registries.conf` are not read.
+- **Step images** replace #105's custom artifact. Each built step is pushed
+  as an ordinary OCI image tagged `key-<cache key hex>`: an OCI image
+  manifest, a standard image config (`architecture` of the host, `os:
+  linux`, `rootfs.type: layers`, `rootfs.diff_ids: [<step DiffID>]`) and the
+  step's canonical layer compressed with gzip. needy's metadata is in the
+  manifest's annotations (needy's own keys under `dev.needy.`, the
+  reverse-DNS prefix of its `dev.needy.control` service label, following
+  image-spec v1.1.0 `annotations.md` "Rules"). Example (digests shortened):
+
+  ```json
+  {
+    "schemaVersion": 2,
+    "mediaType": "application/vnd.oci.image.manifest.v1+json",
+    "config": { "mediaType": "application/vnd.oci.image.config.v1+json", "digest": "sha256:c0…", "size": 120 },
+    "layers": [{ "mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": "sha256:9a…", "size": 31337 }],
+    "annotations": {
+      "dev.needy.image.step.key": "sha256:5e…",
+      "dev.needy.image.step.parent": "sha256:1f…",
+      "dev.needy.image.root": "sha256:b2…",
+      "dev.needy.image.feature.ref": "ghcr.io/devcontainers/features/node:1",
+      "dev.needy.image.feature.digest": "sha256:7d…"
+    }
+  }
+  ```
+
+  `step.parent` is absent for a step on the root, the `feature.*` pair for a
+  `run:` step. A reader refuses a tag whose config is not an image config,
+  that has another number of layers than one, a layer that is not gzip
+  (`TODO(layer-registry-zstd)`), or annotations naming another key; the
+  daemon also refuses a step whose `root` is not its plan's root.
+- **A step image holds the step's layer only, not the stack down to
+  `actor-base`.** A full image (runnable `FROM actor-base`) needs the base's
+  compressed blobs in the target repository: they exist only when
+  `manifest.json` records the base's registry `digest` (release-pushed
+  bases; never for `needy image build`), and getting them there is a
+  cross-repository mount within one registry or a copy across registries
+  (bandwidth, and credentials for the source). The step chain is also
+  already in the cache keys, and tags are last-writer-wins, so a stacked
+  image of one host's lower layers could disagree with the steps another
+  host pulled. A one-layer step image is standard (any registry and tool
+  reads, copies and scans it) and always implementable. B-4 reuses
+  `image::store::registry::pull_layer` (pull a gzip blob by descriptor,
+  verify its digest, the decompressed DiffID, and the store's canonical
+  digest; nothing kept on mismatch). B-4 must add: reading a full image's
+  manifest and config for the actor's platform (an index), the DiffID
+  prefix check against the base, zstd, naming in the store a layer whose
+  canonical form differs from its DiffID (images other tools wrote), and,
+  for pushing snapshots as full images, mounting or copying the base's
+  blobs.
+- Pulls verify the compressed digest (`oci-client`'s `pull_blob`), the
+  DiffID of the decompressed stream, and then the store's canonical digest
+  (`Store::put_expecting`); a mismatch keeps nothing.
+- The daemon does as #105 did: on a local miss, inside the step's single
+  flight, it looks the key up and pulls; after a build it pushes; a lookup,
+  pull or push failure is logged and traced and never fails the build. The
+  root in the plan and the `dev.needy.image.root` annotation are B-2's root.
+  Trace kinds `image.layer.pull` and `image.layer.push` are schema version
+  14, which only adds kinds, so traces of 10 through 13 still read.
+- The layer registry, the TLS registry over a self-signed CA, and the auth
+  shapes (ECR's Basic challenge, Harbor's token service with Basic, the
+  refresh-token grant) are tested in process against `oci-registry`'s
+  `test-support` registry; no live registry was used.
