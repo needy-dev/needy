@@ -61,6 +61,7 @@ fn write_manifest(dir: &Path, driver: ActorDriver, base_abi: u32) {
     base_abi,
     source: None,
     sha256: None,
+    base: None,
   };
   manifest::write(dir, &manifest).unwrap();
 }

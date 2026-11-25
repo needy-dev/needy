@@ -11,6 +11,7 @@ fn pulled() -> Manifest {
       url: "https://example.com/needy-actor-macos-vz-aarch64.tar.gz".into(),
     }),
     sha256: Some("0".repeat(64)),
+    base: None,
   }
 }
 
@@ -42,6 +43,71 @@ fn the_manifest_of_a_release_archive_has_no_source_or_sha256() {
 
   assert_eq!(manifest.driver, ActorDriver::LinuxFirecracker);
   assert_eq!((manifest.source, manifest.sha256), (None, None));
+}
+
+// A manifest written before needy recorded the base (needy 0.0.17 and
+// earlier, release archives and `needy image build`) has no `base`, and is
+// read as before.
+#[test]
+fn a_manifest_without_a_base_is_read_with_none() {
+  let dir = tempfile::tempdir().unwrap();
+  std::fs::write(
+    dir.path().join(FILE),
+    r#"{"version":"0.0.17","driver":"macos-vz","arch":"aarch64","base_abi":1,"source":{"kind":"build"}}"#,
+  )
+  .unwrap();
+
+  let manifest = read(dir.path()).unwrap().unwrap();
+
+  assert_eq!(manifest.base, None);
+  assert_eq!(manifest.source, Some(Source::Build { recipe: None }));
+}
+
+// The release workflow's "Write the image's manifest" step writes `base`
+// with `jq` from the `actor-base` image it built: the published name, the
+// digest when it pushed the base, and its DiffIDs.
+#[test]
+fn the_manifest_of_a_release_archive_records_its_base() {
+  let dir = tempfile::tempdir().unwrap();
+  let digest = format!("sha256:{}", "a".repeat(64));
+  let (root, userland) = (format!("sha256:{}", "1".repeat(64)), format!("sha256:{}", "2".repeat(64)));
+  let json = serde_json::json!({
+    "version": "0.0.18",
+    "driver": "linux-firecracker",
+    "arch": "x86_64",
+    "base_abi": 1,
+    "base": {
+      "image": "ghcr.io/needy-dev/needy/actor-base:0.0.18-ubuntu-24.04",
+      "digest": digest,
+      "diff_ids": [root, userland],
+    },
+  });
+  std::fs::write(dir.path().join(FILE), json.to_string()).unwrap();
+
+  let manifest = read(dir.path()).unwrap().unwrap();
+
+  assert_eq!(
+    manifest.base,
+    Some(Base {
+      image: "ghcr.io/needy-dev/needy/actor-base:0.0.18-ubuntu-24.04".into(),
+      digest: Some(digest),
+      diff_ids: vec![root, userland],
+    })
+  );
+  assert_eq!(serde_json::to_value(&manifest).unwrap(), json);
+}
+
+#[test]
+fn a_base_without_a_digest_is_written_without_one() {
+  let base = Base {
+    image: "needy-actor-base:latest".into(),
+    digest: None,
+    diff_ids: vec!["sha256:01".into()],
+  };
+
+  let json = serde_json::to_value(&base).unwrap();
+
+  assert_eq!(json, serde_json::json!({"image": "needy-actor-base:latest", "diff_ids": ["sha256:01"]}));
 }
 
 #[test]

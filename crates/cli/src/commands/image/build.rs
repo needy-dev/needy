@@ -11,7 +11,9 @@
 //! The images it builds are tagged as built here (`needy-actor:latest`,
 //! `needy-executor:latest`), not as the release's, which the drivers use by
 //! default: a profile names the built actor image with `actor.image`, and
-//! the daemon the executor image with `--executor-image`.
+//! the daemon the executor image with `--executor-image`. The `actor-base`
+//! a VM image's root file system is derived from is built too, as
+//! [`BUILT_BASE_IMAGE`], and the VM image's manifest records its layers.
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -36,6 +38,11 @@ mod from;
 
 /// Lines of a failed step's output to show with its error.
 const FAILED_STEP_LINES: usize = 30;
+
+/// The tag of the `actor-base` image built here, which the VM image's
+/// manifest names as its base; the release's is
+/// `ghcr.io/needy-dev/needy/actor-base:<version>-ubuntu-24.04`.
+const BUILT_BASE_IMAGE: &str = "needy-actor-base:latest";
 
 #[derive(clap::Args)]
 pub struct Args {
@@ -162,7 +169,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
     build_for_macos_apple_container(&docker, &context, &ctx.paths()?.state, feedback).await?;
   } else {
     build_vm_image(&docker, &context, &out, build_args, feedback).await?;
-    record_build(&out, args.recipe)?;
+    let base = build_base(&docker, &context, feedback).await?;
+    record_build(&out, args.recipe, base)?;
     output::message(format_args!("image build: the base VM image {}", out.display()));
   }
   if args.linux_container {
@@ -240,11 +248,51 @@ async fn run_definition_build(args: Args, ctx: &Context) -> Result<i32> {
 
 /// Writes the manifest of the VM image just built into `dir` for this
 /// host's VM driver, from the `base-abi` file the Dockerfile exported next
-/// to its files, which it replaces.
-fn record_build(dir: &Path, recipe: Option<String>) -> Result<()> {
+/// to its files, which it replaces, and the `actor-base` it was derived
+/// from.
+fn record_build(dir: &Path, recipe: Option<String>, base: manifest::Base) -> Result<()> {
   let driver = needy_core_actor::image::vm::host_driver();
-  let manifest = Manifest::made(driver, take_base_abi(dir)?, manifest::Source::Build { recipe });
+  let manifest = Manifest {
+    base: Some(base),
+    ..Manifest::made(driver, take_base_abi(dir)?, manifest::Source::Build { recipe })
+  };
   Ok(manifest::write(dir, &manifest)?)
+}
+
+/// Builds `images/Dockerfile`'s `actor-base` for the platform of this host's
+/// VM image as [`BUILT_BASE_IMAGE`] and returns it as the base the VM
+/// image's manifest records: its layers, from the engine. The VM image's
+/// build has built its stages already, so this only tags them.
+async fn build_base(docker: &Docker, context: &[u8], feedback: bool) -> Result<manifest::Base> {
+  let (_, platform) = actor_target();
+  build(
+    docker,
+    context,
+    BuildImageOptions {
+      target: "actor-base".into(),
+      t: Some(BUILT_BASE_IMAGE.into()),
+      platform: platform.into(),
+      ..options()
+    },
+    feedback,
+  )
+  .await?;
+  let image = docker.inspect_image(BUILT_BASE_IMAGE).await.with_context(|| format!("cannot inspect {BUILT_BASE_IMAGE}"))?;
+  base_of(BUILT_BASE_IMAGE, image)
+}
+
+/// The base a manifest records for the image `name` the engine described
+/// as `image`: its layers' DiffIDs, lowest first.
+fn base_of(name: &str, image: bollard::models::ImageInspect) -> Result<manifest::Base> {
+  let diff_ids = image.root_fs.and_then(|root| root.layers).unwrap_or_default();
+  if diff_ids.is_empty() {
+    bail!("the engine lists no layers of {name}");
+  }
+  Ok(manifest::Base {
+    image: name.into(),
+    digest: None,
+    diff_ids,
+  })
 }
 
 /// Reads and removes the `base-abi` file `images/Dockerfile`'s VM targets

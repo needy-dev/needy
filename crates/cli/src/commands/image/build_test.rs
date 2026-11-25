@@ -402,3 +402,61 @@ fn every_cargo_build_on_a_shared_target_cache_touches_the_sources_first() {
     assert!(touch < cargo, "the sources are touched after cargo builds: {run}");
   }
 }
+
+// The VM image's manifest records the `actor-base` its root file system was
+// derived from (B1 and B3 of
+// docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md),
+// beside the base ABI the build exported.
+#[test]
+fn a_built_vm_image_records_its_base_and_folds_in_the_base_abi() {
+  let dir = tempfile::tempdir().unwrap();
+  std::fs::write(dir.path().join(needy_core_actor::image::base::FILE), "1\n").unwrap();
+  let image = bollard::models::ImageInspect {
+    root_fs: Some(bollard::models::ImageInspectRootFs {
+      typ: "layers".into(),
+      layers: Some(vec!["sha256:01".into(), "sha256:02".into()]),
+    }),
+    ..Default::default()
+  };
+
+  record_build(dir.path(), None, base_of(BUILT_BASE_IMAGE, image).unwrap()).unwrap();
+
+  let manifest = manifest::read(dir.path()).unwrap().unwrap();
+  assert_eq!(manifest.base_abi, 1);
+  assert_eq!(
+    manifest.base,
+    Some(manifest::Base {
+      image: "needy-actor-base:latest".into(),
+      digest: None,
+      diff_ids: vec!["sha256:01".into(), "sha256:02".into()],
+    })
+  );
+  assert!(!dir.path().join(needy_core_actor::image::base::FILE).exists());
+}
+
+#[test]
+fn a_base_the_engine_lists_no_layers_of_is_refused() {
+  let error = base_of(BUILT_BASE_IMAGE, bollard::models::ImageInspect::default()).unwrap_err();
+
+  assert_eq!(error.to_string(), "the engine lists no layers of needy-actor-base:latest");
+}
+
+// `needy image build` builds these targets of `images/Dockerfile` by name;
+// a renamed stage would fail only when someone builds it.
+#[test]
+fn every_target_needy_image_build_names_is_a_stage_of_the_dockerfile() {
+  let dockerfile = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../images/Dockerfile");
+  let text = std::fs::read_to_string(dockerfile).unwrap();
+  let stages: Vec<&str> =
+    text.lines().filter(|line| line.starts_with("FROM ")).filter_map(|line| line.rsplit_once(" AS ").map(|(_, stage)| stage)).collect();
+
+  for target in [
+    "actor",
+    "actor-macos-vz",
+    "actor-base",
+    "actor-container",
+    "executor",
+  ] {
+    assert!(stages.contains(&target), "no stage {target} in {stages:?}");
+  }
+}

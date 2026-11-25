@@ -30,7 +30,11 @@ pub enum Image {
 /// The pinned default OCI root image used when an image definition omits `root:`.
 /// Matches the base distribution used by needy's own actor images in
 /// `images/Dockerfile`.
-// Source: `images/Dockerfile` (`FROM ubuntu:24.04 AS actor-root` and `container-root`)
+// Source: `images/Dockerfile` (`UBUNTU_IMAGE`, which `actor-base` is built on,
+// pinned there by `UBUNTU_DIGEST`)
+// TODO(base-identity): this root is the tag, not the digest `actor-base`
+// pins; the root identity of image definitions is B-2 of
+// docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md.
 // Reference: https://hub.docker.com/_/ubuntu (Ubuntu 24.04 LTS "Noble Numbat")
 pub const DEFAULT_ROOT: &str = "ubuntu:24.04";
 

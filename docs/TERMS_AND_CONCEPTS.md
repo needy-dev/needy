@@ -536,12 +536,24 @@ See the [actor images design](ai/references/architecture/2026-11-12-actor-images
 An actor image without needy's own program in it: the kernel with
 `binfmt_needy` (VM drivers), the root file system, the boot stub and the
 shim stub. One base image serves every needy version that speaks its base
-ABI. Each release has one per driver: a VM image archive, which `needy
-image pull` downloads into `images/<driver>/base` in needy's data directory,
-and `ghcr.io/needy-dev/needy-actor:v<version>`, which the container drivers
-pull. `needy image build` builds one from a needy checkout (a VM image
-directory, or `needy-actor:latest`). The daemon brings the guest needy when
-each actor starts.
+ABI. Every release publishes `ghcr.io/needy-dev/needy/actor-base`
+(`<version>-ubuntu-24.04`), the start of every actor image for the VM and
+container drivers: the distribution's own layers, unchanged and pinned by
+digest, then the userland (packages and the `agent` user) and `/.needy`
+(the stubs and the base ABI label), with no container shims. The base images
+the drivers use are derived from it: a VM image archive per VM driver, whose
+`rootfs.ext4` is `actor-base` with the VM's own additions (systemd) and
+whose `manifest.json` records the base (its name, DiffIDs and, when
+published, digest), which `needy image pull` downloads into
+`images/<driver>/base` in needy's data directory; and
+`ghcr.io/needy-dev/needy-actor:v<version>`, `actor-base` with one layer that
+shims the shells, which the container drivers pull. The executor's image is
+published the same way as `ghcr.io/needy-dev/needy/executor-base` (and
+`needy-executor`). `needy image build` builds one from a needy checkout (a
+VM image directory, with `needy-actor-base:latest` as its base, or
+`needy-actor:latest`). The daemon brings the guest needy when each actor
+starts. See the
+[layered OCI base spec](ai/references/architecture/2026-11-25-layered-oci-base-spec.md).
 
 *Avoid*: actor image with needy, versioned image.
 

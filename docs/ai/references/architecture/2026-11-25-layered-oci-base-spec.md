@@ -164,6 +164,40 @@ implements them.)
 | B-4 | `actor.image` import above the base (control daemon and remote runners); remove `from.Dockerfile` | B-1, B-3 |
 | B-5 | One-shot `needy image build --push`; a CI example; runners take sources from the import (replaces #106) | B-3 |
 
+Settled in B-1 (2026-11-25):
+
+- `images/Dockerfile` targets: `actor-base` (`FROM ubuntu:24.04` pinned by
+  index digest through `UBUNTU_IMAGE` and `UBUNTU_DIGEST`, then one userland
+  layer and one needy layer) and `executor-base` (today's executor on the
+  same pinned root; its own userland, since it is a toolchain image that
+  carries needy). `actor-root` (the VM's `rootfs.ext4`) and
+  `actor-container` (`needy-actor`) are `FROM actor-base`; `executor`
+  (`needy-executor`) is `FROM executor-base`. The target names `needy image
+  build` and the e2e harness use did not change.
+- The needy layer holds `/.needy/{init,proxy,needy,disk,channels,base-abi}`
+  and the `shim-image` script, so an image `FROM actor-base` that runs
+  `RUN ["/.needy/shim-image"]` last is a container actor image as one `FROM
+  needy-actor` is. `actor-base` has no shims and no entrypoint; its labels
+  are `needy.base-abi` and `org.opencontainers.image.base.{name,digest}`
+  naming the distribution root.
+- `needy-actor` is `actor-base` and exactly one layer (the shim step); its
+  labels `org.opencontainers.image.base.name` and, when the release pushed
+  the base, `.digest` name the `actor-base` it comes from (empty when built
+  outside the release). `needy-executor` has `executor-base`'s layers and
+  the same labels for it.
+- `manifest.json` gains an optional `base`: `image` (the published name and
+  tag, or `needy-actor-base:latest` for `needy image build`), `diff_ids` (the
+  base image's `rootfs.diff_ids`) and `digest` (the base's image manifest
+  digest for the architecture, only when the release pushed it). Older
+  manifests without it are read as before; an older needy refuses a
+  manifest with it (`deny_unknown_fields`), which only a downgrade meets.
+- The release workflow builds and verifies the bases on every run (the
+  root's DiffIDs prefix both bases, `actor-base` has two layers above the
+  root and no shims, `needy-actor` has `actor-base`'s layers and one more,
+  the VM build used the verified `actor-base`), pushes them by digest on
+  publishing runs only, tags `ghcr.io/needy-dev/needy/{actor-base,executor-base}:<version>-ubuntu-24.04`
+  and attests each index with `actions/attest-build-provenance`.
+
 ## Testing
 
 - Unit: DiffID prefix matching and refusal; the stack digest is equal for a

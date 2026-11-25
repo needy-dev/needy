@@ -1,5 +1,9 @@
 # Builds the `needy` binaries, the prebuilt actor images and the container
-# images for a release, and on a real release publishes them.
+# images for a release, and on a real release publishes them. The base images
+# `actor-base` and `executor-base` come first; the VM files, `needy-actor` and
+# `needy-executor` are derived from them
+# (docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md, B1,
+# B3 and B6).
 # The structure (build matrix, archives with a `.sha256`, a "binary starts"
 # check, `workflow_dispatch` with an optional upload to an existing release, a
 # `publish` job on `softprops/action-gh-release`) follows moeru-ai/auv's
@@ -51,6 +55,10 @@ env:
   PUBLISH: ${{ github.event_name == 'release' || (inputs.upload_to_release && inputs.tag_name != '') }}
   TAG_NAME: ${{ github.event.release.tag_name || inputs.tag_name }}
   REGISTRY: ghcr.io/needy-dev
+  # The distribution `images/Dockerfile` builds `actor-base` and
+  # `executor-base` on, the second half of their tags
+  # (`<version>-ubuntu-24.04`, B1 of the layered OCI base spec).
+  BASE_DISTRIBUTION: ubuntu-24.04
 
 jobs:
   binary:
@@ -205,9 +213,10 @@ jobs:
             ${{ matrix.archive }}
             ${{ matrix.archive }}.sha256
 
-  # One job per architecture builds that architecture's VM actor files and both
-  # container images on one BuildKit builder, so the `needy` stage of
-  # images/Dockerfile (a full musl build of needy-cli) is built once and reused.
+  # One job per architecture builds that architecture's base images, VM actor
+  # files and container images on one BuildKit builder, so the `needy` stage
+  # of images/Dockerfile (a full musl build of needy-cli) is built once and
+  # reused, and the derived images reuse the bases' cached layers.
   # Native runners for each architecture; QEMU would emulate the kernel and
   # Rust builds and take hours.
   images:
@@ -262,6 +271,141 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
+      # The needy version of this tree, which names the base images
+      # (`<version>-ubuntu-24.04`) and goes in the VM image's manifest.
+      - name: Name the images
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          if [ "$PUBLISH" = true ] && [ "$TAG_NAME" != "v$version" ]; then
+            echo "::warning::the release tag $TAG_NAME is not v$version, the version of this tree; needy $version pulls from v$version"
+          fi
+          {
+            echo "version=$version"
+            echo "actor-base=$REGISTRY/needy/actor-base:$version-$BASE_DISTRIBUTION"
+            echo "executor-base=$REGISTRY/needy/executor-base:$version-$BASE_DISTRIBUTION"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      - name: Build actor-base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: actor-base
+          load: true
+          tags: actor-base:ci
+
+      - name: Build executor-base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: executor-base
+          load: true
+          tags: executor-base:ci
+
+      # The bases' layers (B1 of the layered OCI base spec): each starts with
+      # the distribution's own layers, unchanged (the root `images/Dockerfile`
+      # pins, which `actor-base` names in its labels); `actor-base` has
+      # exactly two layers above them (the userland and `/.needy`) and no
+      # container shims: its shells are the real programs, and the scripts
+      # and stubs an image `FROM` it needs are there.
+      - name: Verify the base images
+        run: |
+          set -euo pipefail
+          layers() { docker image inspect "$1" --format '{{ range .RootFS.Layers }}{{ println . }}{{ end }}' | sed '/^$/d'; }
+          label() { docker image inspect "$1" --format "{{ index .Config.Labels \"$2\" }}"; }
+          starts_with() {
+            if ! diff <(layers "$1") <(layers "$2" | head -n "$(layers "$1" | wc -l)"); then
+              echo "$2 does not start with the layers of $1" >&2; exit 1
+            fi
+          }
+          root="$(label actor-base:ci org.opencontainers.image.base.name)@$(label actor-base:ci org.opencontainers.image.base.digest)"
+          test "$root" = "$(label executor-base:ci org.opencontainers.image.base.name)@$(label executor-base:ci org.opencontainers.image.base.digest)"
+          docker pull --platform linux/${{ matrix.arch }} "$root"
+          starts_with "$root" actor-base:ci
+          starts_with "$root" executor-base:ci
+          test "$(layers actor-base:ci | wc -l)" -eq "$(( $(layers "$root" | wc -l) + 2 ))"
+          test "$(label actor-base:ci needy.base-abi)" = 1
+          docker run --rm actor-base:ci /usr/bin/bash --version
+          docker run --rm actor-base:ci /bin/sh -c '
+            for shell in /usr/bin/sh /usr/bin/bash /usr/bin/dash; do
+              if [ "$shell" -ef /.needy/proxy ] || cmp -s "$(readlink -f "$shell")" /.needy/proxy; then
+                echo "$shell is a shim" >&2; exit 1
+              fi
+            done
+            test ! -e /.needy/real
+            test -x /.needy/init && test -x /.needy/proxy && test -x /.needy/shim-image && test -d /.needy/channels'
+          docker run --rm executor-base:ci needy --version
+          layers actor-base:ci
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Each architecture pushes its images by digest only; the `manifests`
+      # job tags the multi-architecture indexes. These builds hit the cache
+      # of the builds above, so they only push.
+      - name: Push actor-base by digest
+        id: push-actor-base
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: actor-base
+          platforms: linux/${{ matrix.arch }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=image,name=${{ env.REGISTRY }}/needy/actor-base,push-by-digest=true,name-canonical=true,push=true
+
+      - name: Push executor-base by digest
+        id: push-executor-base
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: executor-base
+          platforms: linux/${{ matrix.arch }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          outputs: type=image,name=${{ env.REGISTRY }}/needy/executor-base,push-by-digest=true,name-canonical=true,push=true
+
+      # The digest of each base's image manifest for this architecture, which
+      # the derived images' labels and the VM image's manifest name. A push
+      # with a provenance attestation returns the digest of an index holding
+      # the image and its attestation; the `manifests` job merges the image
+      # manifests themselves into the published index, so that is the digest
+      # a reader finds there.
+      - name: Find the bases' digests
+        id: base-digests
+        if: env.PUBLISH == 'true'
+        env:
+          ACTOR_BASE_DIGEST: ${{ steps.push-actor-base.outputs.digest }}
+          EXECUTOR_BASE_DIGEST: ${{ steps.push-executor-base.outputs.digest }}
+        run: |
+          set -euo pipefail
+          platform_digest() {
+            local raw
+            raw="$(docker buildx imagetools inspect --raw "$1@$2")"
+            if jq -e 'has("manifests")' <<< "$raw" > /dev/null; then
+              jq -r --arg arch "${{ matrix.arch }}" '
+                [.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch)]
+                | if length == 1 then .[0].digest else error("not one linux/\($arch) manifest") end' <<< "$raw"
+            else
+              echo "$2"
+            fi
+          }
+          {
+            echo "actor-base=$(platform_digest "$REGISTRY/needy/actor-base" "$ACTOR_BASE_DIGEST")"
+            echo "executor-base=$(platform_digest "$REGISTRY/needy/executor-base" "$EXECUTOR_BASE_DIGEST")"
+          } | tee -a "$GITHUB_OUTPUT"
+
       # The VM actor's files, exported as images/Dockerfile's header shows
       # (`--output type=local`). `needy image build --out` builds the same target
       # through the Docker API, but picks it from the host it runs on (the
@@ -277,6 +421,19 @@ jobs:
           target: ${{ matrix.vm_target }}
           outputs: type=local,dest=vm
 
+      # `actor-base` again, after the VM files: the same image ID shows the
+      # VM build derived its root file system from the `actor-base` verified
+      # (and pushed) above, not from a rebuild of its stages, so the layers
+      # the manifest records are the ones it holds.
+      - name: Rebuild actor-base
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: actor-base
+          load: true
+          tags: actor-base:after-vm
+
       - name: Verify the actor files
         run: |
           ls -lsh vm
@@ -284,25 +441,32 @@ jobs:
           echo "base ABI $(cat vm/base-abi)"
           if [ -e vm/firecracker ]; then vm/firecracker --version; fi
           sudo e2fsck -fn vm/rootfs.ext4
+          test "$(docker image inspect actor-base:ci --format '{{ .Id }}')" = "$(docker image inspect actor-base:after-vm --format '{{ .Id }}')"
 
       # The image's `manifest.json`, in the shape `needy image pull` reads
-      # (`needy_core_actor::image::manifest`, whose test
-      # `the_manifest_of_a_release_archive_has_no_source_or_sha256` holds the
-      # same fields): the needy version of this tree, the driver, the
-      # architecture and the base ABI the Dockerfile exported as `base-abi`,
-      # which the manifest replaces. `needy image pull` adds where it came
-      # from and the archive's SHA-256.
+      # (`needy_core_actor::image::manifest`, whose tests
+      # `the_manifest_of_a_release_archive_has_no_source_or_sha256` and
+      # `the_manifest_of_a_release_archive_records_its_base` hold the same
+      # fields): the needy version of this tree, the driver, the architecture,
+      # the base ABI the Dockerfile exported as `base-abi`, which the manifest
+      # replaces, and the `actor-base` its root file system was derived from:
+      # the published name, the DiffIDs of its layers and, when this run
+      # pushed it, its digest. `needy image pull` adds where it came from and
+      # the archive's SHA-256.
       - name: Write the image's manifest
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          BASE_IMAGE: ${{ steps.meta.outputs.actor-base }}
+          BASE_DIGEST: ${{ steps.base-digests.outputs.actor-base }}
         run: |
           set -euo pipefail
-          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
-          test -n "$version"
-          if [ "$PUBLISH" = true ] && [ "$TAG_NAME" != "v$version" ]; then
-            echo "::warning::the release tag $TAG_NAME is not v$version, the version of this tree; needy $version pulls from v$version"
-          fi
-          jq -n --arg version "$version" --arg driver "${{ matrix.vm_driver }}" --arg arch "${{ matrix.vm_arch }}" \
+          jq -n --arg version "$VERSION" --arg driver "${{ matrix.vm_driver }}" --arg arch "${{ matrix.vm_arch }}" \
             --argjson base_abi "$(cat vm/base-abi)" \
-            '{version: $version, driver: $driver, arch: $arch, base_abi: $base_abi}' > vm/manifest.json
+            --arg base_image "$BASE_IMAGE" --arg base_digest "$BASE_DIGEST" \
+            --argjson diff_ids "$(docker image inspect actor-base:ci --format '{{ json .RootFS.Layers }}')" \
+            '{version: $version, driver: $driver, arch: $arch, base_abi: $base_abi,
+              base: ({image: $base_image, diff_ids: $diff_ids} + (if $base_digest == "" then {} else {digest: $base_digest} end))}' \
+            > vm/manifest.json
           rm vm/base-abi
           cat vm/manifest.json
 
@@ -328,6 +492,11 @@ jobs:
             ${{ matrix.vm_archive }}
             ${{ matrix.vm_archive }}.sha256
 
+      # The compatibility images (B6 of the layered OCI base spec), derived
+      # from the bases built above, whose names their labels carry.
+      # TODO(base-images): stop building and publishing `needy-actor` and
+      # `needy-executor` once a release has shipped `actor-base` and
+      # `executor-base` and the docs and examples use them.
       - name: Build needy-actor
         uses: docker/build-push-action@v7
         with:
@@ -336,6 +505,7 @@ jobs:
           target: actor-container
           load: true
           tags: needy-actor:ci
+          build-args: BASE_NAME=${{ steps.meta.outputs.actor-base }}
 
       - name: Build needy-executor
         uses: docker/build-push-action@v7
@@ -345,6 +515,7 @@ jobs:
           target: executor
           load: true
           tags: needy-executor:ci
+          build-args: BASE_NAME=${{ steps.meta.outputs.executor-base }}
 
       # The guest needy the daemon injects into actors, from the `needy`
       # stage the builds above already built.
@@ -379,17 +550,30 @@ jobs:
           docker run --rm needy-executor:ci needy --version
           docker image ls
 
-      - name: Log in to GHCR
-        if: env.PUBLISH == 'true'
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # `needy-actor` is `actor-base` and exactly one layer, the shim step,
+      # whose shells are shims; `needy-executor` has `executor-base`'s layers.
+      # Each label names the base it comes from.
+      - name: Verify the compatibility images derive from the bases
+        env:
+          ACTOR_BASE: ${{ steps.meta.outputs.actor-base }}
+          EXECUTOR_BASE: ${{ steps.meta.outputs.executor-base }}
+        run: |
+          set -euo pipefail
+          layers() { docker image inspect "$1" --format '{{ range .RootFS.Layers }}{{ println . }}{{ end }}' | sed '/^$/d'; }
+          label() { docker image inspect "$1" --format "{{ index .Config.Labels \"$2\" }}"; }
+          if ! diff <(layers actor-base:ci) <(layers needy-actor:ci | head -n "$(layers actor-base:ci | wc -l)"); then
+            echo "needy-actor does not start with the layers of actor-base" >&2; exit 1
+          fi
+          test "$(layers needy-actor:ci | wc -l)" -eq "$(( $(layers actor-base:ci | wc -l) + 1 ))"
+          diff <(layers executor-base:ci) <(layers needy-executor:ci)
+          test "$(label needy-actor:ci org.opencontainers.image.base.name)" = "$ACTOR_BASE"
+          test "$(label needy-executor:ci org.opencontainers.image.base.name)" = "$EXECUTOR_BASE"
+          # NOTICE: compare contents, not inodes. The shims are made in a layer
+          # above the one holding /.needy/proxy, and a hard link cannot span
+          # layers, so a shim is a copy of the proxy rather than a link to it
+          # once the image is assembled (docker-container builder, `load`).
+          docker run --rm --entrypoint /bin/sh needy-actor:ci -c 'cmp -s /usr/bin/bash /.needy/proxy && test -x /.needy/real/usr/bin/bash'
 
-      # Each architecture pushes its image by digest only; the `manifests`
-      # job tags the multi-architecture list. These builds hit the cache of
-      # the builds above, so they only push.
       - name: Push needy-actor by digest
         id: push-actor
         if: env.PUBLISH == 'true'
@@ -400,6 +584,9 @@ jobs:
           target: actor-container
           platforms: linux/${{ matrix.arch }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            BASE_NAME=${{ steps.meta.outputs.actor-base }}
+            BASE_DIGEST=${{ steps.base-digests.outputs.actor-base }}
           outputs: type=image,name=${{ env.REGISTRY }}/needy-actor,push-by-digest=true,name-canonical=true,push=true
 
       - name: Push needy-executor by digest
@@ -412,6 +599,9 @@ jobs:
           target: executor
           platforms: linux/${{ matrix.arch }}
           labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          build-args: |
+            BASE_NAME=${{ steps.meta.outputs.executor-base }}
+            BASE_DIGEST=${{ steps.base-digests.outputs.executor-base }}
           outputs: type=image,name=${{ env.REGISTRY }}/needy-executor,push-by-digest=true,name-canonical=true,push=true
 
       - name: Record the digests
@@ -419,9 +609,12 @@ jobs:
         env:
           ACTOR_DIGEST: ${{ steps.push-actor.outputs.digest }}
           EXECUTOR_DIGEST: ${{ steps.push-executor.outputs.digest }}
+          ACTOR_BASE_DIGEST: ${{ steps.push-actor-base.outputs.digest }}
+          EXECUTOR_BASE_DIGEST: ${{ steps.push-executor-base.outputs.digest }}
         run: |
-          mkdir -p digests/needy-actor digests/needy-executor
+          mkdir -p digests/needy-actor digests/needy-executor digests/needy/actor-base digests/needy/executor-base
           touch "digests/needy-actor/${ACTOR_DIGEST#sha256:}" "digests/needy-executor/${EXECUTOR_DIGEST#sha256:}"
+          touch "digests/needy/actor-base/${ACTOR_BASE_DIGEST#sha256:}" "digests/needy/executor-base/${EXECUTOR_BASE_DIGEST#sha256:}"
 
       - name: Upload the digests
         if: env.PUBLISH == 'true'
@@ -439,7 +632,14 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
+      # For the version in Cargo.toml, which names the base images as the
+      # `images` job did.
+      - uses: actions/checkout@v6
+
       - uses: actions/download-artifact@v8
         with:
           pattern: digests-*
@@ -454,22 +654,59 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Tags each image with the release tag and `latest`. needy publishes
-      # every release as a prerelease while it is 0.0.x, so `latest` follows
-      # the newest release of either kind.
+      # Tags `needy-actor` and `needy-executor` with the release tag and
+      # `latest`. needy publishes every release as a prerelease while it is
+      # 0.0.x, so `latest` follows the newest release of either kind. The
+      # bases are tagged `<version>-ubuntu-24.04` only: profiles and `FROM`
+      # lines pin their digest, and the tag is for people (B1 of the layered
+      # OCI base spec).
       - name: Create the multi-architecture manifests
+        id: indexes
         run: |
-          for image in needy-actor needy-executor; do
-            sources=()
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          test -n "$version"
+          index() {
+            local image=$1 tag
+            shift
+            local sources=() tags=()
             for digest in digests/"$image"/*; do
               sources+=("$REGISTRY/$image@sha256:$(basename "$digest")")
             done
-            docker buildx imagetools create \
-              -t "$REGISTRY/$image:$TAG_NAME" \
-              -t "$REGISTRY/$image:latest" \
-              "${sources[@]}"
-            docker buildx imagetools inspect "$REGISTRY/$image:$TAG_NAME"
+            for tag in "$@"; do
+              tags+=(-t "$REGISTRY/$image:$tag")
+            done
+            docker buildx imagetools create "${tags[@]}" "${sources[@]}"
+            docker buildx imagetools inspect "$REGISTRY/$image:$1"
+          }
+          # TODO(base-images): drop these two once the bases replace them (B6).
+          for image in needy-actor needy-executor; do
+            index "$image" "$TAG_NAME" latest
           done
+          for base in actor-base executor-base; do
+            tag="$version-$BASE_DISTRIBUTION"
+            index "needy/$base" "$tag"
+            echo "$base=$(docker buildx imagetools inspect "$REGISTRY/needy/$base:$tag" --format '{{ json .Manifest }}' | jq -r .digest)" >> "$GITHUB_OUTPUT"
+          done
+
+      # A GitHub artifact attestation of each base's index, pushed next to it,
+      # which `gh attestation verify oci://ghcr.io/needy-dev/needy/actor-base@DIGEST
+      # -R needy-dev/needy` checks; the BuildKit provenance the pushes above
+      # attach stays in the index as for every image here.
+      # Reference: https://github.com/actions/attest-build-provenance/tree/v4#container-image
+      - name: Attest the build provenance of actor-base
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/needy/actor-base
+          subject-digest: ${{ steps.indexes.outputs.actor-base }}
+          push-to-registry: true
+
+      - name: Attest the build provenance of executor-base
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/needy/executor-base
+          subject-digest: ${{ steps.indexes.outputs.executor-base }}
+          push-to-registry: true
 
   # The arm64 macOS archive carries the guest needy its daemon injects into
   # actors, which run arm64 Linux on Apple silicon: the static
