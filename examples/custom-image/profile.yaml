@@ -1,9 +1,12 @@
 # A custom actor image (the Dockerfile here: needy's base plus jq) on a
-# Linux host with KVM: a Firecracker actor that boots the VM image made from
-# it. Build the image, then its VM image:
+# Linux host with KVM: a Firecracker actor that boots the base VM image with
+# the image's layers above actor-base imported. Build it FROM actor-base and
+# push it (see the Dockerfile), then, optionally, import it ahead of a run:
 #
-#   docker build -t needy-custom-jq examples/custom-image
-#   needy image build --from needy-custom-jq
+#   docker build --build-arg BASE=<actor-base> --build-arg SHIM=0 \
+#     -t registry.example.com/needy-custom-jq:1 examples/custom-image
+#   docker push registry.example.com/needy-custom-jq:1
+#   needy image build --from registry.example.com/needy-custom-jq:1
 #
 # jq runs in the actor; python3 is routed to an executor, as in
 # examples/smoke. `linux-container.yaml` runs the same image as a container
@@ -12,7 +15,7 @@
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
-  image: needy-custom-jq
+  image: registry.example.com/needy-custom-jq:1
   workspace: { path: ~/workspace, from: "executor:build:~/workspace", writable: true }
   command:
     - /bin/sh

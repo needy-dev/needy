@@ -307,6 +307,7 @@ impl Tally {
       | Event::ImageBuildStep(_)
       | Event::ImageLayerPull(_)
       | Event::ImageLayerPush(_)
+      | Event::ImageImport(_)
       | Event::NetError(_) => {}
       Event::TraceTiming(timing) => {
         for (hook, sample) in &timing.hooks {

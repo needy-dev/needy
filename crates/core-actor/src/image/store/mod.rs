@@ -10,6 +10,10 @@
 //! Docker/OCI image archive for the container drivers. No caller sees
 //! whiteouts, disk formats or how commits collapse.
 //!
+//! [`import`] takes the layers of an OCI image built `FROM` needy's
+//! `actor-base` that are above the base, and [`registry`] shares built steps
+//! through an OCI registry.
+//!
 //! Generic OCI layer canonicalization, algebraic collapse, SquashFS disk
 //! writing, and OCI/Docker hybrid archive assembly live in the standalone
 //! `oci-layer` crate; this module owns needy's cache/data store layout,
@@ -26,6 +30,7 @@
 // TODO(images): a general listing of stored layers waits for `needy image ls`
 // or `log` to need it.
 
+pub mod import;
 mod oci;
 pub mod registry;
 
@@ -602,6 +607,32 @@ impl Store {
   /// kept.
   fn put_expecting(&self, layer: impl Read, expected: &Digest) -> Result<Digest> {
     self.store_checked(&self.cache.join("layers"), Some(expected), |out| Ok(archive::canonical(layer, out)?))
+  }
+
+  /// Stores the canonical form of `layer`, an uncompressed layer archive of
+  /// an image another tool built whose DiffID is `diff_id`, and returns its
+  /// digest. The canonical form (relative member names, no root entry, fresh
+  /// headers) usually differs from what the other tool wrote, so the layer is
+  /// named by its own digest and `diff_id` is recorded as its alias
+  /// ([`Store::imported`]), by which the next import of it finds it.
+  fn put_imported(&self, layer: impl Read, diff_id: &Digest) -> Result<Digest> {
+    let digest = self.put(layer)?;
+    write_atomic(&self.alias_path(diff_id), format!("{digest}\n").as_bytes())?;
+    Ok(digest)
+  }
+
+  /// The stored layer an import took as DiffID `diff_id`, if it is still
+  /// stored.
+  // NOTICE: `collect` does not remove aliases; one whose layer it removed
+  // reads as absent here and is replaced by the next import.
+  fn imported(&self, diff_id: &Digest) -> Option<Digest> {
+    let text = std::fs::read_to_string(self.alias_path(diff_id)).ok()?;
+    let digest = Digest::parse(text.trim()).ok()?;
+    self.has_layer(&digest).then_some(digest)
+  }
+
+  fn alias_path(&self, diff_id: &Digest) -> PathBuf {
+    self.cache.join("imported").join(stem(diff_id))
   }
 
   /// Stores in `dir` the archive `write` writes, named by its digest.

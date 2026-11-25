@@ -15,8 +15,8 @@ use crate::output;
 #[command(arg_required_else_help = true)]
 pub struct Args {
   /// The VM images to remove, as `needy image ls` names them: `base`, or
-  /// the OCI reference a VM image was made from (`needy image build --from
-  /// REF`), or its directory's name.
+  /// the OCI reference an older needy's `needy image build --from REF` made
+  /// a VM image of, or its directory's name.
   #[arg(value_name = "IMAGE")]
   images: Vec<String>,
   /// The VM driver whose images they are. Defaults to this host's.

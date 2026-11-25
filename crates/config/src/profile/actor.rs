@@ -22,8 +22,9 @@ pub struct Actor {
   /// What runs the actor.
   pub driver: ActorDriver,
   /// The actor image, for every driver, decided by its syntax: an OCI image
-  /// reference (the container drivers run it, the VM drivers boot the VM
-  /// image `needy image build --from` made of it), or an image definition,
+  /// reference (the container drivers run it; the VM drivers boot the base
+  /// VM image with its layers above `actor-base` imported), or an image
+  /// definition,
   /// inline or from an image file (see [`crate::image`]). Without it the
   /// container drivers run [`CONTAINER_IMAGE`] and the VM drivers boot the
   /// daemon's base VM image (`needy image pull`).

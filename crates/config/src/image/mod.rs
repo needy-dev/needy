@@ -19,9 +19,10 @@ use crate::{Error, Kind, Source, merge, source};
 /// What `actor.image` names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Image {
-  /// An OCI image reference, run or booted as it is: the container drivers
-  /// run it, the VM drivers boot the VM image `needy image build --from`
-  /// made of it.
+  /// An OCI image reference: the container drivers run it as it is; the VM
+  /// drivers boot the base VM image with the image's layers above needy's
+  /// `actor-base` imported as layer disks, so it must be built `FROM`
+  /// `actor-base`.
   Reference(String),
   /// An image definition, from an image file or written inline.
   Definition(Definition),
@@ -39,8 +40,10 @@ pub enum Image {
 // the plan's `root_image` names it, and nothing pulls it.
 // TODO(default-root): it is the tag, not the digest `actor-base` pins
 // (`UBUNTU_DIGEST`); pinning it here would be a second copy of that digest
-// to keep in step. Pin it, or derive it from the base, once something pulls
-// or builds on it (B-4's import above the base).
+// to keep in step. B-4's import above the base pulls `actor-base`, which
+// pins its root by digest itself, not this name. Pin it, or derive it from
+// the base, once something pulls or builds on it (a definition's `root:`
+// imported on the VM drivers, slice 5 of the images and run data spec).
 // Reference: https://hub.docker.com/_/ubuntu (Ubuntu 24.04 LTS "Noble Numbat")
 pub const DEFAULT_ROOT: &str = "ubuntu:24.04";
 

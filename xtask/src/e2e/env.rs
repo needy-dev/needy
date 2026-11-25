@@ -230,17 +230,6 @@ impl<'a> CellEnv<'a> {
   /// until it answers.
   pub fn start_daemon(&mut self) -> Result<()> {
     anyhow::ensure!(self.daemon.is_none(), "this cell already owns a control child");
-    // The VM images the harness built from container images (the TUI
-    // cells' agents image) are where the daemon looks for a profile's
-    // `actor.image`: its data directory's `images`.
-    let images = self.dir.join("d").join("images");
-    if let Some(built) = &self.ctx.host.images
-      && built.exists()
-      && !images.exists()
-    {
-      std::fs::create_dir_all(self.dir.join("d"))?;
-      std::os::unix::fs::symlink(built, &images).with_context(|| format!("cannot link {}", images.display()))?;
-    }
     let mut args = vec![
       "daemon".to_string(),
       "serve".into(),
@@ -490,7 +479,6 @@ mod tests {
         host_sshfs: Err("test".into()),
         guest: Err("test".into()),
         vm_image: None,
-        images: None,
         agents: BTreeMap::new(),
         stop_now: false,
         docker_host: None,

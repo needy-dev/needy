@@ -138,7 +138,6 @@ async fn start_runner(control: &Control, dir: &Path, rootfs: &str) -> tokio::tas
     actor: Some(crate::runner::ActorConfig {
       gateway: None,
       actor_image: image,
-      vm_images: dir.join("images"),
       guest_disks: dir.join("guest-disks"),
       layer_store: crate::runner::layer_store(&dir.join("cache"), &dir.join("data")),
       guest_needy: Some(guest),
@@ -462,6 +461,53 @@ async fn a_control_daemon_without_kvm_takes_remote_steps_from_the_layer_registry
 
   Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
   control.end().await;
+}
+
+// A remote VM actor of an OCI image built FROM actor-base: the control
+// daemon, without KVM, imports the layers above the base, and the runner,
+// which has no engine and contacts no registry, fetches them with
+// `FetchLayer`, checks they sit on its base, and attaches their disks.
+#[tokio::test]
+async fn a_remote_runner_boots_an_image_from_actor_base_with_the_layers_the_control_daemon_imported() {
+  use needy_core_actor::image::store::import::testing::Image;
+  use oci_registry::testing::TestRegistry;
+
+  use crate::image::import_tests::{agent, record_base};
+
+  let registry = TestRegistry::start().await;
+  let base = Image::actor_base();
+  agent(&base).push(&registry, "agents/codex", "1");
+  let control = Control::start(|_| {}).await;
+  std::fs::remove_file(&control.daemon().config.kvm).unwrap();
+  record_base(&control.started.dir.path().join("image"), &base);
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner(&control, runner_dir.path(), "").await;
+  record_base(&runner_dir.path().join("image"), &base);
+  let reference = registry.repository("agents/codex:1");
+  let profile = format!(
+    "actor:\n  driver: linux-firecracker\n  runner: actor-node\n  command: [sh, -c, 'echo hi']\n  image: {reference}\nuser: {{ name: agent, uid: 1000, gid: 1000 }}\nexecutors:\n  here: {{ driver: native }}\n"
+  );
+
+  let created = control.create(&profile).await.unwrap();
+  let layers = control.snapshot_layers(&created.id);
+  assert_eq!(layers.len(), 2);
+  assert_eq!(control.sessions.load(Ordering::SeqCst), 0, "nothing is built for an imported image");
+
+  // Init's configuration names the disks the runner made of the fetched layers.
+  let config = tokio::time::timeout(Duration::from_secs(10), Guest::config(control.daemon(), &created.id)).await.unwrap().unwrap();
+  assert_eq!(config.layers, layers.iter().map(ToString::to_string).collect::<Vec<_>>());
+  let store = crate::runner::layer_store(&runner_dir.path().join("cache"), &runner_dir.path().join("data"));
+  for layer in &layers {
+    assert!(store.has_layer(layer), "the runner's store lacks {layer}");
+  }
+  let vm_json = run_dir(&runner_dir.path().join("work"), &created.id).await.join("vm.json");
+  let vm_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&vm_json).unwrap()).unwrap();
+  let drives: Vec<_> = vm_json["drives"].as_array().unwrap().iter().map(|d| d["drive_id"].as_str().unwrap().to_string()).collect();
+  assert!(drives.ends_with(&["layer-0".to_string(), "layer-1".to_string()]), "{drives:?}");
+
+  Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
 }
 
 // ROOT CAUSE:

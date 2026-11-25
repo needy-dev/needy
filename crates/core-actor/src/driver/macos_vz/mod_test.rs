@@ -72,6 +72,7 @@ fn a_recipe_sizes_the_vm() {
 #[test]
 fn the_channels_are_the_vsock_bridges_and_the_ports_init_dials_under_firecracker() {
   let vz = MacosVz {
+    imports: None,
     image: Image::new(Path::new(IMAGE)),
     vfkit: VFKIT.into(),
     guest_disks: Path::new(DISK).parent().unwrap().into(),
@@ -157,6 +158,7 @@ async fn a_missing_vfkit_fails_its_check_naming_how_to_install_it() {
 #[tokio::test]
 async fn an_apple_silicon_mac_without_vfkit_fails_the_host_check() {
   let vz = MacosVz {
+    imports: None,
     image: Image::new(Path::new(IMAGE)),
     vfkit: "/nonexistent/vfkit".into(),
     guest_disks: Path::new(DISK).parent().unwrap().into(),
@@ -171,6 +173,7 @@ async fn an_apple_silicon_mac_without_vfkit_fails_the_host_check() {
 #[tokio::test]
 async fn another_host_fails_the_check_naming_the_runtimes_it_has() {
   let vz = MacosVz {
+    imports: None,
     image: Image::new(Path::new(IMAGE)),
     vfkit: VFKIT.into(),
     guest_disks: Path::new(DISK).parent().unwrap().into(),
@@ -222,7 +225,6 @@ async fn detection_needs_apple_silicon_macos() {
   let host = Host {
     kvm: dir.path().to_path_buf(),
     image: dir.path().to_path_buf(),
-    images: dir.path().to_path_buf(),
     guest_disks: dir.path().to_path_buf(),
   };
 

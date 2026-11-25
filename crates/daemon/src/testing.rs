@@ -96,7 +96,6 @@ pub(crate) async fn daemon_in_with_backends(
     data_dir: dir.path().join("data"),
     cache_dir: dir.path().join("cache"),
     actor_image: dir.path().join("image"),
-    vm_images: dir.path().join("images"),
     kvm,
     guest_needy: Some(guest),
     guest_disks: dir.path().join("guest"),
