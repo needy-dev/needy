@@ -301,7 +301,16 @@ the same name replaces and revokes the earlier token
 
 **Gap G1: controller bootstrap.** A controller needs an admin credential it
 can provision before the daemon starts, as it does for runners with
-`--runners-file`. Two minimal options:
+`--runners-file`.
+
+Interim workaround (probe, verified by the `rc` session on a cluster): the
+management socket admits processes of the daemon's own uid (peer
+credentials, `crates/api-server/src/middleware/authentication.rs`), so a
+sidecar in the daemon Pod that runs as the same uid and shares
+`NEEDY_RUNTIME_DIR` (an `emptyDir`) can run `needy client invite --admin -o
+json` without `pods/exec`, and the controller pairs with the code.
+
+Two minimal options for the proper fix:
 
 1. *Preferred:* `needy daemon serve --clients-file PATH`, a hot-reloaded
    file of static clients (`name`, `credential_hash` as SHA-256 of
@@ -353,7 +362,8 @@ letters, digits, `.`, `_`, `-` (`crates/daemon/src/store/mod.rs:512-523`).
 `crates/daemon/src/static_runners.rs`:
 
 ```yaml
-# Either `runners: [...]` or a top-level list. Unknown keys are errors.
+# Either `runners: [...]` or a top-level list. Unknown keys inside an entry
+# are errors; unknown keys next to `runners:` are ignored (untagged enum).
 runners:
 - name: ws-tenant-a-1
   # SHA-256 of the whole credential string, hex, optional "sha256:" prefix.
@@ -409,7 +419,9 @@ Semantics (`crates/daemon/src/store/mod.rs:275-309`,
 
 - **Actor Pods: minted credentials.** One per `Actor`, TTL bounded by
   `maxRunDuration` plus start-up, stored in a Secret owned by the `Actor`,
-  revoked when the run ends or the `Actor` is deleted.
+  revoked **after the actor Pod has terminated** (revoking earlier makes
+  the ephemeral runner exit non-zero, `crates/daemon/src/runner.rs`, so a
+  good run ends with a `Failed` Pod) or when the `Actor` is deleted.
 - **Workspace executors: static entries.** Workspaces are long-lived; `rc`
   generates the credential itself (32 random bytes, hex, after
   `needy-runner.<name>.`), puts the plain value in the Workspace's Secret and
@@ -462,7 +474,7 @@ needy runner serve \
   --work-dir /home/needy/vm
 ```
 
-`crates/cli/src/commands/daemon/runner.rs:7-44` and
+`crates/cli/src/commands/runner.rs:131-176` (the flags; `crates/cli/src/commands/daemon/runner.rs` is the internal mirror) and
 `crates/daemon/src/actor_runner.rs`:
 
 - `--roles actor` with no usable KVM makes the runner exit with an error at
@@ -600,7 +612,7 @@ static `supplementalGroups`, and `capabilities: { drop: [ALL] }`.
 | `profile_name` | **Required.** The name in listings, traces and reports. |
 | `name`, `group` | Free-form; names are not unique. Keep the returned `run_id`. |
 | `actor_args` | Appended to `actor.command`. |
-| `tty`, `wait_for_attach` | A terminal for `run attach`; unset for headless agents (output goes to the console, `GetRunLogs`). |
+| `tty`, `wait_for_attach` | `tty` is a `WindowSize` (rows, cols) for a terminal `run attach` reaches; unset for headless agents (output goes to the console, `GetRunLogs`). |
 | `wait_for_runner_ms` | How long the create waits for the named runners to connect. Use it so `CreateRun` can be sent as soon as the Pod exists. |
 | `client_dir`, `client_execution` | Leave empty. |
 | `image_commit`, `pinned_features` | From an image's lockfile, if `devices-api` keeps one. |
@@ -615,7 +627,8 @@ There is no idempotency key: a retried `CreateRun` makes a second run.
 ### The profile `rc` sends (code and proposal)
 
 ```yaml
-extends: builtin:codex                 # optional
+extends: builtin:codex                 # optional; note that extends replaces lists, so
+                                       # actor.network.allow below replaces codex's ["*"]
 user: { name: agent, uid: 1000, gid: 1000 }
 actor:
   driver: linux-firecracker
@@ -640,7 +653,10 @@ commands:
   the daemon's own Pod (`crates/daemon/src/schedule.rs:272-277`): an actor
   there fails without KVM, and a native executor there runs commands next
   to `state.db`. Reject profiles that leave one unset, or call
-  `CheckProfile` first and refuse any `Placement` whose `runner` is empty.
+  `CheckProfile` first and refuse it when the actor `Placement` is unset, an
+  executor is missing from `executors`, a `Placement`'s `runner` is empty,
+  or any finding explains an unresolved selector (`proto/needy/v1/run.proto`,
+  `CheckProfileResponse`).
   **Gap G3:** the daemon has no switch that forbids control-host placement.
 - `actor.network.allow` must name every host the agent reaches, including
   the product server it reports back to. HTTPS is tunnelled unmodified and
@@ -696,8 +712,8 @@ sequenceDiagram
     RC->>D: GetRun(run_id)
   end
   RC->>D: StopRun (on timeout or Actor deletion)
-  RC->>D: RevokeRunnerCredential(actor-7f3c2a)
   P-->>K: exits 0 (ephemeral)
+  RC->>D: RevokeRunnerCredential(actor-7f3c2a) after the Pod terminated
   RC->>K: delete Pod and Secret (or let ownerReferences do it)
 ```
 
@@ -878,6 +894,9 @@ client, the daemon image and the runner image to one needy release.
   - G1: no non-interactive admin credential for a controller (section 3).
   - G2: no slim needy runtime image (section 5).
   - G3: no switch to forbid control-host placement (section 6).
+  - G6: routed commands map only the working directory between actor and
+    executor paths; a literal actor path in arguments (for example
+    `~/workspace/x`) is not translated (probe, observed by the `rc` session).
   - G4: no TLS on needy's listeners (sections 2 and 8).
   - G5: an `--ephemeral` runner exits 0 whatever the actor's outcome
     (section 5); an exit code reflecting the run would let Kubernetes
