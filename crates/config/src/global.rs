@@ -82,6 +82,9 @@ pub struct Daemon {
   pub engine_host: Option<String>,
   pub process_path: Option<Vec<PathBuf>>,
   pub runners_file: Option<PathBuf>,
+  /// Static control-plane clients and their tokens (`--clients-file`),
+  /// hot-reloaded like `runners_file`.
+  pub clients_file: Option<PathBuf>,
   pub disable_host_files: bool,
   pub host_files_root: Option<PathBuf>,
   pub gateway_listen: Option<String>,
@@ -106,6 +109,7 @@ impl Default for Daemon {
       engine_host: None,
       process_path: None,
       runners_file: None,
+      clients_file: None,
       disable_host_files: false,
       host_files_root: None,
       gateway_listen: None,

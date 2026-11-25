@@ -52,9 +52,10 @@ libc.workspace = true
 
 [dev-dependencies]
 oci-registry = { workspace = true, features = ["test-support"] }
+# Synthetic images `FROM` a stand-in `actor-base` for `actor.image` imports.
+needy-core-actor = { workspace = true, features = ["test-support"] }
 bytes.workspace = true
 needy-common = { workspace = true, features = ["testing"] }
-needy-core-actor = { workspace = true, features = ["test-support"] }
 needy-core-executor = { workspace = true, features = ["test-support"] }
 tar.workspace = true
 tempfile.workspace = true

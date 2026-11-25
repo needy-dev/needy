@@ -54,6 +54,17 @@ fn every_kind() -> Vec<Event> {
       ms: 80,
       error: Some("layer registry unreachable".into()),
     }),
+    Event::ImageImport(ImageImport {
+      reference: "registry.example.com/agents/codex:1".into(),
+      manifest: Some("sha256:3333333333333333333333333333333333333333333333333333333333333333".into()),
+      platform: "linux/amd64".into(),
+      layers: vec!["sha256:2222222222222222222222222222222222222222222222222222222222222222".into()],
+      pulled: 1,
+      skipped: 2,
+      warnings: vec!["layer sha256:2222 has /.envbuilder".into()],
+      ms: 120,
+      error: None,
+    }),
     Event::RunStop(RunStop {
       ended: false,
       by: Some(Principal::Operator),
@@ -384,7 +395,7 @@ fn a_net_event_without_via_reads_from_version_14_and_direct_writes_none() {
   });
   let payload = direct.payload();
   assert!(!payload.contains("via"), "{payload}");
-  assert_eq!(Event::decode("net.connect", 14, &payload).unwrap(), direct);
+  assert_eq!(Event::decode("net.connect", 15, &payload).unwrap(), direct);
   let proxied = Event::NetRequest(NetRequest {
     network: Network::Actor,
     host: "api.example.com".into(),

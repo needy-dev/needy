@@ -93,6 +93,9 @@ pub async fn reconcile(leftover: &Leftover<'_>) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinuxFirecracker {
   pub image: Image,
+  /// The OCI image `actor.image` names, whose layers the run attaches above
+  /// the base; only what [`Driver::image`] says.
+  pub imports: Option<String>,
   /// [`KVM`] outside tests.
   pub kvm: PathBuf,
   /// Where the guest disks are made ([`Host::guest_disks`]).
@@ -100,12 +103,14 @@ pub struct LinuxFirecracker {
 }
 
 impl LinuxFirecracker {
-  /// The driver on `host`: its KVM device and guest disks, and the VM image
-  /// made from the OCI image `image` names (`actor.image`), or the base VM
-  /// image without one.
-  pub fn on(host: &Host, image: Option<&str>) -> Self {
+  /// The driver on `host`: its KVM device and guest disks, and the base VM
+  /// image, which it boots whether or not `imports` names an OCI image
+  /// (`actor.image`): that image's layers are imported above the base and
+  /// attached as layer disks.
+  pub fn on(host: &Host, imports: Option<&str>) -> Self {
     Self {
-      image: crate::driver::vm_image(host, ActorDriver::LinuxFirecracker, image, Image::of),
+      image: Image::new(&host.image),
+      imports: imports.map(str::to_string),
       kvm: host.kvm.clone(),
       guest_disks: host.guest_disks.clone(),
     }
@@ -119,7 +124,7 @@ impl Driver for LinuxFirecracker {
   }
 
   fn image(&self) -> String {
-    crate::driver::describe_vm_image(&self.image.dir, &self.image.source)
+    crate::driver::describe_vm_image(&self.image.dir, self.imports.as_deref())
   }
 
   async fn check_host(&self) -> Result<(), Error> {

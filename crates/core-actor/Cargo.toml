@@ -7,6 +7,13 @@ rust-version.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+# Fixtures for other crates' tests, enabled from their dev-dependencies:
+# `image::store::import::testing`, synthetic OCI images `FROM` a stand-in
+# `actor-base` written into `oci-registry`'s test registry, and
+# `sidecar::gateway::testing`, a SOCKS5 proxy for the gateway's upstream.
+test-support = ["oci-registry/test-support"]
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
@@ -34,6 +41,8 @@ oci-layer = { workspace = true, features = ["squashfs"] }
 oci-client.workspace = true
 oci-registry.workspace = true
 oci-spec.workspace = true
+# Imported image layers may be zstd-compressed (`image::store::import`).
+ruzstd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -72,11 +81,6 @@ procfs-core.workspace = true
 tokio-vsock = { workspace = true, features = ["tonic014"] }
 tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
-
-[features]
-# Fixtures for other crates' tests: a SOCKS5 proxy for the gateway's upstream
-# (`sidecar::gateway::testing`). Enabled from their dev-dependencies.
-test-support = []
 
 [dev-dependencies]
 base64.workspace = true

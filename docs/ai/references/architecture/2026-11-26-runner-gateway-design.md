@@ -144,7 +144,7 @@ itself (local actors, and older runners that proxy to it).
 | Rotation | The file is read again for each connection, so the kubelet's swap of a rotated Secret applies from the next one. |
 | Start-up check | Both commands parse the URL and read the credentials file once at start, failing with a diagnostic; the proxy's reachability is not checked (each connection finds out). |
 | Precedence | The upstream belongs to whoever runs the gateway: the runner's for a gateway the runner runs, the daemon's for one the daemon runs. A daemon's upstream is not sent to runners (its credentials file is on the daemon's host, and the per-actor proxy is the runner Pod's to name). A runner with an upstream whose control plane keeps the gateway (an older daemon) refuses to start the actor rather than let its traffic leave directly from the daemon. |
-| Trace | `net.request`, `net.connect` and `net.error` carry `via`, the upstream's URL (`socks5h://HOST:PORT`, no credentials), when the connection went through one; it is absent when direct. Trace schema version 15; versions 10 to 14 still read. A schema-15 runner's events are refused by a schema-14 daemon (both unreleased with S1, so they ship together). |
+| Trace | `net.request`, `net.connect` and `net.error` carry `via`, the upstream's URL (`socks5h://HOST:PORT`, no credentials), when the connection went through one; it is absent when direct. Trace schema version 16; versions 10 to 15 still read. A schema-16 runner's events are refused by a schema-15 daemon, so S1 and this slice must ship in the same release. |
 
 **Trust shift with `socks5h`.** The proxy resolves the name, so the
 gateway cannot check the address it reaches: `EgressPolicy` (loopback,

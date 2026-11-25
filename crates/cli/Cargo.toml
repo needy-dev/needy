@@ -66,6 +66,10 @@ libc.workspace = true
 
 [dev-dependencies]
 http.workspace = true
+# `image build --from` tests import synthetic images from an in-process
+# registry.
+needy-core-actor = { workspace = true, features = ["test-support"] }
+oci-registry = { workspace = true, features = ["test-support"] }
 indicatif = { workspace = true, features = ["in_memory"] }
 tower.workspace = true
 needy-common = { workspace = true, features = ["testing"] }
