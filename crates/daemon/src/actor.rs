@@ -351,6 +351,17 @@ pub async fn terminal(daemon: &Daemon, run: &Arc<Run>) -> Result<Arc<Instance>, 
     // Remote actor bridges register `run.bridged_terminal` when the guest's
     // terminal process service answers (`BridgeTerminalReady`). Wait until it
     // arrives or the run stops.
+    // NOTICE: the terminal wait counts from the runner's `BridgeStarted`, as
+    // a local actor's counts from its boot: before it, the runner fetches the
+    // image layers, which takes minutes for a few hundred megabytes. That
+    // part is bounded by the run itself: a runner that fails reports
+    // `BridgeExit`, and a bridge that drops ends the actor.
+    let mut started = run.remote_started.subscribe();
+    tokio::select! {
+      () = run.cancel.cancelled() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
+      () = run.actor.exited() => return Err(ControlError::Unavailable(format!("run {} stopped while waiting for its terminal", run.id))),
+      _ = started.wait_for(|started| *started) => {}
+    }
     let deadline = tokio::time::Instant::now() + TERMINAL_WAIT;
     loop {
       if let Some(instance) = run.bridged_terminal.get() {

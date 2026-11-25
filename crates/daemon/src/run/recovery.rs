@@ -355,6 +355,7 @@ impl Daemon {
       gateway: Mutex::new(None),
       bridge: Mutex::new(crate::bridge::Slot::Idle),
       remote_layers: tokio::sync::watch::Sender::new(None),
+      remote_started: tokio::sync::watch::Sender::new(false),
       boot: Mutex::new(super::Boot {
         snapshot: record
           .snapshot

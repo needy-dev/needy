@@ -262,6 +262,7 @@ async fn record_actor_start(daemon: &Daemon, run: &Run, started: &AtomicBool, me
   if started.swap(true, Ordering::SeqCst) {
     return;
   }
+  run.remote_started.send_replace(true);
   let facets = actor::facets(run);
   let driver_label = if meta.driver.is_empty() {
     run.profile.actor.driver.as_str().to_string()

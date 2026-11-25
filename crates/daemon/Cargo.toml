@@ -54,3 +54,5 @@ needy-core-actor = { workspace = true, features = ["test-support"] }
 needy-core-executor = { workspace = true, features = ["test-support"] }
 tar.workspace = true
 tempfile.workspace = true
+# `time::pause` and `time::advance` for waits measured in minutes.
+tokio = { workspace = true, features = ["test-util"] }

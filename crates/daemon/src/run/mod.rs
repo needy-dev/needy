@@ -141,6 +141,9 @@ pub struct Run {
   /// The layer disks a remote actor's runner made of the run's snapshot,
   /// as `BridgePrepared` reported them; `None` until it does.
   pub(crate) remote_layers: tokio::sync::watch::Sender<Option<Vec<String>>>,
+  /// Whether a remote actor's runner reported the VM started
+  /// (`BridgeStarted`); the terminal wait counts from then.
+  pub(crate) remote_started: tokio::sync::watch::Sender<bool>,
   /// The run's tasks: the relays of its commands, and its actor's
   /// guest listener, gateway and VM watch, which run under a child token.
   pub tasks: TaskTracker,
@@ -768,6 +771,7 @@ impl Daemon {
       gateway: Mutex::new(None),
       bridge: Mutex::new(crate::bridge::Slot::Idle),
       remote_layers: tokio::sync::watch::Sender::new(None),
+      remote_started: tokio::sync::watch::Sender::new(false),
       tasks: TaskTracker::new(),
       cancel,
     }))

@@ -606,7 +606,12 @@ pub(super) async fn resolve_remote_snapshot(
   trace: &Dispatch,
   cancel: &CancellationToken,
 ) -> Result<ResolvedSnapshot> {
-  let root = root_digest(daemon).await.context("a remote actor's image is planned on this control daemon's base VM image")?;
+  // A control daemon without KVM still needs the base VM image's files: the
+  // image's cache keys and the runner's root check name its digest.
+  let root = root_digest(daemon).await.context(
+    "a remote actor's image is planned on this control daemon's base VM image; on a control host without KVM, get it with \
+     `needy image pull --driver linux-firecracker`",
+  )?;
   let builder = match vm_unavailable(daemon, ActorDriver::LinuxFirecracker).await {
     None => Builder::Here(ActorDriver::LinuxFirecracker),
     Some(reason) => Builder::Unavailable(reason),
