@@ -123,6 +123,10 @@ struct JoinArgs {
   command: Vec<String>,
 }
 
+// TODO(runner-registry): `--insecure-registry` (and the CA and credential
+// conventions of `oci-registry`) are not offered here yet: a runner makes no
+// registry requests until B-5's direct layer pulls, so the flag would change
+// nothing. Add it with them (layered OCI base spec, "Settled in B-3").
 #[derive(clap::Args)]
 struct ServeArgs {
   /// Control daemon address (`tcp://HOST:PORT`, `http://HOST:PORT`, `https://HOST:PORT`, or `unix:///PATH`).

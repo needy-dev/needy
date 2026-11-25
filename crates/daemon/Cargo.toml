@@ -20,6 +20,9 @@ needy-common.workspace = true
 needy-config.workspace = true
 needy-core.workspace = true
 needy-core-actor.workspace = true
+# Registry access (credentials, certs.d, insecure registries) for features
+# and the layer registry.
+oci-registry.workspace = true
 needy-core-executor.workspace = true
 needy-trace = { workspace = true, features = ["sqlite", "jsonl", "timing"] }
 rand.workspace = true
@@ -48,6 +51,7 @@ uuid.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+oci-registry = { workspace = true, features = ["test-support"] }
 bytes.workspace = true
 needy-common = { workspace = true, features = ["testing"] }
 needy-core-executor = { workspace = true, features = ["test-support"] }

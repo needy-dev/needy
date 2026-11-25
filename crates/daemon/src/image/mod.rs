@@ -28,6 +28,7 @@ use needy_config::image::{Definition, Image};
 use needy_config::profile::{ActorDriver, CONTAINER_IMAGE, User};
 use needy_core::image::Digest;
 use needy_core_actor::image::feature::FeatureStore;
+use needy_core_actor::image::store::registry::Registry;
 use needy_core_actor::image::store::{Store, snapshot_tag};
 use needy_trace::Dispatch;
 
@@ -62,6 +63,9 @@ pub struct Images {
   base_oci_dir: PathBuf,
   /// Container runtime boundaries (Docker-compatible engine and Apple's `container` CLI).
   backends: ContainerBackends,
+  /// The layer registry (`daemon.layer_registry`): a step missing here is
+  /// pulled from it before it is built, and a built step is pushed to it.
+  registry: Option<Registry>,
   /// In-flight builds keyed by step cache key, so concurrent `run create`s
   /// build each missing cache key once and wait for the same result.
   step_flight: SingleFlight<Digest, Digest>,
@@ -89,18 +93,27 @@ pub(crate) fn store_in(cache_dir: &Path, data_dir: &Path) -> Store {
 
 impl Images {
   /// Opens the layer store under `cache_dir` (built layers, disks, snapshots,
-  /// cache keys) and `data_dir` (commit layers and commit history).
-  pub(crate) fn with_backends(cache_dir: &Path, data_dir: &Path, backends: ContainerBackends) -> Self {
+  /// cache keys) and `data_dir` (commit layers and commit history), fetching
+  /// features through `access` and sharing built steps through `registry`
+  /// when there is one.
+  pub(crate) fn with_backends(
+    cache_dir: &Path,
+    data_dir: &Path,
+    backends: ContainerBackends,
+    access: oci_registry::Access,
+    registry: Option<Registry>,
+  ) -> Self {
     let cache = cache_dir.join("image-store");
     let keys_dir = cache.join("keys");
     let base_oci_dir = cache.join("base-oci");
-    let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store");
+    let features = FeatureStore::new(cache_dir).expect("cannot initialize HTTP client for feature store").with_access(access);
     Self {
       store: store_in(cache_dir, data_dir),
       features: Mutex::new(features),
       keys_dir,
       base_oci_dir,
       backends,
+      registry,
       step_flight: SingleFlight::default(),
       base_export_flight: SingleFlight::default(),
       materialize_flight: SingleFlight::default(),

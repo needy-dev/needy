@@ -86,6 +86,12 @@ pub struct Daemon {
   pub host_files_root: Option<PathBuf>,
   pub gateway_listen: Option<String>,
   pub gateway_blocked_cidrs: Vec<String>,
+  /// The OCI registry repository that shares built image layers
+  /// (`[http://]HOST[:PORT]/PATH`); the daemon parses it when it starts.
+  pub layer_registry: Option<String>,
+  /// Registry hosts (`HOST[:PORT]`) whose TLS certificates are not verified
+  /// (`--insecure-registry`); the daemon checks each when it starts.
+  pub insecure_registries: Vec<String>,
 }
 
 impl Default for Daemon {
@@ -104,6 +110,8 @@ impl Default for Daemon {
       host_files_root: None,
       gateway_listen: None,
       gateway_blocked_cidrs: Vec::new(),
+      layer_registry: None,
+      insecure_registries: Vec::new(),
     }
   }
 }
@@ -279,9 +287,18 @@ impl Config {
     for cidr in &self.daemon.gateway_blocked_cidrs {
       validate_cidr(cidr)?;
     }
+    for host in &self.daemon.insecure_registries {
+      if host.is_empty() || host.contains("://") || host.contains('/') || host.chars().any(|c| c.is_whitespace() || c == '\0') {
+        return Err(Error::invalid(
+          "daemon.insecure_registries",
+          format!("invalid insecure registry {host:?}: name a registry host as `HOST[:PORT]`, without a scheme or path"),
+        ));
+      }
+    }
     for (name, value) in [
       ("daemon.executor_image", &self.daemon.executor_image),
       ("daemon.engine_host", &self.daemon.engine_host),
+      ("daemon.layer_registry", &self.daemon.layer_registry),
     ] {
       if value.as_ref().is_some_and(|v| v.is_empty() || v.contains('\0')) {
         return Err(Error::invalid(name, format!("{name} cannot be empty or contain NUL")));

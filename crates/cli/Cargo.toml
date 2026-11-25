@@ -36,6 +36,8 @@ needy-config.workspace = true
 serde_yaml.workspace = true
 needy-core.workspace = true
 needy-core-actor.workspace = true
+# `--insecure-registry` hosts are checked as registry access reads them.
+oci-registry.workspace = true
 needy-core-executor.workspace = true
 needy-daemon.workspace = true
 needy-trace = { workspace = true, features = ["sqlite"] }
