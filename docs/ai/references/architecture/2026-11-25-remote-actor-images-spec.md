@@ -5,6 +5,17 @@ remote actor case to be completed: image layers on remote actor runners, a
 layer registry, and tests on Kubernetes clusters with KVM nodes. Names marked
 *provisional* may change in review.
 
+> **Revision notice (2026-11-25):** D1-D4 and slice R1 stand as implemented.
+> D5 (a needy-specific layer artifact in a registry) and slices R2 and R3 are
+> under revision and not merged: after a review of prior art, the owner chose
+> to reuse standard OCI images and conventions instead. Pushed steps become
+> ordinary OCI image manifests; registry credentials and TLS follow
+> `DOCKER_CONFIG` and containers-style `certs.d`; needy's base becomes one
+> layered OCI image shared by the VM and container drivers; remote runners
+> import `actor.image` OCI layers without an engine; builds are done in CI or
+> by standard in-cluster builders. A design for the shared base follows; this
+> note is updated when it lands.
+
 Parent notes:
 
 - [Remote actor host and runner ergonomics (Phase 1)](2026-11-23-remote-actor-host-and-runner-ergonomics-spec.md):
@@ -128,6 +139,9 @@ fails the run with a clear error on mismatch: layers built on another base
 must not be stacked on this one.
 
 ### D5. A layer registry (OCI Distribution)
+
+*Under revision; see the notice at the top. Kept as the record of what was
+proposed.*
 
 *Provisional configuration:* `daemon.layer_registry` / `needy daemon serve
 --layer-registry REPOSITORY` (for example `registry.example.com/needy/layers`),
