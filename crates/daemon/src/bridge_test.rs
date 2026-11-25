@@ -10,8 +10,9 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  BridgeAttach, BridgeExit, BridgeRequest, BridgeTerminalReady, ControlRequest, CreateRunRequest, GetConfigRequest, GetRunRequest,
-  HeartbeatRequest, RunnerReport, bridge_request, bridge_response, bridge_terminal_task, control_request, control_response, runner_task,
+  BridgeAttach, BridgeExit, BridgeRequest, BridgeStarted, BridgeTerminalReady, ControlRequest, CreateRunRequest, GetConfigRequest,
+  GetRunRequest, HeartbeatRequest, RunnerReport, bridge_request, bridge_response, bridge_terminal_task, control_request, control_response,
+  runner_task,
 };
 use needy_api_server::Listen;
 use needy_api_server::control::{ControlError, ExecOpen, ExecSpec, Guest, MintRunnerCredential, Processes, Runners, Runs, WindowSize};
@@ -572,6 +573,121 @@ async fn an_attach_waiting_before_terminal_ready_reaches_the_remote_terminal() {
   let task = tokio::time::timeout(Duration::from_secs(3), out.next())
     .await
     .expect("the waiting attach reaches the actor's terminal after BridgeTerminalReady")
+    .expect("bridge stream ended");
+  let Some(bridge_response::Payload::TerminalTask(task)) = task.payload else {
+    panic!("expected a terminal task, got {:?}", task.payload);
+  };
+  assert!(matches!(task.kind, Some(bridge_terminal_task::Kind::ListProcesses(_))), "{:?}", task.kind);
+
+  attach.abort();
+  drop(tx);
+  stop.cancel();
+  let _ = server_task.await;
+  started.daemon.shutdown().await;
+}
+
+// ROOT CAUSE:
+//
+// If a remote actor's runner took longer than a minute to start the VM
+// (fetching image layers of a few hundred megabytes), `needy run create -it`
+// failed with "timed out waiting for the terminal" because the attach's
+// terminal wait counted from the attach, which starts before the runner has
+// fetched anything.
+//
+// Before the fix, the attach gave up while the runner was still preparing.
+// The fix counts the terminal wait from the runner's `BridgeStarted`, as a
+// local actor's counts from its boot; before that, the run's own lifecycle
+// bounds the wait.
+#[tokio::test]
+async fn an_attach_waits_for_a_remote_actor_that_is_still_preparing() {
+  let started = testing::daemon_with(|config| {
+    config.kvm = config.state_dir.join("nonexistent-kvm");
+  })
+  .await;
+
+  let bound = started.daemon.server(None).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+  let Listen::Tcp(addr) = &bound.addresses()[0] else {
+    unreachable!();
+  };
+  let addr = addr.clone();
+  let stop = CancellationToken::new();
+  let server_task = tokio::spawn(bound.serve(stop.clone()));
+  let _actor_runner = connect_actor_runner(&started.daemon, &addr, "actor-node").await;
+
+  let created = started
+    .daemon
+    .create(needy_api_server::control::NewRun {
+      tty: Some(WindowSize { rows: 24, cols: 80 }),
+      ..new_run(REMOTE_PROFILE, started.dir.path())
+    })
+    .await
+    .unwrap();
+
+  // A runner attaches before it prepares the VM, without a PID, as
+  // `actor_runner::run_actor` does.
+  let (tx, rx) = mpsc::channel(16);
+  tx.send(Ok(BridgeRequest {
+    payload: Some(bridge_request::Payload::Attach(BridgeAttach {
+      pid: 0,
+      vcpus: 0,
+      mem_mib: 0,
+      driver: String::new(),
+      capture: String::new(),
+    })),
+  }))
+  .await
+  .unwrap();
+  let mut out = started.daemon.bridge(&created.id, Box::pin(ReceiverStream::new(rx))).await.unwrap();
+  let _ = out.next().await.unwrap();
+
+  let daemon = started.daemon.clone();
+  let run = created.id.clone();
+  let attach = tokio::spawn(async move {
+    daemon
+      .exec(
+        ExecOpen::Attach {
+          process: String::new(),
+          run,
+          replay: false,
+          window: None,
+          read_only: true,
+        },
+        Box::pin(tokio_stream::empty()),
+      )
+      .await
+  });
+  tokio::time::sleep(Duration::from_millis(200)).await;
+
+  // Longer than a minute passes while the runner fetches layers.
+  tokio::time::pause();
+  tokio::time::advance(Duration::from_secs(90)).await;
+  tokio::time::resume();
+  tokio::time::sleep(Duration::from_millis(200)).await;
+  if attach.is_finished() {
+    let result = attach.await.unwrap().map(|_| ());
+    panic!("the attach gave up while the remote actor was still preparing: {result:?}");
+  }
+
+  tx.send(Ok(BridgeRequest {
+    payload: Some(bridge_request::Payload::Started(BridgeStarted {
+      pid: 1001,
+      vcpus: 1,
+      mem_mib: 256,
+      driver: "linux-firecracker".into(),
+      capture: "kernel".into(),
+    })),
+  }))
+  .await
+  .unwrap();
+  tx.send(Ok(BridgeRequest {
+    payload: Some(bridge_request::Payload::TerminalReady(BridgeTerminalReady {})),
+  }))
+  .await
+  .unwrap();
+
+  let task = tokio::time::timeout(Duration::from_secs(3), out.next())
+    .await
+    .expect("the attach reaches the actor's terminal once the runner started it")
     .expect("bridge stream ended");
   let Some(bridge_response::Payload::TerminalTask(task)) = task.payload else {
     panic!("expected a terminal task, got {:?}", task.payload);
