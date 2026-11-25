@@ -480,7 +480,7 @@ async fn each_run_on_a_runner_with_a_fixed_work_dir_boots_in_a_fresh_directory()
   let work = runner_dir.path().join("work");
   std::fs::create_dir_all(&work).unwrap();
   // What an earlier VM leaves behind in the work directory.
-  std::fs::write(work.join("v.sock"), "").unwrap();
+  std::fs::write(work.join("v.sock"), "stale").unwrap();
   std::fs::write(work.join("console.log"), "the last run's console").unwrap();
   let runner = start_runner(&control, runner_dir.path(), "").await;
 
@@ -488,8 +488,14 @@ async fn each_run_on_a_runner_with_a_fixed_work_dir_boots_in_a_fresh_directory()
   for _ in 0..2 {
     let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
     let dir = run_dir(&work, &created.id).await;
-    assert!(!dir.join("v.sock").exists(), "{} starts with a stale vsock socket", dir.display());
-    assert!(!dir.join("console.log").exists() || !std::fs::read_to_string(dir.join("console.log")).unwrap().contains("last run"));
+    // This run's own `v.sock` may already be bound; only the stale file must
+    // not be there.
+    assert_ne!(std::fs::read_to_string(dir.join("v.sock")).ok().as_deref(), Some("stale"), "{} has a stale vsock socket", dir.display());
+    assert!(
+      !std::fs::read_to_string(dir.join("console.log")).unwrap_or_default().contains("last run"),
+      "{} has a stale console",
+      dir.display()
+    );
     Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
     for _ in 0..200 {
       if !dir.exists() {
