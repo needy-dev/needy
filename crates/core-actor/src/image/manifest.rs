@@ -8,7 +8,13 @@
 //! (the release workflow writes it next to the image's files); `needy image
 //! pull` fills both in when it unpacks the archive.
 //!
-//! See `docs/ai/references/architecture/2026-11-12-actor-images-design.md`.
+//! A manifest may record the [`Base`] its root file system was derived from
+//! (the release workflow and `needy image build` do); older manifests have
+//! none and are read as before.
+//!
+//! See `docs/ai/references/architecture/2026-11-12-actor-images-design.md`
+//! and, for the base, B1 and B3 of
+//! `docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +46,37 @@ pub struct Manifest {
   /// `None` for an image built on this machine, which came from no archive.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub sha256: Option<String>,
+  /// The `actor-base` image its root file system was derived from; `None`
+  /// in a manifest written before needy recorded it, or for an image made
+  /// from something else (`needy image build --from`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub base: Option<Base>,
+}
+
+/// The `actor-base` image a VM image's root file system was derived from,
+/// as known where it was built, without a registry. The root file system
+/// holds the base's layers and the VM's own additions (systemd and the
+/// workspace directory, the `actor-root` stage of `images/Dockerfile`),
+/// which are not among `diff_ids`.
+// TODO(base-identity): nothing reads this yet; the base stack digest step
+// cache keys use is B-2 of
+// docs/ai/references/architecture/2026-11-25-layered-oci-base-spec.md.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Base {
+  /// The base image's reference: the published name and tag
+  /// (`ghcr.io/needy-dev/needy/actor-base:<version>-ubuntu-24.04`) for a
+  /// release, the local tag for `needy image build`.
+  pub image: String,
+  /// The digest of the base's image manifest for this architecture in the
+  /// registry; `None` when the base was not pushed (a build that publishes
+  /// nothing, or `needy image build`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub digest: Option<String>,
+  /// The base image's layers, lowest first, as the DiffIDs of its
+  /// configuration's `rootfs.diff_ids` (`sha256:<hex>` of each uncompressed
+  /// layer).
+  pub diff_ids: Vec<String>,
 }
 
 impl Manifest {
@@ -54,6 +91,7 @@ impl Manifest {
       base_abi,
       source: Some(source),
       sha256: None,
+      base: None,
     }
   }
 }
