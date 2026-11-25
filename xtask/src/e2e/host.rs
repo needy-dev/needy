@@ -104,9 +104,6 @@ pub struct Host {
   pub guest: Result<PathBuf, String>,
   /// The base VM image of this host's VM driver.
   pub vm_image: Option<PathBuf>,
-  /// Where the VM images made from container images are (the agents
-  /// image's): a daemon's data directory's `images` links here.
-  pub images: Option<PathBuf>,
   /// Each actor driver's agents image for the TUI cells: there, or why not.
   pub agents: BTreeMap<Driver, Result<(), String>>,
   /// Whether `needy run stop` has `--now`.
@@ -406,7 +403,7 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
   // The TUI cells' agents image, when any runs: built on every host, a
   // run host included, since it only downloads the agents' releases.
   let agents = if tui && !listing {
-    agents(&image_names, root, work, needy, vm_image.as_deref(), &could, &needs_docker)
+    agents(&image_names, root, work, &could, &needs_docker)
   } else {
     BTreeMap::new()
   };
@@ -474,7 +471,6 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
     host_sshfs,
     guest,
     vm_image,
-    images: Some(work.join("images")),
     agents,
     stop_now,
     docker_host,
@@ -484,14 +480,12 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
 /// Builds the agents image (`examples/agents/Dockerfile` on the actor
 /// image of `names`) when it is missing or stale, and from it what each
 /// actor driver of this host boots: the image itself for `linux-container`,
-/// a VM image for `linux-firecracker` and `macos-vz`, the image in Apple's
-/// store for `macos-apple-container`. Returns each driver's result.
+/// the image in Apple's store for `macos-apple-container`; the VM drivers
+/// are not covered yet (`TODO(e2e-import)`). Returns each driver's result.
 fn agents(
   names: &Images,
   root: &Path,
   work: &Path,
-  needy: &Path,
-  vm_image: Option<&Path>,
   could: &BTreeMap<ActorDriver, Result<(), String>>,
   needs_docker: &dyn Fn(&str) -> Result<(), String>,
 ) -> BTreeMap<Driver, Result<(), String>> {
@@ -564,17 +558,19 @@ fn agents(
       Driver::Container(_) => Ok(()),
       Driver::Firecracker | Driver::Vz => {
         could.get(&profile_driver).cloned().unwrap_or_else(|| Err("not probed".into()))?;
-        let base = vm_image.filter(|b| b.join("manifest.json").exists()).ok_or("no base VM image to take the kernel from")?;
-        let dir = needy_core_actor::image::vm::dir_of(&work.join("images"), profile_driver, agents_ref);
-        let name = format!("agents-vm-{}", profile_driver.as_str());
-        if !(fresh(&name, &id) && dir.join("manifest.json").exists()) {
-          eprintln!("e2e: building the {} VM image of {agents_ref}", profile_driver.as_str());
-          let mut command = Command::new(needy);
-          command.current_dir(cwd).args(["image", "build", "--from", agents_ref, "--base"]).arg(base).arg("--out").arg(&dir);
-          built(command, "the agents VM image")?;
-          stamp(&name, &id)?;
-        }
-        Ok(())
+        // TODO(e2e-import): since B-4 a VM actor of an OCI image imports the
+        // image's layers above actor-base from a registry
+        // (`needy image build --from` no longer makes a VM image from the
+        // engine's copy), and the agents image is built FROM needy-actor,
+        // the container base, which an import refuses. Covering the TUI
+        // cells on the VM drivers needs the agents image built FROM the
+        // base VM image's actor-base and pushed to a registry the harness
+        // runs for the whole session; reopen with that harness change.
+        Err(format!(
+          "the agents image is not imported for {}: an OCI image on a VM driver is imported above actor-base from a registry, \
+           which the harness does not run yet (TODO(e2e-import))",
+          profile_driver.as_str()
+        ))
       }
       Driver::AppleContainer => {
         could.get(&profile_driver).cloned().unwrap_or_else(|| Err("not probed".into()))?;

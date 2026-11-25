@@ -108,7 +108,6 @@ pub async fn probe(kvm: &Path, image: &Path) -> Facts {
     // pull` on it by hand (owner decision D4 of the actor images design);
     // the control plane could tell the runner to pull once it places actors
     // there.
-    images: std::path::PathBuf::new(),
     // Detection starts no actor, so it makes no guest disk.
     guest_disks: std::path::PathBuf::new(),
   };

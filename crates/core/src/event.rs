@@ -29,7 +29,8 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// Version 12 adds `files.sync`, `files.merge` and `files.merge_pending`.
 /// Version 13 adds `run.create`'s `snapshot` and `image.build.step`.
 /// Version 14 adds `image.layer.pull` and `image.layer.push`.
-pub const SCHEMA_VERSION: u32 = 14;
+/// Version 15 adds `image.import`.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -52,7 +53,8 @@ pub const SCHEMA_VERSION: u32 = 14;
 // (`run.create`'s `snapshot`) and a new kind (`image.build.step`), so
 // traces of 10 through 12 still read. Version 14 only adds kinds
 // (`image.layer.pull`, `image.layer.push`), so traces of 10 through 13 still
-// read.
+// read. Version 15 only adds a kind (`image.import`), so traces of 10 through
+// 14 still read.
 // No older versions are added to this narrowly versioned historical boundary.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
@@ -147,6 +149,9 @@ events! {
   ImageLayerPull(ImageLayerPull) = "image.layer.pull",
   /// A built step's layer pushed to the layer registry.
   ImageLayerPush(ImageLayerPush) = "image.layer.push",
+  /// An OCI image (`actor.image: REF` on a VM driver) imported above the
+  /// base: its layers above `actor-base` taken into the layer store.
+  ImageImport(ImageImport) = "image.import",
   /// The actor's VM started.
   ActorStart(ActorStart) = "actor.start",
   /// The actor's VM process exited.
@@ -302,6 +307,38 @@ pub struct ImageLayerPush {
   /// Wall time of the push in milliseconds.
   pub ms: u64,
   /// Why the push failed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+/// An OCI image imported above the base for a VM actor: what was found and
+/// pulled, or why the import was refused (the run then fails).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageImport {
+  /// The image as `actor.image` names it.
+  pub reference: String,
+  /// The digest of its image manifest for the actor's platform; `None`
+  /// when the import failed before it was read.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub manifest: Option<String>,
+  /// The actor's platform (`linux/amd64`, `linux/arm64`).
+  pub platform: String,
+  /// The layers above the base as the layer store keeps them
+  /// (`sha256:<hex>`), lowest first, empty layers left out.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub layers: Vec<String>,
+  /// How many of `layers` were pulled; the others were stored already.
+  pub pulled: u64,
+  /// Empty or repeated layers above the base that are not stacked.
+  pub skipped: u64,
+  /// What the image has that a VM actor ignores (an entrypoint, a
+  /// builder's own files).
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub warnings: Vec<String>,
+  /// Wall time of the import in milliseconds.
+  pub ms: u64,
+  /// Why the import failed.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub error: Option<String>,
 }

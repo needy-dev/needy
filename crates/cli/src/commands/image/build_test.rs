@@ -460,3 +460,63 @@ fn every_target_needy_image_build_names_is_a_stage_of_the_dockerfile() {
     assert!(stages.contains(&target), "no stage {target} in {stages:?}");
   }
 }
+
+/// A base VM image of `linux-firecracker` in `dir` derived from `base`.
+fn base_vm_image(dir: &Path, base: &needy_core_actor::image::store::import::testing::Image) {
+  std::fs::create_dir_all(dir).unwrap();
+  let manifest = Manifest {
+    base: Some(base.as_base("ghcr.io/needy-dev/needy/actor-base:0.0.18-ubuntu-24.04")),
+    ..Manifest::made(ActorDriver::LinuxFirecracker, needy_core_actor::image::base::ABI, manifest::Source::Build { recipe: None })
+  };
+  manifest::write(dir, &manifest).unwrap();
+}
+
+// `--from` imports the layers above actor-base from the image's registry
+// into the layer store: no BuildKit, no engine, no VM image of its own.
+#[tokio::test]
+async fn from_imports_the_layers_above_actor_base_into_the_layer_store_without_an_engine() {
+  use needy_core_actor::image::store::import::testing::{Compression, Image, Layer, Member};
+
+  let registry = oci_registry::testing::TestRegistry::start().await;
+  let base = Image::actor_base();
+  let mut agent = base.from(vec![
+    Layer::zstd(&[Member::file("/opt/agent", b"agent")]),
+    Layer::empty(Compression::Gzip),
+  ]);
+  agent.entrypoint = Some(vec!["/usr/bin/agent".into()]);
+  agent.push(&registry, "agents/one", "1");
+  let dir = tempfile::tempdir().unwrap();
+  base_vm_image(&dir.path().join("base"), &base);
+  let store = needy_daemon::runner::layer_store(&dir.path().join("cache"), &dir.path().join("data"));
+  let reference = registry.repository("agents/one:1");
+  let from = from::From {
+    reference: &reference,
+    base: &dir.path().join("base"),
+    store: store.clone(),
+    access: oci_registry::Access::standard().with_cert_roots(Vec::new()).with_docker_config(dir.path()).without_proxy(),
+  };
+
+  let report = from::import_for(ActorDriver::LinuxFirecracker, &from, false).await.unwrap();
+
+  let snapshot = report.snapshot.expect("the image adds a layer");
+  assert_eq!(store.resolve(&snapshot).unwrap().layers, report.imported.layers);
+  assert!(store.has_layer(&report.imported.layers[0]));
+  let summary = from::summary(&report);
+  assert_eq!(
+    summary[0],
+    format!(
+      "image build: imported {reference} ({}, linux/amd64): 1 layers above actor-base, 1 pulled, 1 empty or repeated skipped",
+      report.imported.manifest
+    )
+  );
+  assert!(summary[1].starts_with("warning: its Entrypoint [\"/usr/bin/agent\"]"), "{summary:?}");
+  assert!(!dir.path().join("images").exists(), "no VM image is written");
+
+  // A base VM image that records no actor-base cannot have an image
+  // imported above it.
+  let old = dir.path().join("old");
+  std::fs::create_dir_all(&old).unwrap();
+  manifest::write(&old, &Manifest::made(ActorDriver::LinuxFirecracker, 1, manifest::Source::Build { recipe: None })).unwrap();
+  let refused = from::import_for(ActorDriver::LinuxFirecracker, &from::From { base: &old, ..from }, false).await.unwrap_err();
+  assert!(format!("{refused:#}").contains("records no actor-base"), "{refused:#}");
+}

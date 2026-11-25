@@ -146,9 +146,6 @@ pub struct Config {
   /// `macos-vz` files, with their `manifest.json` (`needy image pull`;
   /// `needy_core_actor::image::vm::base_dir`).
   pub actor_image: PathBuf,
-  /// Where `needy image build --from` writes the VM images a profile names by
-  /// their OCI reference: needy's data directory's `images`.
-  pub vm_images: PathBuf,
   /// The KVM device an actor's Firecracker opens:
   /// `needy_core_actor::driver::linux_firecracker::KVM` outside tests.
   pub kvm: PathBuf,
