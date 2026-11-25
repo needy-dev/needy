@@ -149,6 +149,21 @@ async fn start_runner(control: &Control, dir: &Path, rootfs: &str) -> tokio::tas
   tokio::spawn(async move { crate::runner::Runner::start(config).await?.serve(stop).await })
 }
 
+/// The directory the runner made for run `run` under its work directory
+/// `work`, once its `vm.json` is written.
+async fn run_dir(work: &Path, run: &str) -> PathBuf {
+  for _ in 0..200 {
+    let found = std::fs::read_dir(work).into_iter().flatten().flatten().map(|entry| entry.path()).find(|path| {
+      path.file_name().is_some_and(|name| name.to_string_lossy().starts_with(&format!("{run}-"))) && path.join("vm.json").exists()
+    });
+    if let Some(found) = found {
+      return found;
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+  }
+  panic!("no directory for run {run} in {}", work.display());
+}
+
 /// A client calling as the actor runner holding `credential` on behalf of
 /// run `run` (Node Authorizer).
 async fn bound_client(addr: &str, credential: &str, run: &str) -> Client {
@@ -270,13 +285,7 @@ async fn a_remote_runner_fetches_materializes_and_boots_the_run_s_image_layers()
     assert!(store.has_layer(layer), "the runner's store lacks {layer}");
   }
   // The runner reports the disks before it starts the VM.
-  let vm_json = runner_dir.path().join("work/vm.json");
-  for _ in 0..200 {
-    if vm_json.exists() {
-      break;
-    }
-    tokio::time::sleep(Duration::from_millis(25)).await;
-  }
+  let vm_json = run_dir(&runner_dir.path().join("work"), &created.id).await.join("vm.json");
   let vm_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&vm_json).unwrap()).unwrap();
   let drives: Vec<_> = vm_json["drives"].as_array().unwrap().iter().map(|d| d["drive_id"].as_str().unwrap().to_string()).collect();
   assert!(drives.ends_with(&["layer-0".to_string(), "layer-1".to_string()]), "{drives:?}");
@@ -491,18 +500,60 @@ async fn a_remote_runner_boots_an_image_from_actor_base_with_the_layers_the_cont
   for layer in &layers {
     assert!(store.has_layer(layer), "the runner's store lacks {layer}");
   }
-  let vm_json = runner_dir.path().join("work/vm.json");
-  for _ in 0..200 {
-    if vm_json.exists() {
-      break;
-    }
-    tokio::time::sleep(Duration::from_millis(25)).await;
-  }
+  let vm_json = run_dir(&runner_dir.path().join("work"), &created.id).await.join("vm.json");
   let vm_json: serde_json::Value = serde_json::from_slice(&std::fs::read(&vm_json).unwrap()).unwrap();
   let drives: Vec<_> = vm_json["drives"].as_array().unwrap().iter().map(|d| d["drive_id"].as_str().unwrap().to_string()).collect();
   assert!(drives.ends_with(&["layer-0".to_string(), "layer-1".to_string()]), "{drives:?}");
 
   Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
+}
+
+// ROOT CAUSE:
+//
+// If an actor runner was started with a fixed `--work-dir`, every run after
+// the first failed to boot (`Vsock device error ... UnixBind AddrInUse`)
+// because each run reused the directory as it was, and Firecracker leaves
+// its vsock device socket `v.sock` (and `console.log`) behind.
+//
+// Before the fix, every run on the runner used `--work-dir` itself.
+// The fix keeps each run in a fresh directory under it, removed at run end.
+#[tokio::test]
+async fn each_run_on_a_runner_with_a_fixed_work_dir_boots_in_a_fresh_directory() {
+  let control = Control::start(|_| {}).await;
+  let runner_dir = tempfile::tempdir().unwrap();
+  let work = runner_dir.path().join("work");
+  std::fs::create_dir_all(&work).unwrap();
+  // What an earlier VM leaves behind in the work directory.
+  std::fs::write(work.join("v.sock"), "stale").unwrap();
+  std::fs::write(work.join("console.log"), "the last run's console").unwrap();
+  let runner = start_runner(&control, runner_dir.path(), "").await;
+
+  let mut dirs = Vec::new();
+  for _ in 0..2 {
+    let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
+    let dir = run_dir(&work, &created.id).await;
+    // This run's own `v.sock` may already be bound; only the stale file must
+    // not be there.
+    assert_ne!(std::fs::read_to_string(dir.join("v.sock")).ok().as_deref(), Some("stale"), "{} has a stale vsock socket", dir.display());
+    assert!(
+      !std::fs::read_to_string(dir.join("console.log")).unwrap_or_default().contains("last run"),
+      "{} has a stale console",
+      dir.display()
+    );
+    Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+    for _ in 0..200 {
+      if !dir.exists() {
+        break;
+      }
+      tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!dir.exists(), "{} outlived its run", dir.display());
+    dirs.push(dir);
+  }
+  assert_ne!(dirs[0], dirs[1]);
+
   control.end().await;
   let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
 }
