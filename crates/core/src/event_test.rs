@@ -40,6 +40,20 @@ fn every_kind() -> Vec<Event> {
       cached: false,
       ms: 420,
     }),
+    Event::ImageLayerPull(ImageLayerPull {
+      key: "sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+      reference: "registry.example.com/needy/layers:key-1111111111111111111111111111111111111111111111111111111111111111".into(),
+      layer: Some("sha256:2222222222222222222222222222222222222222222222222222222222222222".into()),
+      ms: 35,
+      error: None,
+    }),
+    Event::ImageLayerPush(ImageLayerPush {
+      key: "sha256:1111111111111111111111111111111111111111111111111111111111111111".into(),
+      layer: "sha256:2222222222222222222222222222222222222222222222222222222222222222".into(),
+      reference: "registry.example.com/needy/layers:key-1111111111111111111111111111111111111111111111111111111111111111".into(),
+      ms: 80,
+      error: Some("layer registry unreachable".into()),
+    }),
     Event::RunStop(RunStop {
       ended: false,
       by: Some(Principal::Operator),

@@ -396,3 +396,61 @@ fn a_runner_stacks_layers_only_on_the_base_they_were_built_on() {
   let refused = super::check_root(&image, &other.to_string()).unwrap_err();
   assert!(format!("{refused:#}").contains("refusing to stack them on another base"), "{refused:#}");
 }
+
+/// A control daemon with KVM, sharing layers through `repository`, that
+/// builds both steps of [`REMOTE_IMAGE_PROFILE`] and pushes them.
+async fn build_into_registry(repository: &str) -> Vec<Digest> {
+  let repository = repository.to_string();
+  let builder = Control::start(move |config| config.layer_registry = Some(repository)).await;
+  let _runner = connect_actor_runner(builder.daemon(), &builder.addr, "actor-node").await;
+  let created = builder.create(REMOTE_IMAGE_PROFILE).await.unwrap();
+  assert_eq!(builder.sessions.load(Ordering::SeqCst), 2, "the builder built both steps");
+  let layers = builder.snapshot_layers(&created.id);
+  Runs::stop(builder.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  builder.end().await;
+  layers
+}
+
+/// A control daemon without KVM and with an empty layer store, sharing
+/// layers through `repository`.
+async fn control_without_kvm(repository: &str) -> Control {
+  let repository = repository.to_string();
+  let control = Control::start(move |config| config.layer_registry = Some(repository)).await;
+  std::fs::remove_file(&control.daemon().config.kvm).unwrap();
+  control
+}
+
+// ROOT CAUSE:
+//
+// If a control daemon could not build (no KVM), a remote run's step missing
+// from its layer store failed the create even when the layer registry held
+// it, because the remote plan took steps from the store only and never
+// reached the registry lookup inside the step's single flight.
+//
+// Before the fix, the create failed with "this host cannot build it".
+// The fix tries the store, then the layer registry, and only then refuses.
+#[tokio::test]
+async fn a_control_daemon_without_kvm_takes_remote_steps_from_the_layer_registry() {
+  use oci_registry::testing::TestRegistry;
+
+  let registry = TestRegistry::start().await;
+  let repository = registry.repository("needy/layers");
+  let built = build_into_registry(&repository).await;
+
+  let control = control_without_kvm(&repository).await;
+  let mut runner = connect_actor_runner(control.daemon(), &control.addr, "actor-node").await;
+  let created = control.create(REMOTE_IMAGE_PROFILE).await.unwrap();
+  assert_eq!(control.snapshot_layers(&created.id), built);
+  assert_eq!(control.sessions.load(Ordering::SeqCst), 0, "nothing was built on a host without KVM");
+  let _start = runner.ctrl_stream.message().await.unwrap().unwrap();
+
+  // A step neither here nor in the registry is refused, naming the registry.
+  let missing_step = REMOTE_IMAGE_PROFILE.replace("echo step-two", "echo step-three");
+  let refused = control.create(&missing_step).await.unwrap_err().to_string();
+  assert!(refused.contains("image step `echo step-three`"), "{refused}");
+  assert!(refused.contains(&format!("nor in the layer registry {repository}")), "{refused}");
+  assert!(refused.contains("this host cannot build it"), "{refused}");
+
+  Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  control.end().await;
+}

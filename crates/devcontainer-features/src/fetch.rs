@@ -1,5 +1,8 @@
 //! OCI Distribution v2 Dev Container feature artifact fetcher and
-//! content-addressed cache, built on `oci-client` and `docker_credential`.
+//! content-addressed cache, built on `oci-client`. Registry credentials and
+//! TLS (the Docker credential store, identity tokens, `certs.d`, insecure
+//! registries) come from [`oci_registry::Access`], as for every needy OCI
+//! client.
 //!
 //! Provenance:
 //! - Source: https://github.com/opencontainers/distribution-spec/blob/v1.1.0/spec.md#pulling-manifests
@@ -12,11 +15,9 @@ use std::path::{Component, Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use docker_credential::{CredentialRetrievalError, DockerCredential};
 use jsonc_parser::{ParseOptions, parse_to_serde_value};
-use oci_client::client::{ClientConfig, ClientProtocol};
 use oci_client::errors::{DigestError, OciDistributionError};
-use oci_client::secrets::RegistryAuth;
+use oci_registry::{Access, Operation};
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::watch;
@@ -69,6 +70,9 @@ pub enum FetchError {
   /// OCI registry or transport error reported by `oci-client`.
   #[error("OCI registry error: {0}")]
   Registry(#[from] OciDistributionError),
+  /// The registry client or its credentials could not be set up.
+  #[error(transparent)]
+  Access(#[from] oci_registry::Error),
   /// The OCI manifest JSON was malformed or lacked a usable feature layer.
   #[error("invalid OCI manifest: {0}")]
   InvalidManifest(String),
@@ -286,24 +290,26 @@ impl FetchedFeature {
 
 type FeatureFlightResult = std::result::Result<FetchedFeature, String>;
 type FeatureFlightMap = HashMap<String, watch::Receiver<Option<FeatureFlightResult>>>;
+/// Reusable connections by registry host and repository.
+type Connections = HashMap<(String, String), Arc<oci_registry::Connection>>;
 
 /// Fetches Dev Container feature artifacts over OCI Distribution v2 and caches
 /// them atomically under `cache_dir/features/sha256-<manifest-hex>/`.
 #[derive(Clone)]
 pub struct FeatureStore {
   cache_dir: PathBuf,
-  client: oci_client::Client,
-  protocol: ClientProtocol,
+  access: Access,
+  plain_http: bool,
   registry_override: Option<String>,
-  no_proxy: Option<String>,
   in_flight: Arc<Mutex<FeatureFlightMap>>,
+  connections: Arc<Mutex<Connections>>,
 }
 
 impl fmt::Debug for FeatureStore {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("FeatureStore")
       .field("cache_dir", &self.cache_dir)
-      .field("protocol", &self.protocol)
+      .field("plain_http", &self.plain_http)
       .field("registry_override", &self.registry_override)
       .finish_non_exhaustive()
   }
@@ -311,55 +317,58 @@ impl fmt::Debug for FeatureStore {
 
 impl FeatureStore {
   /// Creates a new feature store caching under `cache_dir` and talking HTTPS
-  /// to OCI registries.
+  /// to OCI registries with the standard [`Access`].
   pub fn new(cache_dir: impl Into<PathBuf>) -> Result<Self> {
-    let protocol = ClientProtocol::Https;
-    let client = build_oci_client(protocol.clone(), None);
     Ok(Self {
       cache_dir: cache_dir.into(),
-      client,
-      protocol,
+      access: Access::standard(),
+      plain_http: false,
       registry_override: None,
-      no_proxy: None,
       in_flight: Arc::default(),
+      connections: Arc::default(),
     })
   }
 
+  /// Reaches registries with `access` (credentials, CA files, insecure
+  /// registries) instead of the standard configuration.
+  pub fn with_access(mut self, access: Access) -> Self {
+    self.access = access;
+    self.connections = Arc::default();
+    self
+  }
+
   /// Overrides the URL scheme (`"https"` by default; `"http"` for plain HTTP
-  /// test registries).
+  /// test registries, which are never sent credentials).
   pub fn with_scheme(mut self, scheme: impl Into<String>) -> Self {
-    let scheme = scheme.into();
-    self.protocol = if scheme.eq_ignore_ascii_case("http") {
-      ClientProtocol::Http
-    } else {
-      ClientProtocol::Https
-    };
-    self.client = build_oci_client(self.protocol.clone(), self.no_proxy.clone());
+    self.plain_http = scheme.into().eq_ignore_ascii_case("http");
+    self.connections = Arc::default();
     self
   }
 
   /// Overrides the registry base URL (for example `"http://127.0.0.1:12345"`),
   /// routing all fetches to that endpoint regardless of `reference.registry`.
+  /// Credentials are those of the endpoint's host.
   pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
     let raw = base_url.into();
     let trimmed = raw.trim_end_matches('/');
-    let (protocol, authority) = if let Some(rest) = trimmed.strip_prefix("http://") {
-      (ClientProtocol::Http, rest)
+    let authority = if let Some(rest) = trimmed.strip_prefix("http://") {
+      self.plain_http = true;
+      rest
     } else if let Some(rest) = trimmed.strip_prefix("https://") {
-      (ClientProtocol::Https, rest)
+      self.plain_http = false;
+      rest
     } else {
-      (self.protocol.clone(), trimmed)
+      trimmed
     };
-    self.protocol = protocol;
     self.registry_override = Some(authority.to_string());
-    self.client = build_oci_client(self.protocol.clone(), self.no_proxy.clone());
+    self.connections = Arc::default();
     self
   }
 
   /// Disables HTTP proxies for loopback/local test registries.
   pub fn without_proxy(mut self) -> Result<Self> {
-    self.no_proxy = Some("*".to_string());
-    self.client = build_oci_client(self.protocol.clone(), self.no_proxy.clone());
+    self.access = self.access.without_proxy();
+    self.connections = Arc::default();
     Ok(self)
   }
 
@@ -551,15 +560,12 @@ impl FeatureStore {
 
   async fn fetch_uncached(&self, reference: &Reference) -> Result<FetchedFeature> {
     let oci_ref = reference.to_oci_reference(self.registry_override.as_deref());
-    let auth = if self.registry_override.is_some() {
-      RegistryAuth::Anonymous
-    } else {
-      resolve_registry_auth(reference.registry.clone()).await
-    };
+    let host = self.registry_override.as_deref().unwrap_or(&reference.registry);
+    let connection = self.connection(host, &reference.repository).await?;
+    let client = &connection.client;
 
-    let (manifest_bytes, _) = self
-      .client
-      .pull_manifest_raw(&oci_ref, &auth, ACCEPTED_MANIFEST_MEDIA_TYPES)
+    let (manifest_bytes, _) = client
+      .pull_manifest_raw(&oci_ref, &connection.auth, ACCEPTED_MANIFEST_MEDIA_TYPES)
       .await
       .map_err(|err| map_oci_error(err, "feature manifest"))?;
 
@@ -599,7 +605,7 @@ impl FeatureStore {
 
     let staged_archive = staged.path().join(ARCHIVE_FILE);
     let mut archive_file = tokio::fs::File::create(&staged_archive).await.map_err(io(staged_archive.display()))?;
-    if let Err(err) = self.client.pull_blob(&oci_ref, layer_digest.to_string().as_str(), &mut archive_file).await {
+    if let Err(err) = client.pull_blob(&oci_ref, layer_digest.to_string().as_str(), &mut archive_file).await {
       drop(archive_file);
       drop(staged);
       return Err(map_oci_error(err, "feature blob"));
@@ -639,6 +645,23 @@ impl FeatureStore {
     Ok(fetched)
   }
 
+  /// A connection to `host` for pulls from `repository`: a cached one while
+  /// it is fresh, so fetches reuse the token `oci-client` holds, or a new
+  /// one, which reads the credential store again.
+  // NOTICE: one client per registry host, since TLS settings (CA files,
+  // insecure registries) are client-wide in `oci-client`.
+  async fn connection(&self, host: &str, repository: &str) -> Result<Arc<oci_registry::Connection>> {
+    let key = (host.to_string(), repository.to_string());
+    if let Some(connection) = self.connections.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
+      && connection.is_fresh()
+    {
+      return Ok(connection.clone());
+    }
+    let connection = Arc::new(self.access.connect(host, self.plain_http, repository, Operation::Pull).await?);
+    self.connections.lock().unwrap_or_else(|p| p.into_inner()).insert(key, connection.clone());
+    Ok(connection)
+  }
+
   fn entry_dir(&self, digest: &Digest) -> PathBuf {
     self.cache_dir.join("features").join(format!("sha256-{}", digest.hex()))
   }
@@ -667,31 +690,6 @@ impl FeatureStore {
     staged.persist(&path).map_err(|e| io(path.display())(e.error))?;
     Ok(())
   }
-}
-
-fn build_oci_client(protocol: ClientProtocol, no_proxy: Option<String>) -> oci_client::Client {
-  let config = ClientConfig {
-    protocol,
-    user_agent: concat!("devcontainer-features/", env!("CARGO_PKG_VERSION")),
-    no_proxy,
-    ..Default::default()
-  };
-  oci_client::Client::new(config)
-}
-
-async fn resolve_registry_auth(registry: String) -> RegistryAuth {
-  // Credential helpers can spawn a subprocess, so run lookup off the async runtime.
-  tokio::task::spawn_blocking(move || match docker_credential::get_credential(&registry) {
-    Ok(DockerCredential::UsernamePassword(username, password)) => RegistryAuth::Basic(username, password),
-    Ok(DockerCredential::IdentityToken(token)) => RegistryAuth::Bearer(token),
-    Err(CredentialRetrievalError::ConfigNotFound | CredentialRetrievalError::NoCredentialConfigured) => RegistryAuth::Anonymous,
-    Err(err) => {
-      tracing::debug!("docker credential lookup for {registry} fell back to anonymous: {err}");
-      RegistryAuth::Anonymous
-    }
-  })
-  .await
-  .unwrap_or(RegistryAuth::Anonymous)
 }
 
 fn map_oci_error(err: OciDistributionError, what: &'static str) -> FetchError {
@@ -1014,5 +1012,44 @@ mod tests {
       "unexpected error: {err:?}"
     );
     assert!(store.get_cached(&manifest_digest).unwrap().is_none());
+  }
+
+  #[tokio::test]
+  async fn fetch_over_tls_uses_certs_d_and_the_docker_credential_store() {
+    use base64::Engine as _;
+    use oci_registry::testing::{Auth, ISSUED_TOKEN, TestRegistry};
+
+    let metadata = r#"{"id":"node","version":"1.5.0"}"#;
+    let blob_bytes = make_feature_tar(metadata, "#!/bin/sh\nexit 0\n");
+    let registry = TestRegistry::start_with(
+      true,
+      Auth::Token {
+        username: "robot$needy".into(),
+        password: "robot-secret".into(),
+      },
+    )
+    .await;
+    let blob_digest = registry.put_blob(&blob_bytes);
+    let manifest_bytes = make_oci_manifest(&Digest::parse(&blob_digest).unwrap(), blob_bytes.len());
+    registry.put_manifest("devcontainers/features/node", "1", "application/vnd.oci.image.manifest.v1+json", &manifest_bytes);
+
+    let config = tempfile::tempdir().unwrap();
+    let auth = base64::engine::general_purpose::STANDARD.encode("robot$needy:robot-secret");
+    std::fs::write(config.path().join("config.json"), serde_json::json!({ "auths": { registry.host(): { "auth": auth } } }).to_string())
+      .unwrap();
+    let certs_d = tempfile::tempdir().unwrap();
+    let access = |roots: Vec<PathBuf>| Access::standard().with_cert_roots(roots).with_docker_config(config.path()).without_proxy();
+    let reference = Reference::parse(&format!("{}/devcontainers/features/node:1", registry.host())).unwrap();
+
+    let cache = tempfile::tempdir().unwrap();
+    let untrusted = FeatureStore::new(cache.path()).unwrap().with_access(access(Vec::new()));
+    assert!(untrusted.fetch(&reference).await.is_err(), "the private CA is not trusted without certs.d");
+
+    let store = FeatureStore::new(cache.path()).unwrap().with_access(access(vec![registry.write_certs_d(certs_d.path())]));
+    let fetched = store.fetch(&reference).await.unwrap();
+    assert_eq!(fetched.digest, Digest::of(&manifest_bytes));
+    assert_eq!(fetched.metadata_json, metadata);
+    let manifest = registry.seen().into_iter().rfind(|seen| seen.path.ends_with("/manifests/1")).unwrap();
+    assert_eq!(manifest.authorization.as_deref(), Some(format!("Bearer {ISSUED_TOKEN}").as_str()));
   }
 }

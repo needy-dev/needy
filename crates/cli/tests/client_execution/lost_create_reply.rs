@@ -70,6 +70,8 @@ async fn a_lost_create_reply_keeps_the_bound_execution_holder() {
       host_files_root: None,
       gateway_listen: None,
       gateway_blocked_cidrs: Vec::new(),
+      layer_registry: None,
+      insecure_registries: Vec::new(),
     })
     .await
     .unwrap(),

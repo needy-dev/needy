@@ -8,10 +8,11 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-docker_credential.workspace = true
 flate2.workspace = true
 jsonc-parser.workspace = true
 oci-client.workspace = true
+# Registry credentials and TLS, shared with every needy OCI client.
+oci-registry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -20,3 +21,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+base64.workspace = true
+oci-registry = { workspace = true, features = ["test-support"] }

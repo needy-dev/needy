@@ -28,7 +28,8 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// from cleanup of an invocation that had already finished or failed.
 /// Version 12 adds `files.sync`, `files.merge` and `files.merge_pending`.
 /// Version 13 adds `run.create`'s `snapshot` and `image.build.step`.
-pub const SCHEMA_VERSION: u32 = 13;
+/// Version 14 adds `image.layer.pull` and `image.layer.push`.
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -49,7 +50,9 @@ pub const SCHEMA_VERSION: u32 = 13;
 // Version 12 only adds kinds, so traces of 10 and 11 still read: they have
 // none of the new kinds. Version 13 only adds an optional field
 // (`run.create`'s `snapshot`) and a new kind (`image.build.step`), so
-// traces of 10 through 12 still read.
+// traces of 10 through 12 still read. Version 14 only adds kinds
+// (`image.layer.pull`, `image.layer.push`), so traces of 10 through 13 still
+// read.
 // No older versions are added to this narrowly versioned historical boundary.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
@@ -139,6 +142,11 @@ events! {
   RunFail(RunFail) = "run.fail",
   /// One layer step of an image build: built in a session or reused from cache.
   ImageBuildStep(ImageBuildStep) = "image.build.step",
+  /// A step's cache key looked up in the layer registry, and its layer
+  /// pulled when the registry had one.
+  ImageLayerPull(ImageLayerPull) = "image.layer.pull",
+  /// A built step's layer pushed to the layer registry.
+  ImageLayerPush(ImageLayerPush) = "image.layer.push",
   /// The actor's VM started.
   ActorStart(ActorStart) = "actor.start",
   /// The actor's VM process exited.
@@ -257,6 +265,45 @@ pub struct ImageBuildStep {
   pub cached: bool,
   /// Wall time in milliseconds; 0 when cached.
   pub ms: u64,
+}
+
+/// A step's cache key looked up in the layer registry: a hit names the
+/// pulled layer, a miss names none, and a lookup or pull that failed (after
+/// which the step is built) names its error.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageLayerPull {
+  /// The step's cache key (`sha256:<hex>`).
+  pub key: String,
+  /// Where it was looked up: `registry/path:key-<hex>`.
+  pub reference: String,
+  /// The pulled layer's digest (`sha256:<hex>`); `None` on a miss or an
+  /// error.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub layer: Option<String>,
+  /// Wall time of the lookup and pull in milliseconds.
+  pub ms: u64,
+  /// Why the lookup or pull failed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+/// A built step's layer pushed to the layer registry. A push that failed
+/// names its error; the build it follows still succeeded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImageLayerPush {
+  /// The step's cache key (`sha256:<hex>`).
+  pub key: String,
+  /// The pushed layer's digest (`sha256:<hex>`).
+  pub layer: String,
+  /// Where it was pushed: `registry/path:key-<hex>`.
+  pub reference: String,
+  /// Wall time of the push in milliseconds.
+  pub ms: u64,
+  /// Why the push failed.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
 }
 
 /// An executor instance a run uses.

@@ -27,6 +27,7 @@
 // or `log` to need it.
 
 mod oci;
+pub mod registry;
 
 pub use needy_core::image::Digest;
 pub use oci::{extract_top_layer, snapshot_tag};
@@ -76,6 +77,9 @@ pub enum Error {
   /// A layer archive the store cannot take.
   #[error("not a layer the store can take: {0}")]
   Invalid(String),
+  /// A layer archive is another layer than the one it was taken as.
+  #[error("the layer archive is {actual}, not the expected {expected}")]
+  Unexpected { expected: Digest, actual: Digest },
   /// A file of the store could not be read or written.
   #[error("{context}: {source}")]
   Io {
@@ -593,8 +597,21 @@ impl Store {
     self.store_with(dir, |out| Ok(archive::canonical(layer, out)?))
   }
 
+  /// Stores a layer as [`Store::put`] does, only if its digest is
+  /// `expected`: another layer is refused ([`Error::Unexpected`]) and not
+  /// kept.
+  fn put_expecting(&self, layer: impl Read, expected: &Digest) -> Result<Digest> {
+    self.store_checked(&self.cache.join("layers"), Some(expected), |out| Ok(archive::canonical(layer, out)?))
+  }
+
   /// Stores in `dir` the archive `write` writes, named by its digest.
   fn store_with(&self, dir: &Path, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<Digest> {
+    self.store_checked(dir, None, write)
+  }
+
+  /// Stores in `dir` the archive `write` writes, named by its digest, which
+  /// must be `expected` when there is one.
+  fn store_checked(&self, dir: &Path, expected: Option<&Digest>, write: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<Digest> {
     std::fs::create_dir_all(dir).map_err(io(dir.display()))?;
     let staged = tempfile::NamedTempFile::new_in(dir).map_err(io(dir.display()))?;
     let mut out = Hashing {
@@ -606,6 +623,14 @@ impl Store {
     inner.flush().map_err(io(staged.path().display()))?;
     drop(inner);
     let digest = Digest::from_bytes(hasher.finalize().into());
+    if let Some(expected) = expected
+      && *expected != digest
+    {
+      return Err(Error::Unexpected {
+        expected: *expected,
+        actual: digest,
+      });
+    }
     let path = dir.join(format!("{}.tar", stem(&digest)));
     if !path.exists() {
       staged.persist(&path).map_err(|e| io(path.display())(e.error))?;

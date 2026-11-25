@@ -125,6 +125,8 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     host_files_root: None,
     gateway_listen: None,
     gateway_blocked_cidrs: Vec::new(),
+    layer_registry: None,
+    insecure_registries: Vec::new(),
   };
 
   let started = tokio::time::timeout(Duration::from_secs(2), crate::Daemon::start(config)).await.expect("start-up fails at once");
@@ -387,4 +389,43 @@ async fn serve_until_suspends_control_when_binding_fails() {
   assert!(daemon.suspending.load(std::sync::atomic::Ordering::SeqCst));
   let rejected = Runs::create(daemon, new_run(PROFILE, started.dir.path())).await.unwrap_err();
   assert!(rejected.to_string().contains("shutting down"), "{rejected}");
+}
+
+#[tokio::test]
+async fn start_up_refuses_an_insecure_registry_or_a_layer_registry_that_is_not_one() {
+  for (insecure, layer, field) in [
+    (vec!["https://registry.example.com".to_string()], None, "daemon.insecure_registries"),
+    (Vec::new(), Some("registry.example.com".to_string()), "daemon.layer_registry"),
+  ] {
+    let dir = tempfile::tempdir().unwrap();
+    let config = crate::Config {
+      holder_executable: Default::default(),
+      state_dir: dir.path().join("state"),
+      runtime_dir: dir.path().join("run"),
+      data_dir: dir.path().join("data"),
+      cache_dir: dir.path().join("cache"),
+      actor_image: dir.path().join("image"),
+      vm_images: dir.path().join("images"),
+      kvm: dir.path().join("kvm"),
+      guest_needy: None,
+      guest_disks: dir.path().join("guest"),
+      executor_image: "needy-executor:latest".into(),
+      heartbeat_interval: Duration::from_secs(15),
+      local_runner: None,
+      report_wait: crate::REPORT_WAIT,
+      mirror_out_wait: crate::MIRROR_OUT_WAIT,
+      merge_driver_timeout: crate::MERGE_DRIVER_TIMEOUT,
+      runners_file: None,
+      disable_host_files: false,
+      host_files_root: None,
+      gateway_listen: None,
+      gateway_blocked_cidrs: Vec::new(),
+      layer_registry: layer,
+      insecure_registries: insecure,
+    };
+    let Err(error) = crate::Daemon::start(config).await else {
+      panic!("a daemon started with an invalid {field}");
+    };
+    assert!(format!("{error:#}").contains(&format!("invalid {field}")), "{error:#}");
+  }
 }

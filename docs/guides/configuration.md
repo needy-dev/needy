@@ -192,6 +192,38 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
   needy image export --profile builtin:opencode -o opencode.tar
   needy image prune
   ```
+- **Sharing built layers**: `needy daemon serve --layer-registry REPOSITORY`
+  (or `needy config set daemon.layer_registry REPOSITORY`) shares built steps
+  through an OCI registry repository such as
+  `registry.example.com/needy/layers`. A step this daemon has not built is
+  pulled from the registry before it is built, and a built step is pushed
+  there as an ordinary OCI image tagged `key-<cache key>`: one gzip layer, a
+  standard image config, and needy's metadata in `dev.needy.image.*`
+  manifest annotations, so `crane`, `skopeo` or any registry can copy and keep
+  it. An `http://` prefix opts into a plain-HTTP registry, which never gets
+  credentials. A failed lookup, pull or push is logged and traced
+  (`image.layer.pull`, `image.layer.push`) without failing the build.
+- **Registry credentials and TLS** (feature fetches and the layer registry):
+  - Credentials come from the Docker credential store: `$DOCKER_CONFIG/config.json`
+    (default `~/.docker/config.json`), its `auths`, `credHelpers` and
+    `credsStore`, so `docker login` and helpers such as
+    `docker-credential-ecr-login` work. An `identitytoken` (ACR, Docker Hub
+    SSO) is exchanged at the registry's token service for an access token;
+    it is never sent to the registry itself. Each process (control daemon,
+    runner) reads its own store; credentials are never forwarded.
+  - TLS trusts the system's store (and `SSL_CERT_FILE` / `SSL_CERT_DIR`) and
+    the CA files of the registry's host in containers-style `certs.d`:
+    `$XDG_CONFIG_HOME/containers/certs.d/HOST[:PORT]/*.crt` (default
+    `~/.config/containers/certs.d`), then `/etc/containers/certs.d`, then
+    `/etc/docker/certs.d`. A host with a port may also be spelled
+    `HOST_PORT_` (containerd's spelling, tried first) and is `HOSTPORT` on
+    Windows. The first directory that exists for the host is
+    used. Client certificates (`*.cert`, `*.key`) are not presented yet.
+  - `needy daemon serve --insecure-registry HOST[:PORT]` (repeatable; or
+    `daemon.insecure_registries: [HOST]` in the settings file) stops verifying
+    that host's TLS certificate, and logs a warning on every connection. It
+    does not switch to plain HTTP and still sends credentials; prefer putting
+    the registry's CA in `certs.d`.
 - **Prebuilt OCI references**: `actor.image: REF` runs an image `FROM` needy's
   base on every driver (`needy image build --from REF` for VM drivers; see
   [`examples/custom-image`](../../examples/custom-image/Dockerfile)).

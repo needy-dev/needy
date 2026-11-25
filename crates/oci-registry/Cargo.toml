@@ -1,0 +1,62 @@
+[package]
+name = "oci-registry"
+description = "Standalone access to OCI Distribution registries the way container tools configure it: Docker credential store, identity-token exchange, system trust store, containers-style certs.d and per-host insecure registries"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[features]
+# `testing`: an in-process OCI Distribution registry (plain HTTP or TLS with
+# a self-signed CA, and the authentication shapes registries use) for tests
+# of crates that talk to registries.
+test-support = [
+  "dep:base64",
+  "dep:bytes",
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:rcgen",
+  "dep:rustls",
+  "dep:sha2",
+  "dep:tokio-rustls",
+]
+
+[dependencies]
+docker_credential.workspace = true
+# Parses a registry's `WWW-Authenticate` challenge for the identity-token
+# exchange; already in the graph through `oci-client`.
+http-auth = { workspace = true }
+oci-client.workspace = true
+# The identity-token exchange is one form POST to the token service that
+# `oci-client` 0.15 cannot send.
+reqwest = { workspace = true, features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+base64 = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
+
+[dev-dependencies]
+base64.workspace = true
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+tokio-rustls.workspace = true
+tracing-subscriber.workspace = true

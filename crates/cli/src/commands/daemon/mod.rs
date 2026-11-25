@@ -87,6 +87,12 @@ struct ServeArgs {
   /// Block outbound actor gateway connections to this CIDR (repeatable, e.g. `10.0.0.0/8`).
   #[arg(long = "gateway-block-cidr", value_name = "CIDR")]
   gateway_blocked_cidrs: Vec<String>,
+  /// OCI registry repository that shares built image steps (`HOST[:PORT]/PATH`; an `http://` prefix opts into plain HTTP).
+  #[arg(long, value_name = "REPOSITORY")]
+  layer_registry: Option<String>,
+  /// Do not verify the TLS certificate of this registry host (`HOST[:PORT]`, repeatable); prefer its CA in `certs.d`.
+  #[arg(long = "insecure-registry", value_name = "HOST")]
+  insecure_registries: Vec<String>,
 }
 
 #[derive(clap::Args)]
@@ -174,7 +180,31 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   if !args.gateway_blocked_cidrs.is_empty() {
     effective.daemon.gateway_blocked_cidrs = args.gateway_blocked_cidrs.clone();
   }
+  if args.layer_registry.is_some() {
+    effective.daemon.layer_registry = args.layer_registry.clone();
+  }
+  if !args.insecure_registries.is_empty() {
+    effective.daemon.insecure_registries = args.insecure_registries.clone();
+  }
   effective.validate()?;
+  if let Some(repository) = &effective.daemon.layer_registry
+    && let Err(error) = needy_core_actor::image::store::registry::Repository::parse(repository)
+  {
+    return Err(
+      crate::diagnostics::Error::new("config.invalid_value", format!("Invalid layer registry: {error}"))
+        .fact("field", "daemon.layer_registry")
+        .into(),
+    );
+  }
+  for host in &effective.daemon.insecure_registries {
+    if let Err(error) = oci_registry::parse_host(host) {
+      return Err(
+        crate::diagnostics::Error::new("config.invalid_value", format!("Invalid insecure registry: {error}"))
+          .fact("field", "daemon.insecure_registries")
+          .into(),
+      );
+    }
+  }
   if args.heartbeat_interval.is_some_and(|interval| interval.is_zero()) {
     return Err(
       crate::diagnostics::Error::new("config.invalid_value", "Heartbeat interval must be positive")
@@ -208,6 +238,8 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     host_files_root: args.host_files_root.or(settings.host_files_root),
     gateway_listen: args.gateway_listen.or(settings.gateway_listen).as_deref().map(listener).transpose()?,
     gateway_blocked_cidrs: settings.gateway_blocked_cidrs,
+    layer_registry: settings.layer_registry,
+    insecure_registries: settings.insecure_registries,
   };
   match needy_daemon::guest_needy(&config) {
     Ok(guest) => tracing::info!("actors get the guest needy {}", guest.display()),

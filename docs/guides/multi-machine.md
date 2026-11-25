@@ -50,6 +50,14 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   serve remote actor runners over an authenticated TCP gateway, and repeatable
   `--gateway-block-cidr CIDR` flags to block outbound CIDR ranges in addition to
   the default loopback/link-local protections.
+- **Shared image layers**: pass `--layer-registry REPOSITORY` (for example
+  `registry.example.com/needy/layers`, or `http://HOST:PORT/PATH` for a
+  plain-HTTP in-cluster registry) to `needy daemon serve` so control hosts
+  that share the repository pull each other's built image steps instead of
+  building them again. Credentials, private CAs (`certs.d`) and
+  `--insecure-registry HOST` follow
+  [registry credentials and TLS](configuration.md#actor-images-recipes-and-builtin);
+  runners do not contact registries yet.
 - **Host-file boundaries**: pass `--disable-host-files` to reject all `host:`
   file mappings, or `--host-files-root DIR` to confine `host:` mappings to an
   allowed directory tree.

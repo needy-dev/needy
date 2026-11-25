@@ -665,6 +665,29 @@ with a history to roll back through. Built layers, snapshots and layer
 disks are cache; commit layers and their history are data. Nothing calls
 it yet (slice 1 of the spec wires it).
 
+### Layer registry (provisional)
+
+An OCI Distribution repository that hosts share built image steps through
+(`needy daemon serve --layer-registry REPOSITORY`, `daemon.layer_registry`;
+`needy-core-actor`'s `image::store::registry`; see the
+[layered OCI base spec](ai/references/architecture/2026-11-25-layered-oci-base-spec.md#slices),
+"Settled in B-3"). Each built step is a **step image**: an ordinary OCI
+image tagged `key-<cache key hex>` with the step's layer only (gzip), a
+standard image config naming its DiffID, and needy's metadata (cache key,
+parent layer, root, feature) in `dev.needy.image.*` manifest annotations. A
+daemon looks a missing step up there before building it and pushes what it
+builds; a failure is traced and never fails the build.
+
+### Registry access
+
+How every needy OCI client reaches a registry (`oci-registry`'s `Access`):
+credentials from the Docker credential store (an `identitytoken` is
+exchanged for an access token first), the system trust store plus the
+host's CA files in containers-style `certs.d`, and per-host **insecure
+registries** (`--insecure-registry HOST`: TLS certificates not verified).
+Plain HTTP is a separate, explicit choice (`http://`) and never carries
+credentials. Each process resolves its own credentials.
+
 ### Layer disk (provisional)
 
 A layer as a read-only SquashFS disk a VM driver attaches after the guest

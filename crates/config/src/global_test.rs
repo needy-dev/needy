@@ -76,3 +76,33 @@ fn gateway_blocked_cidrs_accepts_valid_v4_and_v6_and_rejects_invalid() {
     assert_eq!(err.field(), "daemon.gateway_blocked_cidrs");
   }
 }
+
+#[test]
+fn layer_registry_reads_from_the_settings_file_and_refuses_an_empty_value() {
+  let cfg: Config = serde_yaml::from_str("version: 1\ndaemon:\n  layer_registry: registry.example.com/needy/layers\n").unwrap();
+  cfg.validate().unwrap();
+  assert_eq!(cfg.daemon.layer_registry.as_deref(), Some("registry.example.com/needy/layers"));
+
+  let mut cfg = Config::default();
+  cfg.daemon.layer_registry = Some(String::new());
+  let err = cfg.validate().expect_err("an empty layer registry must be rejected");
+  assert_eq!(err.field(), "daemon.layer_registry");
+}
+
+#[test]
+fn insecure_registries_read_from_the_settings_file_and_refuse_a_url() {
+  let cfg: Config = serde_yaml::from_str("version: 1\ndaemon:\n  insecure_registries: [registry.example.com:5000]\n").unwrap();
+  cfg.validate().unwrap();
+  assert_eq!(cfg.daemon.insecure_registries, ["registry.example.com:5000"]);
+
+  for bad in [
+    "",
+    "https://registry.example.com",
+    "registry.example.com/needy",
+  ] {
+    let mut cfg = Config::default();
+    cfg.daemon.insecure_registries = vec![bad.to_string()];
+    let err = cfg.validate().expect_err("a URL is not a registry host");
+    assert_eq!(err.field(), "daemon.insecure_registries", "{bad:?}");
+  }
+}

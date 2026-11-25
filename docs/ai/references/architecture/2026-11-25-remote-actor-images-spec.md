@@ -15,6 +15,11 @@ layer registry, and tests on Kubernetes clusters with KVM nodes. Names marked
 > import `actor.image` OCI layers without an engine; builds are done in CI or
 > by standard in-cluster builders. A design for the shared base follows; this
 > note is updated when it lands.
+>
+> **Update (2026-11-26):** D5's daemon side landed as slice B-3 of the
+> [layered OCI base spec](2026-11-25-layered-oci-base-spec.md) ("Settled in
+> B-3"): steps are pushed as ordinary OCI images, not the
+> `application/vnd.needy.layer.config.v1+json` artifact below.
 
 Parent notes:
 
