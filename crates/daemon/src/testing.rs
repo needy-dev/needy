@@ -107,6 +107,7 @@ pub(crate) async fn daemon_in_with_backends(
     mirror_out_wait: crate::MIRROR_OUT_WAIT,
     merge_driver_timeout: crate::MERGE_DRIVER_TIMEOUT,
     runners_file: None,
+    clients_file: None,
     disable_host_files: false,
     host_files_root: None,
     gateway_listen: None,

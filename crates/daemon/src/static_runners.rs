@@ -7,10 +7,8 @@
 //! the next reload; `rotate` and `remove` RPCs are refused for static runners.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::SystemTime;
 
 use anyhow::{Context as _, Result, bail};
 use needy_common::sync::lock;
@@ -19,6 +17,7 @@ use needy_core::types::{Capabilities, RunnerRole};
 use serde::Deserialize;
 
 use crate::link::Links;
+use crate::static_file::{Stamp, parse_sha256_hex};
 use crate::store;
 
 /// On-disk static runners file: either `{ runners: [...] }` or a top-level list.
@@ -43,23 +42,6 @@ struct FileEntry {
   labels: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileStamp {
-  modified: Option<SystemTime>,
-  ino: u64,
-  len: u64,
-}
-
-impl FileStamp {
-  fn of(meta: &std::fs::Metadata) -> Self {
-    Self {
-      modified: meta.modified().ok(),
-      ino: meta.ino(),
-      len: meta.len(),
-    }
-  }
-}
-
 /// Live in-memory state for one statically configured runner.
 #[derive(Debug, Clone)]
 pub(crate) struct StaticRunner {
@@ -74,7 +56,7 @@ pub(crate) struct StaticRunner {
 
 #[derive(Default)]
 struct Inner {
-  stamp: Option<FileStamp>,
+  stamp: Option<Stamp>,
   runners: BTreeMap<String, StaticRunner>,
 }
 
@@ -125,7 +107,7 @@ impl StaticRunners {
       }
       return;
     };
-    let stamp = FileStamp::of(&meta);
+    let stamp = Stamp::of(&meta);
     if lock(&self.inner).stamp.as_ref() == Some(&stamp) {
       return;
     }
@@ -294,18 +276,4 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
     );
   }
   Ok(parsed)
-}
-
-fn parse_sha256_hex(text: &str) -> Result<Vec<u8>> {
-  let hex = text.strip_prefix("sha256:").unwrap_or(text);
-  if hex.len() != 64 {
-    bail!("expected 64 hex characters, got {}", hex.len());
-  }
-  let mut bytes = Vec::with_capacity(32);
-  for chunk in hex.as_bytes().as_chunks::<2>().0 {
-    let pair = std::str::from_utf8(chunk).context("non-UTF-8 hex")?;
-    let byte = u8::from_str_radix(pair, 16).with_context(|| format!("invalid hex byte {pair:?}"))?;
-    bytes.push(byte);
-  }
-  Ok(bytes)
 }

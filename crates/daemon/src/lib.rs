@@ -78,6 +78,8 @@ mod runners;
 #[cfg(unix)]
 mod schedule;
 #[cfg(unix)]
+mod static_clients;
+mod static_file;
 mod static_runners;
 #[cfg(unix)]
 mod store;
@@ -187,6 +189,11 @@ pub struct Config {
   /// daemon.
   #[serde(default)]
   pub runners_file: Option<PathBuf>,
+  /// Optional YAML file declaring static control-plane clients and their
+  /// tokens (or token hashes), hot-reloaded like `runners_file`, so a client
+  /// can be provisioned before the daemon starts instead of pairing.
+  #[serde(default)]
+  pub clients_file: Option<PathBuf>,
   /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host workspaces).
   #[serde(default)]
   pub disable_host_files: bool,
@@ -267,6 +274,8 @@ pub struct Daemon {
   pub(crate) links: Arc<link::Links>,
   /// Statically configured runners hot-reloaded from `config.runners_file`.
   pub(crate) static_runners: Arc<static_runners::StaticRunners>,
+  /// Statically configured clients hot-reloaded from `config.clients_file`.
+  pub(crate) static_clients: Arc<static_clients::StaticClients>,
   /// Each runner's machine as its last heartbeat reported it.
   // NOTICE: kept in memory: a runner reports it in every heartbeat, so a
   // control plane that restarts knows it again within one heartbeat.
@@ -379,6 +388,8 @@ impl Daemon {
     let links: Arc<link::Links> = Arc::default();
     let static_runners = Arc::new(static_runners::StaticRunners::new(config.runners_file.clone()));
     static_runners.reload(&links);
+    let static_clients = Arc::new(static_clients::StaticClients::new(config.clients_file.clone()));
+    static_clients.reload();
     let maintenance_cancel = cancel.child_token();
     let maintenance_guard = Arc::new(maintenance_cancel.clone().drop_guard());
     let images = Arc::new(image::Images::with_backends(&config.cache_dir, &config.data_dir, backends, access, layer_registry));
@@ -395,6 +406,7 @@ impl Daemon {
       state,
       links,
       static_runners,
+      static_clients,
       runner_hosts: Arc::default(),
       holder,
       suspending: Arc::default(),
