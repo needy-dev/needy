@@ -101,12 +101,12 @@ pub fn credential_name(credential: &str) -> Option<&str> {
 #[cfg(unix)]
 pub use crate::actor_runner::ActorConfig;
 
-/// The layer store under `cache_dir` and `data_dir` (a runner's XDG cache
-/// and data directories), laid out as a control daemon keeps its own, so a
-/// runner and a daemon on one host share their layers.
-#[cfg(unix)]
+/// The layer store under `cache_dir` and `data_dir` (a runner's, or the
+/// CLI's, XDG cache and data directories), laid out as a control daemon
+/// keeps its own, so a runner, the CLI and a daemon on one host share their
+/// layers.
 pub fn layer_store(cache_dir: &Path, data_dir: &Path) -> needy_core_actor::image::store::Store {
-  crate::image::store_in(cache_dir, data_dir)
+  needy_core_actor::image::store::Store::new(cache_dir.join("image-store"), data_dir.join("image-store"))
 }
 
 /// How a runner starts.

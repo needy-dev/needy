@@ -11,8 +11,10 @@
 #
 #   docker build --build-arg BASE=ghcr.io/needy-dev/needy-actor:v<version> -t needy-agents examples/agents
 #
-# The container drivers run the image as it is; the VM drivers boot the VM
-# image `needy image build --from needy-agents` makes of it (see README.md).
+# The container drivers run the image as it is. For the VM drivers, build it
+# FROM the actor-base your base VM image records, with `--build-arg SHIM=0`,
+# and push it to a registry: a VM actor imports its layers above actor-base
+# (see docs/guides/agent-images.md).
 #
 # Every download below is pinned to one release and checked against a
 # SHA-256 (or, for npm, SHA-512) taken from that release on 2026-11-13. To
@@ -20,6 +22,7 @@
 # source its comment names.
 ARG BASE=needy-actor:latest
 FROM ${BASE}
+ARG SHIM=1
 
 # BuildKit sets TARGETARCH to amd64 or arm64 from the build's platform.
 ARG TARGETARCH
@@ -123,10 +126,10 @@ RUN set -eu; \
     chmod 0755 /usr/local/bin/herdr; \
     herdr --version
 
-# Last: keep the shells shimmed in place, in case a package added or upgraded
-# one, so a container actor routes them by their absolute paths too. The
-# other programs this image added are routed through the trampolines a
-# container actor makes when it starts. The VM drivers do not need it (their
-# kernel catches every exec), and `needy image build --from` puts the real
-# programs back.
-RUN ["/.needy/shim-image"]
+# Last, for the container drivers: keep the shells shimmed in place, in case
+# a package added or upgraded one, so a container actor routes them by their
+# absolute paths too. The other programs this image added are routed through
+# the trampolines a container actor makes when it starts. The VM drivers do
+# not need it (their kernel catches every exec) and refuse an image that ran
+# it (it writes under /.needy), so `SHIM=0` leaves it out.
+RUN if [ "$SHIM" = 1 ]; then /.needy/shim-image; fi

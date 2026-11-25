@@ -219,7 +219,6 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   let config = needy_daemon::Config {
     holder_executable: std::env::current_exe().context("cannot locate the runtime holder executable")?,
     guest_disks: paths.guest_disks(),
-    vm_images: paths.images(),
     actor_image: args.actor_image.or(settings.actor_image).unwrap_or_else(|| paths.base_image()),
     state_dir: paths.state,
     data_dir: paths.data.clone(),

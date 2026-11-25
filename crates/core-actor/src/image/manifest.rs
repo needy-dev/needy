@@ -48,7 +48,7 @@ pub struct Manifest {
   pub sha256: Option<String>,
   /// The `actor-base` image its root file system was derived from; `None`
   /// in a manifest written before needy recorded it, or for an image made
-  /// from something else (`needy image build --from`).
+  /// from something else (`needy image build --from` before B-4).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub base: Option<Base>,
 }
@@ -108,9 +108,12 @@ pub enum Source {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recipe: Option<String>,
   },
-  /// Made by `needy image build --from` from an OCI image: the reference as
-  /// named, with its tag, the image's ID (the digest of its configuration)
-  /// and its platform (`linux/amd64`, `linux/arm64`).
+  /// Made by `needy image build --from` of a needy before B-4 from an OCI
+  /// image: the reference as named, with its tag, the image's ID (the
+  /// digest of its configuration) and its platform (`linux/amd64`,
+  /// `linux/arm64`). No driver boots such an image; `needy image ls` lists
+  /// it by this record. Kept so their manifests still read
+  /// (`deny_unknown_fields`).
   Oci {
     reference: String,
     id: String,
@@ -131,7 +134,7 @@ impl std::fmt::Display for Source {
       // the manifest keeps the whole ID.
       Source::Oci { reference, id, .. } => {
         let short: String = id.trim_start_matches("sha256:").chars().take(12).collect();
-        write!(f, "built from {reference} ({short})")
+        write!(f, "built from {reference} ({short}) by an older needy, no longer booted")
       }
     }
   }

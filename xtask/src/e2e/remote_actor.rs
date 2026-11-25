@@ -19,6 +19,14 @@
 //! store (`GuestService.FetchLayer`).
 // TODO(layer-registry): build on a separate host and share the layer through
 // a registry once R3 of 2026-11-25-remote-actor-images-spec.md lands.
+// TODO(e2e-import): a cell whose `actor.image` is an OCI image built FROM
+// the base VM image's actor-base (`devcontainer build`, BuildKit), imported
+// by the control daemon above the base (B-4 of the layered OCI base spec),
+// needs that image in a registry the control daemon reaches: the harness
+// runs none, and an engine's copy is not importable. The in-process test
+// `a_remote_runner_boots_an_image_from_actor_base_with_the_layers_the_control_daemon_imported`
+// (`crates/daemon/src/actor_runner_test.rs`) covers the path meanwhile;
+// reopen with a session registry in the harness.
 
 use std::fs::File;
 use std::path::Path;

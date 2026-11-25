@@ -89,6 +89,10 @@ rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem
 # already builds with.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-webpki-roots"] }
 # The test registry's TLS listener (`oci-registry`), on `ring` like the rest.
+# Decodes zstd-compressed OCI layers (`application/vnd.oci.image.layer.v1.tar+zstd`,
+# kaniko's and envbuilder's default) in pure Rust, so the static musl and
+# Windows builds need no C zstd; its encoder makes test images.
+ruzstd = "0.8"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 sea-orm = { version = "2.0.4", default-features = false, features = ["macros", "runtime-tokio", "sqlx-sqlite"] }
 sea-orm-migration = { version = "2.0.4", default-features = false, features = ["runtime-tokio", "sqlx-sqlite"] }

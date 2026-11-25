@@ -3,7 +3,6 @@
 
 use needy_api_client::Client;
 use needy_api_server::control::{ControlError, Placement, ProfileCheck, ProfileToCheck, RunnerHost, RunnerReport, Runners, Runs};
-use needy_config::profile::ActorDriver;
 
 use crate::testing::{self, JoinedRunner, Served};
 
@@ -364,22 +363,21 @@ async fn the_check_names_the_actor_image_and_the_base_abi_it_records() {
   assert_eq!(check.actor_base_abi, Some(needy_core_actor::image::base::ABI));
 }
 
+// Since B-4 a VM actor of an OCI image boots the base VM image with the
+// image's layers above actor-base imported; there is no VM image per
+// reference to be missing.
 #[tokio::test]
-async fn a_vm_image_not_yet_made_from_the_profiles_oci_image_names_the_build_that_makes_it() {
+async fn a_vm_actor_of_an_oci_image_is_checked_on_the_base_vm_image_it_is_imported_above() {
   let served = control().await;
 
   let check = check(&served, "actor: { driver: linux-firecracker, image: needy-custom-jq, command: [sh] }").await;
 
-  let dir = needy_core_actor::image::vm::dir_of(&served.dir().join("images"), ActorDriver::LinuxFirecracker, "needy-custom-jq");
-  assert_eq!(check.actor_image, format!("needy-custom-jq, as the VM image {}", dir.display()));
-  assert_eq!(check.actor_base_abi, None);
+  assert_eq!(messages(&check), Vec::<String>::new());
   assert_eq!(
-    messages(&check),
-    [format!(
-      "error: actor: on the control host: actor image is missing {}; run `needy image build --from needy-custom-jq`",
-      dir.join("vmlinux").display()
-    )]
+    check.actor_image,
+    format!("needy-custom-jq, imported above the base VM image {} (built)", served.dir().join("image").display())
   );
+  assert_eq!(check.actor_base_abi, Some(needy_core_actor::image::base::ABI));
 }
 
 #[tokio::test]

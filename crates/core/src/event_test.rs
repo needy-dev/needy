@@ -54,6 +54,17 @@ fn every_kind() -> Vec<Event> {
       ms: 80,
       error: Some("layer registry unreachable".into()),
     }),
+    Event::ImageImport(ImageImport {
+      reference: "registry.example.com/agents/codex:1".into(),
+      manifest: Some("sha256:3333333333333333333333333333333333333333333333333333333333333333".into()),
+      platform: "linux/amd64".into(),
+      layers: vec!["sha256:2222222222222222222222222222222222222222222222222222222222222222".into()],
+      pulled: 1,
+      skipped: 2,
+      warnings: vec!["layer sha256:2222 has /.envbuilder".into()],
+      ms: 120,
+      error: None,
+    }),
     Event::RunStop(RunStop {
       ended: false,
       by: Some(Principal::Operator),

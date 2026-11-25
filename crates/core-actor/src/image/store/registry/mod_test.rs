@@ -243,3 +243,24 @@ async fn a_tag_that_is_not_a_needy_step_image_is_refused() {
   let err = client.lookup(&key).await.unwrap_err();
   assert!(matches!(err, Error::Invalid { .. }), "{err}");
 }
+
+// zstd:chunked layers (Podman, Buildah) are many zstd frames with skippable
+// frames between them; a layer is all of its frames.
+#[test]
+fn a_zstd_blob_decompresses_every_frame_and_skips_skippable_frames() {
+  let dir = tempfile::tempdir().unwrap();
+  let mut blob = ruzstd::encoding::compress_to_vec(&b"first frame, "[..], ruzstd::encoding::CompressionLevel::Fastest);
+  // A skippable frame: magic 0x184D2A50..=0x184D2A5F, a 4-byte
+  // little-endian length, and that many bytes (RFC 8878, 3.1.2).
+  blob.extend(0x184D_2A5Eu32.to_le_bytes());
+  blob.extend(5u32.to_le_bytes());
+  blob.extend(b"skip!");
+  blob.extend(ruzstd::encoding::compress_to_vec(&b"second frame"[..], ruzstd::encoding::CompressionLevel::Fastest));
+  let path = dir.path().join("blob");
+  std::fs::write(&path, &blob).unwrap();
+
+  let (uncompressed, digest) = decompress(&path, Compression::Zstd).unwrap();
+
+  assert_eq!(std::fs::read(uncompressed.path()).unwrap(), b"first frame, second frame");
+  assert_eq!(digest, Digest::of(b"first frame, second frame"));
+}
