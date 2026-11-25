@@ -201,6 +201,16 @@ pub struct Config {
   /// the actor gateway's egress policy for non-service targets.
   #[serde(default)]
   pub gateway_blocked_cidrs: Vec<String>,
+  /// The upstream SOCKS5 proxy the actor gateways this daemon runs connect
+  /// through (`--gateway-upstream`, `socks5h://HOST:PORT` or
+  /// `socks5://HOST:PORT`); direct when unset. Not sent to runners.
+  #[serde(default)]
+  pub gateway_upstream: Option<String>,
+  /// A file of `USERNAME:PASSWORD` for `gateway_upstream`
+  /// (`--gateway-upstream-credentials-file`), read again for each
+  /// connection.
+  #[serde(default)]
+  pub gateway_upstream_credentials_file: Option<PathBuf>,
   /// The layer registry repository (`daemon.layer_registry`,
   /// `--layer-registry`): `[http://]HOST[:PORT]/PATH`, read and written.
   /// Built image steps are pushed to it and a step this host misses is
@@ -217,6 +227,26 @@ pub struct Config {
 #[cfg(unix)]
 fn default_merge_driver_timeout() -> Duration {
   MERGE_DRIVER_TIMEOUT
+}
+
+/// The upstream the actor gateways of a daemon of `config` connect
+/// through, its credentials file checked now so a broken one fails the
+/// start rather than every connection.
+#[cfg(unix)]
+async fn gateway_upstream(config: &Config) -> Result<needy_core_actor::sidecar::gateway::Upstream> {
+  use needy_core_actor::sidecar::gateway::Upstream;
+  let upstream = match &config.gateway_upstream {
+    Some(url) => Upstream::socks5(url, config.gateway_upstream_credentials_file.clone())?,
+    None if config.gateway_upstream_credentials_file.is_some() => {
+      anyhow::bail!("gateway_upstream_credentials_file is set without gateway_upstream")
+    }
+    None => return Ok(Upstream::Direct),
+  };
+  upstream.check().await?;
+  if let Some(via) = upstream.via() {
+    tracing::info!("actor gateways on this daemon connect through the upstream proxy {via}");
+  }
+  Ok(upstream)
 }
 
 #[cfg(unix)]
@@ -252,6 +282,8 @@ pub struct Daemon {
   pub(crate) config: Arc<Config>,
   /// Parsed operator-configured CIDR blocks rejected by local and remote actor gateways.
   pub(crate) gateway_blocked_cidrs: Vec<needy_core_actor::sidecar::gateway::IpCidr>,
+  /// How the actor gateways this daemon runs reach their upstreams.
+  pub(crate) gateway_upstream: needy_core_actor::sidecar::gateway::Upstream,
   instance_id: String,
   discovery: Arc<discovery::Publisher>,
   /// `trace.db`, shared by the runs' SQLite sinks.
@@ -328,6 +360,7 @@ impl Daemon {
           .map_err(|e| anyhow::anyhow!("invalid gateway_blocked_cidrs entry {raw:?}: {e}"))
       })
       .collect::<Result<Vec<_>>>()?;
+    let gateway_upstream = gateway_upstream(&config).await?;
     let access = oci_registry::Access::standard()
       .with_insecure_registries(&config.insecure_registries)
       .context("invalid daemon.insecure_registries")?;
@@ -387,6 +420,7 @@ impl Daemon {
       pool: Arc::new(Pool::new(native, container, links.clone())),
       config: Arc::new(config),
       gateway_blocked_cidrs,
+      gateway_upstream,
       instance_id,
       discovery,
       traces,

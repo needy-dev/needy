@@ -10,7 +10,7 @@ use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use needy_config::profile::FaultDomain;
 use needy_core::chaos::Injector;
-use needy_core::event::{Event, NetConnect, NetDeny, NetRequest};
+use needy_core::event::{Event, NetConnect, NetDeny, NetError, NetRequest};
 use needy_core::network::Policy;
 use needy_core::types::{Effect, Fired, Network};
 use needy_trace::Dispatch;
@@ -20,6 +20,7 @@ use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio_stream::wrappers::UnixListenerStream;
 use tokio_util::sync::CancellationToken;
 
+use super::testing::{Seen as ProxySeen, Socks5Server};
 use super::*;
 
 /// What the test upstream saw of one request.
@@ -203,6 +204,7 @@ async fn a_service_s_host_is_forwarded_to_its_url_as_sent() {
       path: "/v1/models".into(),
       status: 200,
       ms: request.ms,
+      via: None,
     }
   );
 }
@@ -382,6 +384,7 @@ async fn a_connect_to_an_allowed_host_opens_a_tunnel() {
       network: Network::Actor,
       host: "127.0.0.1".into(),
       authority: address.to_string(),
+      via: None,
     })]
   );
 }
@@ -640,4 +643,244 @@ async fn on_activity_fires_for_authenticated_http_and_connect_requests_only() {
   let (status, _) = connect_with_proxy_auth(&gateway.socket, "model.needy:80", Some(&bearer)).await;
   assert_eq!(status, 200);
   assert_eq!(hits.load(Ordering::SeqCst), 2);
+}
+
+/// The upstream `scheme://` the test proxy at `proxy`, with `credentials`.
+fn through(proxy: SocketAddr, scheme: &str, credentials: Option<std::path::PathBuf>) -> Upstream {
+  Upstream::socks5(&format!("{scheme}://{proxy}"), credentials).unwrap()
+}
+
+/// Writes `USERNAME:PASSWORD` to `path`, private to this user.
+fn write_credentials(path: &Path, text: &str) {
+  use std::os::unix::fs::PermissionsExt as _;
+  std::fs::write(path, text).unwrap();
+  std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// What the tunnel's upstream answers to one request sent through it.
+async fn tunneled(mut tunnel: UnixStream, path: &str) -> String {
+  tunnel.write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+  let mut reply = String::new();
+  tunnel.read_to_string(&mut reply).await.unwrap();
+  reply
+}
+
+// `*.invalid` resolves nowhere (RFC 6761 section 6.4), so a request that
+// reaches the upstream proves the gateway did not resolve the name itself.
+#[tokio::test]
+async fn through_a_socks5h_upstream_requests_and_tunnels_send_the_name_unresolved() {
+  let (address, seen) = upstream().await;
+  let proxy = Socks5Server::start(address).await;
+  let via = format!("socks5h://{}", proxy.address());
+  let gateway =
+    start_with("{ allow: [api.invalid] }", "", GatewayOptions::default().with_upstream(through(proxy.address(), "socks5h", None)));
+
+  let (status, body) = get(&gateway.socket, "http://api.invalid/plain").await;
+  let (tunnel_status, tunnel) = connect(&gateway.socket, "api.invalid:443").await;
+  let reply = tunneled(tunnel, "/tunneled").await;
+
+  assert_eq!((status, body.as_str()), (StatusCode::OK, "upstream"));
+  assert_eq!(tunnel_status, 200);
+  assert!(reply.starts_with("HTTP/1.1 200") && reply.ends_with("upstream"), "{reply}");
+  let names = |target: &str| ProxySeen {
+    target: target.into(),
+    name: true,
+    credentials: None,
+  };
+  assert_eq!(proxy.seen(), [names("api.invalid:80"), names("api.invalid:443")]);
+  assert_eq!(seen.lock().unwrap().iter().map(|s| s.path.as_str()).collect::<Vec<_>>(), ["/plain", "/tunneled"]);
+  let events = gateway.events().await;
+  assert!(
+    events.iter().any(|e| matches!(e, Event::NetRequest(r) if r.host == "api.invalid" && r.via.as_deref() == Some(via.as_str()))),
+    "{events:?}"
+  );
+  assert!(
+    events.iter().any(|e| matches!(e, Event::NetConnect(c) if c.authority == "api.invalid:443" && c.via.as_deref() == Some(via.as_str()))),
+    "{events:?}"
+  );
+}
+
+#[tokio::test]
+async fn through_a_socks5_upstream_the_gateway_resolves_validates_and_sends_the_address() {
+  let (address, _) = upstream().await;
+  let proxy = Socks5Server::start(address).await;
+  let port = address.port();
+
+  // `localhost` resolves to loopback here, which the default policy blocks
+  // before the proxy is asked.
+  let strict = start_with("{ allow: [localhost] }", "", GatewayOptions::default().with_upstream(through(proxy.address(), "socks5", None)));
+  let (status, body) = get(&strict.socket, &format!("http://localhost:{port}/")).await;
+  assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+  assert!(proxy.seen().is_empty(), "{:?}", proxy.seen());
+
+  let open = start_with(
+    "{ allow: [localhost] }",
+    "",
+    GatewayOptions::default().with_egress(EgressPolicy::allow_all()).with_upstream(through(proxy.address(), "socks5", None)),
+  );
+  let (status, _) = get(&open.socket, &format!("http://localhost:{port}/")).await;
+  assert_eq!(status, StatusCode::OK);
+  let [sent] = &proxy.seen()[..] else {
+    panic!("{:?}", proxy.seen());
+  };
+  assert!(!sent.name, "{sent:?}");
+  assert!(sent.target.ends_with(&format!(":{port}")) && !sent.target.starts_with("localhost"), "{sent:?}");
+}
+
+#[tokio::test]
+async fn an_ip_literal_is_still_checked_against_the_egress_policy_through_socks5h() {
+  let (address, seen) = upstream().await;
+  let proxy = Socks5Server::start(address).await;
+  let gateway = start_with("{ allow: [127.0.0.1] }", "", GatewayOptions::default().with_upstream(through(proxy.address(), "socks5h", None)));
+
+  let (status, _) = connect(&gateway.socket, &address.to_string()).await;
+  let (http, _) = get(&gateway.socket, &format!("http://{address}/")).await;
+
+  assert_eq!((status, http), (403, StatusCode::FORBIDDEN));
+  assert!(proxy.seen().is_empty());
+  assert!(seen.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_service_is_dialed_directly_not_through_the_upstream() {
+  let (address, seen) = upstream().await;
+  let proxy = Socks5Server::start(address).await;
+  let gateway = start_with(
+    &format!("{{ services: {{ model: {{ url: \"http://{address}\" }} }} }}"),
+    "",
+    GatewayOptions::default().with_upstream(through(proxy.address(), "socks5h", None)),
+  );
+
+  let (status, _) = get(&gateway.socket, "http://model.needy/v1/models").await;
+  let (tunnel_status, tunnel) = connect(&gateway.socket, "model.needy:80").await;
+  let reply = tunneled(tunnel, "/v1/version").await;
+
+  assert_eq!((status, tunnel_status), (StatusCode::OK, 200));
+  assert!(reply.ends_with("upstream"), "{reply}");
+  assert!(proxy.seen().is_empty(), "{:?}", proxy.seen());
+  assert_eq!(seen.lock().unwrap().len(), 2);
+  let events = gateway.events().await;
+  assert!(
+    events.iter().all(|e| match e {
+      Event::NetRequest(r) => r.via.is_none(),
+      Event::NetConnect(c) => c.via.is_none(),
+      _ => true,
+    }),
+    "{events:?}"
+  );
+}
+
+#[tokio::test]
+async fn an_unreachable_upstream_fails_closed_with_502_and_never_connects_directly() {
+  let (address, seen) = upstream().await;
+  // A port nothing listens on any more.
+  let closed = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+  let gateway = start_with(
+    "{ allow: [127.0.0.1] }",
+    "",
+    GatewayOptions::default().with_egress(EgressPolicy::allow_all()).with_upstream(through(closed, "socks5h", None)),
+  );
+
+  let (status, body) = get(&gateway.socket, &format!("http://{address}/direct")).await;
+  let (tunnel, _) = connect(&gateway.socket, &address.to_string()).await;
+
+  assert_eq!((status, tunnel), (StatusCode::BAD_GATEWAY, 502));
+  assert!(body.contains(&format!("upstream proxy socks5h://{closed} is unreachable")), "{body}");
+  assert!(seen.lock().unwrap().is_empty(), "the gateway fell back to a direct connection");
+  let events = gateway.events().await;
+  let errors: Vec<&NetError> = events
+    .iter()
+    .filter_map(|e| match e {
+      Event::NetError(error) => Some(error),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(errors.len(), 2, "{events:?}");
+  for error in errors {
+    assert!(error.error.contains("is unreachable"), "{error:?}");
+    assert_eq!(error.via, Some(format!("socks5h://{closed}")));
+  }
+}
+
+#[tokio::test]
+async fn an_upstream_that_refuses_the_target_answers_502_with_its_reason() {
+  let closed = TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap();
+  // The proxy itself answers, but cannot reach the target.
+  let proxy = Socks5Server::start(closed).await;
+  let gateway =
+    start_with("{ allow: [api.invalid] }", "", GatewayOptions::default().with_upstream(through(proxy.address(), "socks5h", None)));
+
+  let (status, _) = connect(&gateway.socket, "api.invalid:443").await;
+
+  assert_eq!(status, 502);
+  let events = gateway.events().await;
+  assert!(
+    events.iter().any(|e| matches!(e, Event::NetError(n) if n.host == "api.invalid" && n.error.contains("Connection refused"))),
+    "{events:?}"
+  );
+}
+
+#[tokio::test]
+async fn the_upstream_authenticates_with_the_credentials_file_read_again_for_each_connection() {
+  let (address, _) = upstream().await;
+  let proxy = Socks5Server::start(address).await;
+  let dir = tempfile::tempdir().unwrap();
+  let file = dir.path().join("credentials");
+  write_credentials(&file, "alice:first-s3cret\n");
+  proxy.require(Some(("alice", "first-s3cret")));
+  let gateway = start_with(
+    "{ allow: ['*.invalid'] }",
+    "",
+    GatewayOptions::default().with_upstream(through(proxy.address(), "socks5h", Some(file.clone()))),
+  );
+
+  let (first, _) = get(&gateway.socket, "http://a.invalid/").await;
+  // The Secret rotates on both sides; the next connection uses the new one.
+  write_credentials(&file, "bob:second-s3cret\n");
+  proxy.require(Some(("bob", "second-s3cret")));
+  let (second, _) = connect(&gateway.socket, "b.invalid:443").await;
+  // The proxy rotates, the file does not (yet): the proxy refuses.
+  proxy.require(Some(("carol", "third-s3cret")));
+  let (refused, refusal) = get(&gateway.socket, "http://c.invalid/").await;
+
+  assert_eq!((first, second, refused), (StatusCode::OK, 200, StatusCode::BAD_GATEWAY));
+  let credentials: Vec<_> = proxy.seen().into_iter().map(|seen| seen.credentials).collect();
+  assert_eq!(
+    credentials,
+    [
+      Some(("alice".to_string(), "first-s3cret".to_string())),
+      Some(("bob".to_string(), "second-s3cret".to_string()))
+    ]
+  );
+  assert!(refusal.contains("Password auth failure"), "{refusal}");
+  // Neither the answers nor the trace carry a password.
+  let events = gateway.events().await;
+  let recorded: String = events.iter().map(Event::payload).collect();
+  assert!(recorded.contains("Password auth failure"), "{recorded}");
+  for text in [
+    &recorded,
+    &refusal,
+    &format!("{:?}", through(proxy.address(), "socks5h", Some(file))),
+  ] {
+    assert!(!text.contains("s3cret"), "a password leaked: {text}");
+  }
+}
+
+#[tokio::test]
+async fn a_credentials_file_others_can_read_fails_the_connection_before_the_proxy_is_asked() {
+  use std::os::unix::fs::PermissionsExt as _;
+  let (address, _) = upstream().await;
+  let proxy = Socks5Server::start(address).await;
+  let dir = tempfile::tempdir().unwrap();
+  let file = dir.path().join("credentials");
+  write_credentials(&file, "alice:s3cret\n");
+  std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+  let gateway =
+    start_with("{ allow: [api.invalid] }", "", GatewayOptions::default().with_upstream(through(proxy.address(), "socks5h", Some(file))));
+
+  let (status, body) = get(&gateway.socket, "http://api.invalid/").await;
+
+  assert_eq!(status, StatusCode::BAD_GATEWAY);
+  assert!(body.contains("other users can access it"), "{body}");
+  assert!(proxy.seen().is_empty());
 }

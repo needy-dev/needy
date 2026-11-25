@@ -982,6 +982,73 @@ commands:
   started.daemon.shutdown().await;
 }
 
+// The daemon's `--gateway-upstream` applies to the gateway the daemon runs,
+// here the shared TCP gateway an older runner proxies to.
+#[tokio::test]
+async fn the_daemon_s_gateway_upstream_carries_the_traffic_of_the_gateway_it_runs() {
+  let profile = "\
+actor:
+  driver: linux-firecracker
+  runner: actor-node
+  command: [sh, -c, 'echo hi']
+  network:
+    allow: [api.invalid]
+executors:
+  here:
+    driver: native
+commands:
+  - match: echo **
+    to: here
+";
+  let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let proxy = needy_core_actor::sidecar::gateway::testing::Socks5Server::start(target.local_addr().unwrap()).await;
+  let via = format!("socks5h://{}", proxy.address());
+  let started = testing::daemon_with(|config| {
+    config.kvm = config.state_dir.join("nonexistent-kvm");
+    config.gateway_upstream = Some(via.clone());
+  })
+  .await;
+  let bound = started.daemon.server(None).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+  let Listen::Tcp(addr) = &bound.addresses()[0] else {
+    unreachable!();
+  };
+  let addr = addr.clone();
+  let stop = CancellationToken::new();
+  let server_task = tokio::spawn(bound.serve(stop.clone()));
+  let actor_runner = connect_actor_runner(&started.daemon, &addr, "actor-node").await;
+  let created = started.daemon.create(new_run(profile, started.dir.path())).await.unwrap();
+  let bound_gw = started.daemon.bind_gateway_tcp("127.0.0.1:0").await.unwrap();
+  let gw_addr = bound_gw.local_addr().unwrap();
+  let gw_stop = CancellationToken::new();
+  tokio::spawn(bound_gw.serve(gw_stop.clone()));
+
+  let mut conn = tokio::net::TcpStream::connect(gw_addr).await.unwrap();
+  conn
+    .write_all(
+      format!(
+        "{}{} {}\nCONNECT api.invalid:443 HTTP/1.1\r\nHost: api.invalid:443\r\n\r\n",
+        crate::gateway_tcp::PREAMBLE_PREFIX,
+        actor_runner.credential,
+        created.id
+      )
+      .as_bytes(),
+    )
+    .await
+    .unwrap();
+  let mut buf = [0u8; 512];
+  let n = tokio::time::timeout(Duration::from_secs(2), conn.read(&mut buf)).await.expect("gateway response").unwrap();
+  let resp = String::from_utf8_lossy(&buf[..n]);
+
+  assert!(resp.starts_with("HTTP/1.1 200 "), "{resp}");
+  let targets: Vec<String> = proxy.seen().into_iter().map(|seen| seen.target).collect();
+  assert_eq!(targets, ["api.invalid:443"]);
+
+  gw_stop.cancel();
+  stop.cancel();
+  let _ = server_task.await;
+  started.daemon.shutdown().await;
+}
+
 #[tokio::test]
 async fn ephemeral_runner_exits_cleanly_after_completing_a_single_run() {
   let started = testing::daemon_with(|config| {
@@ -1040,6 +1107,7 @@ async fn ephemeral_runner_exits_cleanly_after_completing_a_single_run() {
           guest_needy: Some(runner_dir.join("no-guest")),
           kvm: runner_dir.join("no-kvm"),
           work_dir: Some(runner_dir.join("work")),
+          gateway_upstream: Default::default(),
         }),
       };
       crate::runner::Runner::start(cfg).await.unwrap().serve(runner_stop).await

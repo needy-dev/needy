@@ -56,6 +56,17 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `--gateway-listen tcp://HOST:PORT` to the daemon and `--gateway` to the
   runner for those. See
   [the runner gateway design](../ai/references/architecture/2026-11-26-runner-gateway-design.md).
+- **Per-actor upstream proxy** (from the release after v0.0.18, not
+  released): pass `--gateway-upstream socks5h://HOST[:PORT]` (or
+  `socks5://`, where the runner resolves and checks names itself) and
+  `--gateway-upstream-credentials-file PATH` (`USERNAME:PASSWORD`, not
+  readable by other users; `0440` with a Pod's `fsGroup` works) to
+  `needy runner serve`, so the actor's traffic leaves through that proxy;
+  `needy daemon serve` takes the same flags for the gateways it runs. The
+  file is re-read per connection, a failing proxy gives `502` (never a
+  direct connection), services bypass the proxy, and with `socks5h` the
+  proxy must block private ranges itself. See "Upstream proxy" in the
+  runner gateway design.
 - **Shared image layers**: pass `--layer-registry REPOSITORY` (for example
   `registry.example.com/needy/layers`, or `http://HOST:PORT/PATH` for a
   plain-HTTP in-cluster registry) to `needy daemon serve` so control hosts

@@ -622,6 +622,50 @@ Differences from the probes, not verified on a cluster: running as uid 1000
 from the first process (the probes set up as root, then `setpriv`), a
 static `supplementalGroups`, and `capabilities: { drop: [ALL] }`.
 
+### A per-actor upstream proxy (code, not released)
+
+**From the release after v0.0.18 (not released)**, with the runner running
+the gateway (S1), each actor can leave through a SOCKS5 proxy of its own
+([the runner gateway design](2026-11-26-runner-gateway-design.md), "Upstream
+proxy"). `rc` puts the proxy in the runner's arguments and its credentials
+in a Secret mounted at `/etc/needy/upstream`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata: { name: actor-7f3c2a-upstream, namespace: tenant-a }   # ownerReferences as above
+type: Opaque
+stringData: { credentials: "actor-7f3c2a:<password>" }            # USERNAME:PASSWORD, one line
+---
+# In the Pod above:
+      exec needy runner serve \
+        ... \
+        --gateway-upstream socks5h://proxy-7.example.com:1080 \
+        --gateway-upstream-credentials-file /etc/needy/upstream/credentials
+    volumeMounts:
+    - { name: upstream, mountPath: /etc/needy/upstream, readOnly: true }
+  volumes:
+  - name: upstream
+    secret: { secretName: actor-7f3c2a-upstream, defaultMode: 0440, items: [{ key: credentials, path: credentials }] }
+```
+
+- `socks5h://` sends names to the proxy unresolved (the Pod needs no DNS for
+  the actor's hosts); `socks5://` resolves in the runner and applies
+  `--gateway-block-cidr` before asking the proxy for the address. Port 1080
+  by default.
+- `defaultMode: 0440` with the Pod's `fsGroup` is required: the runner
+  refuses a credentials file other users can read, which includes
+  Kubernetes' default `0644`. Credentials in the URL are refused.
+- The file is read for every connection, so updating the Secret rotates the
+  credentials without restarting the Pod (after the kubelet's sync delay).
+- The upstream never falls back to direct: an unreachable or refusing proxy
+  gives the actor `502` and the run's trace a `net.error` with the reason.
+  Traced `net.request`, `net.connect` and `net.error` carry `via` (the
+  proxy's URL, no credentials).
+- `actor.network.services` are dialed directly, not through the proxy.
+- An upstream runner with an older daemon (one that keeps the gateway)
+  refuses to start the actor rather than let it leave from the daemon.
+
 ## 6. Creating and following a run
 
 ### `CreateRunRequest` (code)
@@ -861,6 +905,23 @@ both sides:
   in-process, where a NetworkPolicy does not see loopback. No ingress.
 - The daemon: no internet egress for actors any more (keep what the layer
   registry and image pulls need); ingress on 7400 as below.
+
+**With a per-actor upstream proxy** (from the release after v0.0.18, not
+released; section 5): the actor's internet traffic leaves through its
+proxy, so the actor Pod needs no internet egress at all:
+
+- Actor Pods: egress only to their proxy's address and port, to the
+  daemon's 7400, and to the in-cluster services the profiles name in
+  `actor.network.services` (dialed directly). DNS only if the proxy's or a
+  service's host is a name (with `socks5h` the actor's hosts are resolved
+  by the proxy, not in the Pod); with `socks5`, DNS too. No ingress.
+- With `socks5h` the runner cannot check the addresses the proxy reaches:
+  `--gateway-block-cidr` and the loopback and metadata blocks apply only
+  to IP literals the actor names. The proxy must refuse private, cluster
+  and metadata ranges (`169.254.169.254`) itself, and the NetworkPolicy
+  above keeps the Pod from reaching them directly.
+- The proxy sees each actor's destinations (names with `socks5h`); TLS is
+  tunnelled end to end as before.
 
 Before S1, or while either side is older:
 

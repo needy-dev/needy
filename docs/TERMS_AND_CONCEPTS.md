@@ -878,6 +878,14 @@ leaves from the runner's host. An older runner proxies the gateway channel
 to the daemon's shared gateway listener instead, and the daemon runs the
 gateway as before.
 
+**Gateway upstream.** Where the gateway's allowed connections to the
+actor's hosts go out: directly from the gateway's host, or through an
+upstream SOCKS5 proxy named by whoever runs the gateway (the runner's or
+the daemon's `--gateway-upstream`), never falling back to direct.
+Services are always dialed directly. Traced connections through one name it
+in `via`. **Provisional** (not released; see the runner gateway design,
+"Upstream proxy").
+
 ### Service
 
 A plain-HTTP name the actor uses for an endpoint outside it:
@@ -924,9 +932,9 @@ firmware, devices, network identity. A recipe defines it.
 
 Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide`, a payload and the
-payload's schema version (9 since `fault.injected` names its fault and
-domain and `chaos.add` and `chaos.remove` exist, after 8 recorded the
-actor's capture in `actor.start`; traces of other versions are refused).
+payload's schema version (15 since the net events carry `via`; a build
+reads the versions `needy_core::event::READ_VERSIONS` names, 10 onwards,
+and refuses others).
 The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
 the run directory. Terminal output is not part of the trace.
 

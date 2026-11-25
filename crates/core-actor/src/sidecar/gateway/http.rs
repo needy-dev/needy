@@ -39,10 +39,10 @@ impl Gateway {
     parts.headers.remove("x-needy-run-id");
     parts.headers.remove(hyper::header::HOST);
     let path = parts.uri.path().to_string();
-    let client = if is_service {
-      &self.service_client
+    let (client, via) = if is_service {
+      (&self.service_client, None)
     } else {
-      &self.client
+      (&self.client, self.upstream.via())
     };
     let started = std::time::Instant::now();
     let result = client.request(Request::from_parts(parts, body)).await;
@@ -55,25 +55,33 @@ impl Gateway {
           path,
           status: response.status().as_u16(),
           ms: started.elapsed().as_millis() as u64,
+          via,
         }));
         Ok(response.map(|b| b.boxed()))
       }
       Err(e) => {
-        if let Some(EgressError::Blocked { ip, reason, .. }) = egress::blocked_in_chain(&e) {
-          let message = format!("needy: {host} resolved to blocked address {ip} ({reason})");
-          self.record(Event::NetDeny(NetDeny {
-            network: self.network,
-            host,
-            path: Some(path),
-          }));
-          return Ok(text(StatusCode::FORBIDDEN, &message));
-        }
-        let message = format!("needy: upstream: {e}");
+        let error = match egress::egress_in_chain(&e) {
+          Some(EgressError::Blocked { ip, reason, .. }) => {
+            let message = format!("needy: {host} resolved to blocked address {ip} ({reason})");
+            self.record(Event::NetDeny(NetDeny {
+              network: self.network,
+              host,
+              path: Some(path),
+            }));
+            return Ok(text(StatusCode::FORBIDDEN, &message));
+          }
+          // `hyper`'s error says only "client error (Connect)"; the
+          // proxy's reason is the one worth recording.
+          Some(upstream @ EgressError::Upstream(_)) => upstream.to_string(),
+          _ => e.to_string(),
+        };
+        let message = format!("needy: upstream: {error}");
         self.record(Event::NetError(NetError {
           network: self.network,
           host,
           path: Some(path),
-          error: e.to_string(),
+          error,
+          via,
         }));
         Ok(text(StatusCode::BAD_GATEWAY, &message))
       }

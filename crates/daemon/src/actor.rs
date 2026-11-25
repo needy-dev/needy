@@ -527,6 +527,7 @@ fn run_gateway(daemon: &Daemon, run: &Arc<Run>, cancel: CancellationToken) -> Ar
     run.trace.clone(),
     run.injector.clone(),
     daemon.gateway_blocked_cidrs.clone(),
+    daemon.gateway_upstream.clone(),
     cancel,
     Arc::new(move || activity_run.touch_activity()),
   )
@@ -534,25 +535,29 @@ fn run_gateway(daemon: &Daemon, run: &Arc<Run>, cancel: CancellationToken) -> Ar
 
 /// An actor's gateway: the allowlist and services of the profile's
 /// `actor.network`, the faults in `injector`, never connecting to
-/// `blocked_cidrs` (the daemon's `--gateway-block-cidr`), recording in
+/// `blocked_cidrs` (the daemon's `--gateway-block-cidr`), leaving through
+/// `upstream` (`--gateway-upstream`; services always directly), recording in
 /// `trace` and calling `on_activity` on each request, until `cancel`. The
 /// one place an actor's gateway is built: by the daemon for an actor it
 /// runs or whose runner proxies to it, and by an actor runner for the actor
 /// it hosts (`actor_runner`), so the two enforce the same policy.
+// NOTICE: `upstream` is the builder's own: the daemon's for a gateway it
+// runs, the runner's for one a runner runs. A daemon's upstream is not sent
+// to its runners: its credentials file is on the daemon's host, and a
+// per-actor proxy is the runner Pod's to name (runner gateway design,
+// "Upstream proxy").
 pub(crate) fn gateway(
   network: &needy_config::profile::ActorNetwork,
   trace: needy_trace::Dispatch,
   injector: Arc<needy_core::chaos::Injector>,
   blocked_cidrs: Vec<gateway::IpCidr>,
+  upstream: gateway::Upstream,
   cancel: CancellationToken,
   on_activity: Arc<dyn Fn() + Send + Sync>,
 ) -> Arc<gateway::Gateway> {
   let policy = needy_core::network::Policy::actor(network);
   let egress = gateway::EgressPolicy::default().with_blocked_cidrs(blocked_cidrs);
-  // TODO(gateway-upstream): per-actor upstream proxy, next slice after S1,
-  // owner discussed 2026-11-26; every actor's gateway dials direct
-  // (`gateway::Upstream::Direct`) until then.
-  let options = gateway::GatewayOptions::default().with_egress(egress).with_on_activity(on_activity);
+  let options = gateway::GatewayOptions::default().with_egress(egress).with_upstream(upstream).with_on_activity(on_activity);
   Arc::new(gateway::Gateway::with_options(policy, trace, Network::Actor, Some(injector), cancel, options))
 }
 

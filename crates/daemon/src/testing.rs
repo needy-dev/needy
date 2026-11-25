@@ -111,6 +111,8 @@ pub(crate) async fn daemon_in_with_backends(
     host_files_root: None,
     gateway_listen: None,
     gateway_blocked_cidrs: Vec::new(),
+    gateway_upstream: None,
+    gateway_upstream_credentials_file: None,
     layer_registry: None,
     insecure_registries: Vec::new(),
   };

@@ -29,7 +29,9 @@ use crate::types::{Capture, Fired, Network, Origin, Outcome, Principal};
 /// Version 12 adds `files.sync`, `files.merge` and `files.merge_pending`.
 /// Version 13 adds `run.create`'s `snapshot` and `image.build.step`.
 /// Version 14 adds `image.layer.pull` and `image.layer.push`.
-pub const SCHEMA_VERSION: u32 = 14;
+/// Version 15 adds `via`, the gateway's upstream proxy, to `net.request`,
+/// `net.connect` and `net.error`.
+pub const SCHEMA_VERSION: u32 = 15;
 
 /// The versions [`Event::decode`] reads. Rows of another version are
 /// rejected.
@@ -52,7 +54,8 @@ pub const SCHEMA_VERSION: u32 = 14;
 // (`run.create`'s `snapshot`) and a new kind (`image.build.step`), so
 // traces of 10 through 12 still read. Version 14 only adds kinds
 // (`image.layer.pull`, `image.layer.push`), so traces of 10 through 13 still
-// read.
+// read. Version 15 only adds an optional field (`via` of `net.request`,
+// `net.connect` and `net.error`), so traces of 10 through 14 still read.
 // No older versions are added to this narrowly versioned historical boundary.
 // Version 0 is the flat string-attribute rows written before the typed
 // schema; they are not read either (module layout redesign, principle 7).
@@ -621,6 +624,11 @@ pub struct NetRequest {
   /// The upstream's HTTP status.
   pub status: u16,
   pub ms: u64,
+  /// The upstream proxy the gateway connected through
+  /// (`socks5h://HOST:PORT`, never credentials); absent when it connected
+  /// directly, and in traces before version 15.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -630,6 +638,11 @@ pub struct NetConnect {
   pub host: String,
   /// `host:port` of the tunnel.
   pub authority: String,
+  /// The upstream proxy the gateway connected through
+  /// (`socks5h://HOST:PORT`, never credentials); absent when it connected
+  /// directly, and in traces before version 15.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,6 +662,11 @@ pub struct NetError {
   /// The request path; `None` for a `CONNECT` tunnel.
   pub path: Option<String>,
   pub error: String,
+  /// The upstream proxy the gateway connected through
+  /// (`socks5h://HOST:PORT`, never credentials); absent when it connected
+  /// directly, and in traces before version 15.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub via: Option<String>,
 }
 
 /// The payload `needy-trace` writes for `trace.gap`.

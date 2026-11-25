@@ -108,6 +108,10 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# The actor gateway's upstream SOCKS5 proxy (`gateway::upstream`): RFC 1928
+# CONNECT with a domain-name target and RFC 1929 username/password, the
+# client `reqwest`'s `socks` feature uses. Tokio only (its default).
+tokio-socks = "0.5"
 tokio-stream = { version = "0.1", features = ["net", "sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-vsock = "0.7"

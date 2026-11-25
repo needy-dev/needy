@@ -43,6 +43,7 @@ tar.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-socks.workspace = true
 tokio-stream.workspace = true
 tokio-util.workspace = true
 tower.workspace = true
@@ -71,6 +72,11 @@ procfs-core.workspace = true
 tokio-vsock = { workspace = true, features = ["tonic014"] }
 tonic = { workspace = true, features = ["router", "transport"] }
 tracing-subscriber.workspace = true
+
+[features]
+# Fixtures for other crates' tests: a SOCKS5 proxy for the gateway's upstream
+# (`sidecar::gateway::testing`). Enabled from their dev-dependencies.
+test-support = []
 
 [dev-dependencies]
 base64.workspace = true
