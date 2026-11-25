@@ -35,7 +35,9 @@ pub use self::lifecycle::{InstanceState, ProcessState, Refused, RunnerState};
 pub use self::runs::{InstanceKind, InstanceRecord, ProcessRecord, RunRecord, actor_instance, executor_instance};
 pub use self::secret::Secret;
 pub(crate) use self::secret::hex;
-pub(crate) use self::secret::{RUNNER as RUNNER_SECRET_KIND, hash as hash_secret, id as secret_id, matches as secret_matches};
+pub(crate) use self::secret::{
+  CLIENT as CLIENT_SECRET_KIND, RUNNER as RUNNER_SECRET_KIND, hash as hash_secret, id as secret_id, matches as secret_matches,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -495,6 +497,11 @@ pub(crate) fn admit(scope: &Scope, report: Report) -> Result<(Capabilities, BTre
 /// a DNS label: lowercase letters, digits and `-`.
 pub(crate) fn check_name(name: &str) -> Result<()> {
   check_label("runner", name)
+}
+
+/// Checks a client's name: a DNS label, as pairing codes require.
+pub(crate) fn check_client_name(name: &str) -> Result<()> {
+  check_label("client", name)
 }
 
 /// A name that is a DNS label: lowercase letters, digits and `-`.

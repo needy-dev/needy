@@ -369,3 +369,127 @@ Settled in B-3 (2026-11-26):
   shapes (ECR's Basic challenge, Harbor's token service with Basic, the
   refresh-token grant) are tested in process against `oci-registry`'s
   `test-support` registry; no live registry was used.
+
+Settled in B-4 (2026-11-26):
+
+- **The import** is `needy_core_actor::image::store::import`, shared by the
+  daemon (`run create` of a VM actor whose `actor.image` is an OCI
+  reference, local or remote) and `needy image build --from`. It reaches the
+  registry through B-3's `oci_registry::Access` (an `http://` prefix is a
+  plain-HTTP registry without credentials, as for the layer registry), and:
+  - reads the manifest the reference names; an OCI index or a Docker
+    manifest list is resolved to the actor's platform (`linux/amd64` for
+    `linux-firecracker`, `linux/arm64` for `macos-vz`; BuildKit's
+    `unknown/unknown` attestation entries are never chosen). A manifest
+    pulled by digest is checked against it. OCI and Docker schema 2
+    manifests both read. The config must be `linux` and the platform's
+    architecture;
+  - checks the `needy.base-abi` label (`base::check`) and that
+    `rootfs.diff_ids` start with the `base.diff_ids` the base VM image's
+    `manifest.json` records (`import::vm_base`). A refusal names the base to
+    build `FROM` (`<name>@<digest> (<tag>)` when the release pushed it), the
+    first layer that differs and, when the image has one, its
+    `org.opencontainers.image.base.name` label. A base VM image without
+    `base` refuses every import;
+  - pulls only the layers above the base, by descriptor: `oci-client`
+    verifies the compressed digest, the decompressed stream (gzip, zstd or
+    uncompressed; Docker's gzip and tar media types too) must hash to the
+    config's DiffID, and nothing is kept otherwise. zstd is decoded by
+    `ruzstd` (pure Rust, so the static musl and Windows builds need no C
+    zstd), every frame of a multi-frame stream with skippable frames
+    skipped, as zstd:chunked layers are written;
+  - skips empty layers (the DiffID of an empty tar,
+    `sha256:5f70bf18...c3c6ef`, or a layer whose canonical form is empty)
+    and a layer that repeats the one below it; a layer that comes back
+    after others is refused (`TODO(import-repeated-layers)`);
+  - reads every member before storing a layer and refuses one that writes
+    under `/.needy`, removes it (`.wh..needy`) or hides the root
+    (`.wh..wh..opq` at the top), and a hard link to a file outside the layer
+    (`TODO(import-hard-links)`). It warns about builder trees
+    (`/.envbuilder`);
+  - stores each layer in the store's canonical form (relative member names,
+    no `/` root entry, fresh headers; hard links kept), named by its own
+    digest, with the image's DiffID recorded as its alias
+    (`image-store/imported/sha256-<DiffID hex>`): the canonical form of a
+    layer another tool wrote differs from its DiffID, and the alias lets the
+    next import of the same layer, from any image, pull nothing.
+    `needy image prune` does not remove aliases; one whose layer it removed
+    is ignored and replaced;
+  - ignores the config's `Entrypoint`, `Cmd`, `User` and `WorkingDir` (a VM
+    actor's init is needy's, the profile says what runs and as whom) and
+    warns about an entrypoint that is not needy's; takes `Env`: `PATH` as
+    the run's image `PATH`, the rest as its image environment, which
+    `actor.env` overrides (as a feature's `containerEnv`).
+- **Images `FROM needy-actor` are refused**, with an error that says to
+  build `FROM actor-base`: the first layer above `actor-base` is the shim
+  step, which moves the shells' real programs to `/.needy/real` and links
+  the proxy in their place, and every later layer was built with the shims
+  in place (a package may have replaced a shim). Undoing that is what
+  `from.Dockerfile` did on a whole exported root file system; per layer it
+  would mean rewriting the layers above the shim step, which then no longer
+  match their DiffIDs or anyone else's, and `needy-actor` is a transition
+  image (`TODO(base-images)`). The refusal is recognised by that layer
+  writing under `/.needy` while the image's
+  `org.opencontainers.image.base.name` label is empty or names an
+  `actor-base` (as `needy-actor`'s is); any other layer that writes there is
+  refused as such.
+- **Identity**: the imported layers sit on the base's stack digest (B-2),
+  which is the run's `Boot.root` and `BridgeAttached.root`; the runner's D4
+  check is unchanged. A layer imported once is the same store layer
+  whichever image named it.
+- **Runs**: `image::prepare` imports and materializes the layer disks for a
+  local VM actor; `image::prepare_remote` imports on the control daemon
+  (which needs registry access, not KVM) and the runner fetches the layers
+  with `FetchLayer` as it fetches built steps
+  (`TODO(runner-registry)`: direct pulls are B-5). An image with nothing
+  above the base boots the base. The container drivers still run
+  `actor.image` as it is. The VM drivers always boot the base VM image;
+  `actor.image` only names the import in `profile check`
+  (`<REF>, imported above the base VM image ...`).
+- **Trace**: one `image.import` event per import (reference, manifest,
+  platform, stored layers, pulled and skipped counts, warnings, time, or the
+  error), schema version 15, which only adds the kind, so traces of 10
+  through 14 still read.
+- **`needy image build --from REF`** is the import, without BuildKit or an
+  engine: it prints what it imported on stderr and the snapshot digest on
+  stdout. `from.Dockerfile` and the bollard build path are deleted; `--out`
+  no longer applies to `--from`; `--base DIR` names the base VM image whose
+  base is imported above, and `--insecure-registry HOST` adds to
+  `daemon.insecure_registries`. The CLI writes the daemon's layer store
+  (`needy_daemon::runner::layer_store`, the same directories).
+- **Per-reference VM images** (`vm::dir_of`) are no longer made or booted,
+  and `Host.images` and the daemon's and runner's `vm_images` are gone.
+  `dir_of` is kept so `needy image rm REF` still finds the directories an
+  older needy made, `needy image ls` still lists them (their manifests'
+  `source.kind: oci` still reads, shown as no longer booted); nothing
+  migrates them.
+- **B-2's markers**: `root::of_vm` keeps the archive and file digests of
+  base VM images without `base` (releases before B-1); the trigger now
+  names only those releases. A custom container `root:` keeps the engine's
+  image ID rather than a ChainID of DiffIDs that start with `actor-base`'s:
+  its config (`Env`, `User`, `WorkingDir`) is part of what container steps
+  are built on, and the identity would pay only once the VM drivers build on
+  the same `root:` (slice 5 of the images and run data spec), which B-4 does
+  not do. `TODO(default-root)` stays: the import pulls `actor-base`, never
+  `DEFAULT_ROOT`.
+- **Deferred**: pushing a snapshot as a full image `FROM actor-base`
+  (mounting or copying the base's blobs; `TODO(snapshot-image)`, with B-5's
+  push), importing without the registry for a reference pinned by digest
+  (`TODO(import-offline)`), and an end-to-end cell: the harness runs no
+  registry, so the remote actor cell and the TUI cells on the VM drivers do
+  not import yet (`TODO(e2e-import)` in `xtask/src/e2e/`). The examples'
+  Dockerfiles take `--build-arg SHIM=0` to leave the shim step out of an
+  image for the VM drivers.
+- **Evidence**: in process only, against `oci-registry`'s test registry
+  (plain HTTP, and TLS with a private CA and Basic credentials) with
+  synthetic images `FROM` a three-layer stand-in `actor-base`
+  (`image::store::import::testing`): gzip, zstd and uncompressed layers,
+  empty and repeated layers, absolute member names with a `/` entry and
+  epoch times, hard links, `/.envbuilder` and its entrypoint, an index with
+  an attestation entry, Docker schema 2; local and remote runs with
+  stand-in Firecracker. The builder shapes come from Shipwright `BuildRun`s
+  (BuildKit and envbuilder) on a Kubernetes cluster on 2026-11-25: both kept
+  the base's layers byte-identical (same compressed blob and DiffID), and
+  envbuilder wrote 14 zstd layers above the base, 10 of them the empty
+  layer, `/.envbuilder` and its own entrypoint. No real VM booted an
+  imported image in this slice.

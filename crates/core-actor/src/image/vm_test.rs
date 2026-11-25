@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn a_vm_image_made_from_an_oci_image_is_found_by_its_tagged_reference() {
+fn a_vm_image_an_older_needy_made_from_an_oci_image_is_found_by_its_tagged_reference() {
   let images = Path::new("/home/user/.local/share/needy/images");
 
   let bare = dir_of(images, ActorDriver::MacosVz, "needy-custom-jq");
@@ -23,33 +23,6 @@ fn references_a_file_name_spells_alike_get_their_own_vm_images() {
 
   assert_ne!(slash, underscore);
   assert_ne!(dir_of(images, ActorDriver::LinuxFirecracker, "agent"), dir_of(images, ActorDriver::MacosVz, "agent"));
-}
-
-#[test]
-fn a_missing_vm_image_made_from_an_oci_image_names_the_build_from_it() {
-  let dir = tempfile::tempdir().unwrap();
-
-  let error = MacosVz::of(dir.path(), Source::Reference("needy-custom-jq".into())).check().unwrap_err();
-
-  assert_eq!(
-    error.to_string(),
-    format!("actor image is missing {}; run `needy image build --from needy-custom-jq`", dir.path().join("Image").display())
-  );
-}
-
-#[test]
-fn a_vm_image_of_another_base_abi_names_its_reference_and_the_base_to_rebuild_from() {
-  let dir = tempfile::tempdir().unwrap();
-  for file in ["Image", "initrd", "rootfs.ext4"] {
-    std::fs::write(dir.path().join(file), "").unwrap();
-  }
-  write_manifest(dir.path(), ActorDriver::MacosVz, 2);
-
-  let error = MacosVz::of(dir.path(), Source::Reference("needy-custom-jq".into())).check().unwrap_err().to_string();
-
-  assert!(error.starts_with(&format!("the actor image needy-custom-jq (the VM image {}) has base ABI 2", dir.path().display())), "{error}");
-  assert!(error.contains("rebuild it FROM a base image of base ABI 1"), "{error}");
-  assert!(error.contains("then run `needy image build --from needy-custom-jq`"), "{error}");
 }
 
 /// Writes a manifest of `driver` and `base_abi` into `dir`.

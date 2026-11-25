@@ -70,8 +70,6 @@ pub struct ActorConfig {
   pub gateway: Option<String>,
   /// Path to the base actor VM image directory.
   pub actor_image: PathBuf,
-  /// Where built VM images live (`paths.images()`).
-  pub vm_images: PathBuf,
   /// Where guest disks live (`paths.guest_disks()`).
   pub guest_disks: PathBuf,
   /// The runner's layer store: the layers it fetched of its runs' images
@@ -81,7 +79,8 @@ pub struct ActorConfig {
   pub guest_needy: Option<PathBuf>,
   /// Path to the KVM device (defaults to `/dev/kvm`).
   pub kvm: PathBuf,
-  /// Working directory for temporary VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
+  /// Directory under which each run gets its own directory for temporary
+  /// VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
   pub work_dir: Option<PathBuf>,
 }
 
@@ -138,19 +137,23 @@ pub(crate) async fn run_actor(
 
   tracing::info!("actor bridge attached to run {}", attached.run_id);
 
-  let temp_dir = if config.work_dir.is_none() {
-    Some(tempfile::tempdir().context("cannot create actor work directory")?)
-  } else {
-    None
-  };
-  let work_dir = match (&config.work_dir, &temp_dir) {
-    (Some(dir), _) => {
+  // NOTICE: every run gets a fresh directory, also under a fixed
+  // `--work-dir`. Firecracker leaves its vsock device socket (`v.sock`)
+  // behind when it exits, and the next VM booted in the same directory
+  // fails with `Vsock device error ... UnixBind AddrInUse`; `console.log`
+  // would also start with the previous run's console. The directory is
+  // removed when this function returns.
+  let run_dir = match &config.work_dir {
+    Some(dir) => {
       std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
-      dir.clone()
+      tempfile::Builder::new()
+        .prefix(&format!("{}-", attached.run_id))
+        .tempdir_in(dir)
+        .with_context(|| format!("cannot create the run's directory in {}", dir.display()))?
     }
-    (None, Some(tmp)) => tmp.path().to_path_buf(),
-    (None, None) => unreachable!(),
+    None => tempfile::tempdir().context("cannot create actor work directory")?,
   };
+  let work_dir = run_dir.path().to_path_buf();
 
   let cancel = CancellationToken::new();
   let tasks = tokio_util::task::TaskTracker::new();
@@ -178,7 +181,6 @@ pub(crate) async fn run_actor(
 
   let host = Host {
     image: config.actor_image.clone(),
-    images: config.vm_images.clone(),
     kvm: config.kvm.clone(),
     guest_disks: config.guest_disks.clone(),
   };

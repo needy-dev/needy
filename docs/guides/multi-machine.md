@@ -43,6 +43,27 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `needy daemon serve` (hot-reloaded) and `--credential-env VAR` or
   `--credential-file PATH` to `needy runner serve` (read-only; never writes
   `runner.json`).
+- **Static clients**: pass `--clients-file PATH` (or `daemon.clients_file`)
+  to `needy daemon serve` to declare control-plane clients before the daemon
+  starts, for example an admin credential a Kubernetes controller mounts from
+  a Secret, without pairing. The file is hot-reloaded: a removed or rotated
+  entry stops authenticating on the next request. Unknown keys are errors.
+
+  ```yaml
+  clients:
+    - name: controller
+      access: admin        # or runs (the default)
+      # The token is needy-client.static-NAME.<64 hex digits>, for example
+      # printf 'needy-client.static-controller.%s' "$(openssl rand -hex 32)"
+      token_hash: sha256:<SHA-256 of the whole token, 64 hex digits>
+    - name: ci
+      token: needy-client.static-ci.<64 hex digits>
+  ```
+
+  Each entry sets `token` or `token_hash`. Static clients appear in
+  `needy client ls` with the ID `static-NAME` and cannot be revoked through
+  the API; edit the file instead. While the file holds a name, no pairing
+  code is created for it and a paired client of that name is refused.
 - **Ephemeral runners & waiting**: pass `--ephemeral` to `needy runner serve`
   to serve one run and exit cleanly, and `--wait-for-runner DURATION` to
   `needy run create` to wait for a matching runner to connect.
@@ -64,6 +85,10 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `--insecure-registry HOST` follow
   [registry credentials and TLS](configuration.md#actor-images-recipes-and-builtin);
   runners do not contact registries yet.
+- **Agent images on remote actors**: a remote VM actor whose `actor.image`
+  is an OCI image built `FROM` `actor-base` is imported by the control daemon
+  (which needs registry access, not KVM), and the runner fetches the layers
+  from it; see [Agent images](agent-images.md).
 - **Host-file boundaries**: pass `--disable-host-files` to reject all `host:`
   file mappings, or `--host-files-root DIR` to confine `host:` mappings to an
   allowed directory tree.

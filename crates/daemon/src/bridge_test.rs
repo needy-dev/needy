@@ -1034,7 +1034,6 @@ async fn ephemeral_runner_exits_cleanly_after_completing_a_single_run() {
         actor: Some(crate::runner::ActorConfig {
           gateway: None,
           actor_image: runner_dir.join("no-image"),
-          vm_images: runner_dir.join("images"),
           guest_disks: runner_dir.join("guest-disks"),
           layer_store: crate::runner::layer_store(&runner_dir.join("cache"), &runner_dir.join("data")),
           guest_needy: Some(runner_dir.join("no-guest")),

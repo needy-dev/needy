@@ -148,7 +148,6 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
   let actor = (!capabilities.actor.is_empty()).then(|| needy_daemon::runner::ActorConfig {
     gateway: args.gateway.clone(),
     actor_image: image.clone(),
-    vm_images: paths.images(),
     guest_disks: paths.guest_disks(),
     layer_store: needy_daemon::runner::layer_store(&paths.cache, &paths.data),
     guest_needy: args.guest_needy.clone(),

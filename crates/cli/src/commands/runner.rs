@@ -156,7 +156,7 @@ struct ServeArgs {
   /// Path to the KVM device (defaults to `/dev/kvm`).
   #[arg(long)]
   kvm: Option<std::path::PathBuf>,
-  /// Working directory for temporary actor VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
+  /// Directory under which each actor run gets its own directory for temporary VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
   #[arg(long)]
   work_dir: Option<std::path::PathBuf>,
   /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs, used only with a

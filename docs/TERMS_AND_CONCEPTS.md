@@ -325,6 +325,12 @@ role permits run and process operations; `admin` also permits client and
 runner administration. This authority is separate from a local OS account
 or a creator-only ACL.
 
+A **static** client is declared with its token (or the token's SHA-256) in
+the daemon's `--clients-file` instead of pairing, so it exists before the
+daemon starts. Its ID is `static-NAME`; it is listed with paired clients,
+cannot be revoked through the API (the file is its only source), and holds
+its name against paired clients while the file declares it.
+
 The CLI stores saved connection contexts, their server-issued identities,
 and credentials in its private `config.yaml` document. A context contains an
 address or connector argv and the credential used with that transport.
@@ -561,9 +567,9 @@ starts. See the
 
 What a profile's `actor.image` names for every driver: an OCI image
 reference, or an [image definition](#image-definition-provisional). The
-container drivers run that image; the VM drivers boot the VM
-image `needy image build --from REF` made of it, found by the same
-reference. Without `actor.image`, the container drivers run the release's
+container drivers run that image; the VM drivers boot the base VM image
+with the image's layers above `actor-base` attached as layer disks, after
+an [import](#image-import). Without `actor.image`, the container drivers run the release's
 base image `ghcr.io/needy-dev/needy-actor:v<version>` (pulled when missing)
 and the VM drivers the base VM image (`needy image pull`; never downloaded
 by the daemon itself).
@@ -602,11 +608,27 @@ An OCI image `FROM` a base image that adds programs (an agent CLI, node,
 jq). A container actor routes the programs it added through trampolines;
 its last step, `RUN ["/.needy/shim-image"]`, keeps the shells shimmed in
 place after a package added or upgraded one. It inherits the base's
-`needy.base-abi` label. For the VM drivers, `needy image build --from`
-turns it into a VM image: its root file system with the real programs put
-back over the shims, and the base's kernel.
+`needy.base-abi` label. For the VM drivers it is built `FROM`
+`actor-base` without the shim step and pushed to a registry, and a run
+[imports](#image-import) it.
 
 *Avoid*: agent image, user image.
+
+### Image import
+
+What a VM actor of an OCI image (`actor.image: REF`) does instead of
+booting a VM image of its own: needy reads the image's manifest for the
+actor's platform and its config, checks that it records this needy's base
+ABI and that its first layers are exactly the `actor-base` the base VM
+image records (by DiffID), and pulls only the layers above the base into
+the layer store, which are attached as layer disks as an image
+definition's steps are. A layer that writes, removes or hides `/.needy` is
+refused, and so is an image `FROM needy-actor`. The control daemon imports
+for remote actors too. `needy image build --from REF` imports ahead of a
+run. See the [agent images guide](guides/agent-images.md) and B4 of the
+[layered OCI base spec](ai/references/architecture/2026-11-25-layered-oci-base-spec.md).
+
+*Avoid*: VM image of an OCI image (what `--from` made before the import).
 
 ### Guest needy
 
@@ -648,8 +670,9 @@ needy does not speak before the actor starts.
 `manifest.json` in a VM image's directory (`images/<driver>/<name>/` in
 needy's data directory): the needy version that made it, its driver,
 architecture and base ABI, where it came from (a release, an imported
-archive, a build from a checkout, or `--from` an OCI image with its image
-ID) and the SHA-256 of the archive it was unpacked from. The VM drivers read
+archive, a build from a checkout, or, for a VM image an older needy made,
+`--from` an OCI image with its image ID) and the SHA-256 of the archive it
+was unpacked from. The VM drivers read
 its base ABI; `needy image ls` shows the rest. A directory without one is
 not an image: `needy image pull` or `needy image build` writes one.
 

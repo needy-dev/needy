@@ -205,7 +205,8 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
   it. An `http://` prefix opts into a plain-HTTP registry, which never gets
   credentials. A failed lookup, pull or push is logged and traced
   (`image.layer.pull`, `image.layer.push`) without failing the build.
-- **Registry credentials and TLS** (feature fetches and the layer registry):
+- **Registry credentials and TLS** (feature fetches, the layer registry and
+  `actor.image` imports):
   - Credentials come from the Docker credential store: `$DOCKER_CONFIG/config.json`
     (default `~/.docker/config.json`), its `auths`, `credHelpers` and
     `credsStore`, so `docker login` and helpers such as
@@ -226,9 +227,12 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
     that host's TLS certificate, and logs a warning on every connection. It
     does not switch to plain HTTP and still sends credentials; prefer putting
     the registry's CA in `certs.d`.
-- **Prebuilt OCI references**: `actor.image: REF` runs an image `FROM` needy's
-  base on every driver (`needy image build --from REF` for VM drivers; see
-  [`examples/custom-image`](../../examples/custom-image/Dockerfile)).
+- **Prebuilt OCI references**: `actor.image: REF` names an image built `FROM`
+  `ghcr.io/needy-dev/needy/actor-base`. The container drivers run it as it is;
+  the VM drivers import its layers above `actor-base` from its registry and
+  attach them to the base VM image (`needy image build --from REF` imports
+  ahead of a run). See [Agent images](agent-images.md) and
+  [`examples/custom-image`](../../examples/custom-image/Dockerfile).
 - **Recipes & stable identity**: recipes set CPU model and count, memory,
   kernel, firmware strings, devices, hostname (`instance-{time}`),
   `os.machine_id` (`/etc/machine-id`), and `required:` identity fields. Setting

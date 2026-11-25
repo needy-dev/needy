@@ -32,6 +32,10 @@
 // so it is a valid image but not a runnable one: what it was built on is
 // named by its annotations. A full image `FROM actor-base` needs the base's
 // blobs in this repository; see the spec's "Settled in B-3".
+// TODO(snapshot-image): pushing a snapshot as a full image `FROM
+// actor-base` (mounting or copying the base's blobs into the repository) is
+// not done; B-4 imports full images but pushes none. Reopen with B-5's
+// `needy image build --push`, the first command that pushes one.
 // TODO(layer-registry-sharing): one repository per tenant; sharing layers
 // across tenants waits for an owner decision (remote actor images spec D5).
 // TODO(layer-registry): images are never deleted by needy; their lifecycle
@@ -515,10 +519,9 @@ impl Registry {
 /// registry's blob is checked against the descriptor's digest as it is read,
 /// the decompressed stream against `diff_id`, and the store keeps the layer
 /// only when its canonical form is `diff_id` too. Nothing is kept otherwise.
-// NOTICE: shared with B-4's import of the layers above the base, which pulls
-// layers by descriptor and DiffID the same way. A layer whose canonical form
-// differs from its DiffID (one another tool wrote) is refused here; B-4 has
-// to decide how the store names such a layer.
+// NOTICE: a step image's layer is needy's own canonical archive, so its
+// canonical form is its DiffID. Layers of images other tools built are
+// imported by `super::import`, which names them by their canonical digest.
 pub async fn pull_layer(
   client: &oci_client::Client,
   image: &oci_client::Reference,
@@ -527,42 +530,17 @@ pub async fn pull_layer(
   diff_id: &Digest,
   store: &Store,
 ) -> Result<Digest> {
-  let staging = store.cache.join("registry");
-  tokio::fs::create_dir_all(&staging).await.map_err(io(staging.display()))?;
-  let staged = tempfile::NamedTempFile::new_in(&staging).map_err(io(staging.display()))?;
-  let mut file = tokio::fs::File::from_std(staged.as_file().try_clone().map_err(io(staged.path().display()))?);
-  // NOTICE: `pull_blob` verifies the compressed digest as it reads.
-  client.pull_blob(image, descriptor, &mut file).await.map_err(|source| Error::Registry {
-    reference: reference.to_string(),
-    source,
-  })?;
-  file.sync_all().await.map_err(io(staged.path().display()))?;
-  drop(file);
-
+  let staged = fetch_blob(client, image, reference, descriptor, store).await?;
   let store = store.clone();
   let reference = reference.to_string();
   let expected = *diff_id;
-  tokio::task::spawn_blocking(move || -> Result<Digest> {
+  blocking("storing a pulled layer", move || -> Result<Digest> {
     let diff_id_mismatch = |actual| Error::DiffId {
       reference: reference.clone(),
       expected,
       actual,
     };
-    // The DiffID is the digest of the decompressed stream as the registry
-    // serves it (image-spec `config.md`), checked before the store
-    // canonicalizes it.
-    let uncompressed = tempfile::NamedTempFile::new_in(staged.path().parent().unwrap_or(staged.path())).map_err(io("staging a layer"))?;
-    let compressed = std::fs::File::open(staged.path()).map_err(io(staged.path().display()))?;
-    let mut decoder = flate2::read::GzDecoder::new(std::io::BufReader::new(compressed));
-    let mut out = Hashing {
-      inner: std::io::BufWriter::new(uncompressed.as_file().try_clone().map_err(io(uncompressed.path().display()))?),
-      hasher: sha2::Sha256::new(),
-    };
-    std::io::copy(&mut decoder, &mut out).map_err(io(format!("decompressing {reference}")))?;
-    let Hashing { mut inner, hasher } = out;
-    std::io::Write::flush(&mut inner).map_err(io(uncompressed.path().display()))?;
-    drop(inner);
-    let actual = Digest::from_bytes(hasher.finalize().into());
+    let (uncompressed, actual) = decompress(staged.path(), Compression::Gzip).map_err(io(format!("decompressing {reference}")))?;
     if actual != expected {
       return Err(diff_id_mismatch(actual));
     }
@@ -573,10 +551,142 @@ pub async fn pull_layer(
     })
   })
   .await
-  .map_err(|e| Error::Io {
-    context: "storing a pulled layer".to_string(),
+}
+
+/// Runs the blocking `work` off the async runtime.
+pub(super) async fn blocking<T: Send + 'static>(what: &str, work: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+  tokio::task::spawn_blocking(work).await.map_err(|e| Error::Io {
+    context: what.to_string(),
     source: std::io::Error::other(e.to_string()),
   })?
+}
+
+/// Pulls the blob `descriptor` of the image `image` into a new file in the
+/// store's staging directory. `oci-client`'s `pull_blob` checks what it
+/// reads against the descriptor's digest.
+pub(super) async fn fetch_blob(
+  client: &oci_client::Client,
+  image: &oci_client::Reference,
+  reference: &str,
+  descriptor: &OciDescriptor,
+  store: &Store,
+) -> Result<tempfile::NamedTempFile> {
+  let staging = store.cache.join("registry");
+  tokio::fs::create_dir_all(&staging).await.map_err(io(staging.display()))?;
+  let staged = tempfile::NamedTempFile::new_in(&staging).map_err(io(staging.display()))?;
+  let mut file = tokio::fs::File::from_std(staged.as_file().try_clone().map_err(io(staged.path().display()))?);
+  // NOTICE: `pull_blob` verifies the compressed digest as it reads.
+  client.pull_blob(image, descriptor, &mut file).await.map_err(|source| Error::Registry {
+    reference: reference.to_string(),
+    source,
+  })?;
+  file.sync_all().await.map_err(io(staged.path().display()))?;
+  Ok(staged)
+}
+
+/// How a layer blob is compressed, by its media type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Compression {
+  None,
+  Gzip,
+  Zstd,
+}
+
+/// Decompresses the blob at `compressed` into a new file beside it and
+/// returns the file and the digest of what it decompressed to: the layer's
+/// DiffID, which image-spec `config.md` defines on the decompressed stream
+/// as the registry serves it. Blocking.
+pub(super) fn decompress(compressed: &std::path::Path, compression: Compression) -> std::io::Result<(tempfile::NamedTempFile, Digest)> {
+  let dir = compressed.parent().unwrap_or(compressed);
+  let uncompressed = tempfile::NamedTempFile::new_in(dir)?;
+  let blob = std::io::BufReader::new(std::fs::File::open(compressed)?);
+  let mut reader: Box<dyn std::io::Read> = match compression {
+    Compression::None => Box::new(blob),
+    Compression::Gzip => Box::new(flate2::read::GzDecoder::new(blob)),
+    Compression::Zstd => Box::new(Zstd::new(blob)),
+  };
+  let mut out = Hashing {
+    inner: std::io::BufWriter::new(uncompressed.as_file().try_clone()?),
+    hasher: sha2::Sha256::new(),
+  };
+  std::io::copy(&mut reader, &mut out)?;
+  let Hashing { mut inner, hasher } = out;
+  std::io::Write::flush(&mut inner)?;
+  drop(inner);
+  Ok((uncompressed, Digest::from_bytes(hasher.finalize().into())))
+}
+
+/// A reader of a whole zstd stream: every frame in turn, skippable frames
+/// skipped, as `zstd -d` reads one. `ruzstd`'s `StreamingDecoder` reads one
+/// frame only, and zstd:chunked layers (Podman, Buildah) are many frames
+/// with skippable frames between them.
+// Reference: RFC 8878, section 3.1 ("Frames": "Zstandard compressed data is
+// made of one or more frames") and 3.1.2 ("Skippable Frames"),
+// https://www.rfc-editor.org/rfc/rfc8878#section-3.1
+// NOTICE: hand-written around `ruzstd::decoding::FrameDecoder`, following
+// `ruzstd` 0.8.3 `src/decoding/streaming_decoder.rs` (`Read for
+// StreamingDecoder`), because that type owns its source and so cannot go on
+// to the next frame.
+struct Zstd<R> {
+  source: R,
+  frame: ruzstd::decoding::FrameDecoder,
+  started: bool,
+}
+
+impl<R: std::io::BufRead> Zstd<R> {
+  fn new(source: R) -> Self {
+    Self {
+      source,
+      frame: ruzstd::decoding::FrameDecoder::new(),
+      started: false,
+    }
+  }
+
+  /// Starts the next frame, skipping skippable ones; `false` at the end of
+  /// the stream.
+  fn next_frame(&mut self) -> std::io::Result<bool> {
+    use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+    loop {
+      if self.source.fill_buf()?.is_empty() {
+        return Ok(false);
+      }
+      match self.frame.reset(&mut self.source) {
+        Ok(()) => return Ok(true),
+        Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame { length, .. })) => {
+          let skipped = std::io::copy(&mut std::io::Read::take(&mut self.source, u64::from(length)), &mut std::io::sink())?;
+          if skipped != u64::from(length) {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "a zstd skippable frame ends early"));
+          }
+        }
+        Err(e) => return Err(std::io::Error::other(e)),
+      }
+    }
+  }
+}
+
+impl<R: std::io::BufRead> std::io::Read for Zstd<R> {
+  fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+    use ruzstd::decoding::BlockDecodingStrategy;
+    if buf.is_empty() {
+      return Ok(0);
+    }
+    loop {
+      if !self.started || (self.frame.is_finished() && self.frame.can_collect() == 0) {
+        if !self.next_frame()? {
+          return Ok(0);
+        }
+        self.started = true;
+      }
+      while self.frame.can_collect() < buf.len() && !self.frame.is_finished() {
+        let wanted = buf.len() - self.frame.can_collect();
+        self.frame.decode_blocks(&mut self.source, BlockDecodingStrategy::UptoBytes(wanted)).map_err(std::io::Error::other)?;
+      }
+      let read = self.frame.read(buf)?;
+      if read > 0 {
+        return Ok(read);
+      }
+    }
+  }
 }
 
 /// A writer that hashes what it writes.

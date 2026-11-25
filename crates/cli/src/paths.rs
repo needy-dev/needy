@@ -89,8 +89,8 @@ impl Paths {
   }
 
   /// needy's VM images, a directory per driver: its base
-  /// (`needy_core_actor::image::vm::base_dir`) and those `needy image build
-  /// --from` makes (`needy_core_actor::image::vm::dir_of`).
+  /// (`needy_core_actor::image::vm::base_dir`), and those an older needy's
+  /// `needy image build --from` made (`needy_core_actor::image::vm::dir_of`).
   pub fn images(&self) -> PathBuf {
     self.data.join("images")
   }

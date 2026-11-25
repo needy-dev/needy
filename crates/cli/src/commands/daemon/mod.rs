@@ -75,6 +75,9 @@ struct ServeArgs {
   /// Path to a YAML/JSON file containing pre-provisioned static runner credentials (hot-reloaded).
   #[arg(long)]
   runners_file: Option<std::path::PathBuf>,
+  /// Path to a YAML file declaring static control-plane clients and their tokens (hot-reloaded).
+  #[arg(long)]
+  clients_file: Option<std::path::PathBuf>,
   /// Reject all `host:` file mappings (copy-in, mirror-out, sync, and host workspaces).
   #[arg(long)]
   disable_host_files: bool,
@@ -216,7 +219,6 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
   let config = needy_daemon::Config {
     holder_executable: std::env::current_exe().context("cannot locate the runtime holder executable")?,
     guest_disks: paths.guest_disks(),
-    vm_images: paths.images(),
     actor_image: args.actor_image.or(settings.actor_image).unwrap_or_else(|| paths.base_image()),
     state_dir: paths.state,
     data_dir: paths.data.clone(),
@@ -234,6 +236,7 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     mirror_out_wait: needy_daemon::MIRROR_OUT_WAIT,
     merge_driver_timeout: needy_daemon::MERGE_DRIVER_TIMEOUT,
     runners_file: args.runners_file.or(settings.runners_file),
+    clients_file: args.clients_file.or(settings.clients_file),
     disable_host_files: args.disable_host_files || settings.disable_host_files,
     host_files_root: args.host_files_root.or(settings.host_files_root),
     gateway_listen: args.gateway_listen.or(settings.gateway_listen).as_deref().map(listener).transpose()?,
