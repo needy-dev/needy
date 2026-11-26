@@ -953,7 +953,8 @@ spec:
 # With a socks5h upstream: only the actor's proxy, the daemon and named
 # services. Give the runner the daemon and the proxy by address
 # (--address tcp://DAEMON_CLUSTER_IP:7400, socks5h://PROXY_IP:1080) and the
-# Pod needs no DNS at all.
+# Pod needs no DNS at all. The Pod has no internet either, so the base VM
+# image must not be downloaded at start (see below).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: { name: actor-7f3c2a-egress, namespace: tenant-a }
@@ -968,6 +969,22 @@ spec:
   - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]
     ports: [{ protocol: TCP, port: 8080 }]
 ```
+
+The tight form was verified for the run only: in the probe the runner Pod
+ran `needy image pull --driver linux-firecracker` under the open policy and
+the tight policy was applied before the run. `needy image pull` is not
+gateway traffic and does not go through `--gateway-upstream`. Until the
+base VM image reaches the Pod without the internet, keep the S1 rule (the
+internet minus cluster ranges) next to an upstream. Ways to deliver the
+base, none of which needs a needy change: bake it into the runner image
+and pass `--actor-image` (gap G2); push it once to an in-cluster OCI
+registry and fetch it in an init container, allowing egress to that
+registry only; or mount it from a read-only volume.
+
+The probe's SOCKS proxies (`serjs/go-socks5-proxy`) cannot filter
+destinations, and a cluster Service name was reachable through them under
+`socks5h`. A production proxy must refuse private, cluster and metadata
+ranges after it resolves a name; which proxy does so is not verified yet.
 
 **Workspace Pods through a proxy (probe, not needy).** Commands in a
 Workspace use the Pod's own network, so the gateway does not see them. A
