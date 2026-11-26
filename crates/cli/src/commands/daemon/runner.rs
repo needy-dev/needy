@@ -212,6 +212,7 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
 /// `credentials`, checked now: a bad URL or credentials file fails the
 /// start instead of every connection. Shared by `daemon serve` and
 /// `runner serve`.
+#[cfg(unix)]
 pub(crate) async fn gateway_upstream(
   url: Option<&str>,
   credentials: Option<PathBuf>,
