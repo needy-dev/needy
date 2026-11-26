@@ -19,6 +19,9 @@ fn executor_name(argv: &[String]) -> String {
   assert_eq!(command, "executor", "{argv:?}");
   let listen = executor.get_one::<String>("listen").unwrap();
   assert!(listen.starts_with("unix:"), "{argv:?}");
+  // The command runs in a Linux container, so its Unix path is checked only
+  // where `Path` has Unix semantics (on Windows `/run/...` is not absolute).
+  #[cfg(unix)]
   needy_config::global::validate_address(listen, true).unwrap();
   executor.get_one::<String>("name").unwrap().clone()
 }
