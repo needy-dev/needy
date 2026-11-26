@@ -890,12 +890,31 @@ Two separate networks. The actor network sits near the actor's main dependency
 enforces an allowlist (HTTPS is tunnelled as is) and forwards **services**.
 The executor network sits near what the work operates on.
 
+**Gateway placement.** The actor gateway runs next to the actor: in the
+daemon for an actor on the control host, and in the **actor runner** for a
+remote actor whose runner and daemon both support it (S1, see
+[the runner gateway design](ai/references/architecture/2026-11-26-runner-gateway-design.md)).
+The daemon stays the policy source (it sends the profile, its blocked CIDRs
+and the run's creation time on the bridge) and the trace owner (the runner
+sends what its gateway records back on the bridge); the actor's egress then
+leaves from the runner's host. An older runner proxies the gateway channel
+to the daemon's shared gateway listener instead, and the daemon runs the
+gateway as before.
+
+**Gateway upstream.** Where the gateway's allowed connections to the
+actor's hosts go out: directly from the gateway's host, or through an
+upstream SOCKS5 proxy named by whoever runs the gateway (the runner's or
+the daemon's `--gateway-upstream`), never falling back to direct.
+Services are always dialed directly. Traced connections through one name it
+in `via`. **Provisional** (not released; see the runner gateway design,
+"Upstream proxy").
+
 ### Service
 
 A plain-HTTP name the actor uses for an endpoint outside it:
 `actor.network.services.NAME.url`. In the actor it is `http://NAME.needy`;
-the gateway forwards each request to the URL, which the control host (where
-the gateway runs) resolves, and a `CONNECT NAME.needy:80` (clients that
+the gateway forwards each request to the URL, which the host where the
+gateway runs (the control host, or a remote actor's runner) resolves, and a `CONNECT NAME.needy:80` (clients that
 tunnel plain HTTP through a proxy) to the URL's host and port. The actor
 never learns the real address.
 
@@ -936,9 +955,9 @@ firmware, devices, network identity. A recipe defines it.
 
 Every event recorded during a run, in order: each carries the run, a
 sequence number, a time, a kind such as `exec.decide`, a payload and the
-payload's schema version (9 since `fault.injected` names its fault and
-domain and `chaos.add` and `chaos.remove` exist, after 8 recorded the
-actor's capture in `actor.start`; traces of other versions are refused).
+payload's schema version (16 since the net events carry `via`; a build
+reads the versions `needy_core::event::READ_VERSIONS` names, 10 onwards,
+and refuses others).
 The profile's `trace:` selects the sinks: SQLite (`trace.db`) and JSONL under
 the run directory. Terminal output is not part of the trace.
 

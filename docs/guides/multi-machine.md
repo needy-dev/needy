@@ -67,10 +67,27 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
 - **Ephemeral runners & waiting**: pass `--ephemeral` to `needy runner serve`
   to serve one run and exit cleanly, and `--wait-for-runner DURATION` to
   `needy run create` to wait for a matching runner to connect.
-- **Remote gateway & SSRF policy**: pass `--gateway-listen tcp://HOST:PORT` to
-  serve remote actor runners over an authenticated TCP gateway, and repeatable
-  `--gateway-block-cidr CIDR` flags to block outbound CIDR ranges in addition to
-  the default loopback/link-local protections.
+- **Remote gateway & SSRF policy**: a remote actor runner runs its actor's
+  gateway itself, so the actor's traffic leaves from the runner's host, under
+  the profile's allowlist and the daemon's repeatable `--gateway-block-cidr
+  CIDR` flags (which block outbound CIDR ranges in addition to the default
+  loopback/link-local protections, and which the daemon sends to its runners).
+  A runner older than this behaviour, or one talking to an older daemon,
+  proxies to the daemon's authenticated TCP gateway instead: pass
+  `--gateway-listen tcp://HOST:PORT` to the daemon and `--gateway` to the
+  runner for those. See
+  [the runner gateway design](../ai/references/architecture/2026-11-26-runner-gateway-design.md).
+- **Per-actor upstream proxy** (from the release after v0.0.18, not
+  released): pass `--gateway-upstream socks5h://HOST[:PORT]` (or
+  `socks5://`, where the runner resolves and checks names itself) and
+  `--gateway-upstream-credentials-file PATH` (`USERNAME:PASSWORD`, not
+  readable by other users; `0440` with a Pod's `fsGroup` works) to
+  `needy runner serve`, so the actor's traffic leaves through that proxy;
+  `needy daemon serve` takes the same flags for the gateways it runs. The
+  file is re-read per connection, a failing proxy gives `502` (never a
+  direct connection), services bypass the proxy, and with `socks5h` the
+  proxy must block private ranges itself. See "Upstream proxy" in the
+  runner gateway design.
 - **Shared image layers**: pass `--layer-registry REPOSITORY` (for example
   `registry.example.com/needy/layers`, or `http://HOST:PORT/PATH` for a
   plain-HTTP in-cluster registry) to `needy daemon serve` so control hosts

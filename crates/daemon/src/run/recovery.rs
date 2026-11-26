@@ -353,6 +353,7 @@ impl Daemon {
       image_commit: None,
       pinned_features: Default::default(),
       gateway: Mutex::new(None),
+      remote_gateway: Mutex::new(None),
       bridge: Mutex::new(crate::bridge::Slot::Idle),
       remote_layers: tokio::sync::watch::Sender::new(None),
       remote_started: tokio::sync::watch::Sender::new(false),

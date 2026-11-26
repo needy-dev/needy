@@ -2,31 +2,42 @@
 //! `RunnerService.Control`.
 //!
 //! Boots a local `linux-firecracker` microVM for the assigned run, bridges its
-//! local vsock channels (`v.sock_7000` guest API, `v.sock_7001` gateway,
-//! `v.sock` port `7002` reverse terminal) outbound to the remote `needy-daemon`
-//! using the runner's own credential plus `x-needy-run-id: <run_id>` (Node
+//! local vsock channels (`v.sock_7000` guest API, `v.sock` port `7002`
+//! reverse terminal) outbound to the remote `needy-daemon` using the
+//! runner's own credential plus `x-needy-run-id: <run_id>` (Node
 //! Authorizer), and streams Firecracker's `console.log` back to the control
 //! plane.
+//!
+//! The actor's gateway (`v.sock_7001`) runs here, next to the actor, when
+//! the control plane agrees (`BridgeAttached.local_gateway`): the actor's
+//! traffic leaves from this host, under the policy the control plane sent,
+//! and what the gateway records goes back on the bridge to the run's trace.
+//! A control plane that does not know a runner's gateway leaves it unset,
+//! and the channel is proxied to its shared gateway listener instead. See
+//! `docs/ai/references/architecture/2026-11-26-runner-gateway-design.md`.
 //!
 //! The runner's credential is held exclusively by the host-side runner process
 //! and is NEVER injected into the Firecracker guest VM.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  BridgeAttach, BridgeAttached, BridgeExit, BridgePrepared, BridgeRequest, BridgeStarted, BridgeTaskResult, BridgeTerminalReady,
-  BridgeTerminalTask, FetchLayerRequest, TerminalTaskRequest, bridge_request, bridge_response, bridge_task_result, bridge_terminal_task,
-  terminal_task_request,
+  BridgeActivity, BridgeAttach, BridgeAttached, BridgeEvents, BridgeExit, BridgePrepared, BridgeRequest, BridgeStarted, BridgeTaskResult,
+  BridgeTerminalReady, BridgeTerminalTask, FetchLayerRequest, TerminalTaskRequest, TraceEvent, bridge_request, bridge_response,
+  bridge_task_result, bridge_terminal_task, terminal_task_request,
 };
 use needy_api_server::middleware::authentication::RUN_ID_HEADER;
 use needy_core_actor::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
 use needy_core_actor::driver::{Driver as _, Host, Running, Start, linux_firecracker};
 use needy_core_actor::image::store::{Digest, LayerDisk, Store};
+use needy_core_actor::sidecar::gateway::{IpCidr, Upstream};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
@@ -34,11 +45,28 @@ const VM_STOP_GRACE: Duration = Duration::from_secs(3);
 const CONSOLE_POLL: Duration = Duration::from_millis(100);
 const TERMINAL_POLL: Duration = Duration::from_millis(200);
 const TERMINAL_WAIT: Duration = Duration::from_secs(60);
+/// Events the local gateway's trace queue holds before it drops them and
+/// records a `trace.gap`, as the daemon's run traces do when full.
+const GATEWAY_TRACE_QUEUE: usize = 1024;
+/// Events handed from the trace's sink to the bridge forwarder at once.
+const GATEWAY_EVENTS_QUEUE: usize = 256;
+/// Events in one `BridgeEvents`.
+const GATEWAY_EVENTS_BATCH: usize = 64;
+/// How often the runner reports the gateway's activity, at most.
+// NOTICE: activity feeds the run's `last_activity_ms`, which idle checks
+// read in seconds; one report a second keeps that current without a message
+// per request.
+const GATEWAY_ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
+/// How long the end of a run waits for the gateway's last events to be
+/// handed to the bridge before it reports the actor's exit.
+const GATEWAY_FLUSH_WAIT: Duration = Duration::from_secs(3);
 
 /// Host-side configuration used by a runner to execute `StartActor` tasks.
 #[derive(Debug, Clone)]
 pub struct ActorConfig {
-  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`).
+  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`),
+  /// which the actor's gateway channel is proxied to when the control plane
+  /// does not let this runner run the gateway itself (an older daemon).
   pub gateway: Option<String>,
   /// Path to the base actor VM image directory.
   pub actor_image: PathBuf,
@@ -54,6 +82,11 @@ pub struct ActorConfig {
   /// Directory under which each run gets its own directory for temporary
   /// VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
   pub work_dir: Option<PathBuf>,
+  /// How the actor's gateway on this runner reaches its upstreams
+  /// (`--gateway-upstream`): one proxy per actor when the runner serves one
+  /// actor (an ephemeral runner Pod). Applies only to a gateway this runner
+  /// runs; an actor whose control plane keeps the gateway is refused.
+  pub gateway_upstream: Upstream,
 }
 
 /// Runs one remote actor VM for `run_id` and bridges all its channels outbound
@@ -90,6 +123,7 @@ pub(crate) async fn run_actor(
         mem_mib: 0,
         driver: String::new(),
         capture: String::new(),
+        local_gateway: true,
       })),
     })
     .await
@@ -134,8 +168,18 @@ pub(crate) async fn run_actor(
   let guest_uds = linux_firecracker::host_port(&work_dir, GUEST_PORT);
   spawn_guest_grpc_proxy(&guest_uds, control_client.channel(), credential, &attached.run_id, &tasks, &cancel)?;
 
-  if let Some(gateway_addr) = &config.gateway {
-    let gateway_uds = linux_firecracker::host_port(&work_dir, GATEWAY_PORT);
+  let gateway_uds = linux_firecracker::host_port(&work_dir, GATEWAY_PORT);
+  // Ends the local gateway's connections and tunnels; cancelled first when
+  // the bridge breaks, so a lost link to the control plane cuts the actor's
+  // egress before the VM is stopped.
+  let gateway_stop = cancel.child_token();
+  // The local gateway's trace, flushed before the actor's exit is reported.
+  let mut gateway_trace: Option<needy_trace::Dispatch> = None;
+  if !attached.local_gateway
+    && let Some(gateway_addr) = &config.gateway
+  {
+    // A control plane that runs the gateway itself (it did not set
+    // `local_gateway`): proxy the channel to it, as before S1.
     let gateway_target = gateway_addr.strip_prefix("tcp://").unwrap_or(gateway_addr).to_string();
     spawn_gateway_proxy(&gateway_uds, gateway_target, credential.to_string(), attached.run_id.clone(), &tasks, &cancel)?;
   }
@@ -149,6 +193,14 @@ pub(crate) async fn run_actor(
   // What fails before the VM runs is reported as the actor's exit, so the
   // run fails with its reason rather than as a lost bridge.
   let booted = async {
+    // An older control plane runs the gateway itself, where this runner's
+    // upstream does not apply: the actor would leave directly from the
+    // control host. Fail closed instead.
+    if !attached.local_gateway && config.gateway_upstream != Upstream::Direct {
+      bail!(
+        "this runner has a gateway upstream (--gateway-upstream), but the control plane runs the actor's gateway itself (it is older than this runner); refusing to start the actor without its upstream"
+      );
+    }
     let layer_disks = prepare_layers(&control_client, &config.layer_store, &config.actor_image, &attached, &work_dir).await?;
     // TODO(remote-actor-images): the time the fetch took belongs in
     // `actor.start` (`layers_fetched_ms`, D6 of
@@ -175,6 +227,17 @@ pub(crate) async fn run_actor(
 
     let profile = needy_config::profile::load(&needy_config::Source::text(attached.profile_yaml.clone(), PathBuf::new()))
       .context("cannot decode profile from control plane")?;
+    if attached.local_gateway {
+      gateway_trace = Some(serve_gateway(
+        &gateway_uds,
+        &profile,
+        &attached,
+        &config.gateway_upstream,
+        bridge_tx.clone(),
+        &tasks,
+        gateway_stop.clone(),
+      )?);
+    }
 
     let layer_disks: Vec<PathBuf> = layer_disks.into_iter().map(|disk| disk.path).collect();
     driver
@@ -207,6 +270,8 @@ pub(crate) async fn run_actor(
         })
         .await;
       cancel.cancel();
+      // The gateway's event forwarder ends once its trace is dropped.
+      drop(gateway_trace);
       drop(bridge_tx);
       tasks.close();
       let _ = tokio::time::timeout(Duration::from_secs(3), tasks.wait()).await;
@@ -279,12 +344,14 @@ pub(crate) async fn run_actor(
         },
         Ok(None) => {
           tracing::warn!("run {}: control plane closed actor bridge unexpectedly; stopping microVM", attached.run_id);
+          gateway_stop.cancel();
           bridge_broken = true;
           let _ = vm.stop(VM_STOP_GRACE).await;
           break None;
         }
         Err(status) => {
           tracing::warn!("run {}: actor bridge error: {status}; stopping microVM", attached.run_id);
+          gateway_stop.cancel();
           bridge_broken = true;
           let _ = vm.stop(VM_STOP_GRACE).await;
           break None;
@@ -301,8 +368,16 @@ pub(crate) async fn run_actor(
   // Stop console tailer and flush any remaining console bytes before sending exit.
   console_cancel.cancel();
   let final_offset = console_handle.await.unwrap_or(0);
+  // The actor is gone: its gateway ends, and what it recorded reaches the
+  // run's trace before the actor's exit does.
+  gateway_stop.cancel();
   if !bridge_broken {
     flush_console(&console_path, final_offset, &bridge_tx).await;
+    if let Some(trace) = &gateway_trace
+      && tokio::time::timeout(GATEWAY_FLUSH_WAIT, trace.flush()).await.is_err()
+    {
+      tracing::warn!("run {}: the gateway's last events did not reach the control plane in time", attached.run_id);
+    }
     if let Some(exit) = vm_exit {
       let _ = bridge_tx
         .send(BridgeRequest {
@@ -313,6 +388,8 @@ pub(crate) async fn run_actor(
   }
 
   cancel.cancel();
+  // The gateway's event forwarder ends once its trace is dropped.
+  drop(gateway_trace);
   drop(bridge_tx);
   tasks.close();
   let _ = tokio::time::timeout(Duration::from_secs(3), tasks.wait()).await;
@@ -487,6 +564,164 @@ async fn proxy_grpc_connection(
   let _ = hyper::server::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
     .serve_connection(hyper_util::rt::TokioIo::new(stream), service)
     .await;
+}
+
+/// Serves the actor's gateway on this runner on Firecracker's gateway
+/// channel `uds`, until `stop`: the profile's allowlist and services, its
+/// network faults with their windows counted from the run's creation on the
+/// control plane (`attached.created_ms`), and the control plane's blocked
+/// CIDRs, leaving through this runner's `upstream`, built as the daemon
+/// builds it (`actor::gateway`). What it records
+/// goes to the run's trace over the bridge (`BridgeEvents`), and its
+/// activity as `BridgeActivity`. Returns its trace, for the end of the run
+/// to flush.
+fn serve_gateway(
+  uds: &Path,
+  profile: &needy_config::profile::Profile,
+  attached: &BridgeAttached,
+  upstream: &Upstream,
+  bridge: mpsc::Sender<BridgeRequest>,
+  tasks: &tokio_util::task::TaskTracker,
+  stop: CancellationToken,
+) -> Result<needy_trace::Dispatch> {
+  let blocked = attached
+    .gateway_blocked_cidrs
+    .iter()
+    .map(|cidr| cidr.parse::<IpCidr>().map_err(|e| anyhow::anyhow!("the control plane named an invalid blocked CIDR {cidr:?}: {e}")))
+    .collect::<Result<Vec<_>>>()?;
+  let injector = Arc::new(needy_core::chaos::Injector::since_ms(&profile.chaos, attached.created_ms));
+  let (events, forwarded) = mpsc::channel(GATEWAY_EVENTS_QUEUE);
+  let trace = needy_trace::Dispatch::new(
+    attached.run_id.clone(),
+    vec![Box::new(BridgeSink { events })],
+    needy_trace::Options {
+      capacity: GATEWAY_TRACE_QUEUE,
+      version: needy_core::event::SCHEMA_VERSION,
+      timing: false,
+    },
+  );
+  tasks.spawn(forward_events(forwarded, bridge.clone()));
+  let active = Arc::new(AtomicBool::new(false));
+  tasks.spawn(forward_activity(active.clone(), bridge, stop.clone()));
+  let gateway = crate::actor::gateway(
+    &profile.actor.network,
+    trace.clone(),
+    injector,
+    blocked,
+    upstream.clone(),
+    stop,
+    Arc::new(move || active.store(true, Ordering::Relaxed)),
+  );
+  if let Err(e) = std::fs::remove_file(uds)
+    && e.kind() != std::io::ErrorKind::NotFound
+  {
+    tracing::warn!("cannot remove {}: {e}", uds.display());
+  }
+  let listener = tokio::net::UnixListener::bind(uds).with_context(|| format!("cannot bind {}", uds.display()))?;
+  tasks.spawn(gateway.run(tokio_stream::wrappers::UnixListenerStream::new(listener)));
+  Ok(trace)
+}
+
+/// What the local gateway's trace sink hands the bridge forwarder.
+enum Forward {
+  Event(TraceEvent),
+  /// Answered once every event before it was handed to the bridge.
+  Flush(oneshot::Sender<()>),
+}
+
+/// The local gateway's trace sink: each event goes to the run's trace on
+/// the control plane, through [`forward_events`]. Waiting for the
+/// forwarder fills the trace's queue when the bridge is slow, which then
+/// drops and records a `trace.gap`, as a full trace does on the daemon.
+struct BridgeSink {
+  events: mpsc::Sender<Forward>,
+}
+
+#[async_trait::async_trait]
+impl needy_trace::Sink for BridgeSink {
+  async fn write(&mut self, event: &needy_trace::Event) -> Result<(), needy_trace::Error> {
+    let event = TraceEvent {
+      time_ms: event.time_ms,
+      kind: event.kind.clone(),
+      payload: event.payload.get().to_string(),
+      version: event.version,
+    };
+    // A closed forwarder means the bridge is gone, and the run's trace with
+    // it: there is nowhere left to write.
+    let _ = self.events.send(Forward::Event(event)).await;
+    Ok(())
+  }
+
+  /// Waits until every event written before is handed to the bridge.
+  async fn flush(&mut self) -> Result<(), needy_trace::Error> {
+    let (done, handed) = oneshot::channel();
+    if self.events.send(Forward::Flush(done)).await.is_ok() {
+      // A forwarder that ended dropped `done`: the bridge is gone.
+      let _ = handed.await;
+    }
+    Ok(())
+  }
+}
+
+/// Sends the local gateway's events on the bridge in order, as many at a
+/// time as are waiting (up to [`GATEWAY_EVENTS_BATCH`]), until the trace
+/// closes or the bridge does.
+async fn forward_events(mut events: mpsc::Receiver<Forward>, bridge: mpsc::Sender<BridgeRequest>) {
+  while let Some(first) = events.recv().await {
+    let mut batch = Vec::new();
+    let mut flushed = None;
+    let mut next = Some(first);
+    while let Some(item) = next.take() {
+      match item {
+        Forward::Event(event) => batch.push(event),
+        Forward::Flush(done) => {
+          flushed = Some(done);
+          break;
+        }
+      }
+      if batch.len() >= GATEWAY_EVENTS_BATCH {
+        break;
+      }
+      next = events.try_recv().ok();
+    }
+    if !batch.is_empty()
+      && bridge
+        .send(BridgeRequest {
+          payload: Some(bridge_request::Payload::Events(BridgeEvents { events: batch })),
+        })
+        .await
+        .is_err()
+    {
+      return;
+    }
+    if let Some(done) = flushed {
+      // The flush's caller may have stopped waiting.
+      let _ = done.send(());
+    }
+  }
+}
+
+/// Reports that the local gateway saw a request (`active`), at most once
+/// per [`GATEWAY_ACTIVITY_INTERVAL`], until `stop` or the bridge closes.
+async fn forward_activity(active: Arc<AtomicBool>, bridge: mpsc::Sender<BridgeRequest>, stop: CancellationToken) {
+  let mut tick = tokio::time::interval(GATEWAY_ACTIVITY_INTERVAL);
+  tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+  loop {
+    tokio::select! {
+      () = stop.cancelled() => return,
+      _ = tick.tick() => {}
+    }
+    if active.swap(false, Ordering::Relaxed)
+      && bridge
+        .send(BridgeRequest {
+          payload: Some(bridge_request::Payload::Activity(BridgeActivity {})),
+        })
+        .await
+        .is_err()
+    {
+      return;
+    }
+  }
 }
 
 /// Proxies guest gateway connections from Firecracker's `v.sock_7001` to the

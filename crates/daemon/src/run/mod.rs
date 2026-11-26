@@ -135,6 +135,10 @@ pub struct Run {
   /// HTTP/CONNECT gateway registered for remote actor runs, served via the
   /// daemon's shared TCP gateway listener.
   gateway: Mutex<Option<Arc<needy_core_actor::sidecar::gateway::Gateway>>>,
+  /// Where a remote actor's gateway runs, as its runner's bridge settled
+  /// it on attach; `None` before the bridge attached, and for an actor on
+  /// the control host, whose gateway the daemon runs.
+  pub(crate) remote_gateway: Mutex<Option<GatewaySite>>,
   /// Outbound remote actor host bridge attachment slot (at most one per run).
   pub(crate) bridge: Mutex<crate::bridge::Slot>,
   /// The layer disks a remote actor's runner made of the run's snapshot,
@@ -307,6 +311,11 @@ impl Run {
     lock(&self.actor_runner_link).is_some()
   }
 
+  /// Where a remote actor's gateway runs, once its bridge attached.
+  pub(crate) fn remote_gateway(&self) -> Option<GatewaySite> {
+    *lock(&self.remote_gateway)
+  }
+
   /// Detaches any remote gateway registered for this run and cancels active
   /// gateway connections.
   pub(crate) fn close_gateway(&self) {
@@ -318,6 +327,18 @@ impl Run {
   fn lock_executors(&self) -> MutexGuard<'_, BTreeMap<String, Arc<Instance>>> {
     lock(&self.executors)
   }
+}
+
+/// Where the gateway of a remote actor runs, which decides where its net
+/// faults take effect and where its `net.*` events come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GatewaySite {
+  /// The daemon's shared gateway listener, which an older runner proxies
+  /// the actor's gateway channel to.
+  Control,
+  /// The actor runner, next to the actor; it forwards what it records over
+  /// the bridge (`BridgeEvents`).
+  Runner,
 }
 
 /// How often a followed console is read again for what the actor wrote.
@@ -763,6 +784,7 @@ impl Daemon {
       image_commit: request.image_commit.clone(),
       pinned_features: request.pinned_features.clone(),
       gateway: Mutex::new(None),
+      remote_gateway: Mutex::new(None),
       bridge: Mutex::new(crate::bridge::Slot::Idle),
       remote_layers: tokio::sync::watch::Sender::new(None),
       remote_started: tokio::sync::watch::Sender::new(false),

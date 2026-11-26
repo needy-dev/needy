@@ -102,6 +102,7 @@ fn actor_run() -> Vec<Recorded> {
         path: "/v1/chat/completions".into(),
         status: 200,
         ms: 900,
+        via: None,
       }),
     ),
     at(

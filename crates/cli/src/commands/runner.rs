@@ -159,9 +159,18 @@ struct ServeArgs {
   /// Directory under which each actor run gets its own directory for temporary VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
   #[arg(long)]
   work_dir: Option<std::path::PathBuf>,
-  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs.
+  /// Control-plane shared TCP gateway address (`HOST:PORT` or `tcp://HOST:PORT`) for remote actor runs, used only with a
+  /// control plane that does not let this runner run the actor's gateway itself (one older than this runner).
   #[arg(long, alias = "gateway-address")]
   gateway: Option<String>,
+  /// Upstream SOCKS5 proxy for the actor gateway this runner runs: `socks5h://HOST[:PORT]` (the proxy resolves names) or
+  /// `socks5://HOST[:PORT]` (this runner resolves and checks them); port 1080 by default. Never falls back to direct.
+  #[arg(long, value_name = "URL")]
+  gateway_upstream: Option<String>,
+  /// File holding `USERNAME:PASSWORD` for `--gateway-upstream`, read again for each connection (a rotated Secret
+  /// applies); other users must not be able to read it (0600, or 0440 with a Pod's fsGroup).
+  #[arg(long, value_name = "PATH", requires = "gateway_upstream")]
+  gateway_upstream_credentials_file: Option<std::path::PathBuf>,
   /// Serve a single actor run (or a single bound run in executor mode) and exit cleanly.
   #[arg(long)]
   ephemeral: bool,
@@ -428,6 +437,8 @@ pub async fn run(args: Args, ctx: &Context) -> Result<i32> {
           kvm: args.kvm,
           work_dir: args.work_dir,
           gateway: args.gateway,
+          gateway_upstream: args.gateway_upstream,
+          gateway_upstream_credentials_file: args.gateway_upstream_credentials_file,
           ephemeral: args.ephemeral,
           join: None,
           join_token_env: None,
@@ -504,6 +515,8 @@ async fn join(args: JoinArgs, ctx: &Context) -> Result<i32> {
       kvm: args.kvm,
       work_dir: None,
       gateway: None,
+      gateway_upstream: None,
+      gateway_upstream_credentials_file: None,
       ephemeral: false,
       join: Some(address),
       join_token_env: None,

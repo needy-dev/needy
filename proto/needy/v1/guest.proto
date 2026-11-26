@@ -273,6 +273,15 @@ message BridgeRequest {
     // The layer disks the runner made of the run's snapshot, sent before
     // the VM starts.
     BridgePrepared prepared = 7;
+    // Trace events the runner's local actor gateway recorded, in the order
+    // it recorded them. Sent only when `BridgeAttached.local_gateway` is
+    // set. The daemon records them in the run's trace at their `time_ms`;
+    // their sequence numbers there are the order they arrive in.
+    BridgeEvents events = 8;
+    // The actor used its network since the last report: the runner's local
+    // gateway saw a request or tunnel. Coalesced by the runner, at most one
+    // per interval; the daemon advances the run's last activity.
+    BridgeActivity activity = 9;
   }
 }
 
@@ -282,6 +291,11 @@ message BridgeAttach {
   uint32 mem_mib = 3;
   string driver = 4;
   string capture = 5;
+  // The runner can run the actor's gateway itself, next to the actor. A
+  // daemon that agrees sets `BridgeAttached.local_gateway`; an older runner
+  // leaves this unset, and its actor's network goes through the daemon's
+  // gateway.
+  bool local_gateway = 6;
 }
 
 message BridgeStarted {
@@ -299,6 +313,14 @@ message BridgeExit {
 }
 
 message BridgeTerminalReady {}
+
+message BridgeEvents {
+  // Each event's `version` is the runner build's schema version; the daemon
+  // refuses one it does not read.
+  repeated TraceEvent events = 1;
+}
+
+message BridgeActivity {}
 
 message BridgePrepared {
   // The digests of the disks the runner attaches, lowest first, as their
@@ -342,6 +364,19 @@ message BridgeAttached {
   // the runner refuses to stack the layers on another base. Empty when
   // `layers` is.
   string root = 6;
+  // The runner runs the actor's gateway (the runner asked with
+  // `BridgeAttach.local_gateway`): it enforces the profile's allowlist,
+  // services and network faults with the fields below, and sends what the
+  // gateway records as `BridgeEvents`. The daemon then serves no gateway
+  // for the run. Unset, the runner proxies the actor's gateway channel to
+  // the daemon's shared gateway listener, as before.
+  bool local_gateway = 7;
+  // CIDRs the gateway refuses to connect to, as the daemon's
+  // `--gateway-block-cidr` names them (`198.51.100.0/24`, `fd00::/8`).
+  repeated string gateway_blocked_cidrs = 8;
+  // When the run was created, in Unix milliseconds on the daemon's clock:
+  // the origin of the faults' `after` and `until` windows.
+  int64 created_ms = 9;
 }
 
 message BridgeStop {

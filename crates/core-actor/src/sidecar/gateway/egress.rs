@@ -16,6 +16,8 @@ use std::task::{Context, Poll};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
+use super::upstream::{Upstream, UpstreamError};
+
 /// An IPv4 or IPv6 CIDR block (e.g. `10.0.0.0/8`, `fd00::/8`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IpCidr {
@@ -226,6 +228,10 @@ pub(super) enum EgressError {
   },
   #[error("invalid upstream URI: {0}")]
   InvalidUri(String),
+  /// The gateway's upstream proxy failed or refused the connection; never
+  /// retried direct.
+  #[error(transparent)]
+  Upstream(#[from] UpstreamError),
   #[error(transparent)]
   Io(#[from] std::io::Error),
 }
@@ -240,6 +246,14 @@ pub(super) fn strip_brackets(host: &str) -> &str {
 /// against `policy` (if present), and connects directly to the validated
 /// addresses so no second DNS lookup can occur.
 pub(super) async fn resolve_and_connect(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
+  let addrs = resolve_validated(host, port, policy).await?;
+  Ok(TcpStream::connect(&addrs[..]).await?)
+}
+
+/// The addresses `(host, port)` resolves to on this host (an IP literal is
+/// its own), each validated against `policy` (if present): the one lookup a
+/// connection to them may use.
+pub(super) async fn resolve_validated(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<Vec<SocketAddr>, EgressError> {
   let host = strip_brackets(host);
   let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
     vec![SocketAddr::new(ip, port)]
@@ -260,14 +274,16 @@ pub(super) async fn resolve_and_connect(host: &str, port: u16, policy: Option<&E
       }
     }
   }
-  Ok(TcpStream::connect(&addrs[..]).await?)
+  Ok(addrs)
 }
 
-/// Walks an error's source chain to find an [`EgressError::Blocked`].
-pub(super) fn blocked_in_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a EgressError> {
+/// Walks an error's source chain to find the [`EgressError`] a connector
+/// returned (a blocked address, or the upstream proxy's failure), which
+/// `hyper`'s client error does not show itself.
+pub(super) fn egress_in_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a EgressError> {
   let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
   while let Some(e) = current {
-    if let Some(egress @ EgressError::Blocked { .. }) = e.downcast_ref::<EgressError>() {
+    if let Some(egress) = e.downcast_ref::<EgressError>() {
       return Some(egress);
     }
     current = e.source();
@@ -282,11 +298,12 @@ pub(super) fn blocked_in_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -
 #[derive(Clone)]
 pub(super) struct ValidatedConnector {
   policy: Option<Arc<EgressPolicy>>,
+  upstream: Upstream,
 }
 
 impl ValidatedConnector {
-  pub(super) fn new(policy: Option<Arc<EgressPolicy>>) -> Self {
-    Self { policy }
+  pub(super) fn new(policy: Option<Arc<EgressPolicy>>, upstream: Upstream) -> Self {
+    Self { policy, upstream }
   }
 }
 
@@ -301,6 +318,7 @@ impl tower::Service<hyper::Uri> for ValidatedConnector {
 
   fn call(&mut self, uri: hyper::Uri) -> Self::Future {
     let policy = self.policy.clone();
+    let upstream = self.upstream.clone();
     Box::pin(async move {
       let Some(raw_host) = uri.host() else {
         return Err(EgressError::InvalidUri(format!("missing host in {uri}")));
@@ -312,7 +330,7 @@ impl tower::Service<hyper::Uri> for ValidatedConnector {
         80
       };
       let port = uri.port_u16().unwrap_or(default_port);
-      let stream = resolve_and_connect(&host, port, policy.as_deref()).await?;
+      let stream = upstream.connect(&host, port, policy.as_deref()).await?;
       Ok(TokioIo::new(stream))
     })
   }

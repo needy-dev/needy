@@ -9,19 +9,29 @@
 //! decision and records typed `net.*` and `fault.injected` events in the
 //! run's trace. A plain-HTTP request to a service's host (`NAME.needy`) goes
 //! to the service's URL, which this machine resolves: the gateway runs next
-//! to the daemon, on the control host.
+//! to its actor, in the daemon on the control host or in the actor runner
+//! that hosts a remote actor (see
+//! `docs/ai/references/architecture/2026-11-26-runner-gateway-design.md`).
 //!
 //! A fault's effect is delivered as a real upstream would deliver it through
 //! a proxy: `refuse` answers 502 as when the upstream refuses the
 //! connection, `reset` resets the actor's connection without an answer,
 //! `hang` holds it until the actor gives up or the run ends, `delay` waits
 //! first, and `status` answers a plain-HTTP request with that status.
+//!
+//! An allowed connection leaves directly or through the operator's upstream
+//! SOCKS5 proxy ([`Upstream`], `--gateway-upstream`); a service's URL is
+//! always dialed directly.
 
 mod connect;
 mod egress;
 mod http;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
+mod upstream;
 
 pub use egress::{BlockedReason, EgressPolicy, IpCidr};
+pub use upstream::{Socks5, Upstream, UpstreamError};
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -95,6 +105,9 @@ pub struct GatewayOptions {
   /// Optional callback invoked on each authenticated CONNECT or HTTP request,
   /// used by the daemon to advance `Run::last_activity_ms`.
   pub on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
+  /// How connections to actor-chosen upstreams go out; direct by default.
+  /// A service's URL is always dialed directly.
+  pub upstream: Upstream,
 }
 
 impl GatewayOptions {
@@ -112,6 +125,11 @@ impl GatewayOptions {
     self.on_activity = Some(on_activity);
     self
   }
+
+  pub fn with_upstream(mut self, upstream: Upstream) -> Self {
+    self.upstream = upstream;
+    self
+  }
 }
 
 /// One network's gateway. Its connections and tunnels are tasks it owns,
@@ -124,6 +142,8 @@ pub struct Gateway {
   policy: Policy,
   chain: Chain,
   egress: Arc<EgressPolicy>,
+  /// How tunnels and requests to actor-chosen hosts reach their upstream.
+  upstream: Upstream,
   /// Client for actor-chosen external targets (resolve-then-validate enabled).
   client: Client<hyper_rustls::HttpsConnector<ValidatedConnector>, Incoming>,
   /// Client for operator-configured `actor.network.services` targets (exempt
@@ -157,16 +177,20 @@ impl Gateway {
     options: GatewayOptions,
   ) -> Self {
     let egress = Arc::new(options.egress);
-    let build_client = |policy: Option<Arc<EgressPolicy>>| {
+    let upstream = options.upstream;
+    let build_client = |policy: Option<Arc<EgressPolicy>>, upstream: Upstream| {
       let https = hyper_rustls::HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
         .enable_http1()
-        .wrap_connector(ValidatedConnector::new(policy));
+        .wrap_connector(ValidatedConnector::new(policy, upstream));
       Client::builder(hyper_util::rt::TokioExecutor::new()).build(https)
     };
-    let client = build_client(Some(egress.clone()));
-    let service_client = build_client(None);
+    let client = build_client(Some(egress.clone()), upstream.clone());
+    // NOTICE: a service's URL is the operator's endpoint, reachable from the
+    // gateway's host (in-cluster on Kubernetes), so it never goes through
+    // the upstream proxy, which reaches the internet.
+    let service_client = build_client(None, Upstream::Direct);
     let auth_token_hash = options.auth_token.map(|token| {
       let digest = Sha256::digest(token.as_bytes());
       let mut out = [0u8; 32];
@@ -179,6 +203,7 @@ impl Gateway {
       chain: Chain::new(&policy, injector),
       policy,
       egress,
+      upstream,
       client,
       service_client,
       auth_token_hash,

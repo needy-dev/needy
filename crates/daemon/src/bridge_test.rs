@@ -210,6 +210,7 @@ async fn bridge_enforces_single_exclusivity_streams_console_and_handles_abrupt_d
         mem_mib: 512,
         driver: "linux-firecracker".into(),
         capture: "kernel".into(),
+        local_gateway: false,
       })),
     }))
     .await
@@ -228,6 +229,7 @@ async fn bridge_enforces_single_exclusivity_streams_console_and_handles_abrupt_d
         mem_mib: 256,
         driver: "linux-firecracker".into(),
         capture: "kernel".into(),
+        local_gateway: false,
       })),
     }))
     .await
@@ -444,6 +446,7 @@ async fn bridge_clean_exit_after_actor_exit_finishes_run() {
       mem_mib: 256,
       driver: "linux-firecracker".into(),
       capture: "kernel".into(),
+      local_gateway: false,
     })),
   }))
   .await
@@ -534,6 +537,7 @@ async fn an_attach_waiting_before_terminal_ready_reaches_the_remote_terminal() {
       mem_mib: 256,
       driver: "linux-firecracker".into(),
       capture: "kernel".into(),
+      local_gateway: false,
     })),
   }))
   .await
@@ -633,6 +637,7 @@ async fn an_attach_waits_for_a_remote_actor_that_is_still_preparing() {
       mem_mib: 0,
       driver: String::new(),
       capture: String::new(),
+      local_gateway: false,
     })),
   }))
   .await
@@ -859,6 +864,7 @@ async fn run_stop_delivers_bridge_stop_before_closing_stream() {
       mem_mib: 256,
       driver: "linux-firecracker".into(),
       capture: "kernel".into(),
+      local_gateway: false,
     })),
   }))
   .await
@@ -976,6 +982,73 @@ commands:
   started.daemon.shutdown().await;
 }
 
+// The daemon's `--gateway-upstream` applies to the gateway the daemon runs,
+// here the shared TCP gateway an older runner proxies to.
+#[tokio::test]
+async fn the_daemon_s_gateway_upstream_carries_the_traffic_of_the_gateway_it_runs() {
+  let profile = "\
+actor:
+  driver: linux-firecracker
+  runner: actor-node
+  command: [sh, -c, 'echo hi']
+  network:
+    allow: [api.invalid]
+executors:
+  here:
+    driver: native
+commands:
+  - match: echo **
+    to: here
+";
+  let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+  let proxy = needy_core_actor::sidecar::gateway::testing::Socks5Server::start(target.local_addr().unwrap()).await;
+  let via = format!("socks5h://{}", proxy.address());
+  let started = testing::daemon_with(|config| {
+    config.kvm = config.state_dir.join("nonexistent-kvm");
+    config.gateway_upstream = Some(via.clone());
+  })
+  .await;
+  let bound = started.daemon.server(None).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+  let Listen::Tcp(addr) = &bound.addresses()[0] else {
+    unreachable!();
+  };
+  let addr = addr.clone();
+  let stop = CancellationToken::new();
+  let server_task = tokio::spawn(bound.serve(stop.clone()));
+  let actor_runner = connect_actor_runner(&started.daemon, &addr, "actor-node").await;
+  let created = started.daemon.create(new_run(profile, started.dir.path())).await.unwrap();
+  let bound_gw = started.daemon.bind_gateway_tcp("127.0.0.1:0").await.unwrap();
+  let gw_addr = bound_gw.local_addr().unwrap();
+  let gw_stop = CancellationToken::new();
+  tokio::spawn(bound_gw.serve(gw_stop.clone()));
+
+  let mut conn = tokio::net::TcpStream::connect(gw_addr).await.unwrap();
+  conn
+    .write_all(
+      format!(
+        "{}{} {}\nCONNECT api.invalid:443 HTTP/1.1\r\nHost: api.invalid:443\r\n\r\n",
+        crate::gateway_tcp::PREAMBLE_PREFIX,
+        actor_runner.credential,
+        created.id
+      )
+      .as_bytes(),
+    )
+    .await
+    .unwrap();
+  let mut buf = [0u8; 512];
+  let n = tokio::time::timeout(Duration::from_secs(2), conn.read(&mut buf)).await.expect("gateway response").unwrap();
+  let resp = String::from_utf8_lossy(&buf[..n]);
+
+  assert!(resp.starts_with("HTTP/1.1 200 "), "{resp}");
+  let targets: Vec<String> = proxy.seen().into_iter().map(|seen| seen.target).collect();
+  assert_eq!(targets, ["api.invalid:443"]);
+
+  gw_stop.cancel();
+  stop.cancel();
+  let _ = server_task.await;
+  started.daemon.shutdown().await;
+}
+
 #[tokio::test]
 async fn ephemeral_runner_exits_cleanly_after_completing_a_single_run() {
   let started = testing::daemon_with(|config| {
@@ -1033,6 +1106,7 @@ async fn ephemeral_runner_exits_cleanly_after_completing_a_single_run() {
           guest_needy: Some(runner_dir.join("no-guest")),
           kvm: runner_dir.join("no-kvm"),
           work_dir: Some(runner_dir.join("work")),
+          gateway_upstream: Default::default(),
         }),
       };
       crate::runner::Runner::start(cfg).await.unwrap().serve(runner_stop).await
@@ -1063,4 +1137,238 @@ actor:
   stop.cancel();
   let _ = server_task.await;
   started.daemon.shutdown().await;
+}
+
+/// A remote run whose actor runner attached a bridge on a daemon that
+/// blocks `198.51.100.0/24`, the runner saying whether it runs the actor's
+/// gateway itself: the daemon, its served address, the run, the bridge's
+/// inbound sender and the `BridgeAttached` it answered.
+struct Attached {
+  started: testing::Started,
+  stop: CancellationToken,
+  server: tokio::task::JoinHandle<Result<(), needy_api_server::server::Error>>,
+  runner: ConnectedActorRunner,
+  run: String,
+  tx: mpsc::Sender<Result<BridgeRequest, tonic::Status>>,
+  attached: needy_api_client::proto::v1::BridgeAttached,
+  _out: needy_api_server::control::ToRunner<needy_api_client::proto::v1::BridgeResponse>,
+}
+
+async fn attach_remote_run(local_gateway: bool) -> Attached {
+  let started = testing::daemon_with(|config| {
+    config.kvm = config.state_dir.join("nonexistent-kvm");
+    config.gateway_blocked_cidrs = vec!["198.51.100.0/24".into()];
+  })
+  .await;
+  let bound = started.daemon.server(None).bind(&[Listen::Tcp("127.0.0.1:0".into())]).await.unwrap();
+  let Listen::Tcp(addr) = &bound.addresses()[0] else {
+    unreachable!();
+  };
+  let addr = addr.clone();
+  let stop = CancellationToken::new();
+  let server = tokio::spawn(bound.serve(stop.clone()));
+  let runner = connect_actor_runner(&started.daemon, &addr, "actor-node").await;
+  let created = started.daemon.create(new_run(REMOTE_PROFILE, started.dir.path())).await.unwrap();
+  let (tx, rx) = mpsc::channel(16);
+  tx.send(Ok(BridgeRequest {
+    payload: Some(bridge_request::Payload::Attach(BridgeAttach {
+      local_gateway,
+      ..Default::default()
+    })),
+  }))
+  .await
+  .unwrap();
+  let mut out = started.daemon.bridge(&created.id, Box::pin(ReceiverStream::new(rx))).await.unwrap();
+  let Some(bridge_response::Payload::Attached(attached)) = out.next().await.unwrap().payload else {
+    panic!("the bridge did not answer attach with attached");
+  };
+  Attached {
+    started,
+    stop,
+    server,
+    runner,
+    run: created.id,
+    tx,
+    attached,
+    _out: out,
+  }
+}
+
+impl Attached {
+  /// What the daemon's shared gateway listener answers the runner's
+  /// proxied `request` for the run: empty when it closes the connection.
+  async fn through_daemon_gateway(&self, request: &str) -> String {
+    let bound = self.started.daemon.bind_gateway_tcp("127.0.0.1:0").await.unwrap();
+    let address = bound.local_addr().unwrap();
+    let stop = CancellationToken::new();
+    tokio::spawn(bound.serve(stop.clone()));
+    let mut conn = tokio::net::TcpStream::connect(address).await.unwrap();
+    conn
+      .write_all(format!("{}{} {}\n{request}", crate::gateway_tcp::PREAMBLE_PREFIX, self.runner.credential, self.run).as_bytes())
+      .await
+      .unwrap();
+    let mut buf = [0u8; 512];
+    let n = tokio::time::timeout(Duration::from_secs(2), conn.read(&mut buf)).await.expect("gateway answer").unwrap_or(0);
+    stop.cancel();
+    String::from_utf8_lossy(&buf[..n]).into_owned()
+  }
+
+  async fn events(&self) -> Vec<needy_core::event::Recorded> {
+    let run = self.started.daemon.runs.find(&self.run).unwrap();
+    run.trace.flush().await;
+    let trace = needy_trace::sink::sqlite::load(&self.started.dir.path().join("state/trace.db"), &self.run).await.unwrap();
+    trace
+      .events
+      .iter()
+      .map(|e| needy_core::event::Recorded {
+        time_ms: e.time_ms,
+        event: needy_core::event::Event::decode(&e.kind, e.version, e.payload.get()).unwrap(),
+      })
+      .collect()
+  }
+
+  async fn end(self) {
+    Runs::stop(&self.started.daemon, &self.run, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now)
+      .await
+      .unwrap();
+    drop(self.tx);
+    self.stop.cancel();
+    let _ = self.server.await;
+    self.started.daemon.shutdown().await;
+  }
+}
+
+fn gateway_events(events: Vec<needy_api_client::proto::v1::TraceEvent>) -> BridgeRequest {
+  BridgeRequest {
+    payload: Some(bridge_request::Payload::Events(needy_api_client::proto::v1::BridgeEvents { events })),
+  }
+}
+
+fn pushed(time_ms: i64, event: &needy_core::event::Event) -> needy_api_client::proto::v1::TraceEvent {
+  needy_api_client::proto::v1::TraceEvent {
+    time_ms,
+    kind: event.kind().as_str().into(),
+    payload: event.payload(),
+    version: needy_core::event::SCHEMA_VERSION,
+  }
+}
+
+#[tokio::test]
+async fn a_runner_that_runs_the_gateway_gets_the_policy_and_its_events_and_activity_reach_the_run() {
+  use needy_core::event::{ActorVmExit, Event, NetDeny};
+  let attached = attach_remote_run(true).await;
+  let run = attached.started.daemon.runs.find(&attached.run).unwrap();
+
+  // The runner is told it runs the gateway, with the daemon's blocked
+  // CIDRs and the run's creation for the faults' windows.
+  assert!(attached.attached.local_gateway);
+  assert_eq!(attached.attached.gateway_blocked_cidrs, ["198.51.100.0/24"]);
+  assert_eq!(attached.attached.created_ms, run.created_ms);
+  // The daemon's own gateway for the run is closed: a connection the old
+  // way reaches no gateway.
+  assert!(run.gateway().is_none());
+  let refused = attached.through_daemon_gateway("GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n").await;
+  assert_eq!(refused, "", "the daemon must not serve the gateway of a run whose runner runs it");
+
+  // The gateway's events are recorded at their time; anything a gateway
+  // does not record is not.
+  let deny = Event::NetDeny(NetDeny {
+    network: needy_core::types::Network::Actor,
+    host: "denied.example.com".into(),
+    path: Some("/".into()),
+  });
+  let forged = Event::ActorVmExit(ActorVmExit {
+    code: Some(0),
+    signal: None,
+    error: None,
+  });
+  attached.tx.send(Ok(gateway_events(vec![pushed(1_234, &deny), pushed(1_235, &forged)]))).await.unwrap();
+  let mut events = Vec::new();
+  for _ in 0..100 {
+    events = attached.events().await;
+    if events.iter().any(|e| e.event == deny) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  let recorded = events.iter().find(|e| e.event == deny).expect("the gateway's net.deny is in the run's trace");
+  assert_eq!(recorded.time_ms, 1_234);
+  assert!(!events.iter().any(|e| e.event == forged), "a runner must not write the run's lifecycle: {events:?}");
+
+  // The gateway's activity keeps the run active.
+  tokio::time::sleep(Duration::from_millis(15)).await;
+  let before = run.last_activity_ms();
+  attached
+    .tx
+    .send(Ok(BridgeRequest {
+      payload: Some(bridge_request::Payload::Activity(needy_api_client::proto::v1::BridgeActivity {})),
+    }))
+    .await
+    .unwrap();
+  for _ in 0..100 {
+    if run.last_activity_ms() > before {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+  assert!(run.last_activity_ms() > before, "BridgeActivity did not advance last_activity_ms");
+
+  // A network fault added or removed now would not reach the runner's
+  // gateway: refused, not silently ignored. Other faults still apply.
+  let refused = Runs::add_fault(
+    &attached.started.daemon,
+    &attached.run,
+    "down",
+    "{ net: { connect: example.com }, refuse: true }",
+    needy_core::types::Principal::Operator,
+  )
+  .await
+  .unwrap_err();
+  assert!(matches!(refused, ControlError::Failed(_)), "{refused:?}");
+  assert!(refused.to_string().contains("runs on its actor runner"), "{refused}");
+  Runs::add_fault(&attached.started.daemon, &attached.run, "fail", "{ exec: 'echo **', exit: 3 }", needy_core::types::Principal::Operator)
+    .await
+    .unwrap();
+  attached.end().await;
+}
+
+#[tokio::test]
+async fn an_older_runner_without_a_gateway_of_its_own_keeps_the_daemon_s_gateway() {
+  use needy_core::event::{Event, NetDeny};
+  let attached = attach_remote_run(false).await;
+  let run = attached.started.daemon.runs.find(&attached.run).unwrap();
+
+  assert!(!attached.attached.local_gateway, "the daemon must not tell an older runner to run a gateway it lacks");
+  assert!(run.gateway().is_some());
+  // The daemon enforces the allowlist, as before S1.
+  let denied = attached
+    .through_daemon_gateway("GET http://denied.example.com/ HTTP/1.1\r\nHost: denied.example.com\r\nConnection: close\r\n\r\n")
+    .await;
+  assert!(denied.starts_with("HTTP/1.1 403 "), "{denied}");
+
+  // Gateway events from the runner are not taken: the daemon records its
+  // own, and would otherwise count a request twice.
+  let forwarded = Event::NetDeny(NetDeny {
+    network: needy_core::types::Network::Actor,
+    host: "forwarded.example.com".into(),
+    path: None,
+  });
+  attached.tx.send(Ok(gateway_events(vec![pushed(1_234, &forwarded)]))).await.unwrap();
+  tokio::time::sleep(Duration::from_millis(100)).await;
+  let events = attached.events().await;
+  assert!(events.iter().any(|e| matches!(&e.event, Event::NetDeny(d) if d.host == "denied.example.com")), "{events:?}");
+  assert!(!events.iter().any(|e| e.event == forwarded), "{events:?}");
+
+  // Network faults apply where the daemon's gateway runs.
+  Runs::add_fault(
+    &attached.started.daemon,
+    &attached.run,
+    "down",
+    "{ net: { connect: example.com }, refuse: true }",
+    needy_core::types::Principal::Operator,
+  )
+  .await
+  .unwrap();
+  Runs::remove_fault(&attached.started.daemon, &attached.run, "down", needy_core::types::Principal::Operator).await.unwrap();
+  attached.end().await;
 }

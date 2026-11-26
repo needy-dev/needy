@@ -54,18 +54,27 @@ flowchart LR
   RC -->|"gRPC: Mint/RevokeRunnerCredential,\nCreateRun/GetRun/StopRun"| D
   RC -->|"creates"| AP
   RC -->|"adds services entry"| WS
-  AP -->|"outbound: control stream, bridge,\ngateway preamble"| D
+  AP -->|"outbound: control stream, bridge\n(gateway events, activity)"| D
   WS -->|"outbound: control + task streams"| D
-  D -->|"allowed HTTPS egress\n(actor.network.allow)"| NET["internet / product server"]
+  AP -->|"allowed HTTPS egress\n(actor.network.allow), from S1"| NET["internet / product server"]
 ```
 
 Every connection is outbound from a runner to the daemon; runners never
 listen (`crates/daemon/src/runner.rs`, module comment). The actor VM has no
-network interface; its HTTP and HTTPS go through the runner's vsock proxy to
-the daemon's gateway, which applies `actor.network`
-(`crates/daemon/src/actor_runner.rs:1-12`, `crates/daemon/src/gateway_tcp.rs:1-19`).
-The actor's egress therefore leaves from the **daemon's** Pod, not the actor
-Pod.
+network interface; its HTTP and HTTPS go through its gateway, which applies
+`actor.network`.
+
+- **From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26): both the daemon and the runner are S1 builds, so the
+  runner runs the gateway in the actor Pod, under the policy the daemon
+  sends on the bridge (the profile, `--gateway-block-cidr`, the run's
+  creation time for fault windows), and sends what the gateway records back
+  to the run's trace. The actor's egress leaves from the **actor Pod**.
+- Before S1, or when either side is older: the runner proxies the VM's
+  gateway channel to the daemon's gateway (`--gateway-listen`, preamble
+  `NEEDY-GATEWAY`; `crates/daemon/src/gateway_tcp.rs:1-19`), and the
+  actor's egress leaves from the **daemon's** Pod. The diagram's arrow from
+  the actor Pod to the internet then runs from the daemon instead, and the
+  actor Pod also dials the daemon's 7401.
 
 ## 2. The `needy-daemon` Deployment
 
@@ -76,8 +85,8 @@ Pod.
 | Flag | Use on Kubernetes |
 | --- | --- |
 | `--listen tcp://0.0.0.0:7400` | The control API for `rc` and runners. Repeatable. The private management socket always exists as well. |
-| `--gateway-listen tcp://0.0.0.0:7401` | The shared, authenticated actor gateway for remote actor runners. Without it a remote actor has no network. |
-| `--gateway-block-cidr CIDR` | Repeatable. Blocks gateway egress to these ranges in addition to the defaults (loopback, link-local including `169.254.169.254`, ULA including `fd00:ec2::254`, unspecified; `crates/core-actor/src/sidecar/gateway/egress.rs:112-144`). Pass the cluster's pod, service and VPC ranges. |
+| `--gateway-listen tcp://0.0.0.0:7401` | The shared, authenticated actor gateway for remote actor runners. Without it a remote actor of a pre-S1 runner has no network. From S1 only older runners use it; keep it while any runner is older than the daemon. |
+| `--gateway-block-cidr CIDR` | Repeatable. Blocks gateway egress to these ranges in addition to the defaults (loopback, link-local including `169.254.169.254`, ULA including `fd00:ec2::254`, unspecified; `crates/core-actor/src/sidecar/gateway/egress.rs:112-144`). Pass the cluster's pod, service and VPC ranges. From S1 the daemon also sends these to the actor runners, which enforce them in the actor Pod; runners have no flag of their own. |
 | `--runners-file PATH` | Static runner credentials, hot-reloaded (section 4). |
 | `--disable-host-files` | Refuses every `host:` file mapping (copy-in, mirror-out, sync, host workspaces). Always set it: `host:` would be the daemon Pod's own filesystem. |
 | `--host-files-root DIR` | Alternative to the above: confines `host:` to one tree. |
@@ -489,8 +498,10 @@ needy runner serve \
 - `--roles actor` with no usable KVM makes the runner exit with an error at
   start ("an explicitly requested runner role is unavailable on this
   machine"), a quick signal of a scheduling or permission problem.
-- `--gateway` is the daemon's `--gateway-listen`. Without it the actor has
-  no network.
+- `--gateway` is the daemon's `--gateway-listen`. Before S1, without it the
+  actor has no network. **From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26), an S1 runner with an S1 daemon runs
+  the gateway itself and ignores `--gateway`; it is used only when the
+  daemon is older. Keep passing it while the daemon may be older.
 - `--actor-image DIR` defaults to `$NEEDY_DATA_DIR/images/linux-firecracker/base`.
 - `--work-dir DIR` holds `vm.json`, the vsock sockets and `console.log`; a
   temporary directory otherwise.
@@ -610,6 +621,50 @@ spec:
 Differences from the probes, not verified on a cluster: running as uid 1000
 from the first process (the probes set up as root, then `setpriv`), a
 static `supplementalGroups`, and `capabilities: { drop: [ALL] }`.
+
+### A per-actor upstream proxy (code, not released)
+
+**From the release after v0.0.18 (not released)**, with the runner running
+the gateway (S1), each actor can leave through a SOCKS5 proxy of its own
+([the runner gateway design](2026-11-26-runner-gateway-design.md), "Upstream
+proxy"). `rc` puts the proxy in the runner's arguments and its credentials
+in a Secret mounted at `/etc/needy/upstream`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata: { name: actor-7f3c2a-upstream, namespace: tenant-a }   # ownerReferences as above
+type: Opaque
+stringData: { credentials: "actor-7f3c2a:<password>" }            # USERNAME:PASSWORD, one line
+---
+# In the Pod above:
+      exec needy runner serve \
+        ... \
+        --gateway-upstream socks5h://proxy-7.example.com:1080 \
+        --gateway-upstream-credentials-file /etc/needy/upstream/credentials
+    volumeMounts:
+    - { name: upstream, mountPath: /etc/needy/upstream, readOnly: true }
+  volumes:
+  - name: upstream
+    secret: { secretName: actor-7f3c2a-upstream, defaultMode: 0440, items: [{ key: credentials, path: credentials }] }
+```
+
+- `socks5h://` sends names to the proxy unresolved (the Pod needs no DNS for
+  the actor's hosts); `socks5://` resolves in the runner and applies
+  `--gateway-block-cidr` before asking the proxy for the address. Port 1080
+  by default.
+- `defaultMode: 0440` with the Pod's `fsGroup` is required: the runner
+  refuses a credentials file other users can read, which includes
+  Kubernetes' default `0644`. Credentials in the URL are refused.
+- The file is read for every connection, so updating the Secret rotates the
+  credentials without restarting the Pod (after the kubelet's sync delay).
+- The upstream never falls back to direct: an unreachable or refusing proxy
+  gives the actor `502` and the run's trace a `net.error` with the reason.
+  Traced `net.request`, `net.connect` and `net.error` carry `via` (the
+  proxy's URL, no credentials).
+- `actor.network.services` are dialed directly, not through the proxy.
+- An upstream runner with an older daemon (one that keeps the gateway)
+  refuses to start the actor rather than let it leave from the daemon.
 
 ## 6. Creating and following a run
 
@@ -836,6 +891,100 @@ run by hand with `needy image build` and `--layer-registry`).
 
 ### Policies (proposal)
 
+**From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26): the actor gateway runs in the actor runner, so the actor's
+allowlisted egress leaves from the **actor Pod** (its egress IP is the actor
+Pod's, after the node's SNAT), and the allowlist is enforced in the actor
+Pod's runner process instead of the daemon's. Policies for S1 builds on
+both sides:
+
+- Actor Pods: egress to the daemon's 7400, to DNS, and to the internet
+  minus the cluster's pod, service and node/VPC ranges and
+  `169.254.169.254`, plus the in-cluster services the profiles name in
+  `actor.network.services`. 7401 is not needed. Keep passing the same
+  ranges to the daemon's `--gateway-block-cidr`: the runner enforces them
+  in-process, where a NetworkPolicy does not see loopback. No ingress.
+- The daemon: no internet egress for actors any more (keep what the layer
+  registry and image pulls need); ingress on 7400 as below.
+
+**With a per-actor upstream proxy** (from the release after v0.0.18, not
+released; section 5): the actor's internet traffic leaves through its
+proxy, so the actor Pod needs no internet egress at all:
+
+- Actor Pods: egress only to their proxy's address and port, to the
+  daemon's 7400, and to the in-cluster services the profiles name in
+  `actor.network.services` (dialed directly). DNS only if the proxy's or a
+  service's host is a name (with `socks5h` the actor's hosts are resolved
+  by the proxy, not in the Pod); with `socks5`, DNS too. No ingress.
+- With `socks5h` the runner cannot check the addresses the proxy reaches:
+  `--gateway-block-cidr` and the loopback and metadata blocks apply only
+  to IP literals the actor names. The proxy must refuse private, cluster
+  and metadata ranges (`169.254.169.254`) itself, and the NetworkPolicy
+  above keeps the Pod from reaching them directly.
+- The proxy sees each actor's destinations (names with `socks5h`); TLS is
+  tunnelled end to end as before.
+
+Manifests in the shapes the probe verified (see the
+[runner gateway evidence](2026-11-26-runner-gateway-design.md#evidence-probe-2026-11-26)).
+NetworkPolicy ports are the **Pod's** ports, not the Service's. Under a CNI
+with kube-proxy replacement, a ClusterIP may be rewritten to a node address
+before routing, so node ranges belong in every exclusion list.
+
+```yaml
+# S1: an actor Pod without an upstream.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: needy-actor-egress, namespace: tenant-a }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: needy-actor } }
+  policyTypes: [Ingress, Egress]
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [POD_CIDR, SERVICE_CIDR, NODE_CIDR, 169.254.169.254/32]  # also --gateway-block-cidr
+  - to: [{ podSelector: { matchLabels: { app: needy-daemon } } }]
+    ports: [{ protocol: TCP, port: 7400 }]
+  - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]       # each actor.network.services backend
+    ports: [{ protocol: TCP, port: 8080 }]
+  - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+           podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+    ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+# With a socks5h upstream: only the actor's proxy, the daemon and named
+# services. Give the runner the daemon and the proxy by address
+# (--address tcp://DAEMON_CLUSTER_IP:7400, socks5h://PROXY_IP:1080) and the
+# Pod needs no DNS at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: actor-7f3c2a-egress, namespace: tenant-a }
+spec:
+  podSelector: { matchLabels: { example.com/actor: actor-7f3c2a } }
+  policyTypes: [Ingress, Egress]
+  egress:
+  - to: [{ podSelector: { matchLabels: { app: proxy-7 } } }]
+    ports: [{ protocol: TCP, port: 1080 }]
+  - to: [{ podSelector: { matchLabels: { app: needy-daemon } } }]
+    ports: [{ protocol: TCP, port: 7400 }]
+  - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]
+    ports: [{ protocol: TCP, port: 8080 }]
+```
+
+**Workspace Pods through a proxy (probe, not needy).** Commands in a
+Workspace use the Pod's own network, so the gateway does not see them. A
+Mihomo TUN sidecar (a privileged native sidecar; `auto-route`,
+`auto-redirect`, `strict-route`, DNS hijack with fake-ip, sniffing,
+`route-exclude-address` with the pod, service **and node** ranges, private
+and link-local ranges rejected, DoH hosts and UDP rejected) sent a test
+domain through a SOCKS proxy while cluster DNS and Services stayed direct.
+It is not fail-closed on its own: when Mihomo was stopped, or its TUN
+device removed (Mihomo then keeps running without recovering), traffic went
+out directly. A NetworkPolicy backstop (egress only to the proxy, kube-dns,
+the daemon's 7400 and the cluster Services the Workspace uses) made every
+such round fail closed; also give the sidecar a liveness probe on its TUN
+link.
+
+Before S1, or while either side is older:
+
 - Actor Pods: egress only to the daemon's 7400 and 7401 and to DNS. If needy
   or the base image is downloaded at start, that source must be allowed too,
   which is the reason to bake them in or serve them in-cluster (section 5).
@@ -901,6 +1050,7 @@ client, the daemon image and the runner image to one needy release.
 | `actor-base`/`executor-base` published; root identity is the base's stack digest | B-1 #110, B-2 #111, merged after v0.0.17; first in the next release |
 | Layer registry, standard registry auth and TLS | B-3 #112, merged |
 | `actor.image: <OCI ref>` imported above the base | B-4, not started |
+| S1: the actor gateway in the actor runner ([design](2026-11-26-runner-gateway-design.md)) | `feat/runner-gateway`, not merged; network `needy chaos add`/`rm` on such runs is refused |
 | `needy image build --push`, runners pulling from the import | B-5, not started |
 | macOS drivers | Not relevant to the cluster |
 | User-device executors | Need a cluster gRPC ingress (D7), unowned |

@@ -8,6 +8,13 @@
 //! (or the bridge stream drops unexpectedly), the daemon runs the same
 //! completion path as `actor::watch` (`ActorVmExit`, `mirror_out`, executor
 //! release, token revocation, and terminal `RunState`).
+//!
+//! A runner that runs the actor's gateway itself (`BridgeAttach.local_gateway`)
+//! is told the policy it enforces in `BridgeAttached` and sends what its
+//! gateway records (`BridgeEvents`) and its network activity
+//! (`BridgeActivity`) back on the bridge; the daemon then serves no gateway
+//! for the run. See
+//! `docs/ai/references/architecture/2026-11-26-runner-gateway-design.md`.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,15 +23,16 @@ use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use needy_api_client::proto::v1::{
-  BridgeAttach, BridgeAttached, BridgeExecTask, BridgeExit, BridgeRequest, BridgeResponse, BridgeStarted, BridgeStop, BridgeTaskResult,
-  BridgeTerminalTask, ExecEnded, ExecRequest, ExecResponse, KillProcessRequest, ListProcessesRequest, ListProcessesResponse,
-  TerminalTaskRequest, TerminalTaskResponse, bridge_request, bridge_response, bridge_task_result, bridge_terminal_task, exec_response,
-  terminal_task_request,
+  BridgeAttach, BridgeAttached, BridgeEvents, BridgeExecTask, BridgeExit, BridgeRequest, BridgeResponse, BridgeStarted, BridgeStop,
+  BridgeTaskResult, BridgeTerminalTask, ExecEnded, ExecRequest, ExecResponse, KillProcessRequest, ListProcessesRequest,
+  ListProcessesResponse, TerminalTaskRequest, TerminalTaskResponse, bridge_request, bridge_response, bridge_task_result,
+  bridge_terminal_task, exec_response, terminal_task_request,
 };
 use needy_api_client::{Executor, Responses};
 use needy_api_server::control::{ControlError, FromRunner, ToRunner};
 use needy_common::sync::lock;
 use needy_common::time::now_ms;
+use needy_config::profile::FaultDomain;
 use needy_core::event::{ActorReady, ActorStart, ActorVmExit, Event};
 use needy_core::types::{ActorState, Capture, RunState};
 use needy_core_actor::driver;
@@ -35,7 +43,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
 use crate::pool::Instance;
-use crate::run::Run;
+use crate::run::{GatewaySite, Run};
 use crate::store::{self, InstanceKind, InstanceRecord, InstanceState};
 use crate::{Daemon, actor};
 
@@ -359,6 +367,18 @@ impl Daemon {
       Some(recipe) => serde_json::to_string(recipe).map_err(|e| ControlError::Internal(format!("cannot serialize recipe: {e}")))?,
       None => String::new(),
     };
+    // A runner that can run the gateway runs it; this daemon's, registered
+    // when the run was placed, closes, so one gateway enforces the run's
+    // network. An older runner proxies to this daemon's.
+    let site = if attach.local_gateway {
+      GatewaySite::Runner
+    } else {
+      GatewaySite::Control
+    };
+    *lock(&run.remote_gateway) = Some(site);
+    if site == GatewaySite::Runner {
+      run.close_gateway();
+    }
     // The run's snapshot as `image::prepare_remote` planned it; the runner
     // fetches its layers with `GuestService.FetchLayer`.
     let boot = run.boot();
@@ -370,6 +390,9 @@ impl Daemon {
         tty: run.tty.is_some(),
         layers: boot.snapshot.map(|snapshot| snapshot.layers.iter().map(ToString::to_string).collect()).unwrap_or_default(),
         root: boot.root.map(|root| root.to_string()).unwrap_or_default(),
+        local_gateway: site == GatewaySite::Runner,
+        gateway_blocked_cidrs: self.gateway_blocked_cidrs.iter().map(ToString::to_string).collect(),
+        created_ms: run.created_ms,
       })),
     };
     if tx.send(attached).await.is_err() {
@@ -385,6 +408,7 @@ impl Daemon {
       mem_mib,
       driver: attach_driver,
       capture: attach_capture,
+      local_gateway: _,
     } = attach;
     if pid > 0 || !attach_driver.is_empty() {
       record_actor_start(
@@ -565,6 +589,16 @@ async fn drive_bridge(
         run.remote_layers.send_replace(Some(prepared.layer_disks));
       }
       Some(Ok(BridgeRequest {
+        payload: Some(bridge_request::Payload::Events(BridgeEvents { events })),
+      })) => record_gateway_events(&run, events),
+      Some(Ok(BridgeRequest {
+        payload: Some(bridge_request::Payload::Activity(_)),
+      })) => {
+        // The runner's gateway saw a request: the run is active, as a
+        // request through this daemon's gateway makes it.
+        run.touch_activity();
+      }
+      Some(Ok(BridgeRequest {
         payload: Some(bridge_request::Payload::Exit(exit)),
       })) => {
         run.touch_activity();
@@ -640,6 +674,40 @@ async fn drive_bridge(
   }
   daemon.finish_run(&run).await;
   run.trace.flush().await;
+}
+
+/// Records in `run`'s trace the events its runner's gateway recorded, at
+/// their times. Their sequence numbers are the order they arrive in, among
+/// the run's other events: the bridge keeps the gateway's order, but an
+/// event of the daemon's own may land between two of them while they were
+/// on their way. Only what a gateway records is taken: the `net.*` events,
+/// network `fault.injected`, and the runner's `trace.gap` for events its
+/// queue dropped; anything else, or a version this daemon does not read, is
+/// dropped with a warning, so a runner cannot write the run's lifecycle.
+fn record_gateway_events(run: &Run, events: Vec<needy_api_client::proto::v1::TraceEvent>) {
+  if run.remote_gateway() != Some(GatewaySite::Runner) {
+    tracing::warn!("run {}: the actor runner sent gateway events, but the daemon runs the run's gateway; dropped", run.id);
+    return;
+  }
+  for pushed in events {
+    let event = match Event::decode(&pushed.kind, pushed.version, &pushed.payload) {
+      Ok(event) => event,
+      Err(e) => {
+        tracing::warn!("run {}: dropped the runner's gateway event {}: {e}", run.id, pushed.kind);
+        continue;
+      }
+    };
+    let from_gateway = match &event {
+      Event::NetRequest(_) | Event::NetConnect(_) | Event::NetDeny(_) | Event::NetError(_) | Event::TraceGap(_) => true,
+      Event::FaultInjected(fired) => fired.domain == FaultDomain::Net,
+      _ => false,
+    };
+    if !from_gateway {
+      tracing::warn!("run {}: dropped {}, which an actor's gateway does not record", run.id, pushed.kind);
+      continue;
+    }
+    run.trace.emit_at(pushed.time_ms, event.kind().as_str(), event.raw());
+  }
 }
 
 #[cfg(test)]
