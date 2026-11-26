@@ -172,3 +172,55 @@ commands:
   assert_eq!(route.argv, ["python3".to_string(), format!("{home}/checkout/a.py")]);
   assert_eq!(route.cwd, format!("{home}/checkout/sub"));
 }
+
+// ROOT CAUSE:
+//
+// If an executor's path map held both `~` and the workspace's longer entry
+// (the default workspace adds `~/workspace`), routing applied every entry in
+// key order, so `~` rewrote a path in the workspace first and the
+// workspace's own entry then matched nothing.
+//
+// Before the fix, a command in the actor's `~/workspace` ran in
+// `<executor home>/workspace`, which does not exist on the executor, and
+// failed to start (seen in the e2e routing cells, v0.0.19).
+// The fix maps each path once, through the longest key that is a prefix of
+// it at a component boundary.
+#[tokio::test]
+async fn a_workspace_entry_wins_over_a_shorter_home_entry_in_the_path_map() {
+  const HOME: &str = r#"
+actor:
+  driver: linux-firecracker
+  workspace: { path: ~/workspace, from: "executor:here:/srv/ws", writable: true }
+user: { name: dev, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native, path_map: { "~": /srv/home } }
+commands:
+  - { match: "python3 **", to: here }
+"#;
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(HOME, started.dir.path())).await.unwrap();
+  let asked = ctx(&["python3", "/home/dev/workspace/a.py", "/home/dev/.config/x"], "/home/dev/workspace/sub");
+  let route = Runs::decide(&started.daemon, &created.id, asked).await.unwrap();
+  assert_eq!(route.target, Target::Executor("here".into()));
+  assert_eq!(route.argv, ["python3", "/srv/ws/a.py", "/srv/home/.config/x"]);
+  assert_eq!(route.cwd, "/srv/ws/sub");
+}
+
+// A path is rewritten once: a mapped value is not mapped again by another
+// entry whose key it happens to start with.
+#[tokio::test]
+async fn a_mapped_path_is_not_mapped_again_by_another_entry() {
+  const CHAIN: &str = r#"
+actor: { driver: linux-firecracker }
+user: { name: dev, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native, path_map: { /a: /b, /b: /c } }
+commands:
+  - { match: "python3 **", to: here }
+"#;
+  let started = testing::daemon().await;
+  let created = Runs::create(&started.daemon, new_run(CHAIN, started.dir.path())).await.unwrap();
+  let route = Runs::decide(&started.daemon, &created.id, ctx(&["python3", "/a/x.py"], "/a")).await.unwrap();
+  assert_eq!(route.argv, ["python3", "/b/x.py"]);
+  assert_eq!(route.cwd, "/b");
+}

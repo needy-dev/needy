@@ -186,10 +186,8 @@ fn executor_command(instance: Option<&Instance>, decision: &Decision) -> Executo
   let mut cwd = decision.cwd.clone();
   let mut search_path_if_missing = false;
   if let Some(instance) = instance {
-    for (from, to) in &instance.path_map {
-      cwd = map_prefix(&cwd, from, to);
-      argv = argv.iter().map(|a| map_prefix(a, from, to)).collect();
-    }
+    cwd = map_path(&instance.path_map, &cwd);
+    argv = argv.iter().map(|a| map_path(&instance.path_map, a)).collect();
     search_path_if_missing = match (argv.first(), decision.argv.first()) {
       (Some(program), Some(asked)) => program == asked && program.starts_with('/'),
       _ => false,
@@ -216,16 +214,26 @@ pub(crate) fn unmapped(instance: &Instance, cwd: &str) -> bool {
   !cwd.is_empty() && !instance.path_map.values().any(within)
 }
 
-/// `value` with the path prefix `from` replaced by `to`; a path is mapped
-/// only at a component boundary.
-fn map_prefix(value: &str, from: &str, to: &str) -> String {
+/// `value` through `path_map`, once, by the longest key that is a prefix of
+/// it at a component boundary, so the workspace's entry (`~/workspace`) wins
+/// over a shorter one such as `~` for the paths in the workspace. A value no
+/// key matches is kept.
+fn map_path(path_map: &BTreeMap<String, String>, value: &str) -> String {
+  path_map
+    .iter()
+    .filter_map(|(from, to)| map_prefix(value, from, to).map(|mapped| (from.trim_end_matches('/').len(), mapped)))
+    .max_by_key(|(len, _)| *len)
+    .map_or_else(|| value.to_string(), |(_, mapped)| mapped)
+}
+
+/// `value` with the path prefix `from` replaced by `to`, or `None` when
+/// `from` is not a prefix of it; a path is mapped only at a component
+/// boundary.
+fn map_prefix(value: &str, from: &str, to: &str) -> Option<String> {
   if value == from {
-    return to.to_string();
+    return Some(to.to_string());
   }
-  match value.strip_prefix(&format!("{}/", from.trim_end_matches('/'))) {
-    Some(rest) => format!("{}/{rest}", to.trim_end_matches('/')),
-    None => value.to_string(),
-  }
+  value.strip_prefix(&format!("{}/", from.trim_end_matches('/'))).map(|rest| format!("{}/{rest}", to.trim_end_matches('/')))
 }
 
 #[cfg(test)]

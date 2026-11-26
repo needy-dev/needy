@@ -836,7 +836,9 @@ A prefix mapping from actor paths to executor paths, for executors whose
 workspace lives elsewhere, such as a Mac. `actor.workspace` adds the entry
 for the workspace; `path_map` holds the others. A key is an actor path (`~`
 is the profile user's home there); a value is a path on the executor (`~` is
-that executor's home).
+that executor's home). A path is mapped once, by the longest key that is a
+prefix of it at a component boundary, so the workspace's entry wins over a
+shorter one such as `~` for the paths in the workspace.
 
 ## Files and networks
 

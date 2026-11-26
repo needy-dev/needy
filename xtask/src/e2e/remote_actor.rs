@@ -300,7 +300,9 @@ exit 0"#
   );
   let mut actor_block = super::scenarios::actor(&env.ctx.host.image_names, cell, &script);
   actor_block["runner"] = json!({ "labels": ["role=actor-e2e"] });
-  actor_block["workspace"] = json!({ "from": format!("executor:{EXECUTOR_NAME}:{}", ws.display()) });
+  // `ws-write` below writes into the workspace, so it is writable.
+  actor_block["workspace"] =
+    json!({ "path": "~/workspace", "from": format!("executor:{EXECUTOR_NAME}:{}", ws.display()), "writable": true });
   actor_block["network"] = json!({ "allow": ["example.com"] });
   actor_block["image"] = json!("./remote-image.yaml");
   let profile = env.profile(&json!({

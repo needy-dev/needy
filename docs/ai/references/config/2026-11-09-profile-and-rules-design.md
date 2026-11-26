@@ -581,7 +581,11 @@ the program of the same name from its own `PATH`. When neither exists, the
 error names the original path. A `path_map` key is an actor path: a leading
 `~` in it is the profile user's home, as on a file mapping's actor side; a
 value is a path on the executor's machine, and a leading `~` in it is that
-executor's home (see [Home directories](#home-directories-)). A command placed with `--executor`, or run
+executor's home (see [Home directories](#home-directories-)). Each path
+(`argv` entries and the working directory) is mapped once, by the longest key
+that is a prefix of it at a component boundary: the workspace's entry wins
+over `~` for the paths in the workspace, and a mapped path is not mapped
+again by another entry. A command placed with `--executor`, or run
 without a run, is never rewritten and gets no `PATH` fallback.
 
 ### Composition
