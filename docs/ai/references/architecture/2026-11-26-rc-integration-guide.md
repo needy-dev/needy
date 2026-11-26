@@ -899,6 +899,10 @@ run by hand with `needy image build` and `--layer-registry`).
 
 ### Policies (proposal)
 
+`rc` applies these only when enabled (`--needy-network-policies`); a
+cluster without them still runs, with the daemon and the gateway's
+`--gateway-block-cidr` as the only egress checks.
+
 **From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26): the actor gateway runs in the actor runner, so the actor's
 allowlisted egress leaves from the **actor Pod** (its egress IP is the actor
 Pod's, after the node's SNAT), and the allowlist is enforced in the actor
@@ -1162,10 +1166,14 @@ client, the daemon image and the runner image to one needy release.
       `/dev/kvm` gid.
 - [ ] Per namespace: `needy-daemon` Deployment (`Recreate`), PVC for
       `NEEDY_STATE_DIR`, Service (7400, 7401), `needy-runners` Secret mounted
-      as a directory, NetworkPolicies.
+      as a directory.
+- [ ] Optional, opt-in (`rc` applies them with `--needy-network-policies`):
+      the actor, daemon and Workspace NetworkPolicies of section 8, and a
+      managed upstream behind `spec.upstream` (implementation-agnostic;
+      Mihomo is the first provider, `--needy-upstream-provider=mihomo`).
 - [ ] Bootstrap an admin client once per daemon (section 3) and keep its
-      token in a controller-only Secret; switch to `--clients-file` when
-      v0.0.18 is out.
+      token in a controller-only Secret, or provision it with
+      `--clients-file` (v0.0.18 and later).
 - [ ] Upgrade the controller before anyone sets `Workspace` `spec.needy`:
       an older controller's typed `Update` drops the field.
 - [ ] Generate a Go client from the pinned needy tag (section 9).
