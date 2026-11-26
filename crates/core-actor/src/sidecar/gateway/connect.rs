@@ -19,6 +19,7 @@ use hyper_util::rt::TokioIo;
 use needy_core::event::{Event, NetConnect, NetDeny, NetError};
 
 use super::egress::{EgressError, strip_brackets};
+use super::upstream::Upstream;
 use super::{Body, Gateway, Reset, text};
 
 impl Gateway {
@@ -32,15 +33,17 @@ impl Gateway {
     if let Some(refusal) = Self::refusal(&decision, &host) {
       return refusal;
     }
-    let (upstream_host, upstream_port, egress_policy) = match self.policy.service(&host) {
-      None => (host.clone(), port, Some(self.egress.as_ref())),
+    // A service's URL is dialed directly, as `Gateway::with_options` says.
+    let (upstream_host, upstream_port, egress_policy, dial) = match self.policy.service(&host) {
+      None => (host.clone(), port, Some(self.egress.as_ref()), &self.upstream),
       Some(url) => match service_authority(url) {
-        Some((svc_host, svc_port)) => (svc_host, svc_port, None),
+        Some((svc_host, svc_port)) => (svc_host, svc_port, None, &Upstream::Direct),
         None => return Ok(text(StatusCode::BAD_GATEWAY, "needy: the service's URL is not plain http://host[:port]")),
       },
     };
+    let via = dial.via();
     let started = std::time::Instant::now();
-    let connected = self.upstream.connect(&upstream_host, upstream_port, egress_policy).await;
+    let connected = dial.connect(&upstream_host, upstream_port, egress_policy).await;
     self.trace.time("net.connect", started.elapsed());
     let mut upstream = match connected {
       Ok(stream) => stream,
@@ -60,6 +63,7 @@ impl Gateway {
           host,
           path: None,
           error: e.to_string(),
+          via,
         }));
         return Ok(text(StatusCode::BAD_GATEWAY, &message));
       }
@@ -68,6 +72,7 @@ impl Gateway {
       network: self.network,
       host,
       authority: authority.clone(),
+      via,
     }));
     let cancel = self.cancel.clone();
     self.tasks.spawn(async move {

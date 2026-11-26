@@ -18,6 +18,7 @@ use needy_api_server::Listen;
 use needy_api_server::control::{Guest, MintRunnerCredential, Runners, Runs, StopMode};
 use needy_core::types::{Capabilities, Principal, RunState, RunnerRole};
 use needy_core_actor::image::store::Digest;
+use needy_core_actor::sidecar::gateway::Upstream;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
@@ -105,6 +106,16 @@ impl Control {
 /// base VM image in `dir` has `rootfs` as its root file system, and whose
 /// stand-in Firecracker runs until its run stops it.
 async fn start_runner(control: &Control, dir: &Path, rootfs: &str) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+  start_runner_with(control, dir, rootfs, Upstream::Direct).await
+}
+
+/// [`start_runner`], with the runner's `--gateway-upstream`.
+async fn start_runner_with(
+  control: &Control,
+  dir: &Path,
+  rootfs: &str,
+  gateway_upstream: Upstream,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
   let minted = Runners::mint_credential(
     control.daemon(),
     MintRunnerCredential {
@@ -145,6 +156,7 @@ async fn start_runner(control: &Control, dir: &Path, rootfs: &str) -> tokio::tas
       guest_needy: Some(guest),
       kvm,
       work_dir: Some(dir.join("work")),
+      gateway_upstream,
     }),
   };
   let stop = control.stop.clone();
@@ -681,7 +693,7 @@ chaos:
   let (bridge, mut sent) = mpsc::channel(64);
   let tasks = tokio_util::task::TaskTracker::new();
   let stop = CancellationToken::new();
-  let trace = super::serve_gateway(&socket, &profile, &attached, bridge, &tasks, stop.clone()).unwrap();
+  let trace = super::serve_gateway(&socket, &profile, &attached, &Upstream::Direct, bridge, &tasks, stop.clone()).unwrap();
 
   let late = through_gateway(&socket, "CONNECT late.invalid:443 HTTP/1.1\r\nHost: late.invalid:443\r\n\r\n").await;
   assert!(late.starts_with("HTTP/1.1 502 "), "{late}");
@@ -720,6 +732,59 @@ chaos:
   drop(trace);
   tasks.close();
   tokio::time::timeout(Duration::from_secs(5), tasks.wait()).await.unwrap();
+}
+
+#[tokio::test]
+async fn the_runner_s_gateway_upstream_carries_the_actor_s_traffic_but_not_its_services() {
+  use needy_core::event::Event;
+  use needy_core_actor::sidecar::gateway::testing::Socks5Server;
+  let upstream = serve_ok().await;
+  // The proxy reaches the test server whatever name it is asked for;
+  // `api.invalid` resolves nowhere, so only the proxy can have reached it.
+  let proxy = Socks5Server::start(upstream).await;
+  let via = format!("socks5h://{}", proxy.address());
+  let control = Control::start(|_| {}).await;
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner_with(&control, runner_dir.path(), "", Upstream::socks5(&via, None).unwrap()).await;
+  let profile = GATEWAY_PROFILE.replace("UPSTREAM", &upstream.to_string()).replace("'198.51.100.10'", "api.invalid");
+  let created = control.create(&profile).await.unwrap();
+  let run = control.daemon().runs.find(&created.id).unwrap();
+  let mut started = run.remote_started.subscribe();
+  tokio::time::timeout(Duration::from_secs(10), started.wait_for(|started| *started)).await.unwrap().unwrap();
+  let socket = needy_core_actor::driver::linux_firecracker::host_port(
+    &run_dir(&runner_dir.path().join("work"), &created.id).await,
+    needy_core_actor::contract::GATEWAY_PORT,
+  );
+
+  let proxied = through_gateway(&socket, "GET http://api.invalid/ HTTP/1.1\r\nHost: api.invalid\r\nConnection: close\r\n\r\n").await;
+  let service = through_gateway(&socket, "GET http://mock.needy/ HTTP/1.1\r\nHost: mock.needy\r\nConnection: close\r\n\r\n").await;
+
+  assert!(proxied.starts_with("HTTP/1.1 200 ") && proxied.ends_with("ok"), "{proxied}");
+  assert!(service.starts_with("HTTP/1.1 200 ") && service.ends_with("ok"), "{service}");
+  // The service went directly; only the actor's own host went through.
+  let targets: Vec<String> = proxy.seen().into_iter().map(|seen| seen.target).collect();
+  assert_eq!(targets, ["api.invalid:80"]);
+  // The daemon's trace records which upstream the runner's gateway used.
+  let recorded = |events: &[Event]| {
+    let proxied =
+      events.iter().any(|e| matches!(e, Event::NetRequest(r) if r.host == "api.invalid" && r.via.as_deref() == Some(via.as_str())));
+    let direct = events.iter().any(|e| matches!(e, Event::NetRequest(r) if r.host == "mock.needy" && r.via.is_none()));
+    proxied && direct
+  };
+  let mut events = Vec::new();
+  for _ in 0..100 {
+    run.trace.flush().await;
+    events = trace(control.started.dir.path(), &created.id).await;
+    if recorded(&events) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+  }
+  assert!(recorded(&events), "{events:?}");
+
+  Runs::stop(control.daemon(), &created.id, Principal::Operator, StopMode::Now).await.unwrap();
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
 }
 
 // ROOT CAUSE:

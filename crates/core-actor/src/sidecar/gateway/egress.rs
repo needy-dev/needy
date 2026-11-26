@@ -16,6 +16,8 @@ use std::task::{Context, Poll};
 use hyper_util::rt::TokioIo;
 use tokio::net::TcpStream;
 
+use super::upstream::{Upstream, UpstreamError};
+
 /// An IPv4 or IPv6 CIDR block (e.g. `10.0.0.0/8`, `fd00::/8`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IpCidr {
@@ -226,6 +228,10 @@ pub(super) enum EgressError {
   },
   #[error("invalid upstream URI: {0}")]
   InvalidUri(String),
+  /// The gateway's upstream proxy failed or refused the connection; never
+  /// retried direct.
+  #[error(transparent)]
+  Upstream(#[from] UpstreamError),
   #[error(transparent)]
   Io(#[from] std::io::Error),
 }
@@ -236,35 +242,18 @@ pub(super) fn strip_brackets(host: &str) -> &str {
   host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host)
 }
 
-/// How the gateway reaches an upstream: the one seam every connection it
-/// opens for the actor goes through, a tunnel's and a forwarded request's.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum Upstream {
-  /// Resolves and connects from the gateway's own host, after
-  /// [`EgressPolicy`] validated the resolved addresses.
-  #[default]
-  Direct,
-  // TODO(gateway-upstream): per-actor upstream proxy, next slice after S1,
-  // owner discussed 2026-11-26. A `Socks5h` variant (proxy URL, the actor's
-  // credentials) would hand the host name to the proxy unresolved, so where
-  // `EgressPolicy` then applies needs that slice's design; nothing selects
-  // an upstream until then.
-}
-
-impl Upstream {
-  /// A connection to `(host, port)`, validated against `policy` when
-  /// given (none for an operator's service).
-  pub(super) async fn connect(&self, host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
-    match self {
-      Self::Direct => resolve_and_connect(host, port, policy).await,
-    }
-  }
-}
-
 /// Resolves `(host, port)` once, validates every returned [`SocketAddr`]
 /// against `policy` (if present), and connects directly to the validated
 /// addresses so no second DNS lookup can occur.
-async fn resolve_and_connect(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
+pub(super) async fn resolve_and_connect(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<TcpStream, EgressError> {
+  let addrs = resolve_validated(host, port, policy).await?;
+  Ok(TcpStream::connect(&addrs[..]).await?)
+}
+
+/// The addresses `(host, port)` resolves to on this host (an IP literal is
+/// its own), each validated against `policy` (if present): the one lookup a
+/// connection to them may use.
+pub(super) async fn resolve_validated(host: &str, port: u16, policy: Option<&EgressPolicy>) -> Result<Vec<SocketAddr>, EgressError> {
   let host = strip_brackets(host);
   let addrs: Vec<SocketAddr> = if let Ok(ip) = host.parse::<IpAddr>() {
     vec![SocketAddr::new(ip, port)]
@@ -285,14 +274,16 @@ async fn resolve_and_connect(host: &str, port: u16, policy: Option<&EgressPolicy
       }
     }
   }
-  Ok(TcpStream::connect(&addrs[..]).await?)
+  Ok(addrs)
 }
 
-/// Walks an error's source chain to find an [`EgressError::Blocked`].
-pub(super) fn blocked_in_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a EgressError> {
+/// Walks an error's source chain to find the [`EgressError`] a connector
+/// returned (a blocked address, or the upstream proxy's failure), which
+/// `hyper`'s client error does not show itself.
+pub(super) fn egress_in_chain<'a>(err: &'a (dyn std::error::Error + 'static)) -> Option<&'a EgressError> {
   let mut current: Option<&(dyn std::error::Error + 'static)> = Some(err);
   while let Some(e) = current {
-    if let Some(egress @ EgressError::Blocked { .. }) = e.downcast_ref::<EgressError>() {
+    if let Some(egress) = e.downcast_ref::<EgressError>() {
       return Some(egress);
     }
     current = e.source();

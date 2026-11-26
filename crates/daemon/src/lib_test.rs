@@ -125,6 +125,8 @@ async fn a_runtime_directory_too_long_for_a_socket_fails_start_up_at_once() {
     host_files_root: None,
     gateway_listen: None,
     gateway_blocked_cidrs: Vec::new(),
+    gateway_upstream: None,
+    gateway_upstream_credentials_file: None,
     layer_registry: None,
     insecure_registries: Vec::new(),
   };
@@ -420,6 +422,8 @@ async fn start_up_refuses_an_insecure_registry_or_a_layer_registry_that_is_not_o
       host_files_root: None,
       gateway_listen: None,
       gateway_blocked_cidrs: Vec::new(),
+      gateway_upstream: None,
+      gateway_upstream_credentials_file: None,
       layer_registry: layer,
       insecure_registries: insecure,
     };

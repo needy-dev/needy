@@ -21,6 +21,10 @@ pub struct RunnerArgs {
   #[arg(long)]
   pub(crate) gateway: Option<String>,
   #[arg(long)]
+  pub(crate) gateway_upstream: Option<String>,
+  #[arg(long, requires = "gateway_upstream")]
+  pub(crate) gateway_upstream_credentials_file: Option<PathBuf>,
+  #[arg(long)]
   pub(crate) ephemeral: bool,
   #[arg(long)]
   pub(crate) join: Option<String>,
@@ -145,6 +149,8 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     None => "saved control connection".to_string(),
   };
   #[cfg(unix)]
+  let gateway_upstream = gateway_upstream(args.gateway_upstream.as_deref(), args.gateway_upstream_credentials_file).await?;
+  #[cfg(unix)]
   let actor = (!capabilities.actor.is_empty()).then(|| needy_daemon::runner::ActorConfig {
     gateway: args.gateway.clone(),
     actor_image: image.clone(),
@@ -153,6 +159,7 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     guest_needy: args.guest_needy.clone(),
     kvm: kvm.clone(),
     work_dir: args.work_dir.clone(),
+    gateway_upstream,
   });
   let config = needy_daemon::runner::Config {
     state_dir: paths.state,
@@ -199,6 +206,31 @@ async fn execute(mut args: RunnerArgs, ctx: &Context, code: Option<String>) -> R
     needy_daemon::runner::serve_with_labels(config, labels_overridden && !stateless).await?;
   }
   Ok(0)
+}
+
+/// The actor gateway's upstream `url` names, with the credentials in
+/// `credentials`, checked now: a bad URL or credentials file fails the
+/// start instead of every connection. Shared by `daemon serve` and
+/// `runner serve`.
+#[cfg(unix)]
+pub(crate) async fn gateway_upstream(
+  url: Option<&str>,
+  credentials: Option<PathBuf>,
+) -> Result<needy_core_actor::sidecar::gateway::Upstream> {
+  use needy_core_actor::sidecar::gateway::Upstream;
+  let Some(url) = url else {
+    return Ok(Upstream::Direct);
+  };
+  let invalid = |error: needy_core_actor::sidecar::gateway::UpstreamError| {
+    anyhow::Error::from(
+      crate::diagnostics::Error::new("config.invalid_value", format!("Invalid gateway upstream: {error}"))
+        .fact("field", "--gateway-upstream")
+        .check("Pass socks5h://HOST[:PORT] or socks5://HOST[:PORT], and USERNAME:PASSWORD in a file other users cannot read."),
+    )
+  };
+  let upstream = Upstream::socks5(url, credentials).map_err(invalid)?;
+  upstream.check().await.map_err(invalid)?;
+  Ok(upstream)
 }
 
 /// Reads a pre-provisioned runner credential from an environment variable or

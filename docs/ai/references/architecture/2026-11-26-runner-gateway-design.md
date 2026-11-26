@@ -110,12 +110,55 @@ egress.
 Exactly one gateway enforces a run's network in every row. `--gateway-listen`
 on the daemon and `--gateway` on the runner stay, for older peers.
 
-### Seam for an upstream proxy
+### Upstream proxy
 
-Every connection the gateway opens goes through
-`needy_core_actor::sidecar::gateway::Upstream` (only `Direct` exists).
-`TODO(gateway-upstream)`: a per-actor upstream proxy (`socks5h`) is the
-next slice after S1 (owner discussed 2026-11-26); not implemented.
+From the release after v0.0.18 (not released). Owner-approved slice
+("per-actor upstream SOCKS proxy", 2026-11-26), on `feat/gateway-upstream`,
+stacked on S1. Evidence level: **code** and in-process tests (below); no
+cluster probe.
+
+On Kubernetes each actor runs in its own ephemeral actor runner Pod, and
+each actor should leave through a SOCKS proxy of its own. The orchestrator
+puts the proxy in the runner Pod's arguments and its credentials in a
+Secret:
+
+```sh
+needy runner serve --roles actor --ephemeral \
+  --gateway-upstream socks5h://proxy-7.example.com:1080 \
+  --gateway-upstream-credentials-file /etc/needy/upstream/credentials
+```
+
+`needy daemon serve` takes the same two flags for the gateways it runs
+itself (local actors, and older runners that proxy to it).
+
+| Decision | Choice and reason |
+| --- | --- |
+| Where it plugs in | `gateway::Upstream` (`crates/core-actor/src/sidecar/gateway/upstream.rs`), the seam S1 left: `Direct` or `Socks5`. Both the plain-HTTP client (`http.rs`, through `ValidatedConnector`) and `CONNECT` tunnels (`connect.rs`) dial through it. `actor::gateway` takes it, so the daemon and the runner build it the same way. |
+| Schemes | `socks5h://HOST[:PORT]`: the gateway sends the target's name to the proxy (address type DOMAINNAME), never resolving it. `socks5://HOST[:PORT]`: the gateway resolves the name, checks every address against `EgressPolicy` as a direct connection does, and asks the proxy for the address. Port 1080 by default (RFC 1928 section 3). No HTTP proxies (`TODO(gateway-upstream)` at the enum). |
+| Client | `tokio-socks` 0.5.3 (MIT; the SOCKS client `reqwest` uses): RFC 1928 CONNECT with a name or an address, RFC 1929 username/password. The gateway resolves and connects to the proxy itself (the crate resolves a proxy name with blocking `std` calls). |
+| Services | `actor.network.services` URLs are always dialed directly, never through the upstream: they name the operator's endpoints, in-cluster on Kubernetes, which the proxy would not reach. |
+| Policy order | The allowlist and chaos decide first, unchanged; only an allowed connection reaches the upstream. |
+| Fail closed | A configured upstream is never bypassed. An unreachable proxy, a refusal (any SOCKS reply other than success), an authentication failure or an unreadable credentials file fails the connection: `502` to the actor and a `net.error` with the reason; nothing is dialed directly. |
+| Credentials | `--gateway-upstream-credentials-file PATH` holds `USERNAME:PASSWORD` on one line (the username has no `:`; each 1 to 255 bytes, RFC 1929). Never in argv (credentials in the URL are refused), the profile, the trace or logs: they are read for each connection and never kept. |
+| File permissions | Refused when other users can access it (any `o` bit); group read is allowed and the owner is not checked; symlinks are followed. A Kubernetes Secret's files are root-owned symlinks into `..data/`, readable by a non-root container through `fsGroup`; the default `defaultMode: 0644` is refused, so the Pod sets `0440`. This is looser than the CLI's own credential files (`0600`, owner, no symlink) on purpose: it is the one way a Secret reaches a non-root Pod. |
+| Rotation | The file is read again for each connection, so the kubelet's swap of a rotated Secret applies from the next one. |
+| Start-up check | Both commands parse the URL and read the credentials file once at start, failing with a diagnostic; the proxy's reachability is not checked (each connection finds out). |
+| Precedence | The upstream belongs to whoever runs the gateway: the runner's for a gateway the runner runs, the daemon's for one the daemon runs. A daemon's upstream is not sent to runners (its credentials file is on the daemon's host, and the per-actor proxy is the runner Pod's to name). A runner with an upstream whose control plane keeps the gateway (an older daemon) refuses to start the actor rather than let its traffic leave directly from the daemon. |
+| Trace | `net.request`, `net.connect` and `net.error` carry `via`, the upstream's URL (`socks5h://HOST:PORT`, no credentials), when the connection went through one; it is absent when direct. Trace schema version 16; versions 10 to 15 still read. A schema-16 runner's events are refused by a schema-15 daemon, so S1 and this slice must ship in the same release. |
+
+**Trust shift with `socks5h`.** The proxy resolves the name, so the
+gateway cannot check the address it reaches: `EgressPolicy` (loopback,
+link-local, ULA, `--gateway-block-cidr`) does not apply to a name sent
+through `socks5h`. An IP literal is still checked (it needs no
+resolution), and `socks5` checks everything as `Direct` does. With
+`socks5h`, blocking private, cluster and metadata ranges is the proxy's job
+and the runner Pod's NetworkPolicy's (the Pod may only reach its proxy, the
+daemon and the named services; see the rc integration guide, section 8).
+The proxy's own address is the operator's choice and is not checked either.
+
+Not done (markers in code): an HTTP `CONNECT` upstream; a handshake or
+connect timeout (a direct connection has none either); a
+`daemon.gateway_upstream` key in the configuration file (flags only).
 
 ## Deferred (with markers in code)
 
@@ -129,7 +172,7 @@ next slice after S1 (owner discussed 2026-11-26); not implemented.
   the runner, so their `matched` and `fired` counts on the daemon stay at
   their placement values; the `fault.injected` events in the trace are
   current (`TODO(runner-gateway-chaos)` in `Daemon::faults`).
-- Per-actor upstream proxy: `TODO(gateway-upstream)`.
+- Per-actor upstream proxy: implemented, see "Upstream proxy" above.
 
 ## Networking consequences on Kubernetes
 
@@ -144,6 +187,35 @@ next slice after S1 (owner discussed 2026-11-26); not implemented.
 - The daemon no longer needs internet egress for actors (it may still need
   it for the layer registry and image pulls), and 7401 is needed only for
   older runners.
+
+## Evidence (probe, 2026-11-26)
+
+A live probe of `feat/gateway-upstream` (static musl `needy` 0.0.18 dev
+build, base VM image from the v0.0.18 release) on a Kubernetes cluster with
+Flannel and Cilium chained (kube-proxy replacement, NetworkPolicy enforced),
+an ephemeral `linux-firecracker` actor runner Pod on a KVM node, and a
+control daemon Pod; every case ran at least three rounds. Probe evidence,
+not a support claim:
+
+- An actor downloading 50 MB over HTTPS through the gateway: with v0.0.18 on
+  both sides the daemon Pod carried the 50 MB both ways; with S1 on both
+  sides it carried about 15-18 KB (control traffic), and the destination saw
+  the actor Pod's address. Each `net.*` event reached the daemon's
+  `trace.db` once; the daemon's `--gateway-block-cidr` was enforced by the
+  runner.
+- Mixed versions (new daemon with a v0.0.18 runner, v0.0.18 daemon with a
+  new runner): the daemon's gateway enforced, as designed. A runner with
+  `--gateway-upstream` and a v0.0.18 daemon refused the actor.
+- Two actors at once, each with its own `socks5h` upstream: each actor's
+  requests arrived from its own proxy, `via` was on each proxied event, a
+  name only one proxy could resolve worked through that proxy only, and the
+  actor Pods made no DNS queries (DNS egress denied, requests still worked).
+  A wrong password and a proxy scaled to zero were 502s with `net.error`
+  and no direct connection; a rotated Secret applied once the kubelet
+  updated the mounted file. No credential appeared in any trace or log.
+- Not covered: a long CONNECT tunnel does not advance `last_activity_ms`
+  after it opens (also on v0.0.18), and the gateway has no connect timeout,
+  so a SYN dropped by a NetworkPolicy hangs until the client gives up.
 
 ## Tests
 
@@ -162,6 +234,34 @@ In-process, next to the code:
   `an_older_runner_without_a_gateway_of_its_own_keeps_the_daemon_s_gateway`.
 - `crates/core/src/chaos/mod_test.rs`:
   `a_time_window_counts_from_a_creation_time_in_unix_milliseconds`.
+
+Upstream proxy, through public behaviour with a test SOCKS5 proxy
+(`gateway::testing::Socks5Server`, behind core-actor's `test-support`
+feature; it connects every CONNECT to one test server, so `*.invalid` names
+prove no local resolution):
+
+- `crates/core-actor/src/sidecar/gateway/mod_test.rs`: names go unresolved
+  through `socks5h` for requests and tunnels, with `via` in the trace;
+  `socks5` resolves, checks and sends the address; IP literals are still
+  checked through `socks5h`; services are dialed directly; an unreachable
+  proxy answers 502 and nothing is dialed directly; a refusing proxy answers
+  502 with its reason; the credentials file is sent and read again after
+  rotation, and no password reaches an answer, the trace or `Debug`; a file
+  others can read fails the connection before the proxy is asked.
+- `crates/core-actor/src/sidecar/gateway/upstream_test.rs`: URL forms (no
+  credentials echoed), the credentials format, file modes (`0600` and `0440`
+  pass, `0644` fails) and a swapped `..data` symlink.
+- `crates/daemon/src/actor_runner_test.rs`:
+  `the_runner_s_gateway_upstream_carries_the_actor_s_traffic_but_not_its_services`
+  (the runner's `ActorConfig.gateway_upstream` reaches its gateway; `via`
+  reaches the daemon's trace).
+- `crates/daemon/src/bridge_test.rs`:
+  `the_daemon_s_gateway_upstream_carries_the_traffic_of_the_gateway_it_runs`.
+- `crates/core/src/event_test.rs`: `via` is optional and version 14 reads.
+
+Not covered by a test: the CLI flags themselves (they build the same
+`Upstream` the tests use), and an upstream runner against an older daemon
+(the refusal is one condition before the VM starts).
 
 Not covered by a test: an S1 runner against an older daemon (the proxy
 path is the unchanged pre-S1 code, selected when `local_gateway` is unset).

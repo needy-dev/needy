@@ -622,6 +622,50 @@ Differences from the probes, not verified on a cluster: running as uid 1000
 from the first process (the probes set up as root, then `setpriv`), a
 static `supplementalGroups`, and `capabilities: { drop: [ALL] }`.
 
+### A per-actor upstream proxy (code, not released)
+
+**From the release after v0.0.18 (not released)**, with the runner running
+the gateway (S1), each actor can leave through a SOCKS5 proxy of its own
+([the runner gateway design](2026-11-26-runner-gateway-design.md), "Upstream
+proxy"). `rc` puts the proxy in the runner's arguments and its credentials
+in a Secret mounted at `/etc/needy/upstream`:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata: { name: actor-7f3c2a-upstream, namespace: tenant-a }   # ownerReferences as above
+type: Opaque
+stringData: { credentials: "actor-7f3c2a:<password>" }            # USERNAME:PASSWORD, one line
+---
+# In the Pod above:
+      exec needy runner serve \
+        ... \
+        --gateway-upstream socks5h://proxy-7.example.com:1080 \
+        --gateway-upstream-credentials-file /etc/needy/upstream/credentials
+    volumeMounts:
+    - { name: upstream, mountPath: /etc/needy/upstream, readOnly: true }
+  volumes:
+  - name: upstream
+    secret: { secretName: actor-7f3c2a-upstream, defaultMode: 0440, items: [{ key: credentials, path: credentials }] }
+```
+
+- `socks5h://` sends names to the proxy unresolved (the Pod needs no DNS for
+  the actor's hosts); `socks5://` resolves in the runner and applies
+  `--gateway-block-cidr` before asking the proxy for the address. Port 1080
+  by default.
+- `defaultMode: 0440` with the Pod's `fsGroup` is required: the runner
+  refuses a credentials file other users can read, which includes
+  Kubernetes' default `0644`. Credentials in the URL are refused.
+- The file is read for every connection, so updating the Secret rotates the
+  credentials without restarting the Pod (after the kubelet's sync delay).
+- The upstream never falls back to direct: an unreachable or refusing proxy
+  gives the actor `502` and the run's trace a `net.error` with the reason.
+  Traced `net.request`, `net.connect` and `net.error` carry `via` (the
+  proxy's URL, no credentials).
+- `actor.network.services` are dialed directly, not through the proxy.
+- An upstream runner with an older daemon (one that keeps the gateway)
+  refuses to start the actor rather than let it leave from the daemon.
+
 ## 6. Creating and following a run
 
 ### `CreateRunRequest` (code)
@@ -861,6 +905,83 @@ both sides:
   in-process, where a NetworkPolicy does not see loopback. No ingress.
 - The daemon: no internet egress for actors any more (keep what the layer
   registry and image pulls need); ingress on 7400 as below.
+
+**With a per-actor upstream proxy** (from the release after v0.0.18, not
+released; section 5): the actor's internet traffic leaves through its
+proxy, so the actor Pod needs no internet egress at all:
+
+- Actor Pods: egress only to their proxy's address and port, to the
+  daemon's 7400, and to the in-cluster services the profiles name in
+  `actor.network.services` (dialed directly). DNS only if the proxy's or a
+  service's host is a name (with `socks5h` the actor's hosts are resolved
+  by the proxy, not in the Pod); with `socks5`, DNS too. No ingress.
+- With `socks5h` the runner cannot check the addresses the proxy reaches:
+  `--gateway-block-cidr` and the loopback and metadata blocks apply only
+  to IP literals the actor names. The proxy must refuse private, cluster
+  and metadata ranges (`169.254.169.254`) itself, and the NetworkPolicy
+  above keeps the Pod from reaching them directly.
+- The proxy sees each actor's destinations (names with `socks5h`); TLS is
+  tunnelled end to end as before.
+
+Manifests in the shapes the probe verified (see the
+[runner gateway evidence](2026-11-26-runner-gateway-design.md#evidence-probe-2026-11-26)).
+NetworkPolicy ports are the **Pod's** ports, not the Service's. Under a CNI
+with kube-proxy replacement, a ClusterIP may be rewritten to a node address
+before routing, so node ranges belong in every exclusion list.
+
+```yaml
+# S1: an actor Pod without an upstream.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: needy-actor-egress, namespace: tenant-a }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: needy-actor } }
+  policyTypes: [Ingress, Egress]
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [POD_CIDR, SERVICE_CIDR, NODE_CIDR, 169.254.169.254/32]  # also --gateway-block-cidr
+  - to: [{ podSelector: { matchLabels: { app: needy-daemon } } }]
+    ports: [{ protocol: TCP, port: 7400 }]
+  - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]       # each actor.network.services backend
+    ports: [{ protocol: TCP, port: 8080 }]
+  - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+           podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+    ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+# With a socks5h upstream: only the actor's proxy, the daemon and named
+# services. Give the runner the daemon and the proxy by address
+# (--address tcp://DAEMON_CLUSTER_IP:7400, socks5h://PROXY_IP:1080) and the
+# Pod needs no DNS at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: actor-7f3c2a-egress, namespace: tenant-a }
+spec:
+  podSelector: { matchLabels: { example.com/actor: actor-7f3c2a } }
+  policyTypes: [Ingress, Egress]
+  egress:
+  - to: [{ podSelector: { matchLabels: { app: proxy-7 } } }]
+    ports: [{ protocol: TCP, port: 1080 }]
+  - to: [{ podSelector: { matchLabels: { app: needy-daemon } } }]
+    ports: [{ protocol: TCP, port: 7400 }]
+  - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]
+    ports: [{ protocol: TCP, port: 8080 }]
+```
+
+**Workspace Pods through a proxy (probe, not needy).** Commands in a
+Workspace use the Pod's own network, so the gateway does not see them. A
+Mihomo TUN sidecar (a privileged native sidecar; `auto-route`,
+`auto-redirect`, `strict-route`, DNS hijack with fake-ip, sniffing,
+`route-exclude-address` with the pod, service **and node** ranges, private
+and link-local ranges rejected, DoH hosts and UDP rejected) sent a test
+domain through a SOCKS proxy while cluster DNS and Services stayed direct.
+It is not fail-closed on its own: when Mihomo was stopped, or its TUN
+device removed (Mihomo then keeps running without recovering), traffic went
+out directly. A NetworkPolicy backstop (egress only to the proxy, kube-dns,
+the daemon's 7400 and the cluster Services the Workspace uses) made every
+such round fail closed; also give the sidecar a liveness probe on its TUN
+link.
 
 Before S1, or while either side is older:
 

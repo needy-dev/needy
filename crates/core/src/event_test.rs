@@ -202,11 +202,13 @@ fn every_kind() -> Vec<Event> {
       path: "/v1/chat/completions".into(),
       status: 200,
       ms: 840,
+      via: Some("socks5h://proxy.example.com:1080".into()),
     }),
     Event::NetConnect(NetConnect {
       network: Network::Actor,
       host: "example.com".into(),
       authority: "example.com:443".into(),
+      via: None,
     }),
     Event::NetDeny(NetDeny {
       network: Network::Actor,
@@ -218,6 +220,7 @@ fn every_kind() -> Vec<Event> {
       host: "example.net".into(),
       path: Some("/".into()),
       error: "connection refused".into(),
+      via: Some("socks5://[2001:db8::1]:1080".into()),
     }),
     Event::TraceGap(TraceGap { dropped: 4 }),
     Event::TraceTiming(TraceTiming {
@@ -380,4 +383,26 @@ fn schema_10_history_keeps_its_original_stop_and_event_meaning() {
   );
   assert_eq!(Event::decode("run.stop", 10, "{}").unwrap(), Event::RunStop(RunStop::default()));
   assert_eq!(Event::decode("trace.gap", 10, r#"{"dropped":6}"#).unwrap(), Event::TraceGap(TraceGap { dropped: 6 }));
+}
+
+#[test]
+fn a_net_event_without_via_reads_from_version_14_and_direct_writes_none() {
+  let direct = Event::NetConnect(NetConnect {
+    network: Network::Actor,
+    host: "example.com".into(),
+    authority: "example.com:443".into(),
+    via: None,
+  });
+  let payload = direct.payload();
+  assert!(!payload.contains("via"), "{payload}");
+  assert_eq!(Event::decode("net.connect", 15, &payload).unwrap(), direct);
+  let proxied = Event::NetRequest(NetRequest {
+    network: Network::Actor,
+    host: "api.example.com".into(),
+    path: "/".into(),
+    status: 200,
+    ms: 3,
+    via: Some("socks5h://proxy.example.com:1080".into()),
+  });
+  assert!(proxied.payload().contains(r#""via":"socks5h://proxy.example.com:1080""#), "{}", proxied.payload());
 }

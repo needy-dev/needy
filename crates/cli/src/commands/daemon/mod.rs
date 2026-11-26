@@ -90,6 +90,17 @@ struct ServeArgs {
   /// Block outbound actor gateway connections to this CIDR (repeatable, e.g. `10.0.0.0/8`).
   #[arg(long = "gateway-block-cidr", value_name = "CIDR")]
   gateway_blocked_cidrs: Vec<String>,
+  /// Upstream SOCKS5 proxy for the actor gateways this daemon runs (not its runners'): `socks5h://HOST[:PORT]` (the
+  /// proxy resolves names) or `socks5://HOST[:PORT]` (the daemon resolves and checks them). Never falls back to direct.
+  // TODO(gateway-upstream): no `daemon.gateway_upstream` key in the
+  // configuration file yet; the owner asked for flags (2026-11-26). Add it
+  // with its validation in `needy_config::global` when an operator needs it.
+  #[arg(long, value_name = "URL")]
+  gateway_upstream: Option<String>,
+  /// File holding `USERNAME:PASSWORD` for `--gateway-upstream`, read again for each connection; other users must not
+  /// be able to read it.
+  #[arg(long, value_name = "PATH", requires = "gateway_upstream")]
+  gateway_upstream_credentials_file: Option<std::path::PathBuf>,
   /// OCI registry repository that shares built image steps (`HOST[:PORT]/PATH`; an `http://` prefix opts into plain HTTP).
   #[arg(long, value_name = "REPOSITORY")]
   layer_registry: Option<String>,
@@ -215,6 +226,8 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
         .into(),
     );
   }
+  // Checked here for the diagnostic; the daemon checks it again as it starts.
+  runner::gateway_upstream(args.gateway_upstream.as_deref(), args.gateway_upstream_credentials_file.clone()).await?;
   let settings = effective.daemon;
   let config = needy_daemon::Config {
     holder_executable: std::env::current_exe().context("cannot locate the runtime holder executable")?,
@@ -241,6 +254,8 @@ async fn serve(args: ServeArgs, ctx: &Context) -> Result<i32> {
     host_files_root: args.host_files_root.or(settings.host_files_root),
     gateway_listen: args.gateway_listen.or(settings.gateway_listen).as_deref().map(listener).transpose()?,
     gateway_blocked_cidrs: settings.gateway_blocked_cidrs,
+    gateway_upstream: args.gateway_upstream,
+    gateway_upstream_credentials_file: args.gateway_upstream_credentials_file,
     layer_registry: settings.layer_registry,
     insecure_registries: settings.insecure_registries,
   };

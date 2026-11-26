@@ -35,7 +35,7 @@ use needy_api_server::middleware::authentication::RUN_ID_HEADER;
 use needy_core_actor::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
 use needy_core_actor::driver::{Driver as _, Host, Running, Start, linux_firecracker};
 use needy_core_actor::image::store::{Digest, LayerDisk, Store};
-use needy_core_actor::sidecar::gateway::IpCidr;
+use needy_core_actor::sidecar::gateway::{IpCidr, Upstream};
 use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -82,6 +82,11 @@ pub struct ActorConfig {
   /// Directory under which each run gets its own directory for temporary
   /// VM files (`vm.json`, `v.sock`, `console.log`); uses a temp dir if omitted.
   pub work_dir: Option<PathBuf>,
+  /// How the actor's gateway on this runner reaches its upstreams
+  /// (`--gateway-upstream`): one proxy per actor when the runner serves one
+  /// actor (an ephemeral runner Pod). Applies only to a gateway this runner
+  /// runs; an actor whose control plane keeps the gateway is refused.
+  pub gateway_upstream: Upstream,
 }
 
 /// Runs one remote actor VM for `run_id` and bridges all its channels outbound
@@ -188,6 +193,14 @@ pub(crate) async fn run_actor(
   // What fails before the VM runs is reported as the actor's exit, so the
   // run fails with its reason rather than as a lost bridge.
   let booted = async {
+    // An older control plane runs the gateway itself, where this runner's
+    // upstream does not apply: the actor would leave directly from the
+    // control host. Fail closed instead.
+    if !attached.local_gateway && config.gateway_upstream != Upstream::Direct {
+      bail!(
+        "this runner has a gateway upstream (--gateway-upstream), but the control plane runs the actor's gateway itself (it is older than this runner); refusing to start the actor without its upstream"
+      );
+    }
     let layer_disks = prepare_layers(&control_client, &config.layer_store, &config.actor_image, &attached, &work_dir).await?;
     // TODO(remote-actor-images): the time the fetch took belongs in
     // `actor.start` (`layers_fetched_ms`, D6 of
@@ -215,7 +228,15 @@ pub(crate) async fn run_actor(
     let profile = needy_config::profile::load(&needy_config::Source::text(attached.profile_yaml.clone(), PathBuf::new()))
       .context("cannot decode profile from control plane")?;
     if attached.local_gateway {
-      gateway_trace = Some(serve_gateway(&gateway_uds, &profile, &attached, bridge_tx.clone(), &tasks, gateway_stop.clone())?);
+      gateway_trace = Some(serve_gateway(
+        &gateway_uds,
+        &profile,
+        &attached,
+        &config.gateway_upstream,
+        bridge_tx.clone(),
+        &tasks,
+        gateway_stop.clone(),
+      )?);
     }
 
     let layer_disks: Vec<PathBuf> = layer_disks.into_iter().map(|disk| disk.path).collect();
@@ -549,7 +570,8 @@ async fn proxy_grpc_connection(
 /// channel `uds`, until `stop`: the profile's allowlist and services, its
 /// network faults with their windows counted from the run's creation on the
 /// control plane (`attached.created_ms`), and the control plane's blocked
-/// CIDRs, built as the daemon builds it (`actor::gateway`). What it records
+/// CIDRs, leaving through this runner's `upstream`, built as the daemon
+/// builds it (`actor::gateway`). What it records
 /// goes to the run's trace over the bridge (`BridgeEvents`), and its
 /// activity as `BridgeActivity`. Returns its trace, for the end of the run
 /// to flush.
@@ -557,6 +579,7 @@ fn serve_gateway(
   uds: &Path,
   profile: &needy_config::profile::Profile,
   attached: &BridgeAttached,
+  upstream: &Upstream,
   bridge: mpsc::Sender<BridgeRequest>,
   tasks: &tokio_util::task::TaskTracker,
   stop: CancellationToken,
@@ -585,6 +608,7 @@ fn serve_gateway(
     trace.clone(),
     injector,
     blocked,
+    upstream.clone(),
     stop,
     Arc::new(move || active.store(true, Ordering::Relaxed)),
   );
