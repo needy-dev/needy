@@ -231,7 +231,14 @@ spec:
         ports:
         - { name: control, containerPort: 7400 }
         - { name: gateway, containerPort: 7401 }
-        readinessProbe: { tcpSocket: { port: 7400 }, periodSeconds: 3 }
+        # An exec probe on the management socket: a tcpSocket probe on 7400
+        # comes from the node, and a daemon ingress NetworkPolicy may refuse
+        # it (some CNIs, Cilium among them, apply policy to kubelet traffic),
+        # leaving the Service without endpoints (probe, observed by the rc
+        # session).
+        readinessProbe:
+          exec: { command: [needy, config, context, check, local, -q, --timeout, 2s] }
+          periodSeconds: 3
         securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
         resources:
           requests: { cpu: 250m, memory: 512Mi }
@@ -953,7 +960,8 @@ spec:
 # With a socks5h upstream: only the actor's proxy, the daemon and named
 # services. Give the runner the daemon and the proxy by address
 # (--address tcp://DAEMON_CLUSTER_IP:7400, socks5h://PROXY_IP:1080) and the
-# Pod needs no DNS at all.
+# Pod needs no DNS at all. The Pod has no internet either, so the base VM
+# image must not be downloaded at start (see below).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata: { name: actor-7f3c2a-egress, namespace: tenant-a }
@@ -968,6 +976,34 @@ spec:
   - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]
     ports: [{ protocol: TCP, port: 8080 }]
 ```
+
+The tight form was verified for the run only: in the probe the runner Pod
+ran `needy image pull --driver linux-firecracker` under the open policy and
+the tight policy was applied before the run. `needy image pull` is not
+gateway traffic and does not go through `--gateway-upstream`. Until the
+base VM image reaches the Pod without the internet, keep the S1 rule (the
+internet minus cluster ranges) next to an upstream. Ways to deliver the
+base, none of which needs a needy change: bake it into the runner image
+and pass `--actor-image` (gap G2); push it once to an in-cluster OCI
+registry and fetch it in an init container, allowing egress to that
+registry only; or mount it from a read-only volume.
+
+A daemon ingress policy must also admit its readiness probe if it is a
+TCP probe; a plain NetworkPolicy cannot name kubelet traffic portably, so
+use the exec probe of section 2.
+
+The `rc` session's end-to-end run of v0.0.19 with these policies (probe,
+2026-11-26): a 50 MB actor download moved about 16 KB through the daemon
+Pod; the cluster API and metadata addresses were denied by the runner's
+gateway; through a `socks5h` upstream the proxy saw the actor Pod, and with
+the proxy scaled to zero nothing went out directly. `needy run report` does
+not yet show `via` or a failed upstream connection (the events are in the
+trace).
+
+The probe's SOCKS proxies (`serjs/go-socks5-proxy`) cannot filter
+destinations, and a cluster Service name was reachable through them under
+`socks5h`. A production proxy must refuse private, cluster and metadata
+ranges after it resolves a name; which proxy does so is not verified yet.
 
 **Workspace Pods through a proxy (probe, not needy).** Commands in a
 Workspace use the Pod's own network, so the gateway does not see them. A
