@@ -2,10 +2,12 @@
 //! (`--clients-file`).
 //!
 //! A static client is provisioned before the daemon starts (a controller
-//! writes a Secret and mounts it) instead of pairing. Its token has the
-//! client token's shape, `needy-client.static-NAME.<64 hex digits>`: the
-//! `static-` ID prefix never matches a paired client's ID (12 hex digits),
-//! so a token names exactly one registry. The file is read again whenever it
+//! writes a Secret and mounts it) instead of pairing. Its token either has
+//! the client token's shape, `needy-client.static-NAME.<64 hex digits>`, and
+//! is found by its ID (the `static-` ID prefix never matches a paired
+//! client's ID, 12 hex digits, so a token names exactly one registry), or is
+//! any other high-entropy secret, found by its SHA-256 among the file's
+//! entries; paired clients always have prefixed tokens. The file is read again whenever it
 //! changes; a removed or rotated entry stops authenticating on the next
 //! request. Static clients are listed with paired ones and cannot be
 //! revoked through the API: the file is their only source.
@@ -24,7 +26,7 @@ use needy_common::sync::lock;
 use needy_common::time::now_ms;
 use serde::Deserialize;
 
-use crate::static_file::{Stamp, parse_sha256_hex};
+use crate::static_file::{Stamp, check_plain_secret, parse_sha256_hex};
 use crate::store;
 
 /// The ID prefix of every static client: `static-NAME`.
@@ -95,6 +97,8 @@ struct Inner {
   stamp: Option<Stamp>,
   /// By ID (`static-NAME`).
   clients: BTreeMap<String, StaticClient>,
+  /// Client IDs by token hash, for unprefixed tokens.
+  by_hash: BTreeMap<Vec<u8>, String>,
 }
 
 /// Registry of statically configured clients backed by an optional file that
@@ -128,6 +132,7 @@ impl StaticClients {
           tracing::info!("clients file {} is absent; static clients removed", path.display());
           inner.clients.clear();
         }
+        inner.by_hash.clear();
         return;
       }
       Err(e) => {
@@ -170,6 +175,7 @@ impl StaticClients {
     for removed in inner.clients.keys().filter(|id| !next.contains_key(*id)) {
       tracing::info!("static client {removed} removed from the clients file");
     }
+    inner.by_hash = next.values().map(|client| (client.token_hash.clone(), client.id.clone())).collect();
     inner.clients = next;
   }
 
@@ -183,8 +189,8 @@ impl StaticClients {
     lock(&self.inner).clients.values().any(|client| client.name == name)
   }
 
-  /// Checks a client token against the static clients, recording when a
-  /// matching one was last used.
+  /// Checks a prefixed client token against the static clients by the ID it
+  /// carries, recording when a matching one was last used.
   pub(crate) fn authenticate(&self, token: &str, now: i64) -> Check {
     let Some(id) = store::secret_id(store::CLIENT_SECRET_KIND, token) else {
       return Check::NotStatic;
@@ -198,6 +204,31 @@ impl StaticClients {
     }
     entry.last_used_ms = Some(now);
     Check::Client(entry.clone())
+  }
+
+  /// The static client whose token is the unprefixed secret `token`, found
+  /// by its hash, recording when it was last used. A prefixed token is
+  /// checked by [`Self::authenticate`] instead.
+  ///
+  /// NOTICE: the map compares digests in time that depends on where they
+  /// differ. That leaks only how a SHA-256 of the caller's own guess relates
+  /// to the stored digests; finding a secret from its digest needs a
+  /// preimage, and plain secrets carry 256 bits
+  /// ([`crate::static_file::check_plain_secret`]).
+  pub(crate) fn find(&self, token: &str, now: i64) -> Option<StaticClient> {
+    let mut inner = lock(&self.inner);
+    let id = inner.by_hash.get(&store::hash_secret(token))?.clone();
+    let entry = inner.clients.get_mut(&id)?;
+    entry.last_used_ms = Some(now);
+    Some(entry.clone())
+  }
+
+  /// The name of the static client whose token is the unprefixed secret
+  /// `token`, without counting it as a use.
+  pub(crate) fn holds(&self, token: &str) -> Option<String> {
+    let inner = lock(&self.inner);
+    let id = inner.by_hash.get(&store::hash_secret(token))?;
+    inner.clients.get(id).map(|client| client.name.clone())
   }
 
   /// Snapshot of every currently configured static client.
@@ -220,6 +251,7 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
   }
   let doc: FileDocument = serde_yaml::from_str(&text).with_context(|| format!("invalid YAML in {}", path.display()))?;
   let mut parsed = BTreeMap::new();
+  let mut by_hash: BTreeMap<Vec<u8>, String> = BTreeMap::new();
   for entry in doc.clients {
     store::check_client_name(&entry.name).map_err(|e| anyhow::anyhow!("{e}"))?;
     let id = format!("{ID_PREFIX}{}", entry.name);
@@ -229,8 +261,13 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
     let token_hash = match (entry.token, entry.token_hash) {
       (Some(token), None) => {
         let token = token.trim();
-        if store::secret_id(store::CLIENT_SECRET_KIND, token) != Some(id.as_str()) {
-          bail!("static client {:?}: token must start with `{}.{id}.`", entry.name, store::CLIENT_SECRET_KIND);
+        match store::secret_id(store::CLIENT_SECRET_KIND, token) {
+          Some(named) if named != id => {
+            bail!("static client {:?}: a prefixed token must start with `{}.{id}.`", entry.name, store::CLIENT_SECRET_KIND)
+          }
+          Some(_) => {}
+          None if store::is_runner_credential(token) => bail!("static client {:?}: token is a runner credential", entry.name),
+          None => check_plain_secret(token).with_context(|| format!("static client {:?}: token is too weak", entry.name))?,
         }
         store::hash_secret(token)
       }
@@ -240,6 +277,11 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
       (Some(_), Some(_)) => bail!("static client {:?}: set only one of token or token_hash", entry.name),
       (None, None) => bail!("static client {:?}: missing token or token_hash", entry.name),
     };
+    // An unprefixed token is found by its hash, so two entries with one hash
+    // would leave the file to decide which client a token is.
+    if let Some(other) = by_hash.insert(token_hash.clone(), entry.name.clone()) {
+      bail!("static clients {other:?} and {:?} have the same token", entry.name);
+    }
     parsed.insert(
       id,
       ParsedEntry {

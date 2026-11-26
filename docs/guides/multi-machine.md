@@ -43,6 +43,23 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `needy daemon serve` (hot-reloaded) and `--credential-env VAR` or
   `--credential-file PATH` to `needy runner serve` (read-only; never writes
   `runner.json`).
+
+  ```yaml
+  runners:
+    - name: ws-a
+      # A plain random secret (after v0.0.21), found by its hash. A runner
+      # serving with it needs --name ws-a: the secret does not carry a name.
+      credential_hash: sha256:<SHA-256 of the whole credential, 64 hex digits>
+      roles: [executor]
+    - name: ws-b
+      credential: needy-runner.ws-b.<64 hex digits>   # the prefixed form
+  ```
+
+  Each entry sets `credential` or `credential_hash`. A credential is either
+  `needy-runner.NAME.<64 hex digits>` or, from the release after v0.0.21,
+  any random secret of at least 32 bytes (see the static clients entry
+  below for the rules and how to generate one). Static runners cannot be
+  rotated or removed through the API; edit the file instead.
 - **Static clients**: pass `--clients-file PATH` (or `daemon.clients_file`)
   to `needy daemon serve` to declare control-plane clients before the daemon
   starts, for example an admin credential a Kubernetes controller mounts from
@@ -53,14 +70,24 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   clients:
     - name: controller
       access: admin        # or runs (the default)
-      # The token is needy-client.static-NAME.<64 hex digits>, for example
-      # printf 'needy-client.static-controller.%s' "$(openssl rand -hex 32)"
+      # A plain random secret, for example
+      # openssl rand -base64 32 | tr '+/' '-_' | tr -d '='
       token_hash: sha256:<SHA-256 of the whole token, 64 hex digits>
     - name: ci
-      token: needy-client.static-ci.<64 hex digits>
+      token: needy-client.static-ci.<64 hex digits>   # the prefixed form
   ```
 
-  Each entry sets `token` or `token_hash`. Static clients appear in
+  Each entry sets `token` or `token_hash`. A token is either
+  `needy-client.static-NAME.<64 hex digits>`, found by the name it carries,
+  or, from the release after v0.0.21, any other random secret, found by its
+  SHA-256 (`printf %s "$TOKEN" | sha256sum`). A plain secret written in the
+  file must be at least 64 hex digits or 43 base64/base64url characters
+  (32 bytes), and may not be shaped like a runner credential or another
+  client's token; a secret given only as a hash cannot be checked, so
+  generate it with 32 random bytes. A file in which two entries share a
+  hash is refused with a warning, like any file that does not load (the
+  previous entries stay), and a secret that both the clients
+  and the runners file hold is refused for both. Static clients appear in
   `needy client ls` with the ID `static-NAME` and cannot be revoked through
   the API; edit the file instead. While the file holds a name, no pairing
   code is created for it and a paired client of that name is refused.

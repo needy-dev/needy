@@ -160,6 +160,23 @@ impl Daemon {
   }
 }
 
+impl Daemon {
+  /// What an unprefixed bearer token is to the runner registry: only a
+  /// static runner's credential can be one, found by its hash.
+  fn unprefixed_runner(&self, token: &str) -> Credential {
+    self.static_runners.reload(&self.links);
+    let Some(name) = self.static_runners.find(token) else {
+      return Credential::Other;
+    };
+    self.static_clients.reload();
+    if let Some(client) = self.static_clients.holds(token) {
+      tracing::warn!("static runner {name} and static client {client} have the same token; refusing it for both");
+      return Credential::Refused;
+    }
+    Credential::Runner(name)
+  }
+}
+
 fn join_token_info(token: store::JoinToken, now: i64) -> JoinTokenInfo {
   let state = if token.revoked_ms.is_some() {
     JoinTokenState::Revoked
@@ -407,8 +424,11 @@ impl Runners for Daemon {
   }
 
   async fn credential(&self, token: &str) -> Result<Credential> {
-    if !store::is_runner_credential(token) {
+    if store::is_client_token(token) {
       return Ok(Credential::Other);
+    }
+    if !store::is_runner_credential(token) {
+      return Ok(self.unprefixed_runner(token));
     }
     self.static_runners.reload(&self.links);
     if let Some((name, matched)) = self.static_runners.authenticate(token) {

@@ -922,9 +922,11 @@ pub enum Credential {
     access: ClientAccess,
   },
   /// Shaped like a runner credential or a client token, but nobody holds it:
-  /// removed, revoked, rotated away, or never issued.
+  /// removed, revoked, rotated away, or never issued. Also an unprefixed
+  /// secret that more than one registry holds.
   Refused,
-  /// Not a credential of this registry.
+  /// Not a credential of this registry. An unprefixed secret no static entry
+  /// holds is this too: nothing in its shape says whose it would be.
   Other,
 }
 

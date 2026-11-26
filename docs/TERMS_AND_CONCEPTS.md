@@ -284,7 +284,9 @@ then on; the join token is not needed again. The runner keeps it in
 `runner.json` in its state directory (mode 0600); the control plane stores
 only its hash. `needy runner rotate` hands the runner a new one at its next
 heartbeat, and the old one stops working once the runner uses the new one;
-`needy runner rm` revokes it.
+`needy runner rm` revokes it. A static runner's credential is declared in the daemon's
+`--runners-file` instead (see static clients under Client below for its forms)
+and changes only when the file does.
 
 ### Control token
 
@@ -330,6 +332,10 @@ the daemon's `--clients-file` instead of pairing, so it exists before the
 daemon starts. Its ID is `static-NAME`; it is listed with paired clients,
 cannot be revoked through the API (the file is its only source), and holds
 its name against paired clients while the file declares it.
+Its token is either a client token naming it (`needy-client.static-NAME.…`)
+or any random secret of at least 32 bytes, which the daemon finds by its
+hash; a static runner in `--runners-file` may have such a credential too.
+Either way the caller is named after the file's entry, not the secret.
 
 The CLI stores saved connection contexts, their server-issued identities,
 and credentials in its private `config.yaml` document. A context contains an

@@ -5,6 +5,11 @@
 //! heartbeats, `ListRunners`, and scheduling. Removing a runner from the file
 //! (or changing its credential) closes its active control stream immediately on
 //! the next reload; `rotate` and `remove` RPCs are refused for static runners.
+//!
+//! A credential is either a runner credential (`needy-runner.NAME.<hex>`),
+//! found by the name it carries, or any other high-entropy secret, found by
+//! its SHA-256 among the file's entries. An orchestrator can then write
+//! plain random secrets without knowing needy's credential format.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -17,7 +22,7 @@ use needy_core::types::{Capabilities, RunnerRole};
 use serde::Deserialize;
 
 use crate::link::Links;
-use crate::static_file::{Stamp, parse_sha256_hex};
+use crate::static_file::{Stamp, check_plain_secret, parse_sha256_hex};
 use crate::store;
 
 /// On-disk static runners file: either `{ runners: [...] }` or a top-level list.
@@ -58,6 +63,8 @@ pub(crate) struct StaticRunner {
 struct Inner {
   stamp: Option<Stamp>,
   runners: BTreeMap<String, StaticRunner>,
+  /// Runner names by credential hash, for unprefixed credentials.
+  by_hash: BTreeMap<Vec<u8>, String>,
 }
 
 /// Registry of statically configured runners backed by an optional file that
@@ -99,6 +106,7 @@ impl StaticRunners {
         }
         let removed: Vec<String> = inner.runners.keys().cloned().collect();
         inner.runners.clear();
+        inner.by_hash.clear();
         removed
       };
       for name in removed {
@@ -163,6 +171,7 @@ impl StaticRunners {
         };
         next.insert(name, state);
       }
+      inner.by_hash = next.values().map(|runner| (runner.credential_hash.clone(), runner.name.clone())).collect();
       inner.runners = next;
       close
     };
@@ -177,8 +186,8 @@ impl StaticRunners {
     lock(&self.inner).runners.contains_key(name)
   }
 
-  /// Authenticates a bearer token against statically configured runners.
-  /// Returns `Some(true)` if matched, `Some(false)` if the runner name is
+  /// Authenticates a prefixed runner credential against statically
+  /// configured runners by the name it carries. Returns `Some(true)` if matched, `Some(false)` if the runner name is
   /// statically configured but the secret did not match, or `None` if the
   /// runner is not statically configured.
   pub(crate) fn authenticate(&self, token: &str) -> Option<(String, bool)> {
@@ -186,6 +195,19 @@ impl StaticRunners {
     let inner = lock(&self.inner);
     let entry = inner.runners.get(name)?;
     Some((entry.name.clone(), store::secret_matches(token, &entry.credential_hash)))
+  }
+
+  /// The static runner whose credential is the unprefixed secret `token`,
+  /// found by its hash. A prefixed token is checked by
+  /// [`Self::authenticate`] instead, so it never names another runner.
+  ///
+  /// NOTICE: the map compares digests in time that depends on where they
+  /// differ. That leaks only how a SHA-256 of the caller's own guess relates
+  /// to the stored digests; finding a secret from its digest needs a
+  /// preimage, and plain secrets carry 256 bits
+  /// ([`crate::static_file::check_plain_secret`]).
+  pub(crate) fn find(&self, token: &str) -> Option<String> {
+    lock(&self.inner).by_hash.get(&store::hash_secret(token)).cloned()
   }
 
   /// Records a heartbeat for a static runner, validating against its scope.
@@ -240,6 +262,7 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
     FileDocument::List(runners) => runners,
   };
   let mut parsed = BTreeMap::new();
+  let mut by_hash: BTreeMap<Vec<u8>, String> = BTreeMap::new();
   for entry in entries {
     store::check_name(&entry.name).map_err(|e| anyhow::anyhow!("{e}"))?;
     store::check_labels(&entry.labels).map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -249,11 +272,11 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
     let credential_hash = match (entry.credential, entry.credential_hash) {
       (Some(secret), None) => {
         let secret = secret.trim();
-        let Some(id) = store::secret_id(store::RUNNER_SECRET_KIND, secret) else {
-          bail!("static runner {:?}: credential must start with `{}.{}.`", entry.name, store::RUNNER_SECRET_KIND, entry.name);
-        };
-        if id != entry.name {
-          bail!("static runner {:?}: credential names runner {id:?} instead", entry.name);
+        match store::secret_id(store::RUNNER_SECRET_KIND, secret) {
+          Some(id) if id != entry.name => bail!("static runner {:?}: credential names runner {id:?} instead", entry.name),
+          Some(_) => {}
+          None if store::is_client_token(secret) => bail!("static runner {:?}: credential is a client token", entry.name),
+          None => check_plain_secret(secret).with_context(|| format!("static runner {:?}: credential is too weak", entry.name))?,
         }
         store::hash_secret(secret)
       }
@@ -263,6 +286,11 @@ fn load_file(path: &Path) -> Result<BTreeMap<String, ParsedEntry>> {
       (Some(_), Some(_)) => bail!("static runner {:?}: set only one of credential or credential_hash", entry.name),
       (None, None) => bail!("static runner {:?}: missing credential or credential_hash", entry.name),
     };
+    // An unprefixed credential is found by its hash, so two entries with one
+    // hash would leave the file to decide which runner a token is.
+    if let Some(other) = by_hash.insert(credential_hash.clone(), entry.name.clone()) {
+      bail!("static runners {other:?} and {:?} have the same credential", entry.name);
+    }
     parsed.insert(
       entry.name.clone(),
       ParsedEntry {

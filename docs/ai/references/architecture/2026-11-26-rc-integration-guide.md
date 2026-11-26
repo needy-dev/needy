@@ -281,8 +281,9 @@ A request on the TCP listener is one of these callers
 | Credential | Caller | Reaches |
 | --- | --- | --- |
 | none, on the management Unix socket, same uid or root | `Operator` | everything |
-| `needy-client.<id>.<64 hex>`, paired client token | `Client { access }` | `runs`: run and process calls; `admin`: also client and runner administration |
+| `needy-client.<id>.<64 hex>`, paired or static client token | `Client { access }` | `runs`: run and process calls; `admin`: also client and runner administration |
 | `needy-runner.<name>.<64 hex>` | `Runner` | `Heartbeat`, `Control`, `Task` only |
+| any other secret a static entry holds (after v0.0.21) | the entry's `Runner` or `Client { access }` | as above |
 | runner credential with `x-needy-run-id` | `Actor { run }` | the actor allowlist, for that run only (section 8) |
 
 `MintRunnerCredential`, `RevokeRunnerCredential`, `CreateJoinToken`,
@@ -332,10 +333,27 @@ clients:
   token_hash: sha256:<64 hex>   # SHA-256 of the whole token; or `token:` in plain
 ```
 
-The token is `needy-client.static-<name>.<64 hex>`: generate 32 random
-bytes as hex, keep the full token in a Secret only `rc-controller` reads,
-and put its hash in the daemon's Secret (mounted as a directory, never with
-`subPath`). Removing or rotating an entry takes effect on the next request;
+Up to v0.0.21 the token must be `needy-client.static-<name>.<64 hex>`.
+From the release after v0.0.21 (code, not yet released) it may also be a
+plain random secret, which the daemon finds by its SHA-256 among the file's
+entries (`crates/daemon/src/clients.rs`, `unprefixed_client`), so `rc`
+needs no knowledge of needy's token format:
+
+```sh
+token=$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')   # 43 characters, 32 bytes
+printf 'sha256:%s\n' "$(printf %s "$token" | sha256sum | cut -d' ' -f1)"
+```
+
+In Go: 32 bytes from `crypto/rand`, `base64.RawURLEncoding`, and
+`sha256.Sum256` of the encoded string. Keep the full token in a Secret only
+`rc-controller` reads, and put its hash in the daemon's Secret (mounted as
+a directory, never with `subPath`). A plain `token:` must be at least 64 hex
+digits or 43 base64/base64url characters and may not look like a prefixed
+runner credential or another client's token; a `token_hash` cannot be
+checked, so it is on `rc` to hash a 32-byte secret. Two entries with one
+hash make the file fail to load (a warning; the previous entries stay), and
+a secret held by both the clients and the runners file is refused for
+both (`crates/daemon/src/static_file.rs`, `static_clients.rs`). Removing or rotating an entry takes effect on the next request;
 static clients are listed by `ListClients` and cannot be revoked through the
 API. While the file holds a name, pairing that name is refused.
 
@@ -374,9 +392,11 @@ is refused (`crates/api-server/src/middleware/authentication.rs:245-258`).
 
 A runner credential is `needy-runner.<name>.<64 hex>`: 32 random bytes after
 a prefix naming the runner; the daemon stores only the SHA-256 of the whole
-string (`crates/daemon/src/store/secret.rs:1-24,50-82`). A runner given
-`--credential-file` or `--credential-env` takes its name from the
-credential and never reads or writes `runner.json`
+string (`crates/daemon/src/store/secret.rs:1-24,50-82`). From the release
+after v0.0.21, a static runner's credential may instead be any plain random
+secret, found by its hash (below). A runner given
+`--credential-file` or `--credential-env` takes its name from a prefixed
+credential (pass `--name` with a plain one) and never reads or writes `runner.json`
 (`crates/cli/src/commands/daemon/runner.rs:56-75,206-222`). Names are DNS
 labels, 1-63 characters (`crates/daemon/src/store/mod.rs:496-505`). Labels:
 keys of 1-63 letters, digits, `.`, `_`, `-`, `/`; values of up to 63
@@ -392,15 +412,24 @@ letters, digits, `.`, `_`, `-` (`crates/daemon/src/store/mod.rs:512-523`).
 runners:
 - name: ws-tenant-a-1
   # SHA-256 of the whole credential string, hex, optional "sha256:" prefix.
-  # Or `credential: needy-runner.ws-tenant-a-1.<hex>` in plain text.
+  # Or `credential: needy-runner.ws-tenant-a-1.<hex>` in plain text, or
+  # (after v0.0.21) a plain random secret, written plain or as its hash.
   credential_hash: "sha256:<64 hex>"
   roles: [executor]           # actor | executor; empty allows both
   labels: { rc.workspace: ws-tenant-a-1 }
 ```
 
-- A plain `credential` must start with `needy-runner.<name>.`
+- Up to v0.0.21 a plain `credential` must start with `needy-runner.<name>.`
   (`static_runners.rs:265-283`); exactly one of `credential` and
-  `credential_hash`.
+  `credential_hash`. From the release after v0.0.21 (code, not yet
+  released) it may also be a plain random secret of at least 64 hex digits
+  or 43 base64/base64url characters, generated and hashed as for static
+  clients (section 3); the daemon finds the entry by the secret's SHA-256
+  (`crates/daemon/src/runners.rs`, `unprefixed_runner`). The Node
+  Authorizer and the trace use the entry's name, so nothing needs the name
+  in the credential, but `needy runner serve --credential-file` needs
+  `--name` with the entry's name. Duplicate hashes in the file, or a secret
+  the clients file also holds, are refused as for static clients.
 - Reloaded when the file's mtime, inode or size changes: every second by
   the maintenance task, and before each authentication and scheduling
   (`crates/daemon/src/runners.rs:27,36-68`; `static_runners.rs:96-191`). A
@@ -448,8 +477,8 @@ Semantics (`crates/daemon/src/store/mod.rs:275-309`,
   the ephemeral runner exit non-zero, `crates/daemon/src/runner.rs`, so a
   good run ends with a `Failed` Pod) or when the `Actor` is deleted.
 - **Workspace executors: static entries.** Workspaces are long-lived; `rc`
-  generates the credential itself (32 random bytes, hex, after
-  `needy-runner.<name>.`), puts the plain value in the Workspace's Secret and
+  generates the credential itself (32 random bytes; up to v0.0.21 as hex
+  after `needy-runner.<name>.`, after it as a plain base64url secret), puts the plain value in the Workspace's Secret and
   its hash in the daemon's `needy-runners` Secret. No daemon round trip, and
   the entry survives a daemon restart or PVC loss.
 
