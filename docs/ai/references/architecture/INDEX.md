@@ -50,3 +50,4 @@ Cross-cutting design decisions, shared vocabulary and project scope.
 | 2026-11-23 | [Phase 3: External client penetration and cloud OCI image layers (proposed spec)](2026-11-23-external-client-penetration-and-oci-layers-spec.md) | spec |
 | 2026-11-26 | [Integrating needy into `rc`](2026-11-26-rc-integration-guide.md) | handoff |
 | 2026-11-26 | [S1: the actor gateway moves into the actor runner](2026-11-26-runner-gateway-design.md) | design |
+| 2026-11-26 | [Multi-host pass, v0.0.19 to v0.0.22](2026-11-26-multi-host-pass-evidence.md) | evidence |

@@ -47,7 +47,7 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   ```yaml
   runners:
     - name: ws-a
-      # A plain random secret (after v0.0.21), found by its hash. A runner
+      # A plain random secret (since v0.0.22), found by its hash. A runner
       # serving with it needs --name ws-a: the secret does not carry a name.
       credential_hash: sha256:<SHA-256 of the whole credential, 64 hex digits>
       roles: [executor]
@@ -56,7 +56,7 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   ```
 
   Each entry sets `credential` or `credential_hash`. A credential is either
-  `needy-runner.NAME.<64 hex digits>` or, from the release after v0.0.21,
+  `needy-runner.NAME.<64 hex digits>` or, since v0.0.22,
   any random secret of at least 32 bytes (see the static clients entry
   below for the rules and how to generate one). Static runners cannot be
   rotated or removed through the API; edit the file instead.
@@ -79,7 +79,7 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
 
   Each entry sets `token` or `token_hash`. A token is either
   `needy-client.static-NAME.<64 hex digits>`, found by the name it carries,
-  or, from the release after v0.0.21, any other random secret, found by its
+  or, since v0.0.22, any other random secret, found by its
   SHA-256 (`printf %s "$TOKEN" | sha256sum`). A plain secret written in the
   file must be at least 64 hex digits or 43 base64/base64url characters
   (32 bytes), and may not be shaped like a runner credential or another
@@ -104,8 +104,7 @@ ephemeral workers, pre-provisioned credentials, and host-side boundaries:
   `--gateway-listen tcp://HOST:PORT` to the daemon and `--gateway` to the
   runner for those. See
   [the runner gateway design](../ai/references/architecture/2026-11-26-runner-gateway-design.md).
-- **Per-actor upstream proxy** (from the release after v0.0.18, not
-  released): pass `--gateway-upstream socks5h://HOST[:PORT]` (or
+- **Per-actor upstream proxy** (since v0.0.19): pass `--gateway-upstream socks5h://HOST[:PORT]` (or
   `socks5://`, where the runner resolves and checks names itself) and
   `--gateway-upstream-credentials-file PATH` (`USERNAME:PASSWORD`, not
   readable by other users; `0440` with a Pod's `fsGroup` works) to

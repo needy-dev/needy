@@ -101,8 +101,8 @@ gateway blocks loopback/link-local SSRF targets by default, accepts additional
 `--gateway-block-cidr` rules. A remote actor's runner runs its gateway itself
 with the same policy, so its service URLs are resolved from the runner's host;
 for older runners the daemon serves the gateway over an authenticated TCP
-listener (`--gateway-listen`). From the release after v0.0.18 (not
-released), `--gateway-upstream socks5h://HOST[:PORT]` on `needy runner
+listener (`--gateway-listen`). Since v0.0.19,
+`--gateway-upstream socks5h://HOST[:PORT]` on `needy runner
 serve` or `needy daemon serve` sends the actor's allowed traffic (not its
 services) through a SOCKS5 proxy, with `--gateway-upstream-credentials-file`;
 traced requests then carry `via`. See

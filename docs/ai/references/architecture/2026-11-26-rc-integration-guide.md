@@ -7,6 +7,13 @@ needy's code at `ad4a146` (v0.0.17 plus B-1 #110 and B-2 #111) unless it is
 marked otherwise; paths are relative to the needy repository unless they
 name another one.
 
+NOTICE (revision, 2026-11-26): release status updated after v0.0.22.
+S1 and the per-actor upstream shipped in v0.0.19, `--clients-file` and
+B-4 (`actor.image` imports) in v0.0.18, plain random static secrets in
+v0.0.22. The code facts and line references stay those of `ad4a146`
+unless a passage names a release. Deployment advice across layouts is in
+the [deployment guide](../../../guides/deployment.md).
+
 Evidence levels used here:
 
 - **code**: read from the source at `ad4a146`; not exercised for this note.
@@ -64,7 +71,7 @@ listen (`crates/daemon/src/runner.rs`, module comment). The actor VM has no
 network interface; its HTTP and HTTPS go through its gateway, which applies
 `actor.network`.
 
-- **From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26): both the daemon and the runner are S1 builds, so the
+- **From S1** (v0.0.19, which carries [the runner gateway](2026-11-26-runner-gateway-design.md)): both the daemon and the runner are S1 builds, so the
   runner runs the gateway in the actor Pod, under the policy the daemon
   sends on the bridge (the profile, `--gateway-block-cidr`, the run's
   creation time for fault windows), and sends what the gateway records back
@@ -145,8 +152,12 @@ pushes the steps and the daemon pulls them.
 - Run as uid 1000, non-root. Nothing in the daemon needs root or KVM.
 - Ports: 7400 (control, gRPC over h2c) and 7401 (actor gateway). One
   ClusterIP Service with both.
-- Readiness: `tcpSocket` on 7400. needy's health service is
-  `needy.v1.HealthService/Check` (public, no token), not
+- Readiness: an **exec** probe,
+  `needy config context check local -q --timeout 2s`, through the
+  management socket (the example below). A `tcpSocket` probe on 7400 comes
+  from the node, and CNIs that apply policy to kubelet traffic (Cilium
+  among them) refuse it under a daemon ingress policy (probe). needy's
+  health service is `needy.v1.HealthService/Check` (public, no token), not
   `grpc.health.v1.Health`, so Kubernetes' built-in gRPC probe does not fit.
 - The listeners are plaintext TCP; there is no in-process TLS listener
   (`crates/config/src/global.rs:148-169`: a listener must be `tcp://`).
@@ -283,7 +294,7 @@ A request on the TCP listener is one of these callers
 | none, on the management Unix socket, same uid or root | `Operator` | everything |
 | `needy-client.<id>.<64 hex>`, paired or static client token | `Client { access }` | `runs`: run and process calls; `admin`: also client and runner administration |
 | `needy-runner.<name>.<64 hex>` | `Runner` | `Heartbeat`, `Control`, `Task` only |
-| any other secret a static entry holds (after v0.0.21) | the entry's `Runner` or `Client { access }` | as above |
+| any other secret a static entry holds (since v0.0.22) | the entry's `Runner` or `Client { access }` | as above |
 | runner credential with `x-needy-run-id` | `Actor { run }` | the actor allowlist, for that run only (section 8) |
 
 `MintRunnerCredential`, `RevokeRunnerCredential`, `CreateJoinToken`,
@@ -322,7 +333,7 @@ the same name replaces and revokes the earlier token
 
 **Gap G1** (a controller needs an admin credential it can provision before
 the daemon starts) is closed by `needy daemon serve --clients-file PATH`
-(needy-dev/needy#114, expected in v0.0.18; code, not yet released). The
+(needy-dev/needy#114, released in v0.0.18). The
 file is hot-reloaded like the runners file, and unknown keys are errors at
 every level:
 
@@ -334,7 +345,7 @@ clients:
 ```
 
 Up to v0.0.21 the token must be `needy-client.static-<name>.<64 hex>`.
-From the release after v0.0.21 (code, not yet released) it may also be a
+Since v0.0.22 (#131) it may also be a
 plain random secret, which the daemon finds by its SHA-256 among the file's
 entries (`crates/daemon/src/clients.rs`, `unprefixed_client`), so `rc`
 needs no knowledge of needy's token format:
@@ -393,7 +404,7 @@ is refused (`crates/api-server/src/middleware/authentication.rs:245-258`).
 A runner credential is `needy-runner.<name>.<64 hex>`: 32 random bytes after
 a prefix naming the runner; the daemon stores only the SHA-256 of the whole
 string (`crates/daemon/src/store/secret.rs:1-24,50-82`). From the release
-after v0.0.21, a static runner's credential may instead be any plain random
+v0.0.22, a static runner's credential may instead be any plain random
 secret, found by its hash (below). A runner given
 `--credential-file` or `--credential-env` takes its name from a prefixed
 credential (pass `--name` with a plain one) and never reads or writes `runner.json`
@@ -413,7 +424,7 @@ runners:
 - name: ws-tenant-a-1
   # SHA-256 of the whole credential string, hex, optional "sha256:" prefix.
   # Or `credential: needy-runner.ws-tenant-a-1.<hex>` in plain text, or
-  # (after v0.0.21) a plain random secret, written plain or as its hash.
+  # (since v0.0.22) a plain random secret, written plain or as its hash.
   credential_hash: "sha256:<64 hex>"
   roles: [executor]           # actor | executor; empty allows both
   labels: { rc.workspace: ws-tenant-a-1 }
@@ -421,8 +432,7 @@ runners:
 
 - Up to v0.0.21 a plain `credential` must start with `needy-runner.<name>.`
   (`static_runners.rs:265-283`); exactly one of `credential` and
-  `credential_hash`. From the release after v0.0.21 (code, not yet
-  released) it may also be a plain random secret of at least 64 hex digits
+  `credential_hash`. Since v0.0.22 (#131) it may also be a plain random secret of at least 64 hex digits
   or 43 base64/base64url characters, generated and hashed as for static
   clients (section 3); the daemon finds the entry by the secret's SHA-256
   (`crates/daemon/src/runners.rs`, `unprefixed_runner`). The Node
@@ -535,7 +545,7 @@ needy runner serve \
   start ("an explicitly requested runner role is unavailable on this
   machine"), a quick signal of a scheduling or permission problem.
 - `--gateway` is the daemon's `--gateway-listen`. Before S1, without it the
-  actor has no network. **From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26), an S1 runner with an S1 daemon runs
+  actor has no network. **From S1** (v0.0.19, which carries [the runner gateway](2026-11-26-runner-gateway-design.md)), an S1 runner with an S1 daemon runs
   the gateway itself and ignores `--gateway`; it is used only when the
   daemon is older. Keep passing it while the daemon may be older.
 - `--actor-image DIR` defaults to `$NEEDY_DATA_DIR/images/linux-firecracker/base`.
@@ -659,9 +669,9 @@ Differences from the probes, not verified on a cluster: running as uid 1000
 from the first process (the probes set up as root, then `setpriv`), a
 static `supplementalGroups`, and `capabilities: { drop: [ALL] }`.
 
-### A per-actor upstream proxy (code, not released)
+### A per-actor upstream proxy (code and probe, v0.0.19)
 
-**From the release after v0.0.18 (not released)**, with the runner running
+**Since v0.0.19**, with the runner running
 the gateway (S1), each actor can leave through a SOCKS5 proxy of its own
 ([the runner gateway design](2026-11-26-runner-gateway-design.md), "Upstream
 proxy"). `rc` puts the proxy in the runner's arguments and its credentials
@@ -782,9 +792,15 @@ commands:
   directory over SFTP; see section 7.
 - `actor.image` today: an image definition (layers, features) works for a
   remote actor when the daemon has or can obtain every step (section 2);
-  or from a layer registry (#112). An OCI reference (`actor.image: REF`)
-  is ignored for a remote actor (`crates/daemon/src/image/mod.rs:173-186`,
-  `TODO(images)`); importing it is B-4.
+  or from a layer registry (#112). Since v0.0.18 (B-4, #115) an OCI
+  reference (`actor.image: REF`) built `FROM` `actor-base` works for a
+  remote actor too: the control daemon imports its layers above the base
+  and the runner fetches them from the daemon (`GuestService.FetchLayer`;
+  `import::Disks::Runner` in `crates/daemon/src/image/mod.rs`, the
+  in-process test
+  `a_remote_runner_boots_an_image_from_actor_base_with_the_layers_the_control_daemon_imported`,
+  and a live run on v0.0.18). The runner does not contact the registry
+  (`TODO(runner-registry)`). See [Agent images](../../../guides/agent-images.md).
 
 ### Following the run (code)
 
@@ -932,7 +948,7 @@ run by hand with `needy image build` and `--layer-registry`).
 cluster without them still runs, with the daemon and the gateway's
 `--gateway-block-cidr` as the only egress checks.
 
-**From S1** (the release after v0.0.17 that carries [the runner gateway](2026-11-26-runner-gateway-design.md); not released on 2026-11-26): the actor gateway runs in the actor runner, so the actor's
+**From S1** (v0.0.19, which carries [the runner gateway](2026-11-26-runner-gateway-design.md)): the actor gateway runs in the actor runner, so the actor's
 allowlisted egress leaves from the **actor Pod** (its egress IP is the actor
 Pod's, after the node's SNAT), and the allowlist is enforced in the actor
 Pod's runner process instead of the daemon's. Policies for S1 builds on
@@ -947,8 +963,7 @@ both sides:
 - The daemon: no internet egress for actors any more (keep what the layer
   registry and image pulls need); ingress on 7400 as below.
 
-**With a per-actor upstream proxy** (from the release after v0.0.18, not
-released; section 5): the actor's internet traffic leaves through its
+**With a per-actor upstream proxy** (since v0.0.19; section 5): the actor's internet traffic leaves through its
 proxy, so the actor Pod needs no internet egress at all:
 
 - Actor Pods: egress only to their proxy's address and port, to the
@@ -1154,10 +1169,12 @@ client, the daemon image and the runner image to one needy release.
 | `MintRunnerCredential`, `--activity-hook`, `--wait-for-runner` | #93, in v0.0.15 |
 | Image layers on remote actors (`FetchLayer`, root check) | #104, in v0.0.17 |
 | Remote terminal wait, base-image hint | #108, in v0.0.17 |
-| `actor-base`/`executor-base` published; root identity is the base's stack digest | B-1 #110, B-2 #111, merged after v0.0.17; first in the next release |
-| Layer registry, standard registry auth and TLS | B-3 #112, merged |
-| `actor.image: <OCI ref>` imported above the base | B-4, not started |
-| S1: the actor gateway in the actor runner ([design](2026-11-26-runner-gateway-design.md)) | `feat/runner-gateway`, not merged; network `needy chaos add`/`rm` on such runs is refused |
+| `actor-base`/`executor-base` published; root identity is the base's stack digest | B-1 #110, B-2 #111, in v0.0.18 |
+| Layer registry, standard registry auth and TLS | B-3 #112, in v0.0.18 |
+| `--clients-file` static clients (G1) | #114, in v0.0.18 |
+| `actor.image: <OCI ref>` imported above the base, local and remote | B-4 #115, in v0.0.18 |
+| S1: the actor gateway in the actor runner ([design](2026-11-26-runner-gateway-design.md)), and the per-actor upstream | #118, in v0.0.19; network `needy chaos add`/`rm` on such runs is refused |
+| Plain random secrets in `--runners-file` and `--clients-file` | #131, in v0.0.22 |
 | `needy image build --push`, runners pulling from the import | B-5, not started |
 | macOS drivers | Not relevant to the cluster |
 | User-device executors | Need a cluster gRPC ingress (D7), unowned |
@@ -1168,7 +1185,7 @@ client, the daemon image and the runner image to one needy release.
   needy version on both sides.
 - Gaps found while writing this note (none implemented):
   - G1: no non-interactive admin credential for a controller (section 3);
-    closed by `--clients-file` (#114, expected in v0.0.18).
+    closed by `--clients-file` (#114, in v0.0.18).
   - G2: no slim needy runtime image (section 5).
   - G3: no switch to forbid control-host placement (section 6).
   - G7: a minted, never-connected runner lists as `online` with empty

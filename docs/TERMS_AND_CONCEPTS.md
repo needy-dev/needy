@@ -139,7 +139,7 @@ A machine running `needy runner serve` that has joined a control
 plane. It reports its **capabilities** and **labels** (`KEY=VALUE`), and sends a heartbeat at the interval the control
 plane sets (15 s by default); it is *online* while one arrived within the last
 three intervals, else *offline*, and *removed* once an operator removed it.
-Runners are registered (`needy runner token create`, then a join), listed
+Runners are registered (`needy runner invite`, then `needy runner join`), listed
 (`needy runner ls`), rotated (`needy runner rotate`) and removed
 (`needy runner rm`). Actors and executors are instances that run on them; a
 runner's name is a DNS label. Designed in
@@ -290,22 +290,21 @@ and changes only when the file does.
 
 ### Control token
 
-NOTICE: this section describes current behavior. The proposed
+NOTICE (migration, 2026-11-26): the shared control token a daemon read from
+`--token-env` no longer exists; `needy daemon serve` has no token flag
+(`crates/cli/src/commands/daemon/mod.rs`). Older notes that mention it
+describe the design before the
 [access redesign](ai/references/cli/2026-11-14-cli-configuration-and-access-spec.md)
-replaces the manually supplied shared control token in normal use with local
-OS admission and individually revocable remote client credentials. Existing
-paired clients would retain their granted permissions during migration.
+landed.
 
-The bearer token a control daemon reads from `--token-env`: the bootstrap and
-admin credential, held by the **operator**. It is required for a TCP listener
-on a non-loopback address; the control socket on the control host needs none
-(its file permissions guard it). An operator uses it to pair the first clients
-and runners; day-to-day clients use their own **client tokens**.
-
-NOTICE: the current server applies its configured control token across its
-listeners, including Unix sockets. The token-free local-socket statement above
-describes a server without that token configured. Separating local and network
-admission is proposed below; it has not landed.
+The **operator** is whoever reaches the daemon's management socket as the
+daemon's own OS account or root; the socket checks the peer's credentials
+and needs no token (`crates/api-server/src/middleware/authentication.rs`).
+Every call on a TCP listener carries a bearer credential instead, except
+the health check, runner join and client pairing: a **client token**
+(paired or static), a **runner credential**, or a runner credential bound
+to a run for an actor. The operator pairs the first clients and runners;
+an admin client can do the same remotely.
 
 ### Local discovery (proposed)
 
@@ -914,8 +913,8 @@ actor's hosts go out: directly from the gateway's host, or through an
 upstream SOCKS5 proxy named by whoever runs the gateway (the runner's or
 the daemon's `--gateway-upstream`), never falling back to direct.
 Services are always dialed directly. Traced connections through one name it
-in `via`. **Provisional** (not released; see the runner gateway design,
-"Upstream proxy").
+in `via`. Released in v0.0.19; see the runner gateway design,
+"Upstream proxy".
 
 ### Service
 
