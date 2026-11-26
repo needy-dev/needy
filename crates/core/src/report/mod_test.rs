@@ -397,6 +397,51 @@ fn a_vm_exit_after_the_driver_exit_reports_finished() {
   assert_eq!(line_after(&report, "| Duration"), "| 1.0s | finished | exit 0 | 0 | 0 | 0 | 0 | 0 |");
 }
 
+// ROOT CAUSE:
+//
+// If a run failed after its driving program reported its exit, as a remote
+// actor run whose bridge ended without the VM's exit does, the report said
+// `finished` while `run ls` said `failed`, because the report kept the state
+// of the first end it read, `actor.exit`, and the `run.fail` after it set
+// only the reason.
+//
+// Before the fix, the report showed `finished` and the failure together.
+// The fix lets `run.fail`, which the daemon records only when the run
+// becomes failed, set the state, as `run ls` shows it.
+#[test]
+fn a_run_failed_after_its_driver_exit_reports_failed() {
+  let events = vec![
+    create(1_000),
+    at(
+      2_000,
+      Event::ActorExit(ActorExit {
+        code: Some(0),
+        signal: None,
+      }),
+    ),
+    at(
+      2_400,
+      Event::ActorVmExit(ActorVmExit {
+        code: None,
+        signal: None,
+        error: Some("actor bridge disconnected".into()),
+      }),
+    ),
+    at(
+      2_400,
+      Event::RunFail(RunFail {
+        reason: "the actor exited before its driving program did: waiting for linux-firecracker failed: actor bridge disconnected".into(),
+      }),
+    ),
+  ];
+
+  let report = render("7f3a", &events, Level::Summary, Format::Markdown);
+  let json: serde_json::Value = serde_json::from_str(&render("7f3a", &events, Level::Summary, Format::Json)).unwrap();
+
+  assert_eq!(line_after(&report, "| Duration"), "| 1.0s | failed | exit 0 | 0 | 0 | 0 | 0 | 0 |");
+  assert_eq!(json["state"], "failed");
+}
+
 #[test]
 fn a_run_stopped_while_running_reports_stopped() {
   let events = vec![create(1_000), at(3_000, Event::RunStop(RunStop::default()))];
