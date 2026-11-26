@@ -433,6 +433,11 @@ mod run {
     {
       return Some((Status::NotCovered, reason.clone()));
     }
+    if cell.scenario == matrix::Scenario::Chaos(matrix::Fault::Sensor)
+      && let Some(Err(reason)) = host.sensors.get(&cell.driver)
+    {
+      return Some((Status::NotCovered, reason.clone()));
+    }
     if cell.end == End::StopNow && !host.stop_now {
       return Some((Status::NotCovered, "`needy run stop` has no --now in this tree".into()));
     }
