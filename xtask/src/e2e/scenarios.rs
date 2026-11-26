@@ -397,13 +397,10 @@ fn workspace(env: &mut CellEnv, cell: &Cell, from: Workspace, checks: &mut Check
   match from {
     Workspace::Executor(kind) => {
       let (mut block, base) = executor(env, kind)?;
-      // The workspace maps itself; a `~` entry as well would compete with
-      // it for the same paths.
-      // REVIEW(path-map): with `path_map: { "~": DIR }` and a workspace
-      // from the same executor, a routed command in `~/workspace` got
-      // `DIR/workspace`, not the workspace's directory (seen 2026-11-13 on
-      // macos-apple-container): the explicit entry won over the longer
-      // workspace entry. Whether the longest prefix should win is open.
+      // The workspace maps itself. A `~` entry as well no longer competes
+      // with it: routing maps a path through the longest matching key
+      // (`routing::map_path`), so the workspace's entry wins for its paths;
+      // the cell keeps the profile to the workspace's own entry.
       if let Some(map) = block.as_object_mut() {
         map.remove("path_map");
       }
@@ -1182,7 +1179,7 @@ fn runner(env: &mut CellEnv, cell: &Cell, at: RunnerAt, checks: &mut Checks) -> 
       // every connection of the transport (at `cut-me`) and writes
       // `cut.done` on the runner's side; the actor waits to see it through
       // the mount, which has to come back.
-      // REVIEW(path-map): no `~` entry beside the workspace (see `workspace`).
+      // No `~` entry beside the workspace (see `workspace`).
       (
         json!({ "driver": "native", "runner": name }),
         format!(

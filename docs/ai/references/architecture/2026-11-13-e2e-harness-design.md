@@ -534,11 +534,13 @@ Made on the spot, as the brief allowed:
   so a harness run never replaces the owner's `needy-actor:latest`.
 - **`DOCKER_HOST` from the Docker CLI's context** when it is unset, so the
   daemons reach OrbStack or Docker Desktop on a Mac as `docker` does.
-- **The workspace cells map no `~` path**: a `path_map` entry for `~` won over
-  the workspace's longer entry (`REVIEW(path-map)` in `scenarios.rs`), and a
-  container workspace path the image lacks failed the routed commands
-  (`REVIEW(workspace-missing)`); the cells use paths that exist and the
-  findings stay marked.
+- **The workspace cells map no `~` path**: a `path_map` entry for `~` used to
+  win over the workspace's longer entry; since 2026-11-26 routing maps a path
+  through the longest matching key, so the workspace's entry wins (the
+  default workspace beside a `~` entry hit this in the routing, fake-agent
+  and lifecycle cells). A container workspace path the image lacks failed
+  the routed commands (`REVIEW(workspace-missing)`); the cells use paths
+  that exist and that finding stays marked.
 - **Remote hosts build natively.** A build host builds from `git archive HEAD`;
   run hosts only get its static needy, static harness and images; the Windows
   runner builds `needy.exe` itself.
