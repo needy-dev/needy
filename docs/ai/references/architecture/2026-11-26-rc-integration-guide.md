@@ -1110,9 +1110,11 @@ client, the daemon image and the runner image to one needy release.
     (section 5); an exit code reflecting the run would let Kubernetes
     status alone tell success from failure.
   - `docs/TERMS_AND_CONCEPTS.md` ("Control token") still describes
-    `--token-env`, and `images/Dockerfile`'s `executor-base` `CMD` calls
-    `needy daemon --mode executor`, which the CLI no longer parses; both are
-    documentation or image follow-ups, not part of this handoff.
+    `--token-env`, a documentation follow-up, not part of this handoff.
+    `images/Dockerfile`'s `executor-base` `CMD` and the `linux-container`
+    executor driver called `needy daemon --mode executor`, which the CLI no
+    longer parses, so every `linux-container` executor exited 2 in v0.0.18
+    and v0.0.19; both now call `needy daemon executor`.
 
 ## 11. Checklists
 

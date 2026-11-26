@@ -1,5 +1,5 @@
 //! The `linux-container` driver: one container per instance, running
-//! `needy daemon --mode executor` on a socket in a directory shared with the
+//! `needy daemon executor` on a socket in a directory shared with the
 //! host. Containers are created through the Docker-compatible engine
 //! ([`crate::engine`]), wherever `DOCKER_HOST` points.
 //!

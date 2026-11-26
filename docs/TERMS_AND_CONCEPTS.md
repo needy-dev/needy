@@ -135,7 +135,7 @@ the connection it dialed; it listens nowhere.
 
 ### Runner
 
-A machine running `needy daemon --mode runner` that has joined a control
+A machine running `needy runner serve` that has joined a control
 plane. It reports its **capabilities** and **labels** (`KEY=VALUE`), and sends a heartbeat at the interval the control
 plane sets (15 s by default); it is *online* while one arrived within the last
 three intervals, else *offline*, and *removed* once an operator removed it.
@@ -246,8 +246,8 @@ unrestricted shared runner resource.
 
 ### Local runner
 
-The runner that runs on the control host, named by `needy daemon --mode
-control --local-runner NAME`. Actors and `linux-container` executors placed
+The runner that runs on the control host, named by `needy daemon serve
+--local-runner NAME`. Actors and `linux-container` executors placed
 on it are created by the control plane itself; as built, actors and
 `linux-container` executors run nowhere else.
 

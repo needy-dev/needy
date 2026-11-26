@@ -291,3 +291,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
   runtime.shutdown_background();
   code
 }
+
+#[cfg(test)]
+#[path = "cli_test.rs"]
+mod tests;

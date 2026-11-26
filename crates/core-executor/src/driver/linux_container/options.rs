@@ -84,7 +84,6 @@ pub fn container(spec: &Spec, options: &Options) -> Result<Container, Error> {
       [
         "needy",
         "daemon",
-        "--mode",
         "executor",
         "--listen",
         &format!("unix:{SOCKET_DIR}/{SOCKET}"),
