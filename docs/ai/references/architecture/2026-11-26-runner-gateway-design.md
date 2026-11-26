@@ -1,9 +1,11 @@
 # S1: the actor gateway moves into the actor runner
 
-Status: **implemented on `feat/runner-gateway`, not released**, 2026-11-26.
+Status: **released in v0.0.19** ([#118](https://github.com/needy-dev/needy/pull/118)),
+2026-11-26; written on `feat/runner-gateway` before the release.
 Owner-approved slice ("S1: the gateway moves into the actor runner").
-Evidence level: **code** and in-process tests (listed below); no cluster
-probe yet.
+Evidence level: **code**, in-process tests (listed below) and a cluster
+probe ("Evidence" below); also exercised across hosts in the
+[multi-host pass](2026-11-26-multi-host-pass-evidence.md).
 
 Related notes:
 
@@ -112,10 +114,10 @@ on the daemon and `--gateway` on the runner stay, for older peers.
 
 ### Upstream proxy
 
-From the release after v0.0.18 (not released). Owner-approved slice
-("per-actor upstream SOCKS proxy", 2026-11-26), on `feat/gateway-upstream`,
-stacked on S1. Evidence level: **code** and in-process tests (below); no
-cluster probe.
+Released in v0.0.19 with S1 (#118). Owner-approved slice
+("per-actor upstream SOCKS proxy", 2026-11-26), written on
+`feat/gateway-upstream`, stacked on S1. Evidence level: **code**,
+in-process tests (below) and the cluster probe ("Evidence" below).
 
 On Kubernetes each actor runs in its own ephemeral actor runner Pod, and
 each actor should leave through a SOCKS proxy of its own. The orchestrator

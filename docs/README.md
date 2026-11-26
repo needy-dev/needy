@@ -34,6 +34,10 @@ docs/
 - [Multi-machine and remote runner setup](guides/multi-machine.md): enrolling
   executor and remote Firecracker actor runners, tunnels, static/TTL credentials,
   and daemon security boundaries.
+- [Deployment](guides/deployment.md): choosing a topology (single host,
+  remote runners, Kubernetes, Windows), starting each role, credentials,
+  where the gateway runs and SOCKS upstreams, images, upgrades and mixed
+  versions, operations, known gaps and the evidence behind each claim.
 - [Development and architecture](guides/development.md): crate layout,
   extension points, `cargo xtask e2e`, and `apps/docs` banner rendering.
 
