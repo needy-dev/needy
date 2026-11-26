@@ -923,6 +923,66 @@ proxy, so the actor Pod needs no internet egress at all:
 - The proxy sees each actor's destinations (names with `socks5h`); TLS is
   tunnelled end to end as before.
 
+Manifests in the shapes the probe verified (see the
+[runner gateway evidence](2026-11-26-runner-gateway-design.md#evidence-probe-2026-11-26)).
+NetworkPolicy ports are the **Pod's** ports, not the Service's. Under a CNI
+with kube-proxy replacement, a ClusterIP may be rewritten to a node address
+before routing, so node ranges belong in every exclusion list.
+
+```yaml
+# S1: an actor Pod without an upstream.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: needy-actor-egress, namespace: tenant-a }
+spec:
+  podSelector: { matchLabels: { app.kubernetes.io/component: needy-actor } }
+  policyTypes: [Ingress, Egress]
+  egress:
+  - to:
+    - ipBlock:
+        cidr: 0.0.0.0/0
+        except: [POD_CIDR, SERVICE_CIDR, NODE_CIDR, 169.254.169.254/32]  # also --gateway-block-cidr
+  - to: [{ podSelector: { matchLabels: { app: needy-daemon } } }]
+    ports: [{ protocol: TCP, port: 7400 }]
+  - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]       # each actor.network.services backend
+    ports: [{ protocol: TCP, port: 8080 }]
+  - to: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: kube-system } },
+           podSelector: { matchLabels: { k8s-app: kube-dns } } }]
+    ports: [{ protocol: UDP, port: 53 }, { protocol: TCP, port: 53 }]
+---
+# With a socks5h upstream: only the actor's proxy, the daemon and named
+# services. Give the runner the daemon and the proxy by address
+# (--address tcp://DAEMON_CLUSTER_IP:7400, socks5h://PROXY_IP:1080) and the
+# Pod needs no DNS at all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: { name: actor-7f3c2a-egress, namespace: tenant-a }
+spec:
+  podSelector: { matchLabels: { example.com/actor: actor-7f3c2a } }
+  policyTypes: [Ingress, Egress]
+  egress:
+  - to: [{ podSelector: { matchLabels: { app: proxy-7 } } }]
+    ports: [{ protocol: TCP, port: 1080 }]
+  - to: [{ podSelector: { matchLabels: { app: needy-daemon } } }]
+    ports: [{ protocol: TCP, port: 7400 }]
+  - to: [{ podSelector: { matchLabels: { app: model-gateway } } }]
+    ports: [{ protocol: TCP, port: 8080 }]
+```
+
+**Workspace Pods through a proxy (probe, not needy).** Commands in a
+Workspace use the Pod's own network, so the gateway does not see them. A
+Mihomo TUN sidecar (a privileged native sidecar; `auto-route`,
+`auto-redirect`, `strict-route`, DNS hijack with fake-ip, sniffing,
+`route-exclude-address` with the pod, service **and node** ranges, private
+and link-local ranges rejected, DoH hosts and UDP rejected) sent a test
+domain through a SOCKS proxy while cluster DNS and Services stayed direct.
+It is not fail-closed on its own: when Mihomo was stopped, or its TUN
+device removed (Mihomo then keeps running without recovering), traffic went
+out directly. A NetworkPolicy backstop (egress only to the proxy, kube-dns,
+the daemon's 7400 and the cluster Services the Workspace uses) made every
+such round fail closed; also give the sidecar a liveness probe on its TUN
+link.
+
 Before S1, or while either side is older:
 
 - Actor Pods: egress only to the daemon's 7400 and 7401 and to DNS. If needy

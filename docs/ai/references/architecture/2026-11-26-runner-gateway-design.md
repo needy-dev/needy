@@ -188,6 +188,35 @@ connect timeout (a direct connection has none either); a
   it for the layer registry and image pulls), and 7401 is needed only for
   older runners.
 
+## Evidence (probe, 2026-11-26)
+
+A live probe of `feat/gateway-upstream` (static musl `needy` 0.0.18 dev
+build, base VM image from the v0.0.18 release) on a Kubernetes cluster with
+Flannel and Cilium chained (kube-proxy replacement, NetworkPolicy enforced),
+an ephemeral `linux-firecracker` actor runner Pod on a KVM node, and a
+control daemon Pod; every case ran at least three rounds. Probe evidence,
+not a support claim:
+
+- An actor downloading 50 MB over HTTPS through the gateway: with v0.0.18 on
+  both sides the daemon Pod carried the 50 MB both ways; with S1 on both
+  sides it carried about 15-18 KB (control traffic), and the destination saw
+  the actor Pod's address. Each `net.*` event reached the daemon's
+  `trace.db` once; the daemon's `--gateway-block-cidr` was enforced by the
+  runner.
+- Mixed versions (new daemon with a v0.0.18 runner, v0.0.18 daemon with a
+  new runner): the daemon's gateway enforced, as designed. A runner with
+  `--gateway-upstream` and a v0.0.18 daemon refused the actor.
+- Two actors at once, each with its own `socks5h` upstream: each actor's
+  requests arrived from its own proxy, `via` was on each proxied event, a
+  name only one proxy could resolve worked through that proxy only, and the
+  actor Pods made no DNS queries (DNS egress denied, requests still worked).
+  A wrong password and a proxy scaled to zero were 502s with `net.error`
+  and no direct connection; a rotated Secret applied once the kubelet
+  updated the mounted file. No credential appeared in any trace or log.
+- Not covered: a long CONNECT tunnel does not advance `last_activity_ms`
+  after it opens (also on v0.0.18), and the gateway has no connect timeout,
+  so a SYN dropped by a NetworkPolicy hangs until the client gives up.
+
 ## Tests
 
 In-process, next to the code:
