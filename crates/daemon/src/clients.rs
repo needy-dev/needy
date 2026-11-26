@@ -38,6 +38,37 @@ fn static_client_info(client: StaticClient) -> ClientInfo {
   }
 }
 
+impl Daemon {
+  // NOTICE: a token that both files hold is refused here and in
+  // `unprefixed_runner` instead of when either file loads. The files reload
+  // independently, so a load-time check against the other file's last
+  // loaded entries could refuse both files for good when an orchestrator
+  // moves one secret from one file to the other. Each file refuses its own
+  // duplicate hashes when it loads.
+  /// What an unprefixed bearer token is to the client registry: only a
+  /// static client's token can be one (paired clients' tokens are always
+  /// prefixed), found by its hash.
+  fn unprefixed_client(&self, token: &str) -> Credential {
+    self.static_clients.reload();
+    let Some(name) = self.static_clients.holds(token) else {
+      return Credential::Other;
+    };
+    self.static_runners.reload(&self.links);
+    if let Some(runner) = self.static_runners.find(token) {
+      tracing::warn!("static client {name} and static runner {runner} have the same token; refusing it for both");
+      return Credential::Refused;
+    }
+    match self.static_clients.find(token, now_ms()) {
+      Some(client) => Credential::Client {
+        id: client.id,
+        name: client.name,
+        access: client.access,
+      },
+      None => Credential::Other,
+    }
+  }
+}
+
 #[async_trait::async_trait]
 impl Clients for Daemon {
   async fn create_pairing_code(&self, request: NewPairingCode) -> Result<CreatedPairingCode> {
@@ -94,8 +125,11 @@ impl Clients for Daemon {
   }
 
   async fn credential(&self, token: &str) -> Result<Credential> {
-    if !store::is_client_token(token) {
+    if store::is_runner_credential(token) {
       return Ok(Credential::Other);
+    }
+    if !store::is_client_token(token) {
+      return Ok(self.unprefixed_client(token));
     }
     let now = now_ms();
     self.static_clients.reload();

@@ -361,3 +361,170 @@ async fn stale_expiry_timer_does_not_disconnect_reminted_runner_with_same_name()
   );
   as_runner(&served, &second.credential).runners().heartbeat(heartbeat()).await.unwrap();
 }
+
+// Unprefixed credentials: plain random secrets an orchestrator generates
+// without needy's credential format, found by their hash.
+const PLAIN_A: &str = "plain-runner-a-0123456789abcdefghijklmnopqrstuvwxyz";
+const PLAIN_B: &str = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
+const PLAIN_OTHER: &str = "plain-runner-x-0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// A daemon whose runners file (and clients file, when `clients` is given)
+/// starts as the text given, and the runners file's path.
+async fn served_with_files(runners: &str, clients: Option<&str>) -> (Served, std::path::PathBuf) {
+  let dir = tempfile::tempdir().unwrap();
+  let runners_file = dir.path().join("runners.yaml");
+  std::fs::write(&runners_file, runners).unwrap();
+  let clients_file = clients.map(|text| {
+    let file = dir.path().join("clients.yaml");
+    std::fs::write(&file, text).unwrap();
+    file
+  });
+  let started = testing::daemon_in(dir, |config| {
+    config.heartbeat_interval = Duration::from_secs(15);
+    config.runners_file = Some(runners_file.clone());
+    config.clients_file = clients_file;
+  })
+  .await;
+  (testing::serve(started, Some(CONTROL_TOKEN)).await, runners_file)
+}
+
+/// Replaces a file the way a mounted Secret changes: a new inode.
+fn replace(file: &std::path::Path, text: &str) {
+  let tmp = file.with_extension("tmp");
+  std::fs::write(&tmp, text).unwrap();
+  std::fs::rename(&tmp, file).unwrap();
+}
+
+#[tokio::test]
+async fn an_unprefixed_static_runner_credential_authenticates_as_its_runner() {
+  let hash = hash_hex(PLAIN_B);
+  let prefixed = "needy-runner.legacy.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  let text = format!(
+    "runners:\n  - name: pod-a\n    credential: {PLAIN_A}\n  - name: pod-b\n    credential_hash: sha256:{hash}\n  - name: legacy\n    credential: {prefixed}\n"
+  );
+  let (served, _file) = served_with_files(&text, None).await;
+
+  as_runner(&served, PLAIN_A).runners().heartbeat(heartbeat()).await.unwrap();
+  as_runner(&served, PLAIN_B).runners().heartbeat(heartbeat()).await.unwrap();
+  as_runner(&served, prefixed).runners().heartbeat(heartbeat()).await.unwrap();
+  let wrong = as_runner(&served, PLAIN_OTHER).runners().heartbeat(heartbeat()).await.unwrap_err();
+  let not_operator = as_runner(&served, PLAIN_A).runners().list_runners(ListRunnersRequest {}).await.unwrap_err();
+  let listed = operator(&served).runners().list_runners(ListRunnersRequest {}).await.unwrap().into_inner().runners;
+
+  let status = |name: &str| listed.iter().find(|runner| runner.name == name).map(|runner| runner.status());
+  assert_eq!(status("pod-a"), Some(RunnerStatus::Online));
+  assert_eq!(status("pod-b"), Some(RunnerStatus::Online));
+  assert_eq!(status("legacy"), Some(RunnerStatus::Online), "a prefixed credential still names its runner");
+  assert_eq!(wrong.code(), Code::Unauthenticated);
+  assert_eq!(not_operator.code(), Code::Unauthenticated, "a runner credential reaches only runner methods");
+}
+
+/// The hex SHA-256 of `secret`, as a runners file writes `credential_hash`.
+fn hash_hex(secret: &str) -> String {
+  crate::store::hex(&crate::store::hash_secret(secret))
+}
+
+#[tokio::test]
+async fn an_actor_runner_with_an_unprefixed_credential_acts_for_its_bound_run() {
+  use needy_api_client::proto::v1::{ControlRequest, GetConfigRequest, GetRunRequest, RunnerReport, control_request};
+  use needy_api_server::control::Runs as _;
+  use needy_api_server::protocol::domain::proto_capabilities;
+
+  let text = format!("runners:\n  - name: actor-node\n    credential: {PLAIN_A}\n    roles: [actor]\n");
+  let (served, _file) = served_with_files(&text, None).await;
+  let runner = as_runner(&served, PLAIN_A);
+  let capabilities = needy_core::types::Capabilities {
+    actor: [needy_config::profile::ActorDriver::LinuxFirecracker].into(),
+    executor: Default::default(),
+  };
+  let beat = HeartbeatRequest {
+    capabilities: Some(proto_capabilities(&capabilities)),
+    ..Default::default()
+  };
+  runner.runners().heartbeat(beat).await.unwrap();
+  let (control_tx, control_rx) = tokio::sync::mpsc::channel::<ControlRequest>(16);
+  let report = ControlRequest {
+    payload: Some(control_request::Payload::Report(RunnerReport::default())),
+  };
+  control_tx.send(report).await.unwrap();
+  let _control = runner.runners().control(tokio_stream::wrappers::ReceiverStream::new(control_rx)).await.unwrap();
+  while served.daemon().links.get("actor-node").is_none() {
+    tokio::time::sleep(Duration::from_millis(10)).await;
+  }
+  let profile = "user: { name: agent, uid: 1000, gid: 1000 }\nactor: { driver: linux-firecracker, runner: actor-node }\n";
+  let created = served.daemon().create(testing::new_run(profile, served.dir())).await.unwrap();
+
+  let bound = as_runner(&served, PLAIN_A).with_run_id(&created.id).unwrap();
+  let config = bound.guest().get_config(GetConfigRequest {}).await.unwrap().into_inner();
+  let denied = bound
+    .runs()
+    .get_run(GetRunRequest {
+      run_id: created.id.clone(),
+    })
+    .await
+    .unwrap_err();
+  let unbound = as_runner(&served, PLAIN_A).with_run_id("no-such-run").unwrap().guest().get_config(GetConfigRequest {}).await.unwrap_err();
+
+  assert_eq!(config.run_id, created.id);
+  assert_eq!(denied.code(), Code::PermissionDenied);
+  assert_eq!(unbound.code(), Code::PermissionDenied);
+}
+
+#[tokio::test]
+async fn a_runners_file_with_a_duplicate_or_weak_credential_loads_no_runners() {
+  let hash = hash_hex(PLAIN_A);
+  let client_token = "needy-client.static-pod.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  for text in [
+    format!("runners:\n  - name: a\n    credential: {PLAIN_A}\n  - name: b\n    credential: {PLAIN_A}\n"),
+    format!("runners:\n  - name: a\n    credential: {PLAIN_A}\n  - name: b\n    credential_hash: {hash}\n"),
+    format!("runners:\n  - name: a\n    credential: {PLAIN_A}\n  - name: b\n    credential: {}\n", &PLAIN_OTHER[..42]),
+    format!("runners:\n  - name: a\n    credential: {PLAIN_A}\n  - name: b\n    credential: {}\n", &PLAIN_B[..63]),
+    format!("runners:\n  - name: a\n    credential: {PLAIN_A}\n  - name: b\n    credential: {client_token}\n"),
+  ] {
+    let (served, _file) = served_with_files(&text, None).await;
+
+    let refused = as_runner(&served, PLAIN_A).runners().heartbeat(heartbeat()).await.unwrap_err();
+
+    assert_eq!(refused.code(), Code::Unauthenticated, "{text}");
+  }
+}
+
+#[tokio::test]
+async fn reloading_the_runners_file_adds_and_removes_unprefixed_credentials() {
+  let (served, file) = served_with_files(&format!("runners:\n  - name: pod-a\n    credential: {PLAIN_A}\n"), None).await;
+  let (_tx, rx) = tokio::sync::mpsc::channel(1);
+  let mut control =
+    as_runner(&served, PLAIN_A).runners().control(tokio_stream::wrappers::ReceiverStream::new(rx)).await.unwrap().into_inner();
+  assert!(served.daemon().links.get("pod-a").is_some());
+
+  replace(&file, &format!("runners:\n  - name: pod-b\n    credential: {PLAIN_B}\n"));
+  as_runner(&served, PLAIN_B).runners().heartbeat(heartbeat()).await.unwrap();
+  let removed = as_runner(&served, PLAIN_A).runners().heartbeat(heartbeat()).await.unwrap_err();
+  let ended = tokio::time::timeout(Duration::from_secs(2), control.message()).await.expect("control stream closes");
+
+  replace(&file, &format!("runners:\n  - name: pod-b\n    credential: {PLAIN_OTHER}\n"));
+  as_runner(&served, PLAIN_OTHER).runners().heartbeat(heartbeat()).await.unwrap();
+  let rotated_away = as_runner(&served, PLAIN_B).runners().heartbeat(heartbeat()).await.unwrap_err();
+
+  assert_eq!(removed.code(), Code::Unauthenticated);
+  assert!(matches!(ended, Ok(None) | Err(_)), "expected closed control stream, got {ended:?}");
+  assert_eq!(rotated_away.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn an_unprefixed_secret_in_both_the_runners_and_clients_files_is_refused_for_both() {
+  use needy_api_client::proto::v1::{GetCallerRequest, ListRunsRequest};
+
+  let runners = format!("runners:\n  - name: pod-a\n    credential: {PLAIN_A}\n  - name: pod-b\n    credential: {PLAIN_B}\n");
+  let clients = format!("clients:\n  - name: controller\n    token: {PLAIN_A}\n  - name: ci\n    token: {PLAIN_OTHER}\n");
+  let (served, _file) = served_with_files(&runners, Some(&clients)).await;
+
+  let as_runner_refused = as_runner(&served, PLAIN_A).runners().heartbeat(heartbeat()).await.unwrap_err();
+  let as_client_refused = as_runner(&served, PLAIN_A).runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+  as_runner(&served, PLAIN_B).runners().heartbeat(heartbeat()).await.unwrap();
+  let ci = as_runner(&served, PLAIN_OTHER).clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+
+  assert_eq!(as_runner_refused.code(), Code::Unauthenticated);
+  assert_eq!(as_client_refused.code(), Code::Unauthenticated);
+  assert_eq!(ci.client_id, "static-ci", "the clients file's other entries still authenticate");
+}

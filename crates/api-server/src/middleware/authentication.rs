@@ -82,10 +82,15 @@ impl Token {
 /// (or for tokenless requests where admission allows), a runner for a runner's
 /// credential on [`RUNNER_METHODS`] (or mapped to `Caller::Actor` on
 /// [`ACTOR_METHODS`] via the Node Authorizer when `x-needy-run-id` names an
-/// active run bound to that runner), and a client for a paired client's token.
-/// A token shaped like a runner credential or a client token that nobody holds
-/// is refused even without a control token, so a removed runner or revoked
-/// client learns that it was.
+/// active run bound to that runner), and a client for a paired or static
+/// client's token. A registry names the runner or client after its lookup,
+/// so an unprefixed static secret, found by its hash, is a caller like any
+/// other. A token shaped like a runner credential or a client token that
+/// nobody holds is refused even without a control token, so a removed runner
+/// or revoked client learns that it was.
+///
+/// NOTICE: the control token is checked first, so a static runner or client
+/// whose unprefixed secret equals it is the listener's caller.
 #[derive(Clone)]
 pub struct Credentials {
   pub allow_anonymous: bool,

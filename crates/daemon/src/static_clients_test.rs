@@ -175,3 +175,75 @@ async fn a_static_client_name_is_not_shared_with_a_paired_client() {
   assert_eq!(refused_code.code(), Code::FailedPrecondition);
   assert_eq!(caller.client_id, "static-ci");
 }
+
+// Unprefixed tokens: plain random secrets an orchestrator generates without
+// needy's token format, found by their hash.
+const PLAIN_ADMIN: &str = "plain-admin-token-0123456789abcdefghijklmnopqrstuvwxyz";
+const PLAIN_RUNS: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const PLAIN_OTHER: &str = "plain-other-token-0123456789abcdefghijklmnopqrstuvwxyz";
+
+#[tokio::test]
+async fn an_unprefixed_static_token_authenticates_with_its_access() {
+  let hash = store::hex(&store::hash_secret(PLAIN_RUNS));
+  let text = format!(
+    "clients:\n  - name: controller\n    access: admin\n    token: {PLAIN_ADMIN}\n  - name: batch\n    token_hash: {hash}\n  - name: ci\n    token: {RUNS_TOKEN}\n"
+  );
+  let (served, _file) = served(&text).await;
+  let admin = with(&served, PLAIN_ADMIN);
+  let batch = with(&served, PLAIN_RUNS);
+
+  let admin_caller = admin.clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+  let listed = admin.clients().list_clients(ListClientsRequest {}).await.unwrap().into_inner().clients;
+  let batch_caller = batch.clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+  batch.runs().list_runs(ListRunsRequest {}).await.unwrap();
+  let denied = batch.clients().list_clients(ListClientsRequest {}).await.unwrap_err();
+  let legacy = with(&served, RUNS_TOKEN).clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+  let wrong = with(&served, PLAIN_OTHER).runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+
+  assert_eq!((admin_caller.client_id.as_str(), admin_caller.name.as_str()), ("static-controller", "controller"));
+  assert_eq!(admin_caller.access, ClientAccess::Admin as i32);
+  let controller = listed.iter().find(|client| client.id == "static-controller").unwrap();
+  assert!(controller.last_used_at_ms > 0, "the calls used the unprefixed token");
+  assert_eq!((batch_caller.client_id.as_str(), batch_caller.name.as_str()), ("static-batch", "batch"));
+  assert_eq!(batch_caller.access, ClientAccess::Runs as i32);
+  assert_eq!(denied.code(), Code::PermissionDenied);
+  assert_eq!(legacy.client_id, "static-ci", "a prefixed token still names its client");
+  assert_eq!(wrong.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn a_clients_file_with_a_duplicate_or_weak_token_loads_no_clients() {
+  let hash = store::hex(&store::hash_secret(PLAIN_ADMIN));
+  let runner_credential = "needy-runner.pod.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  for text in [
+    format!("clients:\n  - name: a\n    token: {PLAIN_ADMIN}\n  - name: b\n    token: {PLAIN_ADMIN}\n"),
+    format!("clients:\n  - name: a\n    token: {PLAIN_ADMIN}\n  - name: b\n    token_hash: {hash}\n"),
+    format!("clients:\n  - name: a\n    token: {PLAIN_ADMIN}\n  - name: b\n    token: {}\n", &PLAIN_OTHER[..42]),
+    format!("clients:\n  - name: a\n    token: {PLAIN_ADMIN}\n  - name: b\n    token: {}\n", &PLAIN_RUNS[..63]),
+    format!("clients:\n  - name: a\n    token: {PLAIN_ADMIN}\n  - name: b\n    token: {runner_credential}\n"),
+  ] {
+    let (served, _file) = served(&text).await;
+
+    let refused = with(&served, PLAIN_ADMIN).runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+
+    assert_eq!(refused.code(), Code::Unauthenticated, "{text}");
+  }
+}
+
+#[tokio::test]
+async fn reloading_the_clients_file_adds_and_removes_unprefixed_tokens() {
+  let (served, file) = served(&format!("clients:\n  - name: controller\n    token: {PLAIN_ADMIN}\n")).await;
+  with(&served, PLAIN_ADMIN).runs().list_runs(ListRunsRequest {}).await.unwrap();
+
+  replace(&file, &format!("clients:\n  - name: ci\n    token: {PLAIN_RUNS}\n"));
+  let added = with(&served, PLAIN_RUNS).clients().get_caller(GetCallerRequest {}).await.unwrap().into_inner();
+  let removed = with(&served, PLAIN_ADMIN).runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+
+  replace(&file, &format!("clients:\n  - name: ci\n    token: {PLAIN_OTHER}\n"));
+  with(&served, PLAIN_OTHER).runs().list_runs(ListRunsRequest {}).await.unwrap();
+  let rotated_away = with(&served, PLAIN_RUNS).runs().list_runs(ListRunsRequest {}).await.unwrap_err();
+
+  assert_eq!(added.client_id, "static-ci");
+  assert_eq!(removed.code(), Code::Unauthenticated);
+  assert_eq!(rotated_away.code(), Code::Unauthenticated);
+}
