@@ -19,7 +19,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.0.19"
+version = "0.0.20"
 edition = "2024"
 rust-version = "1.97"
 repository = "https://github.com/needy-dev/needy"
@@ -128,19 +128,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
 
-devcontainer-features = { path = "crates/devcontainer-features", version = "0.0.19" }
-oci-layer = { path = "crates/oci-layer", version = "0.0.19" }
-oci-registry = { path = "crates/oci-registry", version = "0.0.19" }
-needy-api-client = { path = "crates/api-client", version = "0.0.19" }
-needy-api-proto = { path = "crates/api-proto", version = "0.0.19" }
-needy-api-server = { path = "crates/api-server", version = "0.0.19" }
-needy-common = { path = "crates/common", version = "0.0.19" }
-needy-config = { path = "crates/config", version = "0.0.19" }
-needy-core = { path = "crates/core", version = "0.0.19" }
-needy-core-actor = { path = "crates/core-actor", version = "0.0.19" }
-needy-core-executor = { path = "crates/core-executor", version = "0.0.19" }
-needy-daemon = { path = "crates/daemon", version = "0.0.19" }
-needy-trace = { path = "crates/trace", version = "0.0.19", default-features = false }
+devcontainer-features = { path = "crates/devcontainer-features", version = "0.0.20" }
+oci-layer = { path = "crates/oci-layer", version = "0.0.20" }
+oci-registry = { path = "crates/oci-registry", version = "0.0.20" }
+needy-api-client = { path = "crates/api-client", version = "0.0.20" }
+needy-api-proto = { path = "crates/api-proto", version = "0.0.20" }
+needy-api-server = { path = "crates/api-server", version = "0.0.20" }
+needy-common = { path = "crates/common", version = "0.0.20" }
+needy-config = { path = "crates/config", version = "0.0.20" }
+needy-core = { path = "crates/core", version = "0.0.20" }
+needy-core-actor = { path = "crates/core-actor", version = "0.0.20" }
+needy-core-executor = { path = "crates/core-executor", version = "0.0.20" }
+needy-daemon = { path = "crates/daemon", version = "0.0.20" }
+needy-trace = { path = "crates/trace", version = "0.0.20", default-features = false }
 
 # Line tables keep file:line in panics and backtraces, which is what tests,
 # logs and agents read. Full debug info adds local variables and types for an
