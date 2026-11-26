@@ -433,3 +433,36 @@ async fn start_up_refuses_an_insecure_registry_or_a_layer_registry_that_is_not_o
     assert!(format!("{error:#}").contains(&format!("invalid {field}")), "{error:#}");
   }
 }
+
+// ROOT CAUSE:
+//
+// If a control daemon served the shared actor gateway (`--gateway-listen`),
+// every SIGTERM ended in `daemon.cleanup_incomplete` after a 10 s wait,
+// because the gateway's accept loop ran in the daemon's task tracker and
+// stopped only on the server's stop token, which was cancelled after
+// `suspend_control` had waited for that tracker to drain.
+//
+// Before the fix, the drain always timed out with no run left.
+// The fix stops the gateway's accept loop when control is suspended.
+#[tokio::test]
+async fn a_control_daemon_serving_the_gateway_stops_cleanly() {
+  let started = testing::daemon_with(|config| config.gateway_listen = Some("127.0.0.1:0".into())).await;
+  let daemon = started.daemon.clone();
+  let socket = started.dir.path().join("ctl.sock");
+  let endpoint = format!("unix:{}", socket.display());
+  let stop = tokio_util::sync::CancellationToken::new();
+  let serving = tokio::spawn({
+    let (daemon, endpoint, stop) = (daemon.clone(), endpoint.clone(), stop.clone());
+    async move { daemon.serve_until(std::slice::from_ref(&endpoint), None, stop).await }
+  });
+  while std::os::unix::net::UnixStream::connect(&socket).is_err() {
+    tokio::time::sleep(Duration::from_millis(20)).await;
+  }
+
+  let began = std::time::Instant::now();
+  stop.cancel();
+  tokio::time::timeout(Duration::from_secs(30), serving).await.unwrap().unwrap().unwrap();
+
+  assert!(began.elapsed() < Duration::from_secs(5), "the stop took {:?}", began.elapsed());
+  assert!(!daemon.cleanup_incomplete.load(std::sync::atomic::Ordering::SeqCst), "the stop left cleanup incomplete");
+}

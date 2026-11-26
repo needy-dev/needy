@@ -543,7 +543,11 @@ impl Daemon {
       if let Ok(local) = bound.local_addr() {
         tracing::info!("shared actor gateway listening on tcp://{local}");
       }
-      self.tasks.spawn(bound.serve(server_stop.clone()));
+      // The accept loop runs in `self.tasks`, which `suspend_control` drains,
+      // so it must stop with control (`self.cancel`), not only with the
+      // server after that drain: otherwise every stop waited out the drain
+      // and ended in `cleanup_incomplete`.
+      self.tasks.spawn(bound.serve(self.cancel.child_token()));
     }
     let serving = server.serve(server_stop.clone());
     tokio::pin!(serving);
