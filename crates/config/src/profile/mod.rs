@@ -223,7 +223,7 @@ fn refuse_removed(document: &serde_yaml::Value, source: &Source) -> Result<(), E
       };
       Some((
         key,
-        "remote executors were removed: join the machine as a runner (`needy runner token create`, then `needy daemon --mode runner`) \
+        "remote executors were removed: join the machine as a runner (`needy runner invite` on the control host, then `needy runner join` and `needy runner serve` on the machine) \
          and select it with `runner: NAME`"
           .to_string(),
       ))

@@ -364,7 +364,7 @@ LABEL org.opencontainers.image.base.name=$UBUNTU_IMAGE \
       org.opencontainers.image.base.digest=$UBUNTU_DIGEST
 USER agent
 WORKDIR /home/agent/workspace
-CMD ["needy", "daemon", "--mode", "executor", "--listen", "unix:/run/needy/executor.sock", "--name", "executor"]
+CMD ["needy", "daemon", "executor", "--listen", "unix:/run/needy/executor.sock", "--name", "executor"]
 
 # `needy-executor`, the compatibility name of `executor-base`: the same
 # layers and configuration but its labels, which name the `executor-base`

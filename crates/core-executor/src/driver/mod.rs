@@ -6,7 +6,7 @@
 //! | `executors.NAME.driver` | Module | What an instance is |
 //! | --- | --- | --- |
 //! | `native` | [`native`] | this machine, through the daemon's in-process executor; no OS facility, no prefix |
-//! | `linux-container` | [`linux_container`] | a container running `needy daemon --mode executor`, through a Docker-compatible engine |
+//! | `linux-container` | [`linux_container`] | a container running `needy daemon executor`, through a Docker-compatible engine |
 //!
 //! A runner's own machine needs no driver: the daemon reaches it over the
 //! runner's streams. The `remote` provider, which dialed another machine's

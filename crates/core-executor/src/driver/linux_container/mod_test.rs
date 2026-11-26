@@ -86,7 +86,6 @@ fn the_daemon_sets_name_user_hostname_label_mounts_and_command() {
     [
       "needy",
       "daemon",
-      "--mode",
       "executor",
       "--listen",
       "unix:/run/needy/executor.sock",
