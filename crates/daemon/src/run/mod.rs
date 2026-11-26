@@ -1308,6 +1308,22 @@ impl Daemon {
     self.config.state_dir.join("runs").join(id)
   }
 
+  /// Where the host-side workspace mounts of run `id` go
+  /// (`needy_core_actor::driver::Start::mounts_dir`): the runtime
+  /// directory, private to the daemon's account, and not the run's
+  /// directory, which a workspace often contains.
+  // NOTICE: the default workspace is the folder `run create` runs in, and
+  // from `$HOME` that folder contains the state directory
+  // (`~/.local/state/needy`); a mount point there contains itself, and any
+  // walk of the workspace recursed through `mounts/0/...` without end.
+  // `$XDG_RUNTIME_DIR` is outside the user's tree; where there is none
+  // (macOS, a session without logind) the runtime directory is the state
+  // directory and `workspace::warn_contains_mounts` says so. Nothing here
+  // is a socket, so the path's length does not matter.
+  pub(crate) fn run_mounts_dir(&self, id: &str) -> PathBuf {
+    self.config.runtime_dir.join("mounts").join(id)
+  }
+
   /// Starts the trace of run `id` with the sinks `config` selects; the
   /// default sinks when the profile could not be read.
   pub(crate) fn run_trace(&self, id: &str, config: Option<&needy_config::profile::Trace>) -> Dispatch {

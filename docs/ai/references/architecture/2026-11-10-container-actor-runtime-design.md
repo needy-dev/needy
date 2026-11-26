@@ -302,7 +302,13 @@ hwmon faults or uptime offset; it passes the workspace mounts to
 `ActorRuntime::start`, which runs `sshfs` in passive mode on the daemon's
 machine over an exec stream opened through the run's own guest socket (so
 the stream is the actor's and the SFTP fault tap applies), and bind-mounts
-each mount point into the container. The daemon schedules hwmon faults
+each mount point into the container. The mount points are
+`<runtime>/mounts/<run>/<n>`, a private directory the driver removes when
+the actor ends and reconcile removes after a daemon that died. Until v0.0.21
+they were `<state>/runs/<run>/mounts/<n>`, inside the state directory; a run
+created in a folder that contains it (`$HOME`) then mounted the folder into
+itself, and a walk of the workspace did not end. Reconcile still detaches
+mounts left at the old place (`legacy_mounts_dir`). The daemon schedules hwmon faults
 itself and records them as init does (`fault.injected`).
 
 **Init in a container** (`guest::in_container`: the guest socket exists)

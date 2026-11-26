@@ -275,9 +275,11 @@ impl Daemon {
       tracing::warn!("run {}: its actor's driver {:?} is unknown to this daemon", instance.run, instance.driver);
       return InstanceState::Lost;
     };
+    let mounts_dir = self.run_mounts_dir(&instance.run);
     let leftover = needy_core_actor::driver::Leftover {
       run: &instance.run,
       dir: Path::new(&instance.handle),
+      mounts_dir: &mounts_dir,
       pid: instance.pid.and_then(|pid| u32::try_from(pid).ok()),
     };
     if needy_core_actor::driver::reconcile(driver, &leftover).await {

@@ -74,12 +74,14 @@ pub(super) fn device(root: &Path) -> Option<u64> {
 /// Whether the directory `path` is on another file system than the walk's
 /// root, whose device is `root`: a mount point the walk must not enter.
 // NOTICE: the sshfs default workspace of a run created in the cell directory
-// is mounted at `s/runs/<id>/mounts/0`, inside the very directory it mounts,
-// so a walk that enters it finds the cell again, without end (seen
-// 2026-11-26 on v0.0.20; the mount itself awaits an owner decision). The
-// harness's walks stay on the cell's file system, which also keeps them out
-// of any other mount a run leaves. The guard can stay once that product bug
-// is decided: a walk of the cell has no reason to enter a mount.
+// is mounted in the runtime directory, at `r/mounts/<id>/0`, which the cell
+// sets inside itself (`NEEDY_RUNTIME_DIR`), so a walk that enters it finds
+// the cell again, without end (seen 2026-11-26 on v0.0.20 at
+// `s/runs/<id>/mounts/0`; the daemon now keeps the points out of the state
+// directory, and warns when the runtime directory is inside the workspace).
+// The harness's walks stay on the cell's file system, which also keeps them
+// out of any other mount a run leaves: a walk of the cell has no reason to
+// enter a mount.
 pub(super) fn crosses_mount(path: &Path, root: Option<u64>) -> bool {
   match (root, std::fs::symlink_metadata(path)) {
     (Some(root), Ok(meta)) => meta.dev() != root,
