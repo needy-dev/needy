@@ -521,6 +521,7 @@ mod run {
   fn keep_artifacts(env: &CellEnv, cell: &Cell, results: &Path) -> Option<PathBuf> {
     let dir = results.join(cell.id().replace(['/', '=', ','], "_"));
     std::fs::create_dir_all(&dir).ok()?;
+    let root = invariants::device(&env.dir);
     let mut stack = vec![env.dir.clone()];
     while let Some(d) = stack.pop() {
       let Ok(entries) = std::fs::read_dir(&d) else {
@@ -532,6 +533,11 @@ mod run {
           continue;
         };
         if kind.is_dir() && !kind.is_symlink() {
+          // A mount a run left in the cell (see `invariants::crosses_mount`)
+          // is not the cell's and may contain the cell itself.
+          if invariants::crosses_mount(&path, root) {
+            continue;
+          }
           // A cell's fixtures and outputs are its own; logs and profiles
           // are what explain a failure.
           stack.push(path);
