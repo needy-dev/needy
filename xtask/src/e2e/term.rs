@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,11 @@ use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system}
 
 const ROWS: u16 = 30;
 const COLS: u16 = 100;
+/// How long [`Term::wait`] waits, after the program exits, for the reader
+/// to read the terminal to its end. Reading what is left takes moments;
+/// the bound is for a descendant that keeps the terminal open after the
+/// program exits, which would otherwise hold `wait` up forever.
+const DRAIN: Duration = Duration::from_secs(5);
 
 /// A program on a pseudo-terminal, its output kept raw and as a screen.
 pub struct Term {
@@ -20,6 +25,8 @@ pub struct Term {
   // Kept so the terminal stays open while the child runs.
   _master: Box<dyn MasterPty + Send>,
   output: Arc<Mutex<Output>>,
+  /// Set, and notified, once the reader has read the terminal to its end.
+  drained: Arc<(Mutex<bool>, Condvar)>,
 }
 
 struct Output {
@@ -57,6 +64,8 @@ impl Term {
       screen: vt100::Parser::new(std::num::NonZeroU16::new(ROWS).expect("rows"), std::num::NonZeroU16::new(COLS).expect("cols"), 0),
     }));
     let sink = output.clone();
+    let drained = Arc::new((Mutex::new(false), Condvar::new()));
+    let done = drained.clone();
     thread::spawn(move || {
       let mut buf = [0u8; 4096];
       // EOF or EIO (the child closed the terminal) ends the reader.
@@ -68,12 +77,16 @@ impl Term {
         out.raw.extend_from_slice(&buf[..n]);
         out.screen.process(&buf[..n]);
       }
+      let (flag, ready) = &*done;
+      *flag.lock().unwrap_or_else(|e| e.into_inner()) = true;
+      ready.notify_all();
     });
     Ok(Self {
       child,
       writer,
       _master: pty.master,
       output,
+      drained,
     })
   }
 
@@ -141,11 +154,14 @@ impl Term {
   }
 
   /// Waits for the program to exit and returns its exit code; kills it
-  /// after `timeout`.
+  /// after `timeout`. Once it has exited, also waits (up to [`DRAIN`]) for
+  /// the reader to read the terminal to its end, so the transcript holds
+  /// everything the program wrote.
   pub fn wait(&mut self, timeout: Duration) -> Result<u32> {
     let deadline = Instant::now() + timeout;
     loop {
       if let Some(status) = self.child.try_wait().context("cannot wait for the terminal's program")? {
+        self.drain(DRAIN);
         return Ok(status.exit_code());
       }
       if Instant::now() >= deadline {
@@ -154,6 +170,22 @@ impl Term {
         bail!("the program did not exit within {timeout:?}; the screen:\n{}", self.screen().trim_end());
       }
       thread::sleep(Duration::from_millis(50));
+    }
+  }
+}
+
+impl Term {
+  /// Waits up to `timeout` for the reader to reach the terminal's end: EOF,
+  /// or EIO once no process holds the terminal's other side.
+  fn drain(&self, timeout: Duration) {
+    let (flag, ready) = &*self.drained;
+    let flag = flag.lock().unwrap_or_else(|e| e.into_inner());
+    let (done, _) = ready.wait_timeout_while(flag, timeout, |done| !*done).unwrap_or_else(|e| e.into_inner());
+    if !*done {
+      // NOTICE: a descendant still holds the terminal open, so its end
+      // never comes; the transcript is what was read so far, as before
+      // `wait` waited for the reader at all.
+      eprintln!("e2e: the terminal stayed open {timeout:?} after its program exited; its transcript may be incomplete");
     }
   }
 }
@@ -175,8 +207,12 @@ mod tests {
 
   impl Fixture {
     fn new() -> Self {
+      // NOTICE: a counter too: tests run in parallel, and macOS's clock
+      // is only microsecond-precise, so two fixtures could share a time.
+      static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+      let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
       let suffix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-      let path = std::env::temp_dir().join(format!("needy-viewer-crash-{}-{suffix}", std::process::id()));
+      let path = std::env::temp_dir().join(format!("needy-viewer-crash-{}-{suffix}-{n}", std::process::id()));
       std::fs::create_dir(&path).unwrap();
       Self(path)
     }
@@ -206,5 +242,41 @@ mod tests {
     term.wait(Duration::from_secs(5)).unwrap();
 
     assert!(!fixture.0.join("hangup").exists(), "the viewer handled a signal before its simulated crash");
+  }
+
+  // ROOT CAUSE:
+  //
+  // If a program wrote its last output and exited at once, `wait` returned
+  // as soon as the child had exited while the reader thread had not yet
+  // taken that output in, so the transcript missed the last lines
+  // (`linux-container.runsc/image` missed `image edit: committed sha256:`).
+  //
+  // Before the fix, `wait` watched only the child.
+  // The fix waits until the reader has read the terminal to its end.
+  #[test]
+  fn wait_returns_after_the_last_output_is_read() {
+    let fixture = Fixture::new();
+    // Output small enough for the terminal's buffer, so the program exits
+    // without waiting for the reader.
+    let program = "sleep 0.2; printf 'THE-LAST-LINE\\n'";
+    let mut term = Term::spawn(Path::new("sh"), &["-c", program], &[], &fixture.0).unwrap();
+    // Stall the reader: it reads the output, then waits for the lock this
+    // thread holds until well after the program has exited.
+    let output = term.output.clone();
+    let (held, hold) = std::sync::mpsc::channel();
+    let staller = thread::spawn(move || {
+      let _guard = output.lock().unwrap();
+      held.send(()).unwrap();
+      thread::sleep(Duration::from_millis(800));
+      Instant::now()
+    });
+    hold.recv().unwrap();
+
+    assert_eq!(term.wait(Duration::from_secs(10)).unwrap(), 0);
+    let returned = Instant::now();
+    let released = staller.join().unwrap();
+
+    assert!(returned >= released, "wait returned before the reader could take the program's last output in");
+    assert!(term.transcript().contains("THE-LAST-LINE"), "{:?}", term.transcript());
   }
 }

@@ -106,6 +106,10 @@ pub struct Host {
   pub vm_image: Option<PathBuf>,
   /// Each actor driver's agents image for the TUI cells: there, or why not.
   pub agents: BTreeMap<Driver, Result<(), String>>,
+  /// Each container actor driver's sensors, which the sensor fault needs:
+  /// presented, or the gap the actor records instead. A driver without an
+  /// entry presents sensors wherever it runs (a VM's fake coretemp).
+  pub sensors: BTreeMap<Driver, Result<(), String>>,
   /// Whether `needy run stop` has `--now`.
   pub stop_now: bool,
   /// The engine every daemon is given, when the harness found it through
@@ -457,6 +461,11 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
   } else {
     Ok(())
   };
+  let sensors = if platform == Platform::Linux {
+    container_sensors(Path::new("/"))
+  } else {
+    BTreeMap::new()
+  };
   let stop_now = proc::simple(&needy.to_string_lossy(), &["run", "stop", "--help"], Duration::from_secs(10))
     .map(|out| out.stdout.contains("--now"))
     .unwrap_or(false);
@@ -472,9 +481,33 @@ pub fn prepare(root: &Path, work: &Path, needy: &Path, mode: Prepare, tui: bool,
     guest,
     vm_image,
     agents,
+    sensors,
     stop_now,
     docker_host,
   })
+}
+
+/// Whether a `linux-container` actor on the host whose root is `root`
+/// presents sensors, per OCI runtime: what the actor records as its hwmon
+/// gap (`needy_core_actor::identity::gaps`) when it cannot, read the way the
+/// daemon on this host reads it. The harness runs here on every run host, so
+/// this is the host the cells' daemons run on.
+fn container_sensors(root: &Path) -> BTreeMap<Driver, Result<(), String>> {
+  use needy_config::profile::OciRuntime;
+  use needy_config::recipe::IdentityField;
+  use needy_core_actor::identity;
+
+  let host = identity::Host::read(root);
+  [
+    (Oci::Runc, OciRuntime::Runc),
+    (Oci::Runsc, OciRuntime::Runsc),
+  ]
+  .into_iter()
+  .map(|(oci, runtime)| {
+    let gap = identity::gaps(None, runtime, &host).into_iter().find(|gap| gap.field == Some(IdentityField::Hwmon));
+    (Driver::Container(oci), gap.map_or(Ok(()), |gap| Err(format!("the actor records a hwmon gap: {}", gap.message))))
+  })
+  .collect()
 }
 
 /// Builds the agents image (`examples/agents/Dockerfile` on the actor

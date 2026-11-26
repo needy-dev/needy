@@ -480,6 +480,7 @@ mod tests {
         guest: Err("test".into()),
         vm_image: None,
         agents: BTreeMap::new(),
+        sensors: BTreeMap::new(),
         stop_now: false,
         docker_host: None,
       },

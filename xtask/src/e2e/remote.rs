@@ -650,6 +650,15 @@ fn fetch(build: &Host, run: &Host) -> Result<()> {
   }
   // Only what the run host lacks: the container images it has under the
   // same IDs stay, and the VM image goes only where there is a KVM device.
+  // TODO(e2e-image-identity): the ID comparison never matches between
+  // Docker's classic image store (where `.Id` is the image config's digest)
+  // and the containerd image store (where `.Id` is the manifest or index
+  // digest, and `docker image inspect` does not show the config's digest),
+  // so a build host on one and a run host on the other resend the actor
+  // image every pass. `.RootFS.Layers` matches across stores but misses a
+  // config-only change. Re-open with an identity both stores report alike,
+  // such as a label the harness sets at build time from what the image is
+  // built from, verified on hosts with each store.
   let (_, have) = remote(
     &run.ssh,
     &format!(
