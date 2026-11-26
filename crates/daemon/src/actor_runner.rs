@@ -27,9 +27,9 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail};
 use needy_api_client::Client;
 use needy_api_client::proto::v1::{
-  BridgeActivity, BridgeAttach, BridgeAttached, BridgeEvents, BridgeExit, BridgePrepared, BridgeRequest, BridgeStarted, BridgeTaskResult,
-  BridgeTerminalReady, BridgeTerminalTask, FetchLayerRequest, TerminalTaskRequest, TraceEvent, bridge_request, bridge_response,
-  bridge_task_result, bridge_terminal_task, terminal_task_request,
+  BridgeActivity, BridgeAttach, BridgeAttached, BridgeEvents, BridgeExit, BridgePrepared, BridgeRequest, BridgeResponse, BridgeStarted,
+  BridgeTaskResult, BridgeTerminalReady, BridgeTerminalTask, FetchLayerRequest, TerminalTaskRequest, TraceEvent, bridge_request,
+  bridge_response, bridge_task_result, bridge_terminal_task, terminal_task_request,
 };
 use needy_api_server::middleware::authentication::RUN_ID_HEADER;
 use needy_core_actor::contract::{GATEWAY_PORT, GUEST_PORT, PROCESS_PORT};
@@ -60,6 +60,13 @@ const GATEWAY_ACTIVITY_INTERVAL: Duration = Duration::from_secs(1);
 /// How long the end of a run waits for the gateway's last events to be
 /// handed to the bridge before it reports the actor's exit.
 const GATEWAY_FLUSH_WAIT: Duration = Duration::from_secs(3);
+/// How long the runner keeps the bridge open after it reported the actor's
+/// exit, for the control plane to read the exit and end the bridge.
+// NOTICE: the control plane ends the bridge as soon as it reads the exit
+// (and at most `BRIDGE_STOP_WAIT`, 4 s, after a `BridgeStop`); this bounds
+// only a control plane that is gone or a link that does not carry the
+// runner's last bytes in time.
+const EXIT_DELIVERY_WAIT: Duration = Duration::from_secs(10);
 
 /// Host-side configuration used by a runner to execute `StartActor` tasks.
 #[derive(Debug, Clone)]
@@ -275,6 +282,7 @@ pub(crate) async fn run_actor(
       drop(bridge_tx);
       tasks.close();
       let _ = tokio::time::timeout(Duration::from_secs(3), tasks.wait()).await;
+      wait_for_bridge_end(&mut bridge_stream, &attached.run_id).await;
       return Err(e);
     }
   };
@@ -393,11 +401,32 @@ pub(crate) async fn run_actor(
   drop(bridge_tx);
   tasks.close();
   let _ = tokio::time::timeout(Duration::from_secs(3), tasks.wait()).await;
-
   if bridge_broken {
     bail!("control plane bridge disconnected");
   }
+  wait_for_bridge_end(&mut bridge_stream, &attached.run_id).await;
   Ok(())
+}
+
+/// Waits, after the runner reported its actor's exit (`BridgeExit`), until
+/// the control plane ends the bridge, which it does once it has read the
+/// exit, or `EXIT_DELIVERY_WAIT` passes.
+// NOTICE: returning right after queueing the exit loses it whenever the
+// stream still has DATA unwritten (console bytes not sent yet, a slow link):
+// with both halves of the stream dropped and the response still open, h2
+// resets the stream with `CANCEL` and discards the DATA it holds
+// (`h2` 0.4.20, `src/proto/streams/streams.rs` `maybe_cancel` and
+// `src/proto/streams/prioritize.rs` `pop_frame`), and tonic's server reads a
+// cancelled request stream as its clean end (`tonic` 0.14.9,
+// `src/codec/decode.rs` `poll_frame`), so the daemon sees a lost bridge.
+async fn wait_for_bridge_end(stream: &mut tonic::Streaming<BridgeResponse>, run: &str) {
+  let ended = async {
+    // What else the control plane sends now is for an actor that is gone.
+    while let Ok(Some(_)) = stream.message().await {}
+  };
+  if tokio::time::timeout(EXIT_DELIVERY_WAIT, ended).await.is_err() {
+    tracing::warn!("run {run}: the control plane did not end the actor bridge after the actor's exit in time");
+  }
 }
 
 /// Fetches the layers of the run's snapshot (`attached.layers`) this

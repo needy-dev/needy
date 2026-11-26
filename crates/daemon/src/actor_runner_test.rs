@@ -106,14 +106,16 @@ impl Control {
 /// base VM image in `dir` has `rootfs` as its root file system, and whose
 /// stand-in Firecracker runs until its run stops it.
 async fn start_runner(control: &Control, dir: &Path, rootfs: &str) -> tokio::task::JoinHandle<anyhow::Result<()>> {
-  start_runner_with(control, dir, rootfs, Upstream::Direct).await
+  start_runner_with(control, dir, rootfs, testing::PARKED, Upstream::Direct).await
 }
 
-/// [`start_runner`], with the runner's `--gateway-upstream`.
+/// [`start_runner`], with `firecracker` as its stand-in Firecracker's script
+/// and the runner's `--gateway-upstream`.
 async fn start_runner_with(
   control: &Control,
   dir: &Path,
   rootfs: &str,
+  firecracker: &str,
   gateway_upstream: Upstream,
 ) -> tokio::task::JoinHandle<anyhow::Result<()>> {
   let minted = Runners::mint_credential(
@@ -128,7 +130,7 @@ async fn start_runner_with(
   .await
   .unwrap();
   let image = dir.join("image");
-  fake_image(&image, testing::PARKED);
+  fake_image(&image, firecracker);
   std::fs::write(image.join("rootfs.ext4"), rootfs).unwrap();
   let kvm = dir.join("kvm");
   std::fs::write(&kvm, "").unwrap();
@@ -745,7 +747,7 @@ async fn the_runner_s_gateway_upstream_carries_the_actor_s_traffic_but_not_its_s
   let via = format!("socks5h://{}", proxy.address());
   let control = Control::start(|_| {}).await;
   let runner_dir = tempfile::tempdir().unwrap();
-  let runner = start_runner_with(&control, runner_dir.path(), "", Upstream::socks5(&via, None).unwrap()).await;
+  let runner = start_runner_with(&control, runner_dir.path(), "", testing::PARKED, Upstream::socks5(&via, None).unwrap()).await;
   let profile = GATEWAY_PROFILE.replace("UPSTREAM", &upstream.to_string()).replace("'198.51.100.10'", "api.invalid");
   let created = control.create(&profile).await.unwrap();
   let run = control.daemon().runs.find(&created.id).unwrap();
@@ -830,6 +832,84 @@ async fn each_run_on_a_runner_with_a_fixed_work_dir_boots_in_a_fresh_directory()
     dirs.push(dir);
   }
   assert_ne!(dirs[0], dirs[1]);
+
+  control.end().await;
+  let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;
+}
+
+/// A stand-in Firecracker that runs until the test writes `release` in its
+/// directory, then prints 8 MiB of console and exits 0, as a
+/// VM whose guest reported its driving program's exit powers off.
+const EXITS_AFTER_RELEASE: &str = r#"dir=$(dirname "$3"); touch "$dir/v.sock"
+while [ ! -e "$dir/release" ]; do kill -0 $PPID 2>/dev/null || exit 1; sleep 0.05; done
+yes console | head -c 8388608 >> "$dir/console.log"
+exit 0"#;
+
+const REMOTE_PROFILE: &str = r#"
+actor:
+  driver: linux-firecracker
+  runner: actor-node
+  command: [sh, -c, 'echo hi']
+user: { name: agent, uid: 1000, gid: 1000 }
+executors:
+  here: { driver: native }
+"#;
+
+// ROOT CAUSE:
+//
+// If the runner still had bytes queued on the bridge when its VM exited
+// (console it had not sent yet, or a slow link to the control plane), its
+// `BridgeExit` was lost: the runner queued it, dropped both halves of the
+// bridge stream and returned. h2 then reset the stream with `CANCEL` and
+// discarded the DATA it had not written yet, Exit included, and tonic's
+// server reads a cancelled request stream as its clean end.
+//
+// Before the fix, the daemon saw the bridge end with no exit, recorded
+// `actor.vm.exit` "actor bridge disconnected" after the guest's
+// `actor.exit {code: 0}`, and failed the run.
+// The fix keeps the bridge open after the exit until the control plane
+// ends it, so the exit is delivered before the stream closes.
+#[tokio::test]
+async fn a_remote_actor_s_exit_reaches_the_control_plane_behind_its_last_console() {
+  let control = Control::start(|_| {}).await;
+  let runner_dir = tempfile::tempdir().unwrap();
+  let runner = start_runner_with(&control, runner_dir.path(), "", EXITS_AFTER_RELEASE, Upstream::Direct).await;
+  let created = control.create(REMOTE_PROFILE).await.unwrap();
+  let dir = run_dir(&runner_dir.path().join("work"), &created.id).await;
+
+  // The guest reports its driving program's exit, then its VM powers off.
+  Guest::exit(
+    control.daemon(),
+    &created.id,
+    needy_common::process::Exit {
+      code: Some(0),
+      signal: String::new(),
+    },
+  )
+  .await
+  .unwrap();
+  std::fs::write(dir.join("release"), "").unwrap();
+
+  let mut info = control.daemon().get(&created.id).await.unwrap();
+  for _ in 0..400 {
+    info = control.daemon().get(&created.id).await.unwrap();
+    if matches!(info.state, RunState::Finished | RunState::Failed) {
+      break;
+    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+  }
+  assert_eq!(info.state, RunState::Finished, "{:?}", info.failure);
+  let vm_exits: Vec<_> = trace(control.started.dir.path(), &created.id)
+    .await
+    .into_iter()
+    .filter_map(|event| match event {
+      needy_core::event::Event::ActorVmExit(exit) => Some(exit),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(vm_exits.len(), 1, "{vm_exits:?}");
+  assert_eq!(vm_exits[0].code, Some(0), "{vm_exits:?}");
+  assert_eq!(vm_exits[0].error, None, "{vm_exits:?}");
 
   control.end().await;
   let _ = tokio::time::timeout(Duration::from_secs(10), runner).await;

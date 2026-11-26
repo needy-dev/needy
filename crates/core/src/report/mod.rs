@@ -200,7 +200,12 @@ impl Tally {
         self.actor_stop = stop.actor.clone();
       }
       Event::RunFail(fail) => {
+        // The daemon records `run.fail` only when its run becomes failed, a
+        // state it never leaves, so it owns the state, also after an
+        // `actor.exit` read as the end: a remote actor's bridge lost after
+        // the driving program's exit fails the run.
         self.end(time_ms, RunState::Failed);
+        self.state = Some(RunState::Failed);
         self.failure = Some(fail.reason.clone());
       }
       Event::TraceGap(gap) => self.dropped += gap.dropped,
