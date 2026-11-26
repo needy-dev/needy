@@ -548,7 +548,8 @@ needy runner serve \
   discover it per pool with a one-shot Pod that holds the resource and runs
   `stat -c %g /dev/kvm`, and keep it in `rc`'s pool configuration. The
   probes added it at run time instead (`setpriv --groups 1000,$(stat -c %g /dev/kvm)`
-  after a root setup step).
+  after a root setup step). On a managed EKS KVM pool the `rc` session found
+  `/dev/kvm` with gid 36 and mode `0666` (probe, 2026-11-26).
 - No `privileged`, no added capabilities (probe: `privileged: false`).
 
 ### Resources (code and probe)
@@ -1000,10 +1001,40 @@ the proxy scaled to zero nothing went out directly. `needy run report` does
 not yet show `via` or a failed upstream connection (the events are in the
 trace).
 
-The probe's SOCKS proxies (`serjs/go-socks5-proxy`) cannot filter
+The first probe's SOCKS proxies (`serjs/go-socks5-proxy`) cannot filter
 destinations, and a cluster Service name was reachable through them under
 `socks5h`. A production proxy must refuse private, cluster and metadata
-ranges after it resolves a name; which proxy does so is not verified yet.
+ranges after it resolves a name.
+
+**A filtering upstream: Mihomo (probe, 2026-11-26, not needy).** Mihomo
+(`metacubex/mihomo` v1.19.34) with an authenticated SOCKS5 listener refused
+`socks5h` names that resolve to pod, service, node, private or metadata
+addresses (including `nip.io`-style names and a name with a public and a
+private record), on a self-managed cluster and, in the `rc` session's run,
+on a managed EKS KVM pool. What made it hold:
+
+- `IP-CIDR,<range>,REJECT` rules **without** `no-resolve` for the pod,
+  service and node ranges, `0.0.0.0/8`, `10.0.0.0/8`, `100.64.0.0/10`,
+  `127.0.0.0/8`, `169.254.0.0/16`, `172.16.0.0/12`, `192.168.0.0/16`,
+  `198.18.0.0/15` and `224.0.0.0/3`: the first such rule makes Mihomo
+  resolve the name and match the resolved address.
+- Public resolvers in Mihomo's `dns:` (cluster names then do not resolve
+  at all) and `NOT,((IP-CIDR,0.0.0.0/0)),REJECT` before `MATCH,DIRECT`:
+  without it a name that does not resolve falls through to a direct dial.
+- An egress NetworkPolicy on the Mihomo Pod allowing `0.0.0.0/0` except the
+  same ranges. **Required**: Mihomo matches its rules on one resolved
+  address but its direct dial resolves again and tries every record, so a
+  name with a public and a private record reached a private Pod in about a
+  third of the attempts without the policy, and never with it.
+- Exec probes (`nc -z`), not `tcpSocket`, where the CNI applies the Pod's
+  ingress policy to kubelet probes.
+
+Mihomo answers the SOCKS request with success before it applies its rules.
+A refused plain-HTTP request is a 502 and a `net.error` in needy, but a
+refused CONNECT is a tunnel that closes at once: the actor sees a TLS
+failure and the trace records `net.connect`, not `net.error`. Nothing
+reaches the target either way; do not alert on `net.error` alone. A wrong
+password and a stopped proxy are 502s with `net.error`.
 
 **Workspace Pods through a proxy (probe, not needy).** Commands in a
 Workspace use the Pod's own network, so the gateway does not see them. A
@@ -1017,7 +1048,14 @@ device removed (Mihomo then keeps running without recovering), traffic went
 out directly. A NetworkPolicy backstop (egress only to the proxy, kube-dns,
 the daemon's 7400 and the cluster Services the Workspace uses) made every
 such round fail closed; also give the sidecar a liveness probe on its TUN
-link.
+link. In the second probe the sidecar sent every internet
+connection to the filtering Mihomo above (fake-ip, so names reach it
+unresolved) and rejected only non-internet IP literals and UDP itself, so
+the filtering lives in one place; a liveness probe on `ip link show <tun>`
+restarted it each time its TUN link was deleted. Known gap: the Workspace
+can still query cluster DNS directly, a channel for DNS tunnelling. If the
+Workspace runs an executor runner, its backstop must also allow the
+daemon's 7400.
 
 Before S1, or while either side is older:
 
@@ -1141,7 +1179,11 @@ client, the daemon image and the runner image to one needy release.
       Secret, plain value in the Workspace's), a `services` entry,
       `openssh-sftp-server` and `needy` in the image, busy while a run uses
       it.
-- [ ] Scale the daemon to zero only with no live run.
+- [ ] Scale the daemon to zero only with no live run, and not before its
+      runs' history is no longer needed: a daemon whose state is on an
+      `emptyDir` loses `state.db` and every run's trace and logs when it
+      stops. Keep a grace after the last run (the `rc` session uses "until
+      the runner credential is revoked, plus 10 minutes") or a PVC.
 
 ### `devices-api`
 
