@@ -57,6 +57,7 @@ pub(crate) struct Actor {
   pub profile_yaml: String,
   pub recipe: Option<needy_core::recipe::CompiledRecipe>,
   pub mounts: Vec<needy_core_actor::driver::HostMount>,
+  pub mounts_dir: PathBuf,
   pub guest: PathBuf,
   #[serde(default)]
   pub layer_disks: Vec<PathBuf>,

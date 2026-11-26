@@ -474,6 +474,7 @@ impl Owner {
         recipe: actor.recipe.as_ref(),
         user: &profile.user,
         mounts: &actor.mounts,
+        mounts_dir: &actor.mounts_dir,
         guest: &actor.guest,
         layer_disks: &actor.layer_disks,
         snapshot_image: actor.snapshot_image.as_deref(),

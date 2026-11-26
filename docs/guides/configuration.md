@@ -257,7 +257,7 @@ user: { name: bob, uid: 1001, gid: 1001 }   # whoami, id, HOME and getent agree 
 | `NEEDY_STATE_DIR` | traces, `state.db`, run directories, the socket on macOS (`$XDG_STATE_HOME/needy`) |
 | `NEEDY_DATA_DIR` | VM images in `images/<driver>/`, layer store, locks, and guest disks (`$XDG_DATA_HOME/needy`) |
 | `NEEDY_CONFIG_DIR` | the global configuration, saved connections, and `profiles/` (`$XDG_CONFIG_HOME/needy`) |
-| `NEEDY_RUNTIME_DIR` | the daemon's socket (`$XDG_RUNTIME_DIR/needy`) |
+| `NEEDY_RUNTIME_DIR` | the daemon's socket, and a `linux-container` actor's workspace mount points in `mounts/<run>/` (`$XDG_RUNTIME_DIR/needy`, else the state directory) |
 | `NEEDY_REPO` | the checkout `needy image build` builds base images from, when not run inside it |
 | `DOCKER_HOST` | the Docker-compatible engine (Docker Engine, OrbStack, Podman) |
 

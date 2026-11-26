@@ -217,3 +217,74 @@ async fn a_client_executor_reaches_the_folder_from_another_machine() {
   assert_eq!(mounts, [("/home/agent/workspace", folder.to_str().unwrap())]);
   Runs::stop(daemon, &created.id, needy_core::types::Principal::Operator, needy_api_server::control::StopMode::Now).await.unwrap();
 }
+
+/// Every path under `root`, not following symbolic links, as a tree walk of
+/// the workspace (an agent's `find`, `rg`, a build tool) meets them.
+fn walk(root: &Path) -> Vec<std::path::PathBuf> {
+  let mut found = Vec::new();
+  let mut stack = vec![root.to_path_buf()];
+  while let Some(dir) = stack.pop() {
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+      if entry.file_type().unwrap().is_dir() {
+        stack.push(entry.path());
+      }
+      found.push(entry.path());
+    }
+  }
+  found
+}
+
+// ROOT CAUSE:
+//
+// If the state directory was inside the folder `needy run create` runs in
+// (`~/.local/state/needy` for a run created in `$HOME`, or an e2e cell), a
+// `linux-container` actor's sshfs mount of that folder at
+// `<state>/runs/<id>/mounts/0` contained itself, and any walk of the
+// workspace recursed without end (`.../mounts/0/.../mounts/0/...`, blocked
+// in FUSE) because the run's mount points lived in its run directory.
+//
+// Before the fix, the mount points were in the run's directory.
+// The fix keeps them in the daemon's runtime directory, outside the state
+// directory and the user's tree.
+#[tokio::test]
+async fn a_runs_mount_points_are_outside_its_workspace_when_the_state_directory_is_inside_it() {
+  // In `/tmp`: the run's sockets are in the state directory, and a longer
+  // temporary directory would exceed `SUN_LEN`.
+  let dir = tempfile::tempdir_in("/tmp").unwrap();
+  let home = dir.path().join("home");
+  std::fs::create_dir(&home).unwrap();
+  let state = home.join(".local/state/needy");
+  let started = testing::daemon_in(dir, |config| config.state_dir = state.clone()).await;
+
+  let created = Runs::create(&started.daemon, from_here(NATIVE, started.dir.path(), &home)).await.unwrap();
+
+  assert_eq!(created.workspace.expect("the run names its workspace").source, home.display().to_string());
+  assert!(started.daemon.run_dir(&created.id).starts_with(&home), "the run's directory is in the workspace");
+  let mounts = started.daemon.run_mounts_dir(&created.id);
+  assert!(!mounts.starts_with(&home), "the mount points {} are in the workspace {}", mounts.display(), home.display());
+  // A stand-in for the point the `linux-container` driver mounts the
+  // workspace on: sshfs needs FUSE on Linux.
+  std::fs::create_dir_all(mounts.join("0")).unwrap();
+  let met: Vec<_> = walk(&home).into_iter().filter(|path| path.starts_with(&mounts)).collect();
+  assert!(met.is_empty(), "a walk of the workspace meets its mount: {met:?}");
+}
+
+#[tokio::test]
+async fn a_runtime_directory_inside_the_workspace_is_warned_about() {
+  let dir = tempfile::tempdir_in("/tmp").unwrap();
+  let home = dir.path().join("home");
+  std::fs::create_dir(&home).unwrap();
+  // No `$XDG_RUNTIME_DIR`: the runtime directory is the state directory.
+  let state = home.join(".local/state/needy");
+  let started = testing::daemon_in(dir, |config| {
+    config.state_dir = state.clone();
+    config.runtime_dir = state.clone();
+  })
+  .await;
+  let created = Runs::create(&started.daemon, from_here(NATIVE, started.dir.path(), &home)).await.unwrap();
+  let run = started.daemon.runs.exact(&created.id).unwrap();
+
+  assert!(crate::workspace::warn_contains_mounts(&run.id, &run.profile, &started.daemon.run_mounts_dir(&run.id)));
+  // Outside it, as with `$XDG_RUNTIME_DIR`, nothing is warned about.
+  assert!(!crate::workspace::warn_contains_mounts(&run.id, &run.profile, &started.dir.path().join("run/mounts").join(&run.id)));
+}

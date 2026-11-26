@@ -46,9 +46,29 @@ use crate::image::container::{self, name};
 /// What builds a container actor image of this needy's version.
 const REBUILD: &str = "needy image build --linux-container";
 
-/// Where the host-side workspace mounts of the actor in `dir` are.
-fn mounts_dir(dir: &Path) -> PathBuf {
+/// Where the host-side workspace mounts of the actor in `dir` were before
+/// they moved to [`Start::mounts_dir`].
+// NOTICE: a run a daemon of v0.0.21 or earlier started still has its sshfs
+// mounts here, inside the state directory, which a workspace such as `$HOME`
+// contains. Reconcile detaches them; this read can go once no supported
+// upgrade starts from v0.0.21 or earlier with runs left over.
+fn legacy_mounts_dir(dir: &Path) -> PathBuf {
   dir.join("mounts")
+}
+
+/// Creates `dir`, the run's directory of mount points, and any missing
+/// parents, private (0700) to the daemon's account: the points are the
+/// workspace, which only the daemon and the engine it binds them for read.
+#[cfg(target_os = "linux")]
+fn create_mounts_dir(dir: &Path) -> std::io::Result<()> {
+  use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
+  let missing: Vec<&Path> = dir.ancestors().take_while(|d| !d.as_os_str().is_empty() && !d.exists()).collect();
+  std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+  // The umask may have narrowed the mode; it is set again so it is 0700.
+  for created in missing {
+    std::fs::set_permissions(created, std::fs::Permissions::from_mode(0o700))?;
+  }
+  Ok(())
 }
 
 /// What a `linux-container` actor presents: shims made when its image was
@@ -98,7 +118,7 @@ pub async fn reconcile(leftover: &Leftover<'_>) -> bool {
   // The OCI runtime and image do not matter for ending a container.
   let driver = LinuxContainer::new(OciRuntime::Runc, CONTAINER_IMAGE.into());
   tracing::warn!("run {}: ending its actor's container, which a restarted control plane does not adopt", leftover.run);
-  driver.end_leftover(leftover.run, leftover.dir).await
+  driver.end_leftover(leftover).await
 }
 
 /// What the driver refused, as its error.
@@ -175,10 +195,11 @@ impl LinuxContainer {
       .ok_or_else(|| refused(container::unpullable(&self.image, "the engine pulled it but does not have it", REBUILD)))
   }
 
-  /// Ends the container a previous daemon started for run `run`, whose
-  /// directory is `dir`, and detaches its workspace mounts. Says whether a
-  /// container was there.
-  pub async fn end_leftover(&self, run: &str, dir: &Path) -> bool {
+  /// Ends the container a previous daemon started for the run of
+  /// `leftover`, detaches its workspace mounts and removes their mount
+  /// points. Says whether a container was there.
+  pub async fn end_leftover(&self, leftover: &Leftover<'_>) -> bool {
+    let run = leftover.run;
     let name = name(run);
     let found = match self.engine.stop(&name, Duration::ZERO).await {
       Ok(()) => true,
@@ -190,11 +211,20 @@ impl LinuxContainer {
     if let Err(e) = self.engine.remove(&name).await {
       tracing::warn!("run {run}: cannot remove {name}: {e}");
     }
-    for target in leftover_mounts(dir) {
-      if let Err(e) = detach(&target) {
+    let mut points = leftover_mounts(leftover.mounts_dir);
+    points.extend(leftover_mounts(&legacy_mounts_dir(leftover.dir)));
+    for target in &points {
+      if let Err(e) = detach(target) {
         tracing::warn!("run {run}: {e:#}");
       }
     }
+    // Every point, mounted or not: a daemon that died between creating a
+    // point and mounting it leaves it empty. The legacy points stay with
+    // the run's directory, as before.
+    let made: Vec<PathBuf> = std::fs::read_dir(leftover.mounts_dir)
+      .map(|entries| entries.filter_map(|entry| entry.ok().map(|entry| entry.path())).collect())
+      .unwrap_or_default();
+    remove_points(&made, leftover.mounts_dir);
     found
   }
 
@@ -325,23 +355,33 @@ impl LinuxContainer {
     })
   }
 
-  /// Mounts each of `mounts` on this machine in the actor's directory `dir`,
-  /// for user `uid`:`gid`, through the run's guest channel, and returns the
-  /// mount points with their binds into the container.
-  async fn mount(dir: &Path, mounts: &[HostMount], uid: u32, gid: u32) -> Result<Vec<(PathBuf, String)>, Error> {
+  /// Mounts each of `mounts` on this machine in `mounts_dir`, for user
+  /// `uid`:`gid`, through the guest channel of the actor in `dir`, and
+  /// returns the mount points with their binds into the container.
+  async fn mount(dir: &Path, mounts_dir: &Path, mounts: &[HostMount], uid: u32, gid: u32) -> Result<Vec<(PathBuf, String)>, Error> {
     if mounts.is_empty() {
       return Ok(Vec::new());
     }
     #[cfg(target_os = "linux")]
     {
-      let guest = format!("unix:{}", channels_dir(dir).join(GUEST_SOCKET).display());
-      let client = needy_api_client::Client::connect(&guest).await.map_err(|e| Error::Mount {
-        target: guest.clone(),
-        source: e.into(),
+      create_mounts_dir(mounts_dir).map_err(|source| Error::Write {
+        path: mounts_dir.to_path_buf(),
+        source,
       })?;
+      let guest = format!("unix:{}", channels_dir(dir).join(GUEST_SOCKET).display());
+      let client = match needy_api_client::Client::connect(&guest).await {
+        Ok(client) => client,
+        Err(e) => {
+          remove_points(&[], mounts_dir);
+          return Err(Error::Mount {
+            target: guest.clone(),
+            source: e.into(),
+          });
+        }
+      };
       let mut made = Vec::new();
       for (i, m) in mounts.iter().enumerate() {
-        let point = mounts_dir(dir).join(i.to_string());
+        let point = mounts_dir.join(i.to_string());
         let mount = crate::sshfs::Mount {
           target: point.display().to_string(),
           executor: m.executor.clone(),
@@ -350,7 +390,15 @@ impl LinuxContainer {
           sftp_command: m.sftp_command.clone(),
         };
         if let Err(source) = crate::sshfs::mount(&client, &mount, uid, gid).await {
-          undo(&made);
+          let mut points: Vec<PathBuf> = made.into_iter().map(|(point, _)| point).collect();
+          for made in &points {
+            if let Err(e) = detach(made) {
+              tracing::warn!("{e:#}");
+            }
+          }
+          // The point that did not mount is empty, or gone.
+          points.push(point);
+          remove_points(&points, mounts_dir);
           return Err(Error::Mount {
             target: m.target.clone(),
             source,
@@ -363,17 +411,32 @@ impl LinuxContainer {
     }
     #[cfg(not(target_os = "linux"))]
     {
-      let _ = (dir, uid, gid);
+      let _ = (dir, mounts_dir, uid, gid);
       Err(Error::Unsupported("a container actor's workspace mounts need Linux (sshfs on the daemon's machine)".into()))
     }
   }
 }
 
-/// Detaches the host-side mounts `made`, as far as it can.
-fn undo(made: &[(PathBuf, String)]) {
-  for (point, _) in made {
+/// Detaches the host-side mounts at `points` in `mounts_dir`, as far as it
+/// can, and removes the points and `mounts_dir`.
+fn undo(points: &[PathBuf], mounts_dir: &Path) {
+  for point in points {
     if let Err(e) = detach(point) {
       tracing::warn!("{e:#}");
+    }
+  }
+  remove_points(points, mounts_dir);
+}
+
+/// Removes the mount points `points`, then `mounts_dir`, each only when it
+/// is empty: a point whose mount could not be detached is busy or still
+/// shows the workspace, and is left, with the directory, for reconcile.
+fn remove_points(points: &[PathBuf], mounts_dir: &Path) {
+  for dir in points.iter().map(PathBuf::as_path).chain([mounts_dir]) {
+    match std::fs::remove_dir(dir) {
+      Ok(()) => {}
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+      Err(e) => tracing::warn!("cannot remove the mount point {}: {e}", dir.display()),
     }
   }
 }
@@ -391,10 +454,9 @@ fn detach(point: &Path) -> anyhow::Result<()> {
   }
 }
 
-/// The mount points a daemon left in the actor's directory `dir` that are
-/// still mounted.
-fn leftover_mounts(dir: &Path) -> Vec<PathBuf> {
-  let Ok(entries) = std::fs::read_dir(mounts_dir(dir)) else {
+/// The mount points a daemon left in `mounts_dir` that are still mounted.
+fn leftover_mounts(mounts_dir: &Path) -> Vec<PathBuf> {
+  let Ok(entries) = std::fs::read_dir(mounts_dir) else {
     return Vec::new();
   };
   let mounted = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
@@ -520,7 +582,7 @@ impl Driver for LinuxContainer {
         .map_err(engine_error)?
     };
     binds.extend(accounts);
-    let mounts = Self::mount(start.dir, start.mounts, user.uid, user.gid).await?;
+    let mounts = Self::mount(start.dir, start.mounts_dir, start.mounts, user.uid, user.gid).await?;
     binds.extend(mounts.iter().map(|(_, bind)| bind.clone()));
     let launch = self.launch(start, binds);
     let points: Vec<PathBuf> = mounts.into_iter().map(|(point, _)| point).collect();
@@ -541,7 +603,7 @@ impl Driver for LinuxContainer {
         if let Err(removed) = self.engine.remove(&launch.name).await {
           tracing::warn!("cannot remove {} after a failed start: {removed}", launch.name);
         }
-        undo(&points.iter().map(|p| (p.clone(), String::new())).collect::<Vec<_>>());
+        undo(&points, start.mounts_dir);
         return Err(e);
       }
     };
@@ -553,6 +615,7 @@ impl Driver for LinuxContainer {
       vcpus: launch.vcpus,
       mem_mib: launch.mem_mib,
       mounts: points,
+      mounts_dir: start.mounts_dir.to_path_buf(),
       log: Some(log),
       ended: None,
     }))
@@ -590,6 +653,8 @@ struct Started {
   mem_mib: u32,
   /// The host-side mount points.
   mounts: Vec<PathBuf>,
+  /// The directory of `mounts`, removed with them.
+  mounts_dir: PathBuf,
   log: Option<tokio::task::JoinHandle<()>>,
   /// The status it ended with, once it was cleaned up.
   ended: Option<ExitStatus>,
@@ -609,7 +674,7 @@ impl Started {
         tracing::debug!("{}: the log did not end within 2 s", self.name);
       }
     }
-    undo(&self.mounts.iter().map(|p| (p.clone(), String::new())).collect::<Vec<_>>());
+    undo(&self.mounts, &self.mounts_dir);
     if let Err(e) = self.engine.remove(&self.name).await {
       tracing::warn!("cannot remove {}: {e}", self.name);
     }

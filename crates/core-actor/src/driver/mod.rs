@@ -307,6 +307,9 @@ pub struct Leftover<'a> {
   pub run: &'a str,
   /// The actor's directory.
   pub dir: &'a Path,
+  /// Where its host-side workspace mounts are, as [`Start::mounts_dir`]
+  /// had it.
+  pub mounts_dir: &'a Path,
   /// The host process that ran it.
   pub pid: Option<u32>,
 }
@@ -355,6 +358,12 @@ pub struct Start<'a> {
   /// The workspace mounts, for a driver whose [`Facets::workspace`] is
   /// [`Side::Host`].
   pub mounts: &'a [HostMount],
+  /// Where such a driver puts the host-side mount points of `mounts`, one
+  /// directory per run that the driver creates private and removes when
+  /// the actor ends. It is outside `dir` and the state directory: the
+  /// workspace is often a folder that contains them (`$HOME`), and a mount
+  /// inside the folder it mounts contains itself.
+  pub mounts_dir: &'a Path,
   /// The guest needy the driver brings into the actor at
   /// `crate::contract::GUEST`, already checked
   /// (`crate::image::guest::check`).

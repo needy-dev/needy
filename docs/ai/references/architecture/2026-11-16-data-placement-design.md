@@ -243,7 +243,7 @@ Existing directories are from `crates/cli/src/paths.rs`; new entries are
 | `$XDG_DATA_HOME/needy/state/<name>` | agent state | user data (new) |
 | `$XDG_DATA_HOME/needy/workspaces/<name>` | managed workspaces | user data (new) |
 | `$XDG_CACHE_HOME/needy` | layers, features (environments design) | cache; reserved today with no reader (`TODO(config)` in `paths.rs`) |
-| `$XDG_RUNTIME_DIR/needy` | sockets | runtime (existing) |
+| `$XDG_RUNTIME_DIR/needy` | sockets; `mounts/<run>/`, a `linux-container` actor's host-side workspace mount points (since v0.0.22, outside the state directory a workspace such as `$HOME` contains) | runtime (existing) |
 
 ## Open questions
 

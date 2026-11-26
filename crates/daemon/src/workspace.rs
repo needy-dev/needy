@@ -109,6 +109,33 @@ pub(crate) fn describe(profile: &Profile) -> Option<RunWorkspace> {
   })
 }
 
+/// Warns, and says so, when `mounts`, where run `id`'s actor mounts
+/// `profile`'s workspace on the control host, is inside that workspace's
+/// folder on the control host: the mount then contains itself, and a walk
+/// of the workspace does not end. That is the case where the runtime
+/// directory falls back to the state directory and the run is created in a
+/// folder that contains it, such as `$HOME`
+/// (`Daemon::run_mounts_dir`).
+// TODO(workspaces): a warning, not a refusal; refusing, or a mount root
+// that never falls back into the user's tree, needs the owner's decision.
+pub(crate) fn warn_contains_mounts(id: &str, profile: &Profile, mounts: &std::path::Path) -> bool {
+  let Some(workspace) = describe(profile) else {
+    return false;
+  };
+  // A workspace on a runner is on another machine than these mounts.
+  let on_control_host = profile.executors.get(&workspace.executor).is_some_and(|e| e.runner.is_none());
+  if !on_control_host || workspace.source.is_empty() || !mounts.starts_with(&workspace.source) {
+    return false;
+  }
+  tracing::warn!(
+    "run {id}: its workspace mount points {} are inside its workspace {}, so the mount contains itself and a walk of the \
+     workspace does not end; set XDG_RUNTIME_DIR or NEEDY_RUNTIME_DIR to a directory outside the workspace",
+    mounts.display(),
+    workspace.source
+  );
+  true
+}
+
 #[cfg(test)]
 #[path = "workspace_test.rs"]
 mod tests;

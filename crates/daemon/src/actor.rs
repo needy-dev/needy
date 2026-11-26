@@ -167,9 +167,13 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
   };
   // A driver that sets the actor up from the host mounts the workspace
   // itself; a VM's init, or an Apple `container` actor's, does it inside.
+  let mounts_dir = daemon.run_mounts_dir(&run.id);
   let mounts = match facets.workspace {
     Side::Guest => Vec::new(),
-    Side::Host => mounts(run).into_iter().chain(crate::sync::mounts(daemon, run)).collect(),
+    Side::Host => {
+      crate::workspace::warn_contains_mounts(&run.id, &run.profile, &mounts_dir);
+      mounts(run).into_iter().chain(crate::sync::mounts(daemon, run)).collect()
+    }
   };
   let boot = run.boot();
   let layer_disks = boot.layer_disks.into_iter().map(|disk| disk.path).collect();
@@ -183,6 +187,7 @@ pub async fn start(daemon: &Daemon, run: &Arc<Run>) -> Result<()> {
       profile_yaml: run.profile_yaml.clone(),
       recipe: run.recipe.clone(),
       mounts,
+      mounts_dir,
       guest,
       layer_disks,
       snapshot_image: boot.snapshot_image,

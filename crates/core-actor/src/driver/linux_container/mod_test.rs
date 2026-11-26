@@ -87,6 +87,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     recipe,
     user,
     mounts: &[],
+    mounts_dir: Path::new("/run/user/1000/needy/mounts/0123456789ab"),
     guest: Path::new(GUEST_NEEDY),
     layer_disks: &[],
     snapshot_image: None,
@@ -494,4 +495,32 @@ async fn of_with_engine_binds_machine_id_from_actor_seed_without_recipe() {
   let bodies = fake.bodies();
   let binds = bodies.last().unwrap().1.host_config.as_ref().unwrap().binds.clone().unwrap();
   assert!(binds.contains(&format!("{}:/etc/machine-id:ro", machine_id_path.display())), "{binds:?}");
+}
+
+#[tokio::test]
+async fn ending_a_leftover_actor_removes_its_mount_points() {
+  let (container, _) = runtime(fake(), OciRuntime::Runc);
+  let tmp = tempfile::tempdir().unwrap();
+  let dir = tmp.path().join("state/runs/0123456789ab");
+  let mounts_dir = tmp.path().join("runtime/mounts/0123456789ab");
+  // Points a daemon that died left, whose mounts are gone with it.
+  std::fs::create_dir_all(mounts_dir.join("0")).unwrap();
+  std::fs::create_dir_all(mounts_dir.join("1")).unwrap();
+  // A run of v0.0.21 or earlier had its points in its directory.
+  std::fs::create_dir_all(legacy_mounts_dir(&dir).join("0")).unwrap();
+
+  container
+    .end_leftover(&Leftover {
+      run: "0123456789ab",
+      dir: &dir,
+      mounts_dir: &mounts_dir,
+      pid: None,
+    })
+    .await;
+
+  assert!(!mounts_dir.exists(), "the run's mount points are left");
+  assert!(tmp.path().join("runtime/mounts").exists(), "only the run's own directory goes");
+  // Its legacy points stay with the run's directory, as before; only a
+  // mounted one is detached.
+  assert!(legacy_mounts_dir(&dir).join("0").exists());
 }

@@ -254,6 +254,9 @@ pub(crate) async fn run_actor(
         user: &profile.user,
         recipe: recipe.as_ref(),
         mounts: &[],
+        // A VM's init mounts the workspace inside the actor; nothing is
+        // mounted here.
+        mounts_dir: &work_dir.join("mounts"),
         guest: &guest_needy,
         layer_disks: &layer_disks,
         snapshot_image: None,

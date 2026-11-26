@@ -101,6 +101,7 @@ fn start<'a>(dir: &'a Path, user: &'a User, recipe: Option<&'a CompiledRecipe>) 
     recipe,
     user,
     mounts: &[],
+    mounts_dir: Path::new("/run/user/1000/needy/mounts/0123456789ab"),
     guest: Path::new("/Users/user/.local/bin/needy-linux-aarch64"),
     layer_disks: &[],
     snapshot_image: None,
